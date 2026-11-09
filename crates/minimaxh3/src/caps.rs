@@ -1410,15 +1410,6 @@ mod tests {
             brain_testutil::skip("no MiniMax-H3 checkout in the model store to encode from");
             return;
         };
-        // The text tower places itself over the ambient `BRAIN_DEVICE`
-        // selection, which `gpu_core::devices` caches per process; pin it to
-        // the CPU when nothing has resolved it yet, and skip rather than risk
-        // loading a 50-layer/hidden=5120 tower onto a GPU another test holds.
-        std::env::set_var("BRAIN_DEVICE", "cpu");
-        if !gpu_core::devices::ambient_compute_set().gpus.is_empty() {
-            brain_testutil::skip("ambient compute set already resolved to a GPU by an earlier test in this binary - re-run this test alone, or with BRAIN_DEVICE=cpu set before invoking cargo test");
-            return;
-        }
         let paths = Paths::resolve(&root);
         if !checkpoint::safetensors::has_model_weights(std::path::Path::new(&paths.text_encoder)) {
             brain_testutil::skip(&format!("{} has no text encoder weights - not (yet) downloaded", paths.text_encoder));

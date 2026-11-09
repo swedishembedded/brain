@@ -200,7 +200,7 @@ impl PresentationEncoder {
     /// read after decoder layer `layer` with its linears at `dt`, the
     /// tokenizer at `tokenizer_dir`, and the image and video processor
     /// configs at `processor_dir` (needed only to present images or videos).
-    /// The vision tower runs on `device`.
+    /// The vision tower runs on `device`, and the text tower over its cards.
     pub fn open(text_encoder_dir: &str, tokenizer_dir: &str, processor_dir: Option<&str>, layer: usize, dt: Dtype, device: Option<&str>) -> Result<PresentationEncoder, String> {
         let cfg = Qwen3VlConfig::from_hf(&read_json(&format!("{text_encoder_dir}/config.json"))?);
         if cfg.text.n_layers as usize <= layer {
@@ -264,9 +264,9 @@ impl PresentationEncoder {
     }
 
     /// The text tower for a presentation of `rows` tokens, placed over the
-    /// schedulable cards.
+    /// cards of the encoder's device selection (the CPU when it has none).
     fn text_tower(&self, rows: usize) -> Result<TextTower, String> {
-        let tower = TextTower::from_hf_dir(&self.text_encoder_dir, self.cfg.text.clone(), self.cfg.mrope_section, self.dt, self.layer, rows as u32)?;
+        let tower = TextTower::from_hf_dir(&self.text_encoder_dir, self.cfg.text.clone(), self.cfg.mrope_section, self.dt, self.layer, rows as u32, self.device.as_deref())?;
         tracing::info!(stages = tower.n_stages(), tokens = rows, "minimaxh3 conditioner placed");
         Ok(tower)
     }

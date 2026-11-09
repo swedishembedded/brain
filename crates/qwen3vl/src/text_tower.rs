@@ -17,8 +17,8 @@
 //! by [`model::shard::plan_fewest_devices`] over the schedulable cards' real
 //! capacity, each stage a [`qwen3::Qwen`] shard on its own card, and an encode
 //! hands the prompt's rows from one stage to the next
-//! ([`qwen3::Qwen::encode_stage`]). With no card schedulable it is one stage on
-//! the ambient device.
+//! ([`qwen3::Qwen::encode_stage`]). With no card in the caller's selection it
+//! is one stage on the CPU.
 //!
 //! Every stage is built at the prompt's own length: the tower serves one
 //! encode and is dropped, so its activations are sized for the prompt rather
@@ -60,22 +60,25 @@ pub fn tower_cost(cfg: &QwenConfig, depth: usize, dt: Dtype, rows: u32) -> (Laye
 impl TextTower {
     /// Build the first `depth` layers of the HF Qwen3-VL checkpoint at `dir`
     /// for prompts of up to `rows` tokens, its linears at `dt`, placed over
-    /// the schedulable cards. Refuses, naming the bytes, when the tower fits
-    /// no combination of them.
-    pub fn from_hf_dir(dir: &str, cfg: QwenConfig, mrope_section: [u32; 3], dt: Dtype, depth: usize, rows: u32) -> Result<TextTower, String> {
+    /// the cards `device` selects (the process's own selection when `None`),
+    /// or as one stage on the CPU when it selects none. Refuses, naming the
+    /// bytes, when the tower fits no combination of its cards.
+    pub fn from_hf_dir(dir: &str, cfg: QwenConfig, mrope_section: [u32; 3], dt: Dtype, depth: usize, rows: u32, device: Option<&str>) -> Result<TextTower, String> {
         assert!(depth <= cfg.n_layers as usize, "text tower: depth {depth} past the checkpoint's {} layers", cfg.n_layers);
         let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(dir)).map_err(|e| format!("qwen3vl text tower: open {dir}: {e}"))?;
         let source = crate::import::decoder_source(&reader);
         let (cost, reserve) = tower_cost(&cfg, depth, dt, rows);
-        let shards: Vec<Shard> = if model::shard::StreamPlan::cards(None, 0).is_empty() {
-            vec![Shard { start: 0, end: depth, embed: true, head: false, gpu_index: Shard::ANY_GPU }]
-        } else {
-            let cards = model::shard::StreamPlan::cards(None, reserve);
-            let placed = model::shard::plan_fewest_devices(&cost, &cards).ok_or_else(|| {
-                format!("qwen3vl text tower: {depth} layers at {dt:?} need {} bytes, which fit no combination of the schedulable cards {cards:?} (usable bytes once each holds its {reserve}-byte share of the {rows}-token encode)", cost.total())
-            })?;
-            placed.into_iter().map(|p| Shard { head: false, ..p.shard }).collect()
-        };
+        if model::shard::StreamPlan::cards(device, 0).is_empty() {
+            // No card in the selection: one stage on the CPU, whatever card
+            // the process itself would build on.
+            let shard = Shard { start: 0, end: depth, embed: true, head: false, gpu_index: Shard::ANY_GPU };
+            return Ok(gpu_core::devices::with_host_tier(|| TextTower::with_shards(&source, cfg, mrope_section, dt, vec![shard], rows)));
+        }
+        let cards = model::shard::StreamPlan::cards(device, reserve);
+        let placed = model::shard::plan_fewest_devices(&cost, &cards).ok_or_else(|| {
+            format!("qwen3vl text tower: {depth} layers at {dt:?} need {} bytes, which fit no combination of the schedulable cards {cards:?} (usable bytes once each holds its {reserve}-byte share of the {rows}-token encode)", cost.total())
+        })?;
+        let shards = placed.into_iter().map(|p| Shard { head: false, ..p.shard }).collect();
         Ok(TextTower::with_shards(&source, cfg, mrope_section, dt, shards, rows))
     }
 

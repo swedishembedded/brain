@@ -620,7 +620,6 @@ crates/memauth/src/limits.rs	<key>
 crates/mimi/src/decode_stream.rs	BRAIN_MIMI_WEIGHTS
 crates/mimi/tests/it/decode_omni_chunked.rs	MOE_SKIP_GPU_TESTS
 crates/mimi/tests/it/decode_stream_parity.rs	BRAIN_QWEN3TTS_WEIGHTS
-crates/minimaxh3/src/caps.rs	BRAIN_DEVICE
 crates/minimaxmusic3/src/bin/mm3_bench.rs	<var>
 crates/minimaxmusic3/src/bin/mm3_bench.rs	BRAIN_MINIMAXMUSIC3_DEPTH
 crates/minimaxmusic3/src/bin/mm3_bench.rs	BRAIN_MINIMAXMUSIC3_DIT
