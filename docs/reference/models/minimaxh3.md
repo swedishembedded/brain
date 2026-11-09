@@ -133,9 +133,11 @@ one at 640x352 with one image reference and ~10% less at 768x448 (~16% at
   weights already on the cards. A request the cards cannot hold that way is
   refused, naming the bytes. `--dit_placement streamed` streams it one block
   at a time at fp32 instead, which any card holds but which reads the whole
-  checkpoint every step - many times slower, so it is never chosen for you. On two P40s,
-  768x448 x 121 frames (~13.6k packed rows) holds resident and peaks at
-  ~19.0 GB per card; a 20-step `fl2va` clip at that size takes ~50 min.
+  checkpoint every step - many times slower, so it is never chosen for you. A block runs
+  everything but its attention a few thousand rows at a time, so its
+  workspace grows slowly with the canvas: on two P40s a 768x448 x 121-frame
+  `ref2va` with an image reference (~19k packed rows) holds resident with
+  the sparse-attention gates, at ~2.9 min per step.
 * **`--int8-activation-levels 2`** (`int8_activation_levels: 2` on a
   request) quantizes each int8 linear's input in two levels: the second
   quantizes what the first rounds away, so the activation side is exact to

@@ -948,15 +948,16 @@ MiniMax H3 Community License derivatives.
 - [x] A real ref2va clip at `preset turbo-4step-vsa` (adapter folded,
       gates resident, sparsity 0.75), 640x352 x 124 frames at 24 fps, one
       generated character image, CUDA on two P40s: the character, the
-      scene, the motion and the sound the prompt asks for. DiT resident at
-      ~22 / ~20 GB per card; 4.7 / 4.7 / 2.1 min for the sparse steps after
-      the first; the cold start is dominated by reading ~145 GB of weights
-      from a spinning disk (text encoder + encode ~30 min, the DiT's load
-      with the fold ~68 min).
-- [ ] 768x448 with a reference image does not hold resident with the gates
-      on two P40s (~19k packed rows: the reference adds ~4.1k latent rows
-      and ~4.2k vision tokens); it streams. Measure where the resident
-      workspace goes at that size.
+      scene, the motion and the sound the prompt asks for. With the native
+      sparse-attention kernel and the row-chunked block, 2.0-2.1 min per
+      step (4.7 min before); the cold start is dominated by reading ~145 GB
+      of weights from a spinning disk (text encoder + encode ~30 min, the
+      DiT's load with the fold ~70 min).
+- [x] 768x448 with a reference image (~19k packed rows: the reference adds
+      ~4.1k latent rows and ~4.2k vision tokens) holds resident with the
+      gates on two P40s since a block runs its row-local work in row
+      chunks (block workspace 4.26 GB at 19126 rows, measured): the same
+      prompt and character, 2.9 min per step.
 - [x] Sparse attention is faster than dense on CUDA at ref2va's own
       shapes (one P40, 56 heads, `cargo test -p brain-minimaxh3 --test device -- --device gpu1 --backend cuda --ignored sparse_attention_time`,
       ms per attention incl. tile means, selection and the gated coarse
