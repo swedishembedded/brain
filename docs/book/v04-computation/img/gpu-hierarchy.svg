@@ -1,4 +1,4 @@
-<!-- source-sha256: 79e6f870a5056ff215279a371b36a7d903d70a46546b0592ddd7227b1f3ae65b -->
+<!-- source-sha256: ed5a18a2050a577083d79193a291e807ae09f736148ca0006b1233393d701af9 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 484" width="780" height="484"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="484" fill="#ffffff"/>
 <rect x="20" y="14" width="740" height="118" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Dispatch grid: n = 1000 elements, 16 workgroups of 64 invocations</text>

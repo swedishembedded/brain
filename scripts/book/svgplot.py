@@ -81,6 +81,21 @@ def _fit_ticks(lo, hi, extent_px, along_x: bool, label_px=lambda t: 0.0) -> list
     return nice_ticks(lo, hi, 2)
 
 
+
+def log_ticks(lo: float, hi: float) -> list[float]:
+    """Ticks of a logarithmic axis: the powers of ten in [lo, hi], with 2 and 5
+    times each added when the axis spans fewer than three decades."""
+    a, b = math.floor(math.log10(lo)), math.ceil(math.log10(hi))
+    steps = (1, 2, 5) if b - a < 3 else (1,)
+    ticks = [m * 10.0 ** e for e in range(a, b + 1) for m in steps]
+    return [t for t in ticks if lo * (1 - 1e-9) <= t <= hi * (1 + 1e-9)]
+
+
+def log_label(v: float) -> str:
+    """A log-axis tick label: plain digits with thousands separators, so the
+    reader sees 1, 10, 100, 1,000 rather than exponents."""
+    return f"{v:,.0f}" if v >= 1 else f"{v:g}"
+
 class Plot:
     """A single x/y chart: axes, ticks, lines, points, text.
 
@@ -94,26 +109,41 @@ class Plot:
 
     context = ""  # set by figures.py to the figure being rendered, for messages
 
-    def __init__(self, xlim, ylim, width=560, height=340, xlabel="", ylabel="", title="", legend_loc="auto"):
+    def __init__(self, xlim, ylim, width=560, height=340, xlabel="", ylabel="", title="", legend_loc="auto",
+                 xlog=False, ylog=False):
+        """`xlog`/`ylog` make an axis logarithmic: data are given in their own
+        units and the axis is ticked at powers of ten."""
         self.xlim, self.ylim = xlim, ylim
+        self.xlog, self.ylog = xlog, ylog
         self.w, self.h = width, height
         self.ml, self.mr, self.mt, self.mb = 58, 18, 30 if title else 14, 46
-        yw = max((text_width(fmt(t)) for t in nice_ticks(*ylim)), default=0)
+        yw = max((text_width(lab) for _, lab in self._ticks(ylim, ylog)), default=0)
         self.ml = max(self.ml, math.ceil(yw + (28 if ylabel else 14)))
-        xw = max((text_width(fmt(t)) for t in nice_ticks(*xlim)), default=0) / 2
+        xw = max((text_width(lab) for _, lab in self._ticks(xlim, xlog)), default=0) / 2
         self.mr = max(self.mr, math.ceil(xw + 4))
         self.items: list[str] = []
         self.legend: list[tuple[str, str, str]] = []
         self.xlabel, self.ylabel, self.title = xlabel, ylabel, title
         self.legend_loc = legend_loc
 
+    @staticmethod
+    def _ticks(lim, log):
+        """(value, label) pairs before thinning; used to size the margins."""
+        if log:
+            return [(t, log_label(t)) for t in log_ticks(*lim)]
+        return [(t, fmt(t)) for t in nice_ticks(*lim)]
+
+    def _frac(self, v, lim, log):
+        a, b = lim
+        if log:
+            return (math.log10(v) - math.log10(a)) / (math.log10(b) - math.log10(a))
+        return (v - a) / (b - a)
+
     def x(self, v):
-        x0, x1 = self.xlim
-        return self.ml + (v - x0) / (x1 - x0) * (self.w - self.ml - self.mr)
+        return self.ml + self._frac(v, self.xlim, self.xlog) * (self.w - self.ml - self.mr)
 
     def y(self, v):
-        y0, y1 = self.ylim
-        return self.h - self.mb - (v - y0) / (y1 - y0) * (self.h - self.mt - self.mb)
+        return self.h - self.mb - self._frac(v, self.ylim, self.ylog) * (self.h - self.mt - self.mb)
 
     def line(self, xs, ys, color=0, label="", dash=False, width=2.0):
         c = PALETTE[color] if isinstance(color, int) else color
@@ -276,8 +306,10 @@ class Plot:
     def svg(self) -> str:
         x0, x1 = self.x(self.xlim[0]), self.x(self.xlim[1])
         y0, y1 = self.y(self.ylim[0]), self.y(self.ylim[1])
-        xticks = _fit_ticks(*self.xlim, x1 - x0, True, lambda t: text_width(fmt(t)))
-        yticks = _fit_ticks(*self.ylim, y0 - y1, False)
+        xticks = log_ticks(*self.xlim) if self.xlog else _fit_ticks(*self.xlim, x1 - x0, True, lambda t: text_width(fmt(t)))
+        yticks = log_ticks(*self.ylim) if self.ylog else _fit_ticks(*self.ylim, y0 - y1, False)
+        xlab = log_label if self.xlog else fmt
+        ylab = log_label if self.ylog else fmt
         scene = self._scene()
         self._lint(scene, x0, x1, y1, y0)
         place = self._place_legend(scene, x0, x1, y1, y0) if self.legend and self.legend_loc else None
@@ -307,11 +339,11 @@ class Plot:
         for t in xticks:
             out.append(f'<line x1="{fmt(self.x(t))}" y1="{fmt(y0)}" x2="{fmt(self.x(t))}" y2="{fmt(y1)}" stroke="#edf2f7"/>')
             out.append(f'<text x="{fmt(self.x(t))}" y="{fmt(y0 + 16)}" {FONT} font-size="11" fill="#4a5568" '
-                       f'text-anchor="middle">{fmt(t)}</text>')
+                       f'text-anchor="middle">{xlab(t)}</text>')
         for t in yticks:
             out.append(f'<line x1="{fmt(x0)}" y1="{fmt(self.y(t))}" x2="{fmt(x1)}" y2="{fmt(self.y(t))}" stroke="#edf2f7"/>')
             out.append(f'<text x="{fmt(x0 - 6)}" y="{fmt(self.y(t) + 4)}" {FONT} font-size="11" fill="#4a5568" '
-                       f'text-anchor="end">{fmt(t)}</text>')
+                       f'text-anchor="end">{ylab(t)}</text>')
         out.append(f'<rect x="{fmt(x0)}" y="{fmt(y1)}" width="{fmt(x1 - x0)}" height="{fmt(y0 - y1)}" '
                    'fill="none" stroke="#718096"/>')
         out.append(f'<clipPath id="plot"><rect x="{fmt(x0)}" y="{fmt(y1)}" width="{fmt(x1 - x0)}" height="{fmt(y0 - y1)}"/></clipPath>')

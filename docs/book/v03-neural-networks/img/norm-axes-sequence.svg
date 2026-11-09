@@ -1,4 +1,4 @@
-<!-- source-sha256: 54cba5f3218b1858e9fcd12eac9a1a2f3e2f0d4f46a4926effacbcf71719fafc -->
+<!-- source-sha256: 414e195d4ec105bebd5dc5cfa68df9b2acdb62834e85e13372f1f6dd34f59e2f -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 964 328" width="964" height="328"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="964" height="328" fill="#ffffff"/>
 <rect x="16" y="16" width="300" height="296" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="30" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">batch norm</text>

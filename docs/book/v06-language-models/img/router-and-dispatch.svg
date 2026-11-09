@@ -1,4 +1,4 @@
-<!-- source-sha256: c1575d4bd0c4830c81bc75ce21c2ded71cbfe419e37f57e8e3ee7280953efaff -->
+<!-- source-sha256: 95a4dc37c1db24868c8fa79ec976403397643468b657b394e8c55723d6a391ee -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 610" width="1000" height="610"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="610" fill="#ffffff"/>
 <ellipse cx="130" cy="70" rx="85" ry="28" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="130" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x</text>

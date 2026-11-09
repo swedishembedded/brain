@@ -1,37 +1,29 @@
-<!-- source-sha256: 37d4cbe0dcb7d0f311db127e260877d10cf00b1ed6f27ac93949933e1d231b9a -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 442" width="620" height="442">
+<!-- source-sha256: c26da85425173cbdd519483cf5d96b8a237169bc63df168130ad14c7291d2ab5 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 462" width="560" height="462">
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
-<rect width="620" height="442" fill="#ffffff"/>
-<line x1="58" y1="354" x2="58" y2="30" stroke="#edf2f7"/>
-<text x="58" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
-<line x1="178.89" y1="354" x2="178.89" y2="30" stroke="#edf2f7"/>
-<text x="178.89" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
-<line x1="299.78" y1="354" x2="299.78" y2="30" stroke="#edf2f7"/>
-<text x="299.78" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">40</text>
-<line x1="420.67" y1="354" x2="420.67" y2="30" stroke="#edf2f7"/>
-<text x="420.67" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">60</text>
-<line x1="541.56" y1="354" x2="541.56" y2="30" stroke="#edf2f7"/>
-<text x="541.56" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">80</text>
-<line x1="58" y1="354" x2="602" y2="354" stroke="#edf2f7"/>
-<text x="52" y="358" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
-<line x1="58" y1="282" x2="602" y2="282" stroke="#edf2f7"/>
-<text x="52" y="286" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">200</text>
-<line x1="58" y1="210" x2="602" y2="210" stroke="#edf2f7"/>
-<text x="52" y="214" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">400</text>
-<line x1="58" y1="138" x2="602" y2="138" stroke="#edf2f7"/>
-<text x="52" y="142" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">600</text>
-<line x1="58" y1="66" x2="602" y2="66" stroke="#edf2f7"/>
-<text x="52" y="70" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">800</text>
-<rect x="58" y="30" width="544" height="324" fill="none" stroke="#718096"/>
-<clipPath id="plot"><rect x="58" y="30" width="544" height="324"/></clipPath>
-<g clip-path="url(#plot)"><polyline fill="none" stroke="#9b2c2c" stroke-width="1.6" points="96.03,352.87 134.06,351.74 210.11,349.47 362.23,344.94 666.45,335.88 1274.91,317.76 2491.81,281.52 4925.63,209.04 9793.26,64.09"/><circle cx="96.03" cy="352.87" r="3" fill="#9b2c2c"/><circle cx="134.06" cy="351.74" r="3" fill="#9b2c2c"/><circle cx="210.11" cy="349.47" r="3" fill="#9b2c2c"/><circle cx="362.23" cy="344.94" r="3" fill="#9b2c2c"/><circle cx="666.45" cy="335.88" r="3" fill="#9b2c2c"/><circle cx="1274.91" cy="317.76" r="3" fill="#9b2c2c"/><circle cx="2491.81" cy="281.52" r="3" fill="#9b2c2c"/><circle cx="4925.63" cy="209.04" r="3" fill="#9b2c2c"/><circle cx="9793.26" cy="64.09" r="3" fill="#9b2c2c"/><polyline fill="none" stroke="#c05621" stroke-width="1.6" points="134.25,344.93 134.45,335.87 134.85,317.74 135.64,281.48 137.23,208.95 140.39,63.9"/><circle cx="134.25" cy="344.93" r="3.5" fill="#c05621"/><circle cx="134.45" cy="335.87" r="3.5" fill="#c05621"/><circle cx="134.85" cy="317.74" r="3.5" fill="#c05621"/><circle cx="135.64" cy="281.48" r="3.5" fill="#c05621"/><circle cx="137.23" cy="208.95" r="3.5" fill="#c05621"/><circle cx="140.39" cy="63.9" r="3.5" fill="#c05621"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.6" points="362.42,344.93 362.62,335.87 363.02,317.74 363.81,281.48 365.4,208.95 368.56,63.9"/><circle cx="362.42" cy="344.93" r="3.5" fill="#2b6cb0"/><circle cx="362.62" cy="335.87" r="3.5" fill="#2b6cb0"/><circle cx="363.02" cy="317.74" r="3.5" fill="#2b6cb0"/><circle cx="363.81" cy="281.48" r="3.5" fill="#2b6cb0"/><circle cx="365.4" cy="208.95" r="3.5" fill="#2b6cb0"/><circle cx="368.56" cy="63.9" r="3.5" fill="#2b6cb0"/><text x="377.63" y="65.34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">E = 256, k = 8:</text><text x="377.63" y="77.58" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">806 M parameters,</text><text x="377.63" y="89.82" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">51.4 MFLOPs</text></g>
-<text x="330" y="390" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">MFLOPs per token in the layer</text>
-<text x="14" y="192" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 192)">parameters of the layer (millions)</text>
-<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Capacity against compute, one feed-forward layer</text>
-<line x1="69.44" y1="413" x2="89.44" y2="413" stroke="#9b2c2c" stroke-width="2"/>
-<text x="95.44" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">dense (hidden width 512 to 131,072)</text>
-<line x1="295.33" y1="413" x2="315.33" y2="413" stroke="#c05621" stroke-width="2"/>
-<text x="321.33" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">mixture, 2 of E experts used (E = 8 to 256)</text>
-<line x1="182.38" y1="430" x2="202.38" y2="430" stroke="#2b6cb0" stroke-width="2"/>
-<text x="208.38" y="434" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">mixture, 8 of E experts used (E = 8 to 256)</text>
+<rect width="560" height="462" fill="#ffffff"/>
+<line x1="164.52" y1="374" x2="164.52" y2="30" stroke="#edf2f7"/>
+<text x="164.52" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="316.9" y1="374" x2="316.9" y2="30" stroke="#edf2f7"/>
+<text x="316.9" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="469.29" y1="374" x2="469.29" y2="30" stroke="#edf2f7"/>
+<text x="469.29" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1,000</text>
+<line x1="58" y1="298.3" x2="542" y2="298.3" stroke="#edf2f7"/>
+<text x="52" y="302.3" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="189.99" x2="542" y2="189.99" stroke="#edf2f7"/>
+<text x="52" y="193.99" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100</text>
+<line x1="58" y1="81.68" x2="542" y2="81.68" stroke="#edf2f7"/>
+<text x="52" y="85.68" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1,000</text>
+<rect x="58" y="30" width="484" height="344" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="344"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#9b2c2c" stroke-width="1.6" points="133.85,352.7 179.72,320.09 225.59,287.49 271.47,254.88 317.34,222.28 363.21,189.67 409.09,157.07 454.96,124.47 500.84,91.86"/><circle cx="133.85" cy="352.7" r="3" fill="#9b2c2c"/><circle cx="179.72" cy="320.09" r="3" fill="#9b2c2c"/><circle cx="225.59" cy="287.49" r="3" fill="#9b2c2c"/><circle cx="271.47" cy="254.88" r="3" fill="#9b2c2c"/><circle cx="317.34" cy="222.28" r="3" fill="#9b2c2c"/><circle cx="363.21" cy="189.67" r="3" fill="#9b2c2c"/><circle cx="409.09" cy="157.07" r="3" fill="#9b2c2c"/><circle cx="454.96" cy="124.47" r="3" fill="#9b2c2c"/><circle cx="500.84" cy="91.86" r="3" fill="#9b2c2c"/><polyline fill="none" stroke="#c05621" stroke-width="1.6" points="179.89,254.85 180.06,222.25 180.41,189.64 181.09,157.04 182.42,124.44 185.02,91.83"/><circle cx="179.89" cy="254.85" r="3.5" fill="#c05621"/><circle cx="180.06" cy="222.25" r="3.5" fill="#c05621"/><circle cx="180.41" cy="189.64" r="3.5" fill="#c05621"/><circle cx="181.09" cy="157.04" r="3.5" fill="#c05621"/><circle cx="182.42" cy="124.44" r="3.5" fill="#c05621"/><circle cx="185.02" cy="91.83" r="3.5" fill="#c05621"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.6" points="271.51,254.85 271.55,222.25 271.64,189.64 271.81,157.04 272.15,124.44 272.83,91.83"/><circle cx="271.51" cy="254.85" r="3.5" fill="#2b6cb0"/><circle cx="271.55" cy="222.25" r="3.5" fill="#2b6cb0"/><circle cx="271.64" cy="189.64" r="3.5" fill="#2b6cb0"/><circle cx="271.81" cy="157.04" r="3.5" fill="#2b6cb0"/><circle cx="272.15" cy="124.44" r="3.5" fill="#2b6cb0"/><circle cx="272.83" cy="91.83" r="3.5" fill="#2b6cb0"/><text x="192.52" y="91.83" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">E = 256: 806 M</text><text x="187.39" y="264.19" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">E = 8</text><text x="280.33" y="91.83" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">E = 256: 806 M</text><text x="279.01" y="264.19" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">E = 8</text></g>
+<text x="300" y="410" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">MFLOPs per token in the layer (log scale)</text>
+<text x="14" y="202" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 202)">parameters of the layer, millions (log scale)</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Capacity against compute, one feed-forward layer</text>
+<line x1="39.44" y1="433" x2="59.44" y2="433" stroke="#9b2c2c" stroke-width="2"/>
+<text x="65.44" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">dense (hidden width 512 to 131,072)</text>
+<line x1="265.33" y1="433" x2="285.33" y2="433" stroke="#c05621" stroke-width="2"/>
+<text x="291.33" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">mixture, 2 of E experts used (E = 8 to 256)</text>
+<line x1="152.38" y1="450" x2="172.38" y2="450" stroke="#2b6cb0" stroke-width="2"/>
+<text x="178.38" y="454" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">mixture, 8 of E experts used (E = 8 to 256)</text>
 </svg>

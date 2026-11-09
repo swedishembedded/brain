@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 #
 # Parameters of one feed-forward layer against the FLOPs a token spends in it (D = 2,048, expert hidden width 512, SwiGLU). A dense
-# layer moves along the diagonal: every parameter is used. A mixture with k experts used per token stands at the same x as a dense
+# layer moves along the diagonal of the log-log plot: every parameter is used. A mixture with k experts used per token stands at the same x as a dense
 # layer of k experts' width and rises with the number of experts E. Numbers from `mixture_of_experts.params_flops_data`, the
 # function behind the table of the chapter.
 #
@@ -18,17 +18,21 @@ from svgplot import Plot  # noqa: E402
 
 
 def render() -> str:
+    # Both axes are logarithmic: a dense layer, whose every parameter is used, lies on one diagonal (parameters = FLOPs / 2),
+    # and a mixture rises straight up from it as experts are added, because each new expert adds parameters but almost no
+    # FLOPs (only its router column).
     series = moe.params_flops_data()
-    p = Plot((0, 90), (0, 900), width=620, height=400, xlabel="MFLOPs per token in the layer", ylabel="parameters of the layer (millions)",
-             title="Capacity against compute, one feed-forward layer", legend_loc="below")
+    p = Plot((2, 3000), (2, 3000), width=560, height=420, xlabel="MFLOPs per token in the layer (log scale)",
+             ylabel="parameters of the layer, millions (log scale)", title="Capacity against compute, one feed-forward layer",
+             legend_loc="below", xlog=True, ylog=True)
     dense = series[0][1]
     p.line([x for x, _ in dense], [y for _, y in dense], color=3, label=series[0][0], width=1.6)
     p.points([x for x, _ in dense], [y for _, y in dense], color=3, r=3)
     for color, (label, pts) in zip((1, 0), series[1:]):
         p.line([x for x, _ in pts], [y for _, y in pts], color=color, label=label, width=1.6)
         p.points([x for x, _ in pts], [y for _, y in pts], color=color, r=3.5)
-    top = series[2][1][-1]
-    p.text(top[0] + 1.5, top[1] - 4, f"E = 256, k = 8:", size=11)
-    p.text(top[0] + 1.5, top[1] - 38, f"{top[1]:.0f} M parameters,", size=11)
-    p.text(top[0] + 1.5, top[1] - 72, f"{top[0]:.1f} MFLOPs", size=11)
+    for color, (_, pts) in zip((1, 0), series[1:]):
+        bottom, top = pts[0], pts[-1]
+        p.text(top[0] * 1.12, top[1], f"E = 256: {top[1]:.0f} M", size=10, color="#4a5568")
+        p.text(bottom[0] * 1.12, bottom[1] * 0.82, "E = 8", size=10, color="#4a5568")
     return p.svg()

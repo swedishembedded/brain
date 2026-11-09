@@ -1,4 +1,4 @@
-<!-- source-sha256: 2655ef42d9d5534f6c7ed1579ba152a3b077601548a075ba0448b08a882cb763 -->
+<!-- source-sha256: 9d2acf5a66b8d3807d467188cf141276c6488f25986f29d972b946ebb6a97cad -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 340" width="780" height="340"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-a0aec0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a0aec0"/></marker></defs><rect width="780" height="340" fill="#ffffff"/>
 <rect x="20" y="14" width="740" height="312" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Transposing a [3, 8] matrix: invocation g writes y[g] and reads x[reads[g]]</text>

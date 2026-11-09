@@ -1,4 +1,4 @@
-<!-- source-sha256: 6151817e1d8e72b7999a034758f01cb3dab7bfe68917eb35d10c94a4cf025419 -->
+<!-- source-sha256: d76dee85cdf808e6fe4981db5649ba83ed78de9579297fe88df5051abe0ffda7 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 318" width="780" height="318"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="780" height="318" fill="#ffffff"/>
 <text x="150" y="30.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">gradient arriving at each position</text>
 <text x="620" y="30.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">gradient of the table</text>

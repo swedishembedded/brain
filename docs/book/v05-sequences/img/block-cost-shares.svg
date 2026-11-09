@@ -1,4 +1,4 @@
-<!-- source-sha256: 9a914919ec95b6911ef73d3d45ecef34025ca3d0af5f9237c9ba43f973f7f891 -->
+<!-- source-sha256: 4848543933ee76f402a3c2e958e5a2e27896a91685633119d60d72b01164b765 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 466" width="940" height="466"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="940" height="466" fill="#ffffff"/>
 <text x="176" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">A: GELU, 4 D</text>
 <text x="176" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">T = 1,024</text>

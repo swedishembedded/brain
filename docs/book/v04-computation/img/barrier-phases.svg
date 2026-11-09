@@ -1,4 +1,4 @@
-<!-- source-sha256: 20423e4db049a8b241cfb58be71965230d8528a701a05613283e365154544967 -->
+<!-- source-sha256: 544311a407124fdd3354391d1f3447718aff9fe5f597ea975d9507fac40c2261 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440" width="900" height="440"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="900" height="440" fill="#ffffff"/>
 <rect x="20" y="14" width="420" height="410" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">GPU: the 4 invocations run each phase together</text>

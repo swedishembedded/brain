@@ -1,4 +1,4 @@
-<!-- source-sha256: 3d4f4fe1155054eeb24dafddbaed2c27ebbdd5b1e0cb72378061d90a275d6a08 -->
+<!-- source-sha256: 8185e3b16e1e21de191d68eabff822771c2e59a660d5f4913a16ee99b94bace9 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" width="1000" height="500"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="500" fill="#ffffff"/>
 <text x="500" y="28.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Tiles of a causal score matrix, T = 24: query blocks down the side, key tiles across</text>
 <rect x="12" y="46" width="484" height="400" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>

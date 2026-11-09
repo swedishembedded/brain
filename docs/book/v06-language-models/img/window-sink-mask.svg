@@ -1,4 +1,4 @@
-<!-- source-sha256: f914f1e05fa315be4fb8ca14e3ec1936d44c7dd26c5e45d2cfe936ff766c9fae -->
+<!-- source-sha256: 9dbc7c21adb449637b91d16746f825c4758dd28d09d83c5fe45be723bc042f8c -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 430" width="760" height="430"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="760" height="430" fill="#ffffff"/>
 <text x="204" y="34.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Causal: every earlier key</text>
 <text x="204" y="56.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">key position j</text>
