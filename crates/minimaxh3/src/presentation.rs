@@ -311,35 +311,6 @@ impl PresentationEncoder {
 mod tests {
     use super::*;
 
-    /// A long presentation's text tower holds no more on a card than its
-    /// placement plans for it: real layers, built at a reference image's
-    /// token count, fit inside what `text_tower::tower_cost` prices them at.
-    #[test]
-    fn a_real_text_tower_stage_holds_no_more_than_its_placement_plans() {
-        let Some(root) = crate::caps::store_root() else {
-            brain_testutil::skip("no MiniMax-H3 checkout in the model store");
-            return;
-        };
-        let Some(before) = gpu_core::capacity::available_for(0) else {
-            brain_testutil::skip("no GPU to measure");
-            return;
-        };
-        let dir = format!("{root}/text_encoder");
-        let cfg = Qwen3VlConfig::from_hf(&read_json(&format!("{dir}/config.json")).unwrap());
-        let dt = crate::caps::best_linear_dtype();
-        let (rows, layers) = (4200u32, 8usize);
-        let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(&dir)).unwrap();
-        let source = qwen3vl::import::decoder_source(&reader);
-        let shard = model::shard::Shard { start: 0, end: layers, embed: true, head: false, gpu_index: 0 };
-        let tower = TextTower::with_shards(&source, cfg.text.clone(), cfg.mrope_section, dt, vec![shard], rows);
-        let used = before.saturating_sub(gpu_core::capacity::available_for(0).unwrap());
-        let (cost, reserve) = qwen3vl::text_tower::tower_cost(&cfg.text, layers, dt, rows);
-        let planned = cost.embed + cost.per_layer.iter().sum::<u64>() + reserve;
-        eprintln!("text tower, {layers} layers + embed at {rows} rows, {dt:?}: {used} bytes on the card, {planned} planned (per layer {}, per stage {reserve}, embed {})", cost.per_layer[0], cost.embed);
-        assert!(used <= planned, "the stage holds {used} bytes, its placement planned {planned}");
-        drop(tower);
-    }
-
     /// The 2 fps sampling of a 24 fps clip, and its round-half-to-even block
     /// labels: 30 frames sample 0, 12 and 24, merged as (0, 12) and (24, 24).
     #[test]

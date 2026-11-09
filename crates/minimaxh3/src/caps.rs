@@ -583,7 +583,7 @@ pub fn reference_rows_bound(action: &str, inv: &capability::Invocation, target_v
 /// cache). `bf16_storage` IS `true` on the CPU backend (host RAM holds any
 /// byte layout - see that struct's own comment), so this is a REAL,
 /// non-lying 2x reduction there, not a second silent no-op.
-pub(crate) fn best_linear_dtype() -> gpu_core::select::Dtype {
+pub fn best_linear_dtype() -> gpu_core::select::Dtype {
     use gpu_core::select::Dtype;
     let probe = gpu_core::Gpu::new(&[]);
     let n = probe.caps().numeric;

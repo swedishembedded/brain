@@ -137,7 +137,7 @@ pub fn run(tests: &[CardTest]) -> ExitCode {
         crate::profile::set_program_replays(n);
     }
     println!("\nrunning {} tests{header}", selected.len());
-    let (mut failed, mut ignored) = (Vec::new(), 0usize);
+    let (mut failed, mut ignored, mut no_card) = (Vec::new(), 0usize, 0usize);
     for t in &selected {
         if t.ignored && !args.include_ignored {
             println!("test {} ... ignored", t.name);
@@ -147,6 +147,7 @@ pub fn run(tests: &[CardTest]) -> ExitCode {
         if t.needs_card && args.device.is_none() {
             println!("test {} ... ignored, no --device given", t.name);
             ignored += 1;
+            no_card += 1;
             continue;
         }
         let ok = std::panic::catch_unwind(t.run).is_ok();
@@ -155,7 +156,7 @@ pub fn run(tests: &[CardTest]) -> ExitCode {
             failed.push(t.name);
         }
     }
-    if ignored > 0 {
+    if no_card > 0 {
         eprintln!("SKIP: device tests need their card named: cargo test ... -- --device gpu<i> [--backend cuda]");
     }
     let passed = selected.len() - failed.len() - ignored;
@@ -183,7 +184,9 @@ fn select(device: &str, backend: Option<&str>) -> Result<String, String> {
 
 /// Declare a test binary's `main` from its test functions - the ones that
 /// need the named card, then, after `host:`, any that do not, then, after
-/// `ignored:`, developer sweeps that run only with `--ignored`:
+/// `ignored:`, developer sweeps that run only with `--ignored`, and after
+/// `ignored_host:` such sweeps that need no card (they name their own host
+/// device):
 ///
 /// ```ignore
 /// gpu_core::card_tests!(the_kernel_matches_the_reference, the_kernel_is_selected);
@@ -193,12 +196,13 @@ fn select(device: &str, backend: Option<&str>) -> Result<String, String> {
 /// The target needs `harness = false` in its `[[test]]` entry.
 #[macro_export]
 macro_rules! card_tests {
-    ($($test:path),* $(,)? $(; host: $($host:path),* $(,)?)? $(; ignored: $($ign:path),* $(,)?)?) => {
+    ($($test:path),* $(,)? $(; host: $($host:path),* $(,)?)? $(; ignored: $($ign:path),* $(,)?)? $(; ignored_host: $($ignh:path),* $(,)?)?) => {
         fn main() -> ::std::process::ExitCode {
             $crate::card_tests::run(&[
                 $($crate::card_tests::CardTest { name: stringify!($test), run: $test, needs_card: true, ignored: false },)*
                 $($($crate::card_tests::CardTest { name: stringify!($host), run: $host, needs_card: false, ignored: false },)*)?
                 $($($crate::card_tests::CardTest { name: stringify!($ign), run: $ign, needs_card: true, ignored: true },)*)?
+                $($($crate::card_tests::CardTest { name: stringify!($ignh), run: $ignh, needs_card: false, ignored: true },)*)?
             ])
         }
     };

@@ -65,3 +65,8 @@ brain-testutil.workspace = true
 [[test]]
 name = "device"
 harness = false
+
+# The DiT against its real-weight reference, run only with --ignored; the card ones take `--device`.
+[[test]]
+name = "real_weights"
+harness = false

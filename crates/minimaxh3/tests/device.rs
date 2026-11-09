@@ -10,8 +10,9 @@
 //! Video sparse attention against its host reference, a gated DiT resident
 //! and streamed, the block's row chunks under sparse attention, the DiT's and
 //! the video decoder's flash attention against their materialized trio, the
-//! int8 tier against fp32, and (with `--ignored`) sparse against dense
-//! attention timed at ref2va's own shapes.
+//! int8 tier against fp32, the real text tower's placement against what it
+//! holds (with the real checkout in the model store), and (with
+//! `--ignored`) sparse against dense attention timed at ref2va's own shapes.
 //!
 //! Swedish Embedded AB implements sparse-attention video generation on the
 //! GPUs its clients already own. If your team needs expertise in running
@@ -335,6 +336,35 @@ fn an_int8_resident_model_tracks_the_fp32_one() {
     assert!(cosine(&two.audio, &exact.audio) > 1.0 - 1e-9, "Two: audio cosine {} against the rounded weights", cosine(&two.audio, &exact.audio));
 }
 
+/// A long presentation's text tower holds no more on the card than its
+/// placement plans for it: real layers, built at a reference image's token
+/// count, fit inside what `text_tower::tower_cost` prices them at. Needs the
+/// real checkout in the model store, and a card no other job is filling
+/// while it measures.
+fn a_real_text_tower_stage_holds_no_more_than_its_placement_plans() {
+    let Some(root) = brain_testutil::model_dir("MiniMaxAI/MiniMax-H3").filter(|root| std::path::Path::new(root).is_dir()) else {
+        brain_testutil::skip("no MiniMax-H3 checkout in the model store");
+        return;
+    };
+    let card = *gpu_core::devices::ambient_compute_set().gpus.first().expect("--device names a card");
+    let before = gpu_core::capacity::available_for(card).expect("the named card reports its free memory");
+    let dir = format!("{root}/text_encoder");
+    let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{dir}/config.json")).expect("read the text encoder's config")).expect("parse it");
+    let cfg = qwen3vl::Qwen3VlConfig::from_hf(&config);
+    let dt = minimaxh3::caps::best_linear_dtype();
+    let (rows, layers) = (4200u32, 8usize);
+    let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(&dir)).expect("open the text encoder");
+    let source = qwen3vl::import::decoder_source(&reader);
+    let shard = model::shard::Shard { start: 0, end: layers, embed: true, head: false, gpu_index: card as usize };
+    let tower = qwen3vl::TextTower::with_shards(&source, cfg.text.clone(), cfg.mrope_section, dt, vec![shard], rows);
+    let used = before.saturating_sub(gpu_core::capacity::available_for(card).expect("the named card reports its free memory"));
+    let (cost, reserve) = qwen3vl::text_tower::tower_cost(&cfg.text, layers, dt, rows);
+    let planned = cost.embed + cost.per_layer.iter().sum::<u64>() + reserve;
+    println!("text tower, {layers} layers + embed at {rows} rows, {dt:?}: {used} bytes on gpu{card}, {planned} planned (per layer {}, per stage {reserve}, embed {})", cost.per_layer[0], cost.embed);
+    assert!(used <= planned, "the stage holds {used} bytes, its placement planned {planned}");
+    drop(tower);
+}
+
 /// Dense flash attention against sparse attention at the shapes of a ref2va
 /// with one image reference at 640x352 and 768x448, 121 frames. A
 /// measurement, not a check: it prints.
@@ -374,6 +404,7 @@ gpu_core::card_tests!(
     row_chunks_compute_what_one_chunk_computes,
     the_dits_flash_attention_matches_its_materialized_trio,
     the_decoders_flash_attention_matches_its_materialized_trio,
-    an_int8_resident_model_tracks_the_fp32_one;
+    an_int8_resident_model_tracks_the_fp32_one,
+    a_real_text_tower_stage_holds_no_more_than_its_placement_plans;
     ignored: sparse_attention_time_at_a_real_shape,
 );
