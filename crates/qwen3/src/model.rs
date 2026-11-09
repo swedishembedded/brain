@@ -2071,7 +2071,7 @@ impl Qwen {
         if self.int8_base || self.weights.values().all(Weight::reads_f32_activations) {
             return self.ops.act_f32(x, 0, rows, k);
         }
-        self.ops.act(s, x, 0, rows, k)
+        self.ops.act_shared_scratch(s, x, 0, rows, k)
     }
 
     /// Dispatch one per-layer linear `out = act @ Wᵀ` through the `Ops`

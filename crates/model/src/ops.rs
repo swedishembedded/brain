@@ -1348,6 +1348,8 @@ pub struct Act {
     /// second level, made by the first `I8`/`Q4` product that reads these
     /// rows and shared by the rest.
     fine: Option<std::cell::RefCell<Option<Arc<I8Scratch>>>>,
+    /// Whether `quant` lives in [`Ops::act_shared_scratch`]'s per-device table instead of being this activation's own.
+    shared_scratch: bool,
 }
 
 thread_local! {
@@ -1413,6 +1415,9 @@ pub struct Ops {
     decoded: std::sync::Mutex<tiled::DecodedWeights>,
     /// The reused temporaries of the tiled products ([`tiled::Scratch`]).
     scratch: std::sync::Mutex<tiled::ScratchBuffers>,
+    /// The packed-activation scratch of [`Ops::act_shared_scratch`], one per (width, rows): every activation of that
+    /// shape reuses it.
+    shared_quant: std::sync::Mutex<HashMap<(u32, u64), Arc<I8Scratch>>>,
 }
 
 /// A transfer [`Gpu`] handle (own stream, bounded pinned staging ring) and the pinned-pool lease that pays for
@@ -1520,7 +1525,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default(), scratch: Default::default() })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default(), scratch: Default::default(), shared_quant: Default::default() })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
@@ -1778,6 +1783,10 @@ impl Ops {
     /// the 64-row (256B) storage-binding alignment `quant_rows_steps` itself
     /// asserts.
     pub fn act(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
+        self.act_with(s, x, xr0, rows, k, false)
+    }
+
+    fn act_with(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32, shared: bool) -> Act {
         assert!(rows > 0, "Ops::act: rows must be > 0 (got 0)");
         // A width the packed path cannot hold (not a whole number of
         // `crate::int8::GROUP`s) simply is not packed: [`Self::act_f32`] is
@@ -1792,8 +1801,8 @@ impl Ops {
         // every int8 linear of these rows and this width on a candidate that reads bf16 rows, the two quantisation
         // dispatches (and the scratch) are skipped and a stray product that does need them makes them then.
         let deferred = !row_count_invariant_active() && self.providers.runs("cuda") && self.gpu.int8_packed_unneeded(rows, k / 4);
-        let quant = (!deferred).then(|| self.quantize_rows(s, x, xr0, rows, k));
-        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None }
+        let quant = (!deferred).then(|| self.quantize_rows(s, x, xr0, rows, k, shared));
+        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None, shared_scratch: false }
     }
 
     /// [`Ops::act`] with the activation quantized in two int8 levels:
@@ -1814,11 +1823,26 @@ impl Ops {
 
     /// The packed int8 form of rows `[xr0, xr0 + rows)` of `x`: scratch sized for exactly `[0, xr0 + rows)` and the
     /// `max_abs_row` / `quant_pack` dispatches that fill it.
-    fn quantize_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Arc<I8Scratch> {
+    fn quantize_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32, shared: bool) -> Arc<I8Scratch> {
         let total = (xr0 + rows) as u64;
-        let quant = I8Scratch::new(&self.gpu, total, total, &[k]);
+        let quant = if shared {
+            let mut table = self.shared_quant.lock().unwrap_or_else(|e| e.into_inner());
+            table.entry((k, total)).or_insert_with(|| Arc::new(I8Scratch::new(&self.gpu, total, total, &[k]))).clone()
+        } else {
+            Arc::new(I8Scratch::new(&self.gpu, total, total, &[k]))
+        };
         quant.quant_rows(&self.gpu, [self.idx[kname::MAX_ABS_ROW], self.idx[kname::QUANT_PACK]], s, x, xr0, xr0 + rows, k);
-        Arc::new(quant)
+        quant
+    }
+
+    /// [`Ops::act`] whose packed int8 rows live in one scratch per (width, rows) that every such activation of this
+    /// `Ops` reuses, instead of a fresh allocation per activation. A model with many layers of one shape then holds
+    /// one packed copy per distinct width, not one per layer. Sound where the model's steps run in submission order
+    /// and every product reading an activation is submitted before the next activation of the same width is packed -
+    /// the order a layer stack already imposes on the activation buffers it shares across layers.
+    pub fn act_shared_scratch(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
+        let act = self.act_with(s, x, xr0, rows, k, true);
+        Act { shared_scratch: true, ..act }
     }
 
     /// The packed int8 form of `act` for a product that reads it, made now when [`Ops::act`] deferred it. `None`
@@ -1830,7 +1854,7 @@ impl Ops {
         if !act.quant_deferred {
             return None;
         }
-        let q = self.quantize_rows(s, &act.x, act.xr0, act.m, act.k);
+        let q = self.quantize_rows(s, &act.x, act.xr0, act.m, act.k, act.shared_scratch);
         *act.quant.borrow_mut() = Some(q.clone());
         Some(q)
     }
@@ -1844,7 +1868,7 @@ impl Ops {
     pub fn act_prequantized(&self, x: &DeviceBuffer, sx: &DeviceBuffer, xq: &DeviceBuffer, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_prequantized: rows must be > 0 (got 0)");
         assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(I8Scratch::from_parts(sx.clone(), k, xq.clone())))), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(I8Scratch::from_parts(sx.clone(), k, xq.clone())))), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None, shared_scratch: false }
     }
 
     /// [`Ops::act`], plus the affine K-quant group-sum prepass
@@ -1880,7 +1904,7 @@ impl Ops {
             xr0 + rows,
             k,
         ));
-        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(quant))), quant_deferred: false, xgs: std::cell::RefCell::new(Some(xgs)), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None }
+        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(quant))), quant_deferred: false, xgs: std::cell::RefCell::new(Some(xgs)), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None, shared_scratch: false }
     }
 
     /// [`Ops::act`] for a caller whose weights are ALL fp32-family, so the
@@ -1899,7 +1923,7 @@ impl Ops {
     /// whatever a missing buffer would have held.
     pub fn act_f32(&self, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_f32: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None, shared_scratch: false }
     }
 
     /// [`Self::act_f32`] for all `rows` rows of `x` whose bf16 rounding a fused kernel has already produced
@@ -1907,7 +1931,7 @@ impl Ops {
     /// read this activation take it instead of casting it again.
     pub fn act_f32_with_bf16(&self, x: &DeviceBuffer, rows: u32, k: u32, bf16: DeviceBuffer) -> Act {
         assert!(rows > 0, "Ops::act_f32_with_bf16: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)), e4m3: Default::default(), e4m3_row: Default::default(), fine: None }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)), e4m3: Default::default(), e4m3_row: Default::default(), fine: None, shared_scratch: false }
     }
 
     /// [`Self::act_f32`] for `rows` rows of `x` whose E4M3 quantisation (`xq` bytes, `sx` one scale per row per 128 of K,
@@ -1915,7 +1939,7 @@ impl Ops {
     /// E4M3 take it instead of quantising it again.
     pub fn act_f32_with_e4m3(&self, x: &DeviceBuffer, rows: u32, k: u32, xq: DeviceBuffer, sx: DeviceBuffer) -> Act {
         assert!(rows > 0 && k.is_multiple_of(FP8_BLOCK), "Ops::act_f32_with_e4m3: {rows} rows of {k} (K a multiple of {FP8_BLOCK})");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: std::cell::RefCell::new(Some((xq, sx))), e4m3_row: Default::default(), fine: None }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: std::cell::RefCell::new(Some((xq, sx))), e4m3_row: Default::default(), fine: None, shared_scratch: false }
     }
 
     /// Whether an FP8-weight product of `rows` rows against `n` outputs of width `k` reads E4M3 activations on this device

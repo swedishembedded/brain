@@ -47,7 +47,7 @@ fn measure(helper: &str) -> String {
     let _serialised = ONE_CHILD_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let exe = std::env::current_exe().expect("current_exe");
     let mut cmd = Command::new(exe);
-    cmd.args(["--exact", helper, "--ignored", "--nocapture", "--test-threads=1"]);
+    cmd.args(["--exact", &format!("mem_budget_inference::{helper}"), "--ignored", "--nocapture", "--test-threads=1"]);
     cmd.env("BRAIN_LIMIT_VRAM_TOTAL", "64G");
     cmd.env("BRAIN_LIMIT_RAM_TOTAL", "64G");
     let out = cmd.output().expect("spawn subprocess");
@@ -172,4 +172,49 @@ fn the_inference_build_computes_what_the_training_build_computes() {
     for (i, (x, y)) in a.iter().zip(&b).enumerate() {
         assert!((x - y).abs() <= 1e-4, "logit {i} differs: {x} vs {y}");
     }
+}
+
+/// The device bytes an inference build holds for each owned layer must not grow
+/// faster with the row count under int8 than under bf16. The int8 tier packs
+/// each activation before the linears that read it; that packed copy is
+/// consumed before the next layer packs its own, so one copy per width serves
+/// the whole stack. A copy per layer put ~110 KB per row on the card for every
+/// layer of a Qwen3-VL-32B tower, which two 24 GB cards cannot hold at the
+/// 4200 rows of a reference image.
+///
+/// Measured as the process-wide ledger's charged bytes, because the packing
+/// scratch is allocated through the `Ops` handle, which `Gpu::charged_bytes`
+/// of the model's own handle does not see. Child process: the ledger needs
+/// its ceiling published first.
+#[test]
+fn int8_inference_layers_share_their_packed_activations() {
+    let out = measure("child_measure_per_layer_row_scaled_bytes");
+    let i8: u64 = marker(&out, "I8_ROW_SCALED").parse().expect("byte count");
+    let bf16: u64 = marker(&out, "BF16_ROW_SCALED").parse().expect("byte count");
+    assert!(i8 <= bf16, "int8 layers hold {i8} row-scaled bytes each, more than the {bf16} of bf16");
+}
+
+#[test]
+#[ignore = "child process helper, driven by int8_inference_layers_share_their_packed_activations"]
+fn child_measure_per_layer_row_scaled_bytes() {
+    use gpu_core::select::Dtype;
+    let base = qwen3::QwenConfig::tiny_i8();
+    let charged_now = || memauth::authority().expect("ceiling published by the parent").snapshot().iter().map(|p| p.charged).sum::<u64>();
+    // Bytes `layers` layers hold at `rows`, released again before the next build.
+    let held = |dt: Dtype, layers: u32, rows: u32| {
+        let cfg = qwen3::QwenConfig { n_layers: layers, ..base.clone() };
+        let init = qwen3::init_weights(&cfg, 0);
+        let before = charged_now();
+        let m = qwen3::Qwen::new_shard_dt(cfg, 1, rows, &init, qwen3::Shard::whole(layers as usize), dt);
+        let used = charged_now() - before;
+        drop(m);
+        used
+    };
+    // Bytes one more layer adds at 1024 rows, less what it adds at 64: the part that scales with rows.
+    let row_scaled = |dt: Dtype| {
+        let per_layer = |rows: u32| (held(dt, 6, rows) - held(dt, 2, rows)) / 4;
+        per_layer(1024) - per_layer(64)
+    };
+    println!("I8_ROW_SCALED={}", row_scaled(Dtype::I8));
+    println!("BF16_ROW_SCALED={}", row_scaled(Dtype::BF16));
 }
