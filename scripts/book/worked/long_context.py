@@ -30,6 +30,7 @@ info@swedishembedded.com.
 """
 import bisect
 import math
+from decimal import ROUND_HALF_UP, Decimal
 import struct
 
 import bookrng
@@ -48,7 +49,9 @@ def _g(v, d=4):
 
 
 def _fx(v, d=3):
-    return f"{v:.{d}f}"
+    """Fixed decimals, rounded half away from zero (the book's round rule) on the exact binary value, so only a true tie moves."""
+    out = str(Decimal(v).quantize(Decimal(1).scaleb(-d), rounding=ROUND_HALF_UP)) if math.isfinite(v) else f"{v:.{d}f}"
+    return out[1:] if out.startswith("-") and not any(c in "123456789" for c in out) else out
 
 
 def _table(headers, rows, align=None):
@@ -230,10 +233,13 @@ def frequency_tables():
             f"base' = base x s^(d / (d - 2)) = {int(base)} x {s}^({d}/{d - 2}) = {ntk_base(d, base, s):.2f}. YaRN with bounds "
             "alpha = 1 and beta = 32 turns: the 'index' ramp rises linearly from 0 at the pair floor(c(32)) to 1 at the pair "
             "ceil(c(1)) (Volume V, Chapter 8), the 'turns' ramp is linear in the number of turns n_m = 4096 w_m / 2 pi between 1 and 32. "
-            "Rates in radians per position.\n\n"
+            "Rates in radians per position, to 4 significant digits (the rates are computed in double precision with the library functions pow and exp; "
+            "the base' of NTK-aware scaling is used unrounded).\n\n"
             + _table(["pair m", "original", "interpolation", "NTK-aware", "YaRN (index ramp)", "YaRN (turns ramp)"], rows)
-            + "\n\nPairs whose rate is exactly the original, and pairs whose rate is exactly the original divided by s "
-            f"({pairs} pairs):\n\n"
+            + "\n\nPairs whose rate equals the original, and pairs whose rate equals the original divided by s "
+            f"({pairs} pairs). A library pow is not bit-exact, so 'equals' is a tolerance on the rate x of the scheme against the original rate w of the "
+            "pair: |x - w| <= 1e-12 w for 'unchanged' and |x - w / s| <= 1e-9 w for 'divided by s'; a count differs in another implementation only if its rates "
+            "are not within these tolerances.\n\n"
             + _table(["scheme", "unchanged", "divided by s exactly"], cnt))
 
 
@@ -558,7 +564,10 @@ def chunk_equality():
         rows.append((chunk, -(-len(ids) // chunk), "below 1e-12" if worst < 1e-12 else f"{worst:.3e}"))
     return (f"The model of Volume V, Chapter 12 (`kv_cache.model`, seed {_seed(kc.NAME_MODEL)}) and a prompt of 12 token ids, each "
             f"`integer(12)` from the generator seeded {_seed(NAME_CHUNK)} (`seed_of` of the name `{NAME_CHUNK}`): {ids}. The prompt is "
-            "run in one call and in chunks of c tokens on one cache; the logits of every position are compared.\n\n"
+            "run in one call and in chunks of c tokens on one cache; the logits of every position are compared. The difference is measured in double "
+            "precision, and every row reads the same keys and values and adds them in the same order whatever the chunking, so the test is insensitive "
+            "to the weights (any weights give the same result): it checks the bookkeeping of the cache (the positions written, the keys each row sees and "
+            "the causal mask), not the numerical drift that a different summation order would cause, and not the quality of the model.\n\n"
             + _table(["chunk size c", "calls", "largest difference of any logit from the one-call prefill"], rows))
 
 
@@ -584,14 +593,32 @@ def offload_traffic():
         ("prefill the 131,072 tokens again (arithmetic only)", f"{_int(flops)} FLOPs", _g(flops / PEAK / unit, 4)),
     ]
     swap = 2 * total / BUS
+    body = kc.weight_params(s) - s["V"] * s["D"]
+    attn_per_key = 4 * s["L"] * s["H"] * s["dh"]
+    head = 2 * s["D"] * s["V"]
+    grow = []
+    for m in (4096, 16384, 65536, 131072):
+        w_term = 2 * m * body
+        a_term = attn_per_key * (m * (m + 1) // 2)
+        f_m = kc.flops_new(s, 0, m)
+        assert f_m == w_term + a_term + head
+        grow.append([_int(m), _g(w_term + head, 4), _g(a_term, 4), _g(f_m, 4), _g(f_m / PEAK / (2 * per * m / BUS), 3)])
     return (f"The 7.5-billion decoder (L = 32, 8 key-value heads of width 128) with an int8 cache: "
-            f"{_int(int(per))} bytes per token, {_int(int(total))} bytes ({_gib(total):.2f} GiB) for 131,072 tokens. Model of "
+            f"{_int(int(per))} bytes per token, {_int(int(total))} bytes ({_fx(_gib(total), 2)} GiB) for 131,072 tokens. Model of "
             "Volume IV, Chapter 4: device memory 800 (GB/s), host bus 32 (GB/s), arithmetic 40,000 (GFLOP/s). The model time of an "
             "operation is its bytes over the bandwidth (or its FLOPs over the arithmetic rate); the last column divides it by the "
             "model time of the first row, one read of the whole cache from device memory (one unit).\n\n"
             + _table(["operation", "bytes or FLOPs", "model time (units)"], rows, "lrr")
             + f"\n\nThe re-prefill is a floor, since attention and the head do not reach the arithmetic rate. Model time of the "
-            f"re-prefill over that of the swap out and back in: {_g(flops / PEAK / swap, 3)}.")
+            f"re-prefill over that of the swap out and back in: {_g(flops / PEAK / swap, 3)}.\n\n"
+            "The FLOPs of the re-prefill of n tokens, from Chapter 12 of Volume V: F(n) = 2 n B + 4 L H d_h n (n + 1) / 2 + 2 D V, with "
+            f"B = {_int(body)} the numbers in the weight matrices of the layers (everything but the embedding table, which is also the head), "
+            f"L = {s['L']} layers, H = {s['H']} query heads of width d_h = {s['dh']} (so 4 L H d_h = {_int(attn_per_key)} for each visible key; "
+            f"the sum over the n new tokens of the keys each sees is n (n + 1) / 2), and the head 2 D V = {_int(head)} once, for the last row. "
+            "The first term, with the head, is linear in n; the second is quadratic. The first column of the next table is the weights term plus the head, "
+            "the second the attention term, the third their sum F(n), and the last the model time of F(n) at the arithmetic rate of the model above, over the model time of "
+            f"a swap out and back in (2 x {_int(int(per))} n bytes at the bus bandwidth of the model above).\n\n"
+            + _table(["n tokens", "weights and head FLOPs", "attention FLOPs", "F(n)", "re-prefill time / swap time"], grow))
 
 
 # ------------------------------------------------------------------------------------------------ a needle among random keys

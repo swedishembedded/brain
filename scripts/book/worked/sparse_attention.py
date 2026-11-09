@@ -17,8 +17,7 @@ so a picture and the table beside it cannot disagree.
   the same number of keys, and the cost of the strided pattern at long lengths;
 * the per-query cost of a learned indexer against dense attention at the shapes of `GlmConfig::glm5_2()`, and the length above
   which the indexer pays for itself;
-* an indexer (two projections to width 8) trained for 200 steps to match the dense attention weights, under the stable-digits
-  rule, and the output error and captured mass of attending to the top k keys of the oracle, of that indexer and of a window;
+* an indexer (two projections to width 8) trained for 200 steps to match the dense attention weights, and the output error and captured mass of attending to the top k keys of the oracle, of that indexer and of a window;
 * the Ward-merged bucket index of latent sparse attention on the toy, its read, and its sizes at the default configuration;
 * the keys a selection touches in a paged cache, the bytes of the sparse kernels, and the index pages.
 
@@ -30,6 +29,7 @@ needs, not by what the context holds. If your team needs expertise in sparse att
 procure our services by sending an email to info@swedishembedded.com.
 """
 import math
+from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from multiprocessing import get_context
 
@@ -44,7 +44,8 @@ def _int(n):
 
 
 def _fx(v, d=4):
-    out = f"{v:.{d}f}"
+    """Fixed decimals, rounded half away from zero (the book's round rule) on the exact binary value, so only a true tie moves."""
+    out = str(Decimal(v).quantize(Decimal(1).scaleb(-d), rounding=ROUND_HALF_UP)) if math.isfinite(v) else f"{v:.{d}f}"
     return out[1:] if out.startswith("-") and not any(c in "123456789" for c in out) else out
 
 
@@ -432,14 +433,19 @@ def training_runs():
     return res[0], res[1:]
 
 
+def _assert_stable(base, twin, tol=1e-6):
+    """The training is not chaotic: a 1e-12 change of one starting weight moves nothing printed."""
+    assert all(abs(a - b) < tol for a, b in zip(base, twin)), (base, twin)
+
+
 def indexer_training():
     base, twins = training_runs()
     rows = []
     for step in CHECKPOINTS:
-        kl = stable.text(base["trace"][step]["kl"], [t["trace"][step]["kl"] for t in twins], lambda x: _fx(x, 3))
-        m8 = stable.text(base["trace"][step]["eval"][8][0], [t["trace"][step]["eval"][8][0] for t in twins], lambda x: _fx(x, 3))
-        m32 = stable.text(base["trace"][step]["eval"][32][0], [t["trace"][step]["eval"][32][0] for t in twins], lambda x: _fx(x, 3))
-        rows.append([step, kl, m8, m32])
+        got = [base["trace"][step]["kl"], base["trace"][step]["eval"][8][0], base["trace"][step]["eval"][32][0]]
+        for t in twins:
+            _assert_stable(got, [t["trace"][step]["kl"], t["trace"][step]["eval"][8][0], t["trace"][step]["eval"][32][0]])
+        rows.append([step] + [_fx(x, 3) for x in got])
     return (f"Indexer: s'_ij = (Wq q_i) . (Wk k_j) / sqrt({DI}) with Wq, Wk of shape [{DI}, {D}], entries drawn as normals "
             f"divided by sqrt({D}) from {_seed_line('sparse_attention.indexer_init')}, Wq first and then Wk, row by row. "
             f"Trained on sequence A, the {len(TRAIN_QUERIES)} queries i = 64, 66, ..., 254, by {STEPS} steps of full-batch "
@@ -447,7 +453,7 @@ def indexer_training():
             "p_i and softmax_j(s'_ij) over j <= i; the table's KL is that cross-entropy minus the mean entropy of the dense "
             "weights. Held-out columns: sequence B, queries 128 .. 255, the mean mass of the dense weights on the indexer's "
             f"top 8 and top 32 keys (a random choice of 8 keys keeps {_fx(sum(8 / (i + 1) for i in range(EVAL_FROM, T)) / (T - EVAL_FROM), 3)} of it on average, 32 keys {_fx(sum(32 / (i + 1) for i in range(EVAL_FROM, T)) / (T - EVAL_FROM), 3)}). "
-            + stable.RULE + "\n\n"
+            + "Plain gradient descent at this rate is not chaotic: the values below agree to 1e-6 when the first weight is changed by 1e-12 or 3e-12, so every printed digit is reproducible to a tolerance of 0.001.\n\n"
             + _table(["step", "mean KL on the training queries", "held-out mass of the top 8", "held-out mass of the top 32"], rows))
 
 
@@ -466,8 +472,9 @@ def error_vs_k():
             wm += m
             we += e
         n = T - EVAL_FROM
-        im = stable.text(base["trace"][STEPS]["eval"][k][0], [t["trace"][STEPS]["eval"][k][0] for t in twins], lambda x: _fx(x, 3))
-        ie = stable.text(base["trace"][STEPS]["eval"][k][1], [t["trace"][STEPS]["eval"][k][1] for t in twins], lambda x: _fx(x, 3))
+        for t in twins:
+            _assert_stable(base["trace"][STEPS]["eval"][k], t["trace"][STEPS]["eval"][k])
+        im, ie = (_fx(x, 3) for x in base["trace"][STEPS]["eval"][k])
         rows.append([k, _fx(om / n, 3), _fx(oe / n, 3), im, ie, _fx(wm / n, 3), _fx(we / n, 3)])
     # the identity o - o_hat = (1 - m)(mu_R - mu_S) and its bound 2 (1 - m) max |v|, on every query and every k, for the oracle
     seq = sequence(SEQ_B)
@@ -494,7 +501,7 @@ def error_vs_k():
             "selected keys hold; 'error' is the mean over queries of the length of (dense output - sparse output) divided by "
             "the length of the dense output, the sparse output being one softmax over the selected keys' own scores. Oracle: "
             "the k largest true weights. Indexer: the k largest scores of the trained indexer of the previous table. "
-            "Window: the k most recent keys. Oracle and window are exact; the indexer columns follow the stable-digits rule.\n\n"
+            "Window: the k most recent keys. Oracle, window and indexer columns are reproducible to a tolerance of 0.001.\n\n"
             + _table(["k", "oracle mass", "oracle error", "indexer mass", "indexer error", "window mass", "window error"], rows)
             + "\n\nReading every causal key gives an error of exactly 0 (checked on all 128 queries). Over the "
             f"{len(KS) * (T - EVAL_FROM)} (query, k) pairs of the oracle, the largest difference between the error length "
@@ -709,7 +716,7 @@ def lsa_scale():
             + f"\n\nThe index of one block is {block // bsize} buckets x ({d_idx} centroid numbers + 16 member slots) x 4 bytes = "
             f"{(block // bsize) * (d_idx + 16) * 4:,} bytes for {block} tokens, {idx_bytes} bytes per token and layer. The "
             f"cached keys and values of a layer with 8 key-value heads of width 128 in bf16 are 8 x 128 x 2 x 2 = {kv_bytes:,} "
-            f"bytes per token, so the index is {100 * idx_bytes / kv_bytes:.1f}% of them.")
+            f"bytes per token, so the index is {_fx(100 * idx_bytes / kv_bytes, 1)}% of them.")
 
 
 # ------------------------------------------------------------------------------------------------ 6. paged storage

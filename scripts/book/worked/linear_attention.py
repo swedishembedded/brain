@@ -27,6 +27,7 @@ expertise in linear attention and hybrid decoder architectures, you can procure 
 info@swedishembedded.com.
 """
 import math
+from decimal import ROUND_HALF_UP, Decimal
 
 import bookrng
 
@@ -38,7 +39,8 @@ def _int(n):
 
 
 def _fx(v, d=4):
-    out = f"{v:.{d}f}"
+    """Fixed decimals, rounded half away from zero (the book's round rule) on the exact binary value, so only a true tie moves."""
+    out = str(Decimal(v).quantize(Decimal(1).scaleb(-d), rounding=ROUND_HALF_UP)) if math.isfinite(v) else f"{v:.{d}f}"
     return out[1:] if out.startswith("-") and not any(c in "123456789" for c in out) else out
 
 
@@ -59,7 +61,7 @@ def _vec(v, d=3):
 
 
 def _gib(b):
-    return f"{b / 2**30:.3f}"
+    return _fx(b / 2**30, 3)
 
 
 # ------------------------------------------------------------------------------------------------ arithmetic
@@ -139,7 +141,7 @@ def state_vs_cache():
     rows = []
     for t in (1024, 8192, 65536, 262144):
         full = z["kv_bytes_token"] * t
-        rows.append([_int(t), _int(full), _int(z["state_bytes"]), f"{full / z['state_bytes']:.2f}"])
+        rows.append([_int(t), _int(full), _int(z["state_bytes"]), _fx(full / z['state_bytes'], 2)])
     cross = z["state_bytes"] / z["kv_bytes_token"]
     return (
         "Shape of `crates/qwen35` `qwen38_27b`: model width 5,120; full attention has 4 key-value heads of width 256, so a token adds "
@@ -610,15 +612,22 @@ def chunk_costs():
     T = 4096
     rows = []
     rec = tokenwise_macs(T, dk, dv)
-    rows.append(["1 (token by token)", _int(rec // T), _int(T), _int(2 * T * dk * dv * 4), _int(T)])
-    for C in (16, 32, 64, 128, 256):
+    rows.append(["token loop (the recurrence itself)", f"{rec / T:,.1f}", _int(T), _int(2 * T * dk * dv * 4), _int(T)])
+    for C in (1, 16, 32, 64, 128, 256):
         m = chunk_macs_formula(T, C, dk, dv)
-        rows.append([C, _int(m // T), _int(T // C), _int(2 * (T // C) * dk * dv * 4), _int(C + T // C)])
+        # C = 1 has no triangle, so its depth is the T state steps alone; C > 1 adds the C rows of the solve
+        depth = T if C == 1 else C + T // C
+        rows.append([C, f"{m / T:,.1f}", _int(T // C), _int(2 * (T // C) * dk * dv * 4), _int(depth)])
     return (
         f"One head, T = {_int(T)} tokens, d_k = d_v = {dk}. Multiply-adds per token from the closed form (equal to the counts of the program at small "
-        "sizes). 'State round trips' is the number of times the state is read from memory and written back, counting one read and one write per "
+        "sizes), exact: every value is a multiple of 0.5 and is printed with its .5, not rounded. The counting convention is that of the previous table: one "
+        "multiply-add per term of a scalar product, a score of the matrix N costing d_k + 1 (the dot product, then the product with the strength and the exponential's value), "
+        "while the exponentials and the scalings of whole rows are not counted. The first row is the token recurrence of the previous section (four products "
+        "of d_k d_v per token); the row C = 1 is the closed form of the chunked routine at a chunk of one token. "
+        "'State round trips' is the number of times the state is read from memory and written back, counting one read and one write per "
         "step, with the state in fp32 (4 bytes), if it lives in memory between steps. 'Sequential depth' is the longest chain of steps that "
-        "cannot overlap: for the chunked form, the C rows of the triangular solve (independent across chunks) plus the T/C steps of the state.\n\n"
+        "cannot overlap: for the chunked form, the C rows of the triangular solve (independent across chunks) plus the T/C steps of the state; at C = 1 "
+        "there is no triangle and the depth is the T steps alone.\n\n"
         + _table(["chunk size C", "multiply-adds per token", "state round trips", "state bytes moved (read + write)", "sequential depth"], rows)
     )
 
@@ -835,7 +844,7 @@ def hybrid_costs():
     for t in (1024, 8192, 32768, 131072, 262144):
         d = hybrid_costs_data(t)
         mem_rows.append([_int(t)] + [_gib(d[k][0]) for k in ("attention", "hybrid", "linear")])
-        flop_rows.append([_int(t)] + [f"{d[k][1] / 1e9:.2f}" for k in ("attention", "hybrid", "linear")])
+        flop_rows.append([_int(t)] + [_fx(d[k][1] / 1e9, 2) for k in ("attention", "hybrid", "linear")])
     return (
         f"The {z['layers']}-layer shape of `qwen38_27b` (full attention in every 4th layer: {z['n_full']} full-attention layers and {z['n_lin']} Gated DeltaNet layers), against "
         f"a pure stack of the same width with full attention in all {z['layers']} layers (same 4 key-value heads of width 256), and a pure stack of Gated DeltaNet layers. "

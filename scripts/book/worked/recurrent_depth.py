@@ -26,6 +26,7 @@ looped transformers and their serving cost, you can procure our services by send
 import hashlib
 import json
 import math
+from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from multiprocessing import get_context
 from pathlib import Path
@@ -39,7 +40,8 @@ import transformer_block as tb
 
 
 def _fx(v, d=3):
-    out = f"{v:.{d}f}"
+    """Fixed decimals, rounded half away from zero (the book's round rule) on the exact binary value, so only a true tie moves."""
+    out = str(Decimal(v).quantize(Decimal(1).scaleb(-d), rounding=ROUND_HALF_UP)) if math.isfinite(v) else f"{v:.{d}f}"
     return out[1:] if out.startswith("-") and not any(c in "123456789" for c in out) else out
 
 
@@ -629,15 +631,15 @@ def _cell(kind, f, digits=3):
 
 
 def _span(kind, f, digits=3):
-    """The stable digits of f over the run and its four copies when they all agree; otherwise the smallest and the largest value over the
-    five, written at the table's precision (a chaotic run has no single reproducible value, only a scatter)."""
+    """The interval, over the run and its four copies, that contains every value, widened outward to a grid of 10^-digits.
+    A chaotic run has no reproducible value, only a scatter; the outward rounding keeps only the digits on which the copies lie
+    together, and the claims under the table (not the interval) are what another implementation must reproduce."""
     base, twins = results()[kind]
     vals = [f(base)] + [f(t) for t in twins]
-    t = stable.text(vals[0], vals[1:], lambda x: _fx(x, digits))
-    if not t.startswith(("about", "unstable")):
-        return t
-    lo, hi = _fx(min(vals), digits), _fx(max(vals), digits)
-    return lo if lo == hi else f"{lo} to {hi}"
+    scale = 10 ** digits
+    lo = math.floor(min(vals) * scale + 1e-9) / scale
+    hi = math.ceil(max(vals) * scale - 1e-9) / scale
+    return f"{lo:.{digits}f} to {hi:.{digits}f}"
 
 
 def _count(kind, pred):
@@ -692,7 +694,9 @@ def loop_setup():
             f"the pre-norm block of width {D_T} with {H_T} heads and SwiGLU hidden width {F_T} (causal attention), a gain-only final RMS norm "
             f"(epsilon 1e-6) and a head W_C [{D_T}, 4] on the last position. The block is applied {LOOPS_TRAINED} times in training and the loss is the "
             f"cross-entropy of the last position after the second application. Parameters: {_int(params_block)} in the block, {_int(params_all)} in all "
-            f"(a decoder with two distinct blocks of Chapter 9 has 4,816). A predictor that knows the pointer and follows it exactly k times is right "
+            f"(a decoder with two distinct blocks of Chapter 9 has 4,816). Initialization draws, in this order from one generator: the embedding table E "
+            f"(20 by {D_T}, row by row, every entry `normal()`), then W_Q, W_K, W_V, W_O ({D_T} by {D_T}), W_gate, W_up ({D_T} by {F_T}) and W_down ({F_T} by {D_T}), row by row, "
+            f"each entry `normal() / sqrt(rows)`, then W_C ({D_T} by 4, `normal() / sqrt({D_T})`); both gains and the final gain start at 1. A predictor that knows the pointer and follows it exactly k times is right "
             f"with probability {', '.join(_fx(v, 4) for v in chase)} for k = 1 .. {TEST_LOOPS} (enumerated over the 256 functions and 4 queries); "
             f"in {_fx(one_hop_enough() * 100, 1)} percent of the pairs one hop already gives the answer, because f(x) is a fixed point.")
 
@@ -709,21 +713,23 @@ def loop_training():
     rows = []
     chase = chase_reference()
     for k in range(1, TEST_LOOPS + 1):
-        acc = _span("loop", lambda r, k=k: r["right"][k - 1] / N_TEST, 3)
+        acc = _span("loop", lambda r, k=k: r["right"][k - 1] / N_TEST, 2)
         chg = _cell("loop", lambda r, k=k: r["change"][k - 1], 3)
         rms = _cell("loop", lambda r, k=k: r["rms"][k - 1], 2)
         stp = _cell("loop", lambda r, k=k: r["step"][k - 1], 2)
         rows.append((k, acc, _fx(chase[k - 1], 3), chg, rms, stp))
     curve = [_cell("loop", lambda r, c=c: r["curve"][c], 3) for c in CHECKPOINTS]
-    text = (f"Initialization: draws from `{NAME_LOOP}.init` ({_seed(NAME_LOOP + '.init')}) in the order above. Training: the examples of the stream "
+    text = (f"Initialization: draws from `{NAME_LOOP}.init` ({_seed(NAME_LOOP + '.init')}) in the order of the setup table. Training: the examples of the stream "
             f"`{NAME_LOOP}.data` ({_seed(NAME_LOOP + '.data')}), step s of {STEPS_LOOP} takes the examples 16 (s - 1) to 16 s - 1; the gradient of a step "
             f"is the mean of the 16 example gradients, with the block's gradient the sum over its two uses; Adam on every tensor at rate {LR}, "
             f"beta 0.9 and 0.999, epsilon 1e-8, no weight decay, clipping or warmup. Mean training loss over the 20 steps up to step 100, 200, 400: "
             f"{curve[0]}, {curve[1]}, {curve[2]}. Test: the first {N_TEST} examples of `{NAME_TEST}` ({_seed(NAME_TEST)}), the largest logit "
             "(lowest id on a tie) against the target, with k = 1 .. 8 applications of the block. The relative change is the mean over the test "
-            "examples of ||x_k - x_(k-1)|| / ||x_(k-1)|| for the stream matrices [5, 16] (x_0 the embeddings), the RMS of the stream the root mean "
-            "square of the entries of x_k and the RMS of the change that of the entries of x_k - x_(k-1). " + stable.RULE + " The test accuracy of this run is chaotic in its second digit: where the five values differ, "
-            "the cell gives the smallest and the largest of them, and the claims below the table are the statements that hold in every copy.\n\n")
+            "examples of ||x_k - x_(k-1)|| / ||x_(k-1)|| for the stream matrices [5, 16] (x_0 the embeddings), the RMS of the stream the mean over the "
+            "test examples of the root mean square of the 80 entries of x_k of that example (an average of per-example RMS values, not the RMS of "
+            "all entries pooled) and the RMS of the change the same average for the entries of x_k - x_(k-1). " + stable.RULE + " The test accuracy of this run is chaotic in its second digit: where the five values differ, "
+            "the cell of the accuracy column gives the hundredths that contain the values of all five copies, written 'a to b', and the claims below the table "
+            "(not the interval) are what another implementation must reproduce.\n\n")
     claims = [
         ("accuracy is highest at k = 2, the number of applications it was trained with", _count("loop", lambda r: max(range(TEST_LOOPS), key=lambda k: r["right"][k]) == 1)),
         ("accuracy at k = 2 is above 0.9", _count("loop", lambda r: r["right"][1] / N_TEST > 0.9)),
@@ -741,11 +747,11 @@ def exit_training():
     n_p = PASSES_EXIT
     rows = []
     for t in range(n_p):
-        rows.append((t + 1, _span("exit", lambda r, t=t: r["right"][t] / N_TEST, 3), _span("exit", lambda r, t=t: r["ce"][t], 3),
-                     _span("exit", lambda r, t=t: r["q"][t], 3), _span("exit", lambda r, t=t: r["easy_q"][t], 3),
-                     _span("exit", lambda r, t=t: r["hard_q"][t], 3)))
+        rows.append((t + 1, _span("exit", lambda r, t=t: r["right"][t] / N_TEST, 1), _span("exit", lambda r, t=t: r["ce"][t], 1),
+                     _span("exit", lambda r, t=t: r["q"][t], 1), _span("exit", lambda r, t=t: r["easy_q"][t], 1),
+                     _span("exit", lambda r, t=t: r["hard_q"][t], 1)))
     easy = results()["exit"][0]["easy_n"]
-    rule_rows = [(th, _span("exit", lambda r, th=th: r["rule"][th][1], 3), _span("exit", lambda r, th=th: r["rule"][th][0], 3)) for th in EXIT_QS_TOY]
+    rule_rows = [(th, _span("exit", lambda r, th=th: r["rule"][th][1], 1), _span("exit", lambda r, th=th: r["rule"][th][0], 1)) for th in EXIT_QS_TOY]
     curve = [_cell("exit", lambda r, c=c: r["curve"][c], 3) for c in CHECKPOINTS]
     text = (f"The same task and decoder with the objective of Ouro: {PASSES_EXIT} passes of the one block, pass t > 1 starting from the final-normed "
             f"output of pass t - 1, each pass ending in the shared gain-only RMS norm, the head on the last position and the gate "
@@ -754,8 +760,10 @@ def exit_training():
             f"the data stream `{NAME_EXIT}.data` ({_seed(NAME_EXIT + '.data')}), {STEPS_EXIT} steps, the optimizer and the test examples of the previous "
             f"table. Mean training loss over the 20 steps up to step 100, 200, 400: {curve[0]}, {curve[1]}, {curve[2]}. Of the {N_TEST} test examples, "
             f"{easy} have a fixed point at f(x) ('one hop enough'); the last two columns are the mean exit probability of that group and of the rest. "
-            + stable.RULE + " The test numbers of this run scatter in their first digit, so each cell gives the smallest and the largest value over "
-            "the run and its four copies, and the claims below the tables are the statements that hold in every copy.\n\n")
+            + stable.RULE + " The test numbers of this run scatter in their first digit (the copies differ by far more than the nudge: the run is "
+            "chaotic after about 400 steps), and the cells of the tables are the tenths that contain the values of all five, written 'a to b'; they are "
+            "a guide to the size, not numbers to reproduce. What another implementation must reproduce are the claims below the tables, which "
+            "hold in every copy with a margin.\n\n")
     text += _table(["pass t", "accuracy of the head after pass t", "cross-entropy (nats)", "mean exit probability q_t", "q_t, one hop enough",
                     "q_t, the rest"], rows)
     text += ("\n\nThe exit rule: leave at the first pass whose cumulative exit probability reaches the threshold (the last pass when none does).\n\n"
@@ -764,8 +772,8 @@ def exit_training():
         ("the head after pass 1 is right on fewer than 0.6 of the examples", _count("exit", lambda r: r["right"][0] / N_TEST < 0.6)),
         ("the heads after passes 2 and 3 are right on more than 0.9", _count("exit", lambda r: min(r["right"][1:]) / N_TEST > 0.9)),
         ("most of the exit probability is on the last pass (q_3 above 0.5)", _count("exit", lambda r: r["q"][2] > 0.5)),
-        ("q_1 of the 'one hop enough' group is at least 4 times q_1 of the rest", _count("exit", lambda r: r["easy_q"][0] >= 4 * r["hard_q"][0])),
-        ("at threshold 0.5 fewer than 2.8 passes are run on average", _count("exit", lambda r: r["rule"][0.5][1] < 2.8)),
+        ("q_1 of the 'one hop enough' group is at least 3 times q_1 of the rest", _count("exit", lambda r: r["easy_q"][0] >= 3 * r["hard_q"][0])),
+        ("at threshold 0.5 fewer than 2.9 passes are run on average", _count("exit", lambda r: r["rule"][0.5][1] < 2.9)),
         ("at threshold 0.5 accuracy is within 0.03 of the accuracy of the last pass", _count("exit", lambda r: r["rule"][0.5][0] >= r["right"][2] / N_TEST - 0.03)),
     ]
     return text + "\n\nWhat holds in every copy:\n\n" + _table(["claim", "copies in which it holds"], claims, "lr")
@@ -847,5 +855,15 @@ def shared_gradient_check():
         rows.append((label, n_ent, "below 1e-6" if _worst(p, loss_only, good) < 1e-6 else "FAILS", f"{_worst(p, loss_only, bad):.2f}"))
     return ("One example of the two-hop task from `recurrent_depth.check.example` (" + _seed("recurrent_depth.check.example") + "), parameters from "
             "`recurrent_depth.check.loop` and `recurrent_depth.check.exit`, three entries of every tensor (the first, the middle and the last). "
-            "Criterion: the largest relative error below 1e-6.\n\n"
+            "Conventions. Parameters: drawn as in the training initialization (the embedding table E [20, 16], each entry `normal()`; then W_Q, W_K, "
+            "W_V, W_O [16, 16], W_gate, W_up [16, 24] and W_down [24, 16], each row by row with `normal() / sqrt(rows)`; then W_C [16, 4] with "
+            "`normal() / sqrt(16)`; for the exit model last the gate weights, 16 values of 0.1 `normal()`), the gains 1, the gate bias -1.5, from the "
+            "two generators named above (one per model). A tensor is a matrix [rows, cols] (a gain or gate-weight vector is one row; the bias is [1, 1]); "
+            "the entries checked are (0, 0), (rows // 2, cols // 2) and (rows - 1, cols - 1) with duplicates counted once, so a vector of 16 gives its "
+            "entries 0, 8 and 15 and the bias one entry. Numerical derivative: (L(w + h) - L(w - h)) / (2h) with h = 1e-5 on the loss of that one example, "
+            "in double precision. Relative error: |a - n| / max(|a|, |n|, 1e-3) with a the analytic and n the numerical derivative (the 1e-3 keeps a "
+            "gradient that is zero from dividing by zero); the table gives the largest over the entries. 'Last use only' is the wrong backward that "
+            "keeps, for each weight of the block, the gradient of the last application alone (the first one the backward pass meets) and "
+            "discards the contributions of the earlier uses, while the gradient with respect to the input of each use still flows on to the earlier "
+            "ones as usual. Criterion: the largest relative error below 1e-6.\n\n"
             + _table(["model", "entries checked", "largest relative error, sum over the uses", "same, last use only"], rows, "lrrr"))

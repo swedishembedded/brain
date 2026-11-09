@@ -138,7 +138,7 @@ $$
 a geometric ramp from 1 at $m = 0$ to $1/s$ at $m = d/2 - 1$: the divisor grows exponentially with the pair index, so the fast pairs are divided by a little and the slow ones by almost the full $s$. For the running example, $\mathrm{base}' = 10{,}000 \times 8^{64/62} = 85{,}550.38$.
 
 <!-- worked: long_context.frequency_tables -->
-Head width d = 64, base 10000, trained length 4096, extension s = 8. NTK-aware base: base' = base x s^(d / (d - 2)) = 10000 x 8^(64/62) = 85550.38. YaRN with bounds alpha = 1 and beta = 32 turns: the 'index' ramp rises linearly from 0 at the pair floor(c(32)) to 1 at the pair ceil(c(1)) (Volume V, Chapter 8), the 'turns' ramp is linear in the number of turns n_m = 4096 w_m / 2 pi between 1 and 32. Rates in radians per position.
+Head width d = 64, base 10000, trained length 4096, extension s = 8. NTK-aware base: base' = base x s^(d / (d - 2)) = 10000 x 8^(64/62) = 85550.38. YaRN with bounds alpha = 1 and beta = 32 turns: the 'index' ramp rises linearly from 0 at the pair floor(c(32)) to 1 at the pair ceil(c(1)) (Volume V, Chapter 8), the 'turns' ramp is linear in the number of turns n_m = 4096 w_m / 2 pi between 1 and 32. Rates in radians per position, to 4 significant digits (the rates are computed in double precision with the library functions pow and exp; the base' of NTK-aware scaling is used unrounded).
 
 | pair m | original | interpolation | NTK-aware | YaRN (index ramp) | YaRN (turns ramp) |
 |---|---:|---:|---:|---:|---:|
@@ -155,7 +155,7 @@ Head width d = 64, base 10000, trained length 4096, extension s = 8. NTK-aware b
 | 27 | 0.0004217 | 5.271e-05 | 6.893e-05 | 5.271e-05 | 5.271e-05 |
 | 31 | 0.0001334 | 1.667e-05 | 1.667e-05 | 1.667e-05 | 1.667e-05 |
 
-Pairs whose rate is exactly the original, and pairs whose rate is exactly the original divided by s (32 pairs):
+Pairs whose rate equals the original, and pairs whose rate equals the original divided by s (32 pairs). A library pow is not bit-exact, so 'equals' is a tolerance on the rate x of the scheme against the original rate w of the pair: |x - w| <= 1e-12 w for 'unchanged' and |x - w / s| <= 1e-9 w for 'divided by s'; a count differs in another implementation only if its rates are not within these tolerances.
 
 | scheme | unchanged | divided by s exactly |
 |---|---:|---:|
@@ -250,7 +250,7 @@ $$
 \lambda^2 = 1 + \frac{2\ln s}{\sigma^2} .
 $$
 
-The scale needed depends on the spread $\sigma$ of the scores, which the derivation does not know. The paper does not derive $\mu$ either: it fitted $\mu(s) = 0.1\ln s + 1$ by finding the scale with the lowest perplexity at each extension on four sizes of one model family without fine-tuning, and found that the same values served a second family. The table solves the condition above for the variance that would make the fitted value exact.
+The scale needed depends on the spread $\sigma$ of the scores, which the derivation does not know. The paper does not derive $\mu$ either: it fitted $\mu(s) = 0.1\ln s + 1$ by finding the scale with the lowest perplexity (the exponential of the mean cross-entropy per token, [Chapter 13 of Volume I](../v01-mathematics/13-information-theory.md)) at each extension on four sizes of one model family without fine-tuning, and found that the same values served a second family. The table solves the condition above for the variance that would make the fitted value exact.
 
 <!-- worked: long_context.temperature_factor -->
 t(s) = 0.1 ln s + 1 multiplies the cosine and the sine of every pair, so the rotated query and key are each t(s) times larger and the score is multiplied by lambda = t(s)^2. Keeping the entropy of the row at its value for n keys when there are s n of them needs lambda^2 = 1 + 2 ln(s) / variance (derived in the text); the last column solves that for the variance of the scores that t(s) would be exactly right for.
@@ -267,7 +267,7 @@ t(s) = 0.1 ln s + 1 multiplies the cosine and the sine of every pair, so the rot
 The scores of the previous block (variance 4.0): entropy with n = 4096 keys and lambda = 1: 6.5805; with n = 32768 keys and lambda = 1: 8.5230; with n = 32768 keys and lambda = t(8)^2 = 1.4591: 6.7634.
 <!-- /worked -->
 
-For the extensions from 2 to 8 the fit corresponds to a score variance between 3.7 and 4.5, a standard deviation of about 2, and the variance falls slowly to 2.8 at $s = 64$. I have not measured the spread of a trained model's scores, so this is a consistency check and not an explanation: the form $1 + \text{const}\cdot\ln s$ is what keeping the entropy asks for, and 0.1 is what happened to fit. In the entropy table's scores, with variance 4, scaling by $\lambda = 1.4591$ brings the entropy of 32,768 keys back to 6.7634, within 0.18 nats of the 6.5805 of 4,096 keys, from 8.5230.
+For the extensions from 2 to 8 the fit corresponds to a score variance between 3.7 and 4.5, a standard deviation of about 2, and the variance falls slowly to 2.8 at $s = 64$. The spread of a trained model's scores is not measured here, so this is a consistency check and not an explanation: the form $1 + \text{const}\cdot\ln s$ is what keeping the entropy asks for, and 0.1 is what happened to fit. In the entropy table's scores, with variance 4, scaling by $\lambda = 1.4591$ brings the entropy of 32,768 keys back to 6.7634, within 0.18 nats of the 6.5805 of 4,096 keys, from 8.5230.
 
 The two corrections act in different places, and in an engine they are one table. The rates go into the angle, the factor $\mu$ multiplies the cosine and the sine that come out of it, and both are fixed per position when the keys are written, so a cached key is consistent with the table it was written under. A scheme that changed the table with the current length (the one called dynamic scaling, which raises the base as the text grows) would make every cached key stale; brain refuses a declaration of that type, as the next section shows.
 
@@ -326,8 +326,8 @@ Bytes per token = 2 (keys and values) x layers x key-value heads x head width x 
 | 7.5-billion decoder (8 key-value heads) | fp8 | 1.03125 | 67,584 | 8.25 | 0.258 |
 | 70-billion decoder (8 key-value heads) | f32 | 4.00000 | 655,360 | 80.00 | 2.500 |
 | 70-billion decoder (8 key-value heads) | bf16 | 2.00000 | 327,680 | 40.00 | 1.250 |
-| 70-billion decoder (8 key-value heads) | int8 | 1.03125 | 168,960 | 20.62 | 0.645 |
-| 70-billion decoder (8 key-value heads) | fp8 | 1.03125 | 168,960 | 20.62 | 0.645 |
+| 70-billion decoder (8 key-value heads) | int8 | 1.03125 | 168,960 | 20.63 | 0.645 |
+| 70-billion decoder (8 key-value heads) | fp8 | 1.03125 | 168,960 | 20.63 | 0.645 |
 
 The 80-layer decoder of Volume VI, Chapter 3 (every 5th layer global, the others a window of 1,024 keys, 1,024 key and 1,024 value numbers per token and layer):
 
@@ -382,11 +382,20 @@ The 7.5-billion decoder (L = 32, 8 key-value heads of width 128) with an int8 ca
 | prefill the 131,072 tokens again (arithmetic only) | 6,333,222,386,401,280 FLOPs | 1.43e+04 |
 
 The re-prefill is a floor, since attention and the head do not reach the arithmetic rate. Model time of the re-prefill over that of the swap out and back in: 286.
+
+The FLOPs of the re-prefill of n tokens, from Chapter 12 of Volume V: F(n) = 2 n B + 4 L H d_h n (n + 1) / 2 + 2 D V, with B = 6,979,321,856 the numbers in the weight matrices of the layers (everything but the embedding table, which is also the head), L = 32 layers, H = 32 query heads of width d_h = 128 (so 4 L H d_h = 524,288 for each visible key; the sum over the n new tokens of the keys each sees is n (n + 1) / 2), and the head 2 D V = 1,050,673,152 once, for the last row. The first term, with the head, is linear in n; the second is quadratic. The first column of the next table is the weights term plus the head, the second the attention term, the third their sum F(n), and the last the model time of F(n) at the arithmetic rate of the model above, over the model time of a swap out and back in (2 x 67,584 n bytes at the bus bandwidth of the model above).
+
+| n tokens | weights and head FLOPs | attention FLOPs | F(n) | re-prefill time / swap time |
+|---|---:|---:|---:|---:|
+| 4,096 | 5.718e+13 | 4.399e+12 | 6.157e+13 | 89 |
+| 16,384 | 2.287e+14 | 7.037e+13 | 2.991e+14 | 108 |
+| 65,536 | 9.148e+14 | 1.126e+15 | 2.041e+15 | 184 |
+| 131,072 | 1.83e+15 | 4.504e+15 | 6.333e+15 | 286 |
 <!-- /worked -->
 
 A decoded token attends to the whole sequence, so the cache is read once per token. Read from device memory it costs one unit of model time; across the bus it would cost 25 units, which is the ratio of the two bandwidths. Keeping the blocks that "have not been used lately" on the host and fetching them on demand is the design that suggests itself, an LRU over blocks, and it fails here for a reason in the attention and not the bus: every block of a sequence being decoded is read by every token, so no block is cold, and a block-level scheme streams the whole cache every step. Brain's module `crates/model/src/kv_offload.rs` says this in its header and builds the other design. It moves whole sequences, between scheduler turns: a sequence the scheduler is not advancing this round has all its blocks copied to a byte-budgeted pool of host memory and its device blocks freed for the sequences that are running, and it is copied back when it is advanced again. The cost of the swap, 17.7 GB for the round trip of this sequence, 50 units in the model, is paid once per scheduling transition and not once per token, so it is spread over every token that the other sequences generate in the meantime. The effect is on concurrency, the number of admitted sequences, and not on the length that one running sequence can reach.
 
-The alternative to a swap is dropping the cache and prefilling the prompt again when the sequence resumes. The last line of the table counts it: $6.3 \times 10^{15}$ FLOPs, about 14,300 units at the model's arithmetic rate, a floor since the attention and the head do not reach it, which is 286 times the model time of the swap out and back in. That ratio is nearly independent of the length (both costs are linear in the tokens; recomputation adds a quadratic attention term on top), and it is the same weights-against-bytes comparison as always: a token's recomputation costs $2P$ FLOPs, $1.5 \times 10^{10}$ for this decoder, and its swap costs 67,584 bytes each way. For a model of this size the swap is the cheaper path at every length where the fixed costs of starting a transfer do not dominate.
+The alternative to a swap is dropping the cache and prefilling the prompt again when the sequence resumes. The last line of the table counts it: $6.3 \times 10^{15}$ FLOPs, about 14,300 units at the model's arithmetic rate, a floor since the attention and the head do not reach it, which is 286 times the model time of the swap out and back in. That ratio grows with the length. The weights part of the recomputation and the swap are both linear in the tokens, so their ratio is a constant, about 83 for this decoder: a token's recomputation costs $2B \approx 1.4 \times 10^{10}$ FLOPs ($B$ the numbers in the layers' weight matrices, a little below the 7.5 billion parameters because the embedding table is not multiplied per token) against 67,584 bytes each way for its swap. The attention of the recomputation is quadratic, $4LHd_h\,n(n+1)/2$ FLOPs, and adds to the numerator: the second table gives 89 at 4,096 tokens, 108 at 16,384, 184 at 65,536 and 286 at 131,072, the attention share of the FLOPs rising from 7 percent to 71 percent. The comparison therefore favors the swap more and more as the sequence grows, and for a model of this size it is the cheaper path at every length where the fixed costs of starting a transfer do not dominate.
 
 Where blocks do become cold, a block-level scheme works. A windowed layer never reads a block older than its window again, and it does not need that block at all, so there is nothing to offload there; the ring of Chapter 3 frees it. A layer that selects its positions, as in [Chapter 6](06-sparse-attention.md), reads only the selected ones, and the third row of the table counts what a fetch of 2,048 selected positions across the bus costs per token: 138 MB, 0.39 units in the model, 64 times fewer than the whole cache. The point of that row is that a sparse reader pays a bus price in proportion to what it selects, so it can afford a cold tier to the extent that its selection is predictable.
 
@@ -412,7 +421,7 @@ Activation memory is proportional to the chunk, 7 GiB for the widest activation 
 The change does not alter the result. A prefill in chunks must produce the logits of the one-pass prefill, because the second chunk's rows see the first chunk's cache exactly as the rows of a one-pass prefill see the earlier rows:
 
 <!-- worked: long_context.chunk_equality -->
-The model of Volume V, Chapter 12 (`kv_cache.model`, seed 0xe354ebf228c667c0) and a prompt of 12 token ids, each `integer(12)` from the generator seeded 0x581dbdb647f222d9 (`seed_of` of the name `long_context.chunk_prompt`): [1, 9, 10, 2, 11, 7, 1, 4, 5, 11, 8, 2]. The prompt is run in one call and in chunks of c tokens on one cache; the logits of every position are compared.
+The model of Volume V, Chapter 12 (`kv_cache.model`, seed 0xe354ebf228c667c0) and a prompt of 12 token ids, each `integer(12)` from the generator seeded 0x581dbdb647f222d9 (`seed_of` of the name `long_context.chunk_prompt`): [1, 9, 10, 2, 11, 7, 1, 4, 5, 11, 8, 2]. The prompt is run in one call and in chunks of c tokens on one cache; the logits of every position are compared. The difference is measured in double precision, and every row reads the same keys and values and adds them in the same order whatever the chunking, so the test is insensitive to the weights (any weights give the same result): it checks the bookkeeping of the cache (the positions written, the keys each row sees and the causal mask), not the numerical drift that a different summation order would cause, and not the quality of the model.
 
 | chunk size c | calls | largest difference of any logit from the one-call prefill |
 |---|---:|---:|
@@ -422,7 +431,7 @@ The model of Volume V, Chapter 12 (`kv_cache.model`, seed 0xe354ebf228c667c0) an
 | 1 | 12 | below 1e-12 |
 <!-- /worked -->
 
-Chapter 12 of Volume V proved the cache equivalence for one prompt and a decode step; here a chunk is a decode step of several rows, and the result is below 1e-12 for every chunk size. In brain, commit `4b3d58fc1` (July 2026) split the batched forward so that decode and prefill share one path, with a prefill that streams the prompt in chunks of up to a maximum number of tokens; its message reports that chunks of 2 reproduce the whole-prompt hidden state bit for bit. The decoder interface carries the idea as `prefill_chunk(table, prompt, budget)` in `crates/model/src/serve.rs`: at most `budget` tokens, continuing where the previous call for this sequence stopped, with the sequence free to be released between calls. For a windowed layer a chunk of $c$ rows also needs a ring of $n_{\mathrm{win}} + c - 1$ rows, the slack of Chapter 3.
+Chapter 12 of Volume V proved the cache equivalence for one prompt and a decode step; here a chunk is a decode step of several rows, and the result is below 1e-12 for every chunk size. What that settles is the bookkeeping: positions, visible keys and mask. Every chunking adds the same numbers in the same order, so the test cannot fail through a weight and would pass for any weights; it says nothing about the quality of the model or about the drift that a different summation order would cause. In brain, commit `4b3d58fc1` (July 2026) split the batched forward so that decode and prefill share one path, with a prefill that streams the prompt in chunks of up to a maximum number of tokens; its message reports that chunks of 2 reproduce the whole-prompt hidden state bit for bit. The decoder interface carries the idea as `prefill_chunk(table, prompt, budget)` in `crates/model/src/serve.rs`: at most `budget` tokens, continuing where the previous call for this sequence stopped, with the sequence free to be released between calls. For a windowed layer a chunk of $c$ rows also needs a ring of $n_{\mathrm{win}} + c - 1$ rows, the slack of Chapter 3.
 
 ## Testing whether a model can read it
 
