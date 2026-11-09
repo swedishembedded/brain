@@ -263,16 +263,26 @@ impl PresentationEncoder {
         Ok((tokens, vision_blocks))
     }
 
+    /// The text tower for a presentation of `rows` tokens, placed over the
+    /// schedulable cards.
+    fn text_tower(&self, rows: usize) -> Result<TextTower, String> {
+        let tower = TextTower::from_hf_dir(&self.text_encoder_dir, self.cfg.text.clone(), self.cfg.mrope_section, self.dt, self.layer, rows as u32)?;
+        tracing::info!(stages = tower.n_stages(), tokens = rows, "minimaxh3 conditioner placed");
+        Ok(tower)
+    }
+
     /// Encode the presentation of `prompt` and `items`.
     pub fn encode(&self, prompt: &str, items: &[Presented]) -> Result<TextConditioning, String> {
         let merge = self.cfg.vision.spatial_merge_size;
         let (tokens, vision_blocks) = self.prepare(prompt, items)?;
-        let mut tower = TextTower::from_hf_dir(&self.text_encoder_dir, self.cfg.text.clone(), self.cfg.mrope_section, self.dt, self.layer, tokens.ids.len() as u32)?;
-        tracing::info!(stages = tower.n_stages(), tokens = tokens.ids.len(), vision_blocks = vision_blocks.len(), "minimaxh3 conditioner placed");
         if vision_blocks.is_empty() {
+            let tower = self.text_tower(tokens.ids.len())?;
             return Ok(TextConditioning { embeds: tower.encode(&tokens.ids), token_tags: tokens.tags });
         }
 
+        // The vision tower runs, and is dropped, before the text tower is
+        // placed: the text tower's stages fill the cards they are placed on,
+        // so the two are never on a card at once.
         let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(&self.text_encoder_dir)).map_err(|e| format!("minimaxh3 conditioner: open {}: {e}", self.text_encoder_dir))?;
         let gpu = gpu_core::Gpu::open(self.device.as_deref(), qwen3vl::encoder::vision_pipelines());
         let vision = VisionTower::from_reader(&reader, gpu, self.cfg.vision.clone(), self.cfg.text.d_model)?;
@@ -289,6 +299,8 @@ impl PresentationEncoder {
             if block.video { video_grids.push(llm_grid) } else { image_grids.push(llm_grid) }
         }
         drop(vision);
+        drop(reader);
+        let mut tower = self.text_tower(tokens.ids.len())?;
         let positions = qwen3vl::mrope::get_rope_index_multi(&tokens.ids, &[(self.cfg.image_token_id, &image_grids), (self.cfg.video_token_id, &video_grids)]);
         let embeds = tower.encode_multimodal(&tokens.ids, &positions, &VisionSplice { runs: &tokens.runs, visual: &visual, deepstack: &deepstack });
         Ok(TextConditioning { embeds, token_tags: tokens.tags })
