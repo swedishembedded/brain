@@ -56,7 +56,7 @@
 //! [`train`] refuses a per-block-bias or masked config rather than producing a
 //! gradient for a graph it does not implement: its reverse folds ONE
 //! `rel_bias.weight` gradient across the block stack and attends over every key.
-//! Also not implemented: INT8 and the serving contract. The SentencePiece
+//! Also not implemented: INT8 (the serving contract is `caps`). The SentencePiece
 //! unigram tokenizer umT5 needs now exists as `data::unigram` (next to the
 //! GPT-2/Qwen/CLIP BPEs, per the same rule that put it there);
 //! `tests/umt5_parity.rs` gates the two against one golden so the ids brain
