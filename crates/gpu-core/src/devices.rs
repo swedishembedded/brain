@@ -1372,27 +1372,30 @@ pub fn ambient_compute_set() -> &'static ComputeSet {
 pub enum OpenTarget {
     /// The CPU backend: the token names no card.
     Cpu,
-    /// This physical card, the lowest-numbered the token names.
+    /// This physical card: the thread's current card when the token names
+    /// it (a stage opened under [`with_gpu`]), else the lowest-numbered the
+    /// token names.
     Card(u32),
     /// The process's own device: the software adapter it already runs.
     Ambient,
 }
 
-/// [`OpenTarget`] of `token` resolved against `probe`. `Err`, naming the
+/// [`OpenTarget`] of `token` resolved against `probe`, on this thread whose
+/// current card is `current` ([`current_gpu`]). `Err`, naming the
 /// token, when it does not parse or resolve on the machine, names only NPUs
 /// (no handle opens one), asks for a backend other than the one the process
 /// runs, or asks for the software adapter in a process that does not run it -
 /// never a different device instead.
-pub fn open_target(token: &str, probe: &Inventory, ambient: &ComputeSet) -> Result<OpenTarget, String> {
+pub fn open_target(token: &str, probe: &Inventory, ambient: &ComputeSet, current: Option<u32>) -> Result<OpenTarget, String> {
     let set = DeviceSpec::parse(token).and_then(|spec| spec.resolve(probe)).map_err(|e| format!("device {token:?}: {e}"))?;
     if set.software {
         return if ambient.software { Ok(OpenTarget::Ambient) } else { Err(format!("device {token:?} names the software adapter, which this process does not run")) };
     }
-    if let Some(&card) = set.gpus.first() {
+    if let Some(&lowest) = set.gpus.first() {
         if set.backend != ambient.backend {
             return Err(format!("device {token:?} asks for the {} backend; this process runs {}", set.backend.name(), ambient.backend.name()));
         }
-        return Ok(OpenTarget::Card(card));
+        return Ok(OpenTarget::Card(current.filter(|c| set.gpus.contains(c)).unwrap_or(lowest)));
     }
     if set.backend == Backend::Cpu || !set.cpu_cores.is_empty() {
         return Ok(OpenTarget::Cpu);
@@ -1820,14 +1823,18 @@ mod tests {
     }
 
     /// A device token a handle has no arm of its own for opens what the token
-    /// names - a list's lowest-numbered card, the CPU - or is refused naming it; it is
+    /// names - the thread's own card or a list's lowest-numbered one, the CPU - or is refused naming it; it is
     /// never read as the ambient device.
     #[test]
     fn a_device_token_opens_what_it_names_or_is_refused() {
         let probe = inv(2, 8, 0);
         let ambient = resolve("", probe).unwrap();
-        let target = |t: &str| open_target(t, &probe, &ambient);
+        let target = |t: &str| open_target(t, &probe, &ambient, None);
         assert_eq!(target("gpu1,gpu0"), Ok(OpenTarget::Card(0)), "a list opens its lowest-numbered card");
+        // A stage of a request placed on gpu0,gpu1 opens under `with_gpu` on
+        // its own card: the token keeps it there rather than moving it.
+        assert_eq!(open_target("gpu0,gpu1", &probe, &ambient, Some(1)), Ok(OpenTarget::Card(1)), "the thread's current card when the list names it");
+        assert_eq!(open_target("gpu0", &probe, &ambient, Some(1)), Ok(OpenTarget::Card(0)), "never a card the token does not name");
         assert_eq!(target("gpu0,cpu"), Ok(OpenTarget::Card(0)));
         assert_eq!(target("cpu0-3"), Ok(OpenTarget::Cpu));
         assert_eq!(target("wgpu"), Ok(OpenTarget::Card(0)), "the process's own backend over its cards");

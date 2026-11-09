@@ -365,6 +365,24 @@ fn a_real_text_tower_stage_holds_no_more_than_its_placement_plans() {
     drop(tower);
 }
 
+/// A request placed on several cards hands every component its card list
+/// (`gpu0,gpu1`), and the DiT opens each of its stages under that stage's own
+/// card: a handle opened with the list inside a card's scope is on that
+/// card, never moved to the list's first one, which would stack every stage
+/// on one card. Needs two cards named (`--device gpu0,gpu1`).
+fn a_card_list_opens_each_stage_on_its_own_card() {
+    let cards = gpu_core::devices::ambient_compute_set().gpus.clone();
+    if cards.len() < 2 {
+        brain_testutil::skip_unavailable("name two cards (--device gpu0,gpu1) to place stages on");
+        return;
+    }
+    let list = cards.iter().map(|c| format!("gpu{c}")).collect::<Vec<_>>().join(",");
+    for &card in &cards {
+        let gpu = gpu_core::devices::with_gpu(card, || gpu_core::Gpu::open(Some(&list), &[])).expect("a card the machine has");
+        assert_eq!(gpu.memory_device(), memauth::Device::Gpu(card), "{list} opened in gpu{card}'s scope");
+    }
+}
+
 /// Dense flash attention against sparse attention at the shapes of a ref2va
 /// with one image reference at 640x352 and 768x448, 121 frames. A
 /// measurement, not a check: it prints.
@@ -405,6 +423,7 @@ gpu_core::card_tests!(
     the_dits_flash_attention_matches_its_materialized_trio,
     the_decoders_flash_attention_matches_its_materialized_trio,
     an_int8_resident_model_tracks_the_fp32_one,
-    a_real_text_tower_stage_holds_no_more_than_its_placement_plans;
+    a_real_text_tower_stage_holds_no_more_than_its_placement_plans,
+    a_card_list_opens_each_stage_on_its_own_card;
     ignored: sparse_attention_time_at_a_real_shape,
 );
