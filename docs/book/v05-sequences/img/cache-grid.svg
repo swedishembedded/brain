@@ -1,4 +1,4 @@
-<!-- source-sha256: 68b09e353b3b5f957d259208f2e231c1f5f8396df444fc59d94ac9176f3a4638 -->
+<!-- source-sha256: c8840a12f9c4502b17940161e3f7dd1474212a1f35dfe4fb7ca4ff83c5d38aa5 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 410" width="1000" height="410"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="410" fill="#ffffff"/>
 <text x="500" y="28.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Keys and values computed at each step, prompt of 3 tokens and 4 generated</text>
 <rect x="16" y="58" width="476" height="290" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>

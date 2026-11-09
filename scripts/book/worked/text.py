@@ -286,7 +286,22 @@ def unicode_space():
     return (head + _table(["general category", "code points"], rows) +
             f"\n\nCounted with `unicodedata.category` of Python's Unicode database, version {unicodedata.unidata_version}. "
             "The rows for private use and surrogates are fixed by the standard; the others grow as Unicode assigns "
-            "more characters, so another version prints other numbers.")
+            "more characters, so another version prints other numbers.\n\n" +
+            ucd_note("the counts of letters, marks, numbers, punctuation, symbols, separators, controls and format characters, and "
+                     "unassigned code points",
+                     f"What a reader can reproduce is the arithmetic: the {_n(17 * 65536)} code points, the 2,048 surrogates, "
+                     f"the {_n(scalar)} scalar values, the private-use row ({_n(cats['private use (Co)'])}: 6,400 in the Basic "
+                     "Multilingual Plane plus two planes of 65,534 each) and the 'all' row. The other rows can be compared "
+                     "with a count made from the Database of the reader's own platform, which reproduces them when its version "
+                     "is the one printed."))
+
+
+def ucd_note(what, instead):
+    """The sentence that tells the reader a table's cells are data of the Unicode Character Database, which the page
+    cannot give, and what can be reproduced from the page instead."""
+    return (f"Not reproducible from the page: {what} come from the Unicode Character Database, version "
+            f"{unicodedata.unidata_version} (here read through Python's `unicodedata`), a table of about a hundred thousand "
+            f"entries that this book does not print. {instead}")
 
 
 def graphemes():
@@ -305,7 +320,9 @@ def graphemes():
         rows.append([label, cp_list(seq), len(seq), len(s.encode("utf-8")), len(encode_utf16(seq)), seen])
     return (_table(["text", "code points (hex)", "code points", "UTF-8 bytes", "UTF-16 units", "seen by a reader"], rows, "llrrrr") +
             "\n\nThe last column is not computed: it is what the rules of Unicode text segmentation (UAX 29) "
-            "and a reader agree on.")
+            "and a reader agree on, and those rules need the Grapheme_Cluster_Break property of every code point, which comes "
+            "from the Unicode Character Database and is not on this page. The code point, byte and unit columns are reproducible "
+            "from the page.")
 
 
 def utf8_layout():
@@ -534,7 +551,9 @@ def check_stream():
     ]
     held_rows = [[p, e, s] for p, e, s in held]
     return (_seed_line(name) + " Each string is drawn by the rule of `text.check_decoder`; then chunk sizes `1 + integer(3)` "
-            "are drawn, one per chunk, until the string is used up.\n\n" + _table(["check", "result"], rows, "ll") +
+            "are drawn, one per chunk, until the string is used up: the draws of one string are made in this order, first its length and "
+            "bytes, then one chunk size at a time as the string is consumed (the last chunk is cut short when the string ends, but "
+            "its size is still drawn), and the next string's draws follow at once on the same generator.\n\n" + _table(["check", "result"], rows, "ll") +
             "\n\nBytes of U+1F600 (F0 9F 98 80) fed one prefix at a time: nothing is emitted until the last byte arrives.\n\n" +
             _table(["bytes fed", "code points emitted", "state afterwards"], held_rows, "rrl"))
 
@@ -547,7 +566,7 @@ def order_preserved():
     for _ in range(n):
         a, b = _scalar_draw(gen), _scalar_draw(gen)
         agree += (a < b) == (encode_utf8([a]) < encode_utf8([b])) and (a == b) == (encode_utf8([a]) == encode_utf8([b]))
-    return (_seed_line(name) + f"\n\nPairs (a, b) of scalar values, each drawn by `_scalar_draw` (a first, then b): {n:,}. "
+    return (_seed_line(name) + f"\n\nPairs (a, b) of scalar values, each scalar value drawn as in `text.check_encoder` (`k = integer(1112064)`, then `k` if `k < 0xD800` and `k + 0x800` otherwise; a first, then b): {n:,}. "
             f"`a < b` agrees with comparing the two byte strings byte by byte in {agree:,} of {n:,}.")
 
 
@@ -591,7 +610,11 @@ def same_look_different_bytes():
         ["after NFKD", unicodedata.normalize("NFKD", sa) == unicodedata.normalize("NFKD", sb)],
     ]
     t2 = _table(["compared", "equal"], [[k, str(v).lower()] for k, v in eq], "lr")
-    return t + "\n\n" + t2
+    note = ucd_note("the four equalities of the second table (and the claim behind them, that U+00E9 is canonically equivalent to U+0065 U+0301)",
+                    "The first table is reproducible from the page, from the code points and the UTF-8 rules. For these two spellings a "
+                    "reader can verify the equalities by hand with the single canonical mapping U+00E9 = U+0065 U+0301 (and the "
+                    "compatibility forms, which change neither spelling); for other strings a normalization routine needs the Database.")
+    return t + "\n\n" + t2 + "\n\n" + note
 
 
 def normalization_forms():
@@ -609,7 +632,10 @@ def normalization_forms():
         f = _forms(seq)
         rows.append([label, cp_list(seq), cp_list(f["NFC"]), cp_list(f["NFD"]), cp_list(f["NFKC"]), cp_list(f["NFKD"])])
     return (_table(["input", "code points", "NFC", "NFD", "NFKC", "NFKD"], rows, "llllll") +
-            f"\n\nProduced by `unicodedata.normalize` (Unicode {unicodedata.unidata_version}); code points in hex.")
+            "\n\n" + ucd_note("every cell of the four normalization columns (the decomposition and composition mappings and the "
+                                 "combining classes)", "The first two columns are the inputs. A reader who has the Database, or a "
+                                 "library's normalization routine built from it, can use the seven rows as test vectors; nothing on "
+                                 "this page lets a reader compute them. Code points are in hex."))
 
 
 def reordering():
@@ -624,7 +650,10 @@ def reordering():
     sa, sb = ("".join(map(chr, x)) for x in (a, b))
     eq = unicodedata.normalize("NFD", sa) == unicodedata.normalize("NFD", sb)
     return (_table(["input", "code points", "combining classes", "NFD", "NFC"], rows, "lllll") +
-            f"\n\nThe two inputs differ as raw strings ({str(sa == sb).lower()} for equality) and are equal after NFD ({str(eq).lower()}).")
+            f"\n\nThe two inputs differ as raw strings ({str(sa == sb).lower()} for equality) and are equal after NFD ({str(eq).lower()}).\n\n"
+            + ucd_note("the combining classes (230 for U+0307, 220 for U+0323, 0 for U+0073) and the composition U+1E69 of the NFC column",
+                       "Given the classes, the NFD column follows from the page: the marks of nonzero class are sorted by class, "
+                       "stably. The NFC column needs the table of compositions and is a test vector only."))
 
 
 S_BASE, L_BASE, V_BASE, T_BASE = 0xAC00, 0x1100, 0x1161, 0x11A7
@@ -654,7 +683,9 @@ def hangul():
             f"\n\nWith N = {N_COUNT} (vowels times trailing slots) and T = {T_COUNT}: L index = i // N, V index = (i mod N) // T, T index = i mod T. "
             f"Constants: first syllable U+AC00, first leading jamo U+1100, first vowel U+1161, one before the first trailing "
             f"consonant U+11A7; {L_COUNT} leading consonants, {V_COUNT} vowels, {T_COUNT} trailing slots (slot 0 is none), so "
-            f"{S_COUNT:,} syllables. The formula equals `unicodedata.normalize('NFD', ...)` for {agree:,} of {S_COUNT:,} syllables.")
+            f"{S_COUNT:,} syllables. The formula equals `unicodedata.normalize('NFD', ...)` for {agree:,} of {S_COUNT:,} syllables. "
+            "The table and the constants are reproducible from the page; only the final comparison uses the Unicode Character Database "
+            f"(version {unicodedata.unidata_version}), as the reader's own language ships it.")
 
 
 def case_folding():
@@ -669,7 +700,11 @@ def case_folding():
     for label, seq in items:
         s = "".join(map(chr, seq))
         rows.append([label, cp_list(seq), cp_list(cps(s.lower())), cp_list(cps(s.casefold())), cp_list(cps(s.upper()))])
-    return _table(["input", "code points", "lower", "casefold", "upper"], rows, "lllll")
+    return (_table(["input", "code points", "lower", "casefold", "upper"], rows, "lllll") + "\n\n" +
+            ucd_note("the lower, casefold and upper columns (the case mappings and the case folding of the standard, and for the Greek "
+                     "row the context rule that gives the final sigma)", "Python's `lower`, `casefold` and `upper` were used, with the "
+                     "language-independent mappings. The input columns are reproducible from the page; the other three are test "
+                     "vectors for a case-conversion routine built from the Database."))
 
 
 # -------------------------------------------------- bytes per character by script

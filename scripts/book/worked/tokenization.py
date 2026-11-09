@@ -1067,7 +1067,9 @@ def special_injection():
              tok.special_id["<|im_end|>"], *tok.encode("\n", recognise=False))
     return ("Special tokens: " + ", ".join(f"`{s}` = {tok.special_id[s]}" for s in SPECIALS)
             + f". Ordinary tokens are the {tok.first_special} of the corpus's tokenizer (256 bytes and 70 merges). "
-            f"The message `{attack}` is sent as the user turn.\n\n"
+            f"The message that spells the markers is `{attack}`; the honest message is `{plain}`. Each is sent as the content of the "
+            "user turn, `<|im_start|>user`, a line feed, the message, `<|im_end|>` and a line feed, either as it is (literals are "
+            "specials) or after the escape rule below (escaped first).\n\n"
             + _table(["message", "treatment", "tokens", "special tokens among them", "turns a reader of the ids finds"], rows, "llrrl")
             + "\n\n" + "\n".join(ids_lines)
             + f"\n\nBuilding the sequence from parts, the template's own specials by id and the client's text encoded with "
@@ -1089,9 +1091,18 @@ def check_escape():
         unescaped = tok.encode(chatml([("user", content)]))
         unescaped_forged += sum(i >= tok.first_special for i in unescaped) != 2
         roundtrip += tok.decode(ids) == chatml([("user", content.replace(MARK, "�"))])
-    return (_seed_line(name) + f" Each of {n:,} contents joins `1 + integer(10)` items, each `alphabet[integer(len(alphabet))]`, of a list "
-            "of 13 items: the three special literals, the fragments `<`, `|`, `im`, `_`, `start`, `end`, `>`, the mark U+E000, a line feed, "
-            "`a`, `bread`, a space and U+00E9, in that order.\n\n"
+    return (_seed_line(name) + f" Each of {n:,} contents is drawn as follows: first the count `1 + integer(10)`, then, one by one, that many "
+            "indices `integer(16)`, each choosing an item of this list of 16 (0-indexed, in this order): the three special literals "
+            "`<|im_start|>`, `<|im_end|>`, `<|endoftext|>` (indices 0 to 2), then the 13 fragments `<`, `|`, `im`, `_`, `start`, `end`, "
+            "`>`, the mark U+E000, a line feed, `a`, `bread`, a space and U+00E9 (indices 3 to 15); the content is the chosen items "
+            "joined. Each content is wrapped as the single user message of the template, `<|im_start|>user`, a line feed, the content, "
+            "`<|im_end|>` and a line feed, and encoded with the chapter's tokenizer (326 ordinary ids, specials 326 to 328). The "
+            "encoder's rules are exactly those above: a special literal that directly follows a mark is ordinary text, in the "
+            "unescaped rendering as well (a client that sends a mark itself therefore escapes the literal after it, and a mark just "
+            "before the template's own `<|im_end|>` hides it), and every mark is dropped from the text that is encoded. A rendering "
+            "counts as forged when the number of ids at or above 326 in it is not 2. The escaped rendering is the same wrapping of "
+            "`escape(content)`: every mark in the content first becomes U+FFFD, then a mark is put in front of each special literal. "
+            "The last row compares the decoded ids with the wrapping of the content with its marks replaced by U+FFFD.\n\n"
             + _table(["check", "result"], [
                 ["contents whose escaped rendering holds a special token other than the template's two", f"{forged:,} of {n:,}"],
                 ["contents whose unescaped rendering does", f"{unescaped_forged:,} of {n:,}"],
@@ -1150,7 +1161,10 @@ def check_pretokenizer():
         for g, pat in PATTERN_DIGIT_GROUPS.items():
             groups[g] += pretokenize(data, g) == re.findall(pat, data)
     return (_seed_line(name) + f" Each of {n:,} byte strings has length `integer(40)` and each byte is `pool[integer(len(pool))]` for the "
-            f"{len(pool)}-byte pool: the bytes of `abcXYZ019 ,.!`, a tab and a line feed, then C3, A9, E4, B8, AD and 80, in that order.\n\n"
+            f"{len(pool)}-byte pool: the bytes of `abcXYZ019 ,.!`, a tab and a line feed, then C3, A9, E4, B8, AD and 80, in that order "
+            "(the length is drawn first, then the bytes). The variants with digit groups replace the digit alternative by `[0-9]` "
+            "(at most 1) or `[0-9]{1,3}` (at most 3), with no space in front of it: a space before a digit is then a piece of "
+            "its own, and a run of digits is cut from the left into groups of at most that many.\n\n"
             + _table(["check", "result"], [
                 ["the pieces joined give the input back", f"{covered:,} of {n:,}"],
                 ["scanner equals the regular expression", f"{same:,} of {n:,}"],
@@ -1195,7 +1209,9 @@ def check_roundtrip():
         except UnicodeDecodeError:
             pass
         longest = max(longest, len(ids))
-    return (_seed_line(name) + f" Each of {n:,} byte strings has length `integer(60)` and its bytes are `integer(256)` draws, in order.\n\n"
+    return (_seed_line(name) + f" Each of {n:,} byte strings has length `integer(60)` (drawn first) and then its bytes, each an `integer(256)` draw, in "
+            "order. They are encoded with the corpus's byte-level BPE of this chapter (256 bytes and its 70 merges, "
+            "pre-tokenization by the four rules above, no special tokens) and decoded by joining the byte strings of the ids.\n\n"
             + _table(["check", "result"], [
                 ["decode(encode(bytes)) equals the bytes", f"{ok:,} of {n:,}"],
                 ["of these, strings that are valid UTF-8", f"{valid:,}"]], "lr"))

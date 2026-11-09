@@ -30,6 +30,7 @@ from fractions import Fraction
 from functools import lru_cache
 
 import bookrng
+import stable
 
 # --------------------------------------------------------------------------------------------- formatting
 
@@ -407,11 +408,13 @@ def _copy_mlp(m):
 
 
 @lru_cache(maxsize=None)
-def train_mlp(n_sentences=N_TRAIN):
+def train_mlp(n_sentences=N_TRAIN, nudge=0.0):
     """Train on the first `n_sentences` sentences of the training generator, full batch, MLP_STEPS steps of plain
     gradient descent at MLP_LR, recording train and dev loss every MLP_EVERY steps; keep the parameters of the
-    recorded step with the lowest development loss (early stopping)."""
+    recorded step with the lowest development loss (early stopping). `nudge` is added to the first embedding weight: the
+    test of chaos of `stable.text`."""
     model = Mlp(bookrng.generator(MLP_NAME))
+    model.E[0][0] += nudge
     tr = _batch(_corpus(NAME_TRAIN, n_sentences))
     dv = _batch(dev_set())
     curve, best = [], (math.inf, 0, None)
@@ -643,7 +646,7 @@ def smoothing():
     return "\n".join([
         f"Perplexity on the {N_DEV}-sentence development set ({_int(_n_predicted(dev_set()))} predicted tokens) of the "
         "models of order 2, 3 and 5 trained on the printed corpus. The star marks the setting with the lowest "
-        f"development perplexity for that order. The uniform weight of the interpolated models is {EPS_UNIFORM}, "
+        f"development perplexity for that order. The uniform weight of the interpolated models is {EPS_UNIFORM}. "
         f"The model predicts V - 1 = {V} tokens (`<s>` is never predicted).",
         "",
         _table(["estimate", "order 2", "order 3", "order 5"], rows),
@@ -781,7 +784,7 @@ def sampling():
         "\n".join(ex),
         "",
         "'Accepted' is the share of sentences that the grammar accepts: the right shape and a verb that agrees with the "
-        "subject. The next two columns split the sentences into those without and with the phrase `near the ...`. "
+        "subject. The next two columns split the sentences, grammatical or not, by whether they contain the token `near` anywhere (with phrase) or not (without phrase), and give the accepted sentences over all sentences of each kind. "
         "'Unseen contexts' is the share of the positions whose last four tokens never occurred in the model's training "
         "text, among the sampled positions and among the positions of the real test text.",
         "",
@@ -916,15 +919,26 @@ def shift_bug():
 # --------------------------------------------------------------------------------------------- blocks: the network
 
 
+@lru_cache(maxsize=None)
+def _nudged_curves():
+    """The training curves of the same run started with its first embedding weight changed by each of `stable.NUDGES`."""
+    return [{step: (lt, ld) for step, lt, ld in train_mlp(N_TRAIN, d)["curve"]} for d in stable.NUDGES]
+
+
 def mlp_training():
     r = train_mlp(N_TRAIN)
     model = r["model"]
     cp = {step: (lt, ld) for step, lt, ld in r["curve"]}
+    nudged = _nudged_curves()
+
+    def shown(step, which):
+        """The perplexity at `step` with only the digits that survive the nudged runs (3 decimals when all agree)."""
+        return stable.text(math.exp(cp[step][which]), [math.exp(c[step][which]) for c in nudged], lambda x: _f(x, 3))
     steps = [s for s in (0, 10, 20, 50, 100, 200, 300, 500) if s in cp]
     if r["step"] not in steps:
         steps.append(r["step"])
         steps.sort()
-    rows = [[s, _f(math.exp(cp[s][0]), 3), _f(math.exp(cp[s][1]), 3), "<- lowest dev" if s == r["step"] else ""]
+    rows = [[s, shown(s, 0), shown(s, 1), "<- lowest dev" if s == r["step"] else ""]
             for s in steps]
     test_nll = _mlp_loss(model, _batch(test_set()))
     return "\n".join([
@@ -939,7 +953,8 @@ def mlp_training():
         f"both biases start at 0. That is {model.n_params()} parameters. Training: full-batch gradient descent, "
         f"learning rate {MLP_LR}, {MLP_STEPS} steps on the {r['n_pairs']} training pairs of the printed corpus, "
         f"dev perplexity recorded every {MLP_EVERY} steps; the parameters of the recorded step with the lowest dev "
-        "perplexity are kept (early stopping).",
+        "perplexity are kept (early stopping). " + stable.RULE + " Rounding noise is amplified over the 500 steps, so the last "
+        "rows may lose digits.",
         "",
         _table(["step", "train perplexity", "dev perplexity", ""], rows, "rrrl"),
         "",

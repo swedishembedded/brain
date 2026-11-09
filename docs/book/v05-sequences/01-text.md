@@ -163,6 +163,8 @@ planes. Most of the space is empty, and some of it is not for characters at all:
 | all | 1,114,112 |
 
 Counted with `unicodedata.category` of Python's Unicode database, version 16.0.0. The rows for private use and surrogates are fixed by the standard; the others grow as Unicode assigns more characters, so another version prints other numbers.
+
+Not reproducible from the page: the counts of letters, marks, numbers, punctuation, symbols, separators, controls and format characters, and unassigned code points come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table of about a hundred thousand entries that this book does not print. What a reader can reproduce is the arithmetic: the 1,114,112 code points, the 2,048 surrogates, the 1,112,064 scalar values, the private-use row (137,468: 6,400 in the Basic Multilingual Plane plus two planes of 65,534 each) and the 'all' row. The other rows can be compared with a count made from the Database of the reader's own platform, which reproduces them when its version is the one printed.
 <!-- /worked -->
 
 Notice the two fixed rows. The 2,048 code points U+D800 to U+DFFF, the
@@ -171,6 +173,14 @@ Removing them leaves 1,112,064 **scalar values**, the code points that can
 actually be a character in a text, and from here on "code point" in running
 text will mean a scalar value unless a surrogate is the subject. The private-use
 range is left to applications for their own symbols. Everything else is assigned by the standard, a little more with each release, which is why the counts for letters and symbols depend on the version of the Unicode database that computed them, printed under the table.
+
+That database, the Unicode Character Database, is also the one source in this chapter that the page cannot stand in for. The
+counts of the table above, the combining classes, the normalization and case mappings, and the segmentation properties behind the
+grapheme clusters are entries of tables that the standard publishes and this book does not print. The blocks that depend on it say
+so under their tables and name the version, 16.0.0, with which they were computed. A reader who implements the chapter in another
+language reproduces everything else from the page (the encodings, the decoders, the counts by arithmetic, the Hangul formula, the
+sorting of marks by class once the classes are given) and uses the numbers that come from the database as test vectors for a
+routine of the language's own library: the same inputs must give the same outputs if the two versions of Unicode agree.
 
 A code point is a number, not a picture. A picture of a character, the *glyph*,
 is chosen by a font, and the same code point can have different glyphs in different
@@ -200,7 +210,7 @@ standard. A cluster is as many code points as its script needs:
 | Devanagari NA with vowel sign I | 0928 093F | 2 | 6 | 2 | 1 |
 | the word 'Hej' | 0048 0065 006A | 3 | 3 | 3 | 3 |
 
-The last column is not computed: it is what the rules of Unicode text segmentation (UAX 29) and a reader agree on.
+The last column is not computed: it is what the rules of Unicode text segmentation (UAX 29) and a reader agree on, and those rules need the Grapheme_Cluster_Break property of every code point, which comes from the Unicode Character Database and is not on this page. The code point, byte and unit columns are reproducible from the page.
 <!-- /worked -->
 
 The last column is not computed; the segmentation rules decide it. Four counts of
@@ -380,7 +390,7 @@ property, drawn the same way:
 <!-- worked: text.order_preserved -->
 Generator: the book's SplitMix64, seed 0x439ba62c885b0d55 (`seed_of` of the name `text.order_preserved`, defined on the pseudocode page).
 
-Pairs (a, b) of scalar values, each drawn by `_scalar_draw` (a first, then b): 20,000. `a < b` agrees with comparing the two byte strings byte by byte in 20,000 of 20,000.
+Pairs (a, b) of scalar values, each scalar value drawn as in `text.check_encoder` (`k = integer(1112064)`, then `k` if `k < 0xD800` and `k + 0x800` otherwise; a first, then b): 20,000. `a < b` agrees with comparing the two byte strings byte by byte in 20,000 of 20,000.
 <!-- /worked -->
 
 (UTF-16 does *not* have this property. In code unit order the emoji U+1F600, whose
@@ -561,7 +571,7 @@ where a state other than the start means truncated input. The check is that cutt
 a stream into chunks at random changes nothing:
 
 <!-- worked: text.check_stream -->
-Generator: the book's SplitMix64, seed 0xb22a207a5b90f1a0 (`seed_of` of the name `text.check_stream`, defined on the pseudocode page). Each string is drawn by the rule of `text.check_decoder`; then chunk sizes `1 + integer(3)` are drawn, one per chunk, until the string is used up.
+Generator: the book's SplitMix64, seed 0xb22a207a5b90f1a0 (`seed_of` of the name `text.check_stream`, defined on the pseudocode page). Each string is drawn by the rule of `text.check_decoder`; then chunk sizes `1 + integer(3)` are drawn, one per chunk, until the string is used up: the draws of one string are made in this order, first its length and bytes, then one chunk size at a time as the string is consumed (the last chunk is cut short when the string ends, but its size is still drawn), and the next string's draws follow at once on the same generator.
 
 | check | result |
 |---|---|
@@ -677,6 +687,8 @@ the word are two different code point sequences:
 | after NFD | true |
 | after NFKC | true |
 | after NFKD | true |
+
+Not reproducible from the page: the four equalities of the second table (and the claim behind them, that U+00E9 is canonically equivalent to U+0065 U+0301) come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table of about a hundred thousand entries that this book does not print. The first table is reproducible from the page, from the code points and the UTF-8 rules. For these two spellings a reader can verify the equalities by hand with the single canonical mapping U+00E9 = U+0065 U+0301 (and the compatibility forms, which change neither spelling); for other strings a normalization routine needs the Database.
 <!-- /worked -->
 
 They differ in code point count, in bytes, and therefore in everything computed
@@ -720,7 +732,7 @@ Applied to the characters of the example and a few more:
 | FULLWIDTH LATIN CAPITAL A (U+FF21) | FF21 | FF21 | FF21 | 0041 | 0041 |
 | long s with dot above, dot below (U+1E9B U+0323) | 1E9B 0323 | 1E9B 0323 | 017F 0323 0307 | 1E69 | 0073 0323 0307 |
 
-Produced by `unicodedata.normalize` (Unicode 16.0.0); code points in hex.
+Not reproducible from the page: every cell of the four normalization columns (the decomposition and composition mappings and the combining classes) come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table of about a hundred thousand entries that this book does not print. The first two columns are the inputs. A reader who has the Database, or a library's normalization routine built from it, can use the seven rows as test vectors; nothing on this page lets a reader compute them. Code points are in hex.
 <!-- /worked -->
 
 Read the rows against the steps. The composed and decomposed e-acute meet in
@@ -746,6 +758,8 @@ the order of marks of equal class, since those interact:
 | s, dot below, dot above | 0073 0323 0307 | 0 220 230 | 0073 0323 0307 | 1E69 |
 
 The two inputs differ as raw strings (false for equality) and are equal after NFD (true).
+
+Not reproducible from the page: the combining classes (230 for U+0307, 220 for U+0323, 0 for U+0073) and the composition U+1E69 of the NFC column come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table of about a hundred thousand entries that this book does not print. Given the classes, the NFD column follows from the page: the marks of nonzero class are sorted by class, stably. The NFC column needs the table of compositions and is a test vector only.
 <!-- /worked -->
 
 The composition step is where care is needed, because not every pair that could be merged may be: a short list of composition exclusions keeps some characters decomposed even in NFC. The decomposition step, by contrast, needs
@@ -763,7 +777,7 @@ $i \bmod 28$, with 0 meaning none:
 | U+D55C | 10588 | 18 | 0 | 4 | 1112 1161 11AB |
 | U+D7A3 | 11171 | 18 | 20 | 27 | 1112 1175 11C2 |
 
-With N = 588 (vowels times trailing slots) and T = 28: L index = i // N, V index = (i mod N) // T, T index = i mod T. Constants: first syllable U+AC00, first leading jamo U+1100, first vowel U+1161, one before the first trailing consonant U+11A7; 19 leading consonants, 21 vowels, 28 trailing slots (slot 0 is none), so 11,172 syllables. The formula equals `unicodedata.normalize('NFD', ...)` for 11,172 of 11,172 syllables.
+With N = 588 (vowels times trailing slots) and T = 28: L index = i // N, V index = (i mod N) // T, T index = i mod T. Constants: first syllable U+AC00, first leading jamo U+1100, first vowel U+1161, one before the first trailing consonant U+11A7; 19 leading consonants, 21 vowels, 28 trailing slots (slot 0 is none), so 11,172 syllables. The formula equals `unicodedata.normalize('NFD', ...)` for 11,172 of 11,172 syllables. The table and the constants are reproducible from the page; only the final comparison uses the Unicode Character Database (version 16.0.0), as the reader's own language ships it.
 <!-- /worked -->
 
 Two properties are worth knowing before a pipeline relies on any of this.
@@ -791,6 +805,8 @@ enough.
 | capital I with dot above (U+0130) | 0130 | 0069 0307 | 0069 0307 | 0130 |
 | LATIN SMALL LIGATURE FI (U+FB01) | FB01 | FB01 | 0066 0069 | 0046 0049 |
 | LATIN CAPITAL LETTER A | 0041 | 0061 | 0061 | 0041 |
+
+Not reproducible from the page: the lower, casefold and upper columns (the case mappings and the case folding of the standard, and for the Greek row the context rule that gives the final sigma) come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table of about a hundred thousand entries that this book does not print. Python's `lower`, `casefold` and `upper` were used, with the language-independent mappings. The input columns are reproducible from the page; the other three are test vectors for a case-conversion routine built from the Database.
 <!-- /worked -->
 
 Lowering the sharp s leaves it, because its lowercase is itself; the **case
@@ -931,7 +947,9 @@ pieces between bytes and words, learned from data, is tokenization.
    table of the states reached by feeding the emoji one byte at a time.
 8. **[Implement]** Implement the arithmetic decomposition of the Hangul syllables
    and reproduce the table of `text.hangul`; then check your function against your
-   language's NFD for every syllable.
+   language's NFD for every syllable (the comparison needs the Unicode Character
+   Database of your language, at the version the block prints or a later one for
+   which Hangul has not changed).
 9. **[Investigate]** Find out which of the four counts (bytes, 16-bit units, code
    points, grapheme clusters) the length operation and the indexing of your
    language's string type return for the four-character string of `text.sample_string`
@@ -947,7 +965,7 @@ pieces between bytes and words, learned from data, is tokenization.
 ## Key terms
 
 - **character encoding**: an agreement that maps characters to numbers and numbers to bytes, so that a sequence of bytes can be read back as the text it was written from; ASCII, the code pages and UTF-8 are examples. <!-- concept: character-encoding -->
-- **Unicode**: the standard that numbers every character of every writing system once (its code point, from U+0000 to U+10FFFF) and records its properties, such as category, combining class and case. <!-- concept: unicode -->
+- **Unicode**: the standard that numbers every character of every writing system once (its code point, from U+0000 to U+10FFFF) and records its properties, such as category, combining class and case; what a reader sees as one character is a grapheme cluster, a run of one or more code points (a letter with its accent, a flag, a family emoji) grouped by rules of the standard. <!-- concept: unicode -->
 - **UTF-8**: the encoding that writes each Unicode scalar value as 1 to 4 bytes whose leading bits announce the sequence's length, compatible with ASCII, self-synchronizing and ordered like the code points; its decoder is a state machine of eight states. <!-- concept: utf8 -->
 - **normalization of text**: converting a string to a canonical spelling (NFC, NFD, NFKC or NFKD) so that strings the standard declares equivalent become identical sequences of code points, before they are compared, counted or tokenized. <!-- concept: normalization-of-text -->
 
@@ -978,4 +996,4 @@ pieces between bytes and words, learned from data, is tokenization.
 4. `C3 28`: invalid, `28` is not a continuation. `E2 82`: invalid, truncated. `ED A0 80`: invalid, it would be the surrogate U+D800 (after `ED` the first continuation must be at most `9F`). `F4 8F BF BF`: valid, U+10FFFF. `F4 90 80 80`: invalid, it would be above U+10FFFF.
 5. The bytes are `41 C3 A9 E7 8C AB F0 9F 98 80`. Cutting at 6 bytes leaves `41 C3 A9 E7 8C AB`, the byte after the cut is a lead (`F0`), so the cut is on a boundary and nothing is dropped. Cutting at 5 leaves `41 C3 A9 E7 8C`, the cut would be inside the three-byte character (the byte after, `AB`, is a continuation), so back up over `8C` and `E7` to the cut at 3 bytes: `41 C3 A9`.
 
-**Implement and investigate.** The [Implement] exercises are checked against the worked blocks they name; the [Investigate] exercises have no single answer, and the blocks give the values to compare with.
+**Implement and investigate.** The [Implement] exercises are checked against the worked blocks they name; the [Investigate] exercises have no single answer, and the blocks give the values to compare with. The cells that come from the Unicode Character Database (the category counts, the normalization and case-mapping columns, the combining classes and the grapheme segmentation) are test vectors for your language's library, not results you can compute from this chapter.

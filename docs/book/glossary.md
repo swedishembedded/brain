@@ -786,7 +786,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **underfitting**: a model too restricted to represent the pattern, so that its error is high on the training rows and on new rows alike. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
-**Unicode**: the standard that numbers every character of every writing system once (its code point, from U+0000 to U+10FFFF) and records its properties, such as category, combining class and case. *([Text as Data](v05-sequences/01-text.md))*
+**Unicode**: the standard that numbers every character of every writing system once (its code point, from U+0000 to U+10FFFF) and records its properties, such as category, combining class and case; what a reader sees as one character is a grapheme cluster, a run of one or more code points (a letter with its accent, a flag, a family emoji) grouped by rules of the standard. *([Text as Data](v05-sequences/01-text.md))*
 
 **uniform parameters**: the small block of constants, the same for every invocation and read-only, that the host writes into a separate buffer for a kernel: element counts, scalars, shapes and strides. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 

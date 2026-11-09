@@ -1,4 +1,4 @@
-<!-- source-sha256: a65b2ee7c129a028a2d2b27a9fd5a4b2f20dbfd9be25b749e89b931295d3d245 -->
+<!-- source-sha256: fa281f805ed07cbeb4167e96f29dfdcf0c5a16ca5a06ce0225ae37b39f5d634d -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 560" width="780" height="560"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="560" fill="#ffffff"/>
 <rect x="10" y="10" width="760" height="276" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Lookup: each id picks one row of the table</text>

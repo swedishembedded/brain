@@ -156,7 +156,7 @@ L = 3.3133. The gradient of the table, row by row:
 
 Row 1 is dX[0] + dX[2] = (-1.54, -0.42, -0.15) + (-0.79, -1.17, -0.40) = (-2.33, -1.59, -0.55). Rows 0, 2 and 4 were never used and are zero. The same table from the product N^T dX (N the matrix of the previous example): largest difference from the loop above, below 1e-15. Largest difference from a central difference over all 18 entries (step h = 1e-5, applied to L): below 1e-8.
 
-A loop that assigns, `dW[ids[t]] = dX[t]`, leaves row 1 equal to dX[2] = (-0.79, -1.17, -0.40); the difference from the correct row is (-1.54, -0.42, -0.15), which is exactly dX[0], the use that was overwritten.
+A loop that assigns, `dW[ids[t]] = dX[t]`, leaves row 1 equal to dX[2] = (-0.79, -1.17, -0.40); the correct row minus this wrong row is (-1.54, -0.42, -0.15), which is exactly dX[0], the use that was overwritten.
 <!-- /worked -->
 
 ![The gradient rows of the four positions of `cat sat cat .` flowing back into the table: the two uses of `cat` add into row 1, the other uses each have a row of their own, and the rows of tokens that were not used stay zero.](img/embedding-scatter-add.svg)
@@ -428,7 +428,7 @@ The honest result is mixed, and informative. After training all six answers are 
 The model of the training example had a separate output table. The same training with the table tied, which has half the parameters and a single gradient made of the two parts above, gives a different picture:
 
 <!-- worked: embeddings.tied_comparison -->
-The same corpus, the same 300 steps and the same starting embedding table; the tied model has no second table (its logits are z = E e, and the gradient of the table is the sum of two contributions, as in the previous section). Mean cosine of different tokens of one class after training:
+The same corpus, the same 300 steps of full-batch gradient descent with learning rate 2.0 (as in the previous training block) and the same starting embedding table (the 90 entries drawn first); the tied model has no second table (its logits are z = E e, and the update of the table is E <- E - 2.0 (dE + dW), the sum of the lookup's gradient and the head's, as in the previous section). The final loss is the mean loss over the pairs at the last step. Mean cosine of different tokens of one class after training:
 
 | model | parameters | final loss | singular nouns | plural nouns | verbs | objects |
 |---|---:|---:|---:|---:|---:|---:|
@@ -463,7 +463,17 @@ A second matter is which rows a table should *not* learn. A padding token fills 
 Every number so far has been a table of six or fifteen rows. The configurations below are real: brain's `GptConfig` and `QwenConfig` layouts, every weight, norm and bias counted, and for the GPT also its learned position table.
 
 <!-- worked: embeddings.params -->
-Counted from the layouts of brain's `QwenConfig` and `GptConfig` (every weight, norm and, for the GPT, bias and learned position table; the Qwen3 shapes are the published ones, grouped-query attention with 8 key-value heads of width 128). A shared table is counted once; the separate head adds a second V D.
+Counted from the layouts of brain's `QwenConfig` and `GptConfig`; a shared table is counted once and the separate head adds a second V D. The configurations, with D, V and the model's name in the tables below (query heads, key-value heads and head width are those of grouped-query attention; `ff` is the width of the feed-forward layer; the position table of the GPT has `block` rows):
+
+| model | layers | query heads | key-value heads | head width | ff | block |
+|---|---:|---:|---:|---:|---:|---:|
+| GPT, tiny (brain's `GptConfig::tiny`) | 2 | - | - | - | 128 | 64 |
+| GPT, 12 layers of width 768 | 12 | - | - | - | 3,072 | 1024 |
+| Qwen3, 0.6B | 28 | 16 | 8 | 128 | 3,072 | - |
+| Qwen3, 1.7B | 28 | 16 | 8 | 128 | 6,144 | - |
+| Qwen3, 4B | 36 | 32 | 8 | 128 | 9,728 | - |
+
+Each layer of the Qwen3 models holds two RMS-norm scales (D each), a query projection (D by heads x head width), a key and a value projection (D by key-value heads x head width each), an output projection (heads x head width by D), two scales of head width (the query and key norms), and a gated feed-forward layer of three bias-free matrices (gate and up: D by ff each; down: ff by D); after the layers come one final RMS-norm scale (D). Every other weight of these models is bias-free. Each layer of the GPT holds two layer norms (scale and bias, 2 D each), a combined query-key-value projection (D by 3 D) with a bias of 3 D, an output projection (D by D) with a bias of D, and two feed-forward matrices (D by ff and ff by D) with biases of ff and D; after the layers come one final layer norm (2 D), and before them the token table (V D) and the position table (block D). The number of attention heads of the GPT does not change the count.
 
 | model | V | D | table V D | parameters with one shared table |
 |---|---:|---:|---:|---:|

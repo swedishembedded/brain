@@ -271,8 +271,8 @@ def gradient():
         f"The same table from the product N^T dX (N the matrix of the previous example): largest difference from the loop above, below 1e-15. "
         f"Largest difference from a central difference over all {V * D} entries (step h = 1e-5, applied to L): below 1e-8.",
         "",
-        f"A loop that assigns, `dW[ids[t]] = dX[t]`, leaves row 1 equal to dX[2] = {_row(dE_assign[1], 2)}; the difference from the "
-        f"correct row is {_row(lost, 2)}, which is exactly dX[0], the use that was overwritten.",
+        f"A loop that assigns, `dW[ids[t]] = dX[t]`, leaves row 1 equal to dX[2] = {_row(dE_assign[1], 2)}; the correct row minus "
+        f"this wrong row is {_row(lost, 2)}, which is exactly dX[0], the use that was overwritten.",
     ]
     return "\n".join(out)
 
@@ -446,10 +446,28 @@ def params():
         a_rows.append((label, _int(c["V"]), _int(c["D"]), _int(table), _int(tied_total)))
         b_rows.append((label, _int(sep_total), _int(sep_total - tied_total), f"{100 * table / tied_total:.1f}%",
                        f"{100 * 2 * table / sep_total:.1f}%", _int(2 * table)))
+    cfg_rows = []
+    for key, label in MODEL_LABELS:
+        c = CONFIGS[key]
+        if key.startswith("qwen"):
+            cfg_rows.append((label, c["layers"], c["heads"], c["kv_heads"], c["head_dim"], _int(c["ff"]), "-"))
+        else:
+            cfg_rows.append((label, c["layers"], "-", "-", "-", _int(c["ff"]), c["block"]))
     return "\n".join([
-        "Counted from the layouts of brain's `QwenConfig` and `GptConfig` (every weight, norm and, for the GPT, bias and learned position "
-        "table; the Qwen3 shapes are the published ones, grouped-query attention with 8 key-value heads of width 128). A shared table is "
-        "counted once; the separate head adds a second V D.",
+        "Counted from the layouts of brain's `QwenConfig` and `GptConfig`; a shared table is counted once and the separate head adds a "
+        "second V D. The configurations, with D, V and the model's name in the tables below (query heads, key-value heads and head width "
+        "are those of grouped-query attention; `ff` is the width of the feed-forward layer; the position table of the GPT has `block` rows):",
+        "",
+        _table(["model", "layers", "query heads", "key-value heads", "head width", "ff", "block"], cfg_rows, "lrrrrrr"),
+        "",
+        "Each layer of the Qwen3 models holds two RMS-norm scales (D each), a query projection (D by heads x head width), a key and a value "
+        "projection (D by key-value heads x head width each), an output projection (heads x head width by D), two scales of head width "
+        "(the query and key norms), and a gated feed-forward layer of three bias-free matrices (gate and up: D by ff each; down: ff by D); "
+        "after the layers come one final RMS-norm scale (D). Every other weight of these models is bias-free. Each layer of the GPT holds "
+        "two layer norms (scale and bias, 2 D each), a combined query-key-value projection (D by 3 D) with a bias of 3 D, an output "
+        "projection (D by D) with a bias of D, and two feed-forward matrices (D by ff and ff by D) with biases of ff and D; after the layers "
+        "come one final layer norm (2 D), and before them the token table (V D) and the position table (block D). The number of attention "
+        "heads of the GPT does not change the count.",
         "",
         _table(["model", "V", "D", "table V D", "parameters with one shared table"], a_rows, "lrrrr"),
         "",
@@ -665,8 +683,10 @@ def tied_comparison():
         within = [float(m[i][1 + i]) for i in range(len(CLASSES))]
         rows.append((label, _int(NV * DIM * (1 if tied_head else 2)), _n(hist[STEPS], 4), *(_n(w, 3) for w in within)))
     return "\n".join([
-        f"The same corpus, the same {STEPS} steps and the same starting embedding table; the tied model has no second table "
-        f"(its logits are z = E e, and the gradient of the table is the sum of two contributions, as in the previous section). "
+        f"The same corpus, the same {STEPS} steps of full-batch gradient descent with learning rate {LR} (as in the previous training block) "
+        f"and the same starting embedding table (the {NV * DIM} entries drawn first); the tied model has no second table "
+        f"(its logits are z = E e, and the update of the table is E <- E - {LR} (dE + dW), the sum of the lookup's gradient and the head's, "
+        f"as in the previous section). The final loss is the mean loss over the pairs at the last step. "
         f"Mean cosine of different tokens of one class after training:",
         "",
         _table(["model", "parameters", "final loss", "singular nouns", "plural nouns", "verbs", "objects"], rows, "lrrrrrr"),
