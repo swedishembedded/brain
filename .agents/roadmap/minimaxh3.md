@@ -957,7 +957,9 @@ MiniMax H3 Community License derivatives.
       ~4.1k latent rows and ~4.2k vision tokens) holds resident with the
       gates on two P40s since a block runs its row-local work in row
       chunks (block workspace 4.26 GB at 19126 rows, measured): the same
-      prompt and character, 2.9 min per step.
+      prompt and character, 2.9 min per step. Served by `brain serve` over
+      `/v1/videos` to a client that reattached by its idempotency key after
+      its own one-hour limit, the clip is byte-identical to the CLI's.
 - [x] Sparse attention is faster than dense on CUDA at ref2va's own
       shapes (one P40, 56 heads, `cargo test -p brain-minimaxh3 --test device -- --device gpu1 --backend cuda --ignored sparse_attention_time`,
       ms per attention incl. tile means, selection and the gated coarse
