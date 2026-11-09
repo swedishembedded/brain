@@ -2,16 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Typeset the book as one PDF, separate from the engineering manual.
+"""Typeset the book as PDFs, separate from the engineering manual: the whole
+book as one file, and each volume with written chapters as a file of its own.
 
 Reading order comes from docs/book/book.yaml (the same specification the
 published navigation is generated from): front matter, then each volume with
 written chapters as a LaTeX part (its introduction first), then the appendices.
+A volume's file has the same front matter, the volume's introduction and its
+chapters numbered from 1 (as the text refers to them, "Volume V, chapter 2"),
+and the glossary and author page; links between chapters are plain text in
+every PDF, so a volume on its own has none that dangle.
 Page transforms and the pandoc invocation are the documentation build's own
 (docs/pandoc/build-docs.py), so the two PDFs are typeset by one
 implementation; the book adds the book class and docs/pandoc/book.tex.
 
-    scripts/book/pdf.py      # -> build/book/brain-book.{md,pdf}
+    scripts/book/pdf.py               # the whole book and every written volume
+    scripts/book/pdf.py --whole       # -> build/book/brain-book.{md,pdf}
+    scripts/book/pdf.py --volumes     # every written volume, each on its own
+    scripts/book/pdf.py --volume v05  # -> build/book/volumes/brain-book-v05-<dir>.{md,pdf}
+    scripts/book/pdf.py -j 3          # how many PDFs typeset at once (default 2)
 
 Requires pandoc, xelatex and rsvg-convert (pandoc converts the SVG figures).
 
@@ -22,6 +31,7 @@ sending an email to info@swedishembedded.com.
 """
 import importlib.util
 import re
+from concurrent.futures import ProcessPoolExecutor
 import subprocess
 import sys
 from pathlib import Path
@@ -64,19 +74,19 @@ def tex(s: str) -> str:
     return s.replace("\\", "\\textbackslash{}").replace("&", "\\&").replace("%", "\\%").replace("#", "\\#")
 
 
-def title_header(book) -> Path:
-    """The title page and its reverse (the colophon), from book.yaml."""
+def title_header(book, out: Path, title: str, subtitle: str) -> Path:
+    """The title page and its reverse (the colophon), from book.yaml: `title`
+    and `subtitle` are the book's own, or a volume's title over the book's."""
     rev = subprocess.run(["git", "rev-parse", "--short=9", "HEAD"], cwd=ROOT,
                          capture_output=True, text=True).stdout.strip() or "unknown"
-    out = OUT / "title.tex"
     out.write_text(rf"""\makeatletter
 \renewcommand{{\maketitle}}{{%
   \begin{{titlepage}}\raggedright
     \vspace*{{0.12\textheight}}
     {{\color{{accent}}\rule{{\linewidth}}{{1.5pt}}}}\par\vspace{{18pt}}
-    {{\displayfont\fontsize{{30}}{{36}}\selectfont\bfseries\color{{ink}} {tex(book.title)}\par}}
+    {{\displayfont\fontsize{{30}}{{36}}\selectfont\bfseries\color{{ink}} {tex(title)}\par}}
     \vspace{{14pt}}
-    \parbox{{0.86\linewidth}}{{\raggedright\large\itshape\color{{muted}} {tex(book.subtitle)}}}\par
+    \parbox{{0.86\linewidth}}{{\raggedright\large\itshape\color{{muted}} {tex(subtitle)}}}\par
     \vspace{{18pt}}{{\color{{accent}}\rule{{\linewidth}}{{0.6pt}}}}\par
     \vspace{{0.18\textheight}}
     {{\displayfont\Large\color{{ink}} {tex(book.author)}\par}}
@@ -86,8 +96,8 @@ def title_header(book) -> Path:
   \thispagestyle{{empty}}
   {{\small\color{{muted}}
     \vspace*{{\fill}}
-    \noindent\textbf{{\color{{ink}}{tex(book.title)}}}\\[2pt]
-    {tex(book.subtitle)}\\[10pt]
+    \noindent\textbf{{\color{{ink}}{tex(title)}}}\\[2pt]
+    {tex(subtitle)}\\[10pt]
     Copyright \textcopyright\ 2026 {tex(book.author)}.\\[4pt]
     This work is licensed under the Creative Commons Attribution 4.0
     International License (CC BY 4.0).\\[10pt]
@@ -107,47 +117,52 @@ def title_header(book) -> Path:
     return out
 
 
-def build_markdown() -> Path:
-    book = load()
+def build_markdown(book, out: Path, title: str, subtitle: str, volume=None) -> Path:
+    """The markdown of one PDF: the whole book, or `volume` alone."""
     parts = [f"""---
-title: "{book.title}"
-subtitle: "{book.subtitle}"
+title: "{title}"
+subtitle: "{subtitle}"
 author: "{book.author}"
 date: "{source_date()}"
 toc-title: "Contents"
 ---
 
 """]
-    # Front-matter sections are unnumbered; numbering resumes with Volume I.
+    # Front-matter sections are unnumbered; numbering resumes with Volume I
+    # (or with the volume's first chapter).
     parts.append(latex("\\frontmatter\\setcounter{secnumdepth}{-2}"))
     parts += [page(rel, unnumbered=True) for rel in book.front]
+    if volume is not None:
+        parts.append(page(volume.intro_rel, unnumbered=True))
     parts.append(latex("\\mainmatter\\setcounter{secnumdepth}{3}"))
-    for v in book.volumes:
+    for v in [volume] if volume is not None else book.volumes:
         written = [ch for ch in v.chapters if ch.written]
         if not written:
             continue
-        parts.append(latex(f"\\part{{{v.title}}}"))
-        parts.append(page(v.intro_rel, drop_title=True))
+        if volume is None:
+            parts.append(latex(f"\\part{{{v.title}}}"))
+            parts.append(page(v.intro_rel, drop_title=True))
         parts += [page(ch.rel) for ch in written]
     # Reference material becomes lettered appendices; the author page closes
-    # the book unnumbered.
+    # the book unnumbered. The chronology covers the whole engine, so only the
+    # whole book carries it.
+    back = [rel for rel in book.back if volume is None or rel != "history/chronology.md"]
     parts.append(latex("\\appendix"))
-    parts += [page(rel) for rel in book.back if rel != ABOUT]
+    parts += [page(rel) for rel in back if rel != ABOUT]
     parts.append(latex("\\backmatter"))
-    parts += [page(rel, unnumbered=True) for rel in book.back if rel == ABOUT]
-    OUT.mkdir(parents=True, exist_ok=True)
-    md = OUT / "brain-book.md"
-    md.write_text("".join(parts), encoding="utf-8")
-    print(f"wrote {md.relative_to(ROOT)} ({md.stat().st_size // 1024} KiB)")
-    return md
+    parts += [page(rel, unnumbered=True) for rel in back if rel == ABOUT]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("".join(parts), encoding="utf-8")
+    print(f"wrote {out.relative_to(ROOT)} ({out.stat().st_size // 1024} KiB)")
+    return out
 
 
 REPORT = OUT / "overflow.txt"
 
 
-def overflow_report(log: str) -> list[str]:
+def overflow_report(log: str, report: Path = REPORT) -> list[str]:
     """Every line of the final LaTeX run wider than the text, with its printed
-    page number and the start of what overflows, written to REPORT.
+    page number and the start of what overflows, written to `report`.
 
     LaTeX logs a page as "[N" when it ships it out, so the first such mark
     after a warning is the page the line is on. A display equation shows as an
@@ -162,38 +177,71 @@ def overflow_report(log: str) -> list[str]:
         what = "display or table row" if "detected" in m.group(2) else m.group(3).strip()[:100]
         found.append(f"page {page.group(1) if page else '?'}: {float(m.group(1)):.0f}pt  {what}")
     found = list(dict.fromkeys(found))
-    REPORT.write_text("".join(f + "\n" for f in found), encoding="utf-8")
+    report.write_text("".join(f + "\n" for f in found), encoding="utf-8")
     return found
 
 
-def main() -> int:
-    md = build_markdown()
-    title = title_header(load())
-    _, bad = docs.build_pdf(
-        str(md), pdf=str(OUT / "brain-book.pdf"),
+def typeset(name: str, title: str, subtitle: str, volume=None) -> list[str]:
+    """Build one PDF, `<name>.pdf`, and return its problems (none when clean)."""
+    book = load()
+    base = OUT / name
+    md = build_markdown(book, base.with_suffix(".md"), title, subtitle, volume)
+    header = title_header(book, base.with_name(base.name + ".title.tex"), title, subtitle)
+    docs.build_pdf(
+        str(md), pdf=str(base.with_suffix(".pdf")),
         extra=("--toc-depth=1", "--top-level-division=chapter", "-V", "documentclass=book",
                "-V", "classoption=openright", "-V", "mainfont=P052", "-V", "mathfont=Latin Modern Math",
-               "-H", str(ROOT / "docs" / "pandoc" / "book.tex"), "-H", str(title),
+               "-H", str(ROOT / "docs" / "pandoc" / "book.tex"), "-H", str(header),
                "--lua-filter", str(ROOT / "docs" / "pandoc" / "book-tables.lua")))
-    # A glyph the font lacks is silently dropped from the page; refuse it.
-    log = (OUT / "brain-book.pandoc.log").read_text(encoding="utf-8", errors="replace")
-    overflows = overflow_report(log)
+    log = base.with_suffix(".pandoc.log").read_text(encoding="utf-8", errors="replace")
+    problems = []
+    report = REPORT if volume is None else base.with_name(base.name + ".overflow.txt")
+    overflows = overflow_report(log, report)
     if overflows:
-        print(f"{len(overflows)} line(s) run past the margin; see {REPORT.relative_to(ROOT)}", file=sys.stderr)
-        return 1
+        problems.append(f"{len(overflows)} line(s) run past the margin; see {report.relative_to(ROOT)}")
+    # A glyph the font lacks is silently dropped from the page; refuse it.
     missing = sorted(set(re.findall(r"Missing character: There is no (\S+) \((U\+[0-9A-F]+)\)", log)))
     if missing:
-        print("missing glyphs (the PDF would drop them): " +
-              ", ".join(f"{c} {u}" for c, u in missing), file=sys.stderr)
-        return 1
+        problems.append("missing glyphs (the PDF would drop them): " + ", ".join(f"{c} {u}" for c, u in missing))
     # A table wider than even a landscape page overflows it; the table filter
     # names each one.
     too_wide = re.findall(r"book-tables: (.+)", log)
     if too_wide:
-        print("tables too wide to typeset (split or narrow them):\n  " + "\n  ".join(too_wide),
-              file=sys.stderr)
-        return 1
-    return 0
+        problems.append("tables too wide to typeset (split or narrow them):\n  " + "\n  ".join(too_wide))
+    return [f"{name}: {p}" for p in problems]
+
+
+def jobs(args: list[str]) -> list[tuple]:
+    """(name, title, subtitle, volume) of every PDF the arguments ask for."""
+    book = load()
+    whole = ("brain-book", book.title, book.subtitle, None)
+    written = [v for v in book.volumes if any(ch.written for ch in v.chapters)]
+    def of(v):
+        n = book.volumes.index(v)
+        return (f"volumes/brain-book-{v.dir}", f"Volume {ROMAN[n]}: {v.title}", book.title, v)
+    if "--whole" in args:
+        return [whole]
+    if "--volumes" in args:
+        return [of(v) for v in written]
+    if "--volume" in args:
+        want = args[args.index("--volume") + 1]
+        hit = [v for v in written if v.id == want or v.dir == want]
+        if not hit:
+            sys.exit(f"no written volume {want!r}; written: {', '.join(v.id for v in written)}")
+        return [of(hit[0])]
+    return [whole] + [of(v) for v in written]
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    # Each PDF is one single-threaded xelatex chain; a few run side by side.
+    workers = int(args[args.index("-j") + 1]) if "-j" in args else 2
+    todo = jobs(args)
+    with ProcessPoolExecutor(max_workers=max(1, min(workers, len(todo)))) as pool:
+        problems = [p for found in pool.map(typeset, *zip(*todo)) for p in found]
+    for p in problems:
+        print(p, file=sys.stderr)
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":

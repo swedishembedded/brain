@@ -58,7 +58,7 @@ Enforced by `make check/scope`; `CHANGELOG.md` is exempt.
 | `tests/` | bats suites: `tests/e2e` (real sockets and processes), `tests/gates` (gate specs) |
 | `brain-py/` | Python client driving the `brain` binary as a subprocess |
 | `papers/` | research papers, one scope each (`papers/README.md`); `make papers/<name>/pdf` builds one into `build/papers/` |
-| `docs/book/` | the textbook: machine learning from first principles, brain as its case study; `make book/pdf` |
+| `docs/book/` | the textbook: machine learning from first principles, brain as its case study; `make book` (whole book and each volume) |
 
 ## Rules to read before you start
 

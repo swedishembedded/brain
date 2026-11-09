@@ -1963,12 +1963,17 @@ docs/pdf:
 # The textbook under docs/book: published with the docs (its own part of
 # docs/manifest.yaml) and typeset as its own PDF, in the reading order of
 # docs/book/book.yaml. Requires pandoc, xelatex and rsvg-convert.
-## book - default: book/pdf (the textbook -> build/book/brain-book.pdf)
-book: book/pdf
-
-## book/pdf - typeset the textbook (pandoc + xelatex) -> build/book/brain-book.{md,pdf}
-book/pdf:
+## book - default: the whole textbook and each written volume as its own PDF (build/book/)
+book:
 	scripts/book/pdf.py
+
+## book/pdf - typeset the whole textbook (pandoc + xelatex) -> build/book/brain-book.{md,pdf}
+book/pdf:
+	scripts/book/pdf.py --whole
+
+## book/volumes - typeset each written volume on its own -> build/book/volumes/brain-book-vNN-<name>.pdf
+book/volumes:
+	scripts/book/pdf.py --volumes
 
 # Research papers: one directory per paper under papers/, each with its own
 # Makefile over papers/paper.mk. Adding a directory adds its targets.

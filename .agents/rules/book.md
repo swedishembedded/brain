@@ -9,8 +9,10 @@ Read this before you write or change anything under `docs/book/` or
 `docs/book/` is a textbook, *From First Principles to Intelligent Machines*:
 machine learning taught from arithmetic to a complete engine, with brain's
 implementation and history as the case study. It is published with the docs
-(its own part of `docs/manifest.yaml`) and typeset as its own PDF
-(`make book/pdf`). It is not product documentation: it may explain internals,
+(its own part of `docs/manifest.yaml`) and typeset as PDFs: `make book`
+builds the whole book (`make book/pdf` alone) and each written volume as a
+file of its own (`make book/volumes`), all under `build/book/`. It is not
+product documentation: it may explain internals,
 history and measurements that `docs/` must not, under the rules below.
 Status (which chapters are written, verified, open) lives in
 `.agents/roadmap/book.md`, never in the book.
