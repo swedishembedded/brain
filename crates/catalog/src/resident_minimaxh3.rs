@@ -50,10 +50,11 @@ impl MiniMaxH3Resident {
         MiniMaxH3Resident { id, paths, gpus }
     }
 
-    /// `(weights, activations, host)` of the request `key` names: the DiT
-    /// (and its gates) at its tier, one card's share of the forward's
-    /// workspace and the VAEs, and the host bytes beside them.
-    fn footprint(key: &InstanceKey) -> Option<(u64, u64, u64)> {
+    /// `(dit, workspace, vae, host)` of the request `key` names: the DiT
+    /// (and its gates) at its tier, the forward's workspace on each card that
+    /// holds a stage of it, the VAEs a decode holds after the DiT is gone, and
+    /// the host bytes beside them.
+    fn footprint(key: &InstanceKey) -> Option<(u64, u64, u64, u64)> {
         let Key { vf, vh, vw, audio, reference_rows, dtype, act_levels, gates, .. } = parse_key(&key.config)?;
         let dit_cfg = H3TransformerConfig::real();
         let tier = key_tier(&dtype)?;
@@ -63,7 +64,7 @@ impl MiniMaxH3Resident {
         let activations = minimaxh3::model::forward_workspace_bytes(&dit_cfg, rows, act_levels) + if gates { minimaxh3::vsa::workspace_bytes(&dit_cfg, rows, true) } else { 0 };
         let (ph, pw) = (dit_cfg.patch_size[1] as u64, dit_cfg.patch_size[2] as u64);
         let pixels = vf as u64 * (vh as u64 * ph) * (vw as u64 * pw) * 3 * 4;
-        Some((weights, activations + vae_weights, dit_host_bytes(&dit_cfg) + vae_weights + pixels + (2u64 << 30)))
+        Some((weights, activations, vae_weights, dit_host_bytes(&dit_cfg) + vae_weights + pixels + (2u64 << 30)))
     }
 }
 
@@ -224,8 +225,8 @@ impl ResidentModel for MiniMaxH3Resident {
     fn estimate(&self, key: &InstanceKey) -> MemCost {
         // An unparseable key must not read as "free" - `resident_wan.
         // rs::estimate`'s identical reasoning.
-        let Some((weights, per_card, host)) = Self::footprint(key) else { return MemCost::new(8u64 << 30, 4u64 << 30) };
-        MemCost::new(weights + per_card, host)
+        let Some((dit, workspace, vae, host)) = Self::footprint(key) else { return MemCost::new(8u64 << 30, 4u64 << 30) };
+        MemCost::new((dit + workspace).max(vae), host)
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
@@ -239,12 +240,13 @@ impl ResidentModel for MiniMaxH3Resident {
 }
 
 impl MultiDeviceResidentModel for MiniMaxH3Resident {
-    /// Every card, each holding its share of the DiT and its own copy of the
-    /// request's workspace - what the text tower's and the DiT's placements
-    /// over the same cards need at their peak.
+    /// Every card, each at the largest of its phases: its share of the DiT
+    /// with its own copy of the forward's workspace, or the VAEs, which load
+    /// only once the DiT is gone. The text tower's phase is placed over the
+    /// same cards and dropped before the DiT loads.
     fn estimate_multi(&self, key: &InstanceKey) -> MultiDeviceCost {
         match (Self::footprint(key), self.gpus.len()) {
-            (Some((weights, per_card, host)), n) if n > 0 => MultiDeviceCost::new(self.gpus.iter().map(|&i| (Device::Gpu(i), weights / n as u64 + per_card)).collect(), host),
+            (Some((dit, workspace, vae, host)), n) if n > 0 => MultiDeviceCost::new(self.gpus.iter().map(|&i| (Device::Gpu(i), (dit / n as u64 + workspace).max(vae))).collect(), host),
             _ => MultiDeviceCost::new(Vec::new(), 0),
         }
     }
@@ -300,8 +302,9 @@ mod tests {
     }
 
     /// A request spans every card it may use, each holding its share of the
-    /// DiT and its own workspace - together more than the DiT alone; with no
-    /// card it is unplaceable, and says why.
+    /// DiT and its own workspace - together more than the DiT alone, each
+    /// within a 24 GB card for a ref2va clip at a modest size; with no card it
+    /// is unplaceable, and says why.
     #[test]
     fn a_request_spans_every_card_and_none_without_cards() {
         let r = resident();
@@ -311,6 +314,9 @@ mod tests {
         assert_eq!(devices, vec![Device::Gpu(0), Device::Gpu(1)]);
         let dit = minimaxh3::model::resident_cost(&H3TransformerConfig::real(), gpu_core::select::Dtype::I8, false).total();
         assert!(devices.iter().map(|&d| cost.on(d)).sum::<u64>() > dit, "the cards hold the DiT and their workspace");
+        let small = r.instance_key("ref2va", &Invocation::new().set("prompt", json!("a")).set("width", json!(640)).set("height", json!(352)).set("vsa_gate", json!("/gates.safetensors")));
+        let per_card = r.estimate_multi(&small);
+        assert!(per_card.devices().all(|d| per_card.on(d) < 22u64 << 30), "a 640x352 ref2va with gates fits a 24 GB card's budget: {:?}", per_card.devices().map(|d| per_card.on(d)).collect::<Vec<_>>());
 
         let none = MiniMaxH3Resident { gpus: Vec::new(), ..resident() };
         assert_eq!(none.estimate_multi(&key).devices().count(), 0);
