@@ -152,8 +152,13 @@ fn check(gpu: &Gpu, bsz: u32, heads: u32, t: u32, sigma: f32, rows: u32, seed: u
     let (mut worst_n, mut worst_w) = (0.0f64, 0.0f64);
     for b in 0..bsz {
         for h in 0..heads {
-            // Always the first and last rows (the tile edges), then a sample.
-            let picks: Vec<u32> = [0, t - 1].into_iter().chain((0..rows.saturating_sub(2)).map(|_| r.next_u32() % t)).collect();
+            // Every row when `rows` covers them; otherwise the first and last
+            // rows (the tile edges), then a sample.
+            let picks: Vec<u32> = if rows >= t {
+                (0..t).collect()
+            } else {
+                [0, t - 1].into_iter().chain((0..rows.saturating_sub(2)).map(|_| r.next_u32() % t)).collect()
+            };
             for i in picks {
                 let want = oracle_row(&qkv, &p, b, h, i);
                 let base = ((b * t + i) as usize) * d + (h * HD) as usize;
@@ -199,13 +204,15 @@ fn matches_the_f64_oracle_and_the_generated_tier() {
     }
 }
 
-/// Seeded random shapes, every length residue a tile can leave.
+/// Seeded random shapes, every length residue a tile can leave. Every row is
+/// checked: the no-less-accurate comparison is between two maxima, which a
+/// handful of sampled rows leaves to chance.
 fn random_shapes_match() {
     let Some(gpu) = device() else { return };
     let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for _ in 0..12 {
         let (bsz, heads, t) = (1 + r.next_u32() % 2, 1 + r.next_u32() % 4, 1 + r.next_u32() % 700);
-        check(&gpu, bsz, heads, t, 2.0, 8, u64::from(r.next_u32()));
+        check(&gpu, bsz, heads, t, 2.0, t, u64::from(r.next_u32()));
     }
 }
 
