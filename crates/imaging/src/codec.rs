@@ -93,6 +93,17 @@ pub fn decode_bounded(bytes: &[u8], max_pixels: u64) -> Result<Rgb8, String> {
     Rgb8::new(w, h, img.into_raw())
 }
 
+/// A PPM, PNG or JPEG file's `(width, height)`, read off its header without
+/// decoding a pixel.
+pub fn dimensions(path: impl AsRef<Path>) -> Result<(u32, u32), String> {
+    let path = path.as_ref();
+    let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    if bytes.starts_with(b"P6") {
+        return decode_p6(&bytes).map(|(_, w, h)| (w, h)).map_err(|e| format!("{}: {e}", path.display()));
+    }
+    image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().map_err(|e| format!("{}: {e}", path.display()))?.into_dimensions().map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Read and [`decode`] a file.
 pub fn load(path: impl AsRef<Path>) -> Result<Rgb8, String> {
     let path = path.as_ref();

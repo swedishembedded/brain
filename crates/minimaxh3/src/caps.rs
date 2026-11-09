@@ -523,20 +523,23 @@ pub fn references_from(inv: &capability::Invocation) -> Result<Vec<crate::refere
         .collect()
 }
 
-/// The most packed rows `ref2va`'s references can take, read off the
-/// `references` list alone (no file is opened): an image at its own 2048
-/// short edge and at the widest 4:1 it is accepted at, a video on a canvas
-/// no larger than the clip's own `target_video_rows`, and every soundtrack
-/// no longer than the clip's `target_audio_rows`. Zero for every other
-/// action. What a resident workspace is sized from before the references
-/// are decoded.
+/// The most packed rows `ref2va`'s references can take, before any is
+/// decoded: an image at the size it normalizes to, read off its header (at
+/// the widest 4:1 it is accepted at when the header cannot be read), a video
+/// on a canvas no larger than the clip's own `target_video_rows`, and every
+/// soundtrack no longer than the clip's `target_audio_rows`. Zero for every
+/// other action. What a resident workspace is sized from.
 pub fn reference_rows_bound(action: &str, inv: &capability::Invocation, target_video_rows: u32, target_audio_rows: u32) -> u32 {
     if action != "ref2va" {
         return 0;
     }
     let (dit_cfg, vae_cfg) = real_configs();
     let side = |edge: u32| edge / vae_cfg.spatial_compression_ratio() / dit_cfg.patch_size[1];
-    let image_rows = side(pipeline::REFERENCE_IMAGE_SHORT_EDGE) * side(4 * pipeline::REFERENCE_IMAGE_SHORT_EDGE);
+    let widest = side(pipeline::REFERENCE_IMAGE_SHORT_EDGE) * side(4 * pipeline::REFERENCE_IMAGE_SHORT_EDGE);
+    let canvas = crate::references::ReferenceCanvas::released(canvas_multiple());
+    let image_rows = |path: &str| {
+        imaging::dimensions(path).ok().and_then(|(w, h)| crate::references::normalized_image_size(w, h, &canvas).ok()).map_or(widest, |(w, h)| side(w) * side(h))
+    };
     let list = inv.get_str("references").unwrap_or_default();
     list.split(',')
         .map(str::trim)
@@ -546,7 +549,7 @@ pub fn reference_rows_bound(action: &str, inv: &capability::Invocation, target_v
             let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
             match ext.as_str() {
                 "wav" => target_audio_rows,
-                "png" | "jpg" | "jpeg" | "webp" => image_rows,
+                "png" | "jpg" | "jpeg" | "webp" => image_rows(path),
                 _ => target_video_rows + if track.is_some() { target_audio_rows } else { 0 },
             }
         })
@@ -1293,6 +1296,21 @@ mod tests {
         let e = decoded("turbo-4step", &[("adapter", json!("/elsewhere.safetensors"))]).expect_err("ambiguous");
         assert!(e.contains("preset"), "{e}");
         std::fs::remove_dir_all(&store).ok();
+    }
+
+    /// A reference image the bound can read reserves the rows its
+    /// normalized size packs - a square one 64 x 64 - and one it cannot read
+    /// the widest an image is accepted at.
+    #[test]
+    fn a_readable_reference_image_reserves_its_own_rows() {
+        let dir = std::env::temp_dir().join(format!("brain-minimaxh3-refrows-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let square = dir.join("square.png");
+        imaging::save_png(&square, &imaging::Rgb8::new(768, 768, vec![128; 768 * 768 * 3]).unwrap()).unwrap();
+        let bound = |list: String| reference_rows_bound("ref2va", &Invocation::new().set("references", json!(list)), 0, 0);
+        assert_eq!(bound(square.to_str().unwrap().to_string()), 64 * 64);
+        assert_eq!(bound(dir.join("absent.png").to_str().unwrap().to_string()), 64 * 256, "the widest 4:1 image");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The manifest's own advertised defaults must survive `validate` ->

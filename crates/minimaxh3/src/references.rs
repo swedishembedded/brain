@@ -138,18 +138,23 @@ pub fn normalize_references(media: &[ReferenceMedia], num_frames: u32, canvas: &
 /// Python's `round`) to the canvas multiple, LANCZOS-resized when that
 /// changes its size. Within 1:4 and 4:1.
 pub fn normalize_image(img: &Rgb8, canvas: &ReferenceCanvas) -> Result<Rgb8, String> {
-    let (width, height) = (img.w as f64, img.h as f64);
-    if img.w == 0 || img.h == 0 {
-        return Err(format!("a reference image must have a positive size, got {}x{}", img.w, img.h));
+    let (target_w, target_h) = normalized_image_size(img.w, img.h, canvas)?;
+    Ok(if (target_w, target_h) == (img.w, img.h) { img.clone() } else { resize_lanczos_pil(img, target_w as usize, target_h as usize) })
+}
+
+/// The `(width, height)` [`normalize_image`] puts a `w x h` image at.
+pub fn normalized_image_size(w: u32, h: u32, canvas: &ReferenceCanvas) -> Result<(u32, u32), String> {
+    let (width, height) = (w as f64, h as f64);
+    if w == 0 || h == 0 {
+        return Err(format!("a reference image must have a positive size, got {w}x{h}"));
     }
     if width > 4.0 * height || height > 4.0 * width {
-        return Err(format!("a reference image must be within 1:4 and 4:1, got {}x{}", img.w, img.h));
+        return Err(format!("a reference image must be within 1:4 and 4:1, got {w}x{h}"));
     }
     let scale = canvas.image_short_edge as f64 / width.min(height);
     let m = canvas.multiple as f64;
     let side = |v: f64| canvas.multiple.max(((v * scale / m).round_ties_even() * m) as u32);
-    let (target_w, target_h) = (side(width), side(height));
-    Ok(if (target_w, target_h) == (img.w, img.h) { img.clone() } else { resize_lanczos_pil(img, target_w as usize, target_h as usize) })
+    Ok((side(width), side(height)))
 }
 
 /// A video onto `canvas.fps` - every frame held until the slot of the next,
