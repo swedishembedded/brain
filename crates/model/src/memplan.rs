@@ -526,7 +526,7 @@ mod tests {
         }
     }
 
-    /// An 8B full fine-tune at fp32 (the paramstore byte accounting): values 4n, grads 4n, AdamW state 8n. The
+    /// A 2B-parameter full fine-tune at fp32 (the paramstore byte accounting): values 4n, grads 4n, AdamW state 8n. The
     /// planner narrows the state first, offloads it only when authorized, and recomputes only after narrowing.
     #[test]
     fn a_full_finetune_is_planned_from_the_paramstore_byte_accounting() {

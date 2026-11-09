@@ -213,9 +213,9 @@ mod tests {
         let cost = shard_cost(&cfg);
         assert!(cost.embed > cost.head * 10.0, "the token refiner makes the embed stage far heavier than the head stage: {} vs {}", cost.embed, cost.head);
         assert!(cost.embed < cost.per_layer * 5.0, "the endpoint weights must not dwarf the block stack: {} vs {}", cost.embed, cost.per_layer);
-        // A block costs its attention and FFN only: ~395M params at the
+        // A block costs its attention and FFN only: ~385M params at the
         // real config, `adaln_proj`'s 260M never placed on a stage.
-        assert!((3.5e8..4.5e8).contains(&cost.per_layer), "a block without adaln_proj is ~395M params, got {}", cost.per_layer);
+        assert!((3.5e8..4.5e8).contains(&cost.per_layer), "a block without adaln_proj is ~385M params, got {}", cost.per_layer);
     }
 
     /// More cards than blocks (the tiny config has two) must not open a
