@@ -1,0 +1,80 @@
+<!-- source-sha256: f7b6adc44b23e482e344e67fed06b2649aaeb75e3c5a2e0a9c45932378f71507 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 600" width="1000" height="600"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="600" fill="#ffffff"/>
+<rect x="10" y="10" width="980" height="150" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">three distinct blocks: three sets of weights</text>
+<ellipse cx="80" cy="100" rx="45" ry="25" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="80" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x</text>
+<rect x="205" y="72" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="280" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block 1</text>
+<text x="280" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">weights W1</text>
+<line x1="128" y1="100" x2="202" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="405" y="72" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="480" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block 2</text>
+<text x="480" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">weights W2</text>
+<line x1="358" y1="100" x2="402" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="605" y="72" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="680" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block 3</text>
+<text x="680" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">weights W3</text>
+<line x1="558" y1="100" x2="602" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="880" cy="100" rx="50" ry="25" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="880" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">head</text>
+<line x1="758" y1="100" x2="827" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="10" y="180" width="980" height="170" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="202" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">one block applied three times: one set of weights</text>
+<ellipse cx="80" cy="255" rx="45" ry="25" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="80" y="259.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x</text>
+<rect x="205" y="227" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="280" y="251.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pass 1</text>
+<text x="280" y="267.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">weights W</text>
+<line x1="128" y1="255" x2="202" y2="255" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="405" y="227" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="480" y="251.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pass 2</text>
+<text x="480" y="267.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">weights W</text>
+<line x1="358" y1="255" x2="402" y2="255" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="605" y="227" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="680" y="251.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pass 3</text>
+<text x="680" y="267.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">weights W</text>
+<line x1="558" y1="255" x2="602" y2="255" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="880" cy="255" rx="50" ry="25" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="880" y="259.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">head</text>
+<line x1="758" y1="255" x2="827" y2="255" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="280" y1="283" x2="280" y2="311" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<line x1="480" y1="283" x2="480" y2="311" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<line x1="680" y1="283" x2="680" y2="311" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<line x1="280" y1="311" x2="680" y2="311" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<text x="480" y="333.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the same W is read three times; the cost grows with the passes, the parameters do not</text>
+<rect x="10" y="370" width="980" height="220" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="392" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">recurrent depth: prelude, core applied r times, coda</text>
+<ellipse cx="60" cy="470" rx="42" ry="25" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="60" y="474.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokens</text>
+<rect x="135" y="442" width="110" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="190" y="466.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">prelude</text>
+<text x="190" y="482.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(runs once)</text>
+<line x1="105" y1="470" x2="132" y2="470" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="305" y="438" width="130" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="370" y="466.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">step 1</text>
+<text x="370" y="482.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">adapter + core</text>
+<rect x="465" y="438" width="130" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="530" y="466.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">step 2</text>
+<text x="530" y="482.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">adapter + core</text>
+<rect x="625" y="438" width="130" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="690" y="466.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">step 3</text>
+<text x="690" y="482.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">adapter + core</text>
+<ellipse cx="370" cy="552" rx="65" ry="22" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="370" y="556.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">state s0, random</text>
+<line x1="370" y1="527" x2="370" y2="505" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="438" y1="470" x2="462" y2="470" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="598" y1="470" x2="622" y2="470" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="790" y="442" width="100" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="840" y="466.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">coda</text>
+<text x="840" y="482.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(runs once)</text>
+<line x1="758" y1="470" x2="787" y2="470" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="950" cy="470" rx="33" ry="25" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="950" y="474.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">head</text>
+<line x1="893" y1="470" x2="914" y2="470" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M190,442 L190,438 Q190,428 200,428 L683,428 Q690,428 690,435 L690,435" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M370,428 L370,435" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M530,428 L530,435" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="370" y="416.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">the prelude&#x27;s output is concatenated with the state again at every step</text>
+<text x="610" y="526.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">... r steps in all</text>
+</svg>

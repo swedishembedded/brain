@@ -20,6 +20,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **AdamW**: Adam with decoupled weight decay: $\theta \leftarrow \theta - \eta\lambda\theta - \eta\hat{\mathbf{m}}/(\sqrt{\hat{\mathbf{v}}} + \epsilon_{\mathrm{den}})$. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
+**adaptive computation**: letting the amount of computation depend on the input, here through a learned probability, read from each pass's state, of stopping at that pass, which weights the loss and selects how many passes a token receives. *([Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md))*
+
 **additive attention**: attention whose score for a decoder state and an encoder state is computed by a small network that adds a projection of each before a tanh and takes a weighted sum of the result, so that the decoder can build a different weighted average of the encoder states at every step. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
 
 **affine quantization**: the map from a real number to an $n_b$-bit integer code and back, $q = \mathrm{clamp}(\mathrm{round}(w/\Delta) + q_0, 0, 2^{n_b} - 1)$ and $w' = \Delta(q - q_0)$, a multiplication and an offset applied to a group of weights. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
@@ -462,6 +464,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **logit**: the logarithm of the odds of an event, $\log\frac{p}{1-p}$, a number on the whole real line that a weighted sum of features can model; the model's $z = \mathbf{w}\cdot\mathbf{x}$ is the logit of its predicted probability. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
+**looped transformer**: a transformer whose block, or whole stack of blocks, is applied repeatedly to its own output a fixed number of times, with the embedding applied once at the start and the head reading the final state. *([Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md))*
+
 **loss curve**: the loss plotted against the training step or epoch; it can show the minibatch loss, the loss on the whole training set or on a validation set, each with a different noise level and cost, and it is read by its start, direction, slope and gap. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
 **loss function**: a rule that scores one prediction against its label with a non-negative number, zero for a perfect prediction; its average over the data is the quantity learning minimises. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
@@ -649,6 +653,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **real number**: any number on the number line, including fractions and irrational numbers such as $\sqrt{2}$; a computer holds only an approximation of most of them. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **reconstruction-loss**: the mean squared error between an autoencoder's output and its input, $L_{\mathrm{rec}} = \frac{1}{BD}\sum(\hat{x} - x)^2$; it needs no labels. *([First Complete Models](v03-neural-networks/13-first-models.md))*
+
+**recurrent depth**: a layout of a prelude that embeds the input once, a core applied a variable number of times to a latent state that starts as noise and re-reads the prelude's output at every step, and a coda that reads out the result, so that the amount of computation is chosen when the model is run. *([Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md))*
 
 **recurrent neural network**: a network that reads a sequence one element at a time, keeping a state of fixed size that is rewritten at every step from its previous value and the current element by the same weights, so that its parameters do not grow with the length of the sequence. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
 
@@ -885,6 +891,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **weight-name mapping**: the table and rules that turn the tensor names, orientations and groupings of a published layout into those of an implementation: renames, cuts of fused matrices and transposes, checked before they run for coverage and shape. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
 
 **weight-only quantization**: storing the weights as low-bit codes with scales while the activations stay in a higher-precision format, decoding the codes inside the matrix product so that the bytes read, and not the arithmetic, shrink. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
+
+**weight-shared depth**: using the same parameters at more than one depth of a network, so that its depth, and the arithmetic per token, can grow without the parameters growing; every use needs its own activations and its own cache. *([Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md))*
 
 **WGSL**: the WebGPU Shading Language, a small kernel language that compiles to the native graphics interfaces and in which the book writes its kernel examples. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 

@@ -423,6 +423,7 @@ navigation:
           - docs/book/v06-language-models/04-mixture-of-experts.md
           - docs/book/v06-language-models/05-linear-attention.md
           - docs/book/v06-language-models/06-sparse-attention.md
+          - docs/book/v06-language-models/07-recurrent-depth.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

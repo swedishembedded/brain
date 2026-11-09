@@ -1,0 +1,25 @@
+<!-- source-sha256: 982fe7f921bab514b95f27be72206b4456b84cbbbc0a229d6eae1ce695178920 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 462" width="560" height="462">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="462" fill="#ffffff"/>
+<line x1="196.75" y1="374" x2="196.75" y2="30" stroke="#edf2f7"/>
+<text x="196.75" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="462.12" y1="374" x2="462.12" y2="30" stroke="#edf2f7"/>
+<text x="462.12" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1,000</text>
+<line x1="58" y1="253.78" x2="542" y2="253.78" stroke="#edf2f7"/>
+<text x="52" y="257.78" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100</text>
+<line x1="58" y1="81.78" x2="542" y2="81.78" stroke="#edf2f7"/>
+<text x="52" y="85.78" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1,000</text>
+<rect x="58" y="30" width="484" height="344" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="344"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#9b2c2c" stroke-width="1.6" points="117.63,356.84 197.52,305.06 277.4,253.28 357.28,201.51 437.16,149.73"/><circle cx="117.63" cy="356.84" r="3.5" fill="#9b2c2c"/><circle cx="197.52" cy="305.06" r="3.5" fill="#9b2c2c"/><circle cx="277.4" cy="253.28" r="3.5" fill="#9b2c2c"/><circle cx="357.28" cy="201.51" r="3.5" fill="#9b2c2c"/><circle cx="437.16" cy="149.73" r="3.5" fill="#9b2c2c"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.6" points="117.63,356.84 197.52,356.84 277.4,356.84 357.28,356.84 437.16,356.84"/><circle cx="117.63" cy="356.84" r="3.5" fill="#2b6cb0"/><circle cx="197.52" cy="356.84" r="3.5" fill="#2b6cb0"/><circle cx="277.4" cy="356.84" r="3.5" fill="#2b6cb0"/><circle cx="357.28" cy="356.84" r="3.5" fill="#2b6cb0"/><circle cx="437.16" cy="356.84" r="3.5" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="1.6" points="117.71,356.79 117.78,305.01 117.93,253.23 118.23,201.46 118.83,149.68 120.01,97.9"/><circle cx="117.71" cy="356.79" r="3.5" fill="#c05621"/><circle cx="117.78" cy="305.01" r="3.5" fill="#c05621"/><circle cx="117.93" cy="253.23" r="3.5" fill="#c05621"/><circle cx="118.23" cy="201.46" r="3.5" fill="#c05621"/><circle cx="118.83" cy="149.68" r="3.5" fill="#c05621"/><circle cx="120.01" cy="97.9" r="3.5" fill="#c05621"/><text x="428.8" y="141.26" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">16 layers: 403 M</text><text x="428.8" y="371.66" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">16 passes: 25 M</text><text x="133.07" y="97.9" font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">256 experts: 806 M</text></g>
+<text x="300" y="410" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">MFLOPs per token in the layer (log scale)</text>
+<text x="14" y="202" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 202)">parameters of the layer, millions (log scale)</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Three ways to make a layer bigger</text>
+<line x1="37.18" y1="433" x2="57.18" y2="433" stroke="#9b2c2c" stroke-width="2"/>
+<text x="63.18" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">n distinct dense layers (n = 1 to 16)</text>
+<line x1="263.62" y1="433" x2="283.62" y2="433" stroke="#2b6cb0" stroke-width="2"/>
+<text x="289.62" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">one dense layer applied n times (n = 1 to 16)</text>
+<line x1="100.91" y1="450" x2="120.91" y2="450" stroke="#c05621" stroke-width="2"/>
+<text x="126.91" y="454" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">one mixture layer, 8 experts of 8 used, then up to 256 experts</text>
+</svg>

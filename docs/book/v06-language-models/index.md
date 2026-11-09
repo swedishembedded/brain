@@ -23,7 +23,7 @@ You can write down the recipe of a modern decoder and say what each of its choic
 4. [Mixture of Experts](04-mixture-of-experts.md): how a model can have a trillion parameters yet use only a few billion per token.
 5. [Linear Attention, Recurrence and Hybrid Models](05-linear-attention.md): whether attention can be computed in time linear in the sequence length, and what is lost.
 6. [Sparse Attention](06-sparse-attention.md): how to find the few tokens that each token needs, cheaply.
-7. Looped and Recurrent-Depth Transformers: what happens when a model thinks longer by reusing the same layers more times.
+7. [Looped and Recurrent-Depth Transformers](07-recurrent-depth.md): what happens when a model thinks longer by reusing the same layers more times.
 8. Long Context: how models trained on short texts read long ones.
 9. A Research Architecture: The Spectral Language Model: how a new architecture idea goes from hypothesis to evidence.
 10. Counting Parameters, FLOPs and Memory: how to know, before running a model, what it will cost.

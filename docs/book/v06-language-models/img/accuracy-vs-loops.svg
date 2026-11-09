@@ -1,0 +1,31 @@
+<!-- source-sha256: 2c30f429330f83ec9a7dd5a34d6dfb2c27b43d7b745b4dcf8a183d089eb5a83b -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 405" width="600" height="405">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="405" fill="#ffffff"/>
+<line x1="156.25" y1="334" x2="156.25" y2="30" stroke="#edf2f7"/>
+<text x="156.25" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="287.25" y1="334" x2="287.25" y2="30" stroke="#edf2f7"/>
+<text x="287.25" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="418.25" y1="334" x2="418.25" y2="30" stroke="#edf2f7"/>
+<text x="418.25" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="549.25" y1="334" x2="549.25" y2="30" stroke="#edf2f7"/>
+<text x="549.25" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">8</text>
+<line x1="58" y1="293.47" x2="582" y2="293.47" stroke="#edf2f7"/>
+<text x="52" y="297.47" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="212.4" x2="582" y2="212.4" stroke="#edf2f7"/>
+<text x="52" y="216.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="131.33" x2="582" y2="131.33" stroke="#edf2f7"/>
+<text x="52" y="135.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="50.27" x2="582" y2="50.27" stroke="#edf2f7"/>
+<text x="52" y="54.27" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="524" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.2" points="90.75,188.08 156.25,65.47 221.75,77.63 287.25,86.75 352.75,107.01 418.25,121.2 483.75,130.32 549.25,141.47"/><circle cx="90.75" cy="188.08" r="4" fill="#2b6cb0"/><circle cx="156.25" cy="65.47" r="4" fill="#2b6cb0"/><circle cx="221.75" cy="77.63" r="4" fill="#2b6cb0"/><circle cx="287.25" cy="86.75" r="4" fill="#2b6cb0"/><circle cx="352.75" cy="107.01" r="4" fill="#2b6cb0"/><circle cx="418.25" cy="121.2" r="4" fill="#2b6cb0"/><circle cx="483.75" cy="130.32" r="4" fill="#2b6cb0"/><circle cx="549.25" cy="141.47" r="4" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="1.6" stroke-dasharray="6 4" points="90.75,278.27 156.25,50.27 221.75,240.27 287.25,116.77 352.75,192.77 418.25,107.27 483.75,240.27 549.25,69.27"/><circle cx="90.75" cy="278.27" r="3" fill="#c05621"/><circle cx="156.25" cy="50.27" r="3" fill="#c05621"/><circle cx="221.75" cy="240.27" r="3" fill="#c05621"/><circle cx="287.25" cy="116.77" r="3" fill="#c05621"/><circle cx="352.75" cy="192.77" r="3" fill="#c05621"/><circle cx="418.25" cy="107.27" r="3" fill="#c05621"/><circle cx="483.75" cy="240.27" r="3" fill="#c05621"/><circle cx="549.25" cy="69.27" r="3" fill="#c05621"/><line x1="156.25" y1="334" x2="156.25" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/></g>
+<text x="320" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">applications of the block at test time (trained with 2)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">accuracy on the two-hop task</text>
+<text x="320" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">One block, more or fewer loops than it was trained for</text>
+<line x1="117.74" y1="393" x2="137.74" y2="393" stroke="#2b6cb0" stroke-width="2"/>
+<text x="143.74" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">trained model (one run)</text>
+<line x1="289.73" y1="393" x2="309.73" y2="393" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="315.73" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">exact pointer follower, k hops</text>
+</svg>

@@ -118,4 +118,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 4. [Mixture of Experts](v06-language-models/04-mixture-of-experts.md): How can a model have a trillion parameters yet use only a few billion per token?
 5. [Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md): Can attention be computed in time linear in the sequence length, and what is lost?
 6. [Sparse Attention](v06-language-models/06-sparse-attention.md): If each token only needs a few others, how do we find them cheaply?
+7. [Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md): What if a model could think longer by reusing the same layers more times?
 <!-- /contents -->
