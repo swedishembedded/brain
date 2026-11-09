@@ -1764,9 +1764,11 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.dec.max_seq_len().min(pool_tokens)
     }
 
-    /// One scheduler iteration: admit waiting requests that fit (prefill + sample
-    /// first token), run one batched decode step over all running sequences, then
-    /// reap completed ones. Returns the `(id, tokens)` of requests finished here.
+    /// One scheduler iteration: admit waiting requests that fit, advance their
+    /// prefill by up to `prefill_budget` prompt tokens (a long prompt spans several
+    /// iterations, sampling its first token when the prompt is done), run one
+    /// batched decode step over all running sequences, then reap completed ones.
+    /// Returns the `(id, tokens)` of requests finished here.
     pub fn step(&mut self) -> Vec<(u64, Vec<u32>)> {
         let mut sink = StepReport::default();
         self.step_inner(&mut sink)
