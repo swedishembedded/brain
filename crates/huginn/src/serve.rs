@@ -27,8 +27,9 @@
 //! exactly as the materialized forward does: a decode step does not carry the
 //! previous position's latent. The engine draws that state once at
 //! construction (the reference's `like-init` draw: `Normal(0, init_std) *
-//! emb_scale`) and reuses it for every request, so a served model's greedy
-//! output is reproducible for a given checkpoint; [`Engine::set_state`]
+//! emb_scale`, from a fresh random seed) and reuses it for every request, so a
+//! served model's greedy output is reproducible for the engine's lifetime,
+//! not across engines of the same checkpoint; [`Engine::set_state`]
 //! replaces it with a caller's own draw (a parity gate hands it the state the
 //! reference used).
 //!
