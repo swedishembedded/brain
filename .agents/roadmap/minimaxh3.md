@@ -943,6 +943,20 @@ MiniMax H3 Community License derivatives.
       adapter and gates it may not name as paths.
 - [ ] Presets for `t2va`/`fl2va`: their few-step adapter is lightx2v's
       fl2v distillation of `transformer/`, not fetched or run here yet.
+- [x] A real ref2va clip at `preset turbo-4step-vsa` (adapter folded,
+      gates resident, sparsity 0.75), 640x352 x 124 frames at 24 fps, one
+      generated character image, CUDA on two P40s: the character, the
+      scene, the motion and the sound the prompt asks for. DiT resident at
+      ~22 / ~20 GB per card; 4.7 / 4.7 / 2.1 min for the sparse steps after
+      the first; the cold start is dominated by reading ~145 GB of weights
+      from a spinning disk (text encoder + encode ~30 min, the DiT's load
+      with the fold ~68 min).
+- [ ] 768x448 with a reference image does not hold resident with the gates
+      on two P40s (~19k packed rows: the reference adds ~4.1k latent rows
+      and ~4.2k vision tokens); it streams. Measure where the resident
+      workspace goes at that size.
+- [ ] A sparse step at 640x352 is not yet faster than the dense one
+      measured at 768x448; profile the VSA kernels per kind at size.
 - [ ] Real-weight runs: dense ref2va (20 steps), adapter at 4 steps, VSA
       at 4 steps; measured per step and per card.
 
