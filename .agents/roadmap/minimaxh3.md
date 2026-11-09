@@ -922,8 +922,11 @@ MiniMax H3 Community License derivatives.
       `[999, 749, 500, 250]`). ComfyUI's H3 sampler steps the audio as a
       rescaled variable in the video sigma instead of its own Euler
       schedule; the distillation's own inference is the authority here.
-- [x] The adapter (`crate::lora`): resident int8 corrections beside each
-      linear, the streamed fp32 fold, strict target checks, placement.
+- [x] The adapter (`crate::lora`): folded into the weights as they are
+      read, before a resident build quantizes them (the merged model's int8,
+      as `--fuse-lora` runs it), streamed or resident alike; strict target
+      checks. Held as separate fp32 corrections it cost ~2.7 GB beside the
+      DiT, which pushed a 768x448 ref2va off two P40s into streaming.
 - [x] Segment boundaries recorded by the layout builders
       (`pipeline::Segment`), the tile geometry and the host reference
       attention (`crate::vsa`).

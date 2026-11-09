@@ -85,10 +85,10 @@ brain minimaxh3 ref2va --allow_community true \
 ```
 
 Each target is checked against the DiT by name and shape before a weight is
-read. A resident int8 DiT evaluates each correction beside its linear on the
-fp32 input, never folded into the int8 weights; a streamed fp32 DiT folds it
-exactly as each block is read. The corrections are held on the cards with the
-blocks they belong to and count toward the placement.
+read. The adapter is folded into the DiT's weights, in fp32, as they are read:
+a resident DiT then quantizes the adapted weights to int8, as the
+distillation's own inference fuses it, so the adapter takes no device memory
+and no work per step.
 
 `--vsa_sparsity` turns on video sparse attention (FastVideo's VSA for this
 packed sequence): the video is cut into 4x4x4 tiles of 64 rows, every video

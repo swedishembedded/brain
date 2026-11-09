@@ -66,8 +66,7 @@ impl MiniMaxH3Resident {
 /// held at ([`RESIDENT_DTYPE`]), `"f32"` when the `@{dtype}` suffix is
 /// absent - `resident_wan.rs::parse_key`'s own precedent - and, with `/a2`,
 /// that the request quantizes its activations in two int8 levels, whose
-/// forward needs more workspace; with `/l{bytes}r{rank}`, the adapter it
-/// holds; with `/g`, the blocks' VSA gates.
+/// forward needs more workspace; with `/g`, the blocks' VSA gates.
 #[derive(Debug, PartialEq)]
 struct Key {
     task: String,
@@ -78,9 +77,6 @@ struct Key {
     reference_rows: u32,
     dtype: String,
     act_levels: ActLevels,
-    /// `(device bytes, largest rank)` of the adapter the DiT holds beside its
-    /// linears (`/l{bytes}r{rank}`), zero without one.
-    adapter: (u64, usize),
     /// Whether the DiT holds every block's VSA gate (`/g`).
     gates: bool,
 }
@@ -92,12 +88,11 @@ fn parse_key(config: &str) -> Option<Key> {
     };
     let mut suffixes = dtype.split('/');
     let dtype = suffixes.next()?.to_string();
-    let (mut act_levels, mut adapter, mut gates) = (ActLevels::One, (0u64, 0usize), false);
+    let (mut act_levels, mut gates) = (ActLevels::One, false);
     for suffix in suffixes {
-        match (suffix, suffix.strip_prefix('l').and_then(|l| l.split_once('r'))) {
-            ("a2", _) => act_levels = ActLevels::Two,
-            ("g", _) => gates = true,
-            (_, Some((bytes, rank))) => adapter = (bytes.parse().ok()?, rank.parse().ok()?),
+        match suffix {
+            "a2" => act_levels = ActLevels::Two,
+            "g" => gates = true,
             _ => return None,
         }
     }
@@ -110,7 +105,7 @@ fn parse_key(config: &str) -> Option<Key> {
         Some(r) => r.parse().ok()?,
         None => 0,
     };
-    Some(Key { task, vf, vh, vw, audio, reference_rows, dtype, act_levels, adapter, gates })
+    Some(Key { task, vf, vh, vw, audio, reference_rows, dtype, act_levels, gates })
 }
 
 /// Resolve one invocation's `(video latent extent, audio latent extent)`
@@ -208,20 +203,17 @@ impl ResidentModel for MiniMaxH3Resident {
         // An unparseable level count keys as one level; the request itself is
         // refused once `gen_params_from` runs.
         let levels = if inv.get_i64("int8_activation_levels") == Some(2) { "/a2" } else { "" };
-        // An adapter's corrections and the VSA gates are held beside the DiT,
-        // named outright or by a preset; a request that does not resolve plans
-        // as neither, and is refused itself when it runs.
-        let (adapter, gates) = minimaxh3::caps::requested_extras(inv, &self.paths).unwrap_or_default();
-        let adapter = match adapter.map(|path| minimaxh3::lora::planned_cost(&path)) {
-            Some(Ok((bytes, rank))) => format!("/l{bytes}r{rank}"),
-            _ => String::new(),
-        };
+        // The VSA gates are held beside the DiT, named outright or by a preset;
+        // a request that does not resolve plans without them, and is refused
+        // itself when it runs. An adapter is folded into the weights and
+        // costs nothing beside them.
+        let (_, gates) = minimaxh3::caps::requested_extras(inv, &self.paths).unwrap_or_default();
         let gates = if gates.is_some() { "/g" } else { "" };
-        InstanceKey::new(&self.id, format!("{extent}@{RESIDENT_DTYPE}{levels}{adapter}{gates}"))
+        InstanceKey::new(&self.id, format!("{extent}@{RESIDENT_DTYPE}{levels}{gates}"))
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        let Some(Key { vf, vh, vw, audio, reference_rows, dtype, act_levels, adapter: (adapter_bytes, adapter_rank), gates, .. }) = parse_key(&key.config) else {
+        let Some(Key { vf, vh, vw, audio, reference_rows, dtype, act_levels, gates, .. }) = parse_key(&key.config) else {
             // An unparseable key must not read as "free" - `resident_wan.
             // rs::estimate`'s identical reasoning.
             return MemCost::new(8u64 << 30, 4u64 << 30);
@@ -229,10 +221,10 @@ impl ResidentModel for MiniMaxH3Resident {
         let dit_cfg = H3TransformerConfig::real();
         // An unknown tier must still cost the most this model could.
         let tier = key_tier(&dtype).unwrap_or(gpu_core::select::Dtype::F32);
-        let weights = minimaxh3::model::resident_cost(&dit_cfg, tier, Default::default()).total() + adapter_bytes + if gates { dit_cfg.num_layers as u64 * model::ops::Weight::bytes_for(tier, dit_cfg.inner_dim() as usize, dit_cfg.hidden_size as usize) } else { 0 };
+        let weights = minimaxh3::model::resident_cost(&dit_cfg, tier, gates).total();
         let vae_weights = manifest_bytes(&VideoVaeConfig::real().tensor_manifest()) + manifest_bytes(&minimaxh3::vocoder::VocoderConfig::h3_32khz().tensor_manifest());
         let rows = packed_rows(vf, vh, vw, audio) + reference_rows;
-        let activations = minimaxh3::model::forward_workspace_bytes(&dit_cfg, rows, act_levels) + 3 * rows as u64 * adapter_rank as u64 * 4 + if gates { minimaxh3::vsa::workspace_bytes(&dit_cfg, rows, true) } else { 0 };
+        let activations = minimaxh3::model::forward_workspace_bytes(&dit_cfg, rows, act_levels) + if gates { minimaxh3::vsa::workspace_bytes(&dit_cfg, rows, true) } else { 0 };
         let (ph, pw) = (dit_cfg.patch_size[1] as u64, dit_cfg.patch_size[2] as u64);
         let pixels = vf as u64 * (vh as u64 * ph) * (vw as u64 * pw) * 3 * 4;
 
@@ -307,8 +299,16 @@ impl MiniMaxH3Instance {
                 let lora = adapter.map(|a| minimaxh3::lora::runtime_adapter(a, &cfg)).transpose()?;
                 let gates = vsa_gate.map(|g| minimaxh3::caps::open_vsa_gates(g, &cfg)).transpose()?;
                 let dit_reader = minimaxh3::caps::open_dit_reader(dit)?;
-                let extras = minimaxh3::block::DitExtras { adapter: lora.as_ref(), gates: gates.as_ref().map(|g| g as &dyn checkpoint::TensorSource) };
-                minimaxh3::model::H3Transformer::load(&dit_reader, cfg, device_name(self.device).as_deref(), minimaxh3::pipeline::RESIDENT_TIER, workspace, extras)
+                let folded = lora.as_ref().map(|l| l.folded(&dit_reader));
+                let tensors: &dyn checkpoint::TensorSource = match &folded {
+                    Some(f) => f,
+                    None => &dit_reader,
+                };
+                let model = minimaxh3::model::H3Transformer::load(tensors, cfg, device_name(self.device).as_deref(), minimaxh3::pipeline::RESIDENT_TIER, workspace, gates.as_ref().map(|g| g as &dyn checkpoint::TensorSource))?;
+                match lora.as_ref().map(model::lora::RuntimeLora::unapplied).filter(|m| !m.is_empty()) {
+                    Some(missed) => Err(format!("minimaxh3: the adapter targets {} rectangles no DiT linear read: {}", missed.len(), missed.join(", "))),
+                    None => Ok(model),
+                }
             },
             body,
         )
@@ -327,7 +327,7 @@ impl Instance for MiniMaxH3Instance {
         let rows = packed_rows(vf, vh, vw, audio) + minimaxh3::caps::reference_rows_bound(action, inv, target_video_rows(vf, vh, vw), audio * minimaxh3::pipeline::AUDIO_CHANNELS);
         self.with_hot_dit(&dit, (req.params.adapter.as_ref(), req.params.vsa_gate.as_deref()), (rows, req.params.opts.act_levels), |model| {
             let empty = vae::blocks::Tensors::default();
-            let ckpt = vae.as_checkpoint(&empty, H3TransformerConfig::real(), Default::default());
+            let ckpt = vae.as_checkpoint(&empty, H3TransformerConfig::real(), (None, None));
             minimaxh3::caps::generate_on(&ckpt, &req, &self.paths, Some(model), &inv.cancel, progress)
         })
     }
@@ -358,17 +358,17 @@ mod tests {
 
     #[test]
     fn key_parsing_round_trips_and_a_bad_key_still_costs_something() {
-        let key = |task: &str, reference_rows: u32, dtype: &str, act_levels| Some(Key { task: task.to_string(), vf: 37, vh: 32, vw: 32, audio: 207, reference_rows, dtype: dtype.to_string(), act_levels, adapter: (0, 0), gates: false });
+        let key = |task: &str, reference_rows: u32, dtype: &str, act_levels| Some(Key { task: task.to_string(), vf: 37, vh: 32, vw: 32, audio: 207, reference_rows, dtype: dtype.to_string(), act_levels, gates: false });
         assert_eq!(parse_key("t2va:37x32x32:207"), key("t2va", 0, "f32", ActLevels::One));
         assert_eq!(parse_key("t2va:37x32x32:207@f32"), key("t2va", 0, "f32", ActLevels::One));
         assert_eq!(parse_key("ref2va:37x32x32:207:16384@i8"), key("ref2va", 16384, "i8", ActLevels::One));
         assert_eq!(parse_key("t2va:37x32x32:207@i8/a2"), key("t2va", 0, "i8", ActLevels::Two));
         assert_eq!(parse_key("t2va:37x32x32:207@i8/a3"), None);
-        let adapted = parse_key("ref2va:37x32x32:207@i8/a2/l2654208000r128").expect("an adapted key parses");
-        assert_eq!((adapted.act_levels, adapted.adapter), (ActLevels::Two, (2654208000, 128)));
+        let gated = parse_key("ref2va:37x32x32:207@i8/a2/g").expect("a gated key parses");
+        assert_eq!((gated.act_levels, gated.gates), (ActLevels::Two, true));
         let plain = resident().estimate(&InstanceKey::new(minimaxh3::caps::MODEL, "ref2va:37x32x32:207@i8".to_string()));
-        let held = resident().estimate(&InstanceKey::new(minimaxh3::caps::MODEL, "ref2va:37x32x32:207@i8/l2654208000r128".to_string()));
-        assert!(held.vram >= plain.vram + 2654208000, "an adapter's corrections are planned for: {plain:?} vs {held:?}");
+        let held = resident().estimate(&InstanceKey::new(minimaxh3::caps::MODEL, "ref2va:37x32x32:207@i8/g".to_string()));
+        assert!(held.vram > plain.vram + (1u64 << 30), "the gates are planned for: {plain:?} vs {held:?}");
         assert_eq!(parse_key("garbage"), None);
         let cost = resident().estimate(&InstanceKey::new(minimaxh3::caps::MODEL, "garbage".to_string()));
         assert!(cost.vram > 0 && cost.ram > 0, "{cost:?}");

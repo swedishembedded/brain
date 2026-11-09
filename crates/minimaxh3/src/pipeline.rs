@@ -1068,9 +1068,16 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     // P40 partway through a real 16-step generation, because wgpu gives no
     // guarantee one device's resources are reclaimed before the next opens.
     let seq_len = (packed.position_ids.len() / 3) as u32;
+    // An adapter is folded into the DiT's weights as they are read, resident
+    // (before it quantizes them) or streamed alike.
+    let folded = ckpt.dit_lora.map(|lora| lora.folded(ckpt.dit_tensors));
+    let dit_tensors: &dyn checkpoint::TensorSource = match &folded {
+        Some(f) => f,
+        None => ckpt.dit_tensors,
+    };
     let owned = match model {
         Some(_) => None,
-        None => match H3Transformer::load(ckpt.dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels), crate::block::DitExtras { adapter: ckpt.dit_lora, gates: ckpt.dit_gates }) {
+        None => match H3Transformer::load(dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels), ckpt.dit_gates) {
             Ok(m) => Some(m),
             Err(reason) => {
                 tracing::info!(%reason, "minimaxh3 DiT streamed one block at a time");
@@ -1082,13 +1089,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     let streaming_ctx = resident.is_none().then(|| StreamingDit::open(dit_cfg, device));
     // A gated DiT runs the sparse attention the gates were trained with.
     let gated = resident.map_or(ckpt.dit_gates.is_some(), H3Transformer::has_gates);
-    // A streamed DiT is fp32, where an adapter folds exactly as each block is
-    // read.
-    let folded = ckpt.dit_lora.filter(|_| resident.is_none()).map(|lora| lora.folded(ckpt.dit_tensors));
-    let streamed_tensors: &dyn checkpoint::TensorSource = match &folded {
-        Some(f) => f,
-        None => ckpt.dit_tensors,
-    };
+
     let sched = DualSchedule::for_denoise_steps(opts.denoise_steps)?;
     let num_steps = sched.num_steps();
     let num_text_tokens = packed.text_indices.len();
@@ -1136,9 +1137,9 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
         };
         let out = match resident {
             Some(m) => m.forward(&inp),
-            None => H3Transformer::forward_streaming(streamed_tensors, ckpt.dit_gates, dit_cfg, streaming_ctx.as_ref().expect("streamed whenever nothing is resident"), &inp),
+            None => H3Transformer::forward_streaming(dit_tensors, ckpt.dit_gates, dit_cfg, streaming_ctx.as_ref().expect("streamed whenever nothing is resident"), &inp),
         };
-        if let Some(missed) = folded.is_some().then(|| ckpt.dit_lora.map(model::lora::RuntimeLora::unapplied)).flatten().filter(|m| !m.is_empty()) {
+        if let Some(missed) = ckpt.dit_lora.filter(|_| model.is_none()).map(model::lora::RuntimeLora::unapplied).filter(|m| !m.is_empty()) {
             return Err(format!("generate: the adapter targets {} rectangles no DiT linear read: {}", missed.len(), missed.join(", ")));
         }
 

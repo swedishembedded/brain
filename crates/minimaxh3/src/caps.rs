@@ -154,7 +154,7 @@ pub fn manifest() -> Manifest {
             .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (shared by both the video and the audio schedule, one forward per step - no CFG, this model is guidance-distilled)").min(1.0).max(capability::bounds::DENOISE_STEPS).default(json!(20)))
             .param(ParamSpec::new("seed", ParamType::Int, "initial-noise seed (omit for random; the outcome reports the one used)"))
             .param(ParamSpec::new("int8_activation_levels", ParamType::Int, "int8 levels the DiT's linears quantize their activations to against its int8 weights: 1 (the int8 tier's ordinary arithmetic), or 2 (also quantizes what the first level rounds away - closer to the fp32 model, at a second product per linear)").min(1.0).max(2.0).default(json!(1)))
-            .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter for this action's DiT (a diffusers PEFT save, such as a few-step distillation); runs beside the quantized weights, never folded into them").host_resolved())
+            .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter for this action's DiT (a diffusers PEFT save, such as a few-step distillation); folded into the weights before they are quantized").host_resolved())
             .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier on top of the adapter's own alpha/rank; 1.0 = as trained. Only read when adapter is set.").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
             .param(ParamSpec::new("vsa_sparsity", ParamType::Float, "video sparse attention: the share of the video's key tiles each video query drops (0.75 keeps a quarter), selected per head by tile-mean scores; text, references and audio always stay dense. Omitted: the preset's own, else 0 (dense attention)").min(0.0).max(0.99).step(0.05))
             .param(ParamSpec::new("vsa_gate", ParamType::Str, "server-side path to the trained to_gate_compress of every DiT block (a FastVideo VSA checkpoint or a gate-only extract): adds the coarse branch video sparse attention was distilled with").host_resolved())
@@ -892,11 +892,11 @@ impl VaeWeights {
     /// `ckpt.dit_tensors` - see [`pipeline::t2va_hot`]'s doc) can pass an
     /// empty placeholder map rather than keeping a real one around just to
     /// satisfy this field.
-    pub fn as_checkpoint<'a>(&'a self, dit_tensors: &'a dyn checkpoint::TensorSource, dit_cfg: H3TransformerConfig, extras: crate::block::DitExtras<'a>) -> pipeline::H3Checkpoint<'a> {
+    pub fn as_checkpoint<'a>(&'a self, dit_tensors: &'a dyn checkpoint::TensorSource, dit_cfg: H3TransformerConfig, (dit_lora, dit_gates): DitExtras<'a>) -> pipeline::H3Checkpoint<'a> {
         pipeline::H3Checkpoint {
             dit_tensors,
-            dit_lora: extras.adapter,
-            dit_gates: extras.gates,
+            dit_lora,
+            dit_gates,
             dit_cfg,
             video_vae_tensors: &self.video_vae_tensors,
             video_vae_cfg: self.video_vae_cfg.clone(),
@@ -937,10 +937,14 @@ impl LoadedWeights {
 
     /// A borrowing [`pipeline::H3Checkpoint`] over these tensors - built fresh
     /// per call since [`pipeline::H3Checkpoint`] borrows rather than owns.
-    pub fn as_checkpoint<'a>(&'a self, extras: crate::block::DitExtras<'a>) -> pipeline::H3Checkpoint<'a> {
+    pub fn as_checkpoint<'a>(&'a self, extras: DitExtras<'a>) -> pipeline::H3Checkpoint<'a> {
         self.vae.as_checkpoint(&self.dit_reader, self.dit_cfg, extras)
     }
 }
+
+/// What a generation runs its DiT with besides the checkpoint: the adapter
+/// folded into its weights and every block's VSA gate.
+pub type DitExtras<'a> = (Option<&'a model::lora::RuntimeLora>, Option<&'a dyn checkpoint::TensorSource>);
 
 /// The VSA gate file at `path`, every block's gate checked before a weight
 /// is read.
@@ -1090,7 +1094,7 @@ impl Action for MiniMaxH3Action {
         let lora = req.params.adapter.as_ref().map(|a| crate::lora::runtime_adapter(a, &cfg)).transpose()?;
         let gates = req.params.vsa_gate.as_deref().map(|p| open_vsa_gates(p, &cfg)).transpose()?;
         let weights = LoadedWeights::load(&self.paths, self.paths.dit_for(&self.name)?)?;
-        let extras = crate::block::DitExtras { adapter: lora.as_ref(), gates: gates.as_ref().map(|g| g as &dyn checkpoint::TensorSource) };
+        let extras = (lora.as_ref(), gates.as_ref().map(|g| g as &dyn checkpoint::TensorSource));
         generate_on(&weights.as_checkpoint(extras), &req, &self.paths, None, &inv.cancel, progress)
     }
 }

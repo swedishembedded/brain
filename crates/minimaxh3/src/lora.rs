@@ -15,9 +15,11 @@
 //! SwiGLU value rows and then the gate rows (`crate::block::load_fc1`), so
 //! its correction is split into the same two row bands.
 //!
-//! A resident DiT attaches each correction beside its linear and evaluates
-//! it on the fp32 input (`crate::block::Linear`); a streamed one reads the
-//! checkpoint through [`RuntimeLora::folded`], where the fp32 fold is exact.
+//! The DiT reads its checkpoint through [`RuntimeLora::folded`]: each
+//! correction is folded into the source weights as they are read, in fp32,
+//! before a resident build quantizes them - the merged model's own int8,
+//! as the distillation's reference inference fuses it - so the adapter
+//! costs no device memory and no work per step.
 //!
 //! Swedish Embedded AB implements few-step adapter inference for large video
 //! diffusion models for its clients. If your team needs expertise in running
@@ -26,10 +28,8 @@
 
 use model::adapter::AdapterSpec;
 use model::lora::RuntimeLora;
-use model::ops::Weight;
 
 use crate::config::H3TransformerConfig;
-use gpu_core::select::Dtype;
 
 /// `[out, in]` of the adaptable linear `leaf` of a block.
 fn leaf_shape(cfg: &H3TransformerConfig, leaf: &str) -> Option<(usize, usize)> {
@@ -77,30 +77,6 @@ pub fn runtime_adapter(spec: &AdapterSpec, cfg: &H3TransformerConfig) -> Result<
         }
     }
     Ok(RuntimeLora::new(deltas))
-}
-
-/// Device bytes the corrections of every linear under `prefix` (a block's
-/// `transformer_blocks.{i}.`, with the dot) add when held resident: `A` as an
-/// fp32 weight and `B` transposed.
-pub fn correction_bytes(adapter: &RuntimeLora, prefix: &str) -> u64 {
-    adapter.deltas().iter().filter(|d| d.key.starts_with(prefix)).map(|d| Weight::bytes_for(Dtype::F32, d.pair.r, d.pair.inn) + (d.pair.r * d.pair.out) as u64 * 4).sum()
-}
-
-/// Peak transient bytes the corrections add to a forward over `rows` packed
-/// rows: the q/k/v corrections' `[rows, r]` projections are live together.
-pub fn workspace_bytes(adapter: &RuntimeLora, rows: u32) -> u64 {
-    3 * rows as u64 * adapter.max_rank() as u64 * 4
-}
-
-/// What the adapter at `path` costs held resident, read off its header
-/// alone - what a placement plans with before the adapter itself is read:
-/// `(device bytes, largest rank)`, every factor as fp32.
-pub fn planned_cost(path: &str) -> Result<(u64, usize), String> {
-    let st = checkpoint::mmap::MmapSafetensors::open(path).map_err(|e| format!("minimaxh3: adapter {path}: {e}"))?;
-    let factors: Vec<(&String, &[usize])> = st.names().iter().filter(|n| !n.ends_with(".alpha")).filter_map(|n| st.shape(n).map(|s| (n, s))).collect();
-    let bytes = factors.iter().map(|(_, s)| s.iter().product::<usize>() as u64 * 4).sum();
-    let rank = factors.iter().filter(|(n, _)| n.contains(".lora_A") || n.contains(".lora_down")).filter_map(|(_, s)| s.first().copied()).max().unwrap_or(0);
-    Ok((bytes, rank))
 }
 
 #[cfg(test)]
@@ -161,12 +137,6 @@ pub(crate) mod tests {
         let key = "transformer_blocks.0.ff.net.0.proj.weight";
         assert!(lora.claim(key, cfg.hidden_size as usize, 0, ffn, 0, cfg.hidden_size as usize).is_some(), "the value half");
         assert!(lora.claim(key, cfg.hidden_size as usize, ffn, ffn, 0, cfg.hidden_size as usize).is_some(), "the gate half");
-        assert!(correction_bytes(&lora, "transformer_blocks.0.") > 0);
-        let (planned, rank) = planned_cost(path.to_str().unwrap()).expect("header");
-        let held: u64 = (0..cfg.num_layers).map(|i| correction_bytes(&lora, &format!("transformer_blocks.{i}."))).chain((0..cfg.num_refiner_layers).map(|j| correction_bytes(&lora, &format!("token_refiner.refiner_blocks.{j}.")))).sum();
-        assert_eq!(rank, 2);
-        assert!(planned <= held && held - planned < held / 10, "the header's plan ({planned}) matches what is held ({held})");
-        assert_eq!(correction_bytes(&lora, "transformer_blocks.0."), correction_bytes(&lora, "transformer_blocks.1."));
     }
 
     /// An adapter for another model is refused by name before any weight is
