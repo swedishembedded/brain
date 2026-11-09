@@ -1,0 +1,30 @@
+<!-- source-sha256: fb3568faf5222261bd88bddca7a6960452c0479c2cbe602c89297759ab092785 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 340" width="840" height="340"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="840" height="340" fill="#ffffff"/>
+<rect x="20" y="37" width="220" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="130" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  Tokenizer</text>
+<text x="130" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">merge-list digest</text>
+<rect x="310" y="37" width="220" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="420" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2  Data pipeline</text>
+<text x="420" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">first batch</text>
+<rect x="600" y="37" width="220" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="710" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3  The GPT</text>
+<text x="710" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">logit digest, gradients</text>
+<rect x="600" y="137" width="220" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="710" y="166.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4  Training</text>
+<text x="710" y="182.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">stable loss, exact resume</text>
+<rect x="310" y="137" width="220" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="420" y="166.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5  Generation</text>
+<text x="420" y="182.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ids for seeds</text>
+<rect x="20" y="137" width="220" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="130" y="166.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6  KV cache</text>
+<text x="130" y="182.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">equivalence, mutations</text>
+<rect x="20" y="237" width="220" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="130" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">7  Work report</text>
+<text x="130" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">FLOPs, bytes, intensity</text>
+<line x1="243" y1="70" x2="307" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="533" y1="70" x2="597" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="710" y1="106" x2="710" y2="134" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="597" y1="170" x2="533" y2="170" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="307" y1="170" x2="243" y2="170" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="130" y1="206" x2="130" y2="234" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

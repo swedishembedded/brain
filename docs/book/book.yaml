@@ -486,7 +486,7 @@ volumes:
         title: "Project: Your Own Small Language Model"
         question: "Can you train a small GPT from raw text and generate from it with a KV cache that provably matches uncached generation?"
         introduces: []
-        requires: [gpt-architecture, kv-cache, cache-equivalence, top-p-sampling, byte-pair-encoding]
+        requires: [gpt-architecture, kv-cache, cache-equivalence, top-p-sampling, byte-pair-encoding, byte-level-bpe, special-tokens, sequence-packing, loss-masking, absolute-position-embedding, tied-embeddings, gradient-check, adamw, cosine-schedule, learning-rate-warmup, gradient-clipping, greedy-decoding, temperature, top-k-sampling, prefill-phase, decode-phase, arithmetic-intensity, roofline-model, rounding-error]
         brain: []
 
   - id: v06

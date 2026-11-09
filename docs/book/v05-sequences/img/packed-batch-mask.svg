@@ -1,4 +1,4 @@
-<!-- source-sha256: 20e1144ce7e76d7d222f7b10c83ed00130e3ce0144ee79be486d387bad5c3341 -->
+<!-- source-sha256: 61daf0c00520097b90c35e6725371de3ba3f1aa86896dbecab72d37d9ab7edcb -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" width="1000" height="620"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="620" fill="#ffffff"/>
 <text x="500" y="26.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Four packed rows of the training stream; shade = document</text>
 <text x="534" y="48.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">input at position i (the target is the next token)</text>

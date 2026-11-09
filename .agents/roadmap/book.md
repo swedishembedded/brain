@@ -55,7 +55,8 @@ reproduced its worked examples from the text alone in another language.
       guess and 14 failed (unstated literals, seeds and orders, stale prose
       numbers, and one simulator bug in the ragged tiled-matmul count). All
       were fixed in the following commits; a recheck has not been run.
-- [ ] Volume V, Language, Sequences and Transformers: chapters 1 to 14 written.
+- [ ] Volume V, Language, Sequences and Transformers: all 14 chapters and
+      the project written; the independent reader pass has not been run.
 
 ## Open
 

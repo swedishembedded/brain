@@ -119,14 +119,15 @@ class Tokenizer:
     """Byte-pair merges of Chapter 2 learned on the training documents only, over a compact id space: id 0 is the document
     separator, then the bytes that occur in the training text in increasing order, then the merges in the order learned."""
 
-    def __init__(self):
+    def __init__(self, docs=None, merges=MERGES):
+        docs = train_docs() if docs is None else docs
         table = Counter()
-        for d in train_docs():
+        for d in docs:
             table.update(tok.word_table(d.encode()))
-        self.merges = tok.train_bpe(table, MERGES)
+        self.merges = tok.train_bpe(table, merges)
         self.ranks = tok.ranks_of(self.merges)
         self.pieces_raw = tok.token_bytes(self.merges)
-        used = sorted({b for d in train_docs() for b in d.encode()})
+        used = sorted({b for d in docs for b in d.encode()})
         raw = used + [256 + k for k in range(len(self.merges))]
         self.to_compact = {r: 1 + i for i, r in enumerate(raw)}
         self.to_raw = [None] + raw
@@ -440,10 +441,10 @@ def adamw_update(ts, grads, mom, step, lr, scale, decay, o):
                 r[j] -= lr * (mr[j] / bc1) / (math.sqrt(vr[j] / bc2) + o["eps"])
 
 
-def batch_order(n_rows, B, steps):
-    """The rows of each step: shuffled epochs. Draws from `bookrng.generator(NAME_ORDER)`: one `shuffle` of 0 .. n_rows-1 per
+def batch_order(n_rows, B, steps, name=NAME_ORDER):
+    """The rows of each step: shuffled epochs. Draws from `bookrng.generator(name)`: one `shuffle` of 0 .. n_rows-1 per
     epoch; consecutive groups of B rows are the batches and an incomplete last group is dropped."""
-    g = bookrng.generator(NAME_ORDER)
+    g = bookrng.generator(name)
     out = []
     while len(out) < steps:
         idx = g.shuffle(list(range(n_rows)))

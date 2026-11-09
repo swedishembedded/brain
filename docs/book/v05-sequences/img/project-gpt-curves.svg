@@ -1,0 +1,36 @@
+<!-- source-sha256: 0a7cddb67c3c050fb20d56b3e6f25cbc6c41c8c9e9b22e05215106f91917bcd4 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 380" width="640" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="380" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">50</text>
+<line x1="170.8" y1="334" x2="170.8" y2="30" stroke="#edf2f7"/>
+<text x="170.8" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="283.6" y1="334" x2="283.6" y2="30" stroke="#edf2f7"/>
+<text x="283.6" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">150</text>
+<line x1="396.4" y1="334" x2="396.4" y2="30" stroke="#edf2f7"/>
+<text x="396.4" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">200</text>
+<line x1="509.2" y1="334" x2="509.2" y2="30" stroke="#edf2f7"/>
+<text x="509.2" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">250</text>
+<line x1="622" y1="334" x2="622" y2="30" stroke="#edf2f7"/>
+<text x="622" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">300</text>
+<line x1="58" y1="283.33" x2="622" y2="283.33" stroke="#edf2f7"/>
+<text x="52" y="287.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="198.89" x2="622" y2="198.89" stroke="#edf2f7"/>
+<text x="52" y="202.89" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="114.44" x2="622" y2="114.44" stroke="#edf2f7"/>
+<text x="52" y="118.44" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.5</text>
+<line x1="58" y1="30" x2="622" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<rect x="58" y="30" width="564" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="564" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,35.88 80.56,119.39 103.12,178.33 125.68,205.81 148.24,229.29 170.8,240.42 193.36,245.26 215.92,246.86 238.48,252.58 261.04,252.39 283.6,253.58 306.16,253.45 328.72,256.44 351.28,256.01 373.84,253.63 396.4,257.17 418.96,256.33 441.52,256.18 464.08,258.88 486.64,258.29 509.2,258.18 531.76,258.08 554.32,257.3 576.88,260.05 599.44,259.49 622,258.97"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,86.47 80.56,155.09 103.12,194.55 125.68,218.6 148.24,235.4 170.8,243.61 193.36,248.45 215.92,249.91 238.48,252.05 261.04,253.35 283.6,253.34 306.16,254.85 328.72,253.68 351.28,251.48 373.84,255.52 396.4,254.99 418.96,256.08 441.52,256.75 464.08,257.04 486.64,257.26 509.2,257.5 531.76,257.69 554.32,257.01 576.88,257.58 599.44,257.78 622,258.34"/><circle cx="58" cy="86.47" r="2.5" fill="#2b6cb0"/><circle cx="80.56" cy="155.09" r="2.5" fill="#2b6cb0"/><circle cx="103.12" cy="194.55" r="2.5" fill="#2b6cb0"/><circle cx="125.68" cy="218.6" r="2.5" fill="#2b6cb0"/><circle cx="148.24" cy="235.4" r="2.5" fill="#2b6cb0"/><circle cx="170.8" cy="243.61" r="2.5" fill="#2b6cb0"/><circle cx="193.36" cy="248.45" r="2.5" fill="#2b6cb0"/><circle cx="215.92" cy="249.91" r="2.5" fill="#2b6cb0"/><circle cx="238.48" cy="252.05" r="2.5" fill="#2b6cb0"/><circle cx="261.04" cy="253.35" r="2.5" fill="#2b6cb0"/><circle cx="283.6" cy="253.34" r="2.5" fill="#2b6cb0"/><circle cx="306.16" cy="254.85" r="2.5" fill="#2b6cb0"/><circle cx="328.72" cy="253.68" r="2.5" fill="#2b6cb0"/><circle cx="351.28" cy="251.48" r="2.5" fill="#2b6cb0"/><circle cx="373.84" cy="255.52" r="2.5" fill="#2b6cb0"/><circle cx="396.4" cy="254.99" r="2.5" fill="#2b6cb0"/><circle cx="418.96" cy="256.08" r="2.5" fill="#2b6cb0"/><circle cx="441.52" cy="256.75" r="2.5" fill="#2b6cb0"/><circle cx="464.08" cy="257.04" r="2.5" fill="#2b6cb0"/><circle cx="486.64" cy="257.26" r="2.5" fill="#2b6cb0"/><circle cx="509.2" cy="257.5" r="2.5" fill="#2b6cb0"/><circle cx="531.76" cy="257.69" r="2.5" fill="#2b6cb0"/><circle cx="554.32" cy="257.01" r="2.5" fill="#2b6cb0"/><circle cx="576.88" cy="257.58" r="2.5" fill="#2b6cb0"/><circle cx="599.44" cy="257.78" r="2.5" fill="#2b6cb0"/><circle cx="622" cy="258.34" r="2.5" fill="#2b6cb0"/><line x1="58" y1="263.04" x2="622" y2="263.04" stroke="#718096" stroke-dasharray="4 4"/><text x="67.02" y="275.71" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">grammar learned, nothing copied</text><line x1="58" y1="309.24" x2="622" y2="309.24" stroke="#718096" stroke-dasharray="4 4"/><text x="67.02" y="321.91" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#4a5568" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">entropy of the generator</text></g>
+<text x="340" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">optimizer step</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">loss, nats per target token</text>
+<text x="340" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">The loss stops at the level of a model that copies nothing</text>
+<rect x="430.81" y="38" width="183.19" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="438.81" y1="53" x2="458.81" y2="53" stroke="#c05621" stroke-width="2"/>
+<text x="464.81" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">training (mean of 10 steps)</text>
+<line x1="438.81" y1="70" x2="458.81" y2="70" stroke="#2b6cb0" stroke-width="2"/>
+<text x="464.81" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">validation</text>
+</svg>
