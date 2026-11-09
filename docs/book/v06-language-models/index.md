@@ -18,7 +18,7 @@ You can write down the recipe of a modern decoder and say what each of its choic
 ## Chapters
 
 1. [Anatomy of a Modern Decoder](01-modern-decoder.md): what changed between the first GPT and today's open-weight language models, and why.
-2. Importing Pretrained Models and Proving Parity: how to load someone else's trained weights into your own implementation and prove it computes the same thing.
+2. [Importing Pretrained Models and Proving Parity](02-importing-models.md): how to load someone else's trained weights into your own implementation and prove it computes the same thing.
 3. Attention Variants: Sharing and Compressing Keys: how to shrink the KV cache without losing what attention needs.
 4. Mixture of Experts: how a model can have a trillion parameters yet use only a few billion per token.
 5. Linear Attention, Recurrence and Hybrid Models: whether attention can be computed in time linear in the sequence length, and what is lost.

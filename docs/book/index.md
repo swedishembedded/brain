@@ -113,4 +113,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume VI: Advanced Language Model Architectures](v06-language-models/index.md)
 
 1. [Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md): What changed between the first GPT and today's open-weight language models, and why?
+2. [Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md): How do we load someone else's trained weights into our own implementation and prove it computes the same thing?
 <!-- /contents -->

@@ -546,14 +546,14 @@ def cfg_with(**kw):
     return c
 
 
-def init_decoder(cfg, tied=False):
-    """Weights, drawn from `bookrng.generator(NAME_TINY)` in this order, each matrix row by row:
+def init_decoder(cfg, tied=False, name=NAME_TINY):
+    """Weights, drawn from `bookrng.generator(name)` (Chapter 1 uses NAME_TINY) in this order, each matrix row by row:
     the embedding table W_emb [V, D] as `normal()`; then for each layer l = 0 .. L-1: the gain of norm 1 (D numbers, each
     `1 + 0.1 * normal()`), W_Q [D, H DH], W_K [D, HKV DH], W_V [D, HKV DH] (`normal() / sqrt(D)`), the QK-norm gains of queries
     and then keys (DH numbers each, `1 + 0.1 * normal()`), W_O [H DH, D] (`normal() / sqrt(H DH)`), the gain of norm 2 (D),
     W_gate and W_up [D, F] (`normal() / sqrt(D)`), W_down [F, D] (`normal() / sqrt(F)`); then the last gain (D) and, unless the
     head is tied, the output matrix W_out [V, D] (`normal() / sqrt(D)`)."""
-    g = bookrng.generator(NAME_TINY)
+    g = bookrng.generator(name)
     V, D, L, H, HKV, DH, F = (cfg[k] for k in ("V", "D", "L", "H", "HKV", "DH", "F"))
 
     def mat(r, c, s):

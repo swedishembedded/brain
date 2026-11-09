@@ -418,6 +418,7 @@ navigation:
         pages:
           - docs/book/v06-language-models/index.md
           - docs/book/v06-language-models/01-modern-decoder.md
+          - docs/book/v06-language-models/02-importing-models.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

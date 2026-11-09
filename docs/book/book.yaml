@@ -503,7 +503,7 @@ volumes:
         title: "Importing Pretrained Models and Proving Parity"
         question: "How do we load someone else's trained weights into our own implementation and prove it computes the same thing?"
         introduces: [checkpoint-format, safetensors, weight-name-mapping, reference-golden, parity-tolerance, config-defaults]
-        requires: [modern-decoder-recipe, relative-error, cosine-similarity, tensor]
+        requires: [modern-decoder-recipe, relative-error, cosine-similarity, tensor, rounding-error, machine-epsilon, bf16-format, fp16-format, row-major-layout, transpose, test-dimension-choice, rms-normalization, grouped-query-attention, tied-embeddings]
         brain: [checkpoint, arch, weightset]
       - id: attention-variants
         title: "Attention Variants: Sharing and Compressing Keys"

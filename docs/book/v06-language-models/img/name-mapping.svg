@@ -1,0 +1,79 @@
+<!-- source-sha256: a595465a352c4a5bdd812b536dc93a9b1174b6cb93160d0659f751c6151990b1 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 680" width="800" height="680"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="680" fill="#ffffff"/>
+<text x="195" y="32.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">published layout (one layer)</text>
+<text x="640" y="32.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">the book&#x27;s decoder (layer 0)</text>
+<rect x="500" y="60" width="280" height="40" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="76.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gain 1</text>
+<text x="640" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6: copy</text>
+<rect x="500" y="110" width="280" height="40" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_Q</text>
+<text x="640" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 x 16: rows 0 .. 15, transpose</text>
+<rect x="500" y="160" width="280" height="40" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="176.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_K</text>
+<text x="640" y="192.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 x 8: rows 16 .. 23, transpose</text>
+<rect x="500" y="210" width="280" height="40" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_V</text>
+<text x="640" y="242.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 x 8: rows 24 .. 31, transpose</text>
+<rect x="500" y="260" width="280" height="40" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="276.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">QK-norm gain, queries</text>
+<text x="640" y="292.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4: copy</text>
+<rect x="500" y="310" width="280" height="40" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="326.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">QK-norm gain, keys</text>
+<text x="640" y="342.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4: copy</text>
+<rect x="500" y="360" width="280" height="40" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_O</text>
+<text x="640" y="392.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 x 6: transpose</text>
+<rect x="500" y="410" width="280" height="40" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="426.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gain 2</text>
+<text x="640" y="442.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6: copy</text>
+<rect x="500" y="460" width="280" height="40" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="476.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_gate</text>
+<text x="640" y="492.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 x 10: rows 0 .. 9, transpose</text>
+<rect x="500" y="510" width="280" height="40" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="526.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_up</text>
+<text x="640" y="542.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 x 10: rows 10 .. 19, transpose</text>
+<rect x="500" y="560" width="280" height="40" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="576.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_down</text>
+<text x="640" y="592.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">10 x 6: transpose</text>
+<rect x="20" y="60" width="350" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="76.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layers.N.input_layernorm.weight</text>
+<text x="195" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">stored 6</text>
+<rect x="20" y="160" width="350" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="176.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layers.N.self_attn.qkv_proj.weight</text>
+<text x="195" y="192.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">stored 32 x 6</text>
+<rect x="20" y="260" width="350" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="276.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layers.N.self_attn.q_norm.weight</text>
+<text x="195" y="292.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">stored 4</text>
+<rect x="20" y="310" width="350" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="326.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layers.N.self_attn.k_norm.weight</text>
+<text x="195" y="342.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">stored 4</text>
+<rect x="20" y="360" width="350" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layers.N.self_attn.o_proj.weight</text>
+<text x="195" y="392.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">stored 6 x 16</text>
+<rect x="20" y="410" width="350" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="426.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layers.N.post_attention_layernorm.weight</text>
+<text x="195" y="442.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">stored 6</text>
+<rect x="20" y="485" width="350" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="501.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layers.N.mlp.gate_up_proj.weight</text>
+<text x="195" y="517.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">stored 20 x 6</text>
+<rect x="20" y="560" width="350" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="195" y="576.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layers.N.mlp.down_proj.weight</text>
+<text x="195" y="592.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">stored 6 x 10</text>
+<line x1="373" y1="80" x2="497" y2="80" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="372.8" y1="178.92" x2="497.2" y2="131.08" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="373" y1="180" x2="497" y2="180" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="372.8" y1="181.08" x2="497.2" y2="228.92" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="373" y1="280" x2="497" y2="280" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="373" y1="330" x2="497" y2="330" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="373" y1="380" x2="497" y2="380" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="373" y1="430" x2="497" y2="430" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="372.95" y1="504.43" x2="497.05" y2="480.57" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="372.95" y1="505.57" x2="497.05" y2="529.43" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="373" y1="580" x2="497" y2="580" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="60" y="635" width="26" height="18" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="94" y="648.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">copied</text>
+<rect x="290" y="635" width="26" height="18" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="324" y="648.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">transposed</text>
+<rect x="520" y="635" width="26" height="18" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="554" y="648.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">rows cut out, transposed</text>
+</svg>

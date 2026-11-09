@@ -1,0 +1,49 @@
+<!-- source-sha256: 1c9255ca6c61c8cd59697b3b0ba7f590feaf9930f2136ffc673e354c7572f551 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 330" width="800" height="330"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="330" fill="#ffffff"/>
+<text x="400" y="26.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">A safetensors file of 242 bytes (drawn boxes are not to scale)</text>
+<rect x="50" y="52" width="120" height="76" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="78.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">length N</text>
+<text x="110" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 bytes</text>
+<text x="110" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">u64 little-endian</text>
+<rect x="174" y="52" width="286" height="76" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="317" y="78.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">JSON header</text>
+<text x="317" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">N = 200 bytes</text>
+<text x="317" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">padded with spaces</text>
+<rect x="464" y="52" width="126" height="76" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="527" y="70.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">data of w</text>
+<text x="527" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F32</text>
+<text x="527" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[2, 3]</text>
+<text x="527" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24 bytes</text>
+<rect x="594" y="52" width="86" height="76" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="637" y="70.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">data of b</text>
+<text x="637" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">BF16</text>
+<text x="637" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[3]</text>
+<text x="637" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 bytes</text>
+<rect x="684" y="52" width="66" height="76" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="717" y="70.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">data of h</text>
+<text x="717" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F16</text>
+<text x="717" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[2]</text>
+<text x="717" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 bytes</text>
+<line x1="48" y1="130" x2="48" y2="144" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="2 2"/>
+<text x="48" y="160.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="172" y1="130" x2="172" y2="144" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="2 2"/>
+<text x="172" y="160.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">8</text>
+<line x1="462" y1="130" x2="462" y2="144" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="2 2"/>
+<text x="462" y="160.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">208</text>
+<line x1="592" y1="130" x2="592" y2="144" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="2 2"/>
+<text x="592" y="160.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">232</text>
+<line x1="682" y1="130" x2="682" y2="144" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="2 2"/>
+<text x="682" y="160.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">238</text>
+<line x1="752" y1="130" x2="752" y2="144" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="2 2"/>
+<text x="752" y="160.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">242</text>
+<text x="34" y="160.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">byte</text>
+<path d="M172,184 H630 L642,196 V276 H172 Z" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<path d="M630,184 V196 H642" fill="none" stroke="#4a5568" stroke-width="1.2"/>
+<text x="186" y="210.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">__metadata__: {&quot;format&quot;: &quot;pt&quot;}</text>
+<text x="186" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">w: F32, shape [2, 3], data_offsets [0, 24]</text>
+<text x="186" y="242.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">b: BF16, shape [3], data_offsets [24, 30]</text>
+<text x="186" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">h: F16, shape [2], data_offsets [30, 34]</text>
+<line x1="317" y1="131" x2="317" y2="181" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="326" y="160.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">parsed as</text>
+<text x="400" y="320.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the data starts at byte 208 = 8 + 200; data_offsets count from there, so tensor w is bytes 208 to 232 of the file</text>
+</svg>
