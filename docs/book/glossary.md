@@ -140,6 +140,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **classification**: predicting which of a fixed set of categories an example belongs to, from its features, learned from labelled examples; with two categories, labelled $0$ and $1$, it is binary classification. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
+**color space**: the rule that turns a triple of numbers into a colour, made of three primary colours, a white point and a transfer curve, so that the same triple is a different colour in a different space. *([Images as Data](v07-vision/01-images.md))*
+
 **command recording**: appending many dispatches to one list and handing the list to the device as a single submission, so that the host pays the submission cost once instead of once per dispatch; a read-back or any other observation of the device ends the list. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
 
 **compensated summation**: a way of adding many numbers in which a second variable carries the rounding error of each addition into the next, so that the error of the total stays near $2u$ times the sum of absolute values however many terms there are (Kahan's algorithm). *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
@@ -322,6 +324,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## G
 
+**gamma encoding**: the fixed nonlinear curve, in sRGB a short line and a power law, that maps linear light to the stored code so that equal steps in the code are roughly equal ratios of light; averaging encoded values is therefore not averaging light. *([Images as Data](v07-vision/01-images.md))*
+
 **gated delta network**: a delta-rule memory whose state is first multiplied by a decay gate chosen by the token, with a write strength chosen the same way, so that it forgets as well as corrects. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **gated linear unit**: a hidden layer whose output is the product of two linear functions of the input, one of them passed through a nonlinearity that acts as a gate, so that each hidden unit can be switched or scaled by a second projection. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
@@ -382,6 +386,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **identity matrix**: the square matrix with ones on the diagonal and zeros elsewhere, which leaves every vector unchanged. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
+**image resampling**: computing an image of a new size by looking up each output pixel at a source coordinate fixed by a convention (half-pixel, corner-aligned or asymmetric) and combining nearby source pixels with a kernel that is widened when the image shrinks. *([Images as Data](v07-vision/01-images.md))*
+
 **implementation candidate**: one implementation of an operation together with the conditions under which it is valid (the capabilities it needs, the shapes it serves, the contract of its result), one of several that a selector chooses among. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
 **independence**: the property that $P(A \cap B) = P(A)P(B)$, so that knowing one event tells nothing about the other; it is not the same as being unable to occur together. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
@@ -389,6 +395,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **inference memory formula**: the sum that bounds what a loaded model holds: the weights at their bytes per parameter, the cache summed over layers with each layer's window, the scratch of one forward pass over a chunk of rows, and an overhead for the allocator and the driver. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
 
 **information content**: the surprise of an event, $-\log_2 p$ bits (or $-\ln p$ nats) for an event of probability $p$, the only measure for which certain events carry zero, rarer events carry more and independent events add. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
+
+**input normalization**: subtracting a per-channel mean and dividing by a per-channel standard deviation, with exactly the constants and channel order the model was trained with, before the first layer. *([Images as Data](v07-vision/01-images.md))*
 
 **integer**: a whole number, positive, negative or zero, with no fractional part; the exact numbers of counting and naming. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
@@ -620,6 +628,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **piecewise function**: a function defined by different rules on different parts of its domain, such as the absolute value, ReLU and a schedule with a warmup. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
+**pixel**: one sample of an image, a point measurement of light (three numbers for a colour image, usually 8-bit codes), taken at the centre of its cell in a grid of width times height. *([Images as Data](v07-vision/01-images.md))*
+
 **polynomial**: a sum of constant multiples of powers of $x$; one of degree $n$ has $n + 1$ parameters and is fixed by $n + 1$ points. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 **post-training quantization**: converting a trained float network to integer arithmetic without retraining, by choosing the scale and zero point of each weight tensor from the weights and of each activation tensor from ranges measured on data, and rewriting each layer as an integer accumulation followed by a requantization. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
@@ -761,6 +771,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **shared expert**: an expert outside the routing that every token uses, whose output is added to the routed sum, so that what all tokens need is not copied across the routed experts. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
 
 **shared memory**: the small, fast, on-chip memory of a compute unit that all invocations of one workgroup can read and write and no other workgroup can see, a cache whose contents the programmer chooses. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
+
+**shared preprocessing**: the discipline that every preprocessing step (rounding, layout, colour conversion, resampling, padding, normalization) has one implementation used by every model, with the differences between models expressed as parameters in data and checked against the reference, not as copies of code. *([Images as Data](v07-vision/01-images.md))*
 
 **short convolution**: a causal filter of a few taps applied to each channel separately along the sequence, so that every token is mixed with its few predecessors before the recurrence; it needs the last $K - 1$ inputs as a small state when decoding. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 

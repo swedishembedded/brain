@@ -428,6 +428,10 @@ navigation:
           - docs/book/v06-language-models/09-spectral-lm.md
           - docs/book/v06-language-models/10-model-cost.md
           - docs/book/v06-language-models/11-project-architecture-comparison.md
+      - title: "Volume VII: Vision and Understanding Images"
+        pages:
+          - docs/book/v07-vision/index.md
+          - docs/book/v07-vision/01-images.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

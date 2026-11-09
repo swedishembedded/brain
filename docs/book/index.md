@@ -123,4 +123,8 @@ historical sections draw on in the [Chronology](history/chronology.md).
 9. [A Research Architecture: The Spectral Language Model](v06-language-models/09-spectral-lm.md): How do you test a new architectural idea honestly, using brain's spectral language model as the example?
 10. [Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md): Before running a model, how do we know what it will cost?
 11. [Project: Comparing Language Model Blocks](v06-language-models/11-project-architecture-comparison.md): Can you implement several alternative language-model blocks and compare their quality, cost and memory fairly?
+
+### [Volume VII: Vision and Understanding Images](v07-vision/index.md)
+
+1. [Images as Data](v07-vision/01-images.md): What is an image to a model, and how many ways can preprocessing quietly go wrong?
 <!-- /contents -->
