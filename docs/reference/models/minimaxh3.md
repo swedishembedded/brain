@@ -117,7 +117,11 @@ refused naming the repo.
 
 Sparse attention needs a GPU (its attention pass is workgroup-cooperative).
 The gates are held at the DiT's tier beside each block (~1.9 GB at int8)
-and count toward the placement.
+and count toward the placement. Its saving grows with the video's share of
+the sequence: the text, references and audio are attended in full by every
+query. On a P40 one attention at 0.75 takes ~5% less time than the dense
+one at 640x352 with one image reference and ~10% less at 768x448 (~16% at
+0.9).
 
 * **The text encoder is placed per prompt.** The first 50 layers of the
   Qwen3-VL language tower (~27 GB at int8) are spread over as many of the

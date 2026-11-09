@@ -1973,6 +1973,24 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/flash_attn_f32.cu"),
     },
     CudaKernel {
+        name: "flash_vsa_f32",
+        // Redirected to by name from the WGSL `flash_attn_vsa` (`gpu_core::native_upgrade`) at head_dim 128.
+        op: Op::FlashAttention,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_flash_vsa_f32",
+        what: "video sparse attention at head_dim 128, fp32: flash_bidir_f32's block over one 64-slot query tile, rows gathered through the slot map, the key tiles its mask row keeps streamed 32 keys at a time",
+        reported: "native:flash_vsa_f32",
+        block_dim: 128,
+        // One 64-slot query tile of one head per block, all 128 channels.
+        tile: (64, 128),
+        shared_bytes: (64 * 128 + 32 * 128) * 4,
+        programmatic: false,
+        src: include_str!("../cu/flash_attn_f32.cu"),
+    },
+    CudaKernel {
         name: "flash_bidir_f16_hd64",
         // Redirected to by name from the WGSL `flash_attn_bidir_reg2` (`gpu_core::native_upgrade`) at head_dim 64.
         op: Op::FlashAttention,

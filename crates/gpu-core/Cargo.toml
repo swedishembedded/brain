@@ -77,6 +77,10 @@ name = "flash_bidir_native"
 harness = false
 
 [[test]]
+name = "flash_vsa_native"
+harness = false
+
+[[test]]
 name = "flash_bidir_native_bench"
 harness = false
 

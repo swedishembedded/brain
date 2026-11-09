@@ -130,14 +130,73 @@ __device__ __forceinline__ float brain_fa_dot4(float4 a, float4 b) {
     return fmaf(a.w, b.w, acc);
 }
 
-// Stage the global loads of one 32-key tile of `src` into registers: thread t
-// carries chunk t%32 of key rows t/32 + 4s; keys at or past `keys_left` are 0.
-__device__ __forceinline__ void brain_fa_fetch(float4 (&r)[8], const BrainFaRows& a, const float* src, unsigned int j0, unsigned int keys_left) {
+// Which keys a block reads, 32 at a time. `ContiguousWalk` is every key from
+// 0 to `kend` in order; `TileWalk` is the rows of the key tiles one VSA
+// query tile keeps (`flash_attn_vsa.wgsl`). A walk names a chunk's live key
+// count, the sample rows of the keys this thread fetches (key t/32 + 4s,
+// 0 past the live count), and the chunk after it.
+struct BrainFaContiguousWalk {
+    unsigned int j0, kend;
+    __device__ __forceinline__ bool valid() const { return j0 < kend; }
+    __device__ __forceinline__ unsigned int left() const { return kend - j0; }
+    __device__ __forceinline__ unsigned int row(unsigned int j) const { return j0 + j; }
+    __device__ __forceinline__ void rows_of(unsigned int (&idx)[8]) const {
+#pragma unroll
+        for (int s = 0; s < 8; ++s) { idx[s] = j0 + threadIdx.x / BRAIN_FA_CH + 4u * s; }
+    }
+    __device__ __forceinline__ void advance() { j0 += BRAIN_FA_BK; }
+};
+
+// A query tile that keeps every key tile attends every row; the slots hold
+// each row exactly once, so `all` walks rows 0..`rows` in order, unpadded and
+// without the slot map. The choice is the block's, so the branches on it
+// never diverge.
+struct BrainFaTileWalk {
+    const unsigned int* slots;
+    const unsigned int* live;
+    const unsigned int* keep;  // the query tile's row of the [tiles, tiles] mask
+    unsigned int tiles, kt, c, n;  // n: tile kt's live count; with `all`, kt is the next key row
+    unsigned int rows;
+    bool all;
+    // The first kept tile with rows at or after `kt` (c = 0), or `tiles` when none is left.
+    __device__ __forceinline__ void settle() {
+        if (all) { return; }
+        for (; kt < tiles; ++kt) {
+            if (__ldg(keep + kt) != 0u && (n = __ldg(live + kt)) != 0u) { break; }
+        }
+        c = 0;
+    }
+    __device__ __forceinline__ bool valid() const { return all ? kt < rows : kt < tiles; }
+    __device__ __forceinline__ unsigned int left() const { return all ? rows - kt : min(n - c, (unsigned int)BRAIN_FA_BK); }
+    __device__ __forceinline__ unsigned int row(unsigned int j) const { return all ? kt + j : __ldg(slots + kt * BRAIN_FA_BQ + c + j); }
+    __device__ __forceinline__ void rows_of(unsigned int (&idx)[8]) const {
+        const unsigned int keys_left = left();
+#pragma unroll
+        for (int s = 0; s < 8; ++s) {
+            const unsigned int j = threadIdx.x / BRAIN_FA_CH + 4u * s;
+            idx[s] = all ? kt + j : j < keys_left ? __ldg(slots + kt * BRAIN_FA_BQ + c + j) : 0u;
+        }
+    }
+    __device__ __forceinline__ void advance() {
+        if (all) {
+            kt += BRAIN_FA_BK;
+            return;
+        }
+        c += BRAIN_FA_BK;
+        if (c >= n) { ++kt; settle(); }
+    }
+};
+
+// Stage the global loads of one 32-key chunk of `src` into registers: thread t
+// carries chunk t%32 of key rows `idx` (keys t/32 + 4s); keys at or past
+// `keys_left` are 0. The rows are resolved a chunk ahead, so a gathered walk's
+// index loads are never on this load's critical path.
+__device__ __forceinline__ void brain_fa_fetch(float4 (&r)[8], const BrainFaRows& a, const float* src, const unsigned int (&idx)[8], unsigned int keys_left) {
     const unsigned int c = threadIdx.x % BRAIN_FA_CH;
 #pragma unroll
     for (int s = 0; s < 8; ++s) {
         const unsigned int j = threadIdx.x / BRAIN_FA_CH + 4u * s;
-        r[s] = j < keys_left ? brain_fa_ld(src, (a.seq0 + j0 + j) * a.kv_stride + 4u * c, a.vec) : make_float4(0.f, 0.f, 0.f, 0.f);
+        r[s] = j < keys_left ? brain_fa_ld(src, (a.seq0 + idx[s]) * a.kv_stride + 4u * c, a.vec) : make_float4(0.f, 0.f, 0.f, 0.f);
     }
 }
 
@@ -166,36 +225,41 @@ __device__ __forceinline__ unsigned int brain_fa_live_end(const float* kmask, un
     return (unsigned int)(last + 1);
 }
 
-// Query tile `qt` of one (sample, head). MASKED selects the causal bound and
-// the per-key mask.
-template <bool MASKED>
-__device__ __forceinline__ void brain_fa_core(const BrainFaRows& a, unsigned int qt, float4* qs, float4* kv) {
-    const unsigned int T = a.T;
-    const unsigned int q0 = qt * BRAIN_FA_BQ;
+// Which query rows a block holds: `ContiguousRows` is rows q0.. of the sample
+// up to T, `TileRows` the live slots of one VSA query tile. `row(r)` is the
+// sample row of the block's row r, `live(r)` whether it has one.
+struct BrainFaContiguousRows {
+    unsigned int q0, T;
+    __device__ __forceinline__ bool live(unsigned int r) const { return q0 + r < T; }
+    __device__ __forceinline__ size_t row(unsigned int r) const { return q0 + r; }
+};
 
-    // Keys that can carry weight: all of them, or up to the block's last row
-    // and the last live key.
-    unsigned int kend = T;
-    if (MASKED) {
-        kend = min(T, q0 + BRAIN_FA_BQ);
-        kend = brain_fa_live_end(a.kmask, kend, reinterpret_cast<int*>(kv));
-    }
+struct BrainFaTileRows {
+    const unsigned int* slots;
+    unsigned int qt, n;
+    __device__ __forceinline__ bool live(unsigned int r) const { return r < n; }
+    __device__ __forceinline__ size_t row(unsigned int r) const { return __ldg(slots + qt * BRAIN_FA_BQ + r); }
+};
 
-    // q: 64 rows x 32 chunks, sixteen 16-byte pieces a thread; rows past T are zero.
+// One block of query rows of one (sample, head) over the keys `w` walks.
+// MASKED (contiguous rows and keys only) adds the causal bound and the
+// per-key mask: key j0 + j against row q0 + r.
+template <bool MASKED, typename Rows, typename Walk>
+__device__ __forceinline__ void brain_fa_core(const BrainFaRows& a, const Rows& qrows, Walk w, float4* qs, float4* kv) {
+    // q: 64 rows x 32 chunks, sixteen 16-byte pieces a thread; rows without one are zero.
     {
         const unsigned int c = threadIdx.x % BRAIN_FA_CH;
 #pragma unroll
         for (int s = 0; s < 16; ++s) {
             const unsigned int r = threadIdx.x / BRAIN_FA_CH + 4u * s;
             qs[r * BRAIN_FA_CH + (c ^ ((r >> 2) & 7u))] =
-                q0 + r < T ? brain_fa_ld(a.q, (a.seq0 + q0 + r) * a.q_stride + 4u * c, a.vec) : make_float4(0.f, 0.f, 0.f, 0.f);
+                qrows.live(r) ? brain_fa_ld(a.q, (a.seq0 + qrows.row(r)) * a.q_stride + 4u * c, a.vec) : make_float4(0.f, 0.f, 0.f, 0.f);
         }
     }
 
     const unsigned int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
     const unsigned int rg = lane / 8, cg = lane % 8;
     const unsigned int row0 = 16u * warp + 4u * rg;  // this thread's first of four rows in the tile
-    const unsigned int ntiles = (kend + BRAIN_FA_BK - 1) / BRAIN_FA_BK;
     // exp(x / sqrt(128)) = exp2(x * c2); the running maxima m are in these units.
     const float c2 = 0.08838834764831845f * BRAIN_FA_LOG2E;
 
@@ -210,17 +274,22 @@ __device__ __forceinline__ void brain_fa_core(const BrainFaRows& a, unsigned int
     }
 
     float4 pre[8];
-    if (ntiles > 0) {
-        brain_fa_fetch(pre, a, a.k, 0, kend);
+    unsigned int idx[8], idx_next[8];
+    if (w.valid()) {
+        w.rows_of(idx);
+        brain_fa_fetch(pre, a, a.k, idx, w.left());
         brain_fa_stage(kv, pre);
     }
     __syncthreads();
 
-    for (unsigned int t = 0; t < ntiles; ++t) {
-        const unsigned int j0 = t * BRAIN_FA_BK;
-        const unsigned int left = kend - j0;
+    while (w.valid()) {
+        const unsigned int left = w.left();
         // v of this tile, in flight while its scores are computed.
-        brain_fa_fetch(pre, a, a.v, j0, left);
+        brain_fa_fetch(pre, a, a.v, idx, left);
+        // The next chunk's rows, resolved while the scores are computed.
+        Walk next = w;
+        next.advance();
+        if (next.valid()) { next.rows_of(idx_next); }
 
         // Scores: even chunks into s, odd ones into s2.
         float s[4][4], s2[4][4];
@@ -263,7 +332,7 @@ __device__ __forceinline__ void brain_fa_core(const BrainFaRows& a, unsigned int
         for (int k = 0; k < 4; ++k) {
             const unsigned int j = cg + 8u * k;
             mk[k] = j < left ? 0.f : BRAIN_FA_NEG_INF;
-            if (MASKED && j < left) { mk[k] = __ldg(a.kmask + j0 + j) * BRAIN_FA_LOG2E; }
+            if (MASKED && j < left) { mk[k] = __ldg(a.kmask + w.row(j)) * BRAIN_FA_LOG2E; }
         }
 
         // Online softmax in base 2.
@@ -273,7 +342,7 @@ __device__ __forceinline__ void brain_fa_core(const BrainFaRows& a, unsigned int
 #pragma unroll
             for (int k = 0; k < 4; ++k) {
                 s[i][k] += s2[i][k];
-                if (MASKED && j0 + cg + 8u * k > q0 + row0 + i) { s[i][k] = BRAIN_FA_NEG_INF; }
+                if (MASKED && w.row(cg + 8u * k) > qrows.row(row0 + i)) { s[i][k] = BRAIN_FA_NEG_INF; }
                 mx = fmaxf(mx, fmaf(s[i][k], c2, mk[k]));
             }
             mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
@@ -304,7 +373,7 @@ __device__ __forceinline__ void brain_fa_core(const BrainFaRows& a, unsigned int
         __syncthreads();  // every warp is done reading k
         brain_fa_stage(kv, pre);
         __syncthreads();  // v is visible
-        if (t + 1 < ntiles) { brain_fa_fetch(pre, a, a.k, j0 + BRAIN_FA_BK, left - BRAIN_FA_BK); }
+        if (next.valid()) { brain_fa_fetch(pre, a, a.k, idx_next, next.left()); }
 
         // Output: key j = g + 8k's probabilities come from lane g of the row group.
         const unsigned int lane0 = lane & ~7u;
@@ -331,10 +400,13 @@ __device__ __forceinline__ void brain_fa_core(const BrainFaRows& a, unsigned int
         }
 
         __syncthreads();  // every warp is done reading v
-        if (t + 1 < ntiles) {
+        if (next.valid()) {
             brain_fa_stage(kv, pre);
             __syncthreads();  // the next k is visible
         }
+        w = next;
+#pragma unroll
+        for (int s = 0; s < 8; ++s) { idx[s] = idx_next[s]; }
     }
 
     // Fold each row's sum across its eight lanes, normalise, store.
@@ -345,9 +417,8 @@ __device__ __forceinline__ void brain_fa_core(const BrainFaRows& a, unsigned int
         ls += __shfl_xor_sync(0xffffffffu, ls, 2);
         ls += __shfl_xor_sync(0xffffffffu, ls, 4);
         const float inv = 1.0f / ls;
-        const unsigned int r = q0 + row0 + i;
-        if (r >= T) { continue; }
-        float* dst = a.out + (a.seq0 + r) * a.out_stride;
+        if (!qrows.live(row0 + i)) { continue; }
+        float* dst = a.out + (a.seq0 + qrows.row(row0 + i)) * a.out_stride;
 #pragma unroll
         for (int d = 0; d < 4; ++d) {
             const unsigned int ch = 4u * (cg + 8u * d);
@@ -387,7 +458,65 @@ brain_flash_bidir_f32(const unsigned int* params, const float* qkv, float* out) 
     a.T = T;
     a.seq0 = (size_t)b * T;
     a.vec = ((reinterpret_cast<size_t>(qkv) | reinterpret_cast<size_t>(out)) & 15u) == 0 && ((stride | q_off | k_off | v_off | d_model) & 3u) == 0;
-    brain_fa_core<false>(a, qt, qs, kv);
+    brain_fa_core<false>(a, BrainFaContiguousRows{qt * BRAIN_FA_BQ, T}, BrainFaContiguousWalk{0, T}, qs, kv);
+}
+
+// brain_flash_vsa_f32 - `flash_attn_vsa.wgsl`'s attention natively: one block
+// per (head, VSA query tile), its 64 slots' q resident, the key rows of the
+// tiles its mask row keeps streamed 32 at a time through the slot map. Every
+// thread of a block reads the same mask entries, so the skips never diverge.
+//
+//   params : u32 [tiles, n_heads, head_dim, qkv_stride, q_off, k_off, v_off, d_model]
+//   qkv    : [rows, qkv_stride], as brain_flash_bidir_f32's
+//   out    : [rows, d_model]; only live slots' rows are written
+//   slots  : [tiles * 64] packed row per slot, every row in exactly one live slot
+//   live   : [tiles]; mask : [n_heads, tiles, tiles]
+extern "C" __global__ void __launch_bounds__(BRAIN_FA_THREADS, 2)
+brain_flash_vsa_f32(const unsigned int* params, const float* qkv, float* out, const unsigned int* slots, const unsigned int* live, const unsigned int* mask) {
+    __shared__ float4 qs[BRAIN_FA_BQ * BRAIN_FA_CH];
+    __shared__ float4 kv[BRAIN_FA_BK * BRAIN_FA_CH];
+    const unsigned int tiles = params[0], heads = params[1];
+    const unsigned int stride = params[3], q_off = params[4], k_off = params[5], v_off = params[6], d_model = params[7];
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    if (blk >= heads * tiles) { return; }
+    const unsigned int qt = blk % tiles, h = blk / tiles;
+    const unsigned int hoff = h * BRAIN_FA_HD;
+    BrainFaRows a;
+    a.q = qkv + q_off + hoff;
+    a.k = qkv + k_off + hoff;
+    a.v = qkv + v_off + hoff;
+    a.kmask = nullptr;
+    a.out = out + hoff;
+    a.q_stride = stride;
+    a.kv_stride = stride;
+    a.out_stride = d_model;
+    a.T = 0;
+    a.seq0 = 0;
+    a.vec = ((reinterpret_cast<size_t>(qkv) | reinterpret_cast<size_t>(out)) & 15u) == 0 && ((stride | q_off | k_off | v_off | d_model) & 3u) == 0;
+    const unsigned int* keep = mask + ((size_t)h * tiles + qt) * tiles;
+    const BrainFaTileRows qrows{slots, qt, __ldg(live + qt)};
+    unsigned int kept = 0, rows = 0;
+    for (unsigned int t = threadIdx.x; t < tiles; t += BRAIN_FA_THREADS) {
+        kept += __ldg(keep + t) != 0u;
+        rows += __ldg(live + t);
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+        kept += __shfl_xor_sync(0xffffffffu, kept, o);
+        rows += __shfl_xor_sync(0xffffffffu, rows, o);
+    }
+    unsigned int* scratch = reinterpret_cast<unsigned int*>(kv);
+    if (threadIdx.x % 32 == 0) {
+        scratch[threadIdx.x / 32] = kept;
+        scratch[4 + threadIdx.x / 32] = rows;
+    }
+    __syncthreads();
+    kept = scratch[0] + scratch[1] + scratch[2] + scratch[3];
+    rows = scratch[4] + scratch[5] + scratch[6] + scratch[7];
+    __syncthreads();
+    BrainFaTileWalk w{slots, live, keep, tiles, 0, 0, 0, rows, kept == tiles};
+    w.settle();
+    brain_fa_core<false>(a, qrows, w, qs, kv);
 }
 
 extern "C" __global__ void __launch_bounds__(BRAIN_FA_THREADS, 2)
@@ -413,5 +542,8 @@ brain_flash_gqa_kmask_f32(const unsigned int* params, const float* q, const floa
     a.T = T;
     a.seq0 = (size_t)b * T;
     a.vec = ((reinterpret_cast<size_t>(q) | reinterpret_cast<size_t>(k) | reinterpret_cast<size_t>(v) | reinterpret_cast<size_t>(out)) & 15u) == 0;
-    brain_fa_core<true>(a, qt, qs, kv);
+    // Keys that can carry weight: up to the block's last row and the last live key.
+    const unsigned int q0 = qt * BRAIN_FA_BQ;
+    const unsigned int kend = brain_fa_live_end(a.kmask, min(T, q0 + BRAIN_FA_BQ), reinterpret_cast<int*>(kv));
+    brain_fa_core<true>(a, BrainFaContiguousRows{q0, T}, BrainFaContiguousWalk{0, kend}, qs, kv);
 }

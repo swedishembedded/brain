@@ -936,8 +936,10 @@ MiniMax H3 Community License derivatives.
       map) and `vsa_coarse`/`vsa_gate_add`, gated against
       `vsa::attention_host` on CUDA, Vulkan and wgpu; the block's attention
       arm, the gate import (resident and streamed) and the request params.
-      Not measured at size yet: the flash pass walks every key tile's mask
-      bit, and `vsa_select` ranks by a serial count over each region.
+      `flash_attn_vsa` runs two query tiles per workgroup (reg2's register
+      block); on CUDA at head_dim 128 `native_upgrade` redirects it to
+      `brain_flash_vsa_f32`, the dense native kernel's core over gathered
+      slots and kept tiles (`tests/flash_vsa_native.rs`).
 - [x] `ref2va`'s served `preset` (`base`, `turbo-4step`, `turbo-4step-vsa`):
       pinned store files beside the release, so `/v1/videos` selects the
       adapter and gates it may not name as paths.
@@ -955,8 +957,24 @@ MiniMax H3 Community License derivatives.
       on two P40s (~19k packed rows: the reference adds ~4.1k latent rows
       and ~4.2k vision tokens); it streams. Measure where the resident
       workspace goes at that size.
-- [ ] A sparse step at 640x352 is not yet faster than the dense one
-      measured at 768x448; profile the VSA kernels per kind at size.
+- [x] Sparse attention is faster than dense on CUDA at ref2va's own
+      shapes (one P40, 56 heads, `vsa::tests::sparse_attention_time_at_a_real_shape`,
+      ms per attention incl. tile means, selection and the gated coarse
+      branch):
+
+      | shape | dense | VSA 0 | VSA 0.75 | VSA 0.9 |
+      |---|---:|---:|---:|---:|
+      | 640x352, 15530 rows | 1352 | 1472 | 1289 | 1240 |
+      | 768x448, 19126 rows | 2046 | 2310 | 1835 | 1719 |
+
+      The ceiling is structural: prefix queries attend every tile and video
+      queries every prefix tile, so at 640x352 (8710 prefix rows of 15530)
+      0.75 can skip at most ~16% of the work, and the tile padding of
+      partly live tiles (~6% of queries and keys) takes part of that back.
+      The tile-side passes cost ~35 ms; the rest is the flash pass. Packing
+      kept keys across tile boundaries to drop the key padding measured
+      slower (a per-thread cursor), as did a second inlined core for
+      fully kept query tiles; both were dropped.
 - [ ] Real-weight runs: dense ref2va (20 steps), adapter at 4 steps, VSA
       at 4 steps; measured per step and per card.
 

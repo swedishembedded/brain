@@ -2140,6 +2140,19 @@ pub(crate) const ROWS: &[Row] = &[
         input: Input::PACKED,
         launch: CudaLaunch::NONE,
     },
+    // `minimaxh3`'s video sparse attention at head_dim 128: the bidir kernel's core over one
+    // query tile's kept key tiles, held to the same tolerance (`tests/flash_vsa_native.rs`).
+    Row {
+        slow: "flash_attn_vsa",
+        target: Target::Named("flash_vsa_f32"),
+        bindings: FLASH_VSA_BINDINGS,
+        serves: serves_flash_vsa,
+        blocks: flash_vsa_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: CudaLaunch::NONE,
+    },
     // SAM's relative-position-bias attention (windowed and global spans) at head_dim 64 on fp16 tensor cores.
     Row {
         slow: "flash_attn_cross_relpos",
@@ -2217,6 +2230,23 @@ fn serves_flash_bidir(p: &[u32]) -> bool {
 /// One block per `tile.0` query rows of one (sample, head).
 fn flash_bidir_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
     p[0] * p[1] * p[2].div_ceil(tile.0)
+}
+
+/// `flash_attn_vsa.wgsl`'s bindings: params, the packed `qkv` slab, the written `out`, the tile slot map, the
+/// tiles' live counts, the per-head keep mask.
+const FLASH_VSA_BINDINGS: &[BindKind] =
+    &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead];
+
+/// `[tiles, n_heads, head_dim, qkv_stride, q_off, k_off, v_off, d_model]` with something to attend, at the head
+/// width the kernel serves, and a grid the 32-bit block index covers.
+fn serves_flash_vsa(p: &[u32]) -> bool {
+    matches!(p, [tiles, heads, hd, _, _, _, _, _] if *tiles >= 1 && *heads >= 1 && *hd == FLASH_BIDIR_HEAD_DIM
+        && u64::from(*tiles) * u64::from(*heads) <= u64::from(u32::MAX))
+}
+
+/// One block per (head, query tile): the WGSL kernel pairs two tiles a workgroup, the native one does not.
+fn flash_vsa_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[0] * p[1]
 }
 
 /// One read operand, one written output (`concat_split`, `chan_place`, `silu`).
@@ -3506,6 +3536,16 @@ mod tests {
         assert_eq!(declared, row.bindings.len());
         assert_eq!(flash_bidir_blocks(&[2, 24, 1792, 128, 9216, 0, 3072, 6144, 3072], k.tile), 2 * 24 * 28);
         assert!(!serves_flash_bidir(&[1, 24, 1792, 64, 9216, 0, 3072, 6144, 3072]), "another head width");
+    }
+
+    #[test]
+    fn the_vsa_row_agrees_with_its_registry_entry() {
+        let row = ROWS.iter().find(|r| r.slow == "flash_attn_vsa").expect("the row");
+        let k = row.target.resolve(kernels_cuda::BASELINE_MIN_CC).expect("registry entry");
+        let declared = kernels::FLASH_ATTN_VSA.lines().filter(|l| l.trim_start().starts_with("@group(")).count();
+        assert_eq!(declared, row.bindings.len());
+        assert_eq!(flash_vsa_blocks(&[243, 56, 128, 21504, 0, 7168, 14336, 7168], k.tile), 243 * 56);
+        assert!(!serves_flash_vsa(&[243, 56, 64, 10752, 0, 3584, 7168, 3584]), "another head width");
     }
 
     #[test]
