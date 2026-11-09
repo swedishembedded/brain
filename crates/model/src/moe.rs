@@ -4,10 +4,10 @@
 //! Sparse top-k MoE expert FFN - router weights in, combined output out,
 //! without evaluating every expert densely.
 //!
-//! `crates/glm` (today's only HF-importable MoE forward) evaluates **every**
+//! `crates/glmdsa` (today's only HF-importable MoE forward) evaluates **every**
 //! expert over the **whole** row batch and discards non-selected rows by
 //! multiplying by a zero gate weight afterward (`Mlp::Moe` in
-//! `crates/glm/src/model.rs`, combining with `scale_add.wgsl`) - numerically
+//! `crates/glmdsa/src/model.rs`, combining with `scale_add.wgsl`) - numerically
 //! exact (`router_gate.wgsl`'s own doc comment proves it), but `n_experts`
 //! times the FLOPs of an actual top-k dispatch. At 128 experts / top-8
 //! (Qwen3-Omni's Thinker) that is sixteen times the necessary work, which
@@ -31,17 +31,15 @@
 //! gating safely at that tier needs compaction, which this workstream already
 //! deferred for the fp32 tier for the same atomics-forbidden reason.
 //!
-//! What this module deliberately does NOT do (left for a follow-up): no
-//! row-compaction/gather-scatter (WGSL kernels here may not use atomics, so a
-//! parallel stream-compaction would need a separate prefix-sum pass; the
-//! per-row early-exit already removes the FLOPs, just not the thread
-//! *launches*), no TILED int8 GEMM tier (both int8 and fp32 are naive-dispatch today; a
-//! future tiled+gated kernel is one change, not two, once compaction lands).
+//! Row compaction ([`MoeActs::compact`]) and a device-side row-permuted
+//! grouped GEMM were added later (see the section of that name below); the
+//! paragraphs above describe the first, per-row early-exit form, which the
+//! uncompacted paths still use.
 //!
 //! **Backward** (this session's addition) is a hoist, not a from-scratch
 //! derivation: two complete, gradient-checked MoE backwards already existed -
-//! `crates/moe/src/train.rs`'s softmax-router training loop and
-//! `crates/glm/src/model.rs`'s sigmoid `noaux_tc` router MLP arm - and
+//! `crates/toymoe/src/train.rs`'s softmax-router training loop and
+//! `crates/glmdsa/src/model.rs`'s sigmoid `noaux_tc` router MLP arm - and
 //! comparing them line for line shows the expert half (SwiGLU backward,
 //! `scale_add_dexp`/`scale_add_dgate` combine) is IDENTICAL; only the router
 //! half differs. [`RouterKind`] parameterises that one difference so there is
@@ -62,7 +60,7 @@ pub struct MoeIds {
     pub linear_gated: usize,
     /// `silu_mul.wgsl` - shared with every other SwiGLU MLP in the engine.
     pub silu_mul: usize,
-    /// `scale_add.wgsl` - the same combine step `crates/glm` already uses.
+    /// `scale_add.wgsl` - the same combine step `crates/glmdsa` already uses.
     pub scale_add: usize,
 }
 
@@ -80,7 +78,7 @@ pub struct MoeShape {
 /// (dense, nonzero only at the `top_k` selected experts). Plain softmax top-k -
 /// Qwen3-Omni's Thinker and Talker routers both use this (no aux-loss-free
 /// sigmoid/bias/group-limiting; that variant is `router_gate_sigmoid.wgsl`,
-/// already in use by `crates/glm`).
+/// already in use by `crates/glmdsa`).
 ///
 /// `norm_topk_prob` renormalises the selected probabilities to sum to 1 per row
 /// (Switch/Mixtral, and what every caller in this workspace wants);
@@ -110,7 +108,7 @@ pub fn router_fwd(
 /// variants existing kernels support today - parameterising the difference
 /// here means one router entry point ([`router_fwd_kind`]/[`router_bwd`]),
 /// not two hand-duplicated implementations (confirmed by comparing
-/// `crates/glm/src/model.rs:915-935` against `crates/moe/src/train.rs:466-486`
+/// `crates/glmdsa/src/model.rs`'s MoE backward against `crates/toymoe/src/train.rs`'s
 /// line for line: the expert halves are identical, only the router half
 /// differs).
 #[derive(Clone, Copy)]
@@ -129,14 +127,11 @@ pub enum RouterKind {
     /// different (simpler) form for `false` - see `router_bwd.wgsl`'s header.
     Softmax { aux_coef: f32, z_coef: f32, norm_topk_prob: bool, routed_scaling: f32 },
     /// `router_gate_sigmoid.wgsl` (fwd) + `router_bwd_sigmoid.wgsl` (bwd,
-    /// already unbounded). `crates/glm`'s GLM-5.2/DeepSeek-V3 "noaux_tc"
+    /// already unbounded). `crates/glmdsa`'s GLM-5.2/DeepSeek-V3 "noaux_tc"
     /// router: per-expert selection bias, group-limited top-k, optional
-    /// renormalisation. `router_gate_sigmoid.wgsl`'s forward hard-caps at 64
-    /// experts (`MAX_E`, fixed-size array scratch) - [`router_fwd_kind`]
-    /// asserts this loudly rather than let it silently corrupt (the same
-    /// stopgap `crates/glm/src/model.rs::new_impl_on` already applies; a
-    /// real array-free top-k rewrite is separate kernel work, not a literal
-    /// bump - see that assert's own doc for why).
+    /// renormalisation. `router_gate_sigmoid.wgsl` no longer bounds the expert
+    /// count; its group masking keeps fixed-size arrays of `MAX_GROUP`, so
+    /// [`router_fwd_kind`] asserts `n_group <= 64`.
     SigmoidNoAuxTc { n_group: u32, topk_group: u32, norm_topk_prob: bool, routed_scaling: f32 },
 }
 
@@ -193,7 +188,7 @@ pub struct RouterBwdIds {
     /// `expert_counts.wgsl` - Softmax's aux-loss load-balancing fractions.
     /// `None` for SigmoidNoAuxTc: DeepSeek-V3's selection bias is a
     /// forward-only load-balancing heuristic, never backprop'd (matches
-    /// `crates/glm/src/model.rs`'s own note keeping `moe.router.bias`
+    /// `crates/glmdsa/src/model.rs`'s own note keeping `moe.router.bias`
     /// `Role::Frozen`, out of the optimiser).
     pub expert_counts: Option<usize>,
 }
@@ -206,7 +201,7 @@ pub struct RouterBwdIds {
 /// Does NOT touch `d_x` or the router weight's own gradient - those are an
 /// ordinary dense-linear backward over `d_router_logits` (this fn's own
 /// output), which is not MoE-specific math, so this module does not own its
-/// GEMM-kernel choice (`crates/glm`'s adaptive `pick_gemm` vs plain
+/// GEMM-kernel choice (`crates/glmdsa`'s adaptive `pick_gemm` vs plain
 /// `MATMUL_DW`/`MATMUL_DX`). See [`moe_layer_bwd`]'s doc for where that step
 /// belongs in the required ordering.
 pub fn router_bwd(
@@ -236,7 +231,7 @@ pub fn router_bwd(
             ]
         }
         RouterKind::SigmoidNoAuxTc { norm_topk_prob, routed_scaling, n_group, .. } => {
-            assert!(n_group <= 64, "RouterKind::SigmoidNoAuxTc: router_gate_sigmoid.wgsl hard-caps at 64 experts, n_group must be <=64 (got {n_group})");
+            assert!(n_group <= 64, "RouterKind::SigmoidNoAuxTc: router_gate_sigmoid.wgsl group masking holds at most 64 groups, n_group must be <=64 (got {n_group})");
             vec![g.step(ids.router_bwd, &[logits, gate, d_gate, dlogits], &[rows, e, top_k, norm_topk_prob as u32, gpu_core::f(routed_scaling)], rows)]
         }
     }
@@ -266,7 +261,7 @@ pub fn bank_offset(shape: &MoeShape, e_idx: u32) -> u32 {
 }
 
 /// One expert's gated SwiGLU FFN step, combined into `acc` - the sparse
-/// replacement for `crates/glm`'s dense per-expert loop body. `x` is the
+/// replacement for `crates/glmdsa`'s dense per-expert loop body. `x` is the
 /// (already normed) hidden state shared by every expert; `gate_w`/`up_w`/
 /// `down_w` are expert `e_idx`'s own weights. `accumulate` is `false` only
 /// for the very first expert in the layer's loop (matching `scale_add.wgsl`'s
@@ -368,7 +363,7 @@ pub fn expert_fwd_tiered(
 /// overwritten each call, safe to alias across experts) does not hold for
 /// training: backward needs EVERY expert's own `gate_pre`/`up`/`h`/
 /// `expert_out`, not just whichever expert ran last. Allocates exactly what
-/// `crates/glm/src/model.rs`'s `Mlp::Moe` already allocates per layer
+/// `crates/glmdsa/src/model.rs`'s `Mlp::Moe` already allocates per layer
 /// (`model.rs:463-466`) - memory-neutral, not a reduction. Recompute-in-
 /// backward and true row compaction are follow-ups that compose over this
 /// API unchanged; NOT part of this item.
@@ -578,8 +573,8 @@ pub fn expert_dgate(g: &Gpu, ids: &MoeIdsBwd, shape: &MoeShape, saved: &ExpertSc
 /// Phase C of an MoE layer's backward: one expert's SwiGLU backward,
 /// accumulating dX into `d_x` (the shared input gradient every expert
 /// contributes to). Must run AFTER [`router_bwd`] (see [`moe_layer_bwd`]'s
-/// ordering contract) - mirrors `crates/moe/src/train.rs`'s Phase C loop and
-/// `crates/glm/src/model.rs`'s per-expert MLP backward arm exactly (both
+/// ordering contract) - mirrors `crates/toymoe/src/train.rs`'s Phase C loop and
+/// `crates/glmdsa/src/model.rs`'s per-expert MLP backward arm exactly (both
 /// already gradient-checked); this hoists that sequence, it does not
 /// re-derive it.
 ///
@@ -673,7 +668,7 @@ pub fn expert_bwd(
 /// router backward, THEN the router weight's own dense-linear backward,
 /// `router_weight_bwd` - caller-supplied since that GEMM's kernel/tiling
 /// choice is not MoE-specific math this module should own, e.g.
-/// `crates/glm`'s adaptive `pick_gemm` vs plain `MATMUL_DW`/`MATMUL_DX`) ->
+/// `crates/glmdsa`'s adaptive `pick_gemm` vs plain `MATMUL_DW`/`MATMUL_DX`) ->
 /// Phase C (every expert's SwiGLU backward, [`expert_bwd`], accumulating
 /// into `d_x`).
 ///
@@ -1066,7 +1061,7 @@ pub struct SharedExpertScratch<'a> {
 ///   sigmoid(shared_expert_gate(x)) * shared_expert(x)` exactly (the routed
 ///   and shared paths read the SAME `x`, not the shared path reading the
 ///   routed output) -- Qwen3-Omni's Talker.
-/// - `None`: added UNWEIGHTED, no gate at all. Matches `crates/glm`'s shared
+/// - `None`: added UNWEIGHTED, no gate at all. Matches `crates/glmdsa`'s shared
 ///   expert (`model.rs:794`, GLM-5.2/DeepSeek-V3's architecture) exactly --
 ///   a distinct real design, not a degenerate case of the gated one.
 ///
@@ -1175,7 +1170,7 @@ pub struct SharedExpertBwdIds {
 /// A SUBSET of [`SharedExpertScratch`], not a copy of it: the backward never
 /// reads the forward's `scaled` buffer, and the three gated-arm tensors are
 /// `Option` because the unweighted arm's forward never produces them (
-/// `crates/glm` allocates no sigmoid-gate buffers at all). Build it from a
+/// `crates/glmdsa` allocates no sigmoid-gate buffers at all). Build it from a
 /// forward scratch with [`SharedExpertScratch::acts`], or by hand.
 #[derive(Clone, Copy)]
 pub struct SharedExpertActs<'a> {
@@ -1239,7 +1234,7 @@ pub struct SharedExpertBwdScratch<'a> {
 /// no `d_acc` output.
 ///
 /// `shared_gate_w` selects the arm, exactly as in the forward:
-/// - `None` - unweighted. This is the composition `crates/glm` hand-wrote
+/// - `None` - unweighted. This is the composition `crates/glmdsa` hand-wrote
 ///   inline (`Mlp::Moe`'s shared-expert block) and now calls; the step sequence
 ///   below IS that code, moved, not re-derived.
 /// - `Some(w)` - per-row `sigmoid(x @ wᵀ)` gate. `scale_row` is its own
@@ -1277,7 +1272,7 @@ pub fn shared_expert_bwd(
     let (m, d, ff) = (rows, d_model, shared_ff);
     let mut steps: Vec<Step> = Vec::new();
     // Backward of `y = x·Wᵀ`: weight grad (when trainable) then input grad -
-    // the exact pair `crates/glm`'s `mm_bwd` emits, in that order.
+    // the exact pair `crates/glmdsa`'s `mm_bwd` emits, in that order.
     let mm_bwd = |steps: &mut Vec<Step>, d_y: &DeviceBuffer, xin: &DeviceBuffer, w: &DeviceBuffer, dw: Option<&DeviceBuffer>, dx: &DeviceBuffer, k: u32, n: u32, acc: u32| {
         if let Some(dw) = dw {
             steps.push(g.step(ids.linear_dw, &[d_y, xin, dw], &[m, k, n], n * k));
@@ -1414,7 +1409,7 @@ pub fn shared_expert_fwd_i8(
 // `expert_fwd` above removes the redundant FLOPs of evaluating every expert
 // densely, but stays naive-tier (one thread per output element, no tiling) --
 // measured several times SLOWER than GLM's existing dense TILED path at
-// GLM-5.2's real shape (`crates/glm/examples/moe_migration_bench.rs`), because
+// GLM-5.2's real shape (`crates/glmdsa/examples/moe_migration_bench.rs`), because
 // the naive kernel's per-FLOP inefficiency at ~64 rows/expert swamps the
 // FLOP-count win sparsity promises. This
 // section is the real fix: gather each expert's routed rows into a dense

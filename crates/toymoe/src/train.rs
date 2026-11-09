@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Full training pipeline (forward + backprop + AdamW) as a WGSL compute
-//! pipeline. Mirrors `tiny_sparse_moe.py`'s training step exactly, so the Rust
-//! executable can train the model from scratch on the GPU.
+//! pipeline, so the Rust executable can train the model from scratch on the
+//! GPU. It was written to mirror a reference training script's step exactly;
+//! that script is no longer in the repository.
 //!
 //! Entry point:
 //!   * `train(args)`    - generate the toy corpus, init weights, and run the
