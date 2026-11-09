@@ -8,8 +8,10 @@
 //! ```
 //!
 //! Video sparse attention against its host reference, a gated DiT resident
-//! and streamed, the block's row chunks under sparse attention, and (with
-//! `--ignored`) sparse against dense attention timed at ref2va's own shapes.
+//! and streamed, the block's row chunks under sparse attention, the DiT's and
+//! the video decoder's flash attention against their materialized trio, the
+//! int8 tier against fp32, and (with `--ignored`) sparse against dense
+//! attention timed at ref2va's own shapes.
 //!
 //! Swedish Embedded AB implements sparse-attention video generation on the
 //! GPUs its clients already own. If your team needs expertise in running
@@ -19,11 +21,12 @@
 use checkpoint::TensorSource;
 use gpu_core::select::Dtype;
 use gpu_core::DeviceBuffer;
-use minimaxh3::block::{ActLevels, Ctx, ROW_CHUNK};
+use minimaxh3::block::{attn_mode, dit_attention, ActLevels, AttnMode, Ctx, ROW_CHUNK};
 use minimaxh3::config::{H3TransformerConfig, TAG_TEXT};
 use minimaxh3::dit_shard::StreamingDit;
-use minimaxh3::model::{random_checkpoint, H3Output, H3Transformer, PackedInputs};
+use minimaxh3::model::{random_checkpoint, H3Output, H3Transformer, Int8Rounded, PackedInputs};
 use minimaxh3::pipeline::{build_packed_sequence, PackedSequence, Segment, AUDIO_CHANNELS};
+use minimaxh3::video_vae::{decoder_attention, VideoVaeConfig};
 use minimaxh3::vsa::{attention, attention_host, DevicePlan, Spec, TileGeometry};
 use model::StreamPlan;
 use vae::blocks::Tensors;
@@ -37,6 +40,78 @@ fn close(a: &[f32], b: &[f32]) -> f32 {
 fn outputs_close(a: &H3Output, b: &H3Output, bound: f32, what: &str) {
     let worst = close(&[a.video.as_slice(), &a.audio].concat(), &[b.video.as_slice(), &b.audio].concat());
     assert!(worst < bound, "{what}: worst relative difference {worst}");
+}
+
+/// Cosine similarity and max absolute difference between two same-length
+/// vectors - the pair of numbers this workspace's numeric parity gates are
+/// always stated in.
+fn cos_and_maxabs(a: &[f32], b: &[f32]) -> (f64, f64) {
+    assert_eq!(a.len(), b.len());
+    let (mut dot, mut na, mut nb, mut maxabs) = (0f64, 0f64, 0f64, 0f64);
+    for (x, y) in a.iter().zip(b) {
+        let (x, y) = (*x as f64, *y as f64);
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+        maxabs = maxabs.max((x - y).abs());
+    }
+    (dot / (na.sqrt() * nb.sqrt()), maxabs)
+}
+
+/// Deterministic pseudo-random fill - a SplitMix64 draw's top 24 bits
+/// mapped into `[-1, 1)`, so both arms see byte-identical inputs without
+/// pulling an RNG dependency into this module.
+///
+/// The RANGE is load-bearing, not cosmetic. `q·k` runs over `head_dim`
+/// terms and is then scaled by only `1/sqrt(head_dim)`, so inputs an order
+/// of magnitude wide push the logits far enough apart that `softmax`
+/// saturates to a one-hot pick of a single `v` row - at which point BOTH
+/// arms return that row verbatim, agree bit-for-bit, and prove nothing
+/// about the online softmax. An earlier version of this generator divided
+/// by 2048 instead of 2^23 and produced values up to 8191; it reported
+/// cosine 1.0000000000 and max_abs exactly 0 at every sequence length,
+/// which looked like an unusually clean pass and was in fact a vacuous
+/// one. [`assert_mixing`] below is the standing guard against that.
+fn fill(n: usize, seed: u64) -> Vec<f32> {
+    let mut s = seed;
+    (0..n)
+        .map(|_| {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            ((z >> 40) as f32 / 8_388_608.0) - 1.0
+        })
+        .collect()
+}
+
+fn std_dev(v: &[f32]) -> f64 {
+    let mean = v.iter().map(|x| *x as f64).sum::<f64>() / v.len() as f64;
+    (v.iter().map(|x| (*x as f64 - mean).powi(2)).sum::<f64>() / v.len() as f64).sqrt()
+}
+
+/// Fail unless the attention actually AVERAGED over many keys.
+///
+/// Attention output is a convex combination of `v` rows, so a softmax that
+/// spreads its mass over `n` keys shrinks the spread of the result by
+/// roughly `sqrt(n)`, while one that has saturated to a single key
+/// reproduces a `v` row unchanged and leaves the spread equal to `v`'s.
+/// Comparing two arms on a saturated softmax compares two copies of the
+/// same lookup and would pass no matter what the online softmax did with
+/// its running max and rescale - the exact code this test exists to check.
+/// Half of `v`'s own standard deviation is a deliberately loose threshold:
+/// it is nowhere near the `1/sqrt(37)` a near-uniform mix over even the
+/// shortest sequence here would give, so it fires only on genuine
+/// saturation and never on an unlucky draw.
+fn assert_mixing(out: &[f32], v: &[f32], seq_len: u32) {
+    let (so, sv) = (std_dev(out), std_dev(v));
+    assert!(
+        so < 0.5 * sv,
+        "seq_len {seq_len}: softmax did not mix - output std {so:.4} vs v std {sv:.4}. \
+         The logits have saturated to a one-hot pick, so both attention arms are \
+         returning the same v row verbatim and this comparison proves nothing."
+    );
 }
 
 /// The device attention computes the host reference's: with and without a
@@ -79,8 +154,7 @@ struct Tiny {
 }
 
 impl Tiny {
-    fn new() -> Tiny {
-        let cfg = H3TransformerConfig::tiny();
+    fn new(cfg: H3TransformerConfig) -> Tiny {
         let seed = data::rng::random_seed();
         let tensors = random_checkpoint(&cfg, seed);
         let [_, ph, pw] = cfg.patch_size;
@@ -116,7 +190,13 @@ impl Tiny {
     }
 
     fn resident(&self, gates: Option<&dyn TensorSource>) -> H3Transformer {
-        H3Transformer::load_on(&self.tensors, self.cfg, StreamPlan::single(self.cfg.num_layers as usize), None, Dtype::F32, gates).expect("a resident tiny model")
+        self.resident_from(&self.tensors, Dtype::F32, gates)
+    }
+
+    /// Hold `tensors` - this model's or a view of them - at `tier`, ready to
+    /// run at [`Self::TIMESTEPS`].
+    fn resident_from(&self, tensors: &dyn TensorSource, tier: Dtype, gates: Option<&dyn TensorSource>) -> H3Transformer {
+        H3Transformer::load_on(tensors, self.cfg, StreamPlan::single(self.cfg.num_layers as usize), None, tier, gates).expect("a resident tiny model")
     }
 }
 
@@ -124,7 +204,7 @@ impl Tiny {
 /// gates' coarse branch on, a resident and a streamed DiT agree; dropping
 /// tiles and the coarse branch each change the forward.
 fn a_gated_dit_runs_resident_and_streamed_alike() {
-    let t = Tiny::new();
+    let t = Tiny::new(H3TransformerConfig::tiny());
     let plain = t.resident(None);
     let _p = plain.prepare(&t.tensors, &Tiny::TIMESTEPS).expect("prepare");
     let dense = plain.forward(&t.inputs(None, ROW_CHUNK));
@@ -153,7 +233,7 @@ fn a_gated_dit_runs_resident_and_streamed_alike() {
 /// alike, so the gate projection's full-length buffer is written at each
 /// chunk's own rows too.
 fn row_chunks_compute_what_one_chunk_computes() {
-    let t = Tiny::new();
+    let t = Tiny::new(H3TransformerConfig::tiny());
     let seq_len = t.layout.token_tags.len() as u32;
     assert!(seq_len > 7 && !seq_len.is_multiple_of(7), "the layout spans several chunks with a remainder ({seq_len} rows)");
     let gated = t.resident(Some(&t.gates));
@@ -165,6 +245,94 @@ fn row_chunks_compute_what_one_chunk_computes() {
             outputs_close(&gated.forward(&t.inputs(sparsity, chunk)), &whole, 1e-4, &format!("sparsity {sparsity:?} in {chunk}-row chunks"));
         }
     }
+}
+
+/// The DiT's flash attention computes what its materialized trio does - the
+/// same `1/sqrt(head_dim)` scale, the same unmasked bidirectional coverage,
+/// the same `[seq_len, heads*head_dim]` layout - to fp32 rounding, at the
+/// real head width of 128 and at lengths coprime to every kernel tile (37 is
+/// shorter than one query tile), so the partial-tile guards run.
+fn the_dits_flash_attention_matches_its_materialized_trio() {
+    let cx = Ctx::new(None);
+    if attn_mode(&cx.gpu, 128) != AttnMode::Flash {
+        brain_testutil::skip_unavailable("this card cannot run the flash-attention family: both arms would be the trio");
+        return;
+    }
+    let (heads, head_dim) = (4u32, 128u32);
+    let inner = heads * head_dim;
+    for seq_len in [37u32, 100, 200] {
+        let n = (seq_len * inner) as usize;
+        let v_host = fill(n, 3);
+        let (q, k, v) = (cx.upload(&fill(n, 1)), cx.upload(&fill(n, 2)), cx.upload(&v_host));
+        let run = |mode| cx.gpu.read(&dit_attention(&cx.gpu, mode, &q, &k, &v, seq_len, heads, head_dim), n);
+        let (want, got) = (run(AttnMode::Materialized), run(AttnMode::Flash));
+        assert_mixing(&want, &v_host, seq_len);
+        let (cos, maxabs) = cos_and_maxabs(&want, &got);
+        println!("seq_len {seq_len}: cosine {cos:.10}, max_abs {maxabs:.3e}");
+        assert!(cos > 0.999999, "seq_len {seq_len}: flash vs trio cosine {cos:.10} (max_abs {maxabs:.3e})");
+        assert!(maxabs < 1e-4, "seq_len {seq_len}: flash vs trio max_abs {maxabs:.3e} (cosine {cos:.10})");
+    }
+}
+
+/// The video VAE decoder's attention, on its own kernels: flash and the
+/// materialized trio agree at the decoder's shape - its heads over a tiled
+/// chunk's tokens.
+fn the_decoders_flash_attention_matches_its_materialized_trio() {
+    let cfg = VideoVaeConfig::real();
+    let (heads, head_dim) = (cfg.decoder_num_attention_heads, cfg.decoder_attention_head_dim);
+    // The decoder's own device and kernel table, not the DiT's.
+    let cx = minimaxh3::video_vae::Ctx::new(None);
+    if attn_mode(&cx.gpu, head_dim) != AttnMode::Flash {
+        brain_testutil::skip_unavailable("this card cannot run the flash-attention family: both arms would be the trio");
+        return;
+    }
+    let seq_len = 7 * 256 + cfg.decoder_num_register_tokens + 1;
+    let n = (seq_len * heads * head_dim) as usize;
+    let up = |v: &[f32]| cx.gpu.storage_init("decoder attention check", v);
+    let (q, k, v) = (up(&fill(n, 1)), up(&fill(n, 2)), up(&fill(n, 3)));
+    let run = |mode| cx.gpu.read(&decoder_attention(&cx.gpu, mode, &q, &k, &v, seq_len, heads, head_dim), n);
+    let (want, got) = (run(AttnMode::Materialized), run(AttnMode::Flash));
+    let max_abs = want.iter().zip(&got).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+    let spread = want.iter().fold(0f32, |m, x| m.max(x.abs()));
+    assert!(spread > 1e-3, "the trio's output is ~0 - the comparison would be vacuous");
+    assert!(max_abs < 1e-4, "flash vs trio at the decoder's shape: max_abs {max_abs:.3e}");
+}
+
+/// The int8 tier a generation holds its DiT at stays close to the fp32
+/// model it quantizes, and with two activation levels computes what its
+/// int8 weights do. The widths are the tiny config's widened to whole
+/// quantization groups.
+fn an_int8_resident_model_tracks_the_fp32_one() {
+    let t = Tiny::new(H3TransformerConfig { hidden_size: 64, text_dim: 32, ..H3TransformerConfig::tiny() });
+    if !Ctx::new(None).ops.caps().numeric.int8_dot {
+        brain_testutil::skip_unavailable("this card has no packed int8 dot product");
+        return;
+    }
+    let run = |tensors: &dyn TensorSource, tier: Dtype, act_levels: ActLevels| {
+        let m = t.resident_from(tensors, tier, None);
+        let _plan = m.prepare(tensors, &Tiny::TIMESTEPS).expect("prepare");
+        m.forward(&PackedInputs { act_levels, ..t.inputs(None, ROW_CHUNK) })
+    };
+    let cosine = |a: &[f32], b: &[f32]| {
+        let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
+        let norm = |v: &[f32]| v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        dot / (norm(a) * norm(b))
+    };
+    let fp32 = run(&t.tensors, Dtype::F32, ActLevels::One);
+    // One activation level against the fp32 model: 1 - cosine measured up to
+    // ~1.6e-6 across seeds on this config.
+    let one = run(&t.tensors, Dtype::I8, ActLevels::One);
+    assert!(cosine(&one.video, &fp32.video) > 0.999_99, "One: video cosine {}", cosine(&one.video, &fp32.video));
+    assert!(cosine(&one.audio, &fp32.audio) > 0.999_99, "One: audio cosine {}", cosine(&one.audio, &fp32.audio));
+    // Two levels compute what the int8 weights do: against the fp32 model on
+    // those same rounded weights, what is left is the activation's
+    // second-level rounding, whatever the weights' own rounding costs a given
+    // seed against the unrounded model: 1 - cosine measured near 1e-12.
+    let rounded = Int8Rounded { inner: &t.tensors, cfg: t.cfg, blocks: 0..t.cfg.num_layers as usize, kinds: &[], group: model::int8::GROUP };
+    let exact = run(&rounded, Dtype::F32, ActLevels::One);
+    let two = run(&t.tensors, Dtype::I8, ActLevels::Two);
+    assert!(cosine(&two.video, &exact.video) > 1.0 - 1e-9, "Two: video cosine {} against the rounded weights", cosine(&two.video, &exact.video));
+    assert!(cosine(&two.audio, &exact.audio) > 1.0 - 1e-9, "Two: audio cosine {} against the rounded weights", cosine(&two.audio, &exact.audio));
 }
 
 /// Dense flash attention against sparse attention at the shapes of a ref2va
@@ -203,6 +371,9 @@ fn sparse_attention_time_at_a_real_shape() {
 gpu_core::card_tests!(
     sparse_attention_computes_the_host_reference,
     a_gated_dit_runs_resident_and_streamed_alike,
-    row_chunks_compute_what_one_chunk_computes;
+    row_chunks_compute_what_one_chunk_computes,
+    the_dits_flash_attention_matches_its_materialized_trio,
+    the_decoders_flash_attention_matches_its_materialized_trio,
+    an_int8_resident_model_tracks_the_fp32_one;
     ignored: sparse_attention_time_at_a_real_shape,
 );

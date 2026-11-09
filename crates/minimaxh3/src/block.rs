@@ -424,6 +424,13 @@ fn flash_packed(gpu: &Gpu, ids: &AttnKernels, qkv: &DeviceBuffer, seq_len: u32, 
     out
 }
 
+/// The DiT's self-attention over three `[seq_len, heads*head_dim]` q/k/v
+/// buffers in `mode`: [`attention`] on the DiT's own kernels, which picks
+/// the mode the device runs with [`attn_mode`].
+pub fn dit_attention(gpu: &Gpu, mode: AttnMode, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
+    attention(gpu, &DIT_ATTN, mode, q, k, v, seq_len, heads, head_dim)
+}
+
 /// [`attention`] over a packed `[seq_len, 3*inner]` q/k/v slab: the flash
 /// arm reads it as it is, the materialized arm unpacks it first.
 fn attention_packed(cx: &Ctx, mode: AttnMode, qkv: &DeviceBuffer, seq_len: u32, heads: u32, head_dim: u32) -> DeviceBuffer {
@@ -998,78 +1005,6 @@ pub fn block_forward(cx: &Ctx, w: &BlockWeights, inp: &BlockInputs, cfg: &H3Tran
 mod tests {
     use super::*;
 
-    /// Cosine similarity and max absolute difference between two same-length
-    /// vectors - the pair of numbers this workspace's numeric parity gates are
-    /// always stated in.
-    fn cos_and_maxabs(a: &[f32], b: &[f32]) -> (f64, f64) {
-        assert_eq!(a.len(), b.len());
-        let (mut dot, mut na, mut nb, mut maxabs) = (0f64, 0f64, 0f64, 0f64);
-        for (x, y) in a.iter().zip(b) {
-            let (x, y) = (*x as f64, *y as f64);
-            dot += x * y;
-            na += x * x;
-            nb += y * y;
-            maxabs = maxabs.max((x - y).abs());
-        }
-        (dot / (na.sqrt() * nb.sqrt()), maxabs)
-    }
-
-    /// Deterministic pseudo-random fill - a SplitMix64 draw's top 24 bits
-    /// mapped into `[-1, 1)`, so both arms see byte-identical inputs without
-    /// pulling an RNG dependency into this module.
-    ///
-    /// The RANGE is load-bearing, not cosmetic. `q·k` runs over `head_dim`
-    /// terms and is then scaled by only `1/sqrt(head_dim)`, so inputs an order
-    /// of magnitude wide push the logits far enough apart that `softmax`
-    /// saturates to a one-hot pick of a single `v` row - at which point BOTH
-    /// arms return that row verbatim, agree bit-for-bit, and prove nothing
-    /// about the online softmax. An earlier version of this generator divided
-    /// by 2048 instead of 2^23 and produced values up to 8191; it reported
-    /// cosine 1.0000000000 and max_abs exactly 0 at every sequence length,
-    /// which looked like an unusually clean pass and was in fact a vacuous
-    /// one. [`assert_mixing`] below is the standing guard against that.
-    fn fill(n: usize, seed: u64) -> Vec<f32> {
-        let mut s = seed;
-        (0..n)
-            .map(|_| {
-                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-                let mut z = s;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                z ^= z >> 31;
-                ((z >> 40) as f32 / 8_388_608.0) - 1.0
-            })
-            .collect()
-    }
-
-    fn std_dev(v: &[f32]) -> f64 {
-        let mean = v.iter().map(|x| *x as f64).sum::<f64>() / v.len() as f64;
-        (v.iter().map(|x| (*x as f64 - mean).powi(2)).sum::<f64>() / v.len() as f64).sqrt()
-    }
-
-    /// Fail unless the attention actually AVERAGED over many keys.
-    ///
-    /// Attention output is a convex combination of `v` rows, so a softmax that
-    /// spreads its mass over `n` keys shrinks the spread of the result by
-    /// roughly `sqrt(n)`, while one that has saturated to a single key
-    /// reproduces a `v` row unchanged and leaves the spread equal to `v`'s.
-    /// Comparing two arms on a saturated softmax compares two copies of the
-    /// same lookup and would pass no matter what the online softmax did with
-    /// its running max and rescale - the exact code this test exists to check.
-    /// Half of `v`'s own standard deviation is a deliberately loose threshold:
-    /// it is nowhere near the `1/sqrt(37)` a near-uniform mix over even the
-    /// shortest sequence here would give, so it fires only on genuine
-    /// saturation and never on an unlucky draw.
-    fn assert_mixing(out: &[f32], v: &[f32], seq_len: u32) {
-        let (so, sv) = (std_dev(out), std_dev(v));
-        assert!(
-            so < 0.5 * sv,
-            "seq_len {seq_len}: softmax did not mix - output std {so:.4} vs v std {sv:.4}. \
-             The logits have saturated to a one-hot pick, so both attention arms are \
-             returning the same v row verbatim and this comparison proves nothing."
-        );
-    }
-
     /// A score matrix too large to address in u32 must be REFUSED, not
     /// silently wrapped.
     ///
@@ -1091,50 +1026,5 @@ mod tests {
         let cx = Ctx::new(Some("cpu"));
         let (q, k, v) = (cx.upload(&[0.0]), cx.upload(&[0.0]), cx.upload(&[0.0]));
         attention_trio(&cx.gpu, &DIT_ATTN, &q, &k, &v, 9900, 56, 128);
-    }
-
-    /// The fused flash path must compute the SAME attention as the
-    /// materialized trio, not merely something close: the same
-    /// `1/sqrt(head_dim)` scale, the same unmasked bidirectional coverage, the
-    /// same `[seq_len, heads*head_dim]` output layout. Only the accumulation
-    /// ORDER differs - the online softmax rescales as it streams where the
-    /// trio normalizes once - so the two must agree to fp32 rounding, and
-    /// nothing beyond rounding is being traded away for the memory win.
-    ///
-    /// Runs at the REAL `head_dim` of 128 - the flash family's hard ceiling,
-    /// which `H3TransformerConfig::real()` sits exactly on, not under - and at
-    /// sequence lengths deliberately coprime to the kernels' tiles: none is a
-    /// multiple of the `BR` query tile (64, or 128 on the `reg2` rung) or of
-    /// the `BC = 16` key tile, so the partial-tile guards and the zero-filled
-    /// tail rows are exercised rather than skipped. 37 is also shorter than a
-    /// single query tile, the degenerate case where one workgroup covers the
-    /// whole sequence.
-    ///
-    /// GPU-only by construction: the flash family needs workgroup barriers the
-    /// Cranelift CPU JIT cannot split a kernel body at, so there both arms
-    /// would BE the trio and the comparison would be vacuous. It runs on the ambient device and skips, rather than passing
-    /// silently, where that device cannot run flash.
-    #[test]
-    fn flash_attention_matches_the_materialized_trio_numerically() {
-        let cx = Ctx::new(None);
-        if attn_mode(&cx.gpu, 128) != AttnMode::Flash {
-            brain_testutil::skip("the ambient device cannot run the flash-attention family - both arms would be the trio");
-            return;
-        }
-
-        let (heads, head_dim) = (4u32, 128u32);
-        let inner = heads * head_dim;
-        for &seq_len in &[37u32, 100, 200] {
-            let n = (seq_len * inner) as usize;
-            let v_host = fill(n, 3);
-            let (q, k, v) = (cx.upload(&fill(n, 1)), cx.upload(&fill(n, 2)), cx.upload(&v_host));
-            let want = cx.gpu.read(&attention_trio(&cx.gpu, &DIT_ATTN, &q, &k, &v, seq_len, heads, head_dim), n);
-            let got = cx.gpu.read(&attention_flash(&cx.gpu, &DIT_ATTN, &q, &k, &v, seq_len, heads, head_dim), n);
-            assert_mixing(&want, &v_host, seq_len);
-            let (cos, maxabs) = cos_and_maxabs(&want, &got);
-            println!("seq_len {seq_len}: cosine {cos:.10}, max_abs {maxabs:.3e}");
-            assert!(cos > 0.999999, "seq_len {seq_len}: flash vs trio cosine {cos:.10} (max_abs {maxabs:.3e})");
-            assert!(maxabs < 1e-4, "seq_len {seq_len}: flash vs trio max_abs {maxabs:.3e} (cosine {cos:.10})");
-        }
     }
 }

@@ -431,6 +431,107 @@ pub fn random_checkpoint(cfg: &H3TransformerConfig, seed: u64) -> Tensors {
     t
 }
 
+/// The checkpoint as the int8 tier stores it: every block and refiner
+/// linear weight rounded to its int8 groups and back, everything else as
+/// read. Read in fp32, it separates what the int8 weights cost from what the
+/// int8 arithmetic does.
+pub struct Int8Rounded<'a> {
+    pub inner: &'a dyn checkpoint::TensorSource,
+    pub cfg: H3TransformerConfig,
+    /// The DiT blocks whose linears are rounded (the refiner's always are).
+    pub blocks: std::ops::Range<usize>,
+    /// Name suffixes of the linears rounded; empty rounds every kind.
+    pub kinds: &'static [&'static str],
+    /// Weights per scale group.
+    pub group: usize,
+}
+
+impl Int8Rounded<'_> {
+    /// The input width of a linear the int8 tier quantizes, or `None`.
+    fn linear_k(&self, name: &str) -> Option<usize> {
+        let c = &self.cfg;
+        let block = name.strip_prefix("transformer_blocks.").and_then(|r| r.split('.').next()).and_then(|i| i.parse::<usize>().ok());
+        let in_stack = block.map_or(name.starts_with("token_refiner.refiner_blocks."), |b| self.blocks.contains(&b));
+        let k = if name.ends_with(".to_q.weight") || name.ends_with(".to_k.weight") || name.ends_with(".to_v.weight") || name.ends_with(".ff.net.0.proj.weight") {
+            c.hidden_size
+        } else if name.ends_with(".to_out.0.weight") {
+            c.inner_dim()
+        } else if name.ends_with(".ff.net.2.weight") {
+            c.ffn_dim
+        } else {
+            return None;
+        };
+        (in_stack && (self.kinds.is_empty() || self.kinds.iter().any(|kind| name.ends_with(kind)))).then_some(k as usize)
+    }
+}
+
+/// `w` (`[n, k]`) rounded to symmetric int8 in `group`-wide scale groups
+/// along `k`, and back - the int8 tier's own rounding at
+/// `model::int8::GROUP`, its group-16 (Q6_K-layout) variant otherwise.
+fn int8_round_trip(w: &[f32], k: usize, group: usize) -> Vec<f32> {
+    if group == model::int8::GROUP {
+        return Weight::round_trip(w, w.len() / k, k, Dtype::I8);
+    }
+    w.chunks(group)
+        .flat_map(|g| {
+            let scale = g.iter().fold(0f32, |m, v| m.max(v.abs())) / 127.0;
+            g.iter().map(move |v| if scale > 0.0 { (v / scale).round().clamp(-127.0, 127.0) * scale } else { 0.0 })
+        })
+        .collect()
+}
+
+impl Int8Rounded<'_> {
+    /// `name` in ordered chunks of whole rows - at most `max_elems` values,
+    /// and at least one row - a rounded linear's rows rounded as they are
+    /// read, one row buffered at a time.
+    fn chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        let Some(k) = self.linear_k(name) else { return self.inner.with_tensor_chunks(name, max_elems, f) };
+        let chunk = (max_elems / k).max(1).saturating_mul(k);
+        let (mut row, mut out, mut at) = (Vec::with_capacity(k), Vec::with_capacity(chunk.min(self.inner.numel(name).unwrap_or(k))), 0u64);
+        let found = self.inner.with_tensor_chunks(name, max_elems.max(k), &mut |_, part| {
+            for &w in part {
+                row.push(w);
+                if row.len() == k {
+                    out.extend(int8_round_trip(&row, k, self.group));
+                    row.clear();
+                    if out.len() == chunk {
+                        f(at, &out);
+                        at += out.len() as u64;
+                        out.clear();
+                    }
+                }
+            }
+        });
+        if found && !out.is_empty() {
+            f(at, &out);
+        }
+        found
+    }
+}
+
+/// Values read at a time when a caller asks for the whole tensor.
+const ROUNDED_CHUNK: usize = 1 << 20;
+
+impl checkpoint::TensorSource for Int8Rounded<'_> {
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+        let mut whole = Vec::new();
+        let found = self.chunks(name, ROUNDED_CHUNK, &mut |_, part| whole.extend_from_slice(part));
+        if found {
+            f(&whole);
+        }
+        found
+    }
+    fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        self.chunks(name, max_elems, f)
+    }
+    fn numel(&self, name: &str) -> Option<usize> {
+        self.inner.numel(name)
+    }
+    fn advise_drop(&self, name: &str) {
+        self.inner.advise_drop(name)
+    }
+}
+
 /// The device bytes a streamed DiT holds on each card it runs a stage on:
 /// one block's slot at fp32 - with its VSA gate when `gated` - and the embed
 /// and head stages' weights.
@@ -896,69 +997,6 @@ mod tests {
         }
     }
 
-    /// The checkpoint as the int8 tier stores it: every block and refiner
-    /// linear weight rounded to its int8 groups and back, everything else
-    /// as read.
-    struct Int8RoundedWeights<'a> {
-        inner: &'a dyn checkpoint::TensorSource,
-        cfg: H3TransformerConfig,
-        /// The DiT blocks whose linears are rounded (the refiner's always are).
-        blocks: std::ops::Range<usize>,
-        /// Name suffixes of the linears rounded; empty rounds every kind.
-        kinds: &'static [&'static str],
-        /// Weights per scale group.
-        group: usize,
-    }
-
-    impl Int8RoundedWeights<'_> {
-        /// The input width of a linear the int8 tier quantizes, or `None`.
-        fn linear_k(&self, name: &str) -> Option<usize> {
-            let c = &self.cfg;
-            let block = name.strip_prefix("transformer_blocks.").and_then(|r| r.split('.').next()).and_then(|i| i.parse::<usize>().ok());
-            let in_stack = block.map_or(name.starts_with("token_refiner.refiner_blocks."), |b| self.blocks.contains(&b));
-            let k = if name.ends_with(".to_q.weight") || name.ends_with(".to_k.weight") || name.ends_with(".to_v.weight") || name.ends_with(".ff.net.0.proj.weight") {
-                c.hidden_size
-            } else if name.ends_with(".to_out.0.weight") {
-                c.inner_dim()
-            } else if name.ends_with(".ff.net.2.weight") {
-                c.ffn_dim
-            } else {
-                return None;
-            };
-            (in_stack && (self.kinds.is_empty() || self.kinds.iter().any(|kind| name.ends_with(kind)))).then_some(k as usize)
-        }
-    }
-
-    /// `w` (`[n, k]`) rounded to symmetric int8 in `group`-wide scale groups
-    /// along `k`, and back - the int8 tier's own rounding at
-    /// `model::int8::GROUP`, its group-16 (Q6_K-layout) variant otherwise.
-    fn int8_round_trip(w: &[f32], k: usize, group: usize) -> Vec<f32> {
-        if group == model::int8::GROUP {
-            return Weight::round_trip(w, w.len() / k, k, Dtype::I8);
-        }
-        w.chunks(group)
-            .flat_map(|g| {
-                let scale = g.iter().fold(0f32, |m, v| m.max(v.abs())) / 127.0;
-                g.iter().map(move |v| if scale > 0.0 { (v / scale).round().clamp(-127.0, 127.0) * scale } else { 0.0 })
-            })
-            .collect()
-    }
-
-    impl checkpoint::TensorSource for Int8RoundedWeights<'_> {
-        fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
-            match self.linear_k(name) {
-                Some(k) => self.inner.with_tensor(name, &mut |w| f(&int8_round_trip(w, k, self.group))),
-                None => self.inner.with_tensor(name, f),
-            }
-        }
-        fn numel(&self, name: &str) -> Option<usize> {
-            self.inner.numel(name)
-        }
-        fn advise_drop(&self, name: &str) {
-            self.inner.advise_drop(name)
-        }
-    }
-
     /// Whether the int8 tier's WEIGHT rounding alone moves the end result:
     /// the fp32 streaming forward over the checkpoint as the int8 tier
     /// stores it, against the reference, every golden tap. Runs on the CPU
@@ -974,7 +1012,7 @@ mod tests {
         let want = |name: &str| fx.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("golden fixture tap {name:?} missing")).data.clone();
         let golden = GoldenInputs::read(&fx);
         let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
-        let rounded = Int8RoundedWeights { inner: &reader, cfg, blocks: 0..cfg.num_layers as usize, kinds: &[], group: model::int8::GROUP };
+        let rounded = Int8Rounded { inner: &reader, cfg, blocks: 0..cfg.num_layers as usize, kinds: &[], group: model::int8::GROUP };
         let dit = crate::dit_shard::StreamingDit::open(&cfg, Some("cpu"));
         let t0 = std::time::Instant::now();
         let (out, taps) = H3Transformer::forward_streaming_with_taps(&rounded, &cfg, &dit, &golden.inputs(block::ActLevels::One));
@@ -1005,7 +1043,7 @@ mod tests {
         let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
         let dit = crate::dit_shard::StreamingDit::open(&cfg, Some("cpu"));
         let cosine = |blocks: std::ops::Range<usize>| {
-            let rounded = Int8RoundedWeights { inner: &reader, cfg, blocks: blocks.clone(), kinds: &[], group: model::int8::GROUP };
+            let rounded = Int8Rounded { inner: &reader, cfg, blocks: blocks.clone(), kinds: &[], group: model::int8::GROUP };
             let out = H3Transformer::forward_streaming(&rounded, None, &cfg, &dit, &golden.inputs(block::ActLevels::One));
             let c = brain_testutil::parity::compare(&out.video, &want_video).0;
             eprintln!("blocks {blocks:?} rounded: output_video cosine {c:.6}");
@@ -1045,7 +1083,7 @@ mod tests {
             ("every kind, group 16", &[], 16),
         ];
         for (label, kinds, group) in cases {
-            let rounded = Int8RoundedWeights { inner: &reader, cfg, blocks: 0..cfg.num_layers as usize, kinds, group };
+            let rounded = Int8Rounded { inner: &reader, cfg, blocks: 0..cfg.num_layers as usize, kinds, group };
             let out = H3Transformer::forward_streaming(&rounded, None, &cfg, &dit, &golden.inputs(block::ActLevels::One));
             let (v, a) = (brain_testutil::parity::compare(&out.video, &want_video).0, brain_testutil::parity::compare(&out.audio, &want_audio).0);
             eprintln!("{label}: output_video cosine {v:.6}, output_audio cosine {a:.6}");
@@ -1086,7 +1124,7 @@ mod tests {
         let mut sched = crate::schedule::DualSchedule::new();
         sched.set_timesteps(20);
         let reader = crate::caps::open_dit_reader(&paths.dit).unwrap_or_else(|e| panic!("open_dit_reader: {e}"));
-        let rounded = Int8RoundedWeights { inner: &reader, cfg, blocks: 0..cfg.num_layers as usize, kinds: &[], group: model::int8::GROUP };
+        let rounded = Int8Rounded { inner: &reader, cfg, blocks: 0..cfg.num_layers as usize, kinds: &[], group: model::int8::GROUP };
         let dit = crate::dit_shard::StreamingDit::open(&cfg, Some("cpu"));
         eprintln!("{} packed rows ({} video, {} audio, {} text)", packed.position_ids.len() / 3, packed.video_indices.len(), packed.audio_indices.len(), packed.text_indices.len());
         for step in [0, sched.num_steps() / 2] {
@@ -1528,6 +1566,39 @@ mod tests {
         }
     }
 
+    /// The int8-rounded view rounds each linear row by row as it is read in
+    /// bounded chunks - whatever the chunk size - to exactly what rounding
+    /// the whole tensor at once gives, at the int8 tier's group and at a
+    /// narrower one, and passes every other tensor through untouched.
+    #[test]
+    fn the_int8_rounded_view_rounds_each_row_as_the_whole_tensor_rounds() {
+        let cfg = H3TransformerConfig { hidden_size: 64, text_dim: 32, ..H3TransformerConfig::tiny() };
+        let tensors = random_checkpoint(&cfg, 7);
+        let read = |src: &dyn checkpoint::TensorSource, name: &str, max: usize| {
+            let mut out = Vec::new();
+            assert!(src.with_tensor_chunks(name, max, &mut |off, part| {
+                assert_eq!(off as usize, out.len(), "chunks arrive in order");
+                out.extend_from_slice(part);
+            }));
+            out
+        };
+        let q = "transformer_blocks.0.attn.to_q.weight";
+        let norm = "transformer_blocks.0.norm1.weight";
+        let raw = |name: &str| tensors[name].1.clone();
+        for group in [model::int8::GROUP, 16] {
+            let rounded = Int8Rounded { inner: &tensors, cfg, blocks: 0..cfg.num_layers as usize, kinds: &[], group };
+            let want = int8_round_trip(&raw(q), cfg.hidden_size as usize, group);
+            assert_ne!(want, raw(q), "rounding changes the weights");
+            for max in [1, 7, 64, 1000, usize::MAX] {
+                assert_eq!(read(&rounded, q, max), want, "group {group}, chunks of at most {max}");
+            }
+            let mut whole = Vec::new();
+            assert!(checkpoint::TensorSource::with_tensor(&rounded, q, &mut |w| whole = w.to_vec()));
+            assert_eq!(whole, want);
+            assert_eq!(read(&rounded, norm, 5), raw(norm), "a norm is read as stored");
+        }
+    }
+
     #[test]
     fn a_resident_model_computes_what_the_streamed_forward_computes() {
         use crate::dit_shard::StreamingDit;
@@ -1542,49 +1613,6 @@ mod tests {
         assert_eq!(out.video, streamed.video);
         assert_eq!(out.audio, streamed.audio);
         assert!(out.video.iter().any(|&v| v != 0.0), "the comparison must not be trivially all-zero");
-    }
-
-    /// The int8 tier a generation holds its DiT at stays close to the fp32
-    /// model it quantizes - on a device that runs the packed dot product.
-    /// The widths are the tiny config's widened to whole quantization groups.
-    #[test]
-    fn an_int8_resident_model_tracks_the_fp32_one() {
-        let cfg = H3TransformerConfig { hidden_size: 64, text_dim: 32, ..H3TransformerConfig::tiny() };
-        if !Ctx::new(None).ops.caps().numeric.int8_dot {
-            brain_testutil::skip("the ambient device has no packed int8 dot product");
-            return;
-        }
-        let tensors = random_checkpoint(&cfg, data::rng::random_seed());
-        let packed = Packed::random(&cfg);
-        let plan = || StreamPlan::single(cfg.num_layers as usize);
-        let run = |tier: Dtype, act_levels: block::ActLevels| {
-            let m = H3Transformer::load_on(&tensors, cfg, plan(), None, tier, None).expect("a resident tiny model");
-            let _plan = m.prepare(&tensors, packed.inputs().timestep).expect("prepare");
-            m.forward(&PackedInputs { act_levels, ..packed.inputs() })
-        };
-        let fp32 = run(Dtype::F32, block::ActLevels::One);
-        let cosine = |a: &[f32], b: &[f32]| {
-            let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
-            let norm = |v: &[f32]| v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-            dot / (norm(a) * norm(b))
-        };
-        // One activation level against the fp32 model: 1 - cosine measured up
-        // to ~1.6e-6 across seeds on this config.
-        let one = run(Dtype::I8, block::ActLevels::One);
-        assert!(cosine(&one.video, &fp32.video) > 0.999_99, "One: video cosine {}", cosine(&one.video, &fp32.video));
-        assert!(cosine(&one.audio, &fp32.audio) > 0.999_99, "One: audio cosine {}", cosine(&one.audio, &fp32.audio));
-        // Two levels compute what the int8 weights do: against the fp32 model
-        // on those same rounded weights, what is left is the activation's
-        // second-level rounding, whatever the weights' own rounding costs a
-        // given seed against the unrounded model: 1 - cosine measured near
-        // 1e-12 across seeds.
-        let rounded = Int8RoundedWeights { inner: &tensors, cfg, blocks: 0..cfg.num_layers as usize, kinds: &[], group: model::int8::GROUP };
-        let m = H3Transformer::load_on(&rounded, cfg, plan(), None, Dtype::F32, None).expect("a resident tiny model");
-        let _p = m.prepare(&rounded, packed.inputs().timestep).expect("prepare");
-        let exact = m.forward(&packed.inputs());
-        let two = run(Dtype::I8, block::ActLevels::Two);
-        assert!(cosine(&two.video, &exact.video) > 1.0 - 1e-9, "Two: video cosine {} against the rounded weights", cosine(&two.video, &exact.video));
-        assert!(cosine(&two.audio, &exact.audio) > 1.0 - 1e-9, "Two: audio cosine {} against the rounded weights", cosine(&two.audio, &exact.audio));
     }
 
     /// Splitting the block stack over two stages must change WHERE the work
