@@ -1,0 +1,108 @@
+<!-- source-sha256: 55f41bc4fe94966d13987d32375e7360ac6a3a715972ca378c10bcc866ac246c -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 410" width="1000" height="410"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="410" fill="#ffffff"/>
+<text x="500" y="28.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Keys and values computed at each step, prompt of 3 tokens and 4 generated</text>
+<rect x="16" y="58" width="476" height="290" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="30" y="80" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Recompute the whole text every step</text>
+<text x="88" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">position</text>
+<text x="126" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">0</text>
+<text x="184" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">1</text>
+<text x="242" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">2</text>
+<text x="300" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">3</text>
+<text x="358" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">4</text>
+<text x="416" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">5</text>
+<text x="88" y="146.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">step 1</text>
+<rect x="100" y="124" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="126" y="146" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">5</text>
+<rect x="158" y="124" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="184" y="146" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="216" y="124" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="242" y="146" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">9</text>
+<text x="88" y="188.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">step 2</text>
+<rect x="100" y="166" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="126" y="188" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">5</text>
+<rect x="158" y="166" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="184" y="188" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="216" y="166" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="242" y="188" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">9</text>
+<rect x="274" y="166" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="300" y="188" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">4</text>
+<text x="88" y="230.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">step 3</text>
+<rect x="100" y="208" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="126" y="230" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">5</text>
+<rect x="158" y="208" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="184" y="230" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="216" y="208" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="242" y="230" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">9</text>
+<rect x="274" y="208" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="300" y="230" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">4</text>
+<rect x="332" y="208" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="358" y="230" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">6</text>
+<text x="88" y="272.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">step 4</text>
+<rect x="100" y="250" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="126" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">5</text>
+<rect x="158" y="250" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="184" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="216" y="250" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="242" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">9</text>
+<rect x="274" y="250" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="300" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">4</text>
+<rect x="332" y="250" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="358" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">6</text>
+<rect x="390" y="250" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="416" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">6</text>
+<text x="254" y="330.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">rows computed in all: 18</text>
+<rect x="508" y="58" width="476" height="290" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="522" y="80" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Keep the keys and values: a cache</text>
+<text x="580" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">position</text>
+<text x="618" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">0</text>
+<text x="676" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">1</text>
+<text x="734" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">2</text>
+<text x="792" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">3</text>
+<text x="850" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">4</text>
+<text x="908" y="114.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">5</text>
+<text x="580" y="146.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">step 1</text>
+<rect x="592" y="124" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="618" y="146" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">5</text>
+<rect x="650" y="124" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="676" y="146" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="708" y="124" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="734" y="146" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">9</text>
+<text x="580" y="188.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">step 2</text>
+<rect x="592" y="166" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="618" y="188" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="650" y="166" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="676" y="188" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="708" y="166" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="734" y="188" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="766" y="166" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="792" y="188" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">4</text>
+<text x="580" y="230.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">step 3</text>
+<rect x="592" y="208" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="618" y="230" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="650" y="208" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="676" y="230" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="708" y="208" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="734" y="230" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="766" y="208" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="792" y="230" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="824" y="208" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="850" y="230" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">6</text>
+<text x="580" y="272.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">step 4</text>
+<rect x="592" y="250" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="618" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="650" y="250" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="676" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="708" y="250" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="734" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="766" y="250" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="792" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="824" y="250" width="52" height="36" rx="4" fill="#eef2f7" stroke="#a0aec0" stroke-width="1"/>
+<text x="850" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">cache</text>
+<rect x="882" y="250" width="52" height="36" rx="4" fill="#9ec5e8" stroke="#a0aec0" stroke-width="1"/>
+<text x="908" y="272" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">6</text>
+<text x="746" y="330.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">rows computed in all: 6</text>
+<rect x="350" y="374" width="22" height="14" rx="3" fill="#9ec5e8" stroke="#4a5568" stroke-width="1.2"/>
+<text x="382" y="385.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">computed this step (token id shown)</text>
+<rect x="620" y="374" width="22" height="14" rx="3" fill="#eef2f7" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="385.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">read from the cache</text>
+</svg>

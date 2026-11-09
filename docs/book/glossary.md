@@ -96,6 +96,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## C
 
+**cache equivalence**: the property that running a text as a prefill followed by cached decode steps gives the same logits as one forward pass over the whole text, exactly when the arithmetic is the same and to a stated tolerance when only the order of the sums differs. *([The KV Cache](v05-sequences/12-kv-cache.md))*
+
 **cache hierarchy**: the stack of memories between a core's registers and main memory, each level larger and slower than the one above it and holding copies of the lines most recently used from the level below. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 
 **cache line**: the aligned block of memory, 64 bytes on most chips, that is fetched and kept in a cache as a unit when any of its bytes is needed. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
@@ -191,6 +193,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **decision boundary**: the set of inputs where the model switches its decision, for a linear logit the line, plane or flat sheet $\mathbf{w}\cdot\mathbf{x} = 0$ (at threshold $1/2$), which separates the two predicted classes. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
 **decision tree**: a model that asks a sequence of yes-or-no questions, each a threshold on one feature chosen to make the answers as informative about the class as possible, and predicts the class held at the leaf reached. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
+
+**decode phase**: generating one token at a time, each step running one row through the model, appending one key and one value per layer to the cache and attending to everything in it; limited by the bytes of the weights and the cache. *([The KV Cache](v05-sequences/12-kv-cache.md))*
 
 **decoupled weight decay**: shrinking every weight by the factor $1 - \eta\lambda$ directly, outside the gradient and the adaptive scaling, so that the decay means the same for every parameter. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
@@ -378,6 +382,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **KL divergence**: the excess of the cross-entropy over the entropy, $D_{\mathrm{KL}}(p \,\Vert\, q) = \sum_k p_k \log(p_k/q_k)$; it is never negative, zero only when $q = p$, and not symmetric in its arguments. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
+**KV cache**: for every layer, the key and the value of every token already seen, stored once and read by every later token, so that the past is never run through the model again; its size is two rows of $h_{\mathrm{kv}} d_h$ numbers per token and layer. *([The KV Cache](v05-sequences/12-kv-cache.md))*
+
 ## L
 
 **L1 regularization**: adding to the loss a penalty proportional to the sum of the absolute values of the weights, which is the effect of a Laplace prior and sets some weights exactly to zero. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
@@ -555,6 +561,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **precision and recall**: precision is the share of the examples called positive that are positive, $P(y = 1 \mid \text{decision positive})$; recall is the share of the positive examples that are called positive, $P(\text{decision positive} \mid y = 1)$, also the true positive rate. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **prediction**: the value $\hat{y} = f_\theta(\mathbf{x})$ a model returns for an example. *([The Learning Problem](v02-learning/01-learning-problem.md))*
+
+**prefill phase**: processing the whole prompt in one call, with every matrix seeing all the prompt's rows at once and the keys and values of every prompt position written into the cache; limited by the arithmetic once the prompt is long. *([The KV Cache](v05-sequences/12-kv-cache.md))*
 
 **prefix sum**: the list of running totals of an array, either inclusive (including the element at each position) or exclusive (stopping just before it), used to turn probabilities into a cumulative distribution and lengths into offsets. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 

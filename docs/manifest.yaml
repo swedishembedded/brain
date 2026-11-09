@@ -410,6 +410,7 @@ navigation:
           - docs/book/v05-sequences/09-transformer-block.md
           - docs/book/v05-sequences/10-training-gpt.md
           - docs/book/v05-sequences/11-decoding.md
+          - docs/book/v05-sequences/12-kv-cache.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

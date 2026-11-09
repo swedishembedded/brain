@@ -76,7 +76,7 @@ generation.
     generative model.
 11. [Decoding: Turning Probabilities into Text](11-decoding.md): how to choose what to say, given
     next-token probabilities.
-12. The KV Cache: why the past is remembered instead of recomputed, and what
+12. [The KV Cache](12-kv-cache.md): why the past is remembered instead of recomputed, and what
     remembering costs.
 13. Attention Without the Quadratic Memory: how attention over long sequences is
     computed exactly without storing the full attention matrix.

@@ -467,7 +467,7 @@ volumes:
         title: "The KV Cache"
         question: "Why recompute the past at every step when we could remember it, and what does remembering cost?"
         introduces: [kv-cache, prefill-phase, decode-phase, cache-equivalence]
-        requires: [causal-mask, query-key-value, greedy-decoding, memory-complexity]
+        requires: [causal-mask, query-key-value, greedy-decoding, memory-complexity, rotary-position-embedding, absolute-position-embedding, gpt-architecture, roofline-model, arithmetic-intensity, bandwidth-bound, compute-bound, rounding-error, tree-reduction]
         brain: []
       - id: flash-attention
         title: "Attention Without the Quadratic Memory"
