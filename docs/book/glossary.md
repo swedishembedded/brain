@@ -132,6 +132,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **checkpoint format**: the layout of a trained model in a file: which names, shapes and number formats it holds, and where the bytes of each tensor are, so that a reader that has never seen the file can find and decode them. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
 
+**chunked recurrence**: computing a recurrence over groups of $C$ tokens, with a triangular solve and matrix products inside a group and the state passed only between groups, which gives the same outputs with fewer sequential steps and less state traffic. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
+
 **classification**: predicting which of a fixed set of categories an example belongs to, from its features, learned from labelled examples; with two categories, labelled $0$ and $1$, it is binary classification. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
 **command recording**: appending many dispatches to one list and handing the list to the device as a single submission, so that the host pays the submission cost once instead of once per dispatch; a read-back or any other observation of the device ends the list. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
@@ -207,6 +209,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **decode phase**: generating one token at a time, each step running one row through the model, appending one key and one value per layer to the cache and attending to everything in it; limited by the bytes of the weights and the cache. *([The KV Cache](v05-sequences/12-kv-cache.md))*
 
 **decoupled weight decay**: shrinking every weight by the factor $1 - \eta\lambda$ directly, outside the gradient and the adaptive scaling, so that the decay means the same for every parameter. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
+
+**delta rule**: updating a key-value memory by the outer product of the key and the prediction error, $\mathbf{S} \leftarrow \mathbf{S} + \beta\,\mathbf{k}(\mathbf{v} - \mathbf{S}^\top\mathbf{k})^\top$, one gradient step of a regression of the value on the key, so that a write replaces what the key returned. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **depth-vs-width**: the tradeoff between a network of many layers and one of few wide layers; for the sawtooth, $d$ layers of width $2$ make $2^d$ linear pieces, while one layer with $u$ units makes at most $u + 1$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
@@ -308,6 +312,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## G
 
+**gated delta network**: a delta-rule memory whose state is first multiplied by a decay gate chosen by the token, with a write strength chosen the same way, so that it forgets as well as corrects. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
+
 **gated linear unit**: a hidden layer whose output is the product of two linear functions of the input, one of them passed through a nonlinearity that acts as a gate, so that each hidden unit can be switched or scaled by a second projection. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 
 **gating**: multiplying a signal elementwise by a vector of sigmoid outputs, each between 0 and 1 and computed from the current input and state, so that the network decides for each unit and each step how much of the signal passes. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
@@ -355,6 +361,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **Hessian**: the symmetric matrix of second partial derivatives of a scalar function; $\mathbf{u}^\top\mathbf{H}\mathbf{u}$ is the curvature along the unit direction $\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **hidden layer**: a layer of units between the input and the output whose values are not given by the data; it computes a new description of the input from which the next layer can compute the answer with a simpler rule. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
+
+**hybrid architecture**: a stack that interleaves a few full-attention layers, whose cache grows with the context, with many layers of a fixed-size recurrence or convolution, whose cost does not. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **hypothesis space**: the set of all functions a model can express as its parameters vary. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
@@ -431,6 +439,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **likelihood**: the probability (or density) that a model with a given parameter assigns to the observed data, read as a function of the parameter; it is not the probability of the parameter. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
 **limit**: the value a quantity approaches as its input gets close to a point without reaching it; $\lim_{h\to 0} g(h) = L$ means $g(h)$ can be made as close to $L$ as we like by taking $h$ small enough and nonzero. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
+**linear attention**: attention whose scores are used without a softmax, so that the output is $\mathbf{S}_i^\top\mathbf{q}_i$ for a matrix state $\mathbf{S}_i = \sum_{j \le i}\mathbf{k}_j\mathbf{v}_j^\top$ that is updated by one outer product per token and has a fixed size. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **linear map**: a function of vectors that commutes with addition and scaling, and is determined by what it does to the unit vectors. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
@@ -722,6 +732,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **shared memory**: the small, fast, on-chip memory of a compute unit that all invocations of one workgroup can read and write and no other workgroup can see, a cache whose contents the programmer chooses. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
+**short convolution**: a causal filter of a few taps applied to each channel separately along the sequence, so that every token is mixed with its few predecessors before the recurrence; it needs the last $K - 1$ inputs as a small state when decoding. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
+
 **shuffling**: rearranging a list into an order chosen uniformly among all $n!$ orders, correctly done by swapping each position from the end with a uniformly chosen position at or before it (Fisher-Yates). *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **sigmoid**: the function $\sigma(z) = 1/(1 + e^{-z})$ that maps any real number to $(0, 1)$ and is the inverse of the logit; its slope is $\sigma(1 - \sigma)$, at most $1/4$. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
@@ -751,6 +763,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **stable-softmax**: the softmax computed after subtracting the largest score from every score, which gives the same probabilities but keeps every exponent at most zero, so nothing overflows and the sum is at least one. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **standard error**: the standard deviation of an estimator over repeated samples, the typical size of its error; for the sample mean it is $\sigma/\sqrt{n}$, estimated by $s/\sqrt{n}$. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
+
+**state-space model**: a layer whose state evolves under a linear system in continuous time, $\mathbf{h}' = \mathbf{A}\mathbf{h} + \mathbf{B}x$, discretized into a recurrence $\mathbf{h}_t = \bar{\mathbf{A}}\mathbf{h}_{t-1} + \bar{\mathbf{B}}x_t$ with a step size that may depend on the input. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **stochastic gradient descent**: gradient descent that steps along the gradient of a small random batch of examples instead of the whole training set, $\theta \leftarrow \theta - \eta\,\mathbf{g}_t$, an unbiased but noisy estimate of the full step. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 

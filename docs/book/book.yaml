@@ -521,7 +521,7 @@ volumes:
         title: "Linear Attention, Recurrence and Hybrid Models"
         question: "Can attention be computed in time linear in the sequence length, and what is lost?"
         introduces: [linear-attention, delta-rule, gated-delta-network, chunked-recurrence, short-convolution, hybrid-architecture, state-space-model]
-        requires: [scaled-dot-product-attention, recurrent-neural-network, parallel-scan, gating]
+        requires: [scaled-dot-product-attention, causal-mask, recurrent-neural-network, gating, parallel-scan, gradient-descent, rank, catastrophic-cancellation, overflow-and-underflow, arithmetic-intensity, bandwidth-bound, ordinary-differential-equation, euler-method, kv-cache, sigmoid, silu, rms-normalization]
         brain: [qwen35, lfm2]
       - id: sparse-attention
         title: "Sparse Attention"

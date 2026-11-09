@@ -116,4 +116,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 2. [Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md): How do we load someone else's trained weights into our own implementation and prove it computes the same thing?
 3. [Attention Variants: Sharing and Compressing Keys](v06-language-models/03-attention-variants.md): How do we shrink the KV cache without losing what attention needs?
 4. [Mixture of Experts](v06-language-models/04-mixture-of-experts.md): How can a model have a trillion parameters yet use only a few billion per token?
+5. [Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md): Can attention be computed in time linear in the sequence length, and what is lost?
 <!-- /contents -->

@@ -1,0 +1,49 @@
+<!-- source-sha256: 66a48031c15fe710d01f14ace6011895582b1980517519c5feec0247e55f2e28 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 402" width="780" height="402"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="402" fill="#ffffff"/>
+<rect x="20" y="16" width="740" height="176" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Parallel form: all tokens at once</text>
+<rect x="43" y="67" width="124" height="62" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="105" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Q, K</text>
+<text x="105" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[T, d_k]</text>
+<rect x="193" y="67" width="124" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="255" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">scores Q K^T</text>
+<text x="255" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[T, T]</text>
+<rect x="343" y="67" width="124" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="405" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">causal mask</text>
+<text x="405" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">no softmax</text>
+<rect x="493" y="67" width="124" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="555" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">times V</text>
+<text x="555" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[T, d_v]</text>
+<rect x="643" y="67" width="124" height="62" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="705" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">O</text>
+<text x="705" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[T, d_v]</text>
+<line x1="170" y1="98" x2="190" y2="98" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="320" y1="98" x2="340" y2="98" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="470" y1="98" x2="490" y2="98" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="620" y1="98" x2="640" y2="98" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="390" y="172.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">T = 64, d_k = d_v = 8: 33,280 multiply-adds; the T x T matrix grows with the square of T</text>
+<rect x="20" y="210" width="740" height="176" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="232" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Recurrent form: one token at a time</text>
+<ellipse cx="105" cy="292" rx="62" ry="31" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="105" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">S(t-1)</text>
+<text x="105" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[d_k, d_v]</text>
+<rect x="193" y="261" width="124" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="255" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">write</text>
+<text x="255" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ k(t) v(t)^T</text>
+<ellipse cx="405" cy="292" rx="62" ry="31" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="405" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">S(t)</text>
+<text x="405" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[d_k, d_v]</text>
+<rect x="493" y="261" width="124" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="555" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">read</text>
+<text x="555" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">S(t)^T q(t)</text>
+<ellipse cx="705" cy="292" rx="62" ry="31" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="705" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">o(t)</text>
+<text x="705" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[d_v]</text>
+<line x1="170" y1="292" x2="190" y2="292" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="320" y1="292" x2="340" y2="292" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="470" y1="292" x2="490" y2="292" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="620" y1="292" x2="640" y2="292" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M405,261 L405,261 Q405,256 400,256 L107,256 Q105,256 105,258 L105,258" fill="none" stroke="#1a202c" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head)"/>
+<text x="255" y="252.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">S(t) becomes S(t-1) of the next token</text>
+<text x="390" y="366.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">same T and widths: 8,192 multiply-adds; the state does not grow with T</text>
+</svg>

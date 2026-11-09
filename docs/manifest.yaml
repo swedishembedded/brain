@@ -421,6 +421,7 @@ navigation:
           - docs/book/v06-language-models/02-importing-models.md
           - docs/book/v06-language-models/03-attention-variants.md
           - docs/book/v06-language-models/04-mixture-of-experts.md
+          - docs/book/v06-language-models/05-linear-attention.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md
