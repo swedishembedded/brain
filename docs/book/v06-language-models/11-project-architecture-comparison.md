@@ -111,7 +111,7 @@ function gdn_head_backward(Q, K, V, g, beta, states, dO) -> (dQ, dK, dV, dg, dbe
 The check is the one of Volume III: central differences with a step of $10^{-5}$ in double precision, against the criterion that every difference is below $10^{-6}$. Checking every coordinate of every tensor is not needed to catch a wrong rule and is costly in a plain loop; check instead two coordinates of every tensor, drawn from a generator, so that the router, the gate bias, the output-norm gain and every other tensor are touched at least twice and none is skipped because nobody thought to look at it.
 
 <!-- worked: project_architecture_comparison.gradient_checks -->
-Central differences with step 1e-05 against the hand-written backward pass, in double precision, for each stack on the reference sequence (ids 9 4 1 2 5 4 1 2 5 1 4 4 1, drawn from `project_architecture_comparison.reference`, seed 0x28bfd63b41452eb4). The loss is the mean cross-entropy of the six predictions plus the balancing loss. Two coordinates of every tensor are checked, drawn from the generator `project_architecture_comparison.gradcheck.<arm>`: for each tensor in storage order, a row `integer(rows)` then a column `integer(columns)`, twice. Criterion: every difference below 1e-6.
+Central differences with step 1e-05 against the hand-written backward pass, in double precision, for each stack on the reference sequence (ids 9 4 1 2 5 4 1 2 5 1 4 4 1, drawn from `project_architecture_comparison.reference`, seed 0x28bfd63b41452eb4). The loss is the mean cross-entropy of the six predictions plus the balancing loss. Two coordinates of every tensor are checked, drawn from the generator `project_architecture_comparison.gradcheck.<arm>`: for each tensor in storage order, a row `integer(rows)` then a column `integer(columns)`, twice. Storage order is the order of the draws of milestone 1 with the token table first and the final gain last, layer by layer (the dense layer: g1, W_Q, W_K, W_V, the two QK gains, W_O, g2, W_gate, W_up, W_down; the gated delta layer: g1, W_Q, W_K, W_V, W_a, W_b, the decay bias c, the output-norm gain, W_O, g2, then the network; the mixture's network: the router, then each expert's W_gate, W_up, W_down); the bias c, which has no draws, sits between W_b and the output-norm gain. A vector (a gain or the bias) is a matrix of one row: its row draw is `integer(1)`, which consumes a draw and gives 0, and then comes the column draw. Criterion: every difference below 1e-6.
 
 | stack | loss | tensors | coordinates | largest gradient checked | largest difference |
 |---|---:|---:|---:|---:|---:|
@@ -153,7 +153,7 @@ The cost model is the ledger of [Chapter 10](10-model-cost.md): a layer is a rec
 The definitions are those of the chapter: $N_{\mathrm{act}}$ counts the parameters that take part in the matrix products of one token (the table lookup is not a product, the tied head counts once, a mixture counts the router and the two experts it uses), and FLOPs count two per multiply-add in the matrix products, in the two attention products over the keys a token sees, and in the recurrence; norms, softmax, gates and additions are not counted. A count is only worth having if a run can contradict it. The module therefore counts the multiply-adds while the forward pass runs, in every matrix product, every attention product and every recurrence step, and the table is printed only after the counts agree: the total for a prompt of 13 tokens, the cost of the 13th token as the difference between the counts for 13 and 12 tokens, the parameters against the tensors that were drawn, and the bytes against the numbers that the forward pass holds after it (the keys and values of the last four positions for the window, the final state of each head for the recurrence).
 
 <!-- worked: project_architecture_comparison.cost_model -->
-Costs at the sizes of the project (D = 16, 2 layers, vocabulary 12, tied head) for a sequence of T = 13 tokens, numbers kept in bfloat16 (2 bytes). Parameters are the tensors that exist; active parameters are the ones in the matrix products of a token (the table lookup is not a product; the tied head counts once; the mixture counts the router and the 2 experts used). FLOPs count 2 per multiply-add in the matrix products, in the products of attention (scores and weighted values, over the keys a token sees) and in the recurrence (8 times the heads times $d_k d_v$ per token and layer); norms, softmax, gates and additions are not counted. 'Prefill' is the mean per token over a prompt of 13 tokens (token $i$ sees $i$ keys), 'decode' the cost of the 13th token alone. Each FLOP count was checked against the multiply-adds counted while the forward pass ran (the total for the prompt, and the 13th token as the difference between the counts for 13 and 12 tokens), each parameter count against the tensors, and each cache against the numbers the forward pass holds.
+Costs at the sizes of the project (D = 16, 2 layers, vocabulary 12, tied head) for a sequence of T = 13 tokens, numbers kept in bfloat16 (2 bytes). Parameters are the tensors that exist; active parameters are the ones in the matrix products of a token (the table lookup is not a product; the tied head counts once; the mixture counts the router and the 2 experts used). FLOPs count 2 per multiply-add in the matrix products, in the products of attention (scores and weighted values, over the keys a token sees) and in the recurrence (8 times the heads times $d_k d_v$ per token and layer); norms, softmax, gates and additions are not counted. 'Prefill' is the mean per token over a prompt of 13 tokens (token $i$ sees $i$ keys; the total for the prompt divided by 13 and rounded down to a whole number, so the window's 8,516.92 is printed 8,516), 'decode' the cost of the 13th token alone. Each FLOP count was checked against the multiply-adds counted while the forward pass ran (the total for the prompt, and the 13th token as the difference between the counts for 13 and 12 tokens), each parameter count against the tensors, and each cache against the numbers the forward pass holds.
 
 | stack | parameters | active parameters | prefill FLOPs per token | decode FLOPs | cache bytes | state bytes | bytes held |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -203,7 +203,21 @@ A harness is a function from a candidate to a verdict, and it is worth only as m
 The golden is a safetensors file written byte by byte by `write_safetensors` of Chapter 2. For each arm it holds the ids of the reference sequence (13 ids drawn from `project_architecture_comparison.reference`), the hidden state after the embeddings and after each layer (the output of each block), the output of the final norm, and the logits, all stored as 32-bit floats.
 
 <!-- worked: project_architecture_comparison.golden_files -->
-Goldens of the five stacks on the reference sequence (ids 9 4 1 2 5 4 1 2 5 1 4 4 1), each a safetensors file written by `importing_models.write_safetensors`: the ids as 32-bit integers, then the hidden state after the embeddings and after each layer, the output of the final norm and the logits as 32-bit floats (the 64-bit result rounded to the nearest 32-bit float). The `dense` file holds `ids`, `hidden_00`, `hidden_01`, `hidden_02`, `final_norm`, `logits`. Digest: the first 16 hexadecimal digits of the SHA-256 of the file.
+Goldens of the five stacks on the reference sequence (ids 9 4 1 2 5 4 1 2 5 1 4 4 1), each a safetensors file written by `importing_models.write_safetensors` (Chapter 2): the ids as 32-bit integers, then the hidden state after the embeddings and after each layer, the output of the final norm and the logits as 32-bit floats (the 64-bit result rounded to the nearest 32-bit float), little-endian, back to back in this order. The `dense` file holds `ids`, `hidden_00`, `hidden_01`, `hidden_02`, `final_norm`, `logits`. The file is an 8-byte little-endian length prefix, the header text, and the 4,004 bytes of data. The header is compact JSON (separators `,` and `:`, no other spaces), in the key order below, with the metadata first, padded with spaces on the right to a multiple of 8 bytes: 568 bytes for every stack (the text is 566 bytes for `dense`, and the padding absorbs the different lengths of the other arms' names). The header text of `dense` is these lines joined with no separator (the line breaks are for the page); the other stacks differ only in the last word of the generator name, which is the arm:
+
+```text
+{"__metadata__":{"generator":"project_architecture_comparison.blocks.dense",
+"arithmetic":"64-bit, stored as 32-bit",
+"tolerance_basis":"rounding count x 2^-24"},
+"ids":{"dtype":"I32","shape":[13],"data_offsets":[0,52]},
+"hidden_00":{"dtype":"F32","shape":[13,16],"data_offsets":[52,884]},
+"hidden_01":{"dtype":"F32","shape":[13,16],"data_offsets":[884,1716]},
+"hidden_02":{"dtype":"F32","shape":[13,16],"data_offsets":[1716,2548]},
+"final_norm":{"dtype":"F32","shape":[13,16],"data_offsets":[2548,3380]},
+"logits":{"dtype":"F32","shape":[13,12],"data_offsets":[3380,4004]}}
+```
+
+Digest: the first 16 hexadecimal digits of the SHA-256 of the whole file. Stack, tensors, bytes and digest:
 
 | stack | tensors | file bytes | digest |
 |---|---:|---:|---:|
@@ -214,18 +228,61 @@ Goldens of the five stacks on the reference sequence (ids 9 4 1 2 5 4 1 2 5 1 4 
 | `hybrid` | 6 | 4,580 | 405fae79d414c53d |
 <!-- /worked -->
 
-The golden is a 64-bit result stored in 32 bits, so it carries a relative error of at most $2^{-24}$ per number. The candidate for the correct-code test is the stack with every weight rounded to 32 bits, run in 64-bit arithmetic: what a published checkpoint in 32 bits would give a loader that computes in higher precision. The tolerance for the logits is the parity tolerance of Chapter 2, $\tau_{\mathrm{par}} = (N_{\mathrm{rnd}} + 1)\,2^{-24}$, where $N_{\mathrm{rnd}}$ is the number of roundings along the longest chain of dependent operations (the rule: a sum of $n$ products costs $n$ roundings, each further operation on its result one) and the one added is the golden's own storage. The count is made per block and differs between them: the attention blocks reuse the stage list of Chapter 2 (with the window's four keys in place of the context for the softmax), the mixture replaces the dense network's stages by the router's dot product and softmax, the renormalisation, the expert's stages and the weighted sum of the two experts, and the gated delta layer adds the $d_k + 4$ roundings of one recurrence step for each of the $n$ tokens along the chain of the state, because the state at the last token depends on every step before it. The three tests that follow from the one bound $\varepsilon = \tau_{\mathrm{par}}$ are: rel_l2 at most $\varepsilon$; max_abs at most $\varepsilon$ times the length of the golden; and $1 - $ cosine at most $\varepsilon^2/2$, which is what a relative error of $\varepsilon$ can change in the direction of a vector.
+The golden is a 64-bit result stored in 32 bits, so it carries a relative error of at most $2^{-24}$ per number. The candidate for the correct-code test is the stack with every weight rounded to 32 bits, run in 64-bit arithmetic: what a published checkpoint in 32 bits would give a loader that computes in higher precision. The tolerance for the logits is the parity tolerance of Chapter 2, $\tau_{\mathrm{par}} = (N_{\mathrm{rnd}} + 1)\,2^{-24}$, where $N_{\mathrm{rnd}}$ is the number of roundings along the longest chain of dependent operations (the rule: a sum of $n$ products costs $n$ roundings, each further operation on its result one) and the one added is the golden's own storage. The count is made per block and differs between them: the attention blocks reuse the stage list of Chapter 2 (with the window's four keys in place of the context for the softmax), the mixture replaces the dense network's stages by the router's dot product and softmax, the renormalisation, the expert's stages and the weighted sum of the two experts, and the gated delta layer adds the $d_k + 5$ roundings of one recurrence step for each of the $n$ tokens along the chain of the state, because the state at the last token depends on every step before it. The first table below lists every stage of the four kinds of layer with its count, and the second gives the bound of each tap (the embeddings, the output of each layer, the logits) as one more than the roundings accumulated up to it. The three tests that follow from the one bound $\varepsilon = \tau_{\mathrm{par}}$ are: rel_l2 at most $\varepsilon$; max_abs at most $\varepsilon$ times the length of the golden; and $1 - $ cosine at most $\varepsilon^2/2$, which is what a relative error of $\varepsilon$ can change in the direction of a vector.
+
+<!-- worked: project_architecture_comparison.rounding_stages -->
+The roundings counted along the longest chain of one layer, stage by stage, for a token that sees 13 keys (the window of `swa` keeps 4 of them in the softmax and the weighted sum; the recurrence runs along the 13 tokens of the sequence). The rule is that of Chapter 2: a dot product of length $n$ costs $n$, an RMS norm over $n$ numbers $n + 6$, and each further operation on a result one. The L2 normalisation is the sum of $d_k$ squares, the addition of $\varepsilon$, the square root, the reciprocal and the product, $d_k + 4$; a step of the recurrence is the decay product, the dot of length $d_k$, the subtraction, the product with $\beta$, the product with the key and the addition to the state, $d_k + 5$; the QK-norm is $d_h + 6$ as in Chapter 2; the router's renormalisation is a sum and a division, and the weighted sum of the $K$ experts is $K$. A dash means the layer has no such stage. The softplus of the decay and the sigmoid of the write strength are on branches shorter than the chain through the L2-normalised key and do not enter. The hybrid has the gated delta layer first and the dense layer second, so its layers cost those of the `gdn` and `dense` columns.
+
+| stage | dense layer | window layer | mixture layer | gated delta layer |
+|---|---:|---:|---:|---:|
+| RMS norm 1 | 22 | 22 | 22 | 22 |
+| projection (dot of length D) | 16 | 16 | 16 | 16 |
+| L2 normalisation of q and k | - | - | - | 8 |
+| QK-norm | 10 | 10 | 10 | - |
+| rotation | 4 | 4 | 4 | - |
+| scores (dot of length d_h, scale) | 5 | 5 | 5 | - |
+| softmax over the keys | 16 | 7 | 16 | - |
+| weighted sum of values | 13 | 4 | 13 | - |
+| recurrence, 13 tokens of d_k + 5 | - | - | - | 117 |
+| read-out (dot of length d_k) | - | - | - | 4 |
+| output norm over d_v | - | - | - | 13 |
+| W_O of the attention layer (dot of length 4 d_h) | 16 | 16 | 16 | - |
+| W_O of the recurrent layer (dot of length 2 d_v) | - | - | - | 14 |
+| residual add (mixer) | 1 | 1 | 1 | 1 |
+| RMS norm 2 | 22 | 22 | 22 | 22 |
+| gate or up projection (dot of length D) | 16 | 16 | - | 16 |
+| router (dot of length D) | - | - | 16 | - |
+| router softmax over E experts | - | - | 7 | - |
+| renormalisation of the kept pair | - | - | 2 | - |
+| expert gate or up (dot of length D) | - | - | 16 | - |
+| silu and product with up | 4 | 4 | 4 | 4 |
+| W_down (dot of length F) | 24 | 24 | - | 24 |
+| expert W_down (dot of length FE) | - | - | 6 | - |
+| weighted sum of the K experts | - | - | 2 | - |
+| residual add (network) | 1 | 1 | 1 | 1 |
+| **layer total** | **170** | **152** | **179** | **262** |
+
+The head adds a final RMS norm (16 + 6) and the output projection (16), 38 in all, and the golden's own storage adds 1. The bound on a tap is $(N + 1)\,2^{-24}$ with $N$ the sum of the counts of the layers up to the tap (and of the head for the logits); the embeddings tap, before any layer, has $N = 0$. Per stack, in units of $2^{-24}$:
+
+| stack | layer 0 | layer 1 | head | embeddings tap | layer 0 tap | layer 1 tap | logits tap |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `dense` | 170 | 170 | 38 | 1 | 171 | 341 | 379 |
+| `moe` | 179 | 179 | 38 | 1 | 180 | 359 | 397 |
+| `gdn` | 262 | 262 | 38 | 1 | 263 | 525 | 563 |
+| `swa` | 152 | 152 | 38 | 1 | 153 | 305 | 343 |
+| `hybrid` | 262 | 170 | 38 | 1 | 263 | 433 | 471 |
+<!-- /worked -->
 
 <!-- worked: project_architecture_comparison.parity_table -->
-The harness on correct candidates. The candidate is the stack with every weight rounded to 32 bits and the arithmetic in 64 bits; the golden is the file above, so the two differ by the rounded weights and by the golden's own rounding. The bound is $\tau_{\mathrm{par}} = (N_{\mathrm{rnd}} + 1)\,2^{-24}$ on the relative error of the logits, where $N_{\mathrm{rnd}}$ counts the roundings along the longest chain of dependent operations by the rule of Chapter 2 (a sum of $n$ products costs $n$, each further operation one; the recurrence adds $d_k + 4$ per token; the router adds its softmax and the renormalization), and the one that is added is the golden's storage. The tests derived from that one bound are rel_l2 at most the bound, max_abs at most the bound times the length of the golden, and 1 - cosine at most half the bound squared.
+The harness on correct candidates. The candidate is the stack with every weight rounded to 32 bits and the arithmetic in 64 bits; the golden is the file above, so the two differ by the rounded weights and by the golden's own rounding. The bound is $\tau_{\mathrm{par}} = (N_{\mathrm{rnd}} + 1)\,2^{-24}$ on the relative error of the logits, where $N_{\mathrm{rnd}}$ counts the roundings along the longest chain of dependent operations by the rule of Chapter 2 (a sum of $n$ products costs $n$, each further operation one; the stage counts are in the table above, and the bound of each tap in the second table), and the one that is added is the golden's storage. The tests derived from that one bound are rel_l2 at most the bound, max_abs at most the bound times the length of the golden, and 1 - cosine at most half the bound squared.
 
 | stack | $N_{\mathrm{rnd}}$ | bound $\tau_{\mathrm{par}}$ | rel_l2 of logits | max_abs of logits | all three tests pass | bound over rel_l2 |
 |---|---:|---:|---:|---:|---:|---:|
 | `dense` | 378 | 2.26e-5 | 2.17e-7 | below 1e-6 | yes | 104 |
 | `moe` | 396 | 2.37e-5 | below 1e-7 | below 1e-6 | yes | 367 |
-| `gdn` | 540 | 3.22e-5 | 2.52e-7 | 1.62e-6 | yes | 128 |
+| `gdn` | 562 | 3.36e-5 | 2.52e-7 | 1.62e-6 | yes | 133 |
 | `swa` | 342 | 2.04e-5 | 1.66e-7 | below 1e-6 | yes | 123 |
-| `hybrid` | 459 | 2.74e-5 | 1.13e-7 | below 1e-6 | yes | 242 |
+| `hybrid` | 470 | 2.81e-5 | 1.13e-7 | below 1e-6 | yes | 247 |
 
 The dense stack against the decoder of Chapter 1 (`modern_decoder.forward`, same weights, 64 bits both): rel_l2 below 1e-14.
 <!-- /worked -->
@@ -245,8 +302,8 @@ Mistakes planted in a stack that otherwise passes (the candidate of the previous
 - `gate_sign`: the decay gate is +softplus, so the state grows
 - `group_map`: as above, in the dense layer of the hybrid
 - `final_gain_doubled`: the final norm gain is doubled: every logit is twice as large
-- `weight_1e-9`: one weight of W_Q in layer 0 is changed by 1e-9
-- `weight_1e-3`: one weight of W_Q in layer 0 is changed by 1e-3
+- `weight_1e-9`: the weight in row 0, column 0 of W_Q ($[16, 16]$) of layer 0, after the rounding to 32 bits, is increased by 1e-9
+- `weight_1e-3`: the same weight is increased by 1e-3
 
 | stack | planted mistake | rel_l2 | 1 - cosine | tests failed (max_abs, rel_l2, cosine) | first tap beyond bound |
 |---|---|---:|---:|---|---|
@@ -301,23 +358,23 @@ Predictions registered before the six runs of each arm were made, from the mecha
 **The way it is run.** The arms have matched parameters (milestone 1) and the same skeleton, depth and width. They are trained on the same sequences in the same order for a given seed, so the paired differences remove the variation of the data; they are scored on the same held-out sequences. Each arm chooses its peak learning rate from a short grid by one run on a selection seed that none of the reported seeds uses, so no arm is handicapped by a rate chosen for another, and the choice is made on a seed that is not reported, so the reported intervals are not conditional on the selection. The recipe, its draws and its seeds are in the table.
 
 <!-- worked: project_architecture_comparison.selection -->
-Recipe: Adam with the moments of Volume III (0.9, 0.95, epsilon 1e-8), no weight decay, a linear warmup to the peak rate in 10 steps and a linear fall to a tenth of the peak at step 120 (`schedules.linear_decay`), a clip of the gradient's global norm at 1, 120 steps of 8 sequences, each sequence the next seven draws of the data generator; the loss is the mean over the six scored predictions plus the balancing loss with weight 0.01. Each arm chose its peak rate from 0.01, 0.02, 0.04 by the loss on 120 held-out sequences after one run on the selection seed (`s0`, data from `project_architecture_comparison.data.s0`, held-out set from `project_architecture_comparison.eval.s0`, initial weights from `project_architecture_comparison.init.<arm>.s0`), a seed none of the reported runs uses. The last column says whether the best rate's loss was more than 20 percent below the second best's, so that the choice does not hinge on a small difference.
+Recipe: Adam with the moments of Volume III (0.9, 0.95, epsilon 1e-8, 1-based step in the bias corrections), no weight decay, 120 steps numbered $t = 0, \dots, 119$ with the rate $\eta_t = \eta_{\max}\,(t + 1) / 10$ for $t < 10$ (so step 9 is the first at the peak) and $\eta_t = \eta_{\max}\,(1 - 0.9\,(t - 10) / 110)$ for $t \ge 10$ (a linear fall to a tenth of the peak at step 120, which is never reached; step 119 uses $1 - 0.9 \cdot 109 / 110$ of it), a clip of the batch gradient's global norm (the square root of the sum of squares of every entry) at 1: when the norm exceeds it the gradient is multiplied by clip over norm, then 120 steps of 8 sequences, each sequence the next seven draws of the data generator, the gradient being the mean over the batch. The loss that is differentiated is the mean over the six scored predictions plus, for a mixture, the balancing loss with weight 0.01; the 'training loss' columns of this chapter report the cross-entropy part alone (the balancing term is a regulariser of the router and is not a quality). Each arm chose its peak rate from 0.01, 0.02, 0.04 by the held-out cross-entropy on 120 sequences after one run of 120 steps on the selection seed (`s0`, data from `project_architecture_comparison.data.s0`, held-out set from `project_architecture_comparison.eval.s0`, initial weights from `project_architecture_comparison.init.<arm>.s0`, no nudge), a seed none of the reported runs uses; a tie goes to the lower rate. The ratio column is the runner-up's loss over the best loss, to one digit (these are single runs that end at a few hundredths, whose further digits are not reproducible); the last column says whether it exceeds 1.1, so that the choice does not hinge on a small difference.
 
-| arm | peak rate chosen | best more than 20 percent below the runner-up |
-|---|---:|---:|
-| `dense` | 0.04 | yes |
-| `moe` | 0.04 | yes |
-| `gdn` | 0.02 | yes |
-| `swa` | 0.04 | no |
-| `hybrid` | 0.02 | yes |
+| arm | peak rate chosen | runner-up loss over best loss | ratio above 1.1 |
+|---|---:|---:|---:|
+| `dense` | 0.04 | 1.2 | yes |
+| `moe` | 0.04 | 8.4 | yes |
+| `gdn` | 0.02 | 4.2 | yes |
+| `swa` | 0.04 | 1.0 | no |
+| `hybrid` | 0.02 | 6.5 | yes |
 <!-- /worked -->
 
-The table shows that the choice of rate was not a coin toss for four of the five arms, and that for the window it was: the window's best rate is not clearly better than its runner-up, which matters little, because every rate leaves it near the floor of the task. The rest of the recipe is the same for every arm.
+The table shows that the choice of rate was not a coin toss for four of the five arms (the runner-up's loss is at least 1.2 times the best's), and that for the window it was: the window's best rate is not clearly better than its runner-up, which matters little, because every rate leaves it near the floor of the task. The rest of the recipe is the same for every arm.
 
 Now run every arm on the six reported seeds, each with its four nudged copies. The weights of arm `a` and seed `s` come from `project_architecture_comparison.init.<a>.<s>`, drawn in the order of milestone 1, the data from `project_architecture_comparison.data.<s>` and the held-out set from `project_architecture_comparison.eval.<s>`. A run with the same seed but a different arm sees the same training sequences in the same order.
 
 <!-- worked: project_architecture_comparison.comparison -->
-Held-out loss (mean cross-entropy of the six scored predictions, nats) after 120 steps, on the 6 reported seeds (`r1`, `r2`, `r3`, `r4`, `r5`, `r6`; data `project_architecture_comparison.data.<seed>`, held-out `project_architecture_comparison.eval.<seed>`, weights `project_architecture_comparison.init.<arm>.<seed>`, seeds r1 0x341a22768f472695, r2 0xeec0a40fd2891cd0, and so on by the same rule). All arms see the same sequences in the same order for a seed. Mean over seeds, sample standard deviation (divisor $n - 1$), the 95 percent interval of the mean (Student $t$ with 5 degrees of freedom, multiplier 2.5706), and the training loss of the last 10 steps. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
+Held-out loss (mean cross-entropy of the six scored predictions, nats) after 120 steps, on the 6 reported seeds (`r1`, `r2`, `r3`, `r4`, `r5`, `r6`; data `project_architecture_comparison.data.<seed>`, held-out `project_architecture_comparison.eval.<seed>`, weights `project_architecture_comparison.init.<arm>.<seed>`, the seed of a stream is a function of its full name by the rule of Chapter 17: `project_architecture_comparison.data.r1` has the seed 0x341a22768f472695, `project_architecture_comparison.data.r2` 0xeec0a40fd2891cd0, and every other stream named here has the seed of its own name). All arms see the same sequences in the same order for a seed. Mean over seeds, sample standard deviation (divisor $n - 1$), the 95 percent interval of the mean (Student $t$ with 5 degrees of freedom, multiplier 2.5706), and the training loss: the batch cross-entropy of the last 10 steps (the balancing term excluded), averaged over the steps and the seeds. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | arm | peak rate | parameters | mean | sd | 95 percent interval of the mean | training loss, last 10 steps |
 |---|---:|---:|---:|---:|---:|---:|
@@ -364,7 +421,7 @@ Held-out loss of each of the six predictions, mean over the six seeds (nats). A 
 The window's column is the derivation, drawn from the data: for $y_1$ and $y_2$, whose positions are within one window of the header, its loss is 1.00 and 1.12, well under $\ln 6$ though not zero, and for $y_3$ onward, whose positions are beyond it, the loss is at or just above $\ln 6$, 1.81 to 1.79, because the stack has nothing that carries the header across (it would have had to relay it through the first layer, and it did not). The dense, mixture and recurrent columns are flat in the position, which is what they should be: nothing in their mixers depends on how far back the header is.
 
 <!-- worked: project_architecture_comparison.moe_balance -->
-Share of the expert slots taken by the busiest of the 4 experts on 30 held-out sequences, mean over the six seeds, for the two mixture layers of the `moe` arm: layer 0 0.36, layer 1 0.32 (1 / 4 = 0.25 when the router is perfectly balanced, 0.5 when two experts take everything). The balancing loss has weight 0.01.
+Share of the expert slots taken by the busiest of the 4 experts on the first 30 sequences of the held-out stream `project_architecture_comparison.eval.<seed>` (the first 30 draws of sequences, all 13 positions of each, so 390 tokens and 780 slots per layer), mean over the six seeds, for the two mixture layers of the `moe` arm; a slot is one (token, chosen expert) pair and the share is the largest of the four counts over their sum: layer 0 0.36, layer 1 0.32 (1 / 4 = 0.25 when the router is perfectly balanced, 0.5 when two experts take everything). The balancing loss has weight 0.01.
 <!-- /worked -->
 
 The balancing loss did what it is for. The busiest of four experts takes about a third of the slots and not a half; it is not perfectly balanced, and with a weight of 0.01 over 120 steps it should not be. Milestone 1's gradient check covered the router and the balancing term, and this number is the check that the term does something in a run.
@@ -401,11 +458,11 @@ The tests are the values the worked module prints, collected as a checklist; an 
 | 1 | parameters of dense, moe, gdn, swa, hybrid | 4,128 / 4,256 / 4,130 / 4,128 / 4,129 | exact |
 | 1 | gradient check, largest difference over every tensor of the five stacks | below 1e-6 | criterion |
 | 1 | chunked against recurrent, chunk sizes 1 to 12; with the state dropped | all within tolerance; 3.490 | tolerance; 3 digits |
-| 2 | `dense`: active parameters; prefill FLOPs per token; decode FLOPs; bytes held | 4,032; 8,960; 9,728; 832 | exact |
-| 2 | `moe`: active parameters; prefill FLOPs per token; decode FLOPs; bytes held | 3,008; 6,912; 7,680; 832 | exact |
-| 2 | `gdn`: active parameters; prefill FLOPs per token; decode FLOPs; bytes held | 4,032; 8,960; 8,960; 224 | exact |
-| 2 | `swa`: active parameters; prefill FLOPs per token; decode FLOPs; bytes held | 4,032; 8,516; 8,576; 256 | exact |
-| 2 | `hybrid`: active parameters; prefill FLOPs per token; decode FLOPs; bytes held | 4,032; 8,960; 9,344; 528 | exact |
+| 2 | `dense`: active parameters; prefill FLOPs per token (rounded down); decode FLOPs; bytes held | 4,032; 8,960; 9,728; 832 | exact |
+| 2 | `moe`: active parameters; prefill FLOPs per token (rounded down); decode FLOPs; bytes held | 3,008; 6,912; 7,680; 832 | exact |
+| 2 | `gdn`: active parameters; prefill FLOPs per token (rounded down); decode FLOPs; bytes held | 4,032; 8,960; 8,960; 224 | exact |
+| 2 | `swa`: active parameters; prefill FLOPs per token (rounded down); decode FLOPs; bytes held | 4,032; 8,516; 8,576; 256 | exact |
+| 2 | `hybrid`: active parameters; prefill FLOPs per token (rounded down); decode FLOPs; bytes held | 4,032; 8,960; 9,344; 528 | exact |
 | 3 | golden digest, `dense` | 1f6196ce6dffd1fd | exact |
 | 3 | golden digest, `gdn` | 1f02617b8ff996ef | exact |
 <!-- /worked -->

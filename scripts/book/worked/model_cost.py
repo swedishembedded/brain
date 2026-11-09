@@ -138,7 +138,12 @@ def formula_agrees():
             "and e_h = 0 for a tied one and the 2 d_h only with QK-norm, against the counts of Chapter 1 (`modern_decoder.parameters`, "
             "tensor by tensor, from the shapes of that chapter's table). The last two columns drop the norm gains and the final norm: "
             "the leading terms V D (1 + e_h) + L (2 D H d_h + 2 D h_kv d_h + 3 D F) and the share of P that they leave out.\n\n"
-            + _table(["decoder", "P by the formula", "P by the tensors of Chapter 1", "equal", "leading terms", "left out"], rows))
+            + _table(["decoder", "P by the formula", "P by the tensors of Chapter 1", "equal", "leading terms", "left out"], rows)
+            + "\n\nThe shapes that went in (Qwen3 0.6B ties its head, the others do not; only Llama-2 13B has no QK-norm; all four use a "
+            "SwiGLU network and no biases):\n\n"
+            + _table(["decoder", "V", "D", "L", "H", "h_kv", "d_h", "F", "head", "QK-norm"],
+                     [(s["name"], _int(s["V"]), _int(s["D"]), s["L"], s["H"], s["hkv"], s["dh"], _int(s["F"]),
+                       "tied" if s["tied"] else "separate", "yes" if s["qkn"] else "no") for s in shapes], "l" + "r" * 7 + "ll"))
 
 
 # ------------------------------------------------------------------------------------------------ mixtures and the unified count
@@ -398,6 +403,33 @@ def h3_groups():
     return groups
 
 
+def h3_shape_rows():
+    """The shapes behind the groups of `h3_groups`, as the crate's fixture `rand_tensors` lists them, with the numbers each adds up to
+    (asserted against the group totals)."""
+    g = H3
+    D, inner, hd, F, te = g["hidden"], h3_inner(), g["hd"], g["ffn"], g["t_embed"]
+    vp = g["c_video"] * g["patch"][0] * g["patch"][1] * g["patch"][2]
+    S = lambda *d: "[" + ", ".join(str(x) for x in d) + "]"
+    attn = f"to_q, to_k, to_v {S(inner, D)} each; to_out {S(D, inner)}"
+    norms = f"norm_q, norm_k {S(hd)} each; norm1, norm2 {S(D)} each"
+    ffn = f"ff.net.0.proj {S(2 * F, D)}; ff.net.2 {S(D, F)}"
+    rows = [("attention matrices (blocks)", attn, g["layers"]),
+            ("feed-forward matrices (blocks)", ffn, g["layers"]),
+            ("head norms and block norms", norms + f" (2 x {D} + 2 x {hd} = {2 * D + 2 * hd} per block)", g["layers"]),
+            ("adaln_proj (blocks)", f"linear.weight {S(18 * D, te)}; linear.bias {S(18 * D)}", g["layers"]),
+            ("token refiner (2 blocks, no adaln_proj)",
+             f"per block the attention, norm and feed-forward tensors above (no adaln_proj); once more final_norm {S(D)}", g["refiner"]),
+            ("input projections and text embedder",
+             f"proj_in.weight {S(D, vp)} and bias {S(D)}; audio_proj_in.weight {S(D, g['c_audio'])} and bias {S(D)}; "
+             f"context_embedder.weight {S(D, g['text'])} and bias {S(D)}", 1),
+            ("time embedder",
+             f"linear_1.weight {S(g['t_hidden'], g['freq'])} and bias {S(g['t_hidden'])}; linear_2.weight {S(te, g['t_hidden'])} and bias {S(te)}", 1),
+            ("output norm and heads",
+             f"norm_out.norm.weight {S(D)}; norm_out.linear.weight {S(2 * D, te)} and bias {S(2 * D)}; proj_out.weight {S(vp, D)} and bias {S(vp)}; "
+             f"audio_proj_out.weight {S(g['c_audio'], D)} and bias {S(g['c_audio'])}", 1)]
+    return rows
+
+
 def h3_total():
     return sum(h3_groups().values())
 
@@ -429,6 +461,9 @@ def minimaxh3_parameters():
             f"and for every block an `adaln_proj` from the {_int(H3['t_embed'])}-number time embedding to 18 D numbers, six modulation vectors for "
             "each of three modalities. The tensor list is the one the crate's own fixture `rand_tensors` builds.\n\n"
             + _table(["group", "numbers", "share"], rows)
+            + "\n\nThe tensors behind each group, as the fixture lists them (shapes are [rows, columns], a vector has one dimension; "
+            "all linear maps are stored as [out, in]).\n\n"
+            + _table(["group", "tensors in one instance and their shapes", "instances"], h3_shape_rows(), "llr")
             + "\n\nThe same tensor list against what the crate pins or states.\n\n"
             + _table(["quantity", "counted here", "stated in the crate", "where"], pins, "llll"))
 
@@ -782,6 +817,23 @@ def activations_per_layer_table():
             + _table(["tensor", "sliding layer", "full layer"], rows))
 
 
+def h3_activations_per_block_table():
+    hid, inner, ffn, heads, hd = H3["hidden"], h3_inner(), H3["ffn"], H3["heads"], H3["hd"]
+    items = [("block input, the two norm outputs the matrices read, the residual after attention (4 D)", 4 * hid),
+             ("queries and attention output (2 H d_h)", 2 * inner),
+             ("keys and values (2 H d_h, no sharing)", 2 * inner),
+             ("logsumexp per head (H)", heads),
+             ("gate and value pre-activations and the product (3 F)", 3 * ffn)]
+    total = sum(n for _, n in items)
+    assert total == h3_saved_floats(13312)
+    rows = [(n, _int(v)) for n, v in items] + [("**one block, per row**", _int(total))]
+    return ("Numbers a MiniMax-H3 block keeps per packed row for the backward pass under the same rule (D = 5,376, H = 56 heads of "
+            f"d_h = {hd} so H d_h = {_int(inner)}, F = {_int(ffn)}), with a fused attention kernel that keeps one logsumexp per head. The "
+            "block has two norms and no post-norms, so the 2 D of extra norms that the Gemma-4 layer keeps are absent; the AdaLN tables are "
+            f"side inputs and are not counted per row. Over the {H3['layers']} blocks one row keeps {_int(H3['layers'] * total)} numbers.\n\n"
+            + _table(["tensor", "numbers per row"], rows))
+
+
 def memory_breakdown_data():
     """(label, [(component, GiB)]) for the stacked bars of the memory figure."""
     gemma = g4_total()
@@ -825,10 +877,15 @@ def t5_undercount():
             ("bytes at f32 by the tensor list", _int(new_bytes), f"{_gib(new_bytes):.2f} GiB"),
             ("bytes by the hand-written formula (two network matrices per layer)", _int(old_bytes), f"{_gib(old_bytes):.2f} GiB"),
             ("bytes missing", _int(missing), f"{_gib(missing):.3f} GiB"),
-            ("one network matrix per layer, 24 x 4,096 x 10,240 x 4 bytes", _int(t["L"] * t["D"] * t["F"] * 4), f"{_gib(t['L'] * t['D'] * t['F'] * 4):.3f} GiB")]
+            ("one network matrix per layer, 24 x 4,096 x 10,240 x 4 bytes", _int(t["L"] * t["D"] * t["F"] * 4), f"{_gib(t['L'] * t['D'] * t['F'] * 4):.3f} GiB"),
+            ("final norm gain and position table, (4,096 + 32 x 64) x 4 bytes", _int((t["D"] + t["buckets"] * t["H"]) * 4), ""),
+            ("the two lines above added", _int(t["L"] * t["D"] * t["F"] * 4 + (t["D"] + t["buckets"] * t["H"]) * 4), "")]
+    assert missing == t["L"] * t["D"] * t["F"] * 4 + (t["D"] + t["buckets"] * t["H"]) * 4
     return ("The weights of the T5-XXL encoder at f32 (`T5Config::xxl`): V = 32,128, D = 4,096, F = 10,240, 24 layers, 64 heads of width 64, three network "
-            "matrices per layer (two input matrices and one output matrix), one shared relative-position table of 32 by 64. The hand-written formula counted "
-            "2 D F per layer for the network.\n\n" + _table(["quantity", "value", "in GiB"], rows, "lrr"))
+            "matrices per layer (two input matrices and one output matrix), one shared relative-position table of 32 by 64, and per layer two norm gains of 4,096 (before attention and before the network) "
+            "with a final norm gain of 4,096; QKVO are four matrices of 4,096 by 4,096. The hand-written formula counted 2 D F per layer for the network, "
+            "and counted the embedding table, the four attention matrices and the two norm gains of every layer, but not the final norm gain or the "
+            "position table.\n\n" + _table(["quantity", "value", "in GiB"], rows, "lrr"))
 
 
 def activation_estimates():

@@ -820,7 +820,12 @@ def gradient_checks():
             f"reference sequence (ids {' '.join(str(i) for i in ref_ids())}, drawn from `{NAME_REF}`, seed {_seed(NAME_REF)}). "
             "The loss is the mean cross-entropy of the six predictions plus the balancing loss. Two coordinates of every tensor are "
             "checked, drawn from the generator `" + NAME + ".gradcheck.<arm>`: for each tensor in storage order, a row `integer(rows)` "
-            "then a column `integer(columns)`, twice. Criterion: every difference below 1e-6.\n\n"
+            "then a column `integer(columns)`, twice. Storage order is the order of the draws of milestone 1 with the token table first and "
+            "the final gain last, layer by layer (the dense layer: g1, W_Q, W_K, W_V, the two QK gains, W_O, g2, W_gate, W_up, W_down; "
+            "the gated delta layer: g1, W_Q, W_K, W_V, W_a, W_b, the decay bias c, the output-norm gain, W_O, g2, then the network; the "
+            "mixture's network: the router, then each expert's W_gate, W_up, W_down); the bias c, which has no draws, sits between W_b and "
+            "the output-norm gain. A vector (a gain or the bias) is a matrix of one row: its row draw is `integer(1)`, which consumes a draw "
+            "and gives 0, and then comes the column draw. Criterion: every difference below 1e-6.\n\n"
             + _table(["stack", "loss", "tensors", "coordinates", "largest gradient checked", "largest difference"], rows))
 
 
@@ -946,7 +951,7 @@ def cost_model():
             "token (the table lookup is not a product; the tied head counts once; the mixture counts the router and the 2 experts used). "
             "FLOPs count 2 per multiply-add in the matrix products, in the products of attention (scores and weighted values, over the keys "
             f"a token sees) and in the recurrence (8 times the heads times $d_k d_v$ per token and layer); norms, softmax, gates and additions are not counted. "
-            f"'Prefill' is the mean per token over a prompt of {T} tokens (token $i$ sees $i$ keys), 'decode' the cost of the "
+            f"'Prefill' is the mean per token over a prompt of {T} tokens (token $i$ sees $i$ keys; the total for the prompt divided by {T} and rounded down to a whole number, so the window's {prefill_flops(ARMS['swa'], CFG, T) / T:,.2f} is printed {prefill_flops(ARMS['swa'], CFG, T) // T:,}), 'decode' the cost of the "
             f"{T}th token alone. Each FLOP count was checked against the multiply-adds counted while the forward pass ran (the total for the "
             f"prompt, and the {T}th token as the difference between the counts for {T} and {T - 1} tokens), each parameter count against the "
             "tensors, and each cache against the numbers the forward pass holds.\n\n"
@@ -1024,23 +1029,86 @@ def r32_params(p):
     return go(p)
 
 
-def layer_roundings(spec, cfg, T):
-    """Roundings along the longest chain of dependent operations of one layer, by the rule of Chapter 2: a sum of n products costs n
-    roundings and each further operation on its result one."""
+def layer_stages(spec, cfg, T):
+    """The stages of one layer, [(stage, roundings along the longest chain of dependent operations)], by the rule of Chapter 2: a sum
+    of n products costs n roundings, each further operation on its result one. T is the number of keys a token sees (the window
+    limits it for a sliding window), and for the gated delta layer the number of tokens along the chain of the state."""
     mixer, ffn = spec
-    D = cfg["D"]
+    D, DH, H = cfg["D"], cfg["DH"], cfg["H"]
+    st = [("RMS norm 1", D + 6)]
     if mixer == "gdn":
         DK, DV, HG = cfg["DK"], cfg["DV"], cfg["HG"]
-        mix = (D + 6) + D + (DK + 6) + T * (DK + 4) + DK + (DV + 6) + HG * DV + 1
+        st += [("projection (dot of length D)", D),
+               ("L2 normalisation of q and k", DK + 4),
+               (f"recurrence, {T} tokens of d_k + 5", T * (DK + 5)),
+               ("read-out (dot of length d_k)", DK),
+               ("output norm over d_v", DV + 6),
+               ("W_O of the recurrent layer (dot of length 2 d_v)", HG * DV)]
     else:
-        layer, _ = im.stages(cfg, min(T, cfg["WINDOW"]) if mixer == "swa" else T)
-        mix = sum(c for _, c in layer[:9])
+        keys = min(T, cfg["WINDOW"]) if mixer == "swa" else T
+        st += [("projection (dot of length D)", D),
+               ("QK-norm", DH + 6),
+               ("rotation", 4),
+               ("scores (dot of length d_h, scale)", DH + 1),
+               ("softmax over the keys", keys + 3),
+               ("weighted sum of values", keys),
+               ("W_O of the attention layer (dot of length 4 d_h)", H * DH)]
+    st += [("residual add (mixer)", 1), ("RMS norm 2", D + 6)]
     if ffn == "swiglu":
-        layer, _ = im.stages(cfg, T)
-        net = sum(c for _, c in layer[9:])
+        st += [("gate or up projection (dot of length D)", D), ("silu and product with up", 4),
+               ("W_down (dot of length F)", cfg["F"])]
     else:
-        net = (D + 6) + D + (cfg["E"] + 3) + 2 + D + 4 + cfg["FE"] + cfg["K"] + 1
-    return mix + net
+        st += [("router (dot of length D)", D), ("router softmax over E experts", cfg["E"] + 3),
+               ("renormalisation of the kept pair", 2),
+               ("expert gate or up (dot of length D)", D), ("silu and product with up", 4),
+               ("expert W_down (dot of length FE)", cfg["FE"]), ("weighted sum of the K experts", cfg["K"])]
+    st.append(("residual add (network)", 1))
+    return st
+
+
+def layer_roundings(spec, cfg, T):
+    return sum(c for _, c in layer_stages(spec, cfg, T))
+
+
+def rounding_stages():
+    T = REF_TOKENS
+    kinds = (("dense", ("gqa", "swiglu")), ("swa", ("swa", "swiglu")), ("moe", ("gqa", "moe")), ("gdn", ("gdn", "swiglu")))
+    per = {k: layer_stages(sp, CFG, T) for k, sp in kinds}
+    order = ("RMS norm 1", "projection (dot of length D)", "L2 normalisation of q and k", "QK-norm", "rotation",
+             "scores (dot of length d_h, scale)", "softmax over the keys", "weighted sum of values", f"recurrence, {T} tokens of d_k + 5",
+             "read-out (dot of length d_k)", "output norm over d_v", "W_O of the attention layer (dot of length 4 d_h)", "W_O of the recurrent layer (dot of length 2 d_v)",
+             "residual add (mixer)", "RMS norm 2", "gate or up projection (dot of length D)", "router (dot of length D)",
+             "router softmax over E experts", "renormalisation of the kept pair", "expert gate or up (dot of length D)",
+             "silu and product with up", "W_down (dot of length F)", "expert W_down (dot of length FE)",
+             "weighted sum of the K experts", "residual add (network)")
+    names = sorted({n for k, _ in kinds for n, _ in per[k]}, key=order.index)
+    rows = []
+    for n in names:
+        row = [n]
+        for k, _ in kinds:
+            c = dict(per[k]).get(n)
+            row.append("-" if c is None else str(c))
+        rows.append(row)
+    rows.append(["**layer total**"] + [f"**{sum(c for _, c in per[k])}**" for k, _ in kinds])
+    head = (CFG["D"] + 6) + CFG["D"]
+    tap_rows = []
+    for arm, specs in ARMS.items():
+        n = [layer_roundings(sp, CFG, T) for sp in specs]
+        tap_rows.append((f"`{arm}`", n[0], n[1], head, 1, n[0] + 1, n[0] + n[1] + 1, n[0] + n[1] + head + 1))
+    return (f"The roundings counted along the longest chain of one layer, stage by stage, for a token that sees {T} keys (the window "
+            f"of `swa` keeps {CFG['WINDOW']} of them in the softmax and the weighted sum; the recurrence runs along the {T} tokens of the sequence). "
+            "The rule is that of Chapter 2: a dot product of length $n$ costs $n$, an RMS norm over $n$ numbers $n + 6$, and each further "
+            "operation on a result one. The L2 normalisation is the sum of $d_k$ squares, the addition of $\\varepsilon$, the square root, the reciprocal and the "
+            "product, $d_k + 4$; a step of the recurrence is the decay product, the dot of length $d_k$, the subtraction, the product with $\\beta$, the product "
+            "with the key and the addition to the state, $d_k + 5$; the QK-norm is $d_h + 6$ as in Chapter 2; the router's renormalisation is a "
+            "sum and a division, and the weighted sum of the $K$ experts is $K$. A dash means the layer has no such stage. The softplus of the decay and the sigmoid of the write strength "
+            "are on branches shorter than the chain through the L2-normalised key and do not enter. The hybrid has the gated delta layer "
+            "first and the dense layer second, so its layers cost those of the `gdn` and `dense` columns.\n\n"
+            + _table(["stage", "dense layer", "window layer", "mixture layer", "gated delta layer"], rows, "lrrrr")
+            + f"\n\nThe head adds a final RMS norm ({CFG['D']} + 6) and the output projection ({CFG['D']}), {head} in all, and the golden's own "
+            "storage adds 1. The bound on a tap is $(N + 1)\\,2^{-24}$ with $N$ the sum of the counts of the layers up to the tap (and of the "
+            "head for the logits); the embeddings tap, before any layer, has $N = 0$. Per stack, in units of $2^{-24}$:\n\n"
+            + _table(["stack", "layer 0", "layer 1", "head", "embeddings tap", "layer 0 tap", "layer 1 tap", "logits tap"], tap_rows, "l" + "r" * 7))
 
 
 def roundings(specs, cfg, T, layers=None, head=True):
@@ -1117,6 +1185,8 @@ def verdict_of(row, gold_scale):
 
 
 def golden_files():
+    import json
+    import struct
     rows = []
     for arm in ("dense", "moe", "gdn", "swa", "hybrid"):
         blob = golden_blob(arm)
@@ -1125,10 +1195,28 @@ def golden_files():
     blob = golden_blob("dense")
     _, tensors, _ = im.read_safetensors(blob)
     names = ", ".join(f"`{k}`" for k in tensors)
+    blob0 = golden_blob("dense")
+    (hlen,) = struct.unpack("<Q", blob0[:8])
+    header = json.loads(blob0[8:8 + hlen].decode("utf-8"))
+    meta = header["__metadata__"]
+    entries = [f'"{k}":{{"dtype":"{v["dtype"]}","shape":{json.dumps(v["shape"], separators=(",", ":"))},'
+               f'"data_offsets":{json.dumps(v["data_offsets"], separators=(",", ":"))}}}'
+               for k, v in header.items() if k != "__metadata__"]
+    meta_text = json.dumps({"__metadata__": meta}, separators=(",", ":"))[:-1]
+    pieces = [meta_text[:meta_text.index('"arithmetic"')], meta_text[meta_text.index('"arithmetic"'):meta_text.index('"tolerance_basis"')],
+              meta_text[meta_text.index('"tolerance_basis"'):] + ","] + [e + ("," if i < len(entries) - 1 else "}") for i, e in enumerate(entries)]
     return (f"Goldens of the five stacks on the reference sequence (ids {' '.join(str(i) for i in ref_ids())}), each a safetensors file written "
-            "by `importing_models.write_safetensors`: the ids as 32-bit integers, then the hidden state after the embeddings and after "
+            "by `importing_models.write_safetensors` (Chapter 2): the ids as 32-bit integers, then the hidden state after the embeddings and after "
             "each layer, the output of the final norm and the logits as 32-bit floats (the 64-bit result rounded to the nearest 32-bit "
-            f"float). The `dense` file holds {names}. Digest: the first 16 hexadecimal digits of the SHA-256 of the file.\n\n"
+            f"float), little-endian, back to back in this order. The `dense` file holds {names}. The file is an 8-byte little-endian length "
+            f"prefix, the header text, and the {len(blob0) - 8 - hlen:,} bytes of data. The header is compact JSON (separators `,` and `:`, no other spaces), "
+            f"in the key order below, with the metadata first, padded with spaces on the right to a multiple of 8 bytes: {hlen} bytes for every stack "
+            f"(the text is {len(json.dumps(header, separators=(',', ':')))} bytes for `dense`, and the padding absorbs the different "
+            "lengths of the other arms' names). The header text of `dense` is these lines joined with no separator (the line breaks are "
+            "for the page); the other stacks differ only in the last word of the generator name, which is the arm:\n\n"
+            "```text\n" + "\n".join(pieces) + "\n```\n\n"
+            "Digest: the first 16 hexadecimal digits of the SHA-256 of the whole file. "
+            f"Stack, tensors, bytes and digest:\n\n"
             + _table(["stack", "tensors", "file bytes", "digest"], rows))
 
 
@@ -1153,8 +1241,8 @@ def parity_table():
     return (f"The harness on correct candidates. The candidate is the stack with every weight rounded to 32 bits and the arithmetic in 64 "
             f"bits; the golden is the file above, so the two differ by the rounded weights and by the golden's own rounding. The bound is "
             f"$\\tau_{{\\mathrm{{par}}}} = (N_{{\\mathrm{{rnd}}}} + 1)\\,2^{{-24}}$ on the relative error of the logits, where $N_{{\\mathrm{{rnd}}}}$ counts the roundings along the longest chain of dependent "
-            "operations by the rule of Chapter 2 (a sum of $n$ products costs $n$, each further operation one; the recurrence adds "
-            f"$d_k + 4$ per token; the router adds its softmax and the renormalization), and the one that is added is the golden's storage. "
+            "operations by the rule of Chapter 2 (a sum of $n$ products costs $n$, each further operation one; the stage counts are in the table above, "
+            "and the bound of each tap in the second table), and the one that is added is the golden's storage. "
             "The tests derived from that one bound are rel_l2 at most the bound, max_abs at most the bound times the length of the golden, and 1 - cosine at "
             "most half the bound squared.\n\n"
             + _table(["stack", "$N_{\\mathrm{rnd}}$", "bound $\\tau_{\\mathrm{par}}$", "rel_l2 of logits", "max_abs of logits", "all three tests pass", "bound over rel_l2"], rows)
@@ -1170,8 +1258,8 @@ def planted_bugs():
              ("gdn", "gate_sign", 1, "the decay gate is +softplus, so the state grows"),
              ("hybrid", "group_map", 1, "as above, in the dense layer of the hybrid"),
              ("dense", "final_gain_doubled", None, "the final norm gain is doubled: every logit is twice as large"),
-             ("dense", "weight_1e-9", None, "one weight of W_Q in layer 0 is changed by 1e-9"),
-             ("dense", "weight_1e-3", None, "one weight of W_Q in layer 0 is changed by 1e-3"))
+             ("dense", "weight_1e-9", None, "the weight in row 0, column 0 of W_Q ($[16, 16]$) of layer 0, after the rounding to 32 bits, is increased by 1e-9"),
+             ("dense", "weight_1e-3", None, "the same weight is increased by 1e-3"))
     rows = []
     for arm, bug, layer, what in cases:
         blob = golden_blob(arm)
@@ -1203,6 +1291,7 @@ SELECT_SEED = "s0"
 SEEDS = tuple(f"r{i}" for i in range(1, 7))
 RATES = (0.01, 0.02, 0.04)
 MEMO_PATH = None
+CLEAR_RATIO = 1.1   # the runner-up's selection loss must exceed the best's by this factor for the choice to count as clear
 LN_SYMBOLS = math.log(TASK["symbols"])
 
 
@@ -1343,15 +1432,25 @@ def selection():
     for arm in ARMS:
         runs = {r["job"][2]: r["loss"] for r in sel if r["job"][0] == arm}
         ordered = sorted(runs.values())
-        rows.append((f"`{arm}`", f"{best[arm]:g}", "yes" if ordered[1] > 1.2 * ordered[0] else "no"))
-    return (f"Recipe: Adam with the moments of Volume III (0.9, 0.95, epsilon 1e-8), no weight decay, a linear warmup to the peak rate in "
-            f"{RECIPE['warmup']} steps and a linear fall to a tenth of the peak at step {RECIPE['steps']} (`schedules.linear_decay`), a clip of the gradient's global norm "
-            f"at {RECIPE['clip']:g}, {RECIPE['steps']} steps of {RECIPE['B']} sequences, each sequence the next seven draws of the data generator; the loss is "
-            "the mean over the six scored predictions plus the balancing loss with weight 0.01. Each arm chose its peak rate from "
-            f"{', '.join(f'{r:g}' for r in RATES)} by the loss on 120 held-out sequences after one run on the selection seed (`{SELECT_SEED}`, "
-            f"data from `{NAME}.data.{SELECT_SEED}`, held-out set from `{NAME}.eval.{SELECT_SEED}`, initial weights from `{NAME}.init.<arm>.{SELECT_SEED}`), "
-            "a seed none of the reported runs uses. The last column says whether the best rate's loss was more than 20 percent below the second best's, so that the choice "
-            "does not hinge on a small difference.\n\n" + _table(["arm", "peak rate chosen", "best more than 20 percent below the runner-up"], rows, "lrr"))
+        ratio = ordered[1] / ordered[0]
+        rows.append((f"`{arm}`", f"{best[arm]:g}", f"{ratio:.1f}", "yes" if ratio > CLEAR_RATIO else "no"))
+    return (f"Recipe: Adam with the moments of Volume III (0.9, 0.95, epsilon 1e-8, 1-based step in the bias corrections), no weight decay, "
+            f"{RECIPE['steps']} steps numbered $t = 0, \\dots, {RECIPE['steps'] - 1}$ with the rate $\\eta_t = \\eta_{{\\max}}\\,(t + 1) / {RECIPE['warmup']}$ for "
+            f"$t < {RECIPE['warmup']}$ (so step {RECIPE['warmup'] - 1} is the first at the peak) and "
+            f"$\\eta_t = \\eta_{{\\max}}\\,(1 - 0.9\\,(t - {RECIPE['warmup']}) / {RECIPE['steps'] - RECIPE['warmup']})$ for $t \\ge {RECIPE['warmup']}$ "
+            f"(a linear fall to a tenth of the peak at step {RECIPE['steps']}, which is never reached; step {RECIPE['steps'] - 1} uses "
+            f"$1 - 0.9 \\cdot {RECIPE['steps'] - 1 - RECIPE['warmup']} / {RECIPE['steps'] - RECIPE['warmup']}$ of it), a clip of the batch gradient's global norm "
+            f"(the square root of the sum of squares of every entry) at {RECIPE['clip']:g}: when the norm exceeds it the gradient is multiplied by clip over norm, then "
+            f"{RECIPE['steps']} steps of {RECIPE['B']} sequences, each sequence the next seven draws of the data generator, the gradient being the mean over the "
+            "batch. The loss that is differentiated is the mean over the six scored predictions plus, for a mixture, the balancing loss with weight 0.01; "
+            "the 'training loss' columns of this chapter report the cross-entropy part alone (the balancing term is a regulariser of the "
+            "router and is not a quality). Each arm chose its peak rate from "
+            f"{', '.join(f'{r:g}' for r in RATES)} by the held-out cross-entropy on {RECIPE['n_eval']} sequences after one run of {RECIPE['steps']} steps on the selection seed (`{SELECT_SEED}`, "
+            f"data from `{NAME}.data.{SELECT_SEED}`, held-out set from `{NAME}.eval.{SELECT_SEED}`, initial weights from `{NAME}.init.<arm>.{SELECT_SEED}`, "
+            f"no nudge), a seed none of the reported runs uses; a tie goes to the lower rate. The ratio column is the runner-up's loss over the best loss, "
+            f"to one digit (these are single runs that end at a few hundredths, whose further digits are not reproducible); the last column says whether it exceeds {CLEAR_RATIO:g}, "
+            "so that the choice does not hinge on a small difference.\n\n"
+            + _table(["arm", "peak rate chosen", "runner-up loss over best loss", f"ratio above {CLEAR_RATIO:g}"], rows, "lrrr"))
 
 
 def arm_summary(arm, k=None):
@@ -1372,9 +1471,10 @@ def comparison():
         rows.append((f"`{arm}`", f"{selected_rate(arm):g}", _int(costs(ARMS[arm], CFG, 1)[0]), mu, sd, _interval(lo, hi), tr_))
     return (f"Held-out loss (mean cross-entropy of the six scored predictions, nats) after {RECIPE['steps']} steps, on the {len(SEEDS)} reported seeds "
             f"({', '.join(f'`{s}`' for s in SEEDS)}; data `{NAME}.data.<seed>`, held-out `{NAME}.eval.<seed>`, weights `{NAME}.init.<arm>.<seed>`, "
-            "seeds " + ", ".join(f"{s} {_seed(f'{NAME}.data.{s}')}" for s in SEEDS[:2]) + ", and so on by the same rule). All arms see the same sequences in the same order "
+            f"the seed of a stream is a function of its full name by the rule of Chapter 17: `{NAME}.data.r1` has the seed {_seed(f'{NAME}.data.r1')}, "
+            f"`{NAME}.data.r2` {_seed(f'{NAME}.data.r2')}, and every other stream named here has the seed of its own name). All arms see the same sequences in the same order "
             "for a seed. Mean over seeds, sample standard deviation (divisor $n - 1$), the 95 percent interval of the mean (Student $t$ with "
-            f"{len(SEEDS) - 1} degrees of freedom, multiplier {_fx(sl.ex._t95(len(SEEDS) - 1), 4)}), and the training loss of the last 10 steps. " + stable.RULE + "\n\n"
+            f"{len(SEEDS) - 1} degrees of freedom, multiplier {_fx(sl.ex._t95(len(SEEDS) - 1), 4)}), and the training loss: the batch cross-entropy of the last 10 steps (the balancing term excluded), averaged over the steps and the seeds. " + stable.RULE + "\n\n"
             + _table(["arm", "peak rate", "parameters", "mean", "sd", "95 percent interval of the mean", "training loss, last 10 steps"], rows))
 
 
@@ -1416,8 +1516,9 @@ def by_position():
 
 def moe_balance():
     busiest = [stable_text(lambda k, l=l: sum(run_of("moe", sd, k)["busiest"][l] for sd in SEEDS) / len(SEEDS), 2) for l in range(2)]
-    return ("Share of the expert slots taken by the busiest of the 4 experts on 30 held-out sequences, mean over the six seeds, "
-            f"for the two mixture layers of the `moe` arm: layer 0 {busiest[0]}, layer 1 {busiest[1]} (1 / 4 = 0.25 when the router is perfectly balanced, 0.5 when "
+    return ("Share of the expert slots taken by the busiest of the 4 experts on the first 30 sequences of the held-out stream "
+            f"`{NAME}.eval.<seed>` (the first 30 draws of sequences, all 13 positions of each, so 390 tokens and 780 slots per layer), mean over the six seeds, "
+            f"for the two mixture layers of the `moe` arm; a slot is one (token, chosen expert) pair and the share is the largest of the four counts over their sum: layer 0 {busiest[0]}, layer 1 {busiest[1]} (1 / 4 = 0.25 when the router is perfectly balanced, 0.5 when "
             "two experts take everything). The balancing loss has weight 0.01.")
 
 
@@ -1454,7 +1555,7 @@ def acceptance_fingerprint():
     rows.append(("1", "chunked against recurrent, chunk sizes 1 to 12; with the state dropped", "all within tolerance; 3.490", "tolerance; 3 digits"))
     for arm in ("dense", "moe", "gdn", "swa", "hybrid"):
         P, n_act, dec, cache, state = costs(ARMS[arm], CFG, REF_TOKENS)
-        rows.append(("2", f"`{arm}`: active parameters; prefill FLOPs per token; decode FLOPs; bytes held", f"{_int(n_act)}; {_int(prefill_flops(ARMS[arm], CFG, REF_TOKENS) // REF_TOKENS)}; {_int(dec)}; {_int(cache + state)}", "exact"))
+        rows.append(("2", f"`{arm}`: active parameters; prefill FLOPs per token (rounded down); decode FLOPs; bytes held", f"{_int(n_act)}; {_int(prefill_flops(ARMS[arm], CFG, REF_TOKENS) // REF_TOKENS)}; {_int(dec)}; {_int(cache + state)}", "exact"))
     for arm in ("dense", "gdn"):
         rows.append(("3", f"golden digest, `{arm}`", digest(golden_blob(arm)), "exact"))
     return _table(["milestone", "quantity", "value", "tolerance"], rows, "lllr")

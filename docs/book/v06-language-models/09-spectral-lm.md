@@ -155,7 +155,7 @@ Everything so far transforms the feature axis of a single token, and there is a 
 Take a sequence of $T = 8$ positions with one scalar feature each, and apply a global filter along the sequence axis: transform, multiply each frequency by a real gain, transform back. Increase the input at the last position by 1 and look at the output at every position.
 
 <!-- worked: spectral_lm.leak_table -->
-Sequence length T = 8. Generator `spectral_lm.leak` (0xa74380fc1bcff57d), in this order: the gains g[0] .. g[4] are rng.uniform() + 0.5, and g[5], g[6], g[7] are copies of g[3], g[2], g[1]; then the causal kernel k[0] .. k[7] is eight rng.uniform() draws; then the token vectors, 64 rng.normal() draws, row by row (the mixer is the spectral mixer of this chapter's toy model with the initial weights of run 0, applied to the RMS-normalised vector of each token). 'Sequence transform' is y = Re IDFT(g * DFT(x)) over the sequence axis of a scalar feature; 'causal kernel' is y_i = sum over j <= i of k[i - j] x_j computed with FFTs of length 16 on zero-padded inputs; 'feature-axis mixer' maps each token's own 8 features. Each entry is the largest change of output position i when the input at the last position, 7, is increased by 1 (for the feature-axis mixer: every one of that token's 8 features by 1).
+Sequence length T = 8. Generator `spectral_lm.leak` (0xa74380fc1bcff57d), in this order: the gains g[0] .. g[4] are rng.uniform() + 0.5, and g[5], g[6], g[7] are copies of g[3], g[2], g[1]; then the causal kernel k[0] .. k[7] is eight rng.uniform() draws; then the token vectors, 64 rng.normal() draws, row by row (the mixer is the spectral mixer of this chapter's toy model with the initial weights of run 0, applied to the RMS-normalised vector of each token: the RMS norm has no gain and its epsilon is 1e-06, inside the root). 'Sequence transform' is y = Re IDFT(g * DFT(x)) over the sequence axis of a scalar feature; 'causal kernel' is y_i = sum over j <= i of k[i - j] x_j computed with FFTs of length 16 on zero-padded inputs; 'feature-axis mixer' maps each token's own 8 features. Each entry is the largest change of output position i when the input at the last position, 7, is increased by 1 (for the feature-axis mixer: every one of that token's 8 raw features by 1, before the RMS norm, and the change is measured on the largest absolute difference over the 8 outputs of the mixer alone, without the residual connection).
 
 | output position i | sequence transform | causal kernel, zero-padded | feature-axis mixer |
 |---|---:|---:|---:|
@@ -239,7 +239,7 @@ Weights are drawn from the generator `spectral_lm.run<i>.init` as `rng.normal()`
 | 8 | 0xb89d597447755912 | 0xd27e3ac51d683b9f |
 <!-- /worked -->
 
-Training is full-batch Adam on the mean cross-entropy of a 1,200-token sequence ($\beta = (0.9, 0.999)$, $\varepsilon = 10^{-8}$, no weight decay, no clipping) for 240 steps, with the rate annealed by a cosine from its peak to a tenth of it. Because the model sees only the last two symbols, the gradient of the whole sequence is a sum over the 36 contexts weighted by how often each continuation occurred, and a step costs 36 forward and backward passes whatever the length of the sequence. The loss that training minimizes is the empirical cross-entropy of the sequence; the one reported in the tables is the population cross-entropy.
+Training is full-batch Adam on the mean cross-entropy of a 1,200-token sequence, which gives 1,198 predictions (the first two tokens are only context; each later token is predicted from the two before it), so the mean is over 1,198 terms ($\beta = (0.9, 0.999)$, $\varepsilon = 10^{-8}$, no weight decay, no clipping, the moments bias-corrected at the 1-based step $s$) for $T = 240$ steps, with the rate annealed by a cosine from its peak $\eta_{\max}$ towards a tenth of it: $\eta_s = \eta_{\max}\,\bigl(0.1 + 0.9 \cdot \tfrac12 (1 + \cos(\pi (s - 1)/T))\bigr)$ for $s = 1, \dots, T$. The first step is at the peak, and the last, at $s = T$, is at a little above a tenth, since the angle is $\pi (T - 1)/T$ and not $\pi$. The selection runs use the same formula with $T = 120$. Because the model sees only the last two symbols, the gradient of the whole sequence is a sum over the 36 contexts weighted by how often each continuation occurred, and a step costs 36 forward and backward passes whatever the length of the sequence. The loss that training minimizes is the empirical cross-entropy of the sequence; the one reported in the tables is the population cross-entropy.
 
 Before any of that is trained, the backward pass of every mixer is checked against central differences: the hand-written gradients of the mixers are where a bug would hide inside a result that looks like an effect.
 
@@ -272,7 +272,7 @@ The baselines differ from S in the mixer only, so a difference can be attributed
 Tuning effort is held equal, since unequal effort is one of the cheapest ways to manufacture a win that Volume II listed. Each arm gets the same three peak rates, 0.01, 0.03 and 0.1, one run each from the initial parameters of run 0, 120 annealed steps, scored by the final training loss, and the lowest is the arm's rate. The seeds are paired: run $i$ gives every arm the same training sequence, and the same $\mathbf{E}_1$, $\mathbf{E}_2$ draws, so the paired differences remove the variation that the sequence contributes to every arm alike. The number of runs, eight, was fixed in advance by what the machine could do in a few minutes and was not extended after looking.
 
 <!-- worked: spectral_lm.lr_selection -->
-Learning-rate selection of the amended recipe: 120 full-batch Adam steps from the initial parameters of run 0, the rate annealed over those steps, one run per arm and rate, scored by the final training loss (mean cross-entropy of the 1200-token training sequence, nats per prediction); the lowest decides the arm's peak rate. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
+Learning-rate selection of the amended recipe: 120 full-batch Adam steps from the initial parameters of run 0, the rate annealed over those steps (step s = 1 .. 120 runs at peak (0.1 + 0.9 (1 + cos(pi (s - 1) / 120)) / 2), so the first step is at the peak and the last at 0.1002 of it), one run per arm and rate, scored by the final training loss (mean cross-entropy of the 1200-token training sequence, whose 1198 predictions are made from the 2 tokens before each of positions 2 .. 1199; nats per prediction); the lowest decides the arm's peak rate. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | arm | rate 0.01 | rate 0.03 | rate 0.1 | chosen |
 |---|---:|---:|---:|---:|
@@ -286,10 +286,10 @@ Every arm chooses the largest rate in its grid, which is not a comfortable fact.
 
 ## What the runs said
 
-The recipe written down before the first run held the rate constant. Its runs end at points that move by at most 0.004 nats when one weight starts a trillionth away, which is small beside the spread over runs (0.015 to 0.028) but means the chaotic part of training is visible in the digits, and it did not change the answer to any hypothesis.
+The recipe written down before the first run held the rate constant. Its runs end at points that move by less than 0.05 nats (the table below) when one weight starts a trillionth away, which is the order of the spread over runs (about 0.02) and means the chaotic part of training is visible in the digits; it did not change the answer to any hypothesis.
 
 <!-- worked: spectral_lm.first_attempt -->
-The recipe written into the module before its first run: a constant rate chosen from (0.01, 0.03, 0.1) by the same selection, 1200-token sequences, 240 steps, the same eight runs. Each run was repeated once with the embedding weight E1[0][0] increased by 1e-12. Verdicts of the original runs and of the repeats by the registered rule:
+The recipe written into the module before its first run: a constant rate chosen from (0.01, 0.03, 0.1) by the same selection (one run per arm and rate from the initial parameters of run 0, 120 steps at the constant rate, the lowest final training loss), 1200-token sequences, 240 steps, the same eight runs. Each run was repeated once with the embedding weight E1[0][0] increased by 1e-12. Verdicts of the original runs and of the repeats by the registered rule:
 
 | hypothesis | claim | verdict, original runs | verdict, copies with one weight changed by 1e-12 |
 |---|---:|---:|---:|
@@ -297,16 +297,16 @@ The recipe written into the module before its first run: a constant rate chosen 
 | H2 | S - Q_flop >= +0.02 | refuted | refuted |
 | H3 | |S - R| < 0.02 | supported | supported |
 
-How far the repeat of a run ends from the run, in population cross-entropy (nats per token):
+How far the repeat of a run ends from the run, in population cross-entropy (nats per token). A run at a constant rate is chaotic at the end, so the change itself cannot be reproduced; each cell is a bound that is at least ten times the value found in the module (the smallest of 0.05, 0.1, 0.5 that does so):
 
 | arm | peak rate | largest change of a run's final loss | mean change |
 |---|---:|---:|---:|
-| S | 0.1 | 0.000 | 0.000 |
-| R | 0.1 | 0.001 | 0.000 |
-| Q_par | 0.03 | 0.004 | 0.001 |
-| Q_flop | 0.1 | 0.000 | 0.000 |
+| S | 0.1 | below 0.05 | below 0.05 |
+| R | 0.1 | below 0.05 | below 0.05 |
+| Q_par | 0.03 | below 0.05 | below 0.05 |
+| Q_flop | 0.1 | below 0.05 | below 0.05 |
 
-For scale, the standard deviation over the eight runs of one arm lies between 0.015 and 0.028.
+For scale, the standard deviation over the eight runs of one arm lies between 0.01 and 0.03 (to the nearest hundredth outward, for the same reason).
 <!-- /worked -->
 
 That is the table of the recipe as first written, run at the same length: the verdicts of H1 and H3 are those of the prediction and H2 is refuted. The recipe was then amended to anneal the rate as brain's own runs do, which brings the final points to digits that survive the perturbation test in nearly every cell, and the grid was widened to include 0.1 once the best rate of every arm was found to lie at the top of the narrower one. The number of steps was cut from 300 to 240 to keep the whole module within the book's time limit. These are changes made after seeing results of the earlier recipes, and they are listed so that a reader can discount accordingly; the verdicts did not move because of them, which is the thing to check when a protocol is amended. What follows is the amended recipe.
@@ -369,7 +369,7 @@ With 1,200 tokens the arm of 1,824 parameters is 0.177 nats better on its traini
 A confound is only removed by a new experiment, and a new experiment after the result is exploratory, whatever it confirms. The same eight runs were trained again on sequences of 12,000 tokens, the first 1,200 of which are the old sequences, with the rate selected afresh. The hypotheses were not re-registered and the verdicts below are labelled for what they are.
 
 <!-- worked: spectral_lm.final_losses_more -->
-The same eight runs trained on 12000-token sequences (the 1200-token sequence of each run is the first 1200 tokens of its 12000-token one), rates selected afresh. Population cross-entropy after 240 steps, nats per token; the entropy rate is 1.0053. Digits by the stable-digits rule stated under the table of learning rates: a number is printed only with the digits that agree in the run and in its four nudged copies.
+The same eight runs trained on 12000-token sequences (the 1200-token sequence of each run is the first 1200 tokens of its 12000-token one; 11998 predictions), rates selected afresh. First the selection, as before: for each arm and rate, one run from the initial parameters of run 0 of 120 annealed full-batch steps, scored by the final training loss (mean cross-entropy of the 12000-token sequence of run 0, nats per prediction). Then, for each arm at its chosen peak rate, the population cross-entropy after 240 steps (rate annealed over those 240 steps), nats per token; the entropy rate is 1.0053. Digits by the stable-digits rule stated under the table of learning rates: a number is printed only with the digits that agree in the run and in its four nudged copies.
 
 | arm | rate 0.01 | rate 0.03 | rate 0.1 | chosen |
 |---|---:|---:|---:|---:|

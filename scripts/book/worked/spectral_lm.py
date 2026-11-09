@@ -303,10 +303,11 @@ def leak_table():
     return (f"Sequence length T = {T_LEAK}. Generator `spectral_lm.leak` ({_seed('spectral_lm.leak')}), in this order: the gains g[0] .. g[4] are rng.uniform() + 0.5, "
             f"and g[5], g[6], g[7] are copies of g[3], g[2], g[1]; then the causal kernel k[0] .. k[7] is eight rng.uniform() draws; then the token vectors, "
             f"64 rng.normal() draws, row by row (the mixer is the spectral mixer of this chapter's toy model with the initial weights of "
-            f"run 0, applied to the RMS-normalised vector of each token). 'Sequence transform' is y = Re IDFT(g * DFT(x)) over the sequence axis of a scalar "
+            f"run 0, applied to the RMS-normalised vector of each token: the RMS norm has no gain and its epsilon is {EPS_NORM:g}, inside the root). 'Sequence transform' is y = Re IDFT(g * DFT(x)) over the sequence axis of a scalar "
             f"feature; 'causal kernel' is y_i = sum over j <= i of k[i - j] x_j computed with FFTs of length 16 on zero-padded inputs; 'feature-axis mixer' maps each "
             f"token's own 8 features. Each entry is the largest change of output position i when the input at the last position, 7, is increased by 1 (for the "
-            f"feature-axis mixer: every one of that token's 8 features by 1).\n\n"
+            f"feature-axis mixer: every one of that token's 8 raw features by 1, before the RMS norm, and the change is measured on the largest absolute "
+            f"difference over the 8 outputs of the mixer alone, without the residual connection).\n\n"
             + _table(["output position i", "sequence transform", "causal kernel, zero-padded", "feature-axis mixer"], rows)
             + f"\n\nEntries above the diagonal of the sequence transform's matrix (output i reading input j > i): {leaked} of {pairs} are "
             f"nonzero, the largest has magnitude {_fx(worst_upper, 4)}; for the zero-padded causal kernel the largest is below 1e-12 "
@@ -889,7 +890,9 @@ SHORT = ("Digits by the stable-digits rule stated under the table of learning ra
 
 def lr_selection():
     return (f"Learning-rate selection of the amended recipe: {SEL_STEPS} full-batch Adam steps from the initial parameters of run 0, the rate annealed "
-            f"over those steps, one run per arm and rate, scored by the final training loss (mean cross-entropy of the 1200-token training sequence, nats per "
+            f"over those steps (step s = 1 .. {SEL_STEPS} runs at peak (0.1 + 0.9 (1 + cos(pi (s - 1) / {SEL_STEPS})) / 2), so the first step is at the peak and "
+            f"the last at {_fx(FLOOR + (1 - FLOOR) * 0.5 * (1 + math.cos(math.pi * (SEL_STEPS - 1) / SEL_STEPS)), 4)} of it), one run per arm and rate, scored by the final training loss (mean "
+            f"cross-entropy of the 1200-token training sequence, whose {1200 - 2} predictions are made from the 2 tokens before each of positions 2 .. 1199; nats per "
             "prediction); the lowest decides the arm's peak rate. " + stable.RULE + "\n\n" + _lr_table("main"))
 
 
@@ -920,8 +923,12 @@ def final_losses():
 
 def final_losses_more():
     _, _, h = _source()
-    return (f"The same eight runs trained on 12000-token sequences (the 1200-token sequence of each run is the first 1200 tokens of its 12000-token one), "
-            f"rates selected afresh. Population cross-entropy after {STEPS} steps, nats per token; the entropy rate is {_fx(h, 4)}. " + SHORT
+    n = CONFIGS["more"]["n_tok"]
+    return (f"The same eight runs trained on {n}-token sequences (the 1200-token sequence of each run is the first 1200 tokens of its {n}-token one; "
+            f"{n - 2} predictions), rates selected afresh. First the selection, as before: for each arm and rate, one run from the initial parameters of run 0 of "
+            f"{SEL_STEPS} annealed full-batch steps, scored by the final training loss (mean cross-entropy of the {n}-token sequence of run 0, nats per prediction). "
+            f"Then, for each arm at its chosen peak rate, the population cross-entropy after {STEPS} steps (rate annealed over those {STEPS} steps), nats per token; "
+            f"the entropy rate is {_fx(h, 4)}. " + SHORT
             + "\n\n" + _lr_table("more") + "\n\n" + _final_table("more"))
 
 
@@ -987,13 +994,24 @@ def first_attempt():
     mv = []
     for arm in ARMS:
         moves = [abs(x - y) for x, y in zip(_vals(cfg, arm, "pop"), _vals(cfg, arm, "pop", 0))]
-        mv.append((arm, r[arm], _fx(max(moves), 3), _fx(sum(moves) / len(moves), 3)))
+        mv.append((arm, r[arm], _bound(max(moves)), _bound(sum(moves) / len(moves))))
     t2 = _table(["arm", "peak rate", "largest change of a run's final loss", "mean change"], mv)
     sds = [mean_sd(_vals(cfg, arm, "pop"))[1] for arm in ARMS]
-    return (f"The recipe written into the module before its first run: a constant rate chosen from {CONFIGS['first']['grid']} by the same selection, 1200-token "
+    return (f"The recipe written into the module before its first run: a constant rate chosen from {CONFIGS['first']['grid']} by the same selection "
+            f"(one run per arm and rate from the initial parameters of run 0, {SEL_STEPS} steps at the constant rate, the lowest final training loss), 1200-token "
             f"sequences, {STEPS} steps, the same eight runs. Each run was repeated once with the embedding weight E1[0][0] increased by 1e-12. Verdicts of the original runs and "
-            "of the repeats by the registered rule:\n\n" + t1 + "\n\nHow far the repeat of a run ends from the run, in population cross-entropy (nats per token):\n\n" + t2
-            + f"\n\nFor scale, the standard deviation over the eight runs of one arm lies between {_fx(min(sds), 3)} and {_fx(max(sds), 3)}.")
+            "of the repeats by the registered rule:\n\n" + t1 + "\n\nHow far the repeat of a run ends from the run, in population cross-entropy (nats per token). A run at a "
+            "constant rate is chaotic at the end, so the change itself cannot be reproduced; each cell is a bound that is at least ten times the value found in "
+            "the module (the smallest of 0.05, 0.1, 0.5 that does so):\n\n" + t2
+            + f"\n\nFor scale, the standard deviation over the eight runs of one arm lies between {_fx(math.floor(min(sds) * 100) / 100, 2)} and "
+            f"{_fx(math.ceil(max(sds) * 100) / 100, 2)} (to the nearest hundredth outward, for the same reason).")
+
+
+def _bound(x):
+    for b in (0.05, 0.1, 0.5):
+        if 10 * x < b:
+            return f"below {b:g}"
+    return f"above {0.5:g}"
 
 
 # ------------------------------------------------------------------------------------------------ data for the figures

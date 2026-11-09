@@ -64,8 +64,13 @@ reproduced its worked examples from the text alone in another language.
       bug in a worked module and stale prose). All were fixed in the
       following commits; the project reproduced completely. A recheck has
       not been run.
-- [ ] Volume VI, Advanced Language Model Architectures: all 10 chapters and
-      the project written; the independent reader pass has not been run.
+- [x] Volume VI, Advanced Language Model Architectures: all 10 chapters and
+      the project written. Verified by an independent C re-implementation
+      from the text alone (`scratchpad/reader/v06`): 1024 of 1235
+      items passed, 188 after a guess, 23 failed (unstated metadata, stage
+      counts and schedules, chaotic training cells claimed stable, totals
+      without shapes, and an offload ratio the prose got wrong). All were
+      fixed in the following commits; a recheck has not been run.
 
 ## Open
 

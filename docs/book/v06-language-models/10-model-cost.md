@@ -73,9 +73,18 @@ The formula P = V D (1 + e_h) + D + L (2 D H d_h + 2 D h_kv d_h + 3 D F + 2 d_h 
 | Qwen3 0.6B | 596,049,920 | 596,049,920 | yes | 595,984,384 | 0.011% |
 | Qwen3 8B | 8,190,735,360 | 8,190,735,360 | yes | 8,190,427,136 | 0.004% |
 | Llama-2 13B | 13,015,864,320 | 13,015,864,320 | yes | 13,015,449,600 | 0.003% |
+
+The shapes that went in (Qwen3 0.6B ties its head, the others do not; only Llama-2 13B has no QK-norm; all four use a SwiGLU network and no biases):
+
+| decoder | V | D | L | H | h_kv | d_h | F | head | QK-norm |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---|
+| small decoder | 1,000 | 64 | 4 | 8 | 2 | 8 | 160 | separate | yes |
+| Qwen3 0.6B | 151,936 | 1,024 | 28 | 16 | 8 | 128 | 3,072 | tied | yes |
+| Qwen3 8B | 151,936 | 4,096 | 36 | 32 | 8 | 128 | 12,288 | separate | yes |
+| Llama-2 13B | 32,000 | 5,120 | 40 | 40 | 40 | 128 | 13,824 | separate | no |
 <!-- /worked -->
 
-The last two columns say what can be dropped when a rough count is enough. The norm gains are a fraction of a percent of every model in the table, so the leading terms $V D (1 + e_{\mathrm{h}}) + L(2 D H d_h + 2 D h_{\mathrm{kv}} d_h + 3 D F)$ are the working formula, and the page of an architecture usually needs only these. The embedding is the other thing that changes with size: it is 44 percent of the small decoder and 15 percent of an 8-billion-parameter one, because $V D$ grows with the width $D$ while the layers' share grows with $L D^2$. This is why the "attention plus network" part of $P \approx V D + L (\ldots)$ is the one to keep for large models and why the table of a small model misleads about the proportions of a large one.
+The last two columns say what can be dropped when a rough count is enough. The norm gains are a fraction of a percent of every model in the table, so the leading terms $V D (1 + e_{\mathrm{h}}) + L(2 D H d_h + 2 D h_{\mathrm{kv}} d_h + 3 D F)$ are the working formula, and the page of an architecture usually needs only these. The embedding is the other thing that changes with size: the embedding table and the separate output matrix together, $2 V D$, are 43.8 percent of the small decoder (128,000 of 292,480 numbers; the table alone is 21.9 percent) and 15.2 percent of Qwen3 8B (1,244,659,712 of 8,190,735,360), because $V D$ grows with the width $D$ while the layers' share grows with $L D^2$. This is why the "attention plus network" part of $P \approx V D + L (\ldots)$ is the one to keep for large models and why the table of a small model misleads about the proportions of a large one.
 
 Three caveats about what the count is. It is the number of numbers stored, so a tied head is counted once; the byte size of a checkpoint is the count times the bytes of the format, plus whatever scales a quantized format carries, which later sections count. It is not the number of parameters that a token uses, and the next section separates the two. And it is only as good as the tensor list it was summed from: the section on estimates that went wrong at the end of the chapter has a hand-written formula that missed one matrix per layer.
 
@@ -154,7 +163,7 @@ Both models of this section are in brain's tree as ports, and both are cheap to 
 
 The Gemma-4 text tower of `crates/gemma4` is a decoder stack of 48 layers of width 3,840 that LTX-2.5 uses as a text encoder: a prompt goes through once and the hidden states of every layer feed a projection, so the crate has no output matrix and no cache (`crates/gemma4/src/config.rs`, `crates/gemma4/src/import.rs`). What makes its layers differ is attention. Every sixth layer is full attention (the layers 5, 11, ..., 47, counting from 0) and the other 40 are sliding-window attention with a window of 1,024. The two kinds do not just differ in the mask. A sliding layer has 8 key-value heads of width 256, a full layer has one key-value head of width 512, so the full layers are multi-query attention with twice the head width, and they have no value matrix at all: the crate's flag `attention_k_eq_v` makes a full layer take its value from the raw output of its key projection. The query heads are 16 in both kinds. Each layer has four norms (one before and one after each of attention and the network), a layer scalar, QK-norms, and a gated network whose gate is a tanh GELU. After the last layer, the hidden states of the embedding and of all 48 layers are concatenated, 49 of width 3,840 for each token, and projected to 4,096 numbers for the video stream of LTX and to 2,048 for its audio stream.
 
-The diffusion transformer of MiniMax-H3 in `crates/minimaxh3` is a different kind of model: no tokens in a vocabulary, no cache, no causal mask. It denoises video and audio together in one packed sequence of rows of video, audio and text, and every row attends to every row, in 50 blocks of width 5,376 with 56 heads of width 128. The attention matrices project to a width of $H d_h = 7{,}168$, wider than the stream, and the gate and value matrices of the network are stored as one tensor of $2F$ by $D$. What is peculiar is the conditioning. Each block has an `adaln_proj`, a linear map from a 2,688-number embedding of the timestep to eighteen vectors of width 5,376: six modulation vectors for each of three modalities, which scale, shift and gate the block's two halves (`crates/minimaxh3/src/config.rs`, `crates/minimaxh3/src/model.rs`). The tensor list of the crate's own test fixture holds all of it, and so the whole count follows.
+The diffusion transformer of MiniMax-H3 in `crates/minimaxh3` is a different kind of model: no tokens in a vocabulary, no cache, no causal mask. It denoises video and audio together in one packed sequence of rows of video, audio and text, and every row attends to every row, in 50 blocks of width 5,376 with 56 heads of width 128. The attention matrices project to a width of $H d_h = 7{,}168$, wider than the stream, and the gate and value matrices of the network are stored as one tensor of $2F$ by $D$. What is peculiar is the conditioning. Each block has an `adaln_proj`, a linear map from a 2,688-number embedding of the timestep to eighteen vectors of width 5,376: six modulation vectors for each of three modalities, which scale, shift and gate the block's two halves (`crates/minimaxh3/src/config.rs`, `crates/minimaxh3/src/model.rs`). The tensor list of the crate's own test fixture holds all of it, and so the whole count follows; the second table of the block below prints the shape of every tensor behind each group, and the `adaln_proj` of a block holds a weight of $18 D \times 2{,}688$ and a bias of $18 D$ numbers.
 
 <!-- worked: model_cost.gemma4_parameters -->
 The text tower of Gemma-4 as `Gemma4Config::gemma4_12b` configures it: V = 262,144, D = 3,840, F = 15,360, L = 48 layers, H = 16 query heads. Layers 5, 11, ..., 47 (0-indexed) are full attention with 1 key-value head of width 512 and no V matrix (the key output serves as the value); the other 40 are sliding-window attention with 8 key-value heads of width 256 (window 1,024). Each layer has four norm gains and a layer scalar; the tower has no output matrix; after the last layer an aggregate projection maps the 49 hidden states (embedding output and 48 layers) of one token, 188,160 numbers, to 4,096 and to 2,048 numbers, each with a bias. The attention matrices of one sliding layer hold 47,185,920 numbers, those of a full layer 64,880,640.
@@ -197,6 +206,19 @@ The diffusion transformer of MiniMax-H3 as `H3TransformerConfig::real` configure
 | time embedder | 15,835,008 | 0.05% |
 | output norm and heads | 29,605,760 | 0.09% |
 | **total** | 33,122,992,896 | 100% |
+
+The tensors behind each group, as the fixture lists them (shapes are [rows, columns], a vector has one dimension; all linear maps are stored as [out, in]).
+
+| group | tensors in one instance and their shapes | instances |
+|---|---|---:|
+| attention matrices (blocks) | to_q, to_k, to_v [7168, 5376] each; to_out [5376, 7168] | 50 |
+| feed-forward matrices (blocks) | ff.net.0.proj [28672, 5376]; ff.net.2 [5376, 14336] | 50 |
+| head norms and block norms | norm_q, norm_k [128] each; norm1, norm2 [5376] each (2 x 5376 + 2 x 128 = 11008 per block) | 50 |
+| adaln_proj (blocks) | linear.weight [96768, 2688]; linear.bias [96768] | 50 |
+| token refiner (2 blocks, no adaln_proj) | per block the attention, norm and feed-forward tensors above (no adaln_proj); once more final_norm [5376] | 2 |
+| input projections and text embedder | proj_in.weight [5376, 96] and bias [5376]; audio_proj_in.weight [5376, 32] and bias [5376]; context_embedder.weight [5376, 5120] and bias [5376] | 1 |
+| time embedder | linear_1.weight [5376, 256] and bias [5376]; linear_2.weight [2688, 5376] and bias [2688] | 1 |
+| output norm and heads | norm_out.norm.weight [5376]; norm_out.linear.weight [10752, 2688] and bias [10752]; proj_out.weight [96, 5376] and bias [96]; audio_proj_out.weight [32, 5376] and bias [32] | 1 |
 
 The same tensor list against what the crate pins or states.
 
@@ -388,7 +410,22 @@ Numbers a Gemma-4 layer keeps per token for the backward pass under the rule of 
 | **one layer** | 81,424 | 86,544 |
 <!-- /worked -->
 
-A sliding layer keeps 81,424 numbers per token and a full layer 86,544; the network's three tensors are more than half of it, as the shares of the parameters suggested. With recomputation, a layer keeps only its input, and the backward pass rebuilds one layer's tensors at a time: $L D$ numbers for the 48 boundaries plus one layer's full set. Knowledge #233 has the same count measured on a 27-billion-parameter hybrid model after recomputation: 20,480 bytes per boundary in f32 (5,120 numbers of 4 bytes) and 65 boundaries for 64 layers, 1.33 MB per token, the largest single term once the layer's own working set is segmented. The commit that gave the host trainers of `crates/minimaxh3` the same policy, `263a8211d`, describes the cache under recomputation as "every block's input and what a block rebuild reads (the adaLN tables, contexts and RoPE tables)": the boundaries plus the side inputs that the rebuild needs.
+A sliding layer keeps 81,424 numbers per token and a full layer 86,544; the network's three tensors are more than half of it, as the shares of the parameters suggested. The diffusion transformer of MiniMax-H3 is counted by the same rule:
+
+<!-- worked: model_cost.h3_activations_per_block_table -->
+Numbers a MiniMax-H3 block keeps per packed row for the backward pass under the same rule (D = 5,376, H = 56 heads of d_h = 128 so H d_h = 7,168, F = 14,336), with a fused attention kernel that keeps one logsumexp per head. The block has two norms and no post-norms, so the 2 D of extra norms that the Gemma-4 layer keeps are absent; the AdaLN tables are side inputs and are not counted per row. Over the 50 blocks one row keeps 4,662,000 numbers.
+
+| tensor | numbers per row |
+|---|---:|
+| block input, the two norm outputs the matrices read, the residual after attention (4 D) | 21,504 |
+| queries and attention output (2 H d_h) | 14,336 |
+| keys and values (2 H d_h, no sharing) | 14,336 |
+| logsumexp per head (H) | 56 |
+| gate and value pre-activations and the product (3 F) | 43,008 |
+| **one block, per row** | 93,240 |
+<!-- /worked -->
+
+It has no sharing of keys and values and no cache, so a row keeps more than a token of the tower, and the 4,662,000 numbers per row of the training table below are these 93,240 over 50 blocks. With recomputation, a layer keeps only its input, and the backward pass rebuilds one layer's tensors at a time: $L D$ numbers for the 48 boundaries plus one layer's full set. Knowledge #233 has the same count measured on a 27-billion-parameter hybrid model after recomputation: 20,480 bytes per boundary in f32 (5,120 numbers of 4 bytes) and 65 boundaries for 64 layers, 1.33 MB per token, the largest single term once the layer's own working set is segmented. The commit that gave the host trainers of `crates/minimaxh3` the same policy, `263a8211d`, describes the cache under recomputation as "every block's input and what a block rebuild reads (the adaLN tables, contexts and RoPE tables)": the boundaries plus the side inputs that the rebuild needs.
 
 <!-- worked: model_cost.training_memory_models -->
 Training memory of two models if they were trained, in GiB: brain trains neither at this size (the Gemma-4 crate is an inference port with no trainer; MiniMax-H3 has a host f64 reference trainer for gradient checks), so these are what the formula says, not what a run measured. State = P x (value + gradient + master + two moments) bytes. Activations are kept in bf16 (2 bytes) for 8,192 tokens of Gemma-4 and 13,312 packed rows of the DiT; the attention state is a logsumexp per head (a fused attention kernel). Numbers kept per token: Gemma-4 3,949,312 (all layers) or 270,864 with recomputation (the 48 residual snapshots and one full layer); DiT 4,662,000 or 362,040.
@@ -495,7 +532,7 @@ Three episodes in this tree, two estimates that were wrong and one that had to f
 *A hand-written count that missed a matrix.* Commit `dec49aaec` fixed `te_bytes` in `crates/flux1`, which had derived the weight bytes of the T5-XXL text encoder by hand from its width, hidden width and layer count and counted two network matrices per layer where a T5 block has three. The commit says the placement plan sized the encoder off the undercount, found a card with room for that number, and then the real allocation did not fit. The fix reads the crate's own tensor manifest, the same count the crate's tests pin to the reference. The commit message puts the undercount at "about 5 GiB".
 
 <!-- worked: model_cost.t5_undercount -->
-The weights of the T5-XXL encoder at f32 (`T5Config::xxl`): V = 32,128, D = 4,096, F = 10,240, 24 layers, 64 heads of width 64, three network matrices per layer (two input matrices and one output matrix), one shared relative-position table of 32 by 64. The hand-written formula counted 2 D F per layer for the network.
+The weights of the T5-XXL encoder at f32 (`T5Config::xxl`): V = 32,128, D = 4,096, F = 10,240, 24 layers, 64 heads of width 64, three network matrices per layer (two input matrices and one output matrix), one shared relative-position table of 32 by 64, and per layer two norm gains of 4,096 (before attention and before the network) with a final norm gain of 4,096; QKVO are four matrices of 4,096 by 4,096. The hand-written formula counted 2 D F per layer for the network, and counted the embedding table, the four attention matrices and the two norm gains of every layer, but not the final norm gain or the position table.
 
 | quantity | value | in GiB |
 |---|---:|---:|
@@ -504,9 +541,11 @@ The weights of the T5-XXL encoder at f32 (`T5Config::xxl`): V = 32,128, D = 4,09
 | bytes by the hand-written formula (two network matrices per layer) | 15,022,686,208 | 13.99 GiB |
 | bytes missing | 4,026,556,416 | 3.750 GiB |
 | one network matrix per layer, 24 x 4,096 x 10,240 x 4 bytes | 4,026,531,840 | 3.750 GiB |
+| final norm gain and position table, (4,096 + 32 x 64) x 4 bytes | 24,576 |  |
+| the two lines above added | 4,026,556,416 |  |
 <!-- /worked -->
 
-The count gives 3.75 GiB, 4.03 GB, exactly the one network matrix per layer that the commit names, so "about 5 GiB" is an overstatement of the same error, and the commit's mechanism and the test it added stand. The general lesson is the one this chapter started with: derive bytes from the tensor list, the one source of truth, and do not re-derive it. `Weight::bytes_for` in `crates/model/src/ops.rs` says of itself that it is "the one place a tier's footprint is stated, so a planner's estimate and a built model's report agree", and the pre-flight estimate of `crates/qwen3/src/footprint.rs` is written to use the same arithmetic as the build it predicts for the same reason.
+The count gives 3.75 GiB, 4.03 GB: the one network matrix per layer that the commit names, 4,026,531,840 bytes, plus the 24,576 bytes of the final norm gain and the position table that a formula written from the layers alone also lacks, so "about 5 GiB" is an overstatement of the same error, and the commit's mechanism and the test it added stand. The general lesson is the one this chapter started with: derive bytes from the tensor list, the one source of truth, and do not re-derive it. `Weight::bytes_for` in `crates/model/src/ops.rs` says of itself that it is "the one place a tier's footprint is stated, so a planner's estimate and a built model's report agree", and the pre-flight estimate of `crates/qwen3/src/footprint.rs` is written to use the same arithmetic as the build it predicts for the same reason.
 
 *A budget from the card's size.* Commit `bafa88f7d` records a MiniMax-H3 clip at 768 by 448 that was placed on cards with 21.9 GiB free, int8 blocks plus an 8 GB workspace, and ran out of device memory in the first step. `StreamPlan::cards` had offered each card its total size less a reserve, which counts the driver's share and other processes' allocations as available; it now budgets from what the card reports free. The commit's test makes the rule an assertion: a card with 10 GiB free and a 3 GiB reserve offers 7 GiB. Commit `753a538fe` of the same day, as the section on inference showed, replaced the flat reserve by the proportional one. The two together say that $\mathrm{ovh}$ in the inference formula is a function of what the plan holds and what the card has already given away.
 
