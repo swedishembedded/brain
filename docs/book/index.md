@@ -107,4 +107,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 11. [Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md): Given next-token probabilities, how do we choose what to say?
 12. [The KV Cache](v05-sequences/12-kv-cache.md): Why recompute the past at every step when we could remember it, and what does remembering cost?
 13. [Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md): How can attention over long sequences be computed exactly without ever storing the full attention matrix?
+14. [Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md): How do models that read a whole text at once learn representations for search and classification?
 <!-- /contents -->

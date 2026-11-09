@@ -412,6 +412,7 @@ navigation:
           - docs/book/v05-sequences/11-decoding.md
           - docs/book/v05-sequences/12-kv-cache.md
           - docs/book/v05-sequences/13-flash-attention.md
+          - docs/book/v05-sequences/14-encoders.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

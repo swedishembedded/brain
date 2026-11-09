@@ -479,7 +479,7 @@ volumes:
         title: "Bidirectional Encoders and Embedding Models"
         question: "How do models that read a whole text at once learn representations for search and classification?"
         introduces: [bidirectional-encoder, masked-language-modeling, sentence-embedding, contrastive-loss, retrieval]
-        requires: [transformer-block, cosine-similarity, softmax-cross-entropy, wordpiece]
+        requires: [transformer-block, cosine-similarity, softmax-cross-entropy, wordpiece, causal-mask, loss-masking, temperature, principal-component-analysis, precision-and-recall, special-tokens, adamw, cosine-schedule, rotary-position-embedding, rms-normalization, layer-normalization, gated-linear-unit, kv-cache, arithmetic-intensity]
         brain: [modernbert, t5encoder]
 
       - id: project-gpt

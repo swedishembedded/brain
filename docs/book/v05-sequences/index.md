@@ -80,7 +80,7 @@ generation.
     remembering costs.
 13. [Attention Without the Quadratic Memory](13-flash-attention.md): how attention over long
     sequences is computed exactly without storing the full attention matrix.
-14. Bidirectional Encoders and Embedding Models: how models that read a whole text
+14. [Bidirectional Encoders and Embedding Models](14-encoders.md): how models that read a whole text
     at once learn representations for search and classification.
 15. Project: Your Own Small Language Model: train a small GPT from raw text and
     generate from it with a KV cache that provably matches uncached generation.

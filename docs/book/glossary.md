@@ -80,6 +80,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **bias-variance tradeoff**: the exact split of the expected squared error into noise, squared bias (what the model family cannot express) and variance (how much the fit moves between training sets), and the fact that making a model more flexible lowers the first of the last two and raises the second. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
+**bidirectional encoder**: a stack of transformer blocks whose attention uses the full mask, so that the vector at every position is computed from every token of the text, to the left and to the right, in every layer; it gives a vector per token in one pass and cannot generate left to right. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
+
 **binary cross-entropy**: the loss $-[y\log\hat{p} + (1 - y)\log(1 - \hat{p})]$ for a yes-or-no label $y$ and predicted probability $\hat{p}$, the cross-entropy of a Bernoulli outcome; in terms of the logit $z$ it is $\mathrm{softplus}(z) - y z$. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
 **binary representation**: writing a non-negative whole number as bits, each with a place value that is a power of 2, so that $n$ bits give the $2^n$ numbers $0 \dots 2^n - 1$ and arithmetic on them wraps modulo $2^n$. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
@@ -149,6 +151,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **confidence interval**: a range computed from a sample, $\bar{x} \pm 1.96\,\mathrm{SE}$ at level $95\%$, built by a recipe that contains the true value in about that share of repeated experiments. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **context vector**: the vector that carries what an encoder has read to the decoder; in the first design a single vector, the encoder's last state, and in attention a vector of its own at every output step, a weighted average of the encoder states. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
+
+**contrastive loss**: a loss that trains vectors by comparison: for each anchor it is the softmax cross-entropy, at a temperature, over the cosines of the anchor to its partner and to the partners of the other pairs of the batch (the in-batch negatives), which raises the cosine of the pair and lowers the others. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
 
 **controlled experiment**: a comparison in which the two arms differ only in the thing the claim is about, with the data, recipe, seeds, compute, tuning effort and metric held the same, so that a difference can be attributed to that thing. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
@@ -444,6 +448,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **machine epsilon**: the gap between $1$ and the next larger floating-point number, $2^{1-p}$ ($1.19 \times 10^{-7}$ in 32 bits, $2.22 \times 10^{-16}$ in 64 bits); twice the unit round-off $u = 2^{-p}$, which is the bound on the relative error of one rounding. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
+**masked language modeling**: the training task of an encoder in which a random subset of positions is selected, the input there is replaced (by a mask token, a random token or nothing, in the proportions 80, 10 and 10 percent), and the model is trained to recover the original tokens at the selected positions only, from both sides. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
+
 **matrix**: a table of numbers with $m$ rows and $n$ columns, which is also a linear map from $n$ numbers to $m$ numbers. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
 **matrix inverse**: the matrix $\mathbf{A}^{-1}$ that undoes $\mathbf{A}$, so $\mathbf{A}^{-1}\mathbf{A}$ is the identity; it exists only for a square matrix whose rank equals its size. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
@@ -634,6 +640,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **residual-connection**: a layer that returns its input plus a correction, $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, so that its Jacobian is $\mathbf{I} + \mathbf{J}_f$ and the gradient has a path through it that passes no weights. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
+**retrieval**: finding the stored texts that answer a query by embedding the query, comparing its vector with the stored vectors and ranking the collection by cosine, judged by the share of the relevant texts found among the top $k$ (recall at $k$). *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
+
 **reverse-mode differentiation**: computing derivatives by carrying a row vector from the single output back through the chain of Jacobians, so one sweep gives the gradient with respect to every input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **rms-normalization**: layer normalization without the subtraction of the mean: dividing each example's features by their root mean square and applying a learned gain. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
@@ -669,6 +677,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **seed**: the number from which a generator's starting state is computed; the same seed gives the same stream, and a seed used by a run must be recorded for the run to be repeated. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **selection cache**: the stored map from a key of device identity, driver version, source digest and shape bucket to the candidate chosen, kept between runs so that a measurement is paid once and discarded when any part of the key changes. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
+
+**sentence embedding**: one vector that represents a whole text, obtained by pooling the per-token vectors of an encoder (the mean over the real tokens, or the row of a designated first token) so that two texts can be compared by the cosine of their vectors. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
 
 **sequence packing**: laying the tokens of many documents end to end in one stream and cutting it into rows of a fixed length, with the targets one place later and a padded, masked last row, so that almost every position of every row does useful work. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
 

@@ -1,0 +1,113 @@
+<!-- source-sha256: 18d0b20785e2a0a8411d59049256636d7e8074c17136ea6d51a9e19823dcb888 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" width="1000" height="500"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="500" fill="#ffffff"/>
+<rect x="12" y="24" width="484" height="450" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="26" y="46" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">decoder: causal mask</text>
+<text x="274" y="68.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">key j (read)</text>
+<text x="149" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<text x="199" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">[MASK]</text>
+<text x="249" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">sat</text>
+<text x="299" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">on</text>
+<text x="349" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<text x="399" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">mat</text>
+<text x="116" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">query i</text>
+<text x="116" y="145.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">the</text>
+<rect x="124" y="116" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="174" y="116" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="224" y="116" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="274" y="116" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="324" y="116" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="374" y="116" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="116" y="195.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">[MASK]</text>
+<rect x="124" y="166" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="174" y="166" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="224" y="166" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="274" y="166" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="324" y="166" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="374" y="166" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="116" y="245.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">sat</text>
+<rect x="124" y="216" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="174" y="216" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="224" y="216" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="274" y="216" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="324" y="216" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="374" y="216" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="116" y="295.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">on</text>
+<rect x="124" y="266" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="174" y="266" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="224" y="266" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="274" y="266" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="324" y="266" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<rect x="374" y="266" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="116" y="345.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">the</text>
+<rect x="124" y="316" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="174" y="316" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="224" y="316" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="274" y="316" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="324" y="316" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="374" y="316" width="50" height="50" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="116" y="395.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">mat</text>
+<rect x="124" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="174" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="224" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="274" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="324" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="374" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="124" y="166" width="300" height="50" fill="none" stroke="#c53030" stroke-width="2.4"/>
+<text x="254" y="448.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">21 allowed pairs of 36</text>
+<text x="254" y="470.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the blank (outlined) reads 2 of 6 positions</text>
+<rect x="504" y="24" width="484" height="450" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="518" y="46" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">encoder: full mask</text>
+<text x="766" y="68.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">key j (read)</text>
+<text x="641" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<text x="691" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">[MASK]</text>
+<text x="741" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">sat</text>
+<text x="791" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">on</text>
+<text x="841" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<text x="891" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">mat</text>
+<text x="608" y="100.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">query i</text>
+<text x="608" y="145.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">the</text>
+<rect x="616" y="116" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="666" y="116" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="716" y="116" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="766" y="116" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="816" y="116" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="866" y="116" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<text x="608" y="195.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">[MASK]</text>
+<rect x="616" y="166" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="666" y="166" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="716" y="166" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="766" y="166" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="816" y="166" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="866" y="166" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<text x="608" y="245.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">sat</text>
+<rect x="616" y="216" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="666" y="216" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="716" y="216" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="766" y="216" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="816" y="216" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="866" y="216" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<text x="608" y="295.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">on</text>
+<rect x="616" y="266" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="666" y="266" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="716" y="266" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="766" y="266" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="816" y="266" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="866" y="266" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<text x="608" y="345.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">the</text>
+<rect x="616" y="316" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="666" y="316" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="716" y="316" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="766" y="316" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="816" y="316" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="866" y="316" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<text x="608" y="395.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">mat</text>
+<rect x="616" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="666" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="716" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="766" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="816" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="866" y="366" width="50" height="50" fill="#4a5568" stroke="#a0aec0" stroke-width="1"/>
+<rect x="616" y="166" width="300" height="50" fill="none" stroke="#c53030" stroke-width="2.4"/>
+<text x="746" y="448.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">36 allowed pairs of 36</text>
+<text x="746" y="470.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the blank (outlined) reads 6 of 6 positions</text>
+</svg>

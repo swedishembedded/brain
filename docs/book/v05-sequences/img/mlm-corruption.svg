@@ -1,0 +1,115 @@
+<!-- source-sha256: 983abd71a2865429dcc07a138be9e744e2eb11fcd3ee8e42117bd2a272d38b65 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 350" width="1000" height="350"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="350" fill="#ffffff"/>
+<text x="138" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="end">original</text>
+<text x="138" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="end">selected?</text>
+<text x="138" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="end">input</text>
+<text x="138" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="end">target</text>
+<text x="187" y="39.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">position 0</text>
+<rect x="150" y="60" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="187" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[CLS]</text>
+<text x="187" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">no</text>
+<rect x="150" y="180" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="187" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[CLS]</text>
+<rect x="150" y="252" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="187" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-</text>
+<line x1="187" y1="98" x2="187" y2="112" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<line x1="187" y1="132" x2="187" y2="180" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="264" y="39.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">position 1</text>
+<rect x="227" y="60" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="264" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<text x="264" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">keep</text>
+<rect x="227" y="180" width="74" height="38" fill="#c6f6d5" stroke="#a0aec0" stroke-width="1"/>
+<text x="264" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">the</text>
+<rect x="227" y="252" width="74" height="38" fill="#e2e8f0" stroke="#a0aec0" stroke-width="1"/>
+<text x="264" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<line x1="264" y1="98" x2="264" y2="112" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<line x1="264" y1="132" x2="264" y2="180" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="341" y="39.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">position 2</text>
+<rect x="304" y="60" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="341" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">hen</text>
+<text x="341" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">no</text>
+<rect x="304" y="180" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="341" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">hen</text>
+<rect x="304" y="252" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="341" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-</text>
+<line x1="341" y1="98" x2="341" y2="112" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<line x1="341" y1="132" x2="341" y2="180" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="418" y="39.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">position 3</text>
+<rect x="381" y="60" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="418" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cluck</text>
+<text x="418" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">mask</text>
+<rect x="381" y="180" width="74" height="38" fill="#fefcbf" stroke="#a0aec0" stroke-width="1"/>
+<text x="418" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">[MASK]</text>
+<rect x="381" y="252" width="74" height="38" fill="#e2e8f0" stroke="#a0aec0" stroke-width="1"/>
+<text x="418" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cluck</text>
+<line x1="418" y1="98" x2="418" y2="112" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<line x1="418" y1="132" x2="418" y2="180" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="495" y="39.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">position 4</text>
+<rect x="458" y="60" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="495" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">##ed</text>
+<text x="495" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">random</text>
+<rect x="458" y="180" width="74" height="38" fill="#fed7d7" stroke="#a0aec0" stroke-width="1"/>
+<text x="495" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">owl</text>
+<rect x="458" y="252" width="74" height="38" fill="#e2e8f0" stroke="#a0aec0" stroke-width="1"/>
+<text x="495" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">##ed</text>
+<line x1="495" y1="98" x2="495" y2="112" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<line x1="495" y1="132" x2="495" y2="180" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="572" y="39.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">position 5</text>
+<rect x="535" y="60" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="572" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">near</text>
+<text x="572" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">mask</text>
+<rect x="535" y="180" width="74" height="38" fill="#fefcbf" stroke="#a0aec0" stroke-width="1"/>
+<text x="572" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">[MASK]</text>
+<rect x="535" y="252" width="74" height="38" fill="#e2e8f0" stroke="#a0aec0" stroke-width="1"/>
+<text x="572" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">near</text>
+<line x1="572" y1="98" x2="572" y2="112" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<line x1="572" y1="132" x2="572" y2="180" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="649" y="39.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">position 6</text>
+<rect x="612" y="60" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="649" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<text x="649" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">no</text>
+<rect x="612" y="180" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="649" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<rect x="612" y="252" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="649" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-</text>
+<line x1="649" y1="98" x2="649" y2="112" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<line x1="649" y1="132" x2="649" y2="180" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="726" y="39.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">position 7</text>
+<rect x="689" y="60" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="726" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">barn</text>
+<text x="726" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">no</text>
+<rect x="689" y="180" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="726" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">barn</text>
+<rect x="689" y="252" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="726" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-</text>
+<line x1="726" y1="98" x2="726" y2="112" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<line x1="726" y1="132" x2="726" y2="180" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="803" y="39.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">position 8</text>
+<rect x="766" y="60" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="803" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">.</text>
+<text x="803" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">mask</text>
+<rect x="766" y="180" width="74" height="38" fill="#fefcbf" stroke="#a0aec0" stroke-width="1"/>
+<text x="803" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">[MASK]</text>
+<rect x="766" y="252" width="74" height="38" fill="#e2e8f0" stroke="#a0aec0" stroke-width="1"/>
+<text x="803" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">.</text>
+<line x1="803" y1="98" x2="803" y2="112" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<line x1="803" y1="132" x2="803" y2="180" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="880" y="39.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">position 9</text>
+<rect x="843" y="60" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="880" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[SEP]</text>
+<text x="880" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">no</text>
+<rect x="843" y="180" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="880" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[SEP]</text>
+<rect x="843" y="252" width="74" height="38" fill="#ffffff" stroke="#a0aec0" stroke-width="1"/>
+<text x="880" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-</text>
+<line x1="880" y1="98" x2="880" y2="112" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<line x1="880" y1="132" x2="880" y2="180" stroke="#a0aec0" stroke-width="1" stroke-dasharray="3 3"/>
+<rect x="150" y="318" width="22" height="14" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="329.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">[MASK]</text>
+<rect x="340" y="318" width="22" height="14" rx="3" fill="#fed7d7" stroke="#4a5568" stroke-width="1.2"/>
+<text x="370" y="329.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">random token</text>
+<rect x="530" y="318" width="22" height="14" rx="3" fill="#c6f6d5" stroke="#4a5568" stroke-width="1.2"/>
+<text x="560" y="329.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">left unchanged</text>
+<rect x="720" y="318" width="22" height="14" rx="3" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="750" y="329.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">position with loss</text>
+</svg>
