@@ -69,7 +69,7 @@ fn fft_kernels_compute_the_basis_products() {
     }
     let synth = g.kernel_index("rdft_synth").unwrap();
     let analysis = g.kernel_index("rdft_analysis").unwrap();
-    // Row counts that do and do not fill the last workgroup's 2048/D rows.
+    // Shapes from the smallest to the largest basis, one workgroup per row.
     for (d, m, rows) in [(32usize, 13usize, 5usize), (64, 64, 3), (512, 256, 301), (2048, 101, 2), (2, 2, 1), (128, 77, 33)] {
         let s = model::hostmath::real_fourier_basis(d, m);
         let z = rand(rows * m, (d * 31 + m) as u64);
@@ -79,7 +79,7 @@ fn fft_kernels_compute_the_basis_products() {
         let (zb, xb) = (g.storage_init("z", &z), g.storage_init("x", &x));
         let (xo, zo) = (g.storage((rows * d) as u64), g.storage((rows * m) as u64));
         let params = [rows as u32, d as u32, m as u32, (d as u32).ilog2()];
-        let wg = Dispatch::Workgroups(spectrallm::mixer::fft_workgroups(rows as u32, d as u32));
+        let wg = Dispatch::Workgroups(spectrallm::mixer::fft_workgroups(rows as u32));
         g.submit(&[], &[g.dispatch(synth, &[&zb, &xo], &params, wg), g.dispatch(analysis, &[&xb, &zo], &params, wg)]);
         let (got_x, got_z) = (g.read(&xo, rows * d), g.read(&zo, rows * m));
         gate(&format!("FFT synthesis D={d} m={m}"), "max abs diff vs basis product", max_diff(&got_x, &want_x) as f64, 2e-5);

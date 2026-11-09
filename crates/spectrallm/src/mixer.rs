@@ -58,7 +58,7 @@ pub fn resolve_transform(gpu: &Gpu, cfg: &SpectralConfig) -> Transform {
 pub const FFT_WORKGROUP_BYTES: u32 = 16 * 1024;
 
 /// Workgroups that cover `rows` transforms: one per row.
-pub fn fft_workgroups(rows: u32, _d: u32) -> u32 {
+pub fn fft_workgroups(rows: u32) -> u32 {
     rows
 }
 
@@ -141,7 +141,7 @@ impl SpectralLm {
         let basis = self.basis.as_ref().expect("synthesis on a SwiGLU model");
         let m = self.cfg.d_model;
         match basis.path {
-            Transform::Fft => s.push(self.gpu.dispatch(RDFT_SYNTH, &[src, dst], &[rows, basis.d, m, basis.d.ilog2()], Dispatch::Workgroups(fft_workgroups(rows, basis.d)))),
+            Transform::Fft => s.push(self.gpu.dispatch(RDFT_SYNTH, &[src, dst], &[rows, basis.d, m, basis.d.ilog2()], Dispatch::Workgroups(fft_workgroups(rows)))),
             Transform::Dense => self.linear(s, src, &basis.s, dst, rows, m, basis.d),
         }
     }
@@ -151,7 +151,7 @@ impl SpectralLm {
         let basis = self.basis.as_ref().expect("analysis on a SwiGLU model");
         let m = self.cfg.d_model;
         match basis.path {
-            Transform::Fft => s.push(self.gpu.dispatch(RDFT_ANALYSIS, &[src, dst], &[rows, basis.d, m, basis.d.ilog2()], Dispatch::Workgroups(fft_workgroups(rows, basis.d)))),
+            Transform::Fft => s.push(self.gpu.dispatch(RDFT_ANALYSIS, &[src, dst], &[rows, basis.d, m, basis.d.ilog2()], Dispatch::Workgroups(fft_workgroups(rows)))),
             Transform::Dense => self.linear(s, src, &basis.st, dst, rows, basis.d, m),
         }
     }
