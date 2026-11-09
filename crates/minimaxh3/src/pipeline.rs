@@ -1044,6 +1044,12 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
         Some(f) => f,
         None => ckpt.dit_tensors,
     };
+    let sched = DualSchedule::for_denoise_steps(opts.denoise_steps)?;
+    let num_steps = sched.num_steps();
+    let total = num_steps as u32 + 2;
+    // A request is under way from here: loading the DiT can take longer than
+    // the steps that follow it.
+    progress(0, total, "load DiT");
     // Streaming re-reads the checkpoint every step, so the switch is said
     // out loud: it is the difference between minutes and hours per clip.
     let owned = match H3Transformer::load(dit_tensors, *dit_cfg, device, RESIDENT_TIER, (seq_len, opts.act_levels), ckpt.dit_gates) {
@@ -1058,8 +1064,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     // A gated DiT runs the sparse attention the gates were trained with.
     let gated = resident.map_or(ckpt.dit_gates.is_some(), H3Transformer::has_gates);
 
-    let sched = DualSchedule::for_denoise_steps(opts.denoise_steps)?;
-    let num_steps = sched.num_steps();
+
     let num_text_tokens = packed.text_indices.len();
 
     // Every step's row-timestep plan, known before the first forward, so the
@@ -1082,7 +1087,6 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     };
 
     // Every denoise step, then the two decodes.
-    let total = num_steps as u32 + 2;
     for (i, (unique_ts, ts_idx)) in step_rows.iter().enumerate() {
         if cancel.is_cancelled() {
             return Err("cancelled".to_string());
@@ -1673,6 +1677,7 @@ pub(crate) mod tests {
         let mut seen: Vec<(u32, u32, String)> = Vec::new();
         t2va(&ckpt, &text, &opts, &capability::CancelToken::default(), |d, t, phase| seen.push((d, t, phase.to_string()))).expect("t2va");
         let total = seen[0].1;
+        assert_eq!(seen[0], (0, total, "load DiT".to_string()), "a generation reports before its DiT loads, not first after a step: {seen:?}");
         assert!(seen.iter().all(|(_, t, _)| *t == total), "one fixed total: {seen:?}");
         assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0), "progress never goes backwards: {seen:?}");
         assert_eq!(seen.last().unwrap().0, total, "the run ends at its total: {seen:?}");

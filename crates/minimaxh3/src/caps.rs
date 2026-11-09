@@ -975,6 +975,8 @@ pub fn generate_on(ckpt: &pipeline::H3Checkpoint, req: &Request, paths: &Paths, 
         Conditioning::Keyframes(keyframes) => keyframes.iter().map(|(_, img)| Presented::Image(img)).collect(),
         Conditioning::References(references) => references.iter().map(Presented::of_reference).collect(),
     };
+    // Under way from the start: the text encode alone can take many minutes.
+    progress(Progress::step(0, opts.denoise_steps as u32 + 2, "encode text".to_string()));
     let text = encode_presentation(paths, &req.prompt, &items, opts.device.as_deref())?;
     let report = |done: u32, total: u32, phase: &str| progress(Progress::step(done, total, phase.to_string()));
     let av = match &req.conditioning {
