@@ -180,13 +180,13 @@ Two things in the table are worth reading closely. The gradient into the last st
 A backward pass of this size is easy to get wrong in ways the loss does not show, so it is checked the way Volume III taught, against central differences, for the three cells of this chapter at once. The LSTM and GRU appear later in the chapter, and the check is printed here because the same function backs the table of the next section.
 
 <!-- worked: recurrent_networks.gradient_check_cells -->
-Each cell has H = 3 units. Its parameters are drawn by the initialization recipe of the text from the generator `recurrent_networks.check.<cell>`, with W gain 1.5, forget-gate bias 0.5 (the update-gate bias of the GRU -0.5) and U entries `0.7 * normal()`, and the readout bias set to (0.1, -0.2, 0.05, 0). The loss is the mean cross-entropy of two sequences, one of k = 2 phrases (8 tokens) and one of k = 1 (5 tokens), in that order, from the generator `recurrent_networks.check.data` (seed 0xa5de94c53f641062). Every entry of every parameter is compared with a central difference of step 1e-6.
+Each cell has H = 3 units. Its parameters are drawn by the initialization recipe of the text from the generator `recurrent_networks.check.<cell>` with `<cell>` equal to `rnn` (the vanilla cell), `lstm` or `gru` (seeds in the table), with W gain 1.5, forget-gate bias 0.5 (the update-gate bias of the GRU -0.5) and U entries `0.7 * normal()`, and the readout bias set to (0.1, -0.2, 0.05, 0). The loss is the mean cross-entropy of two sequences, one of k = 2 phrases (8 tokens) and one of k = 1 (5 tokens), in that order, from the generator `recurrent_networks.check.data` (seed 0xa5de94c53f641062). Every entry of every parameter is compared with a central difference of step 1e-6.
 
-| cell | parameters compared | largest absolute difference below 1e-7 |
-|---|---:|---:|
-| vanilla | 64 | yes |
-| LSTM | 208 | yes |
-| GRU | 160 | yes |
+| cell | generator | seed | parameters compared | largest absolute difference below 1e-7 |
+|---|---|---:|---:|---:|
+| vanilla | `recurrent_networks.check.rnn` | 0x25a659a322e69dcb | 64 | yes |
+| LSTM | `recurrent_networks.check.lstm` | 0x15b0f58426e2d1c1 | 208 | yes |
+| GRU | `recurrent_networks.check.gru` | 0xf4e690e907d1ac87 | 160 | yes |
 <!-- /worked -->
 
 ## Why the past fades
@@ -203,7 +203,7 @@ $$
 d\mathbf{h}_{T-k} = \mathbf{J}_{T-k+1}^\top \cdots \mathbf{J}_{T-1}^\top\,\mathbf{J}_T^\top\, d\mathbf{h}_T ,
 $$
 
-and the same bound holds. The slopes are at most 1, so $\lVert\mathbf{J}_t\rVert_2 \le \lVert\mathbf{W}\rVert_2$ and
+and the same bound holds. Here $\lVert\mathbf{W}\rVert_2$ is the spectral norm of [Chapter 6 of Volume I](../v01-mathematics/06-decompositions.md): the first singular value of $\mathbf{W}$, the largest factor by which $\mathbf{W}$ can stretch a vector, and the book's `power_iteration` estimates it by repeatedly multiplying a vector by $\mathbf{W}$ and by $\mathbf{W}^\top$. The slopes are at most 1, so $\lVert\mathbf{J}_t\rVert_2 \le \lVert\mathbf{W}\rVert_2$ and
 
 $$
 \Big\lVert \frac{\partial\mathbf{h}_T}{\partial\mathbf{h}_{T-k}} \Big\rVert_2 \;\le\; \lVert\mathbf{W}\rVert_2^{\,k}.
@@ -218,7 +218,7 @@ The models below, and those of the training section, are all started by one reci
 The table measures the product. Seven models read the same 40 tokens, and for each the entry for $k$ is the spectral norm of the Jacobian of $\mathbf{h}_{40}$ with respect to the state $k$ steps earlier, found by the backward pass above started from each unit vector, with the book's `power_iteration` for the norm. Three of them are the vanilla cell with small, medium and large $\mathbf{W}$; the others are the gated cells of the next sections, which are put here so that one table can show all of them.
 
 <!-- worked: recurrent_networks.jacobian_product -->
-All models have H = 16 units and read the same 40 tokens, ids drawn by `integer(12)` from the generator `recurrent_networks.sens_tokens` (seed 0x0ba60b3c85e8320c). Each model's parameters come from the generator `recurrent_networks.sens.<label>` (labels as in the first column; seeds are `seed_of` of that name) in the order U, W, readout (the readout is not used here), with U entries `0.5 * normal()`, W entries `gain * normal() / sqrt(16)` where the gain is 0.25, 1 and 3 for the three vanilla models and 1 for the gated ones, and the biases of the initialization recipe of the text: LSTM forget bias 0, 1 or 3, GRU update-gate bias -1, all others 0. The entry for k is the spectral norm of the Jacobian of the last state h(40) with respect to the state k steps earlier (for the LSTM the state is (h, c), a 16 by 32 Jacobian), found by running the backward pass of BPTT from each of the 16 unit vectors in h(40) and stacking the 16 gradients that arrive k steps back. The spectral norm is `power_iteration` with 60 iterations from `normal()` draws of the generator `recurrent_networks.spectral` (seed 0x9b8b88813560a59f), restarted for each entry; the second column is the same estimate for the matrix W of a vanilla cell (a gated cell has no single recurrent matrix and shows a dash). Values are rounded to 3 significant digits and are stable to about that.
+All models have H = 16 units and read the same 40 tokens, ids drawn by `integer(12)` from the generator `recurrent_networks.sens_tokens` (seed 0x0ba60b3c85e8320c). Each model's parameters come from the generator `recurrent_networks.sens.<label>`, where the label is the full text of the first column (the generator of the first model is `recurrent_networks.sens.vanilla, small W`, with the comma and the space; the seeds are listed after the table) in the order U, W, readout (the readout is not used here), with U entries `0.5 * normal()`, W entries `gain * normal() / sqrt(16)` where the gain is 0.25, 1 and 3 for the three vanilla models and 1 for the gated ones, and the biases of the initialization recipe of the text: LSTM forget bias 0, 1 or 3, GRU update-gate bias -1, all others 0. The entry for k is the spectral norm of the Jacobian of the last state h(40) with respect to the state k steps earlier (for the LSTM the state is (h, c), a 16 by 32 Jacobian), found by running the backward pass of BPTT from each of the 16 unit vectors in h(40) and stacking the 16 gradients that arrive k steps back. The spectral norm is `power_iteration` with 60 iterations (the start vector, one `normal()` per column of the matrix, is not normalised first) from draws of the generator `recurrent_networks.spectral` (seed 0x9b8b88813560a59f), restarted for each entry; the second column is the same estimate for the matrix W of a vanilla cell (a gated cell has no single recurrent matrix and shows a dash). Values are rounded to 3 significant digits and are stable to about that.
 
 | model | ||W||_2 | k = 1 | k = 2 | k = 4 | k = 8 | k = 16 | k = 24 | k = 32 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -229,6 +229,16 @@ All models have H = 16 units and read the same 40 tokens, ids drawn by `integer(
 | LSTM, forget bias 1 | - | 6.00e-01 | 4.72e-01 | 4.37e-01 | 2.87e-01 | 1.04e-01 | 5.82e-02 | 2.13e-02 |
 | LSTM, forget bias 3 | - | 5.14e-01 | 4.38e-01 | 4.05e-01 | 2.56e-01 | 1.26e-01 | 1.08e-01 | 1.28e-01 |
 | GRU, update bias -1 | - | 9.06e-01 | 8.02e-01 | 5.10e-01 | 2.70e-01 | 3.65e-02 | 5.57e-03 | 5.89e-04 |
+
+| model | generator of the parameters | seed |
+|---|---|---:|
+| vanilla, small W | `recurrent_networks.sens.vanilla, small W` | 0x73e936cec4a7a525 |
+| vanilla, medium W | `recurrent_networks.sens.vanilla, medium W` | 0x2daa5b48431b3051 |
+| vanilla, large W | `recurrent_networks.sens.vanilla, large W` | 0x960da655723740d7 |
+| LSTM, forget bias 0 | `recurrent_networks.sens.LSTM, forget bias 0` | 0xdd5d0a2105a8ec5d |
+| LSTM, forget bias 1 | `recurrent_networks.sens.LSTM, forget bias 1` | 0xe9fc219c9aa8c9b7 |
+| LSTM, forget bias 3 | `recurrent_networks.sens.LSTM, forget bias 3` | 0x4abba5495e3872df |
+| GRU, update bias -1 | `recurrent_networks.sens.GRU, update bias -1` | 0xd551fe7eec210c18 |
 
 The bound ||W||_2^k for the small vanilla model is 4.35e-01, 1.89e-01, 3.57e-02, 1.28e-03, 1.63e-06, 2.08e-09, 2.65e-12 at k = 1, 2, 4, 8, 16, 24, 32. The large vanilla model peaks at k = 32 with 1.29e+03; a global-norm clip with threshold 5 would multiply a gradient of that norm by 0.0039.
 <!-- /worked -->
@@ -386,44 +396,52 @@ The LSTM costs about four vanilla cells per step and the GRU about three. These 
 All of the above is about the first update. What happens over a training run is the experiment of this section: the three cells, with the same size and the same recipe, on the task of the first section. Each cell is trained three times from three different starting points, since a single run says nothing about how often a recipe works.
 
 <!-- worked: recurrent_networks.training -->
-Every cell has H = 12 units and reads the one-hot ids of the task; parameters are drawn by the initialization recipe of the text (order U, W, readout; U entries `0.5 * normal()`, W gain 1, LSTM forget-gate bias 1, GRU update-gate bias -1) from the generator named `recurrent_networks.<cell>.<run>.init` with cell `rnn`, `lstm` or `gru` and run 0, 1 or 2; the seed of each is in the table. Training is Adam (learning rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-08, with the bias correction of Volume III) on minibatches of 14 of the 140 training sequences (10 batches per epoch, 80 epochs, 800 updates), the batches of an epoch being a new shuffle of the sequence indices drawn by `shuffle` from the generator `recurrent_networks.<cell>.<run>.order`, and the gradient of every update is clipped to a global norm of 5. The loss is the mean cross-entropy over the four verbs; the table gives its mean over the batches of the epoch. A test sequence counts as correct when the probability of the two verbs of the subject's number exceeds one half. The columns on the right pool the test sequences by distance: d <= 4 is k in [0, 1] (the window reaches the subject), d > 4 seen in training is k in [2, 4, 8, 12, 16], and beyond training is k in [24, 32]. Losses are rounded to 3 decimals and counts are exact for an implementation that adds in the same order; a different order moves the digits and, rarely, a count by one.
+Every cell has H = 12 units and reads the one-hot ids of the task; parameters are drawn by the initialization recipe of the text (order U, W, readout; U entries `0.5 * normal()`, W gain 1, LSTM forget-gate bias 1, GRU update-gate bias -1) from the generator named `recurrent_networks.<cell>.<run>.init` with cell `rnn`, `lstm` or `gru` and run 0, 1 or 2; the seed of each is in the table. Training is Adam (learning rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-08, with the bias correction of Volume III) on minibatches of 14 of the 140 training sequences (10 batches per epoch, 80 epochs, 800 updates), the batches of an epoch being a new shuffle of the sequence indices drawn by `shuffle` from the generator `recurrent_networks.<cell>.<run>.order`, and the gradient of every update is clipped to a global norm of 5. The training sequences are the 140 of the generator `recurrent_networks.train` in the order in which it makes them (index 0 .. 139). At the start of every epoch the index array is rebuilt as 0, 1, 2, ... and shuffled in place by the Fisher-Yates `shuffle` of Chapter 17 with the one generator `order` of the run, which is never re-seeded within a run (so the permutation of epoch 2 is the next draws of that stream, not a shuffle of epoch 1's permutation); batch b of the epoch holds the entries 14 b to 14 b + 13 of the shuffled array. The 1/14 of the mean is applied to the gradient of the loss with respect to the logits, (p - one-hot) / 14, before anything is propagated back, so the parameter gradients are sums of already scaled terms and nothing is divided afterwards. The sequences of a batch are processed one after the other in batch order and their parameter gradients are added into one accumulator in that order; for one sequence the readout gradients come first, then backpropagation through time runs from the last token to the first, adding the gradient of each step into the accumulator. The global norm adds the squares of all entries left to right over the parameters in the order U (one row per token id), W (row by row), readout weights (row by row), b, readout bias, and takes the square root; the factor min(1, 5 / norm) multiplies every entry before Adam sees it. The loss is the mean cross-entropy over the four verbs; the table gives its mean over the batches of the epoch. A test sequence counts as correct when the probability of the two verbs of the subject's number exceeds one half. The columns on the right pool the test sequences by distance: d <= 4 is k in [0, 1] (the window reaches the subject), d > 4 seen in training is k in [2, 4, 8, 12, 16], and beyond training is k in [24, 32]. Losses are rounded to 3 decimals. The runs are chaotic after the first few epochs (a change of 1e-12 in one weight moves the loss at epoch 40 in the second digit and can move a whole run from learned to not learned), so the stable-digits rule applies. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation. A count is printed when all five runs give the same count and as 'unstable' otherwise.
 
 | cell | run | seed of the initial parameters | loss, epoch 1 | loss, epoch 10 | loss, epoch 20 | loss, epoch 40 | loss, epoch 80 | test, d <= 4 | test, d > 4 seen in training | test, d beyond training |
 |---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| vanilla | 0 | 0xb36960ea49e001ac | 1.558 | 0.818 | 0.611 | 0.450 | 0.315 | 80/80 | 200/200 | 80/80 |
-| vanilla | 1 | 0x424ed0bab675e157 | 1.514 | 1.219 | 1.101 | 0.632 | 0.642 | 79/80 | 199/200 | 80/80 |
-| vanilla | 2 | 0x42611871fc7f793b | 1.471 | 1.182 | 1.076 | 0.769 | 0.631 | 71/80 | 124/200 | 41/80 |
+| vanilla | 0 | 0xb36960ea49e001ac | 1.558 | 0.818 | 0.611 | unstable | unstable | unstable | unstable | unstable |
+| vanilla | 1 | 0x424ed0bab675e157 | 1.514 | 1.219 | 1.101 | unstable | unstable | unstable | unstable | unstable |
+| vanilla | 2 | 0x42611871fc7f793b | 1.471 | 1.182 | 1.076 | unstable | unstable | unstable | unstable | unstable |
 | LSTM | 0 | 0x99a3f129a9e17de9 | 1.393 | 0.930 | 0.659 | 0.598 | 0.475 | 80/80 | 200/200 | 80/80 |
-| LSTM | 1 | 0x446d30fdf220827b | 1.379 | 0.681 | 0.588 | 0.576 | 0.324 | 80/80 | 200/200 | 80/80 |
-| LSTM | 2 | 0x2240bb3bd2a0d306 | 1.385 | 1.169 | 0.643 | 0.504 | 0.252 | 80/80 | 200/200 | 80/80 |
-| GRU | 0 | 0x31fffc5352468972 | 1.395 | 1.164 | 0.694 | 0.557 | 0.339 | 80/80 | 200/200 | 80/80 |
-| GRU | 1 | 0x3f0009f602254250 | 1.421 | 1.174 | 0.704 | 0.595 | 0.353 | 80/80 | 200/200 | 80/80 |
-| GRU | 2 | 0x1075bcb8fa20048c | 1.396 | 1.192 | 0.635 | 0.363 | 0.326 | 80/80 | 177/200 | 64/80 |
+| LSTM | 1 | 0x446d30fdf220827b | 1.379 | 0.681 | 0.588 | unstable | unstable | unstable | 200/200 | 80/80 |
+| LSTM | 2 | 0x2240bb3bd2a0d306 | 1.385 | 1.169 | 0.643 | 0.504 | unstable | 80/80 | 200/200 | 80/80 |
+| GRU | 0 | 0x31fffc5352468972 | 1.395 | 1.164 | 0.694 | 0.557 | unstable | 80/80 | unstable | unstable |
+| GRU | 1 | 0x3f0009f602254250 | 1.421 | 1.174 | 0.704 | 0.595 | unstable | 80/80 | unstable | unstable |
+| GRU | 2 | 0x1075bcb8fa20048c | 1.396 | 1.192 | 0.635 | 0.363 | unstable | 80/80 | unstable | unstable |
+
+What survives the chaos is the distribution over trainings. Each cell was trained 15 times (the 3 runs, each with its 4 nudged copies and itself); the table counts them by the share of the 360 test sequences of all distances that they name correctly. A reimplementation should expect similar fractions, not these counts.
+
+| cell | trainings | all test sequences right | at least 0.95 right | less than 0.7 right |
+|---|---:|---:|---:|---:|
+| vanilla | 15 | 3 | 5 | 5 |
+| LSTM | 15 | 14 | 15 | 0 |
+| GRU | 15 | 7 | 14 | 0 |
 <!-- /worked -->
 
 <!-- worked: recurrent_networks.accuracy_by_distance -->
-Accuracy on the 40 test sequences of each k, averaged over the three runs of a cell (so a multiple of 1/120); the window column is the ceiling of the previous table (0.5 from k = 2, where the last four tokens do not contain the subject).
+Accuracy on the 40 test sequences of each k, averaged over the three runs of a cell (so a multiple of 1/120); the window column is the ceiling of the previous table (0.5 from k = 2, where the last four tokens do not contain the subject). A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | k | d | in training | window of 4 (ceiling) | vanilla | LSTM | GRU |
 |---:|---:|---|---:|---:|---:|---:|
-| 0 | 1 | trained | 1.000 | 1.000 | 1.000 | 1.000 |
-| 1 | 4 | trained | 1.000 | 0.917 | 1.000 | 1.000 |
-| 2 | 7 | trained | 0.500 | 0.967 | 1.000 | 1.000 |
-| 4 | 13 | trained | 0.500 | 0.917 | 1.000 | 0.992 |
-| 8 | 25 | trained | 0.500 | 0.833 | 1.000 | 0.933 |
-| 12 | 37 | trained | 0.500 | 0.833 | 1.000 | 0.942 |
-| 16 | 49 | trained | 0.500 | 0.808 | 1.000 | 0.942 |
-| 24 | 73 | beyond | 0.500 | 0.833 | 1.000 | 0.917 |
-| 32 | 97 | beyond | 0.500 | 0.842 | 1.000 | 0.950 |
+| 0 | 1 | trained | 1.000 | unstable | unstable | 1.000 |
+| 1 | 4 | trained | 1.000 | unstable | 1.000 | 1.000 |
+| 2 | 7 | trained | 0.500 | unstable | 1.000 | 1.000 |
+| 4 | 13 | trained | 0.500 | unstable | 1.000 | about 1 |
+| 8 | 25 | trained | 0.500 | unstable | 1.000 | unstable |
+| 12 | 37 | trained | 0.500 | unstable | 1.000 | unstable |
+| 16 | 49 | trained | 0.500 | unstable | 1.000 | unstable |
+| 24 | 73 | beyond | 0.500 | unstable | 1.000 | unstable |
+| 32 | 97 | beyond | 0.500 | unstable | 1.000 | unstable |
 <!-- /worked -->
 
-![Test accuracy against the distance of the subject from the verb, for the vanilla cell, the GRU and the LSTM (mean of three runs each), and the ceiling of a model that reads the last four tokens. The subject beyond a distance of 61 tokens was not in the training set.](img/accuracy-by-distance.svg)
+![Test accuracy against the distance of the subject from the verb, for the vanilla cell, the GRU and the LSTM (mean of three runs each, the runs themselves), and the ceiling of a model that reads the last four tokens. The subject beyond a distance of 61 tokens was not in the training set.](img/accuracy-by-distance.svg)
 
-The first fact is the one the window could not reach: the best vanilla run, and all three LSTM runs, name the right number at every distance up to 97, including the two distances never trained on. A state of 12 numbers, rewritten 98 times, carried one bit across 32 phrases of noise. The second fact is that it did not always happen. All three LSTM runs are perfect at every distance. Two of the three GRU runs are, and the third is perfect for $d \le 4$ and wrong on 39 of the 280 test sequences beyond it. One vanilla run is perfect, one is two sequences short of it, and one never learned the rule: at the short distances, where a window would already succeed, it is right 71 times in 80. The mean curve in the figure averages a success with a failure, and the lower mean for the vanilla cell is that average and not a decline with distance.
+The first fact is the one the window could not reach: in many trainings the recurrent cell names the right number at every distance up to 97, including the two distances never trained on. A state of 12 numbers, rewritten 98 times, carried one bit across 32 phrases of noise. The second fact is that it did not always happen, and that which runs succeed is itself chaotic: a change of $10^{-12}$ in one weight turns some runs that learned the rule into runs that did not, and the reverse. That is why the table prints most late cells as unstable and why the second table counts trainings instead of quoting one. The LSTM almost always learned the rule, the GRU did about half the time and the vanilla cell in a minority of trainings, and the vanilla failures are not graceful: a failed vanilla training can be wrong at the short distances too, where a window would already succeed. The mean curve in the figure, which is drawn from the three runs themselves, averages successes with failures, and the lower mean for the vanilla cell is that average and not a decline with distance.
 
-Look at that third vanilla run once more, because its training loss is the thing that misleads. At its last epoch the loss is $0.631$, below $\ln 2 = 0.693$, which is what a model that knows the number and guesses between the two verbs of that number would have. A model that is below it on the training set and wrong on the test set has not learned the number; it has memorised the 140 training sequences, coin flips included, which is the overfitting of Volume II. The three runs of the LSTM end at lower losses than $\ln 2$ as well, and their test accuracy tells the difference. A loss does not say that a rule has been learned; a held-out number does.
+Look at the failed trainings once more, because their training loss is the thing that misleads. A failed vanilla training ends at a loss near $0.6$ or $0.7$, around $\ln 2 = 0.693$, which is what a model that knows the number and guesses between the two verbs of that number would have. A model that is at that loss on the training set and wrong on the test set has not learned the number; it has memorised the 140 training sequences, coin flips included, which is the overfitting of Volume II. Successful LSTM trainings end at lower losses than $\ln 2$ as well, and their test accuracy tells the difference. A loss does not say that a rule has been learned; a held-out number does.
 
-What does this say about the vanishing gradient? Less than a textbook would, and the evidence should be read as it is. The Jacobian table shows the signal from a distant state shrinking with distance in randomly initialised vanilla cells, and the training table shows a vanilla cell that learned it anyway. Both are true. A tiny gradient is not a zero one, and the optimizer of Volume III, Adam, divides each parameter's step by a running average of its own gradient size, so a faint and consistent signal can still move a parameter by a normal step. Plausibly what the vanishing gradient costs is therefore not the possibility of learning but the odds: a faint signal competes with every other gradient on the same parameters, and in some runs it loses. Three runs per cell cannot rank the cells and cannot test that reading; they support a tendency, perfect for the LSTM in three of three, for the GRU in two and for the vanilla cell in one, and Exercise 11 asks for more runs. They also show what the window could not do, and the gap is large: the best a model that reads four tokens can do beyond $d = 4$ is $0.5$, and the lowest mean of any recurrent cell beyond it is $0.81$.
+What does this say about the vanishing gradient? Less than a textbook would, and the evidence should be read as it is. The Jacobian table shows the signal from a distant state shrinking with distance in randomly initialised vanilla cells, and the training table shows a vanilla cell that learned it anyway. Both are true. A tiny gradient is not a zero one, and the optimizer of Volume III, Adam, divides each parameter's step by a running average of its own gradient size, so a faint and consistent signal can still move a parameter by a normal step. Plausibly what the vanishing gradient costs is therefore not the possibility of learning but the odds: a faint signal competes with every other gradient on the same parameters, and in some runs it loses. Fifteen trainings per cell can rank the cells only coarsely and cannot test that reading; they support a tendency, perfect on every test sequence in 14 of 15 trainings for the LSTM, in 7 for the GRU and in 3 for the vanilla cell, and Exercise 11 asks for more runs. They also show what the window could not do, and the gap is large: the best a model that reads four tokens can do beyond $d = 4$ is $0.5$, and the least successful recurrent training, a vanilla one, still names the number on more than 60% of all test sequences.
 
 ## Work and depth
 
@@ -503,7 +521,7 @@ A recurrent network gives a model a memory of fixed size: a state of $H$ numbers
 7. **[Implement]** Implement the vanilla cell, its backward pass through time and the check against central differences, and reproduce `recurrent_networks.unroll` and `recurrent_networks.bptt_by_hand`: the states and the backward table to the four decimals shown, and the check below 1e-8.
 8. **[Implement]** Add the LSTM and GRU cells with their backward passes and reproduce `recurrent_networks.gradient_check_cells` with the generator names given there, then `recurrent_networks.lstm_step` and `recurrent_networks.forget_products`.
 9. **[Implement]** Reproduce `recurrent_networks.jacobian_product`: the seven models, the unit-vector backward passes and the spectral norm by the book's `power_iteration`, to the three significant digits shown (the large vanilla row is the delicate one; report the digits you obtain at $k = 32$).
-10. **[Implement]** Reproduce one training run of `recurrent_networks.training` (the LSTM, run 0, then a vanilla run) with the generators and the Adam, clipping and minibatch rules printed there. The loss at the checkpoint epochs should agree to about the third decimal if you add in the same order; the test counts may differ by one. Then reproduce `recurrent_networks.truncation`.
+10. **[Implement]** Reproduce one training run of `recurrent_networks.training` (the LSTM, run 0, then a vanilla run) with the generators and the Adam, clipping and minibatch rules printed there. The first three checkpoint epochs (1, 10 and 20) are stable and should agree to the third decimal; the later columns are chaotic, and the check is that your own five copies (nudge the first weight of $\mathbf{U}$ by $\pm 10^{-12}$ and $\pm 3\times10^{-12}$) show the same split into learned and not learned as the second table. Then reproduce `recurrent_networks.truncation`.
 11. **[Investigate]** Train ten runs of each cell on the task and report how many reach full accuracy at every distance, with the number of updates at which each first falls below a training loss of $0.8$. Does the vanilla cell's failure rate depend on the longest training distance? Repeat with a longest training distance of $k = 4$.
 12. **[Investigate]** Repeat the vanilla runs with plain gradient descent in place of Adam, with the learning rate tuned for each, and record the global gradient norm. Does the failure rate rise, and does it support the reading of the training section that Adam's rescaling hides the fading signal?
 
@@ -547,6 +565,6 @@ A recurrent network gives a model a memory of fixed size: a state of $H$ numbers
 7. The vanilla states and table should match the 4-decimal values of the blocks; the check should report a largest difference below 1e-8.
 8. The checks should report agreement below 1e-7 for all three cells; the LSTM step and the products are closed-form.
 9. The norms are of the printed values to three digits; the large vanilla row at $k = 32$ is $1290$ (to three digits $1.29\times10^3$) and is stable to a perturbation of $10^{-13}$ in a weight.
-10. Loss values at the epochs 1, 10, 20, 40 and 80 as printed (LSTM run 0: 1.393, 0.930, 0.659, 0.598, 0.475); the truncation table gradients to three digits.
+10. Loss values at the epochs 1, 10 and 20 as printed (LSTM run 0: 1.393, 0.930, 0.659), and for the later epochs the values that survive the nudged copies (LSTM run 0: 0.598 at epoch 40 and 0.475 at epoch 80); the truncation table gradients to three digits.
 11. An investigation: report the counts and the update counts; the chapter's three runs found 3 of 3 for the LSTM, 2 of 3 for the GRU and 1 of 3 (with one near miss) for the vanilla cell, and ten runs should narrow those fractions.
 12. An investigation: with a tuned plain-gradient step the vanilla runs should fail more often at long distances, if the reading of the training section holds; if they do not, the reading is wrong and the failure comes from somewhere else.

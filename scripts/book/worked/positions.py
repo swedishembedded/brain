@@ -488,7 +488,7 @@ def yarn_table(d, base, factor, length, beta_fast=32.0, beta_slow=1.0):
     """(inv_freq, attention_factor, low, high): the YaRN frequencies as the chapter states them."""
     half = d // 2
     low = max(0, math.floor(_correction_dim(beta_fast, d, base, length)))
-    high = min(d - 1, math.ceil(_correction_dim(beta_slow, d, base, length)))
+    high = min(half - 1, math.ceil(_correction_dim(beta_slow, d, base, length)))
     if low == high:
         high += 0.001
     out = []
@@ -684,6 +684,7 @@ def rope_cost():
             + _table(["quantity", "FLOPs", "rule"], rows, "lrl")
             + f"\n\nThe rotation reads and writes q and k once each in float32: {_int(move)} bytes, so it does "
             f"{rope / move:.2f} FLOPs per byte. If every head computes its own angles (an analytic kernel), the token costs "
-            f"{_int(tr_analytic)} evaluations of pow, sin and cos; if the angles come from a table shared by the heads, it "
+            f"{_int(tr_analytic)} evaluations of pow, sin and cos (each of the {H} heads of the query and each of the {H} heads of the key "
+            f"rotates its {half} pairs, so q and k are counted separately: 2 x {H} x {half} x 3); if the angles come from a table shared by the heads, it "
             f"costs {_int(tr_table)} evaluations of sin and cos, or none when the table is read from memory.")
 

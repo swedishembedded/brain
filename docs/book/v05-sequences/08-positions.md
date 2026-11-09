@@ -320,7 +320,7 @@ The score falls as the distance grows, with ripples. The fast pairs average out 
 
 The third place to put position is the score. If what the model needs is a preference that depends on the distance, one can add that preference as a number: $s_{ij} + \mathrm{bias}(j - i)$ before the softmax, per head. The bias needs no rotation and no change to the queries and keys; it is an addition to a matrix that already exists, and it is a relative position scheme by its form. Two instances differ in how the number is found.
 
-Raffel and his co-authors, for T5, learn it. A table of numbers, one for each head and each **bucket**, is indexed by the bucket of the offset: close offsets have a bucket each and far offsets share buckets on a logarithmic scale, so that the number of parameters does not grow with the length. For an encoder, where a query looks both ways, half of the buckets serve keys before the query and half the keys after it:
+Raffel and his co-authors, for T5, learn it. A table of numbers, one for each head and each **bucket** (a group of offsets that share one learned number), is indexed by the bucket of the offset: close offsets have a bucket each and far offsets share buckets on a logarithmic scale, so that the number of parameters does not grow with the length. For an encoder, where a query looks both ways, half of the buckets serve keys before the query and half the keys after it:
 
 <!-- worked: positions.relative_buckets -->
 32 buckets and a largest distance of 128, so 16 buckets for the keys at or before the query (offset j - i <= 0) and 16 for the keys after it. With n = |j - i|: the bucket is n for n < 8; for n >= 8 it is 8 + floor(log(n / 8) / log(128 / 8) * 8), at most 15 (natural logarithms), and 16 is added when the key is after the query.
@@ -343,7 +343,7 @@ Raffel and his co-authors, for T5, learn it. A table of numbers, one for each he
 | 200 | 15 | 31 |
 <!-- /worked -->
 
-The eight nearest distances, 0 to 7, have a bucket each in either direction, the distances 8 and 9 share one, the buckets then widen with the distance, and everything from 100 on shares the last bucket of its side. Press, Smith and Lewis, for ALiBi, learn nothing: the bias is minus a fixed slope times the distance, and the slopes of the $H$ heads form a geometric sequence, $\mathrm{slope}_h = 2^{-8h/H}$ for $h = 1, \dots, H$, so that some heads care almost only about the last few tokens and others hardly care at all:
+The eight nearest distances, 0 to 7, have a bucket each in either direction, the distances 8 and 9 share one, the buckets then widen with the distance, and everything from 100 on shares the last bucket of its side. Press, Smith and Lewis, for ALiBi (attention with linear biases), learn nothing: the bias is minus a fixed slope times the distance, and the slopes of the $H$ heads form a geometric sequence, $\mathrm{slope}_h = 2^{-8h/H}$ for $h = 1, \dots, H$, so that some heads care almost only about the last few tokens and others hardly care at all:
 
 <!-- worked: positions.alibi_bias -->
 Eight heads: head h has the slope 2^(-8h/8), that is 0.5, 0.25, 0.125, 0.0625, 0.0312, 0.0156, 0.00781, 0.00391. The bias added to the score of query i and key j (j <= i) in head 1 (slope 0.5) is minus the slope times i - j; blank cells are hidden by the causal mask.
@@ -393,7 +393,7 @@ Pairs that complete less than one turn over the trained length: 9 of 32 (m = 23 
 
 Nine of the 32 pairs, the slowest, have never gone all the way round, so the first position after the trained window sends each of them to an angle that no training example has produced. The model's learned scoring depends on those angles, and the result is not a graceful degradation but an unpredictable one.
 
-The remedy of Chen and his co-authors, **position interpolation**, brings the new positions back into the old range: to read $s$ times the trained length, divide every rate by the factor $s = \mathrm{fac}$, which is the same as dividing every position by it. Position $s L_{\mathrm{train}}$ then gets the angle that $L_{\mathrm{train}}$ had, and no angle is new. The cost is in the fast pairs. Neighbouring tokens that were 1 radian apart on pair 0 are now $1/s$ radians apart, so the finest distinctions the model learned are squeezed. YaRN, of Peng and his co-authors, keeps what interpolation does for slow pairs and refuses what it does to fast ones. Each pair $m$ turns $n_m = L_{\mathrm{train}}\,\omega_m/2\pi$ times over the trained length. A pair with many turns, at least a bound $n_{\mathrm{fast}}$ (32), keeps its rate; a pair with few, at most $n_{\mathrm{slow}}$ (1), is interpolated; in between, the weight of the interpolated rate rises linearly with the pair index. The index at which a pair has $n$ turns follows from $\omega_m = \mathrm{base}^{-2m/d}$:
+The remedy of Chen and his co-authors, **position interpolation**, brings the new positions back into the old range: to read $s$ times the trained length, divide every rate by the factor $s = \mathrm{fac}$, which is the same as dividing every position by it. Position $s L_{\mathrm{train}}$ then gets the angle that $L_{\mathrm{train}}$ had, and no angle is new. The cost is in the fast pairs. Neighbouring tokens that were 1 radian apart on pair 0 are now $1/s$ radians apart, so the finest distinctions the model learned are squeezed. YaRN (yet another RoPE extension), of Peng and his co-authors, keeps what interpolation does for slow pairs and refuses what it does to fast ones. Each pair $m$ turns $n_m = L_{\mathrm{train}}\,\omega_m/2\pi$ times over the trained length. A pair with many turns, at least a bound $n_{\mathrm{fast}}$ (32), keeps its rate; a pair with few, at most $n_{\mathrm{slow}}$ (1), is interpolated; in between, the weight of the interpolated rate rises linearly with the pair index. The index at which a pair has $n$ turns follows from $\omega_m = \mathrm{base}^{-2m/d}$:
 
 $$
 c(n) = \frac{d\,\ln\!\big(L_{\mathrm{train}} / (2\pi n)\big)}{2\ln \mathrm{base}},
@@ -402,14 +402,14 @@ c(n) = \frac{d\,\ln\!\big(L_{\mathrm{train}} / (2\pi n)\big)}{2\ln \mathrm{base}
 \text{high} = \lceil c(n_{\mathrm{slow}})\rceil,
 $$
 
-with low clamped to at least 0 and high to at most $d - 1$. With $r_m = \min(1, \max(0, (m - \text{low})/(\text{high} - \text{low})))$, the rate of pair $m$ is $\omega_m' = r_m\,\omega_m/\mathrm{fac} + (1 - r_m)\,\omega_m$. YaRN adds a second correction, an attention-magnitude factor: it multiplies both the cosine and the sine of every pair by $0.1\ln(\mathrm{fac}) + 1$, so that the rotated query and the rotated key are each that much larger and the score is larger by its square. As an algorithm:
+with low clamped to at least 0 and high to at most $d/2 - 1$, the index of the last pair. With $r_m = \min(1, \max(0, (m - \text{low})/(\text{high} - \text{low})))$, the rate of pair $m$ is $\omega_m' = r_m\,\omega_m/\mathrm{fac} + (1 - r_m)\,\omega_m$. YaRN adds a second correction, an attention-magnitude factor: it multiplies both the cosine and the sine of every pair by $0.1\ln(\mathrm{fac}) + 1$, so that the rotated query and the rotated key are each that much larger and the score is larger by its square. As an algorithm:
 
 ```text
 function yarn_rates(d: int, base: real, fac: real, trained: int,
                     fast: real, slow: real) -> (array<real>[d // 2], real):
     require d mod 2 == 0 and fac >= 1
     low = max(0, floor(d * log(trained / (fast * 2 * pi)) / (2 * log(base))))
-    high = min(d - 1, ceil(d * log(trained / (slow * 2 * pi)) / (2 * log(base))))
+    high = min(d // 2 - 1, ceil(d * log(trained / (slow * 2 * pi)) / (2 * log(base))))
     if low == high:
         high = high + 0.001                 # a step instead of a ramp
     rates = zeros(real, [d // 2])
@@ -548,7 +548,7 @@ One token of one layer with D = 1024, H = 16 heads of width d_h = 64 and a cache
 | scores and sum / rotation | 2,731 times | ratio of the rows 2 and 1 |
 | projections / rotation | 1,365 times | ratio of the rows 3 and 1 |
 
-The rotation reads and writes q and k once each in float32: 16,384 bytes, so it does 0.38 FLOPs per byte. If every head computes its own angles (an analytic kernel), the token costs 3,072 evaluations of pow, sin and cos; if the angles come from a table shared by the heads, it costs 64 evaluations of sin and cos, or none when the table is read from memory.
+The rotation reads and writes q and k once each in float32: 16,384 bytes, so it does 0.38 FLOPs per byte. If every head computes its own angles (an analytic kernel), the token costs 3,072 evaluations of pow, sin and cos (each of the 16 heads of the query and each of the 16 heads of the key rotates its 32 pairs, so q and k are counted separately: 2 x 16 x 32 x 3); if the angles come from a table shared by the heads, it costs 64 evaluations of sin and cos, or none when the table is read from memory.
 <!-- /worked -->
 
 The attention that follows the rotation does 2,731 times its arithmetic, and the ratio only grows with a longer sequence, since the attention grows with $T$ and the rotation does not; even the four projections do 1,365 times as much. In arithmetic the rotation does not matter. In bytes it does: with 0.38 FLOPs for every byte moved it is far below the ridge points of the machines of Volume IV (10 and 50 FLOP per byte), so it is bandwidth-bound, and the cost of a kernel that rotates $\mathbf{q}$ and $\mathbf{k}$ in memory is the cost of reading and writing them. That is the case for fusion, which Volume IV made in general: do the rotation in the kernel that already holds $\mathbf{q}$ and $\mathbf{k}$ in registers, and the extra read and write disappear. The count of angle evaluations is the other cost: a kernel that computes its own angles in every head evaluates the power, the sine and the cosine once per head and pair, and a table of angles shared by the heads evaluates sines and cosines once per position and pair, or not at all when it is read from memory. The kernels of brain come in both forms, as the next section shows.

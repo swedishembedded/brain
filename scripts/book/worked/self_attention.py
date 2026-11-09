@@ -157,7 +157,8 @@ def mha_forward(X, Wq, Wk, Wv, Wo, H, lookahead=None, uniform=False):
 def mha_backward(cache, dY, bug=None):
     """The gradient of a loss with respect to Wq, Wk, Wv, Wo and X, given dY = dL/dY [T, Dout], by the chain of the chapter:
     dO = dY Wo^T; per head dP = dO V^T, dV = P^T dO, dS = P (dP - rowsum(P dP)), dQ = dS K / sqrt(dk), dK = dS^T Q / sqrt(dk);
-    then dWq = X^T dQ (and likewise for K and V) and dX = dQ Wq^T + dK Wk^T + dV Wv^T. `bug` names a wrong variant for the
+    then dWq = X^T dQ (and likewise for K and V) and dX = dQ Wq^T + dK Wk^T + dV Wv^T. With uniform weights the scores do not
+    reach the output, so dS = 0 and Wq and Wk receive no gradient. `bug` names a wrong variant for the
     check to catch: "no_rowsum" (softmax rule without the row term), "no_scale" (the 1/sqrt(dk) left out of dQ and dK) and
     "head_layout" (dO cut into heads as if the concatenation were [H, T, dv] instead of [T, H dv])."""
     X, H, dk, dv, heads = cache["X"], cache["H"], cache["dk"], cache["dv"], cache["heads"]
@@ -180,7 +181,7 @@ def mha_backward(cache, dY, bug=None):
         dS = []
         for i in range(T):
             rowsum = 0.0 if bug == "no_rowsum" else _dot(P[i], dP[i])
-            dS.append([P[i][j] * (dP[i][j] - rowsum) for j in range(T)])
+            dS.append([0.0] * T if cache["uniform"] else [P[i][j] * (dP[i][j] - rowsum) for j in range(T)])
         f = 1.0 if bug == "no_scale" else scale
         dQ.append([[f * x for x in row] for row in matmul(dS, hd["K"])])
         dK.append([[f * x for x in row] for row in matmul(transpose(dS), hd["Q"])])
@@ -378,14 +379,13 @@ def mask_boundary():
     for name, la in (("no mask", None), ("causal: j <= i", 0), ("one too tight: j < i", -1), ("one too loose: j <= i + 1", 1)):
         Y1, _ = mha_forward(e["X"], e["Wq"], e["Wk"], e["Wv"], None, 1, lookahead=la)
         Y2, _ = mha_forward(X2, e["Wq"], e["Wk"], e["Wv"], None, 1, lookahead=la)
-        if any(math.isnan(v) for row in Y1 for v in row):
-            nan_rows = [i + 1 for i in range(4) if any(math.isnan(v) for v in Y1[i])]
-            out.append((name, "-", "output undefined (nan) at position " + ", ".join(map(str, nan_rows))))
-            continue
-        changed = [i + 1 for i in range(4) if max(abs(Y1[i][c] - Y2[i][c]) for c in range(2)) > 1e-12]
-        out.append((name, ", ".join(map(str, changed)), "-"))
+        nan_rows = [i + 1 for i in range(4) if any(math.isnan(v) for v in Y1[i])]
+        changed = [i + 1 for i in range(4) if i + 1 not in nan_rows and max(abs(Y1[i][c] - Y2[i][c]) for c in range(2)) > 1e-12]
+        out.append((name, ", ".join(map(str, changed)) + (f" (position {', '.join(map(str, nan_rows))}: nan)" if nan_rows else ""),
+                    "output undefined (nan) at position " + ", ".join(map(str, nan_rows)) if nan_rows else "-"))
     return ("The input of the example with the first entry of x_3 increased by 1 (token 3 is replaced). The table lists the "
-            "positions whose output changes by more than 1e-12 when it is, for four versions of the boundary of the mask. "
+            "positions whose output changes by more than 1e-12 when it is, for four versions of the boundary of the mask; a position whose output is nan "
+            "(no score survives the mask) is named in brackets and left out of the comparison. "
             "A causal model must not change at positions 1 and 2, which come before the token that was replaced.\n\n"
             + _table(["mask (the pair i, j is kept when)", "positions whose output changes", "problem"], out, "lll"))
 
@@ -818,8 +818,11 @@ def lookup_training():
             f"Volume III), minibatches of {BATCH} fresh examples, {STEPS} updates, no clipping. Examples come from the generator "
             "`self_attention.lookup.train.<run>`, so the two models of a run see the same ones; the parameters are drawn "
             "from `self_attention.lookup.init.<model>.<run>` (seeds in the table; the uniform model draws the same parameters, "
-            "including the W_Q and W_K it does not use). 'uniform' replaces every attention weight by 1 over the positions the "
-            f"mask allows. A loss column is the mean of the {WINDOW} batch losses that end at that step. Accuracy is the "
+            "including the W_Q and W_K it does not use). The 'uniform' model replaces every attention weight by 1 over the positions the "
+            "mask allows, so the logits are W_O applied to the mean of the four value vectors x_t W_V of the whole input (weight 1/4 "
+            "on each of the four positions, the query token included). The parameters that train are E, W_V and W_O; W_Q and W_K "
+            "stay at their initial values, because the scores do not reach the output and the backward pass sets the gradient "
+            "of the scores to zero; the gradient of E is the one through W_V alone. A loss column is the mean of the {WINDOW} batch losses that end at that step. Accuracy is the "
             f"fraction of the {N_TEST} test examples of `{NAME_LOOKUP_TEST}` ({bookrng.seed_of(NAME_LOOKUP_TEST):#018x}) "
             "whose largest logit (first on a tie) is the target. Rounding noise grows into any difference in a trained network. "
             + stable.RULE + "\n\n"

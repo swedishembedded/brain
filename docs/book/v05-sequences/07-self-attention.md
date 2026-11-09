@@ -203,7 +203,7 @@ $$
 \end{aligned}
 $$
 
-The outputs are shuffled exactly as the inputs were: attention is **equivariant** to permutations of the positions. The example shows it:
+The outputs are shuffled exactly as the inputs were: attention is **equivariant** to permutations of the positions: permuting the inputs permutes the outputs in the same way, where an invariant function would leave the outputs unchanged. The example shows it:
 
 <!-- worked: self_attention.equivariance -->
 Generator: the book's SplitMix64, seed 0xe2b3e4a6655e44d3 (`seed_of` of the name `self_attention.shuffle`). The permutation is `shuffle([0, 1, 2, 3], rng)` (Fisher-Yates as in Volume I): [1, 3, 2, 0], so position a of the shuffled input holds token perm[a] + 1 of the original. The example above, attention without a mask, run on the original and on the shuffled input.
@@ -246,13 +246,13 @@ The first row of the masked table has $p_{11} = 1.000$ and so $\mathbf{o}_1 = \m
 A mask has an edge, and edges are where such code goes wrong. The correct boundary and two wrong ones on the same example, with no mask at all for comparison, each tested by the perturbation test of Chapter 4: replace token 3 and list the positions whose output changes.
 
 <!-- worked: self_attention.mask_boundary -->
-The input of the example with the first entry of x_3 increased by 1 (token 3 is replaced). The table lists the positions whose output changes by more than 1e-12 when it is, for four versions of the boundary of the mask. A causal model must not change at positions 1 and 2, which come before the token that was replaced.
+The input of the example with the first entry of x_3 increased by 1 (token 3 is replaced). The table lists the positions whose output changes by more than 1e-12 when it is, for four versions of the boundary of the mask; a position whose output is nan (no score survives the mask) is named in brackets and left out of the comparison. A causal model must not change at positions 1 and 2, which come before the token that was replaced.
 
 | mask (the pair i, j is kept when) | positions whose output changes | problem |
 |---|---|---|
 | no mask | 1, 2, 3, 4 | - |
 | causal: j <= i | 3, 4 | - |
-| one too tight: j < i | - | output undefined (nan) at position 1 |
+| one too tight: j < i | 3, 4 (position 1: nan) | output undefined (nan) at position 1 |
 | one too loose: j <= i + 1 | 2, 3, 4 | - |
 <!-- /worked -->
 
@@ -515,17 +515,17 @@ A model that does not use the pairs can only guess one of 4 values: loss ln 4 = 
 The task needs exactly what attention gives. The model must find the pair whose key matches the query, which is a comparison of the query token with each pair token, and then carry that pair's value, which is a weighted sum with the weight on one pair. It has no position information, and does not need it: whichever order the pairs come in, the answer is the same, and a layer that treats its input as a set is a natural fit. Without attention, the comparison has nothing to act on, and the experiment replaces the learned weights by uniform ones, the second model, to show how much of the answer depends on the weights.
 
 <!-- worked: self_attention.lookup_training -->
-Training: Adam (learning rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-08, with the bias correction of Volume III), minibatches of 16 fresh examples, 600 updates, no clipping. Examples come from the generator `self_attention.lookup.train.<run>`, so the two models of a run see the same ones; the parameters are drawn from `self_attention.lookup.init.<model>.<run>` (seeds in the table; the uniform model draws the same parameters, including the W_Q and W_K it does not use). 'uniform' replaces every attention weight by 1 over the positions the mask allows. A loss column is the mean of the 20 batch losses that end at that step. Accuracy is the fraction of the 400 test examples of `self_attention.lookup.test` (0xe6260bf46083a7f8) whose largest logit (first on a tie) is the target. Rounding noise grows into any difference in a trained network. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
+Training: Adam (learning rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-08, with the bias correction of Volume III), minibatches of 16 fresh examples, 600 updates, no clipping. Examples come from the generator `self_attention.lookup.train.<run>`, so the two models of a run see the same ones; the parameters are drawn from `self_attention.lookup.init.<model>.<run>` (seeds in the table; the uniform model draws the same parameters, including the W_Q and W_K it does not use). The 'uniform' model replaces every attention weight by 1 over the positions the mask allows, so the logits are W_O applied to the mean of the four value vectors x_t W_V of the whole input (weight 1/4 on each of the four positions, the query token included). The parameters that train are E, W_V and W_O; W_Q and W_K stay at their initial values, because the scores do not reach the output and the backward pass sets the gradient of the scores to zero; the gradient of E is the one through W_V alone. A loss column is the mean of the {WINDOW} batch losses that end at that step. Accuracy is the fraction of the 400 test examples of `self_attention.lookup.test` (0xe6260bf46083a7f8) whose largest logit (first on a tie) is the target. Rounding noise grows into any difference in a trained network. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | model | run | seed of the initial parameters | loss, step 50 | loss, step 150 | loss, step 300 | loss, step 600 | test accuracy |
 |---|---|---:|---:|---:|---:|---:|---:|
 | attention | 0 | 0x97ca9bcc54861fff | 1.0689 | 0.0910 | 0.0018 | 0.0004 | 1.000 |
 | attention | 1 | 0x6a7ad5d56f250cd8 | 1.2636 | 0.2184 | 0.0059 | 0.0005 | 1.000 |
-| uniform | 0 | 0x482bdb808d8eae09 | 1.2594 | 1.1072 | 1.1214 | 1.1084 | 0.455 |
-| uniform | 1 | 0x1b0c71a58bc985da | 1.2720 | 1.0968 | 1.1023 | 1.1324 | 0.500 |
+| uniform | 0 | 0x482bdb808d8eae09 | 1.2424 | 0.9686 | 0.8585 | 0.8855 | 0.560 |
+| uniform | 1 | 0x1b0c71a58bc985da | 1.2617 | 0.8858 | 0.9124 | 0.9398 | 0.547 |
 <!-- /worked -->
 
-The attention models reach a loss of 0.0004 and 0.0005 and classify all 400 test examples correctly in both runs; the loss of run 0 is 1.0689 at step 50, 0.0910 at step 150 and 0.0018 at step 300, so most of the learning happens between steps 50 and 300. The uniform models stay near a loss of 1.1 and reach accuracies of 0.455 and 0.500: above the 0.25 of a guess, since the model can learn which values occur among the pairs, and below the 0.5625 that the task's table gives as the most a model can reach without binding keys to values. Every number in the table survived the stable-digits rule of this book: copies of the run with the first weight changed by amounts of order $10^{-12}$ agree with it on every printed digit, so another implementation that adds in another order should expect the same table.
+The attention models reach a loss of 0.0004 and 0.0005 and classify all 400 test examples correctly in both runs; the loss of run 0 is 1.0689 at step 50, 0.0910 at step 150 and 0.0018 at step 300, so most of the learning happens between steps 50 and 300. The uniform models stop near a loss of 0.9 (against ln 4 = 1.386 for a guess) and reach accuracies of 0.560 and 0.547: well above the 0.25 of a guess, since the mean of the value vectors can encode which values occur among the pairs, and just below the 0.5625 that the task's table gives as the most a model can reach without binding keys to values. Every number in the table survived the stable-digits rule of this book: copies of the run with the first weight changed by amounts of order $10^{-12}$ agree with it on every printed digit, so another implementation that adds in another order should expect the same table.
 
 The weights show what the attention model does:
 
@@ -633,7 +633,7 @@ Self-attention lets every position of one sequence read every other in one step.
 6. $4 \cdot 512^2 = 1{,}048{,}576$ for the four projections; one head has $d_h = 64$ and three matrices of $512 \cdot 64 = 32{,}768$ each, 98,304 numbers.
 7. The weights of row 2 are $(0.326, 0.047, 0.032, 0.595)$ and its output $(-0.044, -0.252)$; the masked weights of row 2 are $(0.874, 0.126, 0, 0)$.
 8. Relative differences of order $10^{-8}$ on every tensor, for the correct pass; the wrong passes differ by about 1.2, 0.4 and 2.0 as the table shows, in the tensors named there.
-9. The attention model's loss falls from about 1.07 at step 50 to about 0.0004 at step 600 and its accuracy is 1.000; the uniform model's loss stays near 1.1 and its accuracy is 0.455 for run 0. Another implementation that adds in another order should reproduce the printed digits.
+9. The attention model's loss falls from about 1.07 at step 50 to about 0.0004 at step 600 and its accuracy is 1.000; the uniform model's loss stops near 0.9 and its accuracy is 0.560 for run 0. Another implementation that adds in another order should reproduce the printed digits.
 10. No mask: 1, 2, 3, 4; causal: 3, 4; one too loose: 2, 3, 4; one too tight: position 1 is undefined.
 11. An investigation. Expect the unscaled model to start slower as $d_k$ grows, as the saturation table predicts, and to learn nonetheless at these small widths; the chapter did not run it.
 12. An investigation. Expect the second head to take the second key; whether one wider head can do it depends on whether one softmax row can put weight on two positions at once, which it can, so the difference may be smaller than the constructed example suggests. The chapter did not run it.

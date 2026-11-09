@@ -36,6 +36,7 @@ from multiprocessing import get_context
 from pathlib import Path
 
 import bookrng
+import stable
 
 # ------------------------------------------------------------------------------------------------ formatting
 
@@ -497,15 +498,16 @@ def gradient_check_cells():
                 fp[j] = old
                 worst = max(worst, abs((lp - lm) / 2e-6 - fg[j]))
                 count += 1
-        rows.append((CELL_NAMES[kind], count, "yes" if worst < 1e-7 else "NO"))
+        name = f"recurrent_networks.check.{kind}"
+        rows.append((CELL_NAMES[kind], f"`{name}`", f"{bookrng.seed_of(name):#018x}", count, "yes" if worst < 1e-7 else "NO"))
     return (
         "Each cell has H = 3 units. Its parameters are drawn by the initialization recipe of the text from the generator "
-        "`recurrent_networks.check.<cell>`, with W gain 1.5, forget-gate bias 0.5 (the update-gate bias of the GRU -0.5) and U entries "
+        "`recurrent_networks.check.<cell>` with `<cell>` equal to `rnn` (the vanilla cell), `lstm` or `gru` (seeds in the table), with W gain 1.5, forget-gate bias 0.5 (the update-gate bias of the GRU -0.5) and U entries "
         "`0.7 * normal()`, and the readout bias set to (0.1, -0.2, 0.05, 0). The loss is the mean cross-entropy of two sequences, one of "
         "k = 2 phrases (8 tokens) and one of k = 1 (5 tokens), in that order, from the generator `recurrent_networks.check.data` "
         f"(seed {bookrng.seed_of('recurrent_networks.check.data'):#018x}). Every entry of every parameter is compared "
         "with a central difference of step 1e-6.\n\n"
-        + _table(["cell", "parameters compared", "largest absolute difference below 1e-7"], rows, "lrr")
+        + _table(["cell", "generator", "seed", "parameters compared", "largest absolute difference below 1e-7"], rows, "llrrr")
     )
 
 
@@ -573,18 +575,22 @@ def jacobian_product():
     return (
         f"All models have H = {SENS_H} units and read the same {SENS_T} tokens, ids drawn by `integer({V})` from the generator "
         f"`{SENS_TOKENS_NAME}` (seed {bookrng.seed_of(SENS_TOKENS_NAME):#018x}). Each model's parameters come from the generator "
-        "`recurrent_networks.sens.<label>` (labels as in the first column; seeds are `seed_of` of that name) in the order "
+        "`recurrent_networks.sens.<label>`, where the label is the full text of the first column (the generator of the first model is "
+        "`recurrent_networks.sens.vanilla, small W`, with the comma and the space; the seeds are listed after the table) in the order "
         "U, W, readout (the readout is not used here), with U entries `0.5 * normal()`, W entries `gain * normal() / sqrt(16)` where the gain is "
         "0.25, 1 and 3 for the three vanilla models and 1 for the gated ones, and the biases of the initialization recipe "
         "of the text: LSTM forget bias 0, 1 or 3, GRU update-gate bias -1, all others 0. "
         "The entry for k is the spectral norm of the Jacobian of the last state h(40) with respect to the state k steps earlier "
         f"(for the LSTM the state is (h, c), a {SENS_H} by {2 * SENS_H} Jacobian), found by running the backward pass of "
         f"BPTT from each of the {SENS_H} unit vectors in h(40) and stacking the {SENS_H} gradients that arrive k steps back. "
-        f"The spectral norm is `power_iteration` with {SPECTRAL_ITERS} iterations from `normal()` draws of the generator "
+        f"The spectral norm is `power_iteration` with {SPECTRAL_ITERS} iterations (the start vector, one `normal()` per column of the matrix, is not normalised first) from draws of the generator "
         f"`{SPECTRAL_NAME}` (seed {bookrng.seed_of(SPECTRAL_NAME):#018x}), restarted for each entry; the second column is the same estimate for the "
         "matrix W of a vanilla cell (a gated cell has no single recurrent matrix and shows a dash). Values are rounded to 3 significant digits "
         "and are stable to about that.\n\n"
         + _table(head, rows, "lr" + "r" * len(SENS_KS)) + "\n\n"
+        + _table(["model", "generator of the parameters", "seed"],
+                 [(label, f"`recurrent_networks.sens.{label}`", f"{bookrng.seed_of('recurrent_networks.sens.' + label):#018x}")
+                  for label, _, _, _ in SENS_MODELS], "llr") + "\n\n"
         f"The bound ||W||_2^k for the small vanilla model is {', '.join(f'{b}' for b in bound)} at k = {', '.join(str(k) for k in SENS_KS)}. "
         f"The large vanilla model peaks at k = {clip_k} with {_sci(large['norms'][clip_k], 2)}; a global-norm clip with "
         f"threshold 5 would multiply a gradient of that norm by {_fx(5.0 / large['norms'][clip_k], 4)}."
@@ -704,11 +710,12 @@ def _run_name(kind, seed, part):
 
 
 def _train_job(job):
-    kind, seed = job
+    kind, seed, nudge = job
     train = make_set(NAME_TRAIN, TRAIN_KS, N_TRAIN_PER_K)
     test = make_set(NAME_TEST, TEST_KS, N_TEST_PER_K)
     H = TRAIN_H
     p = init_params(kind, H, bookrng.generator(_run_name(kind, seed, "init")))
+    p["U"][0][0] += nudge                       # 0.0 for the run itself; a tiny change for the copies of the stable-digits rule
     order = bookrng.generator(_run_name(kind, seed, "order"))
     fp = _flat(p)
     m = [[0.0] * len(r) for r in fp]
@@ -741,7 +748,7 @@ def _train_job(job):
         pr = _softmax(_readout(p, h))
         if (pr[0] + pr[1] > 0.5) == (y < 2):
             correct[k] += 1
-    return kind, seed, curve, correct
+    return kind, seed, nudge, curve, correct
 
 
 TRAIN_CACHE = Path(__file__).resolve().parents[3] / "build" / "book" / "recurrent_networks_training.json"
@@ -756,27 +763,48 @@ def _source_digest():
 
 
 @lru_cache(maxsize=None)
-def training_results():
-    """{(kind, seed): (loss at the checkpoint epochs, {k: correct sequences of the test set})}; the nine runs are
-    independent and are spread over three worker processes. Training is deterministic, so a finished result is kept in
-    build/book (keyed by the digest of this module and of bookrng.py) and the chapter's blocks and its figure, which
-    are computed by different programs, share one training."""
+def _all_trainings():
+    """{(kind, seed, nudge): (loss at the checkpoint epochs, {k: correct sequences of the test set})}: the nine runs and,
+    for the stable-digits rule, four copies of each whose first weight is changed by one of `stable.NUDGES`. The 45
+    trainings are independent and are spread over four worker processes. Training is deterministic, so a finished result
+    is kept in build/book (keyed by the digest of this module and of bookrng.py) and the chapter's blocks and its figure,
+    which are computed by different programs, share one training."""
     key = _source_digest()
     if TRAIN_CACHE.is_file():
         try:
             stored = json.loads(TRAIN_CACHE.read_text(encoding="utf-8"))
             if stored.get("key") == key:
-                return {(r["kind"], r["seed"]): ({int(e): v for e, v in r["curve"].items()}, {int(k): v for k, v in r["correct"].items()})
+                return {(r["kind"], r["seed"], r["nudge"]): ({int(e): v for e, v in r["curve"].items()},
+                                                             {int(k): v for k, v in r["correct"].items()})
                         for r in stored["runs"]}
         except (ValueError, KeyError):
             pass
-    jobs = [(kind, seed) for kind in ("rnn", "lstm", "gru") for seed in SEEDS]
-    with get_context("fork").Pool(3) as pool:
+    jobs = [(kind, seed, nudge) for kind in ("rnn", "lstm", "gru") for seed in SEEDS for nudge in (0.0, *stable.NUDGES)]
+    with get_context("fork").Pool(4) as pool:
         res = pool.map(_train_job, jobs, chunksize=1)
     TRAIN_CACHE.parent.mkdir(parents=True, exist_ok=True)
-    TRAIN_CACHE.write_text(json.dumps({"key": key, "runs": [{"kind": k, "seed": s, "curve": c, "correct": r} for k, s, c, r in res]}),
-                           encoding="utf-8")
-    return {(kind, seed): (curve, correct) for kind, seed, curve, correct in res}
+    TRAIN_CACHE.write_text(json.dumps({"key": key, "runs": [{"kind": k, "seed": s, "nudge": n, "curve": c, "correct": r}
+                                                            for k, s, n, c, r in res]}), encoding="utf-8")
+    return {(kind, seed, nudge): (curve, correct) for kind, seed, nudge, curve, correct in res}
+
+
+def training_results():
+    """{(kind, seed): (loss at the checkpoint epochs, {k: correct sequences of the test set})} of the runs themselves."""
+    return {(kind, seed): v for (kind, seed, nudge), v in _all_trainings().items() if nudge == 0.0}
+
+
+def _stable_cell(kind, seed, f, full):
+    """A number computed from a run, printed with the digits on which the run and its four nudged copies agree."""
+    runs = _all_trainings()
+    vals = [f(*runs[(kind, seed, n)]) for n in (0.0, *stable.NUDGES)]
+    return stable.text(vals[0], vals[1:], full)
+
+
+def _stable_count(kind, seed, f, total):
+    """A count out of `total`: printed when the run and its copies agree on it, otherwise as 'unstable'."""
+    runs = _all_trainings()
+    vals = {f(*runs[(kind, seed, n)]) for n in (0.0, *stable.NUDGES)}
+    return f"{vals.pop()}/{total}" if len(vals) == 1 else "unstable"
 
 
 def _pooled(correct, ks):
@@ -785,17 +813,22 @@ def _pooled(correct, ks):
 
 
 def training():
-    res = training_results()
+    groups = [[k for k in TEST_KS if distance(k) <= WINDOW], [k for k in TEST_KS if distance(k) > WINDOW and k in TRAIN_KS],
+              [k for k in TEST_KS if k not in TRAIN_KS]]
     rows = []
     for kind in ("rnn", "lstm", "gru"):
         for seed in SEEDS:
-            curve, correct = res[(kind, seed)]
-            short = _pooled(correct, [k for k in TEST_KS if distance(k) <= WINDOW])
-            seen = _pooled(correct, [k for k in TEST_KS if distance(k) > WINDOW and k in TRAIN_KS])
-            beyond = _pooled(correct, [k for k in TEST_KS if k not in TRAIN_KS])
             rows.append((CELL_NAMES[kind], seed, f"{bookrng.seed_of(_run_name(kind, seed, 'init')):#018x}",
-                         *[_fx(curve[e], 3) for e in CHECKPOINT_EPOCHS],
-                         f"{short[0]}/{short[1]}", f"{seen[0]}/{seen[1]}", f"{beyond[0]}/{beyond[1]}"))
+                         *[_stable_cell(kind, seed, lambda curve, correct, e=e: curve[e], lambda x: _fx(x, 3)) for e in CHECKPOINT_EPOCHS],
+                         *[_stable_count(kind, seed, lambda curve, correct, ks=ks: sum(correct[k] for k in ks), N_TEST_PER_K * len(ks))
+                           for ks in groups]))
+    runs = _all_trainings()
+    n_test = N_TEST_PER_K * len(TEST_KS)
+    dist_rows = []
+    for kind in ("rnn", "lstm", "gru"):
+        shares = [sum(c.values()) / n_test for (kd, _, _), (_, c) in runs.items() if kd == kind]
+        dist_rows.append((CELL_NAMES[kind], len(shares), sum(x == 1.0 for x in shares), sum(x >= 0.95 for x in shares),
+                          sum(x < 0.7 for x in shares)))
     head = (["cell", "run", "seed of the initial parameters"] + [f"loss, epoch {e}" for e in CHECKPOINT_EPOCHS]
             + ["test, d <= 4", "test, d > 4 seen in training", "test, d beyond training"])
     return (
@@ -806,14 +839,30 @@ def training():
         f"Volume III) on minibatches of {BATCH} of the {N_TRAIN_PER_K * len(TRAIN_KS)} training sequences "
         f"(10 batches per epoch, {EPOCHS} epochs, {EPOCHS * 10} updates), the batches of an epoch being a new shuffle of "
         "the sequence indices drawn by `shuffle` from the generator `recurrent_networks.<cell>.<run>.order`, and "
-        f"the gradient of every update is clipped to a global norm of {CLIP:g}. The loss is the mean cross-entropy over "
+        f"the gradient of every update is clipped to a global norm of {CLIP:g}. The training sequences are the {N_TRAIN_PER_K * len(TRAIN_KS)} of "
+        f"the generator `{NAME_TRAIN}` in the order in which it makes them (index 0 .. {N_TRAIN_PER_K * len(TRAIN_KS) - 1}). At the start of every epoch "
+        "the index array is rebuilt as 0, 1, 2, ... and shuffled in place by the Fisher-Yates `shuffle` of Chapter 17 with the one generator `order` of the "
+        "run, which is never re-seeded within a run (so the permutation of epoch 2 is the next draws of that stream, not a shuffle of epoch 1's permutation); "
+        f"batch b of the epoch holds the entries {BATCH} b to {BATCH} b + {BATCH - 1} of the shuffled array. The 1/{BATCH} of the mean is "
+        "applied to the gradient of the loss with respect to the logits, (p - one-hot) / "
+        f"{BATCH}, before anything is propagated back, so the parameter gradients are sums of already scaled terms and nothing is divided afterwards. "
+        "The sequences of a batch are processed one after the other in batch order and their parameter gradients are added into one accumulator "
+        "in that order; for one sequence the readout gradients come first, then backpropagation through time runs from the last token to the first, "
+        "adding the gradient of each step into the accumulator. The global norm adds the squares of all entries left to right over the "
+        "parameters in the order U (one row per token id), W (row by row), readout weights (row by row), b, readout bias, and takes the square root; "
+        "the factor min(1, 5 / norm) multiplies every entry before Adam sees it. The loss is the mean cross-entropy over "
         "the four verbs; the table gives its mean over the batches of the epoch. A test sequence counts as correct when the "
         "probability of the two verbs of the subject's number exceeds one half. The columns on the right pool the test "
         f"sequences by distance: d <= 4 is k in {[k for k in TEST_KS if distance(k) <= WINDOW]} (the window reaches the subject), "
         f"d > 4 seen in training is k in {[k for k in TEST_KS if distance(k) > WINDOW and k in TRAIN_KS]}, and beyond training is "
-        f"k in {[k for k in TEST_KS if k not in TRAIN_KS]}. Losses are rounded to 3 decimals and counts are exact for an "
-        "implementation that adds in the same order; a different order moves the digits and, rarely, a count by one.\n\n"
-        + _table(head, rows, "lrl" + "r" * (len(head) - 3))
+        f"k in {[k for k in TEST_KS if k not in TRAIN_KS]}. Losses are rounded to 3 decimals. The runs are chaotic after "
+        "the first few epochs (a change of 1e-12 in one weight moves the loss at epoch 40 in the second digit and can move a whole run from "
+        "learned to not learned), so the stable-digits rule applies. " + stable.RULE + " A count is printed when all five runs give the same count and as 'unstable' otherwise.\n\n"
+        + _table(head, rows, "lrl" + "r" * (len(head) - 3)) + "\n\n"
+        "What survives the chaos is the distribution over trainings. Each cell was trained 15 times (the 3 runs, each with its 4 nudged copies and itself); "
+        f"the table counts them by the share of the {sum(N_TEST_PER_K for _ in TEST_KS)} test sequences of all distances that they name correctly. "
+        "A reimplementation should expect similar fractions, not these counts.\n\n"
+        + _table(["cell", "trainings", "all test sequences right", "at least 0.95 right", "less than 0.7 right"], dist_rows, "lrrrr")
     )
 
 
@@ -827,15 +876,22 @@ def accuracy_data():
     return out, ceil
 
 
+def _stable_mean(kind, k):
+    """Mean accuracy over the three runs of a cell at k, by the stable-digits rule over the runs and their nudged copies."""
+    runs = _all_trainings()
+    vals = [sum(runs[(kind, s, n)][1][k] for s in SEEDS) / (len(SEEDS) * N_TEST_PER_K) for n in (0.0, *stable.NUDGES)]
+    return stable.text(vals[0], vals[1:], lambda x: _fx(x, 3))
+
+
 def accuracy_by_distance():
     out, ceil = accuracy_data()
     rows = []
     for idx, k in enumerate(TEST_KS):
-        rows.append((k, distance(k), "trained" if k in TRAIN_KS else "beyond", _fx(ceil[idx], 3), *[_fx(out[c][idx], 3) for c in ("rnn", "lstm", "gru")]))
+        rows.append((k, distance(k), "trained" if k in TRAIN_KS else "beyond", _fx(ceil[idx], 3), *[_stable_mean(c, k) for c in ("rnn", "lstm", "gru")]))
     return (
         f"Accuracy on the {N_TEST_PER_K} test sequences of each k, averaged over the three runs of a cell "
         f"(so a multiple of 1/{N_TEST_PER_K * len(SEEDS)}); the window column is the ceiling of the previous table "
-        "(0.5 from k = 2, where the last four tokens do not contain the subject).\n\n"
+        "(0.5 from k = 2, where the last four tokens do not contain the subject). " + stable.RULE + "\n\n"
         + _table(["k", "d", "in training", "window of 4 (ceiling)", "vanilla", "LSTM", "GRU"], rows, "rrlrrrr")
     )
 

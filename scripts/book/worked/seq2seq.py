@@ -430,11 +430,11 @@ def gradient_check():
                     worst_rel = max(worst_rel, abs(num - gr[j]) / max(abs(num), abs(gr[j])))
                     smallest = min(smallest, max(abs(num), abs(gr[j])))
                 count += 1
-        rows.append(("attention" if attention else "no attention", f"{bookrng.seed_of(name):#018x}", count, f"{worst_abs:.1e}",
+        rows.append((f"{'attention' if attention else 'no attention'} (`{name}`)", f"{bookrng.seed_of(name):#018x}", count, f"{worst_abs:.1e}",
                      f"{worst_rel:.1e}"))
     return (
         f"Input {CHECK_SRC} (T = {len(CHECK_SRC)}, so the output has {len(CHECK_SRC) + 1} tokens), H = {CHECK_H}, embedding width {CHECK_DM}, "
-        f"A = {CHECK_A}. Parameters drawn by the recipe of the text from the generator named `seq2seq.check.<model>` (seeds below), "
+        f"A = {CHECK_A}. Parameters drawn by the initialisation recipe of the text from the generator named `seq2seq.check.plain` for the model without attention and `seq2seq.check.attention` for the one with it (seeds below), "
         "after which the three biases get `0.1 * normal()` entries drawn from the same generator, in the order encoder bias, "
         f"decoder bias, output bias. Central differences with step {EPS:g} on every entry of every parameter, against the "
         "gradient of the backward pass. Tolerance: the table prints the largest absolute difference and the largest relative "
@@ -527,9 +527,10 @@ def attention_cost():
     big_h = 1024
     gru = gru_flops(big_h, 2 * big_h)
     per_pair = 4 * big_h + 3 + 2 * big_h
+    query = 2 * big_h * big_h                  # the constant term 2 A H of the query Wa s
     cross = None
     for T in range(1, 100000):
-        if T * per_pair >= gru:
+        if query + T * per_pair >= gru:
             cross = T
             break
     ctx_bytes = lambda T, H, A: (4 * H, 4 * T * H, 4 * T * A, 4 * (T + 1) * T)
@@ -547,8 +548,8 @@ def attention_cost():
         f"{DM_TRAIN}, A = {A_TRAIN}, V = {V}; reading T digits and writing T + 1 tokens (output layer included, loss not):\n\n"
         + t1 + "\n\n"
         f"For a layer of the size that language models use, H = A = {big_h} and a decoder input of width 2 H (the embedding and the "
-        f"context), a GRU step costs {_int(gru)} FLOPs and each encoder position adds {_int(per_pair)} to every attention step, so the "
-        f"attention overtakes the recurrent step itself at T = {cross}.\n\n"
+        f"context), a GRU step costs {_int(gru)} FLOPs and the attention step has a constant part, the query, of {_int(query)} FLOPs, and each encoder position adds {_int(per_pair)}, so the "
+        f"attention step ({_int(query)} + {_int(per_pair)} T) first costs at least as much as the recurrent step itself at T = {cross}.\n\n"
         "Bytes of float32 numbers that a model must hold to answer one input of T digits:\n\n" + t2
     )
 
@@ -686,8 +687,8 @@ def _training_rows(variants):
 
 def training_plain():
     return (
-        f"The model is the one of the text, H = {H_TRAIN} state numbers, embedding width {DM_TRAIN}, V = {V}, the parameters drawn by the recipe "
-        "of the text from the generator named `seq2seq.plain.<run>.init` with run 0 or 1 (seeds in the table). "
+        f"The model is the one of the text, H = {H_TRAIN} state numbers, embedding width {DM_TRAIN}, V = {V}, the parameters drawn by the initialisation recipe "
+        "of the text from the generator named `seq2seq.plain.<run>.init` with run 0 or 1 (`plain` is the model without attention; seeds in the table). "
         f"Training is Adam (learning rate {LR}, beta1 {BETA1}, beta2 {BETA2}, epsilon {EPS_ADAM:g}, with the bias correction of Volume III) "
         f"on minibatches of {BATCH} freshly drawn input sequences, {STEPS} updates ({STEPS * BATCH:,} sequences), every gradient clipped to a "
         f"global norm of {CLIP:g}. Batch element after batch element, the length is `1 + integer({LMAX_TRAIN})` and then that many "
@@ -704,7 +705,7 @@ def training_plain():
 
 def training_attention():
     return (
-        "The model of the text with attention (A = 16), parameters drawn from the generator `seq2seq.attention.<run>.init`, trained "
+        "The model of the text with attention (A = 16), parameters drawn by the same initialisation recipe from the generator `seq2seq.attention.<run>.init` with run 0 or 1, trained "
         "by the protocol of the previous training block (same optimizer, batches, clipping, test set and counting; the sequences of "
         "run r are those of run r there). Same tolerance.\n\n" + _training_rows(("attention",))
     )
@@ -822,7 +823,9 @@ def crate_scale():
     return (
         f"The configuration of the convergence test: vocabulary {v} (6 symbols and the start marker), source and target length {c['src']}, "
         f"{c['n_enc']} encoder blocks and {c['n_dec']} decoder blocks, width d = {d}, {c['heads']} heads, feed-forward width {ff}, batch {c['batch']}. "
-        "Each weight matrix has the shape of its entry in the crate's parameter list (a matrix of [rows, columns] and its bias).\n\n"
+        "Each weight matrix has the shape of its entry in the crate's parameter list (a matrix of [rows, columns] and its bias). "
+        "Every normalisation layer is a gain and a bias of d numbers each (2 d), every linear layer has a bias except the output head, which has none, "
+        "and the position tables are learned tables of one row per position.\n\n"
         + _table(["part", "parameters"], rows) + "\n\n"
         f"The cross-attention of one decoder block scores every target position against every source position, for every head and "
         f"every sequence of the batch: {c['batch']} x {c['heads']} x {c['dec']} x {c['src']} = {_int(scores_per_layer)} scores per block "
