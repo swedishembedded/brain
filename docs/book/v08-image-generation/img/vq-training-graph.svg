@@ -1,0 +1,39 @@
+<!-- source-sha256: 6923c13616cec305ddf89d7951657b748a387952d4ed540cec8764e2487f4e21 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 290" width="800" height="290"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="800" height="290" fill="#ffffff"/>
+<ellipse cx="52" cy="96" rx="36" ry="25" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="52" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reading x</text>
+<rect x="108" y="70" width="84" height="52" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">encoder</text>
+<rect x="220" y="70" width="84" height="52" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="262" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rows z_e</text>
+<rect x="334" y="70" width="116" height="52" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="392" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">nearest code</text>
+<text x="392" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">k = argmin</text>
+<rect x="472" y="70" width="100" height="52" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="522" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">z_q = C[k]</text>
+<rect x="598" y="70" width="84" height="52" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decoder</text>
+<ellipse cx="748" cy="96" rx="30" ry="25" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="748" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x_hat</text>
+<rect x="332" y="184" width="120" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="392" y="202.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">codebook C</text>
+<text x="392" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">K rows of d</text>
+<line x1="91" y1="96" x2="105" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="195" y1="96" x2="217" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="307" y1="96" x2="331" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="453" y1="96" x2="469" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="575" y1="96" x2="595" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="685" y1="96" x2="715" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="392" y1="181" x2="392" y2="125" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M452,206 L512,206 Q522,206 522,196 L522,125" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M522,70 L522,32 Q522,22 512,22 L272,22 Q262,22 262,32 L262,67" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-c53030)"/>
+<text x="392" y="44.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">straight-through:</text>
+<text x="392" y="60.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">gradient copied</text>
+<path d="M250,122 L250,211 Q250,221 260,221 L329,221" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-c53030)"/>
+<path d="M332,192 L284,192 Q274,192 274,182 L274,125" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-c53030)"/>
+<text x="244" y="156.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="end">codebook</text>
+<text x="244" y="172.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="end">term</text>
+<text x="282" y="156.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="start">commitment</text>
+<text x="282" y="172.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="start">term</text>
+<text x="400" y="270.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">solid: the forward pass; dashed red: where gradients go. The argmin passes none.</text>
+</svg>

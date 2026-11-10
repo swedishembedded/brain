@@ -152,6 +152,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **classification**: predicting which of a fixed set of categories an example belongs to, from its features, learned from labelled examples; with two categories, labelled $0$ and $1$, it is binary classification. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
+**codebook**: a table of $K$ vectors of $d$ numbers each, the only values a quantized vector may take; a position of a tokenizer stores the index of a row. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
+
 **color space**: the rule that turns a triple of numbers into a colour, made of three primary colours, a white point and a transfer curve, so that the same triple is a different colour in a different space. *([Images as Data](v07-vision/01-images.md))*
 
 **command recording**: appending many dispatches to one list and handing the list to the device as a single submission, so that the host pays the submission cost once instead of once per dispatch; a read-back or any other observation of the device ends the list. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
@@ -704,6 +706,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **perceptual distance**: a distance (LPIPS, learned perceptual image patch similarity, when the features are learned) between two pictures computed on the features of a pretrained network (channel-normalized at each position, differenced, squared, weighted per channel and averaged over positions and levels), which measures how different they look and need not agree with the pixel error. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*
 
+**perceptual loss**: a training loss that is a perceptual distance, the difference of the features that a frozen pretrained network computes for the output and the target, which prefers a sharp output where a squared error prefers the blurred mean. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
+
 **perplexity**: the exponential of the cross-entropy, $\exp H(p, q)$ with natural logarithms, the number of equally likely choices that would give the same average surprise. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
 **piecewise function**: a function defined by different rules on different parts of its domain, such as the absolute value, ReLU and a schedule with a warmup. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
@@ -912,6 +916,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **storage buffer**: a large array in device memory that a kernel reads or reads and writes, whose element type the kernel declares and whose length the host chooses when it binds the buffer. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
+**straight-through estimator**: the rule that passes the gradient at a quantizer's output to its input unchanged, written $\mathbf{z} + \mathrm{sg}[\mathbf{z}_q - \mathbf{z}]$ with a stop-gradient $\mathrm{sg}$; it replaces a derivative that is zero by a biased one that trains the encoder. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
+
 **stride**: the distance in memory, counted in elements, between two neighbours along one axis; a view is described by one stride per axis, and stride 0 repeats one number. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **subgroup**: the group of consecutive invocations of a workgroup, 32 in this book's model, that the hardware executes with one instruction at a time. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
@@ -1017,6 +1023,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **vector**: an ordered list of real numbers, read as data (the features of one example) or as an arrow with a length and a direction. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **vector addition**: adding two vectors of the same length entry by entry; as arrows it is the parallelogram rule. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
+
+**vector quantization**: replacing a vector by the nearest row of a codebook (smallest squared distance, lowest index on a tie), so that it is stored as one index of $\log_2 K$ bits. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
 
 **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 

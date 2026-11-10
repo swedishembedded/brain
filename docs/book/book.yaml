@@ -659,7 +659,7 @@ volumes:
         title: "Discrete Latents and Vector Quantization"
         question: "How can an image be turned into a short sequence of discrete codes?"
         introduces: [codebook, vector-quantization, straight-through-estimator, perceptual-loss]
-        requires: [variational-autoencoder, nearest-neighbors, perceptual-distance]
+        requires: [variational-autoencoder, nearest-neighbors, k-means, perplexity, chain-rule, gradient-check, autoregressive-factorization, perceptual-distance]
         brain: [vqgan]
       - id: gans
         title: "Adversarial Training"

@@ -453,6 +453,7 @@ navigation:
           - docs/book/v08-image-generation/index.md
           - docs/book/v08-image-generation/01-generative-modeling.md
           - docs/book/v08-image-generation/02-vae.md
+          - docs/book/v08-image-generation/03-vector-quantization.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md
