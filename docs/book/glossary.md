@@ -24,6 +24,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **additive attention**: attention whose score for a decoder state and an encoder state is computed by a small network that adds a projection of each before a tanh and takes a weighted sum of the result, so that the decoder can build a different weighted average of the encoder states at every step. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
 
+**adversarial loss**: the pair of losses in which a discriminator minimizes a classification loss on real and fake samples while the generator minimizes a loss on the discriminator's score of its samples, each holding the other fixed. *([Adversarial Training](v08-image-generation/04-gans.md))*
+
 **affine quantization**: the map from a real number to an $n_b$-bit integer code and back, $q = \mathrm{clamp}(\mathrm{round}(w/\Delta) + q_0, 0, 2^{n_b} - 1)$ and $w' = \Delta(q - q_0)$, a multiplication and an offset applied to a group of weights. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
 **ahead-of-time compilation**: compiling kernels for a list of known device architectures before the program ships and loading the results at run time with a key that identifies their inputs, so that a machine without a compiler can run them, at the price of storage and of devices outside the list. *([One Program, Many Devices](v04-computation/09-backends.md))*
@@ -260,6 +262,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **discrete Fourier transform**: the list $X[k] = \sum_{n=0}^{N-1} x[n]e^{-2\pi i kn/N}$ of correlations of $N$ samples with turning pointers, one per frequency $k$; its modulus gives the amplitude and its angle the phase of the component at that frequency, and the original samples are recovered by the inverse transform. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
+**discriminator**: a classifier trained to tell real samples from a generator's samples, whose output is the probability that a sample is real; at its best it equals $p/(p + q)$. *([Adversarial Training](v08-image-generation/04-gans.md))*
+
 **disparity**: the reciprocal of depth, $1/Z$, called disparity when it is measured as the shift between the two pictures of a stereo pair; it is the coordinate in which depth varies smoothly and in which a scale and shift ambiguity is linear. *([Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md))*
 
 **distribution focal loss**: the cross-entropy between the softmax over the bins of one box side and the two-hot distribution on the two bins around the true distance, which is minimized by that distribution (whose expectation is the true distance) and so constrains the shape and not only the mean. *([Object Detection](v07-vision/04-detection.md))*
@@ -381,6 +385,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **gelu**: the Gaussian error linear unit $z\,\Phi(z)$, the input times the probability that a standard Gaussian variable lies below it, a smooth cousin of the ReLU that dips slightly below zero for negative inputs; it is computed exactly with the error function or approximately by a tanh form or a sigmoid form that are different functions. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **generative model**: a representation of a probability distribution over data, here over images, that can be sampled to produce new data, evaluated to give the probability or density of a given image, or both. *([What It Means to Generate](v08-image-generation/01-generative-modeling.md))*
+
+**generator network**: a network that maps a noise vector drawn from a simple distribution to a sample, so that the samples it makes are draws from a distribution whose density need not be computable; it is the decoder of an autoencoder with the encoder removed. *([Adversarial Training](v08-image-generation/04-gans.md))*
 
 **global gradient norm**: the Euclidean norm of the gradient of every parameter of the model, all tensors taken together as one vector, the number a clip compares with its threshold. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
 
@@ -599,6 +605,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **minibatch**: the small set of $B$ examples whose mean loss gradient is used for one update; its gradient has the full gradient's expectation and a variance $1/B$ that of one example. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **mixed-precision weight search**: choosing the storage width of each tensor so as to minimize the estimated total loss increase within a byte budget, using each tensor's sensitivity; a knapsack problem solved greedily and accepted only after measuring the whole model. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
+
+**mode collapse**: the failure in which a generator maps most of its noise to a few outputs, so its samples cover only a small part of the data's distribution even if each looks plausible. *([Adversarial Training](v08-image-generation/04-gans.md))*
 
 **model**: a function whose rule has a fixed shape and whose behaviour is set by a list of parameters, used to turn the features of an example into a prediction. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 

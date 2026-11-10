@@ -1,0 +1,34 @@
+<!-- source-sha256: 512c05cc69d54282607c4c80e567d52894ed1d766a556b60fe242017ea101520 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 340" width="560" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="340" fill="#ffffff"/>
+<line x1="58" y1="294" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="179" y1="294" x2="179" y2="30" stroke="#edf2f7"/>
+<text x="179" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="300" y1="294" x2="300" y2="30" stroke="#edf2f7"/>
+<text x="300" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">200</text>
+<line x1="421" y1="294" x2="421" y2="30" stroke="#edf2f7"/>
+<text x="421" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">300</text>
+<line x1="542" y1="294" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="542" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">400</text>
+<line x1="58" y1="294" x2="542" y2="294" stroke="#edf2f7"/>
+<text x="52" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="211.54" x2="542" y2="211.54" stroke="#edf2f7"/>
+<text x="52" y="215.54" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="129.08" x2="542" y2="129.08" stroke="#edf2f7"/>
+<text x="52" y="133.08" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="46.62" x2="542" y2="46.62" stroke="#edf2f7"/>
+<text x="52" y="50.62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<rect x="58" y="30" width="484" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="264"/></clipPath>
+<g clip-path="url(#plot)"><line x1="58" y1="192.48" x2="542" y2="192.48" stroke="#a0aec0" stroke-dasharray="4 4"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="70.1,291.92 82.2,292.78 94.3,277.59 106.4,238.5 118.5,263.62 130.6,278.12 142.7,291.08 154.8,283.75 166.9,289.68 179,271.19 191.1,279.46 203.2,281.82 215.3,277.53 227.4,275.72 239.5,287.78 251.6,265.47 263.7,163.14 275.8,90.92 287.9,223.57 300,288.5 312.1,280.21 324.2,278.72 336.3,278.11 348.4,264.09 360.5,283.03 372.6,287.21 384.7,288.19 396.8,278.9 408.9,280.12 421,275.12 433.1,274.21 445.2,276.76 457.3,253.67 469.4,163.92 481.5,173.36 493.6,291.41 505.7,286.34 517.8,291.06 529.9,280.35 542,278.73"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.2" points="70.1,277.35 82.2,280.75 94.3,282.29 106.4,281.7 118.5,278.12 130.6,270.54 142.7,261.5 154.8,252.08 166.9,242.41 179,232.37 191.1,222.88 203.2,214.11 215.3,205.9 227.4,197.98 239.5,190.66 251.6,184.19 263.7,178.35 275.8,173.97 287.9,170.44 300,168.82 312.1,168.51 324.2,169.9 336.3,171.98 348.4,175.11 360.5,178.71 372.6,183.23 384.7,187.57 396.8,190.73 408.9,193.4 421,195.68 433.1,198.32 445.2,200.26 457.3,201.73 469.4,202.19 481.5,202.44 493.6,202.24 505.7,201.55 517.8,201.06 529.9,200.67 542,199.6"/><text x="60.42" y="187.53" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">spread of the data</text></g>
+<text x="300" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">discriminator steps</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">spread of generated samples</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Spread of the samples under two schedules</text>
+<rect x="66" y="38" width="291.54" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">twenty generator steps per discriminator step</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">one generator step per discriminator step</text>
+</svg>

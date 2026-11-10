@@ -20,7 +20,7 @@ You can say what a generative model of images offers (a sampler, a density, or b
 1. [What It Means to Generate](01-generative-modeling.md): what does it mean for a model to learn a distribution over images, and how can we sample from it?
 2. [Variational Autoencoders](02-vae.md): how an autoencoder can be made into a generator, and why that needs a bound on likelihood.
 3. [Discrete Latents and Vector Quantization](03-vector-quantization.md): how an image can be turned into a short sequence of discrete codes.
-4. Adversarial Training: what happens when the loss itself is a network trained to catch the generator.
+4. [Adversarial Training](04-gans.md): what happens when the loss itself is a network trained to catch the generator.
 5. Diffusion Models: how a model can learn to create an image by learning to remove noise.
 6. Flow Matching and Rectified Flow: whether generation can be a straight path from noise to data, followed by an ordinary differential equation.
 7. Samplers and Guidance: how many steps sampling needs, and how to make a model follow its prompt more closely.
