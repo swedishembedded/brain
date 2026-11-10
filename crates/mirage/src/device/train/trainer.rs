@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use model::adapter::{kind, KeyStyle};
+use model::saved::SavedPolicy;
 use optim::{Adam, Optim};
 use paramstore::{ParamStore, Role};
 
@@ -91,6 +92,14 @@ impl DevTrainer {
         self.cfg.lr = lr;
     }
 
+    /// Keep what `policy` names of the forward for the backward ([`TrainConfig::saved`]); the gradients do not
+    /// depend on it. A narrow boundary format is refused: the recompute boundaries stay in full precision.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        crate::train::net::check_saved_policy(policy)?;
+        self.cfg.saved = policy;
+        Ok(())
+    }
+
     /// The names of the trained base tensors (empty for LoRA).
     pub fn trainable(&self) -> &BTreeSet<String> {
         &self.trainable
@@ -129,11 +138,11 @@ impl DevTrainer {
         let mut terms: BTreeMap<&'static str, f64> = BTreeMap::new();
         let (mut loss, mut samples) = (0.0f64, 0usize);
         for p in batch {
-            let mut net = Net::resident(&self.base.config, self.tape());
+            let mut net = Net::resident(&self.base.config, self.tape()).with_saved_policy(self.cfg.saved)?;
             let Some(l) = sample_loss(&mut net, &p.sample, p.target.as_ref(), &self.cfg.weights) else { continue };
             loss += net.tape.scalar(l.total);
             l.terms.iter().for_each(|(k, v)| *terms.entry(k).or_insert(0.0) += v);
-            net.tape.backward(l.total);
+            net.backward(l.total);
             samples += 1;
         }
         if samples == 0 {
@@ -277,6 +286,9 @@ impl FineTuner for DevTrainer {
     }
     fn steps(&self) -> u32 {
         self.step
+    }
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        DevTrainer::set_saved_policy(self, policy)
     }
 }
 

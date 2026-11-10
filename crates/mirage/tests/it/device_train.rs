@@ -18,6 +18,7 @@ use mirage::device::Device;
 use mirage::train::graph::Graph;
 use mirage::train::ops::Seg;
 use mirage::train::tape::{Id, Tape};
+use model::saved::SavedPolicy;
 use paramstore::{ParamStore, Role};
 
 /// Minimum cosine between a device result and the host result.
@@ -870,4 +871,72 @@ fn the_whole_graph_on_the_device_gives_the_host_gradients() {
         }
     }
     assert!(failures.is_empty(), "device gradients deviate from the host: {failures:?}");
+}
+
+/// Parameter gradients and the loss of the whole graph on the host under `policy`.
+fn host_whole_graph(cfg: &mirage::config::MirageConfig, params: &mirage::train::net::Params<f32>, policy: SavedPolicy) -> (f32, usize, BTreeMap<String, Vec<f32>>) {
+    let mut net = Net::<f32>::new(cfg, params, None).with_saved_policy(policy).expect("keep and recompute are supported");
+    let l = whole_graph_loss(&mut net);
+    let loss = net.tape.val(l)[0];
+    let live = net.tape.live_elements();
+    net.backward(l);
+    let mut grads = net.tape.take_grads();
+    (loss, live, net.param_grads(&mut grads))
+}
+
+#[test]
+fn host_recompute_gives_bit_identical_gradients_and_keeps_only_block_boundaries() {
+    crate::common::cap_threads();
+    let ck = crate::common::tiny_checkpoint();
+    let mut params: mirage::train::net::Params<f32> = params_from_checkpoint(&ck);
+    for v in params.values_mut().flatten() {
+        *v *= 0.5;
+    }
+    let (keep_loss, keep_live, keep) = host_whole_graph(&ck.config, &params, SavedPolicy::Keep);
+    let (re_loss, re_live, re) = host_whole_graph(&ck.config, &params, SavedPolicy::Recompute);
+    assert_eq!(keep_loss.to_bits(), re_loss.to_bits(), "the forward value changed under recompute");
+    assert_eq!(keep.len(), re.len());
+    for (name, want) in &keep {
+        let got = &re[name];
+        let differing = got.iter().zip(want).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        assert_eq!(differing, 0, "{name}: {differing} of {} gradient values differ under recompute", want.len());
+    }
+    let weights: usize = params.values().map(Vec::len).sum();
+    eprintln!("host values held after the forward: keep {keep_live}, recompute {re_live} (parameters {weights})");
+    assert!(re_live - weights < (keep_live - weights) / 2, "recompute keeps {} activation values against {} under keep", re_live - weights, keep_live - weights);
+}
+
+#[test]
+fn device_recompute_gives_the_keep_gradients() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("recompute") else { return };
+    let ck = crate::common::tiny_checkpoint();
+    let cfg = ck.config.clone();
+    let mut params: mirage::train::net::Params<f32> = params_from_checkpoint(&ck);
+    for v in params.values_mut().flatten() {
+        *v *= 0.5;
+    }
+    let store = upload_params(&dev, cfg.dec_layers, &params, |_| paramstore::Role::Trainable);
+    let run = |policy: SavedPolicy| {
+        store.zero_grads(dev.gpu());
+        let mut net = Net::resident(&cfg, DevTape::new(&dev, &store)).with_saved_policy(policy).expect("keep and recompute are supported");
+        let l = whole_graph_loss(&mut net);
+        let loss = net.tape.scalar(l);
+        net.backward(l);
+        (loss, stacked_grads(&dev, &store))
+    };
+    let (keep_loss, keep) = run(SavedPolicy::Keep);
+    let (re_loss, re) = run(SavedPolicy::Recompute);
+    assert_eq!(keep_loss.to_bits(), re_loss.to_bits(), "the forward value changed under recompute");
+    let exact = dev.gpu().kind() == "cpu";
+    for (name, want) in &keep {
+        let got = &re[name];
+        if exact {
+            let differing = got.iter().zip(want).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            assert_eq!(differing, 0, "{name}: {differing} of {} gradient values differ under recompute", want.len());
+        } else {
+            let (max_rel, min_cos) = bounds(&dev, 1e-4);
+            assert_close_cos(name, got, want, max_rel, min_cos);
+        }
+    }
 }

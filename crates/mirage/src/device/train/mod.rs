@@ -46,7 +46,7 @@ use super::Device;
 use crate::train::graph::Graph;
 use crate::train::ops::Seg;
 use crate::train::seq::AttnShape;
-use crate::train::tape::Id;
+use crate::train::tape::{Id, Mark};
 use crate::vision::ops::Map;
 
 /// Kernels the training graph dispatches by name, beyond what the inference path lists.
@@ -126,6 +126,8 @@ type Backward = Box<dyn Fn(&mut BwdCtx<'_, '_>, &DeviceBuffer)>;
 struct Node {
     out: Id,
     bwd: Backward,
+    /// `Some(i)` marks the barrier a sealed recompute block left in place of its nodes (see [`Graph::seal`]).
+    block: Option<usize>,
 }
 
 /// What a backward closure sees: forward values, gradient accumulators, and the step recorder.
@@ -179,6 +181,8 @@ pub struct DevTape<'a> {
     nodes: Vec<Node>,
     rec: Rec<'a>,
     grads: Vec<Option<DeviceBuffer>>,
+    /// The next node a backward in progress runs (counting down).
+    cursor: usize,
     param_ids: HashMap<String, Id>,
     ones: HashMap<usize, DeviceBuffer>,
     walsh: HashMap<usize, DeviceBuffer>,
@@ -199,6 +203,7 @@ impl<'a> DevTape<'a> {
             nodes: Vec::new(),
             rec: Rec::new(dev),
             grads: Vec::new(),
+            cursor: 0,
             param_ids: HashMap::new(),
             ones: HashMap::new(),
             walsh: HashMap::new(),
@@ -272,7 +277,7 @@ impl<'a> DevTape<'a> {
         let needs_grad = inputs.iter().any(|&i| self.needs(i));
         let out = self.push_val(buf, len, needs_grad, None);
         if needs_grad {
-            self.nodes.push(Node { out, bwd: Box::new(bwd) });
+            self.nodes.push(Node { out, bwd: Box::new(bwd), block: None });
         }
         out
     }
@@ -311,21 +316,43 @@ impl<'a> DevTape<'a> {
     }
 
     /// Run the forward steps still pending, then the backward of `loss` (a scalar), accumulating into the store's
-    /// gradient buffers.
+    /// gradient buffers. A tape holding sealed recompute blocks cannot rebuild them itself: differentiate those
+    /// through `Net::backward`.
     pub fn backward(&mut self, loss: Id) {
+        self.backward_begin_impl(loss);
+        assert!(self.backward_to_block_impl().is_none(), "this tape holds sealed recompute blocks: run the backward through Net::backward");
+        self.flush();
+    }
+
+    fn backward_begin_impl(&mut self, loss: Id) {
         assert_eq!(self.vals[loss.0].len, 1, "backward starts from a scalar");
         self.grads.resize(self.vals.len(), None);
         if self.vals[loss.0].needs_grad {
             self.grads[loss.0] = Some(self.dev.gpu().storage_init("loss grad", &[1.0]));
         }
-        let nodes = std::mem::take(&mut self.nodes);
-        for node in nodes.iter().rev() {
+        self.cursor = self.nodes.len();
+    }
+
+    fn run_nodes(&mut self, from: usize, to: usize) {
+        for i in (from..to).rev() {
+            let node = &self.nodes[i];
             let Some(gy) = self.grads[node.out.0].clone() else { continue };
             let mut cx = BwdCtx { rec: &mut self.rec, vals: &self.vals, grads: &mut self.grads, store: self.store };
             (node.bwd)(&mut cx, &gy);
         }
-        self.nodes = nodes;
-        self.flush();
+    }
+
+    fn backward_to_block_impl(&mut self) -> Option<usize> {
+        while self.cursor > 0 {
+            let i = self.cursor - 1;
+            if let Some(b) = self.nodes[i].block {
+                self.cursor = i;
+                return Some(b);
+            }
+            self.run_nodes(i, i + 1);
+            self.cursor = i;
+        }
+        None
     }
 }
 
@@ -353,6 +380,49 @@ impl Graph<f32> for DevTape<'_> {
     }
     fn scalar(&mut self, id: Id) -> f64 {
         f64::from(self.value(id)[0])
+    }
+
+    fn mark(&self) -> Mark {
+        Mark { nodes: self.nodes.len(), vals: self.vals.len() }
+    }
+    fn seal(&mut self, mark: Mark, keep: &[Id], block: usize) {
+        // The pending forward steps still hold the buffers about to be released: run them first.
+        self.flush();
+        self.nodes.truncate(mark.nodes);
+        let keep: HashSet<usize> = keep.iter().map(|id| id.0).collect();
+        let released = self.upload(&[0.0]);
+        for (i, v) in self.vals.iter_mut().enumerate().skip(mark.vals) {
+            // A parameter's buffer belongs to the store, not to the block.
+            if v.param.is_none() && !keep.contains(&i) {
+                v.buf = released.clone();
+            }
+        }
+        self.nodes.push(Node { out: Id(usize::MAX), bwd: Box::new(|_, _| {}), block: Some(block) });
+    }
+    fn backward_begin(&mut self, loss: Id) {
+        self.backward_begin_impl(loss);
+    }
+    fn backward_to_block(&mut self) -> Option<usize> {
+        self.backward_to_block_impl()
+    }
+    fn replay_backward(&mut self, mark: Mark, pairs: &[(Id, Id)]) {
+        self.grads.resize(self.vals.len(), None);
+        for &(new, old) in pairs {
+            if new != old {
+                if let Some(g) = self.grads[old.0].take() {
+                    self.grads[new.0] = Some(g);
+                }
+            }
+        }
+        let end = self.nodes.len();
+        self.run_nodes(mark.nodes, end);
+        self.flush();
+        self.nodes.truncate(mark.nodes);
+        self.vals.truncate(mark.vals);
+        self.grads.truncate(mark.vals);
+    }
+    fn backward_end(&mut self) {
+        self.flush();
     }
 
     fn resident_param(&mut self, name: &str) -> Option<Id> {

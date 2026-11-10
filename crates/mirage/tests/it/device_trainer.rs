@@ -196,3 +196,35 @@ fn a_device_full_fine_tune_overfits_and_its_checkpoint_loads_through_the_importe
     assert_eq!(loaded.config, mirage::config::MirageConfig::tiny());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_recompute_step_equals_a_keep_step_on_both_trainers() {
+    use model::saved::{SavedFormat, SavedPolicy};
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("recompute step") else { return };
+    let on_cpu = dev.gpu().kind() == "cpu";
+    let ck = tiny_checkpoint();
+    let p = prepared(&ck.config);
+    let batch = [p.clone_prepared(), p.clone_prepared()];
+    for mode in [Mode::Full, Mode::Lora { rank: 2, alpha: 4.0, seed: 5 }] {
+        let (mut keep, mut recompute) = (Trainer::new(ck.clone(), cfg_for(mode.clone())).unwrap(), Trainer::new(ck.clone(), cfg_for(mode.clone())).unwrap());
+        recompute.set_saved_policy(SavedPolicy::Recompute).unwrap();
+        let mut device_recompute = DevTrainer::new(device("recompute step").unwrap(), ck.clone(), cfg_for(mode.clone())).unwrap();
+        let mut device_keep = DevTrainer::new(device("recompute step").unwrap(), ck.clone(), cfg_for(mode.clone())).unwrap();
+        device_recompute.set_saved_policy(SavedPolicy::Recompute).unwrap();
+        for _ in 0..2 {
+            let (a, b) = (keep.step(&batch).unwrap(), recompute.step(&batch).unwrap());
+            assert_eq!(a.loss.to_bits(), b.loss.to_bits(), "{mode:?}: host loss");
+            assert_eq!(a.grad_norm.to_bits(), b.grad_norm.to_bits(), "{mode:?}: host gradient norm");
+            let (a, b) = (device_keep.step(&batch).unwrap(), device_recompute.step(&batch).unwrap());
+            assert!(on_cpu && a.loss.to_bits() == b.loss.to_bits() && a.grad_norm.to_bits() == b.grad_norm.to_bits() || !on_cpu && (a.loss - b.loss).abs() <= 2e-3 * a.loss.abs().max(1.0), "{mode:?}: device loss {} vs {}", a.loss, b.loss);
+        }
+        let same = |x: &mirage::import::Checkpoint, y: &mirage::import::Checkpoint| x.tensors.iter().all(|(n, t)| t.data.iter().zip(&y.tensors[n].data).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(same(&keep.checkpoint(), &recompute.checkpoint()), "{mode:?}: host weights differ after recompute steps");
+        if on_cpu {
+            assert!(same(&device_keep.checkpoint(), &device_recompute.checkpoint()), "{mode:?}: device weights differ after recompute steps");
+        }
+    }
+    let refused = Trainer::new(ck.clone(), cfg_for(Mode::Full)).unwrap().set_saved_policy(SavedPolicy::Quantized(SavedFormat::Bf16));
+    assert!(refused.is_err_and(|e| e.contains("full precision")), "a narrow boundary format must be refused by name");
+}

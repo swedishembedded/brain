@@ -4,4 +4,3 @@ moondream3	the decoder backward (src/decoder.rs) serves its in-file finite-diffe
 splat	one differentiable rasterizer pass (src/renderer.rs render_bwd) with no layer stack to recompute
 t5encoder	the T5 backward serves gradcheck/src/t5.rs; every production T5 is a frozen inference build
 wm-core	single-op step builders (src/gn.rs and the film/attn/vq steps) with no layer stack to recompute
-mirage	both trainers (src/train host, src/device/train device) hold one image's whole tape and release it after the backward, which bounds memory per image; the recompute and narrow-boundary policies (model::saved) are not implemented for the Mirage graph yet (ledger, lane L3b)

@@ -5,6 +5,8 @@
 //! heads, the text reader and the decoder memory. Each stage mirrors its inference operator in `crate::vision`
 //! (the parity tests hold the two to the same values) and is built from the checked primitives.
 
+use std::rc::Rc;
+
 use super::graph::Graph;
 use super::net::Net;
 use super::ops::Seg;
@@ -18,6 +20,7 @@ use crate::vision::ops::{valid_cells, Map};
 use crate::vision::reader::FRAMES;
 
 /// Encoder values later stages read.
+#[derive(Clone)]
 pub struct EncT {
     /// Stem stage outputs by stride, each with its map.
     pub stages: Vec<(Map, Id)>,
@@ -64,25 +67,40 @@ impl<R: Real, T: Graph<R>> Net<'_, R, T> {
         self.tape.silu(n)
     }
 
-    /// The stem: a stride-2 convolution then four depthwise + pointwise stride-2 stages. Padding stays zero.
-    pub fn stem(&mut self, canvas: Id, h: usize, w: usize) -> Vec<(Map, Id)> {
+    /// A recompute block with one output (see [`Net::block`]).
+    pub(super) fn block1(&mut self, build: impl Fn(&mut Self) -> Id + 'static) -> Id {
+        self.block(move |net| vec![build(net)])[0]
+    }
+
+    /// Stage `k` of the stem on `input` (the canvas for stage 0): a stride-2 convolution, or a depthwise +
+    /// pointwise stride-2 pair, then the norm and re-masking. Padding stays zero.
+    fn stem_stage(&mut self, k: usize, input: (Id, Map), h: usize, w: usize) -> (Id, Map) {
         let widths = self.cfg.stem.clone();
-        let size = self.cfg.canvas;
-        let w0 = self.p("stem/w0");
-        let (mut x, mut m) = self.tape.conv_dense(canvas, Map { h: size, w: size, c: 3 }, w0, 3, 3, widths[0], 2, 2);
-        let mut stages = Vec::with_capacity(widths.len());
-        for k in 0..widths.len() {
-            if k > 0 {
-                let dw = self.p(&format!("stem/dw_{k}"));
-                let (d, dm) = self.tape.depthwise(x, m, dw, 3, 3, 2, 2);
-                x = self.proj(d, &format!("stem/pw_{k}/kernel"), None, dm.h * dm.w, widths[k - 1], widths[k]);
-                m = Map { h: dm.h, w: dm.w, c: widths[k] };
-            }
-            x = self.norm_silu(x, m.c, &format!("stem/norm_{k}/scale"));
-            x = self.tape.mask_rows(x, m.c, &valid_cells(h, w, m.h));
-            stages.push((m, x));
+        let (x, m) = input;
+        let (x, m) = if k == 0 {
+            let w0 = self.p("stem/w0");
+            self.tape.conv_dense(x, m, w0, 3, 3, widths[0], 2, 2)
+        } else {
+            let dw = self.p(&format!("stem/dw_{k}"));
+            let (d, dm) = self.tape.depthwise(x, m, dw, 3, 3, 2, 2);
+            let x = self.proj(d, &format!("stem/pw_{k}/kernel"), None, dm.h * dm.w, widths[k - 1], widths[k]);
+            (x, Map { h: dm.h, w: dm.w, c: widths[k] })
+        };
+        let x = self.norm_silu(x, m.c, &format!("stem/norm_{k}/scale"));
+        (self.tape.mask_rows(x, m.c, &valid_cells(h, w, m.h)), m)
+    }
+
+    /// The stem: five stages, each one recompute block.
+    pub fn stem(&mut self, canvas: Id, h: usize, w: usize) -> Vec<(Map, Id)> {
+        let stages = self.cfg.stem.len();
+        let mut input = (canvas, Map { h: self.cfg.canvas, w: self.cfg.canvas, c: 3 });
+        let mut out = Vec::with_capacity(stages);
+        for k in 0..stages {
+            let (x, m) = self.block_map(move |net| net.stem_stage(k, input, h, w));
+            input = (x, m);
+            out.push((m, x));
         }
-        stages
+        out
     }
 
     fn body_block(&mut self, x: Id, i: usize, gm: Map, valid: &[bool]) -> Id {
@@ -132,6 +150,49 @@ impl<R: Real, T: Graph<R>> Net<'_, R, T> {
         angles
     }
 
+    /// Attention layer `l` of the top on the token matrix `x` (`nv` live rows then the registers): the level-memory
+    /// contribution added to `acc`, then gated attention and the HConvGLU. Returns the new tokens and accumulator.
+    fn top_layer(&mut self, l: usize, x: Id, acc: Option<Id>, nv: usize, tokens: usize, angles: &[f64]) -> (Id, Id) {
+        let c = self.cfg.clone();
+        let d = c.dim;
+        let (hq, hk, qk, vh) = (c.attn_heads, c.attn_kv_heads, c.attn_qk_dim, c.attn_v_dim);
+        let p = format!("top_{l}");
+        let level_gates = self.p("level_gates");
+        let live_rows = self.tape.slice(x, 0, nv * d);
+        let level_norm = self.p(&format!("level_norm_{l}/scale"));
+        let level = self.tape.zc_norm(live_rows, d, level_norm);
+        let gates = self.tape.slice(level_gates, l * d, d);
+        let contribution = self.tape.chan_mul(level, gates);
+        let acc = match acc {
+            Some(a) => self.tape.add(a, contribution),
+            None => contribution,
+        };
+
+        let attn_norm = self.p(&format!("{p}/attn_norm/scale"));
+        let hh = self.tape.zc_norm(x, d, attn_norm);
+        let q = self.proj(hh, &format!("{p}/self_attn/q_proj/kernel"), None, tokens, d, hq * qk);
+        let k = self.proj(hh, &format!("{p}/self_attn/k_proj/kernel"), None, tokens, d, hk * qk);
+        let v = self.proj(hh, &format!("{p}/self_attn/v_proj/kernel"), None, tokens, d, hk * vh);
+        let (q_norm, k_norm) = (self.p(&format!("{p}/self_attn/q_norm/scale")), self.p(&format!("{p}/self_attn/k_norm/scale")));
+        let q = self.tape.zc_norm(q, qk, q_norm);
+        let k = self.tape.zc_norm(k, qk, k_norm);
+        let q = self.tape.rope(q, hq, qk, angles);
+        let k = self.tape.rope(k, hk, qk, angles);
+        let att = self.tape.attention(q, k, v, AttnShape { tq: tokens, tk: tokens, hq, hk, qk, vh, causal: false });
+        let gate = self.proj(hh, &format!("{p}/self_attn/gate_proj/kernel"), None, tokens, d, hq * vh);
+        let gate = self.tape.sigmoid(gate);
+        let gated = self.tape.mul(att, gate);
+        let o = self.proj(gated, &format!("{p}/self_attn/out_proj/kernel"), None, tokens, hq * vh, d);
+        let post = self.p(&format!("{p}/post_attn_norm/scale"));
+        let o = self.tape.zc_norm(o, d, post);
+        let attn_gate = self.p(&format!("{p}/attn_gate"));
+        let a_gate = self.tape.sigmoid(attn_gate);
+        let o = self.tape.scalar_mul(o, a_gate);
+        let x2 = self.tape.add(x, o);
+        let y = self.hconv(x2, &p);
+        (self.tape.add(y, x2), acc)
+    }
+
     /// Body, attention top and level memory over the stem's last map.
     pub fn encoder_top(&mut self, x: Id, h: usize, w: usize) -> (Id, Id) {
         let c = self.cfg.clone();
@@ -140,8 +201,10 @@ impl<R: Real, T: Graph<R>> Net<'_, R, T> {
         let valid = valid_cells(h, w, grid);
         let gm = Map { h: grid, w: grid, c: d };
         let mut x = x;
+        let shared_valid = Rc::new(valid.clone());
         for i in 0..c.body_layers {
-            x = self.body_block(x, i, gm, &valid);
+            let (input, v) = (x, Rc::clone(&shared_valid));
+            x = self.block1(move |net| net.body_block(input, i, gm, &v));
         }
         let live: Vec<usize> = (0..cells).filter(|&i| valid[i]).collect();
         let (nv, regs) = (live.len(), c.registers);
@@ -150,45 +213,15 @@ impl<R: Real, T: Graph<R>> Net<'_, R, T> {
         let registers = self.p("registers");
         let mut x = self.tape.concat(rows, registers);
         let angles = self.encoder_angles(&live, tokens);
-        let (hq, hk, qk, vh) = (c.attn_heads, c.attn_kv_heads, c.attn_qk_dim, c.attn_v_dim);
-
-        let level_gates = self.p("level_gates");
+        let angles = Rc::new(angles);
         let mut acc: Option<Id> = None;
         for l in 0..c.attn_layers {
-            let p = format!("top_{l}");
-            let live_rows = self.tape.slice(x, 0, nv * d);
-            let level_norm = self.p(&format!("level_norm_{l}/scale"));
-            let level = self.tape.zc_norm(live_rows, d, level_norm);
-            let gates = self.tape.slice(level_gates, l * d, d);
-            let contribution = self.tape.chan_mul(level, gates);
-            acc = Some(match acc {
-                Some(a) => self.tape.add(a, contribution),
-                None => contribution,
+            let (input, previous, angles) = (x, acc, Rc::clone(&angles));
+            let outs = self.block(move |net| {
+                let (x, acc) = net.top_layer(l, input, previous, nv, tokens, &angles);
+                vec![x, acc]
             });
-
-            let attn_norm = self.p(&format!("{p}/attn_norm/scale"));
-            let hh = self.tape.zc_norm(x, d, attn_norm);
-            let q = self.proj(hh, &format!("{p}/self_attn/q_proj/kernel"), None, tokens, d, hq * qk);
-            let k = self.proj(hh, &format!("{p}/self_attn/k_proj/kernel"), None, tokens, d, hk * qk);
-            let v = self.proj(hh, &format!("{p}/self_attn/v_proj/kernel"), None, tokens, d, hk * vh);
-            let (q_norm, k_norm) = (self.p(&format!("{p}/self_attn/q_norm/scale")), self.p(&format!("{p}/self_attn/k_norm/scale")));
-            let q = self.tape.zc_norm(q, qk, q_norm);
-            let k = self.tape.zc_norm(k, qk, k_norm);
-            let q = self.tape.rope(q, hq, qk, &angles);
-            let k = self.tape.rope(k, hk, qk, &angles);
-            let att = self.tape.attention(q, k, v, AttnShape { tq: tokens, tk: tokens, hq, hk, qk, vh, causal: false });
-            let gate = self.proj(hh, &format!("{p}/self_attn/gate_proj/kernel"), None, tokens, d, hq * vh);
-            let gate = self.tape.sigmoid(gate);
-            let gated = self.tape.mul(att, gate);
-            let o = self.proj(gated, &format!("{p}/self_attn/out_proj/kernel"), None, tokens, hq * vh, d);
-            let post = self.p(&format!("{p}/post_attn_norm/scale"));
-            let o = self.tape.zc_norm(o, d, post);
-            let attn_gate = self.p(&format!("{p}/attn_gate"));
-            let a_gate = self.tape.sigmoid(attn_gate);
-            let o = self.tape.scalar_mul(o, a_gate);
-            let x2 = self.tape.add(x, o);
-            let y = self.hconv(x2, &p);
-            x = self.tape.add(y, x2);
+            (x, acc) = (outs[0], Some(outs[1]));
         }
 
         let live_rows = self.tape.slice(x, 0, nv * d);
@@ -241,6 +274,15 @@ impl<R: Real, T: Graph<R>> Net<'_, R, T> {
     /// The dense head: pyramid from the encoder memory and two stem skips, then the ten-channel detection map.
     /// The gradient the head sends back into the encoder is scaled by `head_grad` (see [`Tape::grad_scale`]).
     pub fn dense(&mut self, enc: &EncT, h: usize, w: usize) -> DenseT {
+        let enc = enc.clone();
+        let outs = self.block(move |net| {
+            let d = net.dense_head(&enc, h, w);
+            vec![d.head_in, d.head]
+        });
+        DenseT { head_in: outs[0], head: outs[1] }
+    }
+
+    fn dense_head(&mut self, enc: &EncT, h: usize, w: usize) -> DenseT {
         let c = self.cfg.clone();
         let (d, grid) = (c.dense_dim, c.grid());
         let side = c.canvas / c.stride;
@@ -281,28 +323,34 @@ impl<R: Real, T: Graph<R>> Net<'_, R, T> {
         DenseT { head_in, head }
     }
 
-    /// Mask prototypes `[2 side, 2 side, 32]` and the coefficient map `[side, side, 32]`.
+    /// Mask prototypes `[2 side, 2 side, 32]` and the coefficient map `[side, side, 32]`; each branch is one
+    /// recompute block.
     pub fn mask_maps(&mut self, head_in: Id, enc: &EncT, h: usize, w: usize) -> (Id, Id) {
         let c = self.cfg.clone();
         let d = c.dense_dim;
         let side = c.canvas / c.stride;
         let (edge_level, _, _) = c.dense_levels();
         let (edge_map, edge_x) = enc.stages[edge_level];
-        let edge_x = self.tape.grad_scale(edge_x, f64::from(c.head_grad));
-        let (u, um) = self.tape.upsample2(head_in, Map { h: side, w: side, c: d });
-        let skip = self.proj(edge_x, "dense/edge/kernel", None, edge_map.h * edge_map.w, edge_map.c, d);
-        let u = self.tape.add(u, skip);
-        let v_proto = valid_cells(h, w, um.h);
-        let u = self.tape.mask_rows(u, d, &v_proto);
-        let protos = self.mask_branch(u, um, &v_proto, "proto", "protos");
-        let v_coef = valid_cells(h, w, side);
-        let c_in = self.tape.mask_rows(head_in, d, &v_coef);
-        let coefs = self.mask_branch(c_in, Map { h: side, w: side, c: d }, &v_coef, "coef", "coef");
+        let head_grad = f64::from(c.head_grad);
+        let protos = self.block1(move |net| {
+            let edge_x = net.tape.grad_scale(edge_x, head_grad);
+            let (u, um) = net.tape.upsample2(head_in, Map { h: side, w: side, c: d });
+            let skip = net.proj(edge_x, "dense/edge/kernel", None, edge_map.h * edge_map.w, edge_map.c, d);
+            let u = net.tape.add(u, skip);
+            let v_proto = valid_cells(h, w, um.h);
+            let u = net.tape.mask_rows(u, d, &v_proto);
+            net.mask_branch(u, um, &v_proto, "proto", "protos")
+        });
+        let coefs = self.block1(move |net| {
+            let v_coef = valid_cells(h, w, side);
+            let c_in = net.tape.mask_rows(head_in, d, &v_coef);
+            net.mask_branch(c_in, Map { h: side, w: side, c: d }, &v_coef, "coef", "coef")
+        });
         (protos, coefs)
     }
 
-    /// The reader on one window of normalised pixels (`[48, 320, 3]`, a leaf): logits `[80, classes]`.
-    pub fn reader(&mut self, window: Id) -> Id {
+    /// The reader's convolutional stages on one window: the per-frame feature rows `[frames, reader_dim]`.
+    fn reader_stages(&mut self, window: Id) -> Id {
         let c = self.cfg.clone();
         let d = c.reader_dim;
         let widths = [READER_STAGES[0], READER_STAGES[1], READER_STAGES[2], d];
@@ -319,27 +367,43 @@ impl<R: Real, T: Graph<R>> Net<'_, R, T> {
         // Mean over the remaining rows leaves one feature vector per frame.
         let inv = r::<R>(1.0 / m.h as f64);
         let segs: Vec<Seg<R>> = (0..m.h).map(|row| Seg { dst: 0, src: row * m.w * m.c, len: m.w * m.c, w: inv }).collect();
-        let mut seq = self.tape.plan(x, m.w * m.c, segs);
-        let frames = m.w;
-        assert_eq!(frames, FRAMES, "the reader makes {FRAMES} frames per window");
+        let seq = self.tape.plan(x, m.w * m.c, segs);
+        assert_eq!(m.w, FRAMES, "the reader makes {FRAMES} frames per window");
+        seq
+    }
+
+    /// Mixer block `i` of the reader on the frame rows `seq`.
+    fn reader_block(&mut self, seq: Id, i: usize) -> Id {
+        let d = self.cfg.reader_dim;
+        let frames = FRAMES;
+        let norm = self.p(&format!("reader/norm_{i}/scale"));
+        let n = self.tape.zc_norm(seq, d, norm);
+        let mix = self.p(&format!("reader/mix_{i}"));
+        let (hh, _) = self.tape.depthwise(n, Map { h: 1, w: frames, c: d }, mix, 1, READER_MIX_KERNEL, 1, 1);
+        let uv = self.proj(hh, &format!("reader/up_{i}/kernel"), None, frames, d, 2 * d);
+        let left: Vec<Seg<R>> = (0..frames).map(|f| Seg::copy(f * d, f * 2 * d, d)).collect();
+        let right: Vec<Seg<R>> = (0..frames).map(|f| Seg::copy(f * d, f * 2 * d + d, d)).collect();
+        let u = self.tape.plan(uv, frames * d, left);
+        let g = self.tape.plan(uv, frames * d, right);
+        let g = self.tape.silu(g);
+        let gated = self.tape.mul(u, g);
+        let down = self.proj(gated, &format!("reader/down_{i}/kernel"), None, frames, d, d);
+        self.tape.add(seq, down)
+    }
+
+    /// The reader on one window of normalised pixels (`[48, 320, 3]`, a leaf): logits `[80, classes]`. The
+    /// convolutional stages and each mixer block are recompute blocks.
+    pub fn reader(&mut self, window: Id) -> Id {
+        let c = self.cfg.clone();
+        let d = c.reader_dim;
+        let mut seq = self.block1(move |net| net.reader_stages(window));
         for i in 0..c.reader_blocks {
-            let norm = self.p(&format!("reader/norm_{i}/scale"));
-            let n = self.tape.zc_norm(seq, d, norm);
-            let mix = self.p(&format!("reader/mix_{i}"));
-            let (hh, _) = self.tape.depthwise(n, Map { h: 1, w: frames, c: d }, mix, 1, READER_MIX_KERNEL, 1, 1);
-            let uv = self.proj(hh, &format!("reader/up_{i}/kernel"), None, frames, d, 2 * d);
-            let left: Vec<Seg<R>> = (0..frames).map(|f| Seg::copy(f * d, f * 2 * d, d)).collect();
-            let right: Vec<Seg<R>> = (0..frames).map(|f| Seg::copy(f * d, f * 2 * d + d, d)).collect();
-            let u = self.tape.plan(uv, frames * d, left);
-            let g = self.tape.plan(uv, frames * d, right);
-            let g = self.tape.silu(g);
-            let gated = self.tape.mul(u, g);
-            let down = self.proj(gated, &format!("reader/down_{i}/kernel"), None, frames, d, d);
-            seq = self.tape.add(seq, down);
+            let input = seq;
+            seq = self.block1(move |net| net.reader_block(input, i));
         }
         let final_norm = self.p("reader/final_norm/scale");
         let n = self.tape.zc_norm(seq, d, final_norm);
-        let logits = self.proj(n, "reader/out/kernel", None, frames, d, crate::config::READER_CLASSES);
+        let logits = self.proj(n, "reader/out/kernel", None, FRAMES, d, crate::config::READER_CLASSES);
         let bias = self.p("reader/out/bias");
         self.tape.bias_add(logits, bias)
     }

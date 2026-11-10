@@ -15,7 +15,7 @@
 use super::ops::Seg;
 use super::real::Real;
 use super::seq::AttnShape;
-use super::tape::{Id, Tape};
+use super::tape::{Id, Mark, Tape};
 use crate::vision::ops::Map;
 
 /// Reverse-mode primitives. Every method records its output and the backward that distributes the output gradient.
@@ -41,6 +41,21 @@ pub trait Graph<R: Real> {
     fn resident_lora(&mut self, _key: &str) -> Option<(Id, Id, usize, f64)> {
         None
     }
+
+    /// The current position, where a recompute block begins.
+    fn mark(&self) -> Mark;
+    /// Close the recompute block that began at `mark`: drop its recorded work and free every value it created except
+    /// `keep` (its outputs, and the parameters it touched first), leaving a barrier tagged `block` in the record.
+    fn seal(&mut self, mark: Mark, keep: &[Id], block: usize);
+    /// Start a backward from the scalar `loss`.
+    fn backward_begin(&mut self, loss: Id);
+    /// Run the backward down to the next sealed block and return its tag, or `None` when the record is exhausted.
+    fn backward_to_block(&mut self) -> Option<usize>;
+    /// Differentiate a rebuilt block (everything recorded since `mark`): the gradient that reached each sealed
+    /// output `old` seeds its rebuilt twin `new` (`pairs` holds `(new, old)`), then the rebuilt record is dropped.
+    fn replay_backward(&mut self, mark: Mark, pairs: &[(Id, Id)]);
+    /// Finish the backward and submit any work still pending.
+    fn backward_end(&mut self);
 
     fn add(&mut self, a: Id, b: Id) -> Id;
     fn mul(&mut self, a: Id, b: Id) -> Id;
@@ -104,6 +119,24 @@ impl<R: Real> Graph<R> for Tape<R> {
     }
     fn scalar(&mut self, id: Id) -> f64 {
         self.val(id)[0].to_f64()
+    }
+    fn mark(&self) -> Mark {
+        Tape::mark(self)
+    }
+    fn seal(&mut self, mark: Mark, keep: &[Id], block: usize) {
+        Tape::seal(self, mark, keep, block);
+    }
+    fn backward_begin(&mut self, loss: Id) {
+        Tape::backward_begin(self, loss);
+    }
+    fn backward_to_block(&mut self) -> Option<usize> {
+        Tape::backward_to_block(self)
+    }
+    fn replay_backward(&mut self, mark: Mark, pairs: &[(Id, Id)]) {
+        Tape::replay_backward(self, mark, pairs);
+    }
+    fn backward_end(&mut self) {
+        Tape::backward_end(self);
     }
 
     host_graph! {

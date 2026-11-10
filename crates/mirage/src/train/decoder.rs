@@ -4,6 +4,8 @@
 //! The decoder as a training graph: teacher-forced, the whole token sequence as one chunk from an empty state
 //! (the full-recompute mode of the inference decoder, which the incremental mode equals).
 
+use std::rc::Rc;
+
 use super::graph::Graph;
 use super::net::Net;
 use super::ops::Seg;
@@ -164,6 +166,48 @@ impl<R: Real, T: Graph<R>> Net<'_, R, T> {
         self.tape.add(y, mlp)
     }
 
+    /// Decoder layer `l`: the lane-mixing read, the block, and the lane write, on the lanes `lanes`
+    /// (`[t, lanes, dim]`); returns the updated lanes.
+    fn decoder_layer(&mut self, l: usize, lanes: Id, engram: Option<(Id, Id)>, memory: Id, mem_rows: usize, t: usize) -> Id {
+        let c = self.cfg.clone();
+        let (d, n) = (c.dim, c.lanes);
+        let lane_id = l % n;
+        let nx = self.tape.rms_unit(lanes, n * d);
+        let (phi_pre, phi_post, phi_res) = (self.layer("stack/mhc_phi_pre", l), self.layer("stack/mhc_phi_post", l), self.layer("stack/mhc_phi_res", l));
+        let pre = self.tape.linear(nx, phi_pre, t, n * d, n);
+        let post = self.tape.linear(nx, phi_post, t, n * d, n);
+        let res = self.tape.linear(nx, phi_res, t, n * d, n * n);
+        let (a_pre, a_post, a_res) = (self.layer("stack/mhc_a_pre", l), self.layer("stack/mhc_a_post", l), self.layer("stack/mhc_a_res", l));
+        let (b_pre, b_post, b_res) = (self.layer("stack/mhc_b_pre", l), self.layer("stack/mhc_b_post", l), self.layer("stack/mhc_b_res", l));
+        let one_hot = |scale: f64, shift: f64| (0..n).map(|i| r::<R>(scale * if i == lane_id { 1.0 } else { 0.0 } + shift)).collect::<Vec<_>>();
+
+        let p = self.tape.scalar_mul(pre, a_pre);
+        let p = self.tape.bias_add(p, b_pre);
+        let pc = self.constant(one_hot(8.0, -4.0));
+        let p = self.tape.bias_add(p, pc);
+        let h_pre = self.tape.sigmoid(p);
+        let u = self.tape.row_mix(h_pre, lanes, 1, n, d);
+
+        let y = self.decoder_block(l, u, engram, memory, mem_rows, t);
+
+        let q = self.tape.scalar_mul(post, a_post);
+        let q = self.tape.bias_add(q, b_post);
+        // -4 * (1 - lane_one): zero on the layer's own lane, -4 elsewhere.
+        let qc = self.constant((0..n).map(|i| r::<R>(if i == lane_id { 0.0 } else { -4.0 })).collect());
+        let q = self.tape.bias_add(q, qc);
+        let q = self.tape.sigmoid(q);
+        let h_post = self.tape.scale(q, 2.0);
+
+        let rs = self.tape.scalar_mul(res, a_res);
+        let rs = self.tape.bias_add(rs, b_res);
+        let h_res = self.tape.sinkhorn(rs, n, SINKHORN_ITERATIONS);
+        let keep = self.tape.row_mix(h_res, lanes, n, n, d);
+        let neg_u = self.tape.scale(u, -1.0);
+        let delta = self.tape.add(y, neg_u);
+        let write = self.tape.row_mix(h_post, delta, n, 1, d);
+        self.tape.add(keep, write)
+    }
+
     /// Teacher-forced logits `[t, vocab]` for `tokens` over an image memory of `mem_rows` rows.
     pub fn decoder_logits(&mut self, tokens: &[u32], memory: Id, mem_rows: usize) -> Id {
         let c = self.cfg.clone();
@@ -174,47 +218,23 @@ impl<R: Real, T: Graph<R>> Net<'_, R, T> {
         let embedding = self.p("embedding/embedding");
         let root = r::<R>((d as f64).sqrt());
         let x = self.tape.plan(embedding, t * d, tokens.iter().enumerate().map(|(i, &tok)| Seg { dst: i * d, src: tok as usize * d, len: d, w: root }).collect());
-        let engrams: Vec<(Id, Id)> = (0..c.sites.len()).map(|s| self.engram(s, tokens)).collect();
+        let shared_tokens: Rc<Vec<u32>> = Rc::new(tokens.to_vec());
+        let engrams: Vec<(Id, Id)> = (0..c.sites.len())
+            .map(|site| {
+                let tokens = Rc::clone(&shared_tokens);
+                let kc = self.block(move |net| {
+                    let (key, conv) = net.engram(site, &tokens);
+                    vec![key, conv]
+                });
+                (kc[0], kc[1])
+            })
+            .collect();
 
         // Every token starts with the same vector in each of the n lanes.
         let mut lanes = self.tape.plan(x, t * n * d, (0..t * n).map(|i| Seg::copy(i * d, (i / n) * d, d)).collect());
         for l in 0..c.dec_layers {
-            let lane_id = l % n;
-            let nx = self.tape.rms_unit(lanes, n * d);
-            let (phi_pre, phi_post, phi_res) = (self.layer("stack/mhc_phi_pre", l), self.layer("stack/mhc_phi_post", l), self.layer("stack/mhc_phi_res", l));
-            let pre = self.tape.linear(nx, phi_pre, t, n * d, n);
-            let post = self.tape.linear(nx, phi_post, t, n * d, n);
-            let res = self.tape.linear(nx, phi_res, t, n * d, n * n);
-            let (a_pre, a_post, a_res) = (self.layer("stack/mhc_a_pre", l), self.layer("stack/mhc_a_post", l), self.layer("stack/mhc_a_res", l));
-            let (b_pre, b_post, b_res) = (self.layer("stack/mhc_b_pre", l), self.layer("stack/mhc_b_post", l), self.layer("stack/mhc_b_res", l));
-            let one_hot = |scale: f64, shift: f64| (0..n).map(|i| r::<R>(scale * if i == lane_id { 1.0 } else { 0.0 } + shift)).collect::<Vec<_>>();
-
-            let p = self.tape.scalar_mul(pre, a_pre);
-            let p = self.tape.bias_add(p, b_pre);
-            let pc = self.constant(one_hot(8.0, -4.0));
-            let p = self.tape.bias_add(p, pc);
-            let h_pre = self.tape.sigmoid(p);
-            let u = self.tape.row_mix(h_pre, lanes, 1, n, d);
-
-            let site = c.sites.iter().position(|&s| s == l);
-            let y = self.decoder_block(l, u, site.map(|s| engrams[s]), memory, mem_rows, t);
-
-            let q = self.tape.scalar_mul(post, a_post);
-            let q = self.tape.bias_add(q, b_post);
-            // -4 * (1 - lane_one): zero on the layer's own lane, -4 elsewhere.
-            let qc = self.constant((0..n).map(|i| r::<R>(if i == lane_id { 0.0 } else { -4.0 })).collect());
-            let q = self.tape.bias_add(q, qc);
-            let q = self.tape.sigmoid(q);
-            let h_post = self.tape.scale(q, 2.0);
-
-            let rs = self.tape.scalar_mul(res, a_res);
-            let rs = self.tape.bias_add(rs, b_res);
-            let h_res = self.tape.sinkhorn(rs, n, SINKHORN_ITERATIONS);
-            let keep = self.tape.row_mix(h_res, lanes, n, n, d);
-            let neg_u = self.tape.scale(u, -1.0);
-            let delta = self.tape.add(y, neg_u);
-            let write = self.tape.row_mix(h_post, delta, n, 1, d);
-            lanes = self.tape.add(keep, write);
+            let (input, engram) = (lanes, c.sites.iter().position(|&s| s == l).map(|s| engrams[s]));
+            lanes = self.block1(move |net| net.decoder_layer(l, input, engram, memory, mem_rows, t));
         }
         let inv = r::<R>(1.0 / n as f64);
         let mean = self.tape.plan(lanes, t * d, (0..t * n).map(|i| Seg { dst: (i / n) * d, src: i * d, len: d, w: inv }).collect());

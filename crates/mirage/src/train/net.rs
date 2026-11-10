@@ -5,7 +5,11 @@
 //!
 //! Every dense kernel is applied through [`Net::proj`], the one place a LoRA adapter can attach.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
+
+use model::saved::SavedPolicy;
 
 use super::graph::Graph;
 use super::real::{r, Real};
@@ -32,6 +36,24 @@ pub struct AdapterSet<R: Real> {
     pub pairs: BTreeMap<String, (Vec<R>, Vec<R>)>,
 }
 
+/// Refuse a saved-activation policy the Mirage graph cannot honour: its recompute boundaries stay in the
+/// evaluator's own precision, so the narrow-boundary rungs of [`SavedPolicy`] do not apply.
+pub fn check_saved_policy(policy: SavedPolicy) -> Result<(), String> {
+    match policy {
+        SavedPolicy::Quantized(format) => Err(format!("mirage training keeps its recompute boundaries in full precision; {} boundaries are not supported", format.label())),
+        SavedPolicy::Keep | SavedPolicy::Recompute => Ok(()),
+    }
+}
+
+/// The code of a recompute block: records the block's part of the graph and returns its outputs.
+type Build<'a, R, T> = Rc<dyn Fn(&mut Net<'a, R, T>) -> Vec<Id>>;
+
+/// One sealed recompute block: how to rebuild it, and the outputs the forward kept.
+struct Block<'a, R: Real, T: Graph<R>> {
+    run: Build<'a, R, T>,
+    outs: Vec<Id>,
+}
+
 /// A graph under construction over fixed parameters.
 ///
 /// `T` evaluates the graph: the host [`Tape`] (default) or the device tape.
@@ -45,19 +67,84 @@ pub struct Net<'a, R: Real, T: Graph<R> = Tape<R>> {
     ids: HashMap<String, Id>,
     stacked: HashMap<(String, usize), Id>,
     lora_ids: BTreeMap<String, (Id, Id)>,
+    saved: SavedPolicy,
+    blocks: Vec<Block<'a, R, T>>,
+    /// A block is being rebuilt inside the backward: nested blocks run inline.
+    replaying: bool,
 }
 
 impl<'a, R: Real> Net<'a, R> {
     /// A fresh host graph over `params`, optionally with an adapter on some dense kernels.
     pub fn new(cfg: &'a MirageConfig, params: &'a Params<R>, adapter: Option<&'a AdapterSet<R>>) -> Net<'a, R> {
-        Net { tape: Tape::new(), cfg, params: Some(params), adapter, ids: HashMap::new(), stacked: HashMap::new(), lora_ids: BTreeMap::new() }
+        Net { tape: Tape::new(), cfg, params: Some(params), adapter, ids: HashMap::new(), stacked: HashMap::new(), lora_ids: BTreeMap::new(), saved: SavedPolicy::Keep, blocks: Vec::new(), replaying: false }
     }
 }
 
 impl<'a, R: Real, T: Graph<R>> Net<'a, R, T> {
     /// A graph over an evaluator that holds the parameters (and any adapter) itself.
     pub fn resident(cfg: &'a MirageConfig, tape: T) -> Net<'a, R, T> {
-        Net { tape, cfg, params: None, adapter: None, ids: HashMap::new(), stacked: HashMap::new(), lora_ids: BTreeMap::new() }
+        Net { tape, cfg, params: None, adapter: None, ids: HashMap::new(), stacked: HashMap::new(), lora_ids: BTreeMap::new(), saved: SavedPolicy::Keep, blocks: Vec::new(), replaying: false }
+    }
+
+    /// What the backward keeps of the forward: [`SavedPolicy::Keep`] holds every intermediate; `Recompute` holds
+    /// only the outputs of each [`Net::block`] and rebuilds the block inside [`Net::backward`]. A narrow boundary
+    /// format is refused: the graph's blocks hold their boundaries in the evaluator's own precision.
+    pub fn with_saved_policy(mut self, policy: SavedPolicy) -> Result<Self, String> {
+        check_saved_policy(policy)?;
+        self.saved = policy;
+        Ok(self)
+    }
+
+    /// Build a recompute block: `build` records part of the graph and returns the values later work reads. Under
+    /// `Keep` it simply runs. Under `Recompute` everything it recorded is dropped after the forward except those
+    /// outputs; the backward runs `build` again from the same inputs and differentiates that copy, so `build` must
+    /// be deterministic and may read only values created before the block (its inputs and the parameters), through
+    /// ids it captured by value.
+    pub fn block(&mut self, build: impl Fn(&mut Self) -> Vec<Id> + 'static) -> Vec<Id> {
+        if !self.saved.recomputes() || self.replaying {
+            return build(self);
+        }
+        let mark = self.tape.mark();
+        let outs = build(self);
+        // Parameters first touched inside the block must survive it: later blocks reuse their ids.
+        let mut keep = outs.clone();
+        keep.extend(self.ids.values().chain(self.lora_ids.values().flat_map(|(a, b)| [a, b])).filter(|id| id.0 >= mark.values()));
+        self.tape.seal(mark, &keep, self.blocks.len());
+        // A stacked layer's slice is a block-internal value on the host; it is rebuilt when next asked for.
+        self.stacked.retain(|_, id| id.0 < mark.values());
+        self.blocks.push(Block { run: Rc::new(build), outs: outs.clone() });
+        outs
+    }
+
+    /// [`Net::block`] for a block with one output and a map the caller needs outside it.
+    pub fn block_map(&mut self, build: impl Fn(&mut Self) -> (Id, crate::vision::ops::Map) + 'static) -> (Id, crate::vision::ops::Map) {
+        let map = Rc::new(Cell::new(None));
+        let sink = Rc::clone(&map);
+        let out = self.block(move |net| {
+            let (id, m) = build(net);
+            sink.set(Some(m));
+            vec![id]
+        });
+        (out[0], map.get().expect("a block ran at least once"))
+    }
+
+    /// Differentiate the scalar `loss`, rebuilding each sealed block as the backward reaches it. The gradients are
+    /// left with the evaluator (host: [`Tape::take_grads`]; device: the parameter store).
+    pub fn backward(&mut self, loss: Id) {
+        self.tape.backward_begin(loss);
+        while let Some(index) = self.tape.backward_to_block() {
+            let run = Rc::clone(&self.blocks[index].run);
+            let sealed = self.blocks[index].outs.clone();
+            let mark = self.tape.mark();
+            self.replaying = true;
+            let rebuilt = run(self);
+            self.replaying = false;
+            assert_eq!(rebuilt.len(), sealed.len(), "a recompute block rebuilt a different number of outputs");
+            let pairs: Vec<(Id, Id)> = rebuilt.into_iter().zip(sealed).collect();
+            self.tape.replay_backward(mark, &pairs);
+            self.stacked.retain(|_, id| id.0 < mark.values());
+        }
+        self.tape.backward_end();
     }
 
     /// The parameter `name` as a leaf (one leaf per name per graph, so gradients accumulate).

@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use model::adapter::{kind, KeyStyle};
+use model::saved::SavedPolicy;
 use optim::{grad_multiplier, Adam, NamedMoments};
 
 use super::adapter;
@@ -65,12 +66,15 @@ pub struct TrainConfig {
     pub weight_decay: f32,
     /// Global gradient-norm clip.
     pub clip: Option<f32>,
+    /// What the backward keeps of the forward: every intermediate ([`SavedPolicy::Keep`]) or only the outputs of each
+    /// recompute block, rebuilt one block at a time in the backward ([`SavedPolicy::Recompute`]).
+    pub saved: SavedPolicy,
 }
 
 impl TrainConfig {
     /// A run of `mode` with the default weights, learning rate 1e-4 and clip 1.0.
     pub fn new(mode: Mode) -> TrainConfig {
-        TrainConfig { mode, weights: TrainWeights::default(), lr: 1e-4, weight_decay: 0.0, clip: Some(1.0) }
+        TrainConfig { mode, weights: TrainWeights::default(), lr: 1e-4, weight_decay: 0.0, clip: Some(1.0), saved: SavedPolicy::Keep }
     }
 }
 
@@ -104,6 +108,9 @@ pub trait FineTuner {
     fn save(&self, dir: &Path) -> Result<(), String>;
     /// Completed optimiser steps.
     fn steps(&self) -> u32;
+    /// Keep what `policy` names of the forward for the backward (`Keep` or `Recompute`; a narrow boundary format is
+    /// refused). The gradients are identical either way.
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String>;
 }
 
 impl FineTuner for Trainer {
@@ -127,6 +134,9 @@ impl FineTuner for Trainer {
     }
     fn steps(&self) -> u32 {
         Trainer::steps(self)
+    }
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        Trainer::set_saved_policy(self, policy)
     }
 }
 
@@ -186,6 +196,14 @@ impl Trainer {
         self.cfg.lr = lr;
     }
 
+    /// Keep what `policy` names of the forward for the backward ([`TrainConfig::saved`]); the gradients do not
+    /// depend on it. A narrow boundary format is refused: the recompute boundaries stay in full precision.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        super::net::check_saved_policy(policy)?;
+        self.cfg.saved = policy;
+        Ok(())
+    }
+
     /// Completed optimiser steps.
     pub fn steps(&self) -> u32 {
         self.step
@@ -224,11 +242,12 @@ impl Trainer {
         let mut terms: BTreeMap<&'static str, f64> = BTreeMap::new();
         let (mut loss, mut samples) = (0.0f64, 0usize);
         for p in batch {
-            let mut net = Net::<f32>::new(&self.base.config, &self.params, self.adapter.as_ref());
+            let mut net = Net::<f32>::new(&self.base.config, &self.params, self.adapter.as_ref()).with_saved_policy(self.cfg.saved)?;
             let Some(l) = sample_loss(&mut net, &p.sample, p.target.as_ref(), &self.cfg.weights) else { continue };
             loss += f64::from(net.tape.val(l.total)[0]);
             l.terms.iter().for_each(|(k, v)| *terms.entry(k).or_insert(0.0) += v);
-            let mut g = net.tape.backward(l.total);
+            net.backward(l.total);
+            let mut g = net.tape.take_grads();
             let mut sample_grads: BTreeMap<String, Vec<f32>> = if self.adapter.is_some() {
                 net.adapter_grads(&mut g)
                     .into_iter()

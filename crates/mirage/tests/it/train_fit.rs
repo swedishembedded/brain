@@ -294,3 +294,36 @@ fn held_out_metrics_agree_with_hand_computed_values() {
     assert!((character_error_rate(&[("abcd".into(), "abxd".into()), ("ab".into(), "ab".into())]) - 1.0 / 6.0).abs() < 1e-12);
     assert!((mask_iou(&[0.9, 0.9, 0.1, 0.1], &[true, false, true, false]) - 1.0 / 3.0).abs() < 1e-12);
 }
+
+#[test]
+fn recompute_matches_keep_through_the_objective_with_an_adapter() {
+    use model::saved::SavedPolicy;
+    crate::common::cap_threads();
+    let ck = tiny_checkpoint();
+    let cfg = ck.config.clone();
+    let p = prepared(&cfg);
+    let params: Params<f32> = params_from_checkpoint(&ck);
+    // B starts at zero, which would leave every A gradient zero: give both factors values.
+    let mut set = adapter::fresh(&cfg, 4, 8.0, 5);
+    let mut rng = Lcg::new(77); // seed: fixed filler for the adapter factors
+    set.pairs.values_mut().for_each(|(_, b)| b.iter_mut().for_each(|v| *v = rng.signed() * 0.1));
+    let run = |policy: SavedPolicy| {
+        let mut net = Net::<f32>::new(&cfg, &params, Some(&set)).with_saved_policy(policy).expect("supported policy");
+        let l = sample_loss(&mut net, &p.sample, p.target.as_ref(), &TrainWeights::default()).expect("the sample has labels");
+        let loss = net.tape.val(l.total)[0];
+        net.backward(l.total);
+        let mut g = net.tape.take_grads();
+        (loss, net.param_grads(&mut g), net.adapter_grads(&mut g))
+    };
+    let (keep_loss, keep_params, keep_adapter) = run(SavedPolicy::Keep);
+    let (re_loss, re_params, re_adapter) = run(SavedPolicy::Recompute);
+    assert_eq!(keep_loss.to_bits(), re_loss.to_bits());
+    for (name, want) in &keep_params {
+        assert!(re_params[name].iter().zip(want).all(|(a, b)| a.to_bits() == b.to_bits()), "{name}: base gradient differs under recompute");
+    }
+    assert!(!keep_adapter.is_empty() && keep_adapter.values().any(|(da, _)| da.iter().any(|v| *v != 0.0)), "the adapter received no gradient");
+    for (key, (da, db)) in &keep_adapter {
+        let (ra, rb) = &re_adapter[key];
+        assert!(ra.iter().zip(da).all(|(a, b)| a.to_bits() == b.to_bits()) && rb.iter().zip(db).all(|(a, b)| a.to_bits() == b.to_bits()), "{key}: adapter gradient differs under recompute");
+    }
+}

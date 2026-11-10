@@ -45,20 +45,45 @@ impl<R: Real> Grads<R> {
 
 type Backward<R> = Box<dyn Fn(&[Vec<R>], &[R], &mut Grads<R>)>;
 
+/// A position on a tape: how many nodes and values exist. A recompute block spans the range from its mark to
+/// the tape's end when it is sealed, and a replay appends past the end and is truncated back to its own mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mark {
+    pub(crate) nodes: usize,
+    pub(crate) vals: usize,
+}
+
+impl Mark {
+    /// Number of values that existed at the mark; ids at or above it were created after it.
+    pub fn values(self) -> usize {
+        self.vals
+    }
+}
+
 struct Node<R: Real> {
     out: Id,
     bwd: Backward<R>,
+    /// `Some(i)` marks the barrier a sealed recompute block left in place of its nodes (see [`Tape::seal`]).
+    block: Option<usize>,
+}
+
+/// A backward in progress: the gradients so far and the next node to run (counting down).
+struct Reverse<R: Real> {
+    grads: Grads<R>,
+    cursor: usize,
 }
 
 /// The recorded computation.
 pub struct Tape<R: Real> {
     vals: Vec<Vec<R>>,
     nodes: Vec<Node<R>>,
+    reverse: Option<Reverse<R>>,
+    finished: Option<Grads<R>>,
 }
 
 impl<R: Real> Default for Tape<R> {
     fn default() -> Self {
-        Tape { vals: Vec::new(), nodes: Vec::new() }
+        Tape { vals: Vec::new(), nodes: Vec::new(), reverse: None, finished: None }
     }
 }
 
@@ -97,22 +122,112 @@ impl<R: Real> Tape<R> {
     /// Record an operation: its output `v` and the backward that distributes `d out` over its inputs.
     pub fn op(&mut self, v: Vec<R>, bwd: impl Fn(&[Vec<R>], &[R], &mut Grads<R>) + 'static) -> Id {
         let out = self.leaf(v);
-        self.nodes.push(Node { out, bwd: Box::new(bwd) });
+        self.nodes.push(Node { out, bwd: Box::new(bwd), block: None });
         out
     }
 
-    /// Gradients of the scalar `loss` with respect to everything it depends on.
+    /// Elements held by the recorded values right now (a sealed block's freed values count zero).
+    pub fn live_elements(&self) -> usize {
+        self.vals.iter().map(Vec::len).sum()
+    }
+
+    /// The current position (see [`Mark`]).
+    pub fn mark(&self) -> Mark {
+        Mark { nodes: self.nodes.len(), vals: self.vals.len() }
+    }
+
+    /// Close the recompute block that began at `mark`: its nodes (and everything their backward closures saved)
+    /// are dropped, every value it created is freed except the ones in `keep` (its outputs, and the parameters it
+    /// touched first), and one barrier node, tagged `block`, stands in for it. The backward stops at the barrier
+    /// and hands control to the caller, who rebuilds the block and calls [`Tape::replay_backward`].
+    pub fn seal(&mut self, mark: Mark, keep: &[Id], block: usize) {
+        assert!(self.reverse.is_none(), "a block cannot be sealed during a backward");
+        self.nodes.truncate(mark.nodes);
+        let keep: std::collections::HashSet<usize> = keep.iter().map(|id| id.0).collect();
+        for (i, v) in self.vals.iter_mut().enumerate().skip(mark.vals) {
+            if !keep.contains(&i) {
+                *v = Vec::new();
+            }
+        }
+        self.nodes.push(Node { out: Id(usize::MAX), bwd: Box::new(|_, _, _| {}), block: Some(block) });
+    }
+
+    /// Gradients of the scalar `loss` with respect to everything it depends on. A tape holding sealed blocks
+    /// cannot rebuild them itself: differentiate those through `Net::backward`.
     pub fn backward(&self, loss: Id) -> Grads<R> {
         assert_eq!(self.vals[loss.0].len(), 1, "backward starts from a scalar");
         let mut grads = Grads { g: (0..self.vals.len()).map(|_| None).collect() };
         grads.g[loss.0] = Some(vec![R::ONE]);
         for node in self.nodes.iter().rev() {
-            if let Some(gy) = grads.g[node.out.0].take() {
-                (node.bwd)(&self.vals, &gy, &mut grads);
-                // Keep the output gradient readable for callers that probe intermediates.
-                grads.g[node.out.0] = Some(gy);
-            }
+            assert!(node.block.is_none(), "this tape holds sealed recompute blocks: run the backward through Net::backward");
+            self.run(node, &mut grads);
         }
         grads
+    }
+
+    fn run(&self, node: &Node<R>, grads: &mut Grads<R>) {
+        if let Some(gy) = grads.g[node.out.0].take() {
+            (node.bwd)(&self.vals, &gy, grads);
+            // Keep the output gradient readable for callers that probe intermediates.
+            grads.g[node.out.0] = Some(gy);
+        }
+    }
+
+    /// Start a backward from the scalar `loss` that can stop at sealed blocks ([`Tape::backward_to_block`]).
+    pub fn backward_begin(&mut self, loss: Id) {
+        assert_eq!(self.vals[loss.0].len(), 1, "backward starts from a scalar");
+        let mut grads = Grads { g: (0..self.vals.len()).map(|_| None).collect() };
+        grads.g[loss.0] = Some(vec![R::ONE]);
+        self.reverse = Some(Reverse { grads, cursor: self.nodes.len() });
+    }
+
+    /// Run the backward down to the next sealed block and return its index, or `None` when the tape is done.
+    pub fn backward_to_block(&mut self) -> Option<usize> {
+        let mut st = self.reverse.take().expect("backward_begin starts a backward");
+        let mut hit = None;
+        while st.cursor > 0 {
+            st.cursor -= 1;
+            let node = &self.nodes[st.cursor];
+            if let Some(b) = node.block {
+                hit = Some(b);
+                break;
+            }
+            self.run(node, &mut st.grads);
+        }
+        self.reverse = Some(st);
+        hit
+    }
+
+    /// Differentiate the block that was just rebuilt past `mark`: the gradient that reached each sealed output
+    /// `old` seeds its rebuilt twin `new`, the rebuilt nodes run in reverse, and the rebuilt nodes and values are
+    /// dropped again. Gradients that reached values below `mark` (block inputs and parameters) stay.
+    pub fn replay_backward(&mut self, mark: Mark, pairs: &[(Id, Id)]) {
+        let mut st = self.reverse.take().expect("a replay needs a backward in progress");
+        st.grads.g.resize_with(self.vals.len(), || None);
+        for &(new, old) in pairs {
+            if new != old {
+                if let Some(gy) = st.grads.g[old.0].take() {
+                    st.grads.add(new, &gy);
+                }
+            }
+        }
+        for node in self.nodes[mark.nodes..].iter().rev() {
+            self.run(node, &mut st.grads);
+        }
+        self.nodes.truncate(mark.nodes);
+        self.vals.truncate(mark.vals);
+        st.grads.g.truncate(mark.vals);
+        self.reverse = Some(st);
+    }
+
+    /// Finish a backward: its gradients become readable with [`Tape::take_grads`].
+    pub fn backward_end(&mut self) {
+        let st = self.reverse.take().expect("a backward is in progress");
+        self.finished = Some(st.grads);
+    }
+
+    /// The gradients of the last finished backward.
+    pub fn take_grads(&mut self) -> Grads<R> {
+        self.finished.take().expect("no finished backward")
     }
 }
