@@ -934,18 +934,34 @@ pub const MIRAGE_T_BAND_DW: &str = include_str!("../wgsl/mirage_t_band_dw.wgsl")
 pub const MIRAGE_T_BAND_DX: &str = include_str!("../wgsl/mirage_t_band_dx.wgsl");
 /// `wgsl/mirage_t_bcast_acc.wgsl`
 pub const MIRAGE_T_BCAST_ACC: &str = include_str!("../wgsl/mirage_t_bcast_acc.wgsl");
+/// `wgsl/mirage_t_bce_dice.wgsl`
+pub const MIRAGE_T_BCE_DICE: &str = include_str!("../wgsl/mirage_t_bce_dice.wgsl");
+/// `wgsl/mirage_t_bce_dice_bwd.wgsl`
+pub const MIRAGE_T_BCE_DICE_BWD: &str = include_str!("../wgsl/mirage_t_bce_dice_bwd.wgsl");
+/// `wgsl/mirage_t_ce_bwd.wgsl`
+pub const MIRAGE_T_CE_BWD: &str = include_str!("../wgsl/mirage_t_ce_bwd.wgsl");
+/// `wgsl/mirage_t_ce_rows.wgsl`
+pub const MIRAGE_T_CE_ROWS: &str = include_str!("../wgsl/mirage_t_ce_rows.wgsl");
 /// `wgsl/mirage_t_col_red.wgsl`
 pub const MIRAGE_T_COL_RED: &str = include_str!("../wgsl/mirage_t_col_red.wgsl");
 /// `wgsl/mirage_t_conv_dk.wgsl`
 pub const MIRAGE_T_CONV_DK: &str = include_str!("../wgsl/mirage_t_conv_dk.wgsl");
 /// `wgsl/mirage_t_conv_dx.wgsl`
 pub const MIRAGE_T_CONV_DX: &str = include_str!("../wgsl/mirage_t_conv_dx.wgsl");
+/// `wgsl/mirage_t_ctc_dp.wgsl`
+pub const MIRAGE_T_CTC_DP: &str = include_str!("../wgsl/mirage_t_ctc_dp.wgsl");
+/// `wgsl/mirage_t_ctc_grad.wgsl`
+pub const MIRAGE_T_CTC_GRAD: &str = include_str!("../wgsl/mirage_t_ctc_grad.wgsl");
+/// `wgsl/mirage_t_ctc_lp.wgsl`
+pub const MIRAGE_T_CTC_LP: &str = include_str!("../wgsl/mirage_t_ctc_lp.wgsl");
 /// `wgsl/mirage_t_dwconv_dk.wgsl`
 pub const MIRAGE_T_DWCONV_DK: &str = include_str!("../wgsl/mirage_t_dwconv_dk.wgsl");
 /// `wgsl/mirage_t_dwconv_dx.wgsl`
 pub const MIRAGE_T_DWCONV_DX: &str = include_str!("../wgsl/mirage_t_dwconv_dx.wgsl");
 /// `wgsl/mirage_t_ew.wgsl`
 pub const MIRAGE_T_EW: &str = include_str!("../wgsl/mirage_t_ew.wgsl");
+/// `wgsl/mirage_t_focal.wgsl`
+pub const MIRAGE_T_FOCAL: &str = include_str!("../wgsl/mirage_t_focal.wgsl");
 /// `wgsl/mirage_t_gather_cols.wgsl`
 pub const MIRAGE_T_GATHER_COLS: &str = include_str!("../wgsl/mirage_t_gather_cols.wgsl");
 /// `wgsl/mirage_t_grn_de.wgsl`
@@ -960,6 +976,8 @@ pub const MIRAGE_T_KRON_DB: &str = include_str!("../wgsl/mirage_t_kron_db.wgsl")
 pub const MIRAGE_T_KRON_LEFT: &str = include_str!("../wgsl/mirage_t_kron_left.wgsl");
 /// `wgsl/mirage_t_kron_right.wgsl`
 pub const MIRAGE_T_KRON_RIGHT: &str = include_str!("../wgsl/mirage_t_kron_right.wgsl");
+/// `wgsl/mirage_t_l1.wgsl`
+pub const MIRAGE_T_L1: &str = include_str!("../wgsl/mirage_t_l1.wgsl");
 /// `wgsl/mirage_t_mix.wgsl`
 pub const MIRAGE_T_MIX: &str = include_str!("../wgsl/mirage_t_mix.wgsl");
 /// `wgsl/mirage_t_mix_dh.wgsl`
@@ -2037,12 +2055,20 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_t_band_dw", MIRAGE_T_BAND_DW),
     ("mirage_t_band_dx", MIRAGE_T_BAND_DX),
     ("mirage_t_bcast_acc", MIRAGE_T_BCAST_ACC),
+    ("mirage_t_bce_dice", MIRAGE_T_BCE_DICE),
+    ("mirage_t_bce_dice_bwd", MIRAGE_T_BCE_DICE_BWD),
+    ("mirage_t_ce_bwd", MIRAGE_T_CE_BWD),
+    ("mirage_t_ce_rows", MIRAGE_T_CE_ROWS),
     ("mirage_t_col_red", MIRAGE_T_COL_RED),
     ("mirage_t_conv_dk", MIRAGE_T_CONV_DK),
     ("mirage_t_conv_dx", MIRAGE_T_CONV_DX),
+    ("mirage_t_ctc_dp", MIRAGE_T_CTC_DP),
+    ("mirage_t_ctc_grad", MIRAGE_T_CTC_GRAD),
+    ("mirage_t_ctc_lp", MIRAGE_T_CTC_LP),
     ("mirage_t_dwconv_dk", MIRAGE_T_DWCONV_DK),
     ("mirage_t_dwconv_dx", MIRAGE_T_DWCONV_DX),
     ("mirage_t_ew", MIRAGE_T_EW),
+    ("mirage_t_focal", MIRAGE_T_FOCAL),
     ("mirage_t_gather_cols", MIRAGE_T_GATHER_COLS),
     ("mirage_t_grn_de", MIRAGE_T_GRN_DE),
     ("mirage_t_grn_dy", MIRAGE_T_GRN_DY),
@@ -2050,6 +2076,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_t_kron_db", MIRAGE_T_KRON_DB),
     ("mirage_t_kron_left", MIRAGE_T_KRON_LEFT),
     ("mirage_t_kron_right", MIRAGE_T_KRON_RIGHT),
+    ("mirage_t_l1", MIRAGE_T_L1),
     ("mirage_t_mix", MIRAGE_T_MIX),
     ("mirage_t_mix_dh", MIRAGE_T_MIX_DH),
     ("mirage_t_mix_dx", MIRAGE_T_MIX_DX),

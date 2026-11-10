@@ -27,6 +27,8 @@
 mod elementwise;
 mod launch;
 mod linear;
+mod losses;
+pub mod params;
 mod movement;
 mod norm;
 mod rows;
@@ -92,6 +94,15 @@ pub(super) const KERNELS: &[(&str, &str)] = &[
     ("mirage_t_kron_da", ::kernels::MIRAGE_T_KRON_DA),
     ("mirage_t_kron_db", ::kernels::MIRAGE_T_KRON_DB),
     ("mirage_t_gather_cols", ::kernels::MIRAGE_T_GATHER_COLS),
+    ("mirage_t_ce_rows", ::kernels::MIRAGE_T_CE_ROWS),
+    ("mirage_t_ce_bwd", ::kernels::MIRAGE_T_CE_BWD),
+    ("mirage_t_focal", ::kernels::MIRAGE_T_FOCAL),
+    ("mirage_t_l1", ::kernels::MIRAGE_T_L1),
+    ("mirage_t_bce_dice", ::kernels::MIRAGE_T_BCE_DICE),
+    ("mirage_t_bce_dice_bwd", ::kernels::MIRAGE_T_BCE_DICE_BWD),
+    ("mirage_t_ctc_lp", ::kernels::MIRAGE_T_CTC_LP),
+    ("mirage_t_ctc_dp", ::kernels::MIRAGE_T_CTC_DP),
+    ("mirage_t_ctc_grad", ::kernels::MIRAGE_T_CTC_GRAD),
 ];
 
 /// One recorded value.
@@ -218,6 +229,20 @@ impl<'a> DevTape<'a> {
         } else {
             self.dev.gpu().storage_init("constant", v)
         }
+    }
+
+    /// A constant buffer holding the words `v`.
+    pub(crate) fn upload_words(&self, v: &[u32]) -> DeviceBuffer {
+        let buf = self.dev.gpu().storage(v.len().max(1) as u64);
+        if !v.is_empty() {
+            self.dev.gpu().write(&buf, v);
+        }
+        buf
+    }
+
+    /// A constant buffer holding `v` converted to f32.
+    pub(crate) fn upload_f64(&self, v: &[f64]) -> DeviceBuffer {
+        self.upload(&v.iter().map(|&x| x as f32).collect::<Vec<_>>())
     }
 
     pub(crate) fn buf(&self, id: Id) -> DeviceBuffer {
@@ -439,20 +464,20 @@ impl Graph<f32> for DevTape<'_> {
     fn permute_cols(&mut self, z: Id, n: usize, perm: &[u32]) -> Id {
         self.op_permute_cols(z, n, perm)
     }
-    fn softmax_ce(&mut self, _logits: Id, _v: usize, _targets: &[u32], _weights: &[f64]) -> Id {
-        unimplemented!("package B/C/D")
+    fn softmax_ce(&mut self, logits: Id, v: usize, targets: &[u32], weights: &[f64]) -> Id {
+        self.op_softmax_ce(logits, v, targets, weights)
     }
-    fn focal_heat(&mut self, _logits: Id, _target: &[f64], _weight: &[f64], _alpha: f64, _norm: f64) -> Id {
-        unimplemented!("package B/C/D")
+    fn focal_heat(&mut self, logits: Id, target: &[f64], weight: &[f64], alpha: f64, norm: f64) -> Id {
+        self.op_focal_heat(logits, target, weight, alpha, norm)
     }
-    fn l1(&mut self, _x: Id, _target: &[f64], _weight: &[f64], _norm: f64) -> Id {
-        unimplemented!("package B/C/D")
+    fn l1(&mut self, x: Id, target: &[f64], weight: &[f64], norm: f64) -> Id {
+        self.op_l1(x, target, weight, norm)
     }
-    fn bce_dice(&mut self, _logits: Id, _target: &[f64], _bce_weight: f64, _dice_weight: f64) -> Id {
-        unimplemented!("package B/C/D")
+    fn bce_dice(&mut self, logits: Id, target: &[f64], bce_weight: f64, dice_weight: f64) -> Id {
+        self.op_bce_dice(logits, target, bce_weight, dice_weight)
     }
-    fn ctc(&mut self, _logits: Id, _classes: usize, _labels: &[u32]) -> Id {
-        unimplemented!("package B/C/D")
+    fn ctc(&mut self, logits: Id, classes: usize, labels: &[u32]) -> Id {
+        self.op_ctc(logits, classes, labels)
     }
 }
 

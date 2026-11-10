@@ -400,9 +400,16 @@ Device training (lane L3b, in progress): `device::train::DevTape` implements `tr
 parameters resident in a `paramstore::ParamStore` (a stacked decoder layer is one entry `name#layer`; adapters are registered
 pairs). Steps are recorded and submitted lazily (readback, `backward`); backward kernels accumulate with one owner thread per
 element (`mirage_t_*`, no atomics); values carry `needs_grad`, so frozen parameters and constant inputs record no backward.
-Packages A (core, elementwise, linear, norms, plans/gather/concat/slice, softmax, row ops, loss sum), B (depthwise and dense convolutions, upsample, Walsh as a GEMM against its matrix, banded channel convolution with dx and dband, response norm) and C (rope, masked grouped-query attention, causal taps, Sinkhorn, lane mixing, Kronecker rotations, column permutation) are checked against the host
-tape in `device_train` (cosine >= 0.99999, relative error <= 1e-4, CPU backend); the losses (softmax_ce, focal_heat, l1,
-bce_dice, ctc) are still `unimplemented!`. Untuned: attention keeps the probabilities (`tq*hq*tk` values) for the backward; channel and bias reductions loop over rows in one thread per channel.
+Packages A (core, elementwise, linear, norms, plans/gather/concat/slice, softmax, row ops, loss sum), B (depthwise and dense
+convolutions, upsample, Walsh as a GEMM against its matrix, banded channel convolution with dx and dband, response norm), C (rope,
+masked grouped-query attention, causal taps, Sinkhorn, lane mixing, Kronecker rotations, column permutation) and D (token
+cross-entropy, focal heat, L1, BCE+Dice, CTC) are checked against the host tape in `device_train` (cosine >= 0.99999, relative
+error <= 1e-4, losses 1e-5 in value; CPU backend). The whole tiny-config graph (`Net::resident` over `DevTape`, parameters in a
+`ParamStore` via `device::train::params`, decoder layers as `name#layer`) gives the host gradients at group cosine 1.0000 for every
+parameter group (encoder stem, bodies, tops, dense head, mask branches, reader, decoder layers, embedding); only the residual
+routing tensors (`stack/mhc_a_res`, `mhc_phi_res`, peak gradient ~1e-8) differ in direction, below f32 resolution as on the host.
+Untuned: attention keeps the probabilities (`tq*hq*tk` values) for the backward; channel, bias, band-weight and kernel-gradient
+reductions loop over rows in one thread per output; CTC and Sinkhorn run one thread per sequence/block.
 
 Not done in this lane:
 - Device backward and CUDA training. The host graph is the trainer; the device forward kernels have no `*_bwd`

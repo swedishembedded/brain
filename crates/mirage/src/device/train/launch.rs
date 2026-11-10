@@ -365,6 +365,51 @@ impl<'d> Rec<'d> {
     pub(crate) fn gather_cols(&mut self, z: &DeviceBuffer, cols: &DeviceBuffer, out: &DeviceBuffer, total: usize, n: usize, acc: bool) {
         self.threads("mirage_t_gather_cols", &[z, cols, out], &[word(total), word(n), u32::from(acc)], total);
     }
+    /// Cross-entropy row losses and log-sum-exps.
+    pub(crate) fn ce_rows(&mut self, x: &DeviceBuffer, target: &DeviceBuffer, w: &DeviceBuffer, rowloss: &DeviceBuffer, lse: &DeviceBuffer, rows: usize, v: usize) {
+        self.groups("mirage_t_ce_rows", &[x, target, w, rowloss, lse], &[word(rows), word(v)], rows);
+    }
+
+    /// Cross-entropy logit gradient.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ce_bwd(&mut self, x: &DeviceBuffer, target: &DeviceBuffer, w: &DeviceBuffer, lse: &DeviceBuffer, g: &DeviceBuffer, dx: &DeviceBuffer, rows: usize, v: usize) {
+        self.threads("mirage_t_ce_bwd", &[x, target, w, lse, g, dx], &[word(rows * v), word(v)], rows * v);
+    }
+
+    /// Focal loss per cell: `backward` accumulates the logit gradient, otherwise writes the term.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn focal(&mut self, x: &DeviceBuffer, target: &DeviceBuffer, weight: &DeviceBuffer, g: &DeviceBuffer, out: &DeviceBuffer, n: usize, alpha: f32, norm: f32, backward: bool) {
+        self.threads("mirage_t_focal", &[x, target, weight, g, out], &[word(n), alpha.to_bits(), norm.to_bits(), u32::from(backward)], n);
+    }
+
+    /// Weighted L1 per element: `backward` accumulates the gradient, otherwise writes the term.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn l1(&mut self, x: &DeviceBuffer, target: &DeviceBuffer, weight: &DeviceBuffer, g: &DeviceBuffer, out: &DeviceBuffer, n: usize, norm: f32, backward: bool) {
+        self.threads("mirage_t_l1", &[x, target, weight, g, out], &[word(n), norm.to_bits(), u32::from(backward)], n);
+    }
+
+    /// Mask loss forward into `out[0]` and `stats[0..3]`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bce_dice(&mut self, x: &DeviceBuffer, target: &DeviceBuffer, out: &DeviceBuffer, stats: &DeviceBuffer, n: usize, bw: f32, dw: f32) {
+        self.groups("mirage_t_bce_dice", &[x, target, out, stats], &[word(n), bw.to_bits(), dw.to_bits()], 1);
+    }
+
+    /// Mask loss logit gradient.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bce_dice_bwd(&mut self, x: &DeviceBuffer, target: &DeviceBuffer, stats: &DeviceBuffer, g: &DeviceBuffer, dx: &DeviceBuffer, n: usize, bw: f32, dw: f32) {
+        self.threads("mirage_t_bce_dice_bwd", &[x, target, stats, g, dx], &[word(n), bw.to_bits(), dw.to_bits()], n);
+    }
+
+    /// CTC: log-softmax, the alpha-beta recursions (loss into `loss[0]`) and the logit gradient into `grad`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ctc(&mut self, x: &DeviceBuffer, ext: &DeviceBuffer, loss: &DeviceBuffer, grad: &DeviceBuffer, frames: usize, classes: usize, s_len: usize) {
+        let lp = self.alloc(frames * classes);
+        let (alpha, beta) = (self.alloc(frames * s_len), self.alloc(frames * s_len));
+        self.groups("mirage_t_ctc_lp", &[x, &lp], &[word(frames), word(classes)], frames);
+        let p = [word(frames), word(classes), word(s_len)];
+        self.threads("mirage_t_ctc_dp", &[&lp, ext, &alpha, &beta, loss], &p, 1);
+        self.threads("mirage_t_ctc_grad", &[&lp, ext, &alpha, &beta, grad], &p, frames * classes);
+    }
 }
 
 /// Geometry of one convolution of a single image (zero padding `k / 2`).

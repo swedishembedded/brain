@@ -89,18 +89,23 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
-fn assert_close(what: &str, got: &[f32], want: &[f32]) {
+fn assert_close(what: &str, got: &[f32], want: &[f32], max_rel: f64) {
     assert_eq!(got.len(), want.len(), "{what}: length");
     let scale = want.iter().fold(0f64, |m, v| m.max(f64::from(v.abs()))).max(1e-6);
     let max_err = got.iter().zip(want).fold(0f64, |m, (g, w)| m.max(f64::from((g - w).abs()))) / scale;
     let cos = cosine(got, want);
     eprintln!("{what}: cosine {cos:.8}, max relative error {max_err:.2e}");
     assert!(cos >= MIN_COSINE, "{what}: cosine {cos}");
-    assert!(max_err <= MAX_REL, "{what}: max relative error {max_err:.3e}");
+    assert!(max_err <= max_rel, "{what}: max relative error {max_err:.3e}");
 }
 
 /// Build the graph on the host and on the device and compare every output and every leaf gradient.
 fn compare(dev: &Device, name: &str, params: &ParamStore, build: impl Fn(&mut dyn Graph<f32>) -> Run) {
+    compare_within(dev, name, params, MAX_REL, build);
+}
+
+/// [`compare`] with a chosen relative error bound.
+fn compare_within(dev: &Device, name: &str, params: &ParamStore, max_rel: f64, build: impl Fn(&mut dyn Graph<f32>) -> Run) {
     let mut host = Tape::<f32>::new();
     let hr = build(&mut host);
     let hgrads = host.backward(hr.loss);
@@ -108,14 +113,14 @@ fn compare(dev: &Device, name: &str, params: &ParamStore, build: impl Fn(&mut dy
     let mut tape = DevTape::new(dev, params).with_leaf_grads();
     let dr = build(&mut tape);
     for (i, (&h, &d)) in hr.outs.iter().zip(&dr.outs).enumerate() {
-        assert_close(&format!("{name} output {i}"), &tape.value(d), host.val(h));
+        assert_close(&format!("{name} output {i}"), &tape.value(d), host.val(h), max_rel);
     }
     tape.backward(dr.loss);
     assert_eq!(hr.leaves.len(), dr.leaves.len());
     for (i, (&h, &d)) in hr.leaves.iter().zip(&dr.leaves).enumerate() {
         let want = hgrads.get(h).map(<[f32]>::to_vec).unwrap_or_else(|| vec![0.0; host.len(h)]);
         let got = tape.grad(d).unwrap_or_else(|| vec![0.0; want.len()]);
-        assert_close(&format!("{name} gradient of leaf {i}"), &got, &want);
+        assert_close(&format!("{name} gradient of leaf {i}"), &got, &want, max_rel);
     }
 }
 
@@ -247,7 +252,7 @@ fn frozen_parameters_get_no_gradient_while_the_input_path_still_does() {
     let mut tape = DevTape::new(&dev, &params).with_leaf_grads();
     let dr = linear_run(&mut tape, &w, &wt, (rows, inn, out));
     tape.backward(dr.loss);
-    assert_close("frozen: input gradient", &tape.grad(dr.leaves[0]).unwrap(), hgrads.get(hr.leaves[0]).unwrap());
+    assert_close("frozen: input gradient", &tape.grad(dr.leaves[0]).unwrap(), hgrads.get(hr.leaves[0]).unwrap(), MAX_REL);
     assert!(params.read_grad(dev.gpu(), "w").iter().all(|&v| v == 0.0), "a frozen parameter accumulated a gradient");
     assert!(tape.grad(dr.leaves[1]).is_none() && tape.grad(dr.leaves[2]).is_none());
 }
@@ -627,4 +632,226 @@ fn kronecker_rotations_and_permutations_match_the_host() {
             Run { leaves: vec![z, a, b], outs, loss }
         });
     }
+}
+
+/// Value bound for the losses (the brief's 1e-5).
+const LOSS_REL: f64 = 1e-5;
+
+/// A scalar loss as the single output (the random weighting then only multiplies it by one number).
+fn loss_run(g: &mut dyn Graph<f32>, logits: Id, loss: Id) -> Run {
+    let total = weighted_loss(g, &[loss], 300);
+    Run { leaves: vec![logits], outs: vec![loss], loss: total }
+}
+
+#[test]
+fn token_cross_entropy_matches_the_host_at_decoder_size() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("softmax_ce") else { return };
+    let params = no_params(&dev);
+    let (n, v) = (240, 8299);
+    // Padding and prompt rows carry weight 0 and a target that must not be read (out of range here).
+    let weights: Vec<f64> = (0..n).map(|i| if i % 7 == 3 { 0.0 } else { 0.5 + (i % 5) as f64 * 0.25 }).collect();
+    let targets: Vec<u32> = (0..n).map(|i| if weights[i] == 0.0 { u32::MAX } else { ((i * 977) % v) as u32 }).collect();
+    compare_within(&dev, "softmax_ce", &params, LOSS_REL, |g| {
+        let x = g.leaf(noise(n * v, 301, 3.0));
+        let l = g.softmax_ce(x, v, &targets, &weights);
+        loss_run(g, x, l)
+    });
+}
+
+#[test]
+fn the_focal_heat_loss_matches_the_host_on_a_detection_map() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("focal_heat") else { return };
+    let params = no_params(&dev);
+    let cells = 64 * 64;
+    // Peaks (target 1), Gaussian shoulders, background, and excluded padding cells.
+    let target: Vec<f64> = (0..cells).map(|i| if i % 97 == 0 { 1.0 } else if i % 13 == 0 { 0.6 } else { 0.0 }).collect();
+    let weight: Vec<f64> = (0..cells).map(|i| if i % 5 == 4 { 0.0 } else { 1.0 }).collect();
+    compare_within(&dev, "focal_heat", &params, LOSS_REL, |g| {
+        let x = g.leaf(noise(cells, 302, 3.0));
+        let l = g.focal_heat(x, &target, &weight, 0.54, 42.0);
+        loss_run(g, x, l)
+    });
+}
+
+#[test]
+fn the_weighted_l1_matches_the_host() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("l1") else { return };
+    let params = no_params(&dev);
+    let n = 64 * 64 * 4;
+    let target: Vec<f64> = noise(n, 303, 1.0).into_iter().map(f64::from).collect();
+    let weight: Vec<f64> = (0..n).map(|i| if i % 11 == 0 { 1.0 } else { 0.0 }).collect();
+    compare_within(&dev, "l1", &params, LOSS_REL, |g| {
+        // Some predictions equal their target exactly: the subgradient there is zero.
+        let mut xv = noise(n, 304, 1.0);
+        for i in (0..n).step_by(33) {
+            xv[i] = target[i] as f32;
+        }
+        let x = g.leaf(xv);
+        let l = g.l1(x, &target, &weight, 17.0);
+        loss_run(g, x, l)
+    });
+}
+
+#[test]
+fn the_mask_loss_matches_the_host_on_a_128_square_region() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("bce_dice") else { return };
+    let params = no_params(&dev);
+    let n = 128 * 128;
+    let target: Vec<f64> = (0..n).map(|i| if (i / 128 > 30 && i / 128 < 90) && (i % 128 > 20 && i % 128 < 100) { 1.0 } else { 0.0 }).collect();
+    compare_within(&dev, "bce_dice", &params, LOSS_REL, |g| {
+        let x = g.leaf(noise(n, 305, 4.0));
+        let l = g.bce_dice(x, &target, 1.0, 0.7);
+        loss_run(g, x, l)
+    });
+}
+
+#[test]
+fn ctc_matches_the_host_including_repeats_and_infeasible_labels() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("ctc") else { return };
+    let params = no_params(&dev);
+    let (frames, classes) = (80, 307);
+    // A reader window: repeated labels need a blank between them; the last case cannot be aligned at all.
+    let cases: [(usize, Vec<u32>); 4] = [
+        (frames, (0..30).map(|i| 1 + (i * 37 % 300) as u32).collect()),
+        (frames, vec![5, 5, 5, 9, 9, 120, 5]),
+        (frames, vec![3]),
+        (6, vec![4, 4, 4, 4]),
+    ];
+    for (k, (f, labels)) in cases.iter().enumerate() {
+        // The values agree to f32 rounding; the gradient (a difference of two log-space sums) to about 4e-5.
+        compare(&dev, &format!("ctc case {k}"), &params, |g| {
+            let x = g.leaf(noise(f * classes, 306 + k as u64, 2.0));
+            let l = g.ctc(x, classes, labels);
+            loss_run(g, x, l)
+        });
+    }
+}
+
+// ---- the whole model graph, device against host ----
+
+use std::collections::BTreeMap;
+
+use mirage::device::train::params::{stacked_grads, upload_params};
+use mirage::train::net::{params_from_checkpoint, Net};
+use mirage::vision::ops::valid_cells;
+use mirage::vision::memory::Slot;
+
+const CANVAS_SIZE: (usize, usize) = (400, 300);
+
+fn tiny_slots(cfg: &mirage::config::MirageConfig) -> Vec<Slot> {
+    let base = cfg.text + mirage::config::LANGUAGE_TAGS;
+    vec![
+        Slot { bbox: [0.1, 0.1, 0.6, 0.5], token: base },
+        Slot { bbox: [0.3, 0.2, 0.9, 0.7], token: base + 1 },
+        Slot { bbox: [0.05, 0.6, 0.45, 0.95], token: base + cfg.detections },
+    ]
+}
+
+/// Every head's output through a fixed random projection (as `train_graph`), then the supervised losses on the same
+/// maps: one backward reaches the encoder from the detection, mask, reader and decoder heads.
+fn whole_graph_loss<T: Graph<f32>>(net: &mut Net<'_, f32, T>) -> Id {
+    let cfg = net.cfg;
+    let (h, w) = CANVAS_SIZE;
+    let canvas = net.constant(noise(cfg.canvas * cfg.canvas * 3, 71, 1.0));
+    let enc = net.encoder(canvas, h, w);
+    let dense = net.dense(&enc, h, w);
+    let (protos, coefs) = net.mask_maps(dense.head_in, &enc, h, w);
+    let valid = valid_cells(h, w, cfg.grid());
+    let mem = net.decoder_memory(&enc, dense.head_in, &valid, &tiny_slots(cfg));
+    let rows = net.tape.len(mem) / cfg.dim;
+    let window = net.constant(noise(48 * 320 * 3, 5, 1.0));
+    let read = net.reader(window);
+    let tokens = [2u32, 24, 5, 17, 36, 9, 30, 1];
+    let logits = net.decoder_logits(&tokens, mem, rows);
+    let mut parts = Vec::new();
+    for (i, id) in [dense.head, protos, coefs, read, logits].into_iter().enumerate() {
+        let proj = net.constant(noise(net.tape.len(id), 100 + i as u64, 1.0));
+        let prod = net.tape.mul(id, proj);
+        parts.push(net.tape.sum_weighted(prod, 1.0));
+    }
+    // The text and reader losses on top of the projections, so the loss primitives sit in the backward too.
+    let v = net.tape.len(logits) / tokens.len();
+    let targets: Vec<u32> = tokens.iter().skip(1).chain(std::iter::once(&1)).copied().collect();
+    let weights = vec![1.0 / tokens.len() as f64; tokens.len()];
+    parts.push(net.tape.softmax_ce(logits, v, &targets, &weights));
+    parts.push(net.tape.ctc(read, mirage::config::READER_CLASSES, &[3, 5, 5, 9]));
+    let mut total = parts[0];
+    for p in &parts[1..] {
+        total = net.tape.add(total, *p);
+    }
+    total
+}
+
+/// Parameter group of a checkpoint tensor name, for the table.
+fn group(name: &str) -> String {
+    let mut parts = name.split('/');
+    let first = parts.next().unwrap_or(name);
+    match (first, parts.next()) {
+        ("stack", Some(second)) if second == "layers" => "decoder stack (layers)".to_string(),
+        ("stack", _) => "decoder stack (routing, norm)".to_string(),
+        _ => first.to_string(),
+    }
+}
+
+#[test]
+fn the_whole_graph_on_the_device_gives_the_host_gradients() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("whole graph") else { return };
+    let ck = crate::common::tiny_checkpoint();
+    let cfg = ck.config.clone();
+    let mut params: mirage::train::net::Params<f32> = params_from_checkpoint(&ck);
+    for v in params.values_mut().flatten() {
+        *v *= 0.5;
+    }
+
+    let mut host = Net::<f32>::new(&cfg, &params, None);
+    let hl = whole_graph_loss(&mut host);
+    let host_loss = host.tape.val(hl)[0];
+    let mut grads = host.tape.backward(hl);
+    let want = host.param_grads(&mut grads);
+
+    let store = upload_params(&dev, cfg.dec_layers, &params);
+    let mut net = Net::resident(&cfg, DevTape::new(&dev, &store));
+    let dl = whole_graph_loss(&mut net);
+    let dev_loss = net.tape.scalar(dl);
+    net.tape.backward(dl);
+    let got = stacked_grads(&dev, &store);
+    eprintln!("loss: host {host_loss:.6}, device {dev_loss:.6}");
+    assert!((f64::from(host_loss) - dev_loss).abs() <= 1e-4 * f64::from(host_loss).abs().max(1.0), "loss differs");
+
+    // name -> (concatenated device, concatenated host, worst per-tensor cosine and its name, tensors)
+    let mut groups: BTreeMap<String, (Vec<f32>, Vec<f32>, f64, String, usize)> = BTreeMap::new();
+    for (name, w) in &want {
+        let g = &got[name];
+        assert_eq!(g.len(), w.len(), "{name}: gradient length");
+        let e = groups.entry(group(name)).or_insert_with(|| (Vec::new(), Vec::new(), 1.0, String::new(), 0));
+        e.0.extend_from_slice(g);
+        e.1.extend_from_slice(w);
+        // A gradient far below the group's scale (the residual routing's ~1e-18) has no resolvable direction.
+        let peak = w.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let c = cosine(g, w);
+        if c < 0.99 {
+            eprintln!("  low-cosine tensor {name}: host peak gradient {peak:.2e}, cosine {c:.4}");
+        }
+        if c < e.2 {
+            e.2 = c;
+            e.3 = name.clone();
+        }
+        e.4 += 1;
+    }
+    eprintln!("{:<32} {:>8} {:>14} {:>14}  worst tensor", "group", "tensors", "group cosine", "worst cosine");
+    let mut failures = Vec::new();
+    for (name, (d, h, worst, worst_name, tensors)) in &groups {
+        let c = cosine(d, h);
+        eprintln!("{name:<32} {tensors:>8} {c:>14.8} {worst:>14.8}  {worst_name}");
+        if c < 0.9999 {
+            failures.push(format!("{name}: group cosine {c}"));
+        }
+    }
+    assert!(failures.is_empty(), "device gradients deviate from the host: {failures:?}");
 }

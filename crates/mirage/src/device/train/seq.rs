@@ -163,12 +163,7 @@ impl DevTape<'_> {
             assert!((p as usize) < n && inverse[p as usize] == u32::MAX, "permute_cols: `perm` is not a permutation of 0..{n}");
             inverse[p as usize] = i as u32;
         }
-        let upload = |words: &[u32]| {
-            let buf = self.dev.gpu().storage(words.len().max(1) as u64);
-            self.dev.gpu().write(&buf, words);
-            buf
-        };
-        let (fwd, inv) = (upload(perm), upload(&inverse));
+        let (fwd, inv) = (self.upload_words(perm), self.upload_words(&inverse));
         let zb = self.buf(z);
         let y = self.rec.alloc(len);
         self.rec.gather_cols(&zb, &fwd, &y, len, n, false);
