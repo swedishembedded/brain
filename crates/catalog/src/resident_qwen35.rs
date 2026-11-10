@@ -531,8 +531,13 @@ pub const HF_DEFAULT_SPEC_BATCH: usize = 2;
 /// How many prompts a GGUF resident keeps for prefix reuse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrefixCache {
-    /// One per concurrent sequence, and never fewer than [`PrefixCache::FLOOR`]:
-    /// every conversation the server carries stays warm.
+    /// This many per concurrent sequence. An agent's conversation waits on
+    /// its tools between turns, so a server carries more conversations than it
+    /// runs at once, and shared prefixes (the system prompt, an instruction
+    /// several attempts share) take entries of their own: with one entry per
+    /// running sequence, a busy server evicts conversations between their turns.
+    PerSequenceTimes(u32),
+    /// One per concurrent sequence, and never fewer than [`PrefixCache::FLOOR`].
     PerSequence,
     Slots(u32),
 }
@@ -544,6 +549,7 @@ impl PrefixCache {
     /// Cached prompts beside `max_batch` running sequences.
     pub fn slots(self, max_batch: u32) -> u32 {
         match self {
+            PrefixCache::PerSequenceTimes(k) => max_batch.saturating_mul(k).max(PrefixCache::FLOOR),
             PrefixCache::PerSequence => max_batch.max(PrefixCache::FLOOR),
             PrefixCache::Slots(n) => n,
         }
@@ -553,6 +559,7 @@ impl PrefixCache {
 impl std::fmt::Display for PrefixCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PrefixCache::PerSequenceTimes(k) => write!(f, "{k} per sequence (at least {})", PrefixCache::FLOOR),
             PrefixCache::PerSequence => write!(f, "one per sequence (at least {})", PrefixCache::FLOOR),
             PrefixCache::Slots(n) => write!(f, "{n}"),
         }
@@ -564,8 +571,16 @@ impl std::fmt::Display for PrefixCache {
 /// saves that prefill; each also holds memory a sequence could use.
 pub const PREFIX_SLOT_DEFAULTS: &[Rule<PrefixCache>] = &[Rule {
     when: |_| true,
-    ranked: &[PrefixCache::PerSequence, PrefixCache::Slots(4), PrefixCache::Slots(2), PrefixCache::Slots(1), PrefixCache::Slots(0)],
-    why: "an agent resends its whole history every turn: a cached prompt saves its prefill",
+    ranked: &[
+        PrefixCache::PerSequenceTimes(4),
+        PrefixCache::PerSequenceTimes(2),
+        PrefixCache::PerSequence,
+        PrefixCache::Slots(4),
+        PrefixCache::Slots(2),
+        PrefixCache::Slots(1),
+        PrefixCache::Slots(0),
+    ],
+    why: "an agent resends its whole history every turn and waits on its tools between turns: a cached prompt saves its prefill",
 }];
 
 /// The shortest automatic context a default may leave (or the checkpoint's
@@ -885,6 +900,19 @@ impl MultiDeviceResidentModel for Qwen35GgufServed {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_agent_server_caches_more_conversations_than_it_runs_when_memory_allows() {
+        // Ranked first: four, then two cached prompts per running sequence; the
+        // memory check takes the first that fits, down to no cache at all.
+        let ranked = PREFIX_SLOT_DEFAULTS[0].ranked;
+        assert_eq!(ranked[0].slots(16), 64);
+        assert_eq!(ranked[1].slots(16), 32);
+        assert_eq!(ranked[2].slots(16), 16);
+        assert_eq!(*ranked.last().unwrap(), PrefixCache::Slots(0));
+        assert!(ranked.windows(2).all(|w| w[0].slots(16) >= w[1].slots(16)), "{ranked:?}");
+        assert_eq!(PrefixCache::PerSequenceTimes(4).slots(0), PrefixCache::FLOOR);
+    }
+
     use super::*;
 
     /// The model-agnostic policy reaches every Qwen3.8 resident, and a choice a
@@ -1257,7 +1285,7 @@ mod tests {
         assert!(r.cap() > 2048, "sized by memory, not a fixed default: {}", r.cap());
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8, "the most compact, fastest tier fits");
         assert_eq!(r.max_batch(), DEFAULT_MAX_BATCH);
-        assert_eq!(r.prefix_slots(), DEFAULT_MAX_BATCH, "a warm prompt per concurrent sequence fits");
+        assert_eq!(r.prefix_slots(), 4 * DEFAULT_MAX_BATCH, "four warm prompts per concurrent sequence fit");
         let (modes, _) = gpu_core::defaults::candidates(SPECULATION_DEFAULTS, gpu_core::defaults::Hardware::detected());
         assert_eq!(r.speculation().mode, modes[0], "the hardware's best-ranked speculation");
         let (states, _) = gpu_core::defaults::candidates(GDN_STATE_DEFAULTS, gpu_core::defaults::Hardware::detected());
@@ -1306,7 +1334,7 @@ mod tests {
         let said = r.chosen_defaults().join("\n");
         assert!(said.contains("passed over"), "{said}");
         let wide = gguf_resident(&path, "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { max_batch: Some(16), ..Default::default() }).expect("builds");
-        assert_eq!(wide.prefix_slots(), 16, "the prompt cache follows the concurrency where it fits");
+        assert_eq!(wide.prefix_slots(), 4 * 16, "the prompt cache follows the concurrency where it fits");
         std::fs::remove_file(path).ok();
     }
 
