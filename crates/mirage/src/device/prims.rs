@@ -176,7 +176,7 @@ impl Device {
         let p = [a.batch, a.nq, a.heads, a.kvh, a.hd, a.nk, a.visible, scale];
         self.push(s, "mirage_attn_scores", &[q, k, key_mask, &scores, pos], &p, rows * a.nk);
         s.push(self.gpu().dispatch(self.k("mirage_attn_softmax"), &[&scores], &[rows, a.nk], gpu_core::Dispatch::Workgroups(rows)));
-        let lanes = [16u32, 8, 4, 2, 1].into_iter().find(|l| a.vd.is_multiple_of(*l)).expect("1 divides every width");
+        let lanes = [4u32, 2, 1].into_iter().find(|l| a.vd.is_multiple_of(*l)).expect("1 divides every width");
         let p = [a.batch, a.nq, a.heads, a.kvh, a.vd, a.nk, a.visible, lanes];
         s.push(self.gpu().dispatch(self.k("mirage_attn_apply"), &[&scores, v, out, pos], &p, gpu_core::Dispatch::Workgroups(rows * (a.vd / lanes))));
     }

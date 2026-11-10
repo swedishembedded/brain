@@ -236,3 +236,39 @@ fn decoder_gemm_shapes_probe() {
         }
     }
 }
+
+/// One recorded step replayed once at batch 1 / batch 64, for a kernel profiler (`ncu --launch-count`): the
+/// timed probes above replay hundreds of steps.
+#[test]
+#[ignore = "profiling entry point: run under ncu"]
+fn decoder_step_for_profiler_b1() {
+    step_once(1);
+}
+
+/// See [`decoder_step_for_profiler_b1`].
+#[test]
+#[ignore = "profiling entry point: run under ncu"]
+fn decoder_step_for_profiler_b64() {
+    step_once(64);
+}
+
+fn step_once(batch: usize) {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dir) = released_dir() else { return };
+    let Some(cats) = crate::decoder::golden("step profile", "cats") else { return };
+    let model = mirage::model::Mirage::open(&dir).unwrap();
+    let dev = devices("step profile").into_iter().next().expect("a device");
+    let dd = DeviceDecoder::upload(&dev, model.decoder());
+    let memory: Vec<f32> = cats["memory"].iter().map(|&v| v as f32).collect();
+    let tokens: Vec<u32> = cats["tokens"].iter().map(|&t| t as u32).collect();
+    let mems: Vec<&[f32]> = (0..batch).map(|_| &memory[..]).collect();
+    let cross = dd.cross(&dev, &memory_batch(&dev, &mems, 512));
+    let mut st = dd.new_state(&dev, batch, 700);
+    st.set_tokens(&dev, &vec![tokens; batch]);
+    st.first = 2;
+    let (ban, picked) = (dev.buf(&vec![0f32; batch * dd.vocabulary()]), dev.alloc(batch));
+    let tape = dd.record_step(&dev, &st, &cross, true, Some((&ban, &picked)));
+    st.seek(&dev, 150);
+    dev.gpu().replay_tape(&tape);
+    dev.gpu().poll_wait();
+}

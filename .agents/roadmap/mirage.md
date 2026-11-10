@@ -800,3 +800,37 @@ Real-weight experiments under `Recompute` on the device reproduce the `Keep` res
 0.2766 / loss 2.6378, mask IoU 0.6575, OCR CER 0.2472, LoRA held-out text loss 1.6474, exact resume true. With the
 workgroup-split attention kernels of 9fbad69bf the device runs are also faster than before: detection 10.25 samples/s
 (3.92 before), LoRA 2.42 (1.17), OCR 31.3 (13.7), masks 1.74.
+
+### Item 6: decoder step floor (L8c, 2026-11-10)
+
+Hardware: GH200 gpu1 of a shared node. The other session's jobs held every card at 99-100 % utilisation and 83-86 GB for
+most of this lane (one 20 minute window at the start was idle: 1-2 % utilisation, 26 GB); every wall number below that
+was taken in that load is marked "loaded" and is only comparable within its own table. Kernel times come from
+`Gpu::profile_tape` (minimum over 20 replays of the recorded step, each dispatch timed from the previous one's completion)
+and from ncu (`--clock-control base`, cold caches: it prices a kernel at about 1.3-2x its in-graph time).
+Probes (ignored tests in `crates/mirage/tests/it/device_decoder.rs`): `decoder_step_floor_probe` / `_cq` (step time at batch
+1/8/32/64 plus the per-kernel table), `decoder_gemm_shapes_probe` (products at the decoder's shapes),
+`decoder_step_for_profiler_b1` / `_b64` (one replay, for ncu).
+
+Baseline (FP32, idle card, position 150, min over replays): step 1.77 / 2.18 / 3.00 / 5.89 ms at batch 1 / 8 / 32 / 64;
+profile 2.77 / 3.15 / 4.04 / 6.87 ms. At batch 64 `native:matmul_f32_tiled` was 58 % (4.0 ms over 61 products). The ncu of
+its worst product shows why: the mHC gate projection (24 weight rows, k = 2048) launched ONE block of the 64 x 64 tile and
+took 220 us (8 per step = 1.76 ms); every 512-row projection launched 8 blocks. Batch 1 was already under the 2 ms target.
+
+Changes (each its own verified step):
+1. `matmul_f32_skinny` (crates/kernels-cuda/cu/matmul_f32_skinny.cu), chosen by `CudaProvider` for 16..128 rows when the
+   64 x 64 grid would fill less than half the multiprocessors: a 32 x 8 output tile per block, the contraction split over
+   the block's eight warps (each stages its own 32-wide chunk, next chunk prefetched into registers), fixed-order fold.
+   Every model with an f32 `Ops::matmul` inherits it; gate `a_starved_tile_grid_runs_the_skinny_kernel_and_agrees_with_an_f64_oracle`
+   (kernel name per shape, f64 oracle with the sqrt(k) summation bar, tails in m / n / k), the shared parity cases keep their
+   kernels. ncu per product at 64 rows: 24 x 2048 220 -> 23 us, 1120 x 512 (gemv at 2 x 32 rows: 33 us each) -> 24 us,
+   512 x 512 (22.6 us per 32 rows) -> 9.6 us, 384 x 512 -> 9.9 us.
+2. CQ selector (`backend_api::select`): the cooperative CQ product serves 16 rows (was 96) before the decoded weight
+   meets the dense product, which now ends on the skinny kernel; a weight shorter than the dense tiles (the 24-row gate)
+   keeps the cooperative kernel at every row count (the barrier-free `matmul_cq_gemm` took 1.1 ms per gate at 32 rows).
+   Int8-activation (A8) products keep the cooperative kernel to 96 rows (no dense int8 form exists). CQ step profile at
+   batch 64: 9.83 -> 4.72 ms.
+3. `mirage_mhc_maps`: the Sinkhorn loop divided every lane (32 divisions an iteration on one thread per row); one
+   reciprocal per row and one vector reciprocal per column sweep: 29 -> 14 us per launch.
+4. `mirage_attn_apply`: 4 lanes x 16 key groups instead of 16 lanes x 4 groups (the key loop is the latency chain):
+   batch 1 0.356 -> 0.166 ms per step, batch 64 0.418 -> 0.372.

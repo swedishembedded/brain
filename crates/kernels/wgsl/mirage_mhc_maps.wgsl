@@ -49,16 +49,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         r1 = exp(r1 - m);
         r2 = exp(r2 - m);
         r3 = exp(r3 - m);
+        // One reciprocal per row and one vec4 reciprocal per column sweep, then multiplies: a division per lane
+        // (32 an iteration) was the whole cost of this kernel on a device (a single thread per row).
         for (var it = 0u; it < p.iters; it = it + 1u) {
-            r0 = r0 / (r0.x + r0.y + r0.z + r0.w);
-            r1 = r1 / (r1.x + r1.y + r1.z + r1.w);
-            r2 = r2 / (r2.x + r2.y + r2.z + r2.w);
-            r3 = r3 / (r3.x + r3.y + r3.z + r3.w);
-            let cs = r0 + r1 + r2 + r3;
-            r0 = r0 / cs;
-            r1 = r1 / cs;
-            r2 = r2 / cs;
-            r3 = r3 / cs;
+            r0 = r0 * (1.0 / (r0.x + r0.y + r0.z + r0.w));
+            r1 = r1 * (1.0 / (r1.x + r1.y + r1.z + r1.w));
+            r2 = r2 * (1.0 / (r2.x + r2.y + r2.z + r2.w));
+            r3 = r3 * (1.0 / (r3.x + r3.y + r3.z + r3.w));
+            let ics = vec4<f32>(1.0) / (r0 + r1 + r2 + r3);
+            r0 = r0 * ics;
+            r1 = r1 * ics;
+            r2 = r2 * ics;
+            r3 = r3 * ics;
         }
         let ob = idx * stride + 2u * n;
         maps[ob] = r0.x; maps[ob + 1u] = r0.y; maps[ob + 2u] = r0.z; maps[ob + 3u] = r0.w;
