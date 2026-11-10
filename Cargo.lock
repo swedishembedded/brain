@@ -2109,6 +2109,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-modelstore",
+ "brain-optim",
  "brain-testutil",
  "half",
  "safetensors",

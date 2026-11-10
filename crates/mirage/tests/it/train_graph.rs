@@ -14,7 +14,7 @@ use mirage::vision::weights::Weights;
 use mirage::vision::VisionModel;
 
 use crate::common::tiny_checkpoint;
-use crate::fd::noise;
+use crate::fd::{model_check, noise};
 use crate::vision::assert_stage;
 
 const SIZE: (usize, usize) = (400, 300);
@@ -110,15 +110,6 @@ fn all_heads_loss(net: &mut Net<'_, f64>, canvas: Id) -> Id {
     total
 }
 
-fn loss_and_grads(cfg: &mirage::config::MirageConfig, params: &Params<f64>) -> (f64, std::collections::BTreeMap<String, Vec<f64>>) {
-    let mut net = Net::<f64>::new(cfg, params, None);
-    let canvas = net.constant(noise(cfg.canvas * cfg.canvas * 3, 71, 1.0));
-    let loss = all_heads_loss(&mut net, canvas);
-    let value = net.tape.val(loss)[0];
-    let mut grads = net.tape.backward(loss);
-    (value, net.param_grads(&mut grads))
-}
-
 #[test]
 fn the_whole_model_matches_finite_differences_and_every_head_reaches_the_encoder() {
     crate::common::cap_threads();
@@ -131,51 +122,15 @@ fn the_whole_model_matches_finite_differences_and_every_head_reaches_the_encoder
     for v in params.values_mut().flatten() {
         *v *= 0.5;
     }
-    let (_, grads) = loss_and_grads(&cfg, &params);
-    let manifest = mirage::spec::Manifest::new(&cfg);
-    let mut worst = 0f64;
-    let mut worst_name = String::new();
-    let mut unreached = Vec::new();
-    let mut unresolvable = Vec::new();
-    for spec in manifest.iter().filter(|s| !s.training_only) {
-        let g = &grads[&spec.name];
-        if g.iter().all(|v| *v == 0.0) {
-            unreached.push(spec.name.clone());
-            continue;
-        }
-        // One random direction per tensor.
-        let dir = noise(g.len(), 900 + spec.numel() as u64, 1.0);
-        let analytic: f64 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
-        // Richardson extrapolation of two central differences (step h and h/2): rounding stays at the h/2 level
-        // (|loss| * 1e-16 / h, far below the smallest gradients) and the truncation error drops to O(h^4).
-        let h = 2e-4;
-        let shifted = |sign: f64, step: f64| {
-            let mut p = params.clone();
-            p.get_mut(&spec.name).unwrap().iter_mut().zip(&dir).for_each(|(v, d)| *v += sign * step * d);
-            loss_and_grads(&cfg, &p).0
-        };
-        let central = |step: f64| (shifted(1.0, step) - shifted(-1.0, step)) / (2.0 * step);
-        let fd = (4.0 * central(h / 2.0) - central(h)) / 3.0;
-        // Below this a finite difference of the loss cannot resolve a derivative at all.
-        if analytic.abs().max(fd.abs()) < 1e-9 {
-            unresolvable.push(spec.name.clone());
-            continue;
-        }
-        let err = (analytic - fd).abs() / analytic.abs().max(fd.abs());
-        if err > 1e-4 {
-            eprintln!("  {}: analytic {analytic:.6e} fd {fd:.6e} err {err:.2e}", spec.name);
-        }
-        if err > worst {
-            worst = err;
-            worst_name = spec.name.clone();
-        }
-    }
-    eprintln!("model finite-difference check: worst relative error {worst:.3e} at `{worst_name}`; unresolvable: {unresolvable:?}");
-    // The residual routing parameters' gradient vanishes after 20 Sinkhorn rounds (a doubly stochastic projection absorbs
-    // the perturbation); the Sinkhorn primitive itself is held by its own finite-difference check.
-    assert_eq!(unresolvable, ["stack/mhc_a_res", "stack/mhc_b_res", "stack/mhc_phi_res"], "only the residual routing parameters are below the finite-difference floor");
-    assert!(worst < 1e-3, "the model backward deviates by {worst:e} at `{worst_name}`");
-    // Every encoder tensor receives gradient from the heads; the tensors left out are exactly the ones the
-    // composed loss cannot reach (the mask coefficient and reader tensors are reached, MTP heads are training-only).
-    assert!(unreached.is_empty(), "tensors that received no gradient: {unreached:?}");
+    let check = model_check(&cfg, &params, &|net| {
+        let canvas = net.constant(noise(cfg.canvas * cfg.canvas * 3, 71, 1.0));
+        all_heads_loss(net, canvas)
+    });
+    eprintln!("model finite-difference check: worst relative error {:.3e} at `{}`; unresolvable: {:?}", check.worst, check.worst_name, check.unresolvable);
+    assert!(check.worst < 1e-3, "the model backward deviates by {:e} at `{}`", check.worst, check.worst_name);
+    // The residual routing parameters' gradient vanishes after 20 Sinkhorn rounds (a doubly stochastic projection
+    // absorbs the perturbation); the Sinkhorn primitive itself is held by its own finite-difference check.
+    assert_eq!(check.unresolvable, ["stack/mhc_a_res", "stack/mhc_b_res", "stack/mhc_phi_res"], "only the residual routing parameters are below the finite-difference floor");
+    // Every encoder tensor receives gradient from the heads.
+    assert!(check.unreached.is_empty(), "tensors that received no gradient: {:?}", check.unreached);
 }

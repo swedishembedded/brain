@@ -147,6 +147,15 @@ fn argmax(row: &[f32]) -> usize {
     row.iter().enumerate().fold((0, f32::NEG_INFINITY), |best, (i, &v)| if v > best.1 { (i, v) } else { best }).0
 }
 
+/// The frames window `j` of a `strip_w`-wide strip contributes to the joined sequence: from 0 (first window) or
+/// [`LEFT_TRIM`], up to the strip's end when the window reaches it, else [`RIGHT_END`].
+pub fn frame_range(j: usize, strip_w: usize) -> (usize, usize) {
+    let x0 = j * WINDOW_STEP;
+    let lo = if x0 == 0 { 0 } else { LEFT_TRIM };
+    let hi = if x0 + WINDOW_W >= strip_w { (strip_w - x0).div_ceil(FRAME_PX) } else { RIGHT_END };
+    (lo, hi.min(FRAMES))
+}
+
 /// Join the windows' frames and collapse the greedy label path to text.
 ///
 /// Window `j` starts at pixel `224 j`; it contributes frames from 0 (first
@@ -157,10 +166,8 @@ pub fn decode_windows(logits: &[Vec<f32>], strip_w: usize, charset: &[char]) -> 
     let mut text = String::new();
     let mut prev = 0usize;
     for (j, lg) in logits.iter().enumerate() {
-        let x0 = j * WINDOW_STEP;
-        let lo = if x0 == 0 { 0 } else { LEFT_TRIM };
-        let hi = if x0 + WINDOW_W >= strip_w { (strip_w - x0).div_ceil(FRAME_PX) } else { RIGHT_END };
-        for f in lo..hi.min(FRAMES) {
+        let (lo, hi) = frame_range(j, strip_w);
+        for f in lo..hi {
             let label = argmax(&lg[f * READER_CLASSES..(f + 1) * READER_CLASSES]);
             if label != 0 && label != prev {
                 if let Some(&c) = charset.get(label - 1) {

@@ -183,6 +183,15 @@ impl NamedMoments {
         Ok(())
     }
 
+    /// Install the moments of `name` (a resumed run's saved state), refusing a pair whose lengths differ.
+    pub fn restore(&mut self, name: &str, m: Vec<f32>, v: Vec<f32>) -> Result<(), String> {
+        if m.len() != v.len() {
+            return Err(format!("{name}: moments hold {} and {} values", m.len(), v.len()));
+        }
+        self.moments.insert(name.to_string(), (m, v));
+        Ok(())
+    }
+
     /// The moments stored for `name`, when it has been stepped.
     pub fn moments(&self, name: &str) -> Option<(&[f32], &[f32])> {
         self.moments.get(name).map(|(m, v)| (&m[..], &v[..]))

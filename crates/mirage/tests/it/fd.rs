@@ -52,3 +52,68 @@ pub fn check(name: &str, inputs: &[Vec<f64>], build: &dyn Fn(&mut Tape<f64>, &[I
     let err = max_error(inputs, build);
     assert!(err < 1e-4, "{name}: backward deviates from finite differences by {err:e}");
 }
+
+/// Outcome of [`model_check`].
+pub struct ModelCheck {
+    /// Worst relative error of a tensor's directional derivative.
+    pub worst: f64,
+    /// The tensor it occurred at.
+    pub worst_name: String,
+    /// Tensors with a vanishing gradient the finite difference cannot resolve.
+    pub unresolvable: Vec<String>,
+    /// Tensors that received no gradient at all.
+    pub unreached: Vec<String>,
+}
+
+/// Directional finite-difference check of a scalar graph over every non-training-only tensor: one random
+/// direction per tensor, Richardson-extrapolated central differences (steps `h` and `h/2`, so rounding stays at
+/// the `h/2` level and truncation drops to O(h^4)). `loss` builds the graph and returns the scalar.
+pub fn model_check(cfg: &mirage::config::MirageConfig, params: &mirage::train::net::Params<f64>, loss: &dyn Fn(&mut mirage::train::net::Net<'_, f64>) -> Id) -> ModelCheck {
+    use mirage::train::net::Net;
+    let eval = |p: &mirage::train::net::Params<f64>| {
+        let mut net = Net::<f64>::new(cfg, p, None);
+        let l = loss(&mut net);
+        let value = net.tape.val(l)[0];
+        let mut g = net.tape.backward(l);
+        (value, net.param_grads(&mut g))
+    };
+    let (loss_value, grads) = eval(params);
+    let mut out = ModelCheck { worst: 0.0, worst_name: String::new(), unresolvable: Vec::new(), unreached: Vec::new() };
+    for spec in mirage::spec::Manifest::new(cfg).iter().filter(|s| !s.training_only) {
+        let Some(g) = grads.get(&spec.name) else {
+            out.unreached.push(spec.name.clone());
+            continue;
+        };
+        if g.iter().all(|v| *v == 0.0) {
+            out.unreached.push(spec.name.clone());
+            continue;
+        }
+        let dir = noise(g.len(), 900 + spec.numel() as u64, 1.0);
+        let analytic: f64 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
+        let shifted = |sign: f64, step: f64| {
+            let mut p = params.clone();
+            p.get_mut(&spec.name).unwrap().iter_mut().zip(&dir).for_each(|(v, d)| *v += sign * step * d);
+            eval(&p).0
+        };
+        let h = 2e-4;
+        let central = |step: f64| (shifted(1.0, step) - shifted(-1.0, step)) / (2.0 * step);
+        let fd = (4.0 * central(h / 2.0) - central(h)) / 3.0;
+        // Rounding of the loss itself limits a difference quotient to about |loss| * eps / h; a derivative within a
+        // factor 50 of that cannot be resolved, and larger ones are judged net of it.
+        let noise = 8.0 * loss_value.abs() * f64::EPSILON / h;
+        let size = analytic.abs().max(fd.abs());
+        if size < 50.0 * noise.max(1e-12) {
+            out.unresolvable.push(spec.name.clone());
+            continue;
+        }
+        let err = ((analytic - fd).abs() - noise).max(0.0) / size;
+        if err > 1e-4 {
+            eprintln!("  {}: analytic {analytic:.6e} fd {fd:.6e} err {err:.2e}", spec.name);
+        }
+        if err > out.worst {
+            out.worst = err;
+            out.worst_name = spec.name.clone();
+        }
+    }
+    out
+}

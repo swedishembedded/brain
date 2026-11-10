@@ -14,9 +14,12 @@ brain-backend-cpu.workspace = true
 brain-capability.workspace = true
 brain-checkpoint.workspace = true
 brain-modelstore.workspace = true
+brain-data.workspace = true
 brain-gpu-core.workspace = true
+brain-imaging.workspace = true
 brain-kernels.workspace = true
 brain-model.workspace = true
+brain-optim.workspace = true
 half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,7 +27,5 @@ serde_path_to_error.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
-brain-data.workspace = true
-brain-imaging.workspace = true
 brain-testutil.workspace = true
 safetensors.workspace = true
