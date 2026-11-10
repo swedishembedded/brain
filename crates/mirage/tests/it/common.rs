@@ -26,8 +26,22 @@ pub const RELEASED_ARCHITECTURE_JSON: &str = r#"{
   "dtype": "float32"
 }"#;
 
+/// Host threads the test process may use. The vision and decoder host paths fan
+/// out over every core by default, which on a large shared node burns far more
+/// CPU time than these shapes need.
+pub const HOST_TEST_THREADS: usize = 8;
+
+/// Size the process-wide CPU pool once, before the first parallel loop.
+pub fn cap_threads() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = backend_cpu::par::set_global_threads(HOST_TEST_THREADS);
+    });
+}
+
 /// The released checkpoint directory in the model store, when it is there.
 pub fn released_dir() -> Option<PathBuf> {
+    cap_threads();
     let dir = PathBuf::from(brain_testutil::model_dir(REFERENCE)?);
     (dir.join("mirage.safetensors").is_file() && dir.join("mirage.cact").is_file() && dir.join("config.json").is_file()).then_some(dir)
 }
