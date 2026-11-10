@@ -607,7 +607,7 @@ Agreement with the reference engine on the recorded corpus (9 describe cases, 42
 int8, brain keeps them f32, so exact tokens are not expected): packed CQ model 40 of 42 boxes exact, 42 of 42 at IoU 0.5, 39 of 42
 identical name/position/description lines, 4 of 9 documents identical apart from masks and scores. The FP32 model on the same cases:
 0 exact, 29 of 42 at IoU 0.5, 8 identical lines (`device_cact_accept::the_packed_model_agrees_with_the_reference_engine`). The A8 emulation of
-the engine's activation rounding is not implemented.
+the engine's activation rounding is the opt-in `cq-a8` precision (L7 item 5).
 
 Quality of the archive against FP32 (the 2-bit quantisation itself, teacher forced on the cats and text goldens, host path):
 top-1 agreement of the decoder logits 216/237 and 148/169 positions, mean KL(FP32 || CQ) 0.107 and 0.162 nats, next-token accuracy
@@ -694,6 +694,62 @@ Traced the released engine with gdb (token streams of `forward_chunk`). Facts, a
   cross-attention indexes memory by batch row, so candidates run one after the other on the rewound state (images are the batch).
   A candidate-batched variant needs a per-row position or a cross-batch index in the attention kernels.
 
+### Item 5: A8 activation precision (done 2026-11-10, opt-in `cq-a8`)
+
+What the vendor engine does, read from its binary and checked against its running state (gdb on the read-only harness,
+nothing written): every CQ product (`cq_matmul_batch`, `quantize_activation[_batch]`, `cq_row*_dp`, `cq_rows4_*_dp`) rotates each
+128-lane group of the activation row (natural-order Walsh, times 1/sqrt(128)), takes the group's absmax, sets
+`scale = absmax * 0.007874016` (the f32 nearest 1/127, a multiply, bits 0x3c010204; scale 1 for an all-zero group), quantises with
+`fcvtas` (round half AWAY from zero, scale reciprocal then multiply) saturating to int8, and multiplies int8 against an int8
+codebook table (`sdot`): `table_scale = max|level| / 127` (f32), `table[i] = round_away(level[i] / table_scale)`. Read from the live engine:
+2-bit [-127,-38,38,127], 3-bit [-127,-79,-44,-14,15,45,79,127], 4-bit [-126,-95,-74,-57,-43,-30,-17,-5,7,19,31,45,59,76,97,127], scales
+0.0010508697 / 0.0014946931 / 0.0019076669. A group's `i32` dot (at most 128*127*127, exact in f32) is turned into
+`((table_scale * norm) * f32(dot)) * act_scale` and the groups are added in order (the engine's single-row and 4-row kernels
+associate the three factors differently and fuse the last add; that is f32 rounding, not a rule). The training-side fake quantiser in the
+vendor's python (per whole row, not per group, half-even) is not what the engine runs.
+
+Implementation (shared tier, nothing Mirage specific): `model::cq::{CqActivations, a8_table, a8_quantize_group, Cq::matmul_a8}` (host
+oracle), kernels `cq_rotate_a8` / `cq_rotate_a8_wg` (rotation + quantisation, int8 lanes four to a word, scales per group),
+`matmul_cq_a8_gemm` (barrier-free, CPU backend and fallback), `matmul_cq_a8_gemv` (cooperative: 16 threads a row each take a 32-lane
+quarter of four groups at a time and add the quarter dots as integers in workgroup memory), the codebook table built inside the kernels
+from the stored levels. `Ops::set_cq_activations` (default F32); `Ops::cq_product` picks the A8 variants on the same selector rule
+(cooperative up to 96 rows where barriers exist, barrier-free above and on the CPU; there is no dense A8 product, the many-row regime does
+not expand the weight). A model-specific flag was not added (`LinearActivations` is the NVFP4 knob and would have silently ignored `int8`).
+Mirage: `model::Precision {Fp32, Cq, CqA8}` (`cq-a8` on the `precision` option of describe and extract, the residency adapter's instance
+key, `MirageSession::load_with`, `Mirage::open_precision`, `Checkpoint::cq_activations` for the host `Linear`s); the CLI takes it through the
+capability's enum. Never a default.
+
+Measured (kernel tests in `model/tests/it/cq_tier.rs`, Mirage in `mirage/tests/it/device_cact_accept.rs` and `pipeline.rs`):
+- Kernel parity against the exact host integer emulation, widths 2/3/4, 1 to 33 rows, k 256 and 700: rotation kernels bit-exact (bytes and scales,
+  both variants, CPU backend and CUDA gpu1); `matmul_cq_a8_gemm` bit-exact on the CPU backend and on CUDA; `matmul_cq_a8_gemv` bit-exact
+  up to four groups per row and 1.1e-7 to 1.2e-7 of the largest output beyond (the partial sums are added in four slots), CUDA gpu1. Through `Ops::matmul`
+  (m = 1, 4, 9, 100) within 4e-6.
+- The emulation against the engine itself: a product recorded from the engine (260 activation rows, k = 256, 512 weight rows of a decoder
+  projection) is reproduced to 7e-8 to 2.7e-7 of the largest output by the numpy form of the rule and 1.4e-8 by `Cq::matmul_a8`, the f32-activation
+  product is 2.4e-3 to 7.9e-3 away. A 2 x 8 slice is the tracked fixture `tests/golden/vendor_cq_a8_matmul.json`
+  (`the_a8_product_reproduces_a_recorded_engine_product`).
+- Decoder logits teacher forced on the goldens (host path), against FP32 (cats 237 positions / text 169): top-1 agreement CQ f32-act 216 / 148, CQ A8
+  215 / 148; mean KL(FP32 || model) CQ f32-act 0.10676 / 0.16194, CQ A8 0.10704 / 0.16227; A8 against CQ f32-act: top-1 236/237 and 168/169, KL 0.00004 /
+  0.00006; next-token accuracy FP32 236 / 168, CQ 215 / 147, CQ A8 214 / 147. Int8 activations cost nothing measurable next to the 2-bit weights.
+- Vendor agreement on the engine corpus (9 describe cases, 42 boxes, CUDA gpu1): CQ f32 activations 40 exact, 42 at IoU 0.5, 39 identical lines,
+  4 identical documents (apart from masks and scores); CQ A8 34 exact, 42 at IoU 0.5, 39 identical lines, 1 identical document. A8 is NOT closer
+  to the engine's boxes. Reason (analysis, not yet bisected): the engine rounds the activations of every product; brain's A8 covers only the products
+  over packed `Linear`s, while the packed convolutions (5.0 MB, dense f32 here), the query and the keys and values (the vendor python quantises q and
+  k, v to int8 per head, `kv_bits` in the archive header) stay f32, so the rounding errors are independent of the engine's instead of identical. The
+  one-matmul check above is exact, so the arithmetic of a product is right; what remains is coverage.
+- Form probabilities (host, packed weights; cats_form, cats_form_box, cats_form_text): largest probability difference from the engine 0.0685 with
+  f32 activations, 0.0693 with A8 (committed values equal in both); `PROBABILITY_TOLERANCE` stays 0.08. The free-text case stays the coin flip
+  described in item 3.
+- Throughput of `describe_batch`, cats 640x480, best of three, CUDA gpu1 (shared card, idle during the run): images/s at batch 1 / 8 / 64: FP32
+  1.85 / 11.28 / 29.49, packed CQ 2.44 / 8.77 / 31.36, packed CQ A8 2.40 / 8.49 / 32.13. A8 costs no throughput after the cooperative kernel
+  was widened (a first version with four threads a row and whole groups per thread was 1.2x / 2.3x / 1.4x slower at 1 / 8 / 64: 16 threads a row
+  keep the 128 workgroups of the f32 GEMV busy). The FP32 batch-1 figure varies 0.9 to 1.9 between runs on this shared card.
+
+Not done, in order: (1) run the packed convolutions and the Hadamard/structured mixers through the same A8 products (im2col rows against the packed
+kernel; today they are dense f32) and add the engine's per-head int8 query/key/value rounding to the attention kernels, then re-measure exact
+boxes against the corpus; bisect with the existing engine dumps (`dump*.py`) which stage first diverges; (2) tighten `PROBABILITY_TOLERANCE` only if (1)
+brings the form probabilities closer; (3) ncu roofline of the A8 kernels (not profiled; launch bound at Mirage sizes like the f32 ones).
+
 ### Remaining (not done in L7)
 
 - Item 4, saved-activation policy. Findings so far: the host trainer is an eager whole-tape (`train/tape.rs`: `Tape::op` stores every
@@ -706,11 +762,6 @@ Traced the released engine with gdb (token streams of `forward_chunk`). Facts, a
   gates must hold under `Recompute` bit-for-bit on the CPU backend (recompute is deterministic); (5) delete the `mirage` line of
   `scripts/gates/saved-policy.allow`; (6) peak memory before/after with the process-level device counter used by
   `dropping_the_session_releases_device_memory`.
-- Item 5, A8: int8 activations per 128-lane group after the Walsh rotation inside the CQ products (`matmul_cq_*` in the shared layer,
-  selected per shape), exposed as an opt-in precision option; a host reference round trip in `mirage::model` for the parity gate;
-  report the vendor agreement on the engine corpus (`device_cact_accept`) with A8 on and off, KL/top-1 against FP32 on the golden
-  logits. The residual 0.07 probability shift of the form tests (`PROBABILITY_TOLERANCE`) should shrink with it; tighten the
-  tolerance then and re-check the free-text case.
 - Item 6, step floor: GEMM selection at M 1-64 in the shared layer (`matmul_f32_tiled` at 8 workgroups for M=64), fused rmsnorm,
   flash-decode attention, `mhc_maps` workgroup kernel, fewer launches in the structured Hadamard MLP; measure on an idle card only
   (gpu1 carries another session's load now: 87 GB used), min over replays, ncu roofline for the top 5 kernels.
@@ -725,5 +776,5 @@ Traced the released engine with gdb (token streams of `forward_chunk`). Facts, a
 | OCR | the reader and greedy collapse | open |
 | Training | full / head / LoRA, multi-task, gradient checks | host trainer done (L3); device backward open |
 | Serving | capability, CLI, SDK, HTTP, D-Bus, batching | done (L4) |
-| Quantised kernels | native low-bit CQ matmul from the packed weights | done (L5), see above; A8 emulation open |
+| Quantised kernels | native low-bit CQ matmul from the packed weights | done (L5) and the opt-in A8 mode (L7 item 5), see above |
 | Performance | profile-driven batched throughput | open |
