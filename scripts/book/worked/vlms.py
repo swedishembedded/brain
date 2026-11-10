@@ -310,8 +310,10 @@ def smart_resize(h, w, factor, min_px, max_px):
     wb = max(factor, round_by(w, factor))
     if hb * wb > max_px:
         beta = math.sqrt(h * w / max_px)
-        hb = math.floor(h / beta / factor) * factor
-        wb = math.floor(w / beta / factor) * factor
+        # The reference clamps to one factor here as well, so a very wide
+        # picture cannot lose its short side.
+        hb = max(factor, math.floor(h / beta / factor) * factor)
+        wb = max(factor, math.floor(w / beta / factor) * factor)
     elif hb * wb < min_px:
         beta = math.sqrt(min_px / (h * w))
         hb = math.ceil(h * beta / factor) * factor
@@ -375,7 +377,7 @@ def smart_resize_branches():
 
 
 def smart_resize_halves():
-    """Where the rounding rule breaks ties: sides that are an odd multiple of 16, and the zero a very wide picture reaches."""
+    """Where the rounding rule breaks ties: sides that are an odd multiple of 16, and the clamp that keeps a very wide picture from reaching zero."""
     rows = []
     for side in (48, 80, 112, 144, 176):
         rows.append((side, side / 32, round_by(side, 32), math.floor(side / 32) * 32, math.ceil(side / 32) * 32))
@@ -385,10 +387,12 @@ def smart_resize_halves():
     wb = max(QWEN_FACTOR, round_by(w, QWEN_FACTOR))
     beta = math.sqrt(h * w / QWEN_MAX)
     hz = math.floor(h / beta / QWEN_FACTOR) * QWEN_FACTOR
+    hc, wc = smart_resize(h, w, QWEN_FACTOR, QWEN_MIN, QWEN_MAX)
     return ("Sides that are exactly half way between two multiples of 32 go to the even multiple (Python's `round`, and the "
             "Rust `round_ties_even` that ports it):\n\n" + tie
-            + f"\n\nAnd a picture {h} pixels high and {w:,} wide: rounded it is {hb} x {wb} = {hb * wb:,} pixels, over the maximum, "
-            f"so beta = sqrt({h} * {w:,} / {QWEN_MAX:,}) = {beta:.4f} and the height becomes floor({h} / {beta:.4f} / 32) * 32 = {hz}.")
+            + f"\n\nAnd a picture {h} pixels high and {w:,} wide: rounded it is {hb} x {wb:,} = {hb * wb:,} pixels, over the maximum, "
+            f"so beta = sqrt({h} * {w:,} / {QWEN_MAX:,}) = {beta:.4f} and floor({h} / {beta:.4f} / 32) * 32 = {hz}; the clamp to one "
+            f"factor makes the height {hc} (the result is {hc} x {wc:,}).")
 
 
 # ------------------------------------------------------------------------------------------------ slicing (MiniCPM-V)
