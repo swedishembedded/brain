@@ -14,16 +14,42 @@
 //! email to info@swedishembedded.com.
 
 pub mod hconv;
+pub mod prims;
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::ops::{Ops, Weight};
 
 use crate::vision::ops::NORM_EPS;
 
+/// Kernels Mirage dispatches by name that the shared list may not carry.
+const OWN_KERNELS: &[(&str, &str)] = &[
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    ("hconv_glu", kernels::HCONV_GLU),
+    ("mirage_conv2d", kernels::MIRAGE_CONV2D),
+    ("mirage_dwconv", kernels::MIRAGE_DWCONV),
+    ("mirage_rows_mask", kernels::MIRAGE_ROWS_MASK),
+    ("mirage_add_masked", kernels::MIRAGE_ADD_MASKED),
+    ("mirage_gated_mix", kernels::MIRAGE_GATED_MIX),
+    ("mirage_grn_energy", kernels::MIRAGE_GRN_ENERGY),
+    ("mirage_grn_scale", kernels::MIRAGE_GRN_SCALE),
+    ("mirage_grn_apply", kernels::MIRAGE_GRN_APPLY),
+    ("mirage_chan_fma", kernels::MIRAGE_CHAN_FMA),
+    ("mirage_axpy", kernels::MIRAGE_AXPY),
+    ("mirage_swiglu_rows", kernels::MIRAGE_SWIGLU_ROWS),
+    ("mirage_mean_h", kernels::MIRAGE_MEAN_H),
+    ("mirage_rope2d", kernels::MIRAGE_ROPE2D),
+    ("mirage_attn", kernels::MIRAGE_ATTN),
+    ("mirage_upsample2", kernels::MIRAGE_UPSAMPLE2),
+    ("silu", kernels::SILU),
+    ("add", kernels::ADD),
+    ("sigmoid", kernels::SIGMOID),
+    ("bias_add", kernels::BIAS_ADD),
+];
+
 /// Kernels Mirage needs beyond what [`model::ops::kernel_list`] carries.
 fn kernel_list() -> Vec<(&'static str, &'static str)> {
     let mut list = model::ops::kernel_list().to_vec();
-    for (name, src) in [("rmsnorm_rows", kernels::RMSNORM_ROWS), ("hconv_glu", kernels::HCONV_GLU)] {
+    for &(name, src) in OWN_KERNELS {
         if !list.iter().any(|(n, _)| *n == name) {
             list.push((name, src));
         }
@@ -34,8 +60,7 @@ fn kernel_list() -> Vec<(&'static str, &'static str)> {
 /// A device and the kernel indices Mirage dispatches by name.
 pub struct Device {
     ops: Ops,
-    rmsnorm_rows: usize,
-    hconv_glu: usize,
+    kernel: std::collections::HashMap<&'static str, usize>,
 }
 
 impl Device {
@@ -47,13 +72,22 @@ impl Device {
     /// Build over an existing device; its kernel list must be [`Device::kernels`].
     pub fn new(gpu: Gpu) -> Result<Device, String> {
         let ops = Ops::new(gpu)?;
-        let find = |name: &str| ops.gpu().kernel_index(name).ok_or_else(|| format!("the device lacks kernel `{name}`"));
-        Ok(Device { rmsnorm_rows: find("rmsnorm_rows")?, hconv_glu: find("hconv_glu")?, ops })
+        let mut kernel = std::collections::HashMap::new();
+        for &(name, _) in OWN_KERNELS {
+            let index = ops.gpu().kernel_index(name).ok_or_else(|| format!("the device lacks kernel `{name}`"))?;
+            kernel.insert(name, index);
+        }
+        Ok(Device { ops, kernel })
     }
 
     /// The kernel list a [`Gpu`] must be created with for [`Device::new`].
     pub fn kernels() -> Vec<(&'static str, &'static str)> {
         kernel_list()
+    }
+
+    /// Pipeline index of a kernel by name.
+    pub(crate) fn k(&self, name: &str) -> usize {
+        self.kernel[name]
     }
 
     /// The underlying device.
@@ -80,12 +114,12 @@ impl Device {
 
     /// `(1 + scale)`-weighted RMS norm over rows of width `d`: `weight` is `1 + scale`.
     pub fn zc_norm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, weight: &DeviceBuffer, rows: u32, d: u32, y: &DeviceBuffer) {
-        s.push(self.gpu().dispatch(self.rmsnorm_rows, &[x, weight, y], &[d, rows, NORM_EPS.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
+        s.push(self.gpu().dispatch(self.k("rmsnorm_rows"), &[x, weight, y], &[d, rows, NORM_EPS.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
     }
 
     /// The gated product of HConvGLU from a fused `[rows, 2n]` projection.
     pub fn hconv_glu(&self, s: &mut Vec<Step>, ab: &DeviceBuffer, bias: &DeviceBuffer, rows: u32, n: u32, z: &DeviceBuffer) {
-        s.push(self.gpu().step(self.hconv_glu, &[ab, bias, z], &[rows, n], rows * n));
+        s.push(self.gpu().step(self.k("hconv_glu"), &[ab, bias, z], &[rows, n], rows * n));
     }
 
     /// Run `steps` and read `len` values of `buf`.

@@ -848,6 +848,36 @@ pub const MAX_ABS_ROWS: &str = include_str!("../wgsl/max_abs_rows.wgsl");
 pub const MAXPOOL2D: &str = include_str!("../wgsl/maxpool2d.wgsl");
 /// `wgsl/maxpool2d_dx.wgsl`
 pub const MAXPOOL2D_DX: &str = include_str!("../wgsl/maxpool2d_dx.wgsl");
+/// `wgsl/mirage_add_masked.wgsl`
+pub const MIRAGE_ADD_MASKED: &str = include_str!("../wgsl/mirage_add_masked.wgsl");
+/// `wgsl/mirage_attn.wgsl`
+pub const MIRAGE_ATTN: &str = include_str!("../wgsl/mirage_attn.wgsl");
+/// `wgsl/mirage_axpy.wgsl`
+pub const MIRAGE_AXPY: &str = include_str!("../wgsl/mirage_axpy.wgsl");
+/// `wgsl/mirage_chan_fma.wgsl`
+pub const MIRAGE_CHAN_FMA: &str = include_str!("../wgsl/mirage_chan_fma.wgsl");
+/// `wgsl/mirage_conv2d.wgsl`
+pub const MIRAGE_CONV2D: &str = include_str!("../wgsl/mirage_conv2d.wgsl");
+/// `wgsl/mirage_dwconv.wgsl`
+pub const MIRAGE_DWCONV: &str = include_str!("../wgsl/mirage_dwconv.wgsl");
+/// `wgsl/mirage_gated_mix.wgsl`
+pub const MIRAGE_GATED_MIX: &str = include_str!("../wgsl/mirage_gated_mix.wgsl");
+/// `wgsl/mirage_grn_apply.wgsl`
+pub const MIRAGE_GRN_APPLY: &str = include_str!("../wgsl/mirage_grn_apply.wgsl");
+/// `wgsl/mirage_grn_energy.wgsl`
+pub const MIRAGE_GRN_ENERGY: &str = include_str!("../wgsl/mirage_grn_energy.wgsl");
+/// `wgsl/mirage_grn_scale.wgsl`
+pub const MIRAGE_GRN_SCALE: &str = include_str!("../wgsl/mirage_grn_scale.wgsl");
+/// `wgsl/mirage_mean_h.wgsl`
+pub const MIRAGE_MEAN_H: &str = include_str!("../wgsl/mirage_mean_h.wgsl");
+/// `wgsl/mirage_rope2d.wgsl`
+pub const MIRAGE_ROPE2D: &str = include_str!("../wgsl/mirage_rope2d.wgsl");
+/// `wgsl/mirage_rows_mask.wgsl`
+pub const MIRAGE_ROWS_MASK: &str = include_str!("../wgsl/mirage_rows_mask.wgsl");
+/// `wgsl/mirage_swiglu_rows.wgsl`
+pub const MIRAGE_SWIGLU_ROWS: &str = include_str!("../wgsl/mirage_swiglu_rows.wgsl");
+/// `wgsl/mirage_upsample2.wgsl`
+pub const MIRAGE_UPSAMPLE2: &str = include_str!("../wgsl/mirage_upsample2.wgsl");
 /// `wgsl/mla_bwd_dk_pass.wgsl`
 pub const MLA_BWD_DK_PASS: &str = include_str!("../wgsl/mla_bwd_dk_pass.wgsl");
 /// `wgsl/mla_bwd_dk_rope.wgsl`
@@ -1836,6 +1866,21 @@ pub const ALL: &[(&str, &str)] = &[
     ("max_abs_rows", MAX_ABS_ROWS),
     ("maxpool2d", MAXPOOL2D),
     ("maxpool2d_dx", MAXPOOL2D_DX),
+    ("mirage_add_masked", MIRAGE_ADD_MASKED),
+    ("mirage_attn", MIRAGE_ATTN),
+    ("mirage_axpy", MIRAGE_AXPY),
+    ("mirage_chan_fma", MIRAGE_CHAN_FMA),
+    ("mirage_conv2d", MIRAGE_CONV2D),
+    ("mirage_dwconv", MIRAGE_DWCONV),
+    ("mirage_gated_mix", MIRAGE_GATED_MIX),
+    ("mirage_grn_apply", MIRAGE_GRN_APPLY),
+    ("mirage_grn_energy", MIRAGE_GRN_ENERGY),
+    ("mirage_grn_scale", MIRAGE_GRN_SCALE),
+    ("mirage_mean_h", MIRAGE_MEAN_H),
+    ("mirage_rope2d", MIRAGE_ROPE2D),
+    ("mirage_rows_mask", MIRAGE_ROWS_MASK),
+    ("mirage_swiglu_rows", MIRAGE_SWIGLU_ROWS),
+    ("mirage_upsample2", MIRAGE_UPSAMPLE2),
     ("mla_bwd_dk_pass", MLA_BWD_DK_PASS),
     ("mla_bwd_dk_rope", MLA_BWD_DK_ROPE),
     ("mla_bwd_dq_pass", MLA_BWD_DQ_PASS),
