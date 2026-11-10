@@ -386,39 +386,39 @@ impl DeviceDecoder {
             conv.push(out);
             off += width;
         }
-        let q = dev.zc_new(s, &conv[0], &ly.q_norm, b * heads, hd);
-        let k = dev.zc_new(s, &conv[1], &ly.k_norm, b * kvh, hd);
-        dev.rope_pos(s, &q, &st.posbuf, b * heads, hd, c.rope);
-        dev.rope_pos(s, &k, &st.posbuf, b * kvh, hd, c.rope);
+        let q = dev.alloc((b * heads * hd) as usize);
+        dev.zc_norm_rope(s, &conv[0], &ly.q_norm, &st.posbuf, b * heads, hd, c.rope, &q);
+        let k = dev.alloc((b * kvh * hd) as usize);
+        dev.zc_norm_rope(s, &conv[1], &ly.k_norm, &st.posbuf, b * kvh, hd, c.rope, &k);
         dev.row_write(s, &k, &cache.k, &st.posbuf, (b, kvh * hd, maxt));
         dev.row_write(s, &conv[2], &cache.v, &st.posbuf, (b, kvh * vh, maxt));
         let att = dev.alloc(st.batch * (heads * vh) as usize);
         let shape = AttnShape { batch: b, nq: 1, heads, kvh, hd, vd: vh, nk: maxt, visible: u32::MAX };
         dev.attention_at(s, shape, &q, &cache.k, &cache.v, &st.ones, &st.posbuf, &att);
-        self.gated_residual(dev, s, y, (&qkvg, stride, off), &att, &ly.out, &ly.post_attn, ly.attn_gate, b, heads * vh);
+        let h = self.gated_residual(dev, s, y, (&qkvg, stride, off), &att, (&ly.out, &ly.post_attn, ly.attn_gate), &ly.cross_norm, b, heads * vh);
 
         // Cross-attention over the image memory.
-        let h = dev.zc_new(s, y, &ly.cross_norm, b, d);
         let q0 = dev.linear_new(s, &ly.cq, &h, b);
         let q = dev.zc_new(s, &q0, &ly.cq_norm, b * heads, hd);
         let att = dev.alloc(st.batch * (heads * vh) as usize);
         let shape = AttnShape { batch: b, nq: 1, heads, kvh: heads, hd, vd: vh, nk: cross.stride as u32, visible: cross.stride as u32 };
         dev.attention(s, shape, &q, &cross.k[l], &cross.v[l], &cross.mask, &att);
         let cg = dev.linear_new(s, &ly.cgate, &h, b);
-        self.gated_residual(dev, s, y, (&cg, heads * vh, 0), &att, &ly.cout, &ly.post_cross, ly.cross_gate, b, heads * vh);
+        let h = self.gated_residual(dev, s, y, (&cg, heads * vh, 0), &att, (&ly.cout, &ly.post_cross, ly.cross_gate), &ly.pre_hada, b, heads * vh);
 
         // Hadamard MLP.
-        let h = dev.zc_new(s, y, &ly.pre_hada, b, d);
         ly.mlp.encode_add(dev, s, &h, b, y);
     }
 
-    /// `y += gate * zc((att * sigmoid(gate)) Wout)`; `gate` is (buffer, row stride, column offset).
+    /// `y += scalar * zc((att * sigmoid(gate)) Wout)` for `branch = (Wout, post-norm weight, scalar)`, returning the next
+    /// sublayer's input `zc(y)` under `next_norm`; `gate` is (buffer, row stride, column offset).
     #[allow(clippy::too_many_arguments)]
-    fn gated_residual(&self, dev: &Device, s: &mut Vec<gpu_core::Step>, y: &DeviceBuffer, gate: (&DeviceBuffer, u32, u32), att: &DeviceBuffer, out: &Weight, post: &DeviceBuffer, scalar: f32, rows: u32, w: u32) {
+    fn gated_residual(&self, dev: &Device, s: &mut Vec<gpu_core::Step>, y: &DeviceBuffer, gate: (&DeviceBuffer, u32, u32), att: &DeviceBuffer, branch: (&Weight, &DeviceBuffer, f32), next_norm: &DeviceBuffer, rows: u32, w: u32) -> DeviceBuffer {
+        let (out, post, scalar) = branch;
         let gated = dev.alloc((rows * w) as usize);
         dev.sigmoid_mul(s, att, gate.0, &gated, rows * w, w, (gate.1, gate.2));
         let o = dev.linear_new(s, out, &gated, rows);
-        dev.zc_norm_axpy(s, scalar, &o, post, rows, self.cfg.dim as u32, y);
+        dev.zc_norm_axpy_norm(s, scalar, &o, post, next_norm, rows, self.cfg.dim as u32, y)
     }
 
     /// Greedy generation for a batch of sequences, one per memory, sharing the step loop.

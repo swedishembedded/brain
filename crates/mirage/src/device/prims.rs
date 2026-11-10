@@ -364,7 +364,8 @@ impl Device {
         self.push(s, "mirage_row_write", &[src, hist, pos], &[rows, w, maxt], rows * w);
     }
 
-    /// Rotary embedding of position `pos` on `rows` head vectors of width `hd`.
+    /// Rotary embedding of position `pos` on `rows` head vectors of width `hd` (the decoder step runs the norm and
+    /// this rotation as [`Device::zc_norm_rope`]; this is the unfused form the fused kernel is gated against).
     pub fn rope_pos(&self, s: &mut Vec<Step>, t: &DeviceBuffer, pos: &DeviceBuffer, rows: u32, hd: u32, base: f32) {
         self.push(s, "mirage_rope_pos", &[t, pos], &[rows, hd, base.to_bits()], rows * (hd / 2));
     }

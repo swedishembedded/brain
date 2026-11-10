@@ -344,6 +344,50 @@ fn the_fused_decode_attention_equals_the_three_kernel_path_for_every_plan_shape(
 }
 
 #[test]
+fn the_fused_head_norm_and_rotary_equals_the_norm_then_the_rotation() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("rms_rope") else { return };
+    // Head rows of the decoder's width (48) and one that is not a multiple of the workgroup half, at a mid position.
+    for (rows, hd) in [(8usize, 48usize), (3, 10)] {
+        let (x, scale) = (noise(rows * hd, 34, 2.0), noise(hd, 35, 0.3));
+        let (xd, wd) = (upload(&dev, &x), dev.norm_weight(&scale));
+        let pos = dev.gpu().storage(1);
+        dev.gpu().write(&pos, &[150u32]);
+        let mut s = Vec::new();
+        let want_buf = dev.zc_new(&mut s, &xd, &wd, rows as u32, hd as u32);
+        dev.rope_pos(&mut s, &want_buf, &pos, rows as u32, hd as u32, 10000.0);
+        let want = run(&dev, &s, &want_buf, rows * hd);
+        let got_buf = dev.gpu().storage((rows * hd) as u64);
+        let mut s = Vec::new();
+        dev.zc_norm_rope(&mut s, &xd, &wd, &pos, rows as u32, hd as u32, 10000.0, &got_buf);
+        assert_stage(&format!("rms_rope {hd}"), &run(&dev, &s, &got_buf, rows * hd), &want);
+    }
+}
+
+#[test]
+fn the_fused_residual_update_and_next_norm_equals_the_two_dispatches() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("rms_axpy_norm") else { return };
+    // The decoder's width, a tail width, and a branch much larger than the residual (the cross term dominates).
+    for (rows, d, branch_scale) in [(3usize, 512usize, 1.0f32), (5, 150, 1.0), (2, 512, 40.0)] {
+        let (x, y) = (noise(rows * d, 36, branch_scale), noise(rows * d, 37, 1.0));
+        let (w1, w2) = (dev.norm_weight(&noise(d, 38, 0.3)), dev.norm_weight(&noise(d, 39, 0.3)));
+        let xd = upload(&dev, &x);
+        let want_y = upload(&dev, &y);
+        let mut s = Vec::new();
+        dev.zc_norm_axpy(&mut s, 0.37, &xd, &w1, rows as u32, d as u32, &want_y);
+        let want_h = dev.zc_new(&mut s, &want_y, &w2, rows as u32, d as u32);
+        let want = run(&dev, &s, &want_h, rows * d);
+        let want_updated = run(&dev, &[], &want_y, rows * d);
+        let got_y = upload(&dev, &y);
+        let mut s = Vec::new();
+        let got_h = dev.zc_norm_axpy_norm(&mut s, 0.37, &xd, &w1, &w2, rows as u32, d as u32, &got_y);
+        assert_stage(&format!("rms_axpy_norm h {d}"), &run(&dev, &s, &got_h, rows * d), &want);
+        assert_stage(&format!("rms_axpy_norm y {d}"), &run(&dev, &[], &got_y, rows * d), &want_updated);
+    }
+}
+
+#[test]
 fn the_fused_norm_and_residual_add_equals_the_norm_then_the_add() {
     let _g = gpu_core::testgpu::exclusive();
     let Some(dev) = device("rms_axpy") else { return };

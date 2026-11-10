@@ -35,6 +35,8 @@ use crate::vision::ops::{Linear, NORM_EPS};
 const OWN_KERNELS: &[(&str, &str)] = &[
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("mirage_rms_axpy", kernels::MIRAGE_RMS_AXPY),
+    ("mirage_rms_axpy_norm", kernels::MIRAGE_RMS_AXPY_NORM),
+    ("mirage_rms_rope", kernels::MIRAGE_RMS_ROPE),
     ("hconv_glu", kernels::HCONV_GLU),
     ("mirage_conv2d", kernels::MIRAGE_CONV2D),
     ("mirage_dwconv", kernels::MIRAGE_DWCONV),
@@ -263,6 +265,21 @@ impl Device {
     /// `y += scale * zc_norm(x)` row by row, one dispatch (the norm and the residual add of a gated branch).
     pub fn zc_norm_axpy(&self, s: &mut Vec<Step>, scale: f32, x: &DeviceBuffer, weight: &DeviceBuffer, rows: u32, d: u32, y: &DeviceBuffer) {
         s.push(self.gpu().dispatch(self.k("mirage_rms_axpy"), &[x, weight, y], &[d, rows, NORM_EPS.to_bits(), scale.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
+    }
+
+    /// [`Device::zc_norm_axpy`] and then `zc_norm(y)` into a new buffer, in one dispatch: `y += scale * zc_norm(x, w1)`,
+    /// returns `zc_norm(y, w2)` of the updated rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn zc_norm_axpy_norm(&self, s: &mut Vec<Step>, scale: f32, x: &DeviceBuffer, w1: &DeviceBuffer, w2: &DeviceBuffer, rows: u32, d: u32, y: &DeviceBuffer) -> DeviceBuffer {
+        let h = self.alloc((rows * d) as usize);
+        s.push(self.gpu().dispatch(self.k("mirage_rms_axpy_norm"), &[x, w1, y, w2, &h], &[d, rows, NORM_EPS.to_bits(), scale.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
+        h
+    }
+
+    /// `rope(zc_norm(x))` per head row in one dispatch, at the position held in `pos` (see [`Device::rope_pos`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn zc_norm_rope(&self, s: &mut Vec<Step>, x: &DeviceBuffer, weight: &DeviceBuffer, pos: &DeviceBuffer, rows: u32, hd: u32, base: f32, y: &DeviceBuffer) {
+        s.push(self.gpu().dispatch(self.k("mirage_rms_rope"), &[x, weight, pos, y], &[hd, rows, NORM_EPS.to_bits(), base.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
     }
 
     /// The gated product of HConvGLU from a fused `[rows, 2n]` projection.
