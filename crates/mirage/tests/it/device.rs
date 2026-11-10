@@ -273,6 +273,25 @@ fn global_response_norm_matches_the_host_block_tail() {
 }
 
 #[test]
+fn the_fused_norm_and_residual_add_equals_the_norm_then_the_add() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("rms_axpy") else { return };
+    // A width that is not a multiple of the workgroup (tails) and a zero-centred weight.
+    let (rows, d) = (5usize, 150usize);
+    let (x, y, scale) = (noise(rows * d, 31, 2.0), noise(rows * d, 32, 1.0), noise(d, 33, 0.3));
+    let (xd, wd) = (upload(&dev, &x), dev.norm_weight(&scale));
+    let mut s = Vec::new();
+    let normed = dev.zc_new(&mut s, &xd, &wd, rows as u32, d as u32);
+    let want_acc = upload(&dev, &y);
+    dev.axpy(&mut s, 0.37, &normed, &want_acc, (rows * d) as u32);
+    let want = run(&dev, &s, &want_acc, rows * d);
+    let got_acc = upload(&dev, &y);
+    let mut s = Vec::new();
+    dev.zc_norm_axpy(&mut s, 0.37, &xd, &wd, rows as u32, d as u32, &got_acc);
+    assert_stage("rms_axpy", &run(&dev, &s, &got_acc, rows * d), &want);
+}
+
+#[test]
 fn attention_and_rope_match_the_host_formulas() {
     use mirage::device::prims::AttnShape;
     let _g = gpu_core::testgpu::exclusive();

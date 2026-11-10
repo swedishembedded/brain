@@ -418,8 +418,7 @@ impl DeviceDecoder {
         let gated = dev.alloc((rows * w) as usize);
         dev.sigmoid_mul(s, att, gate.0, &gated, rows * w, w, (gate.1, gate.2));
         let o = dev.linear_new(s, out, &gated, rows);
-        let on = dev.zc_new(s, &o, post, rows, self.cfg.dim as u32);
-        dev.axpy(s, scalar, &on, y, rows * self.cfg.dim as u32);
+        dev.zc_norm_axpy(s, scalar, &o, post, rows, self.cfg.dim as u32, y);
     }
 
     /// Greedy generation for a batch of sequences, one per memory, sharing the step loop.

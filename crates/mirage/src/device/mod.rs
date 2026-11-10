@@ -34,6 +34,7 @@ use crate::vision::ops::{Linear, NORM_EPS};
 /// Kernels Mirage dispatches by name that the shared list may not carry.
 const OWN_KERNELS: &[(&str, &str)] = &[
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    ("mirage_rms_axpy", kernels::MIRAGE_RMS_AXPY),
     ("hconv_glu", kernels::HCONV_GLU),
     ("mirage_conv2d", kernels::MIRAGE_CONV2D),
     ("mirage_dwconv", kernels::MIRAGE_DWCONV),
@@ -254,6 +255,11 @@ impl Device {
     /// `(1 + scale)`-weighted RMS norm over rows of width `d`: `weight` is `1 + scale`.
     pub fn zc_norm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, weight: &DeviceBuffer, rows: u32, d: u32, y: &DeviceBuffer) {
         s.push(self.gpu().dispatch(self.k("rmsnorm_rows"), &[x, weight, y], &[d, rows, NORM_EPS.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
+    }
+
+    /// `y += scale * zc_norm(x)` row by row, one dispatch (the norm and the residual add of a gated branch).
+    pub fn zc_norm_axpy(&self, s: &mut Vec<Step>, scale: f32, x: &DeviceBuffer, weight: &DeviceBuffer, rows: u32, d: u32, y: &DeviceBuffer) {
+        s.push(self.gpu().dispatch(self.k("mirage_rms_axpy"), &[x, weight, y], &[d, rows, NORM_EPS.to_bits(), scale.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
     }
 
     /// The gated product of HConvGLU from a fused `[rows, 2n]` projection.
