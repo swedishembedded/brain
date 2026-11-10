@@ -552,8 +552,8 @@ impl BiSeNet {
     }
 
     /// Run on a `[1,3,input_size,input_size]` CHW `[0,1]` blob, IMAGENET-
-    /// normalized by the CALLER (`crate::preprocess`'s job, not this one -
-    /// this crate is the network only). Returns the `[num_class,
+    /// normalized by the CALLER ([`imagenet_normalize`] does it; this method
+    /// is the network only). Returns the `[num_class,
     /// input_size, input_size]` class-logit map, upsampled bilinear
     /// (`align_corners=true`, matching the reference) from the network's
     /// native 1/8 resolution.

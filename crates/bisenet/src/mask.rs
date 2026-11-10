@@ -19,7 +19,7 @@
 //! host-side, matching this workspace's convention for exactly this kind of
 //! infrequent postprocessing (NMS, etc).
 
-/// The 19 BiSeNet classes upstream treats as "not face" for this mask -
+/// The BiSeNet classes (8 of the 19) upstream treats as "not face" for this mask -
 /// background (0) plus hat/neck/necklace/cloth/earring/ear-adjacent classes.
 /// The exact list, not a semantic re-derivation of it.
 pub const BG_LABELS: [u32; 8] = [0, 16, 18, 7, 8, 9, 14, 15];
@@ -42,9 +42,9 @@ pub fn whiten_and_gray(logits: &[f32], orig: &[f32], h: u32, w: u32) -> Vec<f32>
 
     let mut out = vec![0.0f32; 3 * hw];
     for p in 0..hw {
-        let cls = (0..n_class as u32)
-            .max_by(|&a, &b| logits[a as usize * hw + p].total_cmp(&logits[b as usize * hw + p]))
-            .expect("n_class > 0");
+        // The first maximal class, as torch's argmax: `max_by` would keep the last.
+        let score = |c: u32| logits[c as usize * hw + p];
+        let cls = (1..n_class as u32).fold(0, |best, c| if score(c).total_cmp(&score(best)).is_gt() { c } else { best });
         if BG_LABELS.contains(&cls) {
             out[p] = 1.0;
             out[hw + p] = 1.0;
@@ -58,4 +58,20 @@ pub fn whiten_and_gray(logits: &[f32], orig: &[f32], h: u32, w: u32) -> Vec<f32>
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// torch's argmax returns the FIRST maximal class, so a pixel tied
+    /// between face skin (1) and cloth (18) is face, and gray.
+    #[test]
+    fn a_tied_pixel_takes_the_first_class_like_the_reference() {
+        let mut logits = vec![0.0f32; 19];
+        logits[1] = 1.0;
+        logits[18] = 1.0;
+        let out = whiten_and_gray(&logits, &[1.0, 0.0, 0.0], 1, 1);
+        assert_eq!(out, vec![0.299; 3]);
+    }
 }

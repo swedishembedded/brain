@@ -49,7 +49,7 @@ pub struct ScrfdConfig {
     /// Head stem width (80) and its depth (3 convs).
     pub head_channels: u32,
     pub head_depth: u32,
-    /// Output strides, coarse-to-fine order as the graph emits them.
+    /// Output strides, fine to coarse (8, 16, 32), the order the graph emits them.
     pub strides: [u32; 3],
     /// Anchors per location (2).
     pub num_anchors: u32,
