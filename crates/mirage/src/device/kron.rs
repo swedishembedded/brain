@@ -20,9 +20,8 @@ pub struct Kron {
     fb: u32,
     b: DeviceBuffer,
     a: DeviceBuffer,
-    pre: DeviceBuffer,
-    perm: DeviceBuffer,
-    post: DeviceBuffer,
+    /// `[pre | perm | post]`, `fa * fb` values each (one binding for the three vectors).
+    aux: DeviceBuffer,
 }
 
 /// The parameters of a [`Kron`], host side. `None` means the identity (scale of one, identity permutation).
@@ -56,15 +55,8 @@ impl Kron {
         // Permutation entries ride in f32 words; they are exact below 2^24.
         assert!(perm.len() == n && perm.iter().all(|&v| (v as usize) < n), "a permutation of 0..{n}");
         let up = |name: &str, v: &[f32]| dev.param_buffer(name, v);
-        Kron {
-            fa: fa as u32,
-            fb: fb as u32,
-            b: up("kron_b", p.b),
-            a: up("kron_a", p.a),
-            pre: up("kron_pre", p.pre.unwrap_or(&ones)),
-            perm: up("kron_perm", &perm),
-            post: up("kron_post", p.post.unwrap_or(&ones)),
-        }
+        let aux = [p.pre.unwrap_or(&ones), &perm, p.post.unwrap_or(&ones)].concat();
+        Kron { fa: fa as u32, fb: fb as u32, b: up("kron_b", p.b), a: up("kron_a", p.a), aux: up("kron_aux", &aux) }
     }
 
     /// The normalised sequency Walsh transform of rows of width `n` (a power of two).
@@ -93,8 +85,16 @@ impl Kron {
 impl Device {
     /// Append the transform of `rows` rows of `x` into `out` (added to `out` when `acc`).
     pub fn kron(&self, s: &mut Vec<Step>, k: &Kron, x: &DeviceBuffer, rows: u32, out: &DeviceBuffer, acc: bool) {
-        let bufs = [x, &k.b, &k.a, &k.pre, &k.perm, &k.post, out];
+        let bufs = [x, &k.b, &k.a, &k.aux, out];
         s.push(self.gpu().dispatch(self.k("mirage_kron_rows"), &bufs, &[rows, k.fa, k.fb, u32::from(acc)], gpu_core::Dispatch::Workgroups(rows)));
+    }
+
+    /// [`Device::kron`] fused with the Hadamard-MLP middle stage (`mirage_hada_mid`): `out = silu(d2 * (1 +
+    /// softmax(logits) . cond_u) * K(x) + b2)`, with `logits` `[rows, rank]` and `hp = [cond_u | d2 | b2]`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn kron_hada(&self, s: &mut Vec<Step>, k: &Kron, x: &DeviceBuffer, rows: u32, (logits, hp): (&DeviceBuffer, &DeviceBuffer), rank: u32, out: &DeviceBuffer) {
+        let bufs = [x, &k.b, &k.a, &k.aux, logits, hp, out];
+        s.push(self.gpu().dispatch(self.k("mirage_kron_hada"), &bufs, &[rows, k.fa, k.fb, rank], gpu_core::Dispatch::Workgroups(rows)));
     }
 
     /// Gate stage of HConvGLU on tap-major bands.

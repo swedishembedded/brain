@@ -73,6 +73,7 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_band_cols", kernels::MIRAGE_BAND_COLS),
     ("mirage_hconv_band_glu", kernels::MIRAGE_HCONV_BAND_GLU),
     ("mirage_kron_rows", kernels::MIRAGE_KRON_ROWS),
+    ("mirage_kron_hada", kernels::MIRAGE_KRON_HADA),
     ("mirage_cq_gather", kernels::MIRAGE_CQ_GATHER),
     ("argmax_row", kernels::ARGMAX_ROW),
     ("mirage_argmax_wg", kernels::MIRAGE_ARGMAX_WG),

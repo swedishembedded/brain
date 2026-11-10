@@ -273,6 +273,36 @@ fn global_response_norm_matches_the_host_block_tail() {
 }
 
 #[test]
+fn the_fused_rotation_and_conditioning_equals_the_rotation_then_the_middle_stage() {
+    use mirage::device::kron::KronParams;
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("kron_hada") else { return };
+    // 16 x 32 factors as the decoder's MLP, a non-trivial input scale and permutation, and three rows.
+    let (fa, fb, rank, rows) = (16usize, 32usize, 8usize, 3usize);
+    let n = fa * fb;
+    let (a, b) = (noise(fa * fa, 41, 0.3), noise(fb * fb, 42, 0.3));
+    let pre = noise(n, 43, 1.0);
+    let perm: Vec<u32> = (0..n as u32).map(|i| (i * 7 + 3) % n as u32).collect();
+    let post = noise(n, 44, 1.0);
+    let k = Kron::upload(&dev, (fa, fb), &KronParams { a: &a, b: &b, pre: Some(&pre), perm: Some(&perm), post: Some(&post) });
+    let (x, logits) = (noise(rows * n, 45, 1.0), noise(rows * rank, 46, 2.0));
+    let (cond_u, d2, b2) = (noise(rank * n, 47, 0.5), noise(n, 48, 1.0), noise(n, 49, 0.5));
+    let (xd, ld) = (upload(&dev, &x), upload(&dev, &logits));
+    let (cu, d2d, b2d) = (upload(&dev, &cond_u), upload(&dev, &d2), upload(&dev, &b2));
+    let z0 = dev.gpu().storage((rows * n) as u64);
+    let want_out = dev.gpu().storage((rows * n) as u64);
+    let mut s = Vec::new();
+    dev.kron(&mut s, &k, &xd, rows as u32, &z0, false);
+    dev.hada_mid(&mut s, (&ld, rank as u32, 0), (&z0, n as u32, 0), &cu, (&d2d, &b2d), &want_out, (rows as u32, n as u32, rank as u32));
+    let want = run(&dev, &s, &want_out, rows * n);
+    let hp = upload(&dev, &[cond_u.as_slice(), &d2, &b2].concat());
+    let got_out = dev.gpu().storage((rows * n) as u64);
+    let mut s = Vec::new();
+    dev.kron_hada(&mut s, &k, &xd, rows as u32, (&ld, &hp), rank as u32, &got_out);
+    assert_stage("kron_hada", &run(&dev, &s, &got_out, rows * n), &want);
+}
+
+#[test]
 fn the_fused_norm_and_residual_add_equals_the_norm_then_the_add() {
     let _g = gpu_core::testgpu::exclusive();
     let Some(dev) = device("rms_axpy") else { return };

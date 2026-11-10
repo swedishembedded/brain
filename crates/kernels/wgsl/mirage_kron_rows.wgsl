@@ -15,6 +15,8 @@
 // The sequency Walsh transform (a and b the +-1 Sylvester factors, perm the bit-reversed Gray code, post = 1/sqrt(n))
 // and the Hadamard MLP rotations (learned factors, learned permutations and diagonals) are this one operator, so the
 // banded convolutions and the rotations no longer need an n x n matrix per layer. fa * fb <= 1024.
+// aux: [pre | perm | post], each n = fa * fb values (permutation entries ride in f32 words, exact below 2^24); one buffer
+// keeps the binding count of the fused variants (mirage_kron_hada) inside the 8-storage-buffer budget.
 // Params: rows, fa, fb, acc (nonzero: add to out instead of storing). Dispatch: one workgroup per row.
 
 struct Params { rows: u32, fa: u32, fb: u32, acc: u32 };
@@ -22,10 +24,8 @@ struct Params { rows: u32, fa: u32, fb: u32, acc: u32 };
 @group(0) @binding(1) var<storage, read>       x:    array<f32>;
 @group(0) @binding(2) var<storage, read>       b:    array<f32>;
 @group(0) @binding(3) var<storage, read>       a:    array<f32>;
-@group(0) @binding(4) var<storage, read>       pre:  array<f32>;
-@group(0) @binding(5) var<storage, read>       perm: array<f32>;
-@group(0) @binding(6) var<storage, read>       post: array<f32>;
-@group(0) @binding(7) var<storage, read_write> out:  array<f32>;
+@group(0) @binding(4) var<storage, read>       aux:  array<f32>;
+@group(0) @binding(5) var<storage, read_write> out:  array<f32>;
 
 var<workgroup> t: array<f32, 1024>;
 
@@ -40,20 +40,20 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         let l = e % p.fb;
         var s = 0.0;
         for (var j = 0u; j < p.fb; j = j + 1u) {
-            s = s + b[j * p.fb + l] * pre[i * p.fb + j] * x[row * n + i * p.fb + j];
+            s = s + b[j * p.fb + l] * aux[i * p.fb + j] * x[row * n + i * p.fb + j];
         }
         t[e] = s;
     }
     workgroupBarrier();
     for (var e = li.x; e < n; e = e + 512u) {
-        let src = u32(perm[e]);
+        let src = u32(aux[n + e]);
         let k = src / p.fb;
         let l = src % p.fb;
         var s = 0.0;
         for (var i = 0u; i < p.fa; i = i + 1u) {
             s = s + a[i * p.fa + k] * t[i * p.fb + l];
         }
-        let v = s * post[e];
+        let v = s * aux[2u * n + e];
         if (p.acc != 0u) {
             out[row * n + e] = out[row * n + e] + v;
         } else {

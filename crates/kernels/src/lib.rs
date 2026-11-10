@@ -912,6 +912,8 @@ pub const MIRAGE_GRN_SCALE: &str = include_str!("../wgsl/mirage_grn_scale.wgsl")
 pub const MIRAGE_HADA_MID: &str = include_str!("../wgsl/mirage_hada_mid.wgsl");
 /// `wgsl/mirage_hconv_band_glu.wgsl`
 pub const MIRAGE_HCONV_BAND_GLU: &str = include_str!("../wgsl/mirage_hconv_band_glu.wgsl");
+/// `wgsl/mirage_kron_hada.wgsl`
+pub const MIRAGE_KRON_HADA: &str = include_str!("../wgsl/mirage_kron_hada.wgsl");
 /// `wgsl/mirage_kron_rows.wgsl`
 pub const MIRAGE_KRON_ROWS: &str = include_str!("../wgsl/mirage_kron_rows.wgsl");
 /// `wgsl/mirage_lane_mean.wgsl`
@@ -2068,6 +2070,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_grn_scale", MIRAGE_GRN_SCALE),
     ("mirage_hada_mid", MIRAGE_HADA_MID),
     ("mirage_hconv_band_glu", MIRAGE_HCONV_BAND_GLU),
+    ("mirage_kron_hada", MIRAGE_KRON_HADA),
     ("mirage_kron_rows", MIRAGE_KRON_ROWS),
     ("mirage_lane_mean", MIRAGE_LANE_MEAN),
     ("mirage_mean_h", MIRAGE_MEAN_H),
