@@ -15,6 +15,9 @@ use gpu_core::provider::parity::{assert_provider_parity, ParityCase, Tolerance};
 use gpu_core::provider::{LowerCtx, Operand, OpRequest, OperatorProvider, Pass, Role};
 use gpu_core::Gpu;
 
+/// The kernel every device here starts with; the f16 one is added only where it compiles.
+static BASE: [(&str, &str); 1] = [("matmul", kernels::MATMUL)];
+
 fn kernels() -> [(&'static str, &'static str); 2] {
     [("matmul", kernels::MATMUL), gpu_core::provider::native_f16::kernel()]
 }
@@ -25,11 +28,15 @@ fn kernels() -> [(&'static str, &'static str); 2] {
 /// be a hard device-fault panic, not a graceful skip (see
 /// `backend_api::Backend::supports_native_f16`'s own doc comment).
 fn device() -> Option<Gpu> {
-    let gpu = Gpu::new_gpu(&kernels());
-    if !gpu.supports_native_f16() {
+    // A device compiles every kernel it is built with, so the f16 one is only
+    // added once the adapter has said it takes `enable f16;`.
+    // The binary's shared device (built one at a time under the pool's lock):
+    // three of these tests building their own at once hung wgpu's device creation.
+    let probe = gpu_core::testgpu::dev(&BASE);
+    if !probe.supports_native_f16() {
         return None;
     }
-    Some(gpu)
+    Some(probe.new_like(&kernels()))
 }
 
 fn bind(_v: backend_api::select::KernelVariant) -> (usize, &'static str) {
