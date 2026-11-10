@@ -25,7 +25,7 @@
 pub struct RopeConfig {
     /// Per-axis dims; must sum to `head_dim`. Z-Image: `[32,48,48]`.
     pub axes_dims: Vec<u32>,
-    /// Per-axis max position (table length). Z-Image: `[1024,512,512]`.
+    /// Per-axis max position (table length). Z-Image: `[1536,512,512]`.
     pub axes_lens: Vec<u32>,
     /// RoPE base. Z-Image: `256.0`.
     pub theta: f64,

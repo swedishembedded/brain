@@ -863,12 +863,6 @@ impl Unet {
         self.sites
     }
 
-    /// Record the graph for a `h × w` latent and `t_enc` text tokens.
-    ///
-    /// `taps` records every stage output for the parity ladder; it pins buffers
-    /// and therefore disables the activation pool, so a production build passes
-    /// `false` (and `crates/sdxlunet/tests/it/parity.rs` gates the two against each
-    /// other bit-for-bit).
     /// [`Unet::new`] recording the reverse-mode tape, for
     /// [`crate::train::UnetTrainer`]. No control residuals and no injection:
     /// the backward is gated against the plain graph. `activations` is what
@@ -893,23 +887,16 @@ impl Unet {
         &self.out
     }
 
+    /// Record the graph for a `h × w` latent and `t_enc` text tokens.
+    ///
+    /// `taps` records every stage output for the parity ladder; it pins buffers
+    /// and therefore disables the activation pool, so a production build passes
+    /// `false` (and `crates/sdxlunet/tests/it/parity.rs` gates the two against each
+    /// other bit-for-bit).
     pub fn new(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32, taps: bool) -> Unet {
         Unet::new_controlled(gpu, cfg, tensors, h, w, t_enc, taps, false)
     }
 
-    /// [`Unet::new`], plus (when `control`) a set of device inputs the graph
-    /// adds as **control residuals** — the consumer half of the ControlNet
-    /// seam. One buffer per entry of [`UNetConfig::skip_stack`], plus one for
-    /// the mid block, in that order; write them with [`Unet::run_with_control`]
-    /// and read their shapes from [`Unet::control_shapes`].
-    ///
-    /// The residual is added to the SKIP COPY, not to the running hidden state
-    /// — diffusers adds it to `down_block_res_samples`, which only the up path
-    /// consumes. Adding it to `hh` as well would double-count it through the
-    /// next down block, and every shape still matches, so nothing would fail.
-    /// The mid residual *is* added to the running state, because there the
-    /// residual list and the hidden state are the same tensor.
-    #[allow(clippy::too_many_arguments)]
     /// [`Unet::new_controlled`], plus an adapter that contributes an extra term
     /// to every cross-attention context.
     ///
@@ -950,6 +937,18 @@ impl Unet {
         Unet::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control, Some(inject), None, None)
     }
 
+    /// [`Unet::new`], plus (when `control`) a set of device inputs the graph
+    /// adds as **control residuals** - the consumer half of the ControlNet
+    /// seam. One buffer per entry of [`UNetConfig::skip_stack`], plus one for
+    /// the mid block, in that order; write them with [`Unet::run_with_control`]
+    /// and read their shapes from [`Unet::control_shapes`].
+    ///
+    /// The residual is added to the SKIP COPY, not to the running hidden state
+    /// - diffusers adds it to `down_block_res_samples`, which only the up path
+    /// consumes. Adding it to `hh` as well would double-count it through the
+    /// next down block, and every shape still matches, so nothing would fail.
+    /// The mid residual *is* added to the running state, because there the
+    /// residual list and the hidden state are the same tensor.
     pub fn new_controlled(
         gpu: Gpu,
         cfg: UNetConfig,

@@ -441,7 +441,7 @@ mod tests {
     /// The SDXL manifest must be exactly the released checkpoint's tensor
     /// count once the three fusions are accounted for:
     ///   1680 source
-    ///     - 2 per fused attn1 qkv (3 -> 1)   : 61 transformers x layers
+    ///     - 2 per fused attn1 qkv (3 -> 1)   : one per transformer block (70)
     ///     - 1 per fused attn2 kv  (2 -> 1)
     ///     + 2 per split GEGLU proj (1 -> 2 weights, 1 -> 2 biases)
     #[test]

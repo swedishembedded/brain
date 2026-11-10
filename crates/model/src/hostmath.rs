@@ -274,7 +274,8 @@ pub fn dsilu(x: f32) -> f32 {
 /// are here — rather than in a per-model copy — because they are the whole
 /// reason a second copy was written:
 ///
-/// * `flip_sin_to_cos` swaps the halves to `[sin ‖ cos]`. Not cosmetic: a UNet
+/// * `flip_sin_to_cos` chooses the half order: `true` is `[cos ‖ sin]`,
+///   `false` is `[sin ‖ cos]`. Not cosmetic: a UNet
 ///   whose `time_embedding` weights were trained against `[cos ‖ sin]` sees a
 ///   systematic error on **every** timestep and produces plausible-looking
 ///   noise rather than an obvious failure.
