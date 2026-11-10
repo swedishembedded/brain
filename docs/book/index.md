@@ -133,4 +133,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 5. [Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md): How does a network label every pixel or estimate how far away it is?
 6. [Vision Transformers](v07-vision/06-vision-transformers.md): Can attention replace convolution for images?
 7. [Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md): How can one model segment any object you point at, and follow it through a video?
+8. [Contrastive Vision-Language Learning](v07-vision/08-clip.md): How can images and texts be placed in one space where matching pairs land close together?
 <!-- /contents -->

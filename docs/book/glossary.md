@@ -176,6 +176,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **contrastive loss**: a loss that trains vectors by comparison: for each anchor it is the softmax cross-entropy, at a temperature, over the cosines of the anchor to its partner and to the partners of the other pairs of the batch (the in-batch negatives), which raises the cosine of the pair and lowers the others. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
 
+**contrastive pretraining**: training two networks, here one for pictures and one for captions, so that the vectors they write into a shared space are close for the two members of a pair and far for the members of different pairs, with the other pairs of the batch as the negatives. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*
+
 **controlled experiment**: a comparison in which the two arms differ only in the thing the claim is about, with the data, recipe, seeds, compute, tuning effort and metric held the same, so that a difference can be attributed to that thing. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
 **convergence**: the approach of the iterates to the minimiser and of the loss to its minimum; for a quadratic loss it is geometric, with a speed set by the learning rate and the condition number. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
@@ -415,6 +417,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **independence**: the property that $P(A \cap B) = P(A)P(B)$, so that knowing one event tells nothing about the other; it is not the same as being unable to occur together. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 **inference memory formula**: the sum that bounds what a loaded model holds: the weights at their bytes per parameter, the cache summed over layers with each layer's window, the scratch of one forward pass over a chunk of rows, and an overhead for the allocator and the driver. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
+
+**InfoNCE**: the loss that scores each positive pair by a softmax cross-entropy against the negatives of the batch, written here in its symmetric form (rows and columns of the matrix of cosines times a logit scale), which also lower-bounds the shared information by the logarithm of the batch size minus the loss. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*
 
 **information content**: the surprise of an event, $-\log_2 p$ bits (or $-\ln p$ nats) for an event of probability $p$, the only measure for which certain events carry zero, rarer events carry more and independent events add. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
@@ -659,6 +663,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **per-kernel profile**: the table that divides the time of a pass among its dispatches or kernel kinds, with each row's counted FLOPs and bytes, device time, share of the pass and achieved fraction of the device's measured roofline; it explains where the time goes and does not add up to the pass. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
 **perceptron**: a neuron with a step activation together with Rosenblatt's rule for learning its weights, which adds each misclassified example, signed by its label, to the weights and the bias and repeats over the data until a pass has no mistake. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
+
+**perceptual distance**: a distance between two pictures computed on the features of a pretrained network (channel-normalized at each position, differenced, squared, weighted per channel and averaged over positions and levels), which measures how different they look and need not agree with the pixel error. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*
 
 **perplexity**: the exponential of the cross-entropy, $\exp H(p, q)$ with natural logarithms, the number of equally likely choices that would give the same average surprise. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
@@ -1001,3 +1007,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## Y
 
 **YaRN**: a rope scaling that gives each frequency pair a rate between its original and its original divided by the extension factor, by the number of turns it makes over the trained length, and multiplies the cosine and sine of every pair by $0.1\ln s + 1$ to restore the sharpness of the softmax. *([Long Context](v06-language-models/08-long-context.md))*
+
+## Z
+
+**zero-shot classification**: assigning an input to the class whose caption vector is nearest, with the class vectors computed at the time of the question from sentences naming the classes (averaged over several templates), so that classes need no labelled examples and no trained weight of their own. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*

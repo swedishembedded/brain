@@ -24,7 +24,7 @@ You can say what the numbers of an image mean and convert between the layouts an
 5. [Dense Prediction: Segmentation and Depth](05-dense-prediction.md): how a network labels every pixel or estimates how far away it is.
 6. [Vision Transformers](06-vision-transformers.md): whether attention can replace convolution for images.
 7. [Promptable Segmentation and Video Tracking](07-segment-anything.md): how one model can segment any object you point at, and follow it through a video.
-8. Contrastive Vision-Language Learning: how images and texts can be placed in one space where matching pairs land close together.
+8. [Contrastive Vision-Language Learning](08-clip.md): how images and texts can be placed in one space where matching pairs land close together.
 9. Vision-Language Models: how to give a language model eyes.
 10. Reading Documents: how a model reads a page of text from pixels, and how few tokens a page can be squeezed into.
 11. Faces: Detection, Identity and Parsing: how a model finds faces and recognizes the same person across photos.

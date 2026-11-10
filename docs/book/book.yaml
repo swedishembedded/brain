@@ -611,7 +611,7 @@ volumes:
         title: "Contrastive Vision-Language Learning"
         question: "How can images and texts be placed in one space where matching pairs land close together?"
         introduces: [contrastive-pretraining, info-nce, zero-shot-classification, perceptual-distance]
-        requires: [contrastive-loss, vision-transformer, sentence-embedding, temperature]
+        requires: [contrastive-loss, vision-transformer, sentence-embedding, temperature, cosine-similarity, softmax-cross-entropy, binary-cross-entropy, log-sum-exp, gelu, gradient-check, adam, mean-squared-error, convolutional-network, pooling, byte-level-bpe, special-tokens]
         brain: [clip, lpips]
       - id: vlms
         title: "Vision-Language Models"

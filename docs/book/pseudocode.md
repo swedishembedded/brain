@@ -490,6 +490,8 @@ The vision-transformer chapter (Chapter 6) writes out `patchify`, `shift_labels`
 
 The promptable-segmentation chapter (Chapter 7) writes out `grow`, `fourier_encode`, `attend`, `two_way_layer` and `memory_slots` where they are first used. `layer_norm_rows(X)` is the LayerNorm of Volume III, Chapter 10 applied to every row of `X: [R, D]` with gain 1, offset 0 and epsilon 1e-5, and `softmax_rows` is the routine of the complete example at the end of this page. `W.sa.q` and its relatives are the fields of a record of weight matrices.
 
+The contrastive-learning chapter (Chapter 8) writes out `class_vectors`, `classify`, `sigmoid_loss` and `perceptual_distance` where they are first used. `encode_caption(template, name)` is the text tower of the chapter followed by its projection and the scaling to length 1, the vector of the caption made from a template and a class name; a picture's vector `u` is the output of the image tower scaled to length 1; and `a * dot(...)` is a scalar times a scalar. `F[l][:, r, c]` is the vector over the channel axis at position `(r, c)` of the array `F[l]` of shape `[C, H, W]`. The symmetric loss of that chapter is `infonce` of Volume V, Chapter 14 with the cosines multiplied by a logit scale `a` instead of divided by a temperature.
+
 ## Routines of the transformer chapters (Volume V)
 
 Chapters 9 to 12 use four routines of the normalization and attention chapters without writing them out again. Each is defined here by what it returns.
