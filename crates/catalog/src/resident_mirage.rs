@@ -68,9 +68,16 @@ impl MirageResident {
 
 /// Device bytes a served Mirage holds while hot: the weights, the dense matrices the mixers are folded into at
 /// upload, and the activations of a full batch.
-pub const DEVICE_BYTES: u64 = 3 << 30;
+///
+/// MEASURED on a CUDA card through the driver's per-process figure
+/// (`mirage`'s `dropping_the_session_releases_device_memory`): the process held 564 MiB with only the CUDA context
+/// and 948 MiB with the model loaded and a batch of 64 images described, so the model's own share is about 384 MiB;
+/// 1 GiB rounds that up with room for a longer decode.
+pub const DEVICE_BYTES: u64 = 1 << 30;
 
-/// Host bytes: the imported checkpoint, the decoder the form scoring runs on and the decoder-memory cache.
+/// Host bytes: the host copy of the model (the oracle operators and the decoder the form scoring runs on) and the
+/// decoder-memory cache (at most [`mirage::caps::MEMORY_CACHE_BYTES`]). MEASURED: the same process peaked at 1.26 GiB
+/// resident after a batch of 64, the test's own goldens included; 2 GiB leaves room for a full cache.
 pub const HOST_BYTES: u64 = 2 << 30;
 
 impl ResidentModel for MirageResident {

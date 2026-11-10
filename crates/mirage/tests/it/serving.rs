@@ -191,3 +191,77 @@ fn bad_requests_fail_alone_with_the_field_named() {
     let boxy = Invocation::new().blob("image", blob(&rgb, 480, 640)).set("form", json!(r#"{"b": {"type": "string", "format": "box"}}"#));
     assert!(session.run_batch("extract", &[boxy]).pop().unwrap().is_err());
 }
+
+/// Device memory this process holds, in MiB, as the driver reports it (`nvidia-smi` lists compute processes).
+fn process_device_mib() -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi").args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let pid = std::process::id().to_string();
+    text.lines().find_map(|l| {
+        let (p, mib) = l.split_once(',')?;
+        (p.trim() == pid).then(|| mib.trim().parse().ok()).flatten()
+    })
+}
+
+/// Dropping the session (what unloading an instance does) hands the weights and the batch buffers back to the card.
+/// Only on a CUDA device: the CPU backend's "device" memory is the host's.
+#[test]
+fn dropping_the_session_releases_device_memory() {
+    let Some(dir) = released_dir() else {
+        brain_testutil::skip("serving unload: the released checkpoint is absent");
+        return;
+    };
+    let Some((rgb, _, _)) = cats() else { return };
+    let _exclusive = gpu_core::testgpu::exclusive();
+    let context = gpu_core::Gpu::new(&Device::kernels());
+    if context.kind() != "cuda" || process_device_mib().is_none() && std::process::Command::new("nvidia-smi").output().is_err() {
+        brain_testutil::skip_unavailable("serving unload: needs the CUDA backend and nvidia-smi");
+        return;
+    }
+    let baseline = process_device_mib().unwrap_or(0);
+    let session = MirageSession::load(dir.to_str().unwrap(), gpu_core::Gpu::new(&Device::kernels())).expect("loads");
+    session.run_batch("describe", &[describe_inv(&rgb)]).pop().unwrap().expect("describes");
+    let held = process_device_mib().expect("this process uses the card");
+    // The footprint the scheduler budgets is a full batch: its activations come on top of the weights.
+    let full: Vec<Invocation> = (0..mirage::caps::MAX_BATCH).map(|_| describe_inv(&rgb)).collect();
+    session.run_batch("describe", &full).into_iter().for_each(|r| {
+        r.expect("describes");
+    });
+    let full_batch = process_device_mib().expect("this process uses the card");
+    eprintln!("device MiB: after a full batch of {} {full_batch}", mirage::caps::MAX_BATCH);
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    eprintln!("host: {}", status.lines().filter(|l| l.starts_with("VmRSS") || l.starts_with("VmHWM")).collect::<Vec<_>>().join(" | "));
+    drop(session);
+    let after = process_device_mib().unwrap_or(0);
+    eprintln!("device MiB: context only {baseline}, loaded and served {held}, after drop {after}");
+    assert!(held >= baseline + 200, "a served model holds device memory: {baseline} -> {held}");
+    assert!(after <= baseline + (held - baseline) / 4, "dropping the session returns its memory: held {held}, after {after}, baseline {baseline}");
+}
+
+/// Merging concurrent requests is faster than serving them one by one: on an accelerator the decoder step costs about
+/// the same for one sequence as for sixteen. (The CPU backend has no such headroom, so it is not asked.)
+#[test]
+fn a_merged_batch_is_faster_than_serving_the_same_requests_serially() {
+    let (Some(session), Some((rgb, _, _))) = (session(), cats()) else {
+        brain_testutil::skip("serving throughput: the released checkpoint or the cats golden is absent");
+        return;
+    };
+    let _exclusive = gpu_core::testgpu::exclusive();
+    if session.model().device().gpu().kind() != "cuda" {
+        brain_testutil::skip_unavailable("serving throughput: needs the CUDA backend");
+        return;
+    }
+    let invs: Vec<Invocation> = (0..16).map(|_| describe_inv(&rgb)).collect();
+    session.run_batch("describe", &invs[..1]).pop().unwrap().expect("warm-up");
+    let started = std::time::Instant::now();
+    let merged = session.run_batch("describe", &invs);
+    let merged_s = started.elapsed().as_secs_f64();
+    let started = std::time::Instant::now();
+    for inv in &invs {
+        session.run_batch("describe", std::slice::from_ref(inv)).pop().unwrap().expect("describes");
+    }
+    let serial_s = started.elapsed().as_secs_f64();
+    assert!(merged.iter().all(Result::is_ok));
+    eprintln!("16 requests: merged {merged_s:.2} s ({:.1} images/s), one by one {serial_s:.2} s ({:.1} images/s)", 16.0 / merged_s, 16.0 / serial_s);
+    assert!(merged_s < serial_s, "a merged batch of 16 takes {merged_s:.2} s, serving them one by one {serial_s:.2} s");
+}
