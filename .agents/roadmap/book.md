@@ -71,7 +71,12 @@ reproduced its worked examples from the text alone in another language.
       counts and schedules, chaotic training cells claimed stable, totals
       without shapes, and an offload ratio the prose got wrong). All were
       fixed in the following commits; a recheck has not been run.
-- [ ] Volume VII, Vision and Understanding Images: all 12 chapters written; reader pass pending.
+- [x] Volume VII, Vision and Understanding Images: all 12 chapters written.
+      Independent readers reproduced 1166 items in C from the page alone:
+      1007 passed, 131 after a guess, 28 failed (toy heads, initialisations
+      and sub-blocks given only as shapes, constants printed nowhere, and a
+      pseudocode routine behind its fixed prose). All were fixed in the
+      following commits; a recheck has not been run.
 
 ## Open
 
