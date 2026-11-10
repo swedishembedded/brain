@@ -540,6 +540,7 @@ dependencies = [
  "brain-lfm2",
  "brain-loader",
  "brain-minimaxmusic3",
+ "brain-mirage",
  "brain-model",
  "brain-modelopt",
  "brain-modelref",
@@ -6921,6 +6922,14 @@ version = "5.1.0"
 dependencies = [
  "brain",
  "rodio",
+]
+
+[[package]]
+name = "sample-vision-perception"
+version = "5.1.0"
+dependencies = [
+ "brain",
+ "serde_json",
 ]
 
 [[package]]

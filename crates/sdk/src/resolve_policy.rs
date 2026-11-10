@@ -66,15 +66,21 @@ fn fetch(reference: &brain_modelref::ModelRef, model_id: &str) -> Result<()> {
 ///   this variant, not a second one invented here.
 #[cfg(any(feature = "audio", feature = "image", feature = "multimodal", feature = "text", feature = "video", feature = "vision"))]
 pub(crate) fn resolve_with_policy(arch: &str, spec: &dyn ArchSpec, model_id: &str, overrides: &BTreeMap<String, String>, download_policy: loader::DownloadPolicy) -> Result<capability::Assembly> {
+    // The SDK takes no models-directory argument here, so the store is the
+    // resolver's documented default (`BRAIN_MODELS_DIR`, then XDG/HOME).
+    resolve_with_policy_in(loader::model_dir::resolve(None), arch, spec, model_id, overrides, download_policy)
+}
+
+/// [`resolve_with_policy`] against the store `models_dir` names (`None`: no store at all), for a builder that lets
+/// its caller choose the models directory instead of leaving it to the environment.
+#[cfg(any(feature = "audio", feature = "image", feature = "multimodal", feature = "text", feature = "video", feature = "vision"))]
+pub(crate) fn resolve_with_policy_in(models_dir: Option<std::path::PathBuf>, arch: &str, spec: &dyn ArchSpec, model_id: &str, overrides: &BTreeMap<String, String>, download_policy: loader::DownloadPolicy) -> Result<capability::Assembly> {
     let reference = brain_modelref::ModelRef::parse(model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
 
     if download_policy == loader::DownloadPolicy::AlwaysCheck {
         fetch(&reference, model_id)?;
     }
 
-    // The SDK takes no models-directory argument here, so the store is the
-    // resolver's documented default (`BRAIN_MODELS_DIR`, then XDG/HOME).
-    let models_dir = loader::model_dir::resolve(None);
     match loader::resolver::resolve_reference(models_dir.as_deref(), arch, spec, &reference, overrides).map_err(Error::Backend)? {
         Resolution::Resolved(a) => Ok(*a),
         Resolution::Ambiguous(a) => Err(Error::Ambiguous(a)),

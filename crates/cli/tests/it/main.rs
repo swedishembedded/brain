@@ -16,6 +16,7 @@ mod flops_help;
 mod flops_stage_model;
 mod forecast_finetune_timesfm3;
 mod lpips_cli;
+mod mirage_cli;
 mod model_ids;
 mod models_list;
 mod oos_skill_eval;

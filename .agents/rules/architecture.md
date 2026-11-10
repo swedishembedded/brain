@@ -79,7 +79,7 @@ layer 6 - serving, front ends, SDK, samples
     npu-rockchip, sample-reconstruction-splat, sample-study-chat, sample-study-document, sample-
     study-timeline, sample-text-chat-full-finetune, sample-text-embed, sample-text-embed-train,
     sample-text-encoder-finetune, sample-text-retrieve, sample-text-retrieve-json, sample-text-
-    spectral-lm, sample-tts-clone, server, serving, trainjob, web
+    spectral-lm, sample-tts-clone, sample-vision-perception, server, serving, trainjob, web
 ```
 <!-- crate-layers:end -->
 

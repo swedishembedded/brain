@@ -1,0 +1,18 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/vision/perception` -> `sample-vision-perception`.
+name = "sample-vision-perception"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: describe an image and extract a form from it with Mirage through the public brain SDK."
+publish = false
+
+[dependencies]
+# The only brain dependency: the SDK facade, naming the one surface it uses.
+brain = { workspace = true, features = ["vision"] }
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 41

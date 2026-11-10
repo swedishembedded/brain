@@ -184,6 +184,8 @@ ureq.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+# The SDK's perception pipeline, for the CLI-equals-SDK acceptance test.
+brain = { workspace = true, features = ["vision"] }
 # `testutil::skip` / `skip_unavailable` - the two skip helpers, so an
 # absent fixture can be made fatal and absent hardware cannot.
 brain-testutil.workspace = true
