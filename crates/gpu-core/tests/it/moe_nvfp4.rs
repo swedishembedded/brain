@@ -117,7 +117,7 @@ fn run_case(gpu: &Gpu, c: &Case, seed: u64) {
     gpu.write(&grouped, &vec![0x7fc0_dead; slots * n]);
     let (tab, perm) = route(gpu, &ids, ne as u32);
     let max_tiles = ne as u32 + (slots as u32).div_ceil(MR);
-    if gpu.kind() == "cuda" {
+    if crate::card::runs(gpu, "moe_nvfp4_grouped") {
         assert_eq!(
             gpu.native_kernel_for(
                 K_GROUPED,

@@ -232,6 +232,9 @@ fn the_native_fp8_gemv_matches_the_oracle_at_every_row_count_window_and_scale_la
     if !is_cuda(&gpu) || !gpu.caps().workgroup_reductions {
         return brain_testutil::skip_unavailable("the native stored-format GEMVs need a CUDA device");
     }
+    if !crate::card::runs(&gpu, "matmul_fp8_gemv") {
+        return brain_testutil::skip_unavailable("this card is below matmul_fp8_gemv's floor");
+    }
     let base = data::rng::random_seed();
     for (i, c) in [
         Fp8Case { m: 1, k: 2048, n: 300, first: 0, count: 300, block: 128 },
@@ -253,6 +256,9 @@ fn the_native_nvfp4_gemv_matches_the_oracle_at_every_row_count_and_window() {
     let gpu = gpu_core::testgpu::dev(kernel_list());
     if !is_cuda(&gpu) || !gpu.caps().workgroup_reductions {
         return brain_testutil::skip_unavailable("the native stored-format GEMVs need a CUDA device");
+    }
+    if !crate::card::runs(&gpu, "matmul_nvfp4_gemv") {
+        return brain_testutil::skip_unavailable("this card is below matmul_nvfp4_gemv's floor");
     }
     let base = data::rng::random_seed();
     for (i, c) in [
@@ -284,6 +290,9 @@ fn the_native_nvfp4_expert_gather_matches_the_oracle() {
     let gpu = gpu_core::testgpu::dev(kernel_list());
     if !is_cuda(&gpu) || !gpu.caps().workgroup_reductions {
         return brain_testutil::skip_unavailable("the native stored-format GEMVs need a CUDA device");
+    }
+    if !crate::card::runs(&gpu, "moe_nvfp4_gemv_gather") {
+        return brain_testutil::skip_unavailable("this card is below moe_nvfp4_gemv_gather's floor");
     }
     let base = data::rng::random_seed();
     for (i, &(slots, k, n, xdiv, experts)) in [(9usize, 2048usize, 64usize, 9usize, 17usize), (90, 2048, 36, 9, 17), (40, 512, 48, 1, 17), (37, 192, 6, 1, 5), (30, 576, 12, 2, 7), (1, 64, 1, 1, 1)].iter().enumerate() {

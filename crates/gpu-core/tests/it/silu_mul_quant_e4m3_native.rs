@@ -120,6 +120,10 @@ fn the_product_and_its_e4m3_rows_equal_the_pair_of_kernels_they_replace() {
         brain_testutil::skip_unavailable("not a CUDA device");
         return;
     }
+    if !crate::card::runs(&gpu, "silu_mul_quant_e4m3_128") {
+        brain_testutil::skip_unavailable("this card has no FP8 conversions: silu_mul_quant_e4m3_128 is not offered");
+        return;
+    }
     // The MLP width of the 27B model, a row count that is no multiple of a block's 8 groups, and a single row.
     for (rows, k) in [(1u32, 128u32), (3, 17408), (768, 17408), (130, 5120), (4096, 17408)] {
         let n = (rows * k) as usize;
@@ -138,6 +142,10 @@ fn the_halves_of_one_wide_product_read_in_place_equal_the_dense_pair() {
     let gpu = gpu_core::testgpu::dev(&[]);
     if !is_cuda(&gpu) {
         brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    if !crate::card::runs(&gpu, "silu_mul_quant_e4m3_128") {
+        brain_testutil::skip_unavailable("this card has no FP8 conversions: silu_mul_quant_e4m3_128 is not offered");
         return;
     }
     for (rows, k) in [(1u32, 128u32), (16, 17408), (17, 17408), (128, 17408), (9, 5120)] {
@@ -193,6 +201,10 @@ fn the_wide_product_forms_survive_back_to_back_launches() {
     let gpu = gpu_core::testgpu::dev(&[]);
     if !is_cuda(&gpu) {
         brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    if !crate::card::runs(&gpu, "silu_mul_quant_e4m3_128") {
+        brain_testutil::skip_unavailable("this card has no FP8 conversions: silu_mul_quant_e4m3_128 is not offered");
         return;
     }
     for rows in [17u32, 64, 128] {

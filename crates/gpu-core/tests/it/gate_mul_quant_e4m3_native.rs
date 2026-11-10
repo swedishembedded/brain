@@ -23,12 +23,6 @@ fn is_cuda(gpu: &Gpu) -> bool {
     gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some() && gpu_core::native_kernels_enabled()
 }
 
-/// Whether the card has the FP8 conversions the E4M3 kernels are built on
-/// (`kernels_cuda::FP8_CVT_MIN_CC`): no earlier card is offered them.
-fn has_fp8(gpu: &Gpu) -> bool {
-    gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= kernels_cuda::FP8_CVT_MIN_CC)
-}
-
 fn values(n: usize, seed: u64, spread: f32) -> Vec<f32> {
     let mut r = data::rng::Lcg::new(seed);
     (0..n)
@@ -89,7 +83,7 @@ fn the_gated_product_and_its_e4m3_rows_equal_the_chain_they_replace() {
         brain_testutil::skip_unavailable("not a CUDA device");
         return;
     }
-    if !has_fp8(&gpu) {
+    if !crate::card::fp8(&gpu) {
         brain_testutil::skip_unavailable("this card has no FP8 conversions: the E4M3 kernels are not offered");
         return;
     }

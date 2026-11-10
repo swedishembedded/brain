@@ -470,9 +470,14 @@ fn every_candidate_of_the_slot_agrees_with_the_wgsl_reference() {
         return;
     }
     let cc = gpu.caps().arch.compute_capability.unwrap_or((0, 0));
-    let mut candidates: Vec<String> = ["matmul_i8_gemv", "matmul_i8_gemv_wide", "matmul_i8_mma_m16", "matmul_i8_mma_m32"].map(String::from).to_vec();
-    // The weight-streaming candidates: a split of K over a cluster needs Hopper, the unsplit one needs cp.async.
-    candidates.extend(kernels_cuda::I8_STREAM_SPLITS.iter().flat_map(|s| ["s", "w"].map(|w| format!("matmul_i8_stream_{w}{s}"))).filter(|n| kernels_cuda::get(n).is_some_and(|k| k.min_cc <= cc)));
+    // Every candidate this card reaches: the wide and tensor-core builds need tensor-core int8 and cp.async, the
+    // weight-streaming ones cp.async, and a split of K over a cluster Hopper.
+    let candidates: Vec<String> = ["matmul_i8_gemv", "matmul_i8_gemv_wide", "matmul_i8_mma_m16", "matmul_i8_mma_m32"]
+        .map(String::from)
+        .into_iter()
+        .chain(kernels_cuda::I8_STREAM_SPLITS.iter().flat_map(|s| ["s", "w"].map(|w| format!("matmul_i8_stream_{w}{s}"))))
+        .filter(|n| kernels_cuda::get(n).is_some_and(|k| k.min_cc <= cc))
+        .collect();
     let mut served = std::collections::BTreeSet::new();
     for forced in &candidates {
         gpu_core::force_candidate("matmul_i8_gemv", forced);
