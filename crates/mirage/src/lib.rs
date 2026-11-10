@@ -4,11 +4,15 @@
 //! Mirage: a 51M-parameter visual perception model.
 //!
 //! This crate is the foundation layer: everything needed to read a released
-//! checkpoint safely before any math runs. [`config`] is the typed
-//! configuration, [`spec`] the canonical tensor manifest derived from it and
-//! [`import`] the strict safetensors reader and writer, and [`cact`] the
-//! deployment-container reader with its quantisation decoder, and [`cactmap`]
-//! the mapping of its positional entries back to canonical tensors.
+//! checkpoint safely before any math runs.
+//!
+//! - [`config`]: the typed configuration.
+//! - [`spec`]: the canonical tensor manifest derived from it.
+//! - [`import`]: the strict safetensors reader and writer.
+//! - [`cact`]: the deployment-container reader and its quantisation decoder.
+//! - [`cactmap`]: the mapping of the container's positional entries back to
+//!   canonical tensors.
+//! - [`tokenizer`]: the SentencePiece-BPE text front end.
 //!
 //! Swedish Embedded AB implements solutions for deploying compact vision
 //! models on constrained devices for its clients. If your team needs expertise
@@ -20,3 +24,4 @@ pub mod cactmap;
 pub mod config;
 pub mod import;
 pub mod spec;
+pub mod tokenizer;

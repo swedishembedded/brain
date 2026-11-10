@@ -25,6 +25,26 @@ goldens; nothing is transcribed from the vendor's source or engine.
 | `spec`: canonical manifest, 583 tensors / 54,078,804 parameters, training-only tensors marked | done |
 | `import`: header-first strict safetensors import (names, shapes, dtype, byte lengths, metadata), pinned SHA-256, `config.json` cross-check, exact export round trip | done |
 | `cact` / `cactmap`: bounds-checked `.cact` reader, CQ2/3/4 decoder with the packed form kept (`CqMatrix`), positional map derived from the config (806 entries for the released one), layout transforms, Hadamard permutations, vision manifest, charset, tokenizer blob | done |
+| `tokenizer`: SentencePiece-BPE blob parser, score-ordered merging (heap, `O(n log n)`), byte fallback, markers, decode; ids and decodes equal to the publisher's reference on a tracked golden of 24 multilingual strings (en de fr es it nl pl) | done |
+
+## Facts the foundation established
+
+- The released `.cact` has 806 entries: 159 two-bit and 4 four-bit CQ matrices
+  (the embedding and the three hyper-connection routing matrices are 4-bit), the
+  rest FP16/FP32, the two Hadamard permutations (entries 226 and 227, stored as
+  `f32` indices), a 36-value vision manifest, the 306-code-point OCR charset and
+  the tokenizer blob. Its order is derived from the config in `cactmap::layout`.
+- Quantised matrices are stored `[out, in]` and every other tensor keeps its
+  Flax orientation, whatever its dtype; the routing matrices are stored
+  `[layers * lanes, width]`.
+- The embedding has `text + 11 language tags + detections + regions` rows; the
+  tag count belongs to the tokenizer, not to `config.json`.
+- The Hadamard MLP factors (16 and 32 at width 512) follow from the width, and
+  its conditioning rank (8) and the engram tap count (4) are structural
+  constants; none of them is in `config.json`.
+- The released tokenizer adds no dummy prefix and has byte fallback.
+- Tracked goldens live beside the crate tests (`crates/mirage/tests/golden/`)
+  because `testdata/` is not tracked; the dumper is under `tools/goldens/`.
 
 ## Open lanes
 
