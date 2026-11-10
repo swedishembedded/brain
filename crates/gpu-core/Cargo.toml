@@ -81,6 +81,14 @@ name = "flash_vsa_native"
 harness = false
 
 [[test]]
+name = "urgent_lane"
+harness = false
+
+[[test]]
+name = "i8_gemv_native_leak"
+harness = false
+
+[[test]]
 name = "flash_bidir_native_bench"
 harness = false
 

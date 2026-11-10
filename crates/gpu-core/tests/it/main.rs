@@ -5,7 +5,7 @@
 //! file: each links the whole dependency tree, so a binary per file
 //! multiplied build time and disk for nothing. A test here must not change
 //! process-wide state (the current directory, environment variables): the
-//! others run beside it; `bn_native`, `ce_stats_native`, `conv2d_native`, `cuda_impl_policy`, `cuda_provider_matmul`, `cuda_provider_matmul_i8`, `elementwise_native`, `f32_reg_native`, `flash_attn_f16_native`, `flash_bidir_native`, `flash_bidir_native_bench`, `flash_gqa_kmask_native`, `gdn_bwd_sweep_native`, `gdn_chunk_fwd_tc`, `gdn_dscale_native`, `gdn_qk_bwd_native`, `gn_apply_native`, `i8_dyn_native`, `i8w_dx_native`, `perf_floor`, `plumb_native`, `rmsnorm_fused_native`, `softmax_rows_native`, `swiglu_bwd_native` keep binaries of their own.
+//! others run beside it; `bn_native`, `ce_stats_native`, `conv2d_native`, `cuda_impl_policy`, `cuda_provider_matmul`, `cuda_provider_matmul_i8`, `elementwise_native`, `f32_reg_native`, `flash_attn_f16_native`, `flash_bidir_native`, `flash_bidir_native_bench`, `flash_gqa_kmask_native`, `gdn_bwd_sweep_native`, `gdn_chunk_fwd_tc`, `gdn_dscale_native`, `gdn_qk_bwd_native`, `gn_apply_native`, `i8_dyn_native`, `i8w_dx_native`, `perf_floor`, `plumb_native`, `rmsnorm_fused_native`, `softmax_rows_native`, `swiglu_bwd_native`, `urgent_lane`, `i8_gemv_native_leak` keep binaries of their own.
 
 mod card;
 mod child;
@@ -67,7 +67,6 @@ mod i8_gemv_batched_variants;
 mod i8_gemv_multi_native;
 mod i8_gemv_native;
 mod i8_gemv_native_bench;
-mod i8_gemv_native_leak;
 mod i8_gemv_reg_upgrade;
 mod kernel_catalog_validation;
 mod kernel_upgrade;
@@ -105,5 +104,4 @@ mod silu_mul_quant_e4m3_native;
 mod step_cache;
 mod tape;
 mod transient_reclaim;
-mod urgent_lane;
 mod vram_overhead;

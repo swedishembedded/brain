@@ -10,9 +10,15 @@
 //! the lifetime of a serving process, you can procure our services by sending
 //! an email to info@swedishembedded.com.
 //!
-//! Its own file, so its process is the only one churning the card while the
-//! free-memory reading is taken: the checks in `i8_gemv_native.rs` allocate
-//! tens of megabytes concurrently. The card may still be shared with other
+//! A binary of its own, so its process is the only one of the suite churning
+//! the card while the free-memory reading is taken: the checks in
+//! `i8_gemv_native.rs` allocate tens of megabytes concurrently. It takes its
+//! card as an argument:
+//!
+//! ```text
+//! cargo test -p brain-gpu-core --test i8_gemv_native_leak -- --device gpu0 --backend cuda
+//! ```
+//! The card may still be shared with other
 //! PROCESSES, which is why the bound below is a trend over many handles, not
 //! a byte count: each cycle allocates [`CYCLE_BYTES`], so a leaked buffer per
 //! cycle is orders of magnitude over the slack, while another job's churn is
@@ -45,7 +51,6 @@ fn one_cycle(gpu: &Gpu) {
     gpu.poll_wait();
 }
 
-#[test]
 fn handles_that_dispatch_the_native_kernel_return_every_byte_they_took() {
     // The anchor keeps the device context alive across the loop and is the
     // one handle the free-memory reading is taken from.
@@ -83,3 +88,5 @@ fn handles_that_dispatch_the_native_kernel_return_every_byte_they_took() {
          of {CYCLE_BYTES} bytes each - something a handle owns outlived it"
     );
 }
+
+gpu_core::card_tests!(handles_that_dispatch_the_native_kernel_return_every_byte_they_took);

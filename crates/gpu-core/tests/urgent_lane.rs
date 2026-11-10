@@ -16,6 +16,14 @@
 //! `is_idle` answers without waiting while it is busy. The `#[ignore]`d
 //! measurement prints a decode GEMV's latency alone, queued behind a running
 //! prefill GEMM, and beside it in the urgent lane.
+//!
+//! The lane gates are timings, so they keep a binary of their own and take their
+//! card as an argument: run beside every other integration test, the other
+//! tests' work on the card was the delay they measured.
+//!
+//! ```text
+//! cargo test -p brain-gpu-core --test urgent_lane -- --device gpu0 --backend cuda
+//! ```
 
 use gpu_core::{lane, Dispatch, Gpu};
 use std::time::Instant;
@@ -80,7 +88,6 @@ impl Operands {
     }
 }
 
-#[test]
 fn a_lane_changes_where_work_runs_not_what_it_computes() {
     let Some(gpu) = urgent_cuda() else { return };
     let normal = Operands::new(&gpu, 1, 5120, 1024, 7);
@@ -108,7 +115,6 @@ fn a_lane_changes_where_work_runs_not_what_it_computes() {
     assert_eq!(urgent.bits(&gpu), want, "a buffer the urgent lane wrote reads back the same in the normal lane");
 }
 
-#[test]
 fn an_urgent_read_does_not_wait_for_the_normal_lane() {
     let Some(gpu) = urgent_cuda() else { return };
     let bulk = Operands::new(&gpu, 64, 5120, 17408, 3);
@@ -138,7 +144,6 @@ fn an_urgent_read_does_not_wait_for_the_normal_lane() {
 /// not call anything that waits for the whole device: the driver's page-locked
 /// free does, and with a prefill queued on the normal lane it held the decode
 /// loop for the rest of that queue (knowledge 374).
-#[test]
 fn retiring_an_invalidated_graph_in_the_urgent_lane_does_not_wait_for_the_normal_lane() {
     let Some(gpu) = urgent_cuda() else { return };
     let bulk = Operands::new(&gpu, 64, 5120, 17408, 3);
@@ -170,8 +175,6 @@ fn retiring_an_invalidated_graph_in_the_urgent_lane_does_not_wait_for_the_normal
 /// A decode GEMV's latency: alone, behind a running prefill GEMM in the same
 /// lane, and beside it in the urgent lane - one host thread, as a scheduler
 /// that keeps the prefill in flight between decode steps issues them.
-#[test]
-#[ignore]
 fn decode_latency_beside_a_prefill() {
     let Some(gpu) = urgent_cuda() else { return };
     let bulk = Operands::new(&gpu, 64, 5120, 17408, 3);
@@ -202,3 +205,10 @@ fn decode_latency_beside_a_prefill() {
     };
     println!("decode GEMV 1x5120x17408, median ms: alone {:.3}, behind a prefill {:.3}, urgent beside a prefill {:.3}", time(false, false), time(false, true), time(true, true));
 }
+
+gpu_core::card_tests!(
+    a_lane_changes_where_work_runs_not_what_it_computes,
+    an_urgent_read_does_not_wait_for_the_normal_lane,
+    retiring_an_invalidated_graph_in_the_urgent_lane_does_not_wait_for_the_normal_lane;
+    ignored: decode_latency_beside_a_prefill,
+);
