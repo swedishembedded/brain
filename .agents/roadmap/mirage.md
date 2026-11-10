@@ -218,6 +218,55 @@ batch-N post-processing (`post` grows with N: mask fields are host work) overlap
 scoring (`extract_batch` still scores candidates on the host decoder; it needs a device state copy and chunked
 prefill) is not started. The nsys reports are in `~/project/shared/tmp/mirage-l2c/` (outside the repo).
 
+## Lane L6 - performance, round 2
+
+Same hardware and rules as round 1 (GH200 gpu1, shared; rank by the minimum of three runs). The parity ladder (95
+tests) passes on the CPU backend and CUDA after the changes below; decoder logits cosines 0.9999994 / 0.9999977, tokens
+identical (236 and 168).
+
+Step replay exists: `Gpu::begin_tape` / `end_tape` / `replay_tape` (gpu-core) turn a repeated submission into a CUDA
+graph. The contract is that nothing varying is a dispatch parameter, so the decoder step now keeps its position in a
+device word (`BatchState::posbuf`, advanced by a one-thread kernel at the end of the step); every kernel that used the
+position reads it from that buffer (`mirage_tok_at/put`, `mirage_engram_rows`, `mirage_taps`, `mirage_row_write`,
+`mirage_rope_pos`, attention scores/apply with `visible = u32::MAX`). The step is recorded once per generation and
+replayed per token; recording declines the vendor library GEMM (`set_declines_library`), so a replayed step runs the
+in-house f32 kernels (exact f32, not TF32).
+
+| Change | batch-1 describe | batch-8 describe | batch-64 describe |
+|---|---|---|---|
+| round 1 end (eager steps, 16 per readback) | 2.40 s | 2.84 s | 5.87 s |
+| step recorded once, replayed as a graph | 0.76 s | 1.15 s | 4.10 s |
+| exponent-domain Sinkhorn, workgroup argmax, unrolled apply | 0.69 s | 1.06 s | 3.99 s |
+| fused projections (lane maps 3 to 1, q/k/v+gate 4 to 1, MLP cond+rotation 2 to 1) | 0.65 s | 0.95 s | 3.08 s |
+| four-lane Sinkhorn in registers | 0.58 s | | |
+| reader batched over all text lines, parallel host assembly | 0.55 s | 0.83 s | 2.60 s |
+| attention weighted sum split over key groups | 0.47 s | 0.76 s | 2.52 s |
+
+Throughput curve (final; `describe_throughput_over_batch_size`, min of 3, TF32 off in the decoder):
+
+| batch | wall s | images/s | vision | memory | decode | post (device part) |
+|---|---|---|---|---|---|---|
+| 1 | 0.47 | 2.14 | 0.03 | 0.00 | 0.43 | 0.01 (0.01) |
+| 8 | 0.76 | 10.59 | 0.10 | 0.02 | 0.57 | 0.03 (0.03) |
+| 32 | 1.31 | 24.48 | 0.25 | 0.01 | 0.82 | 0.09 (0.07) |
+| 64 | 2.52 | 25.44 | 0.42 | 0.02 | 1.63 | 0.16 (0.13) |
+
+Per decoder step (about 236 steps per sequence): 1.8 ms at batch 1, 2.4 ms at batch 8, 3.5 ms at batch 32, 6.9 ms at
+batch 64. Against the engine (265-271 ms per image on CPU): batch 8 is 2.8x, batch 32 and 64 about 6.5x faster per image;
+batch 1 (470 ms) is 1.8x slower. The batch-1 and batch-64 per-step targets (well under 2 ms) are met at batch 1
+(1.8 ms) and not at batch 64.
+
+Kernel profile after the changes (nsys with `--cuda-graph-trace=node`, all four batch sizes together, ms of kernel time):
+`mirage_attn_apply` 1447 (13%, 29 us avg), `rmsnorm_rows` 1205 (11%, 231k launches, 5 us), in-house GEMV
+`matmul_gemv_reg` 1098 + 520 + 207 (17%), `mirage_attn_scores` 707, `mirage_mhc_maps` 663 (26 us), softmax 301,
+`mirage_taps` 234. Hypotheses: the replayed GEMMs run the in-house gemv kernels at 9-20 us where a 1 MB weight read is
+under 1 us, so the per-step floor at large batch is those kernels' occupancy; the vendor GEMM is not capturable in a
+graph, so the next candidate is an in-house register-tiled batched GEMM for M of 8 to 64 registered with the selector.
+`mirage_attn_apply` is still latency bound (a flash-decode kernel over the cached keys would fuse scores, softmax and
+apply into one launch). Not done this round: ncu roofline fractions for the top five kernels; device form scoring
+(`extract_batch` still scores on the host decoder); cross-attention q + gate concatenation (the per-head `rmsnorm_rows`
+needs a contiguous q).
+
 ## Facts the foundation established
 
 - The released `.cact` has 806 entries: 159 two-bit and 4 four-bit CQ matrices
