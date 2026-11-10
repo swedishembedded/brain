@@ -222,13 +222,13 @@ impl DenseHead {
 /// A cell is kept when its probability equals the maximum of its 3x3
 /// neighbourhood (outside the map counts as absent) and exceeds `threshold`.
 /// The `cap` best by score survive and are ordered by 16 horizontal bands of
-/// the box centre, then by centre x (stable). `valid` optionally restricts
+/// the box centre, then by centre x (stable). `valid` restricts
 /// candidates (and neighbours) to cells inside the resized image.
-pub fn find_proposals(head: &[f32], side: usize, kind: Kind, threshold: f32, cap: usize, valid: Option<&[bool]>) -> Vec<Proposal> {
+pub fn find_proposals(head: &[f32], side: usize, kind: Kind, threshold: f32, cap: usize, valid: &[bool]) -> Vec<Proposal> {
     let [lc, wc, hc, dxc, dyc] = kind.channels();
     let prob: Vec<f32> = head.as_chunks::<DENSE_OUT_CHANNELS>().0.iter().map(|c| ops::sigmoid(c[lc])).collect();
     let usable = |y: isize, x: isize| {
-        (0..side as isize).contains(&y) && (0..side as isize).contains(&x) && valid.is_none_or(|v| v[y as usize * side + x as usize])
+        (0..side as isize).contains(&y) && (0..side as isize).contains(&x) && valid[y as usize * side + x as usize]
     };
     let mut found = Vec::new();
     for y in 0..side {

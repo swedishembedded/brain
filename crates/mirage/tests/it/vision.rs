@@ -8,7 +8,8 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use mirage::vision::dense::Proposal;
+use mirage::vision::dense::{Kind, Proposal};
+use mirage::vision::memory::Slot;
 use mirage::vision::masks::{self, coefficient_cell, round_box};
 use mirage::vision::ops::valid_cells;
 use mirage::vision::preprocess::{letterbox, letterbox_size, Resized};
@@ -26,29 +27,39 @@ pub struct Fixture {
     pub analysis: Analysis,
 }
 
-/// The shared fixture: weights, goldens and one forward pass, or `None` (after
-/// a loud skip) when any of them is absent.
-pub fn fixture(test: &str) -> Option<&'static Fixture> {
-    static CELL: OnceLock<Option<Fixture>> = OnceLock::new();
-    let f = CELL.get_or_init(|| {
-        let dir = released_dir()?;
-        let path = brain_testutil::testdata("golden/mirage/goldens/cats.safetensors");
-        if !std::path::Path::new(&path).is_file() {
-            return None;
-        }
-        let ck = mirage::import::load_dir(&dir, &mirage::import::ImportOptions::default()).expect("released checkpoint imports");
-        let model = VisionModel::new(&ck);
-        let golden = checkpoint::st::load_safetensors(&path).expect("golden loads").tensors;
-        let rgb: Vec<u8> = golden["input_rgb"].iter().map(|&v| v as u8).collect();
-        let image = letterbox(&rgb, 480, 640).expect("golden image letterboxes");
-        // The reference keeps every cell as a peak candidate, padding included.
-        let analysis = model.analyze(&image, ProposalOptions { valid_only: false, ..ProposalOptions::default() });
-        Some(Fixture { model, golden, image, analysis })
-    });
+/// Golden fixtures: name and source image size (height, width).
+pub const FIXTURES: [(&str, usize, usize); 2] = [("cats", 480, 640), ("text", 600, 800)];
+
+fn load(name: &str, h: usize, w: usize) -> Option<Fixture> {
+    let dir = released_dir()?;
+    let path = brain_testutil::testdata(&format!("golden/mirage/goldens/{name}.safetensors"));
+    if !std::path::Path::new(&path).is_file() {
+        return None;
+    }
+    let ck = mirage::import::load_dir(&dir, &mirage::import::ImportOptions::default()).expect("released checkpoint imports");
+    let model = VisionModel::new(&ck);
+    let golden = checkpoint::st::load_safetensors(&path).expect("golden loads").tensors;
+    let rgb: Vec<u8> = golden["input_rgb"].iter().map(|&v| v as u8).collect();
+    let image = letterbox(&rgb, h, w).expect("golden image letterboxes");
+    let analysis = model.analyze(&image, ProposalOptions::default());
+    Some(Fixture { model, golden, image, analysis })
+}
+
+/// The fixture `name` (weights, goldens, one forward pass), or `None` after a
+/// loud skip when any of them is absent.
+pub fn fixture_named(test: &str, name: &str) -> Option<&'static Fixture> {
+    static CELLS: [OnceLock<Option<Fixture>>; 2] = [OnceLock::new(), OnceLock::new()];
+    let i = FIXTURES.iter().position(|f| f.0 == name).expect("known fixture");
+    let f = CELLS[i].get_or_init(|| load(name, FIXTURES[i].1, FIXTURES[i].2));
     if f.is_none() {
-        brain_testutil::skip(&format!("{test}: the released checkpoint or testdata/golden/mirage/goldens/cats.safetensors is absent (make testdata/fetch)"));
+        brain_testutil::skip(&format!("{test}: the released checkpoint or testdata/golden/mirage/goldens/{name}.safetensors is absent (make testdata/fetch)"));
     }
     f.as_ref()
+}
+
+/// The cats fixture.
+pub fn fixture(test: &str) -> Option<&'static Fixture> {
+    fixture_named(test, "cats")
 }
 
 /// Cosine similarity and largest absolute difference.
@@ -127,17 +138,6 @@ fn proposals_and_their_order_match() {
 }
 
 #[test]
-fn restricting_peaks_to_the_image_drops_padding_candidates() {
-    let Some(f) = fixture("valid-only proposals") else { return };
-    let all = &f.analysis;
-    let strict = f.model.analyze(&f.image, ProposalOptions::default());
-    assert_eq!(strict.objects, all.objects, "objects live inside the image");
-    let valid = valid_cells(f.image.h, f.image.w, 64);
-    assert!(strict.text.iter().all(|p| valid[p.y * 64 + p.x]));
-    assert!(strict.text.len() < all.text.len());
-}
-
-#[test]
 fn mask_prototypes_and_coefficients_match() {
     let Some(f) = fixture("masks") else { return };
     let a = &f.analysis;
@@ -155,7 +155,17 @@ fn mask_prototypes_and_coefficients_match() {
 #[test]
 fn decoder_memory_matches() {
     let Some(f) = fixture("memory") else { return };
-    let memory = f.model.decoder_memory(&f.analysis);
+    // Slots come from the golden's own proposal lists so the check is of the memory builder alone.
+    let slots: Vec<Slot> = f.golden["peaks_obj"]
+        .as_chunks::<7>()
+        .0
+        .iter()
+        .enumerate()
+        .map(|(k, p)| Slot { bbox: [p[3], p[4], p[5], p[6]], token: f.model.reference_token(Kind::Object, k) })
+        .chain(f.golden["peaks_txt"].as_chunks::<7>().0.iter().enumerate().map(|(j, p)| Slot { bbox: [p[3], p[4], p[5], p[6]], token: f.model.reference_token(Kind::Text, j) }))
+        .collect();
+    let valid = valid_cells(f.image.h, f.image.w, 16);
+    let memory = f.model.memory.build(&f.analysis.encoder.encoder, &valid, &f.analysis.dense.head_in, &slots);
     assert_stage("memory", &memory, &f.golden["memory"]);
 }
 
@@ -166,5 +176,34 @@ fn the_reader_matches_on_both_windows() {
         let window: Vec<u8> = f.golden[&format!("ocr_window_{i}")].iter().map(|&v| v as u8).collect();
         let logits = f.model.reader.forward(&window);
         assert_stage(&format!("ocr_logits_{i}"), &logits, &f.golden[&format!("ocr_logits_{i}")]);
+    }
+}
+
+#[test]
+fn the_text_image_ladder_matches() {
+    let Some(f) = fixture_named("text ladder", "text") else { return };
+    for ((map, got), name) in f.analysis.encoder.stages.iter().zip(["stage_256", "stage_128", "stage_64", "stage_32", "stage_16"]) {
+        assert_eq!(map.h * map.w * map.c, f.golden[name].len(), "{name} geometry");
+        assert_stage(&format!("text {name}"), got, &f.golden[name]);
+    }
+    assert_stage("text body", &f.analysis.encoder.body, &f.golden["body"]);
+    assert_stage("text top", &f.analysis.encoder.top, &f.golden["top"]);
+    assert_stage("text encoder", &f.analysis.encoder.encoder, &f.golden["encoder"]);
+    assert_stage("text dense64", &f.analysis.dense.d64, &f.golden["dense64"]);
+    assert_stage("text head", &f.analysis.dense.head, &f.golden["head"]);
+    assert_proposals("text objects", &f.analysis.objects, &f.golden["peaks_obj"]);
+    assert_proposals("text lines", &f.analysis.text, &f.golden["peaks_txt"]);
+    let (protos, coefs) = f.model.dense.mask_maps(&f.analysis.dense.head_in, &f.analysis.encoder, f.image.h, f.image.w);
+    assert_stage("text protos", &protos, &f.golden["protos"]);
+    let mut got = Vec::new();
+    for p in &f.analysis.objects {
+        let (cy, cx) = coefficient_cell(round_box(p.bbox));
+        got.extend_from_slice(&coefs[(cy * masks::COEF_SIDE + cx) * 32..][..32]);
+    }
+    assert_stage("text coefs_obj", &got, &f.golden["coefs_obj"]);
+    assert_stage("text memory", &f.model.decoder_memory(&f.analysis), &f.golden["memory"]);
+    for i in 0..2 {
+        let window: Vec<u8> = f.golden[&format!("ocr_window_{i}")].iter().map(|&v| v as u8).collect();
+        assert_stage(&format!("text ocr_logits_{i}"), &f.model.reader.forward(&window), &f.golden[&format!("ocr_logits_{i}")]);
     }
 }

@@ -50,13 +50,15 @@ pub struct ProposalOptions {
     pub object_threshold: f32,
     /// Minimum text probability.
     pub text_threshold: f32,
-    /// Ignore cells outside the resized image when picking peaks.
-    pub valid_only: bool,
+    /// Most object proposals kept.
+    pub max_objects: usize,
+    /// Most text proposals kept.
+    pub max_text: usize,
 }
 
 impl Default for ProposalOptions {
     fn default() -> Self {
-        ProposalOptions { object_threshold: DEFAULT_THRESHOLD, text_threshold: DEFAULT_THRESHOLD, valid_only: true }
+        ProposalOptions { object_threshold: DEFAULT_THRESHOLD, text_threshold: DEFAULT_THRESHOLD, max_objects: MAX_OBJECTS, max_text: MAX_TEXT }
     }
 }
 
@@ -92,9 +94,10 @@ impl VisionModel {
         let encoder = self.encoder.forward(&canvas, img.h, img.w);
         let dense = self.dense.forward(&encoder, img.h, img.w);
         let side = self.cfg.canvas / self.cfg.stride;
-        let valid = options.valid_only.then(|| ops::valid_cells(img.h, img.w, side));
-        let objects = find_proposals(&dense.head, side, Kind::Object, options.object_threshold, MAX_OBJECTS, valid.as_deref());
-        let text = find_proposals(&dense.head, side, Kind::Text, options.text_threshold, MAX_TEXT, valid.as_deref());
+        // Cells outside the resized image carry only the head's bias, never a detection.
+        let valid = ops::valid_cells(img.h, img.w, side);
+        let objects = find_proposals(&dense.head, side, Kind::Object, options.object_threshold, options.max_objects.min(MAX_OBJECTS), &valid);
+        let text = find_proposals(&dense.head, side, Kind::Text, options.text_threshold, options.max_text.min(MAX_TEXT), &valid);
         Analysis { resized_h: img.h, resized_w: img.w, encoder, dense, objects, text }
     }
 
