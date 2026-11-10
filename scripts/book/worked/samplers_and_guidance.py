@@ -254,7 +254,7 @@ def forward_counts():
         ("FLUX.2 base", 50, 4.0, True, "`crates/flux2/src/pipeline.rs`: 50 steps, guidance 4.0"),
         ("FLUX.2 Klein (distilled)", 4, 1.0, False, "`resolved_steps`: fixed 4, no guidance branch"),
         ("FLUX.1 dev", 50, 3.5, False, "one forward; the guidance scalar is an input of the network"),
-        ("Z-Image Turbo", 8, 0.0, False, "`crates/s3dit/src/caps.rs`: steps 8, guidance 0"),
+        ("Z-Image Turbo", 8, 0.0, False, "`crates/s3dit/src/caps.rs`: steps 8, and no guidance scale: one DiT pass a step"),
     ]
     out = []
     for name, steps, g, two, note in rows:
