@@ -122,7 +122,7 @@ Parity (released weights; goldens `testdata/golden/mirage/goldens/{cats,text}`; 
 
 | Stage | CPU backend | CUDA gpu1 |
 |---|---|---|
-| stem stages 256..16 | 1.0000000, 3.6e-6 .. 1.3e-5 | cos >= 0.9999995 (max_abs <= 1e-2) |
+| stem stages 256..16 | 1.0000000, 3.6e-6 .. 1.3e-5 | cos >= 0.999998 (max_abs <= 1e-2) |
 | body | 1.0000000, 1.7e-3 | 0.9999999, 5.4e-1 |
 | top (valid rows + registers) | 1.0000000, 1.4e-1 | 0.999998, 1.6e2 (register-scale values) |
 | encoder memory | 1.0000000, 9.5e-5 | 0.999994, 4.9e-2 |
