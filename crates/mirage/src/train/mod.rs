@@ -14,6 +14,7 @@ pub mod adapter;
 pub mod data;
 pub mod decoder;
 pub mod eval;
+pub mod graph;
 pub mod loss;
 pub mod net;
 pub mod objective;

@@ -22,6 +22,7 @@
 
 use std::collections::BTreeMap;
 
+use super::graph::Graph;
 use super::net::Net;
 use super::ops::Seg;
 use super::real::{r, Real};
@@ -402,18 +403,18 @@ pub struct SampleLoss {
     pub terms: BTreeMap<&'static str, f64>,
 }
 
-fn channel<R: Real>(net: &mut Net<'_, R>, map: Id, cells: usize, ch: usize) -> Id {
+fn channel<R: Real, T: Graph<R>>(net: &mut Net<'_, R, T>, map: Id, cells: usize, ch: usize) -> Id {
     net.tape.plan(map, cells, (0..cells).map(|i| Seg::copy(i, i * DENSE_OUT_CHANNELS + ch, 1)).collect())
 }
 
 /// Build the loss graph of one sample. `target` is the decoder sequence (see [`text_target`]).
-pub fn sample_loss<R: Real>(net: &mut Net<'_, R>, s: &Sample, target: Option<&TextTarget>, w: &TrainWeights) -> Option<SampleLoss> {
+pub fn sample_loss<R: Real, T: Graph<R>>(net: &mut Net<'_, R, T>, s: &Sample, target: Option<&TextTarget>, w: &TrainWeights) -> Option<SampleLoss> {
     let cfg = net.cfg;
     let mut terms: BTreeMap<&'static str, f64> = BTreeMap::new();
     let mut parts: Vec<Id> = Vec::new();
-    let mut add = |net: &mut Net<'_, R>, name: &'static str, id: Id, weight: f64| {
+    let mut add = |net: &mut Net<'_, R, T>, name: &'static str, id: Id, weight: f64| {
         let scaled = net.tape.scale(id, weight);
-        *terms.entry(name).or_insert(0.0) += net.tape.val(scaled)[0].to_f64();
+        *terms.entry(name).or_insert(0.0) += net.tape.scalar(scaled);
         parts.push(scaled);
     };
 

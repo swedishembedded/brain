@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use super::graph::Graph;
 use super::real::{r, Real};
 use super::tape::{Grads, Id, Tape};
 use crate::config::MirageConfig;
@@ -32,12 +33,14 @@ pub struct AdapterSet<R: Real> {
 }
 
 /// A graph under construction over fixed parameters.
-pub struct Net<'a, R: Real> {
+///
+/// `T` evaluates the graph: the host [`Tape`] (default) or the device tape.
+pub struct Net<'a, R: Real, T: Graph<R> = Tape<R>> {
     /// The tape.
-    pub tape: Tape<R>,
+    pub tape: T,
     /// The model configuration.
     pub cfg: &'a MirageConfig,
-    params: &'a Params<R>,
+    params: Option<&'a Params<R>>,
     adapter: Option<&'a AdapterSet<R>>,
     ids: HashMap<String, Id>,
     stacked: HashMap<(String, usize), Id>,
@@ -45,9 +48,16 @@ pub struct Net<'a, R: Real> {
 }
 
 impl<'a, R: Real> Net<'a, R> {
-    /// A fresh graph over `params`, optionally with an adapter on some dense kernels.
+    /// A fresh host graph over `params`, optionally with an adapter on some dense kernels.
     pub fn new(cfg: &'a MirageConfig, params: &'a Params<R>, adapter: Option<&'a AdapterSet<R>>) -> Net<'a, R> {
-        Net { tape: Tape::new(), cfg, params, adapter, ids: HashMap::new(), stacked: HashMap::new(), lora_ids: BTreeMap::new() }
+        Net { tape: Tape::new(), cfg, params: Some(params), adapter, ids: HashMap::new(), stacked: HashMap::new(), lora_ids: BTreeMap::new() }
+    }
+}
+
+impl<'a, R: Real, T: Graph<R>> Net<'a, R, T> {
+    /// A graph over an evaluator that holds the parameters (and any adapter) itself.
+    pub fn resident(cfg: &'a MirageConfig, tape: T) -> Net<'a, R, T> {
+        Net { tape, cfg, params: None, adapter: None, ids: HashMap::new(), stacked: HashMap::new(), lora_ids: BTreeMap::new() }
     }
 
     /// The parameter `name` as a leaf (one leaf per name per graph, so gradients accumulate).
@@ -55,8 +65,13 @@ impl<'a, R: Real> Net<'a, R> {
         if let Some(&id) = self.ids.get(name) {
             return id;
         }
-        let v = self.params.get(name).unwrap_or_else(|| panic!("the parameter set lacks `{name}`")).clone();
-        let id = self.tape.leaf(v);
+        let id = match self.tape.resident_param(name) {
+            Some(id) => id,
+            None => {
+                let v = self.params.expect("a host graph carries its parameters").get(name).unwrap_or_else(|| panic!("the parameter set lacks `{name}`"));
+                self.tape.leaf(v.clone())
+            }
+        };
         self.ids.insert(name.to_string(), id);
         id
     }
@@ -66,9 +81,14 @@ impl<'a, R: Real> Net<'a, R> {
         if let Some(&id) = self.stacked.get(&(name.to_string(), layer)) {
             return id;
         }
-        let whole = self.p(name);
-        let unit = self.tape.len(whole) / self.cfg.dec_layers;
-        let id = self.tape.slice(whole, layer * unit, unit);
+        let id = match self.tape.resident_layer(name, layer) {
+            Some(id) => id,
+            None => {
+                let whole = self.p(name);
+                let unit = self.tape.len(whole) / self.cfg.dec_layers;
+                self.tape.slice(whole, layer * unit, unit)
+            }
+        };
         self.stacked.insert((name.to_string(), layer), id);
         id
     }
@@ -90,27 +110,37 @@ impl<'a, R: Real> Net<'a, R> {
             Some(l) => format!("{name}.{l}"),
             None => name.to_string(),
         };
-        let Some(set) = self.adapter else { return y };
-        let Some((a, b)) = set.pairs.get(&key) else { return y };
-        assert_eq!(a.len(), inn * set.rank, "adapter `{key}`: A is not {inn}x{}", set.rank);
-        assert_eq!(b.len(), set.rank * out, "adapter `{key}`: B is not {}x{out}", set.rank);
-        let (ia, ib) = match self.lora_ids.get(&key) {
-            Some(&ids) => ids,
-            None => {
-                let ids = (self.tape.leaf(a.clone()), self.tape.leaf(b.clone()));
-                self.lora_ids.insert(key.clone(), ids);
-                ids
+        let (ia, ib, rank, scale) = match self.adapter {
+            Some(set) => {
+                let Some((a, b)) = set.pairs.get(&key) else { return y };
+                assert_eq!(a.len(), inn * set.rank, "adapter `{key}`: A is not {inn}x{}", set.rank);
+                assert_eq!(b.len(), set.rank * out, "adapter `{key}`: B is not {}x{out}", set.rank);
+                let (ia, ib) = match self.lora_ids.get(&key) {
+                    Some(&ids) => ids,
+                    None => {
+                        let ids = (self.tape.leaf(a.clone()), self.tape.leaf(b.clone()));
+                        self.lora_ids.insert(key.clone(), ids);
+                        ids
+                    }
+                };
+                (ia, ib, set.rank, set.scale.to_f64())
             }
+            None => match self.tape.resident_lora(&key) {
+                Some(found) => found,
+                None => return y,
+            },
         };
-        let h = self.tape.linear(x, ia, rows, inn, set.rank);
-        let delta = self.tape.linear(h, ib, rows, set.rank, out);
-        let delta = self.tape.scale(delta, set.scale.to_f64());
+        let h = self.tape.linear(x, ia, rows, inn, rank);
+        let delta = self.tape.linear(h, ib, rows, rank, out);
+        let delta = self.tape.scale(delta, scale);
         self.tape.add(y, delta)
     }
+}
 
+impl<R: Real> Net<'_, R> {
     /// Gradients of every parameter the graph used.
     pub fn param_grads(&self, grads: &mut Grads<R>) -> BTreeMap<String, Vec<R>> {
-        self.ids.iter().map(|(name, &id)| (name.clone(), grads.take(id, self.params[name].len()))).collect()
+        self.ids.iter().map(|(name, &id)| (name.clone(), grads.take(id, self.params.expect("host graph")[name].len()))).collect()
     }
 
     /// Gradients of the adapter factors the graph used: `key -> (dA, dB)`.

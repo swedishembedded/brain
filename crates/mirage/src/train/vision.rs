@@ -5,6 +5,7 @@
 //! heads, the text reader and the decoder memory. Each stage mirrors its inference operator in `crate::vision`
 //! (the parity tests hold the two to the same values) and is built from the checked primitives.
 
+use super::graph::Graph;
 use super::net::Net;
 use super::ops::Seg;
 use super::real::{r, Real};
@@ -34,7 +35,7 @@ pub struct DenseT {
     pub head: Id,
 }
 
-impl<R: Real> Net<'_, R> {
+impl<R: Real, T: Graph<R>> Net<'_, R, T> {
     /// `HConvGLU(ZC(x, hconv_norm))` of the block `prefix` on `rows` rows.
     pub fn hconv(&mut self, x: Id, prefix: &str) -> Id {
         let (n, k) = (self.cfg.dim, self.cfg.hconv_kernel);

@@ -4,6 +4,7 @@
 //! The decoder as a training graph: teacher-forced, the whole token sequence as one chunk from an empty state
 //! (the full-recompute mode of the inference decoder, which the incremental mode equals).
 
+use super::graph::Graph;
 use super::net::Net;
 use super::ops::Seg;
 use super::real::{r, Real};
@@ -13,7 +14,7 @@ use crate::config::{ENGRAM_TAPS, HADAMARD_COND_RANK};
 use crate::decoder::hadamard::{legacy_permutation, PERMUTATION_SEEDS};
 use crate::decoder::{engram_indices, ENGRAM_DILATION, SINKHORN_ITERATIONS};
 
-impl<R: Real> Net<'_, R> {
+impl<R: Real, T: Graph<R>> Net<'_, R, T> {
     /// `(att * sigmoid(h Wgate)) Wout` with the kernels `gate` and `out` of layer `l` under `prefix`.
     fn gated_out(&mut self, att: Id, h: Id, prefix: &str, l: usize, t: usize) -> Id {
         let c = self.cfg.clone();
