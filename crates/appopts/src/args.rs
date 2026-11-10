@@ -39,14 +39,34 @@ impl Args {
     pub fn str_or(&mut self, name: &str, default: &str) -> String {
         self.take_str(name).unwrap_or_else(|| default.to_string())
     }
+    /// The `*_or` and `opt_*` number flags: the value given, `default` when
+    /// the flag is absent, and a value that does not parse exits 2 naming the
+    /// flag - it never stands in for the default.
     pub fn u32_or(&mut self, name: &str, default: u32) -> u32 {
-        self.take_str(name).and_then(|s| s.parse().ok()).unwrap_or(default)
+        self.parsed(name).unwrap_or(default)
     }
     pub fn usize_or(&mut self, name: &str, default: usize) -> usize {
-        self.take_str(name).and_then(|s| s.parse().ok()).unwrap_or(default)
+        self.parsed(name).unwrap_or(default)
     }
     pub fn u64_or(&mut self, name: &str, default: u64) -> u64 {
-        self.take_str(name).and_then(|s| s.parse().ok()).unwrap_or(default)
+        self.parsed(name).unwrap_or(default)
+    }
+    /// A flag parsed as `T`: `None` when absent; a value that is not a `T`
+    /// exits 2 naming the flag.
+    pub fn parsed<T: std::str::FromStr>(&mut self, name: &str) -> Option<T>
+    where
+        T::Err: std::fmt::Display,
+    {
+        self.try_parsed(name).unwrap_or_else(|message| {
+            eprintln!("{message}");
+            std::process::exit(2);
+        })
+    }
+    fn try_parsed<T: std::str::FromStr>(&mut self, name: &str) -> Result<Option<T>, String>
+    where
+        T::Err: std::fmt::Display,
+    {
+        self.take_str(name).map(|text| text.parse().map_err(|e| format!("{name}: '{text}': {e}"))).transpose()
     }
     /// `--seed` for a run whose seed matters: the value given, or a freshly
     /// drawn random one that is printed to stderr so the run can be reproduced.
@@ -86,13 +106,13 @@ impl Args {
         }
     }
     pub fn f32_or(&mut self, name: &str, default: f32) -> f32 {
-        self.take_str(name).and_then(|s| s.parse().ok()).unwrap_or(default)
+        self.parsed(name).unwrap_or(default)
     }
     pub fn char_opt(&mut self, name: &str) -> Option<char> {
-        self.take_str(name).and_then(|s| s.chars().next())
+        self.parsed(name)
     }
     pub fn opt_u32(&mut self, name: &str) -> Option<u32> {
-        self.take_str(name).and_then(|s| s.parse().ok())
+        self.parsed(name)
     }
     /// Presence flag `--name` (no value): true if present, marks it used.
     pub fn take_flag(&mut self, name: &str) -> bool {
@@ -179,6 +199,17 @@ mod tests {
         let first = args(&[]).seed_flag("eval", "--order-seed");
         let second = args(&[]).seed_flag("eval", "--order-seed");
         assert_ne!(first, second, "an unseeded flag must not repeat a default");
+    }
+
+    /// A number flag whose value is not a number is an error naming the flag
+    /// and the value, never the default it would have stood for.
+    #[test]
+    fn a_malformed_number_is_an_error_that_names_the_flag() {
+        let err = args(&["--max-frames", "abc"]).try_parsed::<u32>("--max-frames").expect_err("abc");
+        assert!(err.starts_with("--max-frames: ") && err.contains("abc"), "{err}");
+        assert!(args(&["--strength", "0.5x"]).try_parsed::<f32>("--strength").is_err());
+        assert_eq!(args(&["--steps", "8"]).try_parsed::<usize>("--steps"), Ok(Some(8)));
+        assert_eq!(args(&[]).try_parsed::<usize>("--steps"), Ok(None));
     }
 
     #[test]
