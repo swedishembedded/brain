@@ -953,7 +953,8 @@ projection, the block norm after the engram gate, the cross-query norm), `mirage
    minutes, longer with 8 test threads competing for the cores (and the other session's load). With `--nocapture` the line is visible:
    `FATAL: test device::global_response_norm_matches_the_host_block_tail is waiting for the device lock; the test holding it has held it
    600s (limit 600s) and is wedged in the GPU driver`; without it libtest captures the message and `_exit` loses it. Fix (474467d4f): the
-   hold limit applies to driver backends only (`hold_limit(backend)`; the CPU backend has none), with a unit gate.
+   hold limit applies to driver backends only (`hold_limit(backend)`; the CPU backend has none), with a unit gate. Verified: the same
+   command on the fixed tree finishes with `test result: ok. 83 passed; 0 failed; 22 ignored` in 1854 s, exit 0.
 2. `brain-gpu-core` `cuda_uninit_storage` (x2) and `cuda_placement_tier` under `BRAIN_DEVICE=cpu`: not caused by the skinny/selector
    change. `cuda_placement_tier::a_refused_managed_allocation_spills_only_when_the_tier_is_opted_in` re-runs its own binary with
    `--exact managed_over_the_vram_ceiling`, but since aa78ba72e ("one integration test binary per crate", an ancestor of 2c76d3843) the
