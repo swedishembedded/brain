@@ -72,7 +72,8 @@ pub const DEFAULT_PROMPT: &str = "Describe this image.";
 
 /// Built context: the image block (`1 + patches_per_crop` rows) plus room for an
 /// instruction and a caption. A fixed, documented budget - every extra row costs
-/// a `[seq, vocab]` logit slab and this decoder has no KV cache to amortise it.
+/// a `[seq, vocab]` logit slab in the recompute path (decode itself is KV-cached,
+/// `generate_kv`).
 pub const SEQ_LEN: u32 = 1 + 729 + 96;
 
 /// Default generated-token budget, deliberately small.

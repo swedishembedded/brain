@@ -10,8 +10,8 @@
 //! `model::vlm` splice seam to inject the projected vision tokens. No net-new
 //! device kernels — see docs in each stage.
 //!
-//! This crate is being built incrementally (config → M-RoPE → ViT → merger →
-//! DeepStack → import). Today: configuration.
+//! The crate holds the configuration, M-RoPE, the ViT, the merger, DeepStack,
+//! the import and the serving capability.
 
 pub mod caps;
 pub mod captioner;

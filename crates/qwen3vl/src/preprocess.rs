@@ -36,16 +36,21 @@ fn ceil_by_factor(x: f64, f: u32) -> u32 {
 }
 
 /// Resize `(height, width)` to `(h_bar, w_bar)`: both multiples of `factor`,
-/// aspect ratio preserved, pixel area clamped into `[min_pixels, max_pixels]`.
-/// Ports HF `smart_resize`.
+/// aspect ratio preserved, pixel area clamped into `[min_pixels, max_pixels]`,
+/// and neither side below `factor`. Ports HF `smart_resize`, which also refuses
+/// an aspect ratio beyond 200:1; here such a picture is sized with its short
+/// side at `factor` (so it may exceed `max_pixels`) instead of panicking on a
+/// served request.
 pub fn smart_resize(height: u32, width: u32, factor: u32, min_pixels: u32, max_pixels: u32) -> (u32, u32) {
     let (h, w) = (height as f64, width as f64);
     let mut h_bar = factor.max(round_by_factor(h, factor));
     let mut w_bar = factor.max(round_by_factor(w, factor));
     if (h_bar as u64) * (w_bar as u64) > max_pixels as u64 {
         let beta = ((h * w) / max_pixels as f64).sqrt();
-        h_bar = floor_by_factor(h / beta, factor);
-        w_bar = floor_by_factor(w / beta, factor);
+        // The reference clamps to one factor here too: an extreme aspect
+        // ratio would otherwise floor its short side to 0.
+        h_bar = factor.max(floor_by_factor(h / beta, factor));
+        w_bar = factor.max(floor_by_factor(w / beta, factor));
     } else if (h_bar as u64) * (w_bar as u64) < min_pixels as u64 {
         let beta = (min_pixels as f64 / (h * w)).sqrt();
         h_bar = ceil_by_factor(h * beta, factor);
@@ -381,6 +386,18 @@ impl ImageGeometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_extreme_aspect_ratio_never_resizes_a_side_to_zero() {
+        // A 32 x 401,440 picture is far over the pixel budget; scaling it down
+        // to fit would floor the short side to 0 without the reference's
+        // clamp to at least one factor.
+        for (h, w) in [(32u32, 401_440u32), (31, 600_000), (401_440, 32)] {
+            let (hb, wb) = smart_resize(h, w, 32, 64 * 32 * 32, 16_384 * 32 * 32);
+            assert!(hb >= 32 && wb >= 32, "{h}x{w} -> {hb}x{wb}");
+            assert!(hb % 32 == 0 && wb % 32 == 0, "{h}x{w} -> {hb}x{wb}");
+        }
+    }
 
     #[test]
     fn already_valid_size_is_unchanged() {

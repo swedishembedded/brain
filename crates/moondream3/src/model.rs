@@ -348,10 +348,9 @@ impl MoondreamModel {
     ///
     /// # This is `O(T²)` per token, and that is the honest cost
     ///
-    /// There is no KV cache: every step re-runs the whole grown sequence through
-    /// all `n_layers`. `crates/gpt2`, `crates/qwen3` and `crates/deepseek2` each
-    /// keep an `O(1)`-per-token incremental twin alongside their recompute tier;
-    /// this decoder does not have one yet. At the preview config that is 24
+    /// This path keeps no KV cache: every step re-runs the whole grown sequence
+    /// through all `n_layers`. The incremental twin is [`Self::generate_kv`];
+    /// this recompute tier is kept as its reference. At the preview config that is 24
     /// layers over a 730-row image prefix per generated token, so a long caption
     /// is minutes, not milliseconds.
     pub fn generate(&self, prompt: &[u32], img_embeds: &[f32], max_new: usize, eos: Option<u32>) -> Result<Vec<u32>, String> {

@@ -3,9 +3,9 @@
 
 //! Qwen3-VL ViT vision encoder (built on the shared `model::vit` block builder).
 //!
-//! This module grows the encoder incrementally. Today: the positional pieces —
-//! per-patch 2-D positions in spatial-merge-block order and the 2-D vision RoPE
-//! tables that feed the existing `rope2d` kernel.
+//! It holds the whole tower, including the positional pieces: per-patch 2-D
+//! positions in spatial-merge-block order and the 2-D vision RoPE tables that
+//! feed the existing `rope2d` kernel.
 
 /// Per-patch `(h, w)` grid positions for a `hp × wp` patch grid, emitted in
 /// **spatial-merge-block order** (each `m × m` block's patches contiguous), so the
