@@ -10,6 +10,7 @@ use model::ops::Weight;
 
 use crate::device::prims::ConvShape;
 use crate::device::Device;
+use crate::train::seq::AttnShape;
 use crate::vision::ops::NORM_EPS;
 
 /// A word count that must fit a kernel parameter.
@@ -249,6 +250,120 @@ impl<'d> Rec<'d> {
     /// Response-norm input gradient.
     pub(crate) fn grn_dy(&mut self, y: &DeviceBuffer, mask: &DeviceBuffer, energy: &DeviceBuffer, de: &DeviceBuffer, dy: &DeviceBuffer, total: usize, d: usize) {
         self.threads("mirage_t_grn_dy", &[y, mask, energy, de, dy], &[word(total), word(d)], total);
+    }
+    /// Rotary rotation with per-row-and-pair `(cos, sin)`: `y = R(sign) x`, assigned or accumulated.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn rope(&mut self, x: &DeviceBuffer, cs: &DeviceBuffer, y: &DeviceBuffer, rows: usize, heads: usize, hd: usize, sign: f32, acc: bool) {
+        let total = rows * heads * (hd / 2);
+        self.threads("mirage_t_rope", &[x, cs, y], &[word(total), word(heads), word(hd), sign.to_bits(), u32::from(acc)], total);
+    }
+
+    fn attn_params(s: &AttnShape) -> [u32; 8] {
+        [word(s.tq), word(s.tk), word(s.hq), word(s.hk), word(s.qk), word(s.vh), u32::from(s.causal), (1.0 / (s.qk as f32).sqrt()).to_bits()]
+    }
+
+    /// Attention probabilities of every (query, head) row.
+    pub(crate) fn attn_probs(&mut self, q: &DeviceBuffer, k: &DeviceBuffer, pr: &DeviceBuffer, s: &AttnShape) {
+        self.threads("mirage_t_attn_probs", &[q, k, pr], &Self::attn_params(s), s.tq * s.hq);
+    }
+
+    /// Attention output `P v`.
+    pub(crate) fn attn_out(&mut self, pr: &DeviceBuffer, v: &DeviceBuffer, out: &DeviceBuffer, s: &AttnShape) {
+        self.threads("mirage_t_attn_out", &[pr, v, out], &Self::attn_params(s), s.tq * s.hq * s.vh);
+    }
+
+    /// Attention score gradient.
+    pub(crate) fn attn_ds(&mut self, pr: &DeviceBuffer, go: &DeviceBuffer, v: &DeviceBuffer, ds: &DeviceBuffer, s: &AttnShape) {
+        self.threads("mirage_t_attn_ds", &[pr, go, v, ds], &Self::attn_params(s), s.tq * s.hq);
+    }
+
+    /// Attention query gradient.
+    pub(crate) fn attn_dq(&mut self, ds: &DeviceBuffer, k: &DeviceBuffer, dq: &DeviceBuffer, s: &AttnShape) {
+        self.threads("mirage_t_attn_dq", &[ds, k, dq], &Self::attn_params(s), s.tq * s.hq * s.qk);
+    }
+
+    /// Attention key gradient.
+    pub(crate) fn attn_dk(&mut self, ds: &DeviceBuffer, q: &DeviceBuffer, dk: &DeviceBuffer, s: &AttnShape) {
+        self.threads("mirage_t_attn_dk", &[ds, q, dk], &Self::attn_params(s), s.tk * s.hk * s.qk);
+    }
+
+    /// Attention value gradient.
+    pub(crate) fn attn_dv(&mut self, pr: &DeviceBuffer, go: &DeviceBuffer, dv: &DeviceBuffer, s: &AttnShape) {
+        self.threads("mirage_t_attn_dv", &[pr, go, dv], &Self::attn_params(s), s.tk * s.hk * s.vh);
+    }
+
+    /// Causal dilated taps forward.
+    pub(crate) fn taps(&mut self, x: &DeviceBuffer, taps: &DeviceBuffer, y: &DeviceBuffer, t: usize, w: usize, kt: usize, dil: usize) {
+        self.threads("mirage_t_taps", &[x, taps, y], &[word(t), word(w), word(kt), word(dil)], t * w);
+    }
+
+    /// Causal dilated taps input gradient.
+    pub(crate) fn taps_dx(&mut self, gy: &DeviceBuffer, taps: &DeviceBuffer, dx: &DeviceBuffer, t: usize, w: usize, kt: usize, dil: usize) {
+        self.threads("mirage_t_taps_dx", &[gy, taps, dx], &[word(t), word(w), word(kt), word(dil)], t * w);
+    }
+
+    /// Causal dilated taps tap gradient.
+    pub(crate) fn taps_dt(&mut self, x: &DeviceBuffer, gy: &DeviceBuffer, dt: &DeviceBuffer, t: usize, w: usize, kt: usize, dil: usize) {
+        self.threads("mirage_t_taps_dt", &[x, gy, dt], &[word(t), word(w), word(kt), word(dil)], kt * w);
+    }
+
+    /// Sinkhorn forward over `blocks` blocks of `n x n`.
+    pub(crate) fn sinkhorn(&mut self, x: &DeviceBuffer, y: &DeviceBuffer, blocks: usize, n: usize, iters: usize) {
+        self.threads("mirage_t_sinkhorn", &[x, y], &[word(blocks), word(n), word(iters)], blocks);
+    }
+
+    /// Sinkhorn backward; `traj` is scratch for `blocks * 2 * iters * n * n` values.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sinkhorn_bwd(&mut self, x: &DeviceBuffer, y: &DeviceBuffer, gy: &DeviceBuffer, traj: &DeviceBuffer, dl: &DeviceBuffer, blocks: usize, n: usize, iters: usize) {
+        self.threads("mirage_t_sinkhorn_bwd", &[x, y, gy, traj, dl], &[word(blocks), word(n), word(iters)], blocks);
+    }
+
+    /// Lane mixing forward.
+    pub(crate) fn mix(&mut self, h: &DeviceBuffer, x: &DeviceBuffer, y: &DeviceBuffer, dims: [usize; 4]) {
+        let [t, a, _, d] = dims;
+        self.threads("mirage_t_mix", &[h, x, y], &dims.map(word), t * a * d);
+    }
+
+    /// Lane mixing weight gradient.
+    pub(crate) fn mix_dh(&mut self, gy: &DeviceBuffer, x: &DeviceBuffer, dh: &DeviceBuffer, dims: [usize; 4]) {
+        let [t, a, b, _] = dims;
+        self.threads("mirage_t_mix_dh", &[gy, x, dh], &dims.map(word), t * a * b);
+    }
+
+    /// Lane mixing source gradient.
+    pub(crate) fn mix_dx(&mut self, h: &DeviceBuffer, gy: &DeviceBuffer, dx: &DeviceBuffer, dims: [usize; 4]) {
+        let [t, _, b, d] = dims;
+        self.threads("mirage_t_mix_dx", &[h, gy, dx], &dims.map(word), t * b * d);
+    }
+
+    /// `out[q, x] (+)= sum_y a[q, y] m[y sy + x sx]` over `q` rows.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kron_right(&mut self, a: &DeviceBuffer, m: &DeviceBuffer, out: &DeviceBuffer, q: usize, ny: usize, nx: usize, strides: (usize, usize), acc: bool) {
+        let p = [word(q * nx), word(ny), word(nx), word(strides.0), word(strides.1), u32::from(acc)];
+        self.threads("mirage_t_kron_right", &[a, m, out], &p, q * nx);
+    }
+
+    /// `out[r, x, l] (+)= sum_y m[y sy + x sx] a[r, y, l]` over rows viewed as `[fa, fb]`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kron_left(&mut self, a: &DeviceBuffer, m: &DeviceBuffer, out: &DeviceBuffer, rows: usize, fab: (usize, usize), strides: (usize, usize), acc: bool) {
+        let total = rows * fab.0 * fab.1;
+        let p = [word(total), word(fab.0), word(fab.1), word(strides.0), word(strides.1), u32::from(acc)];
+        self.threads("mirage_t_kron_left", &[a, m, out], &p, total);
+    }
+
+    /// Left-factor gradient of the Kronecker rotation.
+    pub(crate) fn kron_da(&mut self, tmp: &DeviceBuffer, g: &DeviceBuffer, da: &DeviceBuffer, rows: usize, fa: usize, fb: usize) {
+        self.threads("mirage_t_kron_da", &[tmp, g, da], &[word(rows), word(fa), word(fb)], fa * fa);
+    }
+
+    /// Right-factor gradient of the Kronecker rotation.
+    pub(crate) fn kron_db(&mut self, z: &DeviceBuffer, dtmp: &DeviceBuffer, db: &DeviceBuffer, rows: usize, fa: usize, fb: usize) {
+        self.threads("mirage_t_kron_db", &[z, dtmp, db], &[word(rows), word(fa), word(fb)], fb * fb);
+    }
+
+    /// `out[r, i] (+)= z[r, cols[i]]`.
+    pub(crate) fn gather_cols(&mut self, z: &DeviceBuffer, cols: &DeviceBuffer, out: &DeviceBuffer, total: usize, n: usize, acc: bool) {
+        self.threads("mirage_t_gather_cols", &[z, cols, out], &[word(total), word(n), u32::from(acc)], total);
     }
 }
 

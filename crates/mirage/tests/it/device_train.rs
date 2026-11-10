@@ -512,3 +512,119 @@ fn an_hconv_block_matches_the_host() {
         compare(&dev, &format!("hconv {rows}x{n}"), &params, |g| hconv_block(g, rows, n, k));
     }
 }
+
+use mirage::train::seq::AttnShape;
+
+#[test]
+fn rotary_embeddings_match_the_host() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("rope") else { return };
+    let params = no_params(&dev);
+    let (rows, heads, hd) = (9, 3, 16);
+    let angles: Vec<f64> = noise(rows * hd / 2, 51, 3.0).into_iter().map(f64::from).collect();
+    compare(&dev, "rope", &params, |g| {
+        let x = g.leaf(noise(rows * heads * hd, 52, 1.0));
+        let y = g.rope(x, heads, hd, &angles);
+        let loss = weighted_loss(g, &[y], 200);
+        Run { leaves: vec![x], outs: vec![y], loss }
+    });
+}
+
+fn attention_run(g: &mut dyn Graph<f32>, s: AttnShape) -> Run {
+    let q = g.leaf(noise(s.tq * s.hq * s.qk, 53, 1.0));
+    let k = g.leaf(noise(s.tk * s.hk * s.qk, 54, 1.0));
+    let v = g.leaf(noise(s.tk * s.hk * s.vh, 55, 1.0));
+    let o = g.attention(q, k, v, s);
+    let loss = weighted_loss(g, &[o], 210);
+    Run { leaves: vec![q, k, v], outs: vec![o], loss }
+}
+
+#[test]
+fn masked_grouped_query_attention_matches_the_host() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("attention") else { return };
+    let params = no_params(&dev);
+    let shapes = [
+        // The decoder's causal self attention, a cross attention over a longer memory, the encoder's one-kv-head top.
+        AttnShape { tq: 37, tk: 37, hq: 8, hk: 2, qk: 48, vh: 64, causal: true },
+        AttnShape { tq: 21, tk: 130, hq: 8, hk: 8, qk: 48, vh: 64, causal: false },
+        AttnShape { tq: 70, tk: 70, hq: 4, hk: 1, qk: 32, vh: 64, causal: false },
+        AttnShape { tq: 5, tk: 3, hq: 2, hk: 2, qk: 3, vh: 5, causal: false },
+        // Few queries over thousands of keys (the cell memory of a full canvas).
+        AttnShape { tq: 6, tk: 4400, hq: 8, hk: 8, qk: 48, vh: 64, causal: false },
+    ];
+    for s in shapes {
+        compare(&dev, &format!("attention tq{} tk{} hq{} hk{} causal {}", s.tq, s.tk, s.hq, s.hk, s.causal), &params, |g| attention_run(g, s));
+    }
+}
+
+#[test]
+fn causal_taps_match_the_host() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("causal_taps") else { return };
+    let params = no_params(&dev);
+    let (t, w) = (23, 37);
+    for (kt, dil) in [(3, 1), (3, 4), (4, 30)] {
+        compare(&dev, &format!("taps kt{kt} dil{dil}"), &params, |g| {
+            let x = g.leaf(noise(t * w, 56, 1.0));
+            let taps = g.leaf(noise(kt * w, 57, 0.5));
+            let y = g.causal_taps(x, taps, w, dil);
+            let loss = weighted_loss(g, &[y], 220);
+            Run { leaves: vec![x, taps], outs: vec![y], loss }
+        });
+    }
+}
+
+#[test]
+fn sinkhorn_matches_the_host_through_twenty_rounds() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("sinkhorn") else { return };
+    let params = no_params(&dev);
+    for (blocks, n, iters) in [(37, 4, 20), (5, 3, 7), (3, 4, 0)] {
+        compare(&dev, &format!("sinkhorn {blocks}x{n} iters {iters}"), &params, |g| {
+            let l = g.leaf(noise(blocks * n * n, 58, 1.5));
+            let y = g.sinkhorn(l, n, iters);
+            let loss = weighted_loss(g, &[y], 230);
+            Run { leaves: vec![l], outs: vec![y], loss }
+        });
+    }
+}
+
+#[test]
+fn lane_mixing_matches_the_host() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("row_mix") else { return };
+    let params = no_params(&dev);
+    for (t, a, b, d) in [(9, 1, 4, 70), (7, 4, 4, 13), (5, 4, 1, 33)] {
+        compare(&dev, &format!("row_mix {t} {a}x{b}x{d}"), &params, |g| {
+            let h = g.leaf(noise(t * a * b, 59, 1.0));
+            let x = g.leaf(noise(t * b * d, 60, 1.0));
+            let y = g.row_mix(h, x, a, b, d);
+            let loss = weighted_loss(g, &[y], 240);
+            Run { leaves: vec![h, x], outs: vec![y], loss }
+        });
+    }
+}
+
+#[test]
+fn kronecker_rotations_and_permutations_match_the_host() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("kron") else { return };
+    let params = no_params(&dev);
+    for (rows, fa, fb) in [(7, 4, 6), (3, 16, 32), (5, 3, 3)] {
+        let n = fa * fb;
+        // A rotation of the columns (a permutation with no fixed structure).
+        let perm: Vec<u32> = (0..n as u32).map(|i| (i * 7 + 3) % n as u32).collect();
+        let perm = if (0..n as u32).all(|i| perm.iter().filter(|&&p| p == i).count() == 1) { perm } else { (0..n as u32).rev().collect() };
+        compare(&dev, &format!("kron {rows}x{fa}x{fb}"), &params, |g| {
+            let z = g.leaf(noise(rows * n, 61, 1.0));
+            let a = g.leaf(noise(fa * fa, 62, 0.5));
+            let b = g.leaf(noise(fb * fb, 63, 0.5));
+            let k = g.kron(z, a, b, fa, fb);
+            let p = g.permute_cols(k, n, &perm);
+            let outs = vec![k, p];
+            let loss = weighted_loss(g, &outs, 250);
+            Run { leaves: vec![z, a, b], outs, loss }
+        });
+    }
+}

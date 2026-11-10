@@ -30,6 +30,7 @@ mod linear;
 mod movement;
 mod norm;
 mod rows;
+mod seq;
 mod spatial;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -71,6 +72,26 @@ pub(super) const KERNELS: &[(&str, &str)] = &[
     ("mirage_t_band_dw", ::kernels::MIRAGE_T_BAND_DW),
     ("mirage_t_grn_de", ::kernels::MIRAGE_T_GRN_DE),
     ("mirage_t_grn_dy", ::kernels::MIRAGE_T_GRN_DY),
+    ("mirage_t_rope", ::kernels::MIRAGE_T_ROPE),
+    ("mirage_t_attn_probs", ::kernels::MIRAGE_T_ATTN_PROBS),
+    ("mirage_t_attn_out", ::kernels::MIRAGE_T_ATTN_OUT),
+    ("mirage_t_attn_ds", ::kernels::MIRAGE_T_ATTN_DS),
+    ("mirage_t_attn_dq", ::kernels::MIRAGE_T_ATTN_DQ),
+    ("mirage_t_attn_dk", ::kernels::MIRAGE_T_ATTN_DK),
+    ("mirage_t_attn_dv", ::kernels::MIRAGE_T_ATTN_DV),
+    ("mirage_t_taps", ::kernels::MIRAGE_T_TAPS),
+    ("mirage_t_taps_dx", ::kernels::MIRAGE_T_TAPS_DX),
+    ("mirage_t_taps_dt", ::kernels::MIRAGE_T_TAPS_DT),
+    ("mirage_t_sinkhorn", ::kernels::MIRAGE_T_SINKHORN),
+    ("mirage_t_sinkhorn_bwd", ::kernels::MIRAGE_T_SINKHORN_BWD),
+    ("mirage_t_mix", ::kernels::MIRAGE_T_MIX),
+    ("mirage_t_mix_dh", ::kernels::MIRAGE_T_MIX_DH),
+    ("mirage_t_mix_dx", ::kernels::MIRAGE_T_MIX_DX),
+    ("mirage_t_kron_right", ::kernels::MIRAGE_T_KRON_RIGHT),
+    ("mirage_t_kron_left", ::kernels::MIRAGE_T_KRON_LEFT),
+    ("mirage_t_kron_da", ::kernels::MIRAGE_T_KRON_DA),
+    ("mirage_t_kron_db", ::kernels::MIRAGE_T_KRON_DB),
+    ("mirage_t_gather_cols", ::kernels::MIRAGE_T_GATHER_COLS),
 ];
 
 /// One recorded value.
@@ -397,26 +418,26 @@ impl Graph<f32> for DevTape<'_> {
     fn grn_scale(&mut self, y: Id, d: usize, valid: &[bool], gamma: Id) -> Id {
         self.op_grn_scale(y, d, valid, gamma)
     }
-    fn rope(&mut self, _x: Id, _heads: usize, _hd: usize, _angles: &[f64]) -> Id {
-        unimplemented!("package B/C/D")
+    fn rope(&mut self, x: Id, heads: usize, hd: usize, angles: &[f64]) -> Id {
+        self.op_rope(x, heads, hd, angles)
     }
-    fn attention(&mut self, _q: Id, _k: Id, _v: Id, _s: AttnShape) -> Id {
-        unimplemented!("package B/C/D")
+    fn attention(&mut self, q: Id, k: Id, v: Id, s: AttnShape) -> Id {
+        self.op_attention(q, k, v, s)
     }
-    fn causal_taps(&mut self, _x: Id, _taps: Id, _w: usize, _dilation: usize) -> Id {
-        unimplemented!("package B/C/D")
+    fn causal_taps(&mut self, x: Id, taps: Id, w: usize, dilation: usize) -> Id {
+        self.op_causal_taps(x, taps, w, dilation)
     }
-    fn sinkhorn(&mut self, _logits: Id, _n: usize, _iters: usize) -> Id {
-        unimplemented!("package B/C/D")
+    fn sinkhorn(&mut self, logits: Id, n: usize, iters: usize) -> Id {
+        self.op_sinkhorn(logits, n, iters)
     }
-    fn row_mix(&mut self, _h: Id, _x: Id, _a: usize, _b: usize, _d: usize) -> Id {
-        unimplemented!("package B/C/D")
+    fn row_mix(&mut self, h: Id, x: Id, a: usize, b: usize, d: usize) -> Id {
+        self.op_row_mix(h, x, a, b, d)
     }
-    fn kron(&mut self, _z: Id, _a: Id, _b: Id, _fa: usize, _fb: usize) -> Id {
-        unimplemented!("package B/C/D")
+    fn kron(&mut self, z: Id, a: Id, b: Id, fa: usize, fb: usize) -> Id {
+        self.op_kron(z, a, b, fa, fb)
     }
-    fn permute_cols(&mut self, _z: Id, _n: usize, _perm: &[u32]) -> Id {
-        unimplemented!("package B/C/D")
+    fn permute_cols(&mut self, z: Id, n: usize, perm: &[u32]) -> Id {
+        self.op_permute_cols(z, n, perm)
     }
     fn softmax_ce(&mut self, _logits: Id, _v: usize, _targets: &[u32], _weights: &[f64]) -> Id {
         unimplemented!("package B/C/D")
