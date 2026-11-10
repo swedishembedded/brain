@@ -172,8 +172,22 @@ reader, JSON). `extract` adds `memory_reused`.
 - **Form scoring runs on the host decoder.** `extract` takes the vision half and
   the memory on the device and scores candidates with the host decoder, one
   image at a time.
-- **No training and no quantised execution yet.** The `.cact` is read for the
-  tokenizer and the reader's character set only.
+- **No quantised execution yet.** The `.cact` is read for the tokenizer and the
+  reader's character set only.
+
+## Fine-tunes
+
+Mirage fine-tunes on the host through the Rust crate (`mirage::train`): full,
+head-only (reader, dense head, decoder) or LoRA on the dense projections, with
+AdamW, exact resume and per-term loss weights. A training run writes a model
+directory: `mirage.safetensors` (the trained weights, or the unchanged base for
+a LoRA run) and, for LoRA, `adapter.safetensors`. After
+`train::prepare::make_servable` (which copies `config.json` and the deployment
+file beside them) every surface that opens a model directory serves it
+unchanged; an `adapter.safetensors` next to the weights is folded into them when
+the directory is opened. The training objective is brain's own: the vendor
+published no recipe. Training records are JSONL with task-presence semantics
+(`mirage::train::data`): a missing label family is unknown, never a negative.
 
 ## Hardware and limits
 

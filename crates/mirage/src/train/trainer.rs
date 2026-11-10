@@ -104,12 +104,15 @@ pub struct Trainer {
     moments: NamedMoments,
     cfg: TrainConfig,
     step: u32,
+    /// The optimiser step the starting weights were exported at (the metadata step counts from here).
+    origin_step: u64,
 }
 
 impl Trainer {
     /// Start from a checkpoint.
     pub fn new(base: Checkpoint, cfg: TrainConfig) -> Result<Trainer, String> {
         let params = params_from_checkpoint::<f32>(&base);
+        let origin_step = base.metadata.step;
         let (adapter, trainable) = match &cfg.mode {
             Mode::Full => (None, Manifest::new(&base.config).iter().filter(|s| !is_training_only(&s.name)).map(|s| s.name.clone()).collect()),
             Mode::Heads(heads) => {
@@ -125,7 +128,7 @@ impl Trainer {
                 (Some(adapter::fresh(&base.config, *rank, *alpha, *seed)), BTreeSet::new())
             }
         };
-        Ok(Trainer { base, params, adapter, trainable, moments: NamedMoments::new(Adam::default()), cfg, step: 0 })
+        Ok(Trainer { base, params, adapter, trainable, moments: NamedMoments::new(Adam::default()), cfg, step: 0, origin_step })
     }
 
     /// Change the learning rate for the steps that follow.
@@ -222,7 +225,9 @@ impl Trainer {
                 t.data.clone_from(&self.params[name]);
             }
         }
-        ck.metadata = Metadata { step: ck.metadata.step + u64::from(self.step), ..ck.metadata };
+        // A LoRA run leaves the base weights (and their step) as they were.
+        let trained = if self.adapter.is_some() { 0 } else { u64::from(self.step) };
+        ck.metadata = Metadata { step: self.origin_step + trained, ..ck.metadata };
         ck
     }
 
@@ -235,14 +240,14 @@ impl Trainer {
         Ok(ck)
     }
 
-    /// Write the run to `dir`: the deployable weights (`mirage.safetensors`, the base for a LoRA run), the adapter
-    /// (`adapter.safetensors`, LoRA runs) and the training state (`state.safetensors`: step and moments).
+    /// Write the run to `dir`: the weights (`mirage.safetensors`, the base for a LoRA run), the adapter
+    /// (`adapter.safetensors`, LoRA runs) and the training state (`state.safetensors`: step and moments). To make
+    /// the directory servable as a model, follow with [`super::prepare::make_servable`].
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         crate::import::export(&self.checkpoint(), &dir.join("mirage.safetensors")).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join("config.json"), self.base.config.to_json()).map_err(|e| e.to_string())?;
         if let Some(set) = &self.adapter {
-            adapter::save(&dir.join("adapter.safetensors"), set, &self.base.config)?;
+            adapter::save(&dir.join(adapter::FILE), set, &self.base.config)?;
         }
         let mut tensors = Vec::new();
         for (name, _) in self.moment_names() {
@@ -265,15 +270,17 @@ impl Trainer {
     /// checkpoint is not needed: the saved weights replace it), the adapter, moments and step from the files.
     pub fn resume(dir: &Path, cfg: TrainConfig) -> Result<Trainer, String> {
         let base = crate::import::load(&dir.join("mirage.safetensors"), &crate::import::ImportOptions::default()).map_err(|e| e.to_string())?;
+        let loaded_step = base.metadata.step;
         let mut t = Trainer::new(base, cfg)?;
         if t.adapter.is_some() {
-            t.adapter = Some(adapter::load(&dir.join("adapter.safetensors"), &t.base.config)?);
+            t.adapter = Some(adapter::load(&dir.join(adapter::FILE), &t.base.config)?);
         }
         let state_path = dir.join("state.safetensors");
         let path = state_path.to_str().ok_or("path is not UTF-8")?;
         let meta = checkpoint::st::read_metadata(path).map_err(|e| e.to_string())?;
         let config: serde_json::Value = meta.get(checkpoint::st::CONFIG_KEY).ok_or("state.safetensors has no config header").and_then(|s| serde_json::from_str(s).map_err(|_| "unreadable state header"))?;
         t.step = config.get("step").and_then(serde_json::Value::as_u64).ok_or("state.safetensors has no step")? as u32;
+        t.origin_step = if t.adapter.is_some() { loaded_step } else { loaded_step.saturating_sub(u64::from(t.step)) };
         let tensors: BTreeMap<String, Vec<f32>> = checkpoint::safetensors::read(path)?.into_iter().map(|x| (x.name, x.data)).collect();
         for (name, len) in t.moment_names() {
             let (Some(m), Some(v)) = (tensors.get(&format!("{name}.m")), tensors.get(&format!("{name}.v"))) else { continue };

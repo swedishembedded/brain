@@ -23,6 +23,9 @@ use crate::spec::Manifest;
 /// The family tag in an adapter file's header.
 pub const FAMILY: &str = "mirage-lora";
 
+/// The adapter file a run directory carries; `Mirage::open` folds it into the weights when present.
+pub const FILE: &str = "adapter.safetensors";
+
 /// Kernels that take an adapter: the decoder's self and cross attention, the encoder's attention, the slot
 /// projections and the engram key/value projections (the dense projections of the brief's scope).
 pub fn is_adaptable(name: &str) -> bool {

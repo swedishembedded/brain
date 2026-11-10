@@ -13,9 +13,11 @@
 pub mod adapter;
 pub mod data;
 pub mod decoder;
+pub mod eval;
 pub mod loss;
 pub mod net;
 pub mod objective;
+pub mod prepare;
 pub mod ops;
 pub mod real;
 pub mod seq;

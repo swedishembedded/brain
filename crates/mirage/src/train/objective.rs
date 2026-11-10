@@ -347,6 +347,12 @@ fn heat_targets(boxes: &[[f32; 4]], side: usize) -> HeatTargets {
     HeatTargets { heat, positives }
 }
 
+/// The mask of rings (flat `[x, y, ...]`, canvas-normalised) on a `field x field` grid, row-major, sampled at
+/// cell centres.
+pub fn rasterise(rings: &[Vec<f64>], field: usize) -> Vec<bool> {
+    (0..field * field).map(|i| inside(rings, ((i % field) as f64 + 0.5) / field as f64, ((i / field) as f64 + 0.5) / field as f64)).collect()
+}
+
 /// Even-odd point-in-polygon over several rings (flat `[x, y, ...]`).
 fn inside(rings: &[Vec<f64>], x: f64, y: f64) -> bool {
     let mut crossings = 0;
@@ -407,7 +413,7 @@ pub fn sample_loss<R: Real>(net: &mut Net<'_, R>, s: &Sample, target: Option<&Te
     let mut parts: Vec<Id> = Vec::new();
     let mut add = |net: &mut Net<'_, R>, name: &'static str, id: Id, weight: f64| {
         let scaled = net.tape.scale(id, weight);
-        terms.insert(name, net.tape.val(scaled)[0].to_f64());
+        *terms.entry(name).or_insert(0.0) += net.tape.val(scaled)[0].to_f64();
         parts.push(scaled);
     };
 

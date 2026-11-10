@@ -24,6 +24,7 @@ mod spec;
 mod tokenizer;
 mod train_fit;
 mod train_graph;
+mod train_real;
 mod train_ops;
 mod vision;
 mod vision_masks;

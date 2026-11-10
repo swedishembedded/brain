@@ -96,8 +96,16 @@ impl Mirage {
     }
 
     /// Load a released model directory (`config.json`, `mirage.safetensors`, `mirage.cact`).
+    ///
+    /// A directory that also holds `adapter.safetensors` (what a LoRA fine-tune writes) is served with the adapter
+    /// folded into the weights, so every surface that loads a directory serves a fine-tune unchanged.
     pub fn open(dir: &Path) -> Result<Mirage, ModelError> {
-        let ck = import::load_dir(dir, &ImportOptions::default())?;
+        let mut ck = import::load_dir(dir, &ImportOptions::default())?;
+        let adapter_path = dir.join(crate::train::adapter::FILE);
+        if adapter_path.is_file() {
+            let set = crate::train::adapter::load(&adapter_path, &ck.config).map_err(ModelError::Request)?;
+            crate::train::adapter::fold(&mut ck, &set).map_err(ModelError::Request)?;
+        }
         let cact = CactModel::new(CactFile::open(&dir.join("mirage.cact"))?, ck.config.clone())?;
         Mirage::new(&ck, cact.tokenizer_blob()?, cact.charset()?)
     }

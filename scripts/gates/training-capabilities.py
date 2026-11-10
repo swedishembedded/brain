@@ -52,6 +52,8 @@ TABLES = [
      "No architecture offers a full fine-tune over a quantized or fp8 base. Trainable\nparameters, gradients and optimizer moments are held below fp32 only where a\ncell says so.\n"),
     ("Image and video generators", ["flux2", "s3dit", "wan"],
      [("lora_f32", "LoRA, fp32 base"), ("lora_int8", "LoRA, int8 base"), ("other", "Other")], ""),
+    ("Perception models", ["mirage"],
+     [("full_ft", "Full and head-only fine-tune"), ("lora_f32", "LoRA, fp32 base"), ("adapter_serving", "Adapters while serving")], ""),
     ("Serving adapters and KV tiers", ["qwen3", "qwen35", "qwen35moe", "ricursive"],
      [("adapter_serving", "Adapters while serving"), ("quant_serving", "Quantized weights while serving"), ("kv_tiers", "KV tiers")], ""),
 ]
