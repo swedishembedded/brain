@@ -834,3 +834,59 @@ Changes (each its own verified step):
    reciprocal per row and one vector reciprocal per column sweep: 29 -> 14 us per launch.
 4. `mirage_attn_apply`: 4 lanes x 16 key groups instead of 16 lanes x 4 groups (the key loop is the latency chain):
    batch 1 0.356 -> 0.166 ms per step, batch 64 0.418 -> 0.372.
+
+Per-step table (FP32 decoder, one step at position 150; "profile" = `profile_tape` sum of per-dispatch minima over 20
+replays, "step" = wall time of a replayed step, minimum over 35 replays; baseline idle card, after on a LOADED card):
+
+| batch | baseline profile / step (idle) | after profile / step (loaded, 99-100 % util) |
+|---|---|---|
+| 1 | 2.77 / 1.77 ms | 2.48-2.71 / 1.85-3.09 ms |
+| 8 | 3.15 / 2.18 ms | 2.86-3.26 / 2.13-2.60 ms |
+| 32 | 4.04 / 3.00 ms | 3.21-3.59 / 2.43-4.26 ms |
+| 64 | 6.87 / 5.89 ms | 3.53-3.97 / 2.64-5.23 ms |
+
+The per-kernel profile is the comparable column (the neighbour's kernels stretch a loaded step's wall time but only add
+to the dispatch minima when they preempt a kernel): batch 64 6.87 -> 3.5 ms, batch 32 4.04 -> 3.2, batch 1 2.77 -> 2.48.
+Packed CQ decoder: batch 64 profile 9.83 -> 4.72 ms (sum of the gate products 6.6 -> 0.5 ms), batch 32 5.18 -> 4.58,
+batch 1 3.17 -> 3.03 (batch 1 is launch bound: 401 dispatches of 3-8 us).
+
+ncu, batch-1 step, FP32, gpu1 (cold caches, base clocks, one replay; `sm%` / `dram%` are the percent of the card's
+peak sustained throughput over the kernel; roofs: ~4 TB/s HBM, ~67 TFLOP/s fp32):
+
+| kernel (n per step) | mean us | share | grid (blocks) | sm % | dram % | roofline reading |
+|---|---|---|---|---|---|---|
+| rmsnorm_rows (73) | 8.3 | 24.6 % | 3 | 0.0 | 0.1 | latency chain of 3 dependent global phases per row; 2 KB moved; launch bound |
+| matmul_gemv_reg MREG=1 (61) | 6.5 | 16.1 % | 573 | 10.7 | 5.6 | weights 0.1-2 MB per product: well under 1 us of HBM time; latency bound |
+| mirage_kron_rows (24) | 12.7 | 12.4 % | 1 | 0.3 | 0.1 | one 512-thread block per row, two phases and a barrier; latency bound |
+| mirage_attn_apply (16) | 10.1 (was 23.8) | 6.5 % | 128 | 1.8 | 1.0 | key loop is the chain |
+| mirage_attn_softmax (16) | 9.7 | 6.3 % | 8 | 0.4 | 0.2 | 8 blocks; latency bound |
+| mirage_attn_scores (16) | 9.6 | 6.2 % | 56 | 0.9 | 0.8 | one thread per (row, key) with a 48-term dot |
+| mirage_mhc_maps (8) | 15.9 (was 36.9) | 5.2 % | 1 | 0.0 | 0.1 | one thread per row, 20 Sinkhorn iterations |
+
+At batch 1 nothing in the step is near a roof: every kernel moves kilobytes, the step is 348 dispatches of 3-12 us and
+its floor is the launch and dependent-load latency of that chain (1.77 ms idle = 5.1 us a dispatch), so the lever is
+dispatch count, not kernel bandwidth.
+Batch 64 products (ncu, per product, 64 rows): 24 x 2048 gate 23 us (6 blocks; 33.5 MFLOP-class work, 0.5 us of roof),
+1120 x 512 24 us (280 blocks), 512 x 512 9.6 us (128 blocks, 3 % of the fp32 roof), 8299 x 512 logits 62 us on the 64 x 64 tile
+(130 blocks, 15 % of the roof). The batch-64 ncu of the whole step stopped on an ncu error while profiling
+`mirage_kron_rows` (not retried); the table above for it is the `profile_tape` one.
+
+Throughput (images/s, FP32 / CQ / CQ-A8, cats 640x480, 224-236 tokens): baseline idle card 29.45 / 31.04 / 32.25 at batch
+64, batch 1 2.00 / 2.52 / 2.44. After: measured only on the loaded card (99-100 % utilisation by the neighbour, which
+also doubles batch 1: decode 0.90 s against 0.47 idle): 24.2 / 21.1 / 15.2 at batch 64, 0.94 / 0.90 / 0.88 at batch 1.
+These are NOT comparable with the idle baseline. No idle window came back after the first twenty minutes, so the
+targets are not demonstrated by wall clock; the per-kernel evidence says they are met with margin (batch-64 decode is
+~260 steps x the step time: 5.9 ms -> about 3.0 ms on the idle card, i.e. an estimated 45 images/s, not a measurement).
+Rerun `describe_throughput_packed_against_fp32` and `decoder_step_floor_probe{,_cq}` on an idle card to confirm.
+
+CQ-A8 at batch 64 is the one regression the dense rule could have caused (no dense int8 product): fixed in the same
+change (cooperative kernel to 96 rows); its decoder profile is unchanged by the selector change.
+
+Not done (measured candidates for the next round, all launch-count work): rmsnorm fused into the following projection or
+the residual (73 dispatches = 24.6 % at batch 1), single-query flash-decode attention with a split merge for self and cross
+(the three attention kernels are 19 %), `mirage_kron_rows` fused with the elementwise stage (24 dispatches, 12.4 %), and
+the logits product (8299 rows) on the skinny/tiled pair. The kernels.md killed-hypothesis row about fused decode attention
+(occupancy) applies: a split-K flash-decode must keep batch x heads x splits blocks.
+Parity: full `make test/one P=brain-mirage T=it` on CUDA gpu1 after each change (190 passed, greedy tokens equal to the
+goldens, cosine floors unchanged); CPU backend `device_decoder`, `device::` and `device_model` modules pass (the
+`device` filter as one run aborted without a summary, twice: not investigated, each module passes alone).
