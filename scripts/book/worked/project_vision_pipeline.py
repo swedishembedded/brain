@@ -242,7 +242,7 @@ def views_table():
         ["padding rows", f"0 to {py - 1} and {py + nh} to {SIZE - 1} ({len(pad_rows)} rows)", "detector view"],
         ["source rows of the first 6 content rows", str(ys[:6]), "detector view"],
         ["source columns of the first 8 content columns", str(xs_first), "detector view"],
-        ["SHA-256 (12 hex) of the 12,288 bytes round(255 v), CHW order r, g, b planes of rows then columns, as H W C", sdig, "detector view"],
+        ["SHA-256 (first 12 hex digits) of the 12,288 bytes round half up (255 v), serialized in H W C order: for each row, each column, the bytes r, g, b", sdig, "detector view"],
         ["sum of the 12,288 values (tolerance 1e-9)", _fx(sumd, 6), "detector view"],
         ["scale per axis (64/96, 64/61)", f"({_fx(SIZE / W, 6)}, {_fx(SIZE / H, 6)})", "segmenter view"],
         ["sum of the 12,288 normalized values (tolerance 1e-9)", _fx(sums, 6), "segmenter view"],
@@ -795,8 +795,8 @@ def planted_mistakes():
 # ------------------------------------------------------------------------------------------------ the cost of the real models
 
 
-def _giga(v):
-    return f"{v / 1e9:,.2f}"
+def _giga(v, d=2):
+    return f"{v / 1e9:,.{d}f}"
 
 
 def ledger_data(k_tracks=3):
@@ -822,18 +822,26 @@ def ledger_data(k_tracks=3):
 def ledger():
     rows = []
     fr = ledger_data()
-    for t in (0, 1, 6, 11):
-        _, keys, trunk, per_track, shared, unshared = fr[t]
-        rows.append([t, _int(keys) if keys else "none", _giga(trunk), _giga(per_track), _giga(shared), _giga(unshared)])
+    g = lambda v: _giga(v, 4)  # noqa: E731
+    for t, keys, trunk, per_track, shared, unshared in fr:
+        rows.append([t, _int(keys) if keys else "none", g(trunk), g(per_track), g(shared), g(unshared)])
     ts = sum(f[4] for f in fr)
     tu = sum(f[5] for f in fr)
-    rows.append(["all 12", "", "", "", _giga(ts), _giga(tu)])
+    rows.append(["all 12", "", "", "", g(ts), g(tu)])
     one = sum(f[4] for f in ledger_data(1))
+    mem0, mem_key = sam.memory_attention_flops(0)[0], sam.memory_attention_flops(1)[0] - sam.memory_attention_flops(0)[0]
+    trunk = fr[0][2]
     lead = ("FLOPs (2 per multiply-add) of the segmenter side of the pipeline for the 12-frame clip priced as the large SAM 2.1 model at "
-            "1,024 by 1,024 pixels, with the formulas of Chapter 7: the trunk once per frame, and for every track a memory attention "
-            "over the keys of the bank (7 slabs of 4,096 cells and one pointer of 4 tokens from each earlier frame, at most 12), a decoder "
-            "with the tracking prompt and a memory encoder; frame 0 has no memory attention and a decoder on a box prompt (2 corner "
-            "tokens and the padding point). The detector is not counted.\n\n")
+            "1,024 by 1,024 pixels, with the formulas of Chapter 7, in billions of FLOPs to four decimals. The trunk costs "
+            f"{g(trunk)} once per frame. For every track: the memory encoder {g(sam.memory_encoder_flops())}; the decoder "
+            f"{g(sum(sam.decoder_flops(1).values()))} with the tracking prompt, and {g(sum(sam.decoder_flops(2).values()))} on frame 0, "
+            "where the prompt is a box (2 corner tokens and the padding point); and, on frames 1 to 11, a memory attention of "
+            f"{g(mem0)} + {mem_key / 1e9:.8f} per key (in FLOPs, {_int(mem0)} + {_int(mem_key)} per key), with keys = 4,096 per slab + 4 "
+            "per pointer. The bank of a frame holds the slab of frame 0, the slabs of the (up to 6) most recent earlier frames other than "
+            "frame 0, and one pointer from each earlier frame (at most 11 back); frame 0 has no memory attention. A track's cost on a frame is "
+            "its memory attention, decoder and memory encoder; the shared column adds the trunk once to the three tracks, the other adds "
+            "it to each. The detector is not counted. Every figure is the sum of exact counts, rounded once to four decimals; a reader "
+            "who adds the printed terms gets the totals to within 0.01.\n\n")
     return (lead + _table(["frame", "memory keys per track", "trunk (GFLOPs)", "per track: attention, decoder, encoder", "3 tracks, trunk shared",
                     "3 tracks, trunk per track"], rows)
             + f"\n\nOne track alone costs {_giga(one)} billion FLOPs over the clip; three tracks that share the trunk cost {_giga(ts)} billion, "

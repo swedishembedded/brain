@@ -781,7 +781,11 @@ def map_table():
             f"({', '.join('image %d %s %s' % (im, _box(b), _f(cf, 2)) for im, b, cf in MAP_DET[1])}).\n\n" +
             _table(["class", "AP@0.3", "AP@0.5", "AP@0.75"], rows, "lrrr") +
             f"\n\nThe mean over the ten thresholds 0.50, 0.55, ..., 0.95 (mAP@0.5:0.95), whose per-threshold values are "
-            f"{per}, is {_f(m, 4)}.")
+            f"{per}, is {_f(m, 4)}. A detection matches a ground-truth box when its IoU is at least the threshold. The class-1 detection "
+            f"in image 2 has an IoU of exactly 16/20 = 0.8, and the threshold 0.5 + 0.05 * 6, evaluated in double precision, is also exactly "
+            f"0.8, so that tie is a match; an evaluator that compared with a strict inequality, or that built the thresholds by repeated "
+            f"addition and landed a rounding error above 0.8, would lose it and print {_f((average_precision(0, 0.8000001) + average_precision(1, 0.8000001)) / 2, 4)} "
+            f"at that threshold in place of {_f((average_precision(0, 0.8) + average_precision(1, 0.8)) / 2, 4)}.")
 
 
 # ------------------------------------------------------------------------------------------------ letterbox and conventions

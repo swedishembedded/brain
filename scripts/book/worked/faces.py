@@ -145,8 +145,13 @@ def photos():
     return ("Landmarks of three photographs, in pixels of each photograph (x to the right, y down), rounded to 0.1. A1 and A2 are two "
             "photographs of person A, B is person B photographed with the pose of A1. The generator is "
             f"`{LANDMARK_NAME}` ({_seed(LANDMARK_NAME)}): each landmark is the canonical shape of the person moved by the pose "
-            "of the photograph (scale 2.0, 3.0, 2.0; rotation 10, -12, 10 degrees; shift (60, 90), (150, 130), (60, 90)) plus a jitter "
-            "of 0.4 times a standard normal in x and then in y, drawn in the order photo, point, coordinate.\n\n"
+            "of the photograph plus a jitter. The canonical shape of a person is the 112-pixel template of the recognition network "
+            "(printed further on, where the fit is derived) plus a fixed offset for each point, in the order of the table: person A "
+            f"{', '.join(_pt(o) for o in SHAPE_A)}; person B {', '.join(_pt(o) for o in SHAPE_B)}. A photograph with scale k, rotation "
+            "theta and shift (tx, ty) maps a shape point (x, y) to (k (x cos theta - y sin theta) + tx + 0.4 e_x, "
+            "k (x sin theta + y cos theta) + ty + 0.4 e_y), where e_x and e_y are standard normals (`normal()`), drawn in the order "
+            "photo (A1, A2, B), point (as in the table), coordinate (x then y), and each coordinate is rounded to 0.1. The poses are "
+            "A1: k = 2.0, theta = 10 degrees, shift (60, 90); A2: k = 3.0, theta = -12 degrees, shift (150, 130); B: the pose of A1.\n\n"
             + _table(["landmark", "A1", "A2", "B"], rows)
             + "\n\nRoot-mean-square distance between corresponding landmarks of two photographs (the square root of the mean over "
             "the five points of the squared distance), pixels:\n\n"
@@ -373,7 +378,14 @@ def scrfd_cost_table():
     vga = m * 480 // 640
     return ("Parameters (weights and biases, the batch normalizations folded into the convolutions, and the three learned scales) "
             "and multiply-adds of the detector's convolutions on a 640 by 640 input, from the layer list of the text. Pooling, the "
-            "shortcut average pools, the additions, the activations and the nearest-neighbour doublings are not counted.\n\n"
+            "shortcut average pools, the additions, the activations and the nearest-neighbour doublings are not counted. The layers "
+            "counted, in full: the stem convolutions have stride 1 except the first, which has stride 2 (output 320 by 320), followed by the "
+            "2 x 2 max pool to 160; a basic block is a 3 x 3 convolution and a second 3 x 3 convolution of the same width, and in a "
+            "strided stage (stages 2 to 4) the first block's first convolution has the stride 2, so both its convolutions and its 1 x 1 "
+            "shortcut convolution are costed at the halved side; the shortcut also has a 1 x 1 convolution when the width changes. The neck "
+            "takes the outputs of stages 2, 3 and 4 (strides 8, 16, 32): three 1 x 1 lateral convolutions to 56 channels, three 3 x 3 "
+            "smoothing convolutions on the three levels, two 3 x 3 stride-2 convolutions that bring a finer level down to the next "
+            "coarser (costed at the coarser side), and two 3 x 3 merge convolutions on the two coarser levels, each of 56 to 56 channels.\n\n"
             + _table(["part", "output", "parameters", "multiply-adds"], rows, "lrrr")
             + f"\n\nTwice the multiply-adds, the FLOPs, is {_int(2 * m)}. The same layer list on a 640 by 480 input needs "
             f"{_int(vga)} multiply-adds (three quarters of the square canvas).")
@@ -540,7 +552,11 @@ def iresnet_table():
     n_tensors = 3 + 49 * 9 + 4 * 2 + 4 + 2 + 4
     return ("Parameters and multiply-adds of the embedding network on a 112 by 112 input, from the layer list of the text: 49 blocks "
             "(3, 13, 30 and 3 per stage) of an entry batch normalization (4 numbers per channel), two 3x3 convolutions with biases, "
-            "a PReLU with one slope per channel, and in the first block of each stage a 1x1 convolution on the shortcut. Activations "
+            "a PReLU with one slope per channel, and in the first block of each stage a 1x1 convolution on the shortcut. The block is "
+            "pre-activation: entry batch normalization, then the first 3 x 3 convolution (stride 1, costed at the block's input "
+            "resolution, from the input width to the stage width), then the PReLU, then the second 3 x 3 convolution (stage width to "
+            "stage width, stride 2 in the first block of each stage, costed at the output resolution), then the addition of the shortcut "
+            "(identity, or the strided 1 x 1 convolution); no normalization follows the second convolution. Activations "
             "and additions are not counted.\n\n"
             + _table(["part", "output", "parameters", "multiply-adds"], rows, "lrrr")
             + f"\n\nTwice the multiply-adds, the FLOPs, is {_int(2 * m)}. The tensors of the file, counted as the text counts them "
@@ -735,7 +751,11 @@ def template_comparison():
             ("distance between the eye centres, pixels", _f(eye(TEMPLATE_112), 2), _f(eye(TEMPLATE_512), 2)),
             ("that distance as a share of the side", _f(eye(TEMPLATE_112) / 112, 4), _f(eye(TEMPLATE_512) / 512, 4)),
             ("eye midpoint to mouth midpoint, as a share of the side", _f(mouth(TEMPLATE_112) / 112, 4), _f(mouth(TEMPLATE_512) / 512, 4))]
-    return (_table(["", "recognition template", "parsing template"], rows, "lrr")
+    return ("The recognition template is the five points printed in the text; the parsing template, in pixel-centre coordinates of "
+            f"the 512-pixel crop, is {', '.join(_pt(p, 5) for p in TEMPLATE_512)} (the brain constant `FFHQ_DST_512`, the same five "
+            "points in the same order). The two distances are the Euclidean distance between the left and right eye points, and the "
+            "last row the distance from the midpoint of the eyes to the midpoint of the mouth corners.\n\n"
+            + _table(["", "recognition template", "parsing template"], rows, "lrr")
             + f"\n\nThe least-squares similarity that takes the parsing template onto the recognition template has scale "
             f"{math.hypot(m[0], m[1]):.4f} (a plain shrink of 512 to 112 would be {112 / 512:.4f}), angle "
             f"{_f(math.degrees(math.atan2(m[1], m[0])), 4)} degrees and a residual of {_f(rms_distance(al, TEMPLATE_112), 3)} pixels.")

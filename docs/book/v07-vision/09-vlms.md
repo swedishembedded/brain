@@ -161,10 +161,10 @@ FLOPs of the MiniCPM-V 4.6 tower for a 448 x 448 picture (1,024 patches of 14 pi
 
 | tower | matrix products | score and average | total |
 |---|---:|---:|---:|
-| no merger: 27 blocks on 1,024 rows | 841.9 | 130.5 | 972.3 |
-| window merger after block 6: 7 blocks on 1,024 rows, 20 on 256 | 374.2 | 39.9 | 414.0 |
-| the window merger itself | 61.6 | 0.0 | 61.7 |
-| merged tower plus its window merger | 435.8 | 39.9 | 475.7 |
+| no merger: 27 blocks on 1,024 rows | 841.87 | 130.46 | 972.33 |
+| window merger after block 6: 7 blocks on 1,024 rows, 20 on 256 | 374.17 | 39.86 | 414.03 |
+| the window merger itself | 61.64 | 0.02 | 61.66 |
+| merged tower plus its window merger | 435.81 | 39.88 | 475.69 |
 
 The merged tower, window merger included, needs 48.9 percent of the FLOPs of the tower without it, a saving of 51.1 percent, and its later blocks attend over 256 rows instead of 1,024.
 <!-- /worked -->
@@ -174,7 +174,7 @@ The table counts the same work the same way as Chapter 6 did. What it adds is a 
 Now the projectors themselves, counted from the tensor shapes of the crates' configurations:
 
 <!-- worked: vlms.projector_table -->
-Parameters of the vision-to-language maps of the crates, counted from the tensor shapes of their configurations (weights and biases, norm gains and offsets included; `matmul` is the weights that multiply a row, the number that sets the FLOPs per row: 2 per weight). A DeepStack merger differs from the main merger only in its norm, over the 4096 concatenated numbers instead of the 1024 of one patch.
+Parameters of the vision-to-language maps of the crates, counted from the tensor shapes of their configurations (weights and biases, norm gains and offsets included; `matmul` is the weights that multiply a row, the number that sets the FLOPs per row: 2 per weight). A DeepStack merger differs from the main merger only in its norm, over the 4096 concatenated numbers instead of the 1024 of one patch. The MiniCPM-V window merger is an attention block (a layer norm of width 1152, the query, key and value projection 1152 -> 3 x 1152 and the output projection 1152 -> 1152, both with biases) followed by a layer norm of width 4608 and the MLP 4608 -> 17216 -> 1152 with biases; its 11,520 norm numbers are 2 x 1152 + 2 x 4608 (gain and offset), its biases 3 x 1152 + 1152 + 17216 + 1152 = 22,976, and the two together are the difference between its two count columns.
 
 | projector | widths | parameters | matmul weights | where |
 |---|---|---:|---:|---|
@@ -218,11 +218,11 @@ What the image tokens add to a prompt of 24 text tokens, with the counting rules
 
 | decoder | picture | image tokens | prefill TFLOPs added | cache bytes per token | cache of the image (MiB) |
 |---|---:|---:|---:|---:|---:|
-| LLaVA-1.5-13B | 336 x 336, fixed | 576 | 14.76 | 819,200 | 450.0 |
-| Qwen3-VL-4B | 448 x 448 | 196 | 1.44 | 147,456 | 27.6 |
-| Qwen3-VL-4B | 1080 x 1920 | 2,040 | 16.08 | 147,456 | 286.9 |
-| Qwen3-VL-4B | 1080 x 1920, served limit | 1,008 | 7.64 | 147,456 | 141.8 |
-| Qwen3-VL-4B | 3000 x 2000 | 5,828 | 52.45 | 147,456 | 819.6 |
+| LLaVA-1.5-13B | 336 x 336, fixed | 576 | 14.76 | 819,200 | 450.00 |
+| Qwen3-VL-4B | 448 x 448 | 196 | 1.44 | 147,456 | 27.56 |
+| Qwen3-VL-4B | 1080 x 1920 | 2,040 | 16.08 | 147,456 | 286.88 |
+| Qwen3-VL-4B | 1080 x 1920, served limit | 1,008 | 7.64 | 147,456 | 141.75 |
+| Qwen3-VL-4B | 3000 x 2000 | 5,828 | 52.45 | 147,456 | 819.56 |
 <!-- /worked -->
 
 LLaVA-1.5's 576 tokens cost the 13-billion-parameter decoder 14.76 trillion FLOPs of prefill and 450 MiB of cache, because its decoder has 40 key-value heads and every token stores 819,200 bytes. Qwen3-VL's 8 key-value heads make a token 147,456 bytes, 0.18 of that, which is why the 4B model can afford 2,040 tokens for a 1080 by 1920 picture in 287 MiB. The count of tokens is what differs between designs, and there are three ways of fixing it.
@@ -282,7 +282,7 @@ $$
 \tag{2}
 $$
 
-with ties to the even multiple. Each side moves by at most half a factor, 16 pixels, so the shape changes by at most the fraction $16/h$ in one side and $16/w$ in the other, which is a few percent for a photograph and large only for a very thin picture. If the rounded area $\bar h \bar w$ is above $N_{\max}$, shrink both original sides by the same factor $\beta = \sqrt{hw/N_{\max}}$, which brings the area to exactly $N_{\max}$ with the shape unchanged, and round **down**. Rounding to nearest at that point could carry the area back over the bound; rounding down cannot. If the area is below $N_{\min}$, grow by $\beta = \sqrt{N_{\min}/(hw)}$ and round **up**, for the same reason mirrored.
+with ties to the even multiple. Each side moves by at most half a factor, 16 pixels, so the shape changes by at most the fraction $16/h$ in one side and $16/w$ in the other, which is a few percent for a photograph and large only for a very thin picture. If the rounded area $\bar h \bar w$ is above $N_{\max}$, shrink both original sides by the same factor $\beta = \sqrt{hw/N_{\max}}$, which brings the area to exactly $N_{\max}$ with the shape unchanged, and round **down**, but never below one factor. Rounding to nearest at that point could carry the area back over the bound; rounding down cannot. If the area is below $N_{\min}$, grow by $\beta = \sqrt{N_{\min}/(hw)}$ and round **up**, for the same reason mirrored.
 
 ```text
 function smart_resize(h: int, w: int, f: int, lo: int, hi: int) -> (int, int):
@@ -291,8 +291,8 @@ function smart_resize(h: int, w: int, f: int, lo: int, hi: int) -> (int, int):
     wb = max(f, round_even(w / f) * f)
     if hb * wb > hi:
         beta = sqrt(h * w / hi)
-        hb = floor(h / beta / f) * f
-        wb = floor(w / beta / f) * f
+        hb = max(f, floor(h / beta / f) * f)
+        wb = max(f, floor(w / beta / f) * f)
     else if hb * wb < lo:
         beta = sqrt(lo / (h * w))
         hb = ceil(h * beta / f) * f
@@ -392,7 +392,7 @@ function slice_grid(h: int, w: int, scale: int, max_slices: int) -> (int, int):
 ```
 
 <!-- worked: vlms.slicing_candidates -->
-A 1080 x 1920 picture: area / 448^2 = 10.332, so multiple = ceil(10.332) = 9 and the candidates are the slice counts 8, 9 and 10. The aspect ratio of the picture is 1.778, ln = 0.5754. The error of a grid is |ln(w / h) - ln(cols / rows)|; the smallest wins and a tie goes to more rows.
+A 1080 x 1920 picture: area / 448^2 = 10.332, so multiple = ceil(10.332) = 9 and the candidates are the slice counts 8, 9 and 10, of which the counts above the maximum of 9 slices are skipped (here 10, which therefore has no rows in the table). The aspect ratio of the picture is 1.778, ln = 0.5754. The error of a grid is |ln(w / h) - ln(cols / rows)|; the smallest wins and a tie goes to more rows.
 
 | slices | rows x cols | cols / rows | error |
 |---|---:|---:|---:|
@@ -427,7 +427,7 @@ function slice_size(h: int, w: int, rows: int, cols: int, scale: int, patch: int
     return view_size(rh / rows, rw / cols, scale, patch, true)
 ```
 
-The source view is `view_size(h, w, 448, 14, upscale)` with `upscale` true only when the picture is not sliced; one slice is `slice_size`. A view of $a 	imes b$ pixels has $(a/14)(b/14)$ patches and a sixteenth of that many tokens in the 16x mode, a quarter in the 4x mode. Every view goes through the tower at its own size, with attention only inside the view, and the prompt lays them out with markers, one `image` marker for the source view and one `slice` marker for each slice, rows of slices separated by a newline (`view_layout` in `crates/minicpmv/src/prompt.rs`).
+The source view is `view_size(h, w, 448, 14, upscale)` with `upscale` true only when the picture is not sliced; one slice is `slice_size`. A view of $a \times b$ pixels has $(a/14)(b/14)$ patches and a sixteenth of that many tokens in the 16x mode, a quarter in the 4x mode. Every view goes through the tower at its own size, with attention only inside the view, and the prompt lays them out with markers, one `image` marker for the source view and one `slice` marker for each slice, rows of slices separated by a newline (`view_layout` in `crates/minicpmv/src/prompt.rs`).
 
 <!-- worked: vlms.slicing_table -->
 The image processor of MiniCPM-V 4.6 as `preprocess.rs` states it (patch 14, slice scale 448, at most 9 slices; Python rounding and truncation): whether the picture is sliced and into how many rows x columns, the source view (the whole picture resized to a multiple of 56 on each side), the size of one slice, and the visual tokens at the default 16x downsampling (one token per 16 patches), in total and at 4x (one token per 4 patches).
@@ -489,9 +489,9 @@ The splice decides which rows are the picture. A second decision is what positio
 Qwen3-VL tells it, with the multi-axis rotary embedding of Chapter 8 of Volume V. Positions for the toy prompt, in both schemes:
 
 <!-- worked: vlms.toy_positions -->
-The spliced sequence of the first example: `<bos>`, four picture rows in a 2 x 2 grid (one frame, so (t, h, w) = (1, 2, 2)), and four words. One-dimensional RoPE gives each row its index. The multi-axis rule of Volume V, Chapter 8 gives a word (c, c, c) and advances the counter c by 1, and gives a picture row (c + t, c + h, c + w) for its frame t, row h and column w, then advances c by max(1, 2, 2) = 2.
+The spliced sequence of the first example: `<bos>`, four picture rows in a grid of 1 frame by 2 rows by 2 columns (sizes (T, H, W) = (1, 2, 2)), and four words. One-dimensional RoPE gives each row its index. The multi-axis rule of Volume V, Chapter 8 gives a word (c, c, c) and advances the counter c by 1, and gives a picture row (c + t, c + h, c + w) for its frame t, row h and column w, each counted from 0 (so the four rows have (t, h, w) = (0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1)), then advances c by max(T, H, W) = max(1, 2, 2) = 2. The last column is the position triple the rule assigns to the token.
 
-| index | token | one-dimensional position | (t, h, w) |
+| index | token | one-dimensional position | position triple |
 |---|---|---:|---:|
 | 0 | <bos> | 0 | (0, 0, 0) |
 | 1 | image patch | 1 | (1, 1, 1) |
@@ -546,7 +546,7 @@ The general recipe for a model of this kind comes from the LLaVA papers (Liu et 
 
 Brain trains, and the places where it does follow the same split. `crates/deepseekvl/src/train.rs` fine-tunes the composite with the two towers frozen, their features extracted once per image and the towers released; the aligner trains from the checkpoint's own weights, the decoder as a LoRA, and the gradient of the spliced rows is carried back through the aligner image by image (commit `bf8d27097`, September 2026, whose test checks the aligner's gradient through the split aligner, the splice and the decoder against finite differences). MiniCPM-V trains more of itself: commit `2d4b550d3` (October 2026) gives it a backward through the tower with checkpointing, so that a full-resolution request does not hold 27 layers of attention probabilities, and LoRA on the tower's linears, each of the decoder, the connector and the tower being trained or frozen on its own (`crates/minicpmv/src/train.rs`). The choice of what is trained is the choice of how much of the first stage to redo.
 
-Scoring is of two kinds. A captioning model is scored against reference captions by the overlap of their n-grams (BLEU and CIDEr are the standard scores). A visual question answering model is scored by agreement with human answers: the standard accuracy of Antol et al. (2015) gives an answer the credit $\min(1, n/3)$, where $n$ is how many of the ten human annotators gave it. Both measure the model in the end, and neither says whether a port of the model is correct; for a port the gate is parity with the reference, and brain's gates are of that kind. Knowledge #191 records the DeepSeek-VL gate as a requirement of 16 greedy tokens identical to the fp32 reference's, checked stage by stage on the real checkpoint (`crates/deepseekvl/tests/it/composite_parity.rs`), and commit `edf32fb7d` (October 2026) states the same for MiniCPM-V: the next-token logits after the prompt match the reference at a cosine of at least 0.9999999999 and the whole greedy continuation is identical, for a sliced image at 16x and at 4x, a document and two images in one prompt. What such a gate cannot see is a preprocessing step that is not in the golden: the commit that checked the MiniCPM-V image processor (`f52516aea`) compared resized views byte for byte, target sizes, grids, normalized patches, the rendered template and the token ids against the reference's own, which is the reproduction of a resizer to the byte that Chapter 1 demanded.
+Scoring is of two kinds. A captioning model is scored against reference captions by the overlap of their n-grams (BLEU and CIDEr are the standard scores). A visual question answering model is scored by agreement with human answers: the standard accuracy of Antol et al. (2015) gives an answer the credit $\min(1, n/3)$, where $n$ is how many of the ten human annotators gave it. Both measure the model in the end, and neither says whether a port of the model is correct; for a port the gate is parity with the reference, and brain's gates are of that kind. The DeepSeek-VL gate is a requirement of 16 greedy tokens identical to the fp32 reference's, checked stage by stage on the real checkpoint (`crates/deepseekvl/tests/it/composite_parity.rs`), and commit `edf32fb7d` (October 2026) states the same for MiniCPM-V: the next-token logits after the prompt match the reference at a cosine of at least 0.9999999999 and the whole greedy continuation is identical, for a sliced image at 16x and at 4x, a document and two images in one prompt. What such a gate cannot see is a preprocessing step that is not in the golden: the commit that checked the MiniCPM-V image processor (`f52516aea`) compared resized views byte for byte, target sizes, grids, normalized patches, the rendered template and the token ids against the reference's own, which is the reproduction of a resizer to the byte that Chapter 1 demanded.
 
 ## Florence-2 answers with boxes
 
@@ -610,7 +610,7 @@ The text `a cat<loc_156><loc_125><loc_531><loc_875>the dog<loc_10><loc_20><loc_3
 
 ## Two towers, and one decoder that draws
 
-DeepSeek-VL's picture has to be seen at two scales at once, as a whole and in fine print, and one tower is a poor compromise. Its tower is hybrid (`crates/deepseekvl/src/tower.rs`): SAM-B, the segmentation encoder of Chapter 7, reads the padded square at 1024 pixels and its map is read as 576 rows of 1,024 numbers; SigLIP-L reads the same square resized to 384 and gives 576 rows of its own. The split aligner of the table above projects each stream to half of the decoder's width and concatenates the halves, high resolution first, so that the picture is 576 tokens each made of one row from each tower. Preprocessing has an unexpected rule, written down as knowledge #191: the processor's configuration lists the mean and standard deviation of CLIP and also says `do_normalize: false`, so the processor does not normalize at all. Each branch normalizes inside the tower with its own statistics, and the listed mean serves for one thing only, the colour of the padding, $\lfloor 255 \times \mathrm{mean} \rfloor$ per channel (the case of Chapter 1's section on constants).
+DeepSeek-VL's picture has to be seen at two scales at once, as a whole and in fine print, and one tower is a poor compromise. Its tower is hybrid (`crates/deepseekvl/src/tower.rs`): SAM-B, the segmentation encoder of Chapter 7, reads the padded square at 1024 pixels and its map is read as 576 rows of 1,024 numbers; SigLIP-L reads the same square resized to 384 and gives 576 rows of its own. The split aligner of the table above projects each stream to half of the decoder's width and concatenates the halves, high resolution first, so that the picture is 576 tokens each made of one row from each tower. Preprocessing has an unexpected rule, found in the checkpoint's own files: the processor's configuration lists the mean and standard deviation of CLIP and also says `do_normalize: false`, so the processor does not normalize at all. Each branch normalizes inside the tower with its own statistics, and the listed mean serves for one thing only, the colour of the padding, $\lfloor 255 \times \mathrm{mean} \rfloor$ per channel (the case of Chapter 1's section on constants).
 
 Janus-Pro shares the decoder and the processor class with DeepSeek-VL, and `brain_arch::by_hf_config` tells them apart by the generation heads only Janus-Pro configures. Its understanding path is the same composite with one tower, SigLIP-L at 384 and a plain two-layer aligner, and each picture's 576 pad ids wrapped in `begin_of_image` and `end_of_image`. The other half of the model runs the picture through the door the other way: the decoder predicts image tokens, 576 of them (a 24 by 24 grid of a VQ codebook of 16,384 codes), with its own head, each of which is embedded by a second aligner from an 8-wide code table back to the decoder's width, and the finished grid is decoded to pixels by the VQ decoder. That is generation, and it needs the machinery of Volume VIII: discrete image tokens, classifier-free guidance (the crate runs a conditional and an unconditional sequence together) and a decoder from codes to pixels. The point to take from it here is what it says about the splice: the same decoder reads pictures through one aligner and writes them through another, with the splice and its zeroing on the reading side only.
 
@@ -723,7 +723,7 @@ The limits are the chapter's own. The toy has a tower that is one matrix, and th
 3. Qwen3-VL gets 5,828 tokens from a 3008 by 1984 grid and LLaVA 576 from a centre crop of a picture resized so that its short side is 336, about a tenth as many tokens, and the sign at the edge may not even be in the crop. Qwen3-VL's prefill added is 52.45 trillion FLOPs and the cache 819.6 MiB against LLaVA's 14.76 trillion and 450 MiB, whose decoder is three times the size and has five times the key-value heads, so the dynamic design is not 10 times dearer but 3.6 times in FLOPs and 1.8 in cache; and the tower's attention adds another 53.4 trillion on top.
 4. One-dimensional: the first word after the picture is at position $10 + 600 = 610$ (positions 0 to 9 for the words, 10 to 609 for the 600 rows), and the third generated token is at $610 + 6 + 2 = 618$. Multi-axis: the counter is 10 before the picture and advances by $\max(1, 20, 30) = 30$, so the first word after is at 40, and the third generated token at $40 + 6 + 2 = 48$.
 5. The lower-edge decoding reads the bin's lower end, while the coordinate can be anywhere in the bin, so its largest error is a whole bin (0.64 pixels at a width of 640); half a bin is the largest error of decoding at the centre of the bin.
-6. Both branches would be fed pixels normalized with CLIP's statistics, so SigLIP, which was trained under mean and standard deviation of 0.5, would see wrongly scaled numbers, and SAM would see a differently coloured border (knowledge #191). Shapes would agree and every number would be off, the silent kind of error of this chapter.
+6. Both branches would be fed pixels normalized with CLIP's statistics, so SigLIP, which was trained under mean and standard deviation of 0.5, would see wrongly scaled numbers, and SAM would see a differently coloured border. Shapes would agree and every number would be off, the silent kind of error of this chapter.
 7. The score products scale with the square of the rows, so quartering the rows of the later blocks cuts their attention sixteen-fold and their matrix products fourfold; the saving is larger for attention. What the model gives up is detail: the later blocks see only the merged windows, and the window merger is a component of 104 million parameters that must itself learn to keep what the later blocks need.
 
 **Exercises.** 1. Pixels $(1.0, 0.0, 1.0, 1.0)$ give $\mathbf{f} = (0.5(1 + 0 + 1 + 1), 1 - 0 + 1 - 1) = (1.5, 1.0)$ and $\mathbf{p} = (2 \cdot 1.5 + 0.1, 2 \cdot 1.0 - 0.1, 1.5 + 1.0) = (3.1, 1.9, 2.5)$, the row at position 3. 2. $720 / 32 = 22.5$ goes to 22, so 704 by 1280, area 901,120, inside the bounds, $22 \times 40 = 880$ tokens. For 1000 by 1000 at 1,000,000: $1000/32 = 31.25$ gives 992 by 992, area 984,064, inside, $31 \times 31 = 961$ tokens. 3. $1500^2 / 448^2 = 11.2$ so the target is $\min(12, 9) = 9$; candidates are 8, 9 and 10 slices, and 10 is above the maximum; the grid 3 by 3 has aspect error 0 against a square and wins. 4. Bins: $x_1 = \lfloor 1000 \times 50 / 1000 \rfloor = 50$, $y_1 = \lfloor 1000 \times 75 / 750 \rfloor = 100$, $x_2 = 951$, $y_2 = \lfloor 933.33 \rfloor = 933$. Lower-edge decoding: $50$, $75$, $951$, $699.75$ pixels, errors $0, 0, 0, 0.25$ (the largest possible is a bin, 1 pixel in x and 0.75 in y); centre decoding: $50.5$, $75.375$, $951.5$, $700.125$, errors $0.5, 0.375, 0.5, 0.125$ (at most 0.5 and 0.375). 5. One-dimensional RoPE advances by $56 \times 40 = 2{,}240$ and the multi-axis rule by 56, so the text is $2{,}184$ positions further on; the cache holds 2,240 rows. 10. At 1,000,000 pixels 800 by 1248 rounds to 800 by 1248, area 998,400, inside the bound, and $25 \times 39 = 975$ tokens, more than the square's 961; `generate` compares the request's total with the resident's capacity (961 times the number of images allowed) and refuses with the message that names the capacity, so the effect is a refusal at the edge and not a corrupted buffer. 11. Without the clamp the height becomes zero when the rounded area is over the maximum and $h / \beta < 32$, that is $\sqrt{N_{\max} h / w} < 32$, or $w / h > N_{\max} / 32^2 = 12{,}544$; and for the rounded area to pass the maximum with a height of 32 the width must round to at least 401,440. The first example is 32 by 401,440 (ratio 12,545), which returns $(0, 2{,}270{,}784)$, and 31 by 600,000 does the same. The reference's limit of 200 is far below that, so the image function accepts shapes the reference would refuse. Either guard closes the hole: the clamp keeps every side at one factor and the request is still answered, and a check at the entry refuses ratios over 200 with an error that names the ratio, as `require` does for video. Neither may let a zero reach the tower, where it becomes an empty patch grid. 12. The saving is nearly linear in the position, falling by about 2.9 points per block: 68.3 percent for a merger after block 0, 51.1 after block 6, 10.9 after block 20, and $-6.3$ after block 26, where the merger costs more than the nothing it saves. A merger at block 0 merges rows that have not yet exchanged any information, while one at block 6 merges rows that have attended to the whole picture seven times.

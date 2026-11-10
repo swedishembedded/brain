@@ -282,7 +282,7 @@ def toy_set():
             "- blobs: `integer(2) + 2` bumps, then for each bump the row centre `uniform() * 7` and the column centre `uniform() * 7`; "
             "pixel = the largest over bumps of exp(-((i - ci)^2 + (j - cj)^2) / (2 * 1.2^2));\n"
             f"- then, for every class, the noise: 64 draws of `normal()` in row-major order, each times {NOISE} and added to the pixel.\n\n"
-            f"The images n = 0, 1, 2 (noise-free pattern shown by thresholding at 0.5; pixel values range over [{lo:.2f}, {hi:.2f}]):\n\n"
+            f"The images n = 0, 1, 2 (the noisy images themselves, each pixel drawn as # when it exceeds 0.5 and . otherwise; pixel values range over [{lo:.2f}, {hi:.2f}]):\n\n"
             f"```text\n{names}\n{pic}\n```")
 
 
@@ -663,8 +663,8 @@ def shift_equivariance():
     return (f"The initialized network ({INIT_NAME}) with circular padding in both convolutions (indices wrap around, so no border), "
             "on the 90 test images x, each shifted to the right by s columns with wrap-around (roll). Largest absolute difference over "
             "all images and values between: (a) the ReLU map of the shifted image and the ReLU map of x shifted by s; (b) the pooled "
-            "map of the shifted image and the pooled map of x shifted by s / 2 columns (for odd s the better of the two neighbouring "
-            "shifts); (c) the logits of the shifted image and of x.\n\n"
+            "map of the shifted image and the pooled map of x shifted by s / 2 columns (for odd s, for each image separately, the smaller of the "
+            "two differences against x shifted by (s - 1) / 2 and by (s + 1) / 2 columns; the error shown is the largest over the images); (c) the logits of the shifted image and of x.\n\n"
             + _table(["shift s", "(a) after conv and ReLU", "(b) after pooling", "(c) logits"], rows))
 
 
@@ -916,8 +916,9 @@ def depth_signal():
         pl, rs = data[(d, "plain")], data[(d, "res")]
         rows.append((d, _sci(pl[0], 2), _sci(rs[0], 2), _sci(math.sqrt(bt) ** d, 2), _sci(pl[1], 2), _sci(rs[1], 2)))
     return (depth_setup() + f" Measured at initialization, for the seeds 0 to 3, on the first {SIGNAL_IMAGES} training images (n = 0 .. {SIGNAL_IMAGES - 1}); "
-            "each entry is the geometric mean over the four seeds. Columns 2 and 3: the root mean square of the stream after the last convolution "
-            "(plain) or block (residual) divided by its value after the stem. Column 4: the factor "
+            "each entry is the geometric mean over the four seeds of a ratio formed within one seed. Columns 2 and 3: the root mean square of the stream "
+            "(the post-ReLU activation; its root mean square is taken over all elements of all those images pooled together) after the last "
+            "convolution (plain) or block (residual) divided by the same quantity after the stem's ReLU and pooling. Column 4: the factor "
             f"{math.sqrt(bt):.4f}^d, where {bt:.4f} is the share of the 9 taps of a 3 by 3 window with padding 1 that land on a real pixel of a 4 by 4 "
             f"map, averaged over positions (on 8 by 8 it is {border_taps(8):.4f}, on 28 by 28 it is {border_taps(28):.4f}). Columns 5 and 6: "
             "the Frobenius norm of the weight gradient of the first body convolution (the one farthest from the loss) of the mean cross-entropy of the images.\n\n"

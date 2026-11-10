@@ -118,7 +118,7 @@ GFLOPs of the vision half of one view (2 FLOPs per multiply-add; layer norms, ac
 SAM with its neck and compressor is 971.9 of the 1,135.1 billion FLOPs of one global view, and CLIP, which does the global reading of the compressed tokens, is 161.7. The compressor itself, 4.8 billion, is among the cheapest stages of the encoder, and its payoff is in what follows it.
 
 <!-- worked: ocr.compression_payoff -->
-The global view of the first generation, with its 4,096 patch tokens given to CLIP-L and then to the decoder as they are (a count, not a model that exists: its position table and weights would have to be trained for it) and as the compressor gives them. CLIP's attention pairs are those of one block over the tokens and the class row; the decoder's rows are the prompt (BOS, the image rows, the 9 tokens of the instruction).
+The global view of the first generation, with its 4,096 patch tokens given to CLIP-L and then to the decoder as they are (a count, not a model that exists: its position table and weights would have to be trained for it) and as the compressor gives them. CLIP's attention pairs are those of one block over the tokens and the class row; the decoder's rows are the prompt: 1 BOS row, the image rows and the 9 tokens of the instruction. The image rows of the compressed view are its 256 tokens plus the 16 learned newline rows and the learned separator row, 273, so its prompt is 1 + 273 + 9 = 283 tokens while the tokens column says 256; the hypothetical view has no newline or separator rows, 4,096 image rows and a prompt of 1 + 4,096 + 9 = 4,106.
 
 | variant | tokens | pairs, one CLIP block | CLIP TFLOPs | prompt tokens | decoder prefill TFLOPs | cache (MiB) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -552,13 +552,13 @@ When a page ends early, at its end-of-sequence token, its blocks are freed that 
 The last piece is placement. The vision towers of a replica need 15 GiB, and the decoder 18, as budgeted by the constants of the two model crates, and the question of where they go depends on the cards.
 
 <!-- worked: ocr.placement -->
-The encoders of one replica need 15 GiB and the decoder 18 GiB (the figures the crates budget). Cards are written (usable GiB). The encoder goes on the card with the most room that holds it (the last of equals); the decoder on another card that holds it, else on the encoder's card if it holds both, else on the host. With two or more cards that each hold the whole model, a replica runs on each, judged by the card's total capacity.
+The encoders of one replica need 15 GiB and the decoder 18 GiB (the figures the crates budget). Cards are written (usable GiB). The encoder goes on the card with the most room that holds it (the last of equals); the decoder on another card that holds it, else on the encoder's card if it holds both, else on the host. That is the placement of one replica, and it reads the free memory of the cards; it alone decides the five rows that do not ask for several replicas. The other three ask for as many replicas as fit. A card qualifies for a whole replica when max(total capacity, free memory) is at least 33 GiB, the encoders and the decoder together; the total capacity is the card's free memory unless the row gives it ("96 and 96 in all"). If two or more cards qualify each runs one replica with both parts on it, otherwise the single placement above is used. So the count of replicas follows the total capacity and the placement of a lone replica follows the free memory.
 
 | offered | replicas | placement |
 |---|---:|---|
 | one card of 24 | 1 | encoder on card 0, decoder on host |
 | cards of 24 and 30 | 1 | encoder on card 1, decoder on card 0 |
-| two cards of 90, one replica planned | 1 | encoder on card 1, decoder on card 0 |
+| two cards of 90, a single replica asked for | 1 | encoder on card 1, decoder on card 0 |
 | one card of 90 | 1 | encoder on card 0, decoder on same card |
 | two cards of 90 | 2 | encoder on card 0, decoder on same card; encoder on card 1, decoder on same card |
 | cards of 90 and 12 | 1 | encoder on card 0, decoder on same card |

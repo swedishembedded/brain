@@ -1,4 +1,4 @@
-<!-- source-sha256: 2f38fb7a7dfecb523651628228eaf945129ca51453ac5c15e7fb56cad80f5b20 -->
+<!-- source-sha256: 00b19ee04656dd4bf6e9d7a632cbf228ebb413b7cf6c4a79f04d51ed2a40dc3c -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 400" width="760" height="400"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="760" height="400" fill="#ffffff"/>
 <text x="380" y="22.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Output samples in the source row (dot i = output pixel i; hollow = outside the source, clamped)</text>
 <rect x="20" y="34" width="720" height="160" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>

@@ -1,4 +1,4 @@
-<!-- source-sha256: 27b843efc24f8d8e2dfa279214df3860c2fb8c77996172c1f2527116eafc44a2 -->
+<!-- source-sha256: 3468de8d677e1cd549e5a84323632c81323cd70f479680ca2ed2b3fafa48297d -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 330" width="960" height="330"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="960" height="330" fill="#ffffff"/>
 <text x="480" y="26.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">image block of the toy page: 2 tiles of 2 x 2 tokens, then a global view of 3 x 3 tokens</text>
 <rect x="219" y="50" width="38" height="38" rx="4" fill="#bee3f8" stroke="#4a5568" stroke-width="1"/>

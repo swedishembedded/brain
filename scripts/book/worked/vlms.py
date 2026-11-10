@@ -64,8 +64,8 @@ def _tflops(v, d=2):
     return f"{v / 1e12:,.{d}f}"
 
 
-def _mib(b):
-    return f"{b / 2 ** 20:,.1f}"
+def _mib(b, d=1):
+    return f"{b / 2 ** 20:,.{d}f}"
 
 
 def _matvec(w, x):
@@ -271,7 +271,11 @@ def projector_table():
     return ("Parameters of the vision-to-language maps of the crates, counted from the tensor shapes of their configurations "
             "(weights and biases, norm gains and offsets included; `matmul` is the weights that multiply a row, the number that "
             "sets the FLOPs per row: 2 per weight). A DeepStack merger differs from the main merger only in its norm, over the "
-            "4096 concatenated numbers instead of the 1024 of one patch.\n\n"
+            "4096 concatenated numbers instead of the 1024 of one patch. The MiniCPM-V window merger is an attention block "
+            "(a layer norm of width 1152, the query, key and value projection 1152 -> 3 x 1152 and the output projection 1152 -> 1152, "
+            "both with biases) followed by a layer norm of width 4608 and the MLP 4608 -> 17216 -> 1152 with biases; its 11,520 norm numbers "
+            "are 2 x 1152 + 2 x 4608 (gain and offset), its biases 3 x 1152 + 1152 + 17216 + 1152 = 22,976, and the two together "
+            "are the difference between its two count columns.\n\n"
             + _table(["projector", "widths", "parameters", "matmul weights", "where"], body, "llrrl")
             + f"\n\nFor comparison, one cross-attention layer of a resampler with 64 learned queries of width 2048 reading "
             f"towers of width 1152 (queries 64 x 2048, W_q and W_o 2048 x 2048, W_k and W_v 1152 x 2048, no biases) has "
@@ -488,7 +492,8 @@ def slicing_candidates():
                 rows.append((slices, f"{r} x {c}", f"{c / r:.3f}", f"{abs(math.log(w / h) - math.log(c / r)):.4f}"))
     best = sliced_grid(h, w, MC_MAX_SLICES, MC_SCALE)
     return (f"A {h} x {w} picture: area / 448^2 = {ratio:.3f}, so multiple = ceil({ratio:.3f}) = {multiple} and the candidates "
-            f"are the slice counts {multiple - 1}, {multiple} and {multiple + 1}. The aspect ratio of the picture is "
+            f"are the slice counts {multiple - 1}, {multiple} and {multiple + 1}, of which the counts above the maximum of {MC_MAX_SLICES} "
+            f"slices are skipped (here {multiple + 1}, which therefore has no rows in the table). The aspect ratio of the picture is "
             f"{w / h:.3f}, ln = {math.log(w / h):.4f}. The error of a grid is |ln(w / h) - ln(cols / rows)|; the smallest "
             f"wins and a tie goes to more rows.\n\n"
             + _table(["slices", "rows x cols", "cols / rows", "error"], rows) + f"\n\nThe winner is {best[0]} x {best[1]}.")
@@ -513,11 +518,11 @@ def window_merger_saving():
     wm_attn_a = after_rows * 4 * 4 * 4 * c                              # 256 windows, 4 queries x 4 keys, width c: 4 x 4 x 4 x c each
     extra = wm_attn_w + wm_mlp_w + wm_attn_a
     rows_out = [
-        ("no merger: 27 blocks on 1,024 rows", _gflops(plain_w), _gflops(plain_a), _gflops(plain_w + plain_a)),
-        ("window merger after block 6: 7 blocks on 1,024 rows, 20 on 256", _gflops(merged_w), _gflops(merged_a), _gflops(merged_w + merged_a)),
-        ("the window merger itself", _gflops(wm_attn_w + wm_mlp_w), _gflops(wm_attn_a), _gflops(extra)),
-        ("merged tower plus its window merger", _gflops(merged_w + wm_attn_w + wm_mlp_w), _gflops(merged_a + wm_attn_a),
-         _gflops(merged_w + merged_a + extra)),
+        ("no merger: 27 blocks on 1,024 rows", _gflops(plain_w, 2), _gflops(plain_a, 2), _gflops(plain_w + plain_a, 2)),
+        ("window merger after block 6: 7 blocks on 1,024 rows, 20 on 256", _gflops(merged_w, 2), _gflops(merged_a, 2), _gflops(merged_w + merged_a, 2)),
+        ("the window merger itself", _gflops(wm_attn_w + wm_mlp_w, 2), _gflops(wm_attn_a, 2), _gflops(extra, 2)),
+        ("merged tower plus its window merger", _gflops(merged_w + wm_attn_w + wm_mlp_w, 2), _gflops(merged_a + wm_attn_a, 2),
+         _gflops(merged_w + merged_a + extra, 2)),
     ]
     saving = 1 - (merged_w + merged_a + extra) / (plain_w + plain_a)
     return ("FLOPs of the MiniCPM-V 4.6 tower for a 448 x 448 picture (1,024 patches of 14 pixels), width 1152, feed-forward 4304. "
@@ -646,7 +651,7 @@ def decoder_cost():
         base = kvc.flops_new(s, 0, TEXT_TOKENS)
         full = kvc.flops_new(s, 0, TEXT_TOKENS + n)
         bytes_ = kvc.cache_bytes_per_token(s) * n
-        rows.append((name, pic, _int(n), _tflops(full - base), _int(kvc.cache_bytes_per_token(s)), _mib(bytes_)))
+        rows.append((name, pic, _int(n), _tflops(full - base), _int(kvc.cache_bytes_per_token(s)), _mib(bytes_, 2)))
     return ("What the image tokens add to a prompt of 24 text tokens, with the counting rules of Volume V (Chapter 12): the "
             "prefill FLOPs of the whole prompt minus those of the 24 text tokens alone (weights at 2 FLOPs each, plus the score "
             "and average products over the keys each row sees; the output head counted once in both, so it cancels), and the "
@@ -693,11 +698,13 @@ def toy_positions():
     rows = []
     for t, (name, p) in enumerate(trip):
         rows.append((t, name if name != "image" else "image patch", t, f"({p[0]}, {p[1]}, {p[2]})"))
-    return ("The spliced sequence of the first example: `<bos>`, four picture rows in a 2 x 2 grid (one frame, so "
-            "(t, h, w) = (1, 2, 2)), and four words. One-dimensional RoPE gives each row its index. The multi-axis rule of Volume "
+    return ("The spliced sequence of the first example: `<bos>`, four picture rows in a grid of 1 frame by 2 rows by 2 columns "
+            "(sizes (T, H, W) = (1, 2, 2)), and four words. One-dimensional RoPE gives each row its index. The multi-axis rule of Volume "
             "V, Chapter 8 gives a word (c, c, c) and advances the counter c by 1, and gives a picture row (c + t, c + h, c + w) "
-            "for its frame t, row h and column w, then advances c by max(1, 2, 2) = 2.\n\n"
-            + _table(["index", "token", "one-dimensional position", "(t, h, w)"], rows, "llrr"))
+            "for its frame t, row h and column w, each counted from 0 (so the four rows have (t, h, w) = (0, 0, 0), (0, 0, 1), (0, 1, 0), "
+            "(0, 1, 1)), then advances c by max(T, H, W) = max(1, 2, 2) = 2. The last column is the position triple the rule assigns "
+            "to the token.\n\n"
+            + _table(["index", "token", "one-dimensional position", "position triple"], rows, "llrr"))
 
 
 def position_advance():

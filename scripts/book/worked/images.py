@@ -144,7 +144,8 @@ def byte_to_float():
     out = ["Every 8-bit code b becomes the 32-bit float u = b / 255 (one division) and returns by floor(u * 255 + 0.5), clamped to "
            "[0, 255], or by floor(u * 255); each operation is rounded to 32 bits. Second test: the constant 7 by 5 image of u is "
            "resized to 3 by 4 with the antialiased bilinear filter of the stripes example (32-bit arithmetic, window order, horizontal "
-           "pass first, defined in the text) and every one of the 12 outputs converted back.", ""]
+           "pass first, defined in the text; the weights are computed in 64-bit and rounded to 32 bits, each pass starts its accumulator at 0 "
+           "and rounds every product and then every sum) and every one of the 12 outputs converted back.", ""]
     out.append(_table(["back-conversion", "codes (of 256) that fail to return directly", "codes that fail after the resize"],
                       [["floor(u * 255 + 0.5)", plain_h, len(after_h)], ["floor(u * 255)", plain_t, len(after_t)]], "lrr"))
     out.append("")
@@ -552,6 +553,9 @@ def letterbox_grid():
     out = [f"A {w0} by {h0} image (pixels numbered 0 to {w0 * h0 - 1} in row-major order) is letterboxed onto an {size} by {size} "
            f"square. Scale s = min({size}/{w0}, {size}/{h0}) = {s:.6f}; content {nw} by {nh}; padding (pad_x, pad_y) = ({_num(px, 1)}, {_num(py, 1)}); "
            f"the content is pasted at the integer offset ({ox}, {oy}). Source column of each content column: {sx}; source row of each content row: {sy}. "
+           "Both axes use the scale itself, not the ratio of the rounded content size: content cell o takes source index "
+           "floor((o + 0.5) / s), clamped to the image (the half-pixel rule above written for the inverse scale), which is why the five "
+           "content rows are not the five-row ratio 4/5 of the source. "
            "Each cell shows the number of the source pixel that fills it, and . is padding.", ""]
     out.append("```text")
     for row in grid:
@@ -893,7 +897,9 @@ def parity_tolerance():
     kv = max(len(ws) for _, ws in tri_weights(5, 4))
     out = ["The red channel of the 7 by 5 fixture (code / 255) is resized to 3 by 4 with the antialiased bilinear filter. Separable "
            "64-bit result against the double sum without separating the axes, and 32-bit result (every product and sum rounded to 32 bits, "
-           "window order, horizontal pass first) against the 64-bit one.", ""]
+           "window order, horizontal pass first) against the 64-bit one. The weights are computed and normalized in 64-bit and then "
+           "rounded to 32 bits, the input is code / 255 rounded to 32 bits, and each pass starts its accumulator at 0 and rounds every "
+           "product and then every sum.", ""]
     rows = [
         ["separable 64-bit vs double sum (64-bit)", f"{sep_vs_direct:.1e}"],
         ["32-bit separable vs 64-bit separable", f"{f32_vs_f64:.1e}"],
@@ -1003,7 +1009,9 @@ def fold_into_first_layer():
            "which take the unnormalized x in [0, 1] directly.", ""]
     out.append(_table(["pixel codes", "outputs (normalize, then layer)", "|difference| in 64-bit", "|difference| in 32-bit"], rows, "lrrr"))
     out.append("")
-    out.append("The 32-bit columns round every product and sum to 32 bits, adding the three products left to right and then the bias.")
+    out.append("The 32-bit columns take x = code / 255 computed in 64-bit and rounded to 32 bits, round the weights, mean, std, the folded "
+               "W / std and the folded bias (computed in 64-bit) to 32 bits, and round every product, difference, quotient and sum to 32 bits, "
+               "adding the three products left to right from 0 and then the bias.")
     return "\n".join(out)
 
 

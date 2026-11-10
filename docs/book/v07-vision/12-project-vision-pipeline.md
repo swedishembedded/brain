@@ -108,7 +108,7 @@ Frame 0 of the clip, read two ways. The detector's view: scale = min(64/96, 64/6
 | padding rows | 0 to 10 and 52 to 63 (23 rows) | detector view |
 | source rows of the first 6 content rows | [0, 2, 3, 5, 6, 8] | detector view |
 | source columns of the first 8 content columns | [0, 2, 3, 5, 6, 8, 9, 11] | detector view |
-| SHA-256 (12 hex) of the 12,288 bytes round(255 v), CHW order r, g, b planes of rows then columns, as H W C | 7e0df808cb20 | detector view |
+| SHA-256 (first 12 hex digits) of the 12,288 bytes round half up (255 v), serialized in H W C order: for each row, each column, the bytes r, g, b | 7e0df808cb20 | detector view |
 | sum of the 12,288 values (tolerance 1e-9) | 3543.070588 | detector view |
 | scale per axis (64/96, 64/61) | (0.666667, 1.049180) | segmenter view |
 | sum of the 12,288 normalized values (tolerance 1e-9) | -13516.819217 | segmenter view |
@@ -212,7 +212,8 @@ The head's output for the nine cells of grid row 13 to 15 and column 3 to 5, who
 The cell in the middle of A scores 1.000 and its neighbours 0.522 and 0.222, and the corner cells 0.116, so that only three of the nine pass a confidence floor of 0.25. The rest of the tail is Chapter 4's, with the numbers brain's own detector pipeline ships with: scores below the confidence floor 0.25 are dropped, the survivors are suppressed class by class with a strict IoU threshold of 0.45 (`DetectOptions` in `crates/sdk/src/detect.rs` has exactly these two defaults) and at most 300 are kept, and the kept boxes go back through `unletterbox` with the padding of milestone 1, clamped to the frame once, last.
 
 ```text
-function detect_frame(frame: array<int>[H, W, 3], conf: real, thr: real) -> list<(array<real>[4], real, int)>:
+function detect_frame(frame: array<int>[H, W, 3], protos: array<real>[4, 3], conf: real, thr: real)
+        -> list<(array<real>[4], real, int)>:
     s = min(64.0 / W, 64.0 / H)
     pad_x = (64 - floor(W * s + 0.5)) // 2
     pad_y = (64 - floor(H * s + 0.5)) // 2
@@ -236,7 +237,7 @@ function detect_frame(frame: array<int>[H, W, 3], conf: real, thr: real) -> list
     return out
 ```
 
-Here `protos` is the $4 \times 3$ array of the prototype colours of the class map. On frame 0, the 57 candidates, 29 of which pass the floor, collapse to three detections, one per object, after 30 IoU evaluations (18 operations each, as Chapter 4 counted, so 540 operations: the tail is not where this pipeline spends its work). Run on every frame, with the matching rule of Chapter 4's evaluation:
+Here `protos`, a parameter, is the $4 \times 3$ array of the prototype colours of the class map. On frame 0, the 57 candidates, 29 of which pass the floor, collapse to three detections, one per object, after 30 IoU evaluations (18 operations each, as Chapter 4 counted, so 540 operations: the tail is not where this pipeline spends its work). Run on every frame, with the matching rule of Chapter 4's evaluation:
 
 <!-- worked: project_vision_pipeline.detector_table -->
 The detector of milestone 2 on every frame: confidence threshold 0.25, class-aware suppression at IoU > 0.45, at most 300 detections. A detection is matched to the unmatched visible object of its class with the largest IoU, at least 0.5; detections are visited by falling score. Raw candidates are the cells whose anchor is not background or padding.
@@ -289,8 +290,9 @@ function admits(view: array<real>[3, S, S], b: array<real>[4], ref: array<real>[
     inside = b[0] - margin <= x + 0.5 and x + 0.5 <= b[2] + margin and b[1] - margin <= y + 0.5 and y + 0.5 <= b[3] + margin
     return inside and sqrt(sum((view[:, y, x] - ref)^2)) <= tol
 
-function segment_box(view: array<real>[3, S, S], box: array<real>[4], tol: real, margin: real) -> array<int>[S, S]:
-    b = [box[0] * S / W, box[1] * S / H, box[2] * S / W, box[3] * S / H]
+function segment_box(view: array<real>[3, S, S], box: array<real>[4], tol: real, margin: real, w0: int, h0: int)
+        -> array<int>[S, S]:
+    b = [box[0] * S / w0, box[1] * S / h0, box[2] * S / w0, box[3] * S / h0]
     sx = floor((b[0] + b[2]) / 2)
     sy = floor((b[1] + b[3]) / 2)
     require 0 <= sx and sx < S and 0 <= sy and sy < S
@@ -471,8 +473,9 @@ The check for this milestone is the presence strings, the pixel counts of the tr
 The run is a short function: detect on frame 0, give each detection to the segmenter as a box prompt in the order of falling score, start a track from each mask, and for every later frame view it once and step every track.
 
 ```text
-function run_pipeline(frames: list<array<int>[H, W, 3]>) -> list<list<(bool, array<int>[S, S])>>:
-    dets = detect_frame(frames[0], 0.25, 0.45)
+function run_pipeline(frames: list<array<int>[H, W, 3]>, protos: array<real>[4, 3], mean: array<real>[3], std: array<real>[3])
+        -> list<list<(bool, array<int>[S, S])>>:
+    dets = detect_frame(frames[0], protos, 0.25, 0.45)
     scores = zeros(real, [len(dets)])
     for n in 0 .. len(dets):
         scores[n] = dets[n][1]
@@ -482,7 +485,7 @@ function run_pipeline(frames: list<array<int>[H, W, 3]>) -> list<list<(bool, arr
     banks = []
     results = []
     for n in order:
-        m0 = segment_box(view0, dets[n][0], 1.0, 2.0)
+        m0 = segment_box(view0, dets[n][0], 1.0, 2.0, W, H)
         bank = map of int to (array<real>[256, 3], array<real>[256]), empty
         bank[0] = (cell_features(view0), mask_cells(m0))
         append mean_colour(view0, m0) to refs
@@ -544,15 +547,23 @@ The one the count does not catch is the padding. The inverse letterbox with 11.5
 The last number is the cost. A frame costs the segmenter side what the formulas of Chapter 7 say, and the point of the pipeline's structure is which parts are paid once. The trunk (Hiera, 1,812 billion FLOPs for the large model) depends on the frame only; the memory attention, the decoder and the memory encoder are paid per track.
 
 <!-- worked: project_vision_pipeline.ledger -->
-FLOPs (2 per multiply-add) of the segmenter side of the pipeline for the 12-frame clip priced as the large SAM 2.1 model at 1,024 by 1,024 pixels, with the formulas of Chapter 7: the trunk once per frame, and for every track a memory attention over the keys of the bank (7 slabs of 4,096 cells and one pointer of 4 tokens from each earlier frame, at most 12), a decoder with the tracking prompt and a memory encoder; frame 0 has no memory attention and a decoder on a box prompt (2 corner tokens and the padding point). The detector is not counted.
+FLOPs (2 per multiply-add) of the segmenter side of the pipeline for the 12-frame clip priced as the large SAM 2.1 model at 1,024 by 1,024 pixels, with the formulas of Chapter 7, in billions of FLOPs to four decimals. The trunk costs 1,812.1469 once per frame. For every track: the memory encoder 11.6077; the decoder 3.6393 with the tracking prompt, and 3.6557 on frame 0, where the prompt is a box (2 corner tokens and the padding point); and, on frames 1 to 11, a memory attention of 115.9641 + 0.01703936 per key (in FLOPs, 115,964,116,992 + 17,039,360 per key), with keys = 4,096 per slab + 4 per pointer. The bank of a frame holds the slab of frame 0, the slabs of the (up to 6) most recent earlier frames other than frame 0, and one pointer from each earlier frame (at most 11 back); frame 0 has no memory attention. A track's cost on a frame is its memory attention, decoder and memory encoder; the shared column adds the trunk once to the three tracks, the other adds it to each. The detector is not counted. Every figure is the sum of exact counts, rounded once to four decimals; a reader who adds the printed terms gets the totals to within 0.01.
 
 | frame | memory keys per track | trunk (GFLOPs) | per track: attention, decoder, encoder | 3 tracks, trunk shared | 3 tracks, trunk per track |
 |---|---:|---:|---:|---:|---:|
-| 0 | none | 1,812.15 | 15.26 | 1,857.94 | 5,482.23 |
-| 1 | 4,100 | 1,812.15 | 201.07 | 2,415.36 | 6,039.66 |
-| 6 | 24,600 | 1,812.15 | 550.38 | 3,463.29 | 7,087.58 |
-| 11 | 28,716 | 1,812.15 | 620.51 | 3,673.69 | 7,297.98 |
-| all 12 |  |  |  | 37,860.28 | 81,351.80 |
+| 0 | none | 1,812.1469 | 15.2634 | 1,857.9373 | 5,482.2312 |
+| 1 | 4,100 | 1,812.1469 | 201.0725 | 2,415.3645 | 6,039.6584 |
+| 2 | 8,200 | 1,812.1469 | 270.9339 | 2,624.9486 | 6,249.2425 |
+| 3 | 12,300 | 1,812.1469 | 340.7953 | 2,834.5327 | 6,458.8266 |
+| 4 | 16,400 | 1,812.1469 | 410.6566 | 3,044.1169 | 6,668.4108 |
+| 5 | 20,500 | 1,812.1469 | 480.5180 | 3,253.7010 | 6,877.9949 |
+| 6 | 24,600 | 1,812.1469 | 550.3794 | 3,463.2851 | 7,087.5790 |
+| 7 | 28,700 | 1,812.1469 | 620.2408 | 3,672.8692 | 7,297.1631 |
+| 8 | 28,704 | 1,812.1469 | 620.3089 | 3,673.0737 | 7,297.3676 |
+| 9 | 28,708 | 1,812.1469 | 620.3771 | 3,673.2782 | 7,297.5721 |
+| 10 | 28,712 | 1,812.1469 | 620.4452 | 3,673.4827 | 7,297.7766 |
+| 11 | 28,716 | 1,812.1469 | 620.5134 | 3,673.6871 | 7,297.9810 |
+| all 12 |  |  |  | 37,860.2770 | 81,351.8037 |
 
 One track alone costs 27,117.27 billion FLOPs over the clip; three tracks that share the trunk cost 37,860.28 billion, 1.40 times as much, where three separate pipelines cost 81,351.80 billion, 3.00 times.
 <!-- /worked -->
