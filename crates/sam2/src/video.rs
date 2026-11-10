@@ -62,7 +62,7 @@ use crate::model::{idx, Decoded, Encoded, Prompt, Sam2};
 
 /// Query rows per memory-attention dispatch. The cross-attention's key length
 /// is `num_maskmem * H*W + obj_ptr_tokens` - 28 736 for hiera at 1024 - so an
-/// unchunked `[H*W, keys]` score slab would be 470 MiB, twice (scores and
+/// unchunked `[H*W, keys]` score slab would be about 449 MiB (470 MB), twice (scores and
 /// probabilities). Chunking the QUERY caps it at a few hundred MiB per
 /// dispatch without changing a single value: softmax is per query row.
 ///
@@ -557,8 +557,9 @@ impl Sam2 {
 /// Tracks ONE object through a clip: a point prompt on one frame, then a mask
 /// on every frame, each conditioned on the memory of the frames before it.
 ///
-/// The caller drives the encoder, because the Hiera trunk is ~99 % of the work
-/// and a caller may already have the [`Encoded`] (a second object on the same
+/// The caller drives the encoder, because the Hiera trunk is most of the work
+/// (nearly all of a still image's; about three quarters of a tracked frame's
+/// once the memory bank is full) and a caller may already have the [`Encoded`] (a second object on the same
 /// frame, a re-prompt, a cached clip):
 ///
 /// ```text
