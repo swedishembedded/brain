@@ -165,6 +165,41 @@ impl Source {
             Source::Safetensors(_) => None,
         }
     }
+
+    /// The source's own `general.name`, when it declares one: a GGUF's name
+    /// is the model's name ("Qwen3 0.6B Instruct"), not a filename stem -
+    /// the output's served id must stay that name, not the source file's.
+    fn general_name(&self) -> Option<String> {
+        match self {
+            Source::Gguf(g) => g.kv().get("general.name").and_then(|v| v.as_str()).map(str::to_string),
+            Source::Safetensors(_) => None,
+        }
+    }
+
+    /// The source's own KVs, when it is a GGUF: a GGUF→GGUF quantization
+    /// must carry the model's identity into the output - the `qwen3.*`
+    /// config KVs and the embedded tokenizer, which is what makes the
+    /// result servable from the model-dir scan (the scanner dispatches on
+    /// `general.architecture` and the resident reads the config KVs beside
+    /// it). A safetensors source has none of that. The five generic keys
+    /// this command writes itself are excluded so the output's own values
+    /// (tier, quantization version, source name) win.
+    fn carried_kvs(&self) -> Vec<(String, GgufValue)> {
+        match self {
+            Source::Gguf(g) => g
+                .kv()
+                .iter()
+                .filter(|(k, _)| {
+                    !matches!(
+                        k.as_str(),
+                        "general.architecture" | "general.name" | "general.quantization_version" | "general.source.name" | "general.file_type"
+                    )
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            Source::Safetensors(_) => Vec::new(),
+        }
+    }
 }
 
 fn stem(path: &str) -> String {
@@ -275,13 +310,14 @@ pub fn run_quantize(argv: &[String]) -> ! {
     };
 
     let arch = args.arch.clone().or_else(|| src.architecture()).unwrap_or_else(|| stem(&out));
-    let name = args.name.clone().unwrap_or_else(|| stem(&args.src));
-    let mut kv = vec![
+    let name = args.name.clone().or_else(|| src.general_name()).unwrap_or_else(|| stem(&args.src));
+    let mut kv = src.carried_kvs();
+    kv.extend(vec![
         ("general.architecture".to_string(), GgufValue::String(arch.clone())),
         ("general.name".to_string(), GgufValue::String(name)),
         ("general.quantization_version".to_string(), GgufValue::U32(2)),
         ("general.source.name".to_string(), GgufValue::String(stem(&args.src))),
-    ];
+    ]);
     // ggml's file-type tag for a uniformly-quantized file. Informational:
     // every tensor also carries its own type, which is what the reader
     // uses. Omitted (not a fabricated 0) when the tier has no real
@@ -395,8 +431,48 @@ mod tests {
         assert_eq!(Tier::Q8K.file_type_id(), None, "Q8_K is never a real release format");
     }
 
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("brain-cli-quantize-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d.join("m.gguf")
+    }
+
     #[test]
     fn a_missing_source_is_an_error_not_an_empty_conversion() {
         assert!(parse(&s(&["--out", "o.gguf"])).unwrap_err().contains("no source"));
+    }
+
+    /// A GGUF→GGUF quantization must carry the source's identity into the
+    /// output: the config KVs a resident reads beside the tensor data, and
+    /// the model's name. Without this the output is a servable file
+    /// tripped into an unservable one by the scan - the exact failure
+    /// observed on this machine: `brain quantize --tier Q4_K_M` from the
+    /// safetensors produced a GGUF with no `qwen3.*` config KVs, which the
+    /// model-dir scan can only decline.
+    #[test]
+    fn a_gguf_source_carries_its_kvs_and_the_output_overrides_the_generics() {
+        let src = scratch("m");
+        let kvs = vec![
+            ("general.architecture".to_string(), GgufValue::String("qwen3".to_string())),
+            ("general.name".to_string(), GgufValue::String("Qwen3 0.6B Instruct".to_string())),
+            ("general.quantization_version".to_string(), GgufValue::U32(2)),
+            ("general.file_type".to_string(), GgufValue::U32(7)),
+            ("qwen3.block_count".to_string(), GgufValue::U32(28)),
+        ];
+        let plan = vec![checkpoint::gguf_write::TensorPlan { name: "blk.0.attn_q.weight".to_string(), shape: vec![2, 4], ty: 0, nbytes: 32 }];
+        let mut w = checkpoint::gguf_write::Writer::create(src.to_str().unwrap(), &kvs, plan, 32).unwrap();
+        w.write_tensor("blk.0.attn_q.weight", &[0u8; 32]).unwrap();
+        w.finish().unwrap();
+        let src = Source::open(src.to_str().unwrap()).unwrap();
+
+        assert_eq!(src.general_name().as_deref(), Some("Qwen3 0.6B Instruct"));
+        let carried = src.carried_kvs();
+        assert!(carried.iter().any(|(k, v)| k == "qwen3.block_count" && v == &GgufValue::U32(28)), "the config KVs must ride along: {carried:?}");
+        assert!(carried.iter().all(|(k, _)| k != "general.name"), "the name is excluded from carried_kvs and applied via the output's own kv: {carried:?}");
+        for (k, _) in &carried {
+            assert!(!matches!(k.as_str(), "general.architecture" | "general.name" | "general.quantization_version" | "general.source.name" | "general.file_type"), "the generics must be excluded: {k}");
+        }
     }
 }
