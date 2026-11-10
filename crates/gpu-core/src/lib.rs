@@ -484,17 +484,84 @@ pub mod card_tests;
 pub mod testgpu {
     use super::{Gpu, WeakGpu};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     /// Held for the whole body of a test that builds its OWN `Gpu` (a kernel
     /// set `dev` cannot serve, or a device the test must own), so at most one
     /// such device is alive at a time. See [`exclusive`].
-    static EXCLUSIVE: Mutex<()> = Mutex::new(());
+    static EXCLUSIVE: DeviceLock = DeviceLock::new();
 
-    /// How long a test waits for [`exclusive`] before the process is aborted.
-    /// The slowest device test in this workspace runs in well under a minute;
-    /// a holder past this has wedged inside the driver.
-    const EXCLUSIVE_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+    /// How long ONE holder may keep [`exclusive`] before the process is
+    /// aborted. The slowest device test in this workspace runs in well under
+    /// a minute on a GPU; a holder past this has wedged inside the driver.
+    /// It bounds a single hold, not the queue: a long line of healthy tests
+    /// behind each other (slow CPU backends) never trips it.
+    const EXCLUSIVE_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// A mutex that also records since when its current holder has held it,
+    /// so a waiter can tell "the queue is long" from "the holder is wedged".
+    pub struct DeviceLock {
+        lock: Mutex<()>,
+        /// Milliseconds since [`epoch`] at which the current holder acquired
+        /// the lock, plus one; 0 while nobody holds it.
+        held_since_ms: AtomicU64,
+    }
+
+    /// The guard of a [`DeviceLock`]; clears the holder's timestamp, then
+    /// releases the lock, on drop.
+    pub struct DeviceGuard {
+        owner: &'static DeviceLock,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for DeviceGuard {
+        fn drop(&mut self) {
+            self.owner.held_since_ms.store(0, Ordering::Release);
+        }
+    }
+
+    fn epoch() -> std::time::Instant {
+        static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
+        *EPOCH.get_or_init(std::time::Instant::now)
+    }
+
+    fn now_ms() -> u64 {
+        epoch().elapsed().as_millis() as u64 + 1
+    }
+
+    impl DeviceLock {
+        const fn new() -> Self {
+            Self { lock: Mutex::new(()), held_since_ms: AtomicU64::new(0) }
+        }
+
+        /// The lock, waiting as long as the queue needs; `Err(held)` once the
+        /// CURRENT holder has held it longer than `limit` (`held` is how
+        /// long). A poisoned lock (a `should_panic` test, a failed assertion)
+        /// is still a free lock.
+        fn acquire_within(&'static self, limit: std::time::Duration) -> Result<DeviceGuard, std::time::Duration> {
+            loop {
+                let guard = match self.lock.try_lock() {
+                    Ok(g) => g,
+                    Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        // 0 means the holder is between acquiring and stamping: not wedged.
+                        let since = self.held_since_ms.load(Ordering::Acquire);
+                        if since != 0 {
+                            let held = std::time::Duration::from_millis(now_ms().saturating_sub(since));
+                            if held >= limit {
+                                return Err(held);
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                };
+                self.held_since_ms.store(now_ms(), Ordering::Release);
+                return Ok(DeviceGuard { owner: self, _guard: guard });
+            }
+        }
+    }
 
     /// The one lock every test that builds its own `Gpu` takes, replacing the
     /// per-file `DEVICE_SERIAL` statics: concurrent device creation and
@@ -503,35 +570,23 @@ pub mod testgpu {
     /// fourteen, a thread spinning in the driver's thread-exit
     /// destructor with the others parked on its lock - hours, not an error).
     ///
-    /// The wait is bounded. A holder wedged in the driver cannot be
-    /// interrupted, so a waiter that outlives [`EXCLUSIVE_WAIT`] aborts the
-    /// process with a message naming the test, instead of leaving CI to find
-    /// a 100%-CPU binary after hours. Returns the guard; drop order makes it
-    /// outlive the `Gpu` the test declares after it.
-    pub fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-        exclusive_within(&EXCLUSIVE, EXCLUSIVE_WAIT).unwrap_or_else(|| {
+    /// The wait is bounded by the holder, not the queue. A holder wedged in
+    /// the driver cannot be interrupted, so a waiter that finds the current
+    /// holder past [`EXCLUSIVE_HOLD_LIMIT`] aborts the process with a message
+    /// naming the test, instead of leaving CI to find a 100%-CPU binary after
+    /// hours. Returns the guard; drop order makes it outlive the `Gpu` the
+    /// test declares after it.
+    pub fn exclusive() -> DeviceGuard {
+        EXCLUSIVE.acquire_within(EXCLUSIVE_HOLD_LIMIT).unwrap_or_else(|held| {
             let test = std::thread::current();
             eprintln!(
-                "FATAL: test `{}` waited {}s for the device lock; the test holding it is wedged in the GPU driver",
+                "FATAL: test `{}` is waiting for the device lock; the test holding it has held it {}s (limit {}s) and is wedged in the GPU driver",
                 test.name().unwrap_or("<unnamed>"),
-                EXCLUSIVE_WAIT.as_secs()
+                held.as_secs(),
+                EXCLUSIVE_HOLD_LIMIT.as_secs()
             );
             crate::hard_exit(101)
         })
-    }
-
-    /// `lock`, or `None` if it stays held for `limit`. A poisoned lock (a
-    /// `should_panic` test, a failed assertion) is still a free lock.
-    fn exclusive_within(lock: &'static Mutex<()>, limit: std::time::Duration) -> Option<std::sync::MutexGuard<'static, ()>> {
-        let deadline = std::time::Instant::now() + limit;
-        loop {
-            match lock.try_lock() {
-                Ok(g) => return Some(g),
-                Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() >= deadline => return None,
-                Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(5)),
-            }
-        }
     }
 
     /// Keyed by the kernel slice's address: kernel sets are `'static` consts,
@@ -571,23 +626,41 @@ pub mod testgpu {
         use super::*;
         use std::time::Duration;
 
-        /// A held lock is reported as held after the limit, not waited on
-        /// forever, and a lock released by a panicking holder is free.
+        /// The limit applies to one holder, not to the queue: waiters behind
+        /// a series of short holds never give up, one holder past the limit
+        /// is reported with its hold time, and a lock released by a
+        /// panicking holder is free.
         #[test]
-        fn the_wait_for_the_device_lock_is_bounded_and_survives_a_panicking_holder() {
-            static LOCK: Mutex<()> = Mutex::new(());
-            let held = exclusive_within(&LOCK, Duration::from_secs(1)).expect("free lock");
-            let t0 = std::time::Instant::now();
-            assert!(exclusive_within(&LOCK, Duration::from_millis(50)).is_none(), "a held lock must time out");
-            assert!(t0.elapsed() < Duration::from_secs(5));
+        fn the_device_lock_limit_measures_the_holder_not_the_queue() {
+            static LOCK: DeviceLock = DeviceLock::new();
+            let limit = Duration::from_millis(300);
+
+            // Four waiters in line, each holder 150 ms: the last waits 600 ms > limit.
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    std::thread::spawn(move || {
+                        let g = LOCK.acquire_within(limit).expect("a long queue of short holds must not abort");
+                        std::thread::sleep(Duration::from_millis(150));
+                        drop(g);
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().expect("waiter");
+            }
+
+            let held = LOCK.acquire_within(limit).expect("free lock");
+            std::thread::sleep(Duration::from_millis(400));
+            let reported = LOCK.acquire_within(limit).err().expect("a holder past the limit must be reported");
+            assert!(reported >= limit, "reported hold {reported:?}");
             drop(held);
 
             let _ = std::thread::spawn(|| {
-                let _g = exclusive_within(&LOCK, Duration::from_secs(1)).expect("free lock");
+                let _g = LOCK.acquire_within(Duration::from_secs(1)).expect("free lock");
                 panic!("holder fails");
             })
             .join();
-            assert!(exclusive_within(&LOCK, Duration::from_secs(1)).is_some(), "a poisoned lock is still free");
+            assert!(LOCK.acquire_within(Duration::from_secs(1)).is_ok(), "a poisoned lock is still free");
         }
     }
 }
