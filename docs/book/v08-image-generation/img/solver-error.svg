@@ -1,0 +1,40 @@
+<!-- source-sha256: cf9b8854bbbb64f924b7e23de374745887493aaebe460279278b2b8ca9359bd1 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 340" width="560" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="340" fill="#ffffff"/>
+<line x1="96.95" y1="294" x2="96.95" y2="30" stroke="#edf2f7"/>
+<text x="96.95" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="217.95" y1="294" x2="217.95" y2="30" stroke="#edf2f7"/>
+<text x="217.95" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="338.95" y1="294" x2="338.95" y2="30" stroke="#edf2f7"/>
+<text x="338.95" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="498.91" y1="294" x2="498.91" y2="30" stroke="#edf2f7"/>
+<text x="498.91" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">50</text>
+<line x1="58" y1="264.61" x2="542" y2="264.61" stroke="#edf2f7"/>
+<text x="52" y="268.61" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.001</text>
+<line x1="58" y1="190.74" x2="542" y2="190.74" stroke="#edf2f7"/>
+<text x="52" y="194.74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.01</text>
+<line x1="58" y1="116.87" x2="542" y2="116.87" stroke="#edf2f7"/>
+<text x="52" y="120.87" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.1</text>
+<line x1="58" y1="43.01" x2="542" y2="43.01" stroke="#edf2f7"/>
+<text x="52" y="47.01" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="484" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="6 4" points="58,54.71 542,143.65"/><polyline fill="none" stroke="#cbd5e0" stroke-width="1.2" stroke-dasharray="6 4" points="58,54.71 542,232.59"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,54.71 179,76.82 300,100.97 421,124.1 542,150.33"/><circle cx="58" cy="54.71" r="3.0" fill="#2b6cb0"/><circle cx="179" cy="76.82" r="3.0" fill="#2b6cb0"/><circle cx="300" cy="100.97" r="3.0" fill="#2b6cb0"/><circle cx="421" cy="124.1" r="3.0" fill="#2b6cb0"/><circle cx="542" cy="150.33" r="3.0" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,45.29 179,101.7 300,165.11 421,217.71 542,269.7"/><circle cx="58" cy="45.29" r="3.0" fill="#c05621"/><circle cx="179" cy="101.7" r="3.0" fill="#c05621"/><circle cx="300" cy="165.11" r="3.0" fill="#c05621"/><circle cx="421" cy="217.71" r="3.0" fill="#c05621"/><circle cx="542" cy="269.7" r="3.0" fill="#c05621"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,58.16 179,100.59 300,146.55 421,198.98 542,241.85"/><circle cx="58" cy="58.16" r="3.0" fill="#2f855a"/><circle cx="179" cy="100.59" r="3.0" fill="#2f855a"/><circle cx="300" cy="146.55" r="3.0" fill="#2f855a"/><circle cx="421" cy="198.98" r="3.0" fill="#2f855a"/><circle cx="542" cy="241.85" r="3.0" fill="#2f855a"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="58,72.27 179,139.9 300,228.78 421,249.1 542,282.63"/><circle cx="58" cy="72.27" r="3.0" fill="#9b2c2c"/><circle cx="179" cy="139.9" r="3.0" fill="#9b2c2c"/><circle cx="300" cy="228.78" r="3.0" fill="#9b2c2c"/><circle cx="421" cy="249.1" r="3.0" fill="#9b2c2c"/><circle cx="542" cy="282.63" r="3.0" fill="#9b2c2c"/></g>
+<text x="300" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">evaluations of the field</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">mean distance to the exact map</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Four solvers, one exact field</text>
+<rect x="66" y="174" width="145.46" height="112" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="189" x2="94" y2="189" stroke="#a0aec0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="193" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">slope -1</text>
+<line x1="74" y1="206" x2="94" y2="206" stroke="#cbd5e0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="210" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">slope -2</text>
+<line x1="74" y1="223" x2="94" y2="223" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="227" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">Euler</text>
+<line x1="74" y1="240" x2="94" y2="240" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="244" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">Heun</text>
+<line x1="74" y1="257" x2="94" y2="257" stroke="#2f855a" stroke-width="2"/>
+<text x="100" y="261" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">DPM-Solver++(2M)</text>
+<line x1="74" y1="274" x2="94" y2="274" stroke="#9b2c2c" stroke-width="2"/>
+<text x="100" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">UniPC</text>
+</svg>

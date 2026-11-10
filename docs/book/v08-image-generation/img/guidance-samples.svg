@@ -1,0 +1,44 @@
+<!-- source-sha256: 19eda5e828e3f5d5cb5cc06c39730c86e1f5bd227f01871ba9b3795997adc8f3 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 340" width="560" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="340" fill="#ffffff"/>
+<line x1="90.27" y1="294" x2="90.27" y2="30" stroke="#edf2f7"/>
+<text x="90.27" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-2</text>
+<line x1="219.33" y1="294" x2="219.33" y2="30" stroke="#edf2f7"/>
+<text x="219.33" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="348.4" y1="294" x2="348.4" y2="30" stroke="#edf2f7"/>
+<text x="348.4" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="477.47" y1="294" x2="477.47" y2="30" stroke="#edf2f7"/>
+<text x="477.47" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="58" y1="294" x2="542" y2="294" stroke="#edf2f7"/>
+<text x="52" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="250" x2="542" y2="250" stroke="#edf2f7"/>
+<text x="52" y="254" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.25</text>
+<line x1="58" y1="206" x2="542" y2="206" stroke="#edf2f7"/>
+<text x="52" y="210" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="162" x2="542" y2="162" stroke="#edf2f7"/>
+<text x="52" y="166" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.75</text>
+<line x1="58" y1="118" x2="542" y2="118" stroke="#edf2f7"/>
+<text x="52" y="122" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="74" x2="542" y2="74" stroke="#edf2f7"/>
+<text x="52" y="78" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.25</text>
+<line x1="58" y1="30" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.5</text>
+<rect x="58" y="30" width="484" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#a0aec0" stroke-width="1.6" stroke-dasharray="6 4" points="66.07,294 82.2,294 98.33,294 114.47,293.99 130.6,293.95 146.73,293.78 162.87,293.11 179,291.01 195.13,285.53 211.27,273.82 227.4,253.59 243.53,225.98 259.67,197.74 275.8,179.49 291.93,179.49 308.07,197.74 324.2,225.98 340.33,253.59 356.47,273.82 372.6,285.53 388.73,291.01 404.87,293.11 421,293.78 437.13,293.95 453.27,293.99 469.4,294 485.53,294 501.67,294 517.8,294 533.93,294"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="66.07,285.55 82.2,282.74 98.33,267.25 114.47,265.14 130.6,240.5 146.73,244.72 162.87,234.86 179,244.02 195.13,256.69 211.27,267.25 227.4,267.95 243.53,252.46 259.67,244.72 275.8,230.64 291.93,234.86 308.07,244.72 324.2,263.02 340.33,277.1 356.47,283.44 372.6,290.48 388.73,293.3 404.87,293.3 421,294 437.13,294 453.27,294 469.4,294 485.53,294 501.67,294 517.8,294 533.93,294"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="66.07,294 82.2,294 98.33,294 114.47,294 130.6,294 146.73,294 162.87,294 179,288.37 195.13,281.33 211.27,271.47 227.4,255.28 243.53,227.82 259.67,196.85 275.8,184.88 291.93,179.95 308.07,194.03 324.2,222.9 340.33,255.28 356.47,277.81 372.6,286.26 388.73,290.48 404.87,293.3 421,294 437.13,294 453.27,294 469.4,294 485.53,294 501.67,294 517.8,294 533.93,294"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="66.07,294 82.2,294 98.33,294 114.47,294 130.6,294 146.73,294 162.87,294 179,294 195.13,294 211.27,294 227.4,294 243.53,294 259.67,294 275.8,274.99 291.93,191.92 308.07,121.52 324.2,122.93 340.33,162.35 356.47,226.42 372.6,269.36 388.73,283.44 404.87,289.78 421,293.3 437.13,294 453.27,294 469.4,294 485.53,294 501.67,294 517.8,294 533.93,294"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="66.07,294 82.2,294 98.33,294 114.47,294 130.6,294 146.73,294 162.87,294 179,294 195.13,294 211.27,294 227.4,294 243.53,294 259.67,294 275.8,294 291.93,294 308.07,294 324.2,293.3 340.33,220.08 356.47,81.39 372.6,79.98 388.73,158.13 404.87,246.83 421,279.22 437.13,289.78 453.27,293.3 469.4,294 485.53,294 501.67,294 517.8,294 533.93,294"/></g>
+<text x="300" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">end point x_0</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">share of samples per unit</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Samples of class 1 at four guidance scales</text>
+<rect x="410.32" y="38" width="123.68" height="95" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="418.32" y1="53" x2="438.32" y2="53" stroke="#a0aec0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="444.32" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">the class itself</text>
+<line x1="418.32" y1="70" x2="438.32" y2="70" stroke="#2b6cb0" stroke-width="2"/>
+<text x="444.32" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">g = 0</text>
+<line x1="418.32" y1="87" x2="438.32" y2="87" stroke="#c05621" stroke-width="2"/>
+<text x="444.32" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">g = 1</text>
+<line x1="418.32" y1="104" x2="438.32" y2="104" stroke="#2f855a" stroke-width="2"/>
+<text x="444.32" y="108" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">g = 3</text>
+<line x1="418.32" y1="121" x2="438.32" y2="121" stroke="#9b2c2c" stroke-width="2"/>
+<text x="444.32" y="125" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">g = 8</text>
+</svg>

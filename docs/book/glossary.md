@@ -154,6 +154,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **classification**: predicting which of a fixed set of categories an example belongs to, from its features, learned from labelled examples; with two categories, labelled $0$ and $1$, it is binary classification. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
+**classifier-free guidance**: sampling with the prediction $u_{\mathrm{un}} + g(u_c - u_{\mathrm{un}})$, the prediction made with the prompt pushed away from the prediction made without it by a scale $g$; $g = 1$ is the plain conditional model, and a larger $g$ follows the prompt harder at the cost of variety and of a second network pass per step. *([Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md))*
+
 **codebook**: a table of $K$ vectors of $d$ numbers each, the only values a quantized vector may take; a position of a tokenizer stores the index of a row. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
 
 **color space**: the rule that turns a triple of numbers into a colour, made of three primary colours, a white point and a transfer curve, so that the same triple is a different colour in a different space. *([Images as Data](v07-vision/01-images.md))*
@@ -255,6 +257,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **derivative**: the limit of the difference quotient $\frac{f(x+h) - f(x)}{h}$ as $h \to 0$; the slope of the tangent to the curve of $f$ at $x$, and the rate at which $f$ changes when $x$ changes. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **determinant**: the signed factor by which a square matrix scales area or volume ($ad - bc$ for a $2 \times 2$); zero exactly when the matrix crushes space and has no inverse. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
+
+**deterministic sampler**: a sampler whose output is a function of its starting noise alone, with no random draw after the first, so that the same noise always gives the same image; the step that re-noises the denoiser's guess to the next level with the noise the old level implies, and Euler's method on the velocity field, are such samplers. *([Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md))*
 
 **device-synchronized timing**: timing in which the clock stops only after the device has finished the work being timed, either by the host waiting for it or by reading timestamps the device wrote itself; a clock stopped when the call returns reads the host's cost of handing over the work. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
@@ -425,6 +429,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **grouped-query attention**: attention in which each key-value head is read by a group of neighbouring query heads, so a layer stores $h_{\mathrm{kv}}$ key-value heads for $H$ query heads, the cache is $h_{\mathrm{kv}} / H$ of the multi-head cache, and the attention FLOPs are unchanged. *([Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md))*
 
 **gru**: gated recurrent unit, a recurrent cell with one state, an update gate that sets how far the state moves toward a new candidate and a reset gate that sets how much of the old state the candidate may read, so that the old state reaches the new one through a gate and not through a matrix. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
+
+**guidance distillation**: training a student network by regression on the guided prediction of a teacher, optionally with the guidance scale as an input, so that one pass of the student gives what two passes of the teacher gave. *([Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md))*
 
 ## H
 
@@ -675,6 +681,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## O
 
 **occupancy**: the fraction of a compute unit's resident-invocation slots that a kernel fills, limited by the registers per invocation, the shared memory per workgroup, the workgroup size and the cap on resident workgroups. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
+
+**ODE solver**: a rule that turns evaluations of a velocity field into the next point of a trajectory, judged by how fast its error falls as the steps shrink (its order) and by how many evaluations of the field each step costs; Euler, Heun and the multistep methods of this chapter are examples. *([Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md))*
 
 **one-hot-encoding**: writing a class index as a vector with a one in the position of that class and zeros elsewhere, the probability vector that puts all its weight on that class. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
