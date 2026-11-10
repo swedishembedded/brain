@@ -313,6 +313,12 @@ pub(crate) fn track_frames(m: &Sam2, frames: &[Vec<f32>], w: u32, h: u32, prompt
             eprintln!("sam2 track: frame {f} - object score {:.3} <= 0, SAM 2 believes the object is occluded here", step.object_score);
         }
         out[f] = Some(Tracked { logits: ctx.download(&up, ushape.numel()), object_score: step.object_score, iou: step.iou });
+        if n > 1 {
+            eprint!("\rsam2 track: frame {}/{n}", f + 1);
+        }
+    }
+    if n > 1 {
+        eprintln!();
     }
     // Frames before the clicks take their mask, and `masks.json` says so
     // through `prompt.frame`: a mask sequence must cover EVERY source frame
