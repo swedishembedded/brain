@@ -432,6 +432,7 @@ navigation:
         pages:
           - docs/book/v07-vision/index.md
           - docs/book/v07-vision/01-images.md
+          - docs/book/v07-vision/02-convolution.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

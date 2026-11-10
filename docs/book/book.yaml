@@ -575,7 +575,7 @@ volumes:
         title: "Convolution"
         question: "How does a small filter slid across an image find edges, textures and eventually objects?"
         introduces: [convolution-2d, kernel-size-stride-padding, receptive-field, im2col, depthwise-convolution, transposed-convolution, convolution-backward]
-        requires: [pixel, dot-product, matmul-backward, convolution-theorem]
+        requires: [pixel, dot-product, matmul-backward, convolution-theorem, stride, matrix-multiplication, gradient-check, arithmetic-intensity, kernel-fusion, batch-normalization]
         brain: [vision]
       - id: cnns
         title: "Convolutional Networks and Residual Learning"

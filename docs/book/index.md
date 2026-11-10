@@ -127,4 +127,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume VII: Vision and Understanding Images](v07-vision/index.md)
 
 1. [Images as Data](v07-vision/01-images.md): What is an image to a model, and how many ways can preprocessing quietly go wrong?
+2. [Convolution](v07-vision/02-convolution.md): How does a small filter slid across an image find edges, textures and eventually objects?
 <!-- /contents -->

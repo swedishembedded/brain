@@ -176,6 +176,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **convexity**: the property that no chord joining two points of the curve lies below the curve, equivalent for twice-differentiable functions to a non-negative second derivative; every critical point of a convex function is a global minimum. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
+**convolution backward**: the gradients of a convolution layer, the weight gradient as a sum over all positions of the output gradient times the input patch (a correlation of the input with $dy$) and the input gradient as the output gradient spread back through the kernel (a full correlation with the turned kernel, col2im of $d\mathbf{Y}^\top\mathbf{W}$). *([Convolution](v07-vision/02-convolution.md))*
+
 **convolution theorem**: the fact that the discrete Fourier transform of a circular convolution of two signals is the pointwise product of their transforms, so that convolution acts independently on each frequency and a long convolution can be computed with three fast transforms. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
 **cooperative matrix**: a small matrix whose elements are held jointly by the invocations of one subgroup and operated on by subgroup-wide load, multiply-add and store operations; the programming interface to tensor cores, available only where the device reports the shapes and types it supports. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
@@ -221,6 +223,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **delta rule**: updating a key-value memory by the outer product of the key and the prediction error, $\mathbf{S} \leftarrow \mathbf{S} + \beta\,\mathbf{k}(\mathbf{v} - \mathbf{S}^\top\mathbf{k})^\top$, one gradient step of a regression of the value on the key, so that a write replaces what the key returned. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **depth-vs-width**: the tradeoff between a network of many layers and one of few wide layers; for the sawtooth, $d$ layers of width $2$ make $2^d$ linear pieces, while one layer with $u$ units makes at most $u + 1$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
+
+**depthwise convolution**: a convolution that gives every channel its own single kernel and sums nothing across channels (a grouped convolution with as many groups as channels); followed by a pointwise convolution it replaces a dense layer with a fraction $1/C_{\mathrm{out}} + 1/k^2$ of its parameters. *([Convolution](v07-vision/02-convolution.md))*
 
 **derivative**: the limit of the difference quotient $\frac{f(x+h) - f(x)}{h}$ as $h \to 0$; the slope of the tangent to the curve of $f$ at $x$, and the rate at which $f$ changes when $x$ changes. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
@@ -386,6 +390,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **identity matrix**: the square matrix with ones on the diagonal and zeros elsewhere, which leaves every vector unchanged. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
+**im2col**: the unrolling of an image into a matrix with one row per window position, so that a convolution becomes one matrix product with the weights, at the price of a matrix about $k^2$ times the input in size. *([Convolution](v07-vision/02-convolution.md))*
+
 **image resampling**: computing an image of a new size by looking up each output pixel at a source coordinate fixed by a convention (half-pixel, corner-aligned or asymmetric) and combining nearby source pixels with a kernel that is widened when the image shrinks. *([Images as Data](v07-vision/01-images.md))*
 
 **implementation candidate**: one implementation of an operation together with the conditions under which it is valid (the capabilities it needs, the shapes it serves, the contract of its result), one of several that a selector chooses among. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
@@ -427,6 +433,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **kernel fusion**: replacing a chain of kernels, each consuming what the one before produced, by one kernel that computes the whole chain and keeps the intermediate results in registers or shared memory instead of writing them to buffers and reading them back. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
 
 **kernel method**: a method that fits a linear model on a (possibly enormous) feature map of the inputs while computing only the kernel, the dot product of the features of two rows, as in kernel ridge regression and the support vector machine. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
+
+**kernel size, stride and padding**: the side of the window, the number of pixels it moves between neighbouring outputs, and the border of zeros added around the image; with the dilation, which spaces the taps, they fix the output size $\lfloor (H + 2p - d(k-1) - 1)/s \rfloor + 1$. *([Convolution](v07-vision/02-convolution.md))*
 
 **KL divergence**: the excess of the cross-entropy over the entropy, $D_{\mathrm{KL}}(p \,\Vert\, q) = \sum_k p_k \log(p_k/q_k)$; it is never negative, zero only when $q = p$, and not symmetric in its arguments. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
@@ -676,6 +684,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **real number**: any number on the number line, including fractions and irrational numbers such as $\sqrt{2}$; a computer holds only an approximation of most of them. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
+**receptive field**: the set of input pixels on which one output value depends; along one axis its size grows by $d(k-1)$ times the jump (the input distance between neighbouring units) at each layer, and the jump multiplies by the stride. *([Convolution](v07-vision/02-convolution.md))*
+
 **reconstruction-loss**: the mean squared error between an autoencoder's output and its input, $L_{\mathrm{rec}} = \frac{1}{BD}\sum(\hat{x} - x)^2$; it needs no labels. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 **recurrent depth**: a layout of a prelude that embeds the input once, a core applied a variable number of times to a latent state that starts as noise and re-reads the prelude's output at every step, and a coda that reads out the result, so that the amount of computation is chosen when the model is run. *([Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md))*
@@ -872,9 +882,13 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **transpose**: the matrix $\mathbf{A}^\top$ with rows and columns swapped; $(\mathbf{A}\mathbf{B})^\top = \mathbf{B}^\top\mathbf{A}^\top$. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
+**transposed convolution**: the adjoint of a strided convolution, used as a layer that enlarges a map: every input value stamps the kernel onto the output at stride spacing and overlapping stamps add, so unequal overlap (unequal phase sums of the kernel) gives a checkerboard pattern. *([Convolution](v07-vision/02-convolution.md))*
+
 **tree reduction**: a parallel reduction that combines the values in pairs, then the pairs in pairs, so that $n$ values need $n - 1$ combinations in only $\lceil \log_2 n \rceil$ dependent steps; inside a workgroup it is a loop over strides with a barrier after each step. *([Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md))*
 
 **two's complement**: the representation of negative whole numbers in which the pattern of $-x$ is $2^n - x$ (the bits of $x$ inverted, plus one), so that the same addition works for both signs, the top bit is the sign, and the range is $-2^{n-1} \dots 2^{n-1} - 1$. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
+
+**two-dimensional convolution**: the operation that gives each output value as the sum of the products of a small kernel's weights with the image values under it, the same kernel at every position and, in deep learning, without turning the kernel over (a cross-correlation). *([Convolution](v07-vision/02-convolution.md))*
 
 **two-pass reduction**: the reduction of an array longer than a workgroup by two dispatches, one in which every workgroup writes a partial result for its slice and a second that reduces the partials, the end of the first dispatch serving as the barrier between workgroups that a dispatch cannot have. *([Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md))*
 
