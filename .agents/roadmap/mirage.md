@@ -969,3 +969,26 @@ projection, the block norm after the engram gate, the cross-query norm), `mirage
    time generated 17.3 ms, tuned 16.8 ms (speedup 1.03x against the 8x floor), maxabs 0. 2.1 ms per 512^3 product (about 30 us idle) means both tiers
    were time-sliced against the neighbour's kernels, so the ratio carries no information; the shape (512 rows) is outside the skinny range, so
    the skinny change does not touch it (kernel chosen: `matmul_f32_tiled`). Rerun on an idle card.
+
+### Item 6: wall-clock confirmation on an idle card (2026-11-11)
+
+gpu1 at 0 % utilisation before each test (another session's 88 GB resident but idle), HEAD 07bb04d33, min over replays.
+
+| decoder step (`decoder_step_floor_probe*`) | batch 1 | 8 | 32 | 64 |
+|---|---|---|---|---|
+| FP32 | 1.574 ms | 2.074 ms | 2.424 ms | 2.693 ms |
+| CQ | 1.430 ms | 3.399 ms | 3.316 ms | 3.612 ms |
+| CQ-A8 | 1.448 ms | 3.449 ms | 4.089 ms | 5.317 ms |
+
+| describe (`describe_throughput_packed_against_fp32`, cats 640x480) | batch 1 | 8 | 64 |
+|---|---|---|---|
+| FP32 | 2.39 img/s (0.419 s) | 12.16 | 45.09 |
+| CQ | 2.66 (0.377 s) | 8.48 | 39.25 |
+| CQ-A8 | 2.57 (0.389 s) | 8.16 | 29.28 |
+
+Targets: batch-1 step < 2 ms - met (FP32 1.57, CQ 1.43); batch-64 FP32 describe > 30 img/s - met (45.1; CQ 39.3).
+Against the vendor CPU engine (265-271 ms/image, 1 image at a time): batch 64 is 6.0 ms/image FP32 (44x), batch 1 is
+still 1.4-1.6x slower per image (decode 0.35-0.39 s = ~236 steps x 1.4-1.6 ms; the vendor CPU runs ~1.1 ms/token).
+Open, optional: batch-1 below the vendor's per-token time needs fewer launches per step (276 FP32 / 329 CQ dispatches)
+- the remaining launch chain is listed in "Item 6 continued"; CQ-A8 at batch >= 8 stays on the cooperative int8
+product (no dense int8 GEMM).
