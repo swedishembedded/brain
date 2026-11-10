@@ -15,6 +15,8 @@
 
 pub mod decoder;
 pub mod hconv;
+pub mod batch_model;
+pub use batch_model::{Image, MirageModel};
 pub mod prims;
 pub mod reader;
 pub mod vision;

@@ -264,11 +264,11 @@ impl DeviceDecoder {
         let h = dev.zc_new(s, y, &ly.norm, b, d);
         let widths = [heads * hd, kvh * hd, kvh * vh];
         let mut conv = Vec::new();
-        for i in 0..3 {
+        for (i, &width) in widths.iter().enumerate() {
             let raw = dev.linear_new(s, &ly.qkv[i], &h, b);
-            dev.row_write(s, &raw, &cache.raw[i], (b, widths[i], maxt), pos as u32);
-            let out = dev.alloc(st.batch * widths[i] as usize);
-            dev.taps(s, &cache.raw[i], &ly.taps[i], &out, (b, widths[i], maxt), pos as u32, c.taps as u32, 1);
+            dev.row_write(s, &raw, &cache.raw[i], (b, width, maxt), pos as u32);
+            let out = dev.alloc(st.batch * width as usize);
+            dev.taps(s, &cache.raw[i], &ly.taps[i], &out, (b, width, maxt), pos as u32, c.taps as u32, 1);
             conv.push(out);
         }
         let q = dev.zc_new(s, &conv[0], &ly.q_norm, b * heads, hd);

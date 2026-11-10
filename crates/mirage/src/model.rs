@@ -72,11 +72,11 @@ from_error!(ImportError => Import, CactError => Cact, TokenizerError => Tokenize
 
 /// The complete model.
 pub struct Mirage {
-    cfg: MirageConfig,
-    vision: VisionModel,
-    decoder: Decoder,
-    tokenizer: Tokenizer,
-    charset: Vec<char>,
+    pub(crate) cfg: MirageConfig,
+    pub(crate) vision: VisionModel,
+    pub(crate) decoder: Decoder,
+    pub(crate) tokenizer: Tokenizer,
+    pub(crate) charset: Vec<char>,
 }
 
 impl Mirage {
@@ -114,7 +114,7 @@ impl Mirage {
         &self.tokenizer
     }
 
-    fn prompt(&self, language: Option<&str>) -> Result<Vec<u32>, ModelError> {
+    pub(crate) fn prompt(&self, language: Option<&str>) -> Result<Vec<u32>, ModelError> {
         let lang = language.unwrap_or("en");
         let tag = self.tokenizer.language_tag(lang).ok_or_else(|| ModelError::Request(format!("the tokenizer has no tag for language `{lang}`")))?;
         Ok(vec![self.cfg.bos, tag])
