@@ -902,6 +902,8 @@ pub const MIRAGE_ROPE_POS: &str = include_str!("../wgsl/mirage_rope_pos.wgsl");
 pub const MIRAGE_ROW_WRITE: &str = include_str!("../wgsl/mirage_row_write.wgsl");
 /// `wgsl/mirage_rows_mask.wgsl`
 pub const MIRAGE_ROWS_MASK: &str = include_str!("../wgsl/mirage_rows_mask.wgsl");
+/// `wgsl/mirage_sigmoid_mul.wgsl`
+pub const MIRAGE_SIGMOID_MUL: &str = include_str!("../wgsl/mirage_sigmoid_mul.wgsl");
 /// `wgsl/mirage_swiglu_rows.wgsl`
 pub const MIRAGE_SWIGLU_ROWS: &str = include_str!("../wgsl/mirage_swiglu_rows.wgsl");
 /// `wgsl/mirage_taps.wgsl`
@@ -1923,6 +1925,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_rope_pos", MIRAGE_ROPE_POS),
     ("mirage_row_write", MIRAGE_ROW_WRITE),
     ("mirage_rows_mask", MIRAGE_ROWS_MASK),
+    ("mirage_sigmoid_mul", MIRAGE_SIGMOID_MUL),
     ("mirage_swiglu_rows", MIRAGE_SWIGLU_ROWS),
     ("mirage_taps", MIRAGE_TAPS),
     ("mirage_upsample2", MIRAGE_UPSAMPLE2),

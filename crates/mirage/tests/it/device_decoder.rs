@@ -53,7 +53,7 @@ fn check_teacher_forcing(dev: &Device, dec: &Decoder, d: usize, memories: &[&[f3
     let mut got: Vec<Vec<f32>> = vec![Vec::new(); tokens.len()];
     for t in 0..steps {
         let feed: Vec<u32> = tokens.iter().map(|s| s[t]).collect();
-        let logits = dd.step(dev, &mut st, &cross, &feed, dec, true).unwrap();
+        let logits = dd.step(dev, &mut st, &cross, &feed, dec, true, None).unwrap();
         let all = dev.read_at(&logits, 0, tokens.len() * vocab);
         for (i, g) in got.iter_mut().enumerate() {
             g.extend_from_slice(&all[i * vocab..(i + 1) * vocab]);

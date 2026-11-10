@@ -270,10 +270,15 @@ impl Device {
         self.push(s, "mirage_mhc_post", &[lanes, y, u, maps, next], &[rows, n, d], rows * n * d);
     }
 
-    /// Causal tap convolution of the history at `pos`.
+    /// Causal tap convolution at `pos`: `src` is the current raw row, which is also stored into `hist`.
     #[allow(clippy::too_many_arguments)]
-    pub fn taps(&self, s: &mut Vec<Step>, hist: &DeviceBuffer, taps: &DeviceBuffer, out: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32), pos: u32, ntaps: u32, dilation: u32) {
-        self.push(s, "mirage_taps", &[hist, taps, out], &[rows, w, maxt, pos, ntaps, dilation], rows * w);
+    pub fn taps(&self, s: &mut Vec<Step>, src: &DeviceBuffer, hist: &DeviceBuffer, taps: &DeviceBuffer, out: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32), pos: u32, ntaps: u32, dilation: u32) {
+        self.push(s, "mirage_taps", &[src, hist, taps, out], &[rows, w, maxt, pos, ntaps, dilation], rows * w);
+    }
+
+    /// `out = att * sigmoid(gate)`.
+    pub fn sigmoid_mul(&self, s: &mut Vec<Step>, att: &DeviceBuffer, gate: &DeviceBuffer, out: &DeviceBuffer, total: u32) {
+        self.push(s, "mirage_sigmoid_mul", &[att, gate, out], &[total], total);
     }
 
     /// `hist[b, pos] = src[b]`.

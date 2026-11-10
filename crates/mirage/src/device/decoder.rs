@@ -188,8 +188,9 @@ impl DeviceDecoder {
     }
 
     /// Feed one token per sequence at the next position; returns the logits
-    /// `[batch, vocabulary]` when `want_logits`.
-    pub fn step(&self, dev: &Device, st: &mut BatchState, cross: &DeviceCross, tokens: &[u32], dec: &Decoder, want_logits: bool) -> Option<DeviceBuffer> {
+    /// `[batch, vocabulary]` when `want_logits`. With `pick = (ban, picked)` the same submission adds `ban` to the
+    /// logits and writes each row's greedy token (as `f32`) into `picked`, so a step costs one submission.
+    pub fn step(&self, dev: &Device, st: &mut BatchState, cross: &DeviceCross, tokens: &[u32], dec: &Decoder, want_logits: bool, pick: Option<(&DeviceBuffer, &DeviceBuffer)>) -> Option<DeviceBuffer> {
         let c = &self.cfg;
         let (b, d, n) = (st.batch, c.dim, c.lanes);
         assert_eq!(tokens.len(), b);
@@ -226,14 +227,16 @@ impl DeviceDecoder {
             let next = dev.alloc(b * n * d);
             dev.mhc_post(&mut s, &lanes, &y, &u, &maps, &next, (bu, nu, du));
             lanes = next;
-            dev.flush(&mut s);
         }
         let out = want_logits.then(|| {
             let mean = dev.alloc(b * d);
             dev.lane_mean(&mut s, &lanes, &mean, (bu, nu, du));
             let normed = dev.zc_new(&mut s, &mean, &self.final_norm, bu, du);
             let logits = dev.linear_new(&mut s, &self.logits_w, &normed, bu);
-            dev.flush(&mut s);
+            if let Some((ban, picked)) = pick {
+                dev.add(&mut s, ban, &logits, bu * self.logits_w.n());
+                dev.argmax(&mut s, &logits, picked, bu, self.logits_w.n());
+            }
             logits
         });
         dev.flush(&mut s);
@@ -254,9 +257,8 @@ impl DeviceDecoder {
             dev.gather_rows(s, engram_rows, &e.table, &gathered, (b, tables, sub));
             let key = dev.linear_new(s, &e.key, &gathered, b);
             let value = dev.linear_new(s, &e.value, &gathered, b);
-            dev.row_write(s, &value, &st.engram_v[site], (b, d, maxt), pos as u32);
             let conv = dev.alloc(st.batch * c.dim);
-            dev.taps(s, &st.engram_v[site], &e.taps, &conv, (b, d, maxt), pos as u32, ENGRAM_TAPS as u32, ENGRAM_DILATION);
+            dev.taps(s, &value, &st.engram_v[site], &e.taps, &conv, (b, d, maxt), pos as u32, ENGRAM_TAPS as u32, ENGRAM_DILATION);
             dev.engram_gate(s, y, &key, &conv, b, d);
         }
         // Self-attention with causal taps and rotary positions.
@@ -266,9 +268,8 @@ impl DeviceDecoder {
         let mut conv = Vec::new();
         for (i, &width) in widths.iter().enumerate() {
             let raw = dev.linear_new(s, &ly.qkv[i], &h, b);
-            dev.row_write(s, &raw, &cache.raw[i], (b, width, maxt), pos as u32);
             let out = dev.alloc(st.batch * width as usize);
-            dev.taps(s, &cache.raw[i], &ly.taps[i], &out, (b, width, maxt), pos as u32, c.taps as u32, 1);
+            dev.taps(s, &raw, &cache.raw[i], &ly.taps[i], &out, (b, width, maxt), pos as u32, c.taps as u32, 1);
             conv.push(out);
         }
         let q = dev.zc_new(s, &conv[0], &ly.q_norm, b * heads, hd);
@@ -305,10 +306,8 @@ impl DeviceDecoder {
     #[allow(clippy::too_many_arguments)]
     fn gated_residual(&self, dev: &Device, s: &mut Vec<gpu_core::Step>, y: &DeviceBuffer, h: &DeviceBuffer, att: &DeviceBuffer, gate: &Weight, out: &Weight, post: &DeviceBuffer, scalar: f32, rows: u32, w: u32) {
         let g = dev.linear_new(s, gate, h, rows);
-        let sg = dev.alloc((rows * w) as usize);
-        dev.sigmoid(s, &g, &sg, rows * w);
         let gated = dev.alloc((rows * w) as usize);
-        dev.mul(s, att, &sg, &gated, rows * w);
+        dev.sigmoid_mul(s, att, &g, &gated, rows * w);
         let o = dev.linear_new(s, out, &gated, rows);
         let on = dev.zc_new(s, &o, post, rows, self.cfg.dim as u32);
         dev.axpy(s, scalar, &on, y, rows * self.cfg.dim as u32);
@@ -335,10 +334,7 @@ impl DeviceDecoder {
         let picked = dev.alloc(b);
         for pos in 0..plen {
             let toks: Vec<u32> = params.iter().map(|p| p.prompt[pos]).collect();
-            let logits = self.step(dev, &mut st, &cross, &toks, dec, pos + 1 == plen);
-            if let Some(logits) = logits {
-                self.pick(dev, &logits, &ban, &picked, b, vocab);
-            }
+            self.step(dev, &mut st, &cross, &toks, dec, pos + 1 == plen, Some((&ban, &picked)));
         }
         let eos = tok.eos_id();
         let mut out: Vec<Option<Generation>> = (0..b).map(|_| None).collect();
@@ -373,17 +369,8 @@ impl DeviceDecoder {
             if out.iter().all(Option::is_some) {
                 break;
             }
-            let logits = self.step(dev, &mut st, &cross, &feed, dec, true).expect("logits requested");
-            self.pick(dev, &logits, &ban, &picked, b, vocab);
+            self.step(dev, &mut st, &cross, &feed, dec, true, Some((&ban, &picked)));
         }
         out.into_iter().map(|g| g.expect("every sequence stopped")).collect()
-    }
-
-    /// Mask banned tokens and choose the greedy token of every row.
-    fn pick(&self, dev: &Device, logits: &DeviceBuffer, ban: &DeviceBuffer, picked: &DeviceBuffer, b: usize, vocab: usize) {
-        let mut s = Vec::new();
-        dev.add(&mut s, ban, logits, (b * vocab) as u32);
-        dev.argmax(&mut s, logits, picked, b as u32, vocab as u32);
-        dev.flush(&mut s);
     }
 }

@@ -55,6 +55,7 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_mhc_mix", kernels::MIRAGE_MHC_MIX),
     ("mirage_mhc_post", kernels::MIRAGE_MHC_POST),
     ("mirage_taps", kernels::MIRAGE_TAPS),
+    ("mirage_sigmoid_mul", kernels::MIRAGE_SIGMOID_MUL),
     ("mirage_row_write", kernels::MIRAGE_ROW_WRITE),
     ("mirage_rope_pos", kernels::MIRAGE_ROPE_POS),
     ("mirage_hada_mid", kernels::MIRAGE_HADA_MID),
