@@ -1,0 +1,2 @@
+crates/mirage/src/decoder/hadamard.rs	-:PERMUTATION_SEEDS=11	const	frozen: the trained model fixes the two Hadamard permutations by these generator seeds; changing them changes the model
+crates/mirage/src/decoder/mod.rs	-:ENGRAM_SEED=0x9E37_79B9	const	salt: the hash salt of the engram tables is part of the trained model, not a random choice

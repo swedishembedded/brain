@@ -50,12 +50,38 @@ Open in L2a:
 - Execution is on the host, not on the GPU op layer: no WGSL kernels (Walsh transform, banded channel
   convolution, GRN, ZC norm, 2D RoPE) and no CUDA parity run exist yet. The staging (one function per
   stage, weights prepared once) is the shape the kernel port needs; backward is not written.
-- The golden peaks keep padding cells as candidates (a flat bias-only plateau gives 32 text proposals on
-  the cats image); `ProposalOptions::valid_only` (the default) excludes them, and the golden test turns it off.
+- Peaks never consider cells outside the resized image (the `valid_only` switch is gone); the goldens were
+  regenerated to match.
 - The reader's strings differ from the engine's by spacing and a letter or two (the engine runs 2-bit
   weights); the join across windows is exercised by the long line.
 - Upscale rounding is half-pixel bilinear in `f64`; an off-by-one against the vendor engine on part of the
   pixels is a known open item.
+
+## Lane L2b - decoder, generation, JSON, forms
+
+All on the host in f32, in the same stage structure as the vision half.
+
+| Item | State | Numbers |
+|---|---|---|
+| Decoder (engram, 4-lane hyper-connections with sinkhorn, self-attention with causal taps and RoPE, cross-attention, Hadamard MLP, tied logits) | done | teacher-forced logits cosine 1.00000000 on both fixtures, max_abs 1.2e-3 (cats) / 2.1e-3 (text); argmax agreement 238 of 238 and 170 of 170 |
+| Hadamard permutations from first principles (legacy shuffle seeded 11 and 13) | done, equal to the two deployment-file entries | exact |
+| Incremental decoding (KV cache, rolling tap and engram state, per-image cross K/V) | done | one-token steps equal the full recompute, max_abs 0 |
+| Greedy generation with absent-slot masking | done | tokens equal the reference exactly: cats 236 tokens, text 168 tokens, both ending in `</s>` |
+| Loop guard (rank order, duplicate keys, requested sections, token budget) | done | stops at the section boundary of a partial line; a valid output is never cut |
+| Line grammar and JSON assembly | done | 6 recorded cases match exactly (bitmap, German, fields, max objects, text, text lines) |
+| Polygon masks (largest / merged / polygons) | done, held to overlap | rasterised IoU against the engine 0.970 to 1.000 over all objects of 4 cases |
+| Forms: choice, count, text; candidate scoring, abstention, softmax | done | structure and candidate order; values are not compared with the engine (2-bit weights) |
+| Typed `Describe` / `Extract`, `Options` (unknown keys refused) | done | |
+
+Open in L2b:
+- Box fields of a form are refused as unsupported (the scoring rule against proposals is not pinned).
+- Polygon vertex lists differ from the engine's (marching squares at the field's 128 grid, Douglas-Peucker
+  tolerance 0.13 cell); only overlap is held. Merged polygons join parts at their nearest vertices.
+- The loop guard's `key()` rule is inferred (scene and entity lines by id, others by text); event (`V`) lines
+  are returned as raw text since no recorded case shows their structure.
+- Form scoring prepends a space to the prompt text to model the dummy prefix; the released tokenizer
+  itself adds none. Probabilities differ from the engine's, as expected from 2-bit weights.
+- Decoding fans out over at most 16 threads (`DECODE_THREADS`): more only adds wake-up cost per token.
 
 ## Facts the foundation established
 

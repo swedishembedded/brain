@@ -13,6 +13,8 @@
 //! - [`cactmap`]: the mapping of the container's positional entries back to
 //!   canonical tensors.
 //! - [`tokenizer`]: the SentencePiece-BPE text front end.
+//! - [`decoder`]: the decoder with incremental state and greedy generation.
+//! - [`describe`], [`form`] and [`model`]: structured results and the end-to-end pipeline.
 //! - [`vision`]: the vision forward pass (encoder, heads, reader, memory).
 //!
 //! Swedish Embedded AB implements solutions for deploying compact vision
@@ -23,7 +25,11 @@
 pub mod cact;
 pub mod cactmap;
 pub mod config;
+pub mod decoder;
+pub mod describe;
+pub mod form;
 pub mod import;
+pub mod model;
 pub mod spec;
 pub mod tokenizer;
 pub mod vision;
