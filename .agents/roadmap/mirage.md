@@ -694,10 +694,26 @@ Traced the released engine with gdb (token streams of `forward_chunk`). Facts, a
   cross-attention indexes memory by batch row, so candidates run one after the other on the rewound state (images are the batch).
   A candidate-batched variant needs a per-row position or a cross-batch index in the attention kernels.
 
-### Remaining (not done in L7 so far)
+### Remaining (not done in L7)
 
-- Item 4 (saved-activation policy, flash-style attention backward, peak training memory before/after), item 5 (A8 emulation), item 6
-  (decoder step floor and ncu table): not started; see the brief `~/code/progress/mirage-l7-brief.md` for the scope of each.
+- Item 4, saved-activation policy. Findings so far: the host trainer is an eager whole-tape (`train/tape.rs`: `Tape::op` stores every
+  value and a boxed backward closure; `backward` walks all nodes), the device trainer (`device/train/*`) records the same graph on
+  the device. Steps: (1) a checkpointed block API on the host tape (run a block's forward on a scratch tape, keep only its boundary
+  value, rebuild the block's tape inside the backward from the stored boundary and run its backward closures, then drop it), per
+  decoder block and per vision stage/body block; (2) the same for the device tape (boundary buffers kept, block steps replayed);
+  (3) attention backward recomputing the probabilities per query tile instead of storing `tq*hq*tk` (the `masked_grouped_query_attention`
+  and vision attention ops in `train/ops.rs` / `device/train/seq.rs`); (4) parity: the existing `device_trainer`/`train_graph` gradient
+  gates must hold under `Recompute` bit-for-bit on the CPU backend (recompute is deterministic); (5) delete the `mirage` line of
+  `scripts/gates/saved-policy.allow`; (6) peak memory before/after with the process-level device counter used by
+  `dropping_the_session_releases_device_memory`.
+- Item 5, A8: int8 activations per 128-lane group after the Walsh rotation inside the CQ products (`matmul_cq_*` in the shared layer,
+  selected per shape), exposed as an opt-in precision option; a host reference round trip in `mirage::model` for the parity gate;
+  report the vendor agreement on the engine corpus (`device_cact_accept`) with A8 on and off, KL/top-1 against FP32 on the golden
+  logits. The residual 0.07 probability shift of the form tests (`PROBABILITY_TOLERANCE`) should shrink with it; tighten the
+  tolerance then and re-check the free-text case.
+- Item 6, step floor: GEMM selection at M 1-64 in the shared layer (`matmul_f32_tiled` at 8 workgroups for M=64), fused rmsnorm,
+  flash-decode attention, `mhc_maps` workgroup kernel, fewer launches in the structured Hadamard MLP; measure on an idle card only
+  (gpu1 carries another session's load now: 87 GB used), min over replays, ncu roofline for the top 5 kernels.
 
 ## Open lanes
 
