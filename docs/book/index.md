@@ -145,4 +145,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 2. [Variational Autoencoders](v08-image-generation/02-vae.md): How can an autoencoder be made into a generator, and why does that need a bound on likelihood?
 3. [Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md): How can an image be turned into a short sequence of discrete codes?
 4. [Adversarial Training](v08-image-generation/04-gans.md): What happens when the loss itself is a network trained to catch the generator?
+5. [Diffusion Models](v08-image-generation/05-diffusion.md): How can a model learn to create an image by learning to remove noise?
 <!-- /contents -->

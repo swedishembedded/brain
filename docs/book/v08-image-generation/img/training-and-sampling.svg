@@ -1,0 +1,44 @@
+<!-- source-sha256: fd4dbb4a5b552cb79ad12f2afbdab2eb1122e5d9b3ed27a481141c76ea850f3b -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 320" width="800" height="320"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="800" height="320" fill="#ffffff"/>
+<rect x="10" y="10" width="380" height="300" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">training: one step</text>
+<ellipse cx="70" cy="95" rx="38" ry="23" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="70" y="99.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">data x_0</text>
+<ellipse cx="70" cy="175" rx="38" ry="23" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="70" y="171.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">noise e</text>
+<text x="70" y="187.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">step t</text>
+<rect x="160" y="95" width="100" height="80" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="210" y="131.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x_t = a_t x_0</text>
+<text x="210" y="147.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ b_t e</text>
+<rect x="160" y="209" width="100" height="52" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="210" y="231.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">network</text>
+<text x="210" y="247.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(x_t, t)</text>
+<rect x="285" y="209" width="90" height="52" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="231.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">squared</text>
+<text x="330" y="247.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">error to e</text>
+<line x1="111" y1="95" x2="157" y2="95" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="111" y1="175" x2="157" y2="175" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="210" y1="178" x2="210" y2="206" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="263" y1="235" x2="282" y2="235" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M70,198 L70,265 Q70,275 80,275 L320,275 Q330,275 330,265 L330,264" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-c53030)"/>
+<text x="200" y="300.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">dashed: the target is the noise e that was added</text>
+<rect x="410" y="10" width="380" height="300" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="424" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">sampling: T steps</text>
+<ellipse cx="480" cy="95" rx="42" ry="23" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="480" y="91.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x_T from</text>
+<text x="480" y="107.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">N(0, 1)</text>
+<rect x="570" y="69" width="100" height="52" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="91.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">network</text>
+<text x="620" y="107.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(x_t, t)</text>
+<rect x="560" y="209" width="120" height="52" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="231.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reverse step</text>
+<text x="620" y="247.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ fresh noise</text>
+<ellipse cx="480" cy="235" rx="42" ry="23" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="480" y="239.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x_0</text>
+<line x1="525" y1="95" x2="567" y2="95" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="620" y1="124" x2="620" y2="206" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="557" y1="235" x2="525" y2="235" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M680,235 L740,235 Q750,235 750,225 L750,105 Q750,95 740,95 L673,95" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="742" y="169.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">x_(t-1)</text>
+<text x="600" y="300.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">repeat for t = T, T - 1, ..., 1</text>
+</svg>

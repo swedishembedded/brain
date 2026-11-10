@@ -244,6 +244,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **delta rule**: updating a key-value memory by the outer product of the key and the prediction error, $\mathbf{S} \leftarrow \mathbf{S} + \beta\,\mathbf{k}(\mathbf{v} - \mathbf{S}^\top\mathbf{k})^\top$, one gradient step of a regression of the value on the key, so that a write replaces what the key returned. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
+**denoising objective**: the training loss of a diffusion model: the mean squared error between the network's output for a noisy input and the target that the noising supplied, averaged over the data, the step and the noise. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
+
 **density estimation**: choosing from a family of candidate distributions the one that best explains observed data, usually by maximizing the likelihood and judging it by the likelihood of data that were held out. *([What It Means to Generate](v08-image-generation/01-generative-modeling.md))*
 
 **depth-vs-width**: the tradeoff between a network of many layers and one of few wide layers; for the sawtooth, $d$ layers of width $2$ make $2^d$ linear pieces, while one layer with $u$ units makes at most $u + 1$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
@@ -304,6 +306,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **entropy**: the expected surprise of a distribution, $H(p) = -\sum_k p_k \log p_k$; it is $0$ for a certain outcome, at most $\log K$ for $K$ outcomes, and the lower bound on the average length of a code for data from the distribution. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
+**epsilon prediction**: asking the network for the noise that was added to the clean value, so that its output $\varepsilon_\theta$ is the estimate from which the clean value or the score follows. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
+
 **estimator**: a rule that turns a sample into a number meant to approximate a quantity of the underlying world; because the sample is random, the number is a random variable with its own distribution, judged by its bias and spread. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **Euler's formula**: the identity $e^{it} = \cos t + i\sin t$, which names the point of the unit circle at angle $t$ and turns the law of exponents into the addition of angles. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
@@ -351,6 +355,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **floating-point number**: a number stored as a sign, an exponent in a fixed range and a significand of fixed precision $p$ bits, $(-1)^s(1 + f/2^{p-1})2^e$; it keeps the same number of significant digits at every scale, so the absolute gap between neighbours doubles with each binade. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 **FLOPs per token**: the arithmetic of a forward pass for one token, two FLOPs for every active parameter plus four per layer, query-head width and key seen for the attention products, $2N_{\mathrm{act}} + 4LHd_hT$; a property of the shapes and not of the hardware. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
+
+**forward noising process**: the chain that turns a data value into noise by adding a little Gaussian noise at each step, $x_t = \sqrt{1 - \beta_t}\,x_{t-1} + \sqrt{\beta_t}\,\varepsilon_t$, which by the addition of Gaussians gives any step directly from the clean value, $x_t = \sqrt{\bar\alpha_t}\,x_0 + \sqrt{1 - \bar\alpha_t}\,\varepsilon$. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
 
 **forward pass**: computing every value of the computational graph in order, from the inputs to the loss. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
@@ -652,6 +658,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **next-token prediction**: the training task of giving high probability to each token of a text given the tokens before it, with the mean cross-entropy over all positions as the loss, so that the text supplies its own labels. *([Language Modeling](v05-sequences/04-language-modeling.md))*
 
+**noise schedule**: the rule that fixes how much noise each step adds, given as the variances $\beta_t$, the running products $\bar\alpha_t$ or the signal-to-noise ratios, and in the continuous limit as the rate of a decay equation. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
+
 **non-maximum suppression**: the greedy removal of duplicate detections, visiting candidates by falling confidence and dropping each one whose overlap with an already kept candidate (of its class, unless the suppression is class-agnostic) exceeds a threshold. *([Object Detection](v07-vision/04-detection.md))*
 
 **norm**: the length of a vector; the L2 norm is $\sqrt{\mathbf{a}\cdot\mathbf{a}}$, and the L1 and max norms measure total and largest-entry size. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
@@ -862,6 +870,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **scaling laws**: measured relations, close to power laws, between the loss of a language model and its parameters, its training tokens and its compute, with the compute estimate $6Pn_{\mathrm{tok}}$ and the finding of about 20 tokens per parameter for a fixed compute; findings of particular studies under their assumptions. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
 
+**score function**: the slope of the logarithm of a density, $\partial \ln p_t(x)/\partial x$, which points toward higher probability; for noised data it equals minus the conditional mean of the noise divided by $b_t$. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
+
 **seed**: the number from which a generator's starting state is computed; the same seed gives the same stream, and a seed used by a run must be recorded for the run to be repeated. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **selection cache**: the stored map from a key of device identity, driver version, source digest and shape bucket to the candidate chosen, kept between runs so that a measurement is paid once and discarded when any part of the key changes. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
@@ -1017,6 +1027,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **UTF-8**: the encoding that writes each Unicode scalar value as 1 to 4 bytes whose leading bits announce the sequence's length, compatible with ASCII, self-synchronizing and ordered like the code points; its decoder is a state machine of eight states. *([Text as Data](v05-sequences/01-text.md))*
 
 ## V
+
+**v-prediction**: asking the network for the velocity $v = a_t\varepsilon - b_t x_0$, a rotation of the clean value and the noise that keeps the error of the implied clean value bounded at every noise level. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
 
 **validation set**: rows kept apart from fitting and used to choose between models (degree, penalty, learning rate, when to stop); the score of the chosen model on it is optimistic, because it was chosen for its score. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
