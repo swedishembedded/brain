@@ -896,8 +896,16 @@ pub const MIRAGE_GRN_APPLY: &str = include_str!("../wgsl/mirage_grn_apply.wgsl")
 pub const MIRAGE_GRN_ENERGY: &str = include_str!("../wgsl/mirage_grn_energy.wgsl");
 /// `wgsl/mirage_grn_scale.wgsl`
 pub const MIRAGE_GRN_SCALE: &str = include_str!("../wgsl/mirage_grn_scale.wgsl");
+/// `wgsl/mirage_cq_gather.wgsl`
+pub const MIRAGE_CQ_GATHER: &str = include_str!("../wgsl/mirage_cq_gather.wgsl");
 /// `wgsl/mirage_hada_mid.wgsl`
 pub const MIRAGE_HADA_MID: &str = include_str!("../wgsl/mirage_hada_mid.wgsl");
+/// `wgsl/mirage_hconv_band_glu.wgsl`
+pub const MIRAGE_HCONV_BAND_GLU: &str = include_str!("../wgsl/mirage_hconv_band_glu.wgsl");
+/// `wgsl/mirage_kron_rows.wgsl`
+pub const MIRAGE_KRON_ROWS: &str = include_str!("../wgsl/mirage_kron_rows.wgsl");
+/// `wgsl/mirage_band_cols.wgsl`
+pub const MIRAGE_BAND_COLS: &str = include_str!("../wgsl/mirage_band_cols.wgsl");
 /// `wgsl/mirage_lane_mean.wgsl`
 pub const MIRAGE_LANE_MEAN: &str = include_str!("../wgsl/mirage_lane_mean.wgsl");
 /// `wgsl/mirage_mean_h.wgsl`
@@ -2034,9 +2042,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_attn_scores", MIRAGE_ATTN_SCORES),
     ("mirage_attn_softmax", MIRAGE_ATTN_SOFTMAX),
     ("mirage_axpy", MIRAGE_AXPY),
+    ("mirage_band_cols", MIRAGE_BAND_COLS),
     ("mirage_chan_fma", MIRAGE_CHAN_FMA),
     ("mirage_conv2d", MIRAGE_CONV2D),
     ("mirage_copy_rows", MIRAGE_COPY_ROWS),
+    ("mirage_cq_gather", MIRAGE_CQ_GATHER),
     ("mirage_dwconv", MIRAGE_DWCONV),
     ("mirage_embed_lanes", MIRAGE_EMBED_LANES),
     ("mirage_engram_gate", MIRAGE_ENGRAM_GATE),
@@ -2047,6 +2057,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_grn_energy", MIRAGE_GRN_ENERGY),
     ("mirage_grn_scale", MIRAGE_GRN_SCALE),
     ("mirage_hada_mid", MIRAGE_HADA_MID),
+    ("mirage_hconv_band_glu", MIRAGE_HCONV_BAND_GLU),
+    ("mirage_kron_rows", MIRAGE_KRON_ROWS),
     ("mirage_lane_mean", MIRAGE_LANE_MEAN),
     ("mirage_mean_h", MIRAGE_MEAN_H),
     ("mirage_mhc_maps", MIRAGE_MHC_MAPS),

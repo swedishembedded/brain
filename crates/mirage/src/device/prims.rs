@@ -303,10 +303,11 @@ impl Device {
         self.push(s, "mirage_rope_pos", &[t, pos], &[rows, hd, base.to_bits()], rows * (hd / 2));
     }
 
-    /// The Hadamard-MLP middle stage: `zc` is `[rows, rank + n]` (conditioning scores then the first rotation), `out` is `[rows, n]`.
+    /// The Hadamard-MLP middle stage. `logits` and `z` are each (buffer, row stride, column offset): one fused
+    /// `[rows, rank + n]` projection or two buffers. `out` is `[rows, n]`.
     #[allow(clippy::too_many_arguments)]
-    pub fn hada_mid(&self, s: &mut Vec<Step>, zc: &DeviceBuffer, cond_u: &DeviceBuffer, d2: &DeviceBuffer, b2: &DeviceBuffer, out: &DeviceBuffer, (rows, n, rank): (u32, u32, u32)) {
-        self.push(s, "mirage_hada_mid", &[zc, cond_u, d2, b2, out], &[rows, n, rank], rows * n);
+    pub fn hada_mid(&self, s: &mut Vec<Step>, logits: (&DeviceBuffer, u32, u32), z: (&DeviceBuffer, u32, u32), cond_u: &DeviceBuffer, (d2, b2): (&DeviceBuffer, &DeviceBuffer), out: &DeviceBuffer, (rows, n, rank): (u32, u32, u32)) {
+        self.push(s, "mirage_hada_mid", &[logits.0, z.0, cond_u, d2, b2, out], &[rows, n, rank, logits.1, z.1, z.2], rows * n);
     }
 
     /// Mean over lanes.

@@ -14,7 +14,10 @@
 //! email to info@swedishembedded.com.
 
 pub mod decoder;
+pub mod hadamard;
 pub mod hconv;
+pub mod kron;
+pub mod lookup;
 pub mod batch_model;
 pub use batch_model::{BatchControl, DecoderMemory, Described, Extracted, Image, MirageModel, Timings};
 pub mod prims;
@@ -65,6 +68,10 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_rope_pos", kernels::MIRAGE_ROPE_POS),
     ("mirage_hada_mid", kernels::MIRAGE_HADA_MID),
     ("mirage_lane_mean", kernels::MIRAGE_LANE_MEAN),
+    ("mirage_band_cols", kernels::MIRAGE_BAND_COLS),
+    ("mirage_hconv_band_glu", kernels::MIRAGE_HCONV_BAND_GLU),
+    ("mirage_kron_rows", kernels::MIRAGE_KRON_ROWS),
+    ("mirage_cq_gather", kernels::MIRAGE_CQ_GATHER),
     ("argmax_row", kernels::ARGMAX_ROW),
     ("mirage_argmax_wg", kernels::MIRAGE_ARGMAX_WG),
     ("silu", kernels::SILU),
@@ -95,6 +102,7 @@ pub struct Device {
     pub(crate) pos_dummy: DeviceBuffer,
     /// Bytes of matrix weights uploaded through [`Device::weight`] (dense f32) and [`Device::linear_weight`] (packed).
     resident: ResidentWeights,
+    form: WeightForm,
 }
 
 /// What the device holds for its matrix weights.
@@ -102,6 +110,7 @@ pub struct Device {
 struct ResidentWeights {
     dense: std::sync::atomic::AtomicU64,
     packed: std::sync::atomic::AtomicU64,
+    structured: std::sync::atomic::AtomicU64,
 }
 
 /// Resident bytes of a model's matrix weights.
@@ -111,6 +120,18 @@ pub struct WeightBytes {
     pub dense: u64,
     /// Rotated-codebook matrices at their stored size (indices, fp16 norms, codebook).
     pub packed: u64,
+    /// The parameters of structured operators at their original size (bands, Kronecker factors, permutations).
+    pub structured: u64,
+}
+
+/// How the structured mixers (HConvGLU channel bands, Hadamard rotations) are resident and run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WeightForm {
+    /// Kernels on the original parameters: Walsh and Kronecker factors, 65-tap bands.
+    #[default]
+    Structured,
+    /// The transforms multiplied out into dense `n x n` matrices, run by the selector's GEMMs.
+    Folded,
 }
 
 impl Device {
@@ -121,6 +142,11 @@ impl Device {
 
     /// Build over an existing device; its kernel list must be [`Device::kernels`].
     pub fn new(gpu: Gpu) -> Result<Device, String> {
+        Device::new_with(gpu, WeightForm::default())
+    }
+
+    /// [`Device::new`] with the residency form of the structured mixers chosen.
+    pub fn new_with(gpu: Gpu, form: WeightForm) -> Result<Device, String> {
         let ops = Ops::new(gpu)?;
         let mut kernel = std::collections::HashMap::new();
         for &(name, _) in OWN_KERNELS.iter().chain(train::KERNELS) {
@@ -128,7 +154,7 @@ impl Device {
             kernel.insert(name, index);
         }
         let pos_dummy = ops.gpu().storage(1);
-        Ok(Device { ops, kernel, pos_dummy, resident: ResidentWeights::default() })
+        Ok(Device { ops, kernel, pos_dummy, resident: ResidentWeights::default(), form })
     }
 
     /// The kernel list a [`Gpu`] must be created with for [`Device::new`].
@@ -179,9 +205,20 @@ impl Device {
         self.buf(values)
     }
 
+    /// A resident parameter of a structured operator (band taps, Kronecker factors, permutations), counted separately.
+    pub fn param_buffer(&self, name: &str, values: &[f32]) -> DeviceBuffer {
+        self.resident.structured.fetch_add(values.len() as u64 * 4, std::sync::atomic::Ordering::Relaxed);
+        self.gpu().storage_init(name, values)
+    }
+
+    /// The residency form of the structured mixers.
+    pub fn form(&self) -> WeightForm {
+        self.form
+    }
+
     /// Bytes of matrix weights uploaded so far.
     pub fn weight_bytes(&self) -> WeightBytes {
-        WeightBytes { dense: self.resident.dense.load(std::sync::atomic::Ordering::Relaxed), packed: self.resident.packed.load(std::sync::atomic::Ordering::Relaxed) }
+        WeightBytes { dense: self.resident.dense.load(std::sync::atomic::Ordering::Relaxed), packed: self.resident.packed.load(std::sync::atomic::Ordering::Relaxed), structured: self.resident.structured.load(std::sync::atomic::Ordering::Relaxed) }
     }
 
     /// The rows of several linears sharing one input, as one weight: stacked in packed form when every part has

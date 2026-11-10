@@ -7,7 +7,8 @@
 
 use data::rng::Lcg;
 use mirage::device::hconv::DeviceHConv;
-use mirage::device::Device;
+use mirage::device::kron::Kron;
+use mirage::device::{Device, WeightForm};
 use mirage::vision::encoder::HConv;
 use mirage::vision::weights::Weights;
 
@@ -53,10 +54,28 @@ fn the_gated_product_kernel_matches_the_formula() {
     assert_stage("hconv_glu", &dev.run_read(&s, &z, rows * n), &want);
 }
 
+/// A device whose structured mixers are resident in `form`.
+fn device_in(test: &str, form: WeightForm) -> Option<Device> {
+    crate::common::cap_threads();
+    match Device::new_with(gpu_core::Gpu::new(&Device::kernels()), form) {
+        Ok(d) => {
+            eprintln!("{test}: device kind {}, {form:?} mixers", d.gpu().kind());
+            Some(d)
+        }
+        Err(e) => {
+            brain_testutil::skip_unavailable(&format!("{test}: no device: {e}"));
+            None
+        }
+    }
+}
+
+const FORMS: [WeightForm; 2] = [WeightForm::Structured, WeightForm::Folded];
+
 fn check_hconv(dev: &Device, name: &str, host: &HConv, width: usize, rows: usize) {
     let x = noise(rows * width, 7, 1.0);
     let want = host.forward(&x, rows);
-    let dh = DeviceHConv::upload(dev, host);
+    let walsh = (dev.form() == WeightForm::Structured).then(|| Kron::walsh(dev, width));
+    let dh = DeviceHConv::upload(dev, host, walsh.as_ref());
     let g = dev.gpu();
     let (xd, y) = (g.storage_init("x", &x), g.storage((rows * width) as u64));
     let mut s = Vec::new();
@@ -65,28 +84,50 @@ fn check_hconv(dev: &Device, name: &str, host: &HConv, width: usize, rows: usize
 }
 
 #[test]
-fn a_folded_hconv_matches_the_host_mixer_on_the_tiny_model() {
+fn an_hconv_in_either_form_matches_the_host_mixer_on_the_tiny_model() {
     let _g = gpu_core::testgpu::exclusive();
-    let Some(dev) = device("tiny hconv") else { return };
     let ck = tiny_checkpoint();
     let w = Weights::new(&ck);
     let host = HConv::new(&w, "body_0", ck.config.dim, ck.config.hconv_kernel);
-    check_hconv(&dev, "tiny hconv", &host, ck.config.dim, 11);
+    for form in FORMS {
+        let Some(dev) = device_in("tiny hconv", form) else { return };
+        check_hconv(&dev, &format!("tiny hconv {form:?}"), &host, ck.config.dim, 11);
+    }
+}
+
+/// The Kronecker row kernel as the sequency Walsh transform equals the host transform (rows beyond one workgroup's
+/// worth of work, widths that split unevenly into factors).
+#[test]
+fn the_walsh_kernel_matches_the_host_transform() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("walsh") else { return };
+    for n in [2usize, 8, 32, 128, 512] {
+        let rows = 9;
+        let x = noise(rows * n, 11, 1.0);
+        let mut want = x.clone();
+        mirage::vision::ops::walsh_sequency_rows(&mut want, n);
+        let (xd, y) = (upload(&dev, &x), dev.gpu().storage((rows * n) as u64));
+        let mut s = Vec::new();
+        dev.kron(&mut s, &Kron::walsh(&dev, n), &xd, rows as u32, &y, false);
+        assert_stage(&format!("walsh {n}"), &run(&dev, &s, &y, rows * n), &want);
+    }
 }
 
 #[test]
-fn a_folded_hconv_matches_the_host_mixer_with_released_weights() {
+fn an_hconv_in_either_form_matches_the_host_mixer_with_released_weights() {
     let _g = gpu_core::testgpu::exclusive();
     let Some(dir) = released_dir() else {
         brain_testutil::skip("released hconv: the released checkpoint is absent (make testdata/fetch)");
         return;
     };
-    let Some(dev) = device("released hconv") else { return };
     let ck = mirage::import::load_dir(&dir, &mirage::import::ImportOptions::default()).unwrap();
     let w = Weights::new(&ck);
-    for prefix in ["body_0", "body_15", "top_0", "top_11"] {
-        let host = HConv::new(&w, prefix, ck.config.dim, ck.config.hconv_kernel);
-        check_hconv(&dev, &format!("{prefix} hconv"), &host, ck.config.dim, 192);
+    for form in FORMS {
+        let Some(dev) = device_in("released hconv", form) else { return };
+        for prefix in ["body_0", "body_15", "top_0", "top_11"] {
+            let host = HConv::new(&w, prefix, ck.config.dim, ck.config.hconv_kernel);
+            check_hconv(&dev, &format!("{prefix} hconv {form:?}"), &host, ck.config.dim, 192);
+        }
     }
 }
 

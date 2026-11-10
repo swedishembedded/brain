@@ -23,7 +23,7 @@ use serde_json::Value;
 use super::decoder::DeviceDecoder;
 use super::reader::{DeviceMemory, DeviceReader, SlotInputs, SlotItem};
 use super::vision::{DeviceVision, Masks};
-use super::Device;
+use super::{Device, WeightForm};
 use crate::decoder::generate::{absent_references, GenerateParams};
 use crate::describe::{assemble, Describe, Detection, Field, Inputs, Options, Section, DEFAULT_CONFIDENCE};
 use crate::form::{self, Extract};
@@ -128,6 +128,7 @@ pub struct MirageModel {
     memory: DeviceMemory,
     decoder: DeviceDecoder,
     timings: std::sync::Mutex<Timings>,
+    resident: Option<u64>,
 }
 
 /// The vision half of a batch: proposals and the decoder memories.
@@ -145,8 +146,14 @@ impl MirageModel {
     /// Put `host`'s weights on a device. `gpu` must have been created with
     /// [`Device::kernels`] (for example `Gpu::new(&Device::kernels())`).
     pub fn new(host: Mirage, gpu: Gpu) -> Result<MirageModel, ModelError> {
-        let dev = Device::new(gpu).map_err(ModelError::Request)?;
-        Ok(MirageModel {
+        MirageModel::new_with(host, gpu, WeightForm::default())
+    }
+
+    /// [`MirageModel::new`] with the residency form of the structured mixers chosen.
+    pub fn new_with(host: Mirage, gpu: Gpu, form: WeightForm) -> Result<MirageModel, ModelError> {
+        let dev = Device::new_with(gpu, form).map_err(ModelError::Request)?;
+        let before = dev.gpu().memory_usage();
+        let mut model = MirageModel {
             vision: DeviceVision::upload(&dev, &host.vision),
             reader: DeviceReader::upload(&dev, &host.vision.reader),
             memory: DeviceMemory::upload(&dev, &host.cfg, &host.vision.memory),
@@ -154,7 +161,16 @@ impl MirageModel {
             dev,
             host,
             timings: Default::default(),
-        })
+            resident: None,
+        };
+        model.resident = before.zip(model.dev.gpu().memory_usage()).map(|(b, a)| a.live.saturating_sub(b.live));
+        Ok(model)
+    }
+
+    /// Device bytes the model's weights and constants hold, by the backend's own allocation accounting (`None` on a
+    /// backend that does not account). Measured around the upload, so it includes every table and kernel tensor.
+    pub fn resident_bytes(&self) -> Option<u64> {
+        self.resident
     }
 
     /// Where the last `describe_batch` spent its time.

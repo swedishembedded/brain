@@ -24,12 +24,12 @@ const ROPE_HALVES: usize = 2;
 /// (gate with bias, value, output) and the transform back.
 pub struct HConv {
     pub(crate) norm: Vec<f32>,
-    gate: Vec<f32>,
+    pub(crate) gate: Vec<f32>,
     pub(crate) gate_bias: Vec<f32>,
-    value: Vec<f32>,
-    out: Vec<f32>,
-    width: usize,
-    kernel: usize,
+    pub(crate) value: Vec<f32>,
+    pub(crate) out: Vec<f32>,
+    pub(crate) width: usize,
+    pub(crate) kernel: usize,
 }
 
 /// An HConvGLU mixer with the Walsh transforms and the banded convolutions

@@ -267,6 +267,71 @@ apply into one launch). Not done this round: ncu roofline fractions for the top 
 (`extract_batch` still scores on the host decoder); cross-attention q + gate concatenation (the per-head `rmsnorm_rows`
 needs a contiguous q).
 
+## Lane L6 - performance, round 3
+
+Hardware: one GH200 (gpu1 of a shared node; at the time of measurement the other session held 89 GB of the card and the
+card was idle, 0 % utilisation), crate test binary, released weights, minimum of three replays.
+
+### Step 1: the regression hunt (no regression)
+
+L6 round 2 (mixed cats + text test, `describe_throughput_over_batch_size`) measured 2.14 / 10.59 / 24.48 / 25.44 images/s at
+batch 1 / 8 / 32 / 64; lane L5 (`describe_throughput_packed_against_fp32`: cats only, no bitmap masks) measured 0.89 / 5.5 / 15.0 for
+FP32. Both tests re-run at HEAD (e826f1f57) on the idle-utilisation card: mixed test 2.14 / 11.12 / 18.44 / 26.63 (batch 32 carried
+a 0.75 s vision outlier, repeat 24.5), cats test FP32 2.19 / 11.18 / 28.59 at batch 1 / 8 / 64 and packed CQ 2.29 / 8.94 / 29.64. The
+device sources changed between the last round-2 commit (44b6a4ff6) and HEAD only in `batch_model.rs` (serving hooks), `mod.rs`,
+`decoder.rs` (cancel and memory hooks), `reader.rs` and a one-line `vision.rs`; the kernels did not change. Conclusion: the L5 numbers
+were taken while the shared card was busy with the other session's jobs (the same code gives the round-2 numbers again). Hypothesis
+"something regressed" killed with the measurement; no bisect needed.
+
+### Step 2: resident memory (structured mixers, CQ row gather)
+
+The HConvGLU mixers and the Hadamard MLPs no longer exist as dense `n^2` matrices. `WeightForm::Structured` (the default; `Folded` is
+kept as the gated candidate and the parity oracle, `Device::new_with`, `MirageModel::new_with`) runs:
+- `mirage_kron_rows`: one operator for the sequency Walsh transform (Sylvester +-1 factors 16 x 32, permutation bit-reversed Gray
+  code, scale 1/sqrt(n)) and the three Hadamard rotations (learned `a`, `b` factors, permutations, diagonals, the residual add fused into
+  the last one): a 512-thread workgroup per row, the 32-term stage into workgroup memory, one barrier (so the CPU JIT runs it), the
+  16-term stage with permutation, scale and accumulate;
+- `mirage_hconv_band_glu` (gate and value 65-tap bands with bias and gated product in one launch) and `mirage_band_cols` (output band),
+  tap-major weights;
+- `mirage_hada_mid` reads logits and z as two strided inputs; `mirage_cq_gather`: a row gather straight from a packed CQ matrix (workgroup
+  per output row and 128-lane group, decode into workgroup memory, one barrier, 128-term signed sum), used for the tied embedding (it
+  shares the logits matrix: one resident copy) and for the two engram tables (37.7 MB dense each, 2.5 MB packed).
+
+Parity: the structured and folded forms both match the host mixer (cosine 1.0 / 0.9999999, max_abs 6.6e-7 structured against 1.5e-4
+folded on body mixers: the structured form is exact f32, the folded form runs TF32 GEMMs), the Walsh kernel matches the host transform at
+widths 2..512, the packed gather matches the host dequantiser bit for bit at 2/3/4 bits including repeats and the absent marker,
+`a_packed_model_describes_like_the_same_model_dequantised` still equals the dequantised model, `structured_and_folded_mixers_describe_alike`
+and the two decoder tests (teacher-forced logits cosines 0.9999994 / 0.9999977, tokens identical) run both forms. CPU backend: every test
+module passes (run per module; running the whole binary at once on the CPU backend aborts the process under the load of 190 parallel
+JIT tests, a pre-existing resource effect, not a failure of any test).
+
+Resident device bytes, measured as the backend's live-allocation delta around the upload (`MirageModel::resident_bytes`):
+
+| model | before | after |
+|---|---|---|
+| FP32 safetensors | 307.5 MB | 205.7 MB (all parameters, no folds) |
+| packed CQ archive | 117.2 MB | 29.8 MB (13.8 packed + 11.5 band taps and factors in f32 + small tensors; archive file 21.6 MB) |
+
+Throughput (same card state, min of 3; mixed test then cats test):
+
+| batch | 1 | 8 | 32 | 64 |
+|---|---|---|---|---|
+| FP32 before (mixed) | 2.14 | 11.12 | 24.5 | 26.63 |
+| FP32 after (mixed) | 1.98 | 10.87 | 25.09 | 27.76 |
+| FP32 before (cats) | 2.19 | 11.18 | | 28.59 |
+| FP32 after (cats) | 1.86 | 10.59 | | 26.2 - 29.5 |
+| CQ before (cats) | 2.29 | 8.94 | | 29.64 |
+| CQ after (cats) | 2.27 | 8.30 | | 30.14 |
+
+Selection: encoder plus dense head of two images, structured against folded: 0.049 s against 0.051 s (CUDA), 1.52 s against 2.14 s (CPU
+backend), so the structured form is the resident default. The Hadamard MLP is the exception at batch 1: the structured form adds
+launches (logits GEMV, three rotation kernels, middle stage against two GEMV-class products) and costs about 0.04 s of the 0.42 s
+batch-1 decode (step 1.8 ms to 2.0 ms) while winning at batch 64 (decode 1.64 s to 1.49 s); it stays the default for the 94 MB it saves.
+nsys (FP32 batch 1 and 64, `fp32_describe_for_profiling`): `matmul_f32_tiled` (the native CUDA 64 x 64 tile GEMM, M = 64) is 39 % of
+kernel time at 47-63 us per launch for 1 MB weights (8 workgroups for a 512-row weight; roofline is about 1 us), `mirage_kron_rows`
+16-18 us per launch with 128 threads before the 512-thread version, `mirage_attn_apply` 11.7 %, `rmsnorm_rows` 9.5 % (89k launches).
+Remaining (step 3 work): small-batch GEMM spread over the card, rmsnorm fusion, flash-decode attention, mhc_maps.
+
 ## Lane L4 - serving
 
 Done 2026-11-10. Model id `Cactus-Compute/mirage` (case-exact upstream name, a deliberate carve-out in
@@ -495,8 +560,8 @@ the archive is the default only when it is all the directory holds, and an adapt
 released model: 8.75 MB packed (projections, routing matrices, tied embedding as the logits matrix) next to 132.5 MB dense, against
 229.7 MB dense for the same model dequantised. The dense remainder is: the folded HConvGLU matrices (88 MB), the Hadamard-MLP
 rotations and `cond_rot` (about 50 MB), the embedding as a gather table (17 MB) and the convolution kernels the archive stores as CQ
-(the file holds 13.76 MB of CQ matrices: 8.75 MB are `Linear`s kept packed, the other 5.0 MB are convolutions expanded to dense). Open: a CQ row gather for the
-embedding lookup, the convolution kernels on CQ, and the HConvGLU/Hadamard folds kept as bands instead of dense `n^2` matrices.
+(the file holds 13.76 MB of CQ matrices: 8.75 MB are `Linear`s kept packed, the other 5.0 MB are convolutions expanded to dense). Done in L6 round 3: the CQ row gather (embedding and engram tables) and the HConvGLU/Hadamard folds replaced by structured kernels;
+open: the convolution kernels on CQ.
 
 Agreement with the reference engine on the recorded corpus (9 describe cases, 42 boxes; CUDA gpu1; the engine rounds activations to
 int8, brain keeps them f32, so exact tokens are not expected): packed CQ model 40 of 42 boxes exact, 42 of 42 at IoU 0.5, 39 of 42

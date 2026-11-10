@@ -64,6 +64,7 @@ fn a_packed_model_describes_like_the_same_model_dequantised() {
     let (m_packed, m_dense) = (build(&packed), build(&dense));
     let (wp, wd) = (m_packed.device().weight_bytes(), m_dense.device().weight_bytes());
     eprintln!("device cact: resident matrix weights packed model {wp:?}, dequantised model {wd:?}");
+    eprintln!("device cact: resident device bytes packed model {:?}, dequantised model {:?}", m_packed.resident_bytes(), m_dense.resident_bytes());
     assert!(wp.packed > 0 && wd.packed == 0 && wp.dense < wd.dense, "the packed model keeps its CQ matrices packed");
 
     let images = [Image { rgb: &rgb, height: 480, width: 640 }];
@@ -184,4 +185,42 @@ fn write_the_requantised_archive_for_the_reference_engine() {
     let path = std::env::temp_dir().join("mirage-requantised.cact");
     std::fs::write(&path, template.quantize(&fp32.checkpoint).unwrap()).unwrap();
     eprintln!("wrote {}", path.display());
+}
+
+/// The CQ row gather equals the host dequantiser row by row, for every width, repeats and the absent marker.
+#[test]
+fn the_packed_row_gather_reads_the_dequantised_rows() {
+    use mirage::device::lookup::Lookup;
+    let _g = gpu_core::testgpu::exclusive();
+    let Ok(dev) = Device::open() else {
+        brain_testutil::skip_unavailable("cq gather: no device");
+        return;
+    };
+    let mut rng = data::rng::Lcg::new(21); // seed: filler compared between two paths
+    let (rows, k) = (37usize, 256usize);
+    let values: Vec<f32> = (0..rows * k).map(|_| rng.signed()).collect();
+    for (bits, book) in [(2u32, vec![-1.5f32, -0.5, 0.5, 1.5]), (3, (0..8).map(|i| i as f32 - 3.5).collect()), (4, (0..16).map(|i| (i as f32 - 7.5) * 0.5).collect())] {
+        let cq = model::cq::Cq::quantize(&values, rows, k, bits, &book).unwrap();
+        let want = cq.dequantize();
+        let table = Lookup::Packed(dev.packed_weight("t", &cq));
+        let ids: Vec<u32> = vec![5, 0, 36, 0xFFFF_FFFF, 17];
+        let idb = dev.gpu().storage(ids.len() as u64);
+        dev.gpu().write(&idb, &ids);
+        // Each id read twice (two lanes), scaled.
+        let out = dev.gpu().storage((ids.len() * 2 * k) as u64);
+        let mut s = Vec::new();
+        dev.embed_lanes_from(&mut s, &table, &idb, &out, (ids.len() as u32, 2, k as u32), 2.0);
+        let got = dev.run_read(&s, &out, ids.len() * 2 * k);
+        for (i, &id) in ids.iter().enumerate() {
+            for lane in 0..2 {
+                let row = &got[(i * 2 + lane) * k..(i * 2 + lane + 1) * k];
+                if id == u32::MAX {
+                    assert!(row.iter().all(|&v| v == 0.0), "{bits}-bit: the absent id reads as zeros");
+                    continue;
+                }
+                let exp: Vec<f32> = want[id as usize * k..(id as usize + 1) * k].iter().map(|v| v * 2.0).collect();
+                crate::vision::assert_stage(&format!("cq gather {bits}-bit id {id} lane {lane}"), row, &exp);
+            }
+        }
+    }
 }

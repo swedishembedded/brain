@@ -19,10 +19,12 @@
 use gpu_core::DeviceBuffer;
 use model::ops::Weight;
 
+use super::hadamard::DeviceHadamard;
+use super::lookup::Lookup;
 use super::prims::{AttnShape, MhcShape};
 use super::reader::MemoryBatch;
 use super::Device;
-use crate::config::{MirageConfig, ENGRAM_TAPS, HADAMARD_COND_RANK};
+use crate::config::{MirageConfig, ENGRAM_TAPS};
 use crate::decoder::generate::{guard, render, GenerateParams, Generation, Stop};
 use crate::decoder::{Decoder, SINKHORN_ITERATIONS};
 use crate::tokenizer::Tokenizer;
@@ -37,6 +39,14 @@ pub const WINDOW: usize = 16;
 /// Rows of several `[out, in]` linears sharing one input, as one weight.
 fn cat(dev: &Device, name: &str, parts: &[&ops::Linear]) -> Weight {
     dev.linear_weight_cat(name, parts)
+}
+
+/// An engram table resident as stored: packed when the archive holds it, else dense f32.
+fn engram_table(dev: &Device, e: &crate::decoder::Engram) -> Lookup {
+    match &e.table_cq {
+        Some(cq) => Lookup::Packed(dev.packed_weight("engram_table", cq)),
+        None => Lookup::Dense(dev.gather_table(&e.table)),
+    }
 }
 
 fn lin(dev: &Device, name: &str, l: &ops::Linear) -> Weight {
@@ -63,18 +73,14 @@ struct DLayer {
     post_cross: DeviceBuffer,
     cross_gate: f32,
     pre_hada: DeviceBuffer,
-    cond_rot: Weight,
-    cond_u: DeviceBuffer,
-    d2: DeviceBuffer,
-    b2: DeviceBuffer,
-    rot: [Weight; 2],
+    mlp: DeviceHadamard,
     phi: Weight,
     a: [f32; 3],
     b: [DeviceBuffer; 3],
 }
 
 struct DEngram {
-    table: DeviceBuffer,
+    table: Lookup,
     key: Weight,
     value: Weight,
     taps: DeviceBuffer,
@@ -85,7 +91,7 @@ pub struct DeviceDecoder {
     cfg: MirageConfig,
     layers: Vec<DLayer>,
     engrams: Vec<DEngram>,
-    embedding: DeviceBuffer,
+    embedding: Lookup,
     logits_w: Weight,
     final_norm: DeviceBuffer,
     ones_lanes: DeviceBuffer,
@@ -159,7 +165,6 @@ impl DeviceDecoder {
             .layers
             .iter()
             .map(|l| {
-                let fold = l.mlp.fold(&dec.perms);
                 DLayer {
                     norm: dev.norm_weight(&l.norm),
                     qkvg: cat(dev, "dqkvg", &[&l.q, &l.k, &l.v, &l.gate]),
@@ -180,22 +185,24 @@ impl DeviceDecoder {
                     post_cross: dev.norm_weight(&l.post_cross),
                     cross_gate: ops::sigmoid(l.cross_gate),
                     pre_hada: dev.norm_weight(&l.pre_hada),
-                    cond_rot: dev.weight("cond_rot", &[l.mlp.cond_v.wt.clone(), fold[0].clone()].concat(), HADAMARD_COND_RANK + d, d),
-                    cond_u: dev.buf(&l.mlp.cond_u),
-                    d2: dev.buf(&l.mlp.d[1]),
-                    b2: dev.buf(&l.mlp.b2),
-                    rot: [dev.weight("w2", &fold[1], d, d), dev.weight("w3", &fold[2], d, d)],
+                    mlp: DeviceHadamard::upload(dev, &l.mlp, &dec.perms),
                     phi: cat(dev, "phi", &[&l.phi_pre, &l.phi_post, &l.phi_res]),
                     a: l.a,
                     b: [dev.buf(&l.b_pre), dev.buf(&l.b_post), dev.buf(&l.b_res)],
                 }
             })
             .collect();
-        let engrams = dec.engrams.iter().map(|e| DEngram { table: dev.buf(&e.table), key: lin(dev, "ekey", &e.key), value: lin(dev, "evalue", &e.value), taps: dev.buf(&e.taps) }).collect();
-        let embedding = dev.gather_table(&dec.embedding.wt);
-        let logits_w = match &dec.embedding.cq {
-            Some(cq) => dev.packed_weight("logits", cq),
-            None => Weight::dense_f32(embedding.clone(), dec.embedding.out as u32, dec.embedding.inn as u32),
+        let engrams = dec.engrams.iter().map(|e| DEngram { table: engram_table(dev, e), key: lin(dev, "ekey", &e.key), value: lin(dev, "evalue", &e.value), taps: dev.buf(&e.taps) }).collect();
+        // The tied embedding is both the lookup table and the logits matrix: one resident copy serves both.
+        let (embedding, logits_w) = match &dec.embedding.cq {
+            Some(cq) => {
+                let w = dev.packed_weight("logits", cq);
+                (Lookup::Packed(w.clone()), w)
+            }
+            None => {
+                let table = dev.gather_table(&dec.embedding.wt);
+                (Lookup::Dense(table.clone()), Weight::dense_f32(table, dec.embedding.out as u32, dec.embedding.inn as u32))
+            }
         };
         DeviceDecoder { layers, engrams, embedding, logits_w, final_norm: dev.norm_weight(&dec.final_norm), ones_lanes: dev.buf(&vec![1.0; cfg.lanes * d]), cfg }
     }
@@ -273,7 +280,7 @@ impl DeviceDecoder {
         dev.tok_at(&mut s, &st.hist, &tok_buf, &st.posbuf, bu, st.maxt as u32);
         dev.engram_rows(&mut s, &st.hist, &rows_buf, &st.posbuf, (bu, st.maxt as u32), (tables as u32, c.hashes as u32, c.slots as u32), &c.orders);
         let mut lanes = dev.alloc(b * n * d);
-        dev.embed_lanes(&mut s, &tok_buf, &self.embedding, &lanes, (bu, nu, du), (d as f32).sqrt());
+        dev.embed_lanes_from(&mut s, &self.embedding, &tok_buf, &lanes, (bu, nu, du), (d as f32).sqrt());
         for (l, ly) in self.layers.iter().enumerate() {
             let nx = dev.zc_new(&mut s, &lanes, &self.ones_lanes, bu, nu * du);
             let phi = dev.linear_new(&mut s, &ly.phi, &nx, bu);
@@ -316,7 +323,7 @@ impl DeviceDecoder {
             let e = &self.engrams[site];
             let (tables, sub) = (c.engram_tables() as u32, c.engram_sub_dim() as u32);
             let gathered = dev.alloc(st.batch * c.dim);
-            dev.gather_rows(s, engram_rows, &e.table, &gathered, (b, tables, sub));
+            dev.gather_rows_from(s, &e.table, engram_rows, &gathered, (b, tables, sub));
             let key = dev.linear_new(s, &e.key, &gathered, b);
             let value = dev.linear_new(s, &e.value, &gathered, b);
             let conv = dev.alloc(st.batch * c.dim);
@@ -361,12 +368,7 @@ impl DeviceDecoder {
 
         // Hadamard MLP.
         let h = dev.zc_new(s, y, &ly.pre_hada, b, d);
-        let zc = dev.linear_new(s, &ly.cond_rot, &h, b);
-        let z1 = dev.alloc(st.batch * c.dim);
-        dev.hada_mid(s, &zc, &ly.cond_u, &ly.d2, &ly.b2, &z1, (b, d, HADAMARD_COND_RANK as u32));
-        let z2 = dev.linear_new(s, &ly.rot[0], &z1, b);
-        let z3 = dev.linear_new(s, &ly.rot[1], &z2, b);
-        dev.add(s, &z3, y, b * d);
+        ly.mlp.encode_add(dev, s, &h, b, y);
     }
 
     /// `y += gate * zc((att * sigmoid(gate)) Wout)`; `gate` is (buffer, row stride, column offset).

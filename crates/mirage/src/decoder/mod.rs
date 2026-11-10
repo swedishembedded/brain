@@ -84,6 +84,8 @@ pub(crate) struct Layer {
 
 pub(crate) struct Engram {
     pub(crate) table: Vec<f32>,
+    /// The table as stored in the deployment archive, when loaded from it: rows of one 128-lane group each.
+    pub(crate) table_cq: Option<std::sync::Arc<model::cq::Cq>>,
     pub(crate) key: Linear,
     pub(crate) value: Linear,
     pub(crate) taps: Vec<f32>,}
@@ -184,11 +186,17 @@ impl Decoder {
             })
             .collect();
         let engrams = (0..cfg.sites.len())
-            .map(|s| Engram {
-                table: w.vec(&format!("engrams_{s}/embedding")),
+            .map(|s| {
+                let name = format!("engrams_{s}/embedding");
+                let table = w.vec(&name);
+                let sub = cfg.engram_sub_dim();
+                Engram {
+                table_cq: w.packed(&name, None, table.len() / sub, sub),
+                table,
                 key: w.linear(&format!("engrams_{s}/key_proj/kernel")),
                 value: w.linear(&format!("engrams_{s}/value_proj/kernel")),
                 taps: w.vec(&format!("engrams_{s}/taps")),
+                }
             })
             .collect();
         let n_hada = cfg.hadamard_width();

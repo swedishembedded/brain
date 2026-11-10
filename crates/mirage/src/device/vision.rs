@@ -165,6 +165,8 @@ impl DeviceVision {
     pub fn upload(dev: &Device, vm: &VisionModel) -> DeviceVision {
         let cfg = vm.model_config().clone();
         let e: &Encoder = &vm.encoder;
+        // One Walsh transform serves every mixer (nothing is uploaded when the mixers are folded).
+        let walsh = (dev.form() == super::WeightForm::Structured).then(|| super::kron::Kron::walsh(dev, cfg.dim));
         let stem = DStem {
             w0: dev.buf(&e.stem.w0),
             norms: e.stem.norms.iter().map(|n| dev.norm_weight(n)).collect(),
@@ -180,7 +182,7 @@ impl DeviceVision {
                 dw: [dev.buf(&b.dw_gate), dev.buf(&b.dw_value), dev.buf(&b.dw_down)],
                 b_value: dev.buf(&b.b_value),
                 b_gate: dev.buf(&b.b_gate),
-                hconv: DeviceHConv::upload(dev, &b.hconv),
+                hconv: DeviceHConv::upload(dev, &b.hconv, walsh.as_ref()),
                 gamma: dev.buf(&b.gamma),
                 beta: dev.buf(&b.beta),
             })
@@ -198,7 +200,7 @@ impl DeviceVision {
                 k_norm: dev.norm_weight(&t.k_norm),
                 post_attn_norm: dev.norm_weight(&t.post_attn_norm),
                 attn_gate: ops::sigmoid(t.attn_gate),
-                hconv: DeviceHConv::upload(dev, &t.hconv),
+                hconv: DeviceHConv::upload(dev, &t.hconv, walsh.as_ref()),
                 level_norm: dev.norm_weight(&e.level_norm[l]),
                 level_gates: dev.buf(&e.level_gates[l * cfg.dim..(l + 1) * cfg.dim]),
             })

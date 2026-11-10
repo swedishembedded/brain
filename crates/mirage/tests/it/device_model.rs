@@ -6,7 +6,7 @@
 //! run-length codes) and equals the same images run alone.
 
 use mirage::describe::Options;
-use mirage::device::{Device, Image, MirageModel};
+use mirage::device::{Device, Image, MirageModel, WeightForm};
 use mirage::model::Mirage;
 use serde_json::Value;
 
@@ -175,5 +175,57 @@ fn describe_throughput_over_batch_size() {
         }
         let (wall, t) = best.unwrap();
         eprintln!("{n:5} | {wall:6.2} | {:8.2} | {wall:9.2} | {:.2} | {:.2} | {:.2} | {:.2} (device {:.2})", n as f64 / wall, t.vision, t.memory, t.decode, t.post, t.reader);
+    }
+}
+
+/// The structured mixers (original parameters) and the folded ones (dense matrices) describe the same images: equal
+/// up to what the dense products' rounding may move. Also prints the encoder time and the resident bytes of both.
+#[test]
+fn structured_and_folded_mixers_describe_alike() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dir) = released_dir() else {
+        brain_testutil::skip("mixer forms: the released checkpoint is absent");
+        return;
+    };
+    let (Some(cats), Some(text)) = (crate::decoder::golden("mixer forms", "cats"), crate::decoder::golden("mixer forms", "text")) else { return };
+    crate::common::cap_threads();
+    let probe = gpu_core::Gpu::new(&Device::kernels());
+    let exact = probe.kind() == "cpu";
+    drop(probe);
+    let rgb: Vec<Vec<u8>> = [&cats, &text].iter().map(|g| g["input_rgb"].iter().map(|&v| v as u8).collect()).collect();
+    let dims = [(480usize, 640usize), (600, 800)];
+    let opts = Options::from_json(r#"{"fields":["bbox","score","position","description"],"max_tokens":600}"#).unwrap();
+    let mut answers = Vec::new();
+    for form in [WeightForm::Structured, WeightForm::Folded] {
+        let model = MirageModel::new_with(Mirage::open(&dir).unwrap(), gpu_core::Gpu::new(&Device::kernels()), form).unwrap();
+        eprintln!("mixer forms {form:?}: resident {:?} bytes, matrices {:?}", model.resident_bytes(), model.device().weight_bytes());
+        let images: Vec<Image> = (0..2).map(|i| Image { rgb: &rgb[i], height: dims[i].0, width: dims[i].1 }).collect();
+        let mut best = f64::MAX;
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            out = model.describe_batch(&images, &opts).into_iter().map(json).collect::<Vec<_>>();
+            best = best.min(model.last_timings().vision);
+        }
+        eprintln!("mixer forms {form:?}: encoder and dense head of 2 images {best:.4} s");
+        answers.push(out);
+    }
+    for (i, (a, b)) in answers[0].iter().zip(&answers[1]).enumerate() {
+        assert_same(exact, a, b, &format!("image {i}: structured against folded mixers"));
+    }
+}
+
+/// The FP32 model's describe at batch 1 and batch 64 (cats), alone, for a profiler (`nsys profile` on this test
+/// binary; `--cuda-graph-trace=node` resolves the replayed decoder steps).
+#[test]
+#[ignore = "profiling entry point: run under nsys/ncu"]
+fn fp32_describe_for_profiling() {
+    let Some(dir) = released_dir() else { return };
+    let Some(cats) = crate::decoder::golden("fp32 profile", "cats") else { return };
+    let rgb: Vec<u8> = cats["input_rgb"].iter().map(|&v| v as u8).collect();
+    let model = MirageModel::new(Mirage::open(&dir).unwrap(), gpu_core::Gpu::new(&Device::kernels())).unwrap();
+    let opts = Options::from_json(r#"{"fields":["bbox","score","position","description"],"max_tokens":600}"#).unwrap();
+    for n in [1usize, 1, 1, 64, 64] {
+        let images: Vec<Image> = (0..n).map(|_| Image { rgb: &rgb, height: 480, width: 640 }).collect();
+        assert!(model.describe_batch(&images, &opts).iter().all(Result::is_ok));
     }
 }

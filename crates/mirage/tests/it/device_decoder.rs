@@ -10,24 +10,29 @@ use mirage::decoder::generate::{absent_references, GenerateParams, Stop};
 use mirage::decoder::{Decoder, Positions};
 use mirage::device::decoder::DeviceDecoder;
 use mirage::device::reader::MemoryBatch;
-use mirage::device::Device;
+use mirage::device::{Device, WeightForm};
 use mirage::vision::weights::Weights;
 
 use crate::common::{released_dir, tiny_checkpoint};
 use crate::vision::{assert_stage, compare};
 
-fn device(test: &str) -> Option<Device> {
+/// The device with the Hadamard rotations resident in each form; both must reproduce the host.
+fn devices(test: &str) -> Vec<Device> {
     crate::common::cap_threads();
-    match Device::open() {
-        Ok(d) => {
-            eprintln!("{test}: device kind {}", d.gpu().kind());
-            Some(d)
-        }
-        Err(e) => {
-            brain_testutil::skip_unavailable(&format!("{test}: no device: {e}"));
-            None
+    let mut out = Vec::new();
+    for form in [WeightForm::Structured, WeightForm::Folded] {
+        match Device::new_with(gpu_core::Gpu::new(&Device::kernels()), form) {
+            Ok(d) => {
+                eprintln!("{test}: device kind {}, {form:?} rotations", d.gpu().kind());
+                out.push(d);
+            }
+            Err(e) => {
+                brain_testutil::skip_unavailable(&format!("{test}: no device: {e}"));
+                return Vec::new();
+            }
         }
     }
+    out
 }
 
 /// Memories of different lengths padded to a common stride.
@@ -76,7 +81,6 @@ fn argmax(v: &[f32]) -> usize {
 #[test]
 fn the_tiny_decoder_matches_the_host_in_a_batch_of_unequal_memories() {
     let _g = gpu_core::testgpu::exclusive();
-    let Some(dev) = device("tiny decoder") else { return };
     let ck = tiny_checkpoint();
     let cfg = ck.config.clone();
     let dec = Decoder::new(&cfg, &Weights::new(&ck));
@@ -84,7 +88,9 @@ fn the_tiny_decoder_matches_the_host_in_a_batch_of_unequal_memories() {
     let m0: Vec<f32> = (0..7 * cfg.dim).map(|_| rng.signed()).collect();
     let m1: Vec<f32> = (0..4 * cfg.dim).map(|_| rng.signed()).collect();
     let tokens: Vec<Vec<u32>> = (0..2).map(|_| (0..12).map(|_| (rng.next_u64() % cfg.embedding_rows() as u64) as u32).collect()).collect();
-    check_teacher_forcing(&dev, &dec, cfg.dim, &[&m0, &m1], &tokens, "tiny");
+    for dev in devices("tiny decoder") {
+        check_teacher_forcing(&dev, &dec, cfg.dim, &[&m0, &m1], &tokens, "tiny");
+    }
 }
 
 #[test]
@@ -95,32 +101,33 @@ fn the_released_decoder_matches_the_host_and_generates_the_reference_tokens() {
         return;
     };
     let (Some(cats), Some(text)) = (crate::decoder::golden("device decoder", "cats"), crate::decoder::golden("device decoder", "text")) else { return };
-    let Some(dev) = device("released decoder") else { return };
     let model = mirage::model::Mirage::open(&dir).unwrap();
     let dec = model.decoder();
-    let d = 512;
-    let gold = [&cats, &text];
-    let steps = 40;
-    let tokens: Vec<Vec<u32>> = gold.iter().map(|g| g["tokens"][..steps].iter().map(|&t| t as u32).collect()).collect();
-    let mems: Vec<&[f32]> = gold.iter().map(|g| &g["memory"][..]).collect();
-    check_teacher_forcing(&dev, dec, d, &mems, &tokens, "released");
+    for dev in devices("released decoder") {
+        let d = 512;
+        let gold = [&cats, &text];
+        let steps = 40;
+        let tokens: Vec<Vec<u32>> = gold.iter().map(|g| g["tokens"][..steps].iter().map(|&t| t as u32).collect()).collect();
+        let mems: Vec<&[f32]> = gold.iter().map(|g| &g["memory"][..]).collect();
+        check_teacher_forcing(&dev, dec, d, &mems, &tokens, "released");
 
-    // Greedy generation, both images in one batch, against the recorded tokens.
-    let dd = DeviceDecoder::upload(&dev, dec);
-    let mem = memory_batch(&dev, &mems, d);
-    let cfg = mirage::config::MirageConfig::from_json(crate::common::RELEASED_ARCHITECTURE_JSON).unwrap();
-    let all: Vec<Vec<u32>> = gold.iter().map(|g| g["tokens"].iter().map(|&t| t as u32).collect()).collect();
-    let banned: Vec<Vec<u32>> = gold.iter().map(|g| absent_references(&cfg, g["peaks_obj"].len() / 7, g["peaks_txt"].len() / 7)).collect();
-    let params: Vec<GenerateParams> =
-        (0..2).map(|i| GenerateParams { prompt: &all[i][..2], banned: &banned[i], max_tokens: 600, max_rank: 5, object_slots: 64, guard: true }).collect();
-    let started = std::time::Instant::now();
-    let out = dd.generate_batch(&dev, &mem, model.tokenizer(), &params);
-    eprintln!("device generation of 2 sequences: {:.1}s", started.elapsed().as_secs_f64());
-    for (i, g) in out.iter().enumerate() {
-        assert_eq!(g.stop, Stop::Eos, "seq{i}");
-        let diff = g.tokens.iter().zip(&all[i][2..]).position(|(a, b)| a != b);
-        eprintln!("seq{i}: {} tokens, first difference {:?}", g.tokens.len(), diff);
-        assert_eq!(&g.tokens[..], &all[i][2..], "seq{i}: greedy tokens differ from the reference");
+        // Greedy generation, both images in one batch, against the recorded tokens.
+        let dd = DeviceDecoder::upload(&dev, dec);
+        let mem = memory_batch(&dev, &mems, d);
+        let cfg = mirage::config::MirageConfig::from_json(crate::common::RELEASED_ARCHITECTURE_JSON).unwrap();
+        let all: Vec<Vec<u32>> = gold.iter().map(|g| g["tokens"].iter().map(|&t| t as u32).collect()).collect();
+        let banned: Vec<Vec<u32>> = gold.iter().map(|g| absent_references(&cfg, g["peaks_obj"].len() / 7, g["peaks_txt"].len() / 7)).collect();
+        let params: Vec<GenerateParams> =
+            (0..2).map(|i| GenerateParams { prompt: &all[i][..2], banned: &banned[i], max_tokens: 600, max_rank: 5, object_slots: 64, guard: true }).collect();
+        let started = std::time::Instant::now();
+        let out = dd.generate_batch(&dev, &mem, model.tokenizer(), &params);
+        eprintln!("device generation of 2 sequences: {:.1}s", started.elapsed().as_secs_f64());
+        for (i, g) in out.iter().enumerate() {
+            assert_eq!(g.stop, Stop::Eos, "seq{i}");
+            let diff = g.tokens.iter().zip(&all[i][2..]).position(|(a, b)| a != b);
+            eprintln!("seq{i}: {} tokens, first difference {:?}", g.tokens.len(), diff);
+            assert_eq!(&g.tokens[..], &all[i][2..], "seq{i}: greedy tokens differ from the reference");
+        }
     }
     let _ = compare;
 }
