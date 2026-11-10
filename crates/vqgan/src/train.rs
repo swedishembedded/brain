@@ -75,7 +75,7 @@
 //! what this module implements, is the **straight-through surrogate**: with
 //! `sub0`, `z0` and `q0` held fixed the whole graph is smooth, its exact
 //! gradient is the update a training step applies, and the two coincide at the
-//! latch point. `crates/codec`'s `StraightThroughVq::surrogate_loss` is the same
+//! latch point. `crates/mimi`'s `ConvReconAE::surrogate_loss` is the same
 //! construction on the host, for the same reason.
 //!
 //! `beta` is [`VqganConfig::beta`] - 0.25 in the CodeFormer preset - and which
@@ -316,7 +316,7 @@ impl VqganTrainer {
         // object: at the latch point `z == z0` and `q == q0`, so the forward
         // VALUE is the quantised one (`z_q_st == q`, to fp32 rounding), while
         // the derivative w.r.t. `z` is the identity — the straight-through
-        // estimator. `crates/codec`'s `StraightThroughVq::surrogate_loss` is
+        // estimator. `crates/mimi`'s `ConvReconAE::surrogate_loss` is
         // the same construction on the host (it feeds the decoder the raw `z`,
         // i.e. `sub0 == 0`; keeping `sub0` makes the forward value exact too).
         let z0 = gpu.storage(te);
