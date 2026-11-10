@@ -24,6 +24,9 @@ pub struct Linear {
     pub inn: usize,
     /// Output width.
     pub out: usize,
+    /// The stored rotated-codebook form of `wt` when the model was loaded from a deployment archive in its packed
+    /// precision; `wt` holds the same values dequantised, so the host paths never look at this.
+    pub cq: Option<std::sync::Arc<model::cq::Cq>>,
 }
 
 impl Linear {
@@ -36,7 +39,7 @@ impl Linear {
                 wt[o * inn + i] = kernel[i * out + o];
             }
         }
-        Linear { wt, inn, out }
+        Linear { wt, inn, out, cq: None }
     }
 
     /// `[rows, in] -> [rows, out]`.

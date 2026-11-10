@@ -36,14 +36,11 @@ pub const WINDOW: usize = 16;
 
 /// Rows of several `[out, in]` linears sharing one input, as one weight.
 fn cat(dev: &Device, name: &str, parts: &[&ops::Linear]) -> Weight {
-    let inn = parts[0].inn;
-    assert!(parts.iter().all(|p| p.inn == inn));
-    let wt: Vec<f32> = parts.iter().flat_map(|p| p.wt.iter().copied()).collect();
-    dev.weight(name, &wt, parts.iter().map(|p| p.out).sum(), inn)
+    dev.linear_weight_cat(name, parts)
 }
 
 fn lin(dev: &Device, name: &str, l: &ops::Linear) -> Weight {
-    dev.weight(name, &l.wt, l.out, l.inn)
+    dev.linear_weight(name, l)
 }
 
 struct DLayer {
@@ -195,8 +192,11 @@ impl DeviceDecoder {
             })
             .collect();
         let engrams = dec.engrams.iter().map(|e| DEngram { table: dev.buf(&e.table), key: lin(dev, "ekey", &e.key), value: lin(dev, "evalue", &e.value), taps: dev.buf(&e.taps) }).collect();
-        let embedding = dev.buf(&dec.embedding.wt);
-        let logits_w = Weight::dense_f32(embedding.clone(), dec.embedding.out as u32, dec.embedding.inn as u32);
+        let embedding = dev.gather_table(&dec.embedding.wt);
+        let logits_w = match &dec.embedding.cq {
+            Some(cq) => dev.packed_weight("logits", cq),
+            None => Weight::dense_f32(embedding.clone(), dec.embedding.out as u32, dec.embedding.inn as u32),
+        };
         DeviceDecoder { layers, engrams, embedding, logits_w, final_norm: dev.norm_weight(&dec.final_norm), ones_lanes: dev.buf(&vec![1.0; cfg.lanes * d]), cfg }
     }
 

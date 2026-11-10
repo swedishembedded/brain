@@ -85,6 +85,11 @@ fn scale() -> f32 {
     1.0 / (GROUP as f32).sqrt()
 }
 
+/// fp16 bit patterns two to a word, low half first.
+fn pack_halves(halves: &[u16]) -> Vec<u32> {
+    halves.chunks(2).map(|c| u32::from(c[0]) | c.get(1).map_or(0, |&h| u32::from(h) << 16)).collect()
+}
+
 fn f16_bits(v: f32) -> u16 {
     half::f16::from_f32(v).to_bits()
 }
@@ -137,6 +142,30 @@ impl Cq {
         }
         let words = |bytes: &[u8]| -> Vec<u32> { bytes.chunks(4).map(|c| c.iter().rev().fold(0u32, |w, &b| (w << 8) | u32::from(b))).collect() };
         Ok(Cq { bits, n, k, codes: words(packed), norms: words(norm_bytes), book: book.to_vec() })
+    }
+
+    /// Rows `first .. first + count` as a matrix of their own (the packed rows and norms are contiguous, so this
+    /// copies words and decodes nothing).
+    pub fn rows(&self, first: usize, count: usize) -> Cq {
+        assert!(first + count <= self.n, "Cq::rows: rows {first}+{count} of {}", self.n);
+        let (w, g) = (self.row_words(), self.groups());
+        let norms = (first * g..(first + count) * g).map(|flat| self.norm_bits(flat)).collect::<Vec<u16>>();
+        Cq { bits: self.bits, n: count, k: self.k, codes: self.codes[first * w..(first + count) * w].to_vec(), norms: pack_halves(&norms), book: self.book.clone() }
+    }
+
+    /// The matrices stacked row-wise (same width, index width and codebook), the packed form of concatenating the
+    /// outputs of projections that share an input.
+    pub fn concat_rows(parts: &[&Cq]) -> Result<Cq, CqError> {
+        let first = parts.first().ok_or_else(|| CqError("nothing to concatenate".to_string()))?;
+        if parts.iter().any(|p| p.bits != first.bits || p.k != first.k || p.book != first.book) {
+            return Err(CqError("the parts differ in index width, input width or codebook".to_string()));
+        }
+        let norms: Vec<u16> = parts.iter().flat_map(|p| (0..p.n * p.groups()).map(|flat| p.norm_bits(flat))).collect();
+        Ok(Cq { bits: first.bits, n: parts.iter().map(|p| p.n).sum(), k: first.k, codes: parts.iter().flat_map(|p| p.codes.iter().copied()).collect(), norms: pack_halves(&norms), book: first.book.clone() })
+    }
+
+    fn norm_bits(&self, flat: usize) -> u16 {
+        (self.norms[flat / 2] >> ((flat % 2) * 16)) as u16
     }
 
     /// The index bytes in the container layout (`n * kpad * bits / 8`).
@@ -332,6 +361,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn row_slices_and_concatenation_are_exact() {
+        let mut rng = Lcg::new(5);
+        let a = Cq::quantize(&rng.vec_scaled(3 * 200, 1.0), 3, 200, 2, &BOOK2).expect("quantises");
+        let b = Cq::quantize(&rng.vec_scaled(5 * 200, 1.0), 5, 200, 2, &BOOK2).expect("quantises");
+        let both = Cq::concat_rows(&[&a, &b]).expect("same width");
+        assert_eq!(both.dequantize(), [a.dequantize(), b.dequantize()].concat());
+        assert_eq!(both.rows(3, 5).dequantize(), b.dequantize());
+        assert_eq!(both.rows(1, 2).dequantize(), a.dequantize()[200..].to_vec());
+        let other = Cq::quantize(&rng.vec_scaled(200, 1.0), 1, 200, 3, &book(3)).expect("quantises");
+        assert!(Cq::concat_rows(&[&a, &other]).is_err(), "different index widths do not stack");
     }
 
     #[test]

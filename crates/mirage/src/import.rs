@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use checkpoint::mmap::MmapSafetensors;
 use sha2::{Digest, Sha256};
@@ -62,6 +63,12 @@ pub struct Tensor {
     pub data: Vec<f32>,
 }
 
+/// The CQ matrices of a deployment archive in their stored (packed) form, by canonical tensor name and decoder layer
+/// (`None` for a tensor that is not stacked). Each is `[out, in]`, the orientation of [`crate::vision::ops::Linear`];
+/// the dequantised values are also in [`Checkpoint::tensors`], so the host paths read them unchanged and only a
+/// device that was asked for the packed form keeps these.
+pub type PackedMatrices = BTreeMap<(String, Option<usize>), Arc<model::cq::Cq>>;
+
 /// A fully loaded checkpoint: configuration, provenance and every tensor.
 #[derive(Debug, Clone)]
 pub struct Checkpoint {
@@ -71,6 +78,8 @@ pub struct Checkpoint {
     pub metadata: Metadata,
     /// Tensors by Flax name.
     pub tensors: BTreeMap<String, Tensor>,
+    /// The quantised matrices as stored; empty for a checkpoint read from safetensors.
+    pub packed: PackedMatrices,
 }
 
 /// What the loader can be asked to enforce.
@@ -310,7 +319,7 @@ pub fn load(path: &Path, options: &ImportOptions) -> Result<Checkpoint, ImportEr
         }
         tensors.insert(t.name.clone(), Tensor { shape: t.shape.clone(), data });
     }
-    Ok(Checkpoint { config: header.config, metadata: header.metadata, tensors })
+    Ok(Checkpoint { config: header.config, metadata: header.metadata, tensors, packed: PackedMatrices::new() })
 }
 
 /// Load `mirage.safetensors` from a model directory and require that

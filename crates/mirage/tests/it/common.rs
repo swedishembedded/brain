@@ -65,5 +65,5 @@ pub fn tiny_checkpoint() -> mirage::import::Checkpoint {
         .iter()
         .map(|t| (t.name.clone(), Tensor { shape: t.shape.clone(), data: (0..t.numel()).map(|_| rng.signed() * 0.5).collect() }))
         .collect();
-    Checkpoint { config, metadata: Metadata { source_sha256: "ab".repeat(32), step: 1234, format: "mirage".to_string() }, tensors }
+    Checkpoint { config, metadata: Metadata { source_sha256: "ab".repeat(32), step: 1234, format: "mirage".to_string() }, tensors, packed: Default::default() }
 }

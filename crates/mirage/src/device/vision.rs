@@ -24,7 +24,7 @@ use crate::vision::ops::{self, valid_cells, Linear, Map};
 use crate::vision::VisionModel;
 
 fn lin(dev: &Device, name: &str, l: &Linear) -> Weight {
-    dev.weight(name, &l.wt, l.out, l.inn)
+    dev.linear_weight(name, l)
 }
 
 /// Per-image validity masks (`1` inside the resized image, `0` on padding) for

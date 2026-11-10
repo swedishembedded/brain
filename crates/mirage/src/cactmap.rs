@@ -25,10 +25,13 @@
 //! email to info@swedishembedded.com.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use model::cq::Cq;
 
 use crate::cact::{CactError, CactFile, EntryDtype};
 use crate::config::{MirageConfig, DENSE_BLOCKS, MASK_BRANCH_BLOCKS, READER_CLASSES, READER_STAGES};
-use crate::import::Tensor;
+use crate::import::{PackedMatrices, Tensor};
 use crate::spec::Manifest;
 
 /// Values in the vision manifest entry.
@@ -417,6 +420,33 @@ impl CactModel {
             Ok(out)
         };
         Ok((read(1)?, read(2)?))
+    }
+
+    /// Every CQ matrix of the file in its stored form, by canonical tensor name and decoder layer. The routing
+    /// matrices (one entry for all layers, `[layers * out, width]`) are split into the per-layer `[out, width]`
+    /// matrices the decoder reads; every other entry is `[out, in]` as stored.
+    pub fn packed_matrices(&self) -> Result<PackedMatrices, CactError> {
+        let mut out = PackedMatrices::new();
+        for slot in &self.slots {
+            let SlotKind::Tensor { name, layer, layout } = &slot.kind else { continue };
+            if self.file.entries()[slot.entry].dtype != EntryDtype::Cq {
+                continue;
+            }
+            let cq = self.file.cq(slot.entry)?;
+            let whole = Cq::from_parts(cq.rows, cq.cols, cq.bits, cq.packed, cq.norms, cq.codebook).map_err(|e| CactError::Entry { index: slot.entry, reason: e.to_string() })?;
+            match layout {
+                Layout::MhcPhi => {
+                    let unit = self.unit_shape(name, None);
+                    for l in 0..unit[0] {
+                        out.insert((name.clone(), Some(l)), Arc::new(whole.rows(l * unit[2], unit[2])));
+                    }
+                }
+                _ => {
+                    out.insert((name.clone(), *layer), Arc::new(whole));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The 36 vision constants (their meaning belongs to the encoder).

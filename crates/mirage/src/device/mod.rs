@@ -25,7 +25,7 @@ pub mod vision;
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::ops::{Ops, Weight};
 
-use crate::vision::ops::NORM_EPS;
+use crate::vision::ops::{Linear, NORM_EPS};
 
 /// Kernels Mirage dispatches by name that the shared list may not carry.
 const OWN_KERNELS: &[(&str, &str)] = &[
@@ -78,7 +78,8 @@ const OWN_KERNELS: &[(&str, &str)] = &[
 /// Kernels Mirage needs beyond what [`model::ops::kernel_list`] carries.
 fn kernel_list() -> Vec<(&'static str, &'static str)> {
     let mut list = model::ops::kernel_list().to_vec();
-    for &(name, src) in OWN_KERNELS.iter().chain(train::KERNELS) {
+    // The rotated-codebook products of a model loaded from the deployment archive's packed matrices.
+    for &(name, src) in model::ops::cq_kernels().iter().chain(OWN_KERNELS).chain(train::KERNELS) {
         if !list.iter().any(|(n, _)| *n == name) {
             list.push((name, src));
         }
@@ -92,6 +93,24 @@ pub struct Device {
     kernel: std::collections::HashMap<&'static str, usize>,
     /// One word that position-reading kernels bind when their position is a parameter instead.
     pub(crate) pos_dummy: DeviceBuffer,
+    /// Bytes of matrix weights uploaded through [`Device::weight`] (dense f32) and [`Device::linear_weight`] (packed).
+    resident: ResidentWeights,
+}
+
+/// What the device holds for its matrix weights.
+#[derive(Debug, Default)]
+struct ResidentWeights {
+    dense: std::sync::atomic::AtomicU64,
+    packed: std::sync::atomic::AtomicU64,
+}
+
+/// Resident bytes of a model's matrix weights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeightBytes {
+    /// Dense f32 matrices (the folded convolution and Hadamard matrices, and every matrix of an FP32 model).
+    pub dense: u64,
+    /// Rotated-codebook matrices at their stored size (indices, fp16 norms, codebook).
+    pub packed: u64,
 }
 
 impl Device {
@@ -109,7 +128,7 @@ impl Device {
             kernel.insert(name, index);
         }
         let pos_dummy = ops.gpu().storage(1);
-        Ok(Device { ops, kernel, pos_dummy })
+        Ok(Device { ops, kernel, pos_dummy, resident: ResidentWeights::default() })
     }
 
     /// The kernel list a [`Gpu`] must be created with for [`Device::new`].
@@ -135,14 +154,55 @@ impl Device {
     /// Upload a `[out, in]` matrix as a resident GEMM weight.
     pub fn weight(&self, name: &str, wt: &[f32], out: usize, inn: usize) -> Weight {
         assert_eq!(wt.len(), out * inn);
+        self.resident.dense.fetch_add(wt.len() as u64 * 4, std::sync::atomic::Ordering::Relaxed);
         Weight::dense_f32(self.gpu().storage_init(name, wt), out as u32, inn as u32)
+    }
+
+    /// The resident weight of a host linear: its stored rotated-codebook form when the model was loaded packed
+    /// (index words, norms and codebook stay resident, 2-4 bits per weight), otherwise the dense f32 matrix.
+    pub fn linear_weight(&self, name: &str, l: &Linear) -> Weight {
+        match &l.cq {
+            Some(cq) => self.packed_weight(name, cq),
+            None => self.weight(name, &l.wt, l.out, l.inn),
+        }
+    }
+
+    /// A rotated-codebook weight uploaded as stored.
+    pub fn packed_weight(&self, name: &str, cq: &model::cq::Cq) -> Weight {
+        self.resident.packed.fetch_add(cq.bytes() as u64, std::sync::atomic::Ordering::Relaxed);
+        Weight::cq(&self.ops, name, cq)
+    }
+
+    /// The embedding table as a dense f32 gather source, counted with the dense weights.
+    pub(crate) fn gather_table(&self, values: &[f32]) -> DeviceBuffer {
+        self.resident.dense.fetch_add(values.len() as u64 * 4, std::sync::atomic::Ordering::Relaxed);
+        self.buf(values)
+    }
+
+    /// Bytes of matrix weights uploaded so far.
+    pub fn weight_bytes(&self) -> WeightBytes {
+        WeightBytes { dense: self.resident.dense.load(std::sync::atomic::Ordering::Relaxed), packed: self.resident.packed.load(std::sync::atomic::Ordering::Relaxed) }
+    }
+
+    /// The rows of several linears sharing one input, as one weight: stacked in packed form when every part has
+    /// one, else concatenated dense.
+    pub fn linear_weight_cat(&self, name: &str, parts: &[&Linear]) -> Weight {
+        let inn = parts[0].inn;
+        assert!(parts.iter().all(|p| p.inn == inn), "linears stacked into one weight share their input width");
+        if let Some(packed) = parts.iter().map(|p| p.cq.as_deref()).collect::<Option<Vec<_>>>() {
+            if let Ok(cq) = model::cq::Cq::concat_rows(&packed) {
+                return self.packed_weight(name, &cq);
+            }
+        }
+        let wt: Vec<f32> = parts.iter().flat_map(|p| p.wt.iter().copied()).collect();
+        self.weight(name, &wt, parts.iter().map(|p| p.out).sum(), inn)
     }
 
     /// `y[rows, out] = x[rows, in] W^T` with the selected GEMM.
     pub fn linear(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, rows: u32, y: &DeviceBuffer) {
-        // Every Mirage weight is dense f32 and reads the f32 activations; `Ops::act` would also pack an int8 copy
-        // (two reduction dispatches per product) that nothing reads.
-        debug_assert!(w.is_dense_f32());
+        // Every Mirage weight (dense f32 or packed CQ) reads the f32 activations; `Ops::act` would also pack an int8
+        // copy (two reduction dispatches per product) that nothing reads.
+        debug_assert!(w.reads_f32_activations());
         let act = self.ops.act_f32(x, 0, rows, w.k());
         self.ops.matmul(s, w, &act, y, 0);
     }

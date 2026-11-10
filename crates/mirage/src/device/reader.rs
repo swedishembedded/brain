@@ -47,7 +47,7 @@ impl DeviceReader {
             w0: dev.buf(&r.w0),
             stage_norm: r.stage_norm.iter().map(|n| dev.norm_weight(n)).collect(),
             dw: r.dw.iter().map(|w| dev.buf(w)).collect(),
-            pw: r.pw.iter().map(|l| dev.weight("reader_pw", &l.wt, l.out, l.inn)).collect(),
+            pw: r.pw.iter().map(|l| dev.linear_weight("reader_pw", l)).collect(),
             pw_out: r.pw.iter().map(|l| l.out).collect(),
             blocks: r
                 .blocks
@@ -55,12 +55,12 @@ impl DeviceReader {
                 .map(|b| DBlock {
                     norm: dev.norm_weight(&b.norm),
                     mix: dev.buf(&b.mix),
-                    up: dev.weight("reader_up", &b.up.wt, b.up.out, b.up.inn),
-                    down: dev.weight("reader_down", &b.down.wt, b.down.out, b.down.inn),
+                    up: dev.linear_weight("reader_up", &b.up),
+                    down: dev.linear_weight("reader_down", &b.down),
                 })
                 .collect(),
             final_norm: dev.norm_weight(&r.final_norm),
-            out: dev.weight("reader_out", &r.out.wt, r.out.out, r.out.inn),
+            out: dev.linear_weight("reader_out", &r.out),
             bias: dev.buf(&r.bias),
         }
     }
@@ -191,8 +191,8 @@ impl DeviceMemory {
             dim: cfg.dim,
             cells: cfg.grid() * cfg.grid(),
             pos: dev.buf(&m.position_rows()),
-            slot_proj: dev.weight("slot_proj", &m.slot_proj.wt, m.slot_proj.out, m.slot_proj.inn),
-            slot_pool: dev.weight("slot_pool", &m.slot_pool.wt, m.slot_pool.out, m.slot_pool.inn),
+            slot_proj: dev.linear_weight("slot_proj", &m.slot_proj),
+            slot_pool: dev.linear_weight("slot_pool", &m.slot_pool),
             slot_norm: dev.norm_weight(&m.slot_norm),
         }
     }

@@ -73,6 +73,70 @@ macro_rules! from_error {
 }
 from_error!(ImportError => Import, CactError => Cact, TokenizerError => Tokenizer, ImageError => Image, FormError => Form);
 
+/// Which stored weights a model directory is loaded from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WeightSource {
+    /// `mirage.safetensors`: FP32 weights, resident as such. The default whenever the file exists.
+    #[default]
+    Safetensors,
+    /// `mirage.cact`: the deployment archive. Its CQ matrices stay packed on the device (2 to 4 bits per weight
+    /// plus fp16 group norms); precision is the archive's, so this is an explicit opt-in whenever both files exist.
+    Cact,
+}
+
+impl WeightSource {
+    /// What a directory holds: FP32 safetensors if present, else the deployment archive.
+    pub fn detect(dir: &Path) -> Result<WeightSource, ModelError> {
+        if dir.join(import::WEIGHTS_FILE).is_file() {
+            Ok(WeightSource::Safetensors)
+        } else if dir.join(crate::resolver::DEPLOYMENT_FILE).is_file() {
+            Ok(WeightSource::Cact)
+        } else {
+            Err(ModelError::Request(format!("{} holds neither {} nor {}", dir.display(), import::WEIGHTS_FILE, crate::resolver::DEPLOYMENT_FILE)))
+        }
+    }
+}
+
+/// A model directory's weights, the tokenizer blob and the reader charset.
+pub struct Loaded {
+    /// The tensors (CQ matrices dequantised) and, for [`WeightSource::Cact`], the packed matrices.
+    pub checkpoint: Checkpoint,
+    /// The tokenizer blob of the deployment archive.
+    pub tokenizer: Vec<u8>,
+    /// The reader charset of the deployment archive.
+    pub charset: Vec<char>,
+}
+
+/// Read `<dir>/config.json` and the weights `source` names; the deployment archive is always read for the tokenizer
+/// and charset. An `adapter.safetensors` is folded into the weights, which is only possible from FP32.
+pub fn load_dir(dir: &Path, source: WeightSource) -> Result<Loaded, ModelError> {
+    let archive = |config: &MirageConfig| -> Result<CactModel, ModelError> { Ok(CactModel::new(CactFile::open(&dir.join(crate::resolver::DEPLOYMENT_FILE))?, config.clone())?) };
+    let adapter_path = dir.join(crate::train::adapter::FILE);
+    let (mut ck, cact) = match source {
+        WeightSource::Safetensors => {
+            let ck = import::load_dir(dir, &ImportOptions::default())?;
+            let cact = archive(&ck.config)?;
+            (ck, cact)
+        }
+        WeightSource::Cact => {
+            if adapter_path.is_file() {
+                return Err(ModelError::Request(format!("{} holds an adapter, which is folded into FP32 weights; load the safetensors instead", dir.display())));
+            }
+            let config_path = dir.join(import::CONFIG_FILE);
+            let sidecar = crate::config::CheckpointConfig::from_json(&std::fs::read_to_string(&config_path).map_err(|e| ModelError::Request(format!("{}: {e}", config_path.display())))?).map_err(|e| ModelError::Request(e.to_string()))?;
+            let cact = archive(&sidecar.architecture)?;
+            let metadata = import::Metadata { source_sha256: sidecar.source_checkpoint_sha256.clone(), step: sidecar.training_step, format: import::FORMAT.to_string() };
+            let ck = Checkpoint { config: sidecar.architecture, metadata, tensors: cact.canonical_tensors()?, packed: cact.packed_matrices()? };
+            (ck, cact)
+        }
+    };
+    if source == WeightSource::Safetensors && adapter_path.is_file() {
+        let set = crate::train::adapter::load(&adapter_path, &ck.config).map_err(ModelError::Request)?;
+        crate::train::adapter::fold(&mut ck, &set).map_err(ModelError::Request)?;
+    }
+    Ok(Loaded { tokenizer: cact.tokenizer_blob()?.to_vec(), charset: cact.charset()?, checkpoint: ck })
+}
+
 /// The complete model.
 pub struct Mirage {
     pub(crate) cfg: MirageConfig,
@@ -100,14 +164,13 @@ impl Mirage {
     /// A directory that also holds `adapter.safetensors` (what a LoRA fine-tune writes) is served with the adapter
     /// folded into the weights, so every surface that loads a directory serves a fine-tune unchanged.
     pub fn open(dir: &Path) -> Result<Mirage, ModelError> {
-        let mut ck = import::load_dir(dir, &ImportOptions::default())?;
-        let adapter_path = dir.join(crate::train::adapter::FILE);
-        if adapter_path.is_file() {
-            let set = crate::train::adapter::load(&adapter_path, &ck.config).map_err(ModelError::Request)?;
-            crate::train::adapter::fold(&mut ck, &set).map_err(ModelError::Request)?;
-        }
-        let cact = CactModel::new(CactFile::open(&dir.join("mirage.cact"))?, ck.config.clone())?;
-        Mirage::new(&ck, cact.tokenizer_blob()?, cact.charset()?)
+        Mirage::open_with(dir, WeightSource::detect(dir)?)
+    }
+
+    /// [`Mirage::open`] from the weights `source` names.
+    pub fn open_with(dir: &Path, source: WeightSource) -> Result<Mirage, ModelError> {
+        let loaded = load_dir(dir, source)?;
+        Mirage::new(&loaded.checkpoint, &loaded.tokenizer, loaded.charset)
     }
 
     /// The vision half.

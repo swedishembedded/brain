@@ -145,7 +145,7 @@ impl Decoder {
         let (d, n) = (cfg.dim, cfg.lanes);
         let heads = cfg.heads();
         let (qd, kd, vd) = (heads * cfg.qk_dim, cfg.kv_heads * cfg.qk_dim, cfg.kv_heads * cfg.v_dim);
-        let lin = |name: &str, layer: usize, inn: usize, out: usize| Linear::from_flax(prefix(w, name, layer), inn, out);
+        let lin = |name: &str, layer: usize, inn: usize, out: usize| w.layer_linear(&format!("stack/layers/block/{name}"), layer, inn, out);
         let vec = |name: &str, layer: usize| prefix(w, name, layer).to_vec();
         let layers = (0..cfg.dec_layers)
             .map(|l| Layer {
@@ -174,9 +174,9 @@ impl Decoder {
                 cross_gate: prefix(w, "cross_gate", l)[0],
                 pre_hada: vec("pre_hada_norm/scale", l),
                 mlp: HadamardMlp::new(cfg, w, l),
-                phi_pre: Linear::from_flax(w.layer("stack/mhc_phi_pre", l), n * d, n),
-                phi_post: Linear::from_flax(w.layer("stack/mhc_phi_post", l), n * d, n),
-                phi_res: Linear::from_flax(w.layer("stack/mhc_phi_res", l), n * d, n * n),
+                phi_pre: w.layer_linear("stack/mhc_phi_pre", l, n * d, n),
+                phi_post: w.layer_linear("stack/mhc_phi_post", l, n * d, n),
+                phi_res: w.layer_linear("stack/mhc_phi_res", l, n * d, n * n),
                 a: [w.get("stack/mhc_a_pre")[l], w.get("stack/mhc_a_post")[l], w.get("stack/mhc_a_res")[l]],
                 b_pre: w.layer("stack/mhc_b_pre", l).to_vec(),
                 b_post: w.layer("stack/mhc_b_post", l).to_vec(),
@@ -196,10 +196,15 @@ impl Decoder {
             cfg: cfg.clone(),
             layers,
             engrams,
-            embedding: Linear { wt: w.vec("embedding/embedding"), inn: d, out: cfg.embedding_rows() },
+            embedding: Linear { wt: w.vec("embedding/embedding"), inn: d, out: cfg.embedding_rows(), cq: w.packed("embedding/embedding", None, cfg.embedding_rows(), d) },
             final_norm: w.vec("stack/final_norm/scale"),
             perms: (legacy_permutation(PERMUTATION_SEEDS.0, n_hada), legacy_permutation(PERMUTATION_SEEDS.1, n_hada)),
         }
+    }
+
+    /// The tied embedding table / output projection as a linear `[rows, dim]` (with its packed form, if loaded packed).
+    pub fn embedding_linear(&self) -> &Linear {
+        &self.embedding
     }
 
     /// Rows of the output vocabulary.

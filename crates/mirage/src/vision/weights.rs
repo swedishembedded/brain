@@ -5,19 +5,24 @@
 
 use std::collections::BTreeMap;
 
+use std::sync::Arc;
+
+use model::cq::Cq;
+
 use super::ops::Linear;
-use crate::import::{Checkpoint, Tensor};
+use crate::import::{Checkpoint, PackedMatrices, Tensor};
 
 /// A borrowed view of the checkpoint's tensors. Names were validated against
 /// the manifest at import, so a lookup of a manifest name cannot miss.
 pub struct Weights<'a> {
     tensors: &'a BTreeMap<String, Tensor>,
+    packed: &'a PackedMatrices,
 }
 
 impl<'a> Weights<'a> {
     /// View `ck`'s tensors.
     pub fn new(ck: &'a Checkpoint) -> Weights<'a> {
-        Weights { tensors: &ck.tensors }
+        Weights { tensors: &ck.tensors, packed: &ck.packed }
     }
 
     fn tensor(&self, name: &str) -> &'a Tensor {
@@ -41,10 +46,20 @@ impl<'a> Weights<'a> {
         &t.data[layer * unit..(layer + 1) * unit]
     }
 
+    /// The stored CQ form of tensor `name` (layer `layer` of a stacked one) when it is an `[out, in]` matrix.
+    pub fn packed(&self, name: &str, layer: Option<usize>, out: usize, inn: usize) -> Option<Arc<Cq>> {
+        self.packed.get(&(name.to_string(), layer)).filter(|c| c.n == out && c.k == inn).cloned()
+    }
+
     /// A Flax dense kernel `[in, out]` as a [`Linear`].
     pub fn linear(&self, name: &str) -> Linear {
         let t = self.tensor(name);
         assert_eq!(t.shape.len(), 2, "`{name}` is not a matrix");
-        Linear::from_flax(&t.data, t.shape[0], t.shape[1])
+        Linear { cq: self.packed(name, None, t.shape[1], t.shape[0]), ..Linear::from_flax(&t.data, t.shape[0], t.shape[1]) }
+    }
+
+    /// Layer `layer` of a stacked Flax dense kernel (`[in, out]` per layer) as a [`Linear`].
+    pub fn layer_linear(&self, name: &str, layer: usize, inn: usize, out: usize) -> Linear {
+        Linear { cq: self.packed(name, Some(layer), out, inn), ..Linear::from_flax(self.layer(name, layer), inn, out) }
     }
 }

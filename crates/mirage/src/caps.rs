@@ -50,10 +50,8 @@ use serde_json::{json, Map, Value};
 use crate::describe::{Options, LANGUAGES};
 use crate::device::{BatchControl, DecoderMemory, Device, Image, MirageModel};
 use crate::form::{self, FieldKind, FormError};
-use crate::import::{self, ImportOptions};
 use crate::memory_cache::{MemoryCache, MemoryKey};
 use crate::model::{Mirage, ModelError};
-use crate::resolver::DEPLOYMENT_FILE;
 use crate::vision::dense::{MAX_OBJECTS, MAX_TEXT};
 
 /// The model id used on the CLI (`brain do mirage …`), over the bus and in the residency manifest.
@@ -261,10 +259,16 @@ impl MirageSession {
     /// Import `<dir>/{config.json, mirage.safetensors, mirage.cact}` and put the weights on `gpu`, which must have
     /// been created with [`Device::kernels`].
     pub fn load(dir: &str, gpu: Gpu) -> Result<MirageSession, String> {
-        let dir = std::path::Path::new(dir);
-        let ck = import::load_dir(dir, &ImportOptions::default()).map_err(|e| e.to_string())?;
-        let cact = crate::cactmap::CactModel::new(crate::cact::CactFile::open(&dir.join(DEPLOYMENT_FILE)).map_err(|e| e.to_string())?, ck.config.clone()).map_err(|e| e.to_string())?;
-        let host = Mirage::new(&ck, cact.tokenizer_blob().map_err(|e| e.to_string())?, cact.charset().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let source = crate::model::WeightSource::detect(std::path::Path::new(dir)).map_err(|e| e.to_string())?;
+        MirageSession::load_with(dir, gpu, source)
+    }
+
+    /// [`MirageSession::load`] from the weights `source` names: with [`crate::model::WeightSource::Cact`] the
+    /// deployment archive's CQ matrices stay packed on the device.
+    pub fn load_with(dir: &str, gpu: Gpu, source: crate::model::WeightSource) -> Result<MirageSession, String> {
+        let loaded = crate::model::load_dir(std::path::Path::new(dir), source).map_err(|e| e.to_string())?;
+        let ck = &loaded.checkpoint;
+        let host = Mirage::new(ck, &loaded.tokenizer, loaded.charset.clone()).map_err(|e| e.to_string())?;
         let revision: Arc<str> = Arc::from(ck.metadata.source_sha256.as_str());
         let model = MirageModel::new(host, gpu).map_err(|e| e.to_string())?;
         Ok(MirageSession { model, revision, cache: Mutex::new(MemoryCache::new(MEMORY_CACHE_BYTES)), stats: Mutex::new(BatchStats::default()) })
