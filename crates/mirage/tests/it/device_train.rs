@@ -787,12 +787,15 @@ fn whole_graph_loss<T: Graph<f32>>(net: &mut Net<'_, f32, T>) -> Id {
     total
 }
 
+/// Per group: concatenated device gradients, concatenated host gradients, worst per-tensor cosine, its tensor, tensor count.
+type GroupStats = (Vec<f32>, Vec<f32>, f64, String, usize);
+
 /// Parameter group of a checkpoint tensor name, for the table.
 fn group(name: &str) -> String {
     let mut parts = name.split('/');
     let first = parts.next().unwrap_or(name);
     match (first, parts.next()) {
-        ("stack", Some(second)) if second == "layers" => "decoder stack (layers)".to_string(),
+        ("stack", Some("layers")) => "decoder stack (layers)".to_string(),
         ("stack", _) => "decoder stack (routing, norm)".to_string(),
         _ => first.to_string(),
     }
@@ -824,8 +827,7 @@ fn the_whole_graph_on_the_device_gives_the_host_gradients() {
     eprintln!("loss: host {host_loss:.6}, device {dev_loss:.6}");
     assert!((f64::from(host_loss) - dev_loss).abs() <= 1e-4 * f64::from(host_loss).abs().max(1.0), "loss differs");
 
-    // name -> (concatenated device, concatenated host, worst per-tensor cosine and its name, tensors)
-    let mut groups: BTreeMap<String, (Vec<f32>, Vec<f32>, f64, String, usize)> = BTreeMap::new();
+    let mut groups: BTreeMap<String, GroupStats> = BTreeMap::new();
     for (name, w) in &want {
         let g = &got[name];
         assert_eq!(g.len(), w.len(), "{name}: gradient length");
