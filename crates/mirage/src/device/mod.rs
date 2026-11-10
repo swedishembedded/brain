@@ -19,6 +19,7 @@ pub mod batch_model;
 pub use batch_model::{BatchControl, DecoderMemory, Described, Extracted, Image, MirageModel, Timings};
 pub mod prims;
 pub mod reader;
+pub mod train;
 pub mod vision;
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
@@ -77,7 +78,7 @@ const OWN_KERNELS: &[(&str, &str)] = &[
 /// Kernels Mirage needs beyond what [`model::ops::kernel_list`] carries.
 fn kernel_list() -> Vec<(&'static str, &'static str)> {
     let mut list = model::ops::kernel_list().to_vec();
-    for &(name, src) in OWN_KERNELS {
+    for &(name, src) in OWN_KERNELS.iter().chain(train::KERNELS) {
         if !list.iter().any(|(n, _)| *n == name) {
             list.push((name, src));
         }
@@ -103,7 +104,7 @@ impl Device {
     pub fn new(gpu: Gpu) -> Result<Device, String> {
         let ops = Ops::new(gpu)?;
         let mut kernel = std::collections::HashMap::new();
-        for &(name, _) in OWN_KERNELS {
+        for &(name, _) in OWN_KERNELS.iter().chain(train::KERNELS) {
             let index = ops.gpu().kernel_index(name).ok_or_else(|| format!("the device lacks kernel `{name}`"))?;
             kernel.insert(name, index);
         }

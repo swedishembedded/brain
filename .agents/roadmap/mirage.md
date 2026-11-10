@@ -396,6 +396,14 @@ vendor's.
 Training throughput (host f32, 32 threads of a shared Grace node, no GPU; samples/s over the whole run): detection
 1.46, masks 1.19, OCR 5.63 (reader only: the encoder is skipped), LoRA text 0.80 (batch 2, encoder + decoder + adapters).
 
+Device training (lane L3b, in progress): `device::train::DevTape` implements `train::graph::Graph<f32>` over device buffers with
+parameters resident in a `paramstore::ParamStore` (a stacked decoder layer is one entry `name#layer`; adapters are registered
+pairs). Steps are recorded and submitted lazily (readback, `backward`); backward kernels accumulate with one owner thread per
+element (`mirage_t_*`, no atomics); values carry `needs_grad`, so frozen parameters and constant inputs record no backward.
+Package A (core, elementwise, linear, norms, plans/gather/concat/slice, softmax, row ops, loss sum) is checked against the host
+tape in `device_train` (cosine >= 0.99999, relative error <= 1e-4, CPU backend); the remaining `Graph` methods are stubs
+(`unimplemented!`) until the next packages. Untuned: channel and bias reductions loop over rows in one thread per channel.
+
 Not done in this lane:
 - Device backward and CUDA training. The host graph is the trainer; the device forward kernels have no `*_bwd`
   counterparts for Walsh, banded channel conv, GRN, ZC norm, 2D RoPE, mHC + Sinkhorn, Hadamard MLP, engram, taps,

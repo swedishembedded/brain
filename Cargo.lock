@@ -2110,6 +2110,7 @@ dependencies = [
  "brain-model",
  "brain-modelstore",
  "brain-optim",
+ "brain-paramstore",
  "brain-testutil",
  "half",
  "safetensors",
