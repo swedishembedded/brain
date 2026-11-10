@@ -74,7 +74,7 @@ All on the host in f32, in the same stage structure as the vision half.
 | Typed `Describe` / `Extract`, `Options` (unknown keys refused) | done | |
 
 Open in L2b:
-- Box fields of a form are refused as unsupported (the scoring rule against proposals is not pinned).
+- Box fields (`format: box`, `x-source` a choice field) are generated like free text after the source (L7: the engine trace shows the prompt carries `name$60` for a box, the source only fixes the place); the earlier prompt tokenisation of `? ` carried a stray space (fixed in L7).
 - Polygon vertex lists differ from the engine's (marching squares at the field's 128 grid, Douglas-Peucker
   tolerance 0.13 cell); only overlap is held. Merged polygons join parts at their nearest vertices.
 - The loop guard's `key()` rule is inferred (scene and entity lines by id, others by text); event (`V`) lines

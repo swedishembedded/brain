@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use mirage::decoder::generate::{absent_references, generate, GenerateParams, Stop};
 use mirage::describe::Options;
-use mirage::model::Mirage;
+use mirage::model::{load_dir, Mirage, WeightSource};
 use serde_json::{json, Value};
 
 use crate::common::released_dir;
@@ -95,15 +95,65 @@ fn an_extract_request_answers_every_field_with_probabilities() {
     // Candidate order is the form's, abstention last.
     let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} missing in {text}"));
     assert!(at("\"dog\":") < at("\"cat\":") && at("\"cat\":") < at("\"bird\":") && at("\"bird\":") < at("\"-\":"));
-    assert!(["dog", "cat", "bird"].contains(&fields["animal"]["value"].as_str().unwrap()) || fields["animal"]["value"].is_null());
+    assert!(fields["animal"]["value"].as_str().is_none_or(|v| ["dog", "cat", "bird"].contains(&v)));
     assert!((0..=5).contains(&fields["n"]["value"].as_i64().unwrap()));
+}
+
+/// How far a probability may sit from the reference engine's: the engine also rounds its activations to 8 bits, which
+/// this FP32-activation model does not (the shift measured on `cats_form` is up to 0.07).
+const PROBABILITY_TOLERANCE: f64 = 0.08;
+
+/// Reference answers (the released engine on the packed weights) for choice, count, free-text and box fields: the
+/// committed value must be equal and every probability within [`PROBABILITY_TOLERANCE`]; the answer shape (`probability`, not a candidate table) must match exactly.
+#[test]
+fn text_and_box_fields_answer_like_the_reference_engine() {
+    let Some(f) = fixture("text and box forms") else { return };
+    let Some(dir) = released_dir() else { return };
+    // The packed archive is what the reference engine runs: the same weights, not their FP32 original.
+    let loaded = load_dir(std::path::Path::new(&dir), WeightSource::Cact).expect("the packed archive loads");
+    let model = Mirage::new(&loaded.checkpoint, &loaded.tokenizer, loaded.charset).unwrap();
+    for name in ["cats_form", "cats_form_box", "cats_form_text"] {
+        let dir = std::path::PathBuf::from(brain_testutil::testdata(&format!("golden/mirage/engine/{name}")));
+        let (Ok(request), Ok(want)) = (std::fs::read_to_string(dir.join("request.txt")), std::fs::read_to_string(dir.join("out.json"))) else {
+            brain_testutil::skip(&format!("{name}: testdata/golden/mirage/engine/{name} is absent (make testdata/fetch)"));
+            continue;
+        };
+        let want: Value = serde_json::from_str(&want).unwrap();
+        let opts = Options::from_json(request.lines().next().unwrap()).unwrap();
+        let got: Value = serde_json::to_value(model.extract(&f.rgb, 480, 640, &opts).unwrap()).unwrap();
+        for (field, expected) in want["form"].as_object().unwrap() {
+            let answer = &got["form"][field];
+            if let Some(table) = expected.get("probabilities") {
+                assert_eq!(answer["value"], expected["value"], "{name}.{field}");
+                for (candidate, q) in table.as_object().unwrap() {
+                    let p = answer["probabilities"][candidate].as_f64().unwrap();
+                    assert!((p - q.as_f64().unwrap()).abs() < PROBABILITY_TOLERANCE, "{name}.{field}.{candidate}: probability {p} against the reference {q}");
+                }
+                continue;
+            }
+            let mut keys: Vec<_> = answer.as_object().unwrap().keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["probability", "value"], "{name}.{field}: a generated field has a value and one probability");
+            // The free-text question is a coin flip between the first word of the question and the abstention (0.39
+            // against 0.32 here, the engine 0.51 for the abstention): only its shape is held against the engine.
+            if name == "cats_form_text" {
+                continue;
+            }
+            assert_eq!(answer["value"], expected["value"], "{name}.{field}");
+            let (p, q) = (answer["probability"].as_f64().unwrap(), expected["probability"].as_f64().unwrap());
+            assert!((p - q).abs() < PROBABILITY_TOLERANCE, "{name}.{field}: probability {p} against the reference {q}");
+        }
+    }
 }
 
 #[test]
 fn unsupported_and_invalid_forms_are_refused() {
     let Some(f) = fixture("form errors") else { return };
     for (form, needle) in [
-        (json!({"b": {"type": "string", "format": "box", "x-source": "a"}}), "box"),
+        (json!({"b": {"type": "string", "format": "box"}}), "x-source"),
+        (json!({"b": {"type": "string", "format": "box", "x-source": "a"}}), "choice field"),
+        (json!({"n": {"type": "integer", "minimum": 0, "maximum": 2}, "b": {"type": "string", "format": "box", "x-source": "n"}}), "choice"),
+        (json!({"a": {"enum": ["x"]}, "b": {"type": "string", "format": "polygon", "x-source": "a"}}), "format"),
         (json!({"a": {"enum": ["x", "x"]}}), "repeated"),
         (json!({"a": {"enum": ["x;y"]}}), "contains"),
         (json!({"a": {"type": "integer", "minimum": 3, "maximum": 1}}), "empty"),

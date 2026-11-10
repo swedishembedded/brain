@@ -13,6 +13,16 @@
 //! abstention `-` for choices) is scored by the summed log-probability of its
 //! tokens and terminator, the scores are soft-maxed into probabilities, and
 //! the most probable candidate is committed before the next field.
+//!
+//! Two kinds are generated instead of scored: free text (`name$<length>` in
+//! the prompt) and a box (`{"type": "string", "format": "box", "x-source":
+//! <choice field>}`). Both read `name$<length>` in the prompt (length 60 unless
+//! `maxLength` says otherwise; a box always 60). After `name=` the decoder
+//! writes the value greedily up to the terminator; the answer is that text
+//! with the product of its token probabilities (`-` is the model's
+//! abstention). The released engine's trace of a box field is exactly this:
+//! the prompt does not mention the source, which only fixes where the box is
+//! asked (after the committed answer of that choice field).
 
 use std::fmt;
 
@@ -27,6 +37,8 @@ use crate::tokenizer::{Tokenizer, TokenizerError};
 pub const MAX_CANDIDATES: usize = 256;
 /// Characters a choice or field name may not contain.
 const RESERVED: &[char] = &[';', '|', '=', '#', '@', '$', '*', '\n'];
+/// Longest generated value, in characters, when a text field names no `maxLength`; a box is always asked for this many.
+const DEFAULT_LENGTH: usize = 60;
 /// Abstention answer of a choice field.
 pub const ABSTAIN: &str = "-";
 
@@ -68,6 +80,8 @@ pub enum FieldKind {
     Count { min: i64, max: i64 },
     /// Free text of at most `max_length` characters.
     Text { max_length: usize },
+    /// The object a committed choice names, generated like text; `source` is the earlier choice field it follows.
+    Box { source: String },
 }
 
 /// A named field.
@@ -96,7 +110,8 @@ pub fn parse_form(form: &Value) -> Result<Vec<FormField>, FormError> {
     if map.is_empty() {
         return invalid("a form needs at least one field");
     }
-    let mut fields = Vec::new();
+    let mut fields: Vec<FormField> = Vec::new();
+    let mut boxes = Vec::new();
     for (name, spec) in map {
         plain(name, "field name")?;
         let ty = spec.get("type").and_then(Value::as_str);
@@ -130,14 +145,31 @@ pub fn parse_form(form: &Value) -> Result<Vec<FormField>, FormError> {
             }
             FieldKind::Count { min, max }
         } else if ty == Some("string") {
-            if spec.get("format").is_some() {
-                return Err(FormError::Unsupported(format!("field `{name}`: box fields are not implemented")));
+            match spec.get("format").map(|f| f.as_str()) {
+                None => {}
+                Some(Some("box")) => {
+                    let Some(source) = spec.get("x-source").and_then(Value::as_str) else {
+                        return invalid(format!("field `{name}`: a box needs `x-source`, the choice field it follows"));
+                    };
+                    boxes.push((name.clone(), source.to_string()));
+                    continue;
+                }
+                Some(other) => return Err(FormError::Unsupported(format!("field `{name}`: format `{}` is not supported (only \"box\")", other.unwrap_or("<not a string>")))),
             }
-            FieldKind::Text { max_length: spec.get("maxLength").and_then(Value::as_u64).unwrap_or(32).min(256) as usize }
+            FieldKind::Text { max_length: spec.get("maxLength").and_then(Value::as_u64).unwrap_or(DEFAULT_LENGTH as u64).min(256) as usize }
         } else {
             return invalid(format!("field `{name}`: expected `enum`, an integer or a string type"));
         };
         fields.push(FormField { name: name.clone(), kind });
+    }
+    // A box follows the committed answer of its source, so it is placed right after that choice field (after the
+    // boxes already placed there): the form's field order is the JSON map's, which a box may precede its source in.
+    for (name, source) in boxes {
+        let Some(at) = fields.iter().position(|f| f.name == source && matches!(f.kind, FieldKind::Choice(_))) else {
+            return invalid(format!("field `{name}`: `x-source` must name a choice field of the form, not `{source}`"));
+        };
+        let after = at + 1 + fields[at + 1..].iter().take_while(|f| matches!(&f.kind, FieldKind::Box { source: s } if *s == source)).count();
+        fields.insert(after, FormField { name, kind: FieldKind::Box { source } });
     }
     Ok(fields)
 }
@@ -152,6 +184,7 @@ fn spec_text(fields: &[FormField]) -> String {
             }
             FieldKind::Count { min, max } => format!("{}#{min}..{max}", f.name),
             FieldKind::Text { max_length } => format!("{}${max_length}", f.name),
+            FieldKind::Box { .. } => format!("{}${DEFAULT_LENGTH}", f.name),
         })
         .collect();
     format!("? {}\n", parts.join(" "))
@@ -167,10 +200,19 @@ fn value_text(v: &Value) -> String {
 /// One answered field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Answer {
-    /// The chosen value (`null` when the model abstained).
+    /// The chosen value (`null` when the model abstained from a choice).
     pub value: Value,
-    /// Probability of every candidate, in candidate order, abstention last.
-    pub probabilities: Vec<(String, f64)>,
+    /// How sure the model is.
+    pub confidence: Confidence,
+}
+
+/// The probability behind an [`Answer`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Confidence {
+    /// Probability of every scored candidate, in candidate order, abstention last (choices and counts).
+    Candidates(Vec<(String, f64)>),
+    /// Product of the token probabilities of a generated value (text and box fields).
+    Generated(f64),
 }
 
 /// The extraction result.
@@ -198,7 +240,10 @@ impl Serialize for Extract {
             fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
                 let mut m = s.serialize_map(Some(2))?;
                 m.serialize_entry("value", &self.0.value)?;
-                m.serialize_entry("probabilities", &Probs(&self.0.probabilities))?;
+                match &self.0.confidence {
+                    Confidence::Candidates(p) => m.serialize_entry("probabilities", &Probs(p))?,
+                    Confidence::Generated(p) => m.serialize_entry("probability", p)?,
+                }
                 m.end()
             }
         }
@@ -223,11 +268,6 @@ fn log_softmax(row: &[f32]) -> Vec<f32> {
     row.iter().map(|v| v - lse).collect()
 }
 
-/// Encode `text` as if it began a new word (a leading boundary mark).
-fn encode_with_prefix(tok: &Tokenizer, text: &str) -> Result<Vec<u32>, TokenizerError> {
-    tok.encode(&format!(" {text}"))
-}
-
 /// Answer `fields` about the image whose memory is `cross`.
 pub fn extract(dec: &Decoder, cross: &CrossMemory, tok: &Tokenizer, prompt: &[u32], fields: &[FormField], max_tokens: usize) -> Result<Extract, FormError> {
     crate::decoder::with_decode_threads(|| extract_inner(dec, cross, tok, prompt, fields, max_tokens))
@@ -237,7 +277,7 @@ fn extract_inner(dec: &Decoder, cross: &CrossMemory, tok: &Tokenizer, prompt: &[
     let vocab = dec.vocabulary();
     let mut st = dec.new_state();
     let mut tokens = prompt.to_vec();
-    tokens.extend(encode_with_prefix(tok, &spec_text(fields))?);
+    tokens.extend(tok.encode(&spec_text(fields))?);
     dec.forward(&mut st, cross, &tokens, Positions::Last);
     let newline = tok.encode("\n")?;
     let eos = [tok.eos_id()];
@@ -250,11 +290,11 @@ fn extract_inner(dec: &Decoder, cross: &CrossMemory, tok: &Tokenizer, prompt: &[
         let (labels, values): (Vec<String>, Vec<Value>) = match &field.kind {
             FieldKind::Choice(options) => (options.iter().map(value_text).collect(), options.clone()),
             FieldKind::Count { min, max } => ((*min..=*max).map(|v| v.to_string()).collect(), (*min..=*max).map(Value::from).collect()),
-            FieldKind::Text { .. } => (Vec::new(), Vec::new()),
+            FieldKind::Text { .. } | FieldKind::Box { .. } => (Vec::new(), Vec::new()),
         };
-        if let FieldKind::Text { max_length } = field.kind {
-            let (text, probability) = greedy_text(dec, cross, tok, &mut st, &mut logits, terminator, max_length.min(max_tokens))?;
-            answers.push((field.name.clone(), Answer { value: Value::String(text.clone()), probabilities: vec![(text, probability)] }));
+        if let Some(length) = generated_length(&field.kind) {
+            let (text, probability) = greedy_text(dec, cross, tok, &mut st, &mut logits, terminator, length.min(max_tokens))?;
+            answers.push((field.name.clone(), Answer { value: Value::String(text), confidence: Confidence::Generated(probability) }));
             continue;
         }
         let mut candidates: Vec<(String, Value, Vec<u32>)> = Vec::new();
@@ -289,9 +329,18 @@ fn extract_inner(dec: &Decoder, cross: &CrossMemory, tok: &Tokenizer, prompt: &[
         let mut commit = candidates[best].2.clone();
         commit.extend_from_slice(terminator);
         dec.forward(&mut st, cross, &commit, Positions::Last);
-        answers.push((field.name.clone(), Answer { value: candidates[best].1.clone(), probabilities }));
+        answers.push((field.name.clone(), Answer { value: candidates[best].1.clone(), confidence: Confidence::Candidates(probabilities) }));
     }
     Ok(Extract { fields: answers })
+}
+
+/// Longest value (in tokens) a generated field may take; `None` for the scored kinds.
+fn generated_length(kind: &FieldKind) -> Option<usize> {
+    match kind {
+        FieldKind::Text { max_length } => Some(*max_length),
+        FieldKind::Box { .. } => Some(DEFAULT_LENGTH),
+        FieldKind::Choice(_) | FieldKind::Count { .. } => None,
+    }
 }
 
 /// Greedy free text until the terminator; returns the text and the product of token probabilities.

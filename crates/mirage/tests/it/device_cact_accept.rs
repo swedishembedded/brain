@@ -56,7 +56,7 @@ fn proposal_agreement(got: &Value, want: &Value) -> (usize, usize, usize, usize)
 fn corpus_cases() -> Vec<(String, PathBuf)> {
     let root = PathBuf::from(brain_testutil::testdata("golden/mirage/engine"));
     let mut cases: Vec<(String, PathBuf)> = std::fs::read_dir(&root)
-        .map(|d| d.flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), e.path())).filter(|(n, p)| n != "cats_form" && p.join("out.json").is_file()).collect())
+        .map(|d| d.flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), e.path())).filter(|(n, p)| !n.starts_with("cats_form") && p.join("out.json").is_file()).collect())
         .unwrap_or_default();
     cases.sort();
     cases

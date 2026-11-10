@@ -106,13 +106,18 @@ the source image, `score`, `mask`, `position`, `description`), `regions`,
 
 - `{"enum": [...]}` - choose one value (strings or numbers, at most 256),
 - `{"type": "integer", "minimum": a, "maximum": b}` - a count (at most 256 values),
-- `{"type": "string", "maxLength": n}` - free text (at most 256 characters).
+- `{"type": "string", "maxLength": n}` - free text (at most 256 characters, 60 by default),
+- `{"type": "string", "format": "box", "x-source": "<choice field>"}` - the object the choice names: after
+  the committed answer of the source field the model writes the value itself, like free text. `x-source` must name
+  a choice field of the form; a box is placed right after its source whatever its position in the JSON.
 
 The other params are `conf`, `text_conf`, `max_objects`, `max_text_lines`,
 `max_tokens` and `language` as above. The outcome is
 `{"form": {"<field>": {"value": ..., "probabilities": {"<candidate>": p, ..., "-": p}}}}`:
 the probability of every candidate with abstention (`-`) last, and `value` is
-`null` when the model abstains. A form is refused above 64 KiB, 32 fields or
+`null` when the model abstains. A text or box field has no candidate table: it answers
+`{"value": "<generated text>", "probability": p}` with the product of the probabilities of the generated tokens
+(`-` is the model's abstention). A form is refused above 64 KiB, 32 fields or
 1024 candidate values in total: every candidate is scored by a decoder pass.
 
 ### Usage accounting
@@ -167,9 +172,6 @@ reader, JSON). `extract` adds `memory_reused`.
   tolerance; the polygons cover the same region (rasterised IoU 0.97 to 1.00
   over the vendor's corpus) but their vertex lists differ. `bitmap` masks are
   exact.
-- **Box form fields are unsupported.** A `string` field with a `format` (a box)
-  is refused: the scoring rule against proposals is not pinned. Choice, count and
-  text fields work.
 - **Form scoring runs on the host decoder.** `extract` takes the vision half and
   the memory on the device and scores candidates with the host decoder, one
   image at a time.

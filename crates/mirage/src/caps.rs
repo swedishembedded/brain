@@ -200,7 +200,7 @@ fn check_form(inv: &Invocation) -> Result<Value, String> {
         .map(|f| match &f.kind {
             FieldKind::Choice(options) => options.len(),
             FieldKind::Count { min, max } => (max - min + 1) as usize,
-            FieldKind::Text { .. } => 0,
+            FieldKind::Text { .. } | FieldKind::Box { .. } => 0,
         })
         .sum();
     if candidates > MAX_FORM_CANDIDATES {
@@ -586,7 +586,7 @@ mod tests {
         let heavy: Map<String, Value> = (0..8).map(|i| (format!("f{i}"), json!({"enum": values}))).collect();
         assert!(check_request("extract", &extract(&Value::Object(heavy).to_string())).unwrap_err().contains("candidate"));
         let boxy = r#"{"b": {"type": "string", "format": "box"}}"#;
-        assert!(check_request("extract", &extract(boxy)).is_err(), "box fields are unsupported");
+        assert!(check_request("extract", &extract(boxy)).is_err(), "a box needs its source");
         assert!(check_request("describe", &describe(json!({"form": "{}"}))).is_err(), "form belongs to extract");
         assert!(check_request("extract", &Invocation::new().blob("image", image(2, 2))).is_err(), "the form is required");
     }
