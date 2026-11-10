@@ -617,7 +617,7 @@ volumes:
         title: "Vision-Language Models"
         question: "How do we give a language model eyes?"
         introduces: [vision-projector, image-token-splicing, dynamic-resolution, multimodal-position-encoding]
-        requires: [vision-transformer, modern-decoder-recipe, contrastive-pretraining, multi-axis-rope]
+        requires: [vision-transformer, modern-decoder-recipe, contrastive-pretraining, multi-axis-rope, patch-embedding, image-resampling, special-tokens, kv-cache, prefill-phase, grouped-query-attention, rotary-position-embedding, cross-attention, bounding-box]
         brain: [llava, qwen3vl, qwen3vlmoe, minicpmv, moondream3, deepseekvl, januspro, florence2, captioner]
       - id: ocr
         title: "Reading Documents"

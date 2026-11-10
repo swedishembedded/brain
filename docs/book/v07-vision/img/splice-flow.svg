@@ -1,0 +1,46 @@
+<!-- source-sha256: a6c1ba33bc1e126427fbd7dd252dd61990b15966f5d7480654841f48cdea3d1d -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 490" width="960" height="490"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="960" height="490" fill="#ffffff"/>
+<rect x="14" y="14" width="586" height="150" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="28" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">text</text>
+<rect x="14" y="176" width="586" height="190" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="28" y="198" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">picture</text>
+<ellipse cx="100" cy="96" rx="75" ry="29" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">prompt</text>
+<text x="100" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">&lt;image&gt; what is this ?</text>
+<rect x="205" y="61" width="150" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="280" y="84.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokenize</text>
+<text x="280" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 ids,</text>
+<text x="280" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">&lt;image&gt; expanded x4</text>
+<rect x="395" y="61" width="150" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">embedding gather</text>
+<text x="470" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9 rows of width 3</text>
+<ellipse cx="100" cy="288" rx="75" ry="29" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="284.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">picture</text>
+<text x="100" y="300.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 4 pixels</text>
+<rect x="205" y="253" width="150" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="280" y="284.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">patchify + tower</text>
+<text x="280" y="300.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 patches, width 2</text>
+<rect x="395" y="253" width="150" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="284.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">projector</text>
+<text x="470" y="300.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 rows of width 3</text>
+<rect x="615" y="148" width="150" height="84" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="690" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">splice</text>
+<text x="690" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rows 1 to 4 overwritten</text>
+<text x="690" y="210.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">by projector rows</text>
+<rect x="810" y="148" width="120" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="870" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decoder</text>
+<text x="870" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reads</text>
+<text x="870" y="210.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9 rows</text>
+<line x1="178" y1="96" x2="202" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="358" y1="96" x2="392" y2="96" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="178" y1="288" x2="202" y2="288" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="358" y1="288" x2="392" y2="288" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M545,96 L682,96 Q690,96 690,104 L690,145" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M545,288 L682,288 Q690,288 690,280 L690,235" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="768" y1="190" x2="807" y2="190" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M870,232 L870,388 Q870,396 862,396 L518,396 Q510,396 510,388 L510,326" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-c53030)"/>
+<text x="480" y="420.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">gradient of the picture rows returns to the projector and the tower;</text>
+<text x="480" y="436.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">the same rows are zeroed on the way to the embedding table</text>
+<text x="480" y="462.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">The placeholder row of the table is read by the gather and overwritten by the splice,</text>
+<text x="480" y="478.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">so its value never reaches the decoder and its row in the table receives no gradient.</text>
+</svg>

@@ -258,6 +258,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **dropout**: randomly setting each unit of a layer to zero with probability $p_{\mathrm{drop}}$ during training, and scaling the kept units by $1/(1 - p_{\mathrm{drop}})$ so that the expected output is unchanged; the layer is the identity at prediction time. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
 
+**dynamic resolution**: letting the grid of a picture, and so its number of tokens, follow its size and shape instead of resizing every picture to one fixed square: each side is rounded to a multiple of the patch times the merge, and the area is bounded from both ends. *([Vision-Language Models](v07-vision/09-vlms.md))*
+
 ## E
 
 **early stopping**: evaluating the validation loss at intervals, keeping the parameters of the lowest value seen, and stopping when it has not improved for a number of evaluations (the patience). *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
@@ -411,6 +413,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **im2col**: the unrolling of an image into a matrix with one row per window position, so that a convolution becomes one matrix product with the weights, at the price of a matrix about $k^2$ times the input in size. *([Convolution](v07-vision/02-convolution.md))*
 
 **image resampling**: computing an image of a new size by looking up each output pixel at a source coordinate fixed by a convention (half-pixel, corner-aligned or asymmetric) and combining nearby source pixels with a kernel that is widened when the image shrinks. *([Images as Data](v07-vision/01-images.md))*
+
+**image token splicing**: replacing, in the embedding rows of a prompt, the rows at the placeholder ids by the projector's rows computed from a picture, in order, with a backward pass that carries their gradient to the projector and zeroes them where they were. *([Vision-Language Models](v07-vision/09-vlms.md))*
 
 **implementation candidate**: one implementation of an operation together with the conditions under which it is valid (the capabilities it needs, the shapes it serves, the contract of its result), one of several that a selector chooses among. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
@@ -585,6 +589,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **multi-query attention**: attention in which every query head of a layer reads one shared key and one shared value per position, so a layer caches $2 d_h$ numbers per token instead of $2 H d_h$, and the heads differ only through their queries. *([Attention Variants: Sharing and Compressing Keys](v06-language-models/03-attention-variants.md))*
 
 **multilayer perceptron**: a network of fully connected layers, each followed by an activation function (usually except the last), so that each layer reads all of the outputs of the one before it; the name is historical, since its units rarely use the step. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
+
+**multimodal position encoding**: the rule that gives the tokens of a sequence of words and picture rows their positions, such as the index of each row, or a triple of frame, row and column for a patch with a counter that advances past the picture by its largest extent. *([Vision-Language Models](v07-vision/09-vlms.md))*
 
 **multiple comparisons**: the problem that testing many hypotheses makes some significant by chance, so that the chance of at least one false positive grows with their number, controlled by tests at a smaller level such as the Bonferroni correction. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
@@ -971,6 +977,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **vector addition**: adding two vectors of the same length entry by entry; as arrows it is the parallelogram rule. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
+
+**vision projector**: the small trained map, a linear layer or a pair of them around a GELU, sometimes folding a block of neighbouring patches into one row, that takes the rows of a vision tower to the width of a language model's embedding rows so that they can be read like the rows of words. *([Vision-Language Models](v07-vision/09-vlms.md))*
 
 **vision transformer**: a model that applies a stack of unmasked transformer blocks to a sequence of patch embeddings with position information added, and reads out a class token or the mean of the tokens. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
