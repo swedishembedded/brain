@@ -34,6 +34,7 @@ mod norm;
 mod rows;
 mod seq;
 mod spatial;
+pub mod trainer;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -51,6 +52,13 @@ use crate::vision::ops::Map;
 /// Kernels the training graph dispatches by name, beyond what the inference path lists.
 pub(super) const KERNELS: &[(&str, &str)] = &[
     ("gelu", ::kernels::GELU),
+    ("grad_scale", ::kernels::GRAD_SCALE),
+    ("gradnorm_sq", ::kernels::GRADNORM_SQ),
+    ("gradnorm_part", ::kernels::GRADNORM_PART),
+    ("adamw", ::kernels::ADAMW),
+    ("clip_coef", ::kernels::CLIP_COEF),
+    ("clip_coef_wg", ::kernels::CLIP_COEF_WG),
+    ("grad_scale_buf", ::kernels::GRAD_SCALE_BUF),
     ("mirage_t_ew", ::kernels::MIRAGE_T_EW),
     ("mirage_t_mul_acc", ::kernels::MIRAGE_T_MUL_ACC),
     ("mirage_t_col_red", ::kernels::MIRAGE_T_COL_RED),
@@ -203,6 +211,13 @@ impl<'a> DevTape<'a> {
     /// both entries of the store, applied as `scale * (x A) B`.
     pub fn with_lora(mut self, key: &str, a: &str, b: &str, rank: usize, scale: f64) -> DevTape<'a> {
         self.lora.insert(key.to_string(), LoraEntry { a: a.to_string(), b: b.to_string(), rank, scale });
+        self
+    }
+
+    /// An evaluation tape: no parameter or input receives a gradient, so no backward is recorded.
+    pub fn without_grads(mut self) -> DevTape<'a> {
+        self.trainable.clear();
+        self.leaves_need_grad = false;
         self
     }
 

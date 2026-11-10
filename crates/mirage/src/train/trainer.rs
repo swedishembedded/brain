@@ -87,6 +87,56 @@ pub struct StepReport {
     pub samples: usize,
 }
 
+/// What a fine-tuning run offers whichever evaluator runs it: the host [`Trainer`] or the device trainer
+/// (`device::train::trainer::DevTrainer`). Checkpoints, adapters and run directories are the same on both.
+pub trait FineTuner {
+    /// One optimiser step on the mean gradient of `batch`.
+    fn step(&mut self, batch: &[Prepared]) -> Result<StepReport, String>;
+    /// Mean loss of `batch` without a step.
+    fn eval_loss(&self, batch: &[Prepared]) -> f64;
+    /// The checkpoint with the trained tensors.
+    fn checkpoint(&self) -> Checkpoint;
+    /// The checkpoint with the adapter folded in.
+    fn merged(&self) -> Result<Checkpoint, String>;
+    /// The adapter (LoRA runs).
+    fn adapter_set(&self) -> Option<AdapterSet<f32>>;
+    /// Write the run to a directory (weights, adapter, training state).
+    fn save(&self, dir: &Path) -> Result<(), String>;
+    /// Completed optimiser steps.
+    fn steps(&self) -> u32;
+}
+
+impl FineTuner for Trainer {
+    fn step(&mut self, batch: &[Prepared]) -> Result<StepReport, String> {
+        Trainer::step(self, batch)
+    }
+    fn eval_loss(&self, batch: &[Prepared]) -> f64 {
+        Trainer::eval_loss(self, batch)
+    }
+    fn checkpoint(&self) -> Checkpoint {
+        Trainer::checkpoint(self)
+    }
+    fn merged(&self) -> Result<Checkpoint, String> {
+        Trainer::merged(self)
+    }
+    fn adapter_set(&self) -> Option<AdapterSet<f32>> {
+        self.adapter.clone()
+    }
+    fn save(&self, dir: &Path) -> Result<(), String> {
+        Trainer::save(self, dir)
+    }
+    fn steps(&self) -> u32 {
+        Trainer::steps(self)
+    }
+}
+
+impl Head {
+    /// Whether the head group trains the tensor `name`.
+    pub fn trains(self, name: &str) -> bool {
+        self.owns(name)
+    }
+}
+
 /// One sample with its decoder target.
 pub struct Prepared {
     /// The image and labels.

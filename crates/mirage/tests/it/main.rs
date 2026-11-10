@@ -16,6 +16,7 @@ mod device_model;
 mod device_decoder;
 mod device_reader;
 mod device_train;
+mod device_trainer;
 mod device_vision;
 mod fd;
 mod import;

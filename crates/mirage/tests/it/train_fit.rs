@@ -109,7 +109,7 @@ fn tiny_sample(cfg: &MirageConfig) -> Sample {
     s
 }
 
-fn prepared(cfg: &MirageConfig) -> Prepared {
+pub(crate) fn prepared(cfg: &MirageConfig) -> Prepared {
     let sample = tiny_sample(cfg);
     let vocab = (cfg.text + mirage::config::LANGUAGE_TAGS) as u32;
     let target = text_target(cfg, &sample, &encode, cfg.text as u32, vocab);
@@ -147,7 +147,7 @@ fn the_objective_matches_finite_differences_and_every_term_is_live() {
     }
 }
 
-fn cfg_for(mode: Mode) -> TrainConfig {
+pub(crate) fn cfg_for(mode: Mode) -> TrainConfig {
     let mut c = TrainConfig::new(mode);
     c.lr = 2e-3;
     c
@@ -230,7 +230,7 @@ fn the_adapter_file_round_trips_and_a_foreign_file_is_refused() {
     assert!(adapter::load(&ck_path, &cfg).is_err(), "a weights file is not an adapter");
 }
 
-fn scratch(name: &str) -> std::path::PathBuf {
+pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("mirage-train-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

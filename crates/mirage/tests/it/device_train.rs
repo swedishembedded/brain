@@ -818,7 +818,7 @@ fn the_whole_graph_on_the_device_gives_the_host_gradients() {
     let mut grads = host.tape.backward(hl);
     let want = host.param_grads(&mut grads);
 
-    let store = upload_params(&dev, cfg.dec_layers, &params);
+    let store = upload_params(&dev, cfg.dec_layers, &params, |_| paramstore::Role::Trainable);
     let mut net = Net::resident(&cfg, DevTape::new(&dev, &store));
     let dl = whole_graph_loss(&mut net);
     let dev_loss = net.tape.scalar(dl);

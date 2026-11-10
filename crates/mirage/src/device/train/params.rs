@@ -9,20 +9,25 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use paramstore::ParamStore;
+use paramstore::{ParamStore, Role};
 
 use crate::device::Device;
 use crate::train::net::Params;
 
 /// Whether the checkpoint tensor `name` carries a leading decoder-layer axis.
 pub fn is_stacked(name: &str) -> bool {
+    // An adapter pair is per projection and layer already (its key ends in `.{layer}`), never stacked.
+    if name.ends_with(model::adapter::kind::LORA_A) || name.ends_with(model::adapter::kind::LORA_B) {
+        return false;
+    }
     name.starts_with("stack/layers/block/") || name.starts_with("stack/mhc_")
 }
 
-/// A store holding every tensor of `params` (all trainable), the stacked ones split per layer over `layers`.
-pub fn upload_params(dev: &Device, layers: usize, params: &Params<f32>) -> ParamStore {
+/// A store holding every tensor of `params` with the role `role_of(name)` (a frozen tensor gets no gradient or moment
+/// buffer), the stacked ones split per layer over `layers`.
+pub fn upload_params(dev: &Device, layers: usize, params: &Params<f32>, role_of: impl Fn(&str) -> Role) -> ParamStore {
     assert!(layers > 0, "a decoder has layers");
-    let mut entries = Vec::new();
+    let mut entries: Vec<(String, usize, Role)> = Vec::new();
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
     for (name, values) in params {
         if is_stacked(name) {
@@ -30,15 +35,15 @@ pub fn upload_params(dev: &Device, layers: usize, params: &Params<f32>) -> Param
             let unit = values.len() / layers;
             for (l, part) in values.chunks_exact(unit).enumerate() {
                 let key = format!("{name}#{l}");
-                entries.push((key.clone(), unit));
+                entries.push((key.clone(), unit, role_of(name)));
                 init.insert(key, part.to_vec());
             }
         } else {
-            entries.push((name.clone(), values.len()));
+            entries.push((name.clone(), values.len(), role_of(name)));
             init.insert(name.clone(), values.clone());
         }
     }
-    ParamStore::new(dev.gpu(), entries, &init)
+    ParamStore::new_with_roles(dev.gpu(), entries, &init)
 }
 
 /// Stack per-layer entries back: `read(entry)` for every store entry, grouped by checkpoint name in layer order.
