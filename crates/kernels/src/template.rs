@@ -342,8 +342,22 @@ pub fn cq_dequant_kernel_name(bits: u32) -> String {
     variant_name("cq_dequant_rotated", &[("BITS", bits)])
 }
 
-/// Every CQ product kernel: the GEMV at each row capacity, the row-blocked kernel and the rotated-domain
-/// dequantiser, for 2-, 3- and 4-bit indices.
+/// Weight rows one workgroup of `matmul_cq_a8_gemv` serves (four threads each; a thread owns whole groups).
+pub const CQ_A8_GEMV_COLS: u32 = 16;
+
+/// The registered name of the decode-regime A8 CQ GEMV carrying up to `rows` activation rows at `bits`-wide indices.
+pub fn cq_a8_gemv_kernel_name(bits: u32, rows: u32) -> String {
+    let cap = GEMV_ROW_CAPACITIES.into_iter().find(|c| *c >= rows).unwrap_or(*GEMV_ROW_CAPACITIES.last().expect("capacities"));
+    variant_name("matmul_cq_a8_gemv", &[("BITS", bits), ("MAXM", cap)])
+}
+
+/// The registered name of the batched A8 CQ product at `bits`-wide indices.
+pub fn cq_a8_gemm_kernel_name(bits: u32) -> String {
+    variant_name("matmul_cq_a8_gemm", &[("BITS", bits), ("MAXM", CQ_GEMM_ROWS)])
+}
+
+/// Every CQ product kernel: the GEMV at each row capacity, the row-blocked kernel, the rotated-domain
+/// dequantiser and the int8-activation GEMV and product (the A8 precision mode), for 2-, 3- and 4-bit indices.
 pub fn cq_variants() -> Vec<Variant> {
     let mut out = Vec::new();
     for bits in [2, 3, 4] {
@@ -352,6 +366,10 @@ pub fn cq_variants() -> Vec<Variant> {
         }
         out.push(interned("matmul_cq_gemm", crate::MATMUL_CQ_GEMM, &[("BITS", bits), ("MAXM", CQ_GEMM_ROWS)]).expect("the CQ product declares BITS and MAXM"));
         out.push(interned("cq_dequant_rotated", crate::CQ_DEQUANT_ROTATED, &[("BITS", bits)]).expect("the CQ dequantiser declares BITS"));
+        for cap in GEMV_ROW_CAPACITIES {
+            out.push(interned("matmul_cq_a8_gemv", crate::MATMUL_CQ_A8_GEMV, &[("BITS", bits), ("MAXM", cap)]).expect("the A8 CQ GEMV declares BITS and MAXM"));
+        }
+        out.push(interned("matmul_cq_a8_gemm", crate::MATMUL_CQ_A8_GEMM, &[("BITS", bits), ("MAXM", CQ_GEMM_ROWS)]).expect("the A8 CQ product declares BITS and MAXM"));
     }
     out
 }

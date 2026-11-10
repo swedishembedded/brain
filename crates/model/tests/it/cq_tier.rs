@@ -12,7 +12,7 @@
 
 use data::rng::Lcg;
 use gpu_core::{Dispatch, Gpu};
-use model::cq::{padded, Cq, GROUP};
+use model::cq::{a8_quantize_group, padded, Cq, CqActivations, GROUP};
 use model::ops::{cq_kernels, training_kernel_list, Ops, Weight};
 
 const BOOKS: [&[f32]; 3] = [&[-1.51, -0.45, 0.45, 1.51], &[-1.75, -1.05, -0.5, -0.16, 0.16, 0.5, 1.05, 1.75], &[-2.4, -1.84, -1.44, -1.1, -0.8, -0.52, -0.25, 0.0, 0.25, 0.52, 0.8, 1.1, 1.44, 1.84, 2.4, 2.9]];
@@ -148,6 +148,118 @@ fn rotation_kernels_match_the_host_transform() {
         g.submit(&[], &[g.dispatch(g.kernel_index(name).expect("registered"), &[&xb, &out], &params, grid)]);
         let worst = g.read(&out, m * padded(k)).iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
         assert!(worst < 1e-5, "{name} differs from the host rotation by {worst:e}");
+    }
+}
+
+/// The int8 lanes (four to a word, lane 0 in the low byte) and group scales the A8 rotation kernels write.
+fn read_a8_rows(g: &Gpu, q: &gpu_core::DeviceBuffer, scales: &gpu_core::DeviceBuffer, m: usize, kpad: usize) -> (Vec<i8>, Vec<f32>) {
+    let lanes = g.read(q, m * kpad / 4).iter().flat_map(|w| w.to_bits().to_le_bytes()).map(|b| b as i8).collect();
+    (lanes, g.read(scales, m * kpad / GROUP))
+}
+
+#[test]
+fn the_int8_rotation_kernels_equal_the_host_quantiser_bit_for_bit() {
+    let ops = ops();
+    let g = ops.gpu();
+    let (m, k) = (5usize, 200usize);
+    let kpad = padded(k);
+    // One row of exact zeros (scale 1) and one with a single outlier (every other lane rounds to 0 or +-1).
+    let mut x = Lcg::new(78).vec_scaled(m * k, 1.0);
+    x[..k].fill(0.0);
+    x[k + 3] = 400.0;
+    let xb = g.storage_init("x", &x);
+    let rotated = Cq::rotate(&x, m, k);
+    let want: Vec<(Vec<i8>, f32)> = rotated.chunks_exact(GROUP).map(a8_quantize_group).collect();
+    let params = [m as u32, k as u32, kpad as u32, 0];
+    let groups = (m * kpad / GROUP) as u32;
+    let mut variants = vec![("cq_rotate_a8", Dispatch::Threads(groups))];
+    if g.caps().workgroup_reductions {
+        variants.push(("cq_rotate_a8_wg", Dispatch::Workgroups(groups)));
+    }
+    for (name, grid) in variants {
+        let (q, s) = (g.storage((m * kpad / 4) as u64), g.storage(groups as u64));
+        g.submit(&[], &[g.dispatch(g.kernel_index(name).expect("registered"), &[&xb, &q, &s], &params, grid)]);
+        let (lanes, scales) = read_a8_rows(g, &q, &s, m, kpad);
+        for (i, (bytes, scale)) in want.iter().enumerate() {
+            assert_eq!(&lanes[i * GROUP..(i + 1) * GROUP], &bytes[..], "{name}: int8 lanes of group {i}");
+            assert_eq!(scales[i].to_bits(), scale.to_bits(), "{name}: scale of group {i}");
+        }
+    }
+}
+
+#[test]
+fn the_int8_product_kernels_equal_the_host_integer_emulation() {
+    let ops = ops();
+    let g = ops.gpu();
+    let barriers = g.caps().workgroup_reductions;
+    eprintln!("cq a8 kernels on {} (workgroup barriers: {barriers})", g.kind());
+    for bits in [2u32, 3, 4] {
+        let (n, k) = (21usize, 256usize);
+        let mut rng = Lcg::new(0xF0 + u64::from(bits));
+        let cq = Cq::quantize(&rng.vec_scaled(n * k, 1.0), n, k, bits, book(bits)).expect("quantises");
+        let weight = Weight::cq(&ops, "cq", &cq);
+        let Weight::Cq { w, s, book: levels, .. } = &weight else { unreachable!() };
+        for m in [1usize, 3, 8, 9, 33] {
+            let x = rng.vec_scaled(m * k, 1.0);
+            let want = cq.matmul_a8(&x, m);
+            let scale = want.iter().map(|v| v.abs()).fold(0f32, f32::max);
+            let (kpad, groups) = (padded(k), padded(k) / GROUP);
+            let rows: Vec<(Vec<i8>, f32)> = Cq::rotate(&x, m, k).chunks_exact(GROUP).map(a8_quantize_group).collect();
+            let packed: Vec<f32> = rows.iter().flat_map(|(q, _)| q.chunks_exact(4).map(|c| f32::from_bits(u32::from_le_bytes([c[0] as u8, c[1] as u8, c[2] as u8, c[3] as u8])))).collect();
+            let (q, a) = (g.storage_init("q", &packed), g.storage_init("a", &rows.iter().map(|r| r.1).collect::<Vec<_>>()));
+            assert_eq!(packed.len(), m * kpad / 4);
+            assert_eq!(rows.len(), m * groups);
+            let params = [m as u32, kpad as u32, n as u32, 0];
+            let mut variants = vec![(kernels::template::cq_a8_gemm_kernel_name(bits), Dispatch::Threads(n as u32 * (m as u32).div_ceil(kernels::template::CQ_GEMM_ROWS)), true)];
+            if barriers {
+                variants.push((kernels::template::cq_a8_gemv_kernel_name(bits, m as u32), Dispatch::Workgroups((n as u32).div_ceil(kernels::template::CQ_A8_GEMV_COLS) * (m as u32).div_ceil(8)), false));
+            }
+            for (name, grid, same_order) in variants {
+                let y = g.storage((m * n) as u64);
+                let index = g.kernel_index(&name).unwrap_or_else(|| panic!("{name} is registered by cq_kernels"));
+                g.submit(&[], &[g.dispatch(index, &[&q, &a, w, s, levels, &y], &params, grid)]);
+                let got = g.read(&y, m * n);
+                let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max) / scale;
+                eprintln!("{name} m={m}: worst difference from the host emulation {worst:e} of the largest output");
+                // The integer parts are exact; the per-group float terms are identical and added in the host's order by the
+                // barrier-free kernel (bit for bit on the CPU backend, a contracted multiply-add on a GPU compiler may move the last bit);
+                // the cooperative kernel adds the four partial sums of a row in another association (a row of two groups, as here, has
+                // one term per lane and adds in the same order).
+                let bound = if same_order && g.kind() == "cpu" { 0.0 } else { 4e-6 };
+                assert!(worst <= bound, "{name} m={m}: {worst:e} of the largest output (bound {bound:e})");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_int8_mode_is_opt_in_and_runs_through_ops_matmul() {
+    let mut ops = ops();
+    assert_eq!(ops.cq_activations(), CqActivations::F32, "f32 activations unless asked");
+    let (n, k, bits) = (37usize, 200usize, 2u32);
+    let mut rng = Lcg::new(0x1A8);
+    let cq = Cq::quantize(&rng.vec_scaled(n * k, 1.0), n, k, bits, book(bits)).expect("quantises");
+    let weight = Weight::cq(&ops, "cq", &cq);
+    let run = |ops: &Ops, x: &[f32], m: usize| {
+        let g = ops.gpu();
+        let (xb, y) = (g.storage_init("x", x), g.storage((m * n) as u64));
+        let mut steps = Vec::new();
+        ops.matmul(&mut steps, &weight, &ops.act_f32(&xb, 0, m as u32, k as u32), &y, 0);
+        g.submit(&[], &steps);
+        g.read(&y, m * n)
+    };
+    for m in [1usize, 4, 9, 100] {
+        let x = rng.vec_scaled(m * k, 1.0);
+        let f32_mode = run(&ops, &x, m);
+        ops.set_cq_activations(CqActivations::A8);
+        let a8 = run(&ops, &x, m);
+        ops.set_cq_activations(CqActivations::F32);
+        assert_eq!(run(&ops, &x, m), f32_mode, "switching back restores the f32 product");
+        let want = cq.matmul_a8(&x, m);
+        let scale = want.iter().map(|v| v.abs()).fold(0f32, f32::max);
+        let worst = a8.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max) / scale;
+        assert!(worst <= 4e-6, "m={m}: Ops::matmul in A8 mode differs from the host emulation by {worst:e}");
+        assert_ne!(a8, f32_mode, "m={m}: the A8 product is a different (coarser) computation");
     }
 }
 

@@ -398,6 +398,10 @@ pub const COPY_WITHIN: &str = include_str!("../wgsl/copy_within.wgsl");
 pub const CQ_DEQUANT_ROTATED: &str = include_str!("../wgsl/cq_dequant_rotated.wgsl");
 /// `wgsl/cq_rotate.wgsl`
 pub const CQ_ROTATE: &str = include_str!("../wgsl/cq_rotate.wgsl");
+/// `wgsl/cq_rotate_a8.wgsl`
+pub const CQ_ROTATE_A8: &str = include_str!("../wgsl/cq_rotate_a8.wgsl");
+/// `wgsl/cq_rotate_a8_wg.wgsl`
+pub const CQ_ROTATE_A8_WG: &str = include_str!("../wgsl/cq_rotate_a8_wg.wgsl");
 /// `wgsl/cq_rotate_wg.wgsl`
 pub const CQ_ROTATE_WG: &str = include_str!("../wgsl/cq_rotate_wg.wgsl");
 /// `wgsl/crop2d.wgsl`
@@ -774,6 +778,10 @@ pub const MASKED_L1_GRAD: &str = include_str!("../wgsl/masked_l1_grad.wgsl");
 pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
 /// `wgsl/matmul_bf16_gemv.wgsl`
 pub const MATMUL_BF16_GEMV: &str = include_str!("../wgsl/matmul_bf16_gemv.wgsl");
+/// `wgsl/matmul_cq_a8_gemm.wgsl`
+pub const MATMUL_CQ_A8_GEMM: &str = include_str!("../wgsl/matmul_cq_a8_gemm.wgsl");
+/// `wgsl/matmul_cq_a8_gemv.wgsl`
+pub const MATMUL_CQ_A8_GEMV: &str = include_str!("../wgsl/matmul_cq_a8_gemv.wgsl");
 /// `wgsl/matmul_cq_gemm.wgsl`
 pub const MATMUL_CQ_GEMM: &str = include_str!("../wgsl/matmul_cq_gemm.wgsl");
 /// `wgsl/matmul_cq_gemv.wgsl`
@@ -872,12 +880,16 @@ pub const MIRAGE_ATTN_SCORES: &str = include_str!("../wgsl/mirage_attn_scores.wg
 pub const MIRAGE_ATTN_SOFTMAX: &str = include_str!("../wgsl/mirage_attn_softmax.wgsl");
 /// `wgsl/mirage_axpy.wgsl`
 pub const MIRAGE_AXPY: &str = include_str!("../wgsl/mirage_axpy.wgsl");
+/// `wgsl/mirage_band_cols.wgsl`
+pub const MIRAGE_BAND_COLS: &str = include_str!("../wgsl/mirage_band_cols.wgsl");
 /// `wgsl/mirage_chan_fma.wgsl`
 pub const MIRAGE_CHAN_FMA: &str = include_str!("../wgsl/mirage_chan_fma.wgsl");
 /// `wgsl/mirage_conv2d.wgsl`
 pub const MIRAGE_CONV2D: &str = include_str!("../wgsl/mirage_conv2d.wgsl");
 /// `wgsl/mirage_copy_rows.wgsl`
 pub const MIRAGE_COPY_ROWS: &str = include_str!("../wgsl/mirage_copy_rows.wgsl");
+/// `wgsl/mirage_cq_gather.wgsl`
+pub const MIRAGE_CQ_GATHER: &str = include_str!("../wgsl/mirage_cq_gather.wgsl");
 /// `wgsl/mirage_dwconv.wgsl`
 pub const MIRAGE_DWCONV: &str = include_str!("../wgsl/mirage_dwconv.wgsl");
 /// `wgsl/mirage_embed_lanes.wgsl`
@@ -896,16 +908,12 @@ pub const MIRAGE_GRN_APPLY: &str = include_str!("../wgsl/mirage_grn_apply.wgsl")
 pub const MIRAGE_GRN_ENERGY: &str = include_str!("../wgsl/mirage_grn_energy.wgsl");
 /// `wgsl/mirage_grn_scale.wgsl`
 pub const MIRAGE_GRN_SCALE: &str = include_str!("../wgsl/mirage_grn_scale.wgsl");
-/// `wgsl/mirage_cq_gather.wgsl`
-pub const MIRAGE_CQ_GATHER: &str = include_str!("../wgsl/mirage_cq_gather.wgsl");
 /// `wgsl/mirage_hada_mid.wgsl`
 pub const MIRAGE_HADA_MID: &str = include_str!("../wgsl/mirage_hada_mid.wgsl");
 /// `wgsl/mirage_hconv_band_glu.wgsl`
 pub const MIRAGE_HCONV_BAND_GLU: &str = include_str!("../wgsl/mirage_hconv_band_glu.wgsl");
 /// `wgsl/mirage_kron_rows.wgsl`
 pub const MIRAGE_KRON_ROWS: &str = include_str!("../wgsl/mirage_kron_rows.wgsl");
-/// `wgsl/mirage_band_cols.wgsl`
-pub const MIRAGE_BAND_COLS: &str = include_str!("../wgsl/mirage_band_cols.wgsl");
 /// `wgsl/mirage_lane_mean.wgsl`
 pub const MIRAGE_LANE_MEAN: &str = include_str!("../wgsl/mirage_lane_mean.wgsl");
 /// `wgsl/mirage_mean_h.wgsl`
@@ -1811,6 +1819,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("copy_within", COPY_WITHIN),
     ("cq_dequant_rotated", CQ_DEQUANT_ROTATED),
     ("cq_rotate", CQ_ROTATE),
+    ("cq_rotate_a8", CQ_ROTATE_A8),
+    ("cq_rotate_a8_wg", CQ_ROTATE_A8_WG),
     ("cq_rotate_wg", CQ_ROTATE_WG),
     ("crop2d", CROP2D),
     ("ct_state_scan", CT_STATE_SCAN),
@@ -1993,6 +2003,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("masked_l1_grad", MASKED_L1_GRAD),
     ("matmul", MATMUL),
     ("matmul_bf16_gemv", MATMUL_BF16_GEMV),
+    ("matmul_cq_a8_gemm", MATMUL_CQ_A8_GEMM),
+    ("matmul_cq_a8_gemv", MATMUL_CQ_A8_GEMV),
     ("matmul_cq_gemm", MATMUL_CQ_GEMM),
     ("matmul_cq_gemv", MATMUL_CQ_GEMV),
     ("matmul_dw", MATMUL_DW),

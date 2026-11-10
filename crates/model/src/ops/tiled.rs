@@ -134,13 +134,16 @@ pub(super) enum Scratch {
     DecodeBf16,
     /// One `[m, tile]` product tile (a forward's output tile, or an input gradient's `dy` tile).
     ProductTile,
-    /// The Walsh-rotated activation rows of a rotated-codebook product (`[m, kpad]`).
+    /// The Walsh-rotated activation rows of a rotated-codebook product (`[m, kpad]`); in the A8 mode the int8 lanes of
+    /// those rows, four to a word.
     Rotated,
+    /// The per-group scales of the int8 rotated activations of an A8 rotated-codebook product.
+    ActScales,
 }
 
 /// The buffers of [`Scratch`], each with its size in words; grown on demand, never shrunk.
 #[derive(Default)]
-pub(super) struct ScratchBuffers([Option<(u64, DeviceBuffer)>; 4]);
+pub(super) struct ScratchBuffers([Option<(u64, DeviceBuffer)>; 5]);
 
 /// The scope in which [`Ops`] decodes a frozen quantized weight once however many products read it; dropping
 /// the outermost guard releases the decoded copies.
@@ -277,7 +280,8 @@ impl Ops {
     /// `y[m, n] = act @ W^T` for a rotated-codebook weight, reading the stored indices in place: the activation
     /// groups are rotated once into a reused scratch (`cq_rotate`), then the selector's first candidate runs (the
     /// cooperative GEMV for few rows where the device has workgroup barriers, the barrier-free row-blocked product
-    /// otherwise). The weight is never expanded.
+    /// otherwise). The weight is never expanded. With [`crate::cq::CqActivations::A8`] the rotation also quantises each
+    /// group to int8 and the integer variants of the same kernels run, on the same selector rule.
     pub(super) fn cq_product(&self, s: &mut Vec<Step>, w: &Weight, act: &Act, y: &DeviceBuffer, yoff: u64) {
         let Weight::Cq { w: codes, s: norms, book, n, k, bits } = w else { unreachable!("Ops::cq_product: not a CQ weight") };
         let (m, kpad) = (act.m, crate::cq::padded(*k as usize) as u32);
@@ -286,18 +290,33 @@ impl Ops {
                 panic!("Ops: kernel '{name}' is not registered on this Gpu -- products over CQ weights need model::ops::cq_kernels() in the kernel list")
             })
         };
-        let rotated = self.scratch(Scratch::Rotated, m as u64 * kpad as u64);
+        let a8 = self.cq_activations == crate::cq::CqActivations::A8;
         let groups = m * (kpad / crate::cq::GROUP as u32);
-        if self.caps.workgroup_reductions {
+        // f32 mode: `[m, kpad]` rotated activations. A8 mode: the same rows as int8 (four lanes per word) and one scale per group.
+        let rotated = self.scratch(Scratch::Rotated, if a8 { m as u64 * kpad as u64 / 4 } else { m as u64 * kpad as u64 });
+        let scales = a8.then(|| self.scratch(Scratch::ActScales, groups as u64));
+        let rotate_params = [m, *k, kpad, act.xr0];
+        match (&scales, self.caps.workgroup_reductions) {
             // One workgroup per group: a few activation rows would otherwise leave the device on a handful of threads.
-            s.push(self.gpu.dispatch(kernel("cq_rotate_wg"), &[&act.x, &rotated], &[m, *k, kpad, act.xr0], gpu_core::Dispatch::Workgroups(groups)));
-        } else {
-            s.push(self.gpu.step(kernel("cq_rotate"), &[&act.x, &rotated], &[m, *k, kpad, act.xr0], groups));
+            (None, true) => s.push(self.gpu.dispatch(kernel("cq_rotate_wg"), &[&act.x, &rotated], &rotate_params, gpu_core::Dispatch::Workgroups(groups))),
+            (None, false) => s.push(self.gpu.step(kernel("cq_rotate"), &[&act.x, &rotated], &rotate_params, groups)),
+            (Some(scales), true) => s.push(self.gpu.dispatch(kernel("cq_rotate_a8_wg"), &[&act.x, &rotated, scales], &rotate_params, gpu_core::Dispatch::Workgroups(groups))),
+            (Some(scales), false) => s.push(self.gpu.step(kernel("cq_rotate_a8"), &[&act.x, &rotated, scales], &rotate_params, groups)),
         }
         let shape = OpShape { m, n: *n, k: kpad, dtype: w.dtype() };
         let params = [m, kpad, *n, 0];
         let out = (yoff, m as u64 * *n as u64);
         let first = select::candidates(Op::MatMul, shape, &self.caps).first().copied().unwrap_or(KernelVariant::Reference);
+        if let Some(scales) = &scales {
+            // No dense A8 product exists (the weight would be expanded to f32 and the integer arithmetic lost), so the
+            // many-row regime stays on the barrier-free kernel.
+            let (name, grid) = match first {
+                KernelVariant::WorkgroupPerOutput => (kernels::template::cq_a8_gemv_kernel_name(*bits, m), gpu_core::Dispatch::Workgroups(n.div_ceil(kernels::template::CQ_A8_GEMV_COLS) * m.div_ceil(kernels::template::GEMV_ROW_CAPACITIES[3]))),
+                _ => (kernels::template::cq_a8_gemm_kernel_name(*bits), gpu_core::Dispatch::Threads(*n * m.div_ceil(kernels::template::CQ_GEMM_ROWS))),
+            };
+            s.push(self.gpu.dispatch_sliced(kernel(&name), &[&rotated, scales, codes, norms, book, y], &[WHOLE, WHOLE, WHOLE, WHOLE, WHOLE, out], &params, grid));
+            return;
+        }
         if first == KernelVariant::RegisterTiled {
             // Many rows: build the weight in the rotated domain (a lookup per stored index, no transform) and run
             // the dense GEMM against the rotated activations, which reads the weight once for all of the rows.

@@ -63,6 +63,27 @@ pub const fn padded(k: usize) -> usize {
     k.div_ceil(GROUP) * GROUP
 }
 
+/// How a rotated-codebook product reads its activations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum CqActivations {
+    /// The rotated activations stay f32: the full-precision product, the default.
+    #[default]
+    F32,
+    /// W2A8, as the vendor engine runs its CQ products: each rotated 128-lane group is quantised to int8 with one scale
+    /// ([`a8_quantize_group`]) and the group dot products accumulate in integers. Lower precision, so only on request.
+    A8,
+}
+
+impl CqActivations {
+    /// The name a person writes for it.
+    pub fn name(self) -> &'static str {
+        match self {
+            CqActivations::F32 => "f32",
+            CqActivations::A8 => "a8",
+        }
+    }
+}
+
 /// In-place unnormalised natural-order Walsh-Hadamard transform (`x.len()` a power of two).
 pub fn walsh_natural(x: &mut [f32]) {
     let n = x.len();
@@ -302,6 +323,58 @@ impl Cq {
     }
 }
 
+/// The engine's activation scale step: `1 / 127` as f32 (`scale = absmax * A8_STEP`, not a division).
+pub const A8_STEP: f32 = 1.0 / 127.0;
+
+/// Round half away from zero (the vendor rounds with `fcvtas`; `f32::round` is the same rule).
+fn round_away(v: f32) -> f32 {
+    v.round()
+}
+
+/// The integer lookup table of a codebook and its scale, as the vendor engine builds it: `scale = max|level| / 127` and
+/// `table[i] = round(level[i] / scale)` (half away from zero), so a group's dot product is exact in integers.
+pub fn a8_table(book: &[f32]) -> (Vec<i8>, f32) {
+    let scale = book.iter().fold(0f32, |m, v| m.max(v.abs())) / 127.0;
+    (book.iter().map(|&v| round_away(v / scale).clamp(-128.0, 127.0) as i8).collect(), scale)
+}
+
+/// One rotated 128-lane activation group as int8 with a single scale: `scale = absmax * A8_STEP` (1 when the group is
+/// all zeros), `q = round(x * (1 / scale))` half away from zero, saturated to int8.
+pub fn a8_quantize_group(group: &[f32]) -> (Vec<i8>, f32) {
+    let absmax = group.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let scale = if absmax > 0.0 { absmax * A8_STEP } else { 1.0 };
+    let inv = 1.0 / scale;
+    (group.iter().map(|&v| round_away(v * inv).clamp(-128.0, 127.0) as i8).collect(), scale)
+}
+
+impl Cq {
+    /// `y[m, n] = x[m, k] W^T` the way the vendor engine's W2A8 products compute it, evaluated exactly on the host: the
+    /// activation groups are rotated, quantised to int8 with one scale per group ([`a8_quantize_group`]), every
+    /// group's dot product with the integer codebook table ([`a8_table`]) is an exact `i32`, and a group contributes
+    /// `((table_scale * norm) * f32(dot)) * activation_scale`, the groups added in order. The device kernels
+    /// `matmul_cq_a8_gemm` and `matmul_cq_a8_gemv` compute the same; the integer parts agree bit for bit, the sum of
+    /// the per-group terms differs from this order only by f32 reassociation on a cooperative kernel.
+    pub fn matmul_a8(&self, x: &[f32], m: usize) -> Vec<f32> {
+        let xr = Cq::rotate(x, m, self.k);
+        let (kpad, groups) = (self.kpad(), self.groups());
+        let (table, table_scale) = a8_table(&self.book);
+        let quantised: Vec<(Vec<i8>, f32)> = (0..m * groups).map(|i| a8_quantize_group(&xr[(i / groups) * kpad + (i % groups) * GROUP..][..GROUP])).collect();
+        let mut y = vec![0f32; m * self.n];
+        for r in 0..self.n {
+            for g in 0..groups {
+                let unit = table_scale * self.norm(r, g);
+                let codes: Vec<i32> = (0..GROUP).map(|j| i32::from(table[self.index(r, g * GROUP + j)])).collect();
+                for i in 0..m {
+                    let (q, scale) = &quantised[i * groups + g];
+                    let dot: i32 = codes.iter().zip(q).map(|(c, &q)| c * i32::from(q)).sum();
+                    y[i * self.n + r] += unit * dot as f32 * scale;
+                }
+            }
+        }
+        y
+    }
+}
+
 /// Index of the level of ascending `book` nearest to `v`.
 fn nearest(book: &[f32], v: f32) -> usize {
     let mut best = 0;
@@ -388,6 +461,57 @@ mod tests {
         assert_eq!(both.rows(1, 2).dequantize(), a.dequantize()[200..].to_vec());
         let other = Cq::quantize(&rng.vec_scaled(200, 1.0), 1, 200, 3, &book(3)).expect("quantises");
         assert!(Cq::concat_rows(&[&a, &other]).is_err(), "different index widths do not stack");
+    }
+
+    /// The vendor engine's integer tables, read from its memory while it served the released archive (`cq_row4_dp`
+    /// and `project_batch_neon_dequant` hold them next to their scales).
+    #[test]
+    fn the_integer_tables_are_the_vendor_engines() {
+        let released: [(&[f32], &[i8]); 3] = [
+            (&[-0.133_172_14, -0.039_902_09, 0.040_035_28, 0.133_460_45], &[-127, -38, 38, 127]),
+            (&[-0.189_261_36, -0.117_884_99, -0.066_149_68, -0.021_013_46, 0.022_101_03, 0.066_785_07, 0.118_262_07, 0.189_826_03], &[-127, -79, -44, -14, 15, 45, 79, 127]),
+            (
+                &[-0.239_531_55, -0.180_706_06, -0.140_957_93, -0.109_012_56, -0.081_512_96, -0.056_527_65, -0.032_939_15, -0.010_116_11, 0.012_710_8, 0.035_707_92, 0.059_458_26, 0.084_977_02, 0.112_741_62, 0.144_696_91, 0.184_239, 0.242_273_7],
+                &[-126, -95, -74, -57, -43, -30, -17, -5, 7, 19, 31, 45, 59, 76, 97, 127],
+            ),
+        ];
+        for (book, want) in released {
+            assert_eq!(a8_table(book).0, want, "{}-level table", book.len());
+        }
+        assert_eq!(a8_table(released[2].0).1.to_bits(), 989_465_262, "the 4-bit table scale is max|level| / 127 in f32");
+        assert_eq!(A8_STEP.to_bits(), 0x3c01_0204, "the engine multiplies the group's absmax by the f32 nearest 1/127");
+    }
+
+    #[test]
+    fn a_group_quantises_with_its_absmax_and_rounds_half_away() {
+        let mut group = [0f32; GROUP];
+        group[0] = 127.0;
+        group[1] = -127.0;
+        group[2] = 0.5;
+        group[3] = -0.5;
+        group[4] = 1.49;
+        let (q, scale) = a8_quantize_group(&group);
+        assert_eq!(scale, 127.0 * A8_STEP);
+        assert_eq!(&q[..5], &[127, -127, 1, -1, 1], "0.5 -> 1 and -0.5 -> -1 (half away from zero), the absmax maps to +-127");
+        let (z, zs) = a8_quantize_group(&[0.0; GROUP]);
+        assert!(z.iter().all(|&v| v == 0) && zs == 1.0, "an all-zero group has scale 1");
+    }
+
+    #[test]
+    fn the_a8_product_is_close_to_the_f32_product_and_exact_in_its_integer_part() {
+        for (bits, k) in [(2u32, 256usize), (3, 200), (4, 128)] {
+            let (n, m) = (9, 3);
+            let mut rng = Lcg::new(u64::from(bits) * 57);
+            let cq = Cq::quantize(&rng.vec_scaled(n * k, 1.0), n, k, bits, &book(bits)).expect("quantises");
+            let x = rng.vec_scaled(m * k, 1.0);
+            let (a8, f32_product) = (cq.matmul_a8(&x, m), cq.matmul_rotated(&x, m));
+            // int8 activations: about 1/255 of a group's range per lane, the dot product averages it out.
+            let scale: f32 = f32_product.iter().map(|v| v * v).sum::<f32>().sqrt() / (f32_product.len() as f32).sqrt();
+            for (a, f) in a8.iter().zip(&f32_product) {
+                assert!((a - f).abs() < 0.05 * scale + 1e-3, "{bits}-bit k={k}: A8 {a} vs f32 {f} (rms {scale})");
+            }
+            assert_ne!(a8, f32_product, "the rounding is not a no-op");
+        }
     }
 
     #[test]

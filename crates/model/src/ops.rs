@@ -536,7 +536,7 @@ pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
 pub fn cq_kernels() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
-        let mut list = vec![("cq_rotate", kernels::CQ_ROTATE), ("cq_rotate_wg", kernels::CQ_ROTATE_WG)];
+        let mut list = vec![("cq_rotate", kernels::CQ_ROTATE), ("cq_rotate_wg", kernels::CQ_ROTATE_WG), ("cq_rotate_a8", kernels::CQ_ROTATE_A8), ("cq_rotate_a8_wg", kernels::CQ_ROTATE_A8_WG)];
         list.extend(kernels::template::cq_variants());
         list
     })
@@ -1453,6 +1453,8 @@ pub struct Ops {
     gemm: LibraryGemmProvider,
     /// The precision of the activation operand quantized-weight products feed ([`Ops::set_linear_activations`]).
     linear_activations: crate::policy::LinearActivations,
+    /// How rotated-codebook products read their activations ([`Ops::set_cq_activations`]).
+    cq_activations: crate::cq::CqActivations,
     /// Bytes of decoded f32 scratch one tile of a quantized product may use (see [`tiled`]).
     tile_budget_bytes: u64,
     /// A tiny buffer bound to the `weight_decode` bindings a tier does not use.
@@ -1573,7 +1575,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default(), scratch: Default::default(), shared_quant: Default::default() })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), cq_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default(), scratch: Default::default(), shared_quant: Default::default() })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
@@ -1590,6 +1592,18 @@ impl Ops {
     /// [`crate::policy::LinearActivations::AUTO`]. FP8 and bf16 weights ignore it.
     pub fn set_linear_activations(&mut self, choice: crate::policy::LinearActivations) {
         self.linear_activations = choice;
+    }
+
+    /// Choose how rotated-codebook (`Weight::Cq`) products read their activations: f32 after the Walsh rotation (the
+    /// default) or int8 with one scale per 128-lane group and integer group dot products, as the vendor engine runs them
+    /// ([`crate::cq::CqActivations::A8`]). Other weight tiers ignore it. Lower precision, so never the default.
+    pub fn set_cq_activations(&mut self, choice: crate::cq::CqActivations) {
+        self.cq_activations = choice;
+    }
+
+    /// The setting of [`Self::set_cq_activations`].
+    pub fn cq_activations(&self) -> crate::cq::CqActivations {
+        self.cq_activations
     }
 
     /// The setting of [`Self::set_linear_activations`].
