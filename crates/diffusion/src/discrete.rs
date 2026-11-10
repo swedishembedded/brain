@@ -61,8 +61,8 @@ pub enum Prediction {
     Epsilon,
     /// The network predicts `x_0` directly.
     Sample,
-    /// The network predicts `v = sqrt(ᾱ)·ε - sqrt(1-ᾱ)·x_0` (SD 2.1-v, SDXL
-    /// refiner-style distillations).
+    /// The network predicts `v = sqrt(ᾱ)·ε - sqrt(1-ᾱ)·x_0` (SD 2.1 at 768
+    /// pixels).
     VPrediction,
 }
 

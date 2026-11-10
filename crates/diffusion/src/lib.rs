@@ -4,14 +4,14 @@
 //! Model-agnostic diffusion core for brain's image-generation models.
 //!
 //! This crate owns the parts of a diffusion model that do **not** depend on the
-//! denoiser architecture: the noise/timestep schedule, the sampler that turns a
-//! sequence of model outputs into a clean latent, the training-time timestep
-//! sampling, the flow-matching (rectified-flow) loss, and classifier-free
-//! guidance. Per-model DiT crates (`s3dit`, `flux2`, `hidream`) call into this
-//! the same way every model calls the shared `model` trainer — the analogue of
-//! how `bench` is model-agnostic.
+//! denoiser architecture: the noise/timestep schedule and the samplers that
+//! turn a sequence of model outputs into a clean latent. Per-model crates
+//! (`s3dit`, `flux1`, `flux2`, `sdxlunet` and others) call into it; the training
+//! objectives (the flow-matching loss and its timestep sampling) and the
+//! classifier-free guidance combine live in those crates, next to the
+//! denoiser they drive.
 //!
-//! Two scheduler families live here, one per forward process:
+//! The schedulers, by forward process:
 //!
 //! * [`scheduler`] — **flow matching / rectified flow** ([`FlowMatchEulerScheduler`],
 //!   Z-Image and FLUX.2): `x_σ = (1-σ)·x_0 + σ·ε`, the denoiser predicts a
@@ -27,10 +27,11 @@
 //!   [`scheduler`], but the update reuses the previous steps' model outputs
 //!   instead of integrating each step independently.
 //!
-//! Both are deliberately pure host math (no `gpu_core` dependency) so they are
-//! trivially unit-testable and reusable on CPU and GPU paths alike; the
-//! device-touching pieces (velocity loss, CFG combine) land alongside as they
-//! are wired to the denoiser.
+//! [`restore`] holds SUPIR's restoration sampler math on the same discrete
+//! chain.
+//!
+//! All of it is deliberately pure host math (no `gpu_core` dependency) so it is
+//! trivially unit-testable and reusable on CPU and GPU paths alike.
 
 pub mod discrete;
 pub mod flowsolvers;
