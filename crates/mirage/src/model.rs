@@ -15,6 +15,8 @@
 use std::fmt;
 use std::path::Path;
 
+use model::cq::CqActivations;
+
 use crate::cact::{CactError, CactFile};
 use crate::cactmap::CactModel;
 use crate::decoder::generate::{absent_references, generate, GenerateParams};
@@ -97,6 +99,65 @@ impl WeightSource {
     }
 }
 
+/// The numeric precision a model is served at: which stored weights, and how the packed ones read their activations.
+/// The `precision` parameter of the capability, the residency adapter's instance key and the CLI flag all name it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Precision {
+    /// `fp32`: the safetensors weights, f32 activations. The default whenever the checkpoint exists.
+    #[default]
+    Fp32,
+    /// `cq`: the packed deployment archive with f32 activations after the rotation.
+    Cq,
+    /// `cq-a8`: the packed archive with int8 activations (one scale per rotated 128-lane group, integer group dot
+    /// products), as the vendor engine runs it. Lower precision than `cq`, so only on request.
+    CqA8,
+}
+
+impl Precision {
+    /// Every precision, in the order the parameter lists them.
+    pub const ALL: [Precision; 3] = [Precision::Fp32, Precision::Cq, Precision::CqA8];
+
+    /// The name a request writes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Precision::Fp32 => "fp32",
+            Precision::Cq => "cq",
+            Precision::CqA8 => "cq-a8",
+        }
+    }
+
+    /// The precision named `name`.
+    pub fn parse(name: &str) -> Option<Precision> {
+        Precision::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    /// The stored weights this precision loads.
+    pub fn source(self) -> WeightSource {
+        match self {
+            Precision::Fp32 => WeightSource::Safetensors,
+            Precision::Cq | Precision::CqA8 => WeightSource::Cact,
+        }
+    }
+
+    /// How its packed matrices read their activations.
+    pub fn activations(self) -> CqActivations {
+        match self {
+            Precision::CqA8 => CqActivations::A8,
+            Precision::Fp32 | Precision::Cq => CqActivations::F32,
+        }
+    }
+}
+
+impl From<WeightSource> for Precision {
+    /// The precision with f32 activations that loads `source`.
+    fn from(source: WeightSource) -> Precision {
+        match source {
+            WeightSource::Safetensors => Precision::Fp32,
+            WeightSource::Cact => Precision::Cq,
+        }
+    }
+}
+
 /// A model directory's weights, the tokenizer blob and the reader charset.
 pub struct Loaded {
     /// The tensors (CQ matrices dequantised) and, for [`WeightSource::Cact`], the packed matrices.
@@ -126,7 +187,7 @@ pub fn load_dir(dir: &Path, source: WeightSource) -> Result<Loaded, ModelError> 
             let sidecar = crate::config::CheckpointConfig::from_json(&std::fs::read_to_string(&config_path).map_err(|e| ModelError::Request(format!("{}: {e}", config_path.display())))?).map_err(|e| ModelError::Request(e.to_string()))?;
             let cact = archive(&sidecar.architecture)?;
             let metadata = import::Metadata { source_sha256: sidecar.source_checkpoint_sha256.clone(), step: sidecar.training_step, format: import::FORMAT.to_string() };
-            let ck = Checkpoint { config: sidecar.architecture, metadata, tensors: cact.canonical_tensors()?, packed: cact.packed_matrices()? };
+            let ck = Checkpoint { config: sidecar.architecture, metadata, tensors: cact.canonical_tensors()?, packed: cact.packed_matrices()?, cq_activations: CqActivations::F32 };
             (ck, cact)
         }
     };
@@ -137,7 +198,14 @@ pub fn load_dir(dir: &Path, source: WeightSource) -> Result<Loaded, ModelError> 
     Ok(Loaded { tokenizer: cact.tokenizer_blob()?.to_vec(), charset: cact.charset()?, checkpoint: ck })
 }
 
-/// Quantise the FP32 checkpoint in `dir` (with its adapter folded in, if it holds one) into the deployment archive in
+/// [`load_dir`] at `precision`: the weights it names, with its activation mode recorded for the host paths.
+pub fn load_precision(dir: &Path, precision: Precision) -> Result<Loaded, ModelError> {
+    let mut loaded = load_dir(dir, precision.source())?;
+    loaded.checkpoint.cq_activations = precision.activations();
+    Ok(loaded)
+}
+
+/// Quantise the FP32 checkpoint in `dir' (with its adapter folded in, if it holds one) into the deployment archive in
 /// `out`, next to a copy of `config.json` so `out` loads like any model directory with [`WeightSource::Cact`].
 ///
 /// The archive's plan (which tensors are CQ at which width, the codebooks, the derived entries and the tokenizer) is
@@ -199,7 +267,12 @@ impl Mirage {
 
     /// [`Mirage::open`] from the weights `source` names.
     pub fn open_with(dir: &Path, source: WeightSource) -> Result<Mirage, ModelError> {
-        let loaded = load_dir(dir, source)?;
+        Mirage::open_precision(dir, source.into())
+    }
+
+    /// [`Mirage::open`] at `precision`.
+    pub fn open_precision(dir: &Path, precision: Precision) -> Result<Mirage, ModelError> {
+        let loaded = load_precision(dir, precision)?;
         Mirage::new(&loaded.checkpoint, &loaded.tokenizer, loaded.charset)
     }
 

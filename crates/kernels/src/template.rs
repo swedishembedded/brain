@@ -342,8 +342,8 @@ pub fn cq_dequant_kernel_name(bits: u32) -> String {
     variant_name("cq_dequant_rotated", &[("BITS", bits)])
 }
 
-/// Weight rows one workgroup of `matmul_cq_a8_gemv` serves (four threads each; a thread owns whole groups).
-pub const CQ_A8_GEMV_COLS: u32 = 16;
+/// Weight rows one workgroup of `matmul_cq_a8_gemv` serves (sixteen threads each).
+pub const CQ_A8_GEMV_COLS: u32 = 4;
 
 /// The registered name of the decode-regime A8 CQ GEMV carrying up to `rows` activation rows at `bits`-wide indices.
 pub fn cq_a8_gemv_kernel_name(bits: u32, rows: u32) -> String {

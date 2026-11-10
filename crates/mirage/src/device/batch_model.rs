@@ -167,6 +167,13 @@ impl MirageModel {
         Ok(model)
     }
 
+    /// The model with its packed matrices reading `activations` (`CqActivations::A8` is the opt-in int8 precision).
+    #[must_use]
+    pub fn with_cq_activations(mut self, activations: model::cq::CqActivations) -> MirageModel {
+        self.dev.set_cq_activations(activations);
+        self
+    }
+
     /// Device bytes the model's weights and constants hold, by the backend's own allocation accounting (`None` on a
     /// backend that does not account). Measured around the upload, so it includes every table and kernel tensor.
     pub fn resident_bytes(&self) -> Option<u64> {

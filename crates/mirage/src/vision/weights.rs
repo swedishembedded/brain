@@ -17,12 +17,13 @@ use crate::import::{Checkpoint, PackedMatrices, Tensor};
 pub struct Weights<'a> {
     tensors: &'a BTreeMap<String, Tensor>,
     packed: &'a PackedMatrices,
+    cq_activations: model::cq::CqActivations,
 }
 
 impl<'a> Weights<'a> {
     /// View `ck`'s tensors.
     pub fn new(ck: &'a Checkpoint) -> Weights<'a> {
-        Weights { tensors: &ck.tensors, packed: &ck.packed }
+        Weights { tensors: &ck.tensors, packed: &ck.packed, cq_activations: ck.cq_activations }
     }
 
     fn tensor(&self, name: &str) -> &'a Tensor {
@@ -51,15 +52,20 @@ impl<'a> Weights<'a> {
         self.packed.get(&(name.to_string(), layer)).filter(|c| c.n == out && c.k == inn).cloned()
     }
 
+    /// `l` with its packed form (if it has one) multiplied the way this checkpoint asks for.
+    pub fn with_activations(&self, l: Linear) -> Linear {
+        Linear { cq_activations: self.cq_activations, ..l }
+    }
+
     /// A Flax dense kernel `[in, out]` as a [`Linear`].
     pub fn linear(&self, name: &str) -> Linear {
         let t = self.tensor(name);
         assert_eq!(t.shape.len(), 2, "`{name}` is not a matrix");
-        Linear { cq: self.packed(name, None, t.shape[1], t.shape[0]), ..Linear::from_flax(&t.data, t.shape[0], t.shape[1]) }
+        self.with_activations(Linear { cq: self.packed(name, None, t.shape[1], t.shape[0]), ..Linear::from_flax(&t.data, t.shape[0], t.shape[1]) })
     }
 
     /// Layer `layer` of a stacked Flax dense kernel (`[in, out]` per layer) as a [`Linear`].
     pub fn layer_linear(&self, name: &str, layer: usize, inn: usize, out: usize) -> Linear {
-        Linear { cq: self.packed(name, Some(layer), out, inn), ..Linear::from_flax(self.layer(name, layer), inn, out) }
+        self.with_activations(Linear { cq: self.packed(name, Some(layer), out, inn), ..Linear::from_flax(self.layer(name, layer), inn, out) })
     }
 }

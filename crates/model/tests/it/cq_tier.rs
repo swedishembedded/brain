@@ -193,9 +193,10 @@ fn the_int8_product_kernels_equal_the_host_integer_emulation() {
     let g = ops.gpu();
     let barriers = g.caps().workgroup_reductions;
     eprintln!("cq a8 kernels on {} (workgroup barriers: {barriers})", g.kind());
-    for bits in [2u32, 3, 4] {
-        let (n, k) = (21usize, 256usize);
-        let mut rng = Lcg::new(0xF0 + u64::from(bits));
+    // 700 is six groups and a partial one (two rounds of the cooperative kernel's four group slots).
+    for (bits, k) in [(2u32, 256usize), (3, 256), (4, 256), (2, 700), (4, 700)] {
+        let n = 21usize;
+        let mut rng = Lcg::new(0xF0 + u64::from(bits) + k as u64);
         let cq = Cq::quantize(&rng.vec_scaled(n * k, 1.0), n, k, bits, book(bits)).expect("quantises");
         let weight = Weight::cq(&ops, "cq", &cq);
         let Weight::Cq { w, s, book: levels, .. } = &weight else { unreachable!() };
@@ -220,13 +221,12 @@ fn the_int8_product_kernels_equal_the_host_integer_emulation() {
                 g.submit(&[], &[g.dispatch(index, &[&q, &a, w, s, levels, &y], &params, grid)]);
                 let got = g.read(&y, m * n);
                 let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max) / scale;
-                eprintln!("{name} m={m}: worst difference from the host emulation {worst:e} of the largest output");
-                // The integer parts are exact; the per-group float terms are identical and added in the host's order by the
-                // barrier-free kernel (bit for bit on the CPU backend, a contracted multiply-add on a GPU compiler may move the last bit);
-                // the cooperative kernel adds the four partial sums of a row in another association (a row of two groups, as here, has
-                // one term per lane and adds in the same order).
+                eprintln!("{name} k={k} m={m}: worst difference from the host emulation {worst:e} of the largest output");
+                // The integer parts are exact and the per-group float terms identical. The barrier-free kernel adds them in the
+                // host's order (bit for bit on the CPU backend; a GPU compiler may contract a multiply-add and move the last
+                // bit); the cooperative kernel adds a row of more than four groups in four interleaved partial sums.
                 let bound = if same_order && g.kind() == "cpu" { 0.0 } else { 4e-6 };
-                assert!(worst <= bound, "{name} m={m}: {worst:e} of the largest output (bound {bound:e})");
+                assert!(worst <= bound, "{name} k={k} m={m}: {worst:e} of the largest output (bound {bound:e})");
             }
         }
     }

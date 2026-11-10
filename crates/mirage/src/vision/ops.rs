@@ -27,6 +27,9 @@ pub struct Linear {
     /// The stored rotated-codebook form of `wt` when the model was loaded from a deployment archive in its packed
     /// precision; `wt` holds the same values dequantised, so the host paths never look at this.
     pub cq: Option<std::sync::Arc<model::cq::Cq>>,
+    /// With [`model::cq::CqActivations::A8`] a linear that has a packed form is multiplied from it with int8
+    /// activations (`Cq::matmul_a8`), the host twin of the device's A8 products.
+    pub cq_activations: model::cq::CqActivations,
 }
 
 impl Linear {
@@ -39,7 +42,7 @@ impl Linear {
                 wt[o * inn + i] = kernel[i * out + o];
             }
         }
-        Linear { wt, inn, out, cq: None }
+        Linear { wt, inn, out, cq: None, cq_activations: Default::default() }
     }
 
     /// `[rows, in] -> [rows, out]`.
@@ -47,7 +50,10 @@ impl Linear {
         if rows == 0 {
             return Vec::new();
         }
-        hostmath::linear_rows(x, &self.wt, rows, self.inn, self.out)
+        match (&self.cq, self.cq_activations) {
+            (Some(cq), model::cq::CqActivations::A8) => cq.matmul_a8(x, rows),
+            _ => hostmath::linear_rows(x, &self.wt, rows, self.inn, self.out),
+        }
     }
 
     /// [`Linear::apply`] plus a per-output bias.

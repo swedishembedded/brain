@@ -5,7 +5,7 @@
 // our services by sending an email to info@swedishembedded.com.
 
 // @what  Decode-regime product of a CQ2/CQ3/CQ4 weight read in place against int8 rotated activation rows with integer group dot products, MAXM rows per workgroup - the cooperative form of matmul_cq_a8_gemm
-// @how   one 64-thread workgroup per (sixteen weight rows, block of MAXM activation rows), four threads per row each own whole 128-lane groups, the int8 table built once per workgroup, an ordered fold of the four partial sums behind a second barrier
+// @how   one 64-thread workgroup per (four weight rows, block of MAXM activation rows), sixteen threads per row each take a 32-lane quarter of four groups at a time, the int8 table built once per workgroup, the four quarter dot products of a group added as integers in workgroup memory behind barriers
 // @opt   4
 // @cpu   no
 // @gpu   yes
@@ -13,10 +13,12 @@
 // @quant cq
 // @dtype f32
 //
-// A group's integer dot product must not be split across threads (its float scale is applied once per group), so a thread
-// owns whole groups: thread `lane` of a row takes groups `lane, lane + 4, ...`, and the four partial sums of a row are
-// added in lane order by one thread. Each group's term is bit-identical to `matmul_cq_a8_gemm`'s; only the order the
-// terms are added in differs (f32 reassociation). More than MAXM rows run as several workgroups per row group, as in
+// A group's integer dot product must be complete before its float scale is applied once, so the four 32-lane quarters
+// of a group (`BITS` words each, read coalesced by consecutive threads) are summed as exact integers through workgroup
+// memory, and the thread owning the group's first quarter adds the group's term: `((table_scale * norm) * f32(dot)) *
+// act_scale`, bit-identical to `matmul_cq_a8_gemm`'s. Four groups are in flight per row; their terms and the four
+// slots' partial sums are added in slot order, so a row of at most four groups sums in the host's order and a longer one
+// differs from it by f32 reassociation only. More than MAXM rows run as several workgroups per row group, as in
 // `matmul_cq_gemv`. BITS and MAXM are template constants.
 //
 //   params : m, kpad, n, 0
@@ -41,11 +43,13 @@ const BITS: u32 = 2u;
 const MAXM: u32 = 8u;
 const GROUP: u32 = 128u;
 const LEVELS: u32 = 1u << BITS;
-const LANES: u32 = 4u;
-const COLS: u32 = 16u;
+const LANES: u32 = 16u;
+const COLS: u32 = 4u;
+const SLOTS: u32 = 4u;
 
 var<workgroup> table: array<i32, 16>;
 var<workgroup> table_scale_shared: array<f32, 1>;
+var<workgroup> quarter_dots: array<i32, 64u * MAXM>;
 var<workgroup> partial: array<f32, 64u * MAXM>;
 
 fn f16_to_f32(h: u32) -> f32 {
@@ -93,31 +97,44 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     }
     workgroupBarrier();
     let table_scale = table_scale_shared[0];
+    let quarter = lane % 4u;
+    let slot = lane / 4u;
     var acc: array<f32, MAXM>;
     for (var r = 0u; r < MAXM; r = r + 1u) { acc[r] = 0.0; }
-    if (live) {
-        for (var g = lane; g < groups; g = g + LANES) {
-            let flat = col * groups + g;
-            let unit = table_scale * f16_to_f32((s[flat >> 1u] >> ((flat & 1u) * 16u)) & 0xFFFFu);
-            var dot: array<i32, MAXM>;
-            for (var r = 0u; r < MAXM; r = r + 1u) { dot[r] = 0; }
-            let gw = col * row_words + g * 4u * BITS;
-            for (var j = 0u; j < GROUP; j = j + 1u) {
+    // Every thread runs every round (the barriers are uniform); a thread past the last group adds zeros.
+    for (var round = 0u; round < (groups + SLOTS - 1u) / SLOTS; round = round + 1u) {
+        let g = slot + SLOTS * round;
+        let owner = live && g < groups;
+        var dot: array<i32, MAXM>;
+        for (var r = 0u; r < MAXM; r = r + 1u) { dot[r] = 0; }
+        if (owner) {
+            let uw = col * row_words + g * 4u * BITS + quarter * BITS;
+            for (var j = 0u; j < 32u; j = j + 1u) {
                 let bit = j * BITS;
                 let word = bit >> 5u;
                 let sh = bit & 31u;
-                var v = w[gw + word] >> sh;
-                if (sh + BITS > 32u) { v = v | (w[gw + word + 1u] << (32u - sh)); }
+                var v = w[uw + word] >> sh;
+                if (sh + BITS > 32u) { v = v | (w[uw + word + 1u] << (32u - sh)); }
                 let level = table[v & ((1u << BITS) - 1u)];
-                let at = g * GROUP + j;
+                let at = g * GROUP + quarter * 32u + j;
                 for (var r = 0u; r < MAXM; r = r + 1u) {
                     if (r0 + r < p.m) { dot[r] = dot[r] + level * sbyte(q[((r0 + r) * p.kpad + at) / 4u], at % 4u); }
                 }
             }
+        }
+        for (var r = 0u; r < MAXM; r = r + 1u) { quarter_dots[t * MAXM + r] = dot[r]; }
+        workgroupBarrier();
+        if (owner && quarter == 0u) {
+            let flat = col * groups + g;
+            let unit = table_scale * f16_to_f32((s[flat >> 1u] >> ((flat & 1u) * 16u)) & 0xFFFFu);
             for (var r = 0u; r < MAXM; r = r + 1u) {
-                if (r0 + r < p.m) { acc[r] = acc[r] + unit * f32(dot[r]) * a[(r0 + r) * groups + g]; }
+                if (r0 + r < p.m) {
+                    let total = quarter_dots[t * MAXM + r] + quarter_dots[(t + 1u) * MAXM + r] + quarter_dots[(t + 2u) * MAXM + r] + quarter_dots[(t + 3u) * MAXM + r];
+                    acc[r] = acc[r] + unit * f32(total) * a[(r0 + r) * groups + g];
+                }
             }
         }
+        workgroupBarrier();
     }
     for (var r = 0u; r < MAXM; r = r + 1u) { partial[t * MAXM + r] = acc[r]; }
     workgroupBarrier();
@@ -125,7 +142,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         for (var r = 0u; r < MAXM; r = r + 1u) {
             if (r0 + r < p.m) {
                 var sum = 0.0;
-                for (var i = 0u; i < LANES; i = i + 1u) { sum = sum + partial[(t + i) * MAXM + r]; }
+                for (var i = 0u; i < SLOTS; i = i + 1u) { sum = sum + partial[(t + 4u * i) * MAXM + r]; }
                 y[(r0 + r) * p.n + col] = sum;
             }
         }

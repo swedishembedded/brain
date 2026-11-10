@@ -13,16 +13,17 @@ use std::path::{Path, PathBuf};
 
 use mirage::describe::Options;
 use mirage::device::{Device, Image, MirageModel};
-use mirage::model::{load_dir, Mirage, WeightSource};
+use mirage::model::{load_precision, Mirage, Precision, WeightSource};
 use serde_json::Value;
 
 use crate::common::released_dir;
 
 type Golden = std::collections::HashMap<String, Vec<f32>>;
 
-fn model_on(dir: &Path, source: WeightSource) -> MirageModel {
-    let l = load_dir(dir, source).expect("loads");
-    MirageModel::new(Mirage::new(&l.checkpoint, &l.tokenizer, l.charset).unwrap(), gpu_core::Gpu::new(&Device::kernels())).unwrap()
+fn model_on(dir: &Path, precision: impl Into<Precision>) -> MirageModel {
+    let precision = precision.into();
+    let l = load_precision(dir, precision).expect("loads");
+    MirageModel::new(Mirage::new(&l.checkpoint, &l.tokenizer, l.charset).unwrap(), gpu_core::Gpu::new(&Device::kernels())).unwrap().with_cq_activations(precision.activations())
 }
 
 fn iou(a: &[f64], b: &[f64]) -> f64 {
@@ -117,6 +118,71 @@ fn the_packed_model_agrees_with_the_reference_engine() {
     eprintln!("reference: the FP32 model agrees with the engine on {n32}/{t32} boxes and {l32} lines");
 }
 
+/// The precision a session is loaded at decides the activation mode of its packed products: int8 only for `cq-a8`.
+#[test]
+fn a_session_runs_int8_activations_only_at_cq_a8() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dir) = released_dir() else {
+        brain_testutil::skip("cact a8 session: the released checkpoint is absent");
+        return;
+    };
+    let dir = dir.to_string_lossy().into_owned();
+    for (precision, want) in [(Precision::Fp32, model::cq::CqActivations::F32), (Precision::Cq, model::cq::CqActivations::F32), (Precision::CqA8, model::cq::CqActivations::A8)] {
+        let session = mirage::caps::MirageSession::load_with(&dir, gpu_core::Gpu::new(&mirage::caps::MirageSession::kernels()), precision).expect("loads");
+        assert_eq!(session.model().device().ops().cq_activations(), want, "{}", precision.name());
+    }
+    assert_eq!(Precision::parse("cq-a8"), Some(Precision::CqA8));
+    assert_eq!(Precision::parse("a8"), None, "only the documented names parse");
+    assert_eq!(Precision::default(), Precision::Fp32, "int8 activations are never the default");
+}
+
+/// The released archive's 2-bit codebook (its header, 4 f32 levels).
+const BOOK2: [f32; 4] = [-0.133_172_14, -0.039_902_09, 0.040_035_28, 0.133_460_45];
+
+/// The int8 activation arithmetic is the deployment engine's: a product recorded from the released engine serving the
+/// cats photograph (two activation rows of a decoder projection, eight rows of its 2-bit weight, the engine's outputs;
+/// captured by breaking in the engine's batched CQ product and reading its operands, see the `what` field of the file) is
+/// reproduced by `Cq::matmul_a8` to f32 rounding, where the f32-activation product is 2e-3 of the largest output away.
+#[test]
+fn the_a8_product_reproduces_a_recorded_engine_product() {
+    let doc: Value = serde_json::from_str(include_str!("../golden/vendor_cq_a8_matmul.json")).expect("the recorded product parses");
+    let numbers = |key: &str| -> Vec<f64> { doc[key].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect() };
+    let bytes = |key: &str| -> Vec<u8> { numbers(key).iter().map(|&v| v as u8).collect() };
+    let floats = |key: &str| -> Vec<f32> { numbers(key).iter().map(|&v| v as f32).collect() };
+    let (m, n, k) = (doc["rows"].as_u64().unwrap() as usize, doc["n"].as_u64().unwrap() as usize, doc["k"].as_u64().unwrap() as usize);
+    let (x, y) = (floats("x"), floats("y"));
+    let cq = model::cq::Cq::from_parts(n, k, 2, &bytes("index_bytes"), &bytes("norm_bytes"), &BOOK2).expect("the recorded weight is a valid 2-bit matrix");
+    let scale = y.iter().fold(0f32, |a, v| a.max(v.abs()));
+    let worst = |got: &[f32]| got.iter().zip(&y).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max) / scale;
+    let (a8, f32_product) = (worst(&cq.matmul_a8(&x, m)), worst(&cq.matmul_rotated(&x, m)));
+    eprintln!("recorded engine product: A8 emulation {a8:e}, f32 activations {f32_product:e} of the largest output");
+    assert!(a8 < 1e-6, "the A8 emulation is {a8:e} from the engine");
+    assert!(f32_product > 100.0 * a8, "the recorded product must tell the two apart (f32 {f32_product:e})");
+}
+
+/// The opt-in A8 precision (int8 activations per rotated group, as the engine runs them) against the engine's recorded
+/// answers, beside the f32-activation packed model on the same cases. Both are printed (recorded in the ledger); the
+/// assertions are the floors the A8 model must keep. Exact agreement is NOT expected to improve: only the products over
+/// packed matrices round their activations here, while the engine also rounds those of the convolutions (dense in this
+/// model) and of attention, so the rounding errors are independent of the engine's instead of identical to them.
+#[test]
+fn the_a8_packed_model_agrees_with_the_reference_engine() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dir) = released_dir() else {
+        brain_testutil::skip("cact a8 acceptance: the released checkpoint is absent");
+        return;
+    };
+    if corpus_cases().is_empty() {
+        brain_testutil::skip("cact a8 acceptance: the engine corpus is absent (make testdata/fetch)");
+        return;
+    }
+    let (total, exact, near, lines, identical) = engine_agreement(&model_on(&dir, Precision::CqA8), "packed CQ A8");
+    let (_, exact_f32, near_f32, lines_f32, identical_f32) = engine_agreement(&model_on(&dir, Precision::Cq), "packed CQ f32 activations");
+    eprintln!("a8 against f32 activations: boxes exact {exact} vs {exact_f32}, at IoU 0.5 {near} vs {near_f32} of {total}, identical lines {lines} vs {lines_f32}, identical documents {identical} vs {identical_f32}");
+    assert!(near * 10 >= total * 9, "A8 proposal recall {near}/{total}");
+    assert!(lines * 10 >= near * 8, "A8 identical lines {lines}/{near}");
+}
+
 fn softmax(row: &[f32]) -> Vec<f64> {
     let m = row.iter().copied().fold(f32::MIN, f32::max);
     let e: Vec<f64> = row.iter().map(|&v| f64::from(v - m).exp()).collect();
@@ -151,6 +217,53 @@ fn quality_against_fp32_on_the_goldens() {
         let n = positions - 1;
         eprintln!("cact quality {name}: {n} teacher-forced positions; top-1 agreement with FP32 {agree}/{n}; mean KL(FP32 || CQ) {:.5} nats; next-token accuracy FP32 {fp32_ok}/{n}, CQ {cq_ok}/{n}", kl / n as f64);
         assert!(agree * 100 >= n * 85, "{name}: top-1 agreement {agree}/{n}");
+    }
+}
+
+/// Teacher-forced decoder logits of the A8 packed model against the FP32 model and against the packed model with f32
+/// activations (host path; the numbers are recorded in the ledger).
+#[test]
+fn a8_quality_against_fp32_and_against_f32_activations_on_the_goldens() {
+    let Some(dir) = released_dir() else {
+        brain_testutil::skip("cact a8 quality: the released checkpoint is absent");
+        return;
+    };
+    let open = |p: Precision| Mirage::open_precision(&dir, p).unwrap();
+    let (fp32, cq, a8) = (open(Precision::Fp32), open(Precision::Cq), open(Precision::CqA8));
+    let vocab = fp32.decoder().vocabulary();
+    let argmax = |row: &[f32]| row.iter().enumerate().max_by(|x, y| x.1.total_cmp(y.1)).unwrap().0;
+    let kl = |p: &[f32], q: &[f32]| -> f64 { softmax(p).iter().zip(softmax(q)).filter(|(p, _)| **p > 0.0).map(|(p, q)| p * (p / q.max(1e-300)).ln()).sum() };
+    for name in ["cats", "text"] {
+        let Some(g) = crate::decoder::golden("cact a8 quality", name) else { return };
+        let tokens: Vec<u32> = g["tokens"].iter().map(|&t| t as u32).collect();
+        let logits: Vec<Vec<f32>> = [&fp32, &cq, &a8].iter().map(|m| m.logits(&g["memory"], &tokens)).collect();
+        let n = logits[0].len() / vocab - 1;
+        let row = |l: &[f32], t: usize| -> Vec<f32> { l[t * vocab..(t + 1) * vocab].to_vec() };
+        // (top-1 agreement, summed KL(reference || model), next-token hits) of `model` against `reference`.
+        let compare = |reference: usize, model: usize| {
+            let (mut agree, mut sum) = (0usize, 0f64);
+            for t in 0..n {
+                let (a, b) = (row(&logits[reference], t), row(&logits[model], t));
+                agree += (argmax(&a) == argmax(&b)) as usize;
+                sum += kl(&a, &b);
+            }
+            (agree, sum / n as f64)
+        };
+        let hits = |model: usize| (0..n).filter(|&t| argmax(&row(&logits[model], t)) as u32 == tokens[t + 1]).count();
+        let (cq_vs_fp32, a8_vs_fp32, a8_vs_cq) = (compare(0, 1), compare(0, 2), compare(1, 2));
+        eprintln!(
+            "cact a8 quality {name}: {n} teacher-forced positions; vs FP32: CQ f32-act top-1 {}/{n} KL {:.5}, CQ A8 top-1 {}/{n} KL {:.5}; A8 vs CQ f32-act: top-1 {}/{n} KL {:.5}; next-token accuracy FP32 {}/{n}, CQ {}/{n}, CQ A8 {}/{n}",
+            cq_vs_fp32.0,
+            cq_vs_fp32.1,
+            a8_vs_fp32.0,
+            a8_vs_fp32.1,
+            a8_vs_cq.0,
+            a8_vs_cq.1,
+            hits(0),
+            hits(1),
+            hits(2)
+        );
+        assert!(a8_vs_fp32.0 * 100 >= n * 80, "{name}: A8 top-1 agreement with FP32 {}/{n}", a8_vs_fp32.0);
     }
 }
 
@@ -190,8 +303,8 @@ fn describe_throughput_packed_against_fp32() {
     }
     let rgb = rgb_of(&cats);
     let opts = Options::from_json(r#"{"fields":["bbox","score","position","description"],"max_tokens":600}"#).unwrap();
-    for (label, source) in [("FP32", WeightSource::Safetensors), ("packed CQ", WeightSource::Cact)] {
-        let model = model_on(&dir, source);
+    for (label, precision) in [("FP32", Precision::Fp32), ("packed CQ", Precision::Cq), ("packed CQ A8", Precision::CqA8)] {
+        let model = model_on(&dir, precision);
         let _ = model.describe_batch(&[Image { rgb: &rgb, height: 480, width: 640 }; 2], &opts);
         let one = model.describe_batch_with(&[Image { rgb: &rgb, height: 480, width: 640 }], &opts, &mirage::device::BatchControl::default()).pop().unwrap().unwrap();
         eprintln!("cact throughput {label}: one image decodes {} tokens", one.decoder_tokens);

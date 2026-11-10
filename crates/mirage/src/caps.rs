@@ -51,7 +51,7 @@ use crate::describe::{Options, LANGUAGES};
 use crate::device::{BatchControl, DecoderMemory, Device, Image, MirageModel};
 use crate::form::{self, FieldKind, FormError};
 use crate::memory_cache::{MemoryCache, MemoryKey};
-use crate::model::{Mirage, ModelError, WeightSource};
+use crate::model::{Mirage, ModelError, Precision};
 use crate::vision::dense::{MAX_OBJECTS, MAX_TEXT};
 
 /// The model id used on the CLI (`brain do mirage …`), over the bus and in the residency manifest.
@@ -97,19 +97,19 @@ fn proposal_params() -> Vec<ParamSpec> {
 }
 
 /// Names of the `precision` parameter and the weights each loads.
-pub const PRECISIONS: [&str; 2] = ["fp32", "cq"];
-
-fn precision_param() -> ParamSpec {
-    ParamSpec::new("precision", ParamType::Enum(PRECISIONS.map(String::from).to_vec()), "weights to serve: fp32 (the safetensors checkpoint) or cq (the packed deployment archive mirage.cact, 2-4 bits per weight; default fp32 when the checkpoint exists)")
+pub fn precision_names() -> Vec<String> {
+    Precision::ALL.iter().map(|p| p.name().to_string()).collect()
 }
 
-/// The weight source a request asks for: `None` leaves the choice to what the model directory holds.
-pub fn weight_source_of(inv: &Invocation) -> Result<Option<crate::model::WeightSource>, String> {
-    match inv.get_str("precision").as_deref() {
+fn precision_param() -> ParamSpec {
+    ParamSpec::new("precision", ParamType::Enum(precision_names()), "precision to serve: fp32 (the safetensors checkpoint), cq (the packed deployment archive mirage.cact, 2-4 bits per weight) or cq-a8 (the archive with int8 activations per 128-lane group, as the vendor engine runs it; lower precision); default fp32 when the checkpoint exists")
+}
+
+/// The precision a request asks for: `None` leaves the choice to what the model directory holds.
+pub fn precision_of(inv: &Invocation) -> Result<Option<Precision>, String> {
+    match inv.get_str("precision") {
         None => Ok(None),
-        Some("fp32") => Ok(Some(crate::model::WeightSource::Safetensors)),
-        Some("cq") => Ok(Some(crate::model::WeightSource::Cact)),
-        Some(other) => Err(format!("param 'precision' must be one of {}, not '{other}'", PRECISIONS.join(", "))),
+        Some(name) => Precision::parse(&name).map(Some).ok_or_else(|| format!("param 'precision' must be one of {}, not '{name}'", precision_names().join(", "))),
     }
 }
 
@@ -232,7 +232,7 @@ pub fn check_request(action: &str, inv: &Invocation) -> Result<(), String> {
         other => return Err(format!("mirage: unknown action '{other}'")),
     }
     check_image(inv)?;
-    weight_source_of(inv)?;
+    precision_of(inv)?;
     let (options, _) = options_of(inv)?;
     if action == "extract" {
         check_form(inv)?;
@@ -282,17 +282,17 @@ impl MirageSession {
     /// been created with [`Device::kernels`].
     pub fn load(dir: &str, gpu: Gpu) -> Result<MirageSession, String> {
         let source = crate::model::WeightSource::detect(std::path::Path::new(dir)).map_err(|e| e.to_string())?;
-        MirageSession::load_with(dir, gpu, source)
+        MirageSession::load_with(dir, gpu, source.into())
     }
 
-    /// [`MirageSession::load`] from the weights `source` names: with [`crate::model::WeightSource::Cact`] the
-    /// deployment archive's CQ matrices stay packed on the device.
-    pub fn load_with(dir: &str, gpu: Gpu, source: crate::model::WeightSource) -> Result<MirageSession, String> {
-        let loaded = crate::model::load_dir(std::path::Path::new(dir), source).map_err(|e| e.to_string())?;
+    /// [`MirageSession::load`] at `precision`: with [`Precision::Cq`] or [`Precision::CqA8`] the deployment archive's CQ
+    /// matrices stay packed on the device, and `CqA8` multiplies them against int8 activations.
+    pub fn load_with(dir: &str, gpu: Gpu, precision: Precision) -> Result<MirageSession, String> {
+        let loaded = crate::model::load_precision(std::path::Path::new(dir), precision).map_err(|e| e.to_string())?;
         let ck = &loaded.checkpoint;
         let host = Mirage::new(ck, &loaded.tokenizer, loaded.charset.clone()).map_err(|e| e.to_string())?;
         let revision: Arc<str> = Arc::from(ck.metadata.source_sha256.as_str());
-        let model = MirageModel::new(host, gpu).map_err(|e| e.to_string())?;
+        let model = MirageModel::new(host, gpu).map_err(|e| e.to_string())?.with_cq_activations(precision.activations());
         Ok(MirageSession { model, revision, cache: Mutex::new(MemoryCache::new(MEMORY_CACHE_BYTES)), stats: Mutex::new(BatchStats::default()) })
     }
 
@@ -445,7 +445,7 @@ fn model_error(e: ModelError) -> String {
 /// resident.
 pub struct MirageProvider {
     dir: String,
-    hot: Arc<Hot<(String, Option<WeightSource>), MirageSession>>,
+    hot: Arc<Hot<(String, Option<Precision>), MirageSession>>,
 }
 
 impl MirageProvider {
@@ -468,7 +468,7 @@ impl Provider for MirageProvider {
 struct MirageAction {
     spec: ActionSpec,
     dir: String,
-    hot: Arc<Hot<(String, Option<WeightSource>), MirageSession>>,
+    hot: Arc<Hot<(String, Option<Precision>), MirageSession>>,
 }
 
 impl Action for MirageAction {
@@ -476,14 +476,14 @@ impl Action for MirageAction {
         self.spec.clone()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let source = weight_source_of(inv)?;
+        let precision = precision_of(inv)?;
         // One resident session at a time: a request for other weights replaces it.
-        let load = || match source {
-            Some(source) => MirageSession::load_with(&self.dir, Gpu::new(&MirageSession::kernels()), source),
+        let load = || match precision {
+            Some(precision) => MirageSession::load_with(&self.dir, Gpu::new(&MirageSession::kernels()), precision),
             None => MirageSession::load(&self.dir, Gpu::new(&MirageSession::kernels())),
         };
         self.hot
-            .try_get((self.dir.clone(), source), load, |s| s.run_batch(&self.spec.name, std::slice::from_ref(inv)).pop().expect("one result per request"))
+            .try_get((self.dir.clone(), precision), load, |s| s.run_batch(&self.spec.name, std::slice::from_ref(inv)).pop().expect("one result per request"))
     }
 }
 
@@ -526,16 +526,15 @@ mod tests {
 
     #[test]
     fn precision_picks_the_weights_and_is_not_a_batching_option() {
-        use crate::model::WeightSource;
         let spec = describe_spec();
-        for (value, source) in [("fp32", Some(WeightSource::Safetensors)), ("cq", Some(WeightSource::Cact))] {
+        for (value, precision) in [("fp32", Precision::Fp32), ("cq", Precision::Cq), ("cq-a8", Precision::CqA8)] {
             let inv = describe(json!({"precision": value}));
             assert!(spec.validate(inv.clone()).is_ok(), "{value}");
-            assert_eq!(weight_source_of(&inv), Ok(source));
+            assert_eq!(precision_of(&inv), Ok(Some(precision)));
             // Requests with different precisions are routed to different sessions, never grouped in one batch.
             assert_eq!(options_of(&inv).unwrap().1, options_of(&describe(json!({}))).unwrap().1);
         }
-        assert_eq!(weight_source_of(&describe(json!({}))), Ok(None));
+        assert_eq!(precision_of(&describe(json!({}))), Ok(None));
         assert!(spec.validate(describe(json!({"precision": "int4"}))).is_err());
         assert!(extract_spec().params.iter().any(|p| p.name == "precision"));
     }

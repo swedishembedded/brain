@@ -173,6 +173,12 @@ impl Device {
         self.ops.gpu()
     }
 
+    /// Choose how the packed (rotated-codebook) matrices read their activations; the default is f32, int8 is the
+    /// opt-in A8 precision (`model::cq::CqActivations`).
+    pub fn set_cq_activations(&mut self, activations: model::cq::CqActivations) {
+        self.ops.set_cq_activations(activations);
+    }
+
     /// The op façade.
     pub fn ops(&self) -> &Ops {
         &self.ops

@@ -92,7 +92,7 @@ million pixels and its payload must be exactly `w x h x 3` floats.
 | `mask_threshold` | bitmap and polygon threshold, 0 to 1 (default 0.5) |
 | `mask_format` | `largest` (default: the largest polygon as a flat `[x, y, ...]` list), `merged`, `polygons`, or `bitmap` (column-major run-length at the source size) |
 | `language` | the language the model writes in: `en es fr pt de it nl pl ru ar zh` (default `en`) |
-| `precision` | `fp32` (the safetensors weights, the default whenever they exist) or `cq` (the packed deployment archive `mirage.cact`; see [Precision](#precision)). `extract` takes it too. |
+| `precision` | `fp32` (the safetensors weights, the default whenever they exist), `cq` (the packed deployment archive `mirage.cact`) or `cq-a8` (the archive with int8 activations, as the engine runs it); see [Precision](#precision). `extract` takes it too. |
 
 The outcome has one output per section that was requested and produced -
 `scene` (attributes), `objects` (`id`, `name`, `bbox` in 0..1000 coordinates of
@@ -174,13 +174,14 @@ reader, JSON). `extract` adds `memory_reused`.
   exact.
 - **Quantised execution is opt-in.** `precision: cq` serves the archive's 2-bit
   matrices packed on the device (see [Precision](#precision)); the engine rounds
-  activations to int8, brain keeps them in float32, so exact tokens are not
-  expected to match the engine's either.
+  activations to int8, brain keeps them in float32 unless `precision: cq-a8` is
+  asked for, so exact tokens are not expected to match the engine's either.
 
 ## Precision
 
 ```bash
 brain mirage describe --image photo.jpg --precision cq --json
+brain mirage describe --image photo.jpg --precision cq-a8 --json
 brain mirage quantize --out ./mirage-cq [--weights DIR]
 ```
 
@@ -189,8 +190,15 @@ HConvGLU bands and the Hadamard rotations run as structured kernels, not as dens
 `n x n` matrices). `cq` keeps the archive's projections, embedding and engram
 tables packed (2 to 4 bits per weight): about 30 MB resident, a few points of
 agreement with the float32 answers (top-1 of the decoder logits 216/237 on the
-reference photograph) and similar throughput. One precision is resident at a time;
-asking for the other replaces it.
+reference photograph) and similar throughput. `cq-a8` serves the same packed
+weights and runs the products over them the way the engine does (W2A8): after the
+128-lane Walsh rotation each activation group is rounded to int8 with one scale
+(`absmax / 127`, half away from zero), the codebook is reduced to an int8 table and
+a group's dot product accumulates in integers. It is lower precision than `cq`
+(measured against the float32 logits: the same top-1 agreement and a mean KL within
+0.0003 nats of `cq`'s), never a default, and covers the products over packed matrices
+only (the convolutions and the attention keys and values keep float32). One
+precision is resident at a time; asking for another replaces it.
 
 `brain mirage quantize` writes `mirage.cact` (plus a copy of `config.json`, so the
 output directory loads as a model directory) from the float32 checkpoint, folding an

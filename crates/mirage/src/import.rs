@@ -80,6 +80,9 @@ pub struct Checkpoint {
     pub tensors: BTreeMap<String, Tensor>,
     /// The quantised matrices as stored; empty for a checkpoint read from safetensors.
     pub packed: PackedMatrices,
+    /// How the host paths multiply the packed matrices ([`model::cq::CqActivations::A8`] rounds the activations to int8
+    /// as the deployment engine does); irrelevant to a checkpoint without packed matrices.
+    pub cq_activations: model::cq::CqActivations,
 }
 
 /// What the loader can be asked to enforce.
@@ -319,7 +322,7 @@ pub fn load(path: &Path, options: &ImportOptions) -> Result<Checkpoint, ImportEr
         }
         tensors.insert(t.name.clone(), Tensor { shape: t.shape.clone(), data });
     }
-    Ok(Checkpoint { config: header.config, metadata: header.metadata, tensors, packed: PackedMatrices::new() })
+    Ok(Checkpoint { config: header.config, metadata: header.metadata, tensors, packed: PackedMatrices::new(), cq_activations: Default::default() })
 }
 
 /// Load `mirage.safetensors` from a model directory and require that

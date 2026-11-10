@@ -204,7 +204,7 @@ impl Decoder {
             cfg: cfg.clone(),
             layers,
             engrams,
-            embedding: Linear { wt: w.vec("embedding/embedding"), inn: d, out: cfg.embedding_rows(), cq: w.packed("embedding/embedding", None, cfg.embedding_rows(), d) },
+            embedding: w.with_activations(Linear { wt: w.vec("embedding/embedding"), inn: d, out: cfg.embedding_rows(), cq: w.packed("embedding/embedding", None, cfg.embedding_rows(), d), cq_activations: Default::default() }),
             final_norm: w.vec("stack/final_norm/scale"),
             perms: (legacy_permutation(PERMUTATION_SEEDS.0, n_hada), legacy_permutation(PERMUTATION_SEEDS.1, n_hada)),
         }
