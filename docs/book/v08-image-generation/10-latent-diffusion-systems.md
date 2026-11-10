@@ -378,46 +378,46 @@ Everything so far has been about operations. The failure at the opening was abou
 The planner is only as good as the bytes it is told. They can be derived from the configuration, and the derivation is worth having because it gives a number to check the planner against.
 
 <!-- worked: latent_diffusion_systems.placement_table -->
-Bytes (GiB = 2^30) that the parts of a FLUX.2 run hold on a device at 1024 x 1024: the denoiser's weights and its scratch for the joint sequence of 512 text rows, 4,096 generated rows and the reference's 4,096 if there is one (DiT, planner: what `flux2::pipeline::dit_bytes` sums; DiT, uploaded: the layout the constructor writes, `flux2_weight_bytes`), the truncated text encoder's weights at the same tier, and the autoencoder's decode and encode graphs.
+Bytes (GiB = 2^30) that the parts of a FLUX.2 run hold on a device at 1024 x 1024: the denoiser's weights and its scratch for the joint sequence of 512 text rows, 4,096 generated rows and the reference's 4,096 if there is one (DiT, priced before: what `flux2::pipeline::dit_bytes` summed before commit 38e8b2b7a; DiT, uploaded: the layout the constructor writes, `flux2_weight_bytes`, which `dit_bytes` has summed since), the truncated text encoder's weights at the same tier, and the autoencoder's decode and encode graphs.
 
-| request (1024 x 1024) | DiT, planner | DiT, uploaded | encoder | decode | encode |
+| request (1024 x 1024) | DiT, priced before | DiT, uploaded | encoder | decode | encode |
 |---|---:|---:|---:|---:|---:|
 | klein-9b f32, no reference | 40.67 | 39.54 | 21.73 | 10.90 | - |
 | klein-9b f32, one reference | 55.24 | 54.11 | 21.73 | 10.90 | 8.13 |
 | klein-9b int8, no reference | 10.31 | 13.35 | 7.78 | 10.90 | - |
-| klein-9b int8, one reference | 11.94 | 14.98 | 7.78 | 10.90 | 8.13 |
+| klein-9b int8, one reference | 11.94 | 14.99 | 7.78 | 10.90 | 8.13 |
 | klein-4b int8, no reference | 5.00 | 6.10 | 4.30 | 10.90 | - |
-| klein-4b int8, one reference | 6.23 | 7.32 | 4.30 | 10.90 | 8.13 |
+| klein-4b int8, one reference | 6.23 | 7.33 | 4.30 | 10.90 | 8.13 |
 
 The four arrangements on cards of 24 GiB, charged as the planner charges them: a card holds its permanent parts and the heaviest single phase (the denoiser, with the reference encoder if there is one, is phase 1; the decode is phase 2).
 
-| request | arrangement | planner, GiB per card (24 GiB) | uploaded layout, GiB per card |
+| request | arrangement | priced before, GiB per card (24 GiB) | uploaded layout, GiB per card |
 |---|---|---|---:|
 | klein-9b int8 | all resident on one card | 28.99, does not fit | 32.03, does not fit |
-| klein-9b int8 | one card, encoder permanent, denoiser and decoder in turn | 18.68, fits | 21.12, fits |
+| klein-9b int8 | one card, encoder permanent, denoiser and decoder in turn | 18.68, fits | 21.13, fits |
 | klein-9b int8 | one card, encoder, denoiser and decoder each in turn | 10.90, fits | 13.35, fits |
 | klein-9b int8 | two cards: denoiser and decoder in turn | encoder | 10.90 and 7.78, fits | 13.35 and 7.78, fits |
-| klein-9b int8, one reference | all resident on one card | 38.75, does not fit | 41.79, does not fit |
-| klein-9b int8, one reference | one card, encoder permanent, denoiser and decoder in turn | 27.85, does not fit | 30.88, does not fit |
-| klein-9b int8, one reference | one card, encoder, denoiser and decoder each in turn | 20.07, fits | 23.11, fits |
-| klein-9b int8, one reference | two cards: denoiser and decoder in turn | encoder | 20.07 and 7.78, fits | 23.11 and 7.78, fits |
-| klein-4b int8, one reference | all resident on one card | 29.56, does not fit | 30.66, does not fit |
+| klein-9b int8, one reference | all resident on one card | 38.75, does not fit | 41.80, does not fit |
+| klein-9b int8, one reference | one card, encoder permanent, denoiser and decoder in turn | 27.85, does not fit | 30.90, does not fit |
+| klein-9b int8, one reference | one card, encoder, denoiser and decoder each in turn | 20.07, fits | 23.12, fits |
+| klein-9b int8, one reference | two cards: denoiser and decoder in turn | encoder | 20.07 and 7.78, fits | 23.12 and 7.78, fits |
+| klein-4b int8, one reference | all resident on one card | 29.56, does not fit | 30.67, does not fit |
 | klein-4b int8, one reference | one card, encoder permanent, denoiser and decoder in turn | 18.66, fits | 19.76, fits |
-| klein-4b int8, one reference | one card, encoder, denoiser and decoder each in turn | 14.35, fits | 15.45, fits |
-| klein-4b int8, one reference | two cards: denoiser and decoder in turn | encoder | 14.35 and 4.30, fits | 15.45 and 4.30, fits |
+| klein-4b int8, one reference | one card, encoder, denoiser and decoder each in turn | 14.35, fits | 15.46, fits |
+| klein-4b int8, one reference | two cards: denoiser and decoder in turn | encoder | 14.35 and 4.30, fits | 15.46 and 4.30, fits |
 | klein-9b f32 | all resident on one card | 73.30, does not fit | 72.17, does not fit |
 | klein-9b f32 | one card, encoder permanent, denoiser and decoder in turn | 62.40, does not fit | 61.27, does not fit |
 | klein-9b f32 | one card, encoder, denoiser and decoder each in turn | 40.67, does not fit | 39.54, does not fit |
 | klein-9b f32 | two cards: denoiser and decoder in turn | encoder | 40.67 and 21.73, does not fit | 39.54 and 21.73, does not fit |
 <!-- /worked -->
 
-Three readings of the first table matter. The decode graph is 10.90 GiB at $1024 \times 1024$, more than the whole 4-billion denoiser at int8 (6.10 GiB with its scratch), and 8.13 GiB more is wanted for the reference encoder: the codec is not a small part. The layout the constructor uploads for the 9-billion model at int8 is 13.35 GiB with its scratch, the same figure as the commit that introduced phased placement gave for a 9B denoiser beside a full-frame decode ("13.35 + 10.90 GiB", commit fa81ef938), which agrees with the derivation to the digits shown. And the planner's own figure for the same part, `dit_bytes`, is 10.31 GiB. It counts every two-dimensional tensor at one byte, but the layout carries a 32-bit scale for every 32 weights (36 bytes per 32 weights, the group-wise layout of `crates/model/src/int8.rs`) and keeps the boundary linears, the double blocks' second feed-forward matrix and the vectors at 32 bits. The first adds 12.5 percent to the quantized part; the second is 3.19 GiB at 32 bits, which the planner prices at a quarter of that. A checkpoint that arrives as a Q8_0 file is priced from its own header and gets the right figure (`gguf_dit_device_bytes`); a safetensors one at int8 is priced as above, and the plan is 3.04 GiB short for the 9B model, on the side of the failure that opened the chapter. The f32 tier errs the other way by 1.13 GiB, because it counts the six tensors that stay on the host.
+Three readings of the first table matter. The decode graph is 10.90 GiB at $1024 \times 1024$, more than the whole 4-billion denoiser at int8 (6.10 GiB with its scratch), and 8.13 GiB more is wanted for the reference encoder: the codec is not a small part. The layout the constructor uploads for the 9-billion model at int8 is 13.35 GiB with its scratch, the same figure as the commit that introduced phased placement gave for a 9B denoiser beside a full-frame decode ("13.35 + 10.90 GiB", commit fa81ef938), which agrees with the derivation to the digits shown. And the planner's own figure for the same part, `dit_bytes`, was 10.31 GiB until this chapter compared the two. It counted every two-dimensional tensor at one byte, but the layout carries a 32-bit scale for every 32 weights (36 bytes per 32 weights, the group-wise layout of `crates/model/src/int8.rs`) and keeps the boundary linears, the double blocks' second feed-forward matrix and the vectors at 32 bits. The first adds 12.5 percent to the quantized part; the second is 3.19 GiB at 32 bits, which the planner priced at a quarter of that. A checkpoint that arrives as a Q8_0 file was already priced from its own header (`gguf_dit_device_bytes`); a safetensors one at int8 was priced 3.04 GiB short for the 9B model, on the side of the failure that opened the chapter, and the f32 tier erred the other way by 1.13 GiB, because it counted the six tensors that stay on the host. Commit 38e8b2b7a makes `dit_bytes` price each tensor by the same rule the constructor and the Q8_0 route use, and a test now holds the two routes equal on a fully-Q8_0 file; the column of the table headed "priced before" is the old figure, kept for the comparison.
 
 The second table places the arrangements on cards of 24 GiB, the size of the cards that the placement commits were developed on. Keeping the encoder resident beside the phases of the others is preferred, because a server that sees many prompts would otherwise rebuild models for each; the table shows when that stops being possible.
 
-![Bytes on a card through three phases for a FLUX.2 klein-9b run with one reference at int8: everything resident at 41.79 GiB; one card with the encoder resident, peaking at 30.88 GiB in the denoising phase; the encoder in a phase of its own, peaking at 23.11 GiB; and the two-card layout, whose denoiser card peaks at the same 23.11 GiB and whose second card holds the 7.78 GiB encoder.](img/card-phases.svg)
+![Bytes on a card through three phases for a FLUX.2 klein-9b run with one reference at int8: everything resident at 41.80 GiB; one card with the encoder resident, peaking at 30.90 GiB in the denoising phase; the encoder in a phase of its own, peaking at 23.12 GiB; and the two-card layout, whose denoiser card peaks at the same 23.12 GiB and whose second card holds the 7.78 GiB encoder.](img/card-phases.svg)
 
-For the same request without a reference, one card holds the encoder, the denoiser and the decode in turn at 21.12 GiB, and everything resident would be 32.03. With a reference the resident encoder no longer fits (30.88 GiB), the plan puts it in a phase of its own before the denoiser, which fits at 23.11 GiB of the uploaded layout, with about 0.9 GiB to spare on the 24 GiB card, and a second card takes the encoder off the first and leaves the same 23.11 GiB there. Each of these is a different pipeline from the standpoint of memory, and the planner picks among them by cost and by what is free at that moment.
+For the same request without a reference, one card holds the encoder, the denoiser and the decode in turn at 21.13 GiB, and everything resident would be 32.03. With a reference the resident encoder no longer fits (30.90 GiB), the plan puts it in a phase of its own before the denoiser, which fits at 23.12 GiB of the uploaded layout, with about 0.9 GiB to spare on the 24 GiB card, and a second card takes the encoder off the first and leaves the same 23.12 GiB there. Each of these is a different pipeline from the standpoint of memory, and the planner picks among them by cost and by what is free at that moment.
 
 ### What the plan costs to carry out
 
@@ -452,7 +452,7 @@ Two sizes in the FLUX.1 pipeline went wrong in ways the byte ledger would have c
 3. The toy's textured source is passed through a masked latent run, and the left half of the decoded picture differs from the source by $0.25$. Give two changes to the pipeline, one in the codec and one outside the latent, that would make the left half equal the source, and say what each costs.
 4. A strength of $0.8$ is requested of a distilled four-step model, and the implementation slices the distilled schedule at $0.8$ instead of scaling it. Using the schedule table, say how many steps remain, and what they cost the request.
 5. A canvas of $1536 \times 1536$ is generated in windows. A reviewer says the windowed run must cost fewer operations than the one-forward run, because each window's forward is shorter. Use the tiling table to say what is wrong with the claim.
-6. The planner says the 9-billion model at int8, loaded from a safetensors checkpoint, fits a 24 GiB card with one reference, and the build runs out of memory. Give the two figures of this chapter that explain it, and say which direction each moves the plan.
+6. Before commit 38e8b2b7a, the planner could say that the 9-billion model at int8, loaded from a safetensors checkpoint, fits a 24 GiB card with one reference, and the build would run out of memory. Give the two figures of this chapter that explain it, and say which direction each moves the plan.
 7. Two pipelines are given the same seed. Why does a picture from FLUX.1 not tell you what FLUX.2 would draw for it?
 
 ## Summary
@@ -510,7 +510,7 @@ What has not been done yet is steering a generator by more than a prompt and a p
 3. In the codec: a latent with room for the texture (more channels, or a codec whose range holds it), which costs a larger latent and so more rows in every pass. Outside the latent: the composite of the pixel contract, `old + mask * (new - old)`, which costs nothing in the generator but needs the mask at pixel resolution and a finite generated image.
 4. Of the four values $1, 0.9674, 0.9081, 0.7672$ only $0.7672$ lies below $0.8$, so slicing leaves a single step: the request keeps one of its four steps. Scaling keeps all four, at $0.8\,\sigma_i$.
 5. Each window carries its own 512 text rows and its own crop of the canvas-sized reference, so a window's forward is 8,704 rows, and four of them cost $306.8$ TFLOP against $226.5$ for the whole canvas: shorter forwards, but more of them, with the text and reference rows repeated in each. The windows save memory (the buffers are those of one window) and not operations.
-6. The planner's figure for the denoiser, 10.31 GiB without a reference, is 3.04 GiB below the uploaded layout of 13.35 GiB (the scales, and the tensors that stay at 32 bits); and a request with a reference adds the encoder's graph, 8.13 GiB, to the denoiser's phase, which an estimate made for a request without one does not contain. Both make the plan optimistic.
+6. The planner's old figure for the denoiser, 10.31 GiB without a reference, is 3.04 GiB below the uploaded layout of 13.35 GiB (the scales, and the tensors that stay at 32 bits); and a request with a reference adds the encoder's graph, 8.13 GiB, to the denoiser's phase, which an estimate made for a request without one does not contain. Both make the plan optimistic.
 7. The two loops draw the starting noise with different generators (SplitMix64 in 32-bit floats and xorshift64\* with a Box-Muller transform in 64-bit floats), so equal seeds are different noises, and in any case the two models were trained on different latents.
 
 **Exercises (calculation answers).**

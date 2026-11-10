@@ -342,8 +342,9 @@ assert sum(_numel(s) for _, s in flux2_manifest(FLUX2["klein-9b"])) == da.flux2_
 
 
 def flux2_weight_bytes(c, tier, planner):
-    """Bytes of the DiT weights. `planner`: what `flux2::pipeline::dit_bytes` sums (every two-dimensional tensor at one byte under int8,
-    every other tensor and every f32 tensor at four). Otherwise the layout the constructor uploads: the six tensors of the clock and the
+    """Bytes of the DiT weights. `planner`: what `flux2::pipeline::dit_bytes` summed before commit 38e8b2b7a (every two-dimensional
+    tensor at one byte under int8, every other tensor and every f32 tensor at four). Otherwise the layout the constructor uploads, which
+    `dit_bytes` has priced since: the six tensors of the clock and the
     modulations stay on the host; under int8 the boundary linears, the double blocks' second feed-forward matrix and every vector stay
     f32, and each other matrix is 32 bytes of int8 plus one 32-bit scale per 32 weights (36 bytes per 32 weights)."""
     total = 0
@@ -360,17 +361,18 @@ def flux2_weight_bytes(c, tier, planner):
     return total
 
 
-def flux2_scratch_bytes(c, tier, n_joint, txt=512):
+def flux2_scratch_bytes(c, tier, n_joint, txt=512, planner=False):
     """The activation scratch the planner prices for one joint sequence (`dit_scratch_bytes` of the crate): 16 words of width d,
     three of the feed-forward width, two latent buffers and one head width per row, the context, 17 d for the clock, and the
     attention's scores and probabilities (two words under int8, which runs fused, else 2 heads n^2); under int8 also one byte-packed
-    copy of the hidden and the feed-forward row and a 32-bit scale per row."""
+    copy of the hidden and the feed-forward row and a 32-bit scale per 32 values of the wider (before commit 38e8b2b7a, `planner`, one
+    scale per row)."""
     d, mlp, heads = c["d"], c["d"] * c["mlp_ratio"], c["heads"]
     attn = 2 if tier == "int8" else 2 * heads * n_joint * n_joint
     words = n_joint * (16 * d + 3 * mlp + 2 * c["in_ch"] + D_HEAD) + txt * c["ctx"] + attn + 17 * d
     b = 4 * words
     if tier == "int8":
-        b += n_joint * (4 + d + mlp)
+        b += n_joint * (d + mlp) + (4 * n_joint if planner else 4 * n_joint * (max(d, mlp) // 32))
     return b
 
 
@@ -404,7 +406,7 @@ def parts(k, tier, n_ref_tokens):
     c = FLUX2[k]
     n_joint = 512 + 4096 + n_ref_tokens
     p = {
-        "dit": (flux2_weight_bytes(c, tier, True) + flux2_scratch_bytes(c, tier, n_joint),
+        "dit": (flux2_weight_bytes(c, tier, True) + flux2_scratch_bytes(c, tier, n_joint, planner=True),
                 flux2_weight_bytes(c, tier, False) + flux2_scratch_bytes(c, tier, n_joint)),
         "te": (te_bytes(k, tier), te_bytes(k, tier)),
         "vae_dec": (vae_bytes("decode", 1024 * 1024),) * 2,
@@ -416,7 +418,7 @@ def parts(k, tier, n_ref_tokens):
 
 def arrangements(k, tier, n_ref_tokens, which):
     """Peak bytes per card of the four arrangements, by the planner's rule: a card is charged its permanent parts plus its heaviest phase.
-    `which` picks the planner's figures (0) or the uploaded layout's (1)."""
+    `which` picks the figures priced before commit 38e8b2b7a (0) or the uploaded layout's, priced since (1)."""
     p = {n: v[which] for n, v in parts(k, tier, n_ref_tokens).items()}
     ph1 = p["dit"] + p.get("vae_enc", 0)
     ph2 = p["vae_dec"]
@@ -443,7 +445,7 @@ def placement_table(card_gib=24):
         label = f"{k} {tier}, {'one reference' if refs else 'no reference'}"
         rows.append([label, _gib(pr["dit"][0]), _gib(pr["dit"][1]), _gib(pr["te"][1]), _gib(pr["vae_dec"][1]),
                      _gib(pr["vae_enc"][1]) if refs else "-"])
-    t1 = _table(["request (1024 x 1024)", "DiT, planner", "DiT, uploaded", "encoder", "decode", "encode"], rows, "lrrrrr")
+    t1 = _table(["request (1024 x 1024)", "DiT, priced before", "DiT, uploaded", "encoder", "decode", "encode"], rows, "lrrrrr")
     rows2 = []
     for k, tier, refs in (("klein-9b", "int8", 0), ("klein-9b", "int8", 4096), ("klein-4b", "int8", 4096), ("klein-9b", "f32", 0)):
         for name in arrangements(k, tier, refs, 1):
@@ -455,11 +457,12 @@ def placement_table(card_gib=24):
                 return f"{_gib(v)}" + (", fits" if v <= cap else ", does not fit")
 
             rows2.append([f"{k} {tier}{', one reference' if refs else ''}", name, cell(pl), cell(up)])
-    t2 = _table(["request", "arrangement", f"planner, GiB per card ({card_gib} GiB)", "uploaded layout, GiB per card"], rows2, "lllr")
+    t2 = _table(["request", "arrangement", f"priced before, GiB per card ({card_gib} GiB)", "uploaded layout, GiB per card"], rows2, "lllr")
     return (
         "Bytes (GiB = 2^30) that the parts of a FLUX.2 run hold on a device at 1024 x 1024: the denoiser's weights and its scratch for "
-        "the joint sequence of 512 text rows, 4,096 generated rows and the reference's 4,096 if there is one (DiT, planner: what "
-        "`flux2::pipeline::dit_bytes` sums; DiT, uploaded: the layout the constructor writes, `flux2_weight_bytes`), the truncated text "
+        "the joint sequence of 512 text rows, 4,096 generated rows and the reference's 4,096 if there is one (DiT, priced before: what "
+        "`flux2::pipeline::dit_bytes` summed before commit 38e8b2b7a; DiT, uploaded: the layout the constructor writes, "
+        "`flux2_weight_bytes`, which `dit_bytes` has summed since), the truncated text "
         "encoder's weights at the same tier, and the autoencoder's decode and encode graphs.\n\n" + t1 +
         f"\n\nThe four arrangements on cards of {card_gib} GiB, charged as the planner charges them: a card holds its permanent parts and "
         "the heaviest single phase (the denoiser, with the reference encoder if there is one, is phase 1; the decode is phase 2).\n\n" + t2)
