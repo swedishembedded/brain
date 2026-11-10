@@ -249,6 +249,11 @@ fn the_e4m3_variant_writes_what_the_quantiser_makes_of_its_stored_rows() {
         brain_testutil::skip_unavailable("not a CUDA device");
         return;
     }
+    // The E4M3 conversions need an FP8-capable card (`kernels_cuda::FP8_CVT_MIN_CC`).
+    if !gpu.has_fused(Fused::AddRmsQuantE4m3) {
+        brain_testutil::skip_unavailable("this card has no FP8 conversions: add_rms_quant_e4m3 is not offered");
+        return;
+    }
     for (rows, d) in [(1u32, 128u32), (3, 640), (130, 5120), (7, 2560), (5, 1152)] {
         for add in [true, false] {
             let n = (rows * d) as usize;

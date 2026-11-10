@@ -20,6 +20,12 @@ fn is_cuda(gpu: &Gpu) -> bool {
     gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some() && gpu_core::native_kernels_enabled()
 }
 
+/// Whether the card has the FP8 conversions the E4M3 kernels are built on
+/// (`kernels_cuda::FP8_CVT_MIN_CC`): no earlier card is offered them.
+fn has_fp8(gpu: &Gpu) -> bool {
+    gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= kernels_cuda::FP8_CVT_MIN_CC)
+}
+
 /// The finite E4M3 magnitudes by code 0..=126 (code 127 is the NaN).
 fn magnitudes() -> Vec<f64> {
     (0u32..127)
@@ -76,6 +82,10 @@ fn the_reciprocal_quotient_makes_the_bytes_the_ieee_quotient_makes() {
         brain_testutil::skip_unavailable("not a CUDA device");
         return;
     }
+    if !has_fp8(&gpu) {
+        brain_testutil::skip_unavailable("this card has no FP8 conversions: the E4M3 kernels are not offered");
+        return;
+    }
     let table = magnitudes();
     // Scales across the fast range and past both ends of it, a block of subnormals, and a block holding an infinity.
     let mut x: Vec<f32> = Vec::new();
@@ -122,6 +132,10 @@ fn the_gated_norm_matches_its_definition_on_both_input_forms() {
     let gpu = gpu_core::testgpu::dev(&[]);
     if !is_cuda(&gpu) {
         brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    if !has_fp8(&gpu) {
+        brain_testutil::skip_unavailable("this card has no FP8 conversions: the E4M3 kernels are not offered");
         return;
     }
     let table = magnitudes();
@@ -182,6 +196,10 @@ fn the_row_quantiser_scales_a_whole_row_and_encodes_the_ieee_quotient() {
     let gpu = gpu_core::testgpu::dev(&[]);
     if !is_cuda(&gpu) {
         brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    if !has_fp8(&gpu) {
+        brain_testutil::skip_unavailable("this card has no FP8 conversions: the E4M3 kernels are not offered");
         return;
     }
     let table = magnitudes();
