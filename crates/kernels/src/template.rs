@@ -252,11 +252,15 @@ pub enum DecodeFormat {
     Mxfp8E4m3 = 12,
     /// MXFP8 with E5M2 elements: an E8M0 scale byte per 32 weights.
     Mxfp8E5m2 = 13,
+    /// Rotated-codebook weights (`model::cq`) with 2-, 3- and 4-bit indices.
+    Cq2 = 14,
+    Cq3 = 15,
+    Cq4 = 16,
 }
 
 impl DecodeFormat {
     /// Every format, in discriminant order.
-    pub const ALL: [DecodeFormat; 14] = [
+    pub const ALL: [DecodeFormat; 17] = [
         DecodeFormat::Bf16,
         DecodeFormat::F16,
         DecodeFormat::I8,
@@ -271,6 +275,9 @@ impl DecodeFormat {
         DecodeFormat::Mxfp4,
         DecodeFormat::Mxfp8E4m3,
         DecodeFormat::Mxfp8E5m2,
+        DecodeFormat::Cq2,
+        DecodeFormat::Cq3,
+        DecodeFormat::Cq4,
     ];
 
     /// The registered kernel name of this format's variant of `weight_decode`.
@@ -309,6 +316,32 @@ pub fn gemv_variants() -> Vec<Variant> {
         for cap in GEMV_ROW_CAPACITIES {
             out.push(interned(base, src, &[("MAXM", cap)]).expect("the GEMV kernels declare MAXM"));
         }
+    }
+    out
+}
+
+/// Row blocking of `matmul_cq_gemm`: activation rows one thread applies each unpacked code to.
+pub const CQ_GEMM_ROWS: u32 = 8;
+
+/// The registered name of the decode-regime CQ GEMV carrying up to `rows` activation rows at `bits`-wide indices.
+pub fn cq_gemv_kernel_name(bits: u32, rows: u32) -> String {
+    let cap = GEMV_ROW_CAPACITIES.into_iter().find(|c| *c >= rows).unwrap_or(*GEMV_ROW_CAPACITIES.last().expect("capacities"));
+    variant_name("matmul_cq_gemv", &[("BITS", bits), ("MAXM", cap)])
+}
+
+/// The registered name of the batched CQ product at `bits`-wide indices.
+pub fn cq_gemm_kernel_name(bits: u32) -> String {
+    variant_name("matmul_cq_gemm", &[("BITS", bits), ("MAXM", CQ_GEMM_ROWS)])
+}
+
+/// Every CQ product kernel: the GEMV at each row capacity and the batched kernel, for 2-, 3- and 4-bit indices.
+pub fn cq_variants() -> Vec<Variant> {
+    let mut out = Vec::new();
+    for bits in [2, 3, 4] {
+        for cap in GEMV_ROW_CAPACITIES {
+            out.push(interned("matmul_cq_gemv", crate::MATMUL_CQ_GEMV, &[("BITS", bits), ("MAXM", cap)]).expect("the CQ GEMV declares BITS and MAXM"));
+        }
+        out.push(interned("matmul_cq_gemm", crate::MATMUL_CQ_GEMM, &[("BITS", bits), ("MAXM", CQ_GEMM_ROWS)]).expect("the CQ product declares BITS and MAXM"));
     }
     out
 }

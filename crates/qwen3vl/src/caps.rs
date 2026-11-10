@@ -1001,6 +1001,10 @@ pub fn linear_dtype(dir: &str, max_pixels: u32, precision: Precision) -> Result<
         // exhaustiveness.
         Dtype::F8E4M3 => "f8e4m3",
         Dtype::F8E5M2 => "f8e5m2",
+        // The rotated-codebook tiers: never built here, listed for exhaustiveness.
+        Dtype::Cq2 => "cq2",
+        Dtype::Cq3 => "cq3",
+        Dtype::Cq4 => "cq4",
     };
     with_resident(dir, max_pixels, precision, |hot| Ok(hot.model.linear_dtype().map(|dt| name(dt).to_string())))
 }

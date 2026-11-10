@@ -30,6 +30,7 @@ mod chunked_bidir_bwd_win;
 mod chunked_bidir_fwd_win;
 mod collective_errors;
 mod conv_dtype_roundtrip;
+mod cq_tier;
 mod cross_scores_kt;
 mod device_gradnorm;
 mod distributed_job;

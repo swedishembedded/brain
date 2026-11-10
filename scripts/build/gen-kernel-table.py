@@ -70,7 +70,7 @@ LEVELS = {
 CPU_CELL = {"yes": "✓", "no": "✗", "native": "native", "native-only": "native only"}
 GPU_CELL = {"yes": "✓", "yes-wg256": "✓ (256)", "no": "✗"}
 NPU_CELL = {"yes": "✓", "no": "-"}
-QUANT_CELL = {"int8": "int8", "q4": "q4", "fp8": "fp8", "nvfp4": "nvfp4", "none": "-"}
+QUANT_CELL = {"int8": "int8", "q4": "q4", "fp8": "fp8", "nvfp4": "nvfp4", "cq": "cq", "none": "-"}
 
 
 def parse_meta(text):

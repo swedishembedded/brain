@@ -42,6 +42,11 @@
 //   FMT 12/13 mxfp8 e4m3/e5m2  w: [n, k/4] bytes; s: one E8M0 byte per 32 weights
 //                  (value = element * global * scale, in that order, as the checkpoint codec decodes)
 //
+//   FMT 14/15/16 cq2/cq3/cq4  rotated-codebook weights (`model::cq`): w: [n, kpad*bits/32] LSB-first indices; s: fp16 group norms
+//                  [n, kpad/128] two to a word (bound as f32 words); wsm: the 2^bits codebook levels as f32 bits; params.block = bits.
+//                  A lane is the group's inverse Walsh transform of codebook[idx] * norm: 128 terms per element, so this is
+//                  the dequantiser of tests, training and tile products, not the inference path (`matmul_cq_gemv` / `matmul_cq_gemm`).
+//
 //   params: row0 (first row decoded), rows (rows in the tile), k, block, cb,
 //           wsm words per row, wd words per row, global scale bits (FMT 10 only, else 0).
 //   out   : [rows, k] f32, row r = weight row row0 + r.
@@ -140,6 +145,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         v = fp8_e4m3((w[wi >> 2u] >> ((wi & 3u) * 8u)) & 0xFFu) * e8m0(plane_byte(wi >> 5u));
     } else if (FMT == 13u) {
         v = fp8_e5m2((w[wi >> 2u] >> ((wi & 3u) * 8u)) & 0xFFu) * e8m0(plane_byte(wi >> 5u));
+    } else if (FMT >= 14u) {
+        let bits = FMT - 12u;
+        let kpad = ((p.k + 127u) / 128u) * 128u;
+        let g = c / 128u;
+        let j = c % 128u;
+        let gw = row * (kpad * bits / 32u) + g * 4u * bits;
+        var acc = 0.0;
+        for (var l = 0u; l < 128u; l = l + 1u) {
+            let bit = l * bits;
+            let word = bit >> 5u;
+            let sh = bit & 31u;
+            var q = w[gw + word] >> sh;
+            if (sh + bits > 32u) { q = q | (w[gw + word + 1u] << (32u - sh)); }
+            let level = bitcast<f32>(wsm[q & ((1u << bits) - 1u)]);
+            var par = j & l;
+            par = par ^ (par >> 4u);
+            par = par ^ (par >> 2u);
+            par = par ^ (par >> 1u);
+            acc = acc + select(level, -level, (par & 1u) != 0u);
+        }
+        let flat = row * (kpad / 128u) + g;
+        let norm = f16_to_f32((bitcast<u32>(s[flat >> 1u]) >> ((flat & 1u) * 16u)) & 0xFFFFu);
+        v = acc * norm * 0.08838834764831845;
     } else {
         // Affine K-quant (FMT 7: 4-bit codes, FMT 8: 8-bit slots): ds * code - dm per 32-element group.
         var code = 0.0;

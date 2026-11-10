@@ -54,6 +54,9 @@ fn dtype_tag(d: Dtype) -> u8 {
         Dtype::F4E2M1 => 8,
         Dtype::F8E4M3 => 9,
         Dtype::F8E5M2 => 10,
+        Dtype::Cq2 => 11,
+        Dtype::Cq3 => 12,
+        Dtype::Cq4 => 13,
     }
 }
 
@@ -70,6 +73,9 @@ fn dtype_from_tag(t: u8) -> Option<Dtype> {
         8 => Dtype::F4E2M1,
         9 => Dtype::F8E4M3,
         10 => Dtype::F8E5M2,
+        11 => Dtype::Cq2,
+        12 => Dtype::Cq3,
+        13 => Dtype::Cq4,
         _ => return None,
     })
 }

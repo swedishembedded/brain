@@ -527,6 +527,21 @@ pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
     })
 }
 
+/// The kernels a rotated-codebook (`Weight::Cq`) product needs: the activation rotation, and the GEMV and batched
+/// product at every index width. A model that holds CQ weights appends this slice to its kernel list; a list without
+/// them panics on the first CQ product with the name of the missing kernel. The tile decode of the CQ formats (tests,
+/// training, `read_host`) is a `weight_decode` variant like every other tier's and comes with
+/// [`frozen_base_kernels`].
+#[must_use]
+pub fn cq_kernels() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut list = vec![("cq_rotate", kernels::CQ_ROTATE)];
+        list.extend(kernels::template::cq_variants());
+        list
+    })
+}
+
 /// [`kernel_list`] plus [`frozen_base_kernels`]: the list an `Ops` that trains
 /// over a quantized or bf16 frozen base feeds `Gpu::new`.
 #[must_use]
@@ -640,6 +655,12 @@ pub enum Weight {
     /// scale bytes in row-major block order, four to a word. A value is `element * global * scale`, in that
     /// order, as the checkpoint codec decodes it. Float-read through the tile decode like [`Weight::FP8`].
     Micro { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32, kind: MicroScaled, global: f32 },
+    /// Rotated-codebook weights (`crate::cq`, `Dtype::Cq2/Cq3/Cq4`): `w` the index rows `[n, kpad * bits / 32]`
+    /// (the `.cact` bytes unchanged), `s` the fp16 group norms two to a word, `book` the `2^bits` codebook
+    /// levels as f32. `k` is the LOGICAL input width; the stored rows are padded to whole 128-lane groups. A
+    /// product rotates the activation groups once (`cq_rotate`) and reads the stored indices in place; nothing
+    /// is expanded to f32 (the tile decode exists for tests, training and `read_host`).
+    Cq { w: DeviceBuffer, s: DeviceBuffer, book: DeviceBuffer, n: u32, k: u32, bits: u32 },
 }
 
 /// Which member of the microscaling family a [`Weight::Micro`] is.
@@ -698,6 +719,20 @@ impl Weight {
         Weight::F32 { w, n, k }
     }
 
+    /// A rotated-codebook weight (`crate::cq::Cq`) uploaded as it is stored: index words, fp16 norms and the
+    /// codebook levels, 2-4 bits per weight resident. Always the tier asked for, never promoted.
+    pub fn cq(ops: &Ops, name: &str, cq: &crate::cq::Cq) -> Weight {
+        let gpu = ops.gpu();
+        let words = |data: &[u32]| {
+            let buf = gpu.storage(data.len() as u64);
+            gpu.write(&buf, data);
+            buf
+        };
+        let (w, s) = (words(&cq.codes), words(&cq.norms));
+        let book = gpu.storage_init(name, &cq.book);
+        Weight::Cq { w, s, book, n: cq.n as u32, k: cq.k as u32, bits: cq.bits }
+    }
+
     /// An `[n, k]` int8 weight from its already packed words and group scales on the device (the pair
     /// [`crate::int8::upload_quantized`] returns).
     pub fn from_packed_int8(w: DeviceBuffer, s: DeviceBuffer, n: usize, k: usize) -> Weight {
@@ -721,7 +756,7 @@ impl Weight {
     /// Whether a product against this tier reads the activations as f32 rows (every float-read tier). The
     /// activation-quantizing tiers (int8 DP4A, int4, K-quants) need [`Ops::act`] to quantize them first.
     pub fn reads_f32_activations(&self) -> bool {
-        matches!(self, Weight::F32 { .. } | Weight::BF16 { .. } | Weight::F16 { .. } | Weight::FP8 { .. } | Weight::NF4 { .. } | Weight::Micro { .. })
+        matches!(self, Weight::F32 { .. } | Weight::BF16 { .. } | Weight::F16 { .. } | Weight::FP8 { .. } | Weight::NF4 { .. } | Weight::Micro { .. } | Weight::Cq { .. })
     }
 
     /// The buffer of an fp32 weight, which a kernel reads as a plain dense
@@ -746,6 +781,9 @@ impl Weight {
             Weight::Micro { kind: MicroScaled::Nvfp4 | MicroScaled::Mxfp4, .. } => Dtype::F4E2M1,
             Weight::Micro { kind: MicroScaled::Mxfp8E4m3, .. } => Dtype::F8E4M3,
             Weight::Micro { kind: MicroScaled::Mxfp8E5m2, .. } => Dtype::F8E5M2,
+            Weight::Cq { bits: 2, .. } => Dtype::Cq2,
+            Weight::Cq { bits: 3, .. } => Dtype::Cq3,
+            Weight::Cq { .. } => Dtype::Cq4,
             // `affine` picks Q4_K vs Q5_K by `bits` (both group=32); a
             // non-affine (Q6_K) weight reuses `Dtype::I8` - it is, from the
             // selector's perspective, exactly `I8` with a different
@@ -785,6 +823,7 @@ impl Weight {
             | Weight::NF4 { n, .. }
             | Weight::FP8 { n, .. }
             | Weight::Micro { n, .. }
+            | Weight::Cq { n, .. }
             | Weight::KQuant { n, .. } => *n,
         }
     }
@@ -799,6 +838,7 @@ impl Weight {
             | Weight::NF4 { k, .. }
             | Weight::FP8 { k, .. }
             | Weight::Micro { k, .. }
+            | Weight::Cq { k, .. }
             | Weight::KQuant { k, .. } => *k,
         }
     }
@@ -811,6 +851,11 @@ impl Weight {
     /// NVFP4 [`Weight::Micro`] (the one weight of that dtype that exists): one E4M3 scale byte per 16 weights.
     #[must_use]
     pub fn bytes_for(dtype: Dtype, n: usize, k: usize) -> u64 {
+        if let Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 = dtype {
+            // Index words, fp16 group norms two to a word, and the codebook levels (`crate::cq`'s device layout).
+            let (kpad, bits) = (crate::cq::padded(k) as u64, u64::from(dtype.bits()));
+            return n as u64 * kpad * bits / 8 + (n as u64 * (kpad / crate::cq::GROUP as u64)).div_ceil(2) * 4 + (1u64 << bits) * 4;
+        }
         let packed = (n as u64 * k as u64).div_ceil(dtype.per_word() as u64) * 4;
         let scales = match dtype {
             Dtype::I8 | Dtype::Q4 | Dtype::NF4 => crate::int8::scale_len(n, k) as u64 * 4,
@@ -838,6 +883,8 @@ impl Weight {
                 Dtype::I8 | Dtype::Q4 | Dtype::NF4 => k.is_multiple_of(crate::int8::GROUP),
                 Dtype::F8E4M3 | Dtype::F8E5M2 => k.is_multiple_of(4),
                 Dtype::Q4K | Dtype::Q8K | Dtype::F4E2M1 => false,
+                // A CQ weight is built from a container's parts or `crate::cq::Cq`, never from a dense matrix here.
+                Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 => false,
             }
     }
 
@@ -874,7 +921,7 @@ impl Weight {
                 let (packed, scales) = crate::fp8::quantize_weight_fp8(raw, n, k, fmt, FP8_BLOCK as usize);
                 crate::fp8::dequantize_weight_fp8(&packed, &scales, n, k, fmt, FP8_BLOCK as usize)
             }
-            Dtype::Q4K | Dtype::Q8K | Dtype::F4E2M1 => panic!("Weight::round_trip: {tier:?} has no Weight::upload path, so there is no deployed decode to simulate"),
+            Dtype::Q4K | Dtype::Q8K | Dtype::F4E2M1 | Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 => panic!("Weight::round_trip: {tier:?} has no Weight::upload path, so there is no deployed decode to simulate"),
         }
     }
 
@@ -981,6 +1028,7 @@ impl Weight {
             // the `assert!` above already refuses both before this match
             // runs.
             Dtype::F8E4M3 | Dtype::F8E5M2 => unreachable!("Weight::upload: the FP8 tiers return before this match"),
+            Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 => unreachable!("Weight::upload: the assert above refuses the CQ tiers (see Weight::cq)"),
         }
     }
 }
@@ -2163,6 +2211,7 @@ impl Ops {
             // touches `act.quant` and bypasses the W4A8 selector arms. It binds
             // the variant itself, like the int8 frozen-base GEMM of `qwen3`.
             Weight::NF4 { .. } | Weight::FP8 { .. } | Weight::Micro { .. } => self.matmul_rows(s, w, (0, n), act, y, yoff),
+            Weight::Cq { .. } => self.cq_product(s, w, act, y, yoff),
             // M12: affine K-quant (`Weight::KQuant { affine: true, .. }` -
             // Q4_K/Q5_K, `matmul_kq_dyn`/`matmul_kq_gemv`). The non-affine
             // (Q6_K, group=16) instantiation never constructs THIS variant's
@@ -2366,7 +2415,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } => {
+            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } | Weight::Cq { .. } => {
                 unreachable!("Ops::embed: bind_embed already panicked for this dtype above")
             }
         }
@@ -2451,7 +2500,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } => {
+            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } | Weight::Cq { .. } => {
                 unreachable!("Ops::moe_linear: bind_moe_linear already panicked for this dtype above")
             }
         }
@@ -2801,7 +2850,7 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::F16 { .. } | Weight::I8 { .. } | Weight::NF4 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } => {
+            Weight::F16 { .. } | Weight::I8 { .. } | Weight::NF4 { .. } | Weight::Q4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } | Weight::Cq { .. } => {
                 unreachable!("{dt:?} runs through the tile decode above")
             }
         }
@@ -2936,6 +2985,9 @@ impl Ops {
         let (n, k, m) = (w.n(), w.k(), act.m);
         assert_eq!(act.k, k, "Ops::matmul_rows: activation width {} does not match weight K {k}", act.k);
         assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_rows: rows {first}+{count} outside the {n} rows of the weight");
+        if matches!(w, Weight::Cq { .. }) && rows == (0, n) {
+            return self.cq_product(s, w, act, y, yoff);
+        }
         if matches!(self.linear_plan(w, count), LinearPlan::TileDecode { .. }) {
             if self.fp8_forward(s, w, rows, act, y, yoff, ActPrecision::F32)
                 || self.small_m_gemv(s, w, rows, act, y, yoff)

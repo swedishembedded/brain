@@ -124,7 +124,7 @@ pub trait Tier {
 impl Tier for Dtype {
     fn arithmetic(self) -> Arithmetic {
         match self {
-            Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => Arithmetic::Float32,
+            Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 | Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 => Arithmetic::Float32,
             Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => Arithmetic::Int8Dot,
         }
     }
@@ -142,6 +142,9 @@ impl Tier for Dtype {
             Dtype::F4E2M1 => "OCP MXFP4 (E2M1 codebook) weights + int8 activations, i32 accumulate (W4A8)",
             Dtype::F8E4M3 => "portable fp8 e4m3 weights (packed bytes, decoded inline, blockwise 128x128 scale), fp32 math",
             Dtype::F8E5M2 => "portable fp8 e5m2 weights (packed bytes, decoded inline, blockwise 128x128 scale), fp32 math",
+            Dtype::Cq2 => "rotated-codebook 2-bit weights (fp16 norm per 128 lanes, Walsh-rotated activations), fp32 math",
+            Dtype::Cq3 => "rotated-codebook 3-bit weights (fp16 norm per 128 lanes, Walsh-rotated activations), fp32 math",
+            Dtype::Cq4 => "rotated-codebook 4-bit weights (fp16 norm per 128 lanes, Walsh-rotated activations), fp32 math",
         }
     }
 
@@ -158,6 +161,9 @@ impl Tier for Dtype {
             Dtype::F4E2M1 => "f4e2m1",
             Dtype::F8E4M3 => "f8e4m3",
             Dtype::F8E5M2 => "f8e5m2",
+            Dtype::Cq2 => "cq2",
+            Dtype::Cq3 => "cq3",
+            Dtype::Cq4 => "cq4",
         }
     }
 }

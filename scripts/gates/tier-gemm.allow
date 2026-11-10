@@ -28,3 +28,6 @@ Mxfp8E4m3	gemv	no MXFP8 GEMV
 Mxfp8E4m3	fused	scratch tile plus vendor library
 Mxfp8E5m2	gemv	no MXFP8 GEMV
 Mxfp8E5m2	fused	scratch tile plus vendor library
+Cq2	tensor_core	batched kernel is CUDA-core row blocking over the rotated activations; no tensor-core path
+Cq3	tensor_core	batched kernel is CUDA-core row blocking over the rotated activations; no tensor-core path
+Cq4	tensor_core	batched kernel is CUDA-core row blocking over the rotated activations; no tensor-core path

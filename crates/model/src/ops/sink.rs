@@ -311,7 +311,7 @@ pub fn rewrite_tile(ops: &dyn DeviceIo, weight: &Weight, dst: &TensorDescriptor,
     let (payload, scales) = match weight {
         Weight::F32 { w, .. } | Weight::BF16 { w, .. } | Weight::F16 { w, .. } => (w, None),
         Weight::I8 { w, s, .. } | Weight::NF4 { w, s, .. } | Weight::FP8 { w, s, .. } => (w, Some(s)),
-        Weight::Q4 { .. } | Weight::KQuant { .. } | Weight::Micro { .. } => {
+        Weight::Q4 { .. } | Weight::KQuant { .. } | Weight::Micro { .. } | Weight::Cq { .. } => {
             return Err(format!("tensor '{}': a {:?} weight cannot be rewritten in place", dst.name, weight.dtype()));
         }
     };

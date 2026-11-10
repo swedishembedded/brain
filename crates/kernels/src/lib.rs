@@ -394,6 +394,8 @@ pub const CONVTR2D_DX: &str = include_str!("../wgsl/convtr2d_dx.wgsl");
 pub const COPY_COLS: &str = include_str!("../wgsl/copy_cols.wgsl");
 /// `wgsl/copy_within.wgsl`
 pub const COPY_WITHIN: &str = include_str!("../wgsl/copy_within.wgsl");
+/// `wgsl/cq_rotate.wgsl`
+pub const CQ_ROTATE: &str = include_str!("../wgsl/cq_rotate.wgsl");
 /// `wgsl/crop2d.wgsl`
 pub const CROP2D: &str = include_str!("../wgsl/crop2d.wgsl");
 /// `wgsl/ct_state_scan.wgsl`
@@ -768,6 +770,10 @@ pub const MASKED_L1_GRAD: &str = include_str!("../wgsl/masked_l1_grad.wgsl");
 pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
 /// `wgsl/matmul_bf16_gemv.wgsl`
 pub const MATMUL_BF16_GEMV: &str = include_str!("../wgsl/matmul_bf16_gemv.wgsl");
+/// `wgsl/matmul_cq_gemm.wgsl`
+pub const MATMUL_CQ_GEMM: &str = include_str!("../wgsl/matmul_cq_gemm.wgsl");
+/// `wgsl/matmul_cq_gemv.wgsl`
+pub const MATMUL_CQ_GEMV: &str = include_str!("../wgsl/matmul_cq_gemv.wgsl");
 /// `wgsl/matmul_dw.wgsl`
 pub const MATMUL_DW: &str = include_str!("../wgsl/matmul_dw.wgsl");
 /// `wgsl/matmul_dw_reg.wgsl`
@@ -1791,6 +1797,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("convtr2d_dx", CONVTR2D_DX),
     ("copy_cols", COPY_COLS),
     ("copy_within", COPY_WITHIN),
+    ("cq_rotate", CQ_ROTATE),
     ("crop2d", CROP2D),
     ("ct_state_scan", CT_STATE_SCAN),
     ("ct_state_scan_bwd", CT_STATE_SCAN_BWD),
@@ -1972,6 +1979,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("masked_l1_grad", MASKED_L1_GRAD),
     ("matmul", MATMUL),
     ("matmul_bf16_gemv", MATMUL_BF16_GEMV),
+    ("matmul_cq_gemm", MATMUL_CQ_GEMM),
+    ("matmul_cq_gemv", MATMUL_CQ_GEMV),
     ("matmul_dw", MATMUL_DW),
     ("matmul_dw_reg", MATMUL_DW_REG),
     ("matmul_dw_reg_splitk", MATMUL_DW_REG_SPLITK),

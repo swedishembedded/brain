@@ -334,6 +334,15 @@ pub enum DType {
     /// structurally `F16`'s own decode narrowed to a 2-bit mantissa (same
     /// 5-bit exponent width/bias).
     F8E5M2,
+    /// Rotated-codebook weights with 2-bit indices (`model::cq`): a Lloyd-Max codebook per tensor class, one fp16
+    /// norm per 128 input lanes, the group rotated by an orthonormal Walsh transform. A FLOAT-read tier: the
+    /// activations are rotated per group once and multiplied against the stored codebook levels in f32, so no device
+    /// capability is needed.
+    Cq2,
+    /// [`DType::Cq2`] with 3-bit indices (not word-aligned per lane: 32 lanes occupy exactly three words).
+    Cq3,
+    /// [`DType::Cq2`] with 4-bit indices.
+    Cq4,
 }
 
 impl DType {
@@ -341,7 +350,7 @@ impl DType {
     /// sized and iterated from. [`Self::index`] is an exhaustive match, so a
     /// new variant fails to compile until it has an index, and
     /// `tests::all_lists_every_dtype_at_its_own_index` fails until it is here.
-    pub const ALL: [DType; 11] = [
+    pub const ALL: [DType; 14] = [
         DType::F32,
         DType::F16,
         DType::BF16,
@@ -353,6 +362,9 @@ impl DType {
         DType::F4E2M1,
         DType::F8E4M3,
         DType::F8E5M2,
+        DType::Cq2,
+        DType::Cq3,
+        DType::Cq4,
     ];
 
     /// This dtype's position in [`Self::ALL`].
@@ -369,6 +381,9 @@ impl DType {
             DType::F4E2M1 => 8,
             DType::F8E4M3 => 9,
             DType::F8E5M2 => 10,
+            DType::Cq2 => 11,
+            DType::Cq3 => 12,
+            DType::Cq4 => 13,
         }
     }
 }
@@ -593,7 +608,9 @@ impl DType {
             DType::F32 => 32,
             DType::F16 | DType::BF16 => 16,
             DType::I8 | DType::Q8K | DType::F8E4M3 | DType::F8E5M2 => 8,
-            DType::Q4 | DType::Q4K | DType::NF4 | DType::F4E2M1 => 4,
+            DType::Q4 | DType::Q4K | DType::NF4 | DType::F4E2M1 | DType::Cq4 => 4,
+            DType::Cq3 => 3,
+            DType::Cq2 => 2,
         }
     }
 
@@ -613,7 +630,7 @@ impl DType {
         match self {
             DType::F32 => 4,
             DType::F16 | DType::BF16 => 2,
-            DType::I8 | DType::Q4 | DType::Q4K | DType::Q8K | DType::NF4 | DType::F4E2M1 | DType::F8E4M3 | DType::F8E5M2 => 1,
+            DType::I8 | DType::Q4 | DType::Q4K | DType::Q8K | DType::NF4 | DType::F4E2M1 | DType::F8E4M3 | DType::F8E5M2 | DType::Cq2 | DType::Cq3 | DType::Cq4 => 1,
         }
     }
 
@@ -720,6 +737,8 @@ impl DType {
                     DType::F32
                 }
             }
+            // The CQ tiers are float-read like NF4: portable integer decode and f32 arithmetic, no capability.
+            DType::Cq2 | DType::Cq3 | DType::Cq4 => self,
         }
     }
 
@@ -740,6 +759,9 @@ impl DType {
             DType::Q8K => "q8k",
             DType::NF4 => "nf4",
             DType::F4E2M1 => "f4e2m1",
+            DType::Cq2 => "cq2",
+            DType::Cq3 => "cq3",
+            DType::Cq4 => "cq4",
             DType::F8E4M3 => "f8e4m3",
             DType::F8E5M2 => "f8e5m2",
         }
@@ -761,6 +783,9 @@ impl DType {
             "f4e2m1" => Some(DType::F4E2M1),
             "f8e4m3" => Some(DType::F8E4M3),
             "f8e5m2" => Some(DType::F8E5M2),
+            "cq2" => Some(DType::Cq2),
+            "cq3" => Some(DType::Cq3),
+            "cq4" => Some(DType::Cq4),
             _ => None,
         }
     }
@@ -795,6 +820,9 @@ mod dtype_tests {
                 DType::F4E2M1,
                 DType::F8E4M3,
                 DType::F8E5M2,
+                DType::Cq2,
+                DType::Cq3,
+                DType::Cq4,
             ] {
                 let promoted = dtype.promote(&numeric);
                 assert!(

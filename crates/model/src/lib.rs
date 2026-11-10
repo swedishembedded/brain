@@ -69,6 +69,7 @@ pub mod head_ce;
 pub mod half;
 pub mod eigen;
 pub mod hostmath;
+pub mod cq;
 pub mod int4;
 pub mod int8;
 pub mod kquant;

@@ -134,11 +134,13 @@ pub(super) enum Scratch {
     DecodeBf16,
     /// One `[m, tile]` product tile (a forward's output tile, or an input gradient's `dy` tile).
     ProductTile,
+    /// The Walsh-rotated activation rows of a rotated-codebook product (`[m, kpad]`).
+    Rotated,
 }
 
 /// The buffers of [`Scratch`], each with its size in words; grown on demand, never shrunk.
 #[derive(Default)]
-pub(super) struct ScratchBuffers([Option<(u64, DeviceBuffer)>; 3]);
+pub(super) struct ScratchBuffers([Option<(u64, DeviceBuffer)>; 4]);
 
 /// The scope in which [`Ops`] decodes a frozen quantized weight once however many products read it; dropping
 /// the outermost guard releases the decoded copies.
@@ -224,6 +226,9 @@ impl Weight {
             Weight::Micro { kind: MicroScaled::Mxfp4, .. } => DecodeFormat::Mxfp4,
             Weight::Micro { kind: MicroScaled::Mxfp8E4m3, .. } => DecodeFormat::Mxfp8E4m3,
             Weight::Micro { kind: MicroScaled::Mxfp8E5m2, .. } => DecodeFormat::Mxfp8E5m2,
+            Weight::Cq { bits: 2, .. } => DecodeFormat::Cq2,
+            Weight::Cq { bits: 3, .. } => DecodeFormat::Cq3,
+            Weight::Cq { .. } => DecodeFormat::Cq4,
             Weight::KQuant { affine: true, bits: 4, .. } => DecodeFormat::KqAffine4,
             Weight::KQuant { affine: true, .. } => DecodeFormat::KqAffine8,
             Weight::KQuant { affine: false, bits: 8, group: 16, .. } => DecodeFormat::KqSym8,
@@ -269,6 +274,31 @@ const GEMV_TARGET_WORKGROUPS: u32 = 528;
 const GEMV_MAX_ROUNDS: u32 = 16;
 
 impl Ops {
+    /// `y[m, n] = act @ W^T` for a rotated-codebook weight, reading the stored indices in place: the activation
+    /// groups are rotated once into a reused scratch (`cq_rotate`), then the selector's first candidate runs (the
+    /// cooperative GEMV for few rows where the device has workgroup barriers, the barrier-free row-blocked product
+    /// otherwise). The weight is never expanded.
+    pub(super) fn cq_product(&self, s: &mut Vec<Step>, w: &Weight, act: &Act, y: &DeviceBuffer, yoff: u64) {
+        let Weight::Cq { w: codes, s: norms, book, n, k, bits } = w else { unreachable!("Ops::cq_product: not a CQ weight") };
+        let (m, kpad) = (act.m, crate::cq::padded(*k as usize) as u32);
+        let kernel = |name: &str| {
+            self.gpu.kernel_index(name).unwrap_or_else(|| {
+                panic!("Ops: kernel '{name}' is not registered on this Gpu -- products over CQ weights need model::ops::cq_kernels() in the kernel list")
+            })
+        };
+        let rotated = self.scratch(Scratch::Rotated, m as u64 * kpad as u64);
+        s.push(self.gpu.step(kernel("cq_rotate"), &[&act.x, &rotated], &[m, *k, kpad, act.xr0], m * (kpad / crate::cq::GROUP as u32)));
+        let shape = OpShape { m, n: *n, k: kpad, dtype: w.dtype() };
+        let params = [m, kpad, *n, 0];
+        let out = (yoff, m as u64 * *n as u64);
+        let first = select::candidates(Op::MatMul, shape, &self.caps).first().copied().unwrap_or(KernelVariant::Reference);
+        let (name, grid) = match first {
+            KernelVariant::WorkgroupPerOutput => (kernels::template::cq_gemv_kernel_name(*bits, m), gpu_core::Dispatch::Workgroups(*n)),
+            _ => (kernels::template::cq_gemm_kernel_name(*bits), gpu_core::Dispatch::Threads(*n * m.div_ceil(kernels::template::CQ_GEMM_ROWS))),
+        };
+        s.push(self.gpu.dispatch_sliced(kernel(&name), &[&rotated, codes, norms, book, y], &[WHOLE, WHOLE, WHOLE, WHOLE, out], &params, grid));
+    }
+
     /// The decode-regime product of an FP8 (E4M3, block or tensor scales) or NVFP4 weight against `act`'s few rows by
     /// the kernel that reads the stored bytes directly. `false` when the weight, its shape, the row count or the
     /// registered kernels do not allow it; the caller then takes the tile decode.
@@ -447,6 +477,8 @@ impl Ops {
             Weight::I8 { w: wb, s: sb, .. } | Weight::Q4 { w: wb, s: sb, .. } | Weight::NF4 { w: wb, s: sb, .. } | Weight::FP8 { w: wb, s: sb, .. } | Weight::Micro { w: wb, s: sb, .. } => {
                 [wb, sb, dummy, dummy]
             }
+            // The codebook rides the sub-scale plane: `weight_decode` reads its levels as f32 bits.
+            Weight::Cq { w: wb, s: sb, book, .. } => [wb, sb, book, dummy],
             Weight::KQuant { w: wb, sz: KqScale::PlainF32(sb), .. } => [wb, sb, dummy, dummy],
             Weight::KQuant { w: wb, sz: KqScale::Packed { wsm, wd }, .. } => [wb, dummy, wsm, wd],
             Weight::F32 { .. } => unreachable!("an F32 weight is already dense"),

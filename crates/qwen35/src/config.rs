@@ -634,7 +634,7 @@ impl Qwen35Config {
                     // `NF4` shares `Q4`'s exact physical layout (4-bit codes, 8/`u32`, one `f32` scale per `group`).
                     gpu_core::select::Dtype::NF4 => n * k / 2 + n * k.div_ceil(group) * 4,
                     // `F4E2M1` is `Weight::Micro` NVFP4 as a checkpoint stores it (the per-tensor `global` is a host scalar).
-                    gpu_core::select::Dtype::F4E2M1 => model::ops::Weight::bytes_for(want, n as usize, k as usize),
+                    gpu_core::select::Dtype::F4E2M1 | gpu_core::select::Dtype::Cq2 | gpu_core::select::Dtype::Cq3 | gpu_core::select::Dtype::Cq4 => model::ops::Weight::bytes_for(want, n as usize, k as usize),
                     // M8.6: 1 byte/weight plus one `f32` scale per 128x128
                     // block (`model::fp8::scale_shape`'s own shape math,
                     // reused rather than reimplemented).

@@ -499,7 +499,7 @@ fn buffers(w: &Weight) -> (&DeviceBuffer, Option<&DeviceBuffer>) {
     match w {
         Weight::F32 { w, .. } | Weight::BF16 { w, .. } | Weight::F16 { w, .. } => (w, None),
         Weight::I8 { w, s, .. } | Weight::NF4 { w, s, .. } | Weight::FP8 { w, s, .. } | Weight::Q4 { w, s, .. } | Weight::Micro { w, s, .. } => (w, Some(s)),
-        Weight::KQuant { w, .. } => (w, None),
+        Weight::KQuant { w, .. } | Weight::Cq { w, .. } => (w, None),
     }
 }
 

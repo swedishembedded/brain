@@ -87,7 +87,7 @@ impl WgslProvider {
                 // the `tile()` one above - they are a decode-to-f32 STORAGE
                 // tier (same family as `BF16`/`F16`), never `PackedInt8` in
                 // practice, for the identical reason.
-                Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => Dispatch::Threads(m * n),
+                Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 | Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 => Dispatch::Threads(m * n),
             },
             KernelVariant::SplitReduction => {
                 unreachable!("Op::MatMul's candidates() never returns SplitReduction")

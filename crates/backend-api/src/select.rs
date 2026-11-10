@@ -468,6 +468,8 @@ fn dtype_storage_requirement(dt: Dtype) -> Requirement {
         // f32), gated on `fp8_storage` - never `int8_dot`, these bytes are
         // not int8 and no DP4A dot product is involved.
         Dtype::F8E4M3 | Dtype::F8E5M2 => Requirement { fp8_storage: true, ..Requirement::default() },
+        // CQ is float-read through portable integer decode (`model::cq`): it needs nothing from the device.
+        Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 => Requirement::default(),
     }
 }
 
@@ -821,6 +823,9 @@ fn no_coop_gradnorm() -> bool {
     NO_COOP_GRADNORM.load(Ordering::Relaxed)
 }
 
+/// Activation rows up to which the cooperative CQ GEMV is offered first (`kernels::template::GEMV_ROW_CAPACITIES`' largest).
+pub const CQ_GEMV_MAX_ROWS: u32 = 8;
+
 /// Every variant that can EXECUTE for `(op, shape)` on this device, with the
 /// static best guess FIRST. Never empty: `Reference` is always executable.
 ///
@@ -905,6 +910,16 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             // per dtype (`matmul_kq_dyn`/`matmul_kq_gemv` for these two,
             // `matmul_i8_dyn`/`matmul_i8_gemv` for I8) - this function only
             // ever names the logical variant.
+            // Rotated-codebook weights (`model::cq`): the activation rows are rotated once per group and read
+            // as f32, so the regime split is only the cooperative GEMV (few rows, barriers) against the
+            // barrier-free row-blocked kernel that serves every other shape and every backend.
+            Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 => {
+                if shape.m <= CQ_GEMV_MAX_ROWS && caps.workgroup_reductions {
+                    vec![WorkgroupPerOutput, Reference]
+                } else {
+                    vec![Reference]
+                }
+            }
             Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => {
                 if shape.m > DECODE_REGIME_MAX_ROWS || !caps.workgroup_reductions {
                     vec![PackedInt8]
@@ -1035,7 +1050,7 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             // just above for exhaustiveness only - no paged-attention KV pool
             // of this dtype exists in this tree.
             Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => vec![WorkgroupPerOutput, Reference],
-            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => vec![Reference],
+            Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 | Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 => vec![Reference],
         },
         // Sparse-MoE expert linear - capability only, NO shape gate, unlike
         // `Op::MatMul`'s Dtype arm this mirrors: none of
@@ -1070,6 +1085,8 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             // `Q4K`/`Q8K` above.
             Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => vec![Reference],
             Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => vec![PackedInt8],
+            // No expert bank is CQ-quantised; kept exhaustive.
+            Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 => vec![Reference],
         },
         // An embedding gather and the two backward GEMMs each have exactly
         // ONE physical kernel shape per dtype in this catalogue - no
