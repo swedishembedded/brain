@@ -329,6 +329,94 @@ image), box form fields (L2b), quantised `.cact` execution (L5), training (L3). 
 `tests/e2e/mirage.bats` (it needs the checkpoint and `MIRAGE_IMAGE`); `tests/e2e/model_table_check.py` reports a
 README section that no longer exists (pre-existing).
 
+## Lane L3 - training
+
+Host training of every task, 2026-11-10 (`crates/mirage/src/train/`). The objective is brain's own: the vendor published
+no recipe (the config carries only `form_share`, `trace_share`, `name_loss`, `seg_loss`, `head_grad`, `heat_alpha`).
+Device backward is not done (see Open).
+
+Design decisions:
+- One graph, two instantiations. The training graph (`train::net`, `train::vision`, `train::decoder`) is generic over the
+  scalar (`train::real::Real`: `f32` trainer, `f64` finite-difference oracle) and built on a reverse-mode tape
+  (`train::tape`) whose every primitive has a hand-written backward (`ops`, `spatial`, `seq`, `loss`). A model's backward
+  is the chain rule over primitives that are each checked against central finite differences of their own forward, so
+  the oracle shares no code with the analytic backward. The existing inference operators stay as they were (f32,
+  parity-proven); the graph equals them stage by stage (cosine 1.0, test below), it does not replace them.
+- Everything dense goes through `Net::proj`, the one place a LoRA adapter attaches. Parameters stay in checkpoint (Flax)
+  layout, so a trained tensor is saved without a transpose and the HConvGLU bands and Hadamard rotations are trained
+  as their own parameters (the unfolded form: no dense-matrix gradient mapping is needed on the host).
+- Shared machinery reused: `optim::NamedMoments` + `Adam::update_slice` + `grad_multiplier` (host AdamW; a `restore`
+  was added for exact resume), `model::adapter::{pair_file, KeyStyle}` for the adapter file, `import::export/load` for
+  weights, `imaging` for decoding, `data::rng::Lcg` for adapter init. No Mirage-only optimizer, adapter or checkpoint
+  format: a run directory is a model directory (`train::prepare::make_servable`), and `Mirage::open` folds an
+  `adapter.safetensors` found beside the weights.
+- Task-presence semantics (`train::data`): a label family is present when its key is present (an empty list is
+  labelled-empty, a missing key unknown). Missing families carry no heatmap negatives; the stop token is supervised only
+  for `closed` records; the first token of a section after an unlabelled one is not supervised (otherwise a missing E
+  section would teach "no objects").
+- `head_grad` is applied as an explicit `grad_scale` op on the encoder memory and the stem skips entering the dense head
+  and mask branches; the decoder's cross-attention memory is not scaled (an interpretation: the config says only "the
+  gradient the heads send back into the encoder").
+- `seg_loss` was 0 in the released configuration; here the mask term is an explicit `TrainWeights::mask`.
+- Residual-routing parameters (`stack/mhc_{a,b,phi}_res`): after 20 Sinkhorn rounds their gradient is below what a
+  finite difference resolves (analytic about 1e-18 against an f64 difference floor of 1e-9). The Sinkhorn primitive is
+  verified alone; the three tensors are effectively frozen by the architecture, not by a filter.
+
+Gradient checks (f64, central differences, relative to the largest gradient entry; block gate 1e-4, model gate 1e-3):
+
+| Level | Checked | Worst error |
+|---|---|---|
+| Primitives (`train_ops`) | add, mul, scale, bias_add, chan_mul, scalar_mul, sigmoid, silu, gelu, grad_scale (identity forward, scaled backward), linear, linear_nt, ZC norm, RMS unit, mask_rows, softmax, row_dot, row_mul, plan (gather/scatter/concat/slice/upsample/pool), permute, depthwise (strides 1x1, 2x2, 2x1, 1xk), dense conv (3 strides), sequency Walsh (self-adjoint, self-inverse), banded channel conv (dx and dband), GRN scale, 2D/1D RoPE, masked GQA self and cross attention, causal dilated taps, 20-round Sinkhorn, lane mixing (3 shapes), Kronecker rotation | 2.4e-9 (CTC), all others below 1e-9 |
+| Losses | token CE with weights, CenterNet focal, weighted L1, BCE+Dice, CTC (also against a brute-force alignment sum) | 2.4e-9 |
+| Whole model (`train_graph`, tiny config) | every tensor except the three residual-routing ones, through all five heads in one backward, nonzero gradient to every encoder tensor | 3.8e-4 (hadamard `cond_u`, gradient 1e-7) |
+| Objective (`train_fit`) | every term live (heat, reg, mask, text, ctc), every tensor outside the decoder stack resolved | below 1e-3 |
+
+Other tests: f32 graph equals the host operators stage by stage (stem, top, encoder, head_in, head, protos, coefs, decoder
+memory with slots, reader logits, decoder logits; cosine >= 0.999999 each); full fine-tune overfits one tiny sample;
+head-only changes only its heads; LoRA is an exact no-op at init (B = 0), leaves the base untouched, learns, and its
+folded weights give the live adapter's loss; exact resume of weights, moments and adapter (bitwise) for full and LoRA;
+the run directory loads through the importer; record schema refusals; unlabelled families never become targets.
+
+Acceptance experiments (released weights, host f32 on 32 threads of a shared Grace node; `train_real.rs`, `#[ignore]`d,
+run with `--ignored --nocapture`; 120 train and 40 held-out records, batch 4, 60 steps, AdamW lr 3e-4, clip 1):
+
+| Experiment | Mode | Before | After |
+|---|---|---|---|
+| Detection (COCO subset, heat + size/offset terms) | head-only dense | AP50 0.2193, loss 3.0292 | AP50 0.2715, loss 2.6316 |
+| Masks (COCO polygons, BCE + Dice) | head-only dense | IoU 0.6508, loss 0.7443 | IoU 0.6576, loss 0.7251 |
+| OCR (synthetic lines, CTC) | head-only reader | CER 0.2943, CTC 1.7011 | CER 0.2639, CTC 1.4003 |
+| LoRA on text CE, served | rank 8 on attention/slot/engram projections | held-out text loss 3.6492 | held-out text loss 1.6490; served-vs-training head cosine 1.00000000, decoder logits cosine 1.00000000 (max_abs 4.0e-4) |
+| Exact resume on the released weights | head-only | - | weights after step 3 bitwise identical to the uninterrupted run |
+
+The LoRA row used 60 train and 12 held-out records, 30 steps of batch 2 at lr 2e-3 (text term only, rank 8, alpha 16); the
+mask gain is small (+0.007 IoU, loss -0.019) because the released mask branch is already good on the labelled boxes;
+the text loss falls mostly by learning brain's line format (`S caption=...`, `E<n> <name> *<ref>`), which is not the
+vendor's.
+
+Training throughput (host f32, 32 threads of a shared Grace node, no GPU; samples/s over the whole run): detection
+1.46, masks 1.19, OCR 5.63 (reader only: the encoder is skipped), LoRA text 0.80 (batch 2, encoder + decoder + adapters).
+
+Not done in this lane:
+- Device backward and CUDA training. The host graph is the trainer; the device forward kernels have no `*_bwd`
+  counterparts for Walsh, banded channel conv, GRN, ZC norm, 2D RoPE, mHC + Sinkhorn, Hadamard MLP, engram, taps,
+  slot construction, CTC. No host-vs-device backward cosine, no nsys profile of a training step. Next steps: write
+  those backward kernels (the host primitives in `train/{ops,spatial,seq,loss}.rs` are the specification and the
+  FD oracle), keep HConvGLU and the Hadamard MLP unfolded on the device for training (the folded dense matrices cost
+  `n^2` parameters per mixer; mapping their gradients back is a contraction with the Walsh/band structure), then
+  compare against `Net::<f32>` gradients at cosine >= 0.9999 on the CPU backend and one CUDA card.
+- The capability action (`train` / `lora_train`): no other model in the tree exposes training as a served action (their
+  fine-tunes run through the SDK study/fine-tune path), so none was added; a served training action would need a
+  dataset blob contract and a long-running action contract that do not exist yet.
+- Form fine-tunes: records carry no forms and `Extract` scoring runs on the host decoder; the form NLL gate is open.
+- The `name_head`, MTP block and `mtp_*` tensors are training-only in the release and are carried through unchanged
+  (no loss uses them); `name_loss`, `form_share` and `trace_share` are honoured only as the weights of trace/form
+  tokens, which the prepared datasets do not contain.
+- Host training memory keeps the whole tape (one image per sample); the saved-activation policy is not implemented
+  (`scripts/gates/saved-policy.allow`, mirage entry, shrinks when the device trainer takes the policy).
+- The two datasets are small (300 train records each); the held-out numbers are 40-record validation sets and show
+  that the machinery learns, not what a full recipe would reach. The OCR set had boxes overhanging the image (a
+  generator defect); `read_jsonl_clamped` is the explicit opt-in reader, the strict one refuses them.
+
 ## Facts the foundation established
 
 - The released `.cact` has 806 entries: 159 two-bit and 4 four-bit CQ matrices
@@ -356,7 +444,7 @@ README section that no longer exists (pre-existing).
 | Decoder forward | lane stack, engrams, cross-attention, Hadamard MLP, logits | open |
 | Heads | boxes, masks, slots, enum scoring | open |
 | OCR | the reader and greedy collapse | open |
-| Training | full / head / LoRA, multi-task, gradient checks | open |
+| Training | full / head / LoRA, multi-task, gradient checks | host trainer done (L3); device backward open |
 | Serving | capability, CLI, SDK, HTTP, D-Bus, batching | done (L4) |
 | Quantised kernels | native low-bit CQ matmul from the packed weights | open |
 | Performance | profile-driven batched throughput | open |
