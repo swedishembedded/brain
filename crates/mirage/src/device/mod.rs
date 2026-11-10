@@ -13,6 +13,7 @@
 //! in portable GPU inference then you can procure our services by sending an
 //! email to info@swedishembedded.com.
 
+pub mod decoder;
 pub mod hconv;
 pub mod prims;
 pub mod reader;
@@ -42,6 +43,18 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_rope2d", kernels::MIRAGE_ROPE2D),
     ("mirage_attn", kernels::MIRAGE_ATTN),
     ("mirage_upsample2", kernels::MIRAGE_UPSAMPLE2),
+    ("mirage_embed_lanes", kernels::MIRAGE_EMBED_LANES),
+    ("mirage_gather_rows", kernels::MIRAGE_GATHER_ROWS),
+    ("mirage_engram_gate", kernels::MIRAGE_ENGRAM_GATE),
+    ("mirage_mhc_maps", kernels::MIRAGE_MHC_MAPS),
+    ("mirage_mhc_mix", kernels::MIRAGE_MHC_MIX),
+    ("mirage_mhc_post", kernels::MIRAGE_MHC_POST),
+    ("mirage_taps", kernels::MIRAGE_TAPS),
+    ("mirage_row_write", kernels::MIRAGE_ROW_WRITE),
+    ("mirage_rope_pos", kernels::MIRAGE_ROPE_POS),
+    ("mirage_hada_mid", kernels::MIRAGE_HADA_MID),
+    ("mirage_lane_mean", kernels::MIRAGE_LANE_MEAN),
+    ("argmax_row", kernels::ARGMAX_ROW),
     ("silu", kernels::SILU),
     ("add", kernels::ADD),
     ("mul", kernels::MUL),

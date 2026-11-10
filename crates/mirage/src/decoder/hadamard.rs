@@ -123,6 +123,38 @@ impl HadamardMlp {
         });
     }
 
+    /// The three Kronecker rotations multiplied out into dense `[out, in]`
+    /// matrices with the diagonal scales and the permutations folded in:
+    /// `W1 = P0 K1 D1`, `W2 = P1 K2`, `W3 = D4 K3 D3`. The middle stage between
+    /// `W1` and `W2` stays elementwise (`cond` gate, `d2`, `b2`, silu), so a
+    /// device runs three GEMMs and one elementwise kernel per layer.
+    pub fn fold(&self, perms: &(Vec<u32>, Vec<u32>)) -> [Vec<f32>; 3] {
+        let (n, (fa, fb)) = (self.n, self.factors);
+        // Row `o = k * fb + l` of the Kronecker matrix, column `c = i * fb + j`.
+        let kron = |a: &[f32], b: &[f32]| -> Vec<f32> {
+            let mut m = vec![0f32; n * n];
+            for k in 0..fa {
+                for l in 0..fb {
+                    for i in 0..fa {
+                        for j in 0..fb {
+                            m[(k * fb + l) * n + i * fb + j] = a[i * fa + k] * b[j * fb + l];
+                        }
+                    }
+                }
+            }
+            m
+        };
+        let pick = |m: &[f32], perm: &[u32]| -> Vec<f32> { perm.iter().flat_map(|&p| m[p as usize * n..(p as usize + 1) * n].iter().copied()).collect() };
+        let mut w1 = pick(&kron(&self.w[0].0, &self.w[0].1), &perms.0);
+        w1.chunks_exact_mut(n).for_each(|row| row.iter_mut().zip(&self.d[0]).for_each(|(v, d)| *v *= d));
+        let w2 = pick(&kron(&self.w[1].0, &self.w[1].1), &perms.1);
+        let mut w3 = kron(&self.w[2].0, &self.w[2].1);
+        for (o, row) in w3.chunks_exact_mut(n).enumerate() {
+            row.iter_mut().zip(&self.d[2]).for_each(|(v, d)| *v *= d * self.d[3][o]);
+        }
+        [w1, w2, w3]
+    }
+
     /// `x: [rows, n]` (already normalised) -> `[rows, n]`.
     pub fn forward(&self, x: &[f32], rows: usize, perms: &(Vec<u32>, Vec<u32>)) -> Vec<f32> {
         let n = self.n;

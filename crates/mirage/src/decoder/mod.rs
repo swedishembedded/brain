@@ -34,7 +34,7 @@ use hadamard::{legacy_permutation, HadamardMlp, PERMUTATION_SEEDS};
 const ENGRAM_SEED: u64 = 0x9E37_79B9;
 const ENGRAM_PRIME: u64 = 0x0100_0193;
 const ENGRAM_DILATION: usize = 3;
-const SINKHORN_ITERATIONS: usize = 20;
+pub(crate) const SINKHORN_ITERATIONS: usize = 20;
 const DECODER_ROPE_PAIRS_DIV: usize = 2;
 
 /// Threads for token-by-token decoding. One token's matrices are small, so
@@ -228,6 +228,17 @@ impl Decoder {
         }
         debug_assert_eq!(k[0].len(), rows * heads * hd);
         CrossMemory { rows, k, v }
+    }
+
+    /// Table rows (`table * slots + slot`) the engram lookups of position `pos` read, one per table;
+    /// `u32::MAX` where the position has no complete n-gram yet (its row is zero).
+    pub fn engram_rows(&self, tokens: &[u32], pos: usize) -> Vec<u32> {
+        let c = &self.cfg;
+        self.engram_indices(&tokens[..=pos], pos)
+            .iter()
+            .enumerate()
+            .map(|(tab, &slot)| if pos + 1 >= c.orders[tab / c.hashes] { (tab * c.slots + slot) as u32 } else { u32::MAX })
+            .collect()
     }
 
     /// N-gram table indices for positions `p0..p0+t`, `[t, tables]`.

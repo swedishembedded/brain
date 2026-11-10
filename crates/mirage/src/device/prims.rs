@@ -8,6 +8,7 @@
 use gpu_core::{DeviceBuffer, Step};
 
 use super::Device;
+use crate::vision::ops::NORM_EPS;
 
 /// A convolution's geometry: input `h x w`, `c` channels in, `kh x kw` kernel, strides.
 #[derive(Debug, Clone, Copy)]
@@ -220,4 +221,83 @@ impl Device {
         self.gpu().poll_wait();
         steps.clear();
     }
+
+    /// `out[b, j, :] = scale * emb[tokens[b], :]` for every lane `j`.
+    pub fn embed_lanes(&self, s: &mut Vec<Step>, tokens: &DeviceBuffer, emb: &DeviceBuffer, out: &DeviceBuffer, (batch, n, d): (u32, u32, u32), scale: f32) {
+        self.push(s, "mirage_embed_lanes", &[tokens, emb, out], &[batch, n, d, scale.to_bits()], batch * n * d);
+    }
+
+    /// Gather `tables` rows of width `sub` per sequence (`u32::MAX` rows are zero).
+    pub fn gather_rows(&self, s: &mut Vec<Step>, rows: &DeviceBuffer, table: &DeviceBuffer, out: &DeviceBuffer, (batch, tables, sub): (u32, u32, u32)) {
+        self.push(s, "mirage_gather_rows", &[rows, table, out], &[batch, tables, sub], batch * tables * sub);
+    }
+
+    /// The engram gate: `y += sigmoid(<rms(y), rms(key)> / sqrt(d)) * value`.
+    pub fn engram_gate(&self, s: &mut Vec<Step>, y: &DeviceBuffer, key: &DeviceBuffer, value: &DeviceBuffer, rows: u32, d: u32) {
+        let p = [d, rows, NORM_EPS.to_bits(), (1.0 / (d as f32).sqrt()).to_bits()];
+        s.push(self.gpu().dispatch(self.k("mirage_engram_gate"), &[y, key, value], &p, gpu_core::Dispatch::Workgroups(rows)));
+    }
+
+    /// Lane maps of a hyper-connection layer (see the kernel).
+    #[allow(clippy::too_many_arguments)]
+    pub fn mhc_maps(&self, s: &mut Vec<Step>, g: MhcShape, a: [f32; 3], pre: &DeviceBuffer, post: &DeviceBuffer, res: &DeviceBuffer, b: [&DeviceBuffer; 3], maps: &DeviceBuffer) {
+        let p = [g.rows, g.n, g.lane_id, g.iters, a[0].to_bits(), a[1].to_bits(), a[2].to_bits()];
+        self.push(s, "mirage_mhc_maps", &[pre, post, res, b[0], b[1], b[2], maps], &p, g.rows);
+    }
+
+    /// `u = sum_j h_pre[j] * lanes[j]`.
+    pub fn mhc_mix(&self, s: &mut Vec<Step>, lanes: &DeviceBuffer, maps: &DeviceBuffer, u: &DeviceBuffer, (rows, n, d): (u32, u32, u32)) {
+        self.push(s, "mirage_mhc_mix", &[lanes, maps, u], &[rows, n, d], rows * d);
+    }
+
+    /// `next = h_res lanes + h_post (y - u)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mhc_post(&self, s: &mut Vec<Step>, lanes: &DeviceBuffer, y: &DeviceBuffer, u: &DeviceBuffer, maps: &DeviceBuffer, next: &DeviceBuffer, (rows, n, d): (u32, u32, u32)) {
+        self.push(s, "mirage_mhc_post", &[lanes, y, u, maps, next], &[rows, n, d], rows * n * d);
+    }
+
+    /// Causal tap convolution of the history at `pos`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn taps(&self, s: &mut Vec<Step>, hist: &DeviceBuffer, taps: &DeviceBuffer, out: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32), pos: u32, ntaps: u32, dilation: u32) {
+        self.push(s, "mirage_taps", &[hist, taps, out], &[rows, w, maxt, pos, ntaps, dilation], rows * w);
+    }
+
+    /// `hist[b, pos] = src[b]`.
+    pub fn row_write(&self, s: &mut Vec<Step>, src: &DeviceBuffer, hist: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32), pos: u32) {
+        self.push(s, "mirage_row_write", &[src, hist], &[rows, w, maxt, pos], rows * w);
+    }
+
+    /// Rotary embedding of position `pos` on `rows` head vectors of width `hd`.
+    pub fn rope_pos(&self, s: &mut Vec<Step>, t: &DeviceBuffer, rows: u32, hd: u32, pos: u32, base: f32) {
+        self.push(s, "mirage_rope_pos", &[t], &[rows, hd, pos, base.to_bits()], rows * (hd / 2));
+    }
+
+    /// The Hadamard-MLP middle stage in place on `z`; `logits` are the pre-softmax conditioning scores.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hada_mid(&self, s: &mut Vec<Step>, z: &DeviceBuffer, logits: &DeviceBuffer, cond_u: &DeviceBuffer, d2: &DeviceBuffer, b2: &DeviceBuffer, (rows, n, rank): (u32, u32, u32)) {
+        self.push(s, "mirage_hada_mid", &[z, logits, cond_u, d2, b2], &[rows, n, rank], rows * n);
+    }
+
+    /// Mean over lanes.
+    pub fn lane_mean(&self, s: &mut Vec<Step>, lanes: &DeviceBuffer, out: &DeviceBuffer, (rows, n, d): (u32, u32, u32)) {
+        self.push(s, "mirage_lane_mean", &[lanes, out], &[rows, n, d], rows * d);
+    }
+
+    /// Row-wise argmax as `f32` indices.
+    pub fn argmax(&self, s: &mut Vec<Step>, x: &DeviceBuffer, out: &DeviceBuffer, m: u32, n: u32) {
+        self.push(s, "argmax_row", &[x, out], &[m, n], m);
+    }
+}
+
+/// Geometry of one hyper-connection layer's maps.
+#[derive(Debug, Clone, Copy)]
+pub struct MhcShape {
+    /// Sequences.
+    pub rows: u32,
+    /// Lanes (at most 4).
+    pub n: u32,
+    /// The lane this layer favours.
+    pub lane_id: u32,
+    /// Sinkhorn iterations.
+    pub iters: u32,
 }

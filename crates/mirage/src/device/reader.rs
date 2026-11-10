@@ -180,6 +180,8 @@ pub struct MemoryBatch {
     pub mask: DeviceBuffer,
     /// Rows per image.
     pub stride: usize,
+    /// Images.
+    pub batch: usize,
 }
 
 impl DeviceMemory {
@@ -216,6 +218,6 @@ impl DeviceMemory {
         let mask: Vec<f32> = (0..batch)
             .flat_map(|b| valid[b].iter().map(|&v| f32::from(u8::from(v))).chain((0..sl).map(move |k| f32::from(u8::from(k < slots.present[b])))).collect::<Vec<_>>())
             .collect();
-        MemoryBatch { rows, mask: dev.buf(&mask), stride }
+        MemoryBatch { rows, mask: dev.buf(&mask), stride, batch }
     }
 }

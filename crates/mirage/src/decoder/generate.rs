@@ -83,12 +83,12 @@ pub fn absent_references(cfg: &MirageConfig, objects: usize, text: usize) -> Vec
     (base + objects as u32..objects_end).chain(objects_end + text as u32..objects_end + cfg.regions as u32).collect()
 }
 
-fn argmax(row: &[f32]) -> u32 {
+pub(crate) fn argmax(row: &[f32]) -> u32 {
     row.iter().enumerate().fold((0, f32::NEG_INFINITY), |b, (i, &v)| if v > b.1 { (i, v) } else { b }).0 as u32
 }
 
 /// Whether the text so far gives a reason to stop.
-fn guard(text: &str, max_rank: i32) -> Option<Stop> {
+pub(crate) fn guard(text: &str, max_rank: i32) -> Option<Stop> {
     let (_, after) = text.split_once("</think>")?;
     if max_rank < 0 {
         return Some(Stop::Sections);
