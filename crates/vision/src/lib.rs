@@ -5,7 +5,7 @@
 //!
 //! ## Why this crate exists
 //!
-//! `crates/yolo` grew a set of genuinely generic conv blocks — `Conv`,
+//! `crates/yolov8` (then `crates/yolo`) grew a set of genuinely generic conv blocks: `Conv`,
 //! `Bottleneck`, `C2f`, `SPPF` — fully parameterized over channels, kernel,
 //! stride and pad, with the channel schedule living entirely in `YoloConfig`.
 //! Nothing about them is detection-specific. But they were unusable by any other
@@ -14,8 +14,8 @@
 //! yolo's own `PIPELINES` array. A second model's pipeline list has a different
 //! order, so those constants would silently dispatch the wrong kernels.
 //!
-//! That is not hypothetical. `wm-diamond` defines `K_NLC_NCHW = 8` in one module
-//! and `= 18` in another for the same kernel, because it maintains two separate
+//! That is not hypothetical. `diamond` (then `wm-diamond`) defined `K_NLC_NCHW = 8` in one module
+//! and `= 18` in another for the same kernel, because it maintained two separate
 //! pipeline arrays by hand.
 //!
 //! This crate breaks that coupling with [`ConvKernelIds::resolve`], which looks

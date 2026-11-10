@@ -4,10 +4,11 @@
 //! BatchNorm folding: collapse conv+BN(eval) into a single biased conv.
 //!
 //! Lives here, not in `crates/npu`, because it is a property of the CONV BLOCK,
-//! not of quantization or of OpenVINO. Three separate consumers need it and only
-//! one of them is the NPU:
-//!   * `vision::blocks::Conv`'s eval path collapses BN into a per-channel
-//!     scale/shift (`pack_sb`);
+//! not of quantization or of OpenVINO. Its consumers, of which only one is the
+//! NPU:
+//!   * `vision::blocks::Conv`'s eval path computes the same per-channel
+//!     scale/shift inline (`pack_sb`) for its fused epilogue without folding
+//!     the weights; it shares [`BN_EPS`] with this module;
 //!   * `brain-npu`'s exporter reproduces the identical fold so the emitted ONNX
 //!     `Conv` (weight + bias) is numerically the same graph;
 //!   * ZipDepth's RepVGG reparameterization folds each of its three branches
