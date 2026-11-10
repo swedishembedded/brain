@@ -34,17 +34,24 @@ const BAN: f32 = -1.0e30;
 /// Decoder steps between host round trips in a generation loop.
 pub const WINDOW: usize = 16;
 
+/// Rows of several `[out, in]` linears sharing one input, as one weight.
+fn cat(dev: &Device, name: &str, parts: &[&ops::Linear]) -> Weight {
+    let inn = parts[0].inn;
+    assert!(parts.iter().all(|p| p.inn == inn));
+    let wt: Vec<f32> = parts.iter().flat_map(|p| p.wt.iter().copied()).collect();
+    dev.weight(name, &wt, parts.iter().map(|p| p.out).sum(), inn)
+}
+
 fn lin(dev: &Device, name: &str, l: &ops::Linear) -> Weight {
     dev.weight(name, &l.wt, l.out, l.inn)
 }
 
 struct DLayer {
     norm: DeviceBuffer,
-    qkv: [Weight; 3],
+    qkvg: Weight,
     taps: [DeviceBuffer; 3],
     q_norm: DeviceBuffer,
     k_norm: DeviceBuffer,
-    gate: Weight,
     out: Weight,
     post_attn: DeviceBuffer,
     attn_gate: f32,
@@ -59,12 +66,12 @@ struct DLayer {
     post_cross: DeviceBuffer,
     cross_gate: f32,
     pre_hada: DeviceBuffer,
-    cond_v: Weight,
+    cond_rot: Weight,
     cond_u: DeviceBuffer,
     d2: DeviceBuffer,
     b2: DeviceBuffer,
-    rot: [Weight; 3],
-    phi: [Weight; 3],
+    rot: [Weight; 2],
+    phi: Weight,
     a: [f32; 3],
     b: [DeviceBuffer; 3],
 }
@@ -158,11 +165,10 @@ impl DeviceDecoder {
                 let fold = l.mlp.fold(&dec.perms);
                 DLayer {
                     norm: dev.norm_weight(&l.norm),
-                    qkv: [lin(dev, "dq", &l.q), lin(dev, "dk", &l.k), lin(dev, "dv", &l.v)],
+                    qkvg: cat(dev, "dqkvg", &[&l.q, &l.k, &l.v, &l.gate]),
                     taps: [dev.buf(&l.q_taps), dev.buf(&l.k_taps), dev.buf(&l.v_taps)],
                     q_norm: dev.norm_weight(&l.q_norm),
                     k_norm: dev.norm_weight(&l.k_norm),
-                    gate: lin(dev, "dgate", &l.gate),
                     out: lin(dev, "dout", &l.out),
                     post_attn: dev.norm_weight(&l.post_attn),
                     attn_gate: ops::sigmoid(l.attn_gate),
@@ -177,12 +183,12 @@ impl DeviceDecoder {
                     post_cross: dev.norm_weight(&l.post_cross),
                     cross_gate: ops::sigmoid(l.cross_gate),
                     pre_hada: dev.norm_weight(&l.pre_hada),
-                    cond_v: lin(dev, "cond_v", &l.mlp.cond_v),
+                    cond_rot: dev.weight("cond_rot", &[l.mlp.cond_v.wt.clone(), fold[0].clone()].concat(), HADAMARD_COND_RANK + d, d),
                     cond_u: dev.buf(&l.mlp.cond_u),
                     d2: dev.buf(&l.mlp.d[1]),
                     b2: dev.buf(&l.mlp.b2),
-                    rot: [dev.weight("w1", &fold[0], d, d), dev.weight("w2", &fold[1], d, d), dev.weight("w3", &fold[2], d, d)],
-                    phi: [lin(dev, "phi_pre", &l.phi_pre), lin(dev, "phi_post", &l.phi_post), lin(dev, "phi_res", &l.phi_res)],
+                    rot: [dev.weight("w2", &fold[1], d, d), dev.weight("w3", &fold[2], d, d)],
+                    phi: cat(dev, "phi", &[&l.phi_pre, &l.phi_post, &l.phi_res]),
                     a: l.a,
                     b: [dev.buf(&l.b_pre), dev.buf(&l.b_post), dev.buf(&l.b_res)],
                 }
@@ -270,12 +276,10 @@ impl DeviceDecoder {
         dev.embed_lanes(&mut s, &tok_buf, &self.embedding, &lanes, (bu, nu, du), (d as f32).sqrt());
         for (l, ly) in self.layers.iter().enumerate() {
             let nx = dev.zc_new(&mut s, &lanes, &self.ones_lanes, bu, nu * du);
-            let pre = dev.linear_new(&mut s, &ly.phi[0], &nx, bu);
-            let post = dev.linear_new(&mut s, &ly.phi[1], &nx, bu);
-            let res = dev.linear_new(&mut s, &ly.phi[2], &nx, bu);
+            let phi = dev.linear_new(&mut s, &ly.phi, &nx, bu);
             let maps = dev.alloc(b * (2 * n + n * n));
             let shape = MhcShape { rows: bu, n: nu, lane_id: (l % n) as u32, iters: SINKHORN_ITERATIONS as u32 };
-            dev.mhc_maps(&mut s, shape, ly.a, &pre, &post, &res, [&ly.b[0], &ly.b[1], &ly.b[2]], &maps);
+            dev.mhc_maps(&mut s, shape, ly.a, &phi, [&ly.b[0], &ly.b[1], &ly.b[2]], &maps);
             let u = dev.alloc(b * d);
             dev.mhc_mix(&mut s, &lanes, &maps, &u, (bu, nu, du));
             let y = dev.alloc(b * d);
@@ -316,19 +320,23 @@ impl DeviceDecoder {
             let key = dev.linear_new(s, &e.key, &gathered, b);
             let value = dev.linear_new(s, &e.value, &gathered, b);
             let conv = dev.alloc(st.batch * c.dim);
-            dev.taps(s, &value, &st.engram_v[site], &e.taps, &conv, &st.posbuf, (b, d, maxt), ENGRAM_TAPS as u32, ENGRAM_DILATION);
+            dev.taps(s, &value, &st.engram_v[site], &e.taps, &conv, &st.posbuf, (b, d, maxt), ENGRAM_TAPS as u32, ENGRAM_DILATION, (d, 0));
             dev.engram_gate(s, y, &key, &conv, b, d);
         }
         // Self-attention with causal taps and rotary positions.
         let cache = &st.layers[l];
         let h = dev.zc_new(s, y, &ly.norm, b, d);
         let widths = [heads * hd, kvh * hd, kvh * vh];
+        // One fused projection: q, k, v, then the attention gate.
+        let qkvg = dev.linear_new(s, &ly.qkvg, &h, b);
+        let stride = widths.iter().sum::<u32>() + heads * vh;
         let mut conv = Vec::new();
+        let mut off = 0;
         for (i, &width) in widths.iter().enumerate() {
-            let raw = dev.linear_new(s, &ly.qkv[i], &h, b);
             let out = dev.alloc(st.batch * width as usize);
-            dev.taps(s, &raw, &cache.raw[i], &ly.taps[i], &out, &st.posbuf, (b, width, maxt), c.taps as u32, 1);
+            dev.taps(s, &qkvg, &cache.raw[i], &ly.taps[i], &out, &st.posbuf, (b, width, maxt), c.taps as u32, 1, (stride, off));
             conv.push(out);
+            off += width;
         }
         let q = dev.zc_new(s, &conv[0], &ly.q_norm, b * heads, hd);
         let k = dev.zc_new(s, &conv[1], &ly.k_norm, b * kvh, hd);
@@ -339,7 +347,7 @@ impl DeviceDecoder {
         let att = dev.alloc(st.batch * (heads * vh) as usize);
         let shape = AttnShape { batch: b, nq: 1, heads, kvh, hd, vd: vh, nk: maxt, visible: u32::MAX };
         dev.attention_at(s, shape, &q, &cache.k, &cache.v, &st.ones, &st.posbuf, &att);
-        self.gated_residual(dev, s, y, &h, &att, &ly.gate, &ly.out, &ly.post_attn, ly.attn_gate, b, heads * vh);
+        self.gated_residual(dev, s, y, (&qkvg, stride, off), &att, &ly.out, &ly.post_attn, ly.attn_gate, b, heads * vh);
 
         // Cross-attention over the image memory.
         let h = dev.zc_new(s, y, &ly.cross_norm, b, d);
@@ -348,24 +356,24 @@ impl DeviceDecoder {
         let att = dev.alloc(st.batch * (heads * vh) as usize);
         let shape = AttnShape { batch: b, nq: 1, heads, kvh: heads, hd, vd: vh, nk: cross.stride as u32, visible: cross.stride as u32 };
         dev.attention(s, shape, &q, &cross.k[l], &cross.v[l], &cross.mask, &att);
-        self.gated_residual(dev, s, y, &h, &att, &ly.cgate, &ly.cout, &ly.post_cross, ly.cross_gate, b, heads * vh);
+        let cg = dev.linear_new(s, &ly.cgate, &h, b);
+        self.gated_residual(dev, s, y, (&cg, heads * vh, 0), &att, &ly.cout, &ly.post_cross, ly.cross_gate, b, heads * vh);
 
         // Hadamard MLP.
         let h = dev.zc_new(s, y, &ly.pre_hada, b, d);
-        let cond = dev.linear_new(s, &ly.cond_v, &h, b);
-        let z1 = dev.linear_new(s, &ly.rot[0], &h, b);
-        dev.hada_mid(s, &z1, &cond, &ly.cond_u, &ly.d2, &ly.b2, (b, d, HADAMARD_COND_RANK as u32));
-        let z2 = dev.linear_new(s, &ly.rot[1], &z1, b);
-        let z3 = dev.linear_new(s, &ly.rot[2], &z2, b);
+        let zc = dev.linear_new(s, &ly.cond_rot, &h, b);
+        let z1 = dev.alloc(st.batch * c.dim);
+        dev.hada_mid(s, &zc, &ly.cond_u, &ly.d2, &ly.b2, &z1, (b, d, HADAMARD_COND_RANK as u32));
+        let z2 = dev.linear_new(s, &ly.rot[0], &z1, b);
+        let z3 = dev.linear_new(s, &ly.rot[1], &z2, b);
         dev.add(s, &z3, y, b * d);
     }
 
-    /// `y += gate * zc((att * sigmoid(h Wgate)) Wout)`.
+    /// `y += gate * zc((att * sigmoid(gate)) Wout)`; `gate` is (buffer, row stride, column offset).
     #[allow(clippy::too_many_arguments)]
-    fn gated_residual(&self, dev: &Device, s: &mut Vec<gpu_core::Step>, y: &DeviceBuffer, h: &DeviceBuffer, att: &DeviceBuffer, gate: &Weight, out: &Weight, post: &DeviceBuffer, scalar: f32, rows: u32, w: u32) {
-        let g = dev.linear_new(s, gate, h, rows);
+    fn gated_residual(&self, dev: &Device, s: &mut Vec<gpu_core::Step>, y: &DeviceBuffer, gate: (&DeviceBuffer, u32, u32), att: &DeviceBuffer, out: &Weight, post: &DeviceBuffer, scalar: f32, rows: u32, w: u32) {
         let gated = dev.alloc((rows * w) as usize);
-        dev.sigmoid_mul(s, att, &g, &gated, rows * w);
+        dev.sigmoid_mul(s, att, gate.0, &gated, rows * w, w, (gate.1, gate.2));
         let o = dev.linear_new(s, out, &gated, rows);
         let on = dev.zc_new(s, &o, post, rows, self.cfg.dim as u32);
         dev.axpy(s, scalar, &on, y, rows * self.cfg.dim as u32);

@@ -265,9 +265,9 @@ impl Device {
 
     /// Lane maps of a hyper-connection layer (see the kernel).
     #[allow(clippy::too_many_arguments)]
-    pub fn mhc_maps(&self, s: &mut Vec<Step>, g: MhcShape, a: [f32; 3], pre: &DeviceBuffer, post: &DeviceBuffer, res: &DeviceBuffer, b: [&DeviceBuffer; 3], maps: &DeviceBuffer) {
+    pub fn mhc_maps(&self, s: &mut Vec<Step>, g: MhcShape, a: [f32; 3], phi: &DeviceBuffer, b: [&DeviceBuffer; 3], maps: &DeviceBuffer) {
         let p = [g.rows, g.n, g.lane_id, g.iters, a[0].to_bits(), a[1].to_bits(), a[2].to_bits()];
-        self.push(s, "mirage_mhc_maps", &[pre, post, res, b[0], b[1], b[2], maps], &p, g.rows);
+        self.push(s, "mirage_mhc_maps", &[phi, b[0], b[1], b[2], maps], &p, g.rows);
     }
 
     /// `u = sum_j h_pre[j] * lanes[j]`.
@@ -283,13 +283,13 @@ impl Device {
 
     /// Causal tap convolution at `pos`: `src` is the current raw row, which is also stored into `hist`.
     #[allow(clippy::too_many_arguments)]
-    pub fn taps(&self, s: &mut Vec<Step>, src: &DeviceBuffer, hist: &DeviceBuffer, taps: &DeviceBuffer, out: &DeviceBuffer, pos: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32), ntaps: u32, dilation: u32) {
-        self.push(s, "mirage_taps", &[src, hist, taps, out, pos], &[rows, w, maxt, ntaps, dilation], rows * w);
+    pub fn taps(&self, s: &mut Vec<Step>, src: &DeviceBuffer, hist: &DeviceBuffer, taps: &DeviceBuffer, out: &DeviceBuffer, pos: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32), ntaps: u32, dilation: u32, (src_stride, src_off): (u32, u32)) {
+        self.push(s, "mirage_taps", &[src, hist, taps, out, pos], &[rows, w, maxt, ntaps, dilation, src_stride, src_off], rows * w);
     }
 
     /// `out = att * sigmoid(gate)`.
-    pub fn sigmoid_mul(&self, s: &mut Vec<Step>, att: &DeviceBuffer, gate: &DeviceBuffer, out: &DeviceBuffer, total: u32) {
-        self.push(s, "mirage_sigmoid_mul", &[att, gate, out], &[total], total);
+    pub fn sigmoid_mul(&self, s: &mut Vec<Step>, att: &DeviceBuffer, gate: &DeviceBuffer, out: &DeviceBuffer, total: u32, w: u32, (gate_stride, gate_off): (u32, u32)) {
+        self.push(s, "mirage_sigmoid_mul", &[att, gate, out], &[total, w, gate_stride, gate_off], total);
     }
 
     /// `hist[b, pos] = src[b]`.
@@ -302,10 +302,10 @@ impl Device {
         self.push(s, "mirage_rope_pos", &[t, pos], &[rows, hd, base.to_bits()], rows * (hd / 2));
     }
 
-    /// The Hadamard-MLP middle stage in place on `z`; `logits` are the pre-softmax conditioning scores.
+    /// The Hadamard-MLP middle stage: `zc` is `[rows, rank + n]` (conditioning scores then the first rotation), `out` is `[rows, n]`.
     #[allow(clippy::too_many_arguments)]
-    pub fn hada_mid(&self, s: &mut Vec<Step>, z: &DeviceBuffer, logits: &DeviceBuffer, cond_u: &DeviceBuffer, d2: &DeviceBuffer, b2: &DeviceBuffer, (rows, n, rank): (u32, u32, u32)) {
-        self.push(s, "mirage_hada_mid", &[z, logits, cond_u, d2, b2], &[rows, n, rank], rows * n);
+    pub fn hada_mid(&self, s: &mut Vec<Step>, zc: &DeviceBuffer, cond_u: &DeviceBuffer, d2: &DeviceBuffer, b2: &DeviceBuffer, out: &DeviceBuffer, (rows, n, rank): (u32, u32, u32)) {
+        self.push(s, "mirage_hada_mid", &[zc, cond_u, d2, b2, out], &[rows, n, rank], rows * n);
     }
 
     /// Mean over lanes.
@@ -315,7 +315,7 @@ impl Device {
 
     /// Row-wise argmax as `f32` indices.
     pub fn argmax(&self, s: &mut Vec<Step>, x: &DeviceBuffer, out: &DeviceBuffer, m: u32, n: u32) {
-        self.push(s, "argmax_row", &[x, out], &[m, n], m);
+        s.push(self.gpu().dispatch(self.k("mirage_argmax_wg"), &[x, out], &[m, n], gpu_core::Dispatch::Workgroups(m)));
     }
     /// `tok[b] = hist[b, pos[0]]`.
     pub fn tok_at(&self, s: &mut Vec<Step>, hist: &DeviceBuffer, tok: &DeviceBuffer, pos: &DeviceBuffer, batch: u32, maxt: u32) {

@@ -32,9 +32,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let kv = h / (p.heads / p.kvh);
     var visible = p.visible;
     if (visible == 0xFFFFFFFFu) { visible = pos[0] + 1u; }
-    var acc = 0.0;
-    for (var s = 0u; s < visible; s = s + 1u) {
-        acc = acc + probs[row * p.nk + s] * v[((b * p.nk + s) * p.kvh + kv) * p.vd + i];
+    // Four independent accumulators hide the load latency of a serial walk over the keys.
+    let pb = row * p.nk;
+    let vb = (b * p.nk * p.kvh + kv) * p.vd + i;
+    let vs = p.kvh * p.vd;
+    var a0 = 0.0;
+    var a1 = 0.0;
+    var a2 = 0.0;
+    var a3 = 0.0;
+    var s = 0u;
+    for (; s + 4u <= visible; s = s + 4u) {
+        a0 = a0 + probs[pb + s] * v[vb + s * vs];
+        a1 = a1 + probs[pb + s + 1u] * v[vb + (s + 1u) * vs];
+        a2 = a2 + probs[pb + s + 2u] * v[vb + (s + 2u) * vs];
+        a3 = a3 + probs[pb + s + 3u] * v[vb + (s + 3u) * vs];
     }
-    out[idx] = acc;
+    for (; s < visible; s = s + 1u) { a0 = a0 + probs[pb + s] * v[vb + s * vs]; }
+    out[idx] = (a0 + a1) + (a2 + a3);
 }

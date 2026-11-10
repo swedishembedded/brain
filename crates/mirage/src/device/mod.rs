@@ -65,6 +65,7 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_hada_mid", kernels::MIRAGE_HADA_MID),
     ("mirage_lane_mean", kernels::MIRAGE_LANE_MEAN),
     ("argmax_row", kernels::ARGMAX_ROW),
+    ("mirage_argmax_wg", kernels::MIRAGE_ARGMAX_WG),
     ("silu", kernels::SILU),
     ("add", kernels::ADD),
     ("mul", kernels::MUL),
