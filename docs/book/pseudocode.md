@@ -473,6 +473,15 @@ serve them; each is defined by what it returns, never by how it is stored.
 | `s[i:j]`, `len(s)` for `text` | the characters (code points, not bytes) `i .. j - 1` of `s` as a `text`, and the number of characters of `s`; `s[i:j]` is the empty text when `i >= j` |
 | `heap<T>` | a priority queue of tuples. `push(q, x)` adds `x`; `pop_min(q)` removes and returns the smallest element in tuple order (an error on an empty queue); `len(q)` is the number of elements |
 
+## Routines of the vision chapters (Volume VII)
+
+The routines of Volume VII's convolution chapters are written out where they are first used and are called by name afterwards.
+`out_size`, `conv2d`, `im2col` and `col2im` are those of Chapter 2 (`conv2d(x, w, s, p, d, G)` takes the stride, padding, dilation and
+number of groups by position). `maxpool2d(x, k, s)` and `maxpool2d_backward` of Chapter 3 take a window of side `k` every `s`
+positions with no padding, and return the winners' rows and columns beside the output (the first maximum in row-major order wins a
+tie, as `argmax` does); `residual_block`, `fold_bn_conv` and `fpn_top_down` are defined there, and `upsample2(x)` repeats each value
+of a map into a 2 by 2 block, `y[c, i, j] = x[c, i // 2, j // 2]`.
+
 ## Routines of the transformer chapters (Volume V)
 
 Chapters 9 to 12 use four routines of the normalization and attention chapters without writing them out again. Each is defined here by what it returns.

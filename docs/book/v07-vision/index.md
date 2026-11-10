@@ -19,7 +19,7 @@ You can say what the numbers of an image mean and convert between the layouts an
 
 1. [Images as Data](01-images.md): what an image is to a model, and how many ways preprocessing can quietly go wrong.
 2. [Convolution](02-convolution.md): how a small filter slid across an image finds edges, textures and eventually objects.
-3. Convolutional Networks and Residual Learning: how stacks of convolutions become image classifiers, and why residual connections let them go deep.
+3. [Convolutional Networks and Residual Learning](03-cnns.md): how stacks of convolutions become image classifiers, and why residual connections let them go deep.
 4. Object Detection: how a network says not just what is in an image but where.
 5. Dense Prediction: Segmentation and Depth: how a network labels every pixel or estimates how far away it is.
 6. Vision Transformers: whether attention can replace convolution for images.

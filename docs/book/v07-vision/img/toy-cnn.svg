@@ -1,0 +1,44 @@
+<!-- source-sha256: 1720ed50e1b09b6ad0bee41cb3edc8b212a2e362543f93c23bf06706ec490e41 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400" width="700" height="400"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="700" height="400" fill="#ffffff"/>
+<text x="350" y="32.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Toy network: 283 parameters, 5,778 multiply-adds per image</text>
+<rect x="34" y="62" width="140" height="124" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="104" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image</text>
+<text x="104" y="136.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 x 8 x 8</text>
+<rect x="198" y="62" width="140" height="124" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="268" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">conv 3x3, pad 1</text>
+<text x="268" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 filters</text>
+<text x="268" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">40 parameters</text>
+<text x="268" y="144.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 8 x 8</text>
+<text x="268" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">receptive field 3</text>
+<rect x="362" y="62" width="140" height="124" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="432" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ReLU</text>
+<text x="432" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">max pool 2x2, stride 2</text>
+<text x="432" y="136.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 4 x 4</text>
+<text x="432" y="152.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">receptive field 4</text>
+<rect x="526" y="62" width="140" height="124" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="596" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">conv 3x3, pad 1</text>
+<text x="596" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 filters</text>
+<text x="596" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">222 parameters</text>
+<text x="596" y="144.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 x 4 x 4</text>
+<text x="596" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">receptive field 8</text>
+<rect x="34" y="228" width="140" height="124" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="104" y="278.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ReLU</text>
+<text x="104" y="294.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">global average pool</text>
+<text x="104" y="310.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 values</text>
+<rect x="198" y="228" width="140" height="124" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="268" y="270.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">linear</text>
+<text x="268" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 to 3</text>
+<text x="268" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">21 parameters</text>
+<text x="268" y="318.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 logits</text>
+<rect x="362" y="228" width="140" height="124" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="432" y="278.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">softmax</text>
+<text x="432" y="294.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cross-entropy</text>
+<text x="432" y="310.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 probabilities</text>
+<line x1="177" y1="124" x2="195" y2="124" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="341" y1="124" x2="359" y2="124" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="505" y1="124" x2="523" y2="124" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M596,186 L596,197 Q596,207 586,207 L114,207 Q104,207 104,217 L104,225" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="177" y1="290" x2="195" y2="290" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="341" y1="290" x2="359" y2="290" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="350" y="388.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">Each box shows the shape of the tensor it produces; the receptive field is along one axis, in input pixels.</text>
+</svg>

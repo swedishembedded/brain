@@ -581,7 +581,7 @@ volumes:
         title: "Convolutional Networks and Residual Learning"
         question: "How do stacks of convolutions become image classifiers, and why did residual connections let them go deep?"
         introduces: [pooling, convolutional-network, resnet, feature-pyramid]
-        requires: [convolution-2d, residual-connection, batch-normalization, softmax-cross-entropy]
+        requires: [convolution-2d, kernel-size-stride-padding, receptive-field, residual-connection, batch-normalization, softmax-cross-entropy, relu, adam, he-initialization, gradient-check, image-resampling]
         brain: [vision]
       - id: detection
         title: "Object Detection"

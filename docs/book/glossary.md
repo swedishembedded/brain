@@ -180,6 +180,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **convolution theorem**: the fact that the discrete Fourier transform of a circular convolution of two signals is the pointwise product of their transforms, so that convolution acts independently on each frequency and a long convolution can be computed with three fast transforms. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
+**convolutional network**: a network built from convolutions, nonlinearities and pooling (or strided convolutions) that shrinks a picture's maps while widening their channels until one output sees the whole picture and a linear layer reads it. *([Convolutional Networks and Residual Learning](v07-vision/03-cnns.md))*
+
 **cooperative matrix**: a small matrix whose elements are held jointly by the invocations of one subgroup and operated on by subgroup-wide load, multiply-add and store operations; the programming interface to tensor cores, available only where the device reports the shapes and types it supports. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 
 **cosine schedule**: a decay of the learning rate from its peak to a floor along half a period of the cosine, $\eta_{\min} + (\eta_{\max} - \eta_{\min})\tfrac12(1 + \cos\pi u)$, which starts and ends with zero slope. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
@@ -295,6 +297,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **fast Fourier transform**: an algorithm for the discrete Fourier transform that splits the samples into even and odd indices and combines the two half-size transforms with one twiddle multiplication per output pair, using about $\tfrac N2\log_2 N$ multiplications instead of $N^2$ and giving the same result up to rounding. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
 **feature**: one measurable property of an example that a prediction may depend on; the features of one example form a vector. *([The Learning Problem](v02-learning/01-learning-problem.md))*
+
+**feature pyramid**: a set of maps of the same width at several strides built from a backbone's levels, each coarse level's context upsampled and added to the finer level's projection (top-down) and, in the path aggregation form, the fine level's detail carried back to the coarse ones by strided convolutions (bottom-up), so that every scale has both resolution and meaning. *([Convolutional Networks and Residual Learning](v07-vision/03-cnns.md))*
 
 **feed-forward network**: the sublayer that applies one small network, two or three matrices and an activation, to each position on its own, so that it computes with what attention has gathered and moves nothing between positions. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 
@@ -640,6 +644,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **polynomial**: a sum of constant multiples of powers of $x$; one of degree $n$ has $n + 1$ parameters and is fixed by $n + 1$ points. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
+**pooling**: a layer that summarizes each window of a map by one number, the largest (max pooling, whose gradient goes to the winner of the window) or the mean (average pooling, whose gradient is shared equally), with no weights; global average pooling takes the whole map. *([Convolutional Networks and Residual Learning](v07-vision/03-cnns.md))*
+
 **post-training quantization**: converting a trained float network to integer arithmetic without retraining, by choosing the scale and zero point of each weight tensor from the weights and of each activation tensor from ranges measured on data, and rewriting each layer as an integer accumulation followed by a requantization. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
 
 **pre-norm**: the block layout in which each sublayer reads a normalized copy of the stream and its result is added to the stream unnormalized, $\mathbf{x} + g(\mathrm{norm}(\mathbf{x}))$, so that the path through the additions alone carries no norm. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
@@ -717,6 +723,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **reproducibility**: the property that running again from the same recorded inputs (seed, data, code, settings) gives the same results exactly, which requires the same draws in the same order and the same floating-point arithmetic. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **reshape-and-view**: reshaping keeps a tensor's line of numbers in row-major order and cuts it into a new shape; a view is a new shape, strides and offset over the same storage, so a reshape of a contiguous array needs no copy. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
+**residual network**: a network of blocks that compute $\mathrm{relu}(f(\mathbf{x}) + \mathrm{sh}(\mathbf{x}))$, the sum of a short stack of convolutions and a shortcut (the identity, or a $1 \times 1$ projection when the shape changes), which lets gradients and signals pass a deep stack along a path without weights; the basic block has two $3 \times 3$ convolutions and the bottleneck block a $1 \times 1$ reduction, a $3 \times 3$ and a $1 \times 1$ expansion. *([Convolutional Networks and Residual Learning](v07-vision/03-cnns.md))*
 
 **residual stream**: the matrix of shape $[T, D]$ that enters a transformer block, is added to by each sublayer and leaves it, so that after $L$ blocks it is the embedding plus the $2L$ contributions that the sublayers wrote. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 

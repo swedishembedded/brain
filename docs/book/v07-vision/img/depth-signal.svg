@@ -1,0 +1,42 @@
+<!-- source-sha256: ebd48afde0fbce21daa765fb36fc32ffc8ceaee81403db5ac0e54ae116fac044 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 380" width="600" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="380" fill="#ffffff"/>
+<line x1="60" y1="334" x2="60" y2="30" stroke="#edf2f7"/>
+<text x="60" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="164.4" y1="334" x2="164.4" y2="30" stroke="#edf2f7"/>
+<text x="164.4" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="268.8" y1="334" x2="268.8" y2="30" stroke="#edf2f7"/>
+<text x="268.8" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="373.2" y1="334" x2="373.2" y2="30" stroke="#edf2f7"/>
+<text x="373.2" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">30</text>
+<line x1="477.6" y1="334" x2="477.6" y2="30" stroke="#edf2f7"/>
+<text x="477.6" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">40</text>
+<line x1="582" y1="334" x2="582" y2="30" stroke="#edf2f7"/>
+<text x="582" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">50</text>
+<line x1="60" y1="334" x2="582" y2="334" stroke="#edf2f7"/>
+<text x="54" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1e-06</text>
+<line x1="60" y1="283.33" x2="582" y2="283.33" stroke="#edf2f7"/>
+<text x="54" y="287.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1e-05</text>
+<line x1="60" y1="232.67" x2="582" y2="232.67" stroke="#edf2f7"/>
+<text x="54" y="236.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.0001</text>
+<line x1="60" y1="182" x2="582" y2="182" stroke="#edf2f7"/>
+<text x="54" y="186" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.001</text>
+<line x1="60" y1="131.33" x2="582" y2="131.33" stroke="#edf2f7"/>
+<text x="54" y="135.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.01</text>
+<line x1="60" y1="80.67" x2="582" y2="80.67" stroke="#edf2f7"/>
+<text x="54" y="84.67" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.1</text>
+<line x1="60" y1="30" x2="582" y2="30" stroke="#edf2f7"/>
+<text x="54" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="60" y="30" width="522" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="60" y="30" width="522" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="80.88,44.71 101.76,71.33 143.52,89.6 185.28,94.61 227.04,127.86 310.56,158.69 394.08,203.33 561.12,284.88"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="80.88,72.35 101.76,70.59 143.52,65.35 185.28,64.85 227.04,74.06 310.56,63.55 394.08,67.72 561.12,57.62"/><circle cx="80.88" cy="44.71" r="3" fill="#2b6cb0"/><circle cx="101.76" cy="71.33" r="3" fill="#2b6cb0"/><circle cx="143.52" cy="89.6" r="3" fill="#2b6cb0"/><circle cx="185.28" cy="94.61" r="3" fill="#2b6cb0"/><circle cx="227.04" cy="127.86" r="3" fill="#2b6cb0"/><circle cx="310.56" cy="158.69" r="3" fill="#2b6cb0"/><circle cx="394.08" cy="203.33" r="3" fill="#2b6cb0"/><circle cx="561.12" cy="284.88" r="3" fill="#2b6cb0"/><circle cx="80.88" cy="72.35" r="3" fill="#c05621"/><circle cx="101.76" cy="70.59" r="3" fill="#c05621"/><circle cx="143.52" cy="65.35" r="3" fill="#c05621"/><circle cx="185.28" cy="64.85" r="3" fill="#c05621"/><circle cx="227.04" cy="74.06" r="3" fill="#c05621"/><circle cx="310.56" cy="63.55" r="3" fill="#c05621"/><circle cx="394.08" cy="67.72" r="3" fill="#c05621"/><circle cx="561.12" cy="57.62" r="3" fill="#c05621"/></g>
+<text x="321" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">convolutions d in the body</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">gradient norm of the first body convolution</text>
+<text x="321" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Gradient reaching the first layer at initialization</text>
+<rect x="68" y="282" width="122.8" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="76" y1="297" x2="96" y2="297" stroke="#2b6cb0" stroke-width="2"/>
+<text x="102" y="301" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">plain stack</text>
+<line x1="76" y1="314" x2="96" y2="314" stroke="#c05621" stroke-width="2"/>
+<text x="102" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">residual stack</text>
+</svg>

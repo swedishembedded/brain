@@ -1,0 +1,77 @@
+<!-- source-sha256: 81eb43e99539a79a3177d36af83df5e80bfcfe268e2a52001e1f199f03c3189f -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 450" width="760" height="450"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="760" height="450" fill="#ffffff"/>
+<text x="76" y="38.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">backbone</text>
+<text x="282" y="38.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">merged maps</text>
+<text x="488" y="38.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">pyramid</text>
+<text x="694" y="38.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">bottom-up</text>
+<text x="385" y="58.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">top-down path</text>
+<text x="694" y="58.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">PAN path</text>
+<text x="76" y="58.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">ResNet-50</text>
+<rect x="10" y="90" width="132" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="76" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F3, stride 8</text>
+<text x="76" y="132.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">512 x 80 x 80</text>
+<rect x="216" y="90" width="132" height="60" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="282" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">M3</text>
+<text x="282" y="132.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 x 80 x 80</text>
+<rect x="422" y="90" width="132" height="60" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="488" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P3</text>
+<text x="488" y="132.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 x 80 x 80</text>
+<rect x="628" y="90" width="132" height="60" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="694" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">N3</text>
+<text x="694" y="132.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 x 80 x 80</text>
+<line x1="145" y1="120" x2="213" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="179" y="111.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">1x1 conv</text>
+<line x1="351" y1="120" x2="419" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="385" y="111.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">3x3 conv</text>
+<line x1="557" y1="120" x2="625" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="591" y="111.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">copy</text>
+<rect x="10" y="220" width="132" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="76" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F4, stride 16</text>
+<text x="76" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1024 x 40 x 40</text>
+<rect x="216" y="220" width="132" height="60" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="282" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">M4</text>
+<text x="282" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 x 40 x 40</text>
+<rect x="422" y="220" width="132" height="60" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="488" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P4</text>
+<text x="488" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 x 40 x 40</text>
+<rect x="628" y="220" width="132" height="60" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="694" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">N4</text>
+<text x="694" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 x 40 x 40</text>
+<line x1="145" y1="250" x2="213" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="179" y="241.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">1x1 conv</text>
+<line x1="351" y1="250" x2="419" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="385" y="241.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">3x3 conv</text>
+<line x1="557" y1="250" x2="625" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="591" y="241.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">add</text>
+<rect x="10" y="350" width="132" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="76" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F5, stride 32</text>
+<text x="76" y="392.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2048 x 20 x 20</text>
+<rect x="216" y="350" width="132" height="60" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="282" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">M5</text>
+<text x="282" y="392.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 x 20 x 20</text>
+<rect x="422" y="350" width="132" height="60" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="488" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P5</text>
+<text x="488" y="392.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 x 20 x 20</text>
+<rect x="628" y="350" width="132" height="60" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="694" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">N5</text>
+<text x="694" y="392.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 x 20 x 20</text>
+<line x1="145" y1="380" x2="213" y2="380" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="179" y="371.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">1x1 conv</text>
+<line x1="351" y1="380" x2="419" y2="380" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="385" y="371.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">3x3 conv</text>
+<line x1="557" y1="380" x2="625" y2="380" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="591" y="371.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">add</text>
+<line x1="282" y1="217" x2="282" y2="153" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="291" y="181.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">upsample x2,</text>
+<text x="291" y="197.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">add</text>
+<line x1="282" y1="347" x2="282" y2="283" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="291" y="311.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">upsample x2,</text>
+<text x="291" y="327.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">add</text>
+<line x1="694" y1="153" x2="694" y2="217" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="685" y="181.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">3x3 conv,</text>
+<text x="685" y="197.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">stride 2</text>
+<line x1="694" y1="283" x2="694" y2="347" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="685" y="311.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">3x3 conv,</text>
+<text x="685" y="327.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">stride 2</text>
+<text x="380" y="440.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">All pyramid maps have the same number of channels, so the sums are elementwise; maps are shown as C x H x W.</text>
+</svg>
