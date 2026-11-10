@@ -650,6 +650,55 @@ family but not per entry; a `brain mirage quantize` verb is not wired (the libra
 - Tracked goldens live beside the crate tests (`crates/mirage/tests/golden/`)
   because `testdata/` is not tracked; the dumper is under `tools/goldens/`.
 
+## Lane L7 - close-out
+
+### Item 1: the full test binary (done 2026-11-10)
+
+The "abort after ~157 tests" was `gpu_core::testgpu::exclusive()` hard-exiting with code 101 after a WAITER had queued for
+600 s behind healthy holders (65 tests of the binary take the lock and many run for minutes on the CPU backend). The limit
+measured the queue, not a wedged holder. `exclusive()` now returns a `DeviceGuard` and aborts only when the CURRENT holder has
+held the lock for 600 s (acquisition instant tracked in an atomic; the FATAL line names the waiting test and the holder's hold
+time). Gate: `testgpu::tests::the_device_lock_limit_measures_the_holder_not_the_queue` (four waiters behind 150 ms holds with a
+300 ms limit never abort; a holder past the limit is reported; a poisoned lock is free).
+Evidence: `make test/one P=brain-mirage T=it` in one process: CPU backend 178 passed, 15 ignored, 853.9 s (the one failure of that
+run was the engine-corpus test picking up the new `cats_form_*` cases, fixed); CUDA gpu1 (`BRAIN_BACKEND=cuda BRAIN_DEVICE=gpu1`,
+card shared with another session): 180 passed, 15 ignored, 103.5 s. Tests that only need a device keep `exclusive()`: they build
+their own `Gpu` from a kernel list that is not `'static`, so `testgpu::dev` sharing does not apply without a larger test refactor.
+
+### Item 3: residency adapter precision (done)
+
+`resident_mirage` keys one instance per weight source (`default` | `fp32` | `cq`) and loads the archive for `cq`.
+Tests: `the_precision_option_selects_the_instance_and_its_weights`, `a_cq_request_is_served_by_the_packed_archive_beside_the_fp32_instance`.
+
+### Item 2: device form scoring and box fields (done)
+
+Traced the released engine with gdb (token streams of `forward_chunk`). Facts, all now implemented and tested:
+- A box field is asked exactly like free text: the prompt carries `name$60` (length token "60"; the default `maxLength` of a text
+  field is 60 as well, not 32), the answer is generated greedily after `name=` up to the terminator and reported as
+  `{"value": text, "probability": product of token probabilities}`. `x-source` is not in the prompt; it only fixes the place of the
+  box (after the committed answer of that choice field). Text and box answers have `probability`, not a candidate table.
+- The prompt was tokenised with a stray space before `?` (token 7915 instead of 8142); fixed (`tok.encode(spec)` as is).
+- Engine agreement (host model on the packed weights, `cats_form*` cases recorded with the vendor harness):
+  `text_and_box_fields_answer_like_the_reference_engine`: committed values equal, every probability within 0.08 (choice/count: the
+  shift measured is up to 0.07; the box value `cat` has probability 0.265 against the engine's 0.280). The engine also rounds
+  activations to 8 bits (item 5), which explains the residual. The free-text case (`what`) is a coin flip between the first word of
+  the question (0.39) and the abstention (0.32; engine 0.51): only its shape is held against the engine.
+- Device scoring (`device/form.rs`): `DeviceDecoder::extract_forms`. The images answering the same form are one device batch
+  (cohort). A field's candidates are scored by rewinding the batch state to the end of the field head, teacher-forcing each candidate
+  and reading the logits of each step; prefix state computed once per field. When the committed answers of the cohort differ in token
+  length the cohort splits per length (state rows copied through the host, `select_state`; cross-attention rebuilt for the subset);
+  free text and box values are generated per image. Host and device share `form::{candidates, settle, Terminators, log_softmax}`.
+  Test `a_device_batch_scores_every_field_kind_as_the_host_does` (two images, two forms, all four kinds): values equal, probabilities
+  within 1e-4 on CPU and 3e-2 tolerance on accelerators; passes on CPU and CUDA gpu1.
+- Not batched across candidates: the decoder steps one token per sequence at a position the whole batch shares and the
+  cross-attention indexes memory by batch row, so candidates run one after the other on the rewound state (images are the batch).
+  A candidate-batched variant needs a per-row position or a cross-batch index in the attention kernels.
+
+### Remaining (not done in L7 so far)
+
+- Item 4 (saved-activation policy, flash-style attention backward, peak training memory before/after), item 5 (A8 emulation), item 6
+  (decoder step floor and ncu table): not started; see the brief `~/code/progress/mirage-l7-brief.md` for the scope of each.
+
 ## Open lanes
 
 | Lane | Scope | State |

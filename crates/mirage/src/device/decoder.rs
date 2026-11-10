@@ -113,8 +113,8 @@ struct LayerCache {
 
 /// Everything earlier tokens leave behind, for a batch.
 pub struct BatchState {
-    batch: usize,
-    maxt: usize,
+    pub(super) batch: usize,
+    pub(super) maxt: usize,
     layers: Vec<LayerCache>,
     engram_v: Vec<DeviceBuffer>,
     ones: DeviceBuffer,
@@ -137,6 +137,13 @@ impl BatchState {
     /// Positions fed so far.
     pub fn position(&self) -> usize {
         self.pos
+    }
+
+    /// Rewind (or advance) to `pos` fed positions: later steps overwrite the cache from there, so one prefix can
+    /// score several continuations in turn without a copy.
+    pub fn seek(&mut self, dev: &Device, pos: usize) {
+        self.pos = pos;
+        dev.gpu().write(&self.posbuf, &[pos as u32]);
     }
 
     /// The token history table as `[batch][maxt]` words.
@@ -222,6 +229,11 @@ impl DeviceDecoder {
         DeviceCross { k, v, mask: mem.mask.clone(), stride: mem.stride }
     }
 
+    /// Size of the vocabulary the logits cover.
+    pub fn vocabulary(&self) -> usize {
+        self.logits_w.n() as usize
+    }
+
     /// An empty state for `batch` sequences of at most `maxt` positions.
     pub fn new_state(&self, dev: &Device, batch: usize, maxt: usize) -> BatchState {
         let c = &self.cfg;
@@ -238,6 +250,35 @@ impl DeviceDecoder {
             posbuf: dev.gpu().storage(1),
             first: 0,
         }
+    }
+
+    /// The sequences `keep` of `st` (in that order) as a state of their own, with the same fed positions.
+    ///
+    /// A host round trip of the caches (a few MiB at form-prompt lengths): the caller splits a batch only when
+    /// its sequences stop sharing a length, which happens a handful of times per request.
+    pub fn select_state(&self, dev: &Device, st: &BatchState, keep: &[usize]) -> BatchState {
+        let mut out = self.new_state(dev, keep.len(), st.maxt);
+        let gather = |from: &DeviceBuffer, to: &DeviceBuffer, chunk: usize| {
+            let all = dev.read_at(from, 0, st.batch * chunk);
+            let picked: Vec<f32> = keep.iter().flat_map(|&k| all[k * chunk..(k + 1) * chunk].iter().copied()).collect();
+            dev.gpu().write_f32(to, &picked);
+        };
+        let c = &self.cfg;
+        let (qd, kd, vd) = (c.heads() * c.qk_dim, c.kv_heads * c.qk_dim, c.kv_heads * c.v_dim);
+        for (src, dst) in st.layers.iter().zip(&out.layers) {
+            gather(&src.k, &dst.k, st.maxt * kd);
+            gather(&src.v, &dst.v, st.maxt * vd);
+            for (i, w) in [qd, kd, vd].into_iter().enumerate() {
+                gather(&src.raw[i], &dst.raw[i], st.maxt * w);
+            }
+        }
+        for (src, dst) in st.engram_v.iter().zip(&out.engram_v) {
+            gather(src, dst, st.maxt * c.dim);
+        }
+        gather(&st.hist, &out.hist, st.maxt);
+        out.first = st.first;
+        out.seek(dev, st.pos);
+        out
     }
 
     /// Feed the history token at the next position for every sequence; returns the logits

@@ -172,9 +172,6 @@ reader, JSON). `extract` adds `memory_reused`.
   tolerance; the polygons cover the same region (rasterised IoU 0.97 to 1.00
   over the vendor's corpus) but their vertex lists differ. `bitmap` masks are
   exact.
-- **Form scoring runs on the host decoder.** `extract` takes the vision half and
-  the memory on the device and scores candidates with the host decoder, one
-  image at a time.
 - **Quantised execution is opt-in.** `precision: cq` serves the archive's 2-bit
   matrices packed on the device (see [Precision](#precision)); the engine rounds
   activations to int8, brain keeps them in float32, so exact tokens are not

@@ -262,7 +262,7 @@ impl Serialize for Extract {
     }
 }
 
-fn log_softmax(row: &[f32]) -> Vec<f32> {
+pub(crate) fn log_softmax(row: &[f32]) -> Vec<f32> {
     let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let lse = max + row.iter().map(|v| (v - max).exp()).sum::<f32>().ln();
     row.iter().map(|v| v - lse).collect()
@@ -279,37 +279,22 @@ fn extract_inner(dec: &Decoder, cross: &CrossMemory, tok: &Tokenizer, prompt: &[
     let mut tokens = prompt.to_vec();
     tokens.extend(tok.encode(&spec_text(fields))?);
     dec.forward(&mut st, cross, &tokens, Positions::Last);
-    let newline = tok.encode("\n")?;
-    let eos = [tok.eos_id()];
+    let ends = Terminators::new(tok)?;
     let mut answers = Vec::new();
     for (i, field) in fields.iter().enumerate() {
-        let terminator: &[u32] = if i + 1 == fields.len() { &eos } else { &newline };
-        let head = tok.encode(&format!("{}=", field.name))?;
-        let mut logits = dec.forward(&mut st, cross, &head, Positions::Last);
-
-        let (labels, values): (Vec<String>, Vec<Value>) = match &field.kind {
-            FieldKind::Choice(options) => (options.iter().map(value_text).collect(), options.clone()),
-            FieldKind::Count { min, max } => ((*min..=*max).map(|v| v.to_string()).collect(), (*min..=*max).map(Value::from).collect()),
-            FieldKind::Text { .. } | FieldKind::Box { .. } => (Vec::new(), Vec::new()),
-        };
+        let terminator = ends.after(i, fields.len());
+        let mut logits = dec.forward(&mut st, cross, &head_tokens(tok, field)?, Positions::Last);
         if let Some(length) = generated_length(&field.kind) {
             let (text, probability) = greedy_text(dec, cross, tok, &mut st, &mut logits, terminator, length.min(max_tokens))?;
             answers.push((field.name.clone(), Answer { value: Value::String(text), confidence: Confidence::Generated(probability) }));
             continue;
         }
-        let mut candidates: Vec<(String, Value, Vec<u32>)> = Vec::new();
-        for (label, value) in labels.iter().zip(&values) {
-            candidates.push((label.clone(), value.clone(), tok.encode(label)?));
-        }
-        if matches!(field.kind, FieldKind::Choice(_)) {
-            candidates.push((ABSTAIN.to_string(), Value::Null, tok.encode(ABSTAIN)?));
-        }
+        let candidates = candidates(tok, &field.kind)?;
         let first = log_softmax(&logits);
         let scores: Vec<f32> = candidates
             .iter()
-            .map(|(_, _, toks)| {
-                let mut seq = toks.clone();
-                seq.extend_from_slice(terminator);
+            .map(|c| {
+                let seq = c.sequence(terminator);
                 let mut score = first[seq[0] as usize];
                 if seq.len() > 1 {
                     let mut branch = st.clone();
@@ -321,21 +306,96 @@ fn extract_inner(dec: &Decoder, cross: &CrossMemory, tok: &Tokenizer, prompt: &[
                 score
             })
             .collect();
-        let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let exps: Vec<f64> = scores.iter().map(|s| f64::from(s - max).exp()).collect();
-        let total: f64 = exps.iter().sum();
-        let probabilities: Vec<(String, f64)> = candidates.iter().zip(&exps).map(|((l, _, _), e)| (l.clone(), e / total)).collect();
-        let best = exps.iter().enumerate().fold(0, |b, (i, e)| if *e > exps[b] { i } else { b });
-        let mut commit = candidates[best].2.clone();
-        commit.extend_from_slice(terminator);
-        dec.forward(&mut st, cross, &commit, Positions::Last);
-        answers.push((field.name.clone(), Answer { value: candidates[best].1.clone(), confidence: Confidence::Candidates(probabilities) }));
+        let (best, probabilities) = settle(&candidates, &scores);
+        dec.forward(&mut st, cross, &candidates[best].sequence(terminator), Positions::Last);
+        answers.push((field.name.clone(), Answer { value: candidates[best].value.clone(), confidence: Confidence::Candidates(probabilities) }));
     }
     Ok(Extract { fields: answers })
 }
 
+/// The token ids that end a field: a newline between fields, the end token after the last.
+pub(crate) struct Terminators {
+    newline: Vec<u32>,
+    eos: [u32; 1],
+}
+
+impl Terminators {
+    pub(crate) fn new(tok: &Tokenizer) -> Result<Terminators, TokenizerError> {
+        Ok(Terminators { newline: tok.encode("\n")?, eos: [tok.eos_id()] })
+    }
+
+    /// The terminator of field `i` of `count`.
+    pub(crate) fn after(&self, i: usize, count: usize) -> &[u32] {
+        if i + 1 == count {
+            &self.eos
+        } else {
+            &self.newline
+        }
+    }
+}
+
+/// The prompt tokens that list the fields (`? name=a|b; n#0..5` and a newline), after the language tokens.
+pub(crate) fn spec_tokens(tok: &Tokenizer, fields: &[FormField]) -> Result<Vec<u32>, TokenizerError> {
+    tok.encode(&spec_text(fields))
+}
+
+/// The tokens that open the answer to `field` (`name=`).
+pub(crate) fn head_tokens(tok: &Tokenizer, field: &FormField) -> Result<Vec<u32>, TokenizerError> {
+    tok.encode(&format!("{}=", field.name))
+}
+
+/// One answer a scored field may give.
+pub(crate) struct Candidate {
+    label: String,
+    value: Value,
+    tokens: Vec<u32>,
+}
+
+impl Candidate {
+    /// The value this candidate answers with (`null` for the abstention).
+    pub(crate) fn value(&self) -> &Value {
+        &self.value
+    }
+
+    /// The answer's tokens and the terminator that closes the field.
+    pub(crate) fn sequence(&self, terminator: &[u32]) -> Vec<u32> {
+        let mut seq = self.tokens.clone();
+        seq.extend_from_slice(terminator);
+        seq
+    }
+}
+
+/// The candidates of a scored field (abstention last for choices); empty for a generated kind.
+pub(crate) fn candidates(tok: &Tokenizer, kind: &FieldKind) -> Result<Vec<Candidate>, TokenizerError> {
+    let (labels, values): (Vec<String>, Vec<Value>) = match kind {
+        FieldKind::Choice(options) => (options.iter().map(value_text).collect(), options.clone()),
+        FieldKind::Count { min, max } => ((*min..=*max).map(|v| v.to_string()).collect(), (*min..=*max).map(Value::from).collect()),
+        FieldKind::Text { .. } | FieldKind::Box { .. } => return Ok(Vec::new()),
+    };
+    let mut out = Vec::with_capacity(labels.len() + 1);
+    for (label, value) in labels.into_iter().zip(values) {
+        let tokens = tok.encode(&label)?;
+        out.push(Candidate { label, value, tokens });
+    }
+    if matches!(kind, FieldKind::Choice(_)) {
+        out.push(Candidate { label: ABSTAIN.to_string(), value: Value::Null, tokens: tok.encode(ABSTAIN)? });
+    }
+    Ok(out)
+}
+
+/// The most probable candidate (the first of equals) and every candidate's probability, from the summed
+/// log-probabilities of their tokens and terminator.
+pub(crate) fn settle(candidates: &[Candidate], scores: &[f32]) -> (usize, Vec<(String, f64)>) {
+    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let exps: Vec<f64> = scores.iter().map(|s| f64::from(s - max).exp()).collect();
+    let total: f64 = exps.iter().sum();
+    let probabilities = candidates.iter().zip(&exps).map(|(c, e)| (c.label.clone(), e / total)).collect();
+    let best = exps.iter().enumerate().fold(0, |b, (i, e)| if *e > exps[b] { i } else { b });
+    (best, probabilities)
+}
+
 /// Longest value (in tokens) a generated field may take; `None` for the scored kinds.
-fn generated_length(kind: &FieldKind) -> Option<usize> {
+pub(crate) fn generated_length(kind: &FieldKind) -> Option<usize> {
     match kind {
         FieldKind::Text { max_length } => Some(*max_length),
         FieldKind::Box { .. } => Some(DEFAULT_LENGTH),

@@ -112,6 +112,51 @@ fn a_device_batch_extracts_a_form_as_the_host_does() {
     }
 }
 
+/// Every field kind, two different images in one batch (and one image under a second form): each answer equals the
+/// host scorer's for the same image, whatever way the cohorts split. Candidates of different token lengths make
+/// the committed answers of the images diverge in length when their winners differ.
+#[test]
+fn a_device_batch_scores_every_field_kind_as_the_host_does() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dir) = released_dir() else {
+        brain_testutil::skip("device forms: the released checkpoint is absent");
+        return;
+    };
+    let (Some(cats), Some(text)) = (crate::decoder::golden("device forms", "cats"), crate::decoder::golden("device forms", "text")) else { return };
+    crate::common::cap_threads();
+    let gpu = gpu_core::Gpu::new(&Device::kernels());
+    let exact = gpu.kind() == "cpu";
+    let host = Mirage::open(&dir).unwrap();
+    let model = MirageModel::new(Mirage::open(&dir).unwrap(), gpu).unwrap();
+    let rgb = |g: &std::collections::HashMap<String, Vec<f32>>| -> Vec<u8> { g["input_rgb"].iter().map(|&v| v as u8).collect() };
+    let (cats_rgb, text_rgb) = (rgb(&cats), rgb(&text));
+    let forms = [
+        serde_json::json!({"thing": {"enum": ["dog", "cat", "bird", "remote", "newspaper"]}, "where": {"type": "string", "format": "box", "x-source": "thing"}, "n": {"type": "integer", "minimum": 0, "maximum": 5}, "label": {"type": "string", "maxLength": 12}}),
+        serde_json::json!({"thing": {"enum": ["dog", "cat", "bird", "remote", "newspaper"]}, "where": {"type": "string", "format": "box", "x-source": "thing"}, "n": {"type": "integer", "minimum": 0, "maximum": 5}, "label": {"type": "string", "maxLength": 12}}),
+        serde_json::json!({"animal": {"enum": ["dog", "cat"]}}),
+    ];
+    let images = [Image { rgb: &cats_rgb, height: 480, width: 640 }, Image { rgb: &text_rgb, height: 600, width: 800 }, Image { rgb: &cats_rgb, height: 480, width: 640 }];
+    let opts = Options::from_json("{}").unwrap();
+    let got = model.extract_batch(&images, &forms, &opts);
+    let tol = if exact { 1e-4 } else { 3e-2 };
+    for (i, (g, form)) in got.into_iter().zip(&forms).enumerate() {
+        let one = Options::from_json(&serde_json::json!({ "form": form }).to_string()).unwrap();
+        let (got, want) = (json(g), json(host.extract(images[i].rgb, images[i].height, images[i].width, &one)));
+        for (field, w) in want["form"].as_object().unwrap() {
+            let g = &got["form"][field];
+            assert_eq!(g["value"], w["value"], "image {i} {field}: the value differs");
+            match w.get("probabilities") {
+                Some(table) => {
+                    for (k, p) in table.as_object().unwrap() {
+                        assert!((g["probabilities"][k].as_f64().unwrap() - p.as_f64().unwrap()).abs() < tol, "image {i} {field}.{k}: {} vs {p}", g["probabilities"][k]);
+                    }
+                }
+                None => assert!((g["probability"].as_f64().unwrap() - w["probability"].as_f64().unwrap()).abs() < tol, "image {i} {field}: probability {} vs {}", g["probability"], w["probability"]),
+            }
+        }
+    }
+}
+
 /// The profiling workload: eight images in one batch (four of each fixture). Duplicates must
 /// describe identically, which also holds the batch-8 path to the single-image answer.
 #[test]

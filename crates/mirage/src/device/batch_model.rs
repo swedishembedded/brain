@@ -401,7 +401,6 @@ impl MirageModel {
     pub fn extract_batch_with(&self, images: &[Image], forms: &[Value], opts: &Options, cached: &[Option<std::sync::Arc<DecoderMemory>>], control: &BatchControl) -> Vec<Result<Extracted, ModelError>> {
         assert_eq!(images.len(), forms.len(), "one form per image");
         assert_eq!(images.len(), cached.len(), "one cache slot per image");
-        let cfg = &self.host.cfg;
         let prompt = self.host.prompt(opts.language.as_deref());
         // The images that need the vision half: not cached, not cancelled, a usable picture.
         let boxed: Vec<Option<Result<Resized, ModelError>>> =
@@ -412,26 +411,65 @@ impl MirageModel {
             let batch = self.analyze(&resized, opts);
             self.decoder_memories(&batch.memory, resized.len())
         });
-        (0..images.len())
-            .map(|i| -> Result<Extracted, ModelError> {
-                if (control.cancelled)(i) {
-                    return Err(ModelError::Cancelled);
+        // Resolve every image's memory and form; the images that can be scored are grouped by form so that each
+        // group is scored as one device batch.
+        let max_tokens = opts.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let mut results: Vec<Option<Result<Extracted, ModelError>>> = (0..images.len()).map(|_| None).collect();
+        let mut pending: Vec<(usize, std::sync::Arc<DecoderMemory>, bool, Vec<form::FormField>)> = Vec::new();
+        for i in 0..images.len() {
+            if (control.cancelled)(i) {
+                results[i] = Some(Err(ModelError::Cancelled));
+                continue;
+            }
+            let (memory, reused) = match (&cached[i], &boxed[i]) {
+                (Some(m), _) => (m.clone(), true),
+                (None, Some(Err(e))) => {
+                    results[i] = Some(Err(ModelError::Request(e.to_string())));
+                    continue;
                 }
-                let (memory, reused) = match (&cached[i], &boxed[i]) {
-                    (Some(m), _) => (m.clone(), true),
-                    (None, Some(Err(e))) => return Err(ModelError::Request(e.to_string())),
-                    (None, _) => {
-                        let k = analysed.iter().position(|&v| v == i).expect("an analysed image");
-                        (fresh.as_ref().expect("a batch was analysed")[k].clone(), false)
+                (None, _) => {
+                    let k = analysed.iter().position(|&v| v == i).expect("an analysed image");
+                    (fresh.as_ref().expect("a batch was analysed")[k].clone(), false)
+                }
+            };
+            match form::parse_form(&forms[i]) {
+                Ok(fields) => pending.push((i, memory, reused, fields)),
+                Err(e) => results[i] = Some(Err(e.into())),
+            }
+        }
+        let prompt = match &prompt {
+            Ok(p) => p,
+            Err(e) => {
+                for (i, ..) in &pending {
+                    results[*i] = Some(Err(ModelError::Request(e.to_string())));
+                }
+                return results.into_iter().map(|r| r.expect("every image has a result")).collect();
+            }
+        };
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for k in 0..pending.len() {
+            match groups.iter_mut().find(|g| pending[g[0]].3 == pending[k].3) {
+                Some(g) => g.push(k),
+                None => groups.push(vec![k]),
+            }
+        }
+        for group in groups {
+            let memories: Vec<&DecoderMemory> = group.iter().map(|&k| pending[k].1.as_ref()).collect();
+            match self.decoder.extract_forms(&self.dev, &self.host.tokenizer, prompt, &memories, &pending[group[0]].3, max_tokens) {
+                Ok(extracts) => {
+                    for (&k, extract) in group.iter().zip(extracts) {
+                        let (i, memory, reused, _) = &pending[k];
+                        results[*i] = Some(Ok(Extracted { extract, memory: memory.clone(), reused: *reused }));
                     }
-                };
-                let fields = form::parse_form(&forms[i])?;
-                let cross = self.host.decoder.cross_memory(&memory.rows, memory.rows.len() / cfg.dim);
-                let prompt = prompt.as_ref().map_err(|e| ModelError::Request(e.to_string()))?;
-                let extract = form::extract(&self.host.decoder, &cross, &self.host.tokenizer, prompt, &fields, opts.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS))?;
-                Ok(Extracted { extract, memory, reused })
-            })
-            .collect()
+                }
+                Err(e) => {
+                    for &k in &group {
+                        results[pending[k].0] = Some(Err(e.clone().into()));
+                    }
+                }
+            }
+        }
+        results.into_iter().map(|r| r.expect("every image has a result")).collect()
     }
 
     /// The live rows of each of the first `n` decoder memories of a batch, read back in one go.

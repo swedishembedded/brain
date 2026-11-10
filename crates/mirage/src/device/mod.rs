@@ -14,6 +14,7 @@
 //! email to info@swedishembedded.com.
 
 pub mod decoder;
+pub mod form;
 pub mod hadamard;
 pub mod hconv;
 pub mod kron;
