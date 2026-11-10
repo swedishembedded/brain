@@ -47,6 +47,19 @@ pub struct Image<'a> {
     pub width: usize,
 }
 
+/// Wall-clock split of the last `describe_batch`, in seconds.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Timings {
+    /// Letterbox, canvas build and upload, encoder, dense head, device synchronised.
+    pub vision: f64,
+    /// Proposal peaks, slot inputs, memory construction on the device.
+    pub memory: f64,
+    /// Batched decoder (prefill and steps) including the host loop guard.
+    pub decode: f64,
+    /// Mask fields, reader and JSON assembly.
+    pub post: f64,
+}
+
 /// The model with resident weights.
 pub struct MirageModel {
     host: Mirage,
@@ -55,6 +68,7 @@ pub struct MirageModel {
     reader: DeviceReader,
     memory: DeviceMemory,
     decoder: DeviceDecoder,
+    timings: std::cell::Cell<Timings>,
 }
 
 /// The vision half of a batch: proposals and the decoder memories.
@@ -80,7 +94,13 @@ impl MirageModel {
             decoder: DeviceDecoder::upload(&dev, &host.decoder),
             dev,
             host,
+            timings: Default::default(),
         })
+    }
+
+    /// Where the last `describe_batch` spent its time.
+    pub fn last_timings(&self) -> Timings {
+        self.timings.get()
     }
 
     /// The device operators run on.
@@ -98,10 +118,13 @@ impl MirageModel {
         let dev = &self.dev;
         let (b, side) = (images.len(), cfg.canvas / cfg.stride);
         let sizes: Vec<(usize, usize)> = images.iter().map(|i| (i.h, i.w)).collect();
+        let t0 = std::time::Instant::now();
         let flat: Vec<f32> = images.iter().flat_map(canvas).collect();
         let masks = Masks::new(dev, cfg, &sizes);
         let enc = self.vision.encode(dev, &dev.buf(&flat), b, &masks);
         let dense = self.vision.dense(dev, &enc, &masks);
+        dev.gpu().poll_wait();
+        let t1 = std::time::Instant::now();
 
         let head = dev.read_at(&dense.head, 0, b * side * side * 10);
         let head_in = dev.read_at(&dense.head_in, 0, b * side * side * cfg.dense_dim);
@@ -122,6 +145,10 @@ impl MirageModel {
             .collect();
         let slots = SlotInputs::collect(&self.host.vision.memory, &items, cfg.detections + cfg.regions);
         let memory = self.memory.build(dev, &enc.encoder, &valids, &slots);
+        let mut t = self.timings.get();
+        t.vision = (t1 - t0).as_secs_f64();
+        t.memory = t1.elapsed().as_secs_f64();
+        self.timings.set(t);
         Batch { images: images.to_vec(), objects, text, memory, masks, enc, dense }
     }
 
@@ -150,8 +177,10 @@ impl MirageModel {
             .iter()
             .map(|banned| GenerateParams { prompt: &prompt, banned, max_tokens: opts.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS), max_rank: opts.max_rank(), object_slots: cfg.detections, guard: true })
             .collect();
-        let generations = self.decoder.generate_batch(&self.dev, &self.host.decoder, &batch.memory, &self.host.tokenizer, &params);
+        let t2 = std::time::Instant::now();
+        let generations = self.decoder.generate_batch(&self.dev, &batch.memory, &self.host.tokenizer, &params);
 
+        let t3 = std::time::Instant::now();
         let maps: OnceCell<(Vec<f32>, Vec<f32>)> = OnceCell::new();
         let side = cfg.canvas / cfg.stride;
         for (k, &i) in ok.iter().enumerate() {
@@ -176,6 +205,10 @@ impl MirageModel {
             };
             results[i] = Ok(assemble(&generations[k].text, &Inputs { objects: &objects, text: &text, frame, read: &read, field: &field }, opts));
         }
+        let mut t = self.timings.get();
+        t.decode = (t3 - t2).as_secs_f64();
+        t.post = t3.elapsed().as_secs_f64();
+        self.timings.set(t);
         results
     }
 

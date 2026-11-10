@@ -170,6 +170,54 @@ kernels are a throughput item); the proposal peak pick, slot box codes and pooli
 two device submissions; `extract_batch` scores forms on the host decoder; CUDA tolerances above are the
 selector's tensor-core GEMMs (see the roofline-by-selection rule), not kernel defects; tuning is L6.
 
+## Lane L6 - performance, round 1
+
+Hardware: one NVIDIA GH200 (gpu1 of a shared node; another session's jobs run on the card, so wall times include
+time slicing), test binary `brain-mirage --test it`, released weights, cats (480x640) and text (600x800) mix,
+bitmap masks, up to 600 tokens, TF32 tensor-core products for the f32 weights (the repo default,
+`GemmPrecision::Auto`; `Fp32Reference` is the precise opt-out). The parity ladder (the whole crate suite, 95 tests)
+passes on the CPU backend and on CUDA gpu1 after every change below; parity numbers did not move (the decoder
+logits cosines stayed 0.99999935 / 0.99999765, tokens identical).
+
+| Change | batch-8 describe wall | 2-sequence generation | kernel time |
+|---|---|---|---|
+| L2c baseline | 12.9 s | 16.5 s | 6024 ms (attention 90%) |
+| key-parallel attention (scores, row softmax, weighted sum; the serial kernel stays as `attention_reference`, tested equal) | 8.4 s | 7.6 s | 756 ms |
+| dense f32 products read f32 activations (`act_f32`) | 7.8 s | 6.7 s | |
+| one submission per step, argmax merged, tap histories written by the tap kernel, fused sigmoid gate | 3.1 s | 2.3 s | |
+| token feedback and engram hashing on the device (`WINDOW` = 16 steps per host round trip), uninitialised temporaries | 2.8 s | 2.4 s | 1018 ms (127k launches) |
+
+Hypotheses killed or found:
+- GEMM activation packing (`max_abs_rows` + `quant_pack`, 59k launches): not a precision change. `Ops::act` packed an
+  int8 copy of every activation whenever the width was a multiple of 32, and dense f32 weights never read it. Dense
+  products now call `act_f32`; results are unchanged. The only reduced precision on the f32 path is TF32 inside the
+  library GEMM (framework default).
+- Host round trips per token: removing them (8 s of `cuStreamSynchronize` before, one submission per step now, a
+  readback every 16 steps) cut decode a lot at first (16.5 s to 2.3 s with the attention and submission work), but the
+  last change (device-side feedback, 16 steps per readback) did not move decode time: a step costs about 9.5 ms
+  whatever the batch, so the step is bound by about 500 launches of 3-50 us kernels, not by syncs.
+
+Throughput curve (gpu1, `describe_throughput_over_batch_size`; vision = letterbox, upload, encoder, dense head;
+memory = peaks and slot construction; decode = prefill and steps with the guard; post = mask fields, reader, JSON):
+
+| batch | wall s | images/s | vision s | memory s | decode s | post s |
+|---|---|---|---|---|---|---|
+| 1 | 2.40 | 0.42 | 0.11 | 0.00 | 2.26 | 0.03 |
+| 8 | 2.84 | 2.82 | 0.18 | 0.00 | 2.41 | 0.21 |
+| 32 | 4.15 | 7.71 | 0.34 | 0.02 | 2.55 | 1.10 |
+| 64 | 5.87 | 10.90 | 0.55 | 0.02 | 2.98 | 2.03 |
+
+Latency of a batch equals its wall time (p50 equals p95 for one batch). Vendor engine CPU baseline: 265-271 ms per
+image at every thread count, so batch 64 (92 ms per image) is 2.9x the engine, batch 32 is 2.0x, and batch 1 (2.4 s)
+is 9x slower than one engine image. The decode is the floor: about 236 steps at 9.5 ms.
+
+Next (round 2): per-step launch count (about 500): concatenated GEMMs sharing an input (phi pre/post/res; self q/k/v
+plus gate; cross q plus gate; MLP cond plus first rotation), `mirage_attn_apply` (48 us a launch, serial over keys),
+`mirage_mhc_maps` (65 us, a thread per sequence), `argmax_row` (343 us, a thread per sequence), then step replay;
+batch-N post-processing (`post` grows with N: mask fields are host work) overlapped with the next batch; device form
+scoring (`extract_batch` still scores candidates on the host decoder; it needs a device state copy and chunked
+prefill) is not started. The nsys reports are in `~/project/shared/tmp/mirage-l2c/` (outside the repo).
+
 ## Facts the foundation established
 
 - The released `.cact` has 806 entries: 159 two-bit and 4 four-bit CQ matrices

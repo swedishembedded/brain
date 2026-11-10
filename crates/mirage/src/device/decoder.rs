@@ -31,6 +31,9 @@ use crate::vision::ops;
 const ENGRAM_DILATION: u32 = 3;
 const BAN: f32 = -1.0e30;
 
+/// Decoder steps between host round trips in a generation loop.
+pub const WINDOW: usize = 16;
+
 fn lin(dev: &Device, name: &str, l: &ops::Linear) -> Weight {
     dev.weight(name, &l.wt, l.out, l.inn)
 }
@@ -105,8 +108,33 @@ pub struct BatchState {
     layers: Vec<LayerCache>,
     engram_v: Vec<DeviceBuffer>,
     ones: DeviceBuffer,
-    /// Tokens fed so far, per sequence.
-    pub tokens: Vec<Vec<u32>>,
+    /// Token history `[batch, maxt]` (u32): the prompt or teacher tokens, then the tokens the device picked.
+    hist: DeviceBuffer,
+    /// Positions fed so far.
+    pos: usize,
+}
+
+impl BatchState {
+    /// Positions fed so far.
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+
+    /// The token history table as `[batch][maxt]` words.
+    pub fn history(&self, dev: &Device) -> Vec<Vec<u32>> {
+        let all = dev.read_at(&self.hist, 0, self.batch * self.maxt);
+        all.chunks_exact(self.maxt).map(|r| r.iter().map(|w| w.to_bits()).collect()).collect()
+    }
+
+    /// Write `tokens[b]` into the first positions of every history row.
+    pub fn set_tokens(&self, dev: &Device, tokens: &[Vec<u32>]) {
+        let mut flat = vec![0u32; self.batch * self.maxt];
+        for (row, t) in flat.chunks_exact_mut(self.maxt).zip(tokens) {
+            assert!(t.len() <= self.maxt, "{} tokens exceed the {} positions of the state", t.len(), self.maxt);
+            row[..t.len()].copy_from_slice(t);
+        }
+        dev.gpu().write(&self.hist, &flat);
+    }
 }
 
 impl DeviceDecoder {
@@ -183,32 +211,30 @@ impl DeviceDecoder {
             layers: (0..self.layers.len()).map(|_| LayerCache { k: table(kd), v: table(vd), raw: [table(qd), table(kd), table(vd)] }).collect(),
             engram_v: (0..self.engrams.len()).map(|_| table(c.dim)).collect(),
             ones: dev.buf(&vec![1.0; batch * maxt]),
-            tokens: vec![Vec::new(); batch],
+            hist: dev.alloc(batch * maxt),
+            pos: 0,
         }
     }
 
-    /// Feed one token per sequence at the next position; returns the logits
+    /// Feed the history token at the next position for every sequence; returns the logits
     /// `[batch, vocabulary]` when `want_logits`. With `pick = (ban, picked)` the same submission adds `ban` to the
-    /// logits and writes each row's greedy token (as `f32`) into `picked`, so a step costs one submission.
-    pub fn step(&self, dev: &Device, st: &mut BatchState, cross: &DeviceCross, tokens: &[u32], dec: &Decoder, want_logits: bool, pick: Option<(&DeviceBuffer, &DeviceBuffer)>) -> Option<DeviceBuffer> {
+    /// logits, writes each row's greedy token (as `f32`) into `picked` and appends it to the history, so a
+    /// step costs one submission and no host round trip. Engram hashing runs on the device from the history.
+    pub fn step(&self, dev: &Device, st: &mut BatchState, cross: &DeviceCross, want_logits: bool, pick: Option<(&DeviceBuffer, &DeviceBuffer)>) -> Option<DeviceBuffer> {
         let c = &self.cfg;
         let (b, d, n) = (st.batch, c.dim, c.lanes);
-        assert_eq!(tokens.len(), b);
-        let pos = st.tokens[0].len();
-        assert!(pos < st.maxt, "the state holds {} positions", st.maxt);
-        for (t, &tok) in st.tokens.iter_mut().zip(tokens) {
-            t.push(tok);
-        }
+        let pos = st.pos;
+        assert!(pos + 1 < st.maxt, "the state holds {} positions", st.maxt);
+        st.pos += 1;
         let g = dev.gpu();
-        let tok_buf = g.storage(b as u64);
-        g.write(&tok_buf, tokens);
         let tables = c.engram_tables();
+        let tok_buf = g.storage(b as u64);
         let rows_buf = g.storage((b * tables) as u64);
-        let engram_rows: Vec<u32> = st.tokens.iter().flat_map(|t| dec.engram_rows(t, pos)).collect();
-        g.write(&rows_buf, &engram_rows);
 
         let mut s = Vec::new();
         let (bu, du, nu) = (b as u32, d as u32, n as u32);
+        dev.tok_at(&mut s, &st.hist, &tok_buf, bu, st.maxt as u32, pos as u32);
+        dev.engram_rows(&mut s, &st.hist, &rows_buf, (bu, st.maxt as u32, pos as u32), (tables as u32, c.hashes as u32, c.slots as u32), &c.orders);
         let mut lanes = dev.alloc(b * n * d);
         dev.embed_lanes(&mut s, &tok_buf, &self.embedding, &lanes, (bu, nu, du), (d as f32).sqrt());
         for (l, ly) in self.layers.iter().enumerate() {
@@ -236,6 +262,7 @@ impl DeviceDecoder {
             if let Some((ban, picked)) = pick {
                 dev.add(&mut s, ban, &logits, bu * self.logits_w.n());
                 dev.argmax(&mut s, &logits, picked, bu, self.logits_w.n());
+                dev.tok_put(&mut s, picked, &st.hist, bu, st.maxt as u32, pos as u32);
             }
             logits
         });
@@ -314,13 +341,19 @@ impl DeviceDecoder {
     }
 
     /// Greedy generation for a batch of sequences, one per memory, sharing the step loop.
-    pub fn generate_batch(&self, dev: &Device, dec: &Decoder, mem: &MemoryBatch, tok: &Tokenizer, params: &[GenerateParams]) -> Vec<Generation> {
+    ///
+    /// The device feeds every picked token back into the next step itself ([`WINDOW`] steps per host round
+    /// trip). The host then walks the window's tokens in order and applies the stop rules (end token, budget,
+    /// loop guard) exactly as a token-by-token loop would; steps taken past a sequence's stop are discarded.
+    pub fn generate_batch(&self, dev: &Device, mem: &MemoryBatch, tok: &Tokenizer, params: &[GenerateParams]) -> Vec<Generation> {
         let b = params.len();
         let plen = params[0].prompt.len();
         assert!(params.iter().all(|p| p.prompt.len() == plen), "a batch shares one prompt length");
-        let maxt = plen + params.iter().map(|p| p.max_tokens).max().unwrap_or(0) + 1;
+        let budget = params.iter().map(|p| p.max_tokens).max().unwrap_or(0);
+        let maxt = plen + budget + WINDOW + 2;
         let cross = self.cross(dev, mem);
         let mut st = self.new_state(dev, b, maxt);
+        st.set_tokens(dev, &params.iter().map(|p| p.prompt.to_vec()).collect::<Vec<_>>());
         let vocab = self.logits_w.n() as usize;
         let ban: Vec<f32> = params
             .iter()
@@ -333,43 +366,58 @@ impl DeviceDecoder {
         let ban = dev.buf(&ban);
         let picked = dev.alloc(b);
         for pos in 0..plen {
-            let toks: Vec<u32> = params.iter().map(|p| p.prompt[pos]).collect();
-            self.step(dev, &mut st, &cross, &toks, dec, pos + 1 == plen, Some((&ban, &picked)));
+            self.step(dev, &mut st, &cross, pos + 1 == plen, Some((&ban, &picked)));
         }
         let eos = tok.eos_id();
         let mut out: Vec<Option<Generation>> = (0..b).map(|_| None).collect();
         let mut generated: Vec<Vec<u32>> = vec![Vec::new(); b];
+        let mut consumed = 0usize;
         loop {
-            let next: Vec<u32> = dev.read_at(&picked, 0, b).iter().map(|&v| v as u32).collect();
-            let mut feed = vec![0u32; b];
+            // Token `consumed` of every sequence is already in the history; run a window of steps, then read it.
+            let take = WINDOW.min(budget + 1 - consumed.min(budget));
+            for _ in 0..take {
+                self.step(dev, &mut st, &cross, true, Some((&ban, &picked)));
+            }
+            let history = st.history(dev);
             for i in 0..b {
-                if out[i].is_some() {
-                    continue;
-                }
-                let p = &params[i];
-                let finish = |generated: &Vec<u32>, stop| Generation { tokens: generated.clone(), text: render(tok, generated, p.object_slots), stop };
-                if generated[i].len() >= p.max_tokens {
-                    out[i] = Some(finish(&generated[i], Stop::MaxTokens));
-                    continue;
-                }
-                generated[i].push(next[i]);
-                if next[i] == eos {
-                    out[i] = Some(finish(&generated[i], Stop::Eos));
-                    continue;
-                }
-                if p.guard {
-                    let text = render(tok, &generated[i], p.object_slots);
-                    if let Some(stop) = guard(&text, p.max_rank) {
-                        out[i] = Some(finish(&generated[i], stop));
-                        continue;
+                for m in consumed..consumed + take {
+                    if out[i].is_some() {
+                        break;
+                    }
+                    let p = &params[i];
+                    let finish = |generated: &Vec<u32>, stop| Generation { tokens: generated.clone(), text: render(tok, generated, p.object_slots), stop };
+                    if generated[i].len() >= p.max_tokens {
+                        out[i] = Some(finish(&generated[i], Stop::MaxTokens));
+                        break;
+                    }
+                    let next = history[i][plen + m];
+                    generated[i].push(next);
+                    if next == eos {
+                        out[i] = Some(finish(&generated[i], Stop::Eos));
+                        break;
+                    }
+                    if p.guard {
+                        let text = render(tok, &generated[i], p.object_slots);
+                        if let Some(stop) = guard(&text, p.max_rank) {
+                            out[i] = Some(finish(&generated[i], stop));
+                            break;
+                        }
                     }
                 }
-                feed[i] = next[i];
             }
+            consumed += take;
             if out.iter().all(Option::is_some) {
                 break;
             }
-            self.step(dev, &mut st, &cross, &feed, dec, true, Some((&ban, &picked)));
+            if consumed > budget {
+                // Every unfinished sequence has spent its own budget (<= budget): finish them.
+                for i in 0..b {
+                    if out[i].is_none() {
+                        out[i] = Some(Generation { tokens: generated[i].clone(), text: render(tok, &generated[i], params[i].object_slots), stop: Stop::MaxTokens });
+                    }
+                }
+                break;
+            }
         }
         out.into_iter().map(|g| g.expect("every sequence stopped")).collect()
     }

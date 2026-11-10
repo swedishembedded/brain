@@ -48,12 +48,12 @@ fn check_teacher_forcing(dev: &Device, dec: &Decoder, d: usize, memories: &[&[f3
     let mem = memory_batch(dev, memories, d);
     let cross = dd.cross(dev, &mem);
     let steps = tokens[0].len();
-    let mut st = dd.new_state(dev, tokens.len(), steps);
+    let mut st = dd.new_state(dev, tokens.len(), steps + 1);
+    st.set_tokens(dev, tokens);
     let vocab = dec.vocabulary();
     let mut got: Vec<Vec<f32>> = vec![Vec::new(); tokens.len()];
-    for t in 0..steps {
-        let feed: Vec<u32> = tokens.iter().map(|s| s[t]).collect();
-        let logits = dd.step(dev, &mut st, &cross, &feed, dec, true, None).unwrap();
+    for _ in 0..steps {
+        let logits = dd.step(dev, &mut st, &cross, true, None).unwrap();
         let all = dev.read_at(&logits, 0, tokens.len() * vocab);
         for (i, g) in got.iter_mut().enumerate() {
             g.extend_from_slice(&all[i * vocab..(i + 1) * vocab]);
@@ -114,7 +114,7 @@ fn the_released_decoder_matches_the_host_and_generates_the_reference_tokens() {
     let params: Vec<GenerateParams> =
         (0..2).map(|i| GenerateParams { prompt: &all[i][..2], banned: &banned[i], max_tokens: 600, max_rank: 5, object_slots: 64, guard: true }).collect();
     let started = std::time::Instant::now();
-    let out = dd.generate_batch(&dev, dec, &mem, model.tokenizer(), &params);
+    let out = dd.generate_batch(&dev, &mem, model.tokenizer(), &params);
     eprintln!("device generation of 2 sequences: {:.1}s", started.elapsed().as_secs_f64());
     for (i, g) in out.iter().enumerate() {
         assert_eq!(g.stop, Stop::Eos, "seq{i}");

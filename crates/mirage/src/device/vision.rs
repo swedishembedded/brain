@@ -307,7 +307,7 @@ impl DeviceVision {
         let mut x = dev.alloc(batch * tokens * d);
         dev.copy_rows(s, body, (cells as u32, 0), &x, (tokens as u32, 0), batch as u32, cells as u32, d as u32);
         dev.copy_rows(s, &self.registers, (0, 0), &x, (tokens as u32, cells as u32), batch as u32, regs as u32, d as u32);
-        let acc = dev.alloc(batch * tokens * d);
+        let acc = dev.alloc_zeroed(batch * tokens * d);
         let (hq, hk, qk, vh) = (c.attn_heads, c.attn_kv_heads, c.attn_qk_dim, c.attn_v_dim);
         for t in &self.top {
             let level = dev.zc_new(s, &x, &t.level_norm, rows, d as u32);

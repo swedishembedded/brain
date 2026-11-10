@@ -136,3 +136,37 @@ fn a_batch_of_eight_describes_duplicates_identically() {
         assert!(out[i] == out[i % 2], "image {i} differs from its duplicate {}", i % 2);
     }
 }
+
+/// Throughput curve of `describe_batch` over batch size on an accelerator: images per second, latency of a
+/// batch and the split between the stages. Needs a real device; the CPU backend skips it (it would take minutes).
+#[test]
+fn describe_throughput_over_batch_size() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dir) = released_dir() else {
+        brain_testutil::skip("throughput: the released checkpoint is absent");
+        return;
+    };
+    let (Some(cats), Some(text)) = (crate::decoder::golden("throughput", "cats"), crate::decoder::golden("throughput", "text")) else { return };
+    crate::common::cap_threads();
+    let gpu = gpu_core::Gpu::new(&Device::kernels());
+    if gpu.kind().to_string() == "cpu" {
+        brain_testutil::skip_unavailable("throughput: the CPU backend is not a throughput target");
+        return;
+    }
+    let model = MirageModel::new(Mirage::open(&dir).unwrap(), gpu).unwrap();
+    let rgb: Vec<Vec<u8>> = [&cats, &text].iter().map(|g| g["input_rgb"].iter().map(|&v| v as u8).collect()).collect();
+    let dims = [(480usize, 640usize), (600, 800)];
+    let opts = Options::from_json(r#"{"fields":["bbox","score","mask","position","description"],"mask_format":"bitmap","max_tokens":600}"#).unwrap();
+    let image = |i: usize| Image { rgb: &rgb[i % 2], height: dims[i % 2].0, width: dims[i % 2].1 };
+    let _ = model.describe_batch(&[image(0), image(1)], &opts);
+    eprintln!("batch | wall s | images/s | latency s | vision | memory | decode | post");
+    for n in [1usize, 8, 32, 64] {
+        let images: Vec<Image> = (0..n).map(image).collect();
+        let started = std::time::Instant::now();
+        let out = model.describe_batch(&images, &opts);
+        let wall = started.elapsed().as_secs_f64();
+        assert!(out.iter().all(Result::is_ok));
+        let t = model.last_timings();
+        eprintln!("{n:5} | {wall:6.2} | {:8.2} | {wall:9.2} | {:.2} | {:.2} | {:.2} | {:.2}", n as f64 / wall, t.vision, t.memory, t.decode, t.post);
+    }
+}

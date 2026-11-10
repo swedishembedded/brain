@@ -16,7 +16,7 @@
 pub mod decoder;
 pub mod hconv;
 pub mod batch_model;
-pub use batch_model::{Image, MirageModel};
+pub use batch_model::{Image, MirageModel, Timings};
 pub mod prims;
 pub mod reader;
 pub mod vision;
@@ -55,6 +55,9 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_mhc_mix", kernels::MIRAGE_MHC_MIX),
     ("mirage_mhc_post", kernels::MIRAGE_MHC_POST),
     ("mirage_taps", kernels::MIRAGE_TAPS),
+    ("mirage_tok_at", kernels::MIRAGE_TOK_AT),
+    ("mirage_tok_put", kernels::MIRAGE_TOK_PUT),
+    ("mirage_engram_rows", kernels::MIRAGE_ENGRAM_ROWS),
     ("mirage_sigmoid_mul", kernels::MIRAGE_SIGMOID_MUL),
     ("mirage_row_write", kernels::MIRAGE_ROW_WRITE),
     ("mirage_rope_pos", kernels::MIRAGE_ROPE_POS),

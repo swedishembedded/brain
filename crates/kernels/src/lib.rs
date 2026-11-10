@@ -872,6 +872,8 @@ pub const MIRAGE_DWCONV: &str = include_str!("../wgsl/mirage_dwconv.wgsl");
 pub const MIRAGE_EMBED_LANES: &str = include_str!("../wgsl/mirage_embed_lanes.wgsl");
 /// `wgsl/mirage_engram_gate.wgsl`
 pub const MIRAGE_ENGRAM_GATE: &str = include_str!("../wgsl/mirage_engram_gate.wgsl");
+/// `wgsl/mirage_engram_rows.wgsl`
+pub const MIRAGE_ENGRAM_ROWS: &str = include_str!("../wgsl/mirage_engram_rows.wgsl");
 /// `wgsl/mirage_gated_mix.wgsl`
 pub const MIRAGE_GATED_MIX: &str = include_str!("../wgsl/mirage_gated_mix.wgsl");
 /// `wgsl/mirage_gather_rows.wgsl`
@@ -908,6 +910,10 @@ pub const MIRAGE_SIGMOID_MUL: &str = include_str!("../wgsl/mirage_sigmoid_mul.wg
 pub const MIRAGE_SWIGLU_ROWS: &str = include_str!("../wgsl/mirage_swiglu_rows.wgsl");
 /// `wgsl/mirage_taps.wgsl`
 pub const MIRAGE_TAPS: &str = include_str!("../wgsl/mirage_taps.wgsl");
+/// `wgsl/mirage_tok_at.wgsl`
+pub const MIRAGE_TOK_AT: &str = include_str!("../wgsl/mirage_tok_at.wgsl");
+/// `wgsl/mirage_tok_put.wgsl`
+pub const MIRAGE_TOK_PUT: &str = include_str!("../wgsl/mirage_tok_put.wgsl");
 /// `wgsl/mirage_upsample2.wgsl`
 pub const MIRAGE_UPSAMPLE2: &str = include_str!("../wgsl/mirage_upsample2.wgsl");
 /// `wgsl/mla_bwd_dk_pass.wgsl`
@@ -1910,6 +1916,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_dwconv", MIRAGE_DWCONV),
     ("mirage_embed_lanes", MIRAGE_EMBED_LANES),
     ("mirage_engram_gate", MIRAGE_ENGRAM_GATE),
+    ("mirage_engram_rows", MIRAGE_ENGRAM_ROWS),
     ("mirage_gated_mix", MIRAGE_GATED_MIX),
     ("mirage_gather_rows", MIRAGE_GATHER_ROWS),
     ("mirage_grn_apply", MIRAGE_GRN_APPLY),
@@ -1928,6 +1935,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_sigmoid_mul", MIRAGE_SIGMOID_MUL),
     ("mirage_swiglu_rows", MIRAGE_SWIGLU_ROWS),
     ("mirage_taps", MIRAGE_TAPS),
+    ("mirage_tok_at", MIRAGE_TOK_AT),
+    ("mirage_tok_put", MIRAGE_TOK_PUT),
     ("mirage_upsample2", MIRAGE_UPSAMPLE2),
     ("mla_bwd_dk_pass", MLA_BWD_DK_PASS),
     ("mla_bwd_dk_rope", MLA_BWD_DK_ROPE),

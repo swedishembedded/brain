@@ -203,8 +203,13 @@ impl Device {
         self.buf(&scale.iter().map(|s| 1.0 + s).collect::<Vec<_>>())
     }
 
-    /// A fresh buffer of `n` values.
+    /// A fresh buffer of `n` values with undefined contents: for outputs a kernel writes completely.
     pub fn alloc(&self, n: usize) -> DeviceBuffer {
+        self.gpu().storage_uninit(n as u64)
+    }
+
+    /// A fresh buffer of `n` zeros: for accumulators.
+    pub fn alloc_zeroed(&self, n: usize) -> DeviceBuffer {
         self.gpu().storage(n as u64)
     }
 
@@ -305,6 +310,23 @@ impl Device {
     /// Row-wise argmax as `f32` indices.
     pub fn argmax(&self, s: &mut Vec<Step>, x: &DeviceBuffer, out: &DeviceBuffer, m: u32, n: u32) {
         self.push(s, "argmax_row", &[x, out], &[m, n], m);
+    }
+    /// `tok[b] = hist[b, pos]`.
+    pub fn tok_at(&self, s: &mut Vec<Step>, hist: &DeviceBuffer, tok: &DeviceBuffer, batch: u32, maxt: u32, pos: u32) {
+        self.push(s, "mirage_tok_at", &[hist, tok], &[batch, maxt, pos], batch);
+    }
+
+    /// `hist[b, pos + 1] = picked[b]`.
+    pub fn tok_put(&self, s: &mut Vec<Step>, picked: &DeviceBuffer, hist: &DeviceBuffer, batch: u32, maxt: u32, pos: u32) {
+        self.push(s, "mirage_tok_put", &[picked, hist], &[batch, maxt, pos], batch);
+    }
+
+    /// Engram table rows of position `pos`; `orders` has at most four entries.
+    #[allow(clippy::too_many_arguments)]
+    pub fn engram_rows(&self, s: &mut Vec<Step>, hist: &DeviceBuffer, rows: &DeviceBuffer, (batch, maxt, pos): (u32, u32, u32), (tables, hashes, slots): (u32, u32, u32), orders: &[usize]) {
+        assert!(orders.len() <= 4, "at most four engram orders");
+        let o = |i: usize| orders.get(i).copied().unwrap_or(0) as u32;
+        self.push(s, "mirage_engram_rows", &[hist, rows], &[batch, maxt, pos, tables, hashes, slots, o(0), o(1), o(2), o(3)], batch * tables);
     }
 }
 
