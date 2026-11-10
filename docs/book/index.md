@@ -142,4 +142,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume VIII: Generating Images](v08-image-generation/index.md)
 
 1. [What It Means to Generate](v08-image-generation/01-generative-modeling.md): What does it mean for a model to learn a distribution over images, and how can we sample from it?
+2. [Variational Autoencoders](v08-image-generation/02-vae.md): How can an autoencoder be made into a generator, and why does that need a bound on likelihood?
 <!-- /contents -->

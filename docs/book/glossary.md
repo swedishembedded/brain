@@ -304,6 +304,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Euler's method**: the rule $x_{i+1} = x_i + h\,f(t_i, x_i)$ that follows the slope of an ODE for a short step $h$ and repeats; with a gradient as the slope it is gradient descent. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
+**evidence lower bound**: for any distribution $r(z \mid \mathbf{x})$ over the latent, the quantity $\mathbb{E}_r[\log p_\theta(\mathbf{x} \mid z)] - D_{\mathrm{KL}}(r \,\Vert\, p(z))$; it is never above the log-likelihood of the reading, and the gap is the KL divergence from $r$ to the model's posterior. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
+
 **exact match**: the share of test questions whose generated answer equals the single reference answer as a string, after a stated normalization; all or nothing, with no partial credit. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **expectation**: the probability-weighted average $\sum_x x\,p(x)$ (or $\int x f(x)\,dx$) of a random variable, the value its long-run average approaches; it is linear, $\mathbb{E}[X + Y] = \mathbb{E}[X] + \mathbb{E}[Y]$. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
@@ -499,6 +501,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **label**: the answer attached to an example, the quantity a supervised model is asked to predict. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **label-smoothing**: replacing the one-hot target by a mixture of it with the uniform distribution, so that the loss is smallest at a finite gap between the scores instead of only in the limit of infinite confidence. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
+
+**latent space**: the space of codes of a latent-variable model together with its prior and its maps, an encoder into it and a decoder out of it that is defined and trained at every point the prior can produce; nearby codes decode to similar readings, and a typical draw from the prior decodes to a plausible one. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
 
 **latent sparse attention**: selecting keys by scoring buckets of keys in a low-dimensional unit-length index space, reading the members of the best buckets together with the most recent keys and the first few, so that the scoring work grows with the number of buckets and not the number of keys. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
 
@@ -786,6 +790,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **relu**: the rectified linear unit $\max(0, z)$, zero for negative inputs and the identity for positive ones, with slope $1$ where it is positive and $0$ elsewhere. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
+**reparameterization trick**: writing a draw from a Gaussian as $z = m + \sigma_{\mathrm{q}}\xi$ with a noise $\xi \sim \mathcal{N}(0, 1)$ that does not depend on the parameters, so that the sample is a differentiable function of the mean and the width and the gradient of an expectation is the expectation of a derivative. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
+
 **repetition penalty**: a factor applied to the logits of tokens already in the text, dividing a positive logit and multiplying a negative one, to make repeats less likely; its additive relatives subtract an amount per presence or per occurrence. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
 
 **RepMixer**: a convolutional token-mixing block of a hybrid vision encoder, trained with parallel branches and folded at inference into one depthwise $3 \times 3$ convolution, followed by a ConvFFN. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
@@ -1005,6 +1011,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **variance**: the expected squared deviation from the mean, $\mathbb{E}[X^2] - \mathbb{E}[X]^2$, which scales by $a^2$ under multiplication by $a$ and adds over independent variables; its square root is the standard deviation. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 **variance-preservation**: choosing the scale of the weights so that the typical size of activations (and of gradients) is the same in every layer, neither shrinking nor growing with depth. *([Initialization: Where Training Starts](v03-neural-networks/09-initialization.md))*
+
+**variational autoencoder**: an autoencoder trained as a latent-variable model by maximizing the evidence lower bound: an encoder that returns the mean and log-variance of a Gaussian over the latent, a draw from it by the reparameterization trick, a decoder that returns a reading, and a loss of reconstruction error plus the KL divergence of the encoder's distribution from the prior. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
 
 **vector**: an ordered list of real numbers, read as data (the features of one example) or as an arrow with a length and a direction. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 

@@ -1,0 +1,37 @@
+<!-- source-sha256: ec40003e03f502cc25b672825f266b90f868c89a481cae9b20f192fa877a297a -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 250" width="800" height="250"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="250" fill="#ffffff"/>
+<rect x="10" y="72" width="104" height="56" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="62" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image</text>
+<text x="62" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 x 1024 x 1024</text>
+<rect x="138" y="72" width="84" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">encoder</text>
+<rect x="254" y="72" width="112" height="56" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="310" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">moments</text>
+<text x="310" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">64 x 128 x 128</text>
+<rect x="388" y="72" width="104" height="56" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="440" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mean (first half)</text>
+<text x="440" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">32 x 128 x 128</text>
+<rect x="513" y="72" width="124" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="575" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pack, standardize</text>
+<text x="575" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">128 x 64 x 64</text>
+<rect x="665" y="72" width="100" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="715" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">denoiser</text>
+<text x="715" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4096 tokens</text>
+<rect x="138" y="178" width="84" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decoder</text>
+<rect x="10" y="178" width="104" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="62" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image</text>
+<rect x="513" y="178" width="124" height="44" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="575" y="196.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">unstandardize,</text>
+<text x="575" y="212.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">unpack</text>
+<line x1="117" y1="100" x2="135" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="225" y1="100" x2="251" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="369" y1="100" x2="385" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="495" y1="100" x2="510" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="640" y1="100" x2="662" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M715,128 L715,190 Q715,200 705,200 L640,200" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="510" y1="200" x2="225" y2="200" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="367.5" y="191.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">32 x 128 x 128</text>
+<line x1="135" y1="200" x2="117" y2="200" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="40.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">frozen at generation time: the autoencoder only encodes and decodes, the denoiser does the generating</text>
+</svg>
