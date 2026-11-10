@@ -748,6 +748,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **polynomial**: a sum of constant multiples of powers of $x$; one of degree $n$ has $n + 1$ parameters and is fixed by $n + 1$ points. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
+**pooled text embedding**: a single vector for the whole prompt, usually the row of an encoder at its end token after the final normalization (and, for SDXL, a projection), with no positions, so that it is added to the timestep embedding and reaches every block with the clock and not through attention. *([Conditioning on Text](v08-image-generation/09-text-conditioning.md))*
+
 **pooling**: a layer that summarizes each window of a map by one number, the largest (max pooling, whose gradient goes to the winner of the window) or the mean (average pooling, whose gradient is shared equally), with no weights; global average pooling takes the whole map. *([Convolutional Networks and Residual Learning](v07-vision/03-cnns.md))*
 
 **post-training quantization**: converting a trained float network to integer arithmetic without retraining, by choosing the scale and zero point of each weight tensor from the weights and of each activation tensor from ranges measured on data, and rewriting each layer as an integer accumulation followed by a requantization. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
@@ -775,6 +777,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **product notation**: the symbol $\prod_{i=a}^{b} x_i$ for the product of the terms $x_i$ as the index $i$ runs from $a$ to $b$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **projection**: the closest point to a vector $\mathbf{v}$ on the line through $\mathbf{u}$, namely $\frac{\mathbf{v}\cdot\mathbf{u}}{\mathbf{u}\cdot\mathbf{u}}\mathbf{u}$; what is left over is orthogonal to $\mathbf{u}$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
+
+**prompt embedding sequence**: the array of rows, one vector per position of the fixed window, that an encoder produces for a prompt, including the rows of the padding; the denoiser reads it by cross-attention or by joint attention. *([Conditioning on Text](v08-image-generation/09-text-conditioning.md))*
 
 **prompt encoder**: the part that turns clicks, box corners and a rough mask into vectors for the decoder: a random Fourier encoding of each coordinate plus a learned embedding of its type, and a convolutional reduction of a mask. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
 
@@ -987,6 +991,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **test set**: rows used once, after every choice is made, to report the final score of the chosen model; looking at it more than once turns it into a validation set. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **test-dimension choice**: choosing the sizes of the model a test runs on (batch, features, widths, heads) all different and above 1, so that bugs that confuse two sizes or depend on a size of 1 change the result. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
+
+**text-encoder conditioning**: turning a prompt into the generator's input with a separate pretrained text encoder that is run forward at generation time, so that the denoiser sees the prompt only through the arrays the encoder produced; the tokenizer, the window, the layer read and the padding are then part of the denoiser's input contract. *([Conditioning on Text](v08-image-generation/09-text-conditioning.md))*
 
 **thread parallelism**: using several threads, each running on its own core with its own registers and first caches and sharing the later caches and memory, to carry out the pieces of one computation at the same time. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 

@@ -149,4 +149,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 6. [Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md): Can generation be a straight path from noise to data, followed by an ordinary differential equation?
 7. [Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md): How many steps does sampling need, and how do we make a model follow its prompt more closely?
 8. [Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md): What network shapes are good at predicting noise, and how do they take in the prompt?
+9. [Conditioning on Text](v08-image-generation/09-text-conditioning.md): How does a sentence become the signal that steers image generation?
 <!-- /contents -->

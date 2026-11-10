@@ -1,0 +1,69 @@
+<!-- source-sha256: f2e119b9a8c0317cfc0eb64402619e3b530f55f94a035b462e54f8196ae35d9b -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 580" width="940" height="580"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="940" height="580" fill="#ffffff"/>
+<text x="290" y="38.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#4a5568" text-anchor="middle">encoder</text>
+<text x="520" y="38.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#4a5568" text-anchor="middle">states read</text>
+<text x="790" y="38.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#4a5568" text-anchor="middle">rows, and the pooled vector</text>
+<ellipse cx="62" cy="319" rx="48" ry="32" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="62" y="315.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">prompt</text>
+<text x="62" y="331.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">text</text>
+<rect x="198" y="86" width="184" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="114.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">CLIP-L and OpenCLIP-bigG,</text>
+<text x="290" y="130.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">causal, 77 positions</text>
+<rect x="422" y="86" width="196" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="114.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">second-to-last block of each,</text>
+<text x="520" y="130.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">not normalised, side by side</text>
+<path d="M110,319 L130,319 Q140,319 140,309 L140,128 Q140,118 150,118 L195,118" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="385" y1="118" x2="419" y2="118" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="674" y="66" width="232" height="48" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="790" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">77 x 2,048 rows to the keys</text>
+<text x="790" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and values of 70 sites</text>
+<rect x="674" y="124" width="232" height="48" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="790" y="144.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1,280 bigG vector, projected,</text>
+<text x="790" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">to the added embedding</text>
+<path d="M618,118 L632,118 Q642,118 642,108 L642,100 Q642,90 652,90 L671,90" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M618,118 L632,118 Q642,118 642,128 L642,138 Q642,148 652,148 L671,148" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="290" y="72.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#4a5568" text-anchor="middle">SDXL</text>
+<rect x="198" y="220" width="184" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="248.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">T5-XXL, bidirectional,</text>
+<text x="290" y="264.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and CLIP-L, causal</text>
+<rect x="422" y="220" width="196" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="248.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">T5: last block, final norm</text>
+<text x="520" y="264.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">CLIP-L: &lt;/s&gt; row, normalised</text>
+<path d="M110,319 L130,319 Q140,319 140,309 L140,262 Q140,252 150,252 L195,252" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="385" y1="252" x2="419" y2="252" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="674" y="200" width="232" height="48" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="790" y="220.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">512 x 4,096 rows to txt_in,</text>
+<text x="790" y="236.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">then joint attention</text>
+<rect x="674" y="258" width="232" height="48" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="790" y="278.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">768 CLIP-L vector, added</text>
+<text x="790" y="294.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">to the timestep vector</text>
+<path d="M618,252 L632,252 Q642,252 642,242 L642,234 Q642,224 652,224 L671,224" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M618,252 L632,252 Q642,252 642,262 L642,272 Q642,282 652,282 L671,282" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="290" y="206.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#4a5568" text-anchor="middle">FLUX.1</text>
+<rect x="198" y="354" width="184" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="382.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Qwen3-4B or 8B, causal,</text>
+<text x="290" y="398.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">27 of its 36 blocks</text>
+<rect x="422" y="354" width="196" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="382.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">after 9, 18 and 27 blocks,</text>
+<text x="520" y="398.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">joined along the features</text>
+<path d="M110,319 L130,319 Q140,319 140,329 L140,376 Q140,386 150,386 L195,386" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="385" y1="386" x2="419" y2="386" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="674" y="362" width="232" height="48" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="790" y="382.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">512 x 7,680 (4B) or 12,288 (9B)</text>
+<text x="790" y="398.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rows to txt_in, joint attention</text>
+<line x1="621" y1="386" x2="671" y2="386" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="290" y="340.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#4a5568" text-anchor="middle">FLUX.2 klein</text>
+<rect x="198" y="488" width="184" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="516.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Qwen3-4B, causal,</text>
+<text x="290" y="532.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">35 of its 36 blocks</text>
+<rect x="422" y="488" width="196" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="516.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">after 35 blocks, the second-</text>
+<text x="520" y="532.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">to-last hidden state</text>
+<path d="M110,319 L130,319 Q140,319 140,329 L140,510 Q140,520 150,520 L195,520" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="385" y1="520" x2="419" y2="520" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="674" y="496" width="232" height="48" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="790" y="516.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">512 x 2,560 rows to cap_embedder,</text>
+<text x="790" y="532.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">then joint attention</text>
+<line x1="621" y1="520" x2="671" y2="520" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="290" y="474.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#4a5568" text-anchor="middle">Z-Image</text>
+</svg>

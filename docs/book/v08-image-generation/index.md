@@ -25,7 +25,7 @@ You can say what a generative model of images offers (a sampler, a density, or b
 6. [Flow Matching and Rectified Flow](06-flow-matching.md): whether generation can be a straight path from noise to data, followed by an ordinary differential equation.
 7. [Samplers and Guidance](07-samplers-and-guidance.md): how many steps sampling needs, and how to make a model follow its prompt more closely.
 8. [Denoiser Architectures: U-Nets and Diffusion Transformers](08-denoiser-architectures.md): what network shapes are good at predicting noise, and how they take in the prompt.
-9. Conditioning on Text: how a sentence becomes the signal that steers image generation.
+9. [Conditioning on Text](09-text-conditioning.md): how a sentence becomes the signal that steers image generation.
 10. Latent Diffusion Systems End to End: how the encoder, denoiser, sampler and decoder combine into a working image generator.
 11. Control, Identity and Adapters: how to steer a generator with a pose, an edge map or a particular person's face.
 12. Restoration and Super-Resolution: how a network can recover detail that is not in the input.
