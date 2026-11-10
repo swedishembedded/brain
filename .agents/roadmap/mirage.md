@@ -27,6 +27,36 @@ goldens; nothing is transcribed from the vendor's source or engine.
 | `cact` / `cactmap`: bounds-checked `.cact` reader, CQ2/3/4 decoder with the packed form kept (`CqMatrix`), positional map derived from the config (806 entries for the released one), layout transforms, Hadamard permutations, vision manifest, charset, tokenizer blob | done |
 | `tokenizer`: SentencePiece-BPE blob parser, score-ordered merging (heap, `O(n log n)`), byte fallback, markers, decode; ids and decodes equal to the publisher's reference on a tracked golden of 24 multilingual strings (en de fr es it nl pl) | done |
 
+## Lane L2a - vision forward
+
+Implemented in `crates/mirage/src/vision/` as host `f32` operators (CPU, row-parallel through the shared
+CPU parallel layer). Each stage is gated against FP32 goldens from an independent numpy reference of the
+same graph (cosine >= 0.9999 required; measured cosine rounds to 1.00000000 at every tap).
+
+| Stage | State | max_abs vs golden (CPU) |
+|---|---|---|
+| Preprocess: letterbox size rule, area / bilinear resize, canvas, valid masks | done, resized image identical to the reference | 0 differing samples |
+| Stem (5 stages, silu on all) | done | 1.2e-5 |
+| Body (gated mixer, sequency-Walsh HConvGLU with 65-tap bands, GRN) | done | 5.6e-4 |
+| Top (registers, 2D RoPE, masked GQA, level memory) and encoder output | done | top 8.1e-2 (register-scale values), encoder 8.6e-5 |
+| Dense head (pyramid, neck, blocks, 10 channels), head input | done | dense64 5.9e-3, head 4.7e-4 |
+| Peaks and proposal order | done, cells, order and boxes equal the golden | boxes within 1e-3 |
+| Mask prototypes and coefficients, per-object field | done | protos 1.1e-5, coefficients 3.3e-6 |
+| Bitmap rendering | done, 5 of 5 engine-corpus objects reproduce every run exactly | exact |
+| Reader forward, windows, join, CTC collapse, crop rule | done | logits 2.0e-5 |
+| Decoder memory (cells + position code, slot rows) | done | 4.9e-4 |
+
+Open in L2a:
+- Execution is on the host, not on the GPU op layer: no WGSL kernels (Walsh transform, banded channel
+  convolution, GRN, ZC norm, 2D RoPE) and no CUDA parity run exist yet. The staging (one function per
+  stage, weights prepared once) is the shape the kernel port needs; backward is not written.
+- The golden peaks keep padding cells as candidates (a flat bias-only plateau gives 32 text proposals on
+  the cats image); `ProposalOptions::valid_only` (the default) excludes them, and the golden test turns it off.
+- The reader's strings differ from the engine's by spacing and a letter or two (the engine runs 2-bit
+  weights); the join across windows is exercised by the long line.
+- Upscale rounding is half-pixel bilinear in `f64`; an off-by-one against the vendor engine on part of the
+  pixels is a known open item.
+
 ## Facts the foundation established
 
 - The released `.cact` has 806 entries: 159 two-bit and 4 four-bit CQ matrices

@@ -12,3 +12,6 @@ mod config;
 mod import;
 mod spec;
 mod tokenizer;
+mod vision;
+mod vision_masks;
+mod vision_reader;

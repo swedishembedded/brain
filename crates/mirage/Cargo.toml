@@ -10,7 +10,9 @@ name = "mirage"
 path = "src/lib.rs"
 
 [dependencies]
+brain-backend-cpu.workspace = true
 brain-checkpoint.workspace = true
+brain-model.workspace = true
 half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,5 +21,6 @@ sha2.workspace = true
 
 [dev-dependencies]
 brain-data.workspace = true
+brain-imaging.workspace = true
 brain-testutil.workspace = true
 safetensors.workspace = true
