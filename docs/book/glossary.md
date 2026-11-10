@@ -394,6 +394,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **hidden layer**: a layer of units between the input and the output whose values are not given by the data; it computes a new description of the input from which the next layer can compute the answer with a simpler rule. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
+**hierarchical vision transformer**: a vision transformer arranged as a pyramid of stages, in which merging neighbouring patches between stages reduces the number of tokens and widens the channels, like the stages of a convolutional network. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
+
 **hybrid architecture**: a stack that interleaves a few full-attention layers, whose cache grows with the context, with many layers of a fixed-size recurrence or convolution, whose cost does not. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **hypothesis space**: the set of all functions a model can express as its parameters vary. *([The Learning Problem](v02-learning/01-learning-problem.md))*
@@ -647,6 +649,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **parity tolerance**: the largest difference between two implementations of the same function that rounding alone can explain, derived from the count of roundings along the longest chain of dependent operations times the unit round-off, so that anything above it is evidence of a bug. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
 
 **partial derivative**: the derivative of a function of several variables with respect to one of them while all the others are held fixed, $\partial L/\partial w_j$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**patch embedding**: the layer that turns a picture into a sequence of tokens by cutting it into non-overlapping square patches, flattening each and applying one shared linear map; identical to a convolution whose kernel size equals its stride. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
 **per-kernel profile**: the table that divides the time of a pass among its dispatches or kernel kinds, with each row's counted FLOPs and bytes, device time, share of the pass and achieved fraction of the device's measured roofline; it explains where the time goes and does not add up to the pass. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
@@ -954,6 +958,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
+**vision transformer**: a model that applies a stack of unmasked transformer blocks to a sequence of patch embeddings with position information added, and reads out a class token or the mean of the tokens. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
+
 **vocabulary**: the list of every piece a tokenizer can produce, each with its id; its size $V$ is the number of rows the model's embedding table needs. *([Tokenization](v05-sequences/02-tokenization.md))*
 
 ## W
@@ -971,6 +977,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **WGSL**: the WebGPU Shading Language, a small kernel language that compiles to the native graphics interfaces and in which the book writes its kernel examples. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
 **whole-pass measurement**: the time of the whole unit of work a user waits for, with every dispatch, wait, copy and host-side step the real use performs inside the bracket, repeated and summarized with its spread; the number by which a change is judged. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
+
+**windowed attention**: attention in which each token reads only the tokens in its own non-overlapping window of the grid, so that the cost grows linearly with the number of tokens; shifting the windows between layers, or adding a few global layers, lets information cross the window borders. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
 **WordPiece**: a tokenizer that cuts a word by greedy longest match from the left, marks every piece after the first with `##`, and turns a word it cannot cover into `[UNK]`; its vocabulary is chosen to raise the likelihood of the training text. *([Tokenization](v05-sequences/02-tokenization.md))*
 

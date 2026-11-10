@@ -599,7 +599,7 @@ volumes:
         title: "Vision Transformers"
         question: "Can attention replace convolution for images?"
         introduces: [patch-embedding, vision-transformer, windowed-attention, hierarchical-vision-transformer]
-        requires: [transformer-block, convolution-2d, multi-axis-rope]
+        requires: [transformer-block, convolution-2d, multi-axis-rope, absolute-position-embedding, sinusoidal-encoding, image-resampling, sliding-window-attention, depthwise-convolution, feature-pyramid, gradient-check, adam]
         brain: [fastvlm]
       - id: segment-anything
         title: "Promptable Segmentation and Video Tracking"

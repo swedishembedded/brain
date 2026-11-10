@@ -22,7 +22,7 @@ You can say what the numbers of an image mean and convert between the layouts an
 3. [Convolutional Networks and Residual Learning](03-cnns.md): how stacks of convolutions become image classifiers, and why residual connections let them go deep.
 4. [Object Detection](04-detection.md): how a network says not just what is in an image but where.
 5. [Dense Prediction: Segmentation and Depth](05-dense-prediction.md): how a network labels every pixel or estimates how far away it is.
-6. Vision Transformers: whether attention can replace convolution for images.
+6. [Vision Transformers](06-vision-transformers.md): whether attention can replace convolution for images.
 7. Promptable Segmentation and Video Tracking: how one model can segment any object you point at, and follow it through a video.
 8. Contrastive Vision-Language Learning: how images and texts can be placed in one space where matching pairs land close together.
 9. Vision-Language Models: how to give a language model eyes.

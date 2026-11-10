@@ -486,6 +486,8 @@ The detection chapter (Chapter 4) writes out `iou`, `decode_v5`, `dfl_decode`, `
 
 The dense-prediction chapter (Chapter 5) writes out `weighted_pixel_loss`, `pixel_shuffle`, `class_iou` and `align_scale_shift` where they are first used. `logits[:, y, x]` is the vector over the class axis of one pixel of an array of shape `[K, H, W]`; `class_iou` returns `nan` for a class that occurs in neither the truth nor the prediction, and the mean IoU is the `mean` of the entries for which `is_finite` is true.
 
+The vision-transformer chapter (Chapter 6) writes out `patchify`, `shift_labels` and `cubic_taps` where they are first used. `zeros(int, [n, n])` is an integer array of zeros, `for k in -1 ..= 2` visits `-1, 0, 1, 2`, and `k_a(x)` is the cubic convolution kernel of Chapter 1 with parameter `a`: `(a + 2) * x^3 - (a + 3) * x^2 + 1` for `x <= 1` and `a * x^3 - 5 * a * x^2 + 8 * a * x - 4 * a` for `1 < x < 2`, taken at `x = abs(.)`, and `0` beyond 2. A list of tuples is built with `append (i, w) to taps`.
+
 ## Routines of the transformer chapters (Volume V)
 
 Chapters 9 to 12 use four routines of the normalization and attention chapters without writing them out again. Each is defined here by what it returns.

@@ -1,0 +1,37 @@
+<!-- source-sha256: 5ae755f95ce8c66a8c7d2db25a0c87b8956d4466a3b82db545ecaffab25ba3e0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 422" width="640" height="422">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="422" fill="#ffffff"/>
+<line x1="209.37" y1="334" x2="209.37" y2="30" stroke="#edf2f7"/>
+<text x="209.37" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">500</text>
+<line x1="391.71" y1="334" x2="391.71" y2="30" stroke="#edf2f7"/>
+<text x="391.71" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1,000</text>
+<line x1="574.04" y1="334" x2="574.04" y2="30" stroke="#edf2f7"/>
+<text x="574.04" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2,000</text>
+<line x1="75" y1="334" x2="622" y2="334" stroke="#edf2f7"/>
+<text x="69" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="75" y1="273.2" x2="622" y2="273.2" stroke="#edf2f7"/>
+<text x="69" y="277.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100</text>
+<line x1="75" y1="212.4" x2="622" y2="212.4" stroke="#edf2f7"/>
+<text x="69" y="216.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1,000</text>
+<line x1="75" y1="151.6" x2="622" y2="151.6" stroke="#edf2f7"/>
+<text x="69" y="155.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10,000</text>
+<line x1="75" y1="90.8" x2="622" y2="90.8" stroke="#edf2f7"/>
+<text x="69" y="94.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100,000</text>
+<line x1="75" y1="30" x2="622" y2="30" stroke="#edf2f7"/>
+<text x="69" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1,000,000</text>
+<rect x="75" y="30" width="547" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="75" y="30" width="547" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="180.49,218.83 362.82,182.22 469.48,160.81 545.15,145.62"/><circle cx="180.49" cy="218.83" r="3" fill="#2b6cb0"/><circle cx="362.82" cy="182.22" r="3" fill="#2b6cb0"/><circle cx="469.48" cy="160.81" r="3" fill="#2b6cb0"/><circle cx="545.15" cy="145.62" r="3" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="180.49,145.62 362.82,109.01 469.48,87.6 545.15,72.4"/><circle cx="180.49" cy="145.62" r="3" fill="#c05621"/><circle cx="362.82" cy="109.01" r="3" fill="#c05621"/><circle cx="469.48" cy="87.6" r="3" fill="#c05621"/><circle cx="545.15" cy="72.4" r="3" fill="#c05621"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="180.49,255.43 362.82,218.83 469.48,197.41 545.15,182.22"/><circle cx="180.49" cy="255.43" r="3" fill="#2f855a"/><circle cx="362.82" cy="218.83" r="3" fill="#2f855a"/><circle cx="469.48" cy="197.41" r="3" fill="#2f855a"/><circle cx="545.15" cy="182.22" r="3" fill="#2f855a"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="180.49,292.04 362.82,255.43 469.48,234.02 545.15,218.83"/><circle cx="180.49" cy="292.04" r="3" fill="#9b2c2c"/><circle cx="362.82" cy="255.43" r="3" fill="#9b2c2c"/><circle cx="469.48" cy="234.02" r="3" fill="#9b2c2c"/><circle cx="545.15" cy="218.83" r="3" fill="#9b2c2c"/></g>
+<text x="348.5" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">side of the square picture (pixels)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">tokens</text>
+<text x="348.5" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Tokens against resolution</text>
+<line x1="35.52" y1="393" x2="55.52" y2="393" stroke="#2b6cb0" stroke-width="2"/>
+<text x="61.52" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">plain ViT, 16-pixel patches</text>
+<line x1="220.16" y1="393" x2="240.16" y2="393" stroke="#c05621" stroke-width="2"/>
+<text x="246.16" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">Swin-T, first stage (stride 4)</text>
+<line x1="417.89" y1="393" x2="437.89" y2="393" stroke="#2f855a" stroke-width="2"/>
+<text x="443.89" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">Swin-T, last stage (stride 32)</text>
+<line x1="214.44" y1="410" x2="234.44" y2="410" stroke="#9b2c2c" stroke-width="2"/>
+<text x="240.44" y="414" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">hybrid encoder, output (stride 64)</text>
+</svg>

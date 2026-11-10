@@ -131,4 +131,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 3. [Convolutional Networks and Residual Learning](v07-vision/03-cnns.md): How do stacks of convolutions become image classifiers, and why did residual connections let them go deep?
 4. [Object Detection](v07-vision/04-detection.md): How does a network say not just what is in an image but where?
 5. [Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md): How does a network label every pixel or estimate how far away it is?
+6. [Vision Transformers](v07-vision/06-vision-transformers.md): Can attention replace convolution for images?
 <!-- /contents -->
