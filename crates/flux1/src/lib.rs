@@ -22,9 +22,9 @@
 //! `single_blocks.N.…`); the diffusers `transformer/` layout is remapped onto
 //! them at import ([`import::import_diffusers`]) with two-way coverage.
 //!
-//! Scope today: **forward parity only**. The backward/gradcheck path, the
-//! sampling pipeline (schedule + VAE + text encoders) and the serving contract
-//! are follow-ups.
+//! The sampling pipeline (schedule, VAE and both text encoders) is
+//! [`pipeline`] and the serving contract [`caps`]; the backward/gradcheck path
+//! is not built.
 
 pub mod caps;
 pub mod config;

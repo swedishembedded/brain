@@ -64,7 +64,7 @@ pub fn read_json(p: &Path) -> Result<serde_json::Value, String> {
 ///
 /// # Only the tokenizers stay resident
 ///
-/// A tower is ~3.3 GB (CLIP-L) or ~10.2 GB (OpenCLIP-bigG) at fp32 and is
+/// A tower is ~0.49 GB (CLIP-L) or ~2.78 GB (OpenCLIP-bigG) at fp32 and is
 /// needed only for the handful of encode calls at the start of a generation,
 /// so [`Self::encode_all`] builds both, encodes every prompt, and drops them -
 /// never held alongside the UNet, which is what a caller decides to keep

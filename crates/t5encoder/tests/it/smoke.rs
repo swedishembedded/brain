@@ -54,16 +54,11 @@ fn fake_init(cfg: &T5Config) -> HashMap<String, Vec<f32>> {
 /// Force the embedding gather to tile, so the multi-tile `embed_tile` path
 /// (sliced bindings, not one whole-table binding) is exercised at toy size too.
 ///
-/// `set_var` mutates process-global state that `block::tile_budget_words`
-/// reads, and libtest runs the tests in this binary on CONCURRENT THREADS — a
-/// racing `setenv`/`getenv` pair is a real data race, not a theoretical one.
-/// The `Once` is what makes it sound: every test in this file calls this as its
-/// FIRST action, so a test that arrives while the write is in flight blocks
-/// until it completes, and no environment read can overlap the single write.
+/// The tile budget is process-global and libtest runs this binary's tests on
+/// concurrent threads, so every test calls this as its FIRST action and the
+/// `Once` sets the budget exactly once, before any forward reads it.
 fn force_tiled_embedding() {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    // SAFETY: the only `set_var` in this binary, serialised by `ONCE`, and every
-    // test funnels through here before any code reads the environment.
     ONCE.call_once(|| model::block::set_tile_budget_words(Some(4096)));
 }
 

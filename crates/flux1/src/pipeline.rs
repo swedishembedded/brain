@@ -215,7 +215,7 @@ fn te_bytes(max_len: u64) -> u64 {
     // The authoritative tensor manifest, not an ad-hoc re-derivation: a
     // T5 block has THREE feed-forward matrices (`wi_0`/`wi_1`/`wo`), and a
     // formula that only counted two silently undercounted real weight bytes
-    // by roughly one `d_ff x d_model` matrix per layer (~5 GiB for XXL) -
+    // by one `d_ff x d_model` matrix per layer (3.75 GiB for XXL at fp32) -
     // `te` then planned onto a card with room for the underestimate, and the
     // real `T5Encoder::new_on` allocation, sized off this same manifest,
     // did not fit.
@@ -665,7 +665,7 @@ mod placement_tests {
     /// three feed-forward matrices a T5 block actually has
     /// (`wi_0`/`wi_1`/`wo` - `t5encoder::config`'s own `tensor_manifest`),
     /// undercounting real weight bytes by roughly one `d_ff x d_model`
-    /// matrix per layer (~5 GiB total). This is exactly the shape of the
+    /// matrix per layer (3.75 GiB at fp32). This is exactly the shape of the
     /// production failure it caused: `te` planned onto a card with 22.9 GiB
     /// free on an estimate that fit, and the real `T5Encoder::new_on`
     /// allocation - correctly sized off the authoritative manifest - did

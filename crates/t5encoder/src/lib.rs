@@ -9,7 +9,7 @@
 //!
 //! | | [`config::T5Config::xxl`] | [`config::T5Config::umt5_xxl`] |
 //! |---|---|---|
-//! | used by | FLUX.1 / FLUX.2 | Wan2.1 / 2.2 video |
+//! | used by | FLUX.1 | Wan2.1 / 2.2 video |
 //! | source | `FLUX.1-*/text_encoder_2/` safetensors | `models_t5_umt5-xxl-enc-bf16.pth` |
 //! | vocabulary | 32128 | **256384** (multilingual) |
 //! | relative bias | ONE table, shared by 24 blocks | **one table PER block** |

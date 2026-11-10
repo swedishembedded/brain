@@ -11,7 +11,7 @@
 //! * **`encode`** - a string in, `[T, d_model]` f32 last-hidden-state out
 //!   (`T5Encoder::read_context`, see its doc for why context rather than
 //!   hidden: it is a no-op for the unmasked FLUX variant and matters for the
-//!   masked Wan one). `variant` selects `flux_xxl` (FLUX.1/2's second text
+//!   masked Wan one). `variant` selects `flux_xxl` (FLUX.1's second text
 //!   encoder, unmasked, T5-XXL v1.1) or `wan_umt5` (Wan2.1/2.2's text tower,
 //!   masked, umT5-XXL).
 //!
@@ -78,7 +78,7 @@ fn encode_spec() -> ActionSpec {
     ActionSpec::new("encode", "Encode a string with T5-XXL or umT5-XXL, returning its last hidden state.")
         .param(ParamSpec::new("text", ParamType::Str, "the string to encode").required())
         .param(
-            ParamSpec::new("variant", ParamType::Str, "flux_xxl (FLUX.1/2, unmasked) or wan_umt5 (Wan2.1/2.2, masked)")
+            ParamSpec::new("variant", ParamType::Str, "flux_xxl (FLUX.1, unmasked) or wan_umt5 (Wan2.1/2.2, masked)")
                 .default(json!("flux_xxl")),
         )
         .param(
@@ -91,7 +91,7 @@ fn encode_spec() -> ActionSpec {
         .output(BlobSpec::new(
             "hidden_states",
             Media::Bytes,
-            "f32 little-endian, row-major [max_len, d_model]; padded rows are exactly zero",
+            "f32 little-endian, row-major [max_len, d_model]; wan_umt5 zeroes the padded rows, flux_xxl returns the encoder's own pad-row outputs",
         ))
 }
 

@@ -29,8 +29,6 @@ use vae::{VaeConfig, VaeDecoder, VaeEncoder};
 use crate::import::import_comfy;
 use crate::{ZImageConfig, ZImageDitI8, ZImageDitShard, ZImageDitWindowed};
 
-/// Filesystem locations of the four Z-Image components (never hard-coded — from
-/// the environment, mirroring the crate's tests).
 /// Qwen `<|endoftext|>` — the pad id the masked caption-encoder path uses
 /// (same id `flux2::pipeline::PAD_TOKEN` uses for the same tokenizer family).
 const PAD_TOKEN: u32 = 151643;
@@ -183,6 +181,8 @@ pub fn check_steps(steps: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Filesystem locations of the four Z-Image components (never hard-coded - from
+/// the environment, mirroring the crate's tests).
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub dit: String,

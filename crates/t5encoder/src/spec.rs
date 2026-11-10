@@ -8,7 +8,7 @@
 //! (a FLUX.1 checkout that has had Wan's tower dropped beside it):
 //!
 //! * **`flux_xxl`** - `text_encoder_2/` plus `tokenizer_2/tokenizer.json`,
-//!   the HF `T5EncoderModel` layout FLUX.1/2 ship their second text encoder
+//!   the HF `T5EncoderModel` layout FLUX.1 ships its second text encoder
 //!   in;
 //! * **`wan_umt5`** - `wan/models_t5_umt5-xxl-enc-bf16.pth` plus
 //!   `wan/tokenizer.json`, the native Wan2.1/2.2 release layout.
