@@ -1,0 +1,50 @@
+<!-- source-sha256: 42ebb85082ce5982b03268505334552587e139876771daade71744e71c4c3906 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 720" width="680" height="720"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="680" height="720" fill="#ffffff"/>
+<ellipse cx="230" cy="46" rx="100" ry="18" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="50.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">token rows x  [N, D]</text>
+<rect x="105" y="96" width="250" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="122.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">RMS norm, gain x (1 + s_a)</text>
+<rect x="105" y="168" width="250" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="186.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">QK norm, rotary, attention</text>
+<text x="230" y="202.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">output projection</text>
+<rect x="105" y="240" width="250" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">RMS norm, gain x tanh(g_a)</text>
+<rect x="208" y="316" width="44" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="338.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+</text>
+<rect x="105" y="396" width="250" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="422.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">RMS norm, gain x (1 + s_m)</text>
+<rect x="105" y="468" width="250" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="494.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">SwiGLU feed-forward</text>
+<rect x="105" y="540" width="250" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="566.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">RMS norm, gain x tanh(g_m)</text>
+<rect x="208" y="616" width="44" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="638.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+</text>
+<ellipse cx="560" cy="46" rx="95" ry="18" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="560" y="50.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">c: timestep vector [256]</text>
+<rect x="485" y="96" width="150" height="494" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="560" y="307.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Linear 256 -&gt; 4 D</text>
+<text x="560" y="323.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">split into</text>
+<text x="560" y="339.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s_a, g_a, s_m, g_m</text>
+<text x="560" y="355.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">each [D]</text>
+<text x="560" y="371.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle"></text>
+<text x="560" y="387.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">one per block</text>
+<line x1="230" y1="67" x2="230" y2="93" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="230" y1="143" x2="230" y2="165" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="230" y1="215" x2="230" y2="237" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="230" y1="287" x2="230" y2="313" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="230" y1="355" x2="230" y2="393" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="230" y1="443" x2="230" y2="465" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="230" y1="515" x2="230" y2="537" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="230" y1="587" x2="230" y2="613" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M130,46 L70,46 Q60,46 60,56 L60,324 Q60,334 70,334 L205,334" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M230,376 L70,376 Q60,376 60,386 L60,624 Q60,634 70,634 L205,634" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="560" y1="67" x2="560" y2="93" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="482" y1="118" x2="358" y2="118" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="420" y="109.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">s_a</text>
+<line x1="482" y1="262" x2="358" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="420" y="253.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">g_a</text>
+<line x1="482" y1="418" x2="358" y2="418" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="420" y="409.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">s_m</text>
+<line x1="482" y1="562" x2="358" y2="562" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="420" y="553.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">g_m</text>
+</svg>

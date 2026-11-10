@@ -1,0 +1,51 @@
+<!-- source-sha256: 8c2b9a4139513b46552f2e52cbaab29202ab59da16fdd76d8a51a6afa88067f4 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 560" width="800" height="560"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="560" fill="#ffffff"/>
+<ellipse cx="150" cy="44" rx="75" ry="18" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="48.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">latent 4 x 128 x 128</text>
+<ellipse cx="650" cy="44" rx="75" ry="18" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="48.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">prediction 4 x 128 x 128</text>
+<rect x="40" y="98" width="220" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">down 0, 128 x 128, 320</text>
+<text x="150" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 resnets</text>
+<rect x="40" y="208" width="220" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="236.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">down 1, 64 x 64, 640</text>
+<text x="150" y="252.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 resnets, 4 attention blocks</text>
+<rect x="40" y="318" width="220" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="346.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">down 2, 32 x 32, 1280</text>
+<text x="150" y="362.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 resnets, 20 attention blocks</text>
+<rect x="540" y="98" width="220" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">up 2, 128 x 128, 320</text>
+<text x="650" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 resnets</text>
+<rect x="540" y="208" width="220" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="236.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">up 1, 64 x 64, 640</text>
+<text x="650" y="252.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 resnets, 6 attention blocks</text>
+<rect x="540" y="318" width="220" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="346.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">up 0, 32 x 32, 1280</text>
+<text x="650" y="362.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 resnets, 30 attention blocks</text>
+<rect x="300" y="438" width="200" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="466.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">middle, 32 x 32, 1280</text>
+<text x="400" y="482.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 resnets, 10 attention blocks</text>
+<line x1="150" y1="65" x2="150" y2="95" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="150" y1="165" x2="150" y2="205" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="159" y="189.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">stride-2 conv</text>
+<line x1="150" y1="275" x2="150" y2="315" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="159" y="299.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">stride-2 conv</text>
+<path d="M150,382 L150,460 Q150,470 160,470 L297,470" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M500,470 L640,470 Q650,470 650,460 L650,385" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="650" y1="315" x2="650" y2="275" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="641" y="299.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">x2, conv</text>
+<line x1="650" y1="205" x2="650" y2="165" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="641" y="189.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">x2, conv</text>
+<line x1="650" y1="95" x2="650" y2="65" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="263" y1="130" x2="537" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="105.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">3 skips, concatenated</text>
+<text x="400" y="121.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">widths 320, 320, 320</text>
+<line x1="263" y1="240" x2="537" y2="240" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="215.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">3 skips, concatenated</text>
+<text x="400" y="231.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">widths 320, 640, 640</text>
+<line x1="263" y1="350" x2="537" y2="350" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="325.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">3 skips, concatenated</text>
+<text x="400" y="341.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">widths 640, 1280, 1280</text>
+<text x="400" y="526.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">blue boxes have attention blocks; every resnet adds a projection of the time embedding to each channel,</text>
+<text x="400" y="542.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">and every attention block reads 77 text tokens</text>
+</svg>

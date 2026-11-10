@@ -1,0 +1,38 @@
+<!-- source-sha256: 4de770413d08507dac0e332d175781002cda688ae5129f55572ff360dea51c26 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 340" width="560" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="340" fill="#ffffff"/>
+<line x1="123.9" y1="294" x2="123.9" y2="30" stroke="#edf2f7"/>
+<text x="123.9" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">500</text>
+<line x1="258.95" y1="294" x2="258.95" y2="30" stroke="#edf2f7"/>
+<text x="258.95" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1000</text>
+<line x1="393.99" y1="294" x2="393.99" y2="30" stroke="#edf2f7"/>
+<text x="393.99" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1500</text>
+<line x1="529.04" y1="294" x2="529.04" y2="30" stroke="#edf2f7"/>
+<text x="529.04" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2000</text>
+<line x1="58" y1="294" x2="542" y2="294" stroke="#edf2f7"/>
+<text x="52" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="241.2" x2="542" y2="241.2" stroke="#edf2f7"/>
+<text x="52" y="245.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.1</text>
+<line x1="58" y1="188.4" x2="542" y2="188.4" stroke="#edf2f7"/>
+<text x="52" y="192.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="135.6" x2="542" y2="135.6" stroke="#edf2f7"/>
+<text x="52" y="139.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.3</text>
+<line x1="58" y1="82.8" x2="542" y2="82.8" stroke="#edf2f7"/>
+<text x="52" y="86.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="30" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<rect x="58" y="30" width="484" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,290.38 127.14,278.39 196.29,259.51 265.43,235.3 403.71,177.61 542,117.16"/><circle cx="58" cy="290.38" r="3.0" fill="#2b6cb0"/><circle cx="127.14" cy="278.39" r="3.0" fill="#2b6cb0"/><circle cx="196.29" cy="259.51" r="3.0" fill="#2b6cb0"/><circle cx="265.43" cy="235.3" r="3.0" fill="#2b6cb0"/><circle cx="403.71" cy="177.61" r="3.0" fill="#2b6cb0"/><circle cx="542" cy="117.16" r="3.0" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,277.45 127.14,261.88 196.29,237.47 265.43,206.93 403.71,137.96 542,71.11"/><circle cx="58" cy="277.45" r="3.0" fill="#c05621"/><circle cx="127.14" cy="261.88" r="3.0" fill="#c05621"/><circle cx="196.29" cy="237.47" r="3.0" fill="#c05621"/><circle cx="265.43" cy="206.93" r="3.0" fill="#c05621"/><circle cx="403.71" cy="137.96" r="3.0" fill="#c05621"/><circle cx="542" cy="71.11" r="3.0" fill="#c05621"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,274.54 127.14,256.38 196.29,228.83 265.43,195.09 403.71,121.11 542,52.06"/><circle cx="58" cy="274.54" r="3.0" fill="#2f855a"/><circle cx="127.14" cy="256.38" r="3.0" fill="#2f855a"/><circle cx="196.29" cy="228.83" r="3.0" fill="#2f855a"/><circle cx="265.43" cy="195.09" r="3.0" fill="#2f855a"/><circle cx="403.71" cy="121.11" r="3.0" fill="#2f855a"/><circle cx="542" cy="52.06" r="3.0" fill="#2f855a"/></g>
+<text x="300" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">image side in pixels</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">share of the multiply-adds of a pass</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Where attention&#x27;s T x T terms take over</text>
+<rect x="66" y="38" width="131.38" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">SDXL U-Net</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">Z-Image</text>
+<line x1="74" y1="87" x2="94" y2="87" stroke="#2f855a" stroke-width="2"/>
+<text x="100" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">FLUX.2 klein-4b</text>
+</svg>

@@ -22,6 +22,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **adaptive computation**: letting the amount of computation depend on the input, here through a learned probability, read from each pass's state, of stopping at that pass, which weights the loss and selects how many passes a token receives. *([Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md))*
 
+**adaptive layer normalization**: a normalization layer whose scale and shift (and, around a sublayer, whose gate) are computed from a conditioning vector such as the timestep embedding instead of being learned constants; a zero gate makes the block the identity. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
+
 **additive attention**: attention whose score for a decoder state and an encoder state is computed by a small network that adds a projection of each before a tanh and takes a weighted sum of the result, so that the decoder can build a different weighted average of the encoder states at every step. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
 
 **adversarial loss**: the pair of losses in which a discriminator minimizes a classification loss on real and fake samples while the generator minimizes a loss on the discriminator's score of its samples, each holding the other fixed. *([Adversarial Training](v08-image-generation/04-gans.md))*
@@ -264,6 +266,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **differentiation rules**: the short list (constants and multiples, sums, products, quotients, powers) from which the derivative of any formula built from simple pieces is computed without returning to the limit. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
+**diffusion transformer**: a denoiser made of transformer blocks over the patch tokens of a latent, with the noise level entering through adaptive layer normalization, and a last layer that maps the tokens back to patches. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
+
 **directional derivative**: the rate of change of a function per unit distance in a chosen unit direction $\mathbf{u}$, equal to $\nabla L\cdot\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **discrete Fourier transform**: the list $X[k] = \sum_{n=0}^{N-1} x[n]e^{-2\pi i kn/N}$ of correlations of $N$ samples with turning pointers, one per frequency $k$; its modulus gives the amplitude and its angle the phase of the component at that frequency, and the original samples are recovered by the inverse transform. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
@@ -489,6 +493,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **Jacobian**: the matrix of shape outputs by inputs whose entry $(i, j)$ is $\partial f_i/\partial x_j$; it is the best linear approximation of a vector function near a point. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **JIT compilation**: compiling a kernel to machine code at the moment a program needs it, on the machine that runs it, so that it fits the device present; the work of the compiler is paid at run time, usually saved in a cache. *([One Program, Many Devices](v04-computation/09-backends.md))*
+
+**joint attention**: one attention in which the prompt tokens and the image tokens are queries and keys of the same softmax, so that each kind of token is updated by the other; a diffusion transformer built on it keeps the prompt as part of its sequence. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
 
 **joint distribution**: the probability $p(x, y)$ of each pair of values of two random variables on the same experiment, whose row and column sums are the marginal distributions. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
@@ -990,6 +996,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **tiled matmul**: the matrix product computed one tile of the output at a time, with the matching tiles of the two inputs staged in a fast memory so that each number loaded is used once per row or column of the tile, cutting the loads from $2n^3$ to $2n^3/T$ for a tile of side $T$. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 
+**timestep embedding**: the vector made from the scalar noise level by a sinusoidal encoding (cosines of the scaled level at a ladder of rates, then the sines) and a small network, so that a model built from vectors can read how noisy its input is. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
+
 **timestep shift**: the map $\sigma' = k\sigma/(1 + (k - 1)\sigma)$, or with $k = e^\mu$ the exponential form $e^\mu/(e^\mu + 1/\sigma - 1)$, that moves the sampling steps toward noise while keeping $0$ and $1$ fixed, so that larger images, which carry more redundant pixels per noise level, spend their steps where the commitment happens. *([Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md))*
 
 **token**: the unit a model counts, one piece of the text a tokenizer cuts, with an integer id in the vocabulary; a token can be a character, a word, a part of a word or a single byte. *([Tokenization](v05-sequences/02-tokenization.md))*
@@ -1023,6 +1031,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **two-pass reduction**: the reduction of an array longer than a workgroup by two dispatches, one in which every workgroup writes a partial result for its slice and a second that reduces the partials, the end of the first dispatch serving as the barrier between workgroups that a dispatch cannot have. *([Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md))*
 
 ## U
+
+**U-Net**: an encoder-decoder network that halves the resolution of a map level by level, then doubles it back, joining each level of the way up to the map of the same size from the way down by a skip connection, so that its output has the size of its input; the denoiser of SDXL has three levels and a stack of nine skips. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
 
 **underfitting**: a model too restricted to represent the pattern, so that its error is high on the training rows and on new rows alike. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 

@@ -22,9 +22,9 @@ You can say what a generative model of images offers (a sampler, a density, or b
 3. [Discrete Latents and Vector Quantization](03-vector-quantization.md): how an image can be turned into a short sequence of discrete codes.
 4. [Adversarial Training](04-gans.md): what happens when the loss itself is a network trained to catch the generator.
 5. [Diffusion Models](05-diffusion.md): how a model can learn to create an image by learning to remove noise.
-6. Flow Matching and Rectified Flow: whether generation can be a straight path from noise to data, followed by an ordinary differential equation.
-7. Samplers and Guidance: how many steps sampling needs, and how to make a model follow its prompt more closely.
-8. Denoiser Architectures: U-Nets and Diffusion Transformers: what network shapes are good at predicting noise, and how they take in the prompt.
+6. [Flow Matching and Rectified Flow](06-flow-matching.md): whether generation can be a straight path from noise to data, followed by an ordinary differential equation.
+7. [Samplers and Guidance](07-samplers-and-guidance.md): how many steps sampling needs, and how to make a model follow its prompt more closely.
+8. [Denoiser Architectures: U-Nets and Diffusion Transformers](08-denoiser-architectures.md): what network shapes are good at predicting noise, and how they take in the prompt.
 9. Conditioning on Text: how a sentence becomes the signal that steers image generation.
 10. Latent Diffusion Systems End to End: how the encoder, denoiser, sampler and decoder combine into a working image generator.
 11. Control, Identity and Adapters: how to steer a generator with a pose, an edge map or a particular person's face.
