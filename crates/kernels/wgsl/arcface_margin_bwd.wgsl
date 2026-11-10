@@ -79,6 +79,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         return;
     }
     let c = cosv[gidx];
-    let sn = max(sqrt(max(1.0 - c * c, 0.0)), SIN_FLOOR);
-    dx[gidx] = dy[gidx] * s * (bitcast<f32>(p.cos_m) + bitcast<f32>(p.sin_m) * c / sn);
+    let sn = sqrt(max(1.0 - c * c, 0.0));
+    var d = bitcast<f32>(p.cos_m);
+    if (sn >= SIN_FLOOR) {
+        d = d + bitcast<f32>(p.sin_m) * c / sn;
+    }
+    dx[gidx] = dy[gidx] * s * d;
 }

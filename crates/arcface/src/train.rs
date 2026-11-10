@@ -756,6 +756,44 @@ mod tests {
         assert!(nonzero > 100, "only {nonzero} nonzero gradient entries - the batch is degenerate");
     }
 
+    /// At `cos = 1` the forward floors `sqrt(1 - c^2)` to a constant, so the
+    /// target column's true derivative there is `s * cos_m`. The finite
+    /// difference cannot reach that point (`1 - c*c` in fp32 is 0 or at least
+    /// ~1.2e-7), so the adjoint is pinned at it directly.
+    #[test]
+    fn the_margin_adjoint_is_finite_at_cos_one() {
+        let gpu = gpu_core::testgpu::dev(crate::model::PIPELINES);
+        let ctx = Ctx::new(&gpu, ids());
+        let (margin, scale) = (0.5f32, 64.0f32);
+        let cos_table = [1.0f32, 0.25, -1.0, 0.6];
+        let cosv = gpu.storage(4);
+        gpu.write(&cosv, bytemuck::cast_slice(&cos_table));
+        // Row 0's target sits at cos = 1, row 1's at cos = 0.6.
+        let labels = gpu.storage(2);
+        gpu.write(&labels, &[0, 1]);
+        let dy = gpu.storage(4);
+        gpu.write(&dy, bytemuck::cast_slice(&[1.0f32; 4]));
+        let dx = gpu.storage(4);
+        let step = ctx.step(
+            kernel("arcface_margin_bwd"),
+            &[&cosv, &labels, &dy, &dx],
+            &[2, 2, f(margin.cos()), f(margin.sin()), f(scale)],
+            4,
+        );
+        gpu.submit(&[], &[step]);
+        let got = gpu.read(&dx, 4);
+        let c = 0.6f32;
+        let want = [
+            scale * margin.cos(),
+            scale,
+            scale,
+            scale * (margin.cos() + margin.sin() * c / (1.0 - c * c).sqrt()),
+        ];
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            assert!((g - w).abs() <= 1e-4 * w.abs(), "element {i}: adjoint {g}, want {w}");
+        }
+    }
+
     /// The margin must actually bite: at `m = 0` the head is a plain scaled
     /// cosine softmax, and turning `m` up must raise the loss on the same batch
     /// (the target logit is pushed down by `cos(θ+m) < cos θ`).
