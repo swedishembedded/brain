@@ -157,8 +157,9 @@ multimodal prompt).
    - the run record (`<out>.json` with the seed and params) the verbs write;
    - then `resolve.rs` handler rows, `seed_flag.rs`'s `SEEDED_VERBS`,
      `quickstart.sh`/`quickstart.bats`, the `wan` make target, and the docs
-     and samples that call `brain ltxv`/`brain wan` (`character_swap.sh` is
-     masked v2v, `chain_images_to_video.sh` mid-frame keyframes).
+     and samples that call `brain ltxv`/`brain wan` (`character_replace.sh` is
+     tracking, still edits and masked v2v with keyframe guides,
+     `chain_images_to_video.sh` mid-frame keyframes).
 
 ## Later
 

@@ -1,6 +1,6 @@
 # sample: videogen/ltxv (LTX-2.5, shell)
 
-Four shell wrappers around `brain ltxv t2v`/`v2v` - LTX-2.5's native
+Three shell wrappers around `brain ltxv t2v` - LTX-2.5's native
 audio-visual video generation, driven straight from the CLI with no server
 and no D-Bus in the loop. Weights come from brain's model store with no
 configuration.
@@ -9,7 +9,7 @@ configuration.
 samples/shell/videogen/ltxv/text_to_video.sh "a boat sailing at sunset" clip.mp4 5
 ```
 
-## The four scripts
+## The three scripts
 
 ### `text_to_video.sh` - prompt in, clip out
 
@@ -72,35 +72,8 @@ needs an odd still count, and is the way to keep a longer or moving-camera
 segment on course through its own middle, not only at its ends. Segment
 `N` is kept at `<out>.segments/clip-N.mp4` for inspection.
 
-### `character_swap.sh` - replace one character, keep everything else
-
-Takes a clip, a mask sequence, and a prompt describing the *whole* frame,
-and replaces only what the mask marks as non-conditioning:
-
-```bash
-brain sam2 track --video stunt.mp4 --point 640,300 --out masks/
-samples/shell/videogen/ltxv/character_swap.sh stunt.mp4 masks/ "a woman in a red coat" out.mp4
-```
-
-The mechanism is masked conditioning - LTX-2.5's `VideoConditionByMask`,
-ported and parity-gated in `ltxv::maskcond`. Every latent position the mask
-marks as conditioning is handed the source clip's own latent and excluded
-from denoising, so the set, the camera move and the lighting come out of
-the sampler bit-exactly unchanged; everything else is renoised from the
-prompt. This needs no adapter (Lightricks has published exactly one
-IC-LoRA for LTX-2.5, and it is a pixel spatial upscaler), which is why
-masked conditioning is the route here rather than a reference-image path.
-
-**This is not an identity swap.** Nothing in this path takes a face crop or
-a per-subject embedding - who the new character is comes from the prompt
-alone. `brain sam2 track` writes the mask sequence with SAM 2's native
-polarity (white = tracked subject) and records it in `masks.json`; the
-reader honours that field and refuses to run if it is missing, rather than
-guessing backwards and preserving the character while regenerating
-everything else. The script's last line of output is the check that the
-swap actually happened: mean `|delta|` inside the replaced region versus
-the preserved one - a preserved value near zero against a much larger
-replaced value is the conditioning working.
+Replacing a person in an existing clip with a character from a sheet is
+its own sample, `samples/shell/videogen/character_replace`.
 
 ## What it needs
 
@@ -125,9 +98,6 @@ only as `.safetensors`; brain's loader reads a GGUF quantization of it
 from a community conversion or from running `brain quantize` yourself.
 `LTX_TINY=1` runs the tiny random-weight DiT instead: a real wiring test
 (the stills genuinely condition the noise), not a quality claim.
-`character_swap.sh` needs the video VAE unconditionally - the conditioning
-is defined on that latent and there is no stand-in for it - and, with no real
-DiT available, brain runs the tiny random-weight DiT by itself.
 
 ## Options
 
@@ -139,5 +109,4 @@ DiT available, brain runs the tiny random-weight DiT by itself.
 | `LTX_AUDIO=0` | `images_to_video.sh`, `chain_images_to_video.sh` | disable the audio half (cheaper, no audio VAE needed) |
 | `LTX_TRACE=<0-5>` | `images_to_video.sh`, `chain_images_to_video.sh` | `brain --trace-ltxv` verbosity (default 4; 5 adds per-block GPU timings) |
 | `MID=1` | `chain_images_to_video.sh` | group stills in triples (start/mid/end) instead of pairs; needs an odd still count |
-| `STRENGTH`, `GUIDANCE` | `character_swap.sh` | conditioning strength (1.0 = pin exactly) / CFG scale |
 | `BRAIN_DEVICE`, `BRAIN` | all | device selector / path to the `brain` binary (default `./target/release/brain`) |

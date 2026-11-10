@@ -36,6 +36,7 @@ mod ouro_cli;
 mod huginn_cli;
 mod load_line;
 mod ltxv_cli;
+mod ltxv_replace;
 mod minicpmv_cli;
 mod mirror_cli;
 mod import_gguf_cli;

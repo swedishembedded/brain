@@ -420,7 +420,7 @@ fn resolve_flux2(dit: Option<&str>, vae: Option<&str>, text_encoder: Option<&str
     Ok((paths, assembly))
 }
 
-fn generate(args: &[String]) -> Result<(), String> {
+pub(crate) fn generate(args: &[String]) -> Result<(), String> {
     let (seed, rest) = crate::args::split_seed(args, "flux2");
     let args = &rest[..];
     let mut prompt = None;

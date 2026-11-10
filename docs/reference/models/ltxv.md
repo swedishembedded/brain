@@ -30,6 +30,8 @@ per component and the open gaps.
 | Text to audio | [x] `brain ltxv t2a` / the `t2a` action: the audio stream alone, the video half never read |
 | Audio to video | [x] `--audio-source <wav>`: the soundtrack held frozen while the picture denoises against it, any length (each window holds its own slice) |
 | Retake, video to audio | [x] `brain ltxv v2v --window S:E` / the `v2v` action: regenerate a time window of the picture, the sound or both; `--hold-video --audio` generates sound for a picture |
+| Masked video to video | [x] `brain ltxv v2v --mask <maskseq>`: regenerate a tracked region, hold the rest token-exactly; `--keyframe F:<image>` guides it with edited stills (see "Replacing a person") |
+| Character replacement | [x] `brain ltxv replace`: a clip, a character sheet and a click on a person in; the clip with the person replaced out (see "Replacing a person") |
 | Extension | [x] `brain ltxv extend` / the `extend` action: continue a clip from its last 57 frames, with its soundtrack |
 | Image / keyframe conditioning | [x] `--start-frame`, `--mid-frame`, `--end-frame` (see "Anchoring a clip on real images") |
 | Clip length from the prompt | [x] the duration head, when it is in the model store (see "Clip length") |
@@ -39,7 +41,7 @@ per component and the open gaps.
 | DFR | [x] `brain ltxv dfr` on the real checkpoint: keyframe-segment canvas, stage 1 with generated keyframe slots, spatial upscale, the detailing pass under the Refine-Details IC-LoRA, 0-2 temporal rounds and the spatial epilogue (`--spatial-upscalings 2`) |
 | LoRA inference | [x] `--adapter <path>` (repeatable): ComfyUI/PEFT `.safetensors` from the official trainer, published IC-LoRAs (with `--reference-video`), or brain-trained adapters, applied beside the int8 weights |
 | LoRA / full fine-tune | [~] video-only DiT; the audio-visual DiT has no training support |
-| CLI | [x] `brain ltxv {t2v,t2a,v2v,extend,upscale,dfr}` |
+| CLI | [x] `brain ltxv {t2v,t2a,v2v,replace,extend,upscale,dfr}` |
 | Capability actions (D-Bus, `brain do`) | [x] `t2v`, `t2a`, `v2v`, `extend`, `upscale`, `dfr`; the clip actions take the source as a `video` input blob and its sound as a `soundtrack` WAV blob |
 | HTTP API | [ ] the OpenAI/Anthropic routes have no video route |
 | Multi-device | [~] the CFG pair runs on two cards concurrently; block sharding across cards is implemented for the video-only DiT |
@@ -562,6 +564,67 @@ with the picture; `--hold-video` keeps every frame and generates sound for
 them (video to audio), `--hold-audio` keeps the soundtrack. `t2v --audio
 --audio-source <wav>` goes the other way: the soundtrack is held frozen and
 the picture denoises against it.
+
+### Replacing a person
+
+```bash
+brain ltxv replace --input street.mp4 --character sheet.png --point 405,195 \
+  --prompt "a woman with short copper-red hair in a mustard raincoat walks toward the camera" \
+  --output-path replaced.mp4
+```
+
+The person clicked on is replaced by the character on the sheet; their
+path, their timing and the background stay the source's. In order:
+
+1. SAM 2.1 tracks the person through the clip (`--point`, repeatable, and
+   `--exclude` are the clicks).
+2. FLUX.2 paints the character over the person on frame 0 and on guide
+   frames (`--guide-frames`, default every 40th frame and the last). It
+   repaints only the person's grown silhouette on a canvas around them and
+   keeps the rest exactly, so the character has to take the person's
+   place, size and pose instead of being staged somewhere else. Where the
+   frame cuts the person off, the canvas extends below it: the model draws
+   a whole body at the person's scale there rather than shrinking the
+   figure to fit, and the rows below the frame are discarded. An edit whose figure overlaps the person by less than
+   half (intersection over union) is retried with another seed; a guide
+   frame with no edit that passes is dropped and reported, because a guide
+   standing somewhere else pulls the clip away from the person's motion.
+   Frame 0 with no passing edit stops the run.
+3. Masked video to video regenerates the person's region and holds every
+   other latent token: the region is the person's silhouette joined with the
+   painted figure's (carried along the track and scaled with the person),
+   grown to whole latent tokens. The conditioning is a mean over each
+   token's 32 x 32 pixels and pixel frames, so a token the region covers
+   only in part is held in part - a sleeve of the old costume survives.
+   Frame 0 is the painted still, held inside the figure and redrawn in a
+   ring across its outline, where the edit blends the clothes into the
+   street. The other stills are keyframe guides held at half strength
+   (`--guide-strength`): held fully, the clip cross-fades from one still's
+   figure into the next instead of moving it.
+4. The generated clip is composited over the source across a feathered
+   edge: outside the region every pixel is the source's own.
+
+Any clip brain decodes is accepted: one that is not 1 + 8k frames at
+multiples of 32 is trimmed at its end and centre-cropped onto that grid,
+the clicks moving with the crop, and the run says what it did
+(`--no-conform` refuses instead). `--actor-mask <dir>` gives the person's
+track as a mask sequence instead of clicks. brain reads no sound out of a
+container, so the result is silent unless `--soundtrack <wav>` carries one.
+`--adapter`/`--lora-scale` apply LoRAs to the video pass and
+`--edit-adapter`/`--edit-lora-scale` to the still edits; every threshold
+and margin above is a flag (`brain ltxv replace --help`).
+
+Every intermediate - the track, each edit attempt, the stills, the region
+mask sequence, the clip the video pass sees and the generated clip - is
+kept in `--work-dir` (default `<output>.work`).
+`samples/shell/videogen/character_replace` runs this, or one step of it,
+with every model and setting as a flag, and lists the pull commands for
+each model it can use.
+
+`brain ltxv v2v --mask <maskseq> --keyframe F:<image>` is the video step on
+its own: guides append clean blocks at their frames' instants and compose
+with the mask; a start, mid or end still would overwrite the tokens the
+mask holds and is refused.
 
 ### Extending a clip
 

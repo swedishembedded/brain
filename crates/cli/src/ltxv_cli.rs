@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain ltxv {t2v,upscale,v2v,dfr,t2a,extend}` - LTX-2.5 video generation, post-hoc
-//! upscaling of a clip that already exists, masked regeneration, the DFR
-//! smoke test, text-to-audio, and the continuation of an existing clip.
+//! `brain ltxv {t2v,upscale,v2v,replace,dfr,t2a,extend}` - LTX-2.5 video
+//! generation, post-hoc upscaling of a clip that already exists, masked
+//! regeneration, character replacement (`crate::ltxv_replace`), the DFR smoke
+//! test, text-to-audio, and the continuation of an existing clip.
 //!
 //! One command, one playable file:
 //!
@@ -375,6 +376,7 @@ Subcommands:
   brain ltxv t2v --help       text to video (this command)
   brain ltxv upscale --help   re-render a finished clip at 2x
   brain ltxv v2v --help       regenerate a masked region of an existing clip
+  brain ltxv replace --help   replace a person in a clip with a character from a sheet
   brain ltxv dfr --help       DFR (Diffusion Fidelity Rendering) smoke test
   brain ltxv t2a --help       text to audio (the audio stream alone)
   brain ltxv extend --help    continue an existing clip"#);
@@ -565,6 +567,12 @@ pub fn run_ltxv(args: &[String]) {
         "t2a" => {
             if let Err(e) = t2a(&args[1..]) {
                 eprintln!("ltxv t2a: {e}");
+                std::process::exit(1);
+            }
+        }
+        "replace" => {
+            if let Err(e) = crate::ltxv_replace::replace(&args[1..]) {
+                eprintln!("ltxv replace: {e}");
                 std::process::exit(1);
             }
         }
@@ -1846,7 +1854,7 @@ mod tests {
     #[test]
     fn every_subcommand_is_listed() {
         let src = include_str!("ltxv_cli.rs");
-        for sub in ["t2v", "upscale", "v2v", "dfr", "t2a", "extend"] {
+        for sub in ["t2v", "upscale", "v2v", "replace", "dfr", "t2a", "extend"] {
             assert!(src.contains(&format!("\"{sub}\"")), "{sub} is listed but not dispatched");
             assert!(super::HELP.contains(&format!("brain ltxv {sub}")), "{sub} is dispatched but not in --help");
         }
