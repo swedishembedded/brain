@@ -15,12 +15,12 @@ fn elementwise_ops() {
     let (a, b) = (noise(12, 1, 1.0), noise(12, 2, 1.0));
     check("add", &[a.clone(), b.clone()], &|t, i| t.add(i[0], i[1]));
     check("mul", &[a.clone(), b.clone()], &|t, i| t.mul(i[0], i[1]));
-    check("scale", &[a.clone()], &|t, i| t.scale(i[0], 0.37));
+    check("scale", std::slice::from_ref(&a), &|t, i| t.scale(i[0], 0.37));
     check("bias_add", &[a.clone(), noise(4, 3, 1.0)], &|t, i| t.bias_add(i[0], i[1]));
     check("chan_mul", &[a.clone(), noise(3, 4, 1.0)], &|t, i| t.chan_mul(i[0], i[1]));
     check("scalar_mul", &[a.clone(), noise(1, 5, 1.0)], &|t, i| t.scalar_mul(i[0], i[1]));
-    check("sigmoid", &[a.clone()], &|t, i| t.sigmoid(i[0]));
-    check("silu", &[a.clone()], &|t, i| t.silu(i[0]));
+    check("sigmoid", std::slice::from_ref(&a), &|t, i| t.sigmoid(i[0]));
+    check("silu", std::slice::from_ref(&a), &|t, i| t.silu(i[0]));
     check("gelu_tanh", &[a], &|t, i| t.gelu_tanh(i[0]));
 }
 

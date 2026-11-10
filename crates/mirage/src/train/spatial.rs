@@ -185,7 +185,7 @@ impl<R: Real> Tape<R> {
     /// Normalised sequency-ordered Walsh transform of every row of width `n`. It is orthonormal and symmetric, so
     /// the backward is the same transform of the output gradient.
     pub fn walsh(&mut self, x: Id, n: usize) -> Id {
-        assert!(n.is_power_of_two() && self.len(x) % n == 0, "walsh: width {n} is not a power of two tiling the input");
+        assert!(n.is_power_of_two() && self.len(x).is_multiple_of(n), "walsh: width {n} is not a power of two tiling the input");
         let mut y = self.val(x).to_vec();
         walsh_rows(&mut y, n);
         self.op(y, move |_, gy, g| {
@@ -199,7 +199,7 @@ impl<R: Real> Tape<R> {
     /// padding, `w: [n, k]`, `k = 2r + 1`.
     pub fn band(&mut self, u: Id, n: usize, w: Id, k: usize) -> Id {
         assert_eq!(self.len(w), n * k, "band: weights are not {n}x{k}");
-        assert!(n > 0 && self.len(u) % n == 0, "band: input does not tile {n}");
+        assert!(n > 0 && self.len(u).is_multiple_of(n), "band: input does not tile {n}");
         let rad = k / 2;
         let mut y = vec![R::ZERO; self.len(u)];
         {

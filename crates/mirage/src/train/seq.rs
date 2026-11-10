@@ -71,7 +71,7 @@ impl<R: Real> Tape<R> {
     /// `v: [tk, hk*vh]`; output `[tq, hq*vh]`.
     pub fn attention(&mut self, q: Id, k: Id, v: Id, s: AttnShape) -> Id {
         let (kw, vw) = (s.hk * s.qk, s.hk * s.vh);
-        assert!(s.hk > 0 && s.hq % s.hk == 0, "attention: {} query heads do not group over {} key heads", s.hq, s.hk);
+        assert!(s.hk > 0 && s.hq.is_multiple_of(s.hk), "attention: {} query heads do not group over {} key heads", s.hq, s.hk);
         assert_eq!(self.len(q), s.tq * s.hq * s.qk, "attention: q shape");
         assert_eq!(self.len(k), s.tk * kw, "attention: k shape");
         assert_eq!(self.len(v), s.tk * vw, "attention: v shape");

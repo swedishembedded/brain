@@ -218,7 +218,7 @@ impl<R: Real> Tape<R> {
     /// `(1 + scale) * x / sqrt(mean(x^2) + eps)` over rows of width `d`.
     pub fn zc_norm(&mut self, x: Id, d: usize, scale: Id) -> Id {
         assert_eq!(self.len(scale), d, "zc_norm: scale is not {d} wide");
-        assert!(d > 0 && self.len(x) % d == 0, "zc_norm: input does not tile {d}");
+        assert!(d > 0 && self.len(x).is_multiple_of(d), "zc_norm: input does not tile {d}");
         let mut y = self.val(x).to_vec();
         {
             let s = self.val(scale);
@@ -254,7 +254,7 @@ impl<R: Real> Tape<R> {
 
     /// `x / sqrt(mean(x^2) + eps)` over rows of width `d` (no scale).
     pub fn rms_unit(&mut self, x: Id, d: usize) -> Id {
-        assert!(d > 0 && self.len(x) % d == 0, "rms_unit: input does not tile {d}");
+        assert!(d > 0 && self.len(x).is_multiple_of(d), "rms_unit: input does not tile {d}");
         let mut y = self.val(x).to_vec();
         rows(&mut y, d, |_, row| {
             let inv = inv_rms(row, d);

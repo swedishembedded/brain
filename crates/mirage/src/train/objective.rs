@@ -153,7 +153,7 @@ impl Sample {
                         id: o.id,
                         name: o.name.clone(),
                         bbox: to_canvas(&o.bbox),
-                        polygons: o.mask_polygons.as_ref().map(|rings| rings.iter().map(|ring| ring.chunks_exact(2).flat_map(|p| [p[0] * sx, p[1] * sy]).collect()).collect()),
+                        polygons: o.mask_polygons.as_ref().map(|rings| rings.iter().map(|ring| ring.as_chunks::<2>().0.iter().flat_map(|p| [p[0] * sx, p[1] * sy]).collect()).collect()),
                         position: o.position.clone(),
                         attributes: o.attributes.iter().flatten().map(|(k, v)| (k.clone(), v.clone())).collect(),
                     }
@@ -428,7 +428,9 @@ pub fn sample_loss<R: Real, T: Graph<R>>(net: &mut Net<'_, R, T>, s: &Sample, ta
         let valid = valid_cells(h, wd, side);
 
         if w.heat > 0.0 || w.regression > 0.0 {
-            let kinds: [(usize, Option<Vec<[f32; 4]>>, [usize; 4]); 2] = [
+            // (logit channel, boxes when the family is labelled, regression channels)
+            type Kind = (usize, Option<Vec<[f32; 4]>>, [usize; 4]);
+            let kinds: [Kind; 2] = [
                 (0, s.objects.as_ref().map(|o| o.iter().map(|g| g.bbox).collect()), [2, 3, 6, 7]),
                 (1, s.text.as_ref().map(|t| t.iter().map(|g| g.bbox).collect()), [4, 5, 8, 9]),
             ];

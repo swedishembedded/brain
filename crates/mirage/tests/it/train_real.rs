@@ -104,7 +104,7 @@ fn mask_miou(ck: &Checkpoint, root: &Path, recs: &[Record]) -> f64 {
             let (r, c) = coefficient_cell(b);
             let coef = &coefs[(r * 64 + c) * 32..][..32];
             let field = object_field(&protos, coef, b);
-            let rings: Vec<Vec<f64>> = polys.iter().map(|p| p.chunks_exact(2).flat_map(|q| [q[0] * sx, q[1] * sy]).collect()).collect();
+            let rings: Vec<Vec<f64>> = polys.iter().map(|p| p.as_chunks::<2>().0.iter().flat_map(|q| [q[0] * sx, q[1] * sy]).collect()).collect();
             total += mask_iou(&field, &rasterise(&rings, 128));
             n += 1;
         }
