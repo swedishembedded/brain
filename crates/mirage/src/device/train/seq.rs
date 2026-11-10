@@ -33,30 +33,32 @@ impl DevTape<'_> {
     }
 
     /// Scaled dot-product attention with softmax over the visible keys. `q: [tq, hq*qk]`, `k: [tk, hk*qk]`,
-    /// `v: [tk, hk*vh]`; output `[tq, hq*vh]`. The probabilities are kept for the backward (`tq * hq * tk` values).
+    /// `v: [tk, hk*vh]`; output `[tq, hq*vh]`. The forward keeps the log-sum-exp of every (query, head) row; the
+    /// backward rebuilds each probability from q, k and that statistic, so no `tq * hq * tk` matrix is ever stored.
     pub(super) fn op_attention(&mut self, q: Id, k: Id, v: Id, s: AttnShape) -> Id {
         assert!(s.hk > 0 && s.hq.is_multiple_of(s.hk), "attention: {} query heads do not group over {} key heads", s.hq, s.hk);
         assert_eq!(self.len_of(q), s.tq * s.hq * s.qk, "attention: q shape");
         assert_eq!(self.len_of(k), s.tk * s.hk * s.qk, "attention: k shape");
         assert_eq!(self.len_of(v), s.tk * s.hk * s.vh, "attention: v shape");
         let (qb, kb, vb) = (self.buf(q), self.buf(k), self.buf(v));
-        let pr = self.rec.alloc(s.tq * s.hq * s.tk);
-        self.rec.attn_probs(&qb, &kb, &pr, &s);
         let out_len = s.tq * s.hq * s.vh;
         let out = self.rec.alloc(out_len);
-        self.rec.attn_out(&pr, &vb, &out, &s);
+        let lse = self.rec.alloc(s.tq * s.hq);
+        self.rec.attn_fwd(&qb, &kb, &vb, &out, &lse, &s);
+        let out_b = out.clone();
         self.op(out, out_len, &[q, k, v], move |cx, go| {
             let (qv, kv, vv) = (cx.val(q), cx.val(k), cx.val(v));
-            let ds = cx.rec.alloc(s.tq * s.hq * s.tk);
-            cx.rec.attn_ds(&pr, go, &vv, &ds, &s);
+            let delta = cx.rec.alloc(s.tq * s.hq);
+            cx.rec.attn_delta(go, &out_b, &delta, &s);
             if let Some(gq) = cx.target(q) {
-                cx.rec.attn_dq(&ds, &kv, &gq, &s);
+                cx.rec.attn_dq(&qv, &kv, &vv, go, &lse, &delta, &gq, &s);
             }
-            if let Some(gk) = cx.target(k) {
-                cx.rec.attn_dk(&ds, &qv, &gk, &s);
-            }
-            if let Some(gv) = cx.target(v) {
-                cx.rec.attn_dv(&pr, go, &gv, &s);
+            // dk and dv share one pass; a frozen side is written to a scratch accumulator.
+            let (gk, gv) = (cx.target(k), cx.target(v));
+            if gk.is_some() || gv.is_some() {
+                let gk = gk.unwrap_or_else(|| cx.rec.alloc_zeroed(s.tk * s.hk * s.qk));
+                let gv = gv.unwrap_or_else(|| cx.rec.alloc_zeroed(s.tk * s.hk * s.vh));
+                cx.rec.attn_dkv(&qv, &kv, &vv, go, &lse, &delta, &gk, &gv, &s);
             }
         })
     }

@@ -4,7 +4,7 @@
 //! Sequence primitives: rotary embeddings, masked grouped-query attention, causal taps, Sinkhorn normalisation,
 //! lane mixing and the Kronecker rotations of the Hadamard MLP, each with its backward.
 
-use super::ops::{rows, softmax_in_place};
+use super::ops::{rows, rows_pair};
 use super::real::{r, Real};
 use super::tape::{Id, Tape};
 
@@ -77,69 +77,78 @@ impl<R: Real> Tape<R> {
         assert_eq!(self.len(v), s.tk * vw, "attention: v shape");
         let group = s.hq / s.hk;
         let scale = r::<R>(1.0 / (s.qk as f64).sqrt());
-        let probs = move |qv: &[R], kv: &[R], qi: usize, h: usize| -> Vec<R> {
+        // Scores of one (query, head) row over its visible keys.
+        let scores = move |qv: &[R], kv: &[R], qi: usize, h: usize| -> Vec<R> {
             let g = h / group;
             let qh = &qv[(qi * s.hq + h) * s.qk..][..s.qk];
-            let mut sc: Vec<R> = (0..s.visible(qi)).map(|t| qh.iter().zip(&kv[t * kw + g * s.qk..][..s.qk]).map(|(a, b)| *a * *b).sum::<R>() * scale).collect();
-            softmax_in_place(&mut sc);
-            sc
+            (0..s.visible(qi)).map(|t| qh.iter().zip(&kv[t * kw + g * s.qk..][..s.qk]).map(|(a, b)| *a * *b).sum::<R>() * scale).collect()
         };
         let mut out = vec![R::ZERO; s.tq * s.hq * s.vh];
+        // The log-sum-exp of every row's scores is all the backward keeps of the softmax: it rebuilds the
+        // probabilities of one row at a time from q, k and this statistic instead of storing `tq * hq * tk` values.
+        let mut lse = vec![R::ZERO; s.tq * s.hq];
         {
             let (qv, kv, vv) = (self.val(q), self.val(k), self.val(v));
-            rows(&mut out, s.hq * s.vh, |qi, row| {
+            rows_pair(&mut out, s.hq * s.vh, &mut lse, s.hq, |qi, row, stat| {
                 for h in 0..s.hq {
                     let g = h / group;
-                    let p = probs(qv, kv, qi, h);
+                    let mut sc = scores(qv, kv, qi, h);
+                    let max = sc.iter().copied().fold(sc[0], |a, b| a.max(b));
+                    let mut sum = R::ZERO;
+                    for x in sc.iter_mut() {
+                        *x = (*x - max).exp();
+                        sum += *x;
+                    }
+                    stat[h] = max + sum.ln();
                     let o = &mut row[h * s.vh..(h + 1) * s.vh];
-                    for (t, pt) in p.iter().enumerate() {
-                        o.iter_mut().zip(&vv[t * vw + g * s.vh..][..s.vh]).for_each(|(a, b)| *a += *pt * *b);
+                    for (t, pt) in sc.iter().enumerate() {
+                        let w = *pt / sum;
+                        o.iter_mut().zip(&vv[t * vw + g * s.vh..][..s.vh]).for_each(|(a, b)| *a += w * *b);
                     }
                 }
             });
         }
+        // The output is the node's own value, which the backward reads to form `sum_e dout * out` per row.
+        let out_id = Id(self.value_count());
         self.op(out, move |vals, gy, grads| {
-            let (qv, kv, vv) = (&vals[q.0], &vals[k.0], &vals[v.0]);
-            // Pass 1, per query row: probabilities and the score gradient of every (head, key), plus dq.
-            let per_row = s.hq * s.tk;
-            let mut ds = vec![R::ZERO; s.tq * per_row];
-            let mut pr = vec![R::ZERO; s.tq * per_row];
+            let (qv, kv, vv, ov) = (&vals[q.0], &vals[k.0], &vals[v.0], &vals[out_id.0]);
+            // Pass 1, per query row: `delta = dout . out`, the score gradient `p (dp - delta) scale` of every key
+            // (probabilities rebuilt from `lse`), and dq.
+            let mut delta = vec![R::ZERO; s.tq * s.hq];
             let mut dq = vec![R::ZERO; qv.len()];
-            super::ops::rows_pair(&mut ds, per_row, &mut pr, per_row, |qi, dsr, prr| {
+            rows_pair(&mut dq, s.hq * s.qk, &mut delta, s.hq, |qi, row, dl| {
                 for h in 0..s.hq {
                     let g = h / group;
-                    let p = probs(qv, kv, qi, h);
-                    let go = &gy[(qi * s.hq + h) * s.vh..][..s.vh];
-                    let dp: Vec<R> = (0..p.len()).map(|t| go.iter().zip(&vv[t * vw + g * s.vh..][..s.vh]).map(|(a, b)| *a * *b).sum()).collect();
-                    let dot: R = p.iter().zip(&dp).map(|(p, d)| *p * *d).sum();
-                    for t in 0..p.len() {
-                        prr[h * s.tk + t] = p[t];
-                        dsr[h * s.tk + t] = p[t] * (dp[t] - dot) * scale;
-                    }
-                }
-            });
-            rows(&mut dq, s.hq * s.qk, |qi, row| {
-                for h in 0..s.hq {
-                    let g = h / group;
-                    for t in 0..s.visible(qi) {
-                        let w = ds[qi * per_row + h * s.tk + t];
+                    let at = (qi * s.hq + h) * s.vh;
+                    let go = &gy[at..][..s.vh];
+                    dl[h] = go.iter().zip(&ov[at..][..s.vh]).map(|(a, b)| *a * *b).sum();
+                    let sc = scores(qv, kv, qi, h);
+                    for (t, x) in sc.iter().enumerate() {
+                        let p = (*x - lse[qi * s.hq + h]).exp();
+                        let dp: R = go.iter().zip(&vv[t * vw + g * s.vh..][..s.vh]).map(|(a, b)| *a * *b).sum();
+                        let w = p * (dp - dl[h]) * scale;
                         row[h * s.qk..(h + 1) * s.qk].iter_mut().zip(&kv[t * kw + g * s.qk..][..s.qk]).for_each(|(a, b)| *a += w * *b);
                     }
                 }
             });
             grads.add(q, &dq);
-            // Pass 2, per key row: dk and dv gather over the queries that see it.
+            // Pass 2, per key row: dk and dv gather over the queries that see it, rebuilding each probability.
             let mut dk = vec![R::ZERO; kv.len()];
             let mut dv = vec![R::ZERO; vv.len()];
-            super::ops::rows_pair(&mut dk, kw, &mut dv, vw, |t, dkr, dvr| {
+            rows_pair(&mut dk, kw, &mut dv, vw, |t, dkr, dvr| {
                 let first = if s.causal { t } else { 0 };
                 for qi in first..s.tq {
                     for h in 0..s.hq {
                         let g = h / group;
-                        let w = ds[qi * per_row + h * s.tk + t];
-                        let p = pr[qi * per_row + h * s.tk + t];
-                        dkr[g * s.qk..(g + 1) * s.qk].iter_mut().zip(&qv[(qi * s.hq + h) * s.qk..][..s.qk]).for_each(|(a, b)| *a += w * *b);
-                        dvr[g * s.vh..(g + 1) * s.vh].iter_mut().zip(&gy[(qi * s.hq + h) * s.vh..][..s.vh]).for_each(|(a, b)| *a += p * *b);
+                        let row = qi * s.hq + h;
+                        let qh = &qv[row * s.qk..][..s.qk];
+                        let go = &gy[row * s.vh..][..s.vh];
+                        let sc = qh.iter().zip(&kv[t * kw + g * s.qk..][..s.qk]).map(|(a, b)| *a * *b).sum::<R>() * scale;
+                        let p = (sc - lse[row]).exp();
+                        let dp: R = go.iter().zip(&vv[t * vw + g * s.vh..][..s.vh]).map(|(a, b)| *a * *b).sum();
+                        let w = p * (dp - delta[row]) * scale;
+                        dkr[g * s.qk..(g + 1) * s.qk].iter_mut().zip(qh).for_each(|(a, b)| *a += w * *b);
+                        dvr[g * s.vh..(g + 1) * s.vh].iter_mut().zip(go).for_each(|(a, b)| *a += p * *b);
                     }
                 }
             });

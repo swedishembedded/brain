@@ -567,6 +567,8 @@ fn masked_grouped_query_attention_matches_the_host() {
         AttnShape { tq: 21, tk: 130, hq: 8, hk: 8, qk: 48, vh: 64, causal: false },
         AttnShape { tq: 70, tk: 70, hq: 4, hk: 1, qk: 32, vh: 64, causal: false },
         AttnShape { tq: 5, tk: 3, hq: 2, hk: 2, qk: 3, vh: 5, causal: false },
+        // A causal sequence longer than one 64-lane chunk over grouped key heads.
+        AttnShape { tq: 150, tk: 150, hq: 8, hk: 2, qk: 48, vh: 64, causal: true },
         // Few queries over thousands of keys (the cell memory of a full canvas).
         AttnShape { tq: 6, tk: 4400, hq: 8, hk: 8, qk: 48, vh: 64, causal: false },
     ];

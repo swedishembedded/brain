@@ -265,34 +265,26 @@ impl<'d> Rec<'d> {
         [word(s.tq), word(s.tk), word(s.hq), word(s.hk), word(s.qk), word(s.vh), u32::from(s.causal), (1.0 / (s.qk as f32).sqrt()).to_bits()]
     }
 
-    /// Attention probabilities of every (query, head) row.
-    pub(crate) fn attn_probs(&mut self, q: &DeviceBuffer, k: &DeviceBuffer, pr: &DeviceBuffer, s: &AttnShape) {
-        self.groups("mirage_t_attn_probs", &[q, k, pr], &Self::attn_params(s), s.tq * s.hq);
+    /// Attention output and the log-sum-exp of every (query, head) row; no probability matrix is formed.
+    pub(crate) fn attn_fwd(&mut self, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, out: &DeviceBuffer, lse: &DeviceBuffer, s: &AttnShape) {
+        self.threads("mirage_t_attn_fwd", &[q, k, v, out, lse], &Self::attn_params(s), s.tq * s.hq);
     }
 
-    /// Attention output `P v`.
-    pub(crate) fn attn_out(&mut self, pr: &DeviceBuffer, v: &DeviceBuffer, out: &DeviceBuffer, s: &AttnShape) {
-        self.threads("mirage_t_attn_out", &[pr, v, out], &Self::attn_params(s), s.tq * s.hq * s.vh);
+    /// `delta[row] = dout . out` of every (query, head) row.
+    pub(crate) fn attn_delta(&mut self, go: &DeviceBuffer, out: &DeviceBuffer, delta: &DeviceBuffer, s: &AttnShape) {
+        self.threads("mirage_t_attn_delta", &[go, out, delta], &Self::attn_params(s), s.tq * s.hq);
     }
 
-    /// Attention score gradient.
-    pub(crate) fn attn_ds(&mut self, pr: &DeviceBuffer, go: &DeviceBuffer, v: &DeviceBuffer, ds: &DeviceBuffer, s: &AttnShape) {
-        self.groups("mirage_t_attn_ds", &[pr, go, v, ds], &Self::attn_params(s), s.tq * s.hq);
+    /// Attention query gradient, probabilities rebuilt from `lse`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn attn_dq(&mut self, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, go: &DeviceBuffer, lse: &DeviceBuffer, delta: &DeviceBuffer, dq: &DeviceBuffer, s: &AttnShape) {
+        self.threads("mirage_t_attn_dq", &[q, k, v, go, lse, delta, dq], &Self::attn_params(s), s.tq * s.hq);
     }
 
-    /// Attention query gradient.
-    pub(crate) fn attn_dq(&mut self, ds: &DeviceBuffer, k: &DeviceBuffer, dq: &DeviceBuffer, s: &AttnShape) {
-        self.threads("mirage_t_attn_dq", &[ds, k, dq], &Self::attn_params(s), s.tq * s.hq * s.qk);
-    }
-
-    /// Attention key gradient.
-    pub(crate) fn attn_dk(&mut self, ds: &DeviceBuffer, q: &DeviceBuffer, dk: &DeviceBuffer, s: &AttnShape) {
-        self.threads("mirage_t_attn_dk", &[ds, q, dk], &Self::attn_params(s), s.tk * s.hk * s.qk);
-    }
-
-    /// Attention value gradient.
-    pub(crate) fn attn_dv(&mut self, pr: &DeviceBuffer, go: &DeviceBuffer, dv: &DeviceBuffer, s: &AttnShape) {
-        self.threads("mirage_t_attn_dv", &[pr, go, dv], &Self::attn_params(s), s.tk * s.hk * s.vh);
+    /// Attention key and value gradients, probabilities rebuilt from `lse`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn attn_dkv(&mut self, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, go: &DeviceBuffer, lse: &DeviceBuffer, delta: &DeviceBuffer, dk: &DeviceBuffer, dv: &DeviceBuffer, s: &AttnShape) {
+        self.threads("mirage_t_attn_dkv", &[q, k, v, go, lse, delta, dk, dv], &Self::attn_params(s), s.tk * s.hk);
     }
 
     /// Causal dilated taps forward.

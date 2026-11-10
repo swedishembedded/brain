@@ -96,6 +96,10 @@ fn sequence_ops() {
         let s = AttnShape { tq: 4, tk: 4, hq: 2, hk: 1, qk: 3, vh: 2, causal };
         check(&format!("attention causal={causal}"), &[noise(4 * 2 * 3, 42, 1.0), noise(4 * 3, 43, 1.0), noise(4 * 2, 44, 1.0)], &move |t, i| t.attention(i[0], i[1], i[2], s));
     }
+    // Sharp softmax rows (scores of several units): the backward rebuilds each probability from the stored
+    // log-sum-exp, which must stay accurate where one key dominates its row. Grouped heads, causal.
+    let sharp = AttnShape { tq: 9, tk: 9, hq: 4, hk: 2, qk: 5, vh: 3, causal: true };
+    check("attention sharp rows", &[noise(9 * 4 * 5, 52, 3.0), noise(9 * 2 * 5, 53, 3.0), noise(9 * 2 * 3, 54, 1.0)], &move |t, i| t.attention(i[0], i[1], i[2], sharp));
     let cross = AttnShape { tq: 3, tk: 5, hq: 2, hk: 2, qk: 2, vh: 2, causal: false };
     check("cross attention", &[noise(3 * 2 * 2, 45, 1.0), noise(5 * 2 * 2, 46, 1.0), noise(5 * 2 * 2, 47, 1.0)], &move |t, i| t.attention(i[0], i[1], i[2], cross));
     check("causal_taps", &[noise(7 * 3, 48, 1.0), noise(4 * 3, 49, 1.0)], &|t, i| t.causal_taps(i[0], i[1], 3, 3));

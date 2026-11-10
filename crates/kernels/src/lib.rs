@@ -940,18 +940,14 @@ pub const MIRAGE_SIGMOID_MUL: &str = include_str!("../wgsl/mirage_sigmoid_mul.wg
 pub const MIRAGE_SWIGLU_ROWS: &str = include_str!("../wgsl/mirage_swiglu_rows.wgsl");
 /// `wgsl/mirage_t_act_bwd.wgsl`
 pub const MIRAGE_T_ACT_BWD: &str = include_str!("../wgsl/mirage_t_act_bwd.wgsl");
-/// `wgsl/mirage_t_attn_dk.wgsl`
-pub const MIRAGE_T_ATTN_DK: &str = include_str!("../wgsl/mirage_t_attn_dk.wgsl");
+/// `wgsl/mirage_t_attn_delta.wgsl`
+pub const MIRAGE_T_ATTN_DELTA: &str = include_str!("../wgsl/mirage_t_attn_delta.wgsl");
+/// `wgsl/mirage_t_attn_dkv.wgsl`
+pub const MIRAGE_T_ATTN_DKV: &str = include_str!("../wgsl/mirage_t_attn_dkv.wgsl");
 /// `wgsl/mirage_t_attn_dq.wgsl`
 pub const MIRAGE_T_ATTN_DQ: &str = include_str!("../wgsl/mirage_t_attn_dq.wgsl");
-/// `wgsl/mirage_t_attn_ds.wgsl`
-pub const MIRAGE_T_ATTN_DS: &str = include_str!("../wgsl/mirage_t_attn_ds.wgsl");
-/// `wgsl/mirage_t_attn_dv.wgsl`
-pub const MIRAGE_T_ATTN_DV: &str = include_str!("../wgsl/mirage_t_attn_dv.wgsl");
-/// `wgsl/mirage_t_attn_out.wgsl`
-pub const MIRAGE_T_ATTN_OUT: &str = include_str!("../wgsl/mirage_t_attn_out.wgsl");
-/// `wgsl/mirage_t_attn_probs.wgsl`
-pub const MIRAGE_T_ATTN_PROBS: &str = include_str!("../wgsl/mirage_t_attn_probs.wgsl");
+/// `wgsl/mirage_t_attn_fwd.wgsl`
+pub const MIRAGE_T_ATTN_FWD: &str = include_str!("../wgsl/mirage_t_attn_fwd.wgsl");
 /// `wgsl/mirage_t_band.wgsl`
 pub const MIRAGE_T_BAND: &str = include_str!("../wgsl/mirage_t_band.wgsl");
 /// `wgsl/mirage_t_band_dw.wgsl`
@@ -2084,12 +2080,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_sigmoid_mul", MIRAGE_SIGMOID_MUL),
     ("mirage_swiglu_rows", MIRAGE_SWIGLU_ROWS),
     ("mirage_t_act_bwd", MIRAGE_T_ACT_BWD),
-    ("mirage_t_attn_dk", MIRAGE_T_ATTN_DK),
+    ("mirage_t_attn_delta", MIRAGE_T_ATTN_DELTA),
+    ("mirage_t_attn_dkv", MIRAGE_T_ATTN_DKV),
     ("mirage_t_attn_dq", MIRAGE_T_ATTN_DQ),
-    ("mirage_t_attn_ds", MIRAGE_T_ATTN_DS),
-    ("mirage_t_attn_dv", MIRAGE_T_ATTN_DV),
-    ("mirage_t_attn_out", MIRAGE_T_ATTN_OUT),
-    ("mirage_t_attn_probs", MIRAGE_T_ATTN_PROBS),
+    ("mirage_t_attn_fwd", MIRAGE_T_ATTN_FWD),
     ("mirage_t_band", MIRAGE_T_BAND),
     ("mirage_t_band_dw", MIRAGE_T_BAND_DW),
     ("mirage_t_band_dx", MIRAGE_T_BAND_DX),
