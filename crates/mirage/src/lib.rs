@@ -17,6 +17,7 @@
 //! - [`describe`], [`form`] and [`model`]: structured results and the end-to-end pipeline.
 //! - [`caps`], [`resolver`] and [`memory_cache`]: the served actions, the model-store rules and the decoder-memory reuse.
 //! - [`vision`]: the vision forward pass (encoder, heads, reader, memory).
+//! - [`train`]: the generic-precision training graph (hand-written, finite-difference-checked backward primitives).
 //!
 //! Swedish Embedded AB implements solutions for deploying compact vision
 //! models on constrained devices for its clients. If your team needs expertise
@@ -37,4 +38,5 @@ pub mod model;
 pub mod resolver;
 pub mod spec;
 pub mod tokenizer;
+pub mod train;
 pub mod vision;
