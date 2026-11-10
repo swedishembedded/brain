@@ -85,27 +85,90 @@ Open in L2b:
 
 ## Lane L2c - device path
 
-Started; only the first operator is on the device. `crates/mirage/src/device/` holds `Device` (an `Ops`
-façade over a `Gpu` chosen by the process: `BRAIN_DEVICE=cpu` runs the CPU backend's WGSL JIT,
-`BRAIN_BACKEND=cuda BRAIN_DEVICE=gpuN` one CUDA card) and the host path stays the oracle.
+Done. Every stage of the model runs on the GPU op layer (`crates/mirage/src/device/`), batched over images, and
+`MirageModel` (resident weights on a caller-chosen `Gpu`) answers `describe_batch` / `extract_batch`. The host
+f32 path stays the parity oracle. The device is whatever the process selected (`BRAIN_DEVICE=cpu` runs the CPU
+backend's WGSL JIT; `BRAIN_BACKEND=cuda BRAIN_DEVICE=gpuN` one CUDA card).
 
-| Item | State | Numbers |
+Layout: `prims.rs` (one method per kernel), `hconv.rs` (folded HConvGLU), `vision.rs` (stem, body, top, dense
+head, mask branches, per-image masks), `reader.rs` (OCR reader and decoder-memory construction),
+`decoder.rs` (device decoder and the shared step loop), `batch_model.rs` (`MirageModel`).
+
+Design decisions:
+- Padding cells are carried, not gathered. Each image owns the full grid; row masks zero the cells outside its
+  resized image where the host operators do, and the attention top runs over `cells + registers` tokens with a key
+  mask (every other top operator is row-wise, so a padding row never reaches a valid row). Image `i` of a batch
+  therefore equals a batch of one.
+- The Walsh transforms and 65-tap bands (HConvGLU) and the Kronecker rotations, permutations and diagonal scales
+  (Hadamard MLP, `HadamardMlp::fold`) are multiplied out into dense matrices at upload, so the device runs
+  selector-picked GEMMs. The band and rotation parameters stay in the host structs (`HConv`, `HadamardMlp`)
+  for the backward lane to map dense gradients back.
+- The decoder advances a batch in lockstep (one token per sequence at a shared position); memories of different
+  lengths share a stride and a key mask; a finished sequence steps on a filler token until the batch is done.
+  Hashing of n-grams, rendering and the loop guard stay on the host (one `[batch]` readback per step).
+- Form extraction (`extract_batch`) runs the vision half and the memory on the device and scores branches with the
+  host decoder: branch scoring clones decoder state and feeds multi-token chunks, which the lockstep device
+  loop does not model. Open: a device state copy.
+- New kernels (catalogued): `mirage_conv2d`, `mirage_dwconv`, `mirage_rows_mask`, `mirage_add_masked`,
+  `mirage_gated_mix`, `mirage_grn_{energy,scale,apply}`, `mirage_chan_fma`, `mirage_axpy`, `mirage_swiglu_rows`,
+  `mirage_mean_h`, `mirage_upsample2`, `mirage_rope2d`, `mirage_attn` (online-softmax masked GQA), `mirage_copy_rows`,
+  `mirage_embed_lanes`, `mirage_gather_rows`, `mirage_engram_gate`, `mirage_mhc_{maps,mix,post}`, `mirage_taps`,
+  `mirage_row_write`, `mirage_rope_pos`, `mirage_hada_mid`, `mirage_lane_mean`, `hconv_glu`. Reused: `rmsnorm_rows`
+  (weight `1 + scale`), `silu`, `sigmoid`, `add`, `mul`, `bias_add`, `argmax_row` and the selector-aware GEMM.
+  `softmax_rows` does not JIT on the CPU backend, so the rank-8 softmax of the Hadamard conditioning lives in
+  `mirage_hada_mid`. All kernels are one thread per element (or per row/head) and untuned.
+
+Parity (released weights; goldens `testdata/golden/mirage/goldens/{cats,text}`; cosine, max_abs):
+
+| Stage | CPU backend | CUDA gpu1 |
 |---|---|---|
-| Tests cap the host pool at 8 threads (`common::cap_threads`) | done | whole suite 5.8 s wall, about 1 CPU-minute (was about 35 CPU-minutes) |
-| `hconv_glu` WGSL kernel (gelu_tanh(gate + bias) * value from a fused projection) | done, catalogued | CPU backend exact; CUDA max_abs 2.4e-7 |
-| HConvGLU on the device: ZC norm (`rmsnorm_rows` with weight 1 + scale), one GEMM into gate and value, `hconv_glu`, one GEMM out; the Walsh transforms and the 65-tap bands are multiplied out into the two weight matrices at upload (`HConv::fold`, accumulated in f64) | done for one mixer | released body_0 / body_15 / top_0 / top_11 against the host mixer: CPU backend cosine 1.0 (max_abs 3.3e-7 .. 5.6e-3, the top blocks have large magnitudes); CUDA gpu1 cosine 0.9999999 (max_abs 1.1e-4 .. 3.7 at the largest magnitudes) |
+| stem stages 256..16 | 1.0000000, 3.6e-6 .. 1.3e-5 | cos >= 0.9999995 (max_abs <= 1e-2) |
+| body | 1.0000000, 1.7e-3 | 0.9999999, 5.4e-1 |
+| top (valid rows + registers) | 1.0000000, 1.4e-1 | 0.999998, 1.6e2 (register-scale values) |
+| encoder memory | 1.0000000, 9.5e-5 | 0.999994, 4.9e-2 |
+| head_in / head (10 channels) | 1.0000000, 7.8e-5 / 5.1e-4 | 0.999999, 7.2e-2 / 3.9e-1 |
+| reader logits | 1.0000000, 2.0e-4 | 1.0000000, 8.8e-3 |
+| decoder memory (cells + slots) vs host and golden | 1.0000000, 2.1e-4 | 0.99999998, 9.2e-2 |
+| decoder teacher-forced logits (40 steps, 2 sequences) | 1.0000000, 4.0e-4; argmax 40/40 | 0.999998, 1.1; argmax 40/40 |
+| greedy generation, both fixtures in one batch | tokens equal the reference: 236 and 168, `</s>` | equal: 236 and 168 |
 
-Design note: no Walsh or banded-convolution kernel was written. The CPU backend's WGSL JIT supports a single
-workgroup barrier, which rules out a staged butterfly, and the dense folded form turns the mixer into two
-selector-picked GEMMs. It spends more arithmetic than the banded form (a 512x1024 and a 512x512 product per
-row) for the roofline-tuned GEMM; whether that is right at batch 8 is for the first profile to say.
+End to end (`device_model` tests): `describe_batch` of the two fixtures equals the host image by image on the CPU
+backend, exactly (proposals, tokens, reasoning, relations, polygon masks, bitmap run-length codes, text lines);
+on CUDA everything but the third decimal of a score and the odd polygon vertex at the threshold is equal.
+Batch of N equals N single runs: CPU exact; CUDA the GEMM selector may pick another kernel for another row count,
+so head maps agree to cosine 0.99999987 (max_abs 0.16 at logit scale) and the described results agree; a batch
+of 8 (4 + 4 duplicates) describes duplicates identically. `extract_batch` agrees with the host on values and
+probabilities (CPU 1e-4, CUDA 2e-2).
 
-Open in L2c (everything below is not started): depthwise 3x3 / 1x5 and the stem convolution (check the
-existing conv kernels first), GRN, 2D RoPE and masked attention for the top blocks, level memory, the dense
-head and mask branches, the reader, batching over images; decoder on the device (mHC maps and sinkhorn,
-Hadamard MLP, causal taps, engram gather, cross-attention over per-image K/V, tied-logit GEMM, device argmax)
-with the shared step loop; `MirageModel` with `describe_batch` / `extract_batch`; a weight-free smoke test of
-every step kind; the first nsys profile of a batch-8 describe on CUDA.
+Weight-free coverage: the tiny configuration runs every device step kind (all primitives, folded mixers, the
+batched vision path with images of different valid regions, the reader, the decoder with engram site, taps,
+lanes and unequal memories) against the host oracle in `device`, `device_vision`, `device_reader` and
+`device_decoder`. There is no tiny `MirageModel` smoke test because it needs a tokenizer blob.
+
+First profile (nsys, CUDA gpu1, test binary, batch-8 `describe_batch` with bitmap masks, 4 cats + 4 text, untuned;
+`device_model::a_batch_of_eight_describes_duplicates_identically`, 12.9 s wall, 6.02 s of kernel time):
+
+| kernel kind | time | share | launches |
+|---|---|---|---|
+| `mirage_attn` | 5424 ms | 90.0% | 3804 |
+| `mirage_mhc_maps` | 123 ms | 2.0% | 1896 |
+| `argmax_row` | 81 ms | 1.3% | 236 |
+| `rmsnorm_rows` | 80 ms | 1.3% | 17574 |
+| `max_abs_rows` + `quant_pack` (GEMM activation prep) | 94 ms | 1.6% | 59368 |
+| cublasLt split-K reduce | 46 ms | 0.8% | 29532 |
+| `mirage_taps` + `mirage_row_write` | 27 ms | 0.5% | 16116 |
+| everything else (elementwise, copy, conv, ...) | < 1% each | | |
+
+The decoder's attention (self over up to 240 keys and cross over 352 keys, 32 threads per launch, about 1.7 ms
+each, 3792 launches) is the whole story: first tuning target is a key-parallel attention (workgroup per
+sequence and head, cooperative softmax) registered as a candidate, then batching the 8-layer step into fewer
+launches (a step issues about 600 dispatches), `mirage_mhc_maps` (one thread per row, serial Sinkhorn) and the
+argmax. The report was `~/project/shared/tmp/mirage-l2c/prof8.nsys-rep` (outside the repo).
+
+Open after L2c: the reader and mask rendering run per text line / on the host (device mask-field and bitmap
+kernels are a throughput item); the proposal peak pick, slot box codes and pooling ranges are host work between
+two device submissions; `extract_batch` scores forms on the host decoder; CUDA tolerances above are the
+selector's tensor-core GEMMs (see the roofline-by-selection rule), not kernel defects; tuning is L6.
 
 ## Facts the foundation established
 

@@ -82,3 +82,57 @@ fn a_device_batch_describes_exactly_as_the_host_does_image_by_image() {
         assert_same(kind == "cpu", &single, &batch[i], &format!("image {i} alone vs in a batch"));
     }
 }
+
+#[test]
+fn a_device_batch_extracts_a_form_as_the_host_does() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dir) = released_dir() else {
+        brain_testutil::skip("device extract: the released checkpoint is absent");
+        return;
+    };
+    let Some(cats) = crate::decoder::golden("device extract", "cats") else { return };
+    crate::common::cap_threads();
+    let gpu = gpu_core::Gpu::new(&Device::kernels());
+    let exact = gpu.kind().to_string() == "cpu";
+    let host = Mirage::open(&dir).unwrap();
+    let model = MirageModel::new(Mirage::open(&dir).unwrap(), gpu).unwrap();
+    let rgb: Vec<u8> = cats["input_rgb"].iter().map(|&v| v as u8).collect();
+    let form = serde_json::json!({"animal": {"enum": ["dog", "cat", "bird"]}, "n": {"type": "integer", "minimum": 0, "maximum": 5}});
+    let opts = Options::from_json(&serde_json::json!({ "form": form }).to_string()).unwrap();
+    let image = Image { rgb: &rgb, height: 480, width: 640 };
+    let got = json(model.extract_batch(&[image, image], &[form.clone(), form], &opts).remove(1));
+    let want = json(host.extract(&rgb, 480, 640, &opts));
+    for field in ["animal", "n"] {
+        assert_eq!(got["form"][field]["value"], want["form"][field]["value"], "{field}: the chosen value differs");
+        let (g, w) = (got["form"][field]["probabilities"].as_object().unwrap(), want["form"][field]["probabilities"].as_object().unwrap());
+        for (k, p) in w {
+            let tol = if exact { 1e-4 } else { 2e-2 };
+            assert!((g[k].as_f64().unwrap() - p.as_f64().unwrap()).abs() < tol, "{field}.{k}: {} vs {p}", g[k]);
+        }
+    }
+}
+
+/// The profiling workload: eight images in one batch (four of each fixture). Duplicates must
+/// describe identically, which also holds the batch-8 path to the single-image answer.
+#[test]
+fn a_batch_of_eight_describes_duplicates_identically() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dir) = released_dir() else {
+        brain_testutil::skip("device batch 8: the released checkpoint is absent");
+        return;
+    };
+    let (Some(cats), Some(text)) = (crate::decoder::golden("device batch 8", "cats"), crate::decoder::golden("device batch 8", "text")) else { return };
+    crate::common::cap_threads();
+    let gpu = gpu_core::Gpu::new(&Device::kernels());
+    let model = MirageModel::new(Mirage::open(&dir).unwrap(), gpu).unwrap();
+    let rgb: Vec<Vec<u8>> = [&cats, &text].iter().map(|g| g["input_rgb"].iter().map(|&v| v as u8).collect()).collect();
+    let dims = [(480usize, 640usize), (600, 800)];
+    let images: Vec<Image> = (0..8).map(|i| Image { rgb: &rgb[i % 2], height: dims[i % 2].0, width: dims[i % 2].1 }).collect();
+    let opts = Options::from_json(r#"{"fields":["bbox","score","mask","position","description"],"mask_format":"bitmap","max_tokens":600}"#).unwrap();
+    let started = std::time::Instant::now();
+    let out: Vec<Value> = model.describe_batch(&images, &opts).into_iter().map(json).collect();
+    eprintln!("describe_batch of 8: {:.1}s", started.elapsed().as_secs_f64());
+    for i in 2..8 {
+        assert!(out[i] == out[i % 2], "image {i} differs from its duplicate {}", i % 2);
+    }
+}
