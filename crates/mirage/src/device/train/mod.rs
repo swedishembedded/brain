@@ -30,6 +30,7 @@ mod linear;
 mod movement;
 mod norm;
 mod rows;
+mod spatial;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -61,6 +62,15 @@ pub(super) const KERNELS: &[(&str, &str)] = &[
     ("mirage_t_rms_dscale", ::kernels::MIRAGE_T_RMS_DSCALE),
     ("mirage_t_softmax", ::kernels::MIRAGE_T_SOFTMAX),
     ("mirage_t_softmax_bwd", ::kernels::MIRAGE_T_SOFTMAX_BWD),
+    ("mirage_t_dwconv_dx", ::kernels::MIRAGE_T_DWCONV_DX),
+    ("mirage_t_dwconv_dk", ::kernels::MIRAGE_T_DWCONV_DK),
+    ("mirage_t_conv_dx", ::kernels::MIRAGE_T_CONV_DX),
+    ("mirage_t_conv_dk", ::kernels::MIRAGE_T_CONV_DK),
+    ("mirage_t_band", ::kernels::MIRAGE_T_BAND),
+    ("mirage_t_band_dx", ::kernels::MIRAGE_T_BAND_DX),
+    ("mirage_t_band_dw", ::kernels::MIRAGE_T_BAND_DW),
+    ("mirage_t_grn_de", ::kernels::MIRAGE_T_GRN_DE),
+    ("mirage_t_grn_dy", ::kernels::MIRAGE_T_GRN_DY),
 ];
 
 /// One recorded value.
@@ -133,6 +143,7 @@ pub struct DevTape<'a> {
     grads: Vec<Option<DeviceBuffer>>,
     param_ids: HashMap<String, Id>,
     ones: HashMap<usize, DeviceBuffer>,
+    walsh: HashMap<usize, DeviceBuffer>,
 }
 
 impl<'a> DevTape<'a> {
@@ -152,6 +163,7 @@ impl<'a> DevTape<'a> {
             grads: Vec::new(),
             param_ids: HashMap::new(),
             ones: HashMap::new(),
+            walsh: HashMap::new(),
         }
     }
 
@@ -367,23 +379,23 @@ impl Graph<f32> for DevTape<'_> {
         self.op_sum_weighted(x, weight)
     }
 
-    fn depthwise(&mut self, _x: Id, _m: Map, _kernel: Id, _kh: usize, _kw: usize, _sy: usize, _sx: usize) -> (Id, Map) {
-        unimplemented!("package B/C/D")
+    fn depthwise(&mut self, x: Id, m: Map, kernel: Id, kh: usize, kw: usize, sy: usize, sx: usize) -> (Id, Map) {
+        self.op_conv(x, m, kernel, (kh, kw), None, (sy, sx))
     }
-    fn conv_dense(&mut self, _x: Id, _m: Map, _kernel: Id, _kh: usize, _kw: usize, _cout: usize, _sy: usize, _sx: usize) -> (Id, Map) {
-        unimplemented!("package B/C/D")
+    fn conv_dense(&mut self, x: Id, m: Map, kernel: Id, kh: usize, kw: usize, cout: usize, sy: usize, sx: usize) -> (Id, Map) {
+        self.op_conv(x, m, kernel, (kh, kw), Some(cout), (sy, sx))
     }
-    fn upsample2(&mut self, _x: Id, _m: Map) -> (Id, Map) {
-        unimplemented!("package B/C/D")
+    fn upsample2(&mut self, x: Id, m: Map) -> (Id, Map) {
+        self.op_upsample2(x, m)
     }
-    fn walsh(&mut self, _x: Id, _n: usize) -> Id {
-        unimplemented!("package B/C/D")
+    fn walsh(&mut self, x: Id, n: usize) -> Id {
+        self.op_walsh(x, n)
     }
-    fn band(&mut self, _u: Id, _n: usize, _w: Id, _k: usize) -> Id {
-        unimplemented!("package B/C/D")
+    fn band(&mut self, u: Id, n: usize, w: Id, k: usize) -> Id {
+        self.op_band(u, n, w, k)
     }
-    fn grn_scale(&mut self, _y: Id, _d: usize, _valid: &[bool], _gamma: Id) -> Id {
-        unimplemented!("package B/C/D")
+    fn grn_scale(&mut self, y: Id, d: usize, valid: &[bool], gamma: Id) -> Id {
+        self.op_grn_scale(y, d, valid, gamma)
     }
     fn rope(&mut self, _x: Id, _heads: usize, _hd: usize, _angles: &[f64]) -> Id {
         unimplemented!("package B/C/D")

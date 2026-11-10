@@ -8,6 +8,7 @@
 use gpu_core::{Dispatch, DeviceBuffer, Step};
 use model::ops::Weight;
 
+use crate::device::prims::ConvShape;
 use crate::device::Device;
 use crate::vision::ops::NORM_EPS;
 
@@ -172,5 +173,104 @@ impl<'d> Rec<'d> {
     pub(crate) fn matmul_dw(&mut self, a: &DeviceBuffer, b: &DeviceBuffer, dw: &DeviceBuffer, rows: usize, n: usize, k: usize) {
         // `Ops::matmul_dw(x, dy, ..)` computes `dw[n, k] += dy[m, n]^T x[m, k]`.
         self.dev.ops().matmul_dw(&mut self.steps, b, a, word(rows), word(n), word(k), dw);
+    }
+
+    /// Forward depthwise (`kernel [kh * kw, c]`) or dense (HWIO) convolution of one image, via the inference kernels.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn conv_fwd(&mut self, g: Conv, dense_cout: Option<usize>, x: &DeviceBuffer, k: &DeviceBuffer, y: &DeviceBuffer) {
+        let shape = ConvShape { batch: 1, h: word(g.h), w: word(g.w), kh: word(g.kh), kw: word(g.kw), sy: word(g.sy), sx: word(g.sx) };
+        match dense_cout {
+            Some(cout) => self.dev.conv2d(&mut self.steps, shape, word(g.c), word(cout), x, k, y),
+            None => self.dev.dwconv(&mut self.steps, shape, word(g.c), x, k, y),
+        }
+    }
+
+    /// Convolution input gradient: depthwise when `dense_cout` is `None`.
+    pub(crate) fn conv_dx(&mut self, g: Conv, dense_cout: Option<usize>, gy: &DeviceBuffer, k: &DeviceBuffer, dx: &DeviceBuffer) {
+        let (ho, wo) = (g.ho(), g.wo());
+        let base = [word(g.h), word(g.w), word(g.c), word(ho), word(wo)];
+        let tail = [word(g.kh), word(g.kw), word(g.sy), word(g.sx)];
+        match dense_cout {
+            Some(cout) => {
+                let params: Vec<u32> = base.iter().copied().chain([word(cout)]).chain(tail).collect();
+                self.threads("mirage_t_conv_dx", &[gy, k, dx], &params, g.h * g.w * g.c);
+            }
+            None => {
+                let params: Vec<u32> = base.iter().copied().chain(tail).collect();
+                self.threads("mirage_t_dwconv_dx", &[gy, k, dx], &params, g.h * g.w * g.c);
+            }
+        }
+    }
+
+    /// Convolution kernel gradient: depthwise when `dense_cout` is `None`.
+    pub(crate) fn conv_dk(&mut self, g: Conv, dense_cout: Option<usize>, x: &DeviceBuffer, gy: &DeviceBuffer, dk: &DeviceBuffer) {
+        let (ho, wo) = (g.ho(), g.wo());
+        let base = [word(g.h), word(g.w), word(g.c), word(ho), word(wo)];
+        let tail = [word(g.kh), word(g.kw), word(g.sy), word(g.sx)];
+        match dense_cout {
+            Some(cout) => {
+                let params: Vec<u32> = base.iter().copied().chain([word(cout)]).chain(tail).collect();
+                self.threads("mirage_t_conv_dk", &[x, gy, dk], &params, g.kh * g.kw * g.c * cout);
+            }
+            None => {
+                let params: Vec<u32> = base.iter().copied().chain(tail).collect();
+                self.threads("mirage_t_dwconv_dk", &[x, gy, dk], &params, g.kh * g.kw * g.c);
+            }
+        }
+    }
+
+    /// Banded channel convolution forward.
+    pub(crate) fn band(&mut self, u: &DeviceBuffer, w: &DeviceBuffer, y: &DeviceBuffer, rows: usize, n: usize, k: usize) {
+        self.threads("mirage_t_band", &[u, w, y], &[word(rows), word(n), word(k)], rows * n);
+    }
+
+    /// Banded channel convolution input gradient.
+    pub(crate) fn band_dx(&mut self, gy: &DeviceBuffer, w: &DeviceBuffer, du: &DeviceBuffer, rows: usize, n: usize, k: usize) {
+        self.threads("mirage_t_band_dx", &[gy, w, du], &[word(rows), word(n), word(k)], rows * n);
+    }
+
+    /// Banded channel convolution weight gradient.
+    pub(crate) fn band_dw(&mut self, u: &DeviceBuffer, gy: &DeviceBuffer, dw: &DeviceBuffer, rows: usize, n: usize, k: usize) {
+        self.threads("mirage_t_band_dw", &[u, gy, dw], &[word(rows), word(n), word(k)], n * k);
+    }
+
+    /// Per-channel energy `sqrt(sum_valid y^2 + eps)` and the response-norm scale `gamma E / (mean(E) + eps) + 1`.
+    pub(crate) fn grn_scale(&mut self, y: &DeviceBuffer, mask: &DeviceBuffer, gamma: &DeviceBuffer, energy: &DeviceBuffer, scale: &DeviceBuffer, rows: usize, d: usize) {
+        let eps = NORM_EPS.to_bits();
+        self.threads("mirage_grn_energy", &[y, mask, energy], &[1, word(rows), word(d), eps], d);
+        self.threads("mirage_grn_scale", &[energy, gamma, scale], &[1, word(d), eps], d);
+    }
+
+    /// Response-norm backward statistics: `de` (assigned) and `dgamma` (accumulated).
+    pub(crate) fn grn_de(&mut self, energy: &DeviceBuffer, gamma: &DeviceBuffer, gs: &DeviceBuffer, de: &DeviceBuffer, dgamma: &DeviceBuffer, d: usize) {
+        self.groups("mirage_t_grn_de", &[energy, gamma, gs, de, dgamma], &[word(d), NORM_EPS.to_bits()], 1);
+    }
+
+    /// Response-norm input gradient.
+    pub(crate) fn grn_dy(&mut self, y: &DeviceBuffer, mask: &DeviceBuffer, energy: &DeviceBuffer, de: &DeviceBuffer, dy: &DeviceBuffer, total: usize, d: usize) {
+        self.threads("mirage_t_grn_dy", &[y, mask, energy, de, dy], &[word(total), word(d)], total);
+    }
+}
+
+/// Geometry of one convolution of a single image (zero padding `k / 2`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Conv {
+    pub(crate) h: usize,
+    pub(crate) w: usize,
+    /// Input channels.
+    pub(crate) c: usize,
+    pub(crate) kh: usize,
+    pub(crate) kw: usize,
+    pub(crate) sy: usize,
+    pub(crate) sx: usize,
+}
+
+impl Conv {
+    pub(crate) fn ho(&self) -> usize {
+        (self.h + 2 * (self.kh / 2) - self.kh) / self.sy + 1
+    }
+
+    pub(crate) fn wo(&self) -> usize {
+        (self.w + 2 * (self.kw / 2) - self.kw) / self.sx + 1
     }
 }

@@ -914,12 +914,30 @@ pub const MIRAGE_SIGMOID_MUL: &str = include_str!("../wgsl/mirage_sigmoid_mul.wg
 pub const MIRAGE_SWIGLU_ROWS: &str = include_str!("../wgsl/mirage_swiglu_rows.wgsl");
 /// `wgsl/mirage_t_act_bwd.wgsl`
 pub const MIRAGE_T_ACT_BWD: &str = include_str!("../wgsl/mirage_t_act_bwd.wgsl");
+/// `wgsl/mirage_t_band.wgsl`
+pub const MIRAGE_T_BAND: &str = include_str!("../wgsl/mirage_t_band.wgsl");
+/// `wgsl/mirage_t_band_dw.wgsl`
+pub const MIRAGE_T_BAND_DW: &str = include_str!("../wgsl/mirage_t_band_dw.wgsl");
+/// `wgsl/mirage_t_band_dx.wgsl`
+pub const MIRAGE_T_BAND_DX: &str = include_str!("../wgsl/mirage_t_band_dx.wgsl");
 /// `wgsl/mirage_t_bcast_acc.wgsl`
 pub const MIRAGE_T_BCAST_ACC: &str = include_str!("../wgsl/mirage_t_bcast_acc.wgsl");
 /// `wgsl/mirage_t_col_red.wgsl`
 pub const MIRAGE_T_COL_RED: &str = include_str!("../wgsl/mirage_t_col_red.wgsl");
+/// `wgsl/mirage_t_conv_dk.wgsl`
+pub const MIRAGE_T_CONV_DK: &str = include_str!("../wgsl/mirage_t_conv_dk.wgsl");
+/// `wgsl/mirage_t_conv_dx.wgsl`
+pub const MIRAGE_T_CONV_DX: &str = include_str!("../wgsl/mirage_t_conv_dx.wgsl");
+/// `wgsl/mirage_t_dwconv_dk.wgsl`
+pub const MIRAGE_T_DWCONV_DK: &str = include_str!("../wgsl/mirage_t_dwconv_dk.wgsl");
+/// `wgsl/mirage_t_dwconv_dx.wgsl`
+pub const MIRAGE_T_DWCONV_DX: &str = include_str!("../wgsl/mirage_t_dwconv_dx.wgsl");
 /// `wgsl/mirage_t_ew.wgsl`
 pub const MIRAGE_T_EW: &str = include_str!("../wgsl/mirage_t_ew.wgsl");
+/// `wgsl/mirage_t_grn_de.wgsl`
+pub const MIRAGE_T_GRN_DE: &str = include_str!("../wgsl/mirage_t_grn_de.wgsl");
+/// `wgsl/mirage_t_grn_dy.wgsl`
+pub const MIRAGE_T_GRN_DY: &str = include_str!("../wgsl/mirage_t_grn_dy.wgsl");
 /// `wgsl/mirage_t_mul_acc.wgsl`
 pub const MIRAGE_T_MUL_ACC: &str = include_str!("../wgsl/mirage_t_mul_acc.wgsl");
 /// `wgsl/mirage_t_plan.wgsl`
@@ -1969,9 +1987,18 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_sigmoid_mul", MIRAGE_SIGMOID_MUL),
     ("mirage_swiglu_rows", MIRAGE_SWIGLU_ROWS),
     ("mirage_t_act_bwd", MIRAGE_T_ACT_BWD),
+    ("mirage_t_band", MIRAGE_T_BAND),
+    ("mirage_t_band_dw", MIRAGE_T_BAND_DW),
+    ("mirage_t_band_dx", MIRAGE_T_BAND_DX),
     ("mirage_t_bcast_acc", MIRAGE_T_BCAST_ACC),
     ("mirage_t_col_red", MIRAGE_T_COL_RED),
+    ("mirage_t_conv_dk", MIRAGE_T_CONV_DK),
+    ("mirage_t_conv_dx", MIRAGE_T_CONV_DX),
+    ("mirage_t_dwconv_dk", MIRAGE_T_DWCONV_DK),
+    ("mirage_t_dwconv_dx", MIRAGE_T_DWCONV_DX),
     ("mirage_t_ew", MIRAGE_T_EW),
+    ("mirage_t_grn_de", MIRAGE_T_GRN_DE),
+    ("mirage_t_grn_dy", MIRAGE_T_GRN_DY),
     ("mirage_t_mul_acc", MIRAGE_T_MUL_ACC),
     ("mirage_t_plan", MIRAGE_T_PLAN),
     ("mirage_t_rms_dscale", MIRAGE_T_RMS_DSCALE),

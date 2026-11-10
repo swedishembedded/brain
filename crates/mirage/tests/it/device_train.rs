@@ -379,3 +379,136 @@ fn softmax_and_row_products_match_the_host() {
         });
     }
 }
+
+use mirage::vision::ops::Map;
+
+#[test]
+fn depthwise_convolutions_match_the_host_at_every_stride() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("depthwise") else { return };
+    let params = no_params(&dev);
+    let m = Map { h: 9, w: 11, c: 6 };
+    // (kh, kw, sy, sx): the stem's 3x3 stride 2x2, anisotropic strides, and 1xk / kx1 kernels.
+    for (kh, kw, sy, sx) in [(3, 3, 1, 1), (3, 3, 2, 2), (3, 3, 2, 1), (1, 7, 1, 1), (1, 5, 1, 2), (3, 1, 2, 1)] {
+        compare(&dev, &format!("depthwise {kh}x{kw} s{sy}x{sx}"), &params, |g| {
+            let x = g.leaf(noise(m.h * m.w * m.c, 31, 1.0));
+            let k = g.leaf(noise(kh * kw * m.c, 32, 0.5));
+            let (y, o) = g.depthwise(x, m, k, kh, kw, sy, sx);
+            assert_eq!(o.c, m.c);
+            let loss = weighted_loss(g, &[y], 130);
+            Run { leaves: vec![x, k], outs: vec![y], loss }
+        });
+    }
+}
+
+#[test]
+fn dense_convolutions_match_the_host() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("conv_dense") else { return };
+    let params = no_params(&dev);
+    let m = Map { h: 9, w: 10, c: 5 };
+    let cout = 7; // neither channel count is a multiple of the workgroup size
+    for (kh, kw, sy, sx) in [(3, 3, 1, 1), (3, 3, 2, 2), (3, 3, 2, 1), (1, 1, 1, 1)] {
+        compare(&dev, &format!("conv {kh}x{kw} s{sy}x{sx}"), &params, |g| {
+            let x = g.leaf(noise(m.h * m.w * m.c, 33, 1.0));
+            let k = g.leaf(noise(kh * kw * m.c * cout, 34, 0.5));
+            let (y, _) = g.conv_dense(x, m, k, kh, kw, cout, sy, sx);
+            let loss = weighted_loss(g, &[y], 140);
+            Run { leaves: vec![x, k], outs: vec![y], loss }
+        });
+    }
+}
+
+#[test]
+fn upsampling_matches_the_host() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("upsample2") else { return };
+    let params = no_params(&dev);
+    let m = Map { h: 5, w: 7, c: 3 };
+    compare(&dev, "upsample2", &params, |g| {
+        let x = g.leaf(noise(m.h * m.w * m.c, 35, 1.0));
+        let (y, o) = g.upsample2(x, m);
+        assert_eq!((o.h, o.w), (10, 14));
+        let loss = weighted_loss(g, &[y], 150);
+        Run { leaves: vec![x], outs: vec![y], loss }
+    });
+}
+
+#[test]
+fn the_walsh_transform_is_the_host_sequency_transform_and_self_adjoint() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("walsh") else { return };
+    let params = no_params(&dev);
+    for (rows, n) in [(5, 8), (7, 64), (3, 512)] {
+        compare(&dev, &format!("walsh {rows}x{n}"), &params, |g| {
+            let x = g.leaf(noise(rows * n, 36, 1.0));
+            let y = g.walsh(x, n);
+            let z = g.walsh(y, n); // self-inverse: z == x
+            let outs = vec![y, z];
+            let loss = weighted_loss(g, &outs, 160);
+            Run { leaves: vec![x], outs, loss }
+        });
+    }
+}
+
+#[test]
+fn banded_channel_convolutions_match_the_host() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("band") else { return };
+    let params = no_params(&dev);
+    // Edge channels (k > n and k < n), and the real width with the real 65-tap kernel.
+    for (rows, n, k) in [(5, 13, 5), (6, 64, 65), (40, 512, 65)] {
+        compare(&dev, &format!("band {rows}x{n} k{k}"), &params, |g| {
+            let u = g.leaf(noise(rows * n, 37, 1.0));
+            let w = g.leaf(noise(n * k, 38, 0.3));
+            let y = g.band(u, n, w, k);
+            let loss = weighted_loss(g, &[y], 170);
+            Run { leaves: vec![u, w], outs: vec![y], loss }
+        });
+    }
+}
+
+#[test]
+fn global_response_norm_scale_matches_the_host() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("grn") else { return };
+    let params = no_params(&dev);
+    let (rows, d) = (11, 70);
+    let valid: Vec<bool> = (0..rows).map(|r| r % 4 != 3).collect();
+    compare(&dev, "grn", &params, |g| {
+        let y = g.leaf(noise(rows * d, 39, 1.0));
+        let gamma = g.leaf(noise(d, 40, 0.5));
+        let s = g.grn_scale(y, d, &valid, gamma);
+        let loss = weighted_loss(g, &[s], 180);
+        Run { leaves: vec![y, gamma], outs: vec![s], loss }
+    });
+}
+
+/// The HConvGLU block as `Net::hconv` builds it: ZC norm, Walsh, gate and value bands, gelu gate, out band, Walsh.
+fn hconv_block(g: &mut dyn Graph<f32>, rows: usize, n: usize, k: usize) -> Run {
+    let x = g.leaf(noise(rows * n, 41, 1.0));
+    let norm = g.leaf(noise(n, 42, 0.3));
+    let (gate, value, out) = (g.leaf(noise(n * k, 43, 0.2)), g.leaf(noise(n * k, 44, 0.2)), g.leaf(noise(n * k, 45, 0.2)));
+    let gate_bias = g.leaf(noise(n, 46, 0.3));
+    let u = g.zc_norm(x, n, norm);
+    let u = g.walsh(u, n);
+    let a = g.band(u, n, gate, k);
+    let v = g.band(u, n, value, k);
+    let a = g.bias_add(a, gate_bias);
+    let a = g.gelu_tanh(a);
+    let a = g.mul(a, v);
+    let y = g.band(a, n, out, k);
+    let y = g.walsh(y, n);
+    let loss = weighted_loss(g, &[y], 190);
+    Run { leaves: vec![x, norm, gate, value, out, gate_bias], outs: vec![y], loss }
+}
+
+#[test]
+fn an_hconv_block_matches_the_host() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("hconv") else { return };
+    let params = no_params(&dev);
+    for (rows, n, k) in [(9, 64, 65), (24, 512, 65)] {
+        compare(&dev, &format!("hconv {rows}x{n}"), &params, |g| hconv_block(g, rows, n, k));
+    }
+}

@@ -400,7 +400,7 @@ Device training (lane L3b, in progress): `device::train::DevTape` implements `tr
 parameters resident in a `paramstore::ParamStore` (a stacked decoder layer is one entry `name#layer`; adapters are registered
 pairs). Steps are recorded and submitted lazily (readback, `backward`); backward kernels accumulate with one owner thread per
 element (`mirage_t_*`, no atomics); values carry `needs_grad`, so frozen parameters and constant inputs record no backward.
-Package A (core, elementwise, linear, norms, plans/gather/concat/slice, softmax, row ops, loss sum) is checked against the host
+Packages A (core, elementwise, linear, norms, plans/gather/concat/slice, softmax, row ops, loss sum) and B (depthwise and dense convolutions, upsample, Walsh as a GEMM against its matrix, banded channel convolution with dx and dband, response norm) is checked against the host
 tape in `device_train` (cosine >= 0.99999, relative error <= 1e-4, CPU backend); the remaining `Graph` methods are stubs
 (`unimplemented!`) until the next packages. Untuned: channel and bias reductions loop over rows in one thread per channel.
 
