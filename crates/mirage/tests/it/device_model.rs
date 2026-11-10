@@ -162,11 +162,18 @@ fn describe_throughput_over_batch_size() {
     eprintln!("batch | wall s | images/s | latency s | vision | memory | decode | post");
     for n in [1usize, 8, 32, 64] {
         let images: Vec<Image> = (0..n).map(image).collect();
-        let started = std::time::Instant::now();
-        let out = model.describe_batch(&images, &opts);
-        let wall = started.elapsed().as_secs_f64();
-        assert!(out.iter().all(Result::is_ok));
-        let t = model.last_timings();
-        eprintln!("{n:5} | {wall:6.2} | {:8.2} | {wall:9.2} | {:.2} | {:.2} | {:.2} | {:.2}", n as f64 / wall, t.vision, t.memory, t.decode, t.post);
+        // The card is shared: rank by the minimum over replays.
+        let mut best: Option<(f64, mirage::device::Timings)> = None;
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let out = model.describe_batch(&images, &opts);
+            let wall = started.elapsed().as_secs_f64();
+            assert!(out.iter().all(Result::is_ok));
+            if best.is_none_or(|(w, _)| wall < w) {
+                best = Some((wall, model.last_timings()));
+            }
+        }
+        let (wall, t) = best.unwrap();
+        eprintln!("{n:5} | {wall:6.2} | {:8.2} | {wall:9.2} | {:.2} | {:.2} | {:.2} | {:.2} (device {:.2})", n as f64 / wall, t.vision, t.memory, t.decode, t.post, t.reader);
     }
 }

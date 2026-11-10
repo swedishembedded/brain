@@ -191,7 +191,7 @@ impl Options {
         self.section_set().iter().map(|s| s.rank()).max().unwrap_or(-1)
     }
 
-    fn wants(&self, f: Field) -> bool {
+    pub(crate) fn wants(&self, f: Field) -> bool {
         self.fields.as_ref().is_none_or(|v| v.contains(&f))
     }
 }
