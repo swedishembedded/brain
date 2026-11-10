@@ -24,12 +24,18 @@ than a rectangle held still.
 
 ## Getting the weights
 
-Model id: `brain/sam2`. `facebook/sam2.1-hiera-tiny` auto-fetches (⤓, opt-in `--autofetch`) on
-first CLI use - no env var or manual download needed. For the `large`
-variant, or to point at a checkpoint you already have, set
-`BRAIN_SAM2_WEIGHTS` to a `sam2.1_hiera_{tiny,large}.pt` release checkpoint
-(or an equivalent `.safetensors`) yourself; `BRAIN_SAM2_VARIANT` picks
-`tiny` (default) or `large`, and a per-request `variant` param overrides it.
+Model id: `brain/sam2`. Both variants brain runs pull into the model store:
+
+```bash
+brain pull facebook/sam2.1-hiera-tiny     # also fetched on first use with --autofetch
+brain pull facebook/sam2.1-hiera-large
+```
+
+The checkpoint resolves from the store; with more than one there, name it
+with `--weights <file>` (a `sam2.1_hiera_{tiny,large}.pt` release
+checkpoint, or an equivalent `.safetensors`). The variant is read from the
+checkpoint's own trunk width; `--variant tiny|large` states it, and is
+checked against the file.
 
 ## Running it: one image
 
@@ -47,8 +53,7 @@ brain sam2 segment --points "614,430" \
 Over D-Bus, the same action takes the same params:
 
 ```bash
-BRAIN_SAM2_WEIGHTS=<ckpt>/sam2.1_hiera_tiny.pt \
-  dbus-run-session -- bash -c 'brain serve --dbus & sleep 3
+dbus-run-session -- bash -c 'brain serve --dbus & sleep 3
     python3 samples/python/vision/segment-image/segment_image.py --image photo.ppm --point 614,430 --concurrent 4'
 ```
 
@@ -112,7 +117,7 @@ its own grid.
 
 | Param | Effect |
 |---|---|
-| `variant` | `tiny` (default) or `large` - overrides `BRAIN_SAM2_VARIANT` for this request |
+| `variant` | `tiny` (default) or `large` - the configuration the served checkpoint is loaded with; it has to be the checkpoint's own |
 | `points` | `"x,y;x,y;…"` in source-image pixels |
 | `labels` | `"1;0;…"` - 1 = foreground, 0 = background (default: all-foreground) |
 | `box` | `"x1,y1,x2,y2"` |

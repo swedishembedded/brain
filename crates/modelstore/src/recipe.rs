@@ -234,6 +234,14 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         roles: &[("weights", "sam2.1_hiera_tiny.pt")],
     },
     FilesRecipe {
+        id: "sam2-large",
+        family: "sam2",
+        signature: &["sam2.1_hiera_large.pt"],
+        repos: &[],
+        files: &["sam2.1_hiera_large.pt"],
+        roles: &[("weights", "sam2.1_hiera_large.pt")],
+    },
+    FilesRecipe {
         id: "rrdbnet",
         family: "rrdbnet",
         // NOT `ai-forever/Real-ESRGAN`'s `RealESRGAN_x4.pth` -- same file
@@ -1663,6 +1671,19 @@ mod tests {
         let r = ModelRef::new("facebook", "sam2.1-hiera-tiny", None);
         let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
         assert_eq!(matched.id(), "sam2");
+    }
+
+    /// `facebook/sam2.1-hiera-large`, the other variant brain's SAM 2 loader
+    /// runs, pulls its own release checkpoint - not the transformers-shaped
+    /// `model.safetensors` beside it - under the same `weights` role.
+    #[test]
+    fn the_large_sam2_checkpoint_pulls_its_release_file() {
+        let listing: Vec<String> = sam2_tiny_listing().into_iter().map(|f| f.replace("hiera_tiny", "hiera_large").replace("hiera_t.yaml", "hiera_l.yaml")).collect();
+        let r = ModelRef::new("facebook", "sam2.1-hiera-large", None);
+        let recipe = recipes().into_iter().find(|x| x.matches(&r, &listing)).expect("a recipe claims sam2.1-hiera-large");
+        let artifacts = recipe.artifacts(&r, &listing, &crate::hub::FakeHub::new()).unwrap();
+        assert_eq!(artifacts.iter().map(|a| a.file.as_str()).collect::<Vec<_>>(), ["sam2.1_hiera_large.pt"]);
+        assert_eq!(files_recipe_roles(recipe.id()).unwrap(), ("sam2", &[("weights", "sam2.1_hiera_large.pt")][..]));
     }
 
     #[test]
