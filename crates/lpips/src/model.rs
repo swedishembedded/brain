@@ -20,7 +20,7 @@
 //! `l2norm_scale2d` computes `x * rsqrt(sum_c x^2 + eps)` where the reference
 //! divides by `sqrt(sum_c x^2) + 1e-10`. With `eps = 1e-20` the two agree to
 //! within `1e-10 / |x|` relative, and both are exactly zero where a ReLU map
-//! is zero in every channel; `tests/reference.rs` holds the device to an f64
+//! is zero in every channel; `tests/it/reference.rs` holds the device to an f64
 //! transcription of the reference formula.
 //!
 //! A mask weights the spatial average. At each tap the mask is area-averaged

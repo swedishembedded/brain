@@ -29,10 +29,9 @@
 //!
 //! The **text** and **CLIP/SigLIP image** towers are trainable:
 //! `ClipText::new_train_on` / `ClipVision::new_train_on` add the reverse pass
-//! over the same forward. The EVA image tower is still forward-only, as are the
-//! `capability` Provider / residency adapter / D-Bus surface and the CLIP BPE
-//! tokenizer (which belongs in `crates/data` next to the GPT-2 and Qwen BPEs,
-//! not here).
+//! over the same forward. The EVA image tower is still forward-only. The
+//! capability Provider lives in [`caps`], and the CLIP BPE tokenizer in
+//! `crates/data` (`clip_bpe`), next to the GPT-2 and Qwen BPEs.
 
 pub mod caps;
 pub mod config;
