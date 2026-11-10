@@ -6,7 +6,7 @@
 //! into one device batch without changing any answer, reuses a decoder memory
 //! between the two actions, and drops cancelled requests.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use capability::Invocation;
 use mirage::caps::{MirageSession, PREPROCESSING_VERSION};
@@ -22,6 +22,13 @@ const FORM: &str = r#"{"animal": {"enum": ["cat", "dog", "bird"]}, "count": {"ty
 fn cats() -> Option<(Vec<u8>, usize, usize)> {
     let g = crate::decoder::golden("serving", "cats")?;
     Some((g["input_rgb"].iter().map(|&v| v as u8).collect(), 480, 640))
+}
+
+/// The serving tests share one session and read deltas of its cumulative stats, so they run one at a time:
+/// a concurrent test's batches would otherwise land between another test's "before" and "after" readings.
+fn serial() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn session() -> Option<&'static MirageSession> {
@@ -55,6 +62,7 @@ fn answer(outcome: &capability::Outcome) -> Value {
 
 #[test]
 fn describe_answers_like_the_model_and_reports_usage() {
+    let _serial = serial();
     let (Some(session), Some((rgb, h, w))) = (session(), cats()) else {
         brain_testutil::skip("serving describe: the released checkpoint or the cats golden is absent");
         return;
@@ -74,6 +82,7 @@ fn describe_answers_like_the_model_and_reports_usage() {
 /// Sixteen identical-option requests are one device batch and each answer is the single-request answer.
 #[test]
 fn concurrent_requests_share_one_batch_and_keep_their_answers() {
+    let _serial = serial();
     let (Some(session), Some((rgb, _, _))) = (session(), cats()) else {
         brain_testutil::skip("serving batch: the released checkpoint or the cats golden is absent");
         return;
@@ -99,6 +108,7 @@ fn concurrent_requests_share_one_batch_and_keep_their_answers() {
 /// Requests with different options are separate calls of one batch; each is answered by its own options.
 #[test]
 fn different_options_run_as_separate_groups() {
+    let _serial = serial();
     let (Some(session), Some((rgb, _, _))) = (session(), cats()) else {
         brain_testutil::skip("serving groups: the released checkpoint or the cats golden is absent");
         return;
@@ -112,6 +122,7 @@ fn different_options_run_as_separate_groups() {
 
 #[test]
 fn extract_reuses_the_memory_a_describe_left_and_gives_the_same_answer() {
+    let _serial = serial();
     let (Some(session), Some((rgb, _, _))) = (session(), cats()) else {
         brain_testutil::skip("serving reuse: the released checkpoint or the cats golden is absent");
         return;
@@ -144,6 +155,7 @@ fn extract_reuses_the_memory_a_describe_left_and_gives_the_same_answer() {
 
 #[test]
 fn a_cancelled_request_fails_alone_and_does_not_join_the_batch() {
+    let _serial = serial();
     let (Some(session), Some((rgb, _, _))) = (session(), cats()) else {
         brain_testutil::skip("serving cancel: the released checkpoint or the cats golden is absent");
         return;
@@ -179,6 +191,7 @@ fn a_cancelled_request_fails_alone_and_does_not_join_the_batch() {
 
 #[test]
 fn bad_requests_fail_alone_with_the_field_named() {
+    let _serial = serial();
     let (Some(session), Some((rgb, _, _))) = (session(), cats()) else {
         brain_testutil::skip("serving errors: the released checkpoint or the cats golden is absent");
         return;
@@ -207,6 +220,7 @@ fn process_device_mib() -> Option<u64> {
 /// Only on a CUDA device: the CPU backend's "device" memory is the host's.
 #[test]
 fn dropping_the_session_releases_device_memory() {
+    let _serial = serial();
     let Some(dir) = released_dir() else {
         brain_testutil::skip("serving unload: the released checkpoint is absent");
         return;
@@ -242,6 +256,7 @@ fn dropping_the_session_releases_device_memory() {
 /// the same for one sequence as for sixteen. (The CPU backend has no such headroom, so it is not asked.)
 #[test]
 fn a_merged_batch_is_faster_than_serving_the_same_requests_serially() {
+    let _serial = serial();
     let (Some(session), Some((rgb, _, _))) = (session(), cats()) else {
         brain_testutil::skip("serving throughput: the released checkpoint or the cats golden is absent");
         return;
