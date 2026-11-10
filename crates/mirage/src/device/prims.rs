@@ -41,6 +41,45 @@ impl ConvShape {
     }
 }
 
+/// How the fused single-query attention covers `nk` keys: `splits` workgroups per (sequence, head), each over `chunk` keys.
+///
+/// A slice is at most [`DecodePlan::MAX_CHUNK`] keys (the kernel's workgroup array holds 128): the weighted-sum
+/// walk of a slice is the kernel's serial chain, and measured on the step (batch 1 to 64, 700 key positions) 32
+/// keys beat 128 by 15-30 % of the attention time and 16 keys were slower at batch 32 and 64 (the merge folds more
+/// partials). A few rows (a batch of one has 8 heads) are spread over more slices, down to [`DecodePlan::MIN_CHUNK`]
+/// keys each, until about [`DecodePlan::TARGET_BLOCKS`] workgroups are in flight. Slices past the visible keys end at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodePlan {
+    /// Workgroups per row.
+    pub splits: u32,
+    /// Keys per workgroup.
+    pub chunk: u32,
+}
+
+impl DecodePlan {
+    /// Keys one workgroup scores into workgroup memory.
+    pub const MAX_CHUNK: u32 = 32;
+    /// Fewest keys worth a workgroup of their own.
+    pub const MIN_CHUNK: u32 = 16;
+    /// Workgroups that keep a large card busy at decode batch sizes.
+    pub const TARGET_BLOCKS: u32 = 256;
+    /// Most partials one merge folds.
+    pub const MAX_SPLITS: u32 = 64;
+
+    /// The plan for `a`, or `None` when the three-kernel path must serve it (several queries a sequence, a value
+    /// head wider than the 64 lanes of a workgroup, or more keys than [`Self::MAX_SPLITS`] slices hold).
+    pub fn of(a: &AttnShape) -> Option<DecodePlan> {
+        if a.nq != 1 || a.vd > 64 || a.nk == 0 {
+            return None;
+        }
+        let rows = a.batch * a.heads;
+        let needed = a.nk.div_ceil(Self::MAX_CHUNK);
+        let wanted = Self::TARGET_BLOCKS.div_ceil(rows).min(a.nk.div_ceil(Self::MIN_CHUNK));
+        let splits = needed.max(wanted);
+        (splits <= Self::MAX_SPLITS).then(|| DecodePlan { splits, chunk: a.nk.div_ceil(splits) })
+    }
+}
+
 /// Grouped-query attention shape for [`Device::attention`].
 #[derive(Debug, Clone, Copy)]
 pub struct AttnShape {
@@ -167,8 +206,20 @@ impl Device {
     }
 
     /// [`Device::attention`] where `a.visible == u32::MAX` means `pos[0] + 1` keys (position in a buffer).
+    ///
+    /// A single query row per sequence (the decoder step) runs the fused decode kernels when [`DecodePlan::of`]
+    /// accepts the shape; every other shape runs the three-kernel path.
     #[allow(clippy::too_many_arguments)]
     pub fn attention_at(&self, s: &mut Vec<Step>, a: AttnShape, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, key_mask: &DeviceBuffer, pos: &DeviceBuffer, out: &DeviceBuffer) {
+        match DecodePlan::of(&a) {
+            Some(plan) => self.attention_decode(s, a, plan, [q, k, v, key_mask, pos], out),
+            None => self.attention_three_kernel(s, a, q, k, v, key_mask, pos, out),
+        }
+    }
+
+    /// Scores, row softmax and weighted sum as three dependent dispatches: any query count, any head width.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention_three_kernel(&self, s: &mut Vec<Step>, a: AttnShape, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, key_mask: &DeviceBuffer, pos: &DeviceBuffer, out: &DeviceBuffer) {
         assert!(a.heads.is_multiple_of(a.kvh), "attention shape {a:?}");
         let scale = (1.0 / (a.hd as f32).sqrt()).to_bits();
         let rows = a.batch * a.nq * a.heads;
@@ -179,6 +230,21 @@ impl Device {
         let lanes = [4u32, 2, 1].into_iter().find(|l| a.vd.is_multiple_of(*l)).expect("1 divides every width");
         let p = [a.batch, a.nq, a.heads, a.kvh, a.vd, a.nk, a.visible, lanes];
         s.push(self.gpu().dispatch(self.k("mirage_attn_apply"), &[&scores, v, out, pos], &p, gpu_core::Dispatch::Workgroups(rows * (a.vd / lanes))));
+    }
+
+    /// The fused single-query kernel (one dispatch, or two when the keys are split over workgroups).
+    pub fn attention_decode(&self, s: &mut Vec<Step>, a: AttnShape, plan: DecodePlan, [q, k, v, key_mask, pos]: [&DeviceBuffer; 5], out: &DeviceBuffer) {
+        let rows = a.batch * a.heads;
+        let scale = (1.0 / (a.hd as f32).sqrt()).to_bits();
+        let p = [a.batch, a.heads, a.kvh, a.hd, a.vd, a.nk, a.visible, scale, plan.splits, plan.chunk];
+        let groups = gpu_core::Dispatch::Workgroups(rows * plan.splits);
+        if plan.splits == 1 {
+            s.push(self.gpu().dispatch(self.k("mirage_attn_decode"), &[q, k, v, key_mask, pos, out], &p, groups));
+            return;
+        }
+        let part = self.alloc((rows * plan.splits * (a.vd + 2)) as usize);
+        s.push(self.gpu().dispatch(self.k("mirage_attn_decode"), &[q, k, v, key_mask, pos, &part], &p, groups));
+        s.push(self.gpu().dispatch(self.k("mirage_attn_merge"), &[&part, out], &[rows, a.vd, plan.splits], gpu_core::Dispatch::Workgroups(rows)));
     }
 
     /// The single-kernel reference attention (serial over keys); the parity oracle for [`Device::attention`].

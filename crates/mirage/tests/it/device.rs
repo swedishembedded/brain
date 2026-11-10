@@ -302,6 +302,47 @@ fn the_fused_rotation_and_conditioning_equals_the_rotation_then_the_middle_stage
     assert_stage("kron_hada", &run(&dev, &s, &got_out, rows * n), &want);
 }
 
+/// The fused single-query kernels (one workgroup per row and key slice, partials merged) against the three-kernel path
+/// they sit beside, for every plan shape: one slice, several slices, slices past the visible keys, a masked-out
+/// sequence, and the planner's refusals.
+#[test]
+fn the_fused_decode_attention_equals_the_three_kernel_path_for_every_plan_shape() {
+    use mirage::device::prims::{AttnShape, DecodePlan};
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("attention_decode") else { return };
+    // (batch, heads, kvh, hd, vd, nk, visible position, expected splits)
+    let cases = [(1u32, 8u32, 2u32, 48u32, 64u32, 300u32, 200u32, 19u32), (4, 8, 8, 48, 64, 100, 99, 7), (64, 8, 1, 16, 8, 100, 40, 4), (2, 4, 4, 8, 6, 513, 400, 32), (64, 8, 1, 16, 8, 20, 15, 1)];
+    for (case, &(batch, heads, kvh, hd, vd, nk, at, splits)) in cases.iter().enumerate() {
+        let a = AttnShape { batch, nq: 1, heads, kvh, hd, vd, nk, visible: u32::MAX };
+        let plan = DecodePlan::of(&a).expect("a single-query shape has a plan");
+        assert_eq!(plan.splits, splits, "case {case}: splits");
+        assert!(plan.chunk <= DecodePlan::MAX_CHUNK && plan.splits * plan.chunk >= nk, "case {case}: the slices cover the keys");
+        let (q, k, v) = (noise((batch * heads * hd) as usize, 50 + case as u64, 1.0), noise((batch * nk * kvh * hd) as usize, 60 + case as u64, 1.0), noise((batch * nk * kvh * vd) as usize, 70 + case as u64, 1.0));
+        // Some keys masked off, as a memory batch of unequal lengths does.
+        let mask: Vec<f32> = (0..batch * nk).map(|i| ((i % nk) % 11 != 3 && (i % nk) < nk - 20 * (i / nk % 2)) as u8 as f32).collect();
+        let (qd, kd, vd_, md) = (upload(&dev, &q), upload(&dev, &k), upload(&dev, &v), upload(&dev, &mask));
+        let pos = dev.gpu().storage(1);
+        dev.gpu().write(&pos, &[at]);
+        let n = (batch * heads * vd) as usize;
+        let (want, got) = (dev.gpu().storage(n as u64), dev.gpu().storage(n as u64));
+        let mut s = Vec::new();
+        dev.attention_three_kernel(&mut s, a, &qd, &kd, &vd_, &md, &pos, &want);
+        let reference = run(&dev, &s, &want, n);
+        let mut s = Vec::new();
+        dev.attention_decode(&mut s, a, plan, [&qd, &kd, &vd_, &md, &pos], &got);
+        assert_stage(&format!("decode attention case {case}"), &run(&dev, &s, &got, n), &reference);
+        // A sequence with no live key yields zeros.
+        let none = upload(&dev, &vec![0.0; (batch * nk) as usize]);
+        let mut s = Vec::new();
+        dev.attention_decode(&mut s, a, plan, [&qd, &kd, &vd_, &none, &pos], &got);
+        assert!(run(&dev, &s, &got, n).iter().all(|x| *x == 0.0), "case {case}: no live key must give zeros");
+    }
+    let multi = AttnShape { batch: 1, nq: 2, heads: 8, kvh: 2, hd: 48, vd: 64, nk: 100, visible: 100 };
+    let wide = AttnShape { nq: 1, vd: 80, ..multi };
+    let long = AttnShape { nq: 1, nk: DecodePlan::MAX_CHUNK * DecodePlan::MAX_SPLITS + 1, ..multi };
+    assert!([multi, wide, long].iter().all(|a| DecodePlan::of(a).is_none()), "several queries, a wide value head and too many keys stay on the three-kernel path");
+}
+
 #[test]
 fn the_fused_norm_and_residual_add_equals_the_norm_then_the_add() {
     let _g = gpu_core::testgpu::exclusive();

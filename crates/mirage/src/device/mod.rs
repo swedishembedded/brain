@@ -50,6 +50,8 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_mean_h", kernels::MIRAGE_MEAN_H),
     ("mirage_rope2d", kernels::MIRAGE_ROPE2D),
     ("mirage_attn", kernels::MIRAGE_ATTN),
+    ("mirage_attn_decode", kernels::MIRAGE_ATTN_DECODE),
+    ("mirage_attn_merge", kernels::MIRAGE_ATTN_MERGE),
     ("mirage_attn_scores", kernels::MIRAGE_ATTN_SCORES),
     ("mirage_attn_softmax", kernels::MIRAGE_ATTN_SOFTMAX),
     ("mirage_attn_apply", kernels::MIRAGE_ATTN_APPLY),

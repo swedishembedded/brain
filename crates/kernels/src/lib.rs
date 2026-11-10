@@ -874,6 +874,10 @@ pub const MIRAGE_ARGMAX_WG: &str = include_str!("../wgsl/mirage_argmax_wg.wgsl")
 pub const MIRAGE_ATTN: &str = include_str!("../wgsl/mirage_attn.wgsl");
 /// `wgsl/mirage_attn_apply.wgsl`
 pub const MIRAGE_ATTN_APPLY: &str = include_str!("../wgsl/mirage_attn_apply.wgsl");
+/// `wgsl/mirage_attn_decode.wgsl`
+pub const MIRAGE_ATTN_DECODE: &str = include_str!("../wgsl/mirage_attn_decode.wgsl");
+/// `wgsl/mirage_attn_merge.wgsl`
+pub const MIRAGE_ATTN_MERGE: &str = include_str!("../wgsl/mirage_attn_merge.wgsl");
 /// `wgsl/mirage_attn_scores.wgsl`
 pub const MIRAGE_ATTN_SCORES: &str = include_str!("../wgsl/mirage_attn_scores.wgsl");
 /// `wgsl/mirage_attn_softmax.wgsl`
@@ -2051,6 +2055,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_argmax_wg", MIRAGE_ARGMAX_WG),
     ("mirage_attn", MIRAGE_ATTN),
     ("mirage_attn_apply", MIRAGE_ATTN_APPLY),
+    ("mirage_attn_decode", MIRAGE_ATTN_DECODE),
+    ("mirage_attn_merge", MIRAGE_ATTN_MERGE),
     ("mirage_attn_scores", MIRAGE_ATTN_SCORES),
     ("mirage_attn_softmax", MIRAGE_ATTN_SOFTMAX),
     ("mirage_axpy", MIRAGE_AXPY),
