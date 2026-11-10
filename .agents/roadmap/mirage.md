@@ -24,6 +24,7 @@ goldens; nothing is transcribed from the vendor's source or engine.
 | `config`: typed `MirageConfig` / `CheckpointConfig`, `deny_unknown_fields`, invariants name the field | done |
 | `spec`: canonical manifest, 583 tensors / 54,078,804 parameters, training-only tensors marked | done |
 | `import`: header-first strict safetensors import (names, shapes, dtype, byte lengths, metadata), pinned SHA-256, `config.json` cross-check, exact export round trip | done |
+| `cact` / `cactmap`: bounds-checked `.cact` reader, CQ2/3/4 decoder with the packed form kept (`CqMatrix`), positional map derived from the config (806 entries for the released one), layout transforms, Hadamard permutations, vision manifest, charset, tokenizer blob | done |
 
 ## Open lanes
 

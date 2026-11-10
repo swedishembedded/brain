@@ -4,6 +4,9 @@
 //! The crate's integration tests, linked as one binary. A test here must not
 //! change process-wide state: the others run beside it.
 
+mod cact;
+mod cactgen;
+mod cactmap;
 mod common;
 mod config;
 mod import;
