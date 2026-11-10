@@ -778,3 +778,25 @@ brings the form probabilities closer; (3) ncu roofline of the A8 kernels (not pr
 | Serving | capability, CLI, SDK, HTTP, D-Bus, batching | done (L4) |
 | Quantised kernels | native low-bit CQ matmul from the packed weights | done (L5) and the opt-in A8 mode (L7 item 5), see above |
 | Performance | profile-driven batched throughput | open |
+
+### Item 4: saved-activation policy and recomputing attention - done (2c04421fc, 521622a18, 9fbad69bf)
+
+Recompute blocks: stem stages, body blocks, top layers, dense head, mask branches, reader stages and mixers, engram
+sites, decoder layers. Gradients under `Recompute` equal `Keep` bit for bit on the CPU backend; the `mirage` line left
+`scripts/gates/saved-policy.allow`. Attention backward rebuilds probabilities per row from q, k and the saved
+log-sum-exp (no `tq*hq*tk` matrix).
+
+One training step, full model, released weights, batch 2 (`train_real::{host,device}_step_memory_{keep,recompute}`,
+CUDA gpu1 idle, 2026-11-10):
+
+| trainer | policy | peak memory | step | samples/s |
+|---|---|---|---|---|
+| device (CUDA) | keep | device peak live 2242 MiB (782 MiB resident) | 0.50 s | 3.96 |
+| device (CUDA) | recompute | device peak live 1175 MiB | 0.52 s | 3.88 |
+| host (CPU) | keep | host peak 2954 MiB | 1.39 s | 1.44 |
+| host (CPU) | recompute | host peak 1769 MiB | 2.63 s | 0.76 |
+
+Real-weight experiments under `Recompute` on the device reproduce the `Keep` results exactly: detection held-out AP50
+0.2766 / loss 2.6378, mask IoU 0.6575, OCR CER 0.2472, LoRA held-out text loss 1.6474, exact resume true. With the
+workgroup-split attention kernels of 9fbad69bf the device runs are also faster than before: detection 10.25 samples/s
+(3.92 before), LoRA 2.42 (1.17), OCR 31.3 (13.7), masks 1.74.

@@ -220,7 +220,16 @@ unchanged base for a LoRA run) and, for LoRA, `adapter.safetensors`. After
 `train::prepare::make_servable` (which copies `config.json` and the deployment
 file beside them) every surface that opens a model directory serves it
 unchanged; an `adapter.safetensors` next to the weights is folded into them when
-the directory is opened. The training objective is brain's own: the vendor
+the directory is opened. Both trainers take the shared saved-activation policy
+(`set_saved_policy`, `model::saved::SavedPolicy`): `Keep` holds every intermediate
+of the forward for the backward, `Recompute` holds only the output of each
+recompute block (stem stage, body block, top layer, dense head, mask branch,
+reader stage and mixer, engram site, decoder layer) and rebuilds one block at a
+time inside the backward. The gradients, and so the optimiser step, are the same
+either way (bit for bit on the CPU backend); a narrow boundary format is refused.
+Attention never stores its `tq x hq x tk` probabilities: the backward rebuilds
+them per row from the queries, keys and one saved log-sum-exp per row. The
+training objective is brain's own: the vendor
 published no recipe. Training records are JSONL with task-presence semantics
 (`mirage::train::data`): a missing label family is unknown, never a negative.
 
