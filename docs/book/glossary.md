@@ -32,6 +32,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Amdahl's law**: the speedup of a whole from making a part that takes the share $p$ of the time $g$ times as fast, $1/((1 - p) + p/g)$, bounded by the ceiling $1/(1 - p)$ however fast the part becomes. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
+**ancestral sampling**: drawing the variables of a model one at a time, parents before children, each from its distribution given the values already drawn, so that the joint draw follows the product of the conditionals. *([What It Means to Generate](v08-image-generation/01-generative-modeling.md))*
+
 **anchor-free detection**: a detector whose every cell, with its anchor point at the cell centre, predicts its box as the distances from that point to the four sides, with no template boxes and no objectness score. *([Object Detection](v07-vision/04-detection.md))*
 
 **angular margin loss**: a classification loss on cosines in which the embedding and the class centres are normalized, the logits are scaled by a constant, and a fixed margin is added to the angle between the sample and its own centre, so that the sample is asked to be closer to its centre by that angle than the plain classifier requires. *([Faces: Detection, Identity and Parsing](v07-vision/11-faces.md))*
@@ -238,6 +240,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **delta rule**: updating a key-value memory by the outer product of the key and the prediction error, $\mathbf{S} \leftarrow \mathbf{S} + \beta\,\mathbf{k}(\mathbf{v} - \mathbf{S}^\top\mathbf{k})^\top$, one gradient step of a regression of the value on the key, so that a write replaces what the key returned. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
+**density estimation**: choosing from a family of candidate distributions the one that best explains observed data, usually by maximizing the likelihood and judging it by the likelihood of data that were held out. *([What It Means to Generate](v08-image-generation/01-generative-modeling.md))*
+
 **depth-vs-width**: the tradeoff between a network of many layers and one of few wide layers; for the sawtooth, $d$ layers of width $2$ make $2^d$ linear pieces, while one layer with $u$ units makes at most $u + 1$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **depthwise convolution**: a convolution that gives every channel its own single kernel and sums nothing across channels (a grouped convolution with as many groups as channels); followed by a pointwise convolution it replaces a dense layer with a fraction $1/C_{\mathrm{out}} + 1/k^2$ of its parameters. *([Convolution](v07-vision/02-convolution.md))*
@@ -372,6 +376,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **gelu**: the Gaussian error linear unit $z\,\Phi(z)$, the input times the probability that a standard Gaussian variable lies below it, a smooth cousin of the ReLU that dips slightly below zero for negative inputs; it is computed exactly with the error function or approximately by a tanh form or a sigmoid form that are different functions. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
+**generative model**: a representation of a probability distribution over data, here over images, that can be sampled to produce new data, evaluated to give the probability or density of a given image, or both. *([What It Means to Generate](v08-image-generation/01-generative-modeling.md))*
+
 **global gradient norm**: the Euclidean norm of the gradient of every parameter of the model, all tensors taken together as one vector, the number a clip compares with its threshold. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
 
 **GPT architecture**: a decoder-only transformer language model: token embeddings plus positions, a stack of pre-norm blocks, a final normalization and a head (tied to the embedding table in GPT-2) that gives one row of logits per position, trained to predict the next token. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
@@ -495,6 +501,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **label-smoothing**: replacing the one-hot target by a mixture of it with the uniform distribution, so that the loss is smallest at a finite gap between the scores instead of only in the limit of infinite confidence. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **latent sparse attention**: selecting keys by scoring buckets of keys in a low-dimensional unit-length index space, reading the members of the best buckets together with the most recent keys and the first few, so that the scoring work grows with the number of buckets and not the number of keys. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
+
+**latent variable**: a variable that is part of a model but never observed, whose value is a hidden cause of the data; the model's density sums or integrates it out. *([What It Means to Generate](v08-image-generation/01-generative-modeling.md))*
 
 **launch overhead**: the fixed cost of starting work on a device, paid per submission and per dispatch regardless of how much the kernel does, which makes many tiny kernels cost mostly their starts. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
 

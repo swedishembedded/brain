@@ -647,7 +647,7 @@ volumes:
         title: "What It Means to Generate"
         question: "What does it mean for a model to learn a distribution over images, and how can we sample from it?"
         introduces: [generative-model, density-estimation, latent-variable, ancestral-sampling]
-        requires: [probability-distribution, maximum-likelihood-estimation, sampling-from-distribution]
+        requires: [probability-distribution, conditional-probability, independence, bayes-rule, expectation, categorical-distribution, gaussian-distribution, entropy, cross-entropy, kl-divergence, sampling-from-distribution, maximum-likelihood-estimation, prior, autoregressive-factorization]
         brain: []
       - id: vae
         title: "Variational Autoencoders"

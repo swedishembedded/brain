@@ -138,4 +138,8 @@ historical sections draw on in the [Chronology](history/chronology.md).
 10. [Reading Documents](v07-vision/10-ocr.md): How does a model read a page of text from pixels, and how few tokens can a page be squeezed into?
 11. [Faces: Detection, Identity and Parsing](v07-vision/11-faces.md): How does a model find faces and recognize the same person across photos?
 12. [Project: A Vision Pipeline](v07-vision/12-project-vision-pipeline.md): Can you build a pipeline that detects, segments and tracks objects through video frames?
+
+### [Volume VIII: Generating Images](v08-image-generation/index.md)
+
+1. [What It Means to Generate](v08-image-generation/01-generative-modeling.md): What does it mean for a model to learn a distribution over images, and how can we sample from it?
 <!-- /contents -->

@@ -411,7 +411,7 @@ random number generator, is passed in.
 
 ## Routines defined in Volume I
 
-Three numerical routines are used by later chapters and defined, with their
+Four routines are used by later chapters and defined, with their
 code, in Volume I. A chapter that calls one names it and states the arguments;
 it does not redefine it.
 
@@ -433,6 +433,7 @@ it does not redefine it.
   `x_next = x - g(x) / gprime(x)` for a minimum of a function with first
   derivative `g` and second derivative `gprime`. One iteration is one such
   update; a chapter states the starting value and the stopping rule.
+- **Sampling a table.** `sample_discrete(p, rng)` of Volume I, chapter 10 returns the index `k` of a draw from the probability table `p: array<real>[K]`: one `u = rng.uniform()`, then the first `k` whose running sum `p[0] + ... + p[k]`, accumulated in that order, exceeds `u` (the last index if rounding leaves none). It consumes exactly one uniform number.
 
 ## Routines defined in Volume III
 

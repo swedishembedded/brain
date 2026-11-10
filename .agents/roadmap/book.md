@@ -77,6 +77,7 @@ reproduced its worked examples from the text alone in another language.
       and sub-blocks given only as shapes, constants printed nowhere, and a
       pseudocode routine behind its fixed prose). All were fixed in the
       following commits; a recheck has not been run.
+- [ ] Volume VIII, Generating Images: chapter 1 written.
 
 ## Open
 
