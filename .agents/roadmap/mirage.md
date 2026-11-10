@@ -660,9 +660,9 @@ measured the queue, not a wedged holder. `exclusive()` now returns a `DeviceGuar
 held the lock for 600 s (acquisition instant tracked in an atomic; the FATAL line names the waiting test and the holder's hold
 time). Gate: `testgpu::tests::the_device_lock_limit_measures_the_holder_not_the_queue` (four waiters behind 150 ms holds with a
 300 ms limit never abort; a holder past the limit is reported; a poisoned lock is free).
-Evidence: `make test/one P=brain-mirage T=it` in one process: CPU backend 178 passed, 15 ignored, 853.9 s (the one failure of that
-run was the engine-corpus test picking up the new `cats_form_*` cases, fixed); CUDA gpu1 (`BRAIN_BACKEND=cuda BRAIN_DEVICE=gpu1`,
-card shared with another session): 180 passed, 15 ignored, 103.5 s. Tests that only need a device keep `exclusive()`: they build
+Evidence: `make test/one P=brain-mirage T=it` in one process: CPU backend 181 passed, 15 ignored, 903 s on the final tree (an earlier run, 178 passed in 853.9 s, had one failure
+was the engine-corpus test picking up the new `cats_form_*` cases, fixed); CUDA gpu1 (`BRAIN_BACKEND=cuda BRAIN_DEVICE=gpu1`,
+card shared with another session): 180 passed, 15 ignored, 103.5 s (before the device form test was added). Tests that only need a device keep `exclusive()`: they build
 their own `Gpu` from a kernel list that is not `'static`, so `testgpu::dev` sharing does not apply without a larger test refactor.
 
 ### Item 3: residency adapter precision (done)
