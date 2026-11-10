@@ -593,7 +593,7 @@ volumes:
         title: "Dense Prediction: Segmentation and Depth"
         question: "How does a network label every pixel or estimate how far away it is?"
         introduces: [semantic-segmentation, monocular-depth, encoder-decoder-cnn, upsampling]
-        requires: [convolutional-network, transposed-convolution, image-resampling]
+        requires: [convolutional-network, transposed-convolution, image-resampling, relu, sigmoid, receptive-field, pooling, resnet, feature-pyramid, depthwise-convolution, batch-normalization, intersection-over-union, softmax-cross-entropy, least-squares, adam, gradient-check, shared-preprocessing, calibration-set, onnx-graph]
         brain: [zipdepth, bisenet]
       - id: vision-transformers
         title: "Vision Transformers"

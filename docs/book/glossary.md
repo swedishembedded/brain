@@ -272,6 +272,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **encoder-decoder**: a model made of two networks trained together, an encoder that reads an input sequence into states and a decoder that writes an output sequence from them, so that the output may have a different length from the input. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
 
+**encoder-decoder CNN**: a convolutional network that shrinks the picture to gather context (the encoder) and then enlarges the result back to the picture's resolution (the decoder), usually joined by skip connections that carry high-resolution encoder features to the decoder. *([Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md))*
+
 **end-to-end-training-loop**: the whole path from data to saved model in one function: shuffle, batch, forward, loss, backward, clip, optimizer step at the scheduled rate, log, evaluate on the validation set, keep the best checkpoint. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 **ensemble**: a set of models whose predictions are combined by a vote or an average; trained independently on resampled data (bagging, random forests) it lowers variance, trained in sequence on what is left (boosting) it lowers bias. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
@@ -560,6 +562,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **momentum**: a running weighted sum of past gradients, $\mathbf{m}_t = \beta\mathbf{m}_{t-1} + \mathbf{g}_t$, stepped along instead of the gradient, so that steady directions add up and back-and-forth directions cancel. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
+**monocular depth**: estimating the distance of every pixel from a single image; because a picture is unchanged when the world is scaled about the camera, the result is a relative map (up to a scale, and for inverse depth a shift) unless the model has learned the size of things. *([Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md))*
+
 **monotonic function**: a function that never reverses direction, always increasing or always decreasing, and so keeps the order of single values. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 **multi-axis rotary embedding**: rotary embedding for tokens that have a position on several axes, such as the frame, row and column of an image patch, in which the channel pairs of a head are divided among the axes and each pair turns by the position on its own axis times its own rate. *([Positional Information](v05-sequences/08-positions.md))*
@@ -788,6 +792,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **selection cache**: the stored map from a key of device identity, driver version, source digest and shape bucket to the candidate chosen, kept between runs so that a measurement is paid once and discarded when any part of the key changes. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
+**semantic segmentation**: assigning a class to every pixel of an image, so that the output is a label map of the picture's own size; a classifier run once per pixel, scored by the intersection over union of the classes' pixel sets. *([Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md))*
+
 **sentence embedding**: one vector that represents a whole text, obtained by pooling the per-token vectors of an encoder (the mean over the real tokens, or the row of a designated first token) so that two texts can be compared by the cosine of their vectors. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
 
 **sequence packing**: laying the tokens of many documents end to end in one stream and cutting it into rows of a fixed length, with the targets one place later and a padded, masked last row, so that almost every position of every row does useful work. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
@@ -927,6 +933,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **unsupervised learning**: learning from examples without labels, to find structure such as groups in the features themselves. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **untied output head**: an output matrix $\mathbf{W}_{\mathrm{out}}$ of shape $[V, D]$ that is separate from the embedding table, so each has its own parameters and its own gradient. *([Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md))*
+
+**upsampling**: any operation that takes a map to one with more positions: repetition, interpolation, a transposed convolution, a pixel shuffle or a learned combination of neighbours, each with its own cost and its own artifacts. *([Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md))*
 
 **UTF-8**: the encoding that writes each Unicode scalar value as 1 to 4 bytes whose leading bits announce the sequence's length, compatible with ASCII, self-synchronizing and ordered like the code points; its decoder is a state machine of eight states. *([Text as Data](v05-sequences/01-text.md))*
 

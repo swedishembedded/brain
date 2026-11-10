@@ -1,0 +1,40 @@
+<!-- source-sha256: 3dca531a15a2c3e0c242929b23dfb99eb292821fe4bbc0ff034db914c03600a2 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 420" width="760" height="420"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="760" height="420" fill="#ffffff"/>
+<text x="380" y="32.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Encoder-decoder segmenter: 687 parameters, 22,784 multiply-adds per 8 by 8 image</text>
+<rect x="25" y="87" width="126" height="86" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="88" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image</text>
+<text x="88" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 x 8 x 8</text>
+<rect x="175" y="87" width="126" height="86" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="238" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">conv 3x3, ReLU</text>
+<text x="238" y="134.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 8 x 8</text>
+<text x="238" y="150.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">40 parameters</text>
+<rect x="325" y="257" width="126" height="86" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="388" y="280.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">max pool 2x2,</text>
+<text x="388" y="296.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">conv 3x3, ReLU</text>
+<text x="388" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 x 4 x 4</text>
+<text x="388" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">296 parameters</text>
+<rect x="475" y="257" width="126" height="86" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="538" y="280.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">transposed conv</text>
+<text x="538" y="296.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">k 2, stride 2</text>
+<text x="538" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 8 x 8</text>
+<text x="538" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">132 parameters</text>
+<rect x="475" y="87" width="126" height="86" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="538" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">concatenate</text>
+<text x="538" y="134.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 + 4 channels</text>
+<text x="538" y="150.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 x 8 x 8</text>
+<rect x="625" y="87" width="126" height="86" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="688" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">conv 3x3</text>
+<text x="688" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 x 8 x 8</text>
+<text x="688" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">219 parameters</text>
+<text x="688" y="158.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">softmax per pixel</text>
+<line x1="154" y1="130" x2="172" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M238,173 L238,288 Q238,300 250,300 L322,300" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="454" y1="300" x2="472" y2="300" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="538" y1="254" x2="538" y2="176" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="604" y1="130" x2="622" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="304" y1="130" x2="472" y2="130" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<text x="388" y="105.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">skip: the 4 x 8 x 8 features,</text>
+<text x="388" y="121.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">copied unchanged</text>
+<text x="380" y="386.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">Without the skip the head sees only the 4 x 8 x 8 map that came through the 4 x 4 bottleneck (579 parameters);</text>
+<text x="380" y="404.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">each bottleneck value reads 8 input pixels along one axis, the whole image, but only at half the resolution.</text>
+</svg>

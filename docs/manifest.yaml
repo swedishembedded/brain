@@ -435,6 +435,7 @@ navigation:
           - docs/book/v07-vision/02-convolution.md
           - docs/book/v07-vision/03-cnns.md
           - docs/book/v07-vision/04-detection.md
+          - docs/book/v07-vision/05-dense-prediction.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

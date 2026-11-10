@@ -71,7 +71,7 @@ reproduced its worked examples from the text alone in another language.
       counts and schedules, chaotic training cells claimed stable, totals
       without shapes, and an offload ratio the prose got wrong). All were
       fixed in the following commits; a recheck has not been run.
-- [ ] Volume VII, Vision and Understanding Images: chapters 1 to 4 written.
+- [ ] Volume VII, Vision and Understanding Images: chapters 1 to 5 written.
 
 ## Open
 
