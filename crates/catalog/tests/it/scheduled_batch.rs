@@ -97,6 +97,28 @@ fn a_cancelled_request_leaves_the_batch_without_disturbing_the_rest() {
 /// Hands a group scripted late jobs: job `i` becomes available at the
 /// `after_polls`-th call of `take`, and every result is recorded in the order
 /// it was delivered.
+/// [`front`], its requests parsed on the scheduling thread. `TextFrontend` parses
+/// on its intake threads, and the tiny CPU engine decodes a whole short request
+/// before an intake thread has handed one back: a job the feed delivers at a
+/// given poll would join whenever the thread got to it. Parsed in place it joins
+/// at that poll, which is what the joining checks script.
+struct InPlace(TextFrontend);
+
+impl llmserve::Frontend for InPlace {
+    fn tok(&self) -> &QwenBpe {
+        self.0.tok()
+    }
+    fn stop(&self) -> &[u32] {
+        self.0.stop()
+    }
+    fn label(&self) -> &str {
+        self.0.label()
+    }
+    fn parse(&self, inv: &Invocation) -> Result<llmserve::ParsedRequest, String> {
+        self.0.parse(inv)
+    }
+}
+
 struct ScriptedFeed {
     late: Vec<(usize, Invocation)>,
     polls: usize,
@@ -133,7 +155,7 @@ fn a_late_request_joins_the_running_group_and_is_answered_when_it_finishes() {
     let alone_short = texts(run_batch_scheduled(&mut scheduler(1), &front, std::slice::from_ref(&short), &mut |_, _| {}));
 
     let mut feed = ScriptedFeed { late: vec![(3, short)], polls: 0, finished: Vec::new() };
-    llmserve::run_open_scheduled(&mut scheduler(4), &front, std::slice::from_ref(&long), 4, 0, &mut |_, _| {}, &mut feed);
+    llmserve::run_open_scheduled(&mut scheduler(4), &InPlace(front), std::slice::from_ref(&long), 4, 0, &mut |_, _| {}, &mut feed);
 
     let order: Vec<usize> = feed.finished.iter().map(|(i, _)| *i).collect();
     assert_eq!(order, vec![1, 0], "the late short request ends before the long one it joined");
