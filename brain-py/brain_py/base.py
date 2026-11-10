@@ -135,6 +135,41 @@ class Outcome:
         return to_pil(raw, w, h, c)
 
 
+#: The model id of Mirage's structured perception actions (`describe`, `extract`).
+MIRAGE_MODEL = "Cactus-Compute/mirage"
+
+
+class Perception(dict):
+    """A Mirage result: the engine-shaped JSON as a ``dict`` (for ``describe`` one
+    key per section; for ``extract`` the ``form`` key), with what the request cost
+    in :attr:`usage` (images, batch size, decoder tokens, latency split).
+    Equal to the JSON the CLI, the SDK and the HTTP surface return."""
+
+    def __init__(self, outputs: dict[str, Any]) -> None:
+        body = dict(outputs)
+        self.usage: dict[str, Any] = body.pop("usage", {}) or {}
+        super().__init__(body)
+
+
+def _image_blob(image: Any) -> tuple[dict, dict]:
+    """``(blobs, meta)`` for an image given as a PIL image or ``(hwc_f32_bytes, w, h)``."""
+    if isinstance(image, tuple):
+        data, w, h = image
+    else:
+        from .image import from_pil_rgb
+
+        w, h = image.size
+        data = from_pil_rgb(image)
+    # The D-Bus server reads the dimensions from the entry itself and the JSONL transport from its
+    # nested ``meta``; carrying both keeps one call valid on either transport.
+    dims = {"w": w, "h": h, "c": 3}
+    return {"image": data}, {"image": {"media": "image", **dims, "meta": dims}}
+
+
+def _csv(value: Any) -> Any:
+    return ",".join(value) if isinstance(value, (list, tuple)) else value
+
+
 def _flatten_messages(messages: Any) -> str:
     """Serialise a chat ``messages`` list to the JSON-array string the runtime reads."""
     if messages is None:
@@ -291,3 +326,29 @@ class BrainBase:
 
     # image() is the natural verb for "give me the picture".
     image = text2image
+
+    # -- structured perception (Mirage) ---------------------------------------
+    def describe(self, image: Any, *, model: str = MIRAGE_MODEL, timeout: float = 600.0,
+                 **options: Any) -> Perception:
+        """Describe an image: scene, objects with boxes, scores and masks, regions,
+        text lines, relations, events and reasoning.
+
+        ``image`` is a PIL image or ``(hwc_f32_bytes, width, height)``. ``options``
+        are the action's params: ``sections``, ``fields`` (a list or a comma
+        separated string), ``conf``, ``text_conf``, ``max_objects``,
+        ``max_text_lines``, ``max_tokens``, ``mask_threshold``, ``mask_format`` and
+        ``language``. Returns the JSON as a :class:`Perception`.
+        """
+        params = {k: _csv(v) for k, v in options.items() if v is not None}
+        blobs, meta = _image_blob(image)
+        return Perception(self.run(model, "describe", params, blobs=blobs, meta=meta, timeout=timeout).outputs)
+
+    def extract(self, image: Any, form: dict, *, model: str = MIRAGE_MODEL, timeout: float = 600.0,
+                **options: Any) -> Perception:
+        """Answer the fields of ``form`` (a dict of choice, count and text fields)
+        about an image. Returns ``{"form": {field: {"value", "probabilities"}}}`` as
+        a :class:`Perception`. ``options`` are as for :meth:`describe`."""
+        params = {k: _csv(v) for k, v in options.items() if v is not None}
+        params["form"] = json.dumps(form)
+        blobs, meta = _image_blob(image)
+        return Perception(self.run(model, "extract", params, blobs=blobs, meta=meta, timeout=timeout).outputs)

@@ -267,6 +267,68 @@ apply into one launch). Not done this round: ncu roofline fractions for the top 
 (`extract_batch` still scores on the host decoder); cross-attention q + gate concatenation (the per-head `rmsnorm_rows`
 needs a contiguous q).
 
+## Lane L4 - serving
+
+Done 2026-11-10. Model id `Cactus-Compute/mirage` (case-exact upstream name, a deliberate carve-out in
+`crates/cli/tests/it/model_ids.rs`); user-facing page `docs/reference/models/mirage.md`.
+
+| Item | State | Where |
+|---|---|---|
+| Capability `Provider`: actions `describe` and `extract`, typed params with ceilings, image blob via `capability::blob`, no param names a path (weights come from the store through `MirageSpec`), cheap `check_request` for the scheduler's door | done | `crates/mirage/src/caps.rs` |
+| One session for every surface: request checks, grouping of equal options into device batches (at most 64), cancellation, usage accounting (`usage`: images, batch, decoder tokens, latency split) | done | `MirageSession::run_batch` |
+| Resolver spec (`weights` role = the checkpoint directory; hand-placed files and a pulled manifest both classify by `model_type: "mirage"`) | done | `crates/mirage/src/resolver.rs` |
+| Pull recipe: `config.json`, `mirage.safetensors`, `mirage.cact` fetched as published, role `weights` = `.` | done | `crates/modelstore/src/recipe.rs` (`mirage` row) |
+| Residency adapter: one instance, `batch_limit` 64, `check_job` at the door, measured footprint, metrics (`mirage_batches`, `mirage_images`, `mirage_widest_batch`, `mirage_memory_hits`, cache size); catalog entry | done | `crates/catalog/src/resident_mirage.rs`, `lib.rs` |
+| Decoder-memory reuse between `describe` and `extract`: key = image content hash + preprocessing version + weights revision + proposal options; byte-bounded LRU (256 MiB) owned by the served instance | done | `crates/mirage/src/memory_cache.rs` |
+| Batch control in the model: `describe_batch_with` / `extract_batch_with` (decoder tokens, kept memories, cancellation between decoder windows), `ModelError::Cancelled` | done | `crates/mirage/src/device/batch_model.rs`, `decoder.rs` |
+| SDK `PerceptionPipeline` (`describe`, `extract`, options builder, `models_dir`, typed `objects()` / `text_lines()`, `Usage`) | done | `crates/sdk/src/perception.rs` |
+| CLI through the generic action path: `brain mirage describe\|extract`; `brain caps` lists both | done | `crates/cli/src/resolve.rs`, `resolver_cli.rs` |
+| HTTP `/v1/run` and D-Bus `Run` through the generic routes, with security tests | done | `crates/catalog/tests/it/mirage_http.rs` |
+| brain-py `describe` / `extract` (`Perception` = JSON dict + `.usage`), Python sample, Rust sample | done | `brain-py/brain_py/base.py`, `samples/python/vision/mirage-perception`, `samples/vision/perception` |
+| Docs page and model index row | done | `docs/reference/models/mirage.md` |
+
+Acceptance evidence (released weights, CPU backend unless stated):
+
+- CLI JSON equals SDK JSON on the cats golden for `describe` (bitmap masks, 600 tokens) and `extract`:
+  `crates/cli/tests/it/mirage_cli.rs`.
+- HTTP `/v1/run` equals the session answer for both actions: `mirage_http::a_served_describe_and_extract_equal_the_session_answers`.
+- CLI, HTTP, D-Bus and brain-py return the same JSON for one picture, for both actions, on CUDA gpu1 through a real
+  `brain serve --dbus --openai` on a private bus: `tests/e2e/mirage.bats` (`MIRAGE_FLAGS="--device gpu1 --backend cuda"`).
+- 16 requests in flight are one device batch whose answers equal their single-request answers: `mirage_served::sixteen_concurrent_requests_are_one_device_batch_and_equal_their_single_answers`
+  (the scheduler's `load` shows 17 running in one group, `mirage_widest_batch` is 16) and, at the session,
+  `serving::concurrent_requests_share_one_batch_and_keep_their_answers` (`BatchStats::sizes`). On CUDA over real
+  D-Bus connections the 16 arrive as groups of 4 and 12 (connection timing); answers equal up to accelerator rounding.
+- Cancellation frees the slot: `mirage_served::a_cancelled_request_takes_no_slot_and_the_rest_are_unaffected` and
+  `serving::a_cancelled_request_fails_alone_and_does_not_join_the_batch`.
+- Unload releases memory (CUDA gpu1, driver per-process figure): 564 MiB with the context alone, 948 MiB with the
+  model loaded and a batch of 64 described, 570 MiB after the session is dropped:
+  `serving::dropping_the_session_releases_device_memory`. Host: 1.26 GiB resident at that point.
+- Reuse: an `extract` after a `describe` (or a second `extract`) of the same image skips the vision half and gives
+  the same answer; other proposal options are another key: `serving::extract_reuses_the_memory_a_describe_left_and_gives_the_same_answer`.
+- Merging pays on an accelerator: 16 requests merged take 2.0 s (8.1 images/s), served one by one 18.4 s (0.9 images/s)
+  on CUDA gpu1, which another session's jobs were also using (`serving::a_merged_batch_is_faster_than_serving_the_same_requests_serially`).
+
+Design notes:
+
+- Batching is the executor's closed group (`Instance::run_batch`, `batch_limit` 64), not `model::serve::Scheduler`:
+  the decoder is a lockstep device loop over a handful of hundred steps (no paged KV, hyper-connection lanes), so
+  continuous admission mid-group would need a different decoder; a request arriving mid-group waits for the next one.
+  Requests with different options are separate `describe_batch` calls of one group (the model takes one `Options`).
+- `describe` keeps the decoder memory of each image (one device read per batch) and `extract` consumes it; `describe`
+  never consumes one, because it also needs the mask maps and reader windows of the vision half.
+- Cancellation granularity: before the group starts (no slot), and between decoder windows (16 steps); a group in
+  which every request is cancelled stops costing steps. A request cancelled mid-window still pays that window.
+- `extract` scoring is host work per image (see L2c "Open after L2c"); a form is bounded at 64 KiB, 32 fields and
+  1024 candidate values so a request cannot ask for unbounded host decoder passes.
+- The D-Bus server reads an input blob's `w`/`h` from the `in_meta` entry itself while the JSONL transport reads a
+  nested `meta`; `brain_py` sends both for images. (Other Python samples that send only the nested form to the bus
+  would fail the same way; not touched here.)
+
+Open after L4: device form scoring (L6), Python/HTTP `describe` for a batch of images in one call (each request is one
+image), box form fields (L2b), quantised `.cact` execution (L5), training (L3). `make test/e2e` does not run
+`tests/e2e/mirage.bats` (it needs the checkpoint and `MIRAGE_IMAGE`); `tests/e2e/model_table_check.py` reports a
+README section that no longer exists (pre-existing).
+
 ## Facts the foundation established
 
 - The released `.cact` has 806 entries: 159 two-bit and 4 four-bit CQ matrices
@@ -295,6 +357,6 @@ needs a contiguous q).
 | Heads | boxes, masks, slots, enum scoring | open |
 | OCR | the reader and greedy collapse | open |
 | Training | full / head / LoRA, multi-task, gradient checks | open |
-| Serving | capability, CLI, SDK, HTTP, D-Bus, batching | open |
+| Serving | capability, CLI, SDK, HTTP, D-Bus, batching | done (L4) |
 | Quantised kernels | native low-bit CQ matmul from the packed weights | open |
 | Performance | profile-driven batched throughput | open |
