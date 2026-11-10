@@ -146,4 +146,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 3. [Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md): How can an image be turned into a short sequence of discrete codes?
 4. [Adversarial Training](v08-image-generation/04-gans.md): What happens when the loss itself is a network trained to catch the generator?
 5. [Diffusion Models](v08-image-generation/05-diffusion.md): How can a model learn to create an image by learning to remove noise?
+6. [Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md): Can generation be a straight path from noise to data, followed by an ordinary differential equation?
 <!-- /contents -->

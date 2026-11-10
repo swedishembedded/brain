@@ -356,6 +356,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **FLOPs per token**: the arithmetic of a forward pass for one token, two FLOPs for every active parameter plus four per layer, query-head width and key seen for the attention products, $2N_{\mathrm{act}} + 4LHd_hT$; a property of the shapes and not of the hardware. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
 
+**flow matching**: training a network to give the velocity field by regressing, with squared error, on the velocity of a sampled pair at its own point of the path; the constant that separates this loss from the loss on the field itself does not depend on the network. *([Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md))*
+
 **forward noising process**: the chain that turns a data value into noise by adding a little Gaussian noise at each step, $x_t = \sqrt{1 - \beta_t}\,x_{t-1} + \sqrt{\beta_t}\,\varepsilon_t$, which by the addition of Gaussians gives any step directly from the clean value, $x_t = \sqrt{\bar\alpha_t}\,x_0 + \sqrt{1 - \bar\alpha_t}\,\varepsilon$. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
 
 **forward pass**: computing every value of the computational graph in order, from the inputs to the loss. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
@@ -754,6 +756,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **probability distribution**: the assignment of a probability to each value of a random variable, written as a table for finitely many values or as a density whose area over an interval is the probability. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
+**probability path**: a family of densities $p_\sigma$, one for each noise fraction, that runs from the data's density at $\sigma = 0$ to the standard normal at $\sigma = 1$; here the density of $x_\sigma = (1 - \sigma)x_0 + \sigma\varepsilon$. *([Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md))*
+
 **product notation**: the symbol $\prod_{i=a}^{b} x_i$ for the product of the terms $x_i$ as the index $i$ runs from $a$ to $b$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **projection**: the closest point to a vector $\mathbf{v}$ on the line through $\mathbf{u}$, namely $\frac{\mathbf{v}\cdot\mathbf{u}}{\mathbf{u}\cdot\mathbf{u}}\mathbf{u}$; what is left over is orthogonal to $\mathbf{u}$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
@@ -787,6 +791,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **receptive field**: the set of input pixels on which one output value depends; along one axis its size grows by $d(k-1)$ times the jump (the input distance between neighbouring units) at each layer, and the jump multiplies by the stride. *([Convolution](v07-vision/02-convolution.md))*
 
 **reconstruction-loss**: the mean squared error between an autoencoder's output and its input, $L_{\mathrm{rec}} = \frac{1}{BD}\sum(\hat{x} - x)^2$; it needs no labels. *([First Complete Models](v03-neural-networks/13-first-models.md))*
+
+**rectified flow**: flow matching on the straight path between a data value and a noise value, together with the repetition that pairs data with the noise it was generated from, which straightens the paths until a few Euler steps suffice. *([Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md))*
 
 **recurrent depth**: a layout of a prelude that embeds the input once, a core applied a variable number of times to a latent state that starts as noise and re-reads the prelude's output at every step, and a coda that reads out the result, so that the amount of computation is chosen when the model is run. *([Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md))*
 
@@ -976,6 +982,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **tiled matmul**: the matrix product computed one tile of the output at a time, with the matching tiles of the two inputs staged in a fast memory so that each number loaded is used once per row or column of the tile, cutting the loads from $2n^3$ to $2n^3/T$ for a tile of side $T$. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 
+**timestep shift**: the map $\sigma' = k\sigma/(1 + (k - 1)\sigma)$, or with $k = e^\mu$ the exponential form $e^\mu/(e^\mu + 1/\sigma - 1)$, that moves the sampling steps toward noise while keeping $0$ and $1$ fixed, so that larger images, which carry more redundant pixels per noise level, spend their steps where the commitment happens. *([Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md))*
+
 **token**: the unit a model counts, one piece of the text a tokenizer cuts, with an integer id in the vocabulary; a token can be a character, a word, a part of a word or a single byte. *([Tokenization](v05-sequences/02-tokenization.md))*
 
 **top-k gating**: choosing the $k$ experts with the largest router scores for a token and combining their outputs with weights that come from those scores, normalized to sum to 1. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
@@ -1047,6 +1055,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **vector quantization**: replacing a vector by the nearest row of a codebook (smallest squared distance, lowest index on a tie), so that it is stored as one index of $\log_2 K$ bits. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
 
 **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
+
+**velocity field**: the average velocity $u(x, \sigma) = \mathbb{E}[\varepsilon - x_0 \mid x_\sigma = x]$ of all the straight lines through a point; following it as an ordinary differential equation carries the standard normal onto the data. *([Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md))*
 
 **vision projector**: the small trained map, a linear layer or a pair of them around a GELU, sometimes folding a block of neighbouring patches into one row, that takes the rows of a vision tower to the width of a language model's embedding rows so that they can be read like the rows of words. *([Vision-Language Models](v07-vision/09-vlms.md))*
 
