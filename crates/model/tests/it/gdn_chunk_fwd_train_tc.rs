@@ -189,6 +189,10 @@ fn the_tensor_core_prefix_matches_the_portable_path_in_value_and_gradient_and_is
         eprintln!("gdn_chunk_fwd_train_tc: this device does not take the fast kernels - nothing to run");
         return;
     }
+    if !gpu_core::provider::cuda::gdn_tensor_core_offered(&g) {
+        brain_testutil::skip_unavailable("gdn_chunk_fwd_train_tc: this card is below the tensor-core GDN kernels' floor");
+        return;
+    }
     for (h, t, chunk) in [(6u32, 256u32, 64u32), (3, 96, 32), (2, 40, 8), (2, 40, 5), (3, 4, 1)] {
         let shape = GdnShape { b: 1, h, t, dk: 128, dv: 128, chunk };
         let (reference, fast, tc) = (run(&g, Tier::Portable, &shape), run(&g, Tier::Fast, &shape), run(&g, Tier::TensorCore, &shape));
@@ -231,6 +235,10 @@ fn the_token_major_backward_equals_the_chunk_major_one_with_the_permutes_folded(
     };
     if !model::gdn::use_fast_kernels(&g) {
         eprintln!("gdn_chunk_fwd_train_tc: this device does not take the fast kernels - nothing to run");
+        return;
+    }
+    if !gpu_core::provider::cuda::gdn_tensor_core_offered(&g) {
+        brain_testutil::skip_unavailable("gdn_chunk_fwd_train_tc: this card is below the tensor-core GDN kernels' floor");
         return;
     }
     // (batch, value heads, tokens, chunk rows, heads per key head)
@@ -362,6 +370,10 @@ fn the_recurrence_output_can_be_written_token_major_and_matches_the_chunk_major_
     };
     if !model::gdn::use_fast_kernels(&g) {
         eprintln!("gdn_chunk_fwd_train_tc: this device does not take the fast kernels - nothing to run");
+        return;
+    }
+    if !gpu_core::provider::cuda::gdn_tensor_core_offered(&g) {
+        brain_testutil::skip_unavailable("gdn_chunk_fwd_train_tc: this card is below the tensor-core GDN kernels' floor");
         return;
     }
     use model::gdn::{gdn_chunk_fwd_tokens, gdn_chunk_fwd_train_tokens, GdnTokScratchBufs, GdnTokenInputs};

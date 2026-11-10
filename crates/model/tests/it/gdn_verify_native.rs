@@ -41,6 +41,12 @@ fn is_cuda(g: &gpu_core::Gpu) -> bool {
     g.kind() == "cuda" && g.caps().arch.compute_capability.is_some() && gpu_core::native_kernels_enabled()
 }
 
+/// Whether this device is offered the GDN fused kernels: a CUDA device at their floor (tensor-core int8
+/// and `cp.async`, compute capability 8.0), native kernels not withheld.
+fn offers_gdn(g: &gpu_core::Gpu) -> bool {
+    is_cuda(g) && g.has_fused(gpu_core::Fused::GdnDecode)
+}
+
 fn u32s(g: &gpu_core::Gpu, v: &[u32]) -> gpu_core::DeviceBuffer {
     let b = g.storage(v.len().max(1) as u64);
     g.write(&b, v);
@@ -87,8 +93,8 @@ fn verify_rows_over_f32_pools_equal_repeated_plain_streaming_steps() {
 /// off, the exact body (an f32 pool) is the reference.
 fn verify_equals_single_steps(bf16: bool, stream: bool) {
     let g = gpu_core::testgpu::dev(&[]);
-    if !is_cuda(&g) {
-        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+    if !offers_gdn(&g) {
+        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
         return;
     }
     let (dk, dv, kw) = (128u32, 128u32, 4u32);
@@ -222,8 +228,8 @@ fn verify_equals_single_steps(bf16: bool, stream: bool) {
 #[test]
 fn verify_reads_qkv_and_z_in_place_from_one_fused_product() {
     let g = gpu_core::testgpu::dev(&[]);
-    if !is_cuda(&g) {
-        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+    if !offers_gdn(&g) {
+        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
         return;
     }
     let (dk, dv, kw) = (128u32, 128u32, 4u32);
@@ -297,8 +303,8 @@ fn verify_reads_qkv_and_z_in_place_from_one_fused_product() {
 #[ignore]
 fn qkvz_back_to_back_stress() {
     let g = gpu_core::testgpu::dev(&[]);
-    if !is_cuda(&g) {
-        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+    if !offers_gdn(&g) {
+        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
         return;
     }
     let (dk, dv, kw, nkh, group, pool_rows) = (128u32, 128u32, 4u32, 16u32, 3u32, 64u32);

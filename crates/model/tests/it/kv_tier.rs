@@ -659,6 +659,18 @@ fn native_decode_is_exact_at(g: &Gpu, tier: KvTier, lens: &[u32], shared_blocks:
 
 /// An explicitly opened CUDA device, or `None` (skipped) when there is none: the ambient GPU may be another backend, which
 /// keeps the WGSL tier.
+/// [`cuda_gpu`] that also runs the native paged decode at head_dim 256 (its kernels need compute
+/// capability 8.0); skipped, naming `what`, on a card below that.
+fn native_decode_gpu(what: &str) -> Option<Gpu> {
+    let g = cuda_gpu(what)?;
+    let decode = g.kernel_index("paged_flash_decode_gqa_hd256#GRP=6").expect("the decode kernel is registered");
+    if g.native_kernel_for(decode, &[1, 6, 1, 256, 6, 16, 1, 1, 1]).is_none() {
+        brain_testutil::skip_unavailable(&format!("{what}: this card is below the native decode kernels' floor"));
+        return None;
+    }
+    Some(g)
+}
+
 fn cuda_gpu(what: &str) -> Option<Gpu> {
     match Gpu::try_new_cuda(kernels()) {
         Ok(g) if g.caps().arch.compute_capability.is_some() => Some(g),
@@ -675,7 +687,7 @@ fn native_decode_of_every_tier_is_exact_at_agent_contexts_over_a_shared_prefix_o
     if brain_testutil::gpu_tests_skipped() {
         return;
     }
-    let Some(g) = cuda_gpu("native decode attention: no CUDA device") else { return };
+    let Some(g) = native_decode_gpu("native decode attention") else { return };
     // One sequence at 48k; 1k + 13k + 48k with the two long ones on one 10,240-token prefix; eight agents at 1-4k
     // on one 1,024-token prefix; sixteen short ones (partly empty splits, a one-key sequence).
     for tier in KvTier::ALL {
@@ -696,7 +708,7 @@ fn native_decode_of_the_bf16_tier_is_exact_at_large_scores_and_beyond_the_f16_ra
     if brain_testutil::gpu_tests_skipped() {
         return;
     }
-    let Some(g) = cuda_gpu("native decode attention: no CUDA device") else { return };
+    let Some(g) = native_decode_gpu("native decode attention") else { return };
     // Scores in the tens; keys, then values, beyond the f16 range (the query shrunk so the scores stay moderate).
     for mag in [Magnitudes { q: 10.0, k: 1.0, v: 1.0 }, Magnitudes { q: 1e-5, k: 1e5, v: 1.0 }, Magnitudes { q: 1.0, k: 1.0, v: 1e5 }] {
         native_decode_is_exact_at(&g, KvTier::BF16, &[13_000, 2047, 129, 1], 0, mag);
@@ -712,7 +724,7 @@ fn native_bf16_decode_writes_every_partial_record_including_splits_past_the_live
     if brain_testutil::gpu_tests_skipped() {
         return;
     }
-    let Some(g) = cuda_gpu("native decode attention: no CUDA device") else { return };
+    let Some(g) = native_decode_gpu("native decode attention") else { return };
     let (n_heads, n_kv, block_size, hd) = (24u32, 4u32, 64u32, 256u32);
     let tier = KvTier::BF16;
     let lens = [1u32, 130, 64, 700];

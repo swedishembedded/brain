@@ -985,6 +985,13 @@ pub fn gdn_chunk_loop_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::Devi
 /// k_beta_decay, decay_mask, raw_attn0, t_mat, raw_intra` as in
 /// [`gdn_chunk_prep_train_step`]; then `query_cm, key_cm, value_cm, beta_cm`, the
 /// chunk-major tensors the recurrence and the backward read.
+/// Whether `gpu` is offered the Gated DeltaNet tensor-core kernels (the token-major prefix and the
+/// chunk loop): a CUDA device at their registered floor. A `true` is not a promise - the backend may
+/// still decline a launch, and each step builder's `None` is the authority.
+pub fn gdn_tensor_core_offered(gpu: &crate::Gpu) -> bool {
+    gpu.caps().arch.compute_capability.is_some_and(|cc| kernels_cuda::get("gdn_chunk_prep_tok_train_tc").is_some_and(|k| k.min_cc <= cc))
+}
+
 pub fn gdn_chunk_prep_tok_train_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 21], l: GdnTokenLayout) -> Option<crate::Step> {
     if !gdn_chunk_prep_tok_shape_ok(l.head_dim, l.head_dim, l.c_len, l.heads, l.group) {
         return None;
