@@ -160,8 +160,22 @@ impl Device {
         self.push(s, "mirage_rope2d", &[t], &[tokens, cells, grid, heads, hd, base.to_bits(), rows], rows * heads * (hd / 2));
     }
 
-    /// Masked grouped-query attention with the usual `1 / sqrt(hd)` scale.
+    /// Masked grouped-query attention with the usual `1 / sqrt(hd)` scale, key-parallel:
+    /// a scores pass, a row softmax and a weighted-sum pass, each with a thread per element.
     pub fn attention(&self, s: &mut Vec<Step>, a: AttnShape, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, key_mask: &DeviceBuffer, out: &DeviceBuffer) {
+        assert!(a.heads.is_multiple_of(a.kvh), "attention shape {a:?}");
+        let scale = (1.0 / (a.hd as f32).sqrt()).to_bits();
+        let rows = a.batch * a.nq * a.heads;
+        let scores = self.alloc((rows * a.nk) as usize);
+        let p = [a.batch, a.nq, a.heads, a.kvh, a.hd, a.nk, a.visible, scale];
+        self.push(s, "mirage_attn_scores", &[q, k, key_mask, &scores], &p, rows * a.nk);
+        s.push(self.gpu().dispatch(self.k("mirage_attn_softmax"), &[&scores], &[rows, a.nk], gpu_core::Dispatch::Workgroups(rows)));
+        let p = [a.batch, a.nq, a.heads, a.kvh, a.vd, a.nk, a.visible];
+        self.push(s, "mirage_attn_apply", &[&scores, v, out], &p, rows * a.vd);
+    }
+
+    /// The single-kernel reference attention (serial over keys); the parity oracle for [`Device::attention`].
+    pub fn attention_reference(&self, s: &mut Vec<Step>, a: AttnShape, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, key_mask: &DeviceBuffer, out: &DeviceBuffer) {
         assert!(a.vd <= 128 && a.heads.is_multiple_of(a.kvh), "attention shape {a:?}");
         let scale = (1.0 / (a.hd as f32).sqrt()).to_bits();
         let p = [a.batch, a.nq, a.heads, a.kvh, a.hd, a.vd, a.nk, a.visible, scale];

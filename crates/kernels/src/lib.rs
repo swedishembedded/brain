@@ -852,6 +852,12 @@ pub const MAXPOOL2D_DX: &str = include_str!("../wgsl/maxpool2d_dx.wgsl");
 pub const MIRAGE_ADD_MASKED: &str = include_str!("../wgsl/mirage_add_masked.wgsl");
 /// `wgsl/mirage_attn.wgsl`
 pub const MIRAGE_ATTN: &str = include_str!("../wgsl/mirage_attn.wgsl");
+/// `wgsl/mirage_attn_apply.wgsl`
+pub const MIRAGE_ATTN_APPLY: &str = include_str!("../wgsl/mirage_attn_apply.wgsl");
+/// `wgsl/mirage_attn_scores.wgsl`
+pub const MIRAGE_ATTN_SCORES: &str = include_str!("../wgsl/mirage_attn_scores.wgsl");
+/// `wgsl/mirage_attn_softmax.wgsl`
+pub const MIRAGE_ATTN_SOFTMAX: &str = include_str!("../wgsl/mirage_attn_softmax.wgsl");
 /// `wgsl/mirage_axpy.wgsl`
 pub const MIRAGE_AXPY: &str = include_str!("../wgsl/mirage_axpy.wgsl");
 /// `wgsl/mirage_chan_fma.wgsl`
@@ -1892,6 +1898,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("maxpool2d_dx", MAXPOOL2D_DX),
     ("mirage_add_masked", MIRAGE_ADD_MASKED),
     ("mirage_attn", MIRAGE_ATTN),
+    ("mirage_attn_apply", MIRAGE_ATTN_APPLY),
+    ("mirage_attn_scores", MIRAGE_ATTN_SCORES),
+    ("mirage_attn_softmax", MIRAGE_ATTN_SOFTMAX),
     ("mirage_axpy", MIRAGE_AXPY),
     ("mirage_chan_fma", MIRAGE_CHAN_FMA),
     ("mirage_conv2d", MIRAGE_CONV2D),

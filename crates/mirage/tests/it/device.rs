@@ -258,6 +258,17 @@ fn attention_and_rope_match_the_host_formulas() {
     let mut s = Vec::new();
     dev.attention(&mut s, a, &qd, &kd, &vd, &md, &o);
     assert_stage("attention", &run(&dev, &s, &o, want.len()), &want);
+    let reference = dev.gpu().storage(want.len() as u64);
+    let mut s = Vec::new();
+    dev.attention_reference(&mut s, a, &qd, &kd, &vd, &md, &reference);
+    assert_stage("attention reference", &run(&dev, &s, &reference, want.len()), &want);
+    // A sequence with no live key yields zeros in both paths.
+    let none = upload(&dev, &[0.0; 14]);
+    let (o1, o2) = (dev.gpu().storage(want.len() as u64), dev.gpu().storage(want.len() as u64));
+    let mut s = Vec::new();
+    dev.attention(&mut s, a, &qd, &kd, &vd, &none, &o1);
+    dev.attention_reference(&mut s, a, &qd, &kd, &vd, &none, &o2);
+    assert!(run(&dev, &s, &o1, want.len()).iter().all(|v| *v == 0.0), "no live key must give zeros");
 
     // 2D rope against the encoder's host rotation: build it from the tiny model's formula.
     let (batch, tokens, cells, grid, heads, hd) = (2usize, 7usize, 6usize, 3usize, 2usize, 8usize);
