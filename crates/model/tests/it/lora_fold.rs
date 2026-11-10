@@ -536,3 +536,31 @@ fn a_peft_wrapped_key_targets_the_same_base_tensor() {
     let pairs = model::lora::read_external_adapter(p.to_str().unwrap()).expect("reads");
     assert_eq!(pairs.iter().map(|p| p.base_key.as_str()).collect::<Vec<_>>(), ["double_blocks.0.img_attn.proj.weight"]);
 }
+
+/// A tensor a build uploads as COLUMN blocks (a down projection whose input
+/// is two concatenated activations) splits the same way: each column band
+/// corrects its own columns, and together they are the whole correction.
+#[test]
+fn a_whole_tensor_delta_splits_into_column_bands() {
+    let (out, inn, r) = (2, 4, 2);
+    let a: Vec<f32> = (0..r * inn).map(|i| i as f32 - 3.0).collect();
+    let b: Vec<f32> = (0..out * r).map(|i| 0.25 * i as f32 + 1.0).collect();
+    let whole = model::lora::RuntimeDelta { key: "l2.weight".into(), row0: 0, row_stride: inn, col0: 0, elems: out * inn, pair: Pair::from_ab(out, inn, r, a, b) };
+    let mut want = vec![0.0; out * inn];
+    whole.fold_into(&mut want);
+
+    let left = whole.col_band(0, 1).expect("in range");
+    let right = whole.col_band(1, 3).expect("in range");
+    assert!(whole.col_band(2, 3).is_err(), "a band past the delta's columns is refused");
+    let lora = model::lora::RuntimeLora::new(vec![left, right]);
+    let mut got = vec![0.0; out * inn];
+    for (c0, k) in [(0, 1), (1, 3)] {
+        let mut band = vec![0.0; out * k];
+        lora.claim("l2.weight", inn, 0, out, c0, k).expect("each band is claimable").fold_into(&mut band);
+        for row in 0..out {
+            got[row * inn + c0..row * inn + c0 + k].copy_from_slice(&band[row * k..(row + 1) * k]);
+        }
+    }
+    assert!(lora.unapplied().is_empty());
+    assert_eq!(got, want);
+}

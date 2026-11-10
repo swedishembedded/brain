@@ -779,6 +779,26 @@ impl RuntimeDelta {
         })
     }
 
+    /// The columns `col0..col0 + inn` of this delta, relative to its own
+    /// first column: what a build that uploads one stored tensor as column
+    /// blocks (a down projection over two concatenated activations) claims
+    /// per block. `B` is shared, `A` keeps only the band's columns.
+    pub fn col_band(&self, col0: usize, inn: usize) -> Result<RuntimeDelta, String> {
+        if inn == 0 || col0 + inn > self.pair.inn {
+            return Err(format!("lora: columns {col0}..{} of {} are outside its {} columns", col0 + inn, self.key, self.pair.inn));
+        }
+        let (r, full) = (self.pair.r, self.pair.inn);
+        let a = (0..r).flat_map(|i| self.pair.a[i * full + col0..i * full + col0 + inn].iter().copied()).collect();
+        Ok(RuntimeDelta {
+            key: self.key.clone(),
+            row0: self.row0,
+            row_stride: self.row_stride,
+            col0: self.col0 + col0,
+            elems: self.elems,
+            pair: Pair::from_ab(self.pair.out, inn, r, a, self.pair.b.clone()),
+        })
+    }
+
     /// Does this delta correct exactly the rectangle a build is about to
     /// upload? Every field must agree: a partial match is a different linear,
     /// and applying a delta to the wrong rows is worse than not applying it.

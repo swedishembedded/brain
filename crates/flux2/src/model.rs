@@ -553,6 +553,22 @@ impl Flux2Model {
         let img_in_w = lin_f32("img_in.weight", d, cfg.in_channels);
         let txt_in_w = lin_f32("txt_in.weight", d, cfg.context_in_dim);
         let final_w_w = lin_f32("final_layer.linear.weight", cfg.in_channels, d);
+        // The time embedding and the modulation linears run on the host at
+        // fp32 (`modulation_for`): an adapter delta over one folds in exactly.
+        let host = |name: &str| -> Vec<f32> {
+            let mut w = getv(name);
+            let whole = lora.and_then(|l| l.deltas().iter().find(|x| x.key == name).map(|x| (x.pair.out, x.pair.inn)));
+            if let Some(dl) = whole.and_then(|(out, inn)| claim(name, inn, 0, out, 0, inn)) {
+                dl.fold_into(&mut w);
+            }
+            w
+        };
+        let time_in_a = host("time_in.in_layer.weight");
+        let time_in_b = host("time_in.out_layer.weight");
+        let mod_img = host("double_stream_modulation_img.lin.weight");
+        let mod_txt = host("double_stream_modulation_txt.lin.weight");
+        let mod_single = host("single_stream_modulation.lin.weight");
+        let final_adaln = host("final_layer.adaLN_modulation.1.weight");
         // Every adapter rectangle must have been claimed by one of the linears
         // above. One that was not would be a weight the user believes is
         // adapted and is not - the same silent no-op `fold_placements` refuses.
@@ -641,12 +657,12 @@ impl Flux2Model {
             final_w: final_w_w,
             modb,
             scr,
-            time_in_a: getv("time_in.in_layer.weight"),
-            time_in_b: getv("time_in.out_layer.weight"),
-            mod_img: getv("double_stream_modulation_img.lin.weight"),
-            mod_txt: getv("double_stream_modulation_txt.lin.weight"),
-            mod_single: getv("single_stream_modulation.lin.weight"),
-            final_adaln: getv("final_layer.adaLN_modulation.1.weight"),
+            time_in_a,
+            time_in_b,
+            mod_img,
+            mod_txt,
+            mod_single,
+            final_adaln,
             gpu,
         }
     }

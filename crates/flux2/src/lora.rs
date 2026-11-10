@@ -596,7 +596,45 @@ pub fn runtime_adapters(
             deltas.extend(ad.runtime_deltas_at(strength));
         }
     }
-    Ok(Some((RuntimeLora::new(deltas), reports)))
+    Ok(Some((RuntimeLora::new(to_build_rectangles(cfg, deltas)?), reports)))
+}
+
+/// Split every delta that corrects a fused tensor WHOLE - how third-party
+/// adapters name them - into the rectangles the runtime build uploads it as
+/// (`model::Flux2Model`'s walk): a double block's `qkv` into q/k/v rows and
+/// its `mlp.0` into the two SwiGLU halves, a single block's `linear1` into
+/// q/k/v and the two halves, and its `linear2` into the attention and MLP
+/// column blocks. A delta already on one of those rectangles, or over a
+/// tensor the build uploads whole, is kept as it is.
+pub(crate) fn to_build_rectangles(cfg: &crate::Flux2Config, deltas: Vec<model::lora::RuntimeDelta>) -> Result<Vec<model::lora::RuntimeDelta>, String> {
+    let (d, mlp) = (cfg.hidden, cfg.mlp_hidden());
+    let mut out = Vec::with_capacity(deltas.len());
+    for delta in deltas {
+        let whole = delta.row0 == 0 && delta.col0 == 0 && delta.pair.out * delta.pair.inn == delta.elems;
+        let key = delta.key.as_str();
+        let rows: &[(usize, usize)] = if !whole {
+            &[]
+        } else if key.ends_with("_attn.qkv.weight") {
+            &[(0, d), (d, d), (2 * d, d)]
+        } else if key.ends_with("_mlp.0.weight") {
+            &[(0, mlp), (mlp, mlp)]
+        } else if key.starts_with("single_blocks.") && key.ends_with(".linear1.weight") {
+            &[(0, d), (d, d), (2 * d, d), (3 * d, mlp), (3 * d + mlp, mlp)]
+        } else {
+            &[]
+        };
+        if !rows.is_empty() {
+            for &(r0, n) in rows {
+                out.push(delta.row_band(r0, n)?);
+            }
+        } else if whole && key.starts_with("single_blocks.") && key.ends_with(".linear2.weight") {
+            out.push(delta.col_band(0, d)?);
+            out.push(delta.col_band(d, mlp)?);
+        } else {
+            out.push(delta);
+        }
+    }
+    Ok(out)
 }
 
 /// One in-flight optimisation step, opened by [`LoraAdapter::stepper`]: it
@@ -712,6 +750,51 @@ pub fn load_adapter(path: &str, cfg: &Cfg) -> Result<LoraAdapter, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A third-party adapter targets fused tensors whole; the runtime build
+    /// uploads them as bands (q/k/v and the two SwiGLU halves by rows, the
+    /// single-block down projection by columns). Every whole delta becomes
+    /// exactly the rectangles the build claims, and a tensor the build uploads
+    /// whole keeps its one delta.
+    #[test]
+    fn whole_tensor_deltas_split_into_the_rectangles_the_build_claims() {
+        let cfg = crate::Flux2Config::klein_4b();
+        let (d, mlp) = (cfg.hidden, cfg.mlp_hidden());
+        let whole = |key: &str, out: usize, inn: usize| model::lora::RuntimeDelta {
+            key: key.into(),
+            row0: 0,
+            row_stride: inn,
+            col0: 0,
+            elems: out * inn,
+            pair: model::lora::Pair::from_ab(out, inn, 1, vec![1.0; inn], vec![1.0; out]),
+        };
+        let deltas = vec![
+            whole("double_blocks.0.img_attn.qkv.weight", 3 * d, d),
+            whole("double_blocks.0.txt_mlp.0.weight", 2 * mlp, d),
+            whole("single_blocks.0.linear1.weight", 3 * d + 2 * mlp, d),
+            whole("single_blocks.0.linear2.weight", d, d + mlp),
+            whole("double_blocks.0.img_attn.proj.weight", d, d),
+        ];
+        let lora = RuntimeLora::new(to_build_rectangles(&cfg, deltas).unwrap());
+        for (key, stride, r0, out, c0, k) in [
+            ("double_blocks.0.img_attn.qkv.weight", d, 0, d, 0, d),
+            ("double_blocks.0.img_attn.qkv.weight", d, d, d, 0, d),
+            ("double_blocks.0.img_attn.qkv.weight", d, 2 * d, d, 0, d),
+            ("double_blocks.0.txt_mlp.0.weight", d, 0, mlp, 0, d),
+            ("double_blocks.0.txt_mlp.0.weight", d, mlp, mlp, 0, d),
+            ("single_blocks.0.linear1.weight", d, 0, d, 0, d),
+            ("single_blocks.0.linear1.weight", d, d, d, 0, d),
+            ("single_blocks.0.linear1.weight", d, 2 * d, d, 0, d),
+            ("single_blocks.0.linear1.weight", d, 3 * d, mlp, 0, d),
+            ("single_blocks.0.linear1.weight", d, 3 * d + mlp, mlp, 0, d),
+            ("single_blocks.0.linear2.weight", d + mlp, 0, d, 0, d),
+            ("single_blocks.0.linear2.weight", d + mlp, 0, d, d, mlp),
+            ("double_blocks.0.img_attn.proj.weight", d, 0, d, 0, d),
+        ] {
+            assert!(lora.claim(key, stride, r0, out, c0, k).is_some(), "{key} rows {r0}+{out} cols {c0}+{k}");
+        }
+        assert!(lora.unapplied().is_empty(), "{:?}", lora.unapplied());
+    }
 
     /// `linear_sites` must reproduce the pre-migration draw order exactly:
     /// double blocks (each stream's 7 leaves in `STREAM_LEAVES` order),
