@@ -858,6 +858,8 @@ pub const MIRAGE_AXPY: &str = include_str!("../wgsl/mirage_axpy.wgsl");
 pub const MIRAGE_CHAN_FMA: &str = include_str!("../wgsl/mirage_chan_fma.wgsl");
 /// `wgsl/mirage_conv2d.wgsl`
 pub const MIRAGE_CONV2D: &str = include_str!("../wgsl/mirage_conv2d.wgsl");
+/// `wgsl/mirage_copy_rows.wgsl`
+pub const MIRAGE_COPY_ROWS: &str = include_str!("../wgsl/mirage_copy_rows.wgsl");
 /// `wgsl/mirage_dwconv.wgsl`
 pub const MIRAGE_DWCONV: &str = include_str!("../wgsl/mirage_dwconv.wgsl");
 /// `wgsl/mirage_gated_mix.wgsl`
@@ -1871,6 +1873,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_axpy", MIRAGE_AXPY),
     ("mirage_chan_fma", MIRAGE_CHAN_FMA),
     ("mirage_conv2d", MIRAGE_CONV2D),
+    ("mirage_copy_rows", MIRAGE_COPY_ROWS),
     ("mirage_dwconv", MIRAGE_DWCONV),
     ("mirage_gated_mix", MIRAGE_GATED_MIX),
     ("mirage_grn_apply", MIRAGE_GRN_APPLY),

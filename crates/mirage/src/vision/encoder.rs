@@ -129,39 +129,36 @@ impl HConv {
     }
 }
 
-struct Stem {
-    w0: Vec<f32>,
-    norms: Vec<Vec<f32>>,
-    dw: Vec<Vec<f32>>,
-    pw: Vec<Linear>,
-    widths: Vec<usize>,
-}
+pub(crate) struct Stem {
+    pub(crate) w0: Vec<f32>,
+    pub(crate) norms: Vec<Vec<f32>>,
+    pub(crate) dw: Vec<Vec<f32>>,
+    pub(crate) pw: Vec<Linear>,
+    pub(crate) widths: Vec<usize>,}
 
-struct Body {
-    mix_norm: Vec<f32>,
-    dw_value: Vec<f32>,
-    b_value: Vec<f32>,
-    dw_gate: Vec<f32>,
-    b_gate: Vec<f32>,
-    dw_down: Vec<f32>,
-    hconv: HConv,
-    gamma: Vec<f32>,
-    beta: Vec<f32>,
-}
+pub(crate) struct Body {
+    pub(crate) mix_norm: Vec<f32>,
+    pub(crate) dw_value: Vec<f32>,
+    pub(crate) b_value: Vec<f32>,
+    pub(crate) dw_gate: Vec<f32>,
+    pub(crate) b_gate: Vec<f32>,
+    pub(crate) dw_down: Vec<f32>,
+    pub(crate) hconv: HConv,
+    pub(crate) gamma: Vec<f32>,
+    pub(crate) beta: Vec<f32>,}
 
-struct Top {
-    attn_norm: Vec<f32>,
-    q: Linear,
-    k: Linear,
-    v: Linear,
-    gate: Linear,
-    out: Linear,
-    q_norm: Vec<f32>,
-    k_norm: Vec<f32>,
-    post_attn_norm: Vec<f32>,
-    attn_gate: f32,
-    hconv: HConv,
-}
+pub(crate) struct Top {
+    pub(crate) attn_norm: Vec<f32>,
+    pub(crate) q: Linear,
+    pub(crate) k: Linear,
+    pub(crate) v: Linear,
+    pub(crate) gate: Linear,
+    pub(crate) out: Linear,
+    pub(crate) q_norm: Vec<f32>,
+    pub(crate) k_norm: Vec<f32>,
+    pub(crate) post_attn_norm: Vec<f32>,
+    pub(crate) attn_gate: f32,
+    pub(crate) hconv: HConv,}
 
 /// Everything the encoder produces that later stages consume.
 pub struct EncoderOutput {
@@ -178,14 +175,14 @@ pub struct EncoderOutput {
 
 /// The encoder's weights, prepared for execution.
 pub struct Encoder {
-    cfg: MirageConfig,
-    stem: Stem,
-    body: Vec<Body>,
-    top: Vec<Top>,
-    registers: Vec<f32>,
-    enc_norm: Vec<f32>,
-    level_norm: Vec<Vec<f32>>,
-    level_gates: Vec<f32>,
+    pub(crate) cfg: MirageConfig,
+    pub(crate) stem: Stem,
+    pub(crate) body: Vec<Body>,
+    pub(crate) top: Vec<Top>,
+    pub(crate) registers: Vec<f32>,
+    pub(crate) enc_norm: Vec<f32>,
+    pub(crate) level_norm: Vec<Vec<f32>>,
+    pub(crate) level_gates: Vec<f32>,
 }
 
 impl Encoder {

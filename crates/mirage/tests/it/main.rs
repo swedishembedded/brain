@@ -12,6 +12,7 @@ mod config;
 mod decoder;
 mod describe;
 mod device;
+mod device_vision;
 mod import;
 mod pipeline;
 mod spec;

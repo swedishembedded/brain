@@ -24,16 +24,15 @@ pub struct Slot {
 
 /// Builds decoder memory.
 pub struct MemoryBuilder {
-    dim: usize,
-    grid: usize,
-    side: usize,
-    cell_px: f32,
-    pe_gate: f32,
-    slot_proj: Linear,
-    slot_pool: Linear,
-    slot_norm: Vec<f32>,
-    embedding: Vec<f32>,
-}
+    pub(crate) dim: usize,
+    pub(crate) grid: usize,
+    pub(crate) side: usize,
+    pub(crate) cell_px: f32,
+    pub(crate) pe_gate: f32,
+    pub(crate) slot_proj: Linear,
+    pub(crate) slot_pool: Linear,
+    pub(crate) slot_norm: Vec<f32>,
+    pub(crate) embedding: Vec<f32>,}
 
 /// Sine then cosine of `pos * exp(-ln(1e4) / (dim/2 - 1) * i)` for `i < dim/2`.
 fn sinusoid(pos: f64, dim: usize) -> Vec<f32> {

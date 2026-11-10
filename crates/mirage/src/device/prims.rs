@@ -161,9 +161,63 @@ impl Device {
 
     /// Masked grouped-query attention with the usual `1 / sqrt(hd)` scale.
     pub fn attention(&self, s: &mut Vec<Step>, a: AttnShape, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, key_mask: &DeviceBuffer, out: &DeviceBuffer) {
-        assert!(a.vd <= 128 && a.heads % a.kvh == 0, "attention shape {a:?}");
+        assert!(a.vd <= 128 && a.heads.is_multiple_of(a.kvh), "attention shape {a:?}");
         let scale = (1.0 / (a.hd as f32).sqrt()).to_bits();
         let p = [a.batch, a.nq, a.heads, a.kvh, a.hd, a.vd, a.nk, a.visible, scale];
         self.push(s, "mirage_attn", &[q, k, v, key_mask, out], &p, a.batch * a.nq * a.heads);
+    }
+
+    /// `y = a * b` elementwise.
+    pub fn mul(&self, s: &mut Vec<Step>, a: &DeviceBuffer, b: &DeviceBuffer, y: &DeviceBuffer, total: u32) {
+        self.push(s, "mul", &[a, b, y], &[total], total);
+    }
+
+    /// `dst[b, dst_off + r] = src[b, src_off + r]` for `r < n` (rows of width `d`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_rows(&self, s: &mut Vec<Step>, src: &DeviceBuffer, (src_stride, src_off): (u32, u32), dst: &DeviceBuffer, (dst_stride, dst_off): (u32, u32), batch: u32, n: u32, d: u32) {
+        self.push(s, "mirage_copy_rows", &[src, dst], &[batch, n, d, src_stride, src_off, dst_stride, dst_off], batch * n * d);
+    }
+
+    /// A resident vector.
+    pub fn buf(&self, v: &[f32]) -> DeviceBuffer {
+        self.gpu().storage_init("mirage", v)
+    }
+
+    /// The weight `1 + scale` of a zero-centred RMS norm, resident.
+    pub fn norm_weight(&self, scale: &[f32]) -> DeviceBuffer {
+        self.buf(&scale.iter().map(|s| 1.0 + s).collect::<Vec<_>>())
+    }
+
+    /// A fresh buffer of `n` values.
+    pub fn alloc(&self, n: usize) -> DeviceBuffer {
+        self.gpu().storage(n as u64)
+    }
+
+    /// `zc_norm(x)` into a new buffer.
+    pub fn zc_new(&self, s: &mut Vec<Step>, x: &DeviceBuffer, weight: &DeviceBuffer, rows: u32, d: u32) -> DeviceBuffer {
+        let y = self.alloc((rows * d) as usize);
+        self.zc_norm(s, x, weight, rows, d, &y);
+        y
+    }
+
+    /// `silu(x)` into a new buffer.
+    pub fn silu_new(&self, s: &mut Vec<Step>, x: &DeviceBuffer, total: u32) -> DeviceBuffer {
+        let y = self.alloc(total as usize);
+        self.silu(s, x, &y, total);
+        y
+    }
+
+    /// `x W^T` into a new buffer.
+    pub fn linear_new(&self, s: &mut Vec<Step>, w: &model::ops::Weight, x: &DeviceBuffer, rows: u32) -> DeviceBuffer {
+        let y = self.alloc((rows * w.n()) as usize);
+        self.linear(s, w, x, rows, &y);
+        y
+    }
+
+    /// Submit `steps` and wait for them, so buffers they used may be dropped.
+    pub fn flush(&self, steps: &mut Vec<Step>) {
+        self.gpu().submit(&[], steps);
+        self.gpu().poll_wait();
+        steps.clear();
     }
 }

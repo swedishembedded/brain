@@ -30,25 +30,23 @@ const LEFT_TRIM: usize = 12;
 /// First frame excluded at the right of a window that is not the last.
 const RIGHT_END: usize = 68;
 
-struct Block {
-    norm: Vec<f32>,
-    mix: Vec<f32>,
-    up: Linear,
-    down: Linear,
-}
+pub(crate) struct Block {
+    pub(crate) norm: Vec<f32>,
+    pub(crate) mix: Vec<f32>,
+    pub(crate) up: Linear,
+    pub(crate) down: Linear,}
 
 /// The reader network.
 pub struct Reader {
-    dim: usize,
-    w0: Vec<f32>,
-    stage_norm: Vec<Vec<f32>>,
-    dw: Vec<Vec<f32>>,
-    pw: Vec<Linear>,
-    blocks: Vec<Block>,
-    final_norm: Vec<f32>,
-    out: Linear,
-    bias: Vec<f32>,
-}
+    pub(crate) dim: usize,
+    pub(crate) w0: Vec<f32>,
+    pub(crate) stage_norm: Vec<Vec<f32>>,
+    pub(crate) dw: Vec<Vec<f32>>,
+    pub(crate) pw: Vec<Linear>,
+    pub(crate) blocks: Vec<Block>,
+    pub(crate) final_norm: Vec<f32>,
+    pub(crate) out: Linear,
+    pub(crate) bias: Vec<f32>,}
 
 impl Reader {
     /// Prepare from the checkpoint tensors.

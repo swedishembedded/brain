@@ -47,65 +47,61 @@ pub fn with_decode_threads<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     par::with_threads(DECODE_THREADS.min(par::threads()), f)
 }
 
-struct Layer {
-    norm: Vec<f32>,
-    q: Linear,
-    k: Linear,
-    v: Linear,
-    q_taps: Vec<f32>,
-    k_taps: Vec<f32>,
-    v_taps: Vec<f32>,
-    q_norm: Vec<f32>,
-    k_norm: Vec<f32>,
-    gate: Linear,
-    out: Linear,
-    post_attn: Vec<f32>,
-    attn_gate: f32,
-    cross_norm: Vec<f32>,
-    cq: Linear,
-    ck: Linear,
-    cv: Linear,
-    cgate: Linear,
-    cout: Linear,
-    cq_norm: Vec<f32>,
-    ck_norm: Vec<f32>,
-    post_cross: Vec<f32>,
-    cross_gate: f32,
-    pre_hada: Vec<f32>,
-    mlp: HadamardMlp,
+pub(crate) struct Layer {
+    pub(crate) norm: Vec<f32>,
+    pub(crate) q: Linear,
+    pub(crate) k: Linear,
+    pub(crate) v: Linear,
+    pub(crate) q_taps: Vec<f32>,
+    pub(crate) k_taps: Vec<f32>,
+    pub(crate) v_taps: Vec<f32>,
+    pub(crate) q_norm: Vec<f32>,
+    pub(crate) k_norm: Vec<f32>,
+    pub(crate) gate: Linear,
+    pub(crate) out: Linear,
+    pub(crate) post_attn: Vec<f32>,
+    pub(crate) attn_gate: f32,
+    pub(crate) cross_norm: Vec<f32>,
+    pub(crate) cq: Linear,
+    pub(crate) ck: Linear,
+    pub(crate) cv: Linear,
+    pub(crate) cgate: Linear,
+    pub(crate) cout: Linear,
+    pub(crate) cq_norm: Vec<f32>,
+    pub(crate) ck_norm: Vec<f32>,
+    pub(crate) post_cross: Vec<f32>,
+    pub(crate) cross_gate: f32,
+    pub(crate) pre_hada: Vec<f32>,
+    pub(crate) mlp: HadamardMlp,
     // hyper-connection lane maps
-    phi_pre: Linear,
-    phi_post: Linear,
-    phi_res: Linear,
-    a: [f32; 3],
-    b_pre: Vec<f32>,
-    b_post: Vec<f32>,
-    b_res: Vec<f32>,
-}
+    pub(crate) phi_pre: Linear,
+    pub(crate) phi_post: Linear,
+    pub(crate) phi_res: Linear,
+    pub(crate) a: [f32; 3],
+    pub(crate) b_pre: Vec<f32>,
+    pub(crate) b_post: Vec<f32>,
+    pub(crate) b_res: Vec<f32>,}
 
-struct Engram {
-    table: Vec<f32>,
-    key: Linear,
-    value: Linear,
-    taps: Vec<f32>,
-}
+pub(crate) struct Engram {
+    pub(crate) table: Vec<f32>,
+    pub(crate) key: Linear,
+    pub(crate) value: Linear,
+    pub(crate) taps: Vec<f32>,}
 
 /// The decoder's weights, prepared for execution.
 pub struct Decoder {
-    cfg: MirageConfig,
-    layers: Vec<Layer>,
-    engrams: Vec<Engram>,
-    embedding: Linear,
-    final_norm: Vec<f32>,
-    perms: (Vec<u32>, Vec<u32>),
-}
+    pub(crate) cfg: MirageConfig,
+    pub(crate) layers: Vec<Layer>,
+    pub(crate) engrams: Vec<Engram>,
+    pub(crate) embedding: Linear,
+    pub(crate) final_norm: Vec<f32>,
+    pub(crate) perms: (Vec<u32>, Vec<u32>),}
 
 /// Cross-attention keys and values of one image's memory, per layer.
 pub struct CrossMemory {
-    rows: usize,
-    k: Vec<Vec<f32>>,
-    v: Vec<Vec<f32>>,
-}
+    pub(crate) rows: usize,
+    pub(crate) k: Vec<Vec<f32>>,
+    pub(crate) v: Vec<Vec<f32>>,}
 
 impl CrossMemory {
     /// Memory rows.

@@ -15,6 +15,7 @@
 
 pub mod hconv;
 pub mod prims;
+pub mod vision;
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::ops::{Ops, Weight};
@@ -42,6 +43,8 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_upsample2", kernels::MIRAGE_UPSAMPLE2),
     ("silu", kernels::SILU),
     ("add", kernels::ADD),
+    ("mul", kernels::MUL),
+    ("mirage_copy_rows", kernels::MIRAGE_COPY_ROWS),
     ("sigmoid", kernels::SIGMOID),
     ("bias_add", kernels::BIAS_ADD),
 ];
@@ -120,6 +123,13 @@ impl Device {
     /// The gated product of HConvGLU from a fused `[rows, 2n]` projection.
     pub fn hconv_glu(&self, s: &mut Vec<Step>, ab: &DeviceBuffer, bias: &DeviceBuffer, rows: u32, n: u32, z: &DeviceBuffer) {
         s.push(self.gpu().step(self.k("hconv_glu"), &[ab, bias, z], &[rows, n], rows * n));
+    }
+
+    /// Read `len` values of `buf` starting at value `offset`.
+    pub fn read_at(&self, buf: &DeviceBuffer, offset: usize, len: usize) -> Vec<f32> {
+        let mut out = vec![0f32; len];
+        self.gpu().read_into(buf, offset as u64, &mut out);
+        out
     }
 
     /// Run `steps` and read `len` values of `buf`.

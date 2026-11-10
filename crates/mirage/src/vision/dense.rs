@@ -54,17 +54,15 @@ pub const MAX_OBJECTS: usize = 64;
 /// Most text proposals kept.
 pub const MAX_TEXT: usize = 32;
 
-struct Block {
-    norm: Vec<f32>,
-    dw: Vec<f32>,
-    pw: Linear,
-}
+pub(crate) struct Block {
+    pub(crate) norm: Vec<f32>,
+    pub(crate) dw: Vec<f32>,
+    pub(crate) pw: Linear,}
 
-struct Branch {
-    blocks: Vec<Block>,
-    final_norm: Vec<f32>,
-    head: Linear,
-}
+pub(crate) struct Branch {
+    pub(crate) blocks: Vec<Block>,
+    pub(crate) final_norm: Vec<f32>,
+    pub(crate) head: Linear,}
 
 impl Branch {
     fn new(w: &Weights, pre: &str, out: &str, n: usize) -> Branch {
@@ -100,21 +98,20 @@ impl Branch {
 
 /// The detection head and the mask branches.
 pub struct DenseHead {
-    cfg: MirageConfig,
-    coarse: Linear,
-    mid: Linear,
-    fine: Linear,
-    neck_norm: Vec<f32>,
-    neck_dw: Vec<f32>,
-    neck_pw: Linear,
-    blocks: Vec<Block>,
-    final_norm: Vec<f32>,
-    out: Linear,
-    bias: Vec<f32>,
-    edge: Linear,
-    proto: Branch,
-    coef: Branch,
-}
+    pub(crate) cfg: MirageConfig,
+    pub(crate) coarse: Linear,
+    pub(crate) mid: Linear,
+    pub(crate) fine: Linear,
+    pub(crate) neck_norm: Vec<f32>,
+    pub(crate) neck_dw: Vec<f32>,
+    pub(crate) neck_pw: Linear,
+    pub(crate) blocks: Vec<Block>,
+    pub(crate) final_norm: Vec<f32>,
+    pub(crate) out: Linear,
+    pub(crate) bias: Vec<f32>,
+    pub(crate) edge: Linear,
+    pub(crate) proto: Branch,
+    pub(crate) coef: Branch,}
 
 /// Dense-head outputs.
 pub struct DenseOutput {

@@ -80,14 +80,13 @@ pub fn legacy_permutation(seed: u32, n: usize) -> Vec<u32> {
 
 /// One layer's Hadamard MLP parameters.
 pub struct HadamardMlp {
-    n: usize,
-    factors: (usize, usize),
-    d: [Vec<f32>; 4],
-    b2: Vec<f32>,
-    w: [(Vec<f32>, Vec<f32>); 3],
-    cond_v: Linear,
-    cond_u: Vec<f32>,
-}
+    pub(crate) n: usize,
+    pub(crate) factors: (usize, usize),
+    pub(crate) d: [Vec<f32>; 4],
+    pub(crate) b2: Vec<f32>,
+    pub(crate) w: [(Vec<f32>, Vec<f32>); 3],
+    pub(crate) cond_v: Linear,
+    pub(crate) cond_u: Vec<f32>,}
 
 impl HadamardMlp {
     /// Layer `layer` of the stacked decoder tensors.
