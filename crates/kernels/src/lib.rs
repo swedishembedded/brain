@@ -638,6 +638,8 @@ pub const GRID_SAMPLE: &str = include_str!("../wgsl/grid_sample.wgsl");
 pub const GRID_SAMPLE_DGRID: &str = include_str!("../wgsl/grid_sample_dgrid.wgsl");
 /// `wgsl/grid_sample_dx.wgsl`
 pub const GRID_SAMPLE_DX: &str = include_str!("../wgsl/grid_sample_dx.wgsl");
+/// `wgsl/hconv_glu.wgsl`
+pub const HCONV_GLU: &str = include_str!("../wgsl/hconv_glu.wgsl");
 /// `wgsl/head_pack.wgsl`
 pub const HEAD_PACK: &str = include_str!("../wgsl/head_pack.wgsl");
 /// `wgsl/head_pack_t.wgsl`
@@ -1732,6 +1734,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("grid_sample", GRID_SAMPLE),
     ("grid_sample_dgrid", GRID_SAMPLE_DGRID),
     ("grid_sample_dx", GRID_SAMPLE_DX),
+    ("hconv_glu", HCONV_GLU),
     ("head_pack", HEAD_PACK),
     ("head_pack_t", HEAD_PACK_T),
     ("head_unpack", HEAD_UNPACK),
