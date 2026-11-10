@@ -253,7 +253,6 @@ fn open_component(path: &str) -> Result<checkpoint::weightio::WeightReader, Stri
 /// Generation options.
 pub struct Opts {
     pub steps: u32,
-    pub guidance: f32,
     pub seed: u64,
     pub width: u32,
     pub height: u32,

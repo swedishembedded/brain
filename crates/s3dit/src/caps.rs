@@ -34,10 +34,10 @@ fn cap_len_param() -> ParamSpec {
     .step(1.0)
 }
 
-/// Shared generation params (steps / guidance / seed / size).
+/// Shared generation params (steps / seed / size / precision). There is no
+/// guidance scale: the sampler makes one conditional DiT pass a step.
 fn gen_params(spec: ActionSpec) -> ActionSpec {
     spec.param(ParamSpec::new("steps", ParamType::Int, "denoising steps (Turbo≈8)").default(json!(8)).min(1.0).max(crate::pipeline::MAX_STEPS as f64).step(1.0))
-        .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance scale; 0 disables (Turbo default)").default(json!(0.0)).min(0.0).max(30.0).step(0.1))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(ParamSpec::new("width", ParamType::Int, "output width, px").default(json!(1024)).min(64.0).max(2048.0).step(8.0))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px").default(json!(1024)).min(64.0).max(2048.0).step(8.0))
@@ -47,26 +47,22 @@ fn gen_params(spec: ActionSpec) -> ActionSpec {
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let prompt = || ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required();
-    let neg = || ParamSpec::new("negative_prompt", ParamType::Str, "what to avoid (only used when guidance>0)");
     let image_out = || BlobSpec::new("image", Media::Image, "the generated image");
 
     let text2image = gen_params(ActionSpec::new("text2image", "generate an image from a text prompt (posters, photos, art; strong at English/Chinese typography)").streaming())
         .param(prompt())
-        .param(neg())
         .param(cap_len_param())
         .param(ParamSpec::new("adapter", ParamType::Str, "path to a trained LoRA adapter (from lora_train) to apply").host_resolved())
         .output(image_out());
 
     let image2image = gen_params(ActionSpec::new("image2image", "regenerate an input image toward a prompt (style/lighting/weather changes, sketch→image)").streaming())
         .param(prompt())
-        .param(neg())
         .param(ParamSpec::new("strength", ParamType::Float, "0=keep input, 1=ignore it; how much to change").default(json!(0.55)).min(0.0).max(1.0).step(0.01))
         .input(BlobSpec::new("image", Media::Image, "the starting image").required())
         .output(image_out());
 
     let inpaint = gen_params(ActionSpec::new("inpaint", "regenerate only the masked region of an image (object removal/replacement, sign-text change)").streaming())
         .param(prompt())
-        .param(neg())
         .param(ParamSpec::new("strength", ParamType::Float, "how strongly to regenerate the masked region").default(json!(0.85)).min(0.0).max(1.0).step(0.01))
         .param(ParamSpec::new("feather", ParamType::Int, "mask-edge feather radius in latent cells (0 = hard edge)").default(json!(2)).min(0.0).max(64.0).step(1.0))
         .input(BlobSpec::new("image", Media::Image, "the image to edit").required())
@@ -315,7 +311,6 @@ fn seed_of(inv: &Invocation) -> Result<u64, String> {
 fn opts_from(inv: &Invocation, width: u32, height: u32, seed: u64) -> crate::pipeline::Opts {
     crate::pipeline::Opts {
         steps: inv.get_i64("steps").unwrap_or(8).max(1) as u32,
-        guidance: inv.get_f64("guidance").unwrap_or(0.0) as f32,
         seed,
         width,
         height,
@@ -511,7 +506,13 @@ mod tests {
         let t2i = &manifest().actions[0];
         let p = |name: &str| t2i.params.iter().find(|p| p.name == name).unwrap();
         assert_eq!((p("steps").min, p("steps").max, p("steps").step), (Some(1.0), Some(150.0), Some(1.0)));
-        assert_eq!((p("guidance").min, p("guidance").max), (Some(0.0), Some(30.0)));
+        // The sampler makes one DiT pass a step and never reads a guidance
+        // scale or a negative prompt, so neither may be offered.
+        for a in &manifest().actions {
+            for name in ["guidance", "negative_prompt"] {
+                assert!(a.params.iter().all(|p| p.name != name), "{} offers '{name}', which the sampler ignores", a.name);
+            }
+        }
         assert_eq!((p("width").min, p("width").max, p("width").step), (Some(64.0), Some(2048.0), Some(8.0)));
         assert_eq!((p("height").min, p("height").max, p("height").step), (Some(64.0), Some(2048.0), Some(8.0)));
 

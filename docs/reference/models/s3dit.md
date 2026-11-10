@@ -26,8 +26,8 @@ env var or manual download needed. The first request downloads and converts
 the checkpoint into the local model store; every request after is instant.
 
 The slower, non-distilled `Tongyi-MAI/Z-Image` base model auto-fetches the
-same way when requested by name (also opt-in) (use it with a higher `guidance` and more
-`steps`).
+same way when requested by name (also opt-in) (use it with more `steps`; classifier-free
+guidance is not implemented, so the base model samples unguided).
 
 `brain serve` does not require `BRAIN_S3DIT_*` either: the statically
 registered resident resolves its four components from the model store, the
@@ -83,9 +83,9 @@ dataset is read.
 
 ## Options
 
-Shared generation parameters: `steps` (default 8), `guidance` (default 0.0),
-`seed` (random when omitted; the outcome reports the one used, and passing it
-back reproduces the image), `width` / `height` (default 1024), `precision` -
+Shared generation parameters: `steps` (default 8), `seed` (random when
+omitted; the outcome reports the one used, and passing it back reproduces the
+image), `width` / `height` (default 1024), `precision` -
 `int8` (default) or `fp32`.
 
 Actions: `text2image`, `image2image`, `inpaint`, `outpaint`, `lora_train`.
