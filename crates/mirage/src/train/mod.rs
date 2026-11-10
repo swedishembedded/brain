@@ -11,6 +11,7 @@
 //! primitive in [`ops`], [`spatial`] and [`seq`] has its backward checked against finite differences.
 
 pub mod decoder;
+pub mod loss;
 pub mod net;
 pub mod ops;
 pub mod real;

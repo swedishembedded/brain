@@ -119,3 +119,53 @@ fn sinkhorn_rows_and_columns_sum_to_one() {
         assert!((row - 1.0).abs() < 1e-6 && (col - 1.0).abs() < 1e-6, "row {row} column {col}");
     }
 }
+
+#[test]
+fn loss_primitives() {
+    let w = [1.0, 0.5, 0.0, 2.0];
+    check("softmax_ce", &[noise(16, 70, 1.0)], &move |t, i| t.softmax_ce(i[0], 4, &[1, 3, 0, 2], &w));
+    let target: Vec<f64> = (0..10).map(|i| if i == 3 { 1.0 } else if i < 6 { 0.4 / (1 + i) as f64 } else { 0.0 }).collect();
+    let weight = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0];
+    check("focal_heat", &[noise(10, 71, 1.5)], &move |t, i| t.focal_heat(i[0], &target, &weight, 0.54, 1.0));
+    let tgt = [0.2, 0.7, 0.5, -0.3];
+    check("l1", &[noise(4, 72, 1.0)], &move |t, i| t.l1(i[0], &tgt, &[1.0, 2.0, 0.0, 1.0], 3.0));
+    let mask = [1.0, 0.0, 1.0, 1.0, 0.0, 0.0];
+    check("bce_dice", &[noise(6, 73, 1.5)], &move |t, i| t.bce_dice(i[0], &mask, 1.0, 1.0));
+    check("ctc", &[noise(7 * 5, 74, 1.0)], &|t, i| t.ctc(i[0], 5, &[2, 2, 4]));
+    check("ctc without repeats", &[noise(6 * 4, 75, 1.0)], &|t, i| t.ctc(i[0], 4, &[1, 3]));
+}
+
+#[test]
+fn ctc_matches_a_brute_force_alignment_sum_and_flags_infeasible_targets() {
+    // 3 frames, 3 classes, label [1]: sum over every 3-frame path that collapses to "1".
+    let logits = noise(9, 76, 1.0);
+    let mut t = mirage::train::tape::Tape::<f64>::new();
+    let x = t.leaf(logits.clone());
+    let loss = t.ctc(x, 3, &[1]);
+    let prob = |frame: usize, k: usize| {
+        let row = &logits[frame * 3..(frame + 1) * 3];
+        row[k].exp() / row.iter().map(|v| v.exp()).sum::<f64>()
+    };
+    let mut total = 0.0;
+    for a in 0..3 {
+        for b in 0..3 {
+            for c in 0..3 {
+                let path = [a, b, c];
+                let mut collapsed = Vec::new();
+                let mut prev = usize::MAX;
+                for &k in &path {
+                    if k != prev && k != 0 {
+                        collapsed.push(k);
+                    }
+                    prev = k;
+                }
+                if collapsed == [1] {
+                    total += prob(0, a) * prob(1, b) * prob(2, c);
+                }
+            }
+        }
+    }
+    assert!((t.val(loss)[0] + total.ln()).abs() < 1e-10, "ctc {} vs brute force {}", t.val(loss)[0], -total.ln());
+    assert!(!mirage::train::loss::ctc_feasible(2, &[1, 1]));
+    assert!(mirage::train::loss::ctc_feasible(3, &[1, 1]));
+}
