@@ -130,7 +130,10 @@ impl Device {
 
     /// `y[rows, out] = x[rows, in] W^T` with the selected GEMM.
     pub fn linear(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, rows: u32, y: &DeviceBuffer) {
-        let act = self.ops.act(s, x, 0, rows, w.k());
+        // Every Mirage weight is dense f32 and reads the f32 activations; `Ops::act` would also pack an int8 copy
+        // (two reduction dispatches per product) that nothing reads.
+        debug_assert!(w.is_dense_f32());
+        let act = self.ops.act_f32(x, 0, rows, w.k());
         self.ops.matmul(s, w, &act, y, 0);
     }
 
