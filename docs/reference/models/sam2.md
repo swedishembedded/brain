@@ -59,12 +59,18 @@ image-batched path.
 
 ## Running it: a video
 
-`brain sam2 track` is the video path. One click on one frame in, a per-frame
+`brain sam2 track` is the video path. Clicks on one frame in, a per-frame
 mask sequence out:
 
 ```bash
 brain sam2 track --video clip.mp4 --point 640,300 --out masks/
 ```
+
+`--point` repeats: several clicks pick one object together (a person whose
+coat and trousers a single click would take apart). `--exclude x,y` is a
+click on something that is not the object. With one click SAM 2 picks the
+best of its three ambiguity masks; with several it asks for one mask, as the
+reference does.
 
 That writes a mask-sequence DIRECTORY:
 

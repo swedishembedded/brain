@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain sam2 track` - one point on one frame in, a per-frame mask sequence
+//! `brain sam2 track` - clicks on one frame in, a per-frame mask sequence
 //! out.
 //!
 //! ```text
@@ -49,11 +49,13 @@ USAGE:
   brain sam2 track --video <clip> --point <x,y> --out <dir> [options]
   brain sam2 track --frames <dir> --point <x,y> --out <dir> [options]
 
-  --video <path>        source clip; decoded with ffmpeg at its native rate
+  --video <path>        source clip, decoded at its native rate
   --frames <dir>        a directory of numbered image files, instead of --video
-  --point <x,y>         the click that picks the object, in SOURCE pixels
-  --label <0|1>         1 = foreground (default), 0 = background
-  --prompt-frame <n>    frame the click sits on (default 0)
+  --point <x,y>         a click on the object, in SOURCE pixels (repeatable:
+                        several clicks pick one object together, for a person
+                        whose coat and trousers SAM 2 would otherwise take apart)
+  --exclude <x,y>       a click on something that is NOT the object (repeatable)
+  --prompt-frame <n>    frame the clicks sit on (default 0)
   --out <dir>           mask-sequence directory (masks.json + mask_%06d.png)
 
   --weights <path>      state the checkpoint outright, as the models directory
@@ -63,7 +65,8 @@ USAGE:
                         against its real trunk width, not trusted blindly
                         (default: derived from that width)
   --max-frames <n>      stop after n frames (default: the whole clip)
-  --fps <f>             resample the clip to this rate before tracking
+  --fps <f>             resample the clip to this rate before tracking; with
+                        --frames, the rate the frames were taken at (required)
   --object-id <n>       recorded in masks.json for multi-character work
   --invert              emit object=0 (LTX masked-conditioning polarity)
   --soft                emit the sigmoid ramp instead of a hard 0/255 mask
@@ -93,7 +96,7 @@ pub fn run_sam2(args: &[String]) {
 }
 
 /// One `(x, y)` click in source pixels.
-fn parse_point(s: &str) -> Result<(f32, f32), String> {
+pub(crate) fn parse_point(s: &str) -> Result<(f32, f32), String> {
     let v: Vec<f32> = s.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>().map_err(|e| format!("--point wants 'x,y': {e}"))?;
     match v[..] {
         [x, y] => Ok((x, y)),
@@ -128,7 +131,7 @@ impl Clip {
         let (raw, name, rate) = match (video, dir) {
             (Some(v), _) => {
                 let p = Path::new(v);
-                let rate = fps.or_else(|| imaging::video::probe_fps(p)).unwrap_or(24.0);
+                let rate = fps.or_else(|| imaging::video::probe_fps(p)).ok_or_else(|| format!("{v}: its frame rate cannot be read from the container; give it with --fps"))?;
                 let opts = imaging::video::VideoDecodeOpts { fps, max_frames: max, spread: 0 };
                 let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| v.to_string());
                 (imaging::video::decode_frames(p, &opts)?, name, rate)
@@ -157,7 +160,7 @@ impl Clip {
                 // with the sequence, and a full machine path in it is both
                 // noise and something a shared artifact should not carry.
                 let name = Path::new(d).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| d.to_string());
-                (f, name, fps.unwrap_or(24.0))
+                (f, name, fps.ok_or("--frames has no frame rate of its own: give it with --fps")?)
             }
             (None, None) => return Err("one of --video or --frames is required".into()),
         };
@@ -184,13 +187,23 @@ fn track(args: &[String]) -> Result<(), String> {
     let mut a = Args::new(&remaining);
     let video = a.take_str("--video");
     let frames_dir = a.take_str("--frames");
-    let point = a.take_str("--point").ok_or("--point <x,y> is required: it is what picks the object")?;
-    let label = a.f32_or("--label", 1.0);
+    let mut points = Vec::new();
+    while let Some(p) = a.take_str("--point") {
+        let (x, y) = parse_point(&p)?;
+        points.push((x, y, 1.0));
+    }
+    while let Some(p) = a.take_str("--exclude") {
+        let (x, y) = parse_point(&p)?;
+        points.push((x, y, 0.0));
+    }
+    if !points.iter().any(|p| p.2 == 1.0) {
+        return Err("--point <x,y> is required: it is what picks the object".into());
+    }
     let prompt_frame = a.usize_or("--prompt-frame", 0);
     let out = a.take_str("--out").ok_or("--out <dir> is required")?;
     let variant_flag = a.take_str("--variant");
     let max_frames = a.u32_or("--max-frames", 0);
-    let fps = a.take_str("--fps").and_then(|s| s.parse::<f64>().ok());
+    let fps = a.parsed::<f64>("--fps");
     let object_id = a.u32_or("--object-id", 0);
     let invert = a.take_flag("--invert");
     let soft = a.take_flag("--soft");
@@ -199,20 +212,38 @@ fn track(args: &[String]) -> Result<(), String> {
         overrides.insert("variant".to_string(), v);
     }
 
-    let assembly = crate::resolver_cli::resolve_or_exit("sam2", &spec, &overrides);
+    let m = load_tracker(&overrides)?;
+    let clip = Clip::load(video.as_deref(), frames_dir.as_deref(), fps, max_frames)?;
+    let (w, h) = (clip.width, clip.height);
+    eprintln!("sam2 track: {} frames at {w}x{h}, {} click(s) on frame {prompt_frame}", clip.len(), points.len());
+    let tracked = track_frames(&m, &clip.frames, w, h, prompt_frame, &points, object_id)?;
+
+    let polarity = if invert { Polarity::ObjectBlack } else { Polarity::ObjectWhite };
+    let mut seq = MaskSeq::new(&out, w, h, clip.fps, polarity, object_id, (clip.name.clone(), clip.len()), prompt_frame, points.clone());
+    seq.binary = !soft;
+    for (f, t) in tracked.iter().enumerate() {
+        seq.write_frame(f, &t.logits, t.object_score, t.iou)?;
+    }
+    let manifest = seq.write_manifest()?;
+    let occluded = seq.occluded_frames();
+    eprintln!(
+        "sam2 track: wrote {} masks to {} ({}), manifest {}{}",
+        tracked.len(),
+        out,
+        polarity.tag(),
+        manifest.display(),
+        if occluded.is_empty() { String::new() } else { format!(", {} occluded frame(s)", occluded.len()) }
+    );
+    Ok(())
+}
+
+/// Load the whole SAM 2.1 checkpoint (memory bank included) the models
+/// directory and `overrides` resolve to.
+pub(crate) fn load_tracker(overrides: &std::collections::BTreeMap<String, String>) -> Result<Sam2, String> {
+    let assembly = crate::resolver_cli::resolve_or_exit("sam2", &sam2::spec::Sam2Spec, overrides);
     let weights = assembly.role_path("weights")?;
     let variant = assembly.variant.clone().ok_or("sam2 track: resolved assembly has no variant")?;
-
-    let (px, py) = parse_point(&point)?;
     let cfg = sam2::caps::variant_config(&variant)?;
-    let clip = Clip::load(video.as_deref(), frames_dir.as_deref(), fps, max_frames)?;
-    let n = clip.len();
-    if prompt_frame >= n {
-        return Err(format!("--prompt-frame {prompt_frame} is past the {n}-frame clip"));
-    }
-    let (w, h) = (clip.width, clip.height);
-    eprintln!("sam2 track: {n} frames at {w}x{h}, prompt ({px}, {py}) on frame {prompt_frame}");
-
     // The WHOLE checkpoint: `Scope::Video` skips nothing and errors on an
     // unmatched key in either direction, so a memory bank left at random init
     // is not a reachable state.
@@ -225,32 +256,48 @@ fn track(args: &[String]) -> Result<(), String> {
         raw.into_iter().map(|(nm, s, d)| (nm.strip_prefix("model.").unwrap_or(&nm).to_string(), s, d)).collect();
     let (weights, rep) = sam2::import_scoped(tensors, &cfg, Scope::Video)?;
     eprintln!("sam2 track: imported {} of {} checkpoint tensors, {} skipped", rep.imported, rep.source, rep.skipped_video);
-    let gpu = gpu_core::Gpu::new(sam2::PIPELINES);
-    let m = Sam2::new_video(gpu, cfg, &weights);
+    Ok(Sam2::new_video(gpu_core::Gpu::new(sam2::PIPELINES), cfg, &weights))
+}
 
+/// One frame's tracking result: mask logits on the source grid (positive is
+/// the object), SAM 2's object score (`<= 0` means it believes the object is
+/// occluded) and its predicted IoU.
+pub(crate) struct Tracked {
+    pub logits: Vec<f32>,
+    pub object_score: f32,
+    pub iou: f32,
+}
+
+/// Track the object `points` (`(x, y, label)` in source pixels, label 1 on
+/// the object, 0 off it) pick on `prompt_frame` through `frames` (interleaved
+/// `h * w * 3` RGB in `[0, 1]`). Every frame gets a result: frames before
+/// the prompt frame take its mask, because reverse tracking is not ported.
+pub(crate) fn track_frames(m: &Sam2, frames: &[Vec<f32>], w: u32, h: u32, prompt_frame: usize, points: &[(f32, f32, f32)], object_id: u32) -> Result<Vec<Tracked>, String> {
+    let n = frames.len();
+    if prompt_frame >= n {
+        return Err(format!("--prompt-frame {prompt_frame} is past the {n}-frame clip"));
+    }
+    if let Some(&(x, y, _)) = points.iter().find(|&&(x, y, _)| !(0.0..w as f32).contains(&x) || !(0.0..h as f32).contains(&y)) {
+        return Err(format!("the click ({x}, {y}) is outside the {w}x{h} frame"));
+    }
     let s = m.cfg.image_size;
     // The reference resizes each frame to `image_size²` without preserving
     // aspect ratio (`Resize((1024, 1024))`), so each axis scales on its own.
     let (sx, sy) = (s as f32 / w as f32, s as f32 / h as f32);
-    let prompt = Prompt { coords: vec![(px * sx, py * sy)], labels: vec![label], mask_lowres: None, multimask_output: true };
-
-    let polarity = if invert { Polarity::ObjectBlack } else { Polarity::ObjectWhite };
-    let mut seq = MaskSeq::new(&out, w, h, clip.fps, polarity, object_id, (clip.name.clone(), n), prompt_frame, vec![(px, py, label)]);
-    seq.binary = !soft;
-
-    let mut tr = Tracker::new(&m, n, object_id);
+    // The reference asks for the 3-way ambiguity head only for a single
+    // click; several clicks already disambiguate (`_use_multimask`).
+    let prompt = Prompt {
+        coords: points.iter().map(|&(x, y, _)| (x * sx, y * sy)).collect(),
+        labels: points.iter().map(|p| p.2).collect(),
+        mask_lowres: None,
+        multimask_output: points.len() == 1,
+    };
+    let mut tr = Tracker::new(m, n, object_id);
+    let mut out: Vec<Option<Tracked>> = (0..n).map(|_| None).collect();
     // The conditioning frame first: everything after it attends to its memory.
-    let order: Vec<usize> = std::iter::once(prompt_frame).chain((0..n).filter(|f| *f != prompt_frame)).collect();
-    let mut logits: Vec<Option<Vec<f32>>> = (0..n).map(|_| None).collect();
-    let mut rows: Vec<(f32, f32)> = vec![(0.0, 0.0); n];
-    for f in order {
-        if f < prompt_frame {
-            // Reverse tracking is not ported; frames before the click keep the
-            // click frame's own mask rather than silently getting an empty one.
-            continue;
-        }
+    for f in prompt_frame..n {
         let ctx = Ctx::new(&m.gpu);
-        let chw = imaging::pixels::hwc_to_chw(&clip.frames[f], 3, h as usize, w as usize);
+        let chw = imaging::pixels::hwc_to_chw(&frames[f], 3, h as usize, w as usize);
         let src = ctx.upload("sam2.track.src", &chw);
         let (dev, shape) = ctx.resize(&src, Shape::new(1, 3, h, w), s, s, Filter::Bilinear, AlignCorners::HalfPixel);
         let resized = ctx.download(&dev, shape.numel());
@@ -262,33 +309,17 @@ fn track(args: &[String]) -> Result<(), String> {
         // the image-resolution ones - one bilinear step, not two.
         let low = 4 * m.cfg.image_embedding_size();
         let (up, ushape) = ctx.resize(&step.low_res_mask, Shape::new(1, 1, low, low), h, w, Filter::Bilinear, AlignCorners::HalfPixel);
-        logits[f] = Some(ctx.download(&up, ushape.numel()));
-        rows[f] = (step.object_score, step.iou);
         if step.object_score <= 0.0 {
             eprintln!("sam2 track: frame {f} - object score {:.3} <= 0, SAM 2 believes the object is occluded here", step.object_score);
         }
+        out[f] = Some(Tracked { logits: ctx.download(&up, ushape.numel()), object_score: step.object_score, iou: step.iou });
     }
-    // Frames before the click take its mask, and `masks.json` says so through
-    // `prompt.frame`: a mask sequence must cover EVERY source frame or the
-    // consumer's frame indices silently shift.
-    let seed = logits[prompt_frame].clone().ok_or("the prompt frame produced no mask")?;
-    let seed_row = rows[prompt_frame];
-    for f in 0..prompt_frame {
-        logits[f] = Some(seed.clone());
-        rows[f] = seed_row;
+    // Frames before the clicks take their mask, and `masks.json` says so
+    // through `prompt.frame`: a mask sequence must cover EVERY source frame
+    // or the consumer's frame indices silently shift.
+    let seed = out[prompt_frame].as_ref().map(|t| (t.logits.clone(), t.object_score, t.iou)).ok_or("the prompt frame produced no mask")?;
+    for slot in &mut out[..prompt_frame] {
+        *slot = Some(Tracked { logits: seed.0.clone(), object_score: seed.1, iou: seed.2 });
     }
-    for f in 0..n {
-        let l = logits[f].as_ref().ok_or_else(|| format!("frame {f} produced no mask"))?;
-        seq.write_frame(f, l, rows[f].0, rows[f].1)?;
-    }
-    let manifest = seq.write_manifest()?;
-    let occluded = seq.occluded_frames();
-    eprintln!(
-        "sam2 track: wrote {n} masks to {} ({}), manifest {}{}",
-        out,
-        polarity.tag(),
-        manifest.display(),
-        if occluded.is_empty() { String::new() } else { format!(", {} occluded frame(s)", occluded.len()) }
-    );
-    Ok(())
+    out.into_iter().enumerate().map(|(f, t)| t.ok_or_else(|| format!("frame {f} produced no mask"))).collect()
 }
