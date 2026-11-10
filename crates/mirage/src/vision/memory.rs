@@ -58,20 +58,50 @@ impl MemoryBuilder {
         }
     }
 
+    /// The gated position code of every encoder cell, `[grid², dim]`.
+    pub fn position_rows(&self) -> Vec<f32> {
+        let (d, g) = (self.dim, self.grid);
+        let half = d / 2;
+        let gate = ops::sigmoid(self.pe_gate);
+        (0..g * g)
+            .flat_map(|cell| [sinusoid((cell / g) as f64, half), sinusoid((cell % g) as f64, half)].concat().into_iter().map(move |p| gate * p))
+            .collect()
+    }
+
     /// Memory rows for the valid cells of `encoder` (`[grid², dim]`) and the
     /// given slots; `head_in` is the dense head's input map.
     pub fn build(&self, encoder: &[f32], valid: &[bool], head_in: &[f32], slots: &[Slot]) -> Vec<f32> {
         let (d, g) = (self.dim, self.grid);
-        let half = d / 2;
-        let gate = ops::sigmoid(self.pe_gate);
+        let pos = self.position_rows();
         let mut rows = Vec::new();
         for cell in (0..g * g).filter(|&c| valid[c]) {
-            let pos = [sinusoid((cell / g) as f64, half), sinusoid((cell % g) as f64, half)].concat();
-            rows.extend(encoder[cell * d..(cell + 1) * d].iter().zip(&pos).map(|(e, p)| e + gate * p));
+            rows.extend(encoder[cell * d..(cell + 1) * d].iter().zip(&pos[cell * d..(cell + 1) * d]).map(|(e, p)| e + p));
         }
         if slots.is_empty() {
             return rows;
         }
+        let (proj_in, pooled) = self.slot_inputs(encoder, valid, head_in, slots);
+        let mut u = self.slot_proj.apply(&proj_in, slots.len());
+        ops::add_inplace(&mut u, &self.slot_pool.apply(&pooled, slots.len()));
+        let mut m = ops::zc_norm(&u, d, &self.slot_norm);
+        for (row, e) in m.chunks_exact_mut(d).zip(self.slot_embedding(slots).chunks_exact(d)) {
+            row.iter_mut().zip(e).for_each(|(a, e)| *a += e);
+        }
+        rows.extend(m);
+        rows
+    }
+
+    /// Scaled embeddings of the slots' reference tokens, `[slots, dim]`.
+    pub fn slot_embedding(&self, slots: &[Slot]) -> Vec<f32> {
+        let (d, root) = (self.dim, (self.dim as f32).sqrt());
+        slots.iter().flat_map(|s| self.embedding[s.token * d..(s.token + 1) * d].iter().map(move |e| root * e)).collect()
+    }
+
+    /// The two inputs of the slot projections: the head feature at the box
+    /// centre with the box code (`[slots, head_dim + 64]`) and the pooled
+    /// encoder features (`[slots, dim]`).
+    pub fn slot_inputs(&self, encoder: &[f32], valid: &[bool], head_in: &[f32], slots: &[Slot]) -> (Vec<f32>, Vec<f32>) {
+        let d = self.dim;
         let head_dim = self.slot_proj.inn - BOX_ENCODING_DIM;
         let mut proj_in = Vec::with_capacity(slots.len() * self.slot_proj.inn);
         let mut pooled = Vec::with_capacity(slots.len() * d);
@@ -86,15 +116,7 @@ impl MemoryBuilder {
             }
             pooled.extend(self.pool_cells(encoder, valid, b));
         }
-        let mut u = self.slot_proj.apply(&proj_in, slots.len());
-        ops::add_inplace(&mut u, &self.slot_pool.apply(&pooled, slots.len()));
-        let mut m = ops::zc_norm(&u, d, &self.slot_norm);
-        let root = (d as f32).sqrt();
-        for (row, s) in m.chunks_exact_mut(d).zip(slots) {
-            row.iter_mut().zip(&self.embedding[s.token * d..(s.token + 1) * d]).for_each(|(a, e)| *a += root * e);
-        }
-        rows.extend(m);
-        rows
+        (proj_in, pooled)
     }
 
     /// Mean encoder feature of the valid cells whose centre lies in the box

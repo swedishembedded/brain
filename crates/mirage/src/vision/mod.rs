@@ -115,17 +115,20 @@ impl VisionModel {
         }
     }
 
+    /// The memory slots of object and text proposals, objects first.
+    pub fn slots(&self, objects: &[Proposal], text: &[Proposal]) -> Vec<memory::Slot> {
+        objects
+            .iter()
+            .enumerate()
+            .map(|(k, p)| memory::Slot { bbox: p.bbox, token: self.reference_token(Kind::Object, k) })
+            .chain(text.iter().enumerate().map(|(j, p)| memory::Slot { bbox: p.bbox, token: self.reference_token(Kind::Text, j) }))
+            .collect()
+    }
+
     /// Decoder memory for an analysed image.
     pub fn decoder_memory(&self, a: &Analysis) -> Vec<f32> {
         let grid = self.cfg.grid();
         let valid = ops::valid_cells(a.resized_h, a.resized_w, grid);
-        let slots: Vec<memory::Slot> = a
-            .objects
-            .iter()
-            .enumerate()
-            .map(|(k, p)| memory::Slot { bbox: p.bbox, token: self.reference_token(Kind::Object, k) })
-            .chain(a.text.iter().enumerate().map(|(j, p)| memory::Slot { bbox: p.bbox, token: self.reference_token(Kind::Text, j) }))
-            .collect();
-        self.memory.build(&a.encoder.encoder, &valid, &a.dense.head_in, &slots)
+        self.memory.build(&a.encoder.encoder, &valid, &a.dense.head_in, &self.slots(&a.objects, &a.text))
     }
 }

@@ -15,6 +15,7 @@
 
 pub mod hconv;
 pub mod prims;
+pub mod reader;
 pub mod vision;
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
