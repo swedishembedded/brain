@@ -158,7 +158,7 @@ fn step_buf_shaped_result_is_byte_identical_to_step() {
 fn the_switch_disables_step_buf_shaped_too() {
     let exe = std::env::current_exe().expect("test binary path");
     let out = std::process::Command::new(exe)
-        .args(["gemv_reg_upgrade_step_buf::with_the_upgrade_off_step_buf_shaped_runs_the_registered_kernel", "--exact", "--ignored", "--nocapture"])
+        .args([&format!("{}::with_the_upgrade_off_step_buf_shaped_runs_the_registered_kernel", module_path!().trim_start_matches("it::")), "--exact", "--ignored", "--nocapture"])
         .output()
         .expect("re-run this test binary for the child test");
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));

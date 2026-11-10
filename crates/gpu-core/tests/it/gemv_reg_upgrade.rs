@@ -182,7 +182,7 @@ fn both_kernels_agree_with_a_host_f64_oracle() {
 fn the_switch_pins_the_handle_back_onto_the_registered_kernel() {
     let exe = std::env::current_exe().expect("test binary path");
     let out = std::process::Command::new(exe)
-        .args(["gemv_reg_upgrade::with_the_upgrade_off_the_handle_keeps_the_registered_kernel", "--exact", "--ignored", "--nocapture"])
+        .args([&format!("{}::with_the_upgrade_off_the_handle_keeps_the_registered_kernel", module_path!().trim_start_matches("it::")), "--exact", "--ignored", "--nocapture"])
         .output()
         .expect("re-run this test binary for the child test");
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
