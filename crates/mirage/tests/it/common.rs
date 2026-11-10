@@ -54,3 +54,16 @@ pub fn released_or_skip(test: &str) -> Option<PathBuf> {
     }
     dir
 }
+
+/// A complete checkpoint of the tiny configuration filled with deterministic noise.
+pub fn tiny_checkpoint() -> mirage::import::Checkpoint {
+    use data::rng::Lcg;
+    use mirage::import::{Checkpoint, Metadata, Tensor};
+    let config = mirage::config::MirageConfig::tiny();
+    let mut rng = Lcg::new(0x5eed); // seed: fixed filler, the tests assert agreement between two paths over whatever it holds
+    let tensors = mirage::spec::Manifest::new(&config)
+        .iter()
+        .map(|t| (t.name.clone(), Tensor { shape: t.shape.clone(), data: (0..t.numel()).map(|_| rng.signed() * 0.5).collect() }))
+        .collect();
+    Checkpoint { config, metadata: Metadata { source_sha256: "ab".repeat(32), step: 1234, format: "mirage".to_string() }, tensors }
+}

@@ -83,6 +83,30 @@ Open in L2b:
   itself adds none. Probabilities differ from the engine's, as expected from 2-bit weights.
 - Decoding fans out over at most 16 threads (`DECODE_THREADS`): more only adds wake-up cost per token.
 
+## Lane L2c - device path
+
+Started; only the first operator is on the device. `crates/mirage/src/device/` holds `Device` (an `Ops`
+façade over a `Gpu` chosen by the process: `BRAIN_DEVICE=cpu` runs the CPU backend's WGSL JIT,
+`BRAIN_BACKEND=cuda BRAIN_DEVICE=gpuN` one CUDA card) and the host path stays the oracle.
+
+| Item | State | Numbers |
+|---|---|---|
+| Tests cap the host pool at 8 threads (`common::cap_threads`) | done | whole suite 5.8 s wall, about 1 CPU-minute (was about 35 CPU-minutes) |
+| `hconv_glu` WGSL kernel (gelu_tanh(gate + bias) * value from a fused projection) | done, catalogued | CPU backend exact; CUDA max_abs 2.4e-7 |
+| HConvGLU on the device: ZC norm (`rmsnorm_rows` with weight 1 + scale), one GEMM into gate and value, `hconv_glu`, one GEMM out; the Walsh transforms and the 65-tap bands are multiplied out into the two weight matrices at upload (`HConv::fold`, accumulated in f64) | done for one mixer | released body_0 / body_15 / top_0 / top_11 against the host mixer: CPU backend cosine 1.0 (max_abs 3.3e-7 .. 5.6e-3, the top blocks have large magnitudes); CUDA gpu1 cosine 0.9999999 (max_abs 1.1e-4 .. 3.7 at the largest magnitudes) |
+
+Design note: no Walsh or banded-convolution kernel was written. The CPU backend's WGSL JIT supports a single
+workgroup barrier, which rules out a staged butterfly, and the dense folded form turns the mixer into two
+selector-picked GEMMs. It spends more arithmetic than the banded form (a 512x1024 and a 512x512 product per
+row) for the roofline-tuned GEMM; whether that is right at batch 8 is for the first profile to say.
+
+Open in L2c (everything below is not started): depthwise 3x3 / 1x5 and the stem convolution (check the
+existing conv kernels first), GRN, 2D RoPE and masked attention for the top blocks, level memory, the dense
+head and mask branches, the reader, batching over images; decoder on the device (mHC maps and sinkhorn,
+Hadamard MLP, causal taps, engram gather, cross-attention over per-image K/V, tied-logit GEMM, device argmax)
+with the shared step loop; `MirageModel` with `describe_batch` / `extract_batch`; a weight-free smoke test of
+every step kind; the first nsys profile of a batch-8 describe on CUDA.
+
 ## Facts the foundation established
 
 - The released `.cact` has 806 entries: 159 two-bit and 4 four-bit CQ matrices

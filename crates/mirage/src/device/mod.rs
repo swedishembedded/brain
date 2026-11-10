@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! Mirage on brain's GPU op layer.
+//!
+//! [`Device`] owns an [`Ops`] façade over a [`Gpu`] chosen by the caller (the
+//! CPU backend through the WGSL JIT, CUDA, Vulkan). Operators are built from
+//! the shared kernels and the selector-aware GEMM; the host operators in
+//! [`crate::vision`] and [`crate::decoder`] stay as the parity oracle.
+//!
+//! Swedish Embedded AB implements solutions for running perception models on
+//! whatever accelerator a customer already owns. If your team needs expertise
+//! in portable GPU inference then you can procure our services by sending an
+//! email to info@swedishembedded.com.
+
+pub mod hconv;
+
+use gpu_core::{DeviceBuffer, Gpu, Step};
+use model::ops::{Ops, Weight};
+
+use crate::vision::ops::NORM_EPS;
+
+/// Kernels Mirage needs beyond what [`model::ops::kernel_list`] carries.
+fn kernel_list() -> Vec<(&'static str, &'static str)> {
+    let mut list = model::ops::kernel_list().to_vec();
+    for (name, src) in [("rmsnorm_rows", kernels::RMSNORM_ROWS), ("hconv_glu", kernels::HCONV_GLU)] {
+        if !list.iter().any(|(n, _)| *n == name) {
+            list.push((name, src));
+        }
+    }
+    list
+}
+
+/// A device and the kernel indices Mirage dispatches by name.
+pub struct Device {
+    ops: Ops,
+    rmsnorm_rows: usize,
+    hconv_glu: usize,
+}
+
+impl Device {
+    /// Open the device the process selected (`BRAIN_DEVICE` / `BRAIN_BACKEND`).
+    pub fn open() -> Result<Device, String> {
+        Device::new(Gpu::new(&kernel_list()))
+    }
+
+    /// Build over an existing device; its kernel list must be [`Device::kernels`].
+    pub fn new(gpu: Gpu) -> Result<Device, String> {
+        let ops = Ops::new(gpu)?;
+        let find = |name: &str| ops.gpu().kernel_index(name).ok_or_else(|| format!("the device lacks kernel `{name}`"));
+        Ok(Device { rmsnorm_rows: find("rmsnorm_rows")?, hconv_glu: find("hconv_glu")?, ops })
+    }
+
+    /// The kernel list a [`Gpu`] must be created with for [`Device::new`].
+    pub fn kernels() -> Vec<(&'static str, &'static str)> {
+        kernel_list()
+    }
+
+    /// The underlying device.
+    pub fn gpu(&self) -> &Gpu {
+        self.ops.gpu()
+    }
+
+    /// The op façade.
+    pub fn ops(&self) -> &Ops {
+        &self.ops
+    }
+
+    /// Upload a `[out, in]` matrix as a resident GEMM weight.
+    pub fn weight(&self, name: &str, wt: &[f32], out: usize, inn: usize) -> Weight {
+        assert_eq!(wt.len(), out * inn);
+        Weight::dense_f32(self.gpu().storage_init(name, wt), out as u32, inn as u32)
+    }
+
+    /// `y[rows, out] = x[rows, in] W^T` with the selected GEMM.
+    pub fn linear(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, rows: u32, y: &DeviceBuffer) {
+        let act = self.ops.act(s, x, 0, rows, w.k());
+        self.ops.matmul(s, w, &act, y, 0);
+    }
+
+    /// `(1 + scale)`-weighted RMS norm over rows of width `d`: `weight` is `1 + scale`.
+    pub fn zc_norm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, weight: &DeviceBuffer, rows: u32, d: u32, y: &DeviceBuffer) {
+        s.push(self.gpu().dispatch(self.rmsnorm_rows, &[x, weight, y], &[d, rows, NORM_EPS.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
+    }
+
+    /// The gated product of HConvGLU from a fused `[rows, 2n]` projection.
+    pub fn hconv_glu(&self, s: &mut Vec<Step>, ab: &DeviceBuffer, bias: &DeviceBuffer, rows: u32, n: u32, z: &DeviceBuffer) {
+        s.push(self.gpu().step(self.hconv_glu, &[ab, bias, z], &[rows, n], rows * n));
+    }
+
+    /// Run `steps` and read `len` values of `buf`.
+    pub fn run_read(&self, steps: &[Step], buf: &DeviceBuffer, len: usize) -> Vec<f32> {
+        self.gpu().submit(&[], steps);
+        self.gpu().read(buf, len)
+    }
+}

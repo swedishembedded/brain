@@ -12,6 +12,8 @@ path = "src/lib.rs"
 [dependencies]
 brain-backend-cpu.workspace = true
 brain-checkpoint.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
 brain-model.workspace = true
 half.workspace = true
 serde.workspace = true

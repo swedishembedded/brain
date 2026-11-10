@@ -26,6 +26,7 @@ pub mod cact;
 pub mod cactmap;
 pub mod config;
 pub mod decoder;
+pub mod device;
 pub mod describe;
 pub mod form;
 pub mod import;

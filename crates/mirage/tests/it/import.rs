@@ -8,12 +8,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use data::rng::Lcg;
-use mirage::config::MirageConfig;
-use mirage::import::{self, Checkpoint, ImportError, ImportOptions, Metadata, Tensor, TensorProblem};
-use mirage::spec::Manifest;
+use mirage::import::{self, Checkpoint, ImportError, ImportOptions, TensorProblem};
 
-use crate::common::released_or_skip;
+use crate::common::{released_or_skip, tiny_checkpoint};
 
 /// The SHA-256 of the released `mirage.safetensors` this suite was written against.
 const RELEASED_SAFETENSORS_SHA256: &str = "6ba97c5c1bef661c9b0c80782135682b38b4312fb33e0b645c93c10604bb16cd";
@@ -48,16 +45,6 @@ fn scratch(name: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!("brain-mirage-import-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     Scratch(dir.join(name))
-}
-
-fn tiny_checkpoint() -> Checkpoint {
-    let config = MirageConfig::tiny();
-    let mut rng = Lcg::new(0x5eed); // seed: fixed filler, the test asserts bit-exact round trips of whatever it holds
-    let tensors = Manifest::new(&config)
-        .iter()
-        .map(|t| (t.name.clone(), Tensor { shape: t.shape.clone(), data: (0..t.numel()).map(|_| rng.signed()).collect() }))
-        .collect();
-    Checkpoint { config, metadata: Metadata { source_sha256: "ab".repeat(32), step: 1234, format: "mirage".to_string() }, tensors }
 }
 
 fn raw_file(path: &Path, tensors: &[(&str, safetensors::Dtype, Vec<usize>, Vec<u8>)], metadata: &[(String, String)]) {

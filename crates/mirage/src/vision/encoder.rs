@@ -23,17 +23,80 @@ const ROPE_HALVES: usize = 2;
 /// The HConvGLU channel mixer: Walsh transform, three banded convolutions
 /// (gate with bias, value, output) and the transform back.
 pub struct HConv {
-    norm: Vec<f32>,
+    pub(crate) norm: Vec<f32>,
     gate: Vec<f32>,
-    gate_bias: Vec<f32>,
+    pub(crate) gate_bias: Vec<f32>,
     value: Vec<f32>,
     out: Vec<f32>,
     width: usize,
     kernel: usize,
 }
 
+/// An HConvGLU mixer with the Walsh transforms and the banded convolutions
+/// multiplied out into two dense matrices, in the `[out, in]` layout GEMM
+/// kernels consume: `forward = gelu_glu(x W_in + bias) W_out` on the normalised
+/// input. The transforms are orthonormal and the bands sparse, so the products
+/// are exact (accumulated in `f64`) and the device runs two GEMMs where the
+/// host runs transforms and band loops.
+pub struct FoldedHConv {
+    /// `ZC` scale plus one, the weight of the RMS norm in front.
+    pub norm_weight: Vec<f32>,
+    /// `[2n, n]`: gate rows then value rows.
+    pub in_wt: Vec<f32>,
+    /// Gate bias, `[n]`.
+    pub gate_bias: Vec<f32>,
+    /// `[n, n]`.
+    pub out_wt: Vec<f32>,
+    /// Channel width.
+    pub width: usize,
+}
+
 impl HConv {
-    fn new(w: &Weights, prefix: &str, width: usize, kernel: usize) -> HConv {
+    /// Multiply the transforms and bands out (see [`FoldedHConv`]).
+    pub fn fold(&self) -> FoldedHConv {
+        let (n, k) = (self.width, self.kernel);
+        let r = k / 2;
+        // The orthonormal sequency Walsh matrix: transform the identity rows.
+        let mut walsh = vec![0f32; n * n];
+        for i in 0..n {
+            walsh[i * n + i] = 1.0;
+        }
+        ops::walsh_sequency_rows(&mut walsh, n);
+        // C[i][j] = sum_k W[i][k] * M[k][j], M[k][j] = w[j][k - j + r] (|k - j| <= r).
+        let walsh_band = |w: &[f32]| -> Vec<f32> {
+            let mut c = vec![0f32; n * n];
+            par::rows_mut(&mut c, n, |i, row| {
+                for (j, out) in row.iter_mut().enumerate() {
+                    let (lo, hi) = (j.saturating_sub(r), (j + r + 1).min(n));
+                    *out = (lo..hi).map(|kk| f64::from(walsh[i * n + kk]) * f64::from(w[j * k + kk + r - j])).sum::<f64>() as f32;
+                }
+            });
+            c
+        };
+        let gate = walsh_band(&self.gate);
+        let value = walsh_band(&self.value);
+        // D[i][j] = sum_k Mo[i][k] * W[k][j], Mo[i][k] = wo[k][i - k + r].
+        let mut band_walsh = vec![0f32; n * n];
+        par::rows_mut(&mut band_walsh, n, |i, row| {
+            for (j, out) in row.iter_mut().enumerate() {
+                let (lo, hi) = (i.saturating_sub(r), (i + r + 1).min(n));
+                *out = (lo..hi).map(|kk| f64::from(self.out[kk * k + i + r - kk]) * f64::from(walsh[kk * n + j])).sum::<f64>() as f32;
+            }
+        });
+        let mut in_wt = vec![0f32; 2 * n * n];
+        let mut out_wt = vec![0f32; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                in_wt[j * n + i] = gate[i * n + j];
+                in_wt[(n + j) * n + i] = value[i * n + j];
+                out_wt[j * n + i] = band_walsh[i * n + j];
+            }
+        }
+        FoldedHConv { norm_weight: self.norm.iter().map(|s| 1.0 + s).collect(), in_wt, gate_bias: self.gate_bias.clone(), out_wt, width: n }
+    }
+
+    /// Read the mixer `prefix` (`body_3`, `top_0`, ...) from the checkpoint tensors.
+    pub fn new(w: &Weights, prefix: &str, width: usize, kernel: usize) -> HConv {
         HConv {
             norm: w.vec(&format!("{prefix}/hconv_norm/scale")),
             gate: w.vec(&format!("{prefix}/hconv/gate_conv")),

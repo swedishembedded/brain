@@ -11,6 +11,7 @@ mod common;
 mod config;
 mod decoder;
 mod describe;
+mod device;
 mod import;
 mod pipeline;
 mod spec;
