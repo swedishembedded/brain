@@ -48,6 +48,8 @@ pub enum ModelError {
     Form(FormError),
     /// The request is invalid.
     Request(String),
+    /// The caller cancelled the request before it finished.
+    Cancelled,
 }
 
 impl fmt::Display for ModelError {
@@ -59,6 +61,7 @@ impl fmt::Display for ModelError {
             ModelError::Image(e) => e.fmt(f),
             ModelError::Form(e) => e.fmt(f),
             ModelError::Request(m) => write!(f, "mirage request: {m}"),
+            ModelError::Cancelled => f.write_str("cancelled"),
         }
     }
 }

@@ -15,6 +15,7 @@
 //! - [`tokenizer`]: the SentencePiece-BPE text front end.
 //! - [`decoder`]: the decoder with incremental state and greedy generation.
 //! - [`describe`], [`form`] and [`model`]: structured results and the end-to-end pipeline.
+//! - [`caps`], [`resolver`] and [`memory_cache`]: the served actions, the model-store rules and the decoder-memory reuse.
 //! - [`vision`]: the vision forward pass (encoder, heads, reader, memory).
 //!
 //! Swedish Embedded AB implements solutions for deploying compact vision
@@ -23,6 +24,7 @@
 //! email to info@swedishembedded.com.
 
 pub mod cact;
+pub mod caps;
 pub mod cactmap;
 pub mod config;
 pub mod decoder;
@@ -30,7 +32,9 @@ pub mod device;
 pub mod describe;
 pub mod form;
 pub mod import;
+pub mod memory_cache;
 pub mod model;
+pub mod resolver;
 pub mod spec;
 pub mod tokenizer;
 pub mod vision;

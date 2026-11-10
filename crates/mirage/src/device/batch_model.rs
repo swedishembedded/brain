@@ -45,6 +45,62 @@ pub struct Image<'a> {
     pub width: usize,
 }
 
+/// What the decoder reads of one image: the live rows (cells and proposal slots) of its memory, `[rows, dim]`.
+///
+/// It depends on the pixels and on the proposal options (`conf`, `text_conf`, `max_objects`, `max_text_lines`) and on
+/// nothing else, so a describe and an extract of the same image under the same proposal options share it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecoderMemory {
+    /// Row-major `[rows, dim]` values.
+    pub rows: Vec<f32>,
+    /// Width of a row.
+    pub dim: usize,
+}
+
+impl DecoderMemory {
+    /// Bytes held.
+    pub fn bytes(&self) -> usize {
+        self.rows.len() * std::mem::size_of::<f32>()
+    }
+}
+
+/// One described image with its accounting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Described {
+    /// The structured result.
+    pub describe: Describe,
+    /// Tokens the decoder generated for the image.
+    pub decoder_tokens: usize,
+    /// The decoder memory, when the batch was asked to keep it ([`BatchControl::keep_memory`]).
+    pub memory: Option<std::sync::Arc<DecoderMemory>>,
+}
+
+/// One extracted form with its accounting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Extracted {
+    /// The answers.
+    pub extract: Extract,
+    /// The decoder memory the answers were scored against (cached or computed).
+    pub memory: std::sync::Arc<DecoderMemory>,
+    /// Whether the memory came from the caller's cache instead of the vision half.
+    pub reused: bool,
+}
+
+/// What a caller may ask of a batch beyond its images.
+pub struct BatchControl<'a> {
+    /// Return each image's decoder memory (one device read per batch).
+    pub keep_memory: bool,
+    /// Whether the request at this index of the batch has been cancelled. Asked before the batch starts and between
+    /// decoder windows, so it must be cheap.
+    pub cancelled: &'a (dyn Fn(usize) -> bool + Sync),
+}
+
+impl Default for BatchControl<'_> {
+    fn default() -> Self {
+        BatchControl { keep_memory: false, cancelled: &|_| false }
+    }
+}
+
 /// Wall-clock split of the last `describe_batch`, in seconds.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Timings {
@@ -68,7 +124,7 @@ pub struct MirageModel {
     reader: DeviceReader,
     memory: DeviceMemory,
     decoder: DeviceDecoder,
-    timings: std::cell::Cell<Timings>,
+    timings: std::sync::Mutex<Timings>,
 }
 
 /// The vision half of a batch: proposals and the decoder memories.
@@ -100,7 +156,15 @@ impl MirageModel {
 
     /// Where the last `describe_batch` spent its time.
     pub fn last_timings(&self) -> Timings {
-        self.timings.get()
+        self.read_timings()
+    }
+
+    fn read_timings(&self) -> Timings {
+        *self.timings.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_timings(&self, t: Timings) {
+        *self.timings.lock().unwrap_or_else(|e| e.into_inner()) = t;
     }
 
     /// The device operators run on.
@@ -145,10 +209,10 @@ impl MirageModel {
             .collect();
         let slots = SlotInputs::collect(&self.host.vision.memory, &items, cfg.detections + cfg.regions);
         let memory = self.memory.build(dev, &enc.encoder, &valids, &slots);
-        let mut t = self.timings.get();
+        let mut t = self.read_timings();
         t.vision = (t1 - t0).as_secs_f64();
         t.memory = t1.elapsed().as_secs_f64();
-        self.timings.set(t);
+        self.set_timings(t);
         Batch { images: images.to_vec(), objects, text, memory, masks, enc, dense }
     }
 
@@ -158,15 +222,36 @@ impl MirageModel {
 
     /// Analyse a batch of images and decode a description of each.
     pub fn describe_batch(&self, images: &[Image], opts: &Options) -> Vec<Result<Describe, ModelError>> {
+        self.describe_batch_with(images, opts, &BatchControl::default()).into_iter().map(|r| r.map(|d| d.describe)).collect()
+    }
+
+    /// [`Self::describe_batch`] with accounting and control: the decoder tokens of each image, optionally the
+    /// decoder memory for a later [`Self::extract_batch_with`], and cancellation. An image whose `cancelled` answers
+    /// `true` before the batch starts takes no part in it; one cancelled while the batch decodes stops costing
+    /// decoder steps once every live image has stopped, and both come back as [`ModelError::Cancelled`].
+    pub fn describe_batch_with(&self, images: &[Image], opts: &Options, control: &BatchControl) -> Vec<Result<Described, ModelError>> {
+        let refuse = |e: ModelError| -> Vec<Result<Described, ModelError>> { images.iter().map(|_| Err(ModelError::Request(e.to_string()))).collect() };
         if opts.form.is_some() {
-            return images.iter().map(|_| Err(ModelError::Request("`form` requests extraction, use `extract_batch`".to_string()))).collect();
+            return refuse(ModelError::Request("`form` requests extraction, use `extract_batch`".to_string()));
         }
         let prompt = match self.host.prompt(opts.language.as_deref()) {
             Ok(p) => p,
-            Err(e) => return images.iter().map(|_| Err(ModelError::Request(e.to_string()))).collect(),
+            Err(e) => return refuse(e),
         };
-        let (ok, resized): (Vec<usize>, Vec<Resized>) = Self::letterboxed(images).into_iter().enumerate().filter_map(|(i, r)| r.ok().map(|r| (i, r))).unzip();
-        let mut results: Vec<Result<Describe, ModelError>> = Self::letterboxed(images).into_iter().map(|r| r.map(|_| Describe::default())).collect();
+        let boxed = Self::letterboxed(images);
+        let mut results: Vec<Result<Described, ModelError>> = Vec::with_capacity(images.len());
+        let (mut ok, mut resized): (Vec<usize>, Vec<Resized>) = (Vec::new(), Vec::new());
+        for (i, r) in boxed.into_iter().enumerate() {
+            results.push(match r {
+                Err(e) => Err(e),
+                Ok(_) if (control.cancelled)(i) => Err(ModelError::Cancelled),
+                Ok(r) => {
+                    ok.push(i);
+                    resized.push(r);
+                    Err(ModelError::Cancelled)
+                }
+            });
+        }
         if resized.is_empty() {
             return results;
         }
@@ -178,7 +263,8 @@ impl MirageModel {
             .map(|banned| GenerateParams { prompt: &prompt, banned, max_tokens: opts.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS), max_rank: opts.max_rank(), object_slots: cfg.detections, guard: true })
             .collect();
         let t2 = std::time::Instant::now();
-        let generations = self.decoder.generate_batch(&self.dev, &batch.memory, &self.host.tokenizer, &params);
+        let generations = self.decoder.generate_batch_until(&self.dev, &batch.memory, &self.host.tokenizer, &params, &|k| (control.cancelled)(ok[k]));
+        let live: Vec<bool> = ok.iter().map(|&i| !(control.cancelled)(i)).collect();
 
         let t3 = std::time::Instant::now();
         let side = cfg.canvas / cfg.stride;
@@ -191,7 +277,7 @@ impl MirageModel {
         });
         let frames: Vec<Frame> = ok.iter().enumerate().map(|(k, &i)| Frame { resized_w: batch.images[k].w, resized_h: batch.images[k].h, width: images[i].width, height: images[i].height }).collect();
         let reads: Vec<Vec<Option<String>>> = if opts.section_set().contains(&Section::Text) {
-            let jobs: Vec<(usize, usize)> = (0..n).flat_map(|k| (0..batch.text[k].len()).map(move |j| (k, j))).collect();
+            let jobs: Vec<(usize, usize)> = (0..n).filter(|&k| live[k]).flat_map(|k| (0..batch.text[k].len()).map(move |j| (k, j))).collect();
             let strings = self.read_lines(&jobs.iter().map(|&(k, j)| (images[ok[k]], crop_rect(crate::describe::public_box(batch.text[k][j].bbox, frames[k]).map(|v| v as f32), images[ok[k]].width, images[ok[k]].height))).collect::<Vec<_>>());
             let mut per: Vec<Vec<Option<String>>> = (0..n).map(|k| vec![None; batch.text[k].len()]).collect();
             for (&(k, j), text) in jobs.iter().zip(strings) {
@@ -203,7 +289,10 @@ impl MirageModel {
         };
         let t_dev = t3.elapsed().as_secs_f64();
 
-        let assemble_one = |k: usize| -> Describe {
+        let assemble_one = |k: usize| -> Option<Described> {
+            if !live[k] {
+                return None;
+            }
             let frame = frames[k];
             let objects: Vec<Detection> = batch.objects[k].iter().map(Detection::from).collect();
             let text: Vec<Detection> = batch.text[k].iter().map(Detection::from).collect();
@@ -214,24 +303,32 @@ impl MirageModel {
                 object_field(&protos[k * pl..(k + 1) * pl], &coefs[k * cl + (cy * COEF_SIDE + cx) * 32..][..32], b)
             };
             let read = |j: usize| -> Option<String> { reads[k].get(j).cloned().flatten() };
-            assemble(&generations[k].text, &Inputs { objects: &objects, text: &text, frame, read: &read, field: &field }, opts)
+            let describe = assemble(&generations[k].text, &Inputs { objects: &objects, text: &text, frame, read: &read, field: &field }, opts);
+            Some(Described { describe, decoder_tokens: generations[k].tokens.len(), memory: None })
         };
         // Assembly is pure host work per image (mask fields, rendering, JSON): fan it out.
         let workers = std::thread::available_parallelism().map_or(1, |p| p.get()).min(8).min(n);
-        let described: Vec<Describe> = std::thread::scope(|sc| {
+        let described: Vec<Option<Described>> = std::thread::scope(|sc| {
             let handles: Vec<_> = (0..workers).map(|w| sc.spawn({ let assemble_one = &assemble_one; move || (w..n).step_by(workers).map(|k| (k, assemble_one(k))).collect::<Vec<_>>() })).collect();
-            let mut all: Vec<(usize, Describe)> = handles.into_iter().flat_map(|h| h.join().expect("assembly does not panic")).collect();
+            let mut all: Vec<(usize, Option<Described>)> = handles.into_iter().flat_map(|h| h.join().expect("assembly does not panic")).collect();
             all.sort_by_key(|(k, _)| *k);
             all.into_iter().map(|(_, d)| d).collect()
         });
+        let memories = control.keep_memory.then(|| self.decoder_memories(&batch.memory, n));
         for (k, d) in described.into_iter().enumerate() {
-            results[ok[k]] = Ok(d);
+            results[ok[k]] = match d {
+                Some(mut d) => {
+                    d.memory = memories.as_ref().map(|m| m[k].clone());
+                    Ok(d)
+                }
+                None => Err(ModelError::Cancelled),
+            };
         }
-        let mut t = self.timings.get();
+        let mut t = self.read_timings();
         t.decode = (t3 - t2).as_secs_f64();
         t.post = t3.elapsed().as_secs_f64();
         t.reader = t_dev;
-        self.timings.set(t);
+        self.set_timings(t);
         results
     }
 
@@ -275,28 +372,59 @@ impl MirageModel {
 
     /// Analyse a batch of images and extract the fields of the matching form in `forms`.
     pub fn extract_batch(&self, images: &[Image], forms: &[Value], opts: &Options) -> Vec<Result<Extract, ModelError>> {
+        let cached = vec![None; images.len()];
+        self.extract_batch_with(images, forms, opts, &cached, &BatchControl::default()).into_iter().map(|r| r.map(|e| e.extract)).collect()
+    }
+
+    /// [`Self::extract_batch`] where `cached[i]` is the decoder memory of image `i` from an earlier call under the
+    /// same proposal options: those images skip the vision half, the others are analysed in one batch. A request
+    /// cancelled before its form is scored comes back as [`ModelError::Cancelled`].
+    pub fn extract_batch_with(&self, images: &[Image], forms: &[Value], opts: &Options, cached: &[Option<std::sync::Arc<DecoderMemory>>], control: &BatchControl) -> Vec<Result<Extracted, ModelError>> {
         assert_eq!(images.len(), forms.len(), "one form per image");
-        let mut results: Vec<Result<Extract, ModelError>> = Vec::new();
-        let boxed: Vec<Result<Resized, ModelError>> = Self::letterboxed(images);
-        let valid: Vec<usize> = (0..images.len()).filter(|&i| boxed[i].is_ok()).collect();
-        let resized: Vec<Resized> = boxed.iter().filter_map(|r| r.as_ref().ok().cloned()).collect();
-        let batch = (!resized.is_empty()).then(|| self.analyze(&resized, opts));
+        assert_eq!(images.len(), cached.len(), "one cache slot per image");
         let cfg = &self.host.cfg;
         let prompt = self.host.prompt(opts.language.as_deref());
-        for (i, r) in boxed.into_iter().enumerate() {
-            results.push((|| {
-                r?;
-                let batch = batch.as_ref().expect("a valid image has a batch");
-                let k = valid.iter().position(|&v| v == i).expect("valid image");
+        // The images that need the vision half: not cached, not cancelled, a usable picture.
+        let boxed: Vec<Option<Result<Resized, ModelError>>> =
+            (0..images.len()).map(|i| (cached[i].is_none() && !(control.cancelled)(i)).then(|| letterbox(images[i].rgb, images[i].height, images[i].width).map_err(ModelError::from))).collect();
+        let analysed: Vec<usize> = (0..images.len()).filter(|&i| matches!(boxed[i], Some(Ok(_)))).collect();
+        let resized: Vec<Resized> = analysed.iter().filter_map(|&i| boxed[i].as_ref().and_then(|r| r.as_ref().ok()).cloned()).collect();
+        let fresh = (!resized.is_empty()).then(|| {
+            let batch = self.analyze(&resized, opts);
+            self.decoder_memories(&batch.memory, resized.len())
+        });
+        (0..images.len())
+            .map(|i| -> Result<Extracted, ModelError> {
+                if (control.cancelled)(i) {
+                    return Err(ModelError::Cancelled);
+                }
+                let (memory, reused) = match (&cached[i], &boxed[i]) {
+                    (Some(m), _) => (m.clone(), true),
+                    (None, Some(Err(e))) => return Err(ModelError::Request(e.to_string())),
+                    (None, _) => {
+                        let k = analysed.iter().position(|&v| v == i).expect("an analysed image");
+                        (fresh.as_ref().expect("a batch was analysed")[k].clone(), false)
+                    }
+                };
                 let fields = form::parse_form(&forms[i])?;
-                let (d, stride) = (cfg.dim, batch.memory.stride);
-                let rows = self.dev.read_at(&batch.memory.rows, k * stride * d, stride * d);
-                let mask = self.dev.read_at(&batch.memory.mask, k * stride, stride);
-                let live: Vec<f32> = rows.chunks_exact(d).zip(&mask).filter(|(_, m)| **m > 0.0).flat_map(|(r, _)| r.iter().copied()).collect();
-                let cross = self.host.decoder.cross_memory(&live, live.len() / d);
-                Ok(form::extract(&self.host.decoder, &cross, &self.host.tokenizer, &prompt.as_ref().map_err(|e| ModelError::Request(e.to_string()))?.clone(), &fields, opts.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS))?)
-            })());
-        }
-        results
+                let cross = self.host.decoder.cross_memory(&memory.rows, memory.rows.len() / cfg.dim);
+                let prompt = prompt.as_ref().map_err(|e| ModelError::Request(e.to_string()))?;
+                let extract = form::extract(&self.host.decoder, &cross, &self.host.tokenizer, prompt, &fields, opts.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS))?;
+                Ok(Extracted { extract, memory, reused })
+            })
+            .collect()
+    }
+
+    /// The live rows of each of the first `n` decoder memories of a batch, read back in one go.
+    fn decoder_memories(&self, mem: &super::reader::MemoryBatch, n: usize) -> Vec<std::sync::Arc<DecoderMemory>> {
+        let (d, stride) = (self.host.cfg.dim, mem.stride);
+        let rows = self.dev.read_at(&mem.rows, 0, n * stride * d);
+        let mask = self.dev.read_at(&mem.mask, 0, n * stride);
+        (0..n)
+            .map(|k| {
+                let live: Vec<f32> = rows[k * stride * d..(k + 1) * stride * d].chunks_exact(d).zip(&mask[k * stride..(k + 1) * stride]).filter(|(_, m)| **m > 0.0).flat_map(|(r, _)| r.iter().copied()).collect();
+                std::sync::Arc::new(DecoderMemory { rows: live, dim: d })
+            })
+            .collect()
     }
 }

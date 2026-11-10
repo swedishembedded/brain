@@ -18,6 +18,7 @@ mod device_reader;
 mod device_vision;
 mod import;
 mod pipeline;
+mod serving;
 mod spec;
 mod tokenizer;
 mod vision;

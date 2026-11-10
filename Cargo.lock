@@ -2097,12 +2097,14 @@ name = "brain-mirage"
 version = "5.1.0"
 dependencies = [
  "brain-backend-cpu",
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-testutil",
  "half",
  "safetensors",

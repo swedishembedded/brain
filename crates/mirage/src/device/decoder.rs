@@ -385,6 +385,13 @@ impl DeviceDecoder {
     /// trip). The host then walks the window's tokens in order and applies the stop rules (end token, budget,
     /// loop guard) exactly as a token-by-token loop would; steps taken past a sequence's stop are discarded.
     pub fn generate_batch(&self, dev: &Device, mem: &MemoryBatch, tok: &Tokenizer, params: &[GenerateParams]) -> Vec<Generation> {
+        self.generate_batch_until(dev, mem, tok, params, &|_| false)
+    }
+
+    /// [`Self::generate_batch`] where `cancelled(i)` is asked for every live sequence after each window: a cancelled
+    /// sequence stops where it is (its partial generation is returned, for the caller to drop) and the loop ends once
+    /// every sequence has stopped, so a batch that is entirely cancelled stops costing device steps.
+    pub fn generate_batch_until(&self, dev: &Device, mem: &MemoryBatch, tok: &Tokenizer, params: &[GenerateParams], cancelled: &dyn Fn(usize) -> bool) -> Vec<Generation> {
         let b = params.len();
         let plen = params[0].prompt.len();
         assert!(params.iter().all(|p| p.prompt.len() == plen), "a batch shares one prompt length");
@@ -450,6 +457,11 @@ impl DeviceDecoder {
                 }
             }
             consumed += take;
+            for i in 0..b {
+                if out[i].is_none() && cancelled(i) {
+                    out[i] = Some(Generation { tokens: generated[i].clone(), text: render(tok, &generated[i], params[i].object_slots), stop: Stop::MaxTokens });
+                }
+            }
             if out.iter().all(Option::is_some) {
                 break;
             }
