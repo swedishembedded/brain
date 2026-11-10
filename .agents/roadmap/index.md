@@ -68,6 +68,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`minimaxh3-streaming-loader`](minimaxh3-streaming-loader.md) | MiniMax-H3 streaming loader: a slowdown hunt that ended in three dead | MiniMax-H3 streaming-loader performance investigation. |
 | [`minimaxh3`](minimaxh3.md) | minimaxh3 | MiniMax-H3 joint video+audio diffusion (`crates/minimaxh3`). |
 | [`minimaxmusic3`](minimaxmusic3.md) | minimaxmusic3 | MiniMax Music 3 song generation (`crates/minimaxmusic3`). |
+| [`mirage`](mirage.md) | mirage | Mirage visual perception model (`crates/mirage`, arch id `mirage`). |
 | [`modelopt`](modelopt.md) | modelopt - model optimization | Measured, budget-constrained model compression (mixed precision, KV precision, QAT/QAD, pruning, distillation, draft training) in `crates/modelopt`. |
 | [`modelstore`](modelstore.md) | modelstore | Model store resolution ladder: plan, download, convert (`crates/modelstore`). |
 | [`npu`](npu.md) | npu | The Intel NPU export and runtime path (`crates/npu`). |

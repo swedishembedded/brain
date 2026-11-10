@@ -651,6 +651,15 @@ pub const ARCHS: &[Arch] = &[
     // stands as the reserved spelling if one is ever authored.
     arch!("florence2", "Florence-2 visual grounding (DaViT + BART)", Vision, Brain, "brain-florence2",
         hf: &["Florence2ForConditionalGeneration"], default_ref: Some("microsoft/Florence-2-base")),
+    // Cactus-Compute/mirage: a 51M-parameter perception model (conv stem, HConvGLU
+    // body, a small attention top, a CenterNet-style dense head, a text reader and
+    // an 8-layer decoder with hyper-connection lanes). It ships as safetensors in
+    // Flax naming and as a 2-bit `.cact`; the checkpoint's `config.json` carries
+    // `model_type: "mirage"` and no `architectures` list, so no HF class name is
+    // declared. No `caps` yet: a capability row is added only together with the
+    // test that backs it.
+    arch!("mirage", "Mirage visual perception (conv/HConvGLU encoder + lane decoder)", Vision, Brain, "brain-mirage",
+        default_ref: Some("Cactus-Compute/mirage")),
     // -- Image generation / restoration --------------------------------
     // `families: &["zimage"]` - `ZimageRecipe::id()` (and the
     // `CompoundManifest::family` it writes at pull/finish time) is

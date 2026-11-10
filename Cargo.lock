@@ -2093,6 +2093,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-mirage"
+version = "5.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-testutil",
+ "half",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2",
+]
+
+[[package]]
 name = "brain-model"
 version = "5.1.0"
 dependencies = [

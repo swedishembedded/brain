@@ -80,6 +80,7 @@ default-members = [
     "crates/fastvlm",
     "crates/moondream3",
     "crates/minicpmv",
+    "crates/mirage",
     "crates/glmdsa",
     "crates/deepseek2",
     "crates/toyseq2seq",
@@ -254,6 +255,7 @@ brain-qwen3vlmoe = { path = "crates/qwen3vlmoe" }
 brain-fastvlm = { path = "crates/fastvlm" }
 brain-moondream3 = { path = "crates/moondream3" }
 brain-florence2 = { path = "crates/florence2" }
+brain-mirage = { path = "crates/mirage" }
 brain-glmdsa = { path = "crates/glmdsa" }
 brain-deepseek2 = { path = "crates/deepseek2" }
 brain-toyseq2seq = { path = "crates/toyseq2seq" }
@@ -406,6 +408,7 @@ ring = "0.17"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_path_to_error = "0.1"
 # Deflate, for the cheap "is there any structure in this at all" screen in
 # `brain-audit` and the archive reader in `brain-connectome`.
 flate2 = "1"

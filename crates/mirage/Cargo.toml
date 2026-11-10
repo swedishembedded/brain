@@ -1,0 +1,23 @@
+[package]
+name = "brain-mirage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mirage: a 51M-parameter visual perception model (convolutional stem, HConvGLU body, attention top, dense detection/mask head, text reader and a lane-mixing decoder). Foundation layer: typed config, canonical tensor manifest, strict safetensors import/export, the .cact container reader with Cactus-Quant decoding, and the SentencePiece-BPE tokenizer."
+
+[lib]
+name = "mirage"
+path = "src/lib.rs"
+
+[dependencies]
+brain-checkpoint.workspace = true
+half.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+brain-data.workspace = true
+brain-testutil.workspace = true
+safetensors.workspace = true
