@@ -75,15 +75,15 @@ pub fn nms_agnostic(dets: &[Detection], iou_thresh: f32, max_det: usize) -> Vec<
 }
 
 fn nms_inner(dets: &[Detection], iou_thresh: f32, max_det: usize, class_aware: bool) -> Vec<Detection> {
+    // A candidate whose confidence is not finite (a NaN logit after a numerical
+    // fault, or an infinity) is not a detection: drop it. That also leaves only
+    // finite values to sort, where the order below is total; a NaN in a
+    // partial-order comparator can misorder the list or make the standard
+    // library's sort panic.
     // Sort indices by confidence descending; ties -> lower original index first
     // (stable: sort by (-conf, idx)).
-    let mut order: Vec<usize> = (0..dets.len()).collect();
-    order.sort_by(|&i, &j| {
-        dets[j][4]
-            .partial_cmp(&dets[i][4])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(i.cmp(&j))
-    });
+    let mut order: Vec<usize> = (0..dets.len()).filter(|&i| dets[i][4].is_finite()).collect();
+    order.sort_by(|&i, &j| dets[j][4].total_cmp(&dets[i][4]).then(i.cmp(&j)));
 
     let mut keep: Vec<Detection> = Vec::new();
     for &i in &order {

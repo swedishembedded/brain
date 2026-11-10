@@ -10,6 +10,7 @@
 mod blend_tiling;
 mod color;
 mod device_ops;
+mod nms_nonfinite;
 mod resize_reference;
 mod save_formats;
 mod untrusted_clip;

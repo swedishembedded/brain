@@ -125,7 +125,9 @@ pub fn decode_detections(
                 }
             }
             let best_s = sigmoid(best_l);
-            if best_s < conf_thresh {
+            // A NaN score compares false with everything, so test it
+            // explicitly, as the YOLOv5 decode does.
+            if best_s.is_nan() || best_s < conf_thresh {
                 continue;
             }
             let dbase = (img * a + i) * 4;
