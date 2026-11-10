@@ -451,11 +451,24 @@ pub fn save_safetensors(
     config: &Value,
     card: Option<&ModelCard>,
 ) -> io::Result<()> {
-    let mut meta: HashMap<String, String> = HashMap::new();
+    let mut meta: BTreeMap<String, String> = BTreeMap::new();
     meta.insert(CONFIG_KEY.to_string(), serde_json::to_string(config)?);
     if let Some(c) = card {
         meta.extend(c.to_metadata());
     }
+    save_safetensors_with_metadata(path, tensors, meta)
+}
+
+/// Write tensors as F32 safetensors under exactly the given `__metadata__`
+/// map: for a format whose header carries its own keys instead of brain's
+/// `brain.config` / card. Same canonical header and atomic write as
+/// [`save_safetensors`], which is this function with brain's keys.
+pub fn save_safetensors_with_metadata(
+    path: &str,
+    tensors: &[(String, Vec<u64>, Vec<f32>)],
+    metadata: BTreeMap<String, String>,
+) -> io::Result<()> {
+    let meta: HashMap<String, String> = metadata.into_iter().collect();
 
     // Own the little-endian byte buffers so the borrowed TensorViews outlive
     // serialize.
@@ -779,6 +792,16 @@ mod tests {
         assert!(meta.contains_key(CONFIG_KEY));
         assert_eq!(read_card(&p).unwrap().unwrap(), card);
         assert_eq!(param_count_from_header(&p).unwrap(), 4096);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn save_with_metadata_writes_exactly_the_given_keys() {
+        let p = scratch("exact-meta");
+        let meta = BTreeMap::from([("format".to_string(), "other".to_string()), ("step".to_string(), "7".to_string())]);
+        save_safetensors_with_metadata(&p, &[("w".to_string(), vec![2], vec![1.0f32, 2.0])], meta.clone()).unwrap();
+        assert_eq!(read_metadata(&p).unwrap(), meta, "no brain.config or card keys are added");
+        assert_eq!(load_safetensors(&p).unwrap().tensors["w"], vec![1.0, 2.0]);
         std::fs::remove_file(&p).ok();
     }
 

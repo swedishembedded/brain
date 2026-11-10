@@ -5,7 +5,8 @@
 //!
 //! This crate is the foundation layer: everything needed to read a released
 //! checkpoint safely before any math runs. [`config`] is the typed
-//! configuration and [`spec`] the canonical tensor manifest derived from it.
+//! configuration, [`spec`] the canonical tensor manifest derived from it and
+//! [`import`] the strict safetensors reader and writer.
 //!
 //! Swedish Embedded AB implements solutions for deploying compact vision
 //! models on constrained devices for its clients. If your team needs expertise
@@ -13,4 +14,5 @@
 //! email to info@swedishembedded.com.
 
 pub mod config;
+pub mod import;
 pub mod spec;

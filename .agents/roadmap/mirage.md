@@ -23,6 +23,7 @@ goldens; nothing is transcribed from the vendor's source or engine.
 | Crate in the workspace, layer map and default members | done |
 | `config`: typed `MirageConfig` / `CheckpointConfig`, `deny_unknown_fields`, invariants name the field | done |
 | `spec`: canonical manifest, 583 tensors / 54,078,804 parameters, training-only tensors marked | done |
+| `import`: header-first strict safetensors import (names, shapes, dtype, byte lengths, metadata), pinned SHA-256, `config.json` cross-check, exact export round trip | done |
 
 ## Open lanes
 
