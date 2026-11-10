@@ -488,6 +488,8 @@ The dense-prediction chapter (Chapter 5) writes out `weighted_pixel_loss`, `pixe
 
 The vision-transformer chapter (Chapter 6) writes out `patchify`, `shift_labels` and `cubic_taps` where they are first used. `zeros(int, [n, n])` is an integer array of zeros, `for k in -1 ..= 2` visits `-1, 0, 1, 2`, and `k_a(x)` is the cubic convolution kernel of Chapter 1 with parameter `a`: `(a + 2) * x^3 - (a + 3) * x^2 + 1` for `x <= 1` and `a * x^3 - 5 * a * x^2 + 8 * a * x - 4 * a` for `1 < x < 2`, taken at `x = abs(.)`, and `0` beyond 2. A list of tuples is built with `append (i, w) to taps`.
 
+The promptable-segmentation chapter (Chapter 7) writes out `grow`, `fourier_encode`, `attend`, `two_way_layer` and `memory_slots` where they are first used. `layer_norm_rows(X)` is the LayerNorm of Volume III, Chapter 10 applied to every row of `X: [R, D]` with gain 1, offset 0 and epsilon 1e-5, and `softmax_rows` is the routine of the complete example at the end of this page. `W.sa.q` and its relatives are the fields of a record of weight matrices.
+
 ## Routines of the transformer chapters (Volume V)
 
 Chapters 9 to 12 use four routines of the normalization and attention chapters without writing them out again. Each is defined here by what it returns.

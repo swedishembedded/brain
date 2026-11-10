@@ -605,7 +605,7 @@ volumes:
         title: "Promptable Segmentation and Video Tracking"
         question: "How can one model segment any object you point at, and follow it through a video?"
         introduces: [promptable-segmentation, mask-decoder, prompt-encoder, memory-attention]
-        requires: [vision-transformer, cross-attention, semantic-segmentation]
+        requires: [vision-transformer, cross-attention, semantic-segmentation, windowed-attention, intersection-over-union, sinusoidal-encoding, multi-axis-rope, transposed-convolution, depthwise-convolution, feature-pyramid]
         brain: [sam1, sam2]
       - id: clip
         title: "Contrastive Vision-Language Learning"

@@ -1,0 +1,41 @@
+<!-- source-sha256: 914767d67f3527ca4ae60e46c4f8b7def37085b01ae797b79ee005e65965465f -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" width="900" height="500"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="900" height="500" fill="#ffffff"/>
+<ellipse cx="230" cy="44" rx="95" ry="26" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="40.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokens</text>
+<text x="230" y="56.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 x 256</text>
+<ellipse cx="670" cy="44" rx="95" ry="26" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="670" y="40.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image cells + position</text>
+<text x="670" y="56.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4,096 x 256</text>
+<rect x="120" y="100" width="220" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">self-attention</text>
+<text x="230" y="140.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokens read tokens</text>
+<rect x="120" y="194" width="220" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">token-to-image attention</text>
+<text x="230" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">queries: tokens; keys, values: cells</text>
+<rect x="120" y="288" width="220" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">MLP</text>
+<text x="230" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 -&gt; 2,048 -&gt; 256</text>
+<rect x="560" y="288" width="220" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="670" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image-to-token attention</text>
+<text x="670" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">queries: cells; keys, values: tokens</text>
+<ellipse cx="230" cy="450" rx="95" ry="26" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="230" y="446.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokens out</text>
+<text x="230" y="462.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 x 256</text>
+<ellipse cx="670" cy="450" rx="95" ry="26" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="670" y="446.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image cells out</text>
+<text x="670" y="462.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4,096 x 256</text>
+<line x1="230" y1="73" x2="230" y2="97" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="230" y1="159" x2="230" y2="191" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="230" y1="253" x2="230" y2="285" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M670,70 L670,214 Q670,222 662,222 L343,222" fill="none" stroke="#1a202c" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head)"/>
+<text x="450" y="212.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">keys and values</text>
+<line x1="670" y1="73" x2="670" y2="285" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="343" y1="316" x2="557" y2="316" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="450" y="307.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">keys and values</text>
+<line x1="230" y1="347" x2="230" y2="421" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="670" y1="347" x2="670" y2="421" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="244" y="384.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">LayerNorm after each step,</text>
+<text x="244" y="400.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">a residual add around each</text>
+<text x="684" y="392.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">the same, on the 4,096 cells</text>
+<text x="450" y="498.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">Two such layers, then one more token-to-image attention; the tokens that leave are the ones that make masks.</text>
+</svg>

@@ -526,6 +526,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **machine epsilon**: the gap between $1$ and the next larger floating-point number, $2^{1-p}$ ($1.19 \times 10^{-7}$ in 32 bits, $2.22 \times 10^{-16}$ in 64 bits); twice the unit round-off $u = 2^{-p}$, which is the bound on the relative error of one rounding. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
+**mask decoder**: the small network that turns the prompt tokens and the stored image embedding into mask logits, by letting tokens and image cells attend to each other and then taking, for each output token, a dot product with the upscaled cells. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
+
 **masked language modeling**: the training task of an encoder in which a random subset of positions is selected, the input there is replaced (by a mask token, a random token or nothing, in the proportions 80, 10 and 10 percent), and the model is trained to recover the original tokens at the selected positions only, from both sides. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
 
 **matrix**: a table of numbers with $m$ rows and $n$ columns, which is also a linear map from $n$ numbers to $m$ numbers. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
@@ -543,6 +545,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **mean squared error**: the average over the examples of the squared difference between prediction and label, $\frac{1}{N}\sum_n (\hat{y}_n - y_n)^2$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
 **measured roofline**: the peak arithmetic rate and the memory bandwidth of the device itself, found by two probes that do nothing but arithmetic and nothing but streaming and whose work is counted, in whose terms every result is stated as a fraction. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
+
+**memory attention**: the attention of a video frame's features onto a bank of memories of earlier frames and object pointers, with position encoded by rotation, which marks the cells that resemble the tracked object before the mask is decoded. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
 
 **memory bandwidth**: the number of bytes per second that main memory can deliver to the processor when the program asks for them in the best possible way (long sequential reads), a property of the machine and not of the program. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
 
@@ -689,6 +693,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **product notation**: the symbol $\prod_{i=a}^{b} x_i$ for the product of the terms $x_i$ as the index $i$ runs from $a$ to $b$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **projection**: the closest point to a vector $\mathbf{v}$ on the line through $\mathbf{u}$, namely $\frac{\mathbf{v}\cdot\mathbf{u}}{\mathbf{u}\cdot\mathbf{u}}\mathbf{u}$; what is left over is orthogonal to $\mathbf{u}$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
+
+**prompt encoder**: the part that turns clicks, box corners and a rough mask into vectors for the decoder: a random Fourier encoding of each coordinate plus a learned embedding of its type, and a convolutional reduction of a mask. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
+
+**promptable segmentation**: the task of returning the mask of an object in an image from a prompt, a point, a box or a rough mask, with the same model for every object and no fixed list of classes; a prompt that leaves the extent open is answered with several masks. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
 
 **pseudo-random generator**: a deterministic state machine (a state, a rule that advances it, and a rule that turns it into a number) whose outputs are judged by how closely they resemble draws from a uniform distribution, not by being unpredictable to someone who knows the rule. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
