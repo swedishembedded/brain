@@ -519,3 +519,20 @@ fn a_base_read_through_a_runtime_lora_has_every_band_folded_in() {
     assert_eq!(norm, vec![7.0; 3]);
     assert!(lora.unapplied().is_empty());
 }
+
+/// A PEFT-saved adapter wraps every key in `base_model.model.` (fal's
+/// FLUX.2 LoRAs ship that way); ComfyUI strips it, and so does the reader,
+/// so the pair lands on the same base tensor a `diffusion_model.` key does.
+#[test]
+fn a_peft_wrapped_key_targets_the_same_base_tensor() {
+    let p = tmp("peft-wrapped.safetensors");
+    write_st(
+        &p,
+        &[
+            ("base_model.model.double_blocks.0.img_attn.proj.lora_A.weight", vec![1, 3], vec![1.0, 1.0, 1.0]),
+            ("base_model.model.double_blocks.0.img_attn.proj.lora_B.weight", vec![2, 1], vec![1.0, 1.0]),
+        ],
+    );
+    let pairs = model::lora::read_external_adapter(p.to_str().unwrap()).expect("reads");
+    assert_eq!(pairs.iter().map(|p| p.base_key.as_str()).collect::<Vec<_>>(), ["double_blocks.0.img_attn.proj.weight"]);
+}

@@ -312,7 +312,8 @@ pub enum ExternalDelta {
 /// base tensor key it targets already resolved. See [`read_external_adapter`].
 pub struct ExternalPair {
     /// The base tensor this adapts, in the model's own naming
-    /// (`<stem>.weight`, the `diffusion_model.` prefix stripped).
+    /// (`<stem>.weight`, the `diffusion_model.` or `base_model.model.`
+    /// prefix stripped).
     pub base_key: String,
     /// The adapter's own stem, for error messages.
     pub stem: String,
@@ -435,12 +436,19 @@ const EXTERNAL_SUFFIXES: [(&str, &str); 4] = [
 const LOKR_SUFFIXES: [&str; 6] =
     [".lokr_w1", ".lokr_w2", ".lokr_w1_a", ".lokr_w1_b", ".lokr_w2_a", ".lokr_w2_b"];
 
+/// The base tensor stem a third-party adapter key's stem targets: without the
+/// `diffusion_model.` prefix ComfyUI exports carry, or the
+/// `base_model.model.` wrapper of an adapter PEFT saved.
+fn base_stem(stem: &str) -> &str {
+    stem.strip_prefix("diffusion_model.").or_else(|| stem.strip_prefix("base_model.model.")).unwrap_or(stem)
+}
+
 /// Read a third-party (ai-toolkit / ComfyUI / diffusers / LyCORIS)
 /// `.safetensors` adapter into per-linear [`ExternalPair`]s, resolving each to
 /// the base tensor key it targets.
 ///
-/// Key matching is ComfyUI's: strip a leading `diffusion_model.`, strip the
-/// family suffix, and the remaining stem plus `.weight` is the base tensor.
+/// Key matching is ComfyUI's: strip a leading `diffusion_model.` or PEFT's
+/// `base_model.model.` wrapper ([`base_stem`]), strip the family suffix, and the remaining stem plus `.weight` is the base tensor.
 /// `.alpha`, when present, is read as the scalar it is.
 ///
 /// **Two families, decided per target stem**, because one file adapts every
@@ -544,7 +552,7 @@ pub fn read_external_adapter(path: &str) -> Result<Vec<ExternalPair>, String> {
     stems.sort();
     let mut out = Vec::with_capacity(stems.len());
     for stem in stems {
-        let base_key = format!("{}.weight", stem.strip_prefix("diffusion_model.").unwrap_or(&stem));
+        let base_key = format!("{}.weight", base_stem(&stem));
         let al = alpha.get(&stem).copied().or(header_alpha);
         let pair = match kr.remove(&stem) {
             Some(factors) => read_lokr(path, &stem, base_key, factors, al)?,
