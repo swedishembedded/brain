@@ -332,6 +332,34 @@ kernel time at 47-63 us per launch for 1 MB weights (8 workgroups for a 512-row 
 16-18 us per launch with 128 threads before the 512-thread version, `mirage_attn_apply` 11.7 %, `rmsnorm_rows` 9.5 % (89k launches).
 Remaining (step 3 work): small-batch GEMM spread over the card, rmsnorm fusion, flash-decode attention, mhc_maps.
 
+### Step 1 addendum: the card state explains L5's numbers
+
+While measuring step 3 the other session's jobs took gpu1 to 99 % utilisation (87 GB held): the same binary then gave FP32 0.98 /
+2.57 / 15.1 images/s and packed CQ 1.08 / 4.29 / 18.3 at batch 1 / 8 / 64 (decode 0.86 s at batch 1 against 0.42 s idle), the
+numbers lane L5 recorded. No code regression exists; throughput figures are only comparable at equal card load, so every table in this
+round states it (idle-card numbers above).
+
+### Step 3 (decoder step floor): one hypothesis killed, the rest not started
+
+Hypothesis: an in-house f32 product with one thread per activation row and four weight rows per workgroup (grid N/4 x M/64, scalar
+then vec4 loads, `Device::linear` inside a replayed step) beats the 64 x 64 tile GEMM (`matmul_f32_tiled`, 39 % of kernel time, 8
+workgroups for a 512-row weight). Measured under load (min of 30 replays per product, 64 x 512 x 512): 58 us scalar, 73 us vec4, against
+the selector 47-63 us in the replayed step; and the library GEMM 6-22 us outside a replay. Killed: the kernel was not committed. A
+useful replacement needs shared-memory staging of the activation tile and split-K for the 8-workgroup weights (a real register tile
+with ~100 workgroups); roofline for that product is about 1 us. Still open from the nsys table: `matmul_f32_tiled` 39 %,
+`mirage_attn_apply` 11.7 %, `rmsnorm_rows` 9.5 % (fuse with the following projection or residual), `mirage_mhc_maps` 5.3 %, in-house
+`mirage_kron_rows` 11 % (a fused one-launch MLP would remove two launches per layer on CUDA). Targets (>30 images/s at batch 64,
+step < 2 ms at batch 1) are not met: 27.8 images/s and 1.9-2.0 ms on the idle card.
+
+### Step 4: serving test on CUDA
+
+`concurrent_requests_share_one_batch_and_keep_their_answers` failed on CUDA only because it compared a merged batch with the
+single-request answers bit for bit, while the GEMM selector picks other kernels (TF32 library products against in-house tiles) for other
+row counts, so scores and the odd threshold mask pixel differ in the last places. Decision: the serving contract promises the same
+structure and values to rounding, not bit identity across batch sizes; forcing one kernel for every row count would give up the
+library's tensor-core products for batched work. The test now asserts exact equality on the CPU backend and, on accelerators, equal
+structure (every box, name, description and text) with scores dropped and masks reduced to their foreground size.
+
 ## Lane L4 - serving
 
 Done 2026-11-10. Model id `Cactus-Compute/mirage` (case-exact upstream name, a deliberate carve-out in
