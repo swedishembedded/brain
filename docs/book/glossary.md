@@ -34,6 +34,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **anchor-free detection**: a detector whose every cell, with its anchor point at the cell centre, predicts its box as the distances from that point to the four sides, with no template boxes and no objectness score. *([Object Detection](v07-vision/04-detection.md))*
 
+**angular margin loss**: a classification loss on cosines in which the embedding and the class centres are normalized, the logits are scaled by a constant, and a fixed margin is added to the angle between the sample and its own centre, so that the sample is asked to be closer to its centre by that angle than the plain classifier requires. *([Faces: Detection, Identity and Parsing](v07-vision/11-faces.md))*
+
 **architecture hypothesis testing**: deciding whether a new architectural idea is worth anything by a hypothesis and a margin stated before the run, a baseline that differs from the candidate in exactly one thing, equal tuning and paired seeds, an ablation of the part the idea is named for, and an effect size with its interval judged against the margin. *([A Research Architecture: The Spectral Language Model](v06-language-models/09-spectral-lm.md))*
 
 **arithmetic intensity**: the number of floating-point operations a computation performs per byte it must move between main memory and the arithmetic, a property of the algorithm and the sizes and formats and not of the machine. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
@@ -310,6 +312,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **F1 score**: the harmonic mean of precision and recall, $2PR/(P + R) = 2\mathrm{TP}/(2\mathrm{TP} + \mathrm{FP} + \mathrm{FN})$, a single number that is near $0$ when either is. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
+**face detection**: finding every face in a photograph as a box with a confidence and five landmark points, so that each face can be aligned to a template; a detector of one class that carries an extra output. *([Faces: Detection, Identity and Parsing](v07-vision/11-faces.md))*
+
+**face parsing**: semantic segmentation of a face crop into the parts of a head and its surroundings, with a fixed set of classes, one for every pixel. *([Faces: Detection, Identity and Parsing](v07-vision/11-faces.md))*
+
 **fast Fourier transform**: an algorithm for the discrete Fourier transform that splits the samples into even and odd indices and combines the two half-size transforms with one twiddle multiplication per output pair, using about $\tfrac N2\log_2 N$ multiplications instead of $N^2$ and giving the same result up to rounding. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
 **feature**: one measurable property of an example that a prediction may depend on; the features of one example form a vector. *([The Learning Problem](v02-learning/01-learning-problem.md))*
@@ -409,6 +415,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **hypothesis test**: a rule for deciding whether data are consistent with a claim that nothing is going on (the null hypothesis), by computing the probability, assuming the claim, of a test statistic at least as extreme as the one observed (the p-value) and comparing it with a threshold fixed in advance. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 ## I
+
+**identity embedding**: a vector computed from a photograph of a person so that photographs of the same person point the same way and photographs of different people do not; two of them are compared by the cosine of the angle between them. *([Faces: Detection, Identity and Parsing](v07-vision/11-faces.md))*
 
 **identity matrix**: the square matrix with ones on the diagonal and zeros elsewhere, which leaves every vector unchanged. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 

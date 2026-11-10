@@ -1,0 +1,45 @@
+<!-- source-sha256: e02565dd93c556b845bf2e235ae2d63836043b340333ca275ff75e46d472ab64 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 420" width="940" height="420"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="940" height="420" fill="#ffffff"/>
+<ellipse cx="96" cy="214" rx="65" ry="31" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="96" y="210.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">photograph</text>
+<text x="96" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">any size</text>
+<rect x="211" y="176" width="150" height="76" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="286" y="202.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">detector</text>
+<text x="286" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16,800 candidates</text>
+<text x="286" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">box, score, 5 points</text>
+<rect x="401" y="66" width="150" height="76" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="476" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">align to the</text>
+<text x="476" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">112 template</text>
+<text x="476" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fit + warp</text>
+<rect x="401" y="286" width="150" height="76" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="476" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">align to the</text>
+<text x="476" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">512 template</text>
+<text x="476" y="344.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fit + warp</text>
+<rect x="591" y="66" width="150" height="76" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="666" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">embedding network</text>
+<text x="666" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">65.2 M parameters</text>
+<text x="666" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">112 x 112 crop</text>
+<rect x="591" y="286" width="150" height="76" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="666" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">parsing network</text>
+<text x="666" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">19 class scores</text>
+<text x="666" y="344.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per pixel</text>
+<rect x="781" y="66" width="130" height="76" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="846" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">512 numbers</text>
+<text x="846" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">unit length,</text>
+<text x="846" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">compare by cosine</text>
+<rect x="781" y="286" width="130" height="76" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="846" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">class map</text>
+<text x="846" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">argmax, then</text>
+<text x="846" y="344.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mask by class</text>
+<line x1="164" y1="214" x2="208" y2="214" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M361,214 L369,214 Q377,214 377,206 L377,112 Q377,104 385,104 L398,104" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M361,214 L369,214 Q377,214 377,222 L377,316 Q377,324 385,324 L398,324" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="554" y1="104" x2="588" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="554" y1="324" x2="588" y2="324" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="744" y1="104" x2="778" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="744" y1="324" x2="778" y2="324" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="306" y="104.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the five landmarks</text>
+<text x="306" y="120.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">leave the detector</text>
+<text x="470" y="388.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">The detector knows nothing about identity and the other two networks know nothing about detection:</text>
+<text x="470" y="404.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the landmarks are the only thing that passes between them, with a different template for each crop.</text>
+</svg>
