@@ -52,8 +52,9 @@ const UPSAMPLE_SCALE: u32 = 2;
 /// The tails are NOT interchangeable and their ORDER is part of the checkpoint's
 /// index numbering — `stage2` gets MinimalMultiScale then StripPoolingAttention,
 /// `stage3` gets ChannelAttention then GlobalContextBlock. Appending them in the
-/// other order would renumber `stage2.2`/`stage2.3` and load the wrong tensors
-/// into the wrong module while still matching every shape.
+/// other order would renumber `stage2.2`/`stage2.3`, so each module would be
+/// handed the other's tensors (their shapes differ, so a strict load refuses
+/// rather than loading them silently).
 struct Stage {
     blocks: Vec<QARepBlock>,
     mms: Option<MinimalMultiScale>,
@@ -250,8 +251,8 @@ pub struct ZipDepth {
 
     // ---- backward scratch, one per graph edge ----
     /// f_half's grad: the SUM of its two consumers (the head and the upsampler's
-    /// feature input). Sized to fuse_half's OUTPUT, NOT the model output — those
-    /// differ by 32x here, and reusing the smaller one overflows (silent heap
+    /// feature input). Sized to fuse_half's OUTPUT, NOT the model output: those
+    /// differ by 8x here, and reusing the smaller one overflows (silent heap
     /// corruption under the CPU JIT's trusted stores).
     d_fhalf_acc: DeviceBuffer,
     d_fhalf: DeviceBuffer,
