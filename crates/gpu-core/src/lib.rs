@@ -496,8 +496,16 @@ pub mod testgpu {
     /// aborted. The slowest device test in this workspace runs in well under
     /// a minute on a GPU; a holder past this has wedged inside the driver.
     /// It bounds a single hold, not the queue: a long line of healthy tests
-    /// behind each other (slow CPU backends) never trips it.
+    /// behind each other never trips it.
     const EXCLUSIVE_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// The hold limit that applies on the backend named `backend`. The limit detects a holder wedged inside a
+    /// GPU driver; the CPU backend has no driver to wedge in, and its tests are legitimately slow (a real model
+    /// through the WGSL interpreter takes minutes, more while the other test threads compete for the same cores),
+    /// so a long CPU hold is slowness and not a wedge: no limit.
+    fn hold_limit(backend: &str) -> Option<std::time::Duration> {
+        (backend != "cpu").then_some(EXCLUSIVE_HOLD_LIMIT)
+    }
 
     /// A mutex that also records since when its current holder has held it,
     /// so a waiter can tell "the queue is long" from "the holder is wedged".
@@ -537,9 +545,9 @@ pub mod testgpu {
 
         /// The lock, waiting as long as the queue needs; `Err(held)` once the
         /// CURRENT holder has held it longer than `limit` (`held` is how
-        /// long). A poisoned lock (a `should_panic` test, a failed assertion)
+        /// long; no `limit`, no error). A poisoned lock (a `should_panic` test, a failed assertion)
         /// is still a free lock.
-        fn acquire_within(&'static self, limit: std::time::Duration) -> Result<DeviceGuard, std::time::Duration> {
+        fn acquire_within(&'static self, limit: Option<std::time::Duration>) -> Result<DeviceGuard, std::time::Duration> {
             loop {
                 let guard = match self.lock.try_lock() {
                     Ok(g) => g,
@@ -549,7 +557,7 @@ pub mod testgpu {
                         let since = self.held_since_ms.load(Ordering::Acquire);
                         if since != 0 {
                             let held = std::time::Duration::from_millis(now_ms().saturating_sub(since));
-                            if held >= limit {
+                            if limit.is_some_and(|limit| held >= limit) {
                                 return Err(held);
                             }
                         }
@@ -577,7 +585,7 @@ pub mod testgpu {
     /// hours. Returns the guard; drop order makes it outlive the `Gpu` the
     /// test declares after it.
     pub fn exclusive() -> DeviceGuard {
-        EXCLUSIVE.acquire_within(EXCLUSIVE_HOLD_LIMIT).unwrap_or_else(|held| {
+        EXCLUSIVE.acquire_within(hold_limit(crate::backend_name())).unwrap_or_else(|held| {
             let test = std::thread::current();
             eprintln!(
                 "FATAL: test `{}` is waiting for the device lock; the test holding it has held it {}s (limit {}s) and is wedged in the GPU driver",
@@ -639,7 +647,7 @@ pub mod testgpu {
             let handles: Vec<_> = (0..4)
                 .map(|_| {
                     std::thread::spawn(move || {
-                        let g = LOCK.acquire_within(limit).expect("a long queue of short holds must not abort");
+                        let g = LOCK.acquire_within(Some(limit)).expect("a long queue of short holds must not abort");
                         std::thread::sleep(Duration::from_millis(150));
                         drop(g);
                     })
@@ -649,18 +657,35 @@ pub mod testgpu {
                 h.join().expect("waiter");
             }
 
-            let held = LOCK.acquire_within(limit).expect("free lock");
+            let held = LOCK.acquire_within(Some(limit)).expect("free lock");
             std::thread::sleep(Duration::from_millis(400));
-            let reported = LOCK.acquire_within(limit).err().expect("a holder past the limit must be reported");
+            let reported = LOCK.acquire_within(Some(limit)).err().expect("a holder past the limit must be reported");
             assert!(reported >= limit, "reported hold {reported:?}");
             drop(held);
 
             let _ = std::thread::spawn(|| {
-                let _g = LOCK.acquire_within(Duration::from_secs(1)).expect("free lock");
+                let _g = LOCK.acquire_within(Some(Duration::from_secs(1))).expect("free lock");
                 panic!("holder fails");
             })
             .join();
-            assert!(LOCK.acquire_within(Duration::from_secs(1)).is_ok(), "a poisoned lock is still free");
+            assert!(LOCK.acquire_within(Some(Duration::from_secs(1))).is_ok(), "a poisoned lock is still free");
+        }
+
+        /// A long hold is a wedge only where a driver can wedge: the CPU backend's slow tests must never abort the
+        /// binary (a broad filter of the Mirage tests did, twice, with the message lost to libtest's capture).
+        #[test]
+        fn only_driver_backends_have_a_hold_limit() {
+            assert_eq!(hold_limit("cpu"), None);
+            for driver in ["cuda", "vulkan", "wgpu"] {
+                assert_eq!(hold_limit(driver), Some(EXCLUSIVE_HOLD_LIMIT), "{driver}");
+            }
+            static LOCK: DeviceLock = DeviceLock::new();
+            let held = LOCK.acquire_within(None).expect("free lock");
+            std::thread::sleep(Duration::from_millis(50));
+            let waiter = std::thread::spawn(|| LOCK.acquire_within(None).map(|_| ()));
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+            assert!(waiter.join().expect("waiter").is_ok(), "without a limit a waiter outlasts any hold");
         }
     }
 }
