@@ -823,8 +823,9 @@ fn no_coop_gradnorm() -> bool {
     NO_COOP_GRADNORM.load(Ordering::Relaxed)
 }
 
-/// Activation rows up to which the cooperative CQ product (several row blocks of eight per weight row) is offered first.
-pub const CQ_GEMV_MAX_ROWS: u32 = 96;
+/// Activation rows up to which the cooperative CQ product (several row blocks of eight per weight row) is offered first
+/// for a weight tall enough for the dense GEMM's tiles; above it the weight is decoded and the dense product runs.
+pub const CQ_GEMV_MAX_ROWS: u32 = 16;
 
 /// Every variant that can EXECUTE for `(op, shape)` on this device, with the
 /// static best guess FIRST. Never empty: `Reference` is always executable.
@@ -917,9 +918,11 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             // rotated-domain dequantisation followed by the dense GEMM (many rows; crossover measured in
             // `model/tests/it/cq_tier.rs`), `Reference` the barrier-free row-blocked kernel of every backend.
             Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 => {
-                if shape.m <= CQ_GEMV_MAX_ROWS && caps.workgroup_reductions {
+                if caps.workgroup_reductions && (shape.m <= CQ_GEMV_MAX_ROWS || shape.n < GEMM_TILE_MIN_COLS) {
+                    // A weight too short for the dense GEMM's tiles (a gate projection of 24 rows) keeps the
+                    // cooperative product at every row count: the barrier-free kernel is far slower there.
                     vec![WorkgroupPerOutput, Reference]
-                } else if caps.workgroup_reductions && shape.n >= GEMM_TILE_MIN_COLS {
+                } else if caps.workgroup_reductions {
                     vec![RegisterTiled, WorkgroupPerOutput, Reference]
                 } else {
                     vec![Reference]

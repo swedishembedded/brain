@@ -78,6 +78,12 @@ const SPEEDUP_FLOOR: f64 = 8.0;
 /// be weakened under pressure rather than having been honest from the start.
 const MAXABS: f32 = 1e-6;
 
+/// The absolute bar for a sum of `k` terms that may be added in a different order than the reference's: `MAXABS`
+/// scaled by `sqrt(k)`, the growth of the rounding error of a sum.
+fn sum_bar(k: u32) -> f32 {
+    MAXABS * (k as f32).sqrt().max(1.0)
+}
+
 /// `(m, n, k)` for the timed comparison. Small enough that the whole run is a
 /// few milliseconds and under a megabyte of device memory, large enough that
 /// the generated tier's uncoalesced weight reads actually cost something.
@@ -269,7 +275,8 @@ fn the_production_registry_routes_a_real_matmul_to_the_tuned_kernel() {
     let selector: Arc<dyn KernelSelector> = Arc::new(select::CachedSelector::new(select::DefaultSelector));
     let registry = gpu_core::provider::ProviderRegistry::for_gpu(&gpu, selector);
 
-    let (m, n, k) = (64u32, 64u32, 64u32);
+    // Wide enough that the 64 x 64 tile fills the device (the narrow shapes belong to the skinny kernel, below).
+    let (m, n, k) = (512u32, 1024u32, 64u32);
     let x = gpu.storage_init("x", &seeded(7, (m * k) as usize));
     let w = gpu.storage_init("w", &seeded(8, (n * k) as usize));
     let y = gpu.storage((m * n) as u64);
@@ -341,7 +348,9 @@ fn the_tuned_cuda_matmul_clears_every_shared_parity_case() {
     let scratch = gpu.storage(1);
     for case in parity::cases_for(select::Op::MatMul) {
         let case = ParityCase {
-            tol: Tolerance::Numeric { atol: MAXABS, rtol: 0.0, cosine_min: 0.999_999 },
+            // The skinny kernel splits the contraction over warps, so it differs from the reference's single ascending
+            // sum by the summation error, which grows with the number of terms.
+            tol: Tolerance::Numeric { atol: sum_bar(case.shape.k), rtol: 0.0, cosine_min: 0.999_999 },
             ..*case
         };
         let bind = |_: select::KernelVariant| -> (usize, &'static str) { (0, "matmul") };
@@ -378,8 +387,57 @@ fn the_tuned_cuda_matmul_clears_every_shared_parity_case() {
     }
 }
 
+/// **A few rows against a short weight** run on the narrow-tile kernel and match an f64 oracle: the decoder step's
+/// shapes at batch 33..128 (24 x 2048 gates, 512-row projections), tails in every dimension, and a shape wide enough
+/// that the 64 x 64 tile fills the device and keeps its kernel.
+fn a_starved_tile_grid_runs_the_skinny_kernel_and_agrees_with_an_f64_oracle() {
+    let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
+        eprintln!("cuda_provider_matmul: no CUDA device on this box - skipping");
+        return;
+    };
+    let selector: Arc<dyn KernelSelector> = Arc::new(select::CachedSelector::new(select::DefaultSelector));
+    let registry = gpu_core::provider::ProviderRegistry::for_gpu(&gpu, selector);
+    let caps = gpu.caps();
+    let units = caps.compute_units.expect("a CUDA device reports its multiprocessors");
+    let bind = |_: select::KernelVariant| -> (usize, &'static str) { (gpu.kernel_index("matmul").expect("'matmul' is registered"), "matmul") };
+    let cases = [(33u32, 24u32, 2048u32), (64, 24, 2048), (64, 512, 512), (64, 1120, 512), (100, 7, 33), (128, 384, 31), (48, 1, 1), (65, 8, 32), (64, 16384, 512), (16, 512, 512), (24, 24, 2048), (32, 1120, 512)];
+    for (m, n, k) in cases {
+        let xs = seeded(11 + u64::from(m), (m * k) as usize);
+        let ws = seeded(12 + u64::from(n), (n * k) as usize);
+        let x = gpu.storage_init("x", &xs);
+        let w = gpu.storage_init("w", &ws);
+        let y = gpu.storage((m * n) as u64);
+        let operands = [
+            Operand { role: Role::Act, buf: &x, range: (0, u64::from(m * k)), dtype: DType::F32 },
+            Operand { role: Role::Weight, buf: &w, range: (0, 0), dtype: DType::F32 },
+            Operand { role: Role::Out, buf: &y, range: (0, u64::from(m * n)), dtype: DType::F32 },
+        ];
+        let attrs = [m, k, n];
+        let req = OpRequest { op: select::Op::MatMul, shape: select::OpShape { m, n, k, dtype: Dtype::F32 }, pass: Pass::Forward, operands: &operands, attrs: &attrs, group: 32, bind: &bind };
+        let mut steps = Vec::new();
+        let lowered = {
+            let mut ctx = LowerCtx { gpu: &gpu, caps: &caps, steps: &mut steps, capture: false };
+            registry.dispatch(&mut ctx, &req)
+        };
+        let starved = (16..=128).contains(&m) && m.div_ceil(64) * n.div_ceil(64) < units / 2;
+        let want_kernel = if starved { "native:matmul_f32_skinny" } else { "native:matmul_f32_tiled" };
+        assert_eq!(lowered.kernels, vec![want_kernel], "m={m} n={n} k={k} on {units} multiprocessors");
+        gpu.submit(&[], &steps);
+        let got = gpu.read(&y, (m * n) as usize);
+        let mut maxabs = 0f64;
+        for r in 0..m as usize {
+            for c in (0..n as usize).step_by(if n > 4096 { 97 } else { 1 }) {
+                let want: f64 = (0..k as usize).map(|i| f64::from(xs[r * k as usize + i]) * f64::from(ws[c * k as usize + i])).sum();
+                maxabs = maxabs.max((want - f64::from(got[r * n as usize + c])).abs());
+            }
+        }
+        assert!(maxabs < f64::from(sum_bar(k)), "m={m} n={n} k={k}: {maxabs:e} from an f64 oracle");
+    }
+}
+
 gpu_core::card_tests!(
     the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with_it,
     the_production_registry_routes_a_real_matmul_to_the_tuned_kernel,
     the_tuned_cuda_matmul_clears_every_shared_parity_case,
+    a_starved_tile_grid_runs_the_skinny_kernel_and_agrees_with_an_f64_oracle,
 );

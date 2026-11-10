@@ -131,3 +131,108 @@ fn the_released_decoder_matches_the_host_and_generates_the_reference_tokens() {
     }
     let _ = compare;
 }
+
+/// The decoder step floor: one recorded step replayed at batch 1, 8, 32 and 64 on the real cats memory, timed as
+/// the minimum over replays (`poll_wait` brackets every timed region) and priced per kernel kind with
+/// `Gpu::profile_tape`. A probe, not a gate: run it on an idle card and note the card load.
+#[test]
+#[ignore = "profiling entry point: prints the step time and the per-kernel table"]
+fn decoder_step_floor_probe() {
+    step_floor(mirage::model::Precision::Fp32);
+}
+
+/// [`decoder_step_floor_probe`] on the packed decoder.
+#[test]
+#[ignore = "profiling entry point: prints the step time and the per-kernel table"]
+fn decoder_step_floor_probe_cq() {
+    step_floor(mirage::model::Precision::Cq);
+}
+
+fn step_floor(precision: mirage::model::Precision) {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dir) = released_dir() else { return };
+    let Some(cats) = crate::decoder::golden("step floor", "cats") else { return };
+    let loaded = mirage::model::load_precision(&dir, precision).expect("loads");
+    let model = mirage::model::Mirage::new(&loaded.checkpoint, &loaded.tokenizer, loaded.charset).unwrap();
+    for mut dev in devices("step floor").into_iter().take(1) {
+        dev.set_cq_activations(precision.activations());
+        let dd = DeviceDecoder::upload(&dev, model.decoder());
+        let memory: Vec<f32> = cats["memory"].iter().map(|&v| v as f32).collect();
+        let tokens: Vec<u32> = cats["tokens"].iter().map(|&t| t as u32).collect();
+        let (rounds, inner) = (40, 10);
+        for batch in [1usize, 8, 32, 64] {
+            let mems: Vec<&[f32]> = (0..batch).map(|_| &memory[..]).collect();
+            let mem = memory_batch(&dev, &mems, 512);
+            let cross = dd.cross(&dev, &mem);
+            let mut st = dd.new_state(&dev, batch, 700);
+            st.set_tokens(&dev, &vec![tokens.clone(); batch]);
+            st.first = 2;
+            let ban = dev.buf(&vec![0f32; batch * dd.vocabulary()]);
+            let picked = dev.alloc(batch);
+            let tape = dd.record_step(&dev, &st, &cross, true, Some((&ban, &picked)));
+            let g = dev.gpu();
+            let mut best = f64::MAX;
+            for round in 0..rounds {
+                st.seek(&dev, 150);
+                let t = std::time::Instant::now();
+                for _ in 0..inner {
+                    g.replay_tape(&tape);
+                }
+                g.poll_wait();
+                if round >= 5 {
+                    best = best.min(t.elapsed().as_secs_f64() / inner as f64);
+                }
+            }
+            eprintln!("STEP batch {batch}: {:.3} ms (min over replays, position 150)", best * 1e3);
+            st.seek(&dev, 150);
+            if let Some(rows) = g.profile_tape(&tape, 20) {
+                let total: f64 = rows.iter().map(|r| r.1).sum();
+                eprintln!("PROFILE batch {batch}: {total:.3} ms in {} dispatches", rows.iter().map(|r| r.2).sum::<u64>());
+                for (k, ms, n) in rows.iter().take(14) {
+                    eprintln!("  {k:<28} {ms:8.4} ms {:5.1}%  x{n}", ms / total * 100.0);
+                }
+            }
+        }
+    }
+}
+
+/// Product times at the decoder's shapes: `rows` activation rows against dense f32 weights of the step's shapes,
+/// eight products per recorded tape (the library declined, as inside a replayed step), minimum over replays.
+#[test]
+#[ignore = "profiling entry point: prints microseconds per product"]
+fn decoder_gemm_shapes_probe() {
+    const REPS: usize = 4;
+    let rounds = 30;
+    let _g = gpu_core::testgpu::exclusive();
+    for dev in devices("gemm shapes").into_iter().take(1) {
+        let g = dev.gpu();
+        let shapes = [("phi", 24usize, 2048usize), ("qkvg", 1120, 512), ("out", 512, 512), ("cq", 384, 512), ("engram", 512, 512), ("logits", 8299, 512)];
+        for rows in [16usize, 32, 33, 64, 128] {
+            let mut line = format!("GEMM rows {rows:3}:");
+            for (name, n, k) in shapes {
+                let w = model::ops::Weight::dense_f32(dev.buf(&vec![0.01f32; n * k]), n as u32, k as u32);
+                let x = dev.buf(&vec![0.5f32; rows * k]);
+                let mut s = Vec::new();
+                g.set_declines_library(true);
+                g.begin_tape();
+                for _ in 0..REPS {
+                    let _ = dev.linear_new(&mut s, &w, &x, rows as u32);
+                }
+                g.submit(&[], &s);
+                let tape = g.end_tape();
+                g.set_declines_library(false);
+                let mut best = f64::MAX;
+                for round in 0..rounds {
+                    let t = std::time::Instant::now();
+                    g.replay_tape(&tape);
+                    g.poll_wait();
+                    if round >= 5 {
+                        best = best.min(t.elapsed().as_secs_f64() / REPS as f64);
+                    }
+                }
+                line += &format!(" {name} {:6.1}us", best * 1e6);
+            }
+            eprintln!("{line}");
+        }
+    }
+}

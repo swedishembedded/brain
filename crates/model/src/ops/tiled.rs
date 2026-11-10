@@ -276,6 +276,9 @@ const DENSE_GEMV_MAX_ROWS: u32 = 1;
 const GEMV_TARGET_WORKGROUPS: u32 = 528;
 const GEMV_MAX_ROUNDS: u32 = 16;
 
+/// Activation rows up to which an int8-activation CQ product stays on the cooperative kernel.
+const A8_COOPERATIVE_MAX_ROWS: u32 = 96;
+
 impl Ops {
     /// `y[m, n] = act @ W^T` for a rotated-codebook weight, reading the stored indices in place: the activation
     /// groups are rotated once into a reused scratch (`cq_rotate`), then the selector's first candidate runs (the
@@ -310,6 +313,9 @@ impl Ops {
         if let Some(scales) = &scales {
             // No dense A8 product exists (the weight would be expanded to f32 and the integer arithmetic lost), so the
             // many-row regime stays on the barrier-free kernel.
+            // The dense product the selector offers from CQ_GEMV_MAX_ROWS rows has no int8 form: up to the range the
+            // cooperative product was measured on (a decode batch) it stays on it, beyond it on the row-blocked kernel.
+            let first = if first == KernelVariant::RegisterTiled && m <= A8_COOPERATIVE_MAX_ROWS { KernelVariant::WorkgroupPerOutput } else { first };
             let (name, grid) = match first {
                 KernelVariant::WorkgroupPerOutput => (kernels::template::cq_a8_gemv_kernel_name(*bits, m), gpu_core::Dispatch::Workgroups(n.div_ceil(kernels::template::CQ_A8_GEMV_COLS) * m.div_ceil(kernels::template::GEMV_ROW_CAPACITIES[3]))),
                 _ => (kernels::template::cq_a8_gemm_kernel_name(*bits), gpu_core::Dispatch::Threads(*n * m.div_ceil(kernels::template::CQ_GEMM_ROWS))),

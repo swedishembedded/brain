@@ -64,6 +64,12 @@ use super::{LowerCtx, Lowered, OpRequest, OperatorProvider, Pass, Role};
 
 /// `matmul.wgsl`'s own `@binding` order, which the f32 GEMM mirrors: uniform,
 /// activations, weights, output.
+/// Rows of x up to which the skinny product kernel is considered for a starved tile grid.
+pub const SKINNY_MAX_ROWS: u32 = 128;
+/// Rows of x from which the skinny kernel also takes the decode regime's products (below it the decode GEMV, which
+/// streams a one-row weight at its roof, stays the kernel): half a block's 32 row lanes.
+pub const SKINNY_MIN_ROWS: u32 = 16;
+
 const MATMUL_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
 /// `paged_flash_prefill_hd256.wgsl`'s own `@binding` order: uniform, queries,
@@ -139,12 +145,14 @@ pub struct CudaProvider {
     /// built for. Never a default: a provider with no capability to resolve
     /// against cannot be constructed (see [`CudaProvider::for_gpu`]).
     cc: Cc,
+    /// Multiprocessors the device reports, when known: the skinny product kernel is claimed only against a count.
+    units: Option<u32>,
 }
 
 impl CudaProvider {
     /// A provider that resolves kernels against compute capability `cc`.
     pub fn new(cc: Cc) -> CudaProvider {
-        CudaProvider { cc }
+        CudaProvider { cc, units: None }
     }
 
     /// The provider for `gpu`, or `None` when this handle's device reports no
@@ -157,7 +165,8 @@ impl CudaProvider {
     /// C++ still declines - one layer down, at `register_native` - so no
     /// dispatch can reach a kernel the device never took.
     pub fn for_gpu(gpu: &crate::Gpu) -> Option<CudaProvider> {
-        gpu.caps().arch.compute_capability.map(CudaProvider::new)
+        let caps = gpu.caps();
+        caps.arch.compute_capability.map(|cc| CudaProvider { cc, units: caps.compute_units })
     }
 
     /// The compute capability this provider resolves against.
@@ -175,6 +184,16 @@ impl CudaProvider {
             return kernels_cuda::get("matmul_i8_mma").filter(|k| k.min_cc <= self.cc);
         }
         kernels_cuda::find(op, dtype, self.cc)
+    }
+
+    /// The skinny-M product kernel when it beats `tiled` for `shape`: at most [`SKINNY_MAX_ROWS`] rows and fewer
+    /// tiles of `tiled` than half the device's multiprocessors (`units`; unknown means no claim).
+    fn skinny_for(&self, tiled: &'static CudaKernel, shape: select::OpShape, units: Option<u32>) -> Option<&'static CudaKernel> {
+        let units = units?;
+        if shape.m < SKINNY_MIN_ROWS || shape.m > SKINNY_MAX_ROWS || tiled.blocks_for(shape.m, shape.n) >= units / 2 {
+            return None;
+        }
+        kernels_cuda::get("matmul_f32_skinny").filter(|k| k.min_cc <= self.cc)
     }
 
     /// [`Self::kernel`]'s registry name - what a test or a diagnostic reports
@@ -1786,7 +1805,10 @@ impl OperatorProvider for CudaProvider {
                 // measured 200 us for a 257x2048 router. The decode regime is
                 // the skinny-M GEMV's (`select::candidates`' head), so leave it
                 // to that.
-                Some(Dtype::F32) => req.shape.m > select::DECODE_REGIME_MAX_ROWS && self.kernel(select::Op::MatMul, Dtype::F32).is_some(),
+                Some(Dtype::F32) => {
+                    let tiled = self.kernel(select::Op::MatMul, Dtype::F32);
+                    tiled.is_some_and(|t| req.shape.m > select::DECODE_REGIME_MAX_ROWS || self.skinny_for(t, req.shape, self.units).is_some())
+                }
                 Some(dt) => self.kernel(select::Op::MatMul, dt).is_some(),
                 None => false,
             }
@@ -1820,6 +1842,9 @@ impl OperatorProvider for CudaProvider {
         let k = k.ok_or_else(|| {
             format!("cuda::CudaProvider::lower: no native {dt:?} MatMul kernel at compute capability {}.{}", self.cc.0, self.cc.1)
         })?;
+        // Few rows against a short weight leave the 64 x 64 tile on a handful of blocks: the narrow tile that
+        // spreads the contraction over a block's warps takes the product.
+        let k = if dt == Dtype::F32 { self.skinny_for(k, req.shape, ctx.caps.compute_units.or(self.units)).unwrap_or(k) } else { k };
         let Some(id) = ctx.gpu.native_kernel(k, MATMUL_BINDINGS) else {
             return Err(format!(
                 "cuda::CudaProvider::lower: this device declined the native {dt:?} matmul kernel \

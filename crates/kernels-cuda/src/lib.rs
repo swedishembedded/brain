@@ -1839,6 +1839,25 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_kq_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_f32_skinny",
+        // Chosen by `CudaProvider` BY NAME for a few rows against a short weight, where the (MatMul, F32) answer
+        // `matmul_f32_tiled` would launch a handful of blocks.
+        op: Op::MatMul,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_f32_skinny",
+        what: "fp32 out = x @ W^T for a few rows; 32 x 8 output tile per block, the contraction split over 8 warps, fixed-order fold",
+        reported: "native:matmul_f32_skinny",
+        block_dim: 256,
+        tile: (32, 8),
+        // 8 warps x 32 k x (32 + 1 pad) floats of x, and 8 warps x 32 k x 8 floats of W.
+        shared_bytes: 8 * 32 * (32 + 1) * 4 + 8 * 32 * 8 * 4,
+        programmatic: false,
+        src: include_str!("../cu/matmul_f32_skinny.cu"),
+    },
+    CudaKernel {
         name: "matmul_f32_reg",
         // The native twin of `matmul_reg3.wgsl`, redirected to BY NAME by
         // `gpu_core::native_upgrade`; the (MatMul, F32) operator answer stays
