@@ -66,19 +66,12 @@
 //! multiple of 64; below the ceiling neither is read and nothing this port
 //! shipped before changes.
 //!
-//! ## One simplification inside the guidance fold
+//! ## The guidance fold
 //!
-//! Real LTX-2.5 sampling (`ltx_pipelines.utils.samplers`) can layer STG
-//! (spatiotemporal guidance), audio/video joint guidance, and CFG rescale on
-//! top of plain CFG. None of that is implemented here: this pipeline runs
-//! ONLY `uncond + guidance·(cond - uncond)` on the model's predicted
-//! velocity (algebraically identical to the roadmap's `cond +
-//! (guidance-1)·(cond-uncond)` spelling), the same fold `wan::pipeline` uses.
-//! STG needs the perturbation machinery this port hasn't built; audio/video
-//! joint guidance needs the audio stream, which is a separate, later
-//! milestone entirely. `guidance <= 1.0` skips the unconditional forward
-//! exactly as `wan::pipeline` does (the combination collapses to the
-//! conditional prediction).
+//! Guidance is LTX-2.5's multimodal guider, in [`crate::guidance`]: CFG,
+//! STG (spatiotemporal guidance), the isolated-modality term and CFG rescale,
+//! each combined per stream on the x0 estimate. A pass whose scale makes its
+//! term vanish is not run ([`crate::guidance::Guidance::needs_uncond`]).
 //!
 //! ## Token layout: the DiT and the VAE disagree, on purpose
 //!

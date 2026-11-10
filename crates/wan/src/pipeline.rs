@@ -167,9 +167,9 @@ pub struct GenOpts {
     pub steps: usize,
     /// Flow-matching sigma shift.
     pub shift: f32,
-    /// Classifier-free guidance. `<= 1.0` skips the unconditional forward
-    /// entirely, which is exact (the combination collapses to the conditional
-    /// prediction) and halves the cost.
+    /// Classifier-free guidance. `<= 1.0` skips the unconditional forward and
+    /// samples on the conditional prediction alone, halving the cost; that is
+    /// the blend exactly at 1.0, and treats a scale below 1 as 1.
     pub guidance: f32,
     pub seed: u64,
     /// `None` uses [`DEFAULT_NEGATIVE_PROMPT`]; `Some("")` means genuinely no
