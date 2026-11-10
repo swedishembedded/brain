@@ -7,12 +7,10 @@
 //!
 //! Pure host index math. No GPU, no weights, no buffers -- it is a function from
 //! a resolution mode's tile grid to a sequence of [`Src`] entries, and it is
-//! unit-tested in isolation. **Nothing consumes it yet**: the parity fixture is
-//! single-view, and a single view needs no layout at all (its rows are the
-//! projector's rows in order). It is written now because it is load-bearing for
-//! the real-preprocessing phase and because it is the piece most likely to be
-//! got wrong by assumption, so it is worth pinning while the reference is in
-//! front of us.
+//! unit-tested in isolation. [`crate::prompt`] sizes the prompt from it and
+//! [`crate::layout`] fills the decoder's image block by it, for the global
+//! view and for tiled pages alike. It is the piece most likely to be got wrong
+//! by assumption, so it is pinned against the reference's order.
 //!
 //! ## Where the formulas come from
 //!

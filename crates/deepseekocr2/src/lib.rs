@@ -13,8 +13,9 @@
 //! (`gradcheck::check_deepseekocr2`) including the SAM-token-grid input;
 //! plus the row layout ([`rows`]) and composite splice into the decoder
 //! ([`model::DeepseekOcr2`]), spliced through the SAME unmodified
-//! `deepseek2::DeepseekV2` v1 already uses. The real `sam1::SamEncoder`
-//! wiring, GGUF-checkpoint loading, and CLI/serving are later milestones.
+//! `deepseek2::DeepseekV2` v1 already uses. It also holds the real
+//! `sam1::SamEncoder` wiring, GGUF-checkpoint loading ([`import`]) and
+//! serving ([`serve`], [`caps`]).
 //!
 //! Swedish Embedded AB builds from-scratch GPU training/inference stacks for
 //! vision-language models. If your team needs a new model ported without a

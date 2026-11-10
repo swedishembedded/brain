@@ -6,10 +6,11 @@
 //! the continuous-batching front end and the residency adapter are the ones every
 //! OCR model shares (`ocrserve`); this module only says what is specific to v1.
 //!
-//! * **Real preprocessing.** [`crate::preprocess::preprocess_image`] turns the
-//!   request's decoded pixels into the normalized tensor with the checkpoint's
-//!   own `mean = std = 0.5` affine and the reference's aspect-preserving
-//!   fit-and-pad - not a stretch, not a borrowed CLIP normalization.
+//! * **Real preprocessing.** [`crate::serve`] cuts the request's decoded pixels
+//!   into the reference's views (aspect-preserving fit-and-pad for the global
+//!   view, a tile grid for a large page) and normalizes them with the
+//!   checkpoint's own `mean = std = 0.5` affine - not a stretch, not a
+//!   borrowed CLIP normalization.
 //! * **The real 273-row prompt.** [`crate::prompt::build_prompt`] assembles
 //!   `BOS ++ <image>x273 ++ text`, and the DeepEncoder's rows - the 16
 //!   `image_newline` rows and the one `view_separator` row carrying the learned
@@ -52,7 +53,9 @@ pub const VISION_DEVICE_BYTES: u64 = 15u64 << 30;
 /// ~11.4 GiB of weights (2234 tensors, 2.9 B parameters at fp32), ~1.0 GiB of
 /// KV cache (12 layers x 2 x 8192 x 1280 fp32), ~0.5 GiB of per-expert MoE
 /// activation scratch at a 512-row round, and ~0.3 GiB of attention
-/// score/probability slabs. 14 GiB rounds that up.
+/// score/probability slabs. The serving build adds a 128k-token bf16 KV pool
+/// and decode tapes for 64 rows (see [`VISION_DEVICE_BYTES`] for the measured
+/// replica), so the decoder is budgeted 18 GiB.
 pub const DECODER_DEVICE_BYTES: u64 = 18u64 << 30;
 
 /// Host bytes the whole composite holds once the decoder is on a card:

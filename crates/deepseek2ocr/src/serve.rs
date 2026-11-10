@@ -62,7 +62,7 @@ pub enum Reading {
 }
 
 impl Reading {
-    /// How an image of `w x h` pixels is read; `max_tiles` caps the tiles (`Some(0)` turns tiling off).
+    /// How an image of `w x h` pixels is read; `max_tiles` caps the tiles (`Some(0)` turns tiling off, and the smallest grid is 2 tiles, so `Some(1)` reads as 2).
     pub fn of(w: u32, h: u32, max_tiles: Option<u32>) -> Reading {
         if max_tiles == Some(0) {
             return Reading::Global;

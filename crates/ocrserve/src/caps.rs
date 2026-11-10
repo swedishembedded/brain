@@ -43,7 +43,7 @@ pub fn generate_spec<M: OcrModel>() -> ActionSpec {
             .default(json!(DEFAULT_INSTRUCTION)),
         )
         .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(DEFAULT_MAX_NEW)))
-        .param(ParamSpec::new("max_tiles", ParamType::Int, "most local tiles a large page is cut into before it is read (0 reads the page as one global view; omitted, the model's own default)").min(0.0).max(64.0))
+        .param(ParamSpec::new("max_tiles", ParamType::Int, "most local tiles a large page is cut into before it is read (0 reads the page as one global view, 1 reads as 2, the smallest grid; omitted, the model's own default)").min(0.0).max(64.0))
         .param(ParamSpec::new("weights", ParamType::Str, "checkpoint DIRECTORY; overrides the model-store resolver's own pick when set").host_resolved())
         .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention)").required())
         .output(BlobSpec::new("text", Media::Text, "the decoded document text")))

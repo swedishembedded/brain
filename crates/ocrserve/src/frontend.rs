@@ -38,7 +38,7 @@ use crate::{DecoderDevice, DEFAULT_INSTRUCTION, DEFAULT_MAX_NEW, MAX_CONTEXT};
 /// the more rows share it the cheaper each token (4.8 ms a step at 32 rows, 6.9 ms at 64, `engine_bench`), and a recorded step is kept
 /// per row count up to this many.
 pub const MAX_BATCH: u32 = 64;
-/// Tokens of K/V the pool holds across all pages in flight: 2048 per row at a full batch, in bf16 (the 14 GiB the decoder is budgeted).
+/// Tokens of K/V the pool holds across all pages in flight: 2048 per row at a full batch, in bf16 (7.5 GiB at DeepSeek-OCR's 61,440 bytes a token).
 pub const POOL_TOKENS: u32 = 128 * 1024;
 /// Pages the vision encoders take at once: each is a full set of towers on the card (~4.5 GiB for DeepSeek-OCR).
 pub const ENCODE_WORKERS: usize = 2;
@@ -49,10 +49,6 @@ pub const PREFILL_CHUNK: u32 = 512;
 /// runs per setting, a neighbour on the card): the crops' median latency fell 3.5 -> 1.9 s (1.1 alone) and the pages' throughput
 /// rose 36 -> 51 per minute. 256 and 128 rows were no better than 512.
 pub const PREFILL_BUDGET: u32 = 512;
-/// Prompt rows prefilled between two decode steps: one chunk. The scheduler's default of two chunks makes every step that admits a
-/// page ~80 ms longer for every page already decoding; with one, 8 full pages and 8 clients of small crops (best of two alternating
-/// runs per setting, a neighbour on the card): the crops' median latency fell 3.5 -> 1.9 s (1.1 alone) and the pages' throughput
-/// rose 36 -> 51 per minute. 256 and 128 rows were no better than 512.
 /// vLLM's recipe for this model family: no 30-gram may repeat within a 90-token window.
 pub const NGRAM_SIZE: u32 = 30;
 pub const NGRAM_WINDOW: u32 = 90;

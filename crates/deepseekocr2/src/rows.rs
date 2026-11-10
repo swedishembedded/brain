@@ -19,14 +19,10 @@
 //! projected output is one contiguous run with no interleaving (only one
 //! `view_separator` tensor exists in the real checkpoint, and no
 //! `image_newline` at all - unlike v1, where both exist).
-//! **Still a design assumption, not yet an empirical fact**: the order
-//! MULTIPLE local tiles take relative to each other and to the global view.
-//! This module assumes row-major-over-the-tile-grid (width fastest), then
-//! the global view, then the separator - the same assumption
-//! `crates/deepseekocr2/src/encoder.rs`'s `gather_rows` already codified for
-//! M3/M4's fixture. If a later milestone's real forward or a real llama.cpp
-//! dump finds a different order, only [`row_plan`] changes - nothing that
-//! consumes a [`RowPlan`] needs to know the formula.
+//! MULTIPLE local tiles go row-major over the tile grid (width fastest),
+//! then the global view, then the separator: the reference's order, the same
+//! one v1 uses and `crate::encoder`'s `gather_rows` codifies. Only
+//! [`row_plan`] knows the formula; nothing that consumes a [`RowPlan`] does.
 
 /// Which vector occupies one row of the decoder's spliced image block.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

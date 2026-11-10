@@ -67,10 +67,10 @@
 //!
 //! ## Scope
 //!
-//! **The global (overview) view only.** DeepSeek-OCR's "Gundam" mode also emits
-//! a local tile grid at 640² and interleaves the two token streams; the row
-//! layout for that already exists in [`crate::rows`], but no graph consumes it
-//! and neither does this module. One image, one view, one 1024² tensor.
+//! **The global (overview) view only**, on the GPU, for the real-weight tests
+//! that pin the encoder. Serving cuts its views (the global view and the
+//! "Gundam" tile grid at 640²) on the host to match the reference's resampling
+//! exactly (`crate::serve`). One image, one view, one 1024² tensor.
 //!
 //! Batch is 1, like everything else in this crate.
 

@@ -45,10 +45,9 @@
 //! ## Scope
 //!
 //! One image, one contiguous decoder run, any [`Src`] sequence - the multi-view
-//! (Base/Gundam) layouts [`crate::rows::row_plan`] can already produce work
-//! here unchanged, because nothing below knows about tiles. What still limits
-//! the composite to the global view is `deepseekv2`'s single-run splice, not
-//! this file.
+//! (Base/Gundam) layouts [`crate::rows::row_plan`] produces work here
+//! unchanged, because nothing below knows about tiles, and a tiled page is
+//! still one run of the decoder's splice.
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::vlm::splice_fwd;

@@ -27,7 +27,7 @@
 //! llama.cpp's own consumer of this GGUF does
 //! (`ggml_concat(ctx0, clip_out, sam_out, 0)`, concatenating along the row
 //! width). At real scale `c_out == clip_width == 1024`, so a swap would be
-//! arithmetically invisible; `crates/deepseekocr/tests/tiny_ref.rs` runs at
+//! arithmetically invisible; `tests/it/tiny_ref.rs` runs at
 //! widths 11 and 14 and asserts each half against its own source tap.
 //!
 //! ## Modules
@@ -81,11 +81,10 @@
 //!   stride), so the composite is too, and the golden fixture is generated at
 //!   `batch = 1` to match.
 //! * **Single contiguous image run.** The decoder splice covers one
-//!   `[row0, row0 + n_rows)` run -- the golden's own scope. [`prompt`] builds
-//!   the global-view prompt over that one run; [`rows`]'s multi-view
-//!   (Base/Gundam) layouts still have no consumer, because they need one splice
-//!   call per run (`layout::RowGather` itself is already indifferent to that;
-//!   `deepseek2::DeepseekV2::enable_mm_splice` is not).
+//!   `[row0, row0 + n_rows)` run. Every layout fits in it: a tiled (Gundam)
+//!   page lays its local tiles, the global view and the separator out as one
+//!   block ([`rows`], [`prompt`]), and serving ([`serve`]) fills that block
+//!   through [`layout`].
 //! * **The real 273-row block is assembled, and the 256-row one is still the
 //!   parity path.** [`DeepseekOcr::new_with_prompt`] sizes the splice at
 //!   [`build_prompt`]'s own `n_rows` (273 at the real geometry) and fills it
@@ -99,12 +98,12 @@
 //!   and every parity number here was measured on it.
 //! * **Stages exchange host buffers.** Each sub-model owns its own `Gpu` with
 //!   its own pipeline list, so SAM → CLIP → projector → decoder round-trip
-//!   through `Vec<f32>` -- the same arrangement `crates/qwenvl` uses. A
+//!   through `Vec<f32>`. A
 //!   same-device fast path is additive (`model::vlm::SpliceRuns` exposes
 //!   each run's buffers for it) and is not built here.
 //! * **The composed decode loop has no multimodal oracle.** The text decoder's
 //!   greedy loop is matched token for token against llama.cpp
-//!   (`crates/deepseekv2/tests/generate.rs`); the image+decoder loop is gated
+//!   (`crates/deepseek2/tests/it/generate.rs`); the image+decoder loop is gated
 //!   only on completing, on finite logits, and on causal self-consistency
 //!   (`tests/real_weight_generate.rs`), because llama.cpp's debug callback
 //!   segfaults inside this model's CLIP graph and no post-image token-id capture

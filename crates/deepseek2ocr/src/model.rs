@@ -29,10 +29,10 @@
 //! one. Nothing about the encoder, the projector or the decoder differs between
 //! them - only which rows of the spliced block carry which vector.
 //!
-//! **Still one contiguous DECODER run** in both cases: the splice seam takes
-//! exactly one `(row0, n_rows)`. A multi-view (Base/Gundam) layout is several
-//! decoder runs and needs one splice call per run; `RowGather` itself is already
-//! indifferent to that, `deepseek2::DeepseekV2::enable_mm_splice` is not.
+//! **One contiguous DECODER run** in both cases: the splice seam takes
+//! exactly one `(row0, n_rows)`. A multi-view (Base/Gundam) layout is one run
+//! too, the local tiles' rows, then the global view's, then the separator
+//! ([`crate::rows`]), so it needs no second splice call.
 //!
 //! **The backward is real and end to end**: the decoder's cross-entropy gradient
 //! reaches the placeholder rows, the splice moves them into the encoder's
