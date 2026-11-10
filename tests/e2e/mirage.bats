@@ -106,6 +106,54 @@ PY
   [ "$(jq '.form | keys | length' <<<"$cli")" -eq 2 ]
 }
 
+@test "D-Bus and HTTP refuse path-like params, malformed forms and oversized images before any work" {
+  run "$PY" - <<PY
+import base64, json, urllib.error, urllib.request
+from brain_py import BrainError
+from brain_py.base import MIRAGE_MODEL
+from brain_py.dbus import BrainDBus
+from brain_py.image import load_ppm
+
+data, w, h = load_ppm("$CONF_DIR/photo.ppm")
+meta = {"image": {"media": "image", "w": w, "h": h, "c": 3}}
+with BrainDBus() as b:
+    for params, needle in (({"weights": "/etc/passwd"}, "weights"), ({"path": "/etc/passwd"}, "path"), ({"sections": "objects,bogus"}, "bogus")):
+        try:
+            b.run(MIRAGE_MODEL, "describe", params, blobs={"image": data}, meta=meta)
+        except BrainError as e:
+            assert needle in str(e), (params, str(e))
+        else:
+            raise AssertionError(f"{params} was accepted")
+    try:
+        b.run(MIRAGE_MODEL, "extract", {"form": "{not json"}, blobs={"image": data}, meta=meta)
+    except BrainError as e:
+        assert "form" in str(e), str(e)
+    else:
+        raise AssertionError("a malformed form was accepted")
+    huge = {"image": {"media": "image", "w": 20000, "h": 20000, "c": 3}}
+    try:
+        b.run(MIRAGE_MODEL, "describe", {}, blobs={"image": data}, meta=huge)
+    except BrainError as e:
+        assert "pixels" in str(e), str(e)
+    else:
+        raise AssertionError("an oversized image was accepted")
+
+def post(body):
+    req = urllib.request.Request("http://127.0.0.1:$PORT/v1/run", data=json.dumps(body).encode(), headers={"Authorization": "Bearer $KEY", "Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=60)
+    except urllib.error.HTTPError as e:
+        return e.code
+    return 200
+
+blob = {"media": "image", "data": base64.b64encode(data).decode(), "meta": {"w": w, "h": h, "c": 3}}
+assert post({"model": MIRAGE_MODEL, "action": "describe", "params": {"weights": "/etc/passwd"}, "blobs": {"image": blob}}) == 400
+assert post({"model": MIRAGE_MODEL, "action": "extract", "params": {"form": "[]"}, "blobs": {"image": blob}}) == 400
+PY
+  echo "$output" >&3
+  [ "$status" -eq 0 ]
+}
+
 @test "16 concurrent requests are batched and each equals the single answer" {
   run "$PY" "$REPO/samples/python/vision/mirage-perception/mirage_perception.py" --image "$CONF_DIR/photo.ppm" --max-tokens 600 --concurrent 16
   echo "$output" >&3
