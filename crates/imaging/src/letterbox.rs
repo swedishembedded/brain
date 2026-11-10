@@ -126,8 +126,8 @@ impl Letterbox {
 /// tensor `[3*size*size]`, filling the border with `pad`.
 ///
 /// `pad` is a parameter, never a constant: yolo's callers pass `114.0/255.0`
-/// (ultralytics' grey) and `cli::depth_cli`'s INT8 calibration passes `0.5`.
-/// A single hard-coded fill would silently change one of them.
+/// (ultralytics' grey), and a detector trained on another fill must be able to
+/// pass its own without changing theirs.
 ///
 /// Resampling is half-pixel nearest neighbour — see the module header for why it
 /// is not a kernel dispatch, and why the `as usize` truncation on the paste

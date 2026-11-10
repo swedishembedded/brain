@@ -868,10 +868,10 @@ fn run_calib(args: &[String]) {
     println!("VERDICT: {verdict}");
 }
 
-/// Load up to `max_n` PPM images from `dir`, letterboxed to `[3,size,size]` CHW.
-/// Load calibration images and preprocess each one **exactly as the predictor
-/// does**: `zipdepth::predict::preprocess_chw` - aspect-preserving bilinear resize
-/// so the shorter side is `input`, both dims rounded to a multiple of 32, no pad.
+/// Load up to `max_n` PPM calibration images from `dir` and preprocess each
+/// one **exactly as the predictor does**: `zipdepth::predict::preprocess_chw`,
+/// an aspect-preserving bilinear resize so the shorter side is `input`, both
+/// dims rounded to a multiple of 32, no pad.
 ///
 /// This used to letterbox to a padded square with a 0.5 grey fill, so
 /// calibration fitted INT8 scales to a resampler, a geometry and a border the
