@@ -166,9 +166,21 @@ fn q8_gguf_cost_matches_the_buffers_flux2_keeps_on_device() {
         .sum();
     let n_joint = 96;
     let got = gguf_dit_device_bytes(&g, &cfg, n_joint, 1).expect("Q8_0 header cost");
-    let legacy = dit_bytes(&cfg, Precision::Int8, n_joint, 1);
     assert!(got > expected_weights, "scratch is a real device allocation");
-    assert_ne!(got, legacy, "the GGUF route must not fall back to config-wide int8 pricing");
+    let _ = std::fs::remove_file(path);
+}
+
+/// A safetensors DiT built at int8 goes through the same constructor as a
+/// Q8_0 GGUF and uploads the same buffers: six vectors stay on the host, the
+/// boundary linears, QK scales and double-stream MLP-down stay f32, and every
+/// other linear is packed at 36 bytes per 32 weights. The architecture-only
+/// price must therefore equal the header price of a fully-Q8_0 file.
+#[test]
+fn int8_architecture_cost_equals_the_q8_gguf_cost() {
+    let (cfg, g, path) = tiny_q8_dit();
+    let n_joint = 96;
+    let gguf = gguf_dit_device_bytes(&g, &cfg, n_joint, 1).expect("Q8_0 header cost");
+    assert_eq!(dit_bytes(&cfg, Precision::Int8, n_joint, 1), gguf, "int8 build priced unlike the buffers it uploads");
     let _ = std::fs::remove_file(path);
 }
 

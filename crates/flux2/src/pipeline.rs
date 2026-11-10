@@ -792,13 +792,20 @@ pub fn read_dit_tensors(path: &str, cfg: &Flux2Config) -> Result<crate::Tensors,
 // text encoder do not co-reside on one 24 GiB P40, and to say so by hand on
 // every run.
 
-/// Bytes one weight of `precision` occupies on the device. Only 2-D tensors
-/// (the linears) are quantised; norm scales and biases stay f32 in both
-/// tiers, which is what the int8 shard builders actually do.
-fn weight_bytes(shape: &[usize], precision: crate::Precision) -> u64 {
-    let n: usize = shape.iter().product();
-    let w = if precision == crate::Precision::Int8 && shape.len() == 2 { 1 } else { 4 };
-    (n * w) as u64
+/// Device bytes `Flux2Model::new_from` allocates for the tensor `name` of
+/// `shape` at `precision`. The six modulation and time vectors stay on the
+/// host in both tiers; at int8 every linear is packed (32 bytes plus one f32
+/// scale per 32 weights) except the ones the constructor keeps f32 on
+/// purpose ([`f32_device_weight`]), the same split a Q8_0 GGUF gets.
+fn weight_bytes(name: &str, shape: &[usize], precision: crate::Precision) -> u64 {
+    if host_weight(name) {
+        return 0;
+    }
+    let n = shape.iter().product::<usize>() as u64;
+    match shape {
+        [rows, k] if precision == crate::Precision::Int8 && !f32_device_weight(name) => *rows as u64 * (*k as u64).div_ceil(32) * 36,
+        _ => n * 4,
+    }
 }
 
 /// The device scratch that `Flux2Model::new_from` allocates for the joint
@@ -826,9 +833,10 @@ fn dit_scratch_bytes(cfg: &Flux2Config, precision: crate::Precision, n_joint: u6
         + batch * 17 * d;
     let mut bytes = f32_words * 4;
     if precision == crate::Precision::Int8 {
-        // I8Scratch: one f32 scale per row plus packed [row, K] buffers for
-        // hidden and MLP widths. `storage` is addressed in four-byte words.
-        bytes += n * (4 + d + mlp);
+        // I8Scratch: a packed [row, K] byte buffer for the hidden and MLP
+        // widths, and f32 group scales for the wider one, as `Flux2Model`
+        // sizes it.
+        bytes += n * (d + mlp) + 4 * model::int8::act_scale_len(n as usize, d.max(mlp) as usize) as u64;
     }
     bytes
 }
@@ -836,19 +844,19 @@ fn dit_scratch_bytes(cfg: &Flux2Config, precision: crate::Precision, n_joint: u6
 /// The DiT's device footprint: its own weights at `precision`, plus the
 /// activation scratch the joint sequence needs.
 ///
-/// This route describes brain-native fp32 maps. A Q8_0 GGUF uses
-/// [`gguf_dit_device_bytes`] instead because the constructor retains a mixture
-/// of packed-int8 and deliberate-fp32 buffers that cannot be inferred from
-/// tensor rank alone.
+/// This route prices brain-native maps from the architecture, tensor by
+/// tensor ([`weight_bytes`]). A Q8_0 GGUF uses [`gguf_dit_device_bytes`],
+/// which prices each tensor from the file header and refuses dtypes the int8
+/// path cannot take; for a fully-Q8_0 file the two agree.
 pub fn dit_bytes(cfg: &Flux2Config, precision: crate::Precision, n_joint: u64, max_batch: u64) -> u64 {
-    let weights: u64 = cfg.tensor_manifest().iter().map(|(_, shape)| weight_bytes(shape, precision)).sum();
+    let weights: u64 = cfg.tensor_manifest().iter().map(|(name, shape)| weight_bytes(name, shape, precision)).sum();
     weights + dit_scratch_bytes(cfg, precision, n_joint, max_batch)
 }
 
 /// Whether `name` becomes a retained fp32 device buffer even on FLUX.2's int8
 /// Q8_0 route. This exactly follows `Flux2Model::new_from`: boundary linears,
 /// QK/RMS scales, and double-stream MLP-down are intentionally not packed.
-fn gguf_f32_device_weight(name: &str) -> bool {
+fn f32_device_weight(name: &str) -> bool {
     name == "img_in.weight"
         || name == "txt_in.weight"
         || name == "final_layer.linear.weight"
@@ -861,7 +869,7 @@ fn gguf_f32_device_weight(name: &str) -> bool {
 ///
 /// The mmap itself is file-backed and demand-paged, not committed RAM; these
 /// six vectors are the owned data relevant to the constructor's device cost.
-fn gguf_host_weight(name: &str) -> bool {
+fn host_weight(name: &str) -> bool {
     matches!(
         name,
         "time_in.in_layer.weight"
@@ -892,10 +900,10 @@ pub fn gguf_dit_device_bytes(g: &checkpoint::gguf::MmapGguf, cfg: &Flux2Config, 
         let (raw, ty) = g.raw_tensor_bytes(&name).ok_or_else(|| format!("flux2: GGUF is missing {name}"))?;
         let raw = raw.len() as u64;
         let elements = shape.iter().product::<usize>() as u64;
-        if gguf_host_weight(&name) {
+        if host_weight(&name) {
             continue;
         }
-        let bytes = if gguf_f32_device_weight(&name) {
+        let bytes = if f32_device_weight(&name) {
             // `up` dequantizes source values to host f32 then uploads this
             // deliberate F32 buffer. That behavior predates this placement
             // fix; the resulting device allocation is exactly elements * 4.
