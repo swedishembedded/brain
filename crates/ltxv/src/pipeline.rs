@@ -1831,6 +1831,44 @@ fn conditioned_latent(noise: Vec<f32>, base_positions: &[f32], base_keyframes_ma
     ConditionedLatent { latent, positions: ic.positions, keyframes_mask: ic.keyframes_mask, denoise_mask: ic.denoise_mask, clean: ic.clean, t: total_t }
 }
 
+/// A masked video-to-video pass's initial state with keyframe guides
+/// appended: [`crate::maskcond`]'s conditioning (`masked`) on the base
+/// sequence `[0, base_t)` - its clean latent and denoise mask, and the
+/// initial latent `noised_initial_latent` makes of them - and each guide in
+/// `guides` (pixel frame, encoded still) appended after it as its own
+/// guiding block at the RoPE position of the instant it names, at
+/// `1 - strength` like every appended still ([`conditioned_latent`]).
+///
+/// The two compose because they write disjoint token ranges: masked
+/// conditioning sets every BASE token, a guide only its own appended block.
+/// A guide pins nothing on the base grid; it is a clean reference the free
+/// tokens attend to - how a character edited into a few source frames
+/// carries its identity through a clip whose motion the mask keeps.
+#[allow(clippy::too_many_arguments)]
+fn masked_with_guides(noise: Vec<f32>, base_positions: &[f32], base_keyframes_mask: &[f32], base_t: usize, lh: usize, lw: usize, channels: usize, fps: f64, masked: &crate::maskcond::MaskConditioning, guides: &[(usize, &[f32])], strength: f32) -> ConditionedLatent {
+    assert!((0.0..=1.0).contains(&strength), "masked_with_guides: strength {strength} is outside [0, 1]");
+    let block_t = lh * lw;
+    let total_t = base_t + guides.len() * block_t;
+    assert_eq!(noise.len(), total_t * channels, "masked_with_guides: noise has {} values, expected {}", noise.len(), total_t * channels);
+    assert_eq!(masked.denoise_mask.len(), base_t, "masked_with_guides: the mask conditioning has {} tokens, expected {base_t}", masked.denoise_mask.len());
+    let base = base_t * channels;
+    let mut latent = crate::maskcond::noised_initial_latent(&noise[..base], &noise[..base], &masked.clean, &masked.denoise_mask, channels, 1.0);
+    let m = 1.0 - strength;
+    let ic = append_image_conditioning(base_t, base_positions, base_keyframes_mask, lh, lw, channels, fps, m, guides);
+    latent.extend_from_slice(&noise[base..]);
+    for (bi, (_, tokens)) in guides.iter().enumerate() {
+        let off = base + bi * block_t * channels;
+        for (i, &c) in tokens.iter().enumerate() {
+            latent[off + i] = (1.0 - m) * c + m * latent[off + i];
+        }
+    }
+    let mut denoise_mask = masked.denoise_mask.clone();
+    denoise_mask.extend_from_slice(&ic.denoise_mask[base_t..]);
+    let mut clean = masked.clean.clone();
+    clean.extend_from_slice(&ic.clean[base..]);
+    ConditionedLatent { latent, positions: ic.positions, keyframes_mask: ic.keyframes_mask, denoise_mask, clean, t: total_t }
+}
+
 /// How many `lh*lw`-token conditioning blocks [`conditioned_latent`] will
 /// APPEND for a given request - `0` for image-to-video (a lone start still
 /// overwrites latent frame 0 in place), otherwise one per still given,
@@ -1907,6 +1945,38 @@ mod conditioned_latent_tests {
         assert_eq!(&c.positions[base_t * 2..base_t * 2 + 2], &[0.0, 0.125]);
         let second = base_t + block_t;
         assert_eq!(&c.positions[second * 2..second * 2 + 2], &[1.0, 1.125], "the end still conditions pixel-frame 8 of a 9-frame clip");
+    }
+
+    /// Masked conditioning and keyframe guides compose: every base token is
+    /// exactly what the mask conditioning made of it (held tokens frozen at
+    /// the source's latent, regenerated ones from noise), and each guide is
+    /// its own frozen block at the instant it names - the same block, at the
+    /// same position, the keyframe path appends for that still.
+    #[test]
+    fn a_masked_pass_with_guides_keeps_the_mask_and_appends_each_guide() {
+        let (noise, positions, km, base_t) = base(2);
+        let source: Vec<f32> = (0..base_t * CH).map(|i| 50.0 + i as f32).collect();
+        // Latent frame 0 held, latent frame 1 regenerated.
+        let block_t = LH * LW;
+        let mask: Vec<f32> = (0..base_t).map(|i| if i < block_t { 1.0 } else { 0.0 }).collect();
+        let mc = crate::maskcond::apply_video_condition_by_mask(&vec![0f32; base_t * CH], &vec![1f32; base_t], &source, &mask, CH, 1.0);
+        let (g4, g8) = (tokens(200.0), tokens(300.0));
+
+        let c = masked_with_guides(noise.clone(), &positions, &km, base_t, LH, LW, CH, FPS, &mc, &[(4, &g4), (8, &g8)], 1.0);
+
+        assert_eq!(c.t, base_t + 2 * block_t, "one block per guide");
+        assert_eq!(&c.denoise_mask[..base_t], &mc.denoise_mask[..], "the base keeps the mask's own denoise mask");
+        assert_eq!(&c.clean[..base_t * CH], &mc.clean[..]);
+        let want = crate::maskcond::noised_initial_latent(&noise[..base_t * CH], &noise[..base_t * CH], &mc.clean, &mc.denoise_mask, CH, 1.0);
+        assert_eq!(&c.latent[..base_t * CH], &want[..], "the base starts where the masked pass alone starts");
+        assert_eq!(&c.latent[..block_t * CH], &source[..block_t * CH], "a held token starts at the source's latent");
+        assert_eq!(&c.denoise_mask[base_t..], &vec![0.0f32; 2 * block_t][..], "both guides are frozen at strength 1.0");
+        assert_eq!(&c.latent[base_t * CH..(base_t + block_t) * CH], &g4[..]);
+        assert_eq!(&c.latent[(base_t + block_t) * CH..], &g8[..]);
+        assert_eq!(&c.clean[base_t * CH..(base_t + block_t) * CH], &g4[..]);
+        let keyframed = conditioned_latent(noise, &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, None, None, None, &[(4, &g4), (8, &g8)], 1.0);
+        assert_eq!(c.positions, keyframed.positions, "each guide sits where the keyframe path puts the same instant");
+        assert_eq!(c.keyframes_mask, keyframed.keyframes_mask);
     }
 
     /// Start-only stays image-to-video: `combined_image_conditionings`'
@@ -3667,20 +3737,35 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
         // reference's algebra, not a specialisation of it, so this stays
         // correct if a caller ever hands it a state something else conditioned
         // first.
-        if o.start_frame.is_some() || o.mid_frame.is_some() || o.end_frame.is_some() || !o.future_anchors.is_empty() || st.context.is_some() {
-            return Err("a masked video-to-video pass was given a conditioning still or a carried latent context as well: masked conditioning already writes every token's clean latent and denoise mask, so the two cannot both apply".into());
+        // A start, mid or end still writes the base grid's tokens (or appends a
+        // block at a fixed instant the pass did not ask for), which masked
+        // conditioning already writes; keyframe guides append blocks of their
+        // own and compose ([`masked_with_guides`]).
+        if o.start_frame.is_some() || o.mid_frame.is_some() || o.end_frame.is_some() || st.context.is_some() {
+            return Err("a masked video-to-video pass was given a start, mid or end still or a carried latent context as well: masked conditioning already writes every token's clean latent and denoise mask, so the two cannot both apply; a keyframe guide (--keyframe) composes with it".into());
         }
         assert_eq!(ms.mask.len(), t, "masked stage: mask has {} tokens, expected {t}", ms.mask.len());
         let cond_tc = chw_to_tc(ms.chw, c, sc.lat_t, lh, lw);
         let mc = crate::maskcond::apply_video_condition_by_mask(&vec![0f32; t * c], &vec![1f32; t], &cond_tc, ms.mask, c, ms.strength);
-        // `GaussianNoiser`, which the reference runs after every conditioning
-        // item. `latent0` IS this stage's noise draw, so it stands in for both
-        // the state's own latent and the fresh draw at `noise_scale = 1.0`,
-        // where the noiser's first lerp is the identity.
-        let latent = crate::maskcond::noised_initial_latent(&latent0, &latent0, &mc.clean, &mc.denoise_mask, c, 1.0);
         let carried = ms.mask.iter().filter(|&&m| m >= 1.0).count();
         tracing::info!(stage = st.label, tokens = t, carried, strength = ms.strength, "masked conditioning applied");
-        (latent, positions, keyframes_mask, t, Some((mc.denoise_mask, mc.clean)))
+        if o.future_anchors.is_empty() {
+            // `GaussianNoiser`, which the reference runs after every conditioning
+            // item. `latent0` IS this stage's noise draw, so it stands in for both
+            // the state's own latent and the fresh draw at `noise_scale = 1.0`,
+            // where the noiser's first lerp is the identity.
+            let latent = crate::maskcond::noised_initial_latent(&latent0, &latent0, &mc.clean, &mc.denoise_mask, c, 1.0);
+            (latent, positions, keyframes_mask, t, Some((mc.denoise_mask, mc.clean)))
+        } else {
+            let mut guide_tokens = Vec::with_capacity(o.future_anchors.len());
+            for (_, path) in &o.future_anchors {
+                guide_tokens.push(encode_still(sc.vcfg, sc.vweights, path, st.width, st.height, c, o.device.as_deref())?);
+            }
+            let guides: Vec<(usize, &[f32])> = o.future_anchors.iter().zip(&guide_tokens).map(|((at, _), tokens)| (*at, tokens.as_slice())).collect();
+            tracing::info!(stage = st.label, keyframes = ?guides.iter().map(|(at, _)| *at).collect::<Vec<_>>(), strength = o.conditioning_strength, "keyframe guides appended to the masked pass");
+            let cl = masked_with_guides(latent0, &positions, &keyframes_mask, t, lh, lw, c, o.fps as f64, &mc, &guides, o.conditioning_strength);
+            (cl.latent, cl.positions, cl.keyframes_mask, cl.t, Some((cl.denoise_mask, cl.clean)))
+        }
     } else {
         // Merged context + image branch: context pins a prefix over
         // an already-built conditioning state.  The two write provably
@@ -5481,9 +5566,20 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
     if !(0.0..=1.0).contains(&o.strength) {
         return Err(format!("strength {} is outside [0, 1]", o.strength));
     }
+    // The clip's content comes from the source: a start, mid or end still
+    // would overwrite tokens the mask writes. Keyframe guides append their
+    // own blocks and compose with it, at instants inside the clip, in order.
+    if o.base.start_frame.is_some() || o.base.mid_frame.is_some() || o.base.end_frame.is_some() {
+        return Err("a masked pass takes its content from the source clip: a start, mid or end still would overwrite what the mask holds; give the edited frames as keyframe guides (--keyframe <frame>:<image>) instead".into());
+    }
+    if let Some(&(at, _)) = o.base.future_anchors.iter().find(|(at, _)| *at >= frames) {
+        return Err(format!("a keyframe guide names pixel frame {at}, past the clip's last frame {}", frames - 1));
+    }
+    if o.base.future_anchors.windows(2).any(|p| p[0].0 >= p[1].0) {
+        return Err(format!("keyframe guides must name distinct frames in ascending order, got {:?}", o.base.future_anchors.iter().map(|(at, _)| *at).collect::<Vec<_>>()));
+    }
     let vcfg = LtxVaeConfig::conv25();
-    let lat_t = vcfg.latent_frames(frames as u32).ok_or_else(|| format!("{frames} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)"))? as usize;
-    let (lh, lw) = (h / 32, w / 32);
+    let (lat_t, lh, lw) = crate::maskcond::latent_grid(frames, w, h)?;
     let t = lat_t * lh * lw;
 
     let dit_cfg = dit_config_from_name(&o.base.dit_config).inspect_err(|e| tracing::error!(dit_config = %o.base.dit_config, error = %e, "unknown DiT config"))?;
@@ -5574,10 +5670,10 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
         return Err("cancelled".into());
     }
 
-    // `frames`/`width`/`height` come from the clip; image conditioning and
-    // audio are cleared, because this entry point's content comes from the
-    // source and its sound stays in the source file.
-    let pass_opts = GenOpts { frames, width: w, height: h, start_frame: None, mid_frame: None, end_frame: None, ..o.base.clone() };
+    // `frames`/`width`/`height` come from the clip; the keyframe guides ride
+    // along as appended blocks (checked above), and no start/mid/end still
+    // reaches here.
+    let pass_opts = GenOpts { frames, width: w, height: h, ..o.base.clone() };
     let audio_noise = o.base.audio.then(|| seeded_noise(ta * crate::audio::TOKEN_DIM as usize, o.base.seed ^ AUDIO_SEED_SALT));
     let sc = StageCtx {
         a_ctx_cond: text.a_cond.as_deref().unwrap_or_default(),

@@ -294,14 +294,13 @@ impl LatentMaskAccumulator {
         self.out
     }
 
-    /// `F.interpolate(mode="area")` = adaptive average pooling: output cell `i`
-    /// spans `[floor(i*H/O), ceil((i+1)*H/O))`.
+    /// `F.interpolate(mode="area")` = adaptive average pooling over [`cell_span`].
     fn area_average(&self, frame: &[f32]) -> Vec<f32> {
         let mut plane = vec![0f32; self.lat_h * self.lat_w];
         for oh in 0..self.lat_h {
-            let (h0, h1) = (oh * self.h_pix / self.lat_h, ((oh + 1) * self.h_pix).div_ceil(self.lat_h));
+            let (h0, h1) = cell_span(oh, self.h_pix, self.lat_h);
             for ow in 0..self.lat_w {
-                let (w0, w1) = (ow * self.w_pix / self.lat_w, ((ow + 1) * self.w_pix).div_ceil(self.lat_w));
+                let (w0, w1) = cell_span(ow, self.w_pix, self.lat_w);
                 let mut sum = 0f64;
                 for hh in h0..h1 {
                     for ww in w0..w1 {
@@ -313,6 +312,62 @@ impl LatentMaskAccumulator {
         }
         plane
     }
+}
+
+/// The pixels latent cell `i` of `lat` covers along an axis of `pix`: adaptive
+/// average pooling's `[floor(i*pix/lat), ceil((i+1)*pix/lat))`.
+fn cell_span(i: usize, pix: usize, lat: usize) -> (usize, usize) {
+    (i * pix / lat, ((i + 1) * pix).div_ceil(lat))
+}
+
+/// The `(frames, rows, columns)` latent grid a `frames`-frame `w`x`h` clip
+/// encodes to: the causal VAE's `1 + (frames - 1) / 8` frames and one token
+/// per 32 x 32 pixels.
+pub fn latent_grid(frames: usize, w: usize, h: usize) -> Result<(usize, usize, usize), String> {
+    let lat_f = crate::vae3d::LtxVaeConfig::conv25()
+        .latent_frames(frames as u32)
+        .ok_or_else(|| format!("{frames} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)"))?;
+    Ok((lat_f as usize, h / 32, w / 32))
+}
+
+/// Grow per-frame regenerate regions (`[h * w]`, `true` = regenerate) to the
+/// whole latent tokens they touch, on the [`latent_grid`] `grid`.
+///
+/// The conditioning mask is a MEAN over each token's pixels and pixel frames
+/// ([`LatentMaskAccumulator`]), so a token a region covers only in part is
+/// held at that fraction: the sampler keeps part of the source there, and a
+/// replaced costume keeps a sleeve of the old one. Snapped, every token is
+/// either regenerated on all of its pixels or held on all of them, and the
+/// snapped regions are exactly the pixels a composite must take from the
+/// generated clip.
+///
+/// # Panics
+/// If `regions` does not hold `grid`'s pixel frames of `w * h` values.
+pub fn snap_to_latent_tokens(regions: &[Vec<bool>], w: usize, h: usize, grid: (usize, usize, usize)) -> Vec<Vec<bool>> {
+    let (lat_f, lat_h, lat_w) = grid;
+    let run = if lat_f > 1 { (regions.len() - 1) / (lat_f - 1) } else { 0 };
+    assert_eq!(regions.len(), 1 + (lat_f - 1) * run, "snap_to_latent_tokens: {} frames for {lat_f} latent frames", regions.len());
+    assert!(regions.iter().all(|r| r.len() == w * h), "snap_to_latent_tokens: a region is not {w}x{h}");
+    // The pixel frames of latent frame `t`: frame 0 alone, then runs of `run`.
+    let frames_of = |t: usize| if t == 0 { 0..1 } else { 1 + (t - 1) * run..1 + t * run };
+    let mut out = vec![vec![false; w * h]; regions.len()];
+    for t in 0..lat_f {
+        for oh in 0..lat_h {
+            let (h0, h1) = cell_span(oh, h, lat_h);
+            for ow in 0..lat_w {
+                let (w0, w1) = cell_span(ow, w, lat_w);
+                let touched = frames_of(t).any(|f| (h0..h1).any(|y| regions[f][y * w + w0..y * w + w1].contains(&true)));
+                if touched {
+                    for f in frames_of(t) {
+                        for y in h0..h1 {
+                            out[f][y * w + w0..y * w + w1].fill(true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 // ===========================================================================
@@ -549,6 +604,37 @@ mod tests {
     }
 
     use super::*;
+
+    /// One regenerated pixel takes its whole token: every pixel of the cell,
+    /// on every pixel frame of the token's run, and nothing outside it. The
+    /// snapped regions then reduce to a latent mask with no partial token.
+    #[test]
+    fn snapping_grows_a_region_to_whole_latent_tokens() {
+        let (frames, w, h) = (17, 64, 64);
+        let grid = latent_grid(frames, w, h).unwrap();
+        assert_eq!(grid, (3, 2, 2));
+        let mut regions = vec![vec![false; w * h]; frames];
+        regions[3][40 * w + 5] = true; // latent frame 1 (pixel frames 1..=8), cell (1, 0)
+        let snapped = snap_to_latent_tokens(&regions, w, h, grid);
+        for (f, frame) in snapped.iter().enumerate() {
+            for y in 0..h {
+                for x in 0..w {
+                    let want = (1..=8).contains(&f) && y >= 32 && x < 32;
+                    assert_eq!(frame[y * w + x], want, "pixel ({x}, {y}) of frame {f}");
+                }
+            }
+        }
+        regions[0][0] = true; // the causal first latent frame is pixel frame 0 alone
+        let snapped = snap_to_latent_tokens(&regions, w, h, grid);
+        assert!(snapped[0][31 * w + 31] && !snapped[0][32 * w + 32] && !snapped[1][0]);
+
+        let mut acc = LatentMaskAccumulator::new(frames, h, w, grid.0, grid.1, grid.2);
+        for frame in &snapped {
+            acc.push_frame(&frame.iter().map(|&r| if r { 1.0 } else { 0.0 }).collect::<Vec<f32>>());
+        }
+        assert!(acc.finish().iter().all(|&v| v == 0.0 || v == 1.0), "a snapped region leaves no token partly held");
+        assert!(latent_grid(16, w, h).is_err(), "16 frames is not 1 + 8k");
+    }
 
     /// The polarity flip is an involution pair, and it is the ONLY place the
     /// inversion lives. A tracked object must reach the reference's polarity as

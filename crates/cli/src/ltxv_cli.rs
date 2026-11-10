@@ -651,9 +651,13 @@ Every latent position the mask marks as CONDITIONING is handed the source
 clip's own latent and excluded from denoising, so it leaves the sampler
 bit-exactly unchanged; everything else is renoised and redrawn from the
 prompt. That is LTX-2.5's own `VideoConditionByMask` (ported in
-`ltxv::maskcond`), and it needs no adapter - which matters, because the only
-IC-LoRA published for LTX-2.5 is a pixel spatial upscaler, so the adapter
-route to this is closed.
+`ltxv::maskcond`), and it needs no adapter.
+
+Keyframe guides compose with it: `--keyframe <frame>:<image>` appends an
+edited still - a source frame with a new character painted in, say - as a
+clean guiding block at that frame's instant. It pins nothing on the clip's
+own grid; the regenerated region attends to it, which is how an identity
+given in a few frames carries through motion the mask keeps.
 
 The clip's size is the output size: this runs ONE stage at the source's own
 resolution and never rescales. It must be VAE-representable - 1 + 8k frames on
@@ -698,6 +702,12 @@ Sampling:
   --strength <S>            how hard the mask's conditioning region is pinned
                             (default 1.0 = bit-exact; lower lets it drift
                             toward the prompt)
+  --keyframe <F>:<image>    a keyframe guide at pixel frame F (repeatable, any
+                            order): the PNG/JPEG still at the clip's size,
+                            encoded through the video VAE and appended as a
+                            guiding block at F's instant
+  --keyframe-strength <S>   how hard every keyframe guide is held, 0..1
+                            (default 1.0)
   --steps <N>               denoise steps (default 4; IGNORED for
                             --dit-config ltx25_22b, whose distilled schedule
                             has a fixed shape)
@@ -745,7 +755,7 @@ Placement:
 /// out of this command's own argv. `vae` is the only role `resolve_or_exit`
 /// can fail to fill; every other role simply stays `None` in the returned
 /// `Paths`.
-fn resolve_ltxv(overrides: &std::collections::BTreeMap<String, String>, spatial_upsampler: Option<&str>) -> Result<Paths, String> {
+pub(crate) fn resolve_ltxv(overrides: &std::collections::BTreeMap<String, String>, spatial_upsampler: Option<&str>) -> Result<Paths, String> {
     let spec = LtxvSpec;
     let assembly = crate::resolver_cli::resolve_or_exit("ltxv", &spec, overrides);
     Paths::from_assembly(&assembly, spatial_upsampler)
@@ -1122,8 +1132,7 @@ fn extend(args: &[String]) -> Result<(), String> {
     let paths = resolve_ltxv(&overrides, None)?;
     ltxv::pipeline::resolve_defaults(&mut o.base, &paths, Named { dit_config: dit_named, frames: true, size: true, fps: true });
     let decoded = read_clip(&input, 0)?;
-    // The source's own rate, so the continuation plays at the clip's speed.
-    let fps = fps.unwrap_or_else(|| imaging::video::probe_fps(std::path::Path::new(&input)).map(|f| f.round() as usize).filter(|&f| f > 0).unwrap_or(o.base.fps));
+    let fps = source_fps(&input, fps)?;
     o.base.fps = fps;
     if let Some(s) = seconds {
         if !(s.is_finite() && s > 0.0) {
@@ -1226,7 +1235,7 @@ fn t2a(args: &[String]) -> Result<(), String> {
 /// The frames are MOVED rather than cloned: a long clip's pixels are the
 /// largest buffer a command ever holds, and copying all of them to hand them
 /// to the encoder is a copy nothing reads twice.
-fn write_clip(video: ltxv::pipeline::Video, out: &str) -> Result<String, String> {
+pub(crate) fn write_clip(video: ltxv::pipeline::Video, out: &str) -> Result<String, String> {
     let audio_desc = video
         .audio
         .as_ref()
@@ -1240,9 +1249,24 @@ fn write_clip(video: ltxv::pipeline::Video, out: &str) -> Result<String, String>
     Ok(format!("{} ({width}x{height}, {} frames at {fps} fps{audio_desc})", written.display(), frames.len()))
 }
 
+/// The rate a clip read from `path` plays at: `given` (`--fps`), else the
+/// container's own, so an edit never changes playback speed. A container
+/// whose rate cannot be read is an error naming the flag, never a default
+/// that would play the result at the wrong speed.
+pub(crate) fn source_fps(path: &str, given: Option<usize>) -> Result<usize, String> {
+    match given {
+        Some(0) => Err("--fps 0 is not a frame rate".into()),
+        Some(f) => Ok(f),
+        None => imaging::video::probe_fps(std::path::Path::new(path))
+            .map(|f| f.round() as usize)
+            .filter(|&f| f > 0)
+            .ok_or_else(|| format!("{path}: its frame rate cannot be read from the container; give it with --fps")),
+    }
+}
+
 /// Decode a whole video file into the pipeline's RGB8 clip, refusing one
 /// whose frames change size.
-fn read_clip(path: &str, fps: usize) -> Result<ltxv::pipeline::Video, String> {
+pub(crate) fn read_clip(path: &str, fps: usize) -> Result<ltxv::pipeline::Video, String> {
     let decoded = imaging::video::decode_frames_rgb8(std::path::Path::new(path), &imaging::video::VideoDecodeOpts { fps: None, max_frames: 0, spread: 0 })?;
     let first = decoded.first().ok_or_else(|| format!("{path} has no frames"))?;
     let (w, h) = (first.w, first.h);
@@ -1325,13 +1349,9 @@ fn upscale(args: &[String]) -> Result<(), String> {
         vcfg.latent_frames(context_frames as u32).ok_or_else(|| format!("--context-frames {context_frames} is not of the form 1 + 8k"))? as usize
     };
 
-    let in_path = std::path::Path::new(&input);
     let decoded = read_clip(&input, 0)?;
     let (w, h) = (decoded.width, decoded.height);
-    // The source's own rate, so an upscale never silently changes playback
-    // speed. `--fps` overrides; a missing `ffprobe` is not fatal (see
-    // `imaging::video::probe_fps`), it just means the caller has to say.
-    let fps = fps.unwrap_or_else(|| imaging::video::probe_fps(in_path).map(|f| f.round() as usize).filter(|&f| f > 0).unwrap_or(o.base.fps));
+    let fps = source_fps(&input, fps)?;
     o.base.fps = fps;
     // `upscale` re-renders a finished clip's PICTURE. It never runs the
     // audio-visual DiT, so it has no sound track of its own to carry; any
@@ -1446,6 +1466,13 @@ fn v2v(args: &[String]) -> Result<(), String> {
             }
             "--output-path" | "--out" => out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string()),
             "--strength" => o.strength = flt(i, "--strength")?,
+            "--keyframe" => {
+                let v = need(i)?;
+                let (at, path) = v.split_once(':').ok_or_else(|| format!("--keyframe: '{v}' is not <frame>:<image>"))?;
+                let at = at.trim().parse::<usize>().map_err(|e| format!("--keyframe: frame '{at}': {e}"))?;
+                o.base.future_anchors.push((at, path.to_string()));
+            }
+            "--keyframe-strength" => o.base.conditioning_strength = flt(i, "--keyframe-strength")?,
             "--steps" => o.base.steps = num(i, "--steps")?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
             "--negative-prompt" => o.base.negative_prompt = need(i)?.clone(),
@@ -1471,6 +1498,8 @@ fn v2v(args: &[String]) -> Result<(), String> {
         }
         i += 2;
     }
+    // The guides are appended in timeline order; the order they were typed in carries nothing.
+    o.base.future_anchors.sort_by_key(|(at, _)| *at);
     let input = input.ok_or("--input is required")?;
     let out = out.ok_or("--output-path is required")?;
     let prompt = prompt.ok_or("--prompt is required: the model denoises the regenerated region against the text context, and an empty one costs exactly the detail this command exists to produce")?;
@@ -1480,11 +1509,9 @@ fn v2v(args: &[String]) -> Result<(), String> {
     let paths = resolve_ltxv(&overrides, None)?;
     ltxv::pipeline::resolve_defaults(&mut o.base, &paths, Named { dit_config: dit_named, frames: true, size: true, fps: true });
 
-    let in_path = std::path::Path::new(&input);
     let decoded = read_clip(&input, 0)?;
     let (w, h) = (decoded.width, decoded.height);
-    // The source's own rate, so an edit never silently changes playback speed.
-    let fps = fps.unwrap_or_else(|| imaging::video::probe_fps(in_path).map(|f| f.round() as usize).filter(|&f| f > 0).unwrap_or(o.base.fps));
+    let fps = source_fps(&input, fps)?;
     o.base.fps = fps;
     let clip = ltxv::pipeline::Video { fps, ..decoded };
 
@@ -1525,6 +1552,8 @@ fn v2v(args: &[String]) -> Result<(), String> {
         o.base.seed,
         serde_json::json!({
             "prompt": prompt, "input": input, "mask": o.mask_dir, "strength": o.strength,
+            "keyframes": o.base.future_anchors.iter().map(|(at, path)| serde_json::json!({"frame": at, "image": path})).collect::<Vec<_>>(),
+            "keyframe_strength": o.base.conditioning_strength,
             "settings": base_params(&o.base),
         }),
     )?;
@@ -1793,7 +1822,7 @@ mod tests {
     #[test]
     fn every_v2v_flag_the_parser_accepts_is_documented() {
         let src = include_str!("ltxv_cli.rs");
-        for flag in ["--prompt", "--input", "--mask", "--window", "--hold-video", "--audio", "--audio-source", "--hold-audio", "--output-path", "--strength", "--steps", "--guidance", "--seed", "--fps", "--dit-config", "--device"] {
+        for flag in ["--prompt", "--input", "--mask", "--window", "--hold-video", "--audio", "--audio-source", "--hold-audio", "--output-path", "--strength", "--keyframe", "--keyframe-strength", "--steps", "--guidance", "--seed", "--fps", "--dit-config", "--device"] {
             assert!(super::V2V_HELP.contains(flag), "{flag} is parsed but not in v2v --help");
             assert!(src.contains(&format!("\"{flag}\"")) || super::guidance_flag(flag), "{flag} is in v2v --help but not parsed");
         }
