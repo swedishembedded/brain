@@ -1,0 +1,50 @@
+<!-- source-sha256: 80499781e94a0623a2eb7dd7e9dd74da35538f07d15900dc4d4505ebba681266 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 440" width="940" height="440"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="940" height="440" fill="#ffffff"/>
+<ellipse cx="92" cy="210" rx="70" ry="35" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="92" y="206.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">frame t</text>
+<text x="92" y="222.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">96 x 61, bytes</text>
+<rect x="217" y="78" width="150" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="292" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  letterbox</text>
+<text x="292" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">64 x 41 in 64 x 64</text>
+<text x="292" y="140.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">grey, pad (0, 11)</text>
+<rect x="395" y="78" width="150" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2  head</text>
+<text x="470" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1,024 cells</text>
+<text x="470" y="140.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">box and score</text>
+<rect x="573" y="78" width="150" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="648" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2  filter, NMS</text>
+<text x="648" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">score &gt;= 0.25</text>
+<text x="648" y="140.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">IoU &gt; 0.45</text>
+<rect x="761" y="78" width="150" height="84" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="836" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2  inverse</text>
+<text x="836" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">letterbox</text>
+<text x="836" y="140.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">boxes in frame px</text>
+<rect x="217" y="258" width="150" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="292" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  stretch</text>
+<text x="292" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">64 x 64, ImageNet</text>
+<text x="292" y="320.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">constants</text>
+<rect x="395" y="258" width="150" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3  segmenter</text>
+<text x="470" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">box prompt, seed</text>
+<text x="470" y="320.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">region growing</text>
+<rect x="573" y="258" width="150" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="648" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4  tracker</text>
+<text x="648" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">memory attention</text>
+<text x="648" y="320.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bank of 7 slots</text>
+<rect x="761" y="258" width="150" height="84" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="836" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">masks, presence</text>
+<text x="836" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per frame, per</text>
+<text x="836" y="320.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">track</text>
+<path d="M162,210 L182,210 Q190,210 190,202 L190,128 Q190,120 198,120 L214,120" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M162,210 L182,210 Q190,210 190,218 L190,292 Q190,300 198,300 L214,300" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="370" y1="120" x2="392" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="548" y1="120" x2="570" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="726" y1="120" x2="758" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="370" y1="300" x2="392" y2="300" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="548" y1="300" x2="570" y2="300" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="726" y1="300" x2="758" y2="300" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M836,162 L836,202 Q836,210 828,210 L478,210 Q470,210 470,218 L470,255" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="668" y="200.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">box prompts, frame 0 (frame pixels, scaled per axis)</text>
+<text x="470" y="406.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">The detector reads the letterboxed view and the segmenter reads the stretched one: the same frame in two coordinate systems,</text>
+<text x="470" y="422.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">joined only by the boxes, which are always stated in frame pixels. The numbers are the milestones; the fifth runs them together.</text>
+</svg>

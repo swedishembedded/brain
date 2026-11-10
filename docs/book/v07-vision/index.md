@@ -28,4 +28,4 @@ You can say what the numbers of an image mean and convert between the layouts an
 9. [Vision-Language Models](09-vlms.md): how to give a language model eyes.
 10. [Reading Documents](10-ocr.md): how a model reads a page of text from pixels, and how few tokens a page can be squeezed into.
 11. [Faces: Detection, Identity and Parsing](11-faces.md): how a model finds faces and recognizes the same person across photos.
-12. Project: A Vision Pipeline: build a pipeline that detects, segments and tracks objects through video frames.
+12. [Project: A Vision Pipeline](12-project-vision-pipeline.md): build a pipeline that detects, segments and tracks objects through video frames.
