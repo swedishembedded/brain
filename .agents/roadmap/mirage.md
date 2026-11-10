@@ -360,6 +360,16 @@ structure and values to rounding, not bit identity across batch sizes; forcing o
 library's tensor-core products for batched work. The test now asserts exact equality on the CPU backend and, on accelerators, equal
 structure (every box, name, description and text) with scores dropped and masks reduced to their foreground size.
 
+### Step 5: precision on the serving surface and the quantize verb
+
+`describe` and `extract` take `precision` (`fp32` | `cq`); omitted, the directory decides as before (safetensors when present). The
+provider keeps one session per (directory, weight source) and replaces it when the other precision is asked for; `precision` is
+not a batching option (it never joins a batch group). `brain mirage quantize --out DIR [--weights DIR]` calls
+`mirage::model::quantize_dir` (FP32 checkpoint with its adapter folded, plan from the directory's `mirage.cact`, atomic write, config
+copied); the CLI re-quantisation of the released weights differs from the vendor's file only in the 0.6 % of index bytes recorded in
+L5. Tests: `precision_picks_the_weights_and_is_not_a_batching_option`, `quantize_dir_writes_a_loadable_archive`. Not done: the
+residency adapter (`resident_mirage`) still loads the directory's default precision.
+
 ## Lane L4 - serving
 
 Done 2026-11-10. Model id `Cactus-Compute/mirage` (case-exact upstream name, a deliberate carve-out in

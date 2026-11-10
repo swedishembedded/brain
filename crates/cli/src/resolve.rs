@@ -460,6 +460,11 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         args.extend(["--arch".to_string(), arch.to_string()]);
         crate::finetune_cli::run_finetune(&args);
     }
+    // `mirage quantize` is a conversion of files, not a capability of the served model.
+    if arch == "mirage" && rest.first().is_some_and(|v| v == "quantize") {
+        crate::mirage_cli::run_quantize(&rest[1..]);
+        crate::drain_before_exit(0);
+    }
     if let Some((_, model)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch) {
         // A resolver-migrated architecture resolves its own `--<role>`
         // override flags and its `Assembly` first (`resolver_migrated` is

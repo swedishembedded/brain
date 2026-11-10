@@ -51,7 +51,7 @@ use crate::describe::{Options, LANGUAGES};
 use crate::device::{BatchControl, DecoderMemory, Device, Image, MirageModel};
 use crate::form::{self, FieldKind, FormError};
 use crate::memory_cache::{MemoryCache, MemoryKey};
-use crate::model::{Mirage, ModelError};
+use crate::model::{Mirage, ModelError, WeightSource};
 use crate::vision::dense::{MAX_OBJECTS, MAX_TEXT};
 
 /// The model id used on the CLI (`brain do mirage …`), over the bus and in the residency manifest.
@@ -96,6 +96,23 @@ fn proposal_params() -> Vec<ParamSpec> {
     ]
 }
 
+/// Names of the `precision` parameter and the weights each loads.
+pub const PRECISIONS: [&str; 2] = ["fp32", "cq"];
+
+fn precision_param() -> ParamSpec {
+    ParamSpec::new("precision", ParamType::Enum(PRECISIONS.map(String::from).to_vec()), "weights to serve: fp32 (the safetensors checkpoint) or cq (the packed deployment archive mirage.cact, 2-4 bits per weight; default fp32 when the checkpoint exists)")
+}
+
+/// The weight source a request asks for: `None` leaves the choice to what the model directory holds.
+pub fn weight_source_of(inv: &Invocation) -> Result<Option<crate::model::WeightSource>, String> {
+    match inv.get_str("precision").as_deref() {
+        None => Ok(None),
+        Some("fp32") => Ok(Some(crate::model::WeightSource::Safetensors)),
+        Some("cq") => Ok(Some(crate::model::WeightSource::Cact)),
+        Some(other) => Err(format!("param 'precision' must be one of {}, not '{other}'", PRECISIONS.join(", "))),
+    }
+}
+
 /// The `describe` action.
 pub fn describe_spec() -> ActionSpec {
     let mut params = vec![
@@ -105,6 +122,7 @@ pub fn describe_spec() -> ActionSpec {
         ParamSpec::new("mask_format", ParamType::Enum(["largest", "merged", "polygons", "bitmap"].map(String::from).to_vec()), "mask rendering (default largest)"),
     ];
     params.extend(proposal_params());
+    params.push(precision_param());
     ActionSpec::new("describe", "describe an image: scene, objects with boxes, scores and masks, regions, text lines, relations, events and reasoning")
         .params(params)
         .input(BlobSpec::new("image", Media::Image, "the image to describe (HWC f32 in [0,1])").required())
@@ -119,6 +137,7 @@ pub fn extract_spec() -> ActionSpec {
     )
     .required()];
     params.extend(proposal_params());
+    params.push(precision_param());
     ActionSpec::new("extract", "answer the fields of a form about an image (choice, count and text fields) with the probability of every candidate")
         .params(params)
         .input(BlobSpec::new("image", Media::Image, "the image to read the form from (HWC f32 in [0,1])").required())
@@ -153,7 +172,9 @@ fn options_of(inv: &Invocation) -> Result<(Options, String), String> {
                 let items: Vec<Value> = text.split(',').map(|s| Value::String(s.trim().to_string())).collect();
                 map.insert(name, Value::Array(items));
             }
-            "form" => {}
+            // The form and the weights are not decoding options: the form is its own input and the precision picks the
+            // session (see `MirageProvider`), so neither joins the batch group.
+            "form" | "precision" => {}
             _ => {
                 map.insert(name, value);
             }
@@ -211,6 +232,7 @@ pub fn check_request(action: &str, inv: &Invocation) -> Result<(), String> {
         other => return Err(format!("mirage: unknown action '{other}'")),
     }
     check_image(inv)?;
+    weight_source_of(inv)?;
     let (options, _) = options_of(inv)?;
     if action == "extract" {
         check_form(inv)?;
@@ -423,7 +445,7 @@ fn model_error(e: ModelError) -> String {
 /// resident.
 pub struct MirageProvider {
     dir: String,
-    hot: Arc<Hot<String, MirageSession>>,
+    hot: Arc<Hot<(String, Option<WeightSource>), MirageSession>>,
 }
 
 impl MirageProvider {
@@ -446,7 +468,7 @@ impl Provider for MirageProvider {
 struct MirageAction {
     spec: ActionSpec,
     dir: String,
-    hot: Arc<Hot<String, MirageSession>>,
+    hot: Arc<Hot<(String, Option<WeightSource>), MirageSession>>,
 }
 
 impl Action for MirageAction {
@@ -454,8 +476,14 @@ impl Action for MirageAction {
         self.spec.clone()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let source = weight_source_of(inv)?;
+        // One resident session at a time: a request for other weights replaces it.
+        let load = || match source {
+            Some(source) => MirageSession::load_with(&self.dir, Gpu::new(&MirageSession::kernels()), source),
+            None => MirageSession::load(&self.dir, Gpu::new(&MirageSession::kernels())),
+        };
         self.hot
-            .try_get(self.dir.clone(), || MirageSession::load(&self.dir, Gpu::new(&MirageSession::kernels())), |s| s.run_batch(&self.spec.name, std::slice::from_ref(inv)).pop().expect("one result per request"))
+            .try_get((self.dir.clone(), source), load, |s| s.run_batch(&self.spec.name, std::slice::from_ref(inv)).pop().expect("one result per request"))
     }
 }
 
@@ -494,6 +522,22 @@ mod tests {
         assert!(m.actions[1].params.iter().any(|p| p.name == "form" && p.required));
         // The served view is the same manifest: nothing to drop.
         assert_eq!(m.clone().for_serving().actions.iter().map(|a| a.params.len()).collect::<Vec<_>>(), m.actions.iter().map(|a| a.params.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn precision_picks_the_weights_and_is_not_a_batching_option() {
+        use crate::model::WeightSource;
+        let spec = describe_spec();
+        for (value, source) in [("fp32", Some(WeightSource::Safetensors)), ("cq", Some(WeightSource::Cact))] {
+            let inv = describe(json!({"precision": value}));
+            assert!(spec.validate(inv.clone()).is_ok(), "{value}");
+            assert_eq!(weight_source_of(&inv), Ok(source));
+            // Requests with different precisions are routed to different sessions, never grouped in one batch.
+            assert_eq!(options_of(&inv).unwrap().1, options_of(&describe(json!({}))).unwrap().1);
+        }
+        assert_eq!(weight_source_of(&describe(json!({}))), Ok(None));
+        assert!(spec.validate(describe(json!({"precision": "int4"}))).is_err());
+        assert!(extract_spec().params.iter().any(|p| p.name == "precision"));
     }
 
     #[test]

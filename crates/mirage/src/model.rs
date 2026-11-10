@@ -74,7 +74,7 @@ macro_rules! from_error {
 from_error!(ImportError => Import, CactError => Cact, TokenizerError => Tokenizer, ImageError => Image, FormError => Form);
 
 /// Which stored weights a model directory is loaded from.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum WeightSource {
     /// `mirage.safetensors`: FP32 weights, resident as such. The default whenever the file exists.
     #[default]
@@ -135,6 +135,36 @@ pub fn load_dir(dir: &Path, source: WeightSource) -> Result<Loaded, ModelError> 
         crate::train::adapter::fold(&mut ck, &set).map_err(ModelError::Request)?;
     }
     Ok(Loaded { tokenizer: cact.tokenizer_blob()?.to_vec(), charset: cact.charset()?, checkpoint: ck })
+}
+
+/// Quantise the FP32 checkpoint in `dir` (with its adapter folded in, if it holds one) into the deployment archive in
+/// `out`, next to a copy of `config.json` so `out` loads like any model directory with [`WeightSource::Cact`].
+///
+/// The archive's plan (which tensors are CQ at which width, the codebooks, the derived entries and the tokenizer) is
+/// taken from the `mirage.cact` already in `dir`; the weights come from the safetensors. Files are written through a
+/// temporary name and renamed, so a failed run leaves no partial archive. Returns the archive's path.
+pub fn quantize_dir(dir: &Path, out: &Path) -> Result<std::path::PathBuf, ModelError> {
+    let io = |what: &str, e: std::io::Error| ModelError::Request(format!("{what}: {e}"));
+    if !dir.join(import::WEIGHTS_FILE).is_file() {
+        return Err(ModelError::Request(format!("{} holds no {} to quantise", dir.display(), import::WEIGHTS_FILE)));
+    }
+    let template_path = dir.join(crate::resolver::DEPLOYMENT_FILE);
+    if !template_path.is_file() {
+        return Err(ModelError::Request(format!("{} holds no {}: the released archive supplies the quantisation plan", dir.display(), crate::resolver::DEPLOYMENT_FILE)));
+    }
+    let fp32 = load_dir(dir, WeightSource::Safetensors)?;
+    let template = CactModel::new(CactFile::open(&template_path)?, fp32.checkpoint.config.clone())?;
+    let bytes = template.quantize(&fp32.checkpoint)?;
+    std::fs::create_dir_all(out).map_err(|e| io(&out.display().to_string(), e))?;
+    let target = out.join(crate::resolver::DEPLOYMENT_FILE);
+    let tmp = out.join(format!("{}.tmp", crate::resolver::DEPLOYMENT_FILE));
+    std::fs::write(&tmp, &bytes).map_err(|e| io(&tmp.display().to_string(), e))?;
+    std::fs::rename(&tmp, &target).map_err(|e| io(&target.display().to_string(), e))?;
+    let config = dir.join(import::CONFIG_FILE);
+    if config.is_file() && out.canonicalize().ok() != dir.canonicalize().ok() {
+        std::fs::copy(&config, out.join(import::CONFIG_FILE)).map_err(|e| io(&config.display().to_string(), e))?;
+    }
+    Ok(target)
 }
 
 /// The complete model.

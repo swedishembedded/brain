@@ -92,6 +92,7 @@ million pixels and its payload must be exactly `w x h x 3` floats.
 | `mask_threshold` | bitmap and polygon threshold, 0 to 1 (default 0.5) |
 | `mask_format` | `largest` (default: the largest polygon as a flat `[x, y, ...]` list), `merged`, `polygons`, or `bitmap` (column-major run-length at the source size) |
 | `language` | the language the model writes in: `en es fr pt de it nl pl ru ar zh` (default `en`) |
+| `precision` | `fp32` (the safetensors weights, the default whenever they exist) or `cq` (the packed deployment archive `mirage.cact`; see [Precision](#precision)). `extract` takes it too. |
 
 The outcome has one output per section that was requested and produced -
 `scene` (attributes), `objects` (`id`, `name`, `bbox` in 0..1000 coordinates of
@@ -172,8 +173,31 @@ reader, JSON). `extract` adds `memory_reused`.
 - **Form scoring runs on the host decoder.** `extract` takes the vision half and
   the memory on the device and scores candidates with the host decoder, one
   image at a time.
-- **No quantised execution yet.** The `.cact` is read for the tokenizer and the
-  reader's character set only.
+- **Quantised execution is opt-in.** `precision: cq` serves the archive's 2-bit
+  matrices packed on the device (see [Precision](#precision)); the engine rounds
+  activations to int8, brain keeps them in float32, so exact tokens are not
+  expected to match the engine's either.
+
+## Precision
+
+```bash
+brain mirage describe --image photo.jpg --precision cq --json
+brain mirage quantize --out ./mirage-cq [--weights DIR]
+```
+
+`fp32` (default) keeps every weight as float32: about 206 MB resident (the 65-tap
+HConvGLU bands and the Hadamard rotations run as structured kernels, not as dense
+`n x n` matrices). `cq` keeps the archive's projections, embedding and engram
+tables packed (2 to 4 bits per weight): about 30 MB resident, a few points of
+agreement with the float32 answers (top-1 of the decoder logits 216/237 on the
+reference photograph) and similar throughput. One precision is resident at a time;
+asking for the other replaces it.
+
+`brain mirage quantize` writes `mirage.cact` (plus a copy of `config.json`, so the
+output directory loads as a model directory) from the float32 checkpoint, folding an
+adapter in first. The quantisation plan (which tensors are packed at which width,
+the codebooks, the tokenizer) is read from the `mirage.cact` already in the weights
+directory. The file is written under a temporary name and renamed.
 
 ## Fine-tunes
 

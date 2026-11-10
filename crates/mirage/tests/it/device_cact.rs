@@ -224,3 +224,22 @@ fn the_packed_row_gather_reads_the_dequantised_rows() {
         }
     }
 }
+
+/// `quantize_dir` writes a directory that loads as a deployment archive and equals the in-memory quantisation.
+#[test]
+fn quantize_dir_writes_a_loadable_archive() {
+    let Some(dir) = released_dir() else {
+        brain_testutil::skip("device cact: the released checkpoint is absent");
+        return;
+    };
+    let out = std::env::temp_dir().join(format!("mirage-quantize-{}", std::process::id()));
+    let path = mirage::model::quantize_dir(&dir, &out).expect("quantises");
+    let written = std::fs::read(&path).unwrap();
+    let original = std::fs::metadata(dir.join("mirage.cact")).unwrap().len();
+    assert_eq!(written.len() as u64, original, "same plan, same size");
+    let loaded = load_dir(&out, WeightSource::Cact).expect("the output directory loads as an archive");
+    assert!(!loaded.checkpoint.packed.is_empty());
+    let missing = mirage::model::quantize_dir(&out, &out.join("again"));
+    assert!(missing.is_err(), "a directory without safetensors is refused");
+    std::fs::remove_dir_all(&out).unwrap();
+}
