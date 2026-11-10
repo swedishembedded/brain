@@ -100,6 +100,11 @@ impl DevTrainer {
         Ok(())
     }
 
+    /// The device the run executes on (its memory accounting is the run's footprint).
+    pub fn device(&self) -> &Device {
+        &self.dev
+    }
+
     /// The names of the trained base tensors (empty for LoRA).
     pub fn trainable(&self) -> &BTreeSet<String> {
         &self.trainable

@@ -18,6 +18,9 @@ pub(super) fn word(n: usize) -> u32 {
     u32::try_from(n).unwrap_or_else(|_| panic!("a device training dimension of {n} exceeds 32 bits"))
 }
 
+/// The widest query/key and value head the attention kernels take (a partial result row lives in each thread's registers).
+const ATTN_MAX_WIDTH: usize = 64;
+
 /// Pending forward and backward steps, and the buffers that must be zero when the submission starts.
 pub(crate) struct Rec<'d> {
     pub(super) dev: &'d Device,
@@ -262,12 +265,13 @@ impl<'d> Rec<'d> {
     }
 
     fn attn_params(s: &AttnShape) -> [u32; 8] {
+        assert!(s.qk <= ATTN_MAX_WIDTH && s.vh <= ATTN_MAX_WIDTH, "training attention holds a partial row per thread: head widths up to {ATTN_MAX_WIDTH}, got qk {} and vh {}", s.qk, s.vh);
         [word(s.tq), word(s.tk), word(s.hq), word(s.hk), word(s.qk), word(s.vh), u32::from(s.causal), (1.0 / (s.qk as f32).sqrt()).to_bits()]
     }
 
     /// Attention output and the log-sum-exp of every (query, head) row; no probability matrix is formed.
     pub(crate) fn attn_fwd(&mut self, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, out: &DeviceBuffer, lse: &DeviceBuffer, s: &AttnShape) {
-        self.threads("mirage_t_attn_fwd", &[q, k, v, out, lse], &Self::attn_params(s), s.tq * s.hq);
+        self.groups("mirage_t_attn_fwd", &[q, k, v, out, lse], &Self::attn_params(s), s.tq * s.hq);
     }
 
     /// `delta[row] = dout . out` of every (query, head) row.
@@ -278,13 +282,13 @@ impl<'d> Rec<'d> {
     /// Attention query gradient, probabilities rebuilt from `lse`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn attn_dq(&mut self, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, go: &DeviceBuffer, lse: &DeviceBuffer, delta: &DeviceBuffer, dq: &DeviceBuffer, s: &AttnShape) {
-        self.threads("mirage_t_attn_dq", &[q, k, v, go, lse, delta, dq], &Self::attn_params(s), s.tq * s.hq);
+        self.groups("mirage_t_attn_dq", &[q, k, v, go, lse, delta, dq], &Self::attn_params(s), s.tq * s.hq);
     }
 
     /// Attention key and value gradients, probabilities rebuilt from `lse`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn attn_dkv(&mut self, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, go: &DeviceBuffer, lse: &DeviceBuffer, delta: &DeviceBuffer, dk: &DeviceBuffer, dv: &DeviceBuffer, s: &AttnShape) {
-        self.threads("mirage_t_attn_dkv", &[q, k, v, go, lse, delta, dk, dv], &Self::attn_params(s), s.tk * s.hk);
+        self.groups("mirage_t_attn_dkv", &[q, k, v, go, lse, delta, dk, dv], &Self::attn_params(s), s.tk * s.hk);
     }
 
     /// Causal dilated taps forward.
