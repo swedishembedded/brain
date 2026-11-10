@@ -129,4 +129,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 1. [Images as Data](v07-vision/01-images.md): What is an image to a model, and how many ways can preprocessing quietly go wrong?
 2. [Convolution](v07-vision/02-convolution.md): How does a small filter slid across an image find edges, textures and eventually objects?
 3. [Convolutional Networks and Residual Learning](v07-vision/03-cnns.md): How do stacks of convolutions become image classifiers, and why did residual connections let them go deep?
+4. [Object Detection](v07-vision/04-detection.md): How does a network say not just what is in an image but where?
 <!-- /contents -->

@@ -32,6 +32,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Amdahl's law**: the speedup of a whole from making a part that takes the share $p$ of the time $g$ times as fast, $1/((1 - p) + p/g)$, bounded by the ceiling $1/(1 - p)$ however fast the part becomes. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
+**anchor-free detection**: a detector whose every cell, with its anchor point at the cell centre, predicts its box as the distances from that point to the four sides, with no template boxes and no objectness score. *([Object Detection](v07-vision/04-detection.md))*
+
 **architecture hypothesis testing**: deciding whether a new architectural idea is worth anything by a hypothesis and a margin stated before the run, a baseline that differs from the candidate in exactly one thing, equal tuning and paired seeds, an ablation of the part the idea is named for, and an effect size with its interval judged against the margin. *([A Research Architecture: The Spectral Language Model](v06-language-models/09-spectral-lm.md))*
 
 **arithmetic intensity**: the number of floating-point operations a computation performs per byte it must move between main memory and the arithmetic, a property of the algorithm and the sizes and formats and not of the machine. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
@@ -93,6 +95,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **binary representation**: writing a non-negative whole number as bits, each with a place value that is a power of 2, so that $n$ bits give the $2^n$ numbers $0 \dots 2^n - 1$ and arithmetic on them wraps modulo $2^n$. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
 
 **bootstrap**: a method that estimates the sampling distribution of a statistic by repeatedly drawing a sample of the same size with replacement from the sample itself and recomputing the statistic, giving a standard error or interval without a formula. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
+
+**bounding box**: the smallest axis-aligned rectangle that holds an object, written as corners $(x_1, y_1, x_2, y_2)$, as a centre and size $(c_x, c_y, w, h)$, or in either form divided by the image size; a box covers the pixels $x_1 \le x < x_2$, $y_1 \le y < y_2$. *([Object Detection](v07-vision/04-detection.md))*
+
+**box regression loss**: a loss on the difference between a predicted box and the true one; the IoU family (1 minus the IoU, GIoU, DIoU or CIoU) measures it by overlap, and adds terms so that boxes that do not overlap still receive a gradient. *([Object Detection](v07-vision/04-detection.md))*
 
 **broadcasting**: the rule that aligns two shapes from the right and treats an axis of size 1 as stretched to match the other, by giving it stride 0, so that arrays of different shapes combine without copying. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
@@ -239,6 +245,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **directional derivative**: the rate of change of a function per unit distance in a chosen unit direction $\mathbf{u}$, equal to $\nabla L\cdot\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **discrete Fourier transform**: the list $X[k] = \sum_{n=0}^{N-1} x[n]e^{-2\pi i kn/N}$ of correlations of $N$ samples with turning pointers, one per frequency $k$; its modulus gives the amplitude and its angle the phase of the component at that frequency, and the original samples are recovered by the inverse transform. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
+
+**distribution focal loss**: the cross-entropy between the softmax over the bins of one box side and the two-hot distribution on the two bins around the true distance, which is minimized by that distribution (whose expectation is the true distance) and so constrains the shape and not only the mean. *([Object Detection](v07-vision/04-detection.md))*
 
 **distribution shift**: a difference between the source of the rows a model will meet and the source of the rows it was fitted to and scored on, which no held-out set from the training source can reveal. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
@@ -414,6 +422,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **integral**: the limit of the Riemann sums $\sum f(t_i)\,\Delta t$ as the width goes to zero, written $\int_a^b f(t)\,dt$; the signed area between the graph of $f$ and the axis. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
+**intersection over union**: the area two boxes share divided by the area they cover together, a number from 0 to 1 that is unchanged by scaling or shifting both boxes and is 0 for boxes that do not meet. *([Object Detection](v07-vision/04-detection.md))*
+
 **inverse function**: the function $f^{-1}$ that undoes $f$, so $f^{-1}(f(x)) = x$; it exists when $f$ is one-to-one. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 ## J
@@ -583,6 +593,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **Newton's method**: the iteration that replaces a function by its tangent line (or, for minimisation, by a quadratic with the same slope and curvature) and jumps to its zero (or bottom), $x \leftarrow x - f(x)/f'(x)$ or $x \leftarrow x - f'(x)/f''(x)$; its error is squared at each step near a simple root. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **next-token prediction**: the training task of giving high probability to each token of a text given the tokens before it, with the mean cross-entropy over all positions as the loss, so that the text supplies its own labels. *([Language Modeling](v05-sequences/04-language-modeling.md))*
+
+**non-maximum suppression**: the greedy removal of duplicate detections, visiting candidates by falling confidence and dropping each one whose overlap with an already kept candidate (of its class, unless the suppression is class-agnostic) exceeds a threshold. *([Object Detection](v07-vision/04-detection.md))*
 
 **norm**: the length of a vector; the L2 norm is $\sqrt{\mathbf{a}\cdot\mathbf{a}}$, and the L1 and max norms measure total and largest-entry size. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 

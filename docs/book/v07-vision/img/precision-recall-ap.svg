@@ -1,0 +1,40 @@
+<!-- source-sha256: bce9ac3f3ac50fc6d3f342d44bcf49cdd952e6cdd89f51703cd6ac39e7b5cd78 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 380" width="560" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="380" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="154.8" y1="334" x2="154.8" y2="30" stroke="#edf2f7"/>
+<text x="154.8" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.2</text>
+<line x1="251.6" y1="334" x2="251.6" y2="30" stroke="#edf2f7"/>
+<text x="251.6" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.4</text>
+<line x1="348.4" y1="334" x2="348.4" y2="30" stroke="#edf2f7"/>
+<text x="348.4" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.6</text>
+<line x1="445.2" y1="334" x2="445.2" y2="30" stroke="#edf2f7"/>
+<text x="445.2" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.8</text>
+<line x1="542" y1="334" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="542" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="58" y1="334" x2="542" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="276.1" x2="542" y2="276.1" stroke="#edf2f7"/>
+<text x="52" y="280.1" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="218.19" x2="542" y2="218.19" stroke="#edf2f7"/>
+<text x="52" y="222.19" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="160.29" x2="542" y2="160.29" stroke="#edf2f7"/>
+<text x="52" y="164.29" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="102.38" x2="542" y2="102.38" stroke="#edf2f7"/>
+<text x="52" y="106.38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="44.48" x2="542" y2="44.48" stroke="#edf2f7"/>
+<text x="52" y="48.48" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="484" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="304"/></clipPath>
+<g clip-path="url(#plot)"><rect x="58" y="160.29" width="121" height="173.71" fill="#2b6cb0" fill-opacity="0.18"/><rect x="179" y="160.29" width="121" height="173.71" fill="#2b6cb0" fill-opacity="0.18"/><rect x="300" y="160.29" width="121" height="173.71" fill="#2b6cb0" fill-opacity="0.18"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,334 179,189.24 179,237.49 300,189.24 421,160.29 421,189.24 421,209.92"/><circle cx="58" cy="334" r="3.5" fill="#c05621"/><circle cx="179" cy="189.24" r="3.5" fill="#c05621"/><circle cx="179" cy="237.49" r="3.5" fill="#c05621"/><circle cx="300" cy="189.24" r="3.5" fill="#c05621"/><circle cx="421" cy="160.29" r="3.5" fill="#c05621"/><circle cx="421" cy="189.24" r="3.5" fill="#c05621"/><circle cx="421" cy="209.92" r="3.5" fill="#c05621"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.4" points="58,160.29 179,160.29 179,160.29 300,160.29 300,160.29 421,160.29"/></g>
+<text x="300" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">recall</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">precision</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Precision-recall curve, AP = 0.45</text>
+<rect x="329.8" y="38" width="204.2" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="337.8" y1="53" x2="357.8" y2="53" stroke="#c05621" stroke-width="2"/>
+<text x="363.8" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">precision after each detection</text>
+<line x1="337.8" y1="70" x2="357.8" y2="70" stroke="#2b6cb0" stroke-width="2"/>
+<text x="363.8" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">envelope (area = AP)</text>
+</svg>

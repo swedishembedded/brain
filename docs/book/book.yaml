@@ -587,7 +587,7 @@ volumes:
         title: "Object Detection"
         question: "How does a network say not just what is in an image but where?"
         introduces: [bounding-box, intersection-over-union, anchor-free-detection, non-maximum-suppression, box-regression-loss, distribution-focal-loss]
-        requires: [convolutional-network, feature-pyramid, classification]
+        requires: [convolutional-network, feature-pyramid, classification, sigmoid, binary-cross-entropy, softmax-cross-entropy, kl-divergence, precision-and-recall, shared-preprocessing]
         brain: [yolov8, yolov5]
       - id: dense-prediction
         title: "Dense Prediction: Segmentation and Depth"

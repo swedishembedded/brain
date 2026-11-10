@@ -482,6 +482,8 @@ positions with no padding, and return the winners' rows and columns beside the o
 tie, as `argmax` does); `residual_block`, `fold_bn_conv` and `fpn_top_down` are defined there, and `upsample2(x)` repeats each value
 of a map into a 2 by 2 block, `y[c, i, j] = x[c, i // 2, j // 2]`.
 
+The detection chapter (Chapter 4) writes out `iou`, `decode_v5`, `dfl_decode`, `dfl_loss`, `ciou`, `nms` and `unletterbox` where they are first used. A box is an `array<real>[4]` of corners `(x1, y1, x2, y2)` in pixels, with `x1 < x2` and `y1 < y2` for a non-empty box; its area is `max(x2 - x1, 0.0) * max(y2 - y1, 0.0)`, so a box with a negative side has area 0. `atan2(w, h)` with `h > 0` is the arctangent of `w / h`.
+
 ## Routines of the transformer chapters (Volume V)
 
 Chapters 9 to 12 use four routines of the normalization and attention chapters without writing them out again. Each is defined here by what it returns.
