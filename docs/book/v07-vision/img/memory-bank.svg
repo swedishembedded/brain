@@ -1,4 +1,4 @@
-<!-- source-sha256: dc1dcd1365a02e3a5bdbeb8b7fe799c323d44284c3fd90de8e98d75fc3925330 -->
+<!-- source-sha256: 21078460e20fbfe1e3d7fa9c0a999733e2b857184948d0c7f03121d1ffa4857f -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 400" width="940" height="400"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="940" height="400" fill="#ffffff"/>
 <text x="470" y="34.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Frame 12 reads memory slabs of 7 frames and object pointers of 12 frames</text>
 <rect x="40" y="81" width="60" height="78" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>

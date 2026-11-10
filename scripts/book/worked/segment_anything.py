@@ -305,7 +305,10 @@ def prompt_tokens():
         ("a foreground click and a background click", [(2, 2), (6, 3)], [1, 0], ["click (label 1)", "click (label 0)", "padding"]),
         ("a box from (x 1, y 1) to (x 4, y 4)", [(1, 1), (4, 4)], [2, 3], ["corner (label 2)", "corner (label 3)", "padding"]),
     ]
-    out = []
+    out = [f"The first two cases use the click (x 2, y 2) and the background click (x 6, y 3), the box uses the corners (x 1, y 1) and "
+           "(x 4, y 4); x is the column and y the row of the 8 by 8 picture, and a pixel is encoded at its centre, "
+           "((x + 0.5)/8, (y + 0.5)/8) mapped to [-1, 1] by `2u - 1`, then Fourier-encoded with G and added to the type embedding "
+           "of its label."]
     for title, pts, labs, names in cases:
         rows = embed_points(t, pts, labs)
         out.append(f"{title}:\n\n" + _table(["token"] + [f"d{i}" for i in range(D)],
@@ -351,7 +354,22 @@ def toy_setup():
     return (f"{_seed(NAME_TOY)}. One generator draws every tensor, each entry one `normal()` times the scale shown, tensors in the "
             "order of the table, each row-major (a weight [in, out] is drawn row by row; `y = x W`). All biases are 0, "
             "all LayerNorm gains 1 and offsets 0 (epsilon 1e-5).\n\n"
-            + _table(["tensor (draw order, top to bottom)", "shape", "scale"], items, "lll"))
+            + _table(["tensor (draw order, top to bottom)", "shape", "scale"], items, "lll")
+            + "\n\nWhat the tensors do, so that the forward pass can be repeated. A point (x, y) in pixels becomes the Fourier encoding "
+              "of ((x + 0.5)/8, (y + 0.5)/8) mapped to [-1, 1] by `2u - 1`, plus the type embedding of its label (label 0 is a "
+              "background click, 1 a foreground click, 2 and 3 the corners of a box); the padding point is `not_a_point` alone. The "
+              "token sequence is the iou token, the four mask tokens, then the prompt tokens, and this initial sequence is also the "
+              "position code `tok_pe` that is added to the queries and keys of the token side in every layer. The cells carry the "
+              "image embedding plus `no_mask` (copied to every cell) as their content and, as their position code, the Fourier encoding "
+              "of the cell centre ((j + 0.5)/4, (i + 0.5)/4) mapped to [-1, 1]. Every attention has one head, scores q . k / sqrt(w) "
+              "with w the projected width (8 in the self-attention, 4 in the cross-attentions), a softmax over the keys, the values "
+              "projected by v and the result by out. In layer 0 the self-attention takes no position code and has no residual; in "
+              "layer 1 it compares `q + tok_pe`, copies `q` and has a residual. Each attention and the MLP are followed by a residual "
+              "add and a LayerNorm; the MLP is `relu(x W_up) W_down`. The upscaling is the transposed convolution of kernel 2 and "
+              "stride 2 from 8 to 2 channels, followed by the exact GELU (of the multilayer-network chapter), taking the 4 x 4 cells to "
+              "8 x 8. A hypernetwork is `relu(h W_1) W_2` on the mask token's output, giving 2 numbers; the IoU head is "
+              "`relu(h W_1) W_2` on the overlap token followed by a sigmoid. The large model's hypernetworks have three layers (256, 256, "
+              "256 and 32 numbers, a ReLU between layers); the toy keeps two.")
 
 
 # ------------------------------------------------------------------------------------------------ the two-way decoder
@@ -524,7 +542,9 @@ def decoder_prompts():
         diff = max(abs(a - b) for a, b in zip(r["masks"][1], base["masks"][1]))
         pos = sum(1 for v in r["masks"][1] if v > 0)
         rows.append((name, str(len(r["tokens"])), str(pos), _fx(diff, 3)))
-    return ("The same weights and the same image embedding; only the prompt changes. Mask token 1.\n\n"
+    return ("The same weights and the same image embedding; only the prompt changes. Mask token 1. The click is (x 2, y 2) with label 1; "
+            "the background click is (x 6, y 3) with label 0; the box has corners (x 1, y 1) with label 2 and (x 4, y 4) with label 3. "
+            "Every prompt gets the padding point, and the difference is the largest absolute difference over the 64 logits.\n\n"
             + _table(["prompt", "tokens", "pixels with logit > 0", "largest difference of logit from the one-click map"], rows))
 
 
@@ -669,9 +689,15 @@ def hiera_stages():
             "3 -> 144 channels on the 1,024 by 1,024 picture; 48 blocks in stages of 2, 6, 36 and 4; the width and the number of "
             "heads double, and the grid halves (a 2 by 2 max pool of the queries), at the first block of stages 2, 3 and 4; the "
             "windows of the stages are 8, 4, 16 and 8 and a block's window at the first block of a stage is that of the stage before; "
-            "blocks 23, 33 and 43 are global; an MLP ratio 4. FLOPs count 2 per multiply-add.\n\n"
+            "blocks 23, 33 and 43 (numbering the blocks from 0) are global; an MLP ratio 4. FLOPs count 2 per multiply-add. Per block, "
+            "with N_in cells at the block's input, N_out at its output (a quarter of N_in at the first block of stages 2 to 4), c the "
+            "input width and c' the output width: the shortcut projection (only where c' differs from c) 2 N_in c c'; the qkv projection "
+            "2 N_in c (3c'), taken on the input grid and already at the output width; the output projection 2 N_out c' c'; the MLP "
+            "2 * 2 N_out c' (4c'); the products of a windowed block 4 (N_in/w^2) (queries per window) (w^2) c', with w^2 queries per "
+            "window and w^2/4 at the first block of a stage (the pooled queries), and of a global block 4 N_out N_in c'. The window w "
+            "of a stage's first block is that of the stage before, and every window divides its grid, so nothing is padded.\n\n"
             + _table(["stage", "blocks", "output grid", "width", "heads", "window(s)", "GFLOPs"], rows, "lrrrrrr")
-            + f"\n\nPatch embedding: {_giga(total['patch'])} billion FLOPs. Trunk in all: {_giga(sum(total.values()))} billion FLOPs "
+            + f"\n\nPatch embedding: {_giga(total['patch'])} billion FLOPs. Trunk in all: {_giga(sum(total.values()), 4)} billion FLOPs "
               f"(shortcut projections {_giga(total['proj'])}, qkv {_giga(total['qkv'])}, attention products {_giga(total['attn'])}, "
               f"output projections {_giga(total['out'])}, MLPs {_giga(total['mlp'])}).")
 
@@ -729,13 +755,22 @@ def encoder_vs_decoder():
     decsum = sum(dec.values())
     mem_bytes = 4 * (256 * 64 * 64 + 32 * 256 * 256 + 64 * 128 * 128)
     rows = [
-        ("Hiera-L trunk (SAM 2.1), once per image", _giga(hiera), "1.00"),
-        ("ViT-B tower with neck (the SAM 1 tower of brain), once per image", _giga(vitb), _fx(vitb / hiera, 2)),
-        ("mask decoder of SAM 2, one click, once per prompt", _giga(decsum), _fx(decsum / hiera, 4)),
+        ("Hiera-L trunk (SAM 2.1), once per image", _giga(hiera, 4), "1.00"),
+        ("ViT-B tower with neck (the SAM 1 tower of brain), once per image", _giga(vitb, 4), _fx(vitb / hiera, 2)),
+        ("mask decoder of SAM 2, one click, once per prompt", _giga(decsum, 4), _fx(decsum / hiera, 4)),
     ]
     drows = [(k, f"{v / 1e6:,.1f}", _fx(100 * v / decsum, 1)) for k, v in dec.items()]
     n_prompts = 8
-    return ("FLOPs count 2 per multiply-add; norms, activations and the relative-position terms are not counted.\n\n"
+    return ("FLOPs count 2 per multiply-add; norms, activations and the relative-position terms are not counted. The ViT-B tower: a "
+            "16 by 16 patch embedding of stride 16 on 1,024 by 1,024 (4,096 tokens, width 768), 12 blocks of 12 heads and an MLP of "
+            "3,072, global attention in blocks 2, 5, 8 and 11 (numbered from 0) and windows of 14 elsewhere; the qkv and output "
+            "projections run on the rows the block holds (4,900 padded rows in a windowed block, 4,096 in a global one), the MLP "
+            "on the 4,096 real tokens; the neck is a 1 x 1 convolution 768 -> 256 and a 3 x 3 convolution 256 -> 256 on 64 by 64. "
+            "The decoder, with 8 tokens and the 4,096 cells: the self-attention (four 256 x 256 projections and the products), the "
+            "token-to-image and image-to-token attentions (projections 256 -> 128 of the tokens or the cells, 128 -> 256 back, and "
+            "their products at width 128), a token MLP 256 -> 2,048 -> 256, two layers and the final token-to-image attention; the two "
+            "transposed convolutions 256 -> 64 on 64 by 64 and 64 -> 32 on 128 by 128; four hypernetworks of three layers (256, 256, "
+            "256 and 32); the dot products with the 32 channels at 256 by 256; and the IoU and object-score heads.\n\n"
             + _table(["quantity", "GFLOPs", "relative to the Hiera-L trunk"], rows, "lrr")
             + "\n\nThe decoder by part (one click: 1 point token and the padding token, 4 mask tokens, the IoU token and the object-score "
               "token, 8 tokens in all):\n\n" + _table(["part", "MFLOPs", "share (%)"], drows, "lrr")
@@ -786,7 +821,9 @@ def memory_selection():
         rows.append((str(f), ", ".join(f"{s}" for _, s in slabs), ", ".join(str(tp) for tp, _ in slabs), str(len(ptrs)),
                      _int(tk)))
     return ("A clip of 64 frames, one prompt on frame 0 (the only conditioning frame), the large model: 7 memory slots, 16 object "
-            "pointers at most, 4,096 cells per slab (a 64 by 64 grid) and 4 tokens per pointer (256 / 64).\n\n"
+            "pointers at most, 4,096 cells per slab (a 64 by 64 grid) and 4 tokens per pointer (256 / 64). Frame t reads the pointer of "
+            "the prompted frame 0 and of each of the frames t - 1 down to t - 15 that exists and is not prompted, so it reads "
+            "min(t, 16) pointers; the keys are 4,096 times the slabs plus 4 times the pointers.\n\n"
             + _table(["frame t", "source frames of the slabs", "temporal positions", "pointers", "keys of the cross-attention"], rows, "lllrr"))
 
 
@@ -822,12 +859,17 @@ def frame_costs():
         tk = len(slabs) * 4096 + 4 * len(ptrs)
         mem, sa_, ca, _ = memory_attention_flops(tk)
         tot = trunk + mem + dec + memenc
-        rows.append((str(f), _int(tk), _giga(trunk), _giga(mem), _giga(dec), _giga(memenc), _giga(tot), _fx(100 * mem / tot, 1)))
+        rows.append((str(f), _int(tk), _giga(trunk, 3), _giga(mem, 3), _giga(dec, 3), _giga(memenc, 3), _giga(tot, 3),
+                     _fx(100 * mem / tot, 1)))
     return ("GFLOPs for one tracked frame of the large model (2 per multiply-add). The decoder runs with the tracking prompt: no click, "
             "the padding point twice (8 tokens, as for one click). Memory attention: 4 layers on 4,096 cells, a single head of width 256 "
             "whose cross-attention keys and values come from 64-wide memory tokens; the memory encoder: a mask downsampler of 4 "
-            "stride-2 convolutions (1, 4, 16, 64, 256 channels, kernel 3), two 1 x 1 convolutions, two ConvNeXt blocks "
-            "(depthwise 7 x 7 and two pointwise layers of ratio 4) and a 1 x 1 convolution to 64.\n\n"
+            "stride-2 convolutions (1, 4, 16, 64, 256 channels, kernel 3, on 1,024 by 1,024 down to 64 by 64), a 1 x 1 convolution 256 -> 256 "
+            "after the downsampler and a 1 x 1 projection 256 -> 256 of the frame's features, two ConvNeXt blocks "
+            "(depthwise 7 x 7 and pointwise layers 256 -> 1,024 -> 256) and a 1 x 1 convolution to 64. In each memory-attention layer "
+            "the self-attention has four 256 x 256 projections, the cross-attention has 256 x 256 projections of the queries and of "
+            "the output, 64 -> 256 projections of the keys and the values of the memory tokens, and the feed-forward network is "
+            "256 -> 2,048 -> 256. Totals are the sum of the unrounded counts, so the printed columns can differ from the total by 0.001.\n\n"
             + _table(["frame", "memory keys", "trunk", "memory attention", "decoder", "memory encoder", "total", "memory attention (%)"],
                      rows))
 
@@ -913,8 +955,10 @@ def memory_toy():
             "the mask channel m = 2 on the memory cell that the earlier mask covered and 0 everywhere else. Memory: the object (and its "
             "mask) at token 4, column 1 and row 1. Current frame: the object has moved to token 5 (column 2, row 1), and the current "
             "cells carry no mask channel. The query, key and value projections are the identity, the score is q . k / sqrt(8), and the "
-            "rotation (when used) is applied to queries and keys by the cell's (x, y) with base 10000; the values are the unrotated "
-            "memory features.\n\n" + "\n\n".join(parts))
+            "rotation (when used) is applied to queries and keys by the cell's (x, y); the values are the unrotated memory features. "
+            "The rotation pairs adjacent channels (0, 1), (2, 3), (4, 5), (6, 7), unlike the half-split pairing of Chapter 6's "
+            "toy; pairs 0 and 1 turn by x times the rates 1 and 0.01 (10000^(-4j/8) for j = 0, 1) and pairs 2 and 3 turn by y times "
+            "the same two rates, a pair (a, b) going to (a cos - b sin, a sin + b cos).\n\n" + "\n\n".join(parts))
 
 
 # ------------------------------------------------------------------------------------------------ figure data

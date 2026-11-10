@@ -96,6 +96,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **binary representation**: writing a non-negative whole number as bits, each with a place value that is a power of 2, so that $n$ bits give the $2^n$ numbers $0 \dots 2^n - 1$ and arithmetic on them wraps modulo $2^n$. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
 
+**BiSeNet**: a segmentation network with two paths, a shallow spatial path that keeps one eighth of the resolution to place boundaries and a fast-shrinking context path with a global pool that supplies the meaning, joined by a learned fusion and followed by a head that predicts per-pixel class scores. *([Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md))*
+
 **bootstrap**: a method that estimates the sampling distribution of a statistic by repeatedly drawing a sample of the same size with replacement from the sample itself and recomputing the statistic, giving a standard error or interval without a formula. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **bounding box**: the smallest axis-aligned rectangle that holds an object, written as corners $(x_1, y_1, x_2, y_2)$, as a centre and size $(c_x, c_y, w, h)$, or in either form divided by the image size; a box covers the pixels $x_1 \le x < x_2$, $y_1 \le y < y_2$. *([Object Detection](v07-vision/04-detection.md))*
@@ -186,6 +188,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **convexity**: the property that no chord joining two points of the curve lies below the curve, equivalent for twice-differentiable functions to a non-negative second derivative; every critical point of a convex function is a global minimum. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
+**ConvFFN**: a feed-forward network for feature maps: a depthwise $7 \times 7$ convolution with normalization, then two $1 \times 1$ convolutions that widen the channels by a factor (4) and narrow them again with a GELU between them. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
+
 **convolution backward**: the gradients of a convolution layer, the weight gradient as a sum over all positions of the output gradient times the input patch (a correlation of the input with $dy$) and the input gradient as the output gradient spread back through the kernel (a full correlation with the turned kernel, col2im of $d\mathbf{Y}^\top\mathbf{W}$). *([Convolution](v07-vision/02-convolution.md))*
 
 **convolution theorem**: the fact that the discrete Fourier transform of a circular convolution of two signals is the pointwise product of their transforms, so that convolution acts independently on each frequency and a long convolution can be computed with three fast transforms. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
@@ -249,6 +253,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **directional derivative**: the rate of change of a function per unit distance in a chosen unit direction $\mathbf{u}$, equal to $\nabla L\cdot\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **discrete Fourier transform**: the list $X[k] = \sum_{n=0}^{N-1} x[n]e^{-2\pi i kn/N}$ of correlations of $N$ samples with turning pointers, one per frequency $k$; its modulus gives the amplitude and its angle the phase of the component at that frequency, and the original samples are recovered by the inverse transform. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
+
+**disparity**: the reciprocal of depth, $1/Z$, called disparity when it is measured as the shift between the two pictures of a stereo pair; it is the coordinate in which depth varies smoothly and in which a scale and shift ambiguity is linear. *([Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md))*
 
 **distribution focal loss**: the cross-entropy between the softmax over the bins of one box side and the two-hot distribution on the two bins around the true distance, which is minimized by that distribution (whose expectation is the true distance) and so constrains the shape and not only the mean. *([Object Detection](v07-vision/04-detection.md))*
 
@@ -652,6 +658,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **orthogonality**: the property of two vectors having dot product 0, that is, being at right angles. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
+**output stride**: the ratio of the picture's side to the side of the map a network predicts on before any enlargement, so that a stride-4 output holds one prediction per $4 \times 4$ block of pixels. *([Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md))*
+
 **overfit-one-batch**: the test of training a network on one fixed small batch for a few hundred steps; the loss must fall to nearly zero, and if it does not the model, loss, data or update is broken. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
 **overfitting**: a model so flexible for its data that it fits the accidents of the training rows, so that its training error is low and its error on new rows is worse than that of a simpler model. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
@@ -682,7 +690,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **perceptron**: a neuron with a step activation together with Rosenblatt's rule for learning its weights, which adds each misclassified example, signed by its label, to the weights and the bias and repeats over the data until a pass has no mistake. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
 
-**perceptual distance**: a distance between two pictures computed on the features of a pretrained network (channel-normalized at each position, differenced, squared, weighted per channel and averaged over positions and levels), which measures how different they look and need not agree with the pixel error. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*
+**perceptual distance**: a distance (LPIPS, learned perceptual image patch similarity, when the features are learned) between two pictures computed on the features of a pretrained network (channel-normalized at each position, differenced, squared, weighted per channel and averaged over positions and levels), which measures how different they look and need not agree with the pixel error. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*
 
 **perplexity**: the exponential of the cross-entropy, $\exp H(p, q)$ with natural logarithms, the number of equally likely choices that would give the same average surprise. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
@@ -719,6 +727,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **projection**: the closest point to a vector $\mathbf{v}$ on the line through $\mathbf{u}$, namely $\frac{\mathbf{v}\cdot\mathbf{u}}{\mathbf{u}\cdot\mathbf{u}}\mathbf{u}$; what is left over is orthogonal to $\mathbf{u}$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **prompt encoder**: the part that turns clicks, box corners and a rough mask into vectors for the decoder: a random Fourier encoding of each coordinate plus a learned embedding of its type, and a convolutional reduction of a mask. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
+
+**prompt ensembling**: averaging, for each class, the text vectors of several sentence templates that name it (for example "a photo of a square" and "a drawing of a square") and renormalizing, so that no single template's wording decides the class vector. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*
 
 **promptable segmentation**: the task of returning the mask of an object in an image from a prompt, a point, a box or a rough mask, with the same model for every object and no fixed list of classes; a prompt that leaves the extent open is answered with several masks. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
 
@@ -769,6 +779,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **relu**: the rectified linear unit $\max(0, z)$, zero for negative inputs and the identity for positive ones, with slope $1$ where it is positive and $0$ elsewhere. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **repetition penalty**: a factor applied to the logits of tokens already in the text, dividing a positive logit and multiplying a negative one, to make repeats less likely; its additive relatives subtract an amount per presence or per occurrence. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
+
+**RepMixer**: a convolutional token-mixing block of a hybrid vision encoder, trained with parallel branches and folded at inference into one depthwise $3 \times 3$ convolution, followed by a ConvFFN. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
 **reporting uncertainty**: stating with a result its intervals over seeds and over the test sample, the numbers of seeds and examples, what was tuned on which split, and how many variants were tried, so that a reader can judge how far to trust it. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
 
@@ -895,6 +907,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **supervised learning**: learning from examples that all carry labels, in order to predict the label of a new example. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **SwiGLU**: the gated feed-forward network $(\mathrm{silu}(\mathbf{x}\mathbf{W}_{\mathrm{gate}}) \odot \mathbf{x}\mathbf{W}_{\mathrm{up}})\mathbf{W}_{\mathrm{down}}$, whose hidden width of $8D/3$ gives it as many parameters as a plain network of width $4D$. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
+
+**Swin transformer**: a hierarchical vision transformer whose attention is confined to non-overlapping windows and whose windows are displaced by half a window in alternate layers, so that information crosses window borders at the same cost per layer. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
 **symmetry-breaking**: starting the units of a layer with different weights, by random draws, so that their gradients differ; units that start identical stay identical forever. *([Initialization: Where Training Starts](v03-neural-networks/09-initialization.md))*
 

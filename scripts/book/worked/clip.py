@@ -199,12 +199,12 @@ def scale_sweep():
     """The loss of the printed batch and of a perfectly ranked one as the logit scale grows, and the best finite scale."""
     cs, _, _ = similarity_matrix()
     good = [[0.9 if i == j else 0.1 for j in range(4)] for i in range(4)]
-    scales = (1.0, 5.0, 10.0, 100.0 / 7.0, 30.0, 50.0, 100.0, 1000.0)
+    scales = (1.0, 5.0, 10.0, 1.0 / 0.07, 30.0, 50.0, 100.0, 1000.0)
     rows = []
     for a in scales:
         l1 = symmetric_loss(cs, a)[2]
         l2 = symmetric_loss(good, a)[2]
-        rows.append((f"{a:g}" if a != 100.0 / 7.0 else "14.2857", _fx(l1, 6), _fx(l2, 6)))
+        rows.append((f"{a:g}" if a != 1.0 / 0.07 else "1/0.07 = 14.285714", _fx(l1, 6), _fx(l2, 6)))
     # best finite scale of the printed batch by ternary search of the (convex in a) loss
     lo, hi = 0.01, 1000.0
     for _ in range(200):
@@ -694,10 +694,14 @@ def training_setup():
             f"The logit scale is a = exp(psi) with psi starting at ln(1/0.07) = {PSI0:.4f} (a = {math.exp(PSI0):.3f}) and clamped to "
             f"[0, ln 100] after every update. The classes are the 16 (colour, shape) pairs; the 4 held-out classes never appear in a "
             f"training batch. Each step takes one batch of {cfg['batch']} pairs, one for each of {cfg['batch']} of the 12 training classes "
-            f"(a fresh `shuffle` of them, the first {cfg['batch']} kept), so that no two captions of a batch are equal. Pictures and "
-            f"templates come from `bookrng.generator(\"clip.stream.r.main\")` (run 0: {_seed('clip.stream.0.main')}), in the order of the "
-            f"shuffle: for each pair the template `integer(3)`, the brightness `0.7 + 0.3 * uniform()` and the 108 noise values. Adam "
-            f"(beta_1 0.9, beta_2 0.999, epsilon 1e-8, bias correction, learning rate {LR}, no weight decay), {cfg['steps']} steps. "
+            f"(a fresh `shuffle` of them, the first {cfg['batch']} kept), so that no two captions of a batch are equal. The training classes, "
+            f"before each shuffle, are {list(TRAIN_CLASSES)} in ascending order (the held-out classes {list(HELD_OUT)} removed); the rows of "
+            f"the embedding table E are the templates (rows 0 to 2), the colours (3 to 6) and the shapes (7 to 10). Pictures and "
+            f"templates come from `bookrng.generator(\"clip.stream.r.main\")` (run 0: {_seed('clip.stream.0.main')}), the same stream that "
+            f"does the shuffle: each step first shuffles, then, for each pair in the shuffled order, draws the template `integer(3)`, the "
+            f"brightness `0.7 + 0.3 * uniform()` and the 108 noise values (channel-major, one `normal()` times {NOISE_SD} each). Adam "
+            f"(beta_1 0.9, beta_2 0.999, epsilon 1e-8, bias correction, learning rate {LR}, no weight decay) on all tower weights and, "
+            f"in the settings with a learned scale, on psi = ln a itself (the gradient is taken with respect to psi), {cfg['steps']} steps. "
             f"The 128 test pictures (8 per class) come from `bookrng.generator(\"clip.test\")` ({_seed('clip.test')}): for class 0 to 15 "
             f"in order and 8 pictures each, the brightness and then the 108 noise values. A picture is classified by the class whose prompt "
             f"vector has the largest dot product with its vector (the first on a tie). {stab.RULE} The nudge is added to Wp[0][0], the "
@@ -804,7 +808,7 @@ def scale_table():
         q, wq = _mean_twins(_early(key), key)
         rows.append((label, stab.text(a, wa, lambda x: f"{x:.2f}"), _t3(q, wq), _t3(s, ws), _t3(h, wh)))
     return ("The same towers, data and 3,600 pairs for each setting, mean over the three runs (0, 1, 2; the stream generators are "
-            "`clip.stream.r.<setting>`), ensemble accuracy after the last step. The scale column is the final a; the next column is the training-class accuracy after "
+            "`clip.stream.r.<setting>` with the settings fixed_1, fixed_14, fixed_100, main and sigmoid, in the order of the rows), ensemble accuracy after the last step. The scale column is the final a; the next column is the training-class accuracy after "
             "1,200 pairs.\n\n"
             + _table(["setting", "final a", "training accuracy after 1,200 pairs", "accuracy, training classes",
                       "accuracy, held-out classes"], rows, "lrrrr"))
@@ -1142,11 +1146,19 @@ def tower_cost():
         flops[name] = fl
         rows.append((name, _int(t), _int(par), f"{fl / 1e9:,.2f}"))
     ratio = flops[spec[2][0]] / flops[spec[0][0]]
-    return ("Per forward pass of one text (or one picture): tokens, parameters read off the tensor manifests of `crates/clip/src/config.rs` "
-            "(biases, norms, positions and the class token included; the image-tower projection of EVA included), and FLOPs by the rule of "
+    return ("Per forward pass of one text (or one picture): tokens, parameters read off the tensor manifests of `crates/clip/src/config.rs`, "
+            "and FLOPs by the rule of "
             "Volume V, Chapter 9 (the four projections 8 T D^2, the feed-forward network 4 T D F or, gated, 6 T D F, the score and average "
             "products 4 T^2 D, the softmax 5 H T^2) summed over the blocks; the patch embedding, norms and activations are under one "
-            "percent and left out.\n\n"
+            "percent and left out. Parameters, with D the width and F the feed-forward width: a block has the query, key, value and output "
+            "projections with biases (4 D^2 + 4 D), two LayerNorms (4 D) and a feed-forward network of two matrices with biases "
+            "(2 D F + F + D); the EVA block has three such matrices (3 D F + 3 F + D) and two more LayerNorms, one of width D and one of "
+            "width F (2 D + 2 F). The CLIP-L text tower is the 49,408-row token table, 77 position rows, 12 blocks (F = 3,072) and a final "
+            "LayerNorm, without the text projection. The bigG text tower is the same with 1,280-wide rows, 32 blocks (F = 5,120) and the "
+            "1,280 by 1,280 projection (no bias), 20 heads. The CLIP-L/14 picture tower is the class token, a 14 by 14 patch convolution "
+            "from 3 channels without bias, 257 position rows, the LayerNorm before the blocks and 24 blocks (F = 4,096), without the "
+            "final LayerNorm and the projection. The EVA02 tower is the class token, the patch convolution with a bias, 577 position "
+            "rows, 24 gated blocks (F = 2,730), the final LayerNorm and the projection to 768 with a bias.\n\n"
             + _table(["tower", "tokens", "parameters", "GFLOPs per pass"], rows)
             + f"\n\nOne 224 by 224 picture through the CLIP-L/14 image tower costs {ratio:.1f} times one caption through the CLIP-L text "
               "tower. A zero-shot classifier pays the caption side once per class, then the picture side once per picture.")

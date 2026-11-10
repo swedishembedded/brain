@@ -199,7 +199,7 @@ Bilinear interpolation turns the step 1 to 5 into 1, 2, 4, 5 across two input pi
 
 ## Skip connections, and the shapes they make
 
-Doubling the map restores a number of positions, but it cannot restore information that the encoder discarded. A boundary at the pixel scale is gone by the bottleneck, and no interpolation of the bottleneck returns it. The remedy of the U-Net of Ronneberger, Fischer and Brox (2015) is to keep what the encoder knew at each resolution and hand it to the decoder at the same resolution: a **skip connection**. The decoder's upsampled map and the encoder's map of the same size are concatenated along the channel axis, and the next convolution mixes them. The network that the chapter trains is the smallest one that has the whole structure, with one level of encoding.
+Doubling the map restores a number of positions, but it cannot restore information that the encoder discarded. A boundary at the pixel scale is gone by the bottleneck, and no interpolation of the bottleneck returns it. The remedy of the U-Net of Ronneberger, Fischer and Brox (2015), an encoder-decoder named for the U shape of its diagram, is to keep what the encoder knew at each resolution and hand it to the decoder at the same resolution: a **skip connection**. The decoder's upsampled map and the encoder's map of the same size are concatenated along the channel axis, and the next convolution mixes them. The network that the chapter trains is the smallest one that has the whole structure, with one level of encoding.
 
 ![The tiny encoder-decoder: a 1 by 8 by 8 image, a 3 by 3 convolution to 4 by 8 by 8, a 2 by 2 max pool and a 3 by 3 convolution to 8 by 4 by 4, a transposed convolution with k 2 and stride 2 to 4 by 8 by 8, a concatenation with the 4 by 8 by 8 features of the first stage (the skip, drawn as a red arrow) to 8 by 8 by 8 and a 3 by 3 convolution to 3 by 8 by 8 logits, with the parameters of each layer.](img/encoder-decoder-skip.svg)
 
@@ -338,7 +338,7 @@ Pixel accuracy is 51/64 = 0.7969, and the class that matters, the box, scores an
 The experiment compares four ways of building a small segmenter on one synthetic task, and measures them by the held-out IoU of every class. A scene is a horizon, a ground, a sky and a box standing on the ground, drawn at random, with each pixel's intensity set by its class plus noise, so that no pixel is certain by itself and a decision needs the neighbours and a boundary needs resolution.
 
 <!-- worked: dense_prediction.seg_data_summary -->
-Generator `bookrng.generator("dense_prediction.seg_data")`, seed 0x5bae8ab9e3465a5d (6606370234385717853). One stream makes the 60 training scenes and then the 60 test scenes; a scene draws, in this order, the horizon row h0 = 2 + integer(3), the box width bw = 2 + integer(2) and height bh = 2 + integer(2), the left column x1 = integer(8 - bw + 1), the lower edge y2 = h0 + 1 + integer(8 - h0) (the top edge is max(0, y2 - bh)), and then 64 values normal() in row-major order. The pixel is mean_c + 0.15 normal() with the class means sky 0.8, ground 0.35, box 0.65; the box overwrites sky and ground. Class weights are n_pixels / (3 count_c) of the training pixels.
+Generator `bookrng.generator("dense_prediction.seg_data")`, seed 0x5bae8ab9e3465a5d (6606370234385717853). One stream makes the 60 training scenes and then the 60 test scenes; a scene draws, in this order, the horizon row h0 = 2 + integer(3), the box width bw = 2 + integer(2) and height bh = 2 + integer(2), the left column x1 = integer(8 - bw + 1), the lower edge y2 = h0 + 1 + integer(8 - h0) (the top edge is max(0, y2 - bh)), and then 64 values normal() in row-major order. The pixel is mean_c + 0.15 normal() with the class means sky 0.8, ground 0.35, box 0.65; rows 0 to h0 - 1 are sky and rows h0 to 7 ground, and the box (rows y1 to y2 - 1, columns x1 to x1 + bw - 1) overwrites sky and ground. Class weights are n_pixels / (3 count_c) of the training pixels.
 
 | class | training pixels | share | test pixels | share | weight |
 |---|---:|---:|---:|---:|---:|
@@ -348,6 +348,27 @@ Generator `bookrng.generator("dense_prediction.seg_data")`, seed 0x5bae8ab9e3465
 <!-- /worked -->
 
 The four models, all in the table of shapes above or described by it: `pixel` is a $1 \times 1$ convolution, a linear classifier on one intensity (6 parameters), the baseline that never looks at a neighbour; `coarse` runs the encoder to the $4 \times 4$ bottleneck, classifies there with a $1 \times 1$ convolution and repeats each decision over its $2 \times 2$ block (363 parameters), a plain classification network's way of producing a map; `noskip` adds the transposed-convolution decoder and a $3 \times 3$ head but no skip (579); `unet` adds the skip (687). A fifth run trains unet with the class weights of (1).
+
+The initialization is the part of that description that decides every later digit, so here it is in full.
+
+<!-- worked: dense_prediction.seg_init_recipe -->
+Each model draws its weights from `bookrng.generator("dense_prediction.seg_init.<kind>")`, with the seeds (seed_of of the full name) unet: 0x9237ad1b55f65e74 (10536080186174496372); noskip: 0x9ffe25733d6921a2 (11528693272996815266); coarse: 0xc6c86e85a992b4a1 (14323820135206532257); pixel: 0x4d8f0e67d984a2bb (5588701501783843515). The tensors are drawn in the order of the table, each row-major, each entry one `normal()` times the scale shown (the square root of 2 over the fan-in for the layers that feed a ReLU, the square root of 1 over the fan-in for the last layer, and 1 for the 1 x 1 convolution of `pixel`); all biases are 0. Layouts: a convolution weight is [out, in, kernel row, kernel column], so a row of W1 is one output channel's 3 x 3 kernel and a row of W2 is one output channel's 4 x 3 x 3 taps (input channel slowest); the transposed convolution Wu is [in, out, a, b], row (in * 4 + out) holding its 2 x 2 kernel in the order (a, b) = (0,0), (0,1), (1,0), (1,1); the skip concatenation puts the 4 upsampled channels first and the 4 skip channels after them, so the columns of Wh are ordered (upsampled channels, skip channels) each by (channel, kernel row, kernel column).
+
+| kind | tensor | rows x columns | scale |
+|---|---|---:|---|
+| unet | W1 | 4 x 9 | sqrt(2/9) |
+| unet | W2 | 8 x 36 | sqrt(2/36) |
+| unet | Wu | 32 x 4 | sqrt(2/8) |
+| unet | Wh | 3 x 72 | 1/sqrt(72) |
+| noskip | W1 | 4 x 9 | sqrt(2/9) |
+| noskip | W2 | 8 x 36 | sqrt(2/36) |
+| noskip | Wu | 32 x 4 | sqrt(2/8) |
+| noskip | Wh | 3 x 36 | 1/sqrt(36) |
+| coarse | W1 | 4 x 9 | sqrt(2/9) |
+| coarse | W2 | 8 x 36 | sqrt(2/36) |
+| coarse | Wc | 3 x 8 | 1/sqrt(8) |
+| pixel | Wp | 3 x 1 | 1 |
+<!-- /worked -->
 
 All four are hand-derived backward passes in the worked module, so the first check is a gradient check, against the central difference, parameter by parameter:
 
@@ -590,7 +611,7 @@ The normalized map aligns to exactly the same residual, since a min-max normaliz
 Brain's depth network is ZipDepth (`crates/zipdepth`), a convolutional encoder-decoder of 6.1 million parameters that outputs a relative inverse depth, non-negative (a ReLU ends it), at exactly the resolution of its input, a multiple of 32 on each side. Its stages follow the pattern of the chapter, and its table of shapes is the chapter's tiny network written at full size.
 
 <!-- worked: dense_prediction.zipdepth_counts -->
-The base ZipDepth (`dims` 48, 96, 192, 384, `depths` 2, 2, 6, 2, decoder width 96, half-resolution width 32, input 384 by 384) from its layer list. 'Before' counts the trainable parameters of the trained form: every convolution weight, bias, and the scale and shift of every BatchNorm (the running statistics and the two normalization constants are not parameters). 'After' is the form for inference, in which each branch block is one 3 by 3 convolution with a bias, each BatchNorm that follows a single convolution is folded into it, and a BatchNorm over a sum stays as a scale and a shift. Multiply-adds are those of the convolutions of the inference form at 384 by 384 (the gather of the convex upsample counts 9 per output pixel); pooling, softmax, ReLU and the element-wise sums are not counted.
+The base ZipDepth (`dims` 48, 96, 192, 384, `depths` 2, 2, 6, 2, decoder width 96, half-resolution width 32, input 384 by 384) from its layer list. 'Before' counts the trainable parameters of the trained form: every convolution weight, bias, and the scale and shift of every BatchNorm (the running statistics and the two normalization constants are not parameters). 'After' is the form for inference, in which each branch block is one 3 by 3 convolution with a bias, each BatchNorm that follows a single convolution is folded into it, and a BatchNorm over a sum stays as a scale and a shift. Multiply-adds are those of the convolutions of the inference form at 384 by 384 (the gather of the convex upsample counts 9 per output pixel); pooling, softmax, ReLU and the element-wise sums are not counted. Every stage name stands for these units. A block is a 3 by 3 and a 1 by 1 convolution, each with BatchNorm, plus a raw identity (no BatchNorm) where the shapes agree. The multi-scale unit that ends stage 2 is two depthwise 3 by 3 convolutions (dilation 1 and 2) whose sum goes through BatchNorm; the strip gate after it is a depthwise 1 by 1 convolution and a BatchNorm. Stage 3 ends with a channel gate (squeeze and excitation: 1 by 1 convolutions 192 to 24 to 192 on the pooled vector, no biases) and a context block (a 1 by 1 convolution 192 to 1 with bias that scores each position, a 1 by 1 convolution 192 to 48 with bias, BatchNorm, a 1 by 1 convolution 48 to 192 with bias, the last three on a single pooled vector). The pyramid pooling is a 1 by 1 convolution 384 to 96 with BatchNorm, three successive stride-1 max pools whose outputs are concatenated with their input (4 x 96 = 384 channels), and a 1 by 1 convolution 384 to 384 with BatchNorm. The cross-scale exchange is two grouped 1 by 1 convolutions, 384 to 192 at 12 by 12 and 192 to 384 at 24 by 24. In every grouped 1 by 1 convolution (the exchange and the decoder fusions, one for each of the two inputs) the number of groups is the first of 4, 2, 1 that divides both channel counts, which is 4 in all of them here. The convex upsample is a 3 by 3 convolution 32 to 8 with BatchNorm, a 1 by 1 convolution 8 to 36 with bias (the 9 weights of each of the 4 pixels of a 2 by 2 output block) and the gather.
 
 | stage | output [C, H, W] | parameters before | parameters after | multiply-adds |
 |---|---|---:|---:|---:|
@@ -701,6 +722,9 @@ Depth has the extra problem that a picture fixes distances only up to a common s
 - **monocular depth**: estimating the distance of every pixel from a single image; because a picture is unchanged when the world is scaled about the camera, the result is a relative map (up to a scale, and for inverse depth a shift) unless the model has learned the size of things. <!-- concept: monocular-depth -->
 - **encoder-decoder CNN**: a convolutional network that shrinks the picture to gather context (the encoder) and then enlarges the result back to the picture's resolution (the decoder), usually joined by skip connections that carry high-resolution encoder features to the decoder. <!-- concept: encoder-decoder-cnn -->
 - **upsampling**: any operation that takes a map to one with more positions: repetition, interpolation, a transposed convolution, a pixel shuffle or a learned combination of neighbours, each with its own cost and its own artifacts. <!-- concept: upsampling -->
+- **output stride**: the ratio of the picture's side to the side of the map a network predicts on before any enlargement, so that a stride-4 output holds one prediction per $4 \times 4$ block of pixels. <!-- concept: output-stride -->
+- **disparity**: the reciprocal of depth, $1/Z$, called disparity when it is measured as the shift between the two pictures of a stereo pair; it is the coordinate in which depth varies smoothly and in which a scale and shift ambiguity is linear. <!-- concept: disparity -->
+- **BiSeNet**: a segmentation network with two paths, a shallow spatial path that keeps one eighth of the resolution to place boundaries and a fast-shrinking context path with a global pool that supplies the meaning, joined by a learned fusion and followed by a head that predicts per-pixel class scores. <!-- concept: bisenet -->
 
 ## Answers
 

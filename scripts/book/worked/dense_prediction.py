@@ -460,8 +460,9 @@ def seg_data_summary():
             f"the {N_TEST} test scenes; a scene draws, in this order, the horizon row h0 = 2 + integer(3), the box width bw = 2 + integer(2) "
             f"and height bh = 2 + integer(2), the left column x1 = integer(8 - bw + 1), the lower edge y2 = h0 + 1 + integer(8 - h0) "
             f"(the top edge is max(0, y2 - bh)), and then 64 values normal() in row-major order. The pixel is "
-            f"mean_c + {SIGMA} normal() with the class means sky {CLASS_MEAN[0]}, ground {CLASS_MEAN[1]}, box {CLASS_MEAN[2]}; the box "
-            f"overwrites sky and ground. Class weights are n_pixels / (3 count_c) of the training pixels.\n\n"
+            f"mean_c + {SIGMA} normal() with the class means sky {CLASS_MEAN[0]}, ground {CLASS_MEAN[1]}, box {CLASS_MEAN[2]}; rows 0 to "
+            f"h0 - 1 are sky and rows h0 to 7 ground, and the box (rows y1 to y2 - 1, columns x1 to x1 + bw - 1) overwrites sky and "
+            f"ground. Class weights are n_pixels / (3 count_c) of the training pixels.\n\n"
             + _table(["class", "training pixels", "share", "test pixels", "share", "weight"], rows, "lrrrrr"))
 
 
@@ -494,6 +495,28 @@ def seg_init(kind, nudge=0.0):
     first = _init_shapes(kind)[0][0]
     p[first][0][0] += nudge
     return p
+
+
+def seg_init_recipe():
+    """The initialization of the four segmenters, as a table and the layouts that fix the meaning of each draw."""
+    fan_in = {"W1": 9, "W2": C_E1 * 9, "Wu": C_E2, "Wc": C_E2}      # Wh's fan-in is its number of columns
+    rows = []
+    for kind in KINDS:
+        for name, r, c, gain in _init_shapes(kind):
+            fan = fan_in.get(name, c)
+            scale = "1" if name == "Wp" else (f"sqrt(2/{fan})" if name in ("W1", "W2", "Wu") else f"1/sqrt({fan})")
+            rows.append((kind, name, f"{r} x {c}", scale))
+    seeds = "; ".join(f"{k}: {_seed(INIT_PREFIX + k)[5:]}" for k in KINDS)
+    return ("Each model draws its weights from `bookrng.generator(\"dense_prediction.seg_init.<kind>\")`, with the seeds "
+            f"(seed_of of the full name) {seeds}. The tensors are drawn in the order of the table, each row-major, each entry one "
+            "`normal()` times the scale shown (the square root of 2 over the fan-in for the layers that feed a ReLU, the square root of "
+            "1 over the fan-in for the last layer, and 1 for the 1 x 1 convolution of `pixel`); all biases are 0. Layouts: a "
+            "convolution weight is [out, in, kernel row, kernel column], so a row of W1 is one output channel's 3 x 3 kernel and a "
+            "row of W2 is one output channel's 4 x 3 x 3 taps (input channel slowest); the transposed convolution Wu is "
+            "[in, out, a, b], row (in * 4 + out) holding its 2 x 2 kernel in the order (a, b) = (0,0), (0,1), (1,0), (1,1); the skip "
+            "concatenation puts the 4 upsampled channels first and the 4 skip channels after them, so the columns of Wh are ordered "
+            "(upsampled channels, skip channels) each by (channel, kernel row, kernel column).\n\n"
+            + _table(["kind", "tensor", "rows x columns", "scale"], rows, "llrl"))
 
 
 def n_params(p):
@@ -1135,7 +1158,19 @@ def zipdepth_counts():
             "the form for inference, in which each branch block is one 3 by 3 convolution with a bias, each BatchNorm that follows a "
             "single convolution is folded into it, and a BatchNorm over a sum stays as a scale and a shift. Multiply-adds are those "
             "of the convolutions of the inference form at 384 by 384 (the gather of the convex upsample counts 9 per output pixel); pooling, "
-            "softmax, ReLU and the element-wise sums are not counted.\n\n"
+            "softmax, ReLU and the element-wise sums are not counted. Every stage name stands for these units. A block is a 3 by 3 and a 1 by 1 "
+            "convolution, each with BatchNorm, plus a raw identity (no BatchNorm) where the shapes agree. The multi-scale unit that ends "
+            "stage 2 is two depthwise 3 by 3 convolutions (dilation 1 and 2) whose sum goes through BatchNorm; the strip gate after it "
+            "is a depthwise 1 by 1 convolution and a BatchNorm. Stage 3 ends with a channel gate (squeeze and excitation: 1 by 1 "
+            "convolutions 192 to 24 to 192 on the pooled vector, no biases) and a context block (a 1 by 1 convolution 192 to 1 with bias "
+            "that scores each position, a 1 by 1 convolution 192 to 48 with bias, BatchNorm, a 1 by 1 convolution 48 to 192 with bias, "
+            "the last three on a single pooled vector). The pyramid pooling is a 1 by 1 convolution 384 to 96 with BatchNorm, three "
+            "successive stride-1 max pools whose outputs are concatenated with their input (4 x 96 = 384 channels), and a 1 by 1 "
+            "convolution 384 to 384 with BatchNorm. The cross-scale exchange is two grouped 1 by 1 convolutions, 384 to 192 at 12 by 12 "
+            "and 192 to 384 at 24 by 24. In every grouped 1 by 1 convolution (the exchange and the decoder fusions, one for each of the "
+            "two inputs) the number of groups is the first of 4, 2, 1 that divides both channel counts, which is 4 in all of them here. "
+            "The convex upsample is a 3 by 3 convolution 32 to 8 with BatchNorm, a 1 by 1 convolution 8 to 36 with bias (the 9 weights "
+            "of each of the 4 pixels of a 2 by 2 output block) and the gather.\n\n"
             + _table(["stage", "output [C, H, W]", "parameters before", "parameters after", "multiply-adds"], rows, "llrrr")
             + f"\n\nTotal: {_int(tb)} parameters before folding, {_int(ta)} after, {_int(tm)} multiply-adds ({_int(2 * tm)} FLOPs) per 384 by 384 image.")
 

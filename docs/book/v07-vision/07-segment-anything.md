@@ -127,12 +127,12 @@ seed 0xabd7bdd88b92148f (12382574438230660239). Draws, in this order: the 6 entr
 | pad as the layer computes it (4 keys) | (0.430, 0.260, 0.139, 0.171) | (-1.268, 0.396) |
 <!-- /worked -->
 
-The weights on the real tokens fall from 0.519, 0.313 and 0.168 to 0.430, 0.260 and 0.139, and the output moves. A checkpoint was trained with the pad in its softmax, so a port that masks it computes a different function, and a port that pads before the norm computes yet another. Brain's tower pads after `norm1` and says why in its module header. The same fact has a second consequence for training: the bias of the key projection receives gradient through the padded positions. The gradient test of commit 8c7739511 found that a mutation dropping exactly those positions from the bias gradient was invisible to the directional gradient check of Volume III and needed a per-entry test, which `crates/sam1/tests/it/gradcheck.rs` now holds, and knowledge #187 records the general lesson: a weight with a use that is easy to miss needs an element-wise check.
+The weights on the real tokens fall from 0.519, 0.313 and 0.168 to 0.430, 0.260 and 0.139, and the output moves. A checkpoint was trained with the pad in its softmax, so a port that masks it computes a different function, and a port that pads before the norm computes yet another. Brain's tower pads after `norm1` and says why in its module header. The same fact has a second consequence for training: the bias of the key projection receives gradient through the padded positions. The gradient test of commit 8c7739511 found that a mutation dropping exactly those positions from the bias gradient was invisible to the directional gradient check of Volume III and needed a per-entry test, which `crates/sam1/tests/it/gradcheck.rs` now holds, and the general lesson is that a weight with a use that is easy to miss needs an element-wise check.
 
 The second model, SAM 2, replaces the plain transformer with a hierarchical one, Hiera, which is the pyramid of Chapter 6 with one change that matters for cost: when a stage boundary halves the grid, it does so by max-pooling only the queries of the attention that starts the stage, so the keys keep the old resolution for that block. The trunk of the large model (`crates/sam2/src/config.rs`, `Sam2Config::hiera_large`) has these stages.
 
 <!-- worked: segment_anything.hiera_stages -->
-The Hiera trunk of the large SAM 2.1 model (`sam2.1_hiera_l`): patch embedding a 7 by 7 convolution of stride 4 and 3 -> 144 channels on the 1,024 by 1,024 picture; 48 blocks in stages of 2, 6, 36 and 4; the width and the number of heads double, and the grid halves (a 2 by 2 max pool of the queries), at the first block of stages 2, 3 and 4; the windows of the stages are 8, 4, 16 and 8 and a block's window at the first block of a stage is that of the stage before; blocks 23, 33 and 43 are global; an MLP ratio 4. FLOPs count 2 per multiply-add.
+The Hiera trunk of the large SAM 2.1 model (`sam2.1_hiera_l`): patch embedding a 7 by 7 convolution of stride 4 and 3 -> 144 channels on the 1,024 by 1,024 picture; 48 blocks in stages of 2, 6, 36 and 4; the width and the number of heads double, and the grid halves (a 2 by 2 max pool of the queries), at the first block of stages 2, 3 and 4; the windows of the stages are 8, 4, 16 and 8 and a block's window at the first block of a stage is that of the stage before; blocks 23, 33 and 43 (numbering the blocks from 0) are global; an MLP ratio 4. FLOPs count 2 per multiply-add. Per block, with N_in cells at the block's input, N_out at its output (a quarter of N_in at the first block of stages 2 to 4), c the input width and c' the output width: the shortcut projection (only where c' differs from c) 2 N_in c c'; the qkv projection 2 N_in c (3c'), taken on the input grid and already at the output width; the output projection 2 N_out c' c'; the MLP 2 * 2 N_out c' (4c'); the products of a windowed block 4 (N_in/w^2) (queries per window) (w^2) c', with w^2 queries per window and w^2/4 at the first block of a stage (the pooled queries), and of a global block 4 N_out N_in c'. The window w of a stage's first block is that of the stage before, and every window divides its grid, so nothing is padded.
 
 | stage | blocks | output grid | width | heads | window(s) | GFLOPs |
 |---|---:|---:|---:|---:|---:|---:|
@@ -141,7 +141,7 @@ The Hiera trunk of the large SAM 2.1 model (`sam2.1_hiera_l`): patch embedding a
 | 3 | 36 | 64 x 64 | 576 | 8 | global, 4, 16 | 1,381.15 |
 | 4 | 4 | 32 x 32 | 1152 | 16 | 8, 16 | 146.16 |
 
-Patch embedding: 2.77 billion FLOPs. Trunk in all: 1,812.15 billion FLOPs (shortcut projections 16.31, qkv 415.84, attention products 203.09, output projections 130.46, MLPs 1,043.68).
+Patch embedding: 2.77 billion FLOPs. Trunk in all: 1,812.1469 billion FLOPs (shortcut projections 16.31, qkv 415.84, attention products 203.09, output projections 130.46, MLPs 1,043.68).
 <!-- /worked -->
 
 A $7 \times 7$ convolution of stride 4 cuts the picture into the $256 \times 256$ grid of stage 1, and the position is a $7 \times 7$ learned table resampled to the grid by bicubic interpolation plus a small table tiled over each window. After the last block of each stage the map is stored, and a feature pyramid with $1 \times 1$ lateral convolutions and a top-down path on the two coarsest levels (Chapter 3) turns the stored maps into 256-channel maps. The map at stride 16, $256 \times 64 \times 64$, plus one learned vector, is the **image embedding** the decoder reads. The two finer maps, $32 \times 256 \times 256$ and $64 \times 128 \times 128$, are kept for the end of the decoder, which will want detail that stride 16 has lost.
@@ -210,6 +210,8 @@ The table shows (4) at work. With $\sigma_\Omega = 1$ two points a tenth of the 
 The second ingredient is a type. A click may be a foreground click or a background one, and a box is two clicks that are corners, so each point carries one of four learned embeddings, added to its encoding: background (label 0), foreground (1), top-left corner (2) and bottom-right corner (3). A box is thus the pair of tokens of its corners and goes through exactly the code path of two clicks, which is how `crates/sam2/src/hostpe.rs` handles it (`embed_points`). Brain's `label_slot` panics by name on any other label, because the reference leaves such a point with a bare positional term and no embedding, which is a vector no test covers. Last, a padding point with label $-1$ is always appended: it receives the learned vector `not_a_point` in place of the positional encoding, and it makes the token count the same whether or not a real point is there.
 
 <!-- worked: segment_anything.prompt_tokens -->
+The first two cases use the click (x 2, y 2) and the background click (x 6, y 3), the box uses the corners (x 1, y 1) and (x 4, y 4); x is the column and y the row of the 8 by 8 picture, and a pixel is encoded at its centre, ((x + 0.5)/8, (y + 0.5)/8) mapped to [-1, 1] by `2u - 1`, then Fourier-encoded with G and added to the type embedding of its label.
+
 one foreground click at (x 2, y 2):
 
 | token | d0 | d1 | d2 | d3 | d4 | d5 | d6 | d7 |
@@ -310,6 +312,8 @@ seed 0x352233ac9aa94763 (3828679449640519523). One generator draws every tensor,
 | transposed convolution W[c][c'][a][b] | 8 x 2 x 2 x 2 | 1/sqrt(8) |
 | hypernetwork of mask token i = 0..3: layer 1, layer 2 | 8 x 8, 8 x 2 | 1/sqrt(fan-in) |
 | IoU head: layer 1, layer 2 | 8 x 8, 8 x 4 | 1/sqrt(fan-in) |
+
+What the tensors do, so that the forward pass can be repeated. A point (x, y) in pixels becomes the Fourier encoding of ((x + 0.5)/8, (y + 0.5)/8) mapped to [-1, 1] by `2u - 1`, plus the type embedding of its label (label 0 is a background click, 1 a foreground click, 2 and 3 the corners of a box); the padding point is `not_a_point` alone. The token sequence is the iou token, the four mask tokens, then the prompt tokens, and this initial sequence is also the position code `tok_pe` that is added to the queries and keys of the token side in every layer. The cells carry the image embedding plus `no_mask` (copied to every cell) as their content and, as their position code, the Fourier encoding of the cell centre ((j + 0.5)/4, (i + 0.5)/4) mapped to [-1, 1]. Every attention has one head, scores q . k / sqrt(w) with w the projected width (8 in the self-attention, 4 in the cross-attentions), a softmax over the keys, the values projected by v and the result by out. In layer 0 the self-attention takes no position code and has no residual; in layer 1 it compares `q + tok_pe`, copies `q` and has a residual. Each attention and the MLP are followed by a residual add and a LayerNorm; the MLP is `relu(x W_up) W_down`. The upscaling is the transposed convolution of kernel 2 and stride 2 from 8 to 2 channels, followed by the exact GELU (of the multilayer-network chapter), taking the 4 x 4 cells to 8 x 8. A hypernetwork is `relu(h W_1) W_2` on the mask token's output, giving 2 numbers; the IoU head is `relu(h W_1) W_2` on the overlap token followed by a sigmoid. The large model's hypernetworks have three layers (256, 256, 256 and 32 numbers, a ReLU between layers); the toy keeps two.
 <!-- /worked -->
 
 <!-- worked: segment_anything.decoder_shapes -->
@@ -378,7 +382,7 @@ The last column of the image-to-token attention is a different object: for each 
 
 The tokens have read the image. Now they must be turned into masks, and the decision that makes this cheap is that a mask is not decoded token by token into pixels; it is the result of one dot product per pixel.
 
-The updated cells are reshaped back into a map of the embedding's size and enlarged by transposed convolutions of kernel 2 and stride 2 (Chapter 2), each of which doubles the sides: from $64 \times 64$ to $128 \times 128$ and then to $256 \times 256$, with channel counts 256, 64 and 32. In SAM 2 the finer maps of the encoder, $64 \times 128 \times 128$ and $32 \times 256 \times 256$, are added after each transposed convolution, which is where the detail stride 16 lost comes back. Call the final map $\mathsf{F}$, of $C'$ channels. Then each of the four mask tokens goes through its own small MLP, a hypernetwork, whose output is a vector $\mathbf{h}_i$ of $C'$ numbers, and the logit of mask $i$ at pixel $p$ is
+The updated cells are reshaped back into a map of the embedding's size and enlarged by transposed convolutions of kernel 2 and stride 2 (Chapter 2), each of which doubles the sides: from $64 \times 64$ to $128 \times 128$ and then to $256 \times 256$, with channel counts 256, 64 and 32. In SAM 2 the finer maps of the encoder, $64 \times 128 \times 128$ and $32 \times 256 \times 256$, are added after each transposed convolution, which is where the detail stride 16 lost comes back. Call the final map $\mathsf{F}$, of $C'$ channels. Then each of the four mask tokens goes through its own three-layer MLP (widths 256, 256, 256 and then $C'$), a hypernetwork, whose output is a vector $\mathbf{h}_i$ of $C'$ numbers, and the logit of mask $i$ at pixel $p$ is
 
 $$
 \ell_i(p) = \mathbf{h}_i \cdot \mathsf{F}[:, p], \tag{5}
@@ -449,7 +453,7 @@ The table checks (5) on one pixel, and the four maps show what the machinery pro
 The same weights answer different prompts differently, because the prompt enters twice, in the tokens and in the keys the cells are compared with.
 
 <!-- worked: segment_anything.decoder_prompts -->
-The same weights and the same image embedding; only the prompt changes. Mask token 1.
+The same weights and the same image embedding; only the prompt changes. Mask token 1. The click is (x 2, y 2) with label 1; the background click is (x 6, y 3) with label 0; the box has corners (x 1, y 1) with label 2 and (x 4, y 4) with label 3. Every prompt gets the padding point, and the difference is the largest absolute difference over the 64 logits.
 
 | prompt | tokens | pixels with logit > 0 | largest difference of logit from the one-click map |
 |---|---:|---:|---:|
@@ -467,13 +471,13 @@ Training has the three parts promised at the start. The mask loss is the sum of 
 The claim of the first section was that the picture is expensive and the click is cheap. Count it, with 2 FLOPs per multiply-add, the Hiera trunk from the table above, the ViT-B tower of `crates/sam1` with its neck for comparison (the padded grid for windowed blocks, global blocks on 4,096 tokens, relative-position terms not counted), and the decoder with the sizes of the large model.
 
 <!-- worked: segment_anything.encoder_vs_decoder -->
-FLOPs count 2 per multiply-add; norms, activations and the relative-position terms are not counted.
+FLOPs count 2 per multiply-add; norms, activations and the relative-position terms are not counted. The ViT-B tower: a 16 by 16 patch embedding of stride 16 on 1,024 by 1,024 (4,096 tokens, width 768), 12 blocks of 12 heads and an MLP of 3,072, global attention in blocks 2, 5, 8 and 11 (numbered from 0) and windows of 14 elsewhere; the qkv and output projections run on the rows the block holds (4,900 padded rows in a windowed block, 4,096 in a global one), the MLP on the 4,096 real tokens; the neck is a 1 x 1 convolution 768 -> 256 and a 3 x 3 convolution 256 -> 256 on 64 by 64. The decoder, with 8 tokens and the 4,096 cells: the self-attention (four 256 x 256 projections and the products), the token-to-image and image-to-token attentions (projections 256 -> 128 of the tokens or the cells, 128 -> 256 back, and their products at width 128), a token MLP 256 -> 2,048 -> 256, two layers and the final token-to-image attention; the two transposed convolutions 256 -> 64 on 64 by 64 and 64 -> 32 on 128 by 128; four hypernetworks of three layers (256, 256, 256 and 32); the dot products with the 32 channels at 256 by 256; and the IoU and object-score heads.
 
 | quantity | GFLOPs | relative to the Hiera-L trunk |
 |---|---:|---:|
-| Hiera-L trunk (SAM 2.1), once per image | 1,812.15 | 1.00 |
-| ViT-B tower with neck (the SAM 1 tower of brain), once per image | 967.17 | 0.53 |
-| mask decoder of SAM 2, one click, once per prompt | 3.64 | 0.0020 |
+| Hiera-L trunk (SAM 2.1), once per image | 1,812.1469 | 1.00 |
+| ViT-B tower with neck (the SAM 1 tower of brain), once per image | 967.1702 | 0.53 |
+| mask decoder of SAM 2, one click, once per prompt | 3.6393 | 0.0020 |
 
 The decoder by part (one click: 1 point token and the padding token, 4 mask tokens, the IoU token and the object-score token, 8 tokens in all):
 
@@ -536,7 +540,7 @@ function memory_slots(frame: int, cond: list<int>, n_mem: int) -> list<(int, int
 ```
 
 <!-- worked: segment_anything.memory_selection -->
-A clip of 64 frames, one prompt on frame 0 (the only conditioning frame), the large model: 7 memory slots, 16 object pointers at most, 4,096 cells per slab (a 64 by 64 grid) and 4 tokens per pointer (256 / 64).
+A clip of 64 frames, one prompt on frame 0 (the only conditioning frame), the large model: 7 memory slots, 16 object pointers at most, 4,096 cells per slab (a 64 by 64 grid) and 4 tokens per pointer (256 / 64). Frame t reads the pointer of the prompted frame 0 and of each of the frames t - 1 down to t - 15 that exists and is not prompted, so it reads min(t, 16) pointers; the keys are 4,096 times the slabs plus 4 times the pointers.
 
 | frame t | source frames of the slabs | temporal positions | pointers | keys of the cross-attention |
 |---|---|---|---:|---:|
@@ -555,10 +559,10 @@ Frame 1 sees only the prompted frame. From frame 7 on the bank is full: seven sl
 
 Memory attention itself is four layers, each a self-attention of the current frame's cells, a cross-attention into the memory tokens and an MLP, with the normalization first (a pre-norm layer, as in Volume V). The queries are the 4,096 cells of the current frame, the keys are the memory plus a position code (a sine code of the memory grid and, added to it, a learned vector per slot) and the values are the memory without it. The attention is a single head of width 256, and the keys and values are projected up from 64 to 256, so the cross-attention is one softmax over 28,736 keys for each of 4,096 queries.
 
-Position needs care here, and the reason is concrete. A cell at the top left of the current frame should be compared with the memory around the top left, and the memory is seven slabs of the *same* grid laid end to end. Memory attention rotates queries and keys with the axial rotary embedding of Volume V (Chapter 8's multi-axis RoPE): the first half of the pairs of channels turn by the column and the second half by the row, with base 10,000. The query's table of rotations is repeated down the keys, one copy per slab, because each slab is the same grid from a different frame; and the pointer tokens at the end are not rotated at all, because they have no place in the grid. The rotation makes the score depend on where a key lies *relative to* the query, so memory at the same cell counts for more than memory three cells away. Here is the effect on a grid of $3 \times 3$ cells where an object, shown by its appearance and by a mask channel in the memory, has moved one cell to the right.
+Position needs care here, and the reason is concrete. A cell at the top left of the current frame should be compared with the memory around the top left, and the memory is seven slabs of the *same* grid laid end to end. Memory attention rotates queries and keys with the axial rotary embedding of Volume V (Chapter 8's multi-axis RoPE): the first half of the pairs of channels turn by the column and the second half by the row, with base 10,000. The pairs here are adjacent channels, $(0, 1), (2, 3), \dots$, where Chapter 6's toy pairs the first half of the channels with the second; the two pairings are the same rotation up to a fixed permutation of channels, and a checkpoint is tied to the one it was trained with. The query's table of rotations is repeated down the keys, one copy per slab, because each slab is the same grid from a different frame; and the pointer tokens at the end are not rotated at all, because they have no place in the grid. The rotation makes the score depend on where a key lies *relative to* the query, so memory at the same cell counts for more than memory three cells away. Here is the effect on a grid of $3 \times 3$ cells where an object, shown by its appearance and by a mask channel in the memory, has moved one cell to the right.
 
 <!-- worked: segment_anything.memory_toy -->
-A 3 by 3 grid, token t at column x = t mod 3 and row y = t div 3. A cell's feature has width 8: (a, 0, m, 0, a, 0, 0, 0) with the appearance a = 1.4 on the object and -1.4 elsewhere in both the x and y channels, and the mask channel m = 2 on the memory cell that the earlier mask covered and 0 everywhere else. Memory: the object (and its mask) at token 4, column 1 and row 1. Current frame: the object has moved to token 5 (column 2, row 1), and the current cells carry no mask channel. The query, key and value projections are the identity, the score is q . k / sqrt(8), and the rotation (when used) is applied to queries and keys by the cell's (x, y) with base 10000; the values are the unrotated memory features.
+A 3 by 3 grid, token t at column x = t mod 3 and row y = t div 3. A cell's feature has width 8: (a, 0, m, 0, a, 0, 0, 0) with the appearance a = 1.4 on the object and -1.4 elsewhere in both the x and y channels, and the mask channel m = 2 on the memory cell that the earlier mask covered and 0 everywhere else. Memory: the object (and its mask) at token 4, column 1 and row 1. Current frame: the object has moved to token 5 (column 2, row 1), and the current cells carry no mask channel. The query, key and value projections are the identity, the score is q . k / sqrt(8), and the rotation (when used) is applied to queries and keys by the cell's (x, y); the values are the unrotated memory features. The rotation pairs adjacent channels (0, 1), (2, 3), (4, 5), (6, 7), unlike the half-split pairing of Chapter 6's toy; pairs 0 and 1 turn by x times the rates 1 and 0.01 (10000^(-4j/8) for j = 0, 1) and pairs 2 and 3 turn by y times the same two rates, a pair (a, b) going to (a cos - b sin, a sin + b cos).
 
 Attention without position (content only). Weights of the query at the object's new cell (token 5), over the 9 memory cells:
 
@@ -613,14 +617,14 @@ When the object comes back, the frames after it find an appearance in the older 
 A tracked frame runs the trunk again, since the picture is new, and adds memory attention, the decoder with the tracking prompt (no click: the padding point twice) and the memory encoder.
 
 <!-- worked: segment_anything.frame_costs -->
-GFLOPs for one tracked frame of the large model (2 per multiply-add). The decoder runs with the tracking prompt: no click, the padding point twice (8 tokens, as for one click). Memory attention: 4 layers on 4,096 cells, a single head of width 256 whose cross-attention keys and values come from 64-wide memory tokens; the memory encoder: a mask downsampler of 4 stride-2 convolutions (1, 4, 16, 64, 256 channels, kernel 3), two 1 x 1 convolutions, two ConvNeXt blocks (depthwise 7 x 7 and two pointwise layers of ratio 4) and a 1 x 1 convolution to 64.
+GFLOPs for one tracked frame of the large model (2 per multiply-add). The decoder runs with the tracking prompt: no click, the padding point twice (8 tokens, as for one click). Memory attention: 4 layers on 4,096 cells, a single head of width 256 whose cross-attention keys and values come from 64-wide memory tokens; the memory encoder: a mask downsampler of 4 stride-2 convolutions (1, 4, 16, 64, 256 channels, kernel 3, on 1,024 by 1,024 down to 64 by 64), a 1 x 1 convolution 256 -> 256 after the downsampler and a 1 x 1 projection 256 -> 256 of the frame's features, two ConvNeXt blocks (depthwise 7 x 7 and pointwise layers 256 -> 1,024 -> 256) and a 1 x 1 convolution to 64. In each memory-attention layer the self-attention has four 256 x 256 projections, the cross-attention has 256 x 256 projections of the queries and of the output, 64 -> 256 projections of the keys and the values of the memory tokens, and the feed-forward network is 256 -> 2,048 -> 256. Totals are the sum of the unrounded counts, so the printed columns can differ from the total by 0.001.
 
 | frame | memory keys | trunk | memory attention | decoder | memory encoder | total | memory attention (%) |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 4,100 | 1,812.15 | 185.83 | 3.64 | 11.61 | 2,013.22 | 9.2 |
-| 2 | 8,200 | 1,812.15 | 255.69 | 3.64 | 11.61 | 2,083.08 | 12.3 |
-| 8 | 28,704 | 1,812.15 | 605.06 | 3.64 | 11.61 | 2,432.46 | 24.9 |
-| 20 | 28,736 | 1,812.15 | 605.61 | 3.64 | 11.61 | 2,433.00 | 24.9 |
+| 1 | 4,100 | 1,812.147 | 185.825 | 3.639 | 11.608 | 2,013.219 | 9.2 |
+| 2 | 8,200 | 1,812.147 | 255.687 | 3.639 | 11.608 | 2,083.081 | 12.3 |
+| 8 | 28,704 | 1,812.147 | 605.062 | 3.639 | 11.608 | 2,432.456 | 24.9 |
+| 20 | 28,736 | 1,812.147 | 605.607 | 3.639 | 11.608 | 2,433.001 | 24.9 |
 <!-- /worked -->
 
 Once the bank is full, memory attention is 605.6 billion FLOPs, 24.9 percent of the frame, and the frame costs a third more than a still image with one click (2,433 against 1,816 billion FLOPs). Its work is dominated by the cross-attention: the scores and averages are $4 \cdot 4{,}096 \cdot 28{,}736 \cdot 256$ FLOPs in each of four layers, 482 billion FLOPs, because the head is a single head of width 256 over every key of every slab. Frame 1, with a one-slab bank, is 9.2 percent. A comment in brain's `Tracker` documentation says the trunk is about 99 percent of the work and that is true of the image path, where it is 99.8 percent, and not of a tracked frame with a full bank, where the count above gives the trunk 74.5 percent of the frame. Which of the two numbers matters depends on the question: the cache that saves a second prompt saves the trunk, and the trunk is what a tracker must run on every frame.

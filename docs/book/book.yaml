@@ -592,13 +592,13 @@ volumes:
       - id: dense-prediction
         title: "Dense Prediction: Segmentation and Depth"
         question: "How does a network label every pixel or estimate how far away it is?"
-        introduces: [semantic-segmentation, monocular-depth, encoder-decoder-cnn, upsampling]
+        introduces: [semantic-segmentation, monocular-depth, encoder-decoder-cnn, upsampling, output-stride, disparity, bisenet]
         requires: [convolutional-network, transposed-convolution, image-resampling, relu, sigmoid, receptive-field, pooling, resnet, feature-pyramid, depthwise-convolution, batch-normalization, intersection-over-union, softmax-cross-entropy, least-squares, adam, gradient-check, shared-preprocessing, calibration-set, onnx-graph]
         brain: [zipdepth, bisenet]
       - id: vision-transformers
         title: "Vision Transformers"
         question: "Can attention replace convolution for images?"
-        introduces: [patch-embedding, vision-transformer, windowed-attention, hierarchical-vision-transformer]
+        introduces: [patch-embedding, vision-transformer, windowed-attention, hierarchical-vision-transformer, swin-transformer, repmixer, convffn]
         requires: [transformer-block, convolution-2d, multi-axis-rope, absolute-position-embedding, sinusoidal-encoding, image-resampling, sliding-window-attention, depthwise-convolution, feature-pyramid, gradient-check, adam]
         brain: [fastvlm]
       - id: segment-anything
@@ -610,7 +610,7 @@ volumes:
       - id: clip
         title: "Contrastive Vision-Language Learning"
         question: "How can images and texts be placed in one space where matching pairs land close together?"
-        introduces: [contrastive-pretraining, info-nce, zero-shot-classification, perceptual-distance]
+        introduces: [contrastive-pretraining, info-nce, zero-shot-classification, perceptual-distance, prompt-ensembling]
         requires: [contrastive-loss, vision-transformer, sentence-embedding, temperature, cosine-similarity, softmax-cross-entropy, binary-cross-entropy, log-sum-exp, gelu, gradient-check, adam, mean-squared-error, convolutional-network, pooling, byte-level-bpe, special-tokens]
         brain: [clip, lpips]
       - id: vlms
@@ -618,7 +618,7 @@ volumes:
         question: "How do we give a language model eyes?"
         introduces: [vision-projector, image-token-splicing, dynamic-resolution, multimodal-position-encoding]
         requires: [vision-transformer, modern-decoder-recipe, contrastive-pretraining, multi-axis-rope, patch-embedding, image-resampling, special-tokens, kv-cache, prefill-phase, grouped-query-attention, rotary-position-embedding, cross-attention, bounding-box]
-        brain: [llava, qwen3vl, qwen3vlmoe, minicpmv, moondream3, deepseekvl, januspro, florence2, captioner]
+        brain: [llava, qwen3vl, qwen3vlmoe, minicpmv, moondream3, deepseekvl, januspro, florence2, captioner, mirage]
       - id: ocr
         title: "Reading Documents"
         question: "How does a model read a page of text from pixels, and how few tokens can a page be squeezed into?"
