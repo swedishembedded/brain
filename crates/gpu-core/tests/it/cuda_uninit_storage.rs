@@ -17,18 +17,40 @@
 //! * a step's uniform is not cleared either: its parameters are uploaded over all of it before the dispatch runs
 //!   (a prefill round over fresh buffers paid one clear per dispatch for it, about 2,000 a round on the 27B).
 //!
-//! Skipped without a CUDA device.
+//! Skipped without a CUDA device. The clear counters are process-wide, and this binary runs every module's tests
+//! side by side, so each check runs in a child process of its own where nothing else allocates.
 
 use gpu_core::Gpu;
 
 const WORDS: u64 = 1 << 20;
 
-/// The clear counters are process-wide; the tests here take turns so neither sees the other's clears.
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Run `helper`, one of this module's ignored tests, alone in a child process of this binary, and require it to
+/// have run and passed.
+fn alone(helper: &str) {
+    let name = format!("{}::{helper}", module_path!().trim_start_matches("it::"));
+    let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", &name, "--ignored", "--nocapture", "--test-threads=1"])
+        .output()
+        .expect("re-run this test binary for the child");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "{helper} failed:\n{text}");
+    assert!(text.contains("1 passed"), "{helper} did not run:\n{text}");
+}
 
 #[test]
 fn uninitialised_storage_skips_the_clear_and_is_poisoned_in_a_debug_build() {
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    alone("uninitialised_storage_alone");
+}
+
+#[test]
+fn a_step_over_fresh_buffers_does_not_clear_its_uniform() {
+    alone("fresh_buffers_alone");
+}
+
+/// The child of [`uninitialised_storage_skips_the_clear_and_is_poisoned_in_a_debug_build`].
+#[test]
+#[ignore = "runs alone in a child process of its parent test"]
+fn uninitialised_storage_alone() {
     let Ok(gpu) = Gpu::try_new_cuda(&[]) else {
         brain_testutil::skip_unavailable("cuda_uninit_storage: no CUDA device on this box");
         return;
@@ -59,9 +81,10 @@ const FILL: &str = "struct P { n: u32, v: u32, pad: u32 };
 fn main(@builtin(global_invocation_id) id: vec3<u32>) { if (id.x < p.n) { out[id.x] = p.v; } }
 ";
 
+/// The child of [`a_step_over_fresh_buffers_does_not_clear_its_uniform`].
 #[test]
-fn a_step_over_fresh_buffers_does_not_clear_its_uniform() {
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+#[ignore = "runs alone in a child process of its parent test"]
+fn fresh_buffers_alone() {
     let Ok(gpu) = Gpu::try_new_cuda(&[("fill", FILL)]) else {
         brain_testutil::skip_unavailable("cuda_uninit_storage: no CUDA device on this box");
         return;
