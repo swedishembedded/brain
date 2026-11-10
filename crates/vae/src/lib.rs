@@ -5,11 +5,11 @@
 //! FLUX.2, and HiDream-I1 to compress images into the latent space the DiT
 //! denoises.
 //!
-//! Decoder-first: latent-diffusion inference only needs `decode` (the VAE runs
-//! frozen), so that is what lands first and is parity-gated against the
-//! reference. The encoder, KL diagonal-Gaussian sampling, and the trainable
-//! `Model` impl (with explicit backward + gradcheck) land alongside as the
-//! training path is wired.
+//! The VAE runs frozen: generation needs `decode`, and image-to-image and
+//! training data need the encoder's posterior mean. Both are parity-gated
+//! against the reference. There is no KL sampling and no trainable `Model`
+//! here; the reverse mode in `blocks::grad` serves the crates that train
+//! convolutional stacks built from these blocks.
 //!
 //! Everything is composed from brain's existing kernels — conv (`conv_bias_reg`),
 //! GroupNorm (`gn_stats`/`gn_apply`), SiLU, residual add, nearest upsample, and
