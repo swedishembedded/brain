@@ -197,8 +197,25 @@ fn the_upgrade_is_active_for_both_code_bits_independently() {
 /// the two kernels perform the identical operations in the identical order by
 /// construction (see `matmul_kq_gemv_reg.wgsl`'s own header), so this is a
 /// real `assert_eq!` on the bits, not a tolerance.
+///
+/// It withholds native kernels for the whole process, and this binary runs every module's tests side by side,
+/// so the check runs in a child process of its own.
 #[test]
 fn the_register_kernel_is_byte_identical_to_the_plain_gemv() {
+    let name = format!("{}::the_register_kernel_is_byte_identical_to_the_plain_gemv_alone", module_path!().trim_start_matches("it::"));
+    let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", &name, "--ignored", "--nocapture", "--test-threads=1"])
+        .output()
+        .expect("re-run this test binary for the child");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "the register kernel must be byte-identical to the plain gemv:\n{text}");
+    assert!(text.contains("1 passed"), "the child test must have run:\n{text}");
+}
+
+/// The child of [`the_register_kernel_is_byte_identical_to_the_plain_gemv`].
+#[test]
+#[ignore = "runs alone in a child process of its parent test"]
+fn the_register_kernel_is_byte_identical_to_the_plain_gemv_alone() {
     // Both sides must be the WGSL tiers: on a CUDA device the plain kernel's
     // slot would otherwise run the native K-quant GEMV, which is held to an
     // f64 oracle (`kq_native.rs`), not to these kernels' bits.

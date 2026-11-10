@@ -4,20 +4,12 @@
 //! `kernel-performance.md` M8.10/M8.11: `gpu_core::provider::cpu_isa::
 //! CpuIsaProvider` proof tests.
 //!
-//! A dedicated integration-test FILE, not an inline `#[cfg(test)]` module in
-//! `src/provider/cpu_isa.rs`, for one reason: these tests need the CPU
-//! backend SPECIFICALLY (`register_native`/`step_native` exist only on
-//! `backend-cpu` today), and there is no way to build a `Gpu` that bypasses
-//! the ambient `--device`/`BRAIN_DEVICE` backend-class selection
-//! (`Gpu::wrap`/`wrap_on` are private to `gpu_core`'s internal
-//! `native_facade` module - not visible even from a sibling module inside
-//! the same crate, confirmed by trying). `gpu_core::set_default_backend`
-//! is the one lever that works, and it is process-global - safe to call here
-//! ONLY because each `tests/*.rs` file is its own separate binary/process
-//! under `cargo test`, so this can never race a DIFFERENT test file's
-//! process the way it would if this lived inside the lib's own unit tests
-//! (which share one process with every other `#[cfg(test)]` module in the
-//! crate).
+//! These tests need the CPU backend SPECIFICALLY (`register_native`/`step_native`
+//! exist only on `backend-cpu` today), so they build their handle with
+//! `Gpu::new_cpu`. They must not switch the process's default backend: this
+//! file shares one test binary with every other integration test, and a
+//! process-wide switch to the CPU moved the tests that ran after it onto the
+//! CPU.
 
 use std::sync::Arc;
 
@@ -25,10 +17,6 @@ use backend_api::select::{self, CachedSelector, Dtype, KernelSelector, KernelVar
 use backend_api::DType;
 use gpu_core::provider::cpu_isa::CpuIsaProvider;
 use gpu_core::provider::{LowerCtx, OpRequest, Operand, Pass, ProviderRegistry, Role};
-
-fn force_cpu() {
-    gpu_core::set_default_backend(gpu_core::Backend::Cpu);
-}
 
 /// The CPU backend registers its native ISA kernels only where it has AVX2
 /// code for them, so on any other host (aarch64, say) these providers decline
@@ -63,8 +51,7 @@ fn bind_f32(v: KernelVariant) -> (usize, &'static str) {
 /// about what runs, only how it is reached.
 #[test]
 fn cpu_isa_f32_matmul_is_bit_identical_to_the_hidden_fastpath() {
-    force_cpu();
-    let gpu = gpu_core::testgpu::dev(KERNELS);
+    let gpu = gpu_core::Gpu::new_cpu(KERNELS);
     if !host_has_native_isa_path(&gpu) {
         return;
     }
@@ -127,8 +114,7 @@ fn cpu_isa_f32_matmul_is_bit_identical_to_the_hidden_fastpath() {
 /// the right operand order).
 #[test]
 fn cpu_isa_i8_matmul_reaches_the_native_avx2_gemm() {
-    force_cpu();
-    let gpu = gpu_core::testgpu::dev(&[]);
+    let gpu = gpu_core::Gpu::new_cpu(&[]);
     if !host_has_native_isa_path(&gpu) {
         return;
     }
