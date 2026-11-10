@@ -165,3 +165,31 @@ fn a_store_scan_finds_the_checkpoint_with_no_setting() {
     assert_eq!(manifest.model, MODEL);
     assert_eq!(manifest.actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["describe", "extract"]);
 }
+
+#[test]
+fn a_cq_request_is_served_by_the_packed_archive_beside_the_fp32_instance() {
+    let Some(dir) = released_dir() else {
+        brain_testutil::skip("mirage served precision: Cactus-Compute/mirage is not in the model store");
+        return;
+    };
+    let exec = executor(&dir);
+    let request = |precision: Option<&str>| {
+        let inv = describe(3, 8);
+        match precision {
+            Some(p) => inv.set("precision", json!(p)),
+            None => inv,
+        }
+    };
+    let fp32 = answer(wait(&submit(&exec, "describe", request(Some("fp32")))));
+    let cq = answer(wait(&submit(&exec, "describe", request(Some("cq")))));
+    // Two instances were loaded: one per weight source, each with its own batch counter.
+    let stats = stats_when(&exec, |s| s.metrics.len() >= 2);
+    assert_eq!(stats.metrics.len(), 2, "one instance per precision: {stats:?}");
+    // Both answer with the same structure; the packed weights are a different (quantised) model.
+    assert_eq!(fp32.as_object().unwrap().keys().collect::<Vec<_>>(), cq.as_object().unwrap().keys().collect::<Vec<_>>());
+    // The default request is served by the directory's default instance, a third.
+    wait(&submit(&exec, "describe", request(None))).expect("the default request succeeds");
+    let stats = stats_when(&exec, |s| s.metrics.len() >= 3);
+    assert_eq!(stats.metrics.len(), 3, "the default is its own instance: {stats:?}");
+    exec.shutdown();
+}

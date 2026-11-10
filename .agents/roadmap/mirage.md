@@ -367,8 +367,10 @@ provider keeps one session per (directory, weight source) and replaces it when t
 not a batching option (it never joins a batch group). `brain mirage quantize --out DIR [--weights DIR]` calls
 `mirage::model::quantize_dir` (FP32 checkpoint with its adapter folded, plan from the directory's `mirage.cact`, atomic write, config
 copied); the CLI re-quantisation of the released weights differs from the vendor's file only in the 0.6 % of index bytes recorded in
-L5. Tests: `precision_picks_the_weights_and_is_not_a_batching_option`, `quantize_dir_writes_a_loadable_archive`. Not done: the
-residency adapter (`resident_mirage`) still loads the directory's default precision.
+L5. Tests: `precision_picks_the_weights_and_is_not_a_batching_option`, `quantize_dir_writes_a_loadable_archive`. The residency
+adapter keys one instance per weight source (`default` | `fp32` | `cq`; L7 item 3): a `precision` request is served by an instance
+loaded with exactly those weights. Tests: `the_precision_option_selects_the_instance_and_its_weights`,
+`a_cq_request_is_served_by_the_packed_archive_beside_the_fp32_instance`.
 
 ## Lane L4 - serving
 

@@ -32,6 +32,7 @@
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use mirage::caps::{MirageSession, MAX_BATCH, MODEL};
+use mirage::model::WeightSource;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 /// Mirage behind the scheduler.
@@ -85,8 +86,11 @@ impl ResidentModel for MirageResident {
         mirage::caps::manifest()
     }
 
-    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(MODEL, "default")
+    /// One instance per weight source: a request naming a `precision` is served by the instance holding exactly those
+    /// weights (loaded on first use, the scheduler evicts it like any other), a request naming none by the
+    /// directory's default.
+    fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
+        InstanceKey::new(MODEL, mirage::caps::weight_source_of(inv).ok().flatten().map_or("default", config_of))
     }
 
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
@@ -101,10 +105,27 @@ impl ResidentModel for MirageResident {
         mirage::caps::check_request(action, inv)
     }
 
-    fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+    fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(&MirageSession::kernels()))?;
-        Ok(Box::new(MirageInstance { session: MirageSession::load(&self.dir, gpu)? }))
+        let session = match source_of(&key.config) {
+            Some(source) => MirageSession::load_with(&self.dir, gpu, source)?,
+            None => MirageSession::load(&self.dir, gpu)?,
+        };
+        Ok(Box::new(MirageInstance { session }))
     }
+}
+
+/// The instance configuration naming `source`; the inverse of [`source_of`].
+fn config_of(source: WeightSource) -> &'static str {
+    match source {
+        WeightSource::Safetensors => "fp32",
+        WeightSource::Cact => "cq",
+    }
+}
+
+/// The weights an instance configuration asks for; `None` for the directory's default.
+fn source_of(config: &str) -> Option<WeightSource> {
+    [WeightSource::Safetensors, WeightSource::Cact].into_iter().find(|s| config_of(*s) == config)
 }
 
 /// A resident Mirage.
@@ -132,5 +153,28 @@ impl Instance for MirageInstance {
             ("mirage_cached_memories".to_string(), entries.into()),
             ("mirage_cached_memory_bytes".to_string(), bytes.into()),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Each precision is its own instance, so a `cq` request is served by the packed archive and never by (or grouped
+    /// with) the FP32 weights; a request naming none keeps the directory default.
+    #[test]
+    fn the_precision_option_selects_the_instance_and_its_weights() {
+        let resident = MirageResident { dir: String::new() };
+        let key = |precision: Option<&str>| {
+            let inv = precision.map_or_else(Invocation::new, |p| Invocation::new().set("precision", json!(p)));
+            resident.instance_key("describe", &inv)
+        };
+        assert_eq!(key(None).config, "default");
+        assert_eq!(key(Some("fp32")).config, "fp32");
+        assert_eq!(key(Some("cq")).config, "cq");
+        assert_eq!(source_of("cq"), Some(WeightSource::Cact));
+        assert_eq!(source_of("fp32"), Some(WeightSource::Safetensors));
+        assert_eq!(source_of("default"), None);
     }
 }
