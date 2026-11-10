@@ -23,24 +23,7 @@ use std::process::Command;
 /// unset, for `None`), executing only the `print_ambient` helper below, and
 /// return its `(compute_set debug, ambient_gpu pin debug, stderr)`.
 fn run_ambient(device: Option<&str>) -> (String, String, String, String) {
-    let exe = std::env::current_exe().expect("current_exe");
-    let mut cmd = Command::new(exe);
-    cmd.args(["--exact", "device_grammar::print_ambient", "--ignored", "--nocapture", "--test-threads=1"]);
-    // `BRAIN_BACKEND` overrides the backend a device token implies, in the
-    // child as in this process. The comparison is of the token alone, so a
-    // lane that exports it (the CUDA validation run) must not reach the child.
-    cmd.env_remove("BRAIN_BACKEND");
-    match device {
-        Some(v) => {
-            cmd.env("BRAIN_DEVICE", v);
-        }
-        None => {
-            cmd.env_remove("BRAIN_DEVICE");
-        }
-    }
-    let out = cmd.output().expect("spawn subprocess");
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let (out, stdout, stderr) = spawn_ambient(device);
     assert!(
         out.status.success(),
         "subprocess (BRAIN_DEVICE={device:?}) exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
@@ -59,6 +42,30 @@ fn run_ambient(device: Option<&str>) -> (String, String, String, String) {
     let set_dbg = extract("AMBIENT_SET_DEBUG:");
     let pin_dbg = extract("AMBIENT_GPU_PIN:");
     (selected, set_dbg, pin_dbg, stderr)
+}
+
+/// The `print_ambient` child under `BRAIN_DEVICE=device` (unset for `None`),
+/// whatever its exit: `(output, stdout, stderr)`.
+fn spawn_ambient(device: Option<&str>) -> (std::process::Output, String, String) {
+    let exe = std::env::current_exe().expect("current_exe");
+    let mut cmd = Command::new(exe);
+    cmd.args(["--exact", "device_grammar::print_ambient", "--ignored", "--nocapture", "--test-threads=1"]);
+    // `BRAIN_BACKEND` overrides the backend a device token implies, in the
+    // child as in this process. The comparison is of the token alone, so a
+    // lane that exports it (the CUDA validation run) must not reach the child.
+    cmd.env_remove("BRAIN_BACKEND");
+    match device {
+        Some(v) => {
+            cmd.env("BRAIN_DEVICE", v);
+        }
+        None => {
+            cmd.env_remove("BRAIN_DEVICE");
+        }
+    }
+    let out = cmd.output().expect("spawn subprocess");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    (out, stdout, stderr)
 }
 
 /// The subprocess entry point `run_ambient` invokes. Never runs as part of
@@ -151,30 +158,18 @@ fn brain_device_gpu_index_pins_the_specific_card_not_just_the_backend() {
     assert_eq!(selected, format!("Some({idx})"), "BRAIN_DEVICE={tok:?} must select gpu{idx} before anything resolved the set");
 }
 
-/// An out-of-range `BRAIN_DEVICE=gpu<N>` must fall back to the default
-/// "all devices" set - never panic, never silently reinterpret the
-/// unrecognised index as "just use wgpu, ambient card".
+/// An out-of-range `BRAIN_DEVICE=gpu<N>` stops the program at its first
+/// device use, naming the variable and the token - never a run on every
+/// device instead, never the unrecognised index read as "the ambient card".
 #[test]
-fn brain_device_invalid_gpu_index_falls_back_to_all_devices_without_panicking() {
+fn brain_device_invalid_gpu_index_is_refused_naming_it() {
     let inv = gpu_core::Inventory::probe();
-    let bad = inv.gpus + 99;
-    let tok = format!("gpu{bad}");
-    let (_selected, set_dbg, _pin, stderr) = run_ambient(Some(&tok));
-    let want_fallback = gpu_core::DeviceSpec::default().resolve(&inv).unwrap();
-    assert_eq!(
-        set_dbg,
-        format!("{want_fallback:?}"),
-        "an out-of-range index must fall back to the all-devices default set"
-    );
-    assert!(
-        !stderr.is_empty(),
-        "a malformed/unresolvable BRAIN_DEVICE must print a warning to stderr"
-    );
-    assert_eq!(
-        stderr.matches("BRAIN_DEVICE").count(),
-        1,
-        "expected exactly one warning line mentioning BRAIN_DEVICE, got:\n{stderr}"
-    );
+    let tok = format!("gpu{}", inv.gpus + 99);
+    let (out, stdout, stderr) = spawn_ambient(Some(&tok));
+    assert!(!out.status.success(), "BRAIN_DEVICE={tok} must not resolve:\nstdout:\n{stdout}");
+    assert!(!stdout.contains("AMBIENT_SET_DEBUG:"), "no compute set may be resolved for {tok}:\n{stdout}");
+    let said = format!("{stdout}{stderr}");
+    assert!(said.contains("BRAIN_DEVICE") && said.contains(&tok), "the refusal names the variable and its value:\n{said}");
 }
 
 /// Absent `BRAIN_DEVICE` must resolve identically to an absent `--device`:
