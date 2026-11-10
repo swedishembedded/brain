@@ -35,11 +35,39 @@ pub struct MemoryBuilder {
     pub(crate) embedding: Vec<f32>,}
 
 /// Sine then cosine of `pos * exp(-ln(1e4) / (dim/2 - 1) * i)` for `i < dim/2`.
-fn sinusoid(pos: f64, dim: usize) -> Vec<f32> {
+pub(crate) fn sinusoid(pos: f64, dim: usize) -> Vec<f32> {
     let half = dim / 2;
     let step = -(1e4f64.ln()) / (half as f64 - 1.0);
     let angles: Vec<f64> = (0..half).map(|i| pos * (step * i as f64).exp()).collect();
     angles.iter().map(|a| a.sin() as f32).chain(angles.iter().map(|a| a.cos() as f32)).collect()
+}
+
+/// Sine and cosine of the four rounded box coordinates at eight octave frequencies, `[BOX_ENCODING_DIM]`.
+pub(crate) fn box_code(b: [f32; 4]) -> Vec<f32> {
+    let mut code = Vec::with_capacity(BOX_ENCODING_DIM);
+    for coord in b {
+        let angles: Vec<f64> = (0..BOX_ENCODING_DIM / 8).map(|k| f64::from(coord) * std::f64::consts::PI * 2f64.powi(k as i32)).collect();
+        code.extend(angles.iter().map(|a| a.sin() as f32).chain(angles.iter().map(|a| a.cos() as f32)));
+    }
+    code
+}
+
+/// The cells a slot pools: the valid cells of a `g x g` grid whose centre lies in the box (inclusive), else the
+/// box-centre cell.
+pub(crate) fn pooled_cells(g: usize, cell_px: f32, valid: &[bool], b: [f32; 4]) -> Vec<usize> {
+    let canvas = (g as f32) * cell_px;
+    let px = b.map(|v| v * canvas);
+    let mut picked: Vec<usize> = (0..g * g)
+        .filter(|&c| {
+            let (cx, cy) = ((c % g) as f32 * cell_px + cell_px / 2.0, (c / g) as f32 * cell_px + cell_px / 2.0);
+            valid[c] && px[0] <= cx && cx <= px[2] && px[1] <= cy && cy <= px[3]
+        })
+        .collect();
+    if picked.is_empty() {
+        let cell = |lo: f32, hi: f32| ((g as f32 * (lo + hi) / 2.0) as usize).min(g - 1);
+        picked.push(cell(b[1], b[3]) * g + cell(b[0], b[2]));
+    }
+    picked
 }
 
 impl MemoryBuilder {
@@ -110,31 +138,16 @@ impl MemoryBuilder {
             let cell = |lo: f32, hi: f32| ((self.side as f32 * (lo + hi) / 2.0) as usize).min(self.side - 1);
             let (cy, cx) = (cell(b[1], b[3]), cell(b[0], b[2]));
             proj_in.extend_from_slice(&head_in[(cy * self.side + cx) * head_dim..][..head_dim]);
-            for coord in b {
-                let angles: Vec<f64> = (0..BOX_ENCODING_DIM / 8).map(|k| f64::from(coord) * std::f64::consts::PI * 2f64.powi(k as i32)).collect();
-                proj_in.extend(angles.iter().map(|a| a.sin() as f32).chain(angles.iter().map(|a| a.cos() as f32)));
-            }
+            proj_in.extend(box_code(b));
             pooled.extend(self.pool_cells(encoder, valid, b));
         }
         (proj_in, pooled)
     }
 
-    /// Mean encoder feature of the valid cells whose centre lies in the box
-    /// (inclusive); the box-centre cell when none does.
+    /// Mean encoder feature of the pooled cells of a box.
     fn pool_cells(&self, encoder: &[f32], valid: &[bool], b: [f32; 4]) -> Vec<f32> {
-        let (d, g) = (self.dim, self.grid);
-        let canvas = (g as f32) * self.cell_px;
-        let px = b.map(|v| v * canvas);
-        let mut picked: Vec<usize> = (0..g * g)
-            .filter(|&c| {
-                let (cx, cy) = ((c % g) as f32 * self.cell_px + self.cell_px / 2.0, (c / g) as f32 * self.cell_px + self.cell_px / 2.0);
-                valid[c] && px[0] <= cx && cx <= px[2] && px[1] <= cy && cy <= px[3]
-            })
-            .collect();
-        if picked.is_empty() {
-            let cell = |lo: f32, hi: f32| ((g as f32 * (lo + hi) / 2.0) as usize).min(g - 1);
-            picked.push(cell(b[1], b[3]) * g + cell(b[0], b[2]));
-        }
+        let d = self.dim;
+        let picked = pooled_cells(self.grid, self.cell_px, valid, b);
         let mut mean = vec![0f32; d];
         for &c in &picked {
             mean.iter_mut().zip(&encoder[c * d..(c + 1) * d]).for_each(|(a, e)| *a += e);

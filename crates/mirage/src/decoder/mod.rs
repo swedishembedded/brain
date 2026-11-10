@@ -33,7 +33,7 @@ use hadamard::{legacy_permutation, HadamardMlp, PERMUTATION_SEEDS};
 
 const ENGRAM_SEED: u64 = 0x9E37_79B9;
 const ENGRAM_PRIME: u64 = 0x0100_0193;
-const ENGRAM_DILATION: usize = 3;
+pub(crate) const ENGRAM_DILATION: usize = 3;
 pub(crate) const SINKHORN_ITERATIONS: usize = 20;
 const DECODER_ROPE_PAIRS_DIV: usize = 2;
 
@@ -243,23 +243,7 @@ impl Decoder {
 
     /// N-gram table indices for positions `p0..p0+t`, `[t, tables]`.
     fn engram_indices(&self, tokens: &[u32], p0: usize) -> Vec<usize> {
-        let c = &self.cfg;
-        let tables = c.engram_tables();
-        let mut out = Vec::with_capacity((tokens.len() - p0) * tables);
-        for t in p0..tokens.len() {
-            for (oi, &order) in c.orders.iter().enumerate() {
-                for hh in 0..c.hashes {
-                    let mut acc = (ENGRAM_SEED * (oi * c.hashes + hh + 1) as u64) & 0xFFFF_FFFF;
-                    for j in 0..order {
-                        let tok = if t >= j { u64::from(tokens[t - j]) } else { 0 };
-                        acc = ((acc ^ tok) * ENGRAM_PRIME) & 0xFFFF_FFFF;
-                    }
-                    acc ^= acc >> 15;
-                    out.push((acc % c.slots as u64) as usize);
-                }
-            }
-        }
-        out
+        engram_indices(&self.cfg, tokens, p0)
     }
 
     /// Engram keys and tap-convolved values for the new positions.
@@ -526,6 +510,26 @@ impl Decoder {
         let normed = ops::zc_norm(&mean, d, &self.final_norm);
         self.embedding.apply(&normed, rows)
     }
+}
+
+/// N-gram table indices for positions `p0..tokens.len()`, `[positions, tables]`: one hash per (order, hash function).
+pub(crate) fn engram_indices(c: &MirageConfig, tokens: &[u32], p0: usize) -> Vec<usize> {
+    let tables = c.engram_tables();
+    let mut out = Vec::with_capacity((tokens.len() - p0) * tables);
+    for t in p0..tokens.len() {
+        for (oi, &order) in c.orders.iter().enumerate() {
+            for hh in 0..c.hashes {
+                let mut acc = (ENGRAM_SEED * (oi * c.hashes + hh + 1) as u64) & 0xFFFF_FFFF;
+                for j in 0..order {
+                    let tok = if t >= j { u64::from(tokens[t - j]) } else { 0 };
+                    acc = ((acc ^ tok) * ENGRAM_PRIME) & 0xFFFF_FFFF;
+                }
+                acc ^= acc >> 15;
+                out.push((acc % c.slots as u64) as usize);
+            }
+        }
+    }
+    out
 }
 
 fn add_gated(y: &mut [f32], o: &[f32], gate: f32, d: usize) {

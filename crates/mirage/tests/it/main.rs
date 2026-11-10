@@ -22,6 +22,7 @@ mod pipeline;
 mod serving;
 mod spec;
 mod tokenizer;
+mod train_graph;
 mod train_ops;
 mod vision;
 mod vision_masks;

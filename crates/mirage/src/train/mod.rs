@@ -10,8 +10,11 @@
 //! The graph runs in `f64` as the finite-difference oracle and in `f32` as the trainer (see [`real`]). Every
 //! primitive in [`ops`], [`spatial`] and [`seq`] has its backward checked against finite differences.
 
+pub mod decoder;
+pub mod net;
 pub mod ops;
 pub mod real;
 pub mod seq;
 pub mod spatial;
 pub mod tape;
+pub mod vision;
