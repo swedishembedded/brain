@@ -516,6 +516,16 @@ one thread per activation group left the device idle through a serial 7 x 64 but
 0.12 waves: the 262 KB weight is L2 resident and the kernel is launch- and latency-bound, so the roofline at Mirage's sizes is the
 launch floor, not memory; a bandwidth-bound shape needs a taller weight than any Mirage projection.
 
+Quantising (`CactModel::quantize`, `CactBuilder`): the container writer rebuilds the released `mirage.cact` byte for byte (header,
+codebooks, 44-byte records, 64-byte blob alignment, no padding after the last blob). A group's stored norm is the L2 norm of the
+rotated group and a lane's index is the nearest codebook level of `u / norm` (the codebooks are on the unit sphere of a group); with
+that rule, quantising the released FP32 weights against the released archive's plan writes a file of the same size whose 163 CQ
+entries agree with the vendor's on 99.4 % of the index bytes and 99.9 % of the norm bytes (differences are ties and fp16 rounding)
+and whose other 643 entries are identical. The reference engine's harness loads the re-quantised file and describes the cats photograph
+(scene, tags, two tabby cats, boxes within a pixel of the original archive's). The plan (which entries are CQ at which width, the
+codebooks, the derived entries and the tokenizer) is taken from a template archive, because `config.json` records the widths per tensor
+family but not per entry; a `brain mirage quantize` verb is not wired (the library function and its tests are the surface).
+
 ## Facts the foundation established
 
 - The released `.cact` has 806 entries: 159 two-bit and 4 four-bit CQ matrices
@@ -545,5 +555,5 @@ launch floor, not memory; a bandwidth-bound shape needs a taller weight than any
 | OCR | the reader and greedy collapse | open |
 | Training | full / head / LoRA, multi-task, gradient checks | host trainer done (L3); device backward open |
 | Serving | capability, CLI, SDK, HTTP, D-Bus, batching | done (L4) |
-| Quantised kernels | native low-bit CQ matmul from the packed weights | done (L5), see above; A8 and `quantize` open |
+| Quantised kernels | native low-bit CQ matmul from the packed weights | done (L5), see above; A8 emulation open |
 | Performance | profile-driven batched throughput | open |

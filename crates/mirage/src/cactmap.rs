@@ -29,9 +29,9 @@ use std::sync::Arc;
 
 use model::cq::Cq;
 
-use crate::cact::{CactError, CactFile, EntryDtype};
+use crate::cact::{CactBuilder, CactError, CactFile, EntryDtype};
 use crate::config::{MirageConfig, DENSE_BLOCKS, MASK_BRANCH_BLOCKS, READER_CLASSES, READER_STAGES};
-use crate::import::{PackedMatrices, Tensor};
+use crate::import::{Checkpoint, PackedMatrices, Tensor};
 use crate::spec::Manifest;
 
 /// Values in the vision manifest entry.
@@ -422,6 +422,52 @@ impl CactModel {
         Ok((read(1)?, read(2)?))
     }
 
+    /// A new archive holding `ck`'s weights, laid out like this one: entry order, dtypes, index widths, codebooks, the
+    /// header and the derived entries (permutations, vision constants, charset, tokenizer) are taken from `self`;
+    /// every projection that this archive stores as CQ is quantised from `ck` (rotate each 128-lane group, store its
+    /// L2 norm as fp16, nearest codebook level per lane), every other tensor is converted to its stored dtype.
+    /// Quantising the released FP32 weights against the released archive reproduces its matrices
+    /// (`device_cact::quantising_the_fp32_weights_reproduces_the_archive_matrices`).
+    pub fn quantize(&self, ck: &Checkpoint) -> Result<Vec<u8>, CactError> {
+        if ck.config != self.config {
+            return Err(CactError::Header("the checkpoint's configuration differs from the archive's".to_string()));
+        }
+        let mut out = CactBuilder::new(self.file.header(), self.file.codebooks());
+        for slot in &self.slots {
+            let e = &self.file.entries()[slot.entry];
+            let SlotKind::Tensor { name, layer, layout } = &slot.kind else {
+                out.push_as(e, self.file.entry_bytes(slot.entry)?);
+                continue;
+            };
+            let bad = |reason: String| CactError::Entry { index: slot.entry, reason };
+            let tensor = ck.tensors.get(name).ok_or_else(|| bad(format!("the checkpoint lacks `{name}`")))?;
+            let unit = self.unit_shape(name, *layer);
+            let canonical = match layer {
+                Some(l) => &tensor.data[l * unit.iter().product::<usize>()..][..unit.iter().product::<usize>()],
+                None => &tensor.data[..],
+            };
+            if canonical.len() != unit.iter().product::<usize>() {
+                return Err(bad(format!("`{name}` has {} values, expected {}", canonical.len(), unit.iter().product::<usize>())));
+            }
+            let stored = match layout {
+                Layout::Same => canonical.to_vec(),
+                Layout::Transpose => transpose(canonical, unit[1], unit[0]),
+                Layout::MhcPhi => canonical_to_mhc_phi(canonical, unit[0], unit[1], unit[2]),
+            };
+            match e.dtype {
+                EntryDtype::Fp16 => out.push_fp16(&e.shape, &stored),
+                EntryDtype::Fp32 => out.push_fp32(&e.shape, &stored),
+                EntryDtype::Cq => {
+                    let book = self.file.codebook(e.bits).ok_or_else(|| bad(format!("no codebook for {} bits", e.bits)))?;
+                    let cols: usize = e.shape[1..].iter().product();
+                    out.push_cq(&e.shape, &Cq::quantize(&stored, e.shape[0], cols, e.bits, book).map_err(|err| bad(err.to_string()))?);
+                }
+                EntryDtype::Raw => return Err(bad(format!("`{name}` is stored raw"))),
+            }
+        }
+        Ok(out.finish())
+    }
+
     /// Every CQ matrix of the file in its stored form, by canonical tensor name and decoder layer. The routing
     /// matrices (one entry for all layers, `[layers * out, width]`) are split into the per-layer `[out, width]`
     /// matrices the decoder reads; every other entry is `[out, in]` as stored.
@@ -500,6 +546,19 @@ fn mhc_phi_to_canonical(stored: &[f32], layers: usize, width: usize, lanes: usiz
         }
     }
     t
+}
+
+/// Canonical `[layers, width, lanes]` -> stored `[layers * lanes, width]`.
+fn canonical_to_mhc_phi(canonical: &[f32], layers: usize, width: usize, lanes: usize) -> Vec<f32> {
+    let mut s = vec![0f32; canonical.len()];
+    for l in 0..layers {
+        for j in 0..lanes {
+            for w in 0..width {
+                s[(l * lanes + j) * width + w] = canonical[(l * width + w) * lanes + j];
+            }
+        }
+    }
+    s
 }
 
 fn check_header(file: &CactFile, c: &MirageConfig) -> Result<(), CactError> {

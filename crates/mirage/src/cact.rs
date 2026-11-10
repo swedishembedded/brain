@@ -290,6 +290,11 @@ impl CactFile {
         &self.entries
     }
 
+    /// All shared codebooks, 2-bit then 3-bit then 4-bit, as the header stores them.
+    pub fn codebooks(&self) -> [f32; CODEBOOK_LEN] {
+        self.codebooks
+    }
+
     /// The shared codebook for `bits`-wide indices.
     pub fn codebook(&self, bits: u32) -> Option<&[f32]> {
         match bits {
@@ -332,6 +337,11 @@ impl CactFile {
         let packed_len = rows * padded_cols * e.bits as usize / 8;
         let blob = self.blob(e);
         Ok(CqMatrix { rows, cols, padded_cols, bits: e.bits, group: e.group, packed: &blob[..packed_len], norms: &blob[packed_len..], codebook })
+    }
+
+    /// The bytes of any entry's blob, as stored.
+    pub fn entry_bytes(&self, index: usize) -> Result<&[u8], CactError> {
+        Ok(self.blob(self.entry(index)?))
     }
 
     /// Any numeric entry as row-major `f32`; a CQ entry is decoded.
@@ -413,6 +423,97 @@ fn parse_entry(bytes: &[u8], index: usize, at: usize, directory_end: usize) -> R
         }
     }
     Ok(Entry { dtype, shape, offset, nbytes, group: if dtype == EntryDtype::Cq { group } else { 0 }, bits: if dtype == EntryDtype::Cq { bits } else { 0 } })
+}
+
+/// Alignment of every blob in a file.
+pub const BLOB_ALIGN: usize = 64;
+
+/// Writer of the container [`CactFile`] reads: the header, the shared codebooks, one 44-byte record per entry and the
+/// blobs, each starting on a [`BLOB_ALIGN`]-byte boundary, in the order they were pushed.
+pub struct CactBuilder {
+    header: CactHeader,
+    codebooks: [f32; CODEBOOK_LEN],
+    records: Vec<(Entry, Vec<u8>)>,
+}
+
+impl CactBuilder {
+    /// Start a file with `header` (its tensor count is set when the file is finished) and `codebooks`.
+    pub fn new(header: &CactHeader, codebooks: [f32; CODEBOOK_LEN]) -> CactBuilder {
+        CactBuilder { header: header.clone(), codebooks, records: Vec::new() }
+    }
+
+    fn push(&mut self, dtype: EntryDtype, shape: &[usize], bytes: Vec<u8>, group: usize, bits: u32) {
+        let entry = Entry { dtype, shape: shape.to_vec(), offset: 0, nbytes: bytes.len(), group, bits };
+        self.records.push((entry, bytes));
+    }
+
+    /// An fp16 entry from `values` (rounded to nearest even).
+    pub fn push_fp16(&mut self, shape: &[usize], values: &[f32]) {
+        self.push(EntryDtype::Fp16, shape, values.iter().flat_map(|&v| half::f16::from_f32(v).to_le_bytes()).collect(), 0, 0);
+    }
+
+    /// An fp32 entry from `values`.
+    pub fn push_fp32(&mut self, shape: &[usize], values: &[f32]) {
+        self.push(EntryDtype::Fp32, shape, values.iter().flat_map(|v| v.to_le_bytes()).collect(), 0, 0);
+    }
+
+    /// A raw blob (the tokenizer).
+    pub fn push_raw(&mut self, bytes: &[u8]) {
+        self.push(EntryDtype::Raw, &[], bytes.to_vec(), 0, 0);
+    }
+
+    /// A quantised matrix of logical `shape`.
+    pub fn push_cq(&mut self, shape: &[usize], cq: &model::cq::Cq) {
+        let mut bytes = cq.packed_bytes();
+        bytes.extend(cq.norm_bytes());
+        self.push(EntryDtype::Cq, shape, bytes, model::cq::GROUP, cq.bits);
+    }
+
+    /// An entry exactly as another file stores it.
+    pub fn push_as(&mut self, e: &Entry, bytes: &[u8]) {
+        self.push(e.dtype, &e.shape, bytes.to_vec(), e.group, e.bits);
+    }
+
+    /// The file's bytes.
+    pub fn finish(mut self) -> Vec<u8> {
+        let align = |n: usize| n.div_ceil(BLOB_ALIGN) * BLOB_ALIGN;
+        self.header.fields[1] = self.records.len() as u32;
+        let mut at = align(DIRECTORY_START + self.records.len() * RECORD_BYTES);
+        let mut end = at;
+        for (entry, bytes) in &mut self.records {
+            entry.offset = at;
+            end = at + bytes.len();
+            at = align(end);
+        }
+        // Blobs start aligned; the last one is not padded.
+        let mut out = vec![0u8; end];
+        for (i, f) in self.header.fields.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+        }
+        out[HEADER_U32S * 4..HEADER_BYTES].copy_from_slice(&self.header.rope_theta.to_le_bytes());
+        for (i, c) in self.codebooks.iter().enumerate() {
+            out[HEADER_BYTES + i * 4..][..4].copy_from_slice(&c.to_le_bytes());
+        }
+        for (i, (e, bytes)) in self.records.iter().enumerate() {
+            let r = &mut out[DIRECTORY_START + i * RECORD_BYTES..][..RECORD_BYTES];
+            r[0] = match e.dtype {
+                EntryDtype::Fp16 => 1,
+                EntryDtype::Fp32 => 2,
+                EntryDtype::Cq => 3,
+                EntryDtype::Raw => 4,
+            };
+            r[1] = e.shape.len() as u8;
+            for (d, &extent) in e.shape.iter().enumerate() {
+                r[4 + 4 * d..][..4].copy_from_slice(&(extent as u32).to_le_bytes());
+            }
+            r[20..28].copy_from_slice(&(e.offset as u64).to_le_bytes());
+            r[28..36].copy_from_slice(&(e.nbytes as u64).to_le_bytes());
+            r[36..40].copy_from_slice(&(e.group as u32).to_le_bytes());
+            r[40..44].copy_from_slice(&e.bits.to_le_bytes());
+            out[e.offset..e.offset + bytes.len()].copy_from_slice(bytes);
+        }
+        out
+    }
 }
 
 /// A borrowed view of one CQ matrix: logically `[rows, cols]` row-major,

@@ -219,8 +219,8 @@ impl Cq {
         out
     }
 
-    /// Quantise a row-major `[n, k]` matrix against `book` (ascending levels): rotate each group, take its rms as the
-    /// norm (rounded to fp16, as it is stored) and pick the nearest level for every lane.
+    /// Quantise a row-major `[n, k]` matrix against `book` (ascending levels of a unit-variance source): rotate each
+    /// group, store its L2 norm (rounded to fp16, as it is stored) and pick the nearest level for every lane.
     pub fn quantize(raw: &[f32], n: usize, k: usize, bits: u32, book: &[f32]) -> Result<Cq, CqError> {
         if raw.len() != n * k {
             return Err(CqError(format!("{} values for a {n}x{k} matrix", raw.len())));
@@ -242,8 +242,10 @@ impl Cq {
                 for v in &mut group {
                     *v *= scale();
                 }
-                let rms = (group.iter().map(|v| v * v).sum::<f32>() / GROUP as f32).sqrt();
-                let stored = f16_bits(rms);
+                // The stored norm is the group's L2 norm (the rotation preserves it) and the codebook holds levels on
+                // the unit sphere (about 1/sqrt(GROUP) per lane), so a lane's target is its share of the norm.
+                let l2 = group.iter().map(|v| v * v).sum::<f32>().sqrt();
+                let stored = f16_bits(l2);
                 norms[(r * groups + g) * 2..][..2].copy_from_slice(&stored.to_le_bytes());
                 let norm = f16_value(stored);
                 for &v in &group {
@@ -316,12 +318,13 @@ mod tests {
     use super::*;
     use data::rng::Lcg;
 
-    const BOOK2: [f32; 4] = [-1.5104, -0.4528, 0.4528, 1.5104];
+    /// The 2-bit Lloyd-Max levels of a unit Gaussian, scaled to the unit sphere of a 128-lane group.
+    const BOOK2: [f32; 4] = [-0.133_5, -0.040_02, 0.040_02, 0.133_5];
 
     fn book(bits: u32) -> Vec<f32> {
-        // Evenly spaced levels are enough to exercise every code path.
+        // Evenly spaced unit-sphere levels are enough to exercise every code path.
         let levels = 1usize << bits;
-        (0..levels).map(|i| (i as f32 - (levels as f32 - 1.0) / 2.0) * 0.8).collect()
+        (0..levels).map(|i| (i as f32 - (levels as f32 - 1.0) / 2.0) * 0.07).collect()
     }
 
     #[test]
@@ -334,6 +337,17 @@ mod tests {
             assert_eq!(again.dequantize(), cq.dequantize(), "{bits}-bit parts round trip");
             assert_eq!(cq.packed_bytes().len(), 5 * 256 * bits as usize / 8);
         }
+    }
+
+    #[test]
+    fn dequantising_approximates_the_source_matrix() {
+        // Gaussian weights against the 2-bit Lloyd-Max levels: the relative error is the quantiser's distortion
+        // (about 0.12 of the energy for 4 levels, so about 0.35 in norm), not a scale error.
+        let mut rng = Lcg::new(21);
+        let raw: Vec<f32> = (0..4 * 256).map(|_| (0..12).map(|_| rng.signed()).sum::<f32>() * 0.5).collect();
+        let cq = Cq::quantize(&raw, 4, 256, 2, &BOOK2).expect("quantises");
+        let (num, den) = cq.dequantize().iter().zip(&raw).fold((0f64, 0f64), |(n, d), (a, b)| (n + f64::from(a - b).powi(2), d + f64::from(*b).powi(2)));
+        assert!((num / den).sqrt() < 0.45, "relative error {}", (num / den).sqrt());
     }
 
     #[test]
