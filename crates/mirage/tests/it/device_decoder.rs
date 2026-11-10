@@ -148,6 +148,13 @@ fn decoder_step_floor_probe_cq() {
     step_floor(mirage::model::Precision::Cq);
 }
 
+/// [`decoder_step_floor_probe`] on the packed decoder with int8 activations.
+#[test]
+#[ignore = "profiling entry point: prints the step time and the per-kernel table"]
+fn decoder_step_floor_probe_cq_a8() {
+    step_floor(mirage::model::Precision::CqA8);
+}
+
 fn step_floor(precision: mirage::model::Precision) {
     let _g = gpu_core::testgpu::exclusive();
     let Some(dir) = released_dir() else { return };

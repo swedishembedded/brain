@@ -890,3 +890,81 @@ the logits product (8299 rows) on the skinny/tiled pair. The kernels.md killed-h
 Parity: full `make test/one P=brain-mirage T=it` on CUDA gpu1 after each change (190 passed, greedy tokens equal to the
 goldens, cosine floors unchanged); CPU backend `device_decoder`, `device::` and `device_model` modules pass (the
 `device` filter as one run aborted without a summary, twice: not investigated, each module passes alone).
+
+### Item 6 continued: launch count of the decoder step (L8d, 2026-11-11)
+
+Conditions: gpu1 of the shared node, held at 99-100 % utilisation and 88 GB by the neighbour for the whole lane (no idle window
+came back: `nvidia-smi` read 100 % at every check), so no wall-clock confirmation exists and the comparable measure is
+`Gpu::profile_tape` (sum of per-dispatch minima over 20 replays; the wall `STEP` lines of the probes move by +-1.5 ms with the
+neighbour's load and are not used). Before = the tree at 4a5831167 re-measured in the same load.
+
+Changes (each its own verified commit; parity ladder after each: `make test/one P=brain-mirage T=it` filters `device_decoder::`,
+`device_model::`, `device::` on CUDA gpu1 and on the CPU backend, which includes the released-weight greedy tokens equal to the
+goldens, batch == image-by-image, forms, packed-vs-FP32 agreement; cosine floors untouched):
+
+| commit | change | dispatches/step FP32 (CQ) |
+|---|---|---|
+| (4a5831167) | before | 348 (401) |
+| eaea56978 | `mirage_rms_axpy`: post-norm of the self/cross branch and its gated residual add in one dispatch | 332 (385) |
+| 9da512fb5 | `mirage_kron_hada`: first Kronecker rotation of the structured Hadamard MLP with its conditioning/SiLU stage (kron keeps its memory saving; its input scale, permutation and output scale share one `aux` binding to stay inside the 8-storage-buffer budget) | 324 (377) |
+| 9b7acd06f | `mirage_attn_decode` + `mirage_attn_merge`: single-query attention (scores, softmax, weighted sum) as one kernel per (row, 32-key slice) and a split merge, replacing three kernels; planner `DecodePlan` (nq 1, vd <= 64, up to 64 slices, about 256 workgroups in flight) with the three-kernel path kept for everything else and as the test oracle | 308 (361) |
+| 47a5cfe40 | `mirage_rms_rope` (head norm + rotary position, q and k) and `mirage_rms_axpy_norm` (branch residual update + the next sublayer's norm; the updated row's sum of squares is expanded over the first pass's partials so one barrier suffices) | 276 (329) |
+
+Slice length of the attention kernel, measured on the step (profile ms of the 16 attention launches, FP32, batch 1 / 8 / 32 / 64):
+three kernels 0.48 / 0.55 / 0.80 / 1.17; 128-key slices 0.47 / 0.80 / 1.07 / 1.31 (the weighted-sum walk of a slice is a serial
+chain); 32-key slices (kept) 0.40 / 0.49 / 0.67 / 0.94; 16-key slices 0.38 / 0.46 / 0.71 / ~1.0 (merge folds more partials, worse at batch >= 32).
+
+Profile minima, whole step, sum of per-dispatch minima in ms (dispatches in brackets; before -> after):
+
+| precision | batch 1 | batch 8 | batch 32 | batch 64 |
+|---|---|---|---|---|
+| FP32 | 2.70 -> 2.37 (348 -> 276) | 3.23 -> 2.91 | 3.59 -> 3.25 | 3.97 -> 3.56 |
+| CQ | 3.02 -> 2.39..2.76 (401 -> 329) | 4.60 -> 4.34 | 4.79 -> 4.49 (446 -> 374) | 5.16 -> 4.76 |
+| CQ-A8 | not measured before (probe added in this lane) -> 2.38 (329) | 4.49 | 5.06 | 8.39 (the int8 products have no dense form, batch 64 stays on the cooperative kernel) |
+
+Batch-1 FP32 per-kernel minima after (ms per step, count): `matmul_gemv_reg` 0.446 (61), `mirage_attn_decode` 0.267 (16),
+`rmsnorm_rows` 0.239 (25, was 73), `mirage_kron_rows` 0.230 (16), `mirage_rms_axpy_norm` 0.201 (16), `mirage_taps` 0.150 (26),
+`mirage_kron_hada` 0.150 (8), `mirage_attn_merge` 0.134 (16), `mirage_mhc_maps` 0.132 (8), `mirage_rms_rope` 0.095 (16).
+Batch 64: skinny GEMM 0.92 (60), attention 0.82 + 0.14, rmsnorm 0.27 (25), kron 0.22, rms_axpy_norm 0.19, taps 0.16.
+
+Logits product (8299 x 512, 64 rows): the selector's answer is already the better of the two candidates. ncu (`--clock-control base`):
+`matmul_f32_tiled` 62.9 us (130 blocks) against `matmul_f32_skinny` forced onto it 121.2 us (2076 blocks of the 32 x 8 tile, the
+weight is read twice from L2); no selector change. It is 1.7 % of the batch-64 step; a faster candidate would be a new
+tensor-core kernel, which is a precision change (opt-in by the precision rule) and is not worth it at this share.
+
+Targets: batch-1 step < 2 ms and batch-64 describe > 30 images/s are NOT demonstrated by wall clock (loaded card). Evidence by profile:
+FP32 batch-1 profile 2.70 -> 2.37 ms (the idle wall step was 0.64 x its profile at baseline: 1.77 / 2.77, so about 1.5 ms expected);
+batch-64 profile 3.97 -> 3.56 ms (idle wall step 5.89 at profile 6.87 before the 4a5831167 changes, about 3.0 ms expected after those
+and this lane, i.e. an estimated 45 images/s, not a measurement). The single remaining step: on an idle card run
+`decoder_step_floor_probe{,_cq,_cq_a8}` (`STEP` lines) and `describe_throughput_packed_against_fp32`.
+
+Left on the launch chain (candidates, in order of share at batch 1): `mirage_taps` x3 per layer (0.15 ms, a multi-width variant needs
+9 bindings or a packed parameter buffer), `mirage_kron_rows` x2 per layer (0.23 ms; the second rotation could take the first's output through
+workgroup memory only with a second barrier, which the CPU interpreter lacks), the remaining 25 `rmsnorm_rows` (lane norm before the mHC
+projection, the block norm after the engram gate, the cross-query norm), `mirage_mhc_maps` (0.13 ms, one row of 20 Sinkhorn iterations),
+`mirage_sigmoid_mul` into the projection's prologue (needs a shared-GEMM prologue hook).
+
+### Test faults found in the L8d lane
+
+1. A single CPU-backend run of the mirage `it` binary with the broad filter `device` aborted without a summary (twice before, once more
+   reproduced here: `it device --nocapture --test-threads=8`, exit status 101, no signal). Root cause: `gpu_core::testgpu::exclusive()`
+   aborts the process (`hard_exit(101)`) when the CURRENT holder of the device lock has held it for 600 s, as a wedge-in-the-driver
+   detector. On the CPU backend there is no driver, and a real-model test through the WGSL interpreter legitimately holds the lock for
+   minutes, longer with 8 test threads competing for the cores (and the other session's load). With `--nocapture` the line is visible:
+   `FATAL: test device::global_response_norm_matches_the_host_block_tail is waiting for the device lock; the test holding it has held it
+   600s (limit 600s) and is wedged in the GPU driver`; without it libtest captures the message and `_exit` loses it. Fix (474467d4f): the
+   hold limit applies to driver backends only (`hold_limit(backend)`; the CPU backend has none), with a unit gate.
+2. `brain-gpu-core` `cuda_uninit_storage` (x2) and `cuda_placement_tier` under `BRAIN_DEVICE=cpu`: not caused by the skinny/selector
+   change. `cuda_placement_tier::a_refused_managed_allocation_spills_only_when_the_tier_is_opted_in` re-runs its own binary with
+   `--exact managed_over_the_vram_ceiling`, but since aa78ba72e ("one integration test binary per crate", an ancestor of 2c76d3843) the
+   test is `cuda_placement_tier::managed_over_the_vram_ceiling`, so the child runs 0 tests and prints no `SKIPPED=`. The same child-process
+   pattern fails the same way in `gemv_reg_upgrade`, `gemv_reg_upgrade_step_buf`, `memory_limit` (x3) and `auto_placement` of that crate (7 failures in a
+   full `BRAIN_DEVICE=cpu make test/one P=brain-gpu-core T=it`); recorded, not fixed here (a mechanical module-path fix across the helper tests of several
+   crates, unrelated to Mirage). The two `cuda_uninit_storage` tests pass alone and in the full gpu-core binary on the CPU backend in this lane
+   (they share process-wide clear counters; a failure there needs another test touching the counters at the same time).
+3. `brain-gpu-core` `cuda_provider_matmul` `the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with_it`
+   (`make test/one P=brain-gpu-core T=cuda_provider_matmul ARGS="the_tuned_cuda_matmul_is_faster --nocapture --device gpu1 --backend cuda"`,
+   gpu1 at 100 % utilisation and 88 GB used by the neighbour): FAILS on speed, passes on agreement: 512x512x512 f32, 8 dispatches, device
+   time generated 17.3 ms, tuned 16.8 ms (speedup 1.03x against the 8x floor), maxabs 0. 2.1 ms per 512^3 product (about 30 us idle) means both tiers
+   were time-sliced against the neighbour's kernels, so the ratio carries no information; the shape (512 rows) is outside the skinny range, so
+   the skinny change does not touch it (kernel chosen: `matmul_f32_tiled`). Rerun on an idle card.
