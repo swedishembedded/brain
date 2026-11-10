@@ -14,6 +14,7 @@ mod describe;
 mod device;
 mod device_model;
 mod device_cact;
+mod device_cact_accept;
 mod device_decoder;
 mod device_reader;
 mod device_train;

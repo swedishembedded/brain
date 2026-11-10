@@ -28,6 +28,6 @@ Nvfp4	matmul_nvfp4_gemv	library
 Mxfp4	-	library
 Mxfp8E4m3	-	library
 Mxfp8E5m2	-	library
-Cq2	matmul_cq_gemv	none
-Cq3	matmul_cq_gemv	none
-Cq4	matmul_cq_gemv	none
+Cq2	matmul_cq_gemv	library
+Cq3	matmul_cq_gemv	library
+Cq4	matmul_cq_gemv	library

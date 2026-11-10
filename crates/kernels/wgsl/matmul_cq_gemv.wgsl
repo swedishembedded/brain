@@ -4,8 +4,8 @@
 // clients. If your team needs expertise in rotated-codebook weight formats then you can procure our services by
 // sending an email to info@swedishembedded.com.
 
-// @what  Decode-regime GEMV of a CQ2/CQ3/CQ4 weight read in place against up to MAXM rotated f32 activation rows
-// @how   one 64-thread workgroup per weight row, threads stream 32-lane units of the packed row, codebook in shared memory, one barrier then an ordered fold
+// @what  Decode-regime product of a CQ2/CQ3/CQ4 weight read in place against rotated f32 activation rows, MAXM rows per workgroup
+// @how   one 64-thread workgroup per (four weight rows, block of MAXM activation rows), 16 threads per row stream its 32-lane units, codebook in shared memory, one barrier then an ordered fold
 // @opt   4
 // @cpu   no
 // @gpu   yes
@@ -14,9 +14,13 @@
 // @dtype f32
 //
 // The bandwidth-bound sibling of `matmul_cq_gemm`: the packed row (`kpad * BITS / 8` bytes) is read once, coalesced
-// (consecutive threads take consecutive `BITS`-word units), and applied to every activation row. A unit is 32 lanes
-// = `BITS` words, four per 128-lane group, so a unit's norm is its group's. Same operands and layout as
-// `matmul_cq_gemm`; BITS and MAXM (1, 2, 4, 8) are template constants.
+// (16 consecutive threads take consecutive `BITS`-word units of one row), and applied to every activation row. A
+// unit is 32 lanes = `BITS` words, four per 128-lane group, so a unit's norm is its group's. Sixteen threads per row
+// keep a 512-wide row (16 units) on one thread each, and a workgroup serves four rows. Same operands and layout as
+// `matmul_cq_gemm`; BITS and MAXM (1, 2, 4, 8) are template constants. More than MAXM rows run as several
+// workgroups per row group (workgroup `i` is row group `i % ceil(n / 4)`, row block `i / ceil(n / 4)`): the packed
+// rows are re-read once per block from cache, which is cheap while the weight is small against the activations'
+// arithmetic.
 //
 //   params : m, kpad, n, 0
 //   xr     : [m, kpad] f32   (rotated by cq_rotate)
@@ -38,7 +42,8 @@ struct Params {
 
 const BITS: u32 = 2u;
 const MAXM: u32 = 8u;
-const THREADS: u32 = 64u;
+const LANES: u32 = 16u;
+const COLS: u32 = 4u;
 
 var<workgroup> levels: array<f32, 16>;
 var<workgroup> partial: array<f32, 64u * MAXM>;
@@ -60,15 +65,19 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     let t = li.x;
     if (t < (1u << BITS)) { levels[t] = book[t]; }
     workgroupBarrier();
-    let col = wg.y * nwg.x + wg.x;
-    let live = col < p.n;
+    let lin = wg.y * nwg.x + wg.x;
+    let tiles = (p.n + COLS - 1u) / COLS;
+    let col = (lin % tiles) * COLS + t / LANES;
+    let lane = t % LANES;
+    let r0 = (lin / tiles) * MAXM;
+    let live = col < p.n && r0 < p.m;
     let groups = p.kpad / 128u;
     let units = p.kpad / 32u;
     let row_words = p.kpad * BITS / 32u;
     var acc: array<f32, MAXM>;
     for (var r = 0u; r < MAXM; r = r + 1u) { acc[r] = 0.0; }
     if (live) {
-        for (var u = t; u < units; u = u + THREADS) {
+        for (var u = lane; u < units; u = u + LANES) {
             let flat = col * groups + u / 4u;
             let norm = f16_to_f32((s[flat >> 1u] >> ((flat & 1u) * 16u)) & 0xFFFFu);
             let uw = col * row_words + u * BITS;
@@ -82,7 +91,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
                 if (sh + BITS > 32u) { v = v | (w[uw + word + 1u] << (32u - sh)); }
                 let level = levels[v & ((1u << BITS) - 1u)];
                 for (var r = 0u; r < MAXM; r = r + 1u) {
-                    if (r < p.m) { part[r] = part[r] + level * xr[r * p.kpad + u * 32u + j]; }
+                    if (r0 + r < p.m) { part[r] = part[r] + level * xr[(r0 + r) * p.kpad + u * 32u + j]; }
                 }
             }
             for (var r = 0u; r < MAXM; r = r + 1u) { acc[r] = acc[r] + norm * part[r]; }
@@ -90,9 +99,14 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     }
     for (var r = 0u; r < MAXM; r = r + 1u) { partial[t * MAXM + r] = acc[r]; }
     workgroupBarrier();
-    if (t < p.m && live) {
-        var sum = 0.0;
-        for (var i = 0u; i < THREADS; i = i + 1u) { sum = sum + partial[i * MAXM + t]; }
-        y[t * p.n + col] = sum;
+    if (lane == 0u && live) {
+        let base = (t / LANES) * LANES;
+        for (var r = 0u; r < MAXM; r = r + 1u) {
+            if (r0 + r < p.m) {
+                var sum = 0.0;
+                for (var i = 0u; i < LANES; i = i + 1u) { sum = sum + partial[(base + i) * MAXM + r]; }
+                y[(r0 + r) * p.n + col] = sum;
+            }
+        }
     }
 }

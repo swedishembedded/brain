@@ -320,6 +320,9 @@ pub fn gemv_variants() -> Vec<Variant> {
     out
 }
 
+/// Weight rows one workgroup of `matmul_cq_gemv` serves.
+pub const CQ_GEMV_COLS: u32 = 4;
+
 /// Row blocking of `matmul_cq_gemm`: activation rows one thread applies each unpacked code to.
 pub const CQ_GEMM_ROWS: u32 = 8;
 
@@ -334,7 +337,13 @@ pub fn cq_gemm_kernel_name(bits: u32) -> String {
     variant_name("matmul_cq_gemm", &[("BITS", bits), ("MAXM", CQ_GEMM_ROWS)])
 }
 
-/// Every CQ product kernel: the GEMV at each row capacity and the batched kernel, for 2-, 3- and 4-bit indices.
+/// The registered name of the rotated-domain dequantiser at `bits`-wide indices.
+pub fn cq_dequant_kernel_name(bits: u32) -> String {
+    variant_name("cq_dequant_rotated", &[("BITS", bits)])
+}
+
+/// Every CQ product kernel: the GEMV at each row capacity, the row-blocked kernel and the rotated-domain
+/// dequantiser, for 2-, 3- and 4-bit indices.
 pub fn cq_variants() -> Vec<Variant> {
     let mut out = Vec::new();
     for bits in [2, 3, 4] {
@@ -342,6 +351,7 @@ pub fn cq_variants() -> Vec<Variant> {
             out.push(interned("matmul_cq_gemv", crate::MATMUL_CQ_GEMV, &[("BITS", bits), ("MAXM", cap)]).expect("the CQ GEMV declares BITS and MAXM"));
         }
         out.push(interned("matmul_cq_gemm", crate::MATMUL_CQ_GEMM, &[("BITS", bits), ("MAXM", CQ_GEMM_ROWS)]).expect("the CQ product declares BITS and MAXM"));
+        out.push(interned("cq_dequant_rotated", crate::CQ_DEQUANT_ROTATED, &[("BITS", bits)]).expect("the CQ dequantiser declares BITS"));
     }
     out
 }

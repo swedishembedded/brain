@@ -470,6 +470,52 @@ Not done in this lane:
   that the machinery learns, not what a full recipe would reach. The OCR set had boxes overhanging the image (a
   generator defect); the generator is fixed and the strict reader is the only reader.
 
+## L5: native low-bit execution of the deployment archive
+
+Generic tier `Dtype::Cq2/Cq3/Cq4` (`Weight::Cq`, host codec `model::cq`): groups of 128 input lanes, a Lloyd-Max codebook, one
+fp16 norm per group, the group rotated by the natural-order orthonormal Walsh matrix, so `y = sum_g norm_g * (codebook[idx_g] . (H x_g))`.
+The `.cact` bytes upload unchanged (index words, norms two to a word, codebook levels as f32). Kernels in the shared catalogue:
+`cq_rotate` (barrier-free, one thread per group) and `cq_rotate_wg` (a workgroup per group), `matmul_cq_gemv` (16 lanes per weight row,
+four rows per workgroup, up to eight activation rows per workgroup, more rows as more workgroups), `matmul_cq_gemm` (barrier-free, one
+thread per weight row and block of eight activation rows; the CPU backend and the fallback), `cq_dequant_rotated` (the weight in the
+rotated domain as dense f32, for the dense GEMM at many rows), and a `weight_decode` arm per width (the dequantiser of tests,
+training and `read_host`: 128 terms per element, not an inference path). Selection is the shared selector (`select::candidates`,
+`Op::MatMul`, Cq dtypes): the cooperative product up to 96 rows where the device has workgroup barriers, rotated dequantisation plus
+the dense GEMM above (crossover measured by `cq_tier::cq_crossover`, `--ignored`), the barrier-free kernel everywhere else. The native
+autotuner (`native_tune`) is not wired to this tier: the choice is the selector's rule, not a timed probe. Coverage gate
+(`tier-gemm.map`): GEMV `matmul_cq_gemv`, batched path `library` (scratch tile plus vendor GEMM), `fused` listed as a gap.
+
+Kernel parity against the dequantised f32 matmul, worst error as a fraction of the root of the summed squared terms: 3e-7 to 9e-7
+(cooperative and barrier-free kernels, every width, 1 to 33 rows, k = 200 and 256) and 1.2e-6 (dense-GEMM path, 100 rows), CUDA gpu1;
+the CPU backend holds the 2e-5 bound (`model/tests/it/cq_tier.rs`; the tile decode equals the host dequantiser to 1e-5).
+
+Mirage on the archive: `WeightSource::Cact` (`Mirage::open_with`, `MirageSession::load_with`, `mirage::model::load_dir`) keeps every
+CQ matrix a `Linear` reads packed on the device (`Linear::cq`, `Checkpoint::packed`); the default stays FP32 safetensors when it exists,
+the archive is the default only when it is all the directory holds, and an adapter refuses the archive. Resident matrix weights of the
+released model: 8.75 MB packed (projections, routing matrices, tied embedding as the logits matrix) next to 132.5 MB dense, against
+229.7 MB dense for the same model dequantised. The dense remainder is: the folded HConvGLU matrices (88 MB), the Hadamard-MLP
+rotations and `cond_rot` (about 50 MB), the embedding as a gather table (17 MB) and the convolution kernels the archive stores as CQ
+(the file holds 13.76 MB of CQ matrices: 8.75 MB are `Linear`s kept packed, the other 5.0 MB are convolutions expanded to dense). Open: a CQ row gather for the
+embedding lookup, the convolution kernels on CQ, and the HConvGLU/Hadamard folds kept as bands instead of dense `n^2` matrices.
+
+Agreement with the reference engine on the recorded corpus (9 describe cases, 42 boxes; CUDA gpu1; the engine rounds activations to
+int8, brain keeps them f32, so exact tokens are not expected): packed CQ model 40 of 42 boxes exact, 42 of 42 at IoU 0.5, 39 of 42
+identical name/position/description lines, 4 of 9 documents identical apart from masks and scores. The FP32 model on the same cases:
+0 exact, 29 of 42 at IoU 0.5, 8 identical lines (`device_cact_accept::the_packed_model_agrees_with_the_reference_engine`). The A8 emulation of
+the engine's activation rounding is not implemented.
+
+Quality of the archive against FP32 (the 2-bit quantisation itself, teacher forced on the cats and text goldens, host path):
+top-1 agreement of the decoder logits 216/237 and 148/169 positions, mean KL(FP32 || CQ) 0.107 and 0.162 nats, next-token accuracy
+215/237 and 147/169 for CQ against 236/237 and 168/169 for FP32. Proposals: of the FP32 model's boxes the packed model has 3 of 4
+(cats) and 7 of 7 (text) at IoU 0.5 and no exact one (`quality_against_fp32_on_the_goldens`, `proposals_of_the_packed_model_cover_the_fp32_proposals`).
+
+Throughput of `describe_batch`, cats 640x480, best of three, CUDA gpu1 shared with another session's jobs: FP32 0.89 / 5.5 / 15.0 images/s
+at batch 1 / 8 / 64; packed CQ 1.08 / 4.35 / 16.0. Before the cooperative rotation kernel the packed model ran 0.36 / 2.3 / 5.8:
+one thread per activation group left the device idle through a serial 7 x 64 butterfly in every decode-step linear
+(`describe_throughput_packed_against_fp32`). ncu of `matmul_cq_gemv` (CQ2, 2048 x 512, one row): 8.5 us, DRAM 1.3 % of peak, grid
+0.12 waves: the 262 KB weight is L2 resident and the kernel is launch- and latency-bound, so the roofline at Mirage's sizes is the
+launch floor, not memory; a bandwidth-bound shape needs a taller weight than any Mirage projection.
+
 ## Facts the foundation established
 
 - The released `.cact` has 806 entries: 159 two-bit and 4 four-bit CQ matrices
@@ -499,5 +545,5 @@ Not done in this lane:
 | OCR | the reader and greedy collapse | open |
 | Training | full / head / LoRA, multi-task, gradient checks | host trainer done (L3); device backward open |
 | Serving | capability, CLI, SDK, HTTP, D-Bus, batching | done (L4) |
-| Quantised kernels | native low-bit CQ matmul from the packed weights | open |
+| Quantised kernels | native low-bit CQ matmul from the packed weights | done (L5), see above; A8 and `quantize` open |
 | Performance | profile-driven batched throughput | open |

@@ -39,9 +39,14 @@ fn host_product(x: &[f32], m: usize, k: usize, w: &[f32], n: usize) -> Vec<(f64,
 }
 
 fn assert_close(label: &str, got: &[f32], want: &[(f64, f64)]) {
+    assert_within(label, got, want, 2e-5);
+}
+
+fn assert_within(label: &str, got: &[f32], want: &[(f64, f64)], bound: f64) {
     let worst = got.iter().zip(want).map(|(&g, &(w, scale))| (f64::from(g) - w).abs() / (1e-6 + scale)).fold(0f64, f64::max);
     // f32 summation of up to a few hundred terms: the error is a small multiple of the unit roundoff of the term scale.
-    assert!(worst < 2e-5, "{label}: worst error {worst:e} of the term scale");
+    eprintln!("{label}: worst error {worst:e} of the term scale");
+    assert!(worst < bound, "{label}: worst error {worst:e} of the term scale (bound {bound:e})");
 }
 
 #[test]
@@ -57,7 +62,7 @@ fn products_equal_the_dequantised_matmul_for_every_width_and_row_count() {
         let weight = Weight::cq(&ops, "cq", &cq);
         assert!(!weight.is_dense_f32() && weight.reads_f32_activations());
         assert_eq!(weight.resident_bytes() as usize, cq.bytes(), "{bits}-bit resident bytes");
-        for m in [1usize, 2, 7, 8, 9, 33] {
+        for m in [1usize, 2, 7, 8, 9, 33, 100] {
             let x = rng.vec_scaled(m * k, 1.0);
             let xb = g.storage_init("x", &x);
             let y = g.storage((m * n) as u64);
@@ -65,6 +70,7 @@ fn products_equal_the_dequantised_matmul_for_every_width_and_row_count() {
             let act = ops.act_f32(&xb, 0, m as u32, k as u32);
             ops.matmul(&mut steps, &weight, &act, &y, 0);
             g.submit(&[], &steps);
+            // m = 100 is the dense-GEMM-over-the-rotated-weight path on a device with barriers; it holds the same bound.
             assert_close(&format!("cq{bits} m={m} Ops::matmul"), &g.read(&y, m * n), &host_product(&x, m, k, &wd, n));
         }
     }
@@ -103,14 +109,14 @@ fn each_product_kernel_agrees_with_the_host_on_its_own() {
         let wd = cq.dequantize();
         let weight = Weight::cq(&ops, "cq", &cq);
         let Weight::Cq { w, s, book: levels, .. } = &weight else { unreachable!() };
-        for m in [1usize, 3, 8] {
+        for m in [1usize, 3, 8, 9, 33] {
             let x = rng.vec_scaled(m * k, 1.0);
             let xr = g.storage_init("xr", &Cq::rotate(&x, m, k));
             let want = host_product(&x, m, k, &wd, n);
             let params = [m as u32, padded(k) as u32, n as u32, 0];
             let mut variants = vec![(kernels::template::cq_gemm_kernel_name(bits), Dispatch::Threads(n as u32 * (m as u32).div_ceil(kernels::template::CQ_GEMM_ROWS)))];
             if barriers {
-                variants.push((kernels::template::cq_gemv_kernel_name(bits, m as u32), Dispatch::Workgroups(n as u32)));
+                variants.push((kernels::template::cq_gemv_kernel_name(bits, m as u32), Dispatch::Workgroups((n as u32).div_ceil(kernels::template::CQ_GEMV_COLS) * (m as u32).div_ceil(8))));
             }
             for (name, grid) in variants {
                 let y = g.storage((m * n) as u64);
@@ -124,17 +130,64 @@ fn each_product_kernel_agrees_with_the_host_on_its_own() {
 }
 
 #[test]
-fn rotation_kernel_matches_the_host_transform() {
+fn rotation_kernels_match_the_host_transform() {
     let ops = ops();
     let g = ops.gpu();
     let (m, k) = (5usize, 200usize);
     let x = Lcg::new(77).vec_scaled(m * k, 1.0);
     let xb = g.storage_init("x", &x);
-    let out = g.storage((m * padded(k)) as u64);
-    let index = g.kernel_index("cq_rotate").expect("registered");
-    g.submit(&[], &[g.step(index, &[&xb, &out], &[m as u32, k as u32, padded(k) as u32, 0], (m * padded(k) / GROUP) as u32)]);
-    let got = g.read(&out, m * padded(k));
     let want = Cq::rotate(&x, m, k);
-    let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
-    assert!(worst < 1e-5, "rotation differs by {worst:e}");
+    let params = [m as u32, k as u32, padded(k) as u32, 0];
+    let groups = (m * padded(k) / GROUP) as u32;
+    let mut variants = vec![("cq_rotate", Dispatch::Threads(groups))];
+    if g.caps().workgroup_reductions {
+        variants.push(("cq_rotate_wg", Dispatch::Workgroups(groups)));
+    }
+    for (name, grid) in variants {
+        let out = g.storage((m * padded(k)) as u64);
+        g.submit(&[], &[g.dispatch(g.kernel_index(name).expect("registered"), &[&xb, &out], &params, grid)]);
+        let worst = g.read(&out, m * padded(k)).iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst < 1e-5, "{name} differs from the host rotation by {worst:e}");
+    }
+}
+
+/// Crossover between the cooperative product and the row-blocked one over the row count, on the shapes of Mirage's
+/// decoder projections. Run by hand on an accelerator: `cargo test ... -- --ignored cq_crossover`.
+#[test]
+#[ignore = "benchmark: run by hand on a GPU"]
+fn cq_crossover() {
+    let ops = ops();
+    let g = ops.gpu();
+    if !g.caps().workgroup_reductions {
+        brain_testutil::skip_unavailable("cq crossover: needs workgroup barriers (a GPU)");
+        return;
+    }
+    let (n, k, bits) = (2048usize, 512usize, 2u32);
+    let mut rng = Lcg::new(31);
+    let cq = Cq::quantize(&rng.vec_scaled(n * k, 1.0), n, k, bits, book(bits)).expect("quantises");
+    let weight = Weight::cq(&ops, "cq", &cq);
+    let Weight::Cq { w, s, book: levels, .. } = &weight else { unreachable!() };
+    eprintln!("m | cooperative us | row-blocked us   (n={n} k={k} cq{bits}, kernel time per product over 50 replays)");
+    for m in [1usize, 4, 8, 16, 32, 64, 128, 256, 512] {
+        let xr = g.storage_init("xr", &Cq::rotate(&Lcg::new(3).vec_scaled(m * k, 1.0), m, k));
+        let y = g.storage((m * n) as u64);
+        let params = [m as u32, k as u32, n as u32, 0];
+        let time = |name: String, grid: Dispatch| -> f64 {
+            let index = g.kernel_index(&name).expect("registered");
+            let steps: Vec<_> = (0..50).map(|_| g.dispatch(index, &[&xr, w, s, levels, &y], &params, grid)).collect();
+            g.submit(&[], &steps);
+            let _ = g.read(&y, 1);
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                g.submit(&[], &steps);
+                let _ = g.read(&y, 1);
+                best = best.min(t.elapsed().as_secs_f64() / 50.0);
+            }
+            best * 1e6
+        };
+        let coop = time(kernels::template::cq_gemv_kernel_name(bits, m as u32), Dispatch::Workgroups((n as u32).div_ceil(kernels::template::CQ_GEMV_COLS) * (m as u32).div_ceil(8)));
+        let blocked = time(kernels::template::cq_gemm_kernel_name(bits), Dispatch::Threads(n as u32 * (m as u32).div_ceil(kernels::template::CQ_GEMM_ROWS)));
+        eprintln!("{m:4} | {coop:10.1} | {blocked:10.1}");
+    }
 }

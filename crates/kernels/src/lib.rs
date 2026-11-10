@@ -394,8 +394,12 @@ pub const CONVTR2D_DX: &str = include_str!("../wgsl/convtr2d_dx.wgsl");
 pub const COPY_COLS: &str = include_str!("../wgsl/copy_cols.wgsl");
 /// `wgsl/copy_within.wgsl`
 pub const COPY_WITHIN: &str = include_str!("../wgsl/copy_within.wgsl");
+/// `wgsl/cq_dequant_rotated.wgsl`
+pub const CQ_DEQUANT_ROTATED: &str = include_str!("../wgsl/cq_dequant_rotated.wgsl");
 /// `wgsl/cq_rotate.wgsl`
 pub const CQ_ROTATE: &str = include_str!("../wgsl/cq_rotate.wgsl");
+/// `wgsl/cq_rotate_wg.wgsl`
+pub const CQ_ROTATE_WG: &str = include_str!("../wgsl/cq_rotate_wg.wgsl");
 /// `wgsl/crop2d.wgsl`
 pub const CROP2D: &str = include_str!("../wgsl/crop2d.wgsl");
 /// `wgsl/ct_state_scan.wgsl`
@@ -1797,7 +1801,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("convtr2d_dx", CONVTR2D_DX),
     ("copy_cols", COPY_COLS),
     ("copy_within", COPY_WITHIN),
+    ("cq_dequant_rotated", CQ_DEQUANT_ROTATED),
     ("cq_rotate", CQ_ROTATE),
+    ("cq_rotate_wg", CQ_ROTATE_WG),
     ("crop2d", CROP2D),
     ("ct_state_scan", CT_STATE_SCAN),
     ("ct_state_scan_bwd", CT_STATE_SCAN_BWD),

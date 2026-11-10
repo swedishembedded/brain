@@ -536,7 +536,7 @@ pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
 pub fn cq_kernels() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
-        let mut list = vec![("cq_rotate", kernels::CQ_ROTATE)];
+        let mut list = vec![("cq_rotate", kernels::CQ_ROTATE), ("cq_rotate_wg", kernels::CQ_ROTATE_WG)];
         list.extend(kernels::template::cq_variants());
         list
     })

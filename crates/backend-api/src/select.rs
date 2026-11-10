@@ -823,8 +823,8 @@ fn no_coop_gradnorm() -> bool {
     NO_COOP_GRADNORM.load(Ordering::Relaxed)
 }
 
-/// Activation rows up to which the cooperative CQ GEMV is offered first (`kernels::template::GEMV_ROW_CAPACITIES`' largest).
-pub const CQ_GEMV_MAX_ROWS: u32 = 8;
+/// Activation rows up to which the cooperative CQ product (several row blocks of eight per weight row) is offered first.
+pub const CQ_GEMV_MAX_ROWS: u32 = 96;
 
 /// Every variant that can EXECUTE for `(op, shape)` on this device, with the
 /// static best guess FIRST. Never empty: `Reference` is always executable.
@@ -913,9 +913,14 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             // Rotated-codebook weights (`model::cq`): the activation rows are rotated once per group and read
             // as f32, so the regime split is only the cooperative GEMV (few rows, barriers) against the
             // barrier-free row-blocked kernel that serves every other shape and every backend.
+            // `WorkgroupPerOutput` is the cooperative product (decode and few-row batches), `RegisterTiled` the
+            // rotated-domain dequantisation followed by the dense GEMM (many rows; crossover measured in
+            // `model/tests/it/cq_tier.rs`), `Reference` the barrier-free row-blocked kernel of every backend.
             Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 => {
                 if shape.m <= CQ_GEMV_MAX_ROWS && caps.workgroup_reductions {
                     vec![WorkgroupPerOutput, Reference]
+                } else if caps.workgroup_reductions && shape.n >= GEMM_TILE_MIN_COLS {
+                    vec![RegisterTiled, WorkgroupPerOutput, Reference]
                 } else {
                     vec![Reference]
                 }

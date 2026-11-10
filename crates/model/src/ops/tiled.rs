@@ -287,13 +287,28 @@ impl Ops {
             })
         };
         let rotated = self.scratch(Scratch::Rotated, m as u64 * kpad as u64);
-        s.push(self.gpu.step(kernel("cq_rotate"), &[&act.x, &rotated], &[m, *k, kpad, act.xr0], m * (kpad / crate::cq::GROUP as u32)));
+        let groups = m * (kpad / crate::cq::GROUP as u32);
+        if self.caps.workgroup_reductions {
+            // One workgroup per group: a few activation rows would otherwise leave the device on a handful of threads.
+            s.push(self.gpu.dispatch(kernel("cq_rotate_wg"), &[&act.x, &rotated], &[m, *k, kpad, act.xr0], gpu_core::Dispatch::Workgroups(groups)));
+        } else {
+            s.push(self.gpu.step(kernel("cq_rotate"), &[&act.x, &rotated], &[m, *k, kpad, act.xr0], groups));
+        }
         let shape = OpShape { m, n: *n, k: kpad, dtype: w.dtype() };
         let params = [m, kpad, *n, 0];
         let out = (yoff, m as u64 * *n as u64);
         let first = select::candidates(Op::MatMul, shape, &self.caps).first().copied().unwrap_or(KernelVariant::Reference);
+        if first == KernelVariant::RegisterTiled {
+            // Many rows: build the weight in the rotated domain (a lookup per stored index, no transform) and run
+            // the dense GEMM against the rotated activations, which reads the weight once for all of the rows.
+            let dense = self.scratch(Scratch::DecodeF32, *n as u64 * kpad as u64);
+            let dequant = kernel(&kernels::template::cq_dequant_kernel_name(*bits));
+            s.push(self.gpu.step(dequant, &[codes, norms, book, &dense], &[*n, kpad, 0, 0], *n * kpad));
+            let rotated_act = self.act_f32(&rotated, 0, m, kpad);
+            return self.matmul(s, &Weight::F32 { w: dense, n: *n, k: kpad }, &rotated_act, y, yoff);
+        }
         let (name, grid) = match first {
-            KernelVariant::WorkgroupPerOutput => (kernels::template::cq_gemv_kernel_name(*bits, m), gpu_core::Dispatch::Workgroups(*n)),
+            KernelVariant::WorkgroupPerOutput => (kernels::template::cq_gemv_kernel_name(*bits, m), gpu_core::Dispatch::Workgroups(n.div_ceil(kernels::template::CQ_GEMV_COLS) * m.div_ceil(kernels::template::GEMV_ROW_CAPACITIES[3]))),
             _ => (kernels::template::cq_gemm_kernel_name(*bits), gpu_core::Dispatch::Threads(*n * m.div_ceil(kernels::template::CQ_GEMM_ROWS))),
         };
         s.push(self.gpu.dispatch_sliced(kernel(&name), &[&rotated, codes, norms, book, y], &[WHOLE, WHOLE, WHOLE, WHOLE, out], &params, grid));
