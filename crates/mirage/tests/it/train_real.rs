@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use mirage::import::{load_dir, Checkpoint, ImportOptions};
-use mirage::train::data::{load_picture, read_jsonl, Record};
+use mirage::train::data::{load_picture, read_jsonl_clamped, Record};
 use mirage::train::eval::{average_precision_50, character_error_rate, mask_iou};
 use mirage::train::objective::{rasterise, TrainWeights};
 use mirage::train::prepare::{prepare, Resources};
@@ -47,7 +47,7 @@ fn env(test: &str) -> Option<Env> {
 }
 
 fn records(root: &Path, split: &str, n: usize) -> Vec<Record> {
-    let mut r = read_jsonl(&root.join(format!("{split}.jsonl"))).expect("the subset parses");
+    let mut r = read_jsonl_clamped(&root.join(format!("{split}.jsonl"))).expect("the subset parses");
     r.truncate(n);
     r
 }

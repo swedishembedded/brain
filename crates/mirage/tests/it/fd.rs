@@ -50,6 +50,7 @@ pub fn max_error(inputs: &[Vec<f64>], build: &dyn Fn(&mut Tape<f64>, &[Id]) -> I
 /// Assert [`max_error`] stays under the block tolerance.
 pub fn check(name: &str, inputs: &[Vec<f64>], build: &dyn Fn(&mut Tape<f64>, &[Id]) -> Id) {
     let err = max_error(inputs, build);
+    eprintln!("fd {name}: {err:.2e}");
     assert!(err < 1e-4, "{name}: backward deviates from finite differences by {err:e}");
 }
 
