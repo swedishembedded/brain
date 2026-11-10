@@ -16,9 +16,10 @@
 //! against their own served device forward.
 //!
 //! This lands backward/gradcheck for the vocoder's own conv/snake stack.
-//! The multi-scale STFT/mel discriminator + adversarial + feature-matching
-//! loss this model's training scope also requires is a further, larger
-//! step, tracked separately in the roadmap - an MSE reconstruction loss is
+//! A single-resolution STFT discriminator with the LSGAN and
+//! feature-matching losses lives in [`crate::discriminator`]; the
+//! multi-scale discriminator and the joint generator-discriminator loop are
+//! still open in the roadmap - an MSE reconstruction loss is
 //! enough to prove every gradient here is analytically correct, which is
 //! what gradcheck exists to do; it is not the loss a real training run
 //! would use.

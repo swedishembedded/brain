@@ -22,7 +22,8 @@
 //!
 //! The STFT itself is the one new piece: a direct DFT-matrix formulation
 //! (`O(n_fft^2)` per frame, not an FFT butterfly), deliberately - a
-//! windowed matmul against a FIXED, precomputed cos/sin basis is trivially
+//! windowed matmul against a FIXED cos/sin basis (evaluated in the loops,
+//! not stored) is trivially
 //! differentiable (backward is the same matmul against the transposed
 //! basis), where backpropagating through an FFT algorithm's butterfly
 //! network would be real additional work for no benefit at the frame
@@ -314,10 +315,10 @@ pub fn feature_matching_loss(feat_real: &[f32], feat_fake: &[f32]) -> (f32, Vec<
 }
 
 /// One discriminator update: forward on `real`/`fake` waveforms, the LSGAN
-/// D loss, backward into `(d_conv1, d_conv2, d_conv_out)`. Also returns
-/// `a1_real`/`a1_fake` (feature-matching's own inputs) and `d_mag_fake`
-/// (so a caller doing full G+D training can continue backprop into the
-/// generator via [`stft_mag_bwd`]).
+/// D loss, backward into `(d_conv1, d_conv2, d_conv_out)`. It returns only
+/// the loss and those three weight gradients; a joint G+D loop would also
+/// need the gradient on the fake magnitudes to continue into the generator
+/// through [`stft_mag_bwd`].
 pub struct DStep {
     pub loss: f32,
     pub d_conv1: Conv2dW,
