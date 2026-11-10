@@ -301,6 +301,8 @@ ORIGIN="tools/goldens/s3dit_model_dump_reference.py (and its block/real siblings
 golden_tree "zimage"       "golden/zimage"
 ORIGIN="tools/goldens/rrdbnet_dump_reference.py"
 golden_tree "esrgan"       "golden/esrgan"
+ORIGIN="the Mirage numpy reference (stage taps), plus the engine corpus of rendered masks; the tokenizer golden is tracked with the crate"
+golden_tree "mirage"       "golden/mirage"
 ORIGIN="tools/goldens/qwen3omnimoe_dump_reference.py"
 golden_tree "omni"         "golden/omni"
 ORIGIN="tools/goldens/ltxv_{vae,audio,upsampler,duration_head,na_decoder,schedule,dit,av_dit}_dump_reference.py, against Lightricks/LTX-2.5 in the store"
