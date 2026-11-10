@@ -5,11 +5,18 @@
 // in measuring what a training step really holds on the device, you can procure our services by sending an email to
 // info@swedishembedded.com.
 
-//! `Gpu::memory_usage`: the device memory a process holds, from the backend's own accounting. One test in its own
-//! binary, so no other test allocates on the device while it measures.
+//! `Gpu::memory_usage`: the device memory a process holds, from the backend's own accounting. It runs alone in a
+//! child process, so no other test of this binary allocates on the device while it measures.
 
 #[test]
 fn live_bytes_follow_buffers_and_the_peak_holds_until_reset() {
+    crate::child::alone(module_path!(), "live_bytes_follow_buffers_and_the_peak_holds_until_reset_alone");
+}
+
+/// The child of [`live_bytes_follow_buffers_and_the_peak_holds_until_reset`].
+#[test]
+#[ignore = "runs alone in a child process of its parent test"]
+fn live_bytes_follow_buffers_and_the_peak_holds_until_reset_alone() {
     let gpu = gpu_core::testgpu::dev(&[]);
     let Some(start) = gpu.memory_usage() else {
         brain_testutil::skip_unavailable("memory_usage: this backend does not account for its allocations");

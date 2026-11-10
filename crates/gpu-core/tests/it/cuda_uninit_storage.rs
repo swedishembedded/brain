@@ -24,27 +24,14 @@ use gpu_core::Gpu;
 
 const WORDS: u64 = 1 << 20;
 
-/// Run `helper`, one of this module's ignored tests, alone in a child process of this binary, and require it to
-/// have run and passed.
-fn alone(helper: &str) {
-    let name = format!("{}::{helper}", module_path!().trim_start_matches("it::"));
-    let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
-        .args(["--exact", &name, "--ignored", "--nocapture", "--test-threads=1"])
-        .output()
-        .expect("re-run this test binary for the child");
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "{helper} failed:\n{text}");
-    assert!(text.contains("1 passed"), "{helper} did not run:\n{text}");
-}
-
 #[test]
 fn uninitialised_storage_skips_the_clear_and_is_poisoned_in_a_debug_build() {
-    alone("uninitialised_storage_alone");
+    crate::child::alone(module_path!(), "uninitialised_storage_alone");
 }
 
 #[test]
 fn a_step_over_fresh_buffers_does_not_clear_its_uniform() {
-    alone("fresh_buffers_alone");
+    crate::child::alone(module_path!(), "fresh_buffers_alone");
 }
 
 /// The child of [`uninitialised_storage_skips_the_clear_and_is_poisoned_in_a_debug_build`].

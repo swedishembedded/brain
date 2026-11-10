@@ -97,8 +97,16 @@ fn a_readback_inside_a_recording_is_refused() {
     let _ = g.read(&a, 4);
 }
 
+/// The leak counters are process-wide, so the check runs alone in a child process.
 #[test]
 fn a_tape_returns_every_device_object_it_held() {
+    crate::child::alone(module_path!(), "a_tape_returns_every_device_object_it_held_alone");
+}
+
+/// The child of [`a_tape_returns_every_device_object_it_held`].
+#[test]
+#[ignore = "runs alone in a child process of its parent test"]
+fn a_tape_returns_every_device_object_it_held_alone() {
     let _s = serial();
     use backend_cuda::live_resources;
     let g = gpu();

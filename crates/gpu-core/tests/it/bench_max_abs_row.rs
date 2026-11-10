@@ -26,8 +26,8 @@
 //! Without that, `gpu_core::upgrade` would redirect slot 0 to slot 1 and the
 //! benchmark would measure the same kernel twice and report a confident dead heat.
 //! The end-to-end check that the redirect *does* fire lives in
-//! `tests/kernel_upgrade.rs` (a separate binary, because the switch is
-//! process-wide).
+//! `kernel_upgrade.rs`; the switch is process-wide, so the checks here that set
+//! it run in a child process of their own.
 
 use gpu_core::Gpu;
 
@@ -150,8 +150,17 @@ fn bench_max_abs_row() {
 /// cooperative kernel agrees with the reference **bit for bit**, including the
 /// all-zero row (whose `1e-8` guard keeps the scale finite) and row widths
 /// shorter than, equal to, and not a multiple of the 64-lane stride.
+///
+/// The pin is process-wide, so the check runs in a child process of its own.
 #[test]
 fn max_abs_rows_matches_reference_exactly() {
+    crate::child::alone(module_path!(), "max_abs_rows_matches_reference_exactly_alone");
+}
+
+/// The child of [`max_abs_rows_matches_reference_exactly`].
+#[test]
+#[ignore = "runs alone in a child process of its parent test"]
+fn max_abs_rows_matches_reference_exactly_alone() {
     let gpu = pinned_gpu();
     for &(m, k) in &[(1u32, 1u32), (3, 17), (5, 64), (7, 65), (33, 128), (64, 300), (129, 1024)] {
         let mut x = fill((m * k) as usize);

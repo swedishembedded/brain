@@ -47,14 +47,7 @@ impl Placer for Refuses {
 /// in a child process of its own.
 #[test]
 fn the_host_tier_is_a_real_placement_not_a_label() {
-    let name = format!("{}::the_host_tier_is_a_real_placement_not_a_label_alone", module_path!().trim_start_matches("it::"));
-    let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
-        .args(["--exact", &name, "--ignored", "--nocapture", "--test-threads=1"])
-        .output()
-        .expect("re-run this test binary for the child");
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "the host tier check failed:\n{text}");
-    assert!(text.contains("1 passed"), "the child test must have run:\n{text}");
+    crate::child::alone(module_path!(), "the_host_tier_is_a_real_placement_not_a_label_alone");
 }
 
 /// The child of [`the_host_tier_is_a_real_placement_not_a_label`].

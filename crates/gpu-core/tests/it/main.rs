@@ -8,6 +8,7 @@
 //! others run beside it; `bn_native`, `ce_stats_native`, `conv2d_native`, `cuda_impl_policy`, `cuda_provider_matmul`, `cuda_provider_matmul_i8`, `elementwise_native`, `f32_reg_native`, `flash_attn_f16_native`, `flash_bidir_native`, `flash_bidir_native_bench`, `flash_gqa_kmask_native`, `gdn_bwd_sweep_native`, `gdn_chunk_fwd_tc`, `gdn_dscale_native`, `gdn_qk_bwd_native`, `gn_apply_native`, `i8_dyn_native`, `i8w_dx_native`, `perf_floor`, `plumb_native`, `rmsnorm_fused_native`, `softmax_rows_native`, `swiglu_bwd_native` keep binaries of their own.
 
 mod card;
+mod child;
 mod adaln_row_gather;
 mod add_rms_quant_native;
 mod arch_desc_real_divergence;

@@ -202,14 +202,7 @@ fn the_upgrade_is_active_for_both_code_bits_independently() {
 /// so the check runs in a child process of its own.
 #[test]
 fn the_register_kernel_is_byte_identical_to_the_plain_gemv() {
-    let name = format!("{}::the_register_kernel_is_byte_identical_to_the_plain_gemv_alone", module_path!().trim_start_matches("it::"));
-    let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
-        .args(["--exact", &name, "--ignored", "--nocapture", "--test-threads=1"])
-        .output()
-        .expect("re-run this test binary for the child");
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "the register kernel must be byte-identical to the plain gemv:\n{text}");
-    assert!(text.contains("1 passed"), "the child test must have run:\n{text}");
+    crate::child::alone(module_path!(), "the_register_kernel_is_byte_identical_to_the_plain_gemv_alone");
 }
 
 /// The child of [`the_register_kernel_is_byte_identical_to_the_plain_gemv`].
