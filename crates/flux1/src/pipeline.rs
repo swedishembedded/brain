@@ -145,7 +145,7 @@ pub struct Flux1 {
 ///
 /// Pinned by `dit_weight_bytes_matches_measured_footprint` against the
 /// measured fp32 footprint (`AGENTS.md`/`dit_parity.rs`: ~11.9 B params ≈
-/// 47.6 GiB) - a PLACEMENT INPUT, not claimed exact.
+/// 47.6 GB, 44.3 GiB) - a PLACEMENT INPUT, not claimed exact.
 fn dit_weight_bytes(cfg: &Flux1Config, precision: Precision) -> u64 {
     let d = cfg.hidden as u64;
     let mlp = cfg.mlp_hidden() as u64;
@@ -639,7 +639,7 @@ mod placement_tests {
 
     /// `dit_weight_bytes` is a closed-form PLACEMENT INPUT, not a real
     /// tensor manifest (flux1 has none) - pinned against the measured fp32
-    /// footprint (`AGENTS.md`/`dit_parity.rs`: ~11.9 B params ≈ 47.6 GiB) so
+    /// footprint (`AGENTS.md`/`dit_parity.rs`: ~11.9 B params ≈ 47.6 GB, 44.3 GiB) so
     /// a future architecture-formula bug (like the missing modulation
     /// linears this test would have caught) shows up as a failing test, not
     /// as a placement that silently doesn't fit.
@@ -647,7 +647,7 @@ mod placement_tests {
     fn dit_weight_bytes_matches_measured_footprint() {
         let cfg = Flux1Config::dev();
         let gib = dit_weight_bytes(&cfg, Precision::F32) as f64 / (1024.0 * 1024.0 * 1024.0);
-        assert!((40.0..55.0).contains(&gib), "dit_weight_bytes = {gib:.2} GiB, expected ~47.6 GiB (measured)");
+        assert!((40.0..55.0).contains(&gib), "dit_weight_bytes = {gib:.2} GiB, expected ~44.3 GiB (47.6 GB, measured)");
     }
 
     #[test]

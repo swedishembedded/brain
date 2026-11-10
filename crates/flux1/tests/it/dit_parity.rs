@@ -15,7 +15,7 @@
 //!   permutation, the bias placement, the GELU MLPs, the 3-axis RoPE, the joint
 //!   attention, the column-split `linear2` and the final head.
 //! * **full depth, int8** (`dit*.safetensors`, `BRAIN_FLUX1_FULL=1`) — all
-//!   19 + 38 blocks at ~12 GiB. fp32 would be 47.6 GiB and does not fit a
+//!   19 + 38 blocks at ~12 GiB. fp32 would be 44.3 GiB and does not fit a
 //!   24 GiB card, so this run reports the *quantized* cosine and is honest
 //!   about it; the fp32 full-depth number is NOT measured here.
 //!
@@ -45,7 +45,7 @@ fn max_abs(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Read the diffusers `transformer/` shards, dropping out-of-depth blocks as
-/// each shard lands so a reduced-depth run never materializes 47.6 GiB.
+/// each shard lands so a reduced-depth run never materializes 44.3 GiB.
 fn load(cfg: &Flux1Config) -> Option<flux1::Tensors> {
     let Ok(dir) = std::env::var("BRAIN_FLUX1_TRANSFORMER") else {
         brain_testutil::skip("BRAIN_FLUX1_TRANSFORMER unset");
@@ -185,7 +185,7 @@ fn reduced_depth_fp32_parity() {
 
 /// The full 12 B model at int8 (~12 GiB). Opt-in: it needs ~60 GiB of host RAM
 /// to import and a >=16 GiB card. Reports the measured cosine; the fp32
-/// full-depth forward is NOT run here (47.6 GiB does not fit one P40).
+/// full-depth forward is NOT run here (44.3 GiB does not fit one P40).
 #[test]
 fn full_depth_int8_parity() {
     if std::env::var("BRAIN_FLUX1_FULL").is_err() {

@@ -124,7 +124,7 @@ fn f(x: f32) -> u32 {
 }
 
 // DiT numeric tier — `model::dispatch::Precision`, shared with flux2 (the
-// ONE name→tier map). For THIS model: fp32 is the parity reference (47.6 GiB
+// ONE name→tier map). For THIS model: fp32 is the parity reference (44.3 GiB
 // of weights at full depth — it does NOT fit one 24 GiB card, so the fp32
 // gate runs at reduced depth); int8 quantizes every linear except the ones
 // named in [`Flux1Model::new_with`] and brings the full 12 B model to

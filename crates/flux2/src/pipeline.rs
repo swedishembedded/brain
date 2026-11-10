@@ -364,7 +364,7 @@ pub fn img2img_sigmas(strength: f32, steps: usize, n_gen: usize) -> Vec<f32> {
 //
 // How well that reconciliation works is a function of the STEP COUNT, and a
 // distilled sampler has very few. `klein_sigmas` spends its first three
-// 4-step sigmas descending 1.0 -> 0.7685 and then covers the remaining 77% of
+// 4-step sigmas descending 1.0 -> about 0.77 and then covers the remaining 77% of
 // the trajectory in one leap to zero: three rounds in which a window can see
 // what its neighbour did to their shared cells and correct, followed by a step
 // that lands most of the picture on an average nothing reconciles afterwards.
@@ -1066,26 +1066,6 @@ fn te_device_override() -> Result<Option<TePlacement>, String> {
     Ok(Some(TePlacement { gpu_index: Some(idx), int8, before_denoiser: false }))
 }
 
-/// Ask the engine where this pipeline's parts go.
-///
-/// Returns the DiT's home and the text encoder's placement. The VAE's decode
-/// graph is declared `with("dit")` - it decodes the DiT's own latents, so it
-/// takes the denoiser's place on the same card (phase 2, after the eviction
-/// [`evict_denoiser_before_decode`] names), rather than paying a cross-card
-/// transfer for them.
-///
-/// The text encoder's numeric tier follows the DiT's, and is not derived from
-/// an estimate. An int8 run asks for the int8 encoder; an f32 run asks for the
-/// f32 one, and falls back to int8 only if that does not fit anywhere.
-///
-/// That is deliberate. The one configuration this pipeline has been measured
-/// in on two cards is an int8 DiT beside a truncated **int8** encoder, and a
-/// placement estimate is an estimate: choosing the far larger f32 encoder for
-/// an int8 run on the strength of one is how a plan that arithmetically fits
-/// becomes a driver out-of-memory. Truncation itself is free of that risk -
-/// `Shard::owns` is `l < end` and the deepest tap is layer 27, so the layers
-/// past it are never read and a truncated shard's conditioning is
-/// bit-identical to a whole encoder's at the same width.
 /// The parts this pipeline is made of, as the engine sees them: `[dit, te,
 /// vae_dec]`, plus a `vae_enc` when a reference can occur, with the cost each
 /// will occupy and the phase it is live in. The denoiser is phase 1, the
@@ -1135,6 +1115,26 @@ pub fn part_needs(
 /// beside the denoiser (phase 1) and the decode graph (phase 2): before both.
 const TE_PHASE: u32 = 0;
 
+/// Ask the engine where this pipeline's parts go.
+///
+/// Returns the DiT's home and the text encoder's placement. The VAE's decode
+/// graph is declared `with("dit")` - it decodes the DiT's own latents, so it
+/// takes the denoiser's place on the same card (phase 2, after the eviction
+/// [`evict_denoiser_before_decode`] names), rather than paying a cross-card
+/// transfer for them.
+///
+/// The text encoder's numeric tier follows the DiT's, and is not derived from
+/// an estimate. An int8 run asks for the int8 encoder; an f32 run asks for the
+/// f32 one, and falls back to int8 only if that does not fit anywhere.
+///
+/// That is deliberate. The one configuration this pipeline has been measured
+/// in on two cards is an int8 DiT beside a truncated **int8** encoder, and a
+/// placement estimate is an estimate: choosing the far larger f32 encoder for
+/// an int8 run on the strength of one is how a plan that arithmetically fits
+/// becomes a driver out-of-memory. Truncation itself is free of that risk -
+/// `Shard::owns` is `l < end` and the deepest tap is layer 27, so the layers
+/// past it are never read and a truncated shard's conditioning is
+/// bit-identical to a whole encoder's at the same width.
 pub fn plan_parts(cfg: &Flux2Config, paths: &Paths, vae_cfg: &vae::VaeConfig, precision: crate::Precision, n_joint: u64, n_out_max: u64, max_batch: u64) -> Result<(gpu_core::devices::Homes, TePlacement), String> {
     let te_cfg = te_config(cfg);
     let layers = *TAP_LAYERS.iter().max().unwrap();
@@ -2324,8 +2324,6 @@ fn denoise_group_on<D: Denoiser>(
         ref_tokens: Vec<f32>,
         sigmas: Vec<f32>,
         lat: Vec<f32>,
-        /// First schedule index this lane runs; > 0 for img2img inits.
-        start: usize,
         /// Set only when the request carries a mask; `None` leaves the
         /// trajectory bit-for-bit what it was before masking existed.
         preserve: Option<Preserve>,
@@ -2407,8 +2405,9 @@ fn denoise_group_on<D: Denoiser>(
         let noise = model::hostmath::randn(n_gen * cfg.in_channels, o.seed);
         // The source latent `x₀`. `strength` needs it as the init, a mask
         // needs it as the preserved content at every step, and both need
-        // it at the output size - so it is encoded ONCE here rather than
-        // once per consumer.
+        // it at the output size - so it is encoded once here for both
+        // consumers. (The first reference's conditioning tokens are a
+        // separate encode, above, even when they are the same pixels.)
         let img2img = o.strength.is_some_and(|s| s < 1.0);
         let want_src = img2img || o.mask.is_some();
         let src = if want_src {
@@ -2461,16 +2460,16 @@ fn denoise_group_on<D: Denoiser>(
         // round trip the option documents.
         let st = o.strength.unwrap_or(1.0);
         let zero = img2img && st <= 0.0;
-        let (mut lat, start, sigmas) = if zero {
-            (src.as_ref().expect("img2img encodes the source above").clone(), 0usize, Vec::new())
+        let (mut lat, sigmas) = if zero {
+            (src.as_ref().expect("img2img encodes the source above").clone(), Vec::new())
         } else if img2img {
             let sigmas = img2img_sigmas(st, steps, n_gen);
             let x0 = src.as_ref().expect("img2img encodes the source above");
             let lat: Vec<f32> =
                 x0.iter().zip(&noise).map(|(&a, &e)| (1.0 - st) * a + st * e).collect();
-            (lat, 0usize, sigmas)
+            (lat, sigmas)
         } else {
-            (noise, 0usize, sigmas)
+            (noise, sigmas)
         };
         // Seed the preserved region on the source's own trajectory before
         // the first forward, not just after each step: otherwise the model
@@ -2492,7 +2491,6 @@ fn denoise_group_on<D: Denoiser>(
             ref_tokens,
             sigmas,
             lat,
-            start,
             preserve,
         });
     }
@@ -2514,7 +2512,7 @@ fn denoise_group_on<D: Denoiser>(
             }
         });
         let active: Vec<usize> =
-            (0..lanes.len()).filter(|&k| i >= lanes[k].start && i < lanes[k].steps).collect();
+            (0..lanes.len()).filter(|&k| i < lanes[k].steps).collect();
         if active.is_empty() {
             break;
         }
@@ -2665,12 +2663,6 @@ impl BatchRequest {
     }
 }
 
-/// Convert an interleaved HWC RGB image in `[0,1]` (the shared
-/// `capability::blob` wire format, also what the CLI's PPM loader produces) to
-/// the reference-image layout [`Pipeline::generate`] expects: `[-1,1]` CHW,
-/// **center-cropped** to multiples of 16. Returns `(chw, h, w)` with the
-/// cropped dims — the ONE implementation shared by the CLI and the capability
-/// provider.
 /// The size `(w, h)` a `w x h` reference is center-cropped to on the way in:
 /// whole latent tokens on each axis.
 ///
@@ -2682,6 +2674,12 @@ pub fn ref_crop_size(w: u32, h: u32) -> (u32, u32) {
     (w - w % 16, h - h % 16)
 }
 
+/// Convert an interleaved HWC RGB image in `[0,1]` (the shared
+/// `capability::blob` wire format, also what the CLI's PPM loader produces) to
+/// the reference-image layout [`Pipeline::generate`] expects: `[-1,1]` CHW,
+/// **center-cropped** to multiples of 16. Returns `(chw, h, w)` with the
+/// cropped dims - the ONE implementation shared by the CLI and the capability
+/// provider.
 pub fn ref_from_hwc(hwc: &[f32], w: u32, h: u32) -> Result<(Vec<f32>, u32, u32), String> {
     let (cw, ch) = ref_crop_size(w, h);
     if cw == 0 || ch == 0 {
