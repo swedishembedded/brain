@@ -411,8 +411,46 @@ routing tensors (`stack/mhc_a_res`, `mhc_phi_res`, peak gradient ~1e-8) differ i
 Untuned: attention keeps the probabilities (`tq*hq*tk` values) for the backward; channel, bias, band-weight and kernel-gradient
 reductions loop over rows in one thread per output; CTC and Sinkhorn run one thread per sequence/block.
 
+Device trainer (lane L3b, package E): `device::train::trainer::DevTrainer` takes the host trainer's `TrainConfig`/`Mode`
+(full, head-only, LoRA) on any `Device`. Parameters live in a `ParamStore` (frozen tensors are `Role::Frozen`: no gradient or
+moment buffer, and a frozen encoder records no backward), gradients accumulate over the batch's images, and the shared device
+`optim::Optim` applies AdamW with the global clip. A run directory is the host trainer's (`mirage.safetensors` in checkpoint layout,
+`adapter.safetensors`, `state.safetensors` with the moments by checkpoint name), so a run resumes on either evaluator, and the
+HConvGLU bands and Hadamard rotations are saved unfolded and folded when the model opens (training never touches the folded
+matrices). Both trainers implement `train::trainer::FineTuner`. Tests: `device_trainer` (steps follow the host trainer in every mode:
+loss to 1e-4, weight-update cosine >= 0.999 on the CPU backend; exact resume for full and LoRA; a device run directory resumes on
+the host; LoRA no-op at init, learns, merge equals live).
+
+CUDA (gpu1 of a shared node, `BRAIN_BACKEND=cuda BRAIN_DEVICE=gpu1`): `device_train` and `device_trainer` pass (39 tests) with the
+bounds widened to cosine 0.9999 / 2e-3 because the selector picks tensor-core GEMMs. Whole tiny graph, group cosine of the
+parameter gradients against `Net::<f32>`: stem 0.999996, body_0 0.9999986, body_1 0.9999985, top_0 0.9999986, top_1 0.9999987,
+dense 0.9999990, reader 0.9999998, decoder layers 0.9999994, embedding 0.99999975, engrams 0.9999997 (the residual routing
+tensors, peak gradient ~1e-8, are below f32 resolution as on the host).
+
+Acceptance experiments on the device (CUDA gpu1, same configs and data as the host runs; the OCR subset was regenerated after the
+generator fix, so its host numbers were re-measured; host = 32 threads of a shared Grace node):
+
+| Experiment | Before | After (device) | After (host) | samples/s device / host |
+|---|---|---|---|---|
+| Detection, head-only dense | AP50 0.2193, loss 3.0282 | AP50 0.2765, loss 2.6377 | AP50 0.2715, loss 2.6316 | 6.90 / 1.46 |
+| Masks, head-only dense | IoU 0.6508, loss 0.7446 | IoU 0.6575, loss 0.7254 | IoU 0.6576, loss 0.7251 | 3.52 / 1.19 |
+| OCR, head-only reader | CER 0.2814, CTC 1.6543 | CER 0.2472, CTC 1.3549 | CER 0.2472, CTC 1.3548 | 13.7 / 7.65 |
+| LoRA text, rank 8 | loss 3.6489 | loss 1.6474; served-vs-training head cosine 1.00000000, logits 1.00000000 (max_abs 6.0e-4) | loss 1.6490 | 1.76 / 0.80 |
+| Exact resume on the released weights (device) | - | weights after step 3 bitwise identical: true | - | - |
+
+(The detection and mask host columns are the L3 measurements; the OCR host column was rerun on the regenerated subset.)
+
+First nsys profile of a full-model device step (released weights, batch 2, CUDA gpu1, untuned kernels): 3326 ms of kernel time over
+three steps, 1.11 samples/s. Top rows: `mirage_t_col_red` 32.5% (1332 launches), `dwconv_dk` 14.4%, `rms_dscale` 12.5%, `conv_dk`
+10.1%, `attn_ds` 8.5%, shared `matmul_dw` 6.1%, `attn_probs` 3.8%. Fix: the one-thread-per-output reductions became tiled
+workgroup reductions (a workgroup owns 8 adjacent columns, 8 row lanes, one barrier; narrow periods use all 64 threads as row
+lanes) and the attention probability and score-gradient kernels run one workgroup per (query, head) row. After: 971 ms kernel
+time, 1.87 samples/s; remaining top rows `matmul_dw` 20.6%, `col_red` 13.0%, `rms_dscale` 8.2%, `dwconv_dk` 7.9%, `conv_dk` 5.5%.
+Open: attention still stores the probabilities (`tq*hq*tk`); the saved-activation policies (recompute, narrow boundaries) are not
+implemented for the Mirage graph, so `scripts/gates/saved-policy.allow` keeps its `mirage` entry with an updated reason.
+
 Not done in this lane:
-- Device backward and CUDA training. The host graph is the trainer; the device forward kernels have no `*_bwd`
+- (Done, see above.) Device backward and CUDA training. The host graph is the trainer; the device forward kernels have no `*_bwd`
   counterparts for Walsh, banded channel conv, GRN, ZC norm, 2D RoPE, mHC + Sinkhorn, Hadamard MLP, engram, taps,
   slot construction, CTC. No host-vs-device backward cosine, no nsys profile of a training step. Next steps: write
   those backward kernels (the host primitives in `train/{ops,spatial,seq,loss}.rs` are the specification and the
@@ -430,7 +468,7 @@ Not done in this lane:
   (`scripts/gates/saved-policy.allow`, mirage entry, shrinks when the device trainer takes the policy).
 - The two datasets are small (300 train records each); the held-out numbers are 40-record validation sets and show
   that the machinery learns, not what a full recipe would reach. The OCR set had boxes overhanging the image (a
-  generator defect); `read_jsonl_clamped` is the explicit opt-in reader, the strict one refuses them.
+  generator defect); the generator is fixed and the strict reader is the only reader.
 
 ## Facts the foundation established
 

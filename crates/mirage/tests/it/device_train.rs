@@ -89,23 +89,34 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
-fn assert_close(what: &str, got: &[f32], want: &[f32], max_rel: f64) {
+fn assert_close_cos(what: &str, got: &[f32], want: &[f32], max_rel: f64, min_cos: f64) {
     assert_eq!(got.len(), want.len(), "{what}: length");
     let scale = want.iter().fold(0f64, |m, v| m.max(f64::from(v.abs()))).max(1e-6);
     let max_err = got.iter().zip(want).fold(0f64, |m, (g, w)| m.max(f64::from((g - w).abs()))) / scale;
     let cos = cosine(got, want);
     eprintln!("{what}: cosine {cos:.8}, max relative error {max_err:.2e}");
-    assert!(cos >= MIN_COSINE, "{what}: cosine {cos}");
+    assert!(cos >= min_cos, "{what}: cosine {cos}");
     assert!(max_err <= max_rel, "{what}: max relative error {max_err:.3e}");
 }
 
 /// Build the graph on the host and on the device and compare every output and every leaf gradient.
+/// The CPU backend runs the same f32 arithmetic as the host oracle; a GPU's selector may pick tensor-core GEMMs
+/// (rounding at about 1e-3 of the largest value), so the bounds widen there (ledger, lane L2c).
+fn bounds(dev: &Device, max_rel: f64) -> (f64, f64) {
+    if dev.gpu().kind() == "cpu" {
+        (max_rel, MIN_COSINE)
+    } else {
+        (max_rel.max(2e-3), 0.9999)
+    }
+}
+
 fn compare(dev: &Device, name: &str, params: &ParamStore, build: impl Fn(&mut dyn Graph<f32>) -> Run) {
     compare_within(dev, name, params, MAX_REL, build);
 }
 
 /// [`compare`] with a chosen relative error bound.
 fn compare_within(dev: &Device, name: &str, params: &ParamStore, max_rel: f64, build: impl Fn(&mut dyn Graph<f32>) -> Run) {
+    let (max_rel, min_cos) = bounds(dev, max_rel);
     let mut host = Tape::<f32>::new();
     let hr = build(&mut host);
     let hgrads = host.backward(hr.loss);
@@ -113,14 +124,14 @@ fn compare_within(dev: &Device, name: &str, params: &ParamStore, max_rel: f64, b
     let mut tape = DevTape::new(dev, params).with_leaf_grads();
     let dr = build(&mut tape);
     for (i, (&h, &d)) in hr.outs.iter().zip(&dr.outs).enumerate() {
-        assert_close(&format!("{name} output {i}"), &tape.value(d), host.val(h), max_rel);
+        assert_close_cos(&format!("{name} output {i}"), &tape.value(d), host.val(h), max_rel, min_cos);
     }
     tape.backward(dr.loss);
     assert_eq!(hr.leaves.len(), dr.leaves.len());
     for (i, (&h, &d)) in hr.leaves.iter().zip(&dr.leaves).enumerate() {
         let want = hgrads.get(h).map(<[f32]>::to_vec).unwrap_or_else(|| vec![0.0; host.len(h)]);
         let got = tape.grad(d).unwrap_or_else(|| vec![0.0; want.len()]);
-        assert_close(&format!("{name} gradient of leaf {i}"), &got, &want, max_rel);
+        assert_close_cos(&format!("{name} gradient of leaf {i}"), &got, &want, max_rel, min_cos);
     }
 }
 
@@ -252,7 +263,8 @@ fn frozen_parameters_get_no_gradient_while_the_input_path_still_does() {
     let mut tape = DevTape::new(&dev, &params).with_leaf_grads();
     let dr = linear_run(&mut tape, &w, &wt, (rows, inn, out));
     tape.backward(dr.loss);
-    assert_close("frozen: input gradient", &tape.grad(dr.leaves[0]).unwrap(), hgrads.get(hr.leaves[0]).unwrap(), MAX_REL);
+    let (rel, cos) = bounds(&dev, MAX_REL);
+    assert_close_cos("frozen: input gradient", &tape.grad(dr.leaves[0]).unwrap(), hgrads.get(hr.leaves[0]).unwrap(), rel, cos);
     assert!(params.read_grad(dev.gpu(), "w").iter().all(|&v| v == 0.0), "a frozen parameter accumulated a gradient");
     assert!(tape.grad(dr.leaves[1]).is_none() && tape.grad(dr.leaves[2]).is_none());
 }
@@ -825,7 +837,7 @@ fn the_whole_graph_on_the_device_gives_the_host_gradients() {
     net.tape.backward(dl);
     let got = stacked_grads(&dev, &store);
     eprintln!("loss: host {host_loss:.6}, device {dev_loss:.6}");
-    assert!((f64::from(host_loss) - dev_loss).abs() <= 1e-4 * f64::from(host_loss).abs().max(1.0), "loss differs");
+    assert!((f64::from(host_loss) - dev_loss).abs() <= bounds(&dev, 1e-4).0 * f64::from(host_loss).abs().max(1.0), "loss differs");
 
     let mut groups: BTreeMap<String, GroupStats> = BTreeMap::new();
     for (name, w) in &want {
@@ -851,7 +863,7 @@ fn the_whole_graph_on_the_device_gives_the_host_gradients() {
     for (name, (d, h, worst, worst_name, tensors)) in &groups {
         let c = cosine(d, h);
         eprintln!("{name:<32} {tensors:>8} {c:>14.8} {worst:>14.8}  {worst_name}");
-        if c < 0.9999 {
+        if c < bounds(&dev, 0.0).1.min(0.9999) {
             failures.push(format!("{name}: group cosine {c}"));
         }
     }

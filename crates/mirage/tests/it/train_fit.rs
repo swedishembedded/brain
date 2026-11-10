@@ -283,19 +283,6 @@ fn a_saved_checkpoint_loads_through_the_importer_unchanged() {
 }
 
 #[test]
-fn the_clamping_reader_trims_overhanging_boxes_and_the_strict_reader_refuses_them() {
-    let dir = scratch("clamp");
-    let path = dir.join("r.jsonl");
-    std::fs::write(&path, "{\"image\":\"a.jpg\",\"text\":[{\"value\":\"ab\",\"bbox\":[134,903,312,1012]},{\"value\":\"x\",\"bbox\":[10,1000,20,1100]}]}\n").unwrap();
-    assert!(mirage::train::data::read_jsonl(&path).is_err());
-    let recs = mirage::train::data::read_jsonl_clamped(&path).unwrap();
-    let text = recs[0].text.as_ref().unwrap();
-    assert_eq!(text.len(), 1, "a box that collapses after clamping is dropped");
-    assert_eq!(text[0].bbox, [134.0, 903.0, 312.0, 1000.0]);
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
 fn held_out_metrics_agree_with_hand_computed_values() {
     use mirage::train::eval::{average_precision_50, character_error_rate, edit_distance, mask_iou};
     // Two images, one truth each; image 0 is found exactly, image 1 only by a lower-ranked box.

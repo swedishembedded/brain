@@ -214,32 +214,6 @@ pub fn read_jsonl(path: &Path) -> Result<Vec<Record>, RecordError> {
         .collect()
 }
 
-/// [`read_jsonl`] for datasets whose boxes may overhang the image by a few pixels (text rendered near an edge):
-/// every box is clamped to `0..1000` and a label whose box collapses is dropped. The strict reader is the default;
-/// this is the explicit opt-in.
-pub fn read_jsonl_clamped(path: &Path) -> Result<Vec<Record>, RecordError> {
-    let text = std::fs::read_to_string(path).map_err(|e| RecordError(format!("{}: {e}", path.display())))?;
-    let mut out = Vec::new();
-    for (i, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
-        let fail = |e: String| RecordError(format!("{} line {}: {e}", path.display(), i + 1));
-        let mut value: serde_json::Value = serde_json::from_str(line).map_err(|e| fail(e.to_string()))?;
-        for family in ["objects", "text"] {
-            let Some(list) = value.get_mut(family).and_then(serde_json::Value::as_array_mut) else { continue };
-            list.retain_mut(|label| {
-                let Some(b) = label.get_mut("bbox").and_then(serde_json::Value::as_array_mut) else { return true };
-                let c: Vec<f64> = b.iter().filter_map(serde_json::Value::as_f64).map(|v| v.clamp(0.0, 1000.0)).collect();
-                if c.len() != 4 || c[2] <= c[0] || c[3] <= c[1] {
-                    return false;
-                }
-                *b = c.into_iter().map(serde_json::Value::from).collect();
-                true
-            });
-        }
-        out.push(Record::parse(&value.to_string()).map_err(|e| fail(e.to_string()))?);
-    }
-    Ok(out)
-}
-
 /// A decoded image: `h x w` RGB bytes.
 pub struct Picture {
     /// Height.

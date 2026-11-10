@@ -50,13 +50,16 @@ fn device_steps_follow_the_host_trainer_in_every_mode() {
         let ck = tiny_checkpoint();
         let p = prepared(&ck.config);
         let batch = [p.clone_prepared(), p.clone_prepared()];
+        let on_cpu = dev.gpu().kind() == "cpu";
+        // A GPU's tensor-core GEMMs round at ~1e-3: the losses agree to that and the Adam updates a little less.
+        let (rel, cos_floor) = if on_cpu { (1e-4, 0.999) } else { (2e-3, 0.98) };
         let mut host = Trainer::new(ck.clone(), cfg_for(mode.clone())).unwrap();
         let mut device = DevTrainer::new(dev, ck.clone(), cfg_for(mode.clone())).unwrap();
         for s in 0..3 {
             let (h, d) = (host.step(&batch).unwrap(), device.step(&batch).unwrap());
             eprintln!("{mode:?} step {s}: loss host {:.6} device {:.6}, grad norm host {:.4e} device {:.4e}", h.loss, d.loss, h.grad_norm, d.grad_norm);
-            assert!((h.loss - d.loss).abs() <= 1e-4 * h.loss.abs().max(1.0), "loss {} vs {}", h.loss, d.loss);
-            assert!((h.grad_norm - d.grad_norm).abs() <= 1e-3 * h.grad_norm.max(1e-6), "grad norm {} vs {}", h.grad_norm, d.grad_norm);
+            assert!((h.loss - d.loss).abs() <= rel * h.loss.abs().max(1.0), "loss {} vs {}", h.loss, d.loss);
+            assert!((h.grad_norm - d.grad_norm).abs() <= 10.0 * rel * h.grad_norm.max(1e-6), "grad norm {} vs {}", h.grad_norm, d.grad_norm);
         }
         // The trained tensors agree (the updates are Adam steps of near-identical gradients).
         let (hc, dc) = (host.checkpoint(), device.checkpoint());
@@ -75,11 +78,11 @@ fn device_steps_follow_the_host_trainer_in_every_mode() {
             }
         }
         eprintln!("{mode:?}: worst cosine of the weight updates {worst:.6}");
-        assert!(worst >= 0.999, "{mode:?}: weight updates differ (cosine {worst})");
+        assert!(worst >= cos_floor, "{mode:?}: weight updates differ (cosine {worst})");
         if let (Some(h), Some(d)) = (host.adapter_set(), device.adapter_set()) {
             for (key, (ha, hb)) in &h.pairs {
                 let (da, db) = &d.pairs[key];
-                assert!(cosine(ha, da) >= 0.999 && cosine(hb, db) >= 0.999, "adapter `{key}` differs");
+                assert!(cosine(ha, da) >= cos_floor && cosine(hb, db) >= cos_floor, "adapter `{key}` differs");
             }
         }
         assert_eq!(host.steps(), device.steps());
@@ -136,6 +139,7 @@ fn a_resumed_device_lora_run_ends_exactly_where_the_uninterrupted_run_does() {
 fn a_device_run_directory_resumes_on_the_host_trainer() {
     let _g = gpu_core::testgpu::exclusive();
     let Some(dev) = device("cross resume") else { return };
+    let rel = if dev.gpu().kind() == "cpu" { 1e-4 } else { 2e-3 };
     let (mut t, p) = dev_trainer(dev, Mode::Heads(vec![Head::Reader]));
     let batch = std::slice::from_ref(&p);
     t.step(batch).unwrap();
@@ -144,7 +148,7 @@ fn a_device_run_directory_resumes_on_the_host_trainer() {
     let mut host = Trainer::resume(&dir, cfg_for(Mode::Heads(vec![Head::Reader]))).unwrap();
     assert_eq!(host.steps(), 1);
     let (d, h) = (t.step(batch).unwrap(), host.step(batch).unwrap());
-    assert!((d.loss - h.loss).abs() <= 1e-4 * h.loss.abs().max(1.0), "second step: device {} vs host {}", d.loss, h.loss);
+    assert!((d.loss - h.loss).abs() <= rel * h.loss.abs().max(1.0), "second step: device {} vs host {}", d.loss, h.loss);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -152,13 +156,14 @@ fn a_device_run_directory_resumes_on_the_host_trainer() {
 fn a_device_lora_adapter_is_a_no_op_at_init_learns_and_merges_exactly() {
     let _g = gpu_core::testgpu::exclusive();
     let Some(dev) = device("device lora") else { return };
+    let rel = if dev.gpu().kind() == "cpu" { 1e-5 } else { 2e-3 };
     let (mut t, p) = dev_trainer(dev, Mode::Lora { rank: 2, alpha: 4.0, seed: 5 });
     t.set_lr(2e-2);
     let batch = std::slice::from_ref(&p);
     let ck = tiny_checkpoint();
     let host_base = Trainer::new(ck.clone(), cfg_for(Mode::Full)).unwrap();
     let before = t.eval_loss(batch);
-    assert!((before - host_base.eval_loss(batch)).abs() <= 1e-5 * before.abs().max(1.0), "B starts at zero, so a fresh adapter changes nothing");
+    assert!((before - host_base.eval_loss(batch)).abs() <= rel * before.abs().max(1.0), "B starts at zero, so a fresh adapter changes nothing");
     for _ in 0..20 {
         t.step(batch).unwrap();
     }
@@ -168,7 +173,7 @@ fn a_device_lora_adapter_is_a_no_op_at_init_learns_and_merges_exactly() {
     assert_eq!(t.checkpoint().tensors, ck.tensors, "the base stays untouched");
     let merged = Trainer::new(t.merged().unwrap(), cfg_for(Mode::Full)).unwrap();
     let (live, folded) = (t.eval_loss(batch), merged.eval_loss(batch));
-    assert!((live - folded).abs() <= 1e-4 * live.abs().max(1.0), "live {live} vs merged {folded}");
+    assert!((live - folded).abs() <= 10.0 * rel * live.abs().max(1.0), "live {live} vs merged {folded}");
 }
 
 #[test]

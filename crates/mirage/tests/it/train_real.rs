@@ -10,11 +10,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use mirage::import::{load_dir, Checkpoint, ImportOptions};
-use mirage::train::data::{load_picture, read_jsonl_clamped, Record};
+use mirage::device::train::trainer::DevTrainer;
+use mirage::device::Device;
+use mirage::train::data::{load_picture, read_jsonl, Record};
 use mirage::train::eval::{average_precision_50, character_error_rate, mask_iou};
 use mirage::train::objective::{rasterise, TrainWeights};
 use mirage::train::prepare::{prepare, Resources};
-use mirage::train::trainer::{Head, Mode, Prepared, TrainConfig, Trainer};
+use mirage::train::trainer::{FineTuner, Head, Mode, Prepared, TrainConfig, Trainer};
 use mirage::vision::masks::{coefficient_cell, object_field, round_box};
 use mirage::vision::preprocess::{canvas, letterbox, CANVAS};
 use mirage::vision::reader::crop_rect;
@@ -47,7 +49,7 @@ fn env(test: &str) -> Option<Env> {
 }
 
 fn records(root: &Path, split: &str, n: usize) -> Vec<Record> {
-    let mut r = read_jsonl_clamped(&root.join(format!("{split}.jsonl"))).expect("the subset parses");
+    let mut r = read_jsonl(&root.join(format!("{split}.jsonl"))).expect("the subset parses");
     r.truncate(n);
     r
 }
@@ -112,7 +114,7 @@ fn mask_miou(ck: &Checkpoint, root: &Path, recs: &[Record]) -> f64 {
     total / n.max(1) as f64
 }
 
-fn run(trainer: &mut Trainer, train: &[Prepared], steps: usize, batch: usize, label: &str) {
+fn run(trainer: &mut dyn FineTuner, train: &[Prepared], steps: usize, batch: usize, label: &str) {
     let start = Instant::now();
     for s in 0..steps {
         let b: Vec<&Prepared> = (0..batch).map(|k| &train[(s * batch + k) % train.len()]).collect();
@@ -127,61 +129,66 @@ fn weights(text: f64, heat: f64, regression: f64, mask: f64, ctc: f64) -> TrainW
     TrainWeights { text, heat, regression, mask, ctc }
 }
 
-fn trainer(e: &Env, mode: Mode, w: TrainWeights, lr: f32) -> Trainer {
+fn train_config(mode: Mode, w: TrainWeights, lr: f32) -> TrainConfig {
     let mut cfg = TrainConfig::new(mode);
     cfg.weights = w;
     cfg.lr = lr;
-    Trainer::new(e.ck.clone(), cfg).unwrap()
+    cfg
 }
 
-#[test]
-#[ignore = "acceptance experiment: minutes of host compute"]
-fn detection_fine_tune_raises_held_out_ap50() {
+/// The host trainer, or with `device` the device trainer on the device the process selected
+/// (`BRAIN_BACKEND` / `BRAIN_DEVICE`).
+fn trainer(e: &Env, device: bool, mode: Mode, w: TrainWeights, lr: f32) -> Box<dyn FineTuner> {
+    let cfg = train_config(mode, w, lr);
+    if device {
+        let dev = Device::open().expect("a device");
+        println!("RESULT device: {}", dev.gpu().kind());
+        Box::new(DevTrainer::new(dev, e.ck.clone(), cfg).unwrap())
+    } else {
+        Box::new(Trainer::new(e.ck.clone(), cfg).unwrap())
+    }
+}
+
+fn detection_fine_tune_raises_held_out_ap50(device: bool) {
     let Some(e) = env("detection") else { return };
     let (train_recs, val_recs) = (records(&e.coco, "train", 120), records(&e.coco, "val", 40));
     let (train, val) = (prepared(&e, &e.coco, &train_recs), prepared(&e, &e.coco, &val_recs));
-    let mut t = trainer(&e, Mode::Heads(vec![Head::Dense]), weights(0.0, 1.0, 1.0, 0.0, 0.0), 3e-4);
+    let mut t = trainer(&e, device, Mode::Heads(vec![Head::Dense]), weights(0.0, 1.0, 1.0, 0.0, 0.0), 3e-4);
     let (ap0, loss0) = (detection_ap50(&e.ck, &e.coco, &val_recs), t.eval_loss(&val));
     println!("RESULT detection before: held-out AP50 {ap0:.4}, held-out loss {loss0:.4}");
-    run(&mut t, &train, 60, 4, "detection");
+    run(t.as_mut(), &train, 60, 4, "detection");
     let (ap1, loss1) = (detection_ap50(&t.checkpoint(), &e.coco, &val_recs), t.eval_loss(&val));
     println!("RESULT detection after: held-out AP50 {ap1:.4}, held-out loss {loss1:.4}");
     assert!(loss1 < loss0 && ap1 > ap0, "AP50 {ap0} -> {ap1}, loss {loss0} -> {loss1}");
 }
 
-#[test]
-#[ignore = "acceptance experiment: minutes of host compute"]
-fn ocr_fine_tune_lowers_held_out_cer() {
+fn ocr_fine_tune_lowers_held_out_cer(device: bool) {
     let Some(e) = env("ocr") else { return };
     let (train_recs, val_recs) = (records(&e.ocr, "train", 120), records(&e.ocr, "val", 40));
     let (train, val) = (prepared(&e, &e.ocr, &train_recs), prepared(&e, &e.ocr, &val_recs));
-    let mut t = trainer(&e, Mode::Heads(vec![Head::Reader]), weights(0.0, 0.0, 0.0, 0.0, 1.0), 3e-4);
+    let mut t = trainer(&e, device, Mode::Heads(vec![Head::Reader]), weights(0.0, 0.0, 0.0, 0.0, 1.0), 3e-4);
     let (cer0, loss0) = (reader_cer(&e.ck, &e.ocr, &val_recs, &e.res.charset), t.eval_loss(&val));
     println!("RESULT ocr before: held-out CER {cer0:.4}, held-out CTC {loss0:.4}");
-    run(&mut t, &train, 60, 4, "ocr");
+    run(t.as_mut(), &train, 60, 4, "ocr");
     let (cer1, loss1) = (reader_cer(&t.checkpoint(), &e.ocr, &val_recs, &e.res.charset), t.eval_loss(&val));
     println!("RESULT ocr after: held-out CER {cer1:.4}, held-out CTC {loss1:.4}");
     assert!(loss1 < loss0 && cer1 < cer0, "CER {cer0} -> {cer1}, loss {loss0} -> {loss1}");
 }
 
-#[test]
-#[ignore = "acceptance experiment: minutes of host compute"]
-fn mask_fine_tune_raises_held_out_iou() {
+fn mask_fine_tune_raises_held_out_iou(device: bool) {
     let Some(e) = env("mask") else { return };
     let (train_recs, val_recs) = (records(&e.coco, "train", 120), records(&e.coco, "val", 40));
     let (train, val) = (prepared(&e, &e.coco, &train_recs), prepared(&e, &e.coco, &val_recs));
-    let mut t = trainer(&e, Mode::Heads(vec![Head::Dense]), weights(0.0, 0.0, 0.0, 1.0, 0.0), 3e-4);
+    let mut t = trainer(&e, device, Mode::Heads(vec![Head::Dense]), weights(0.0, 0.0, 0.0, 1.0, 0.0), 3e-4);
     let (iou0, loss0) = (mask_miou(&e.ck, &e.coco, &val_recs), t.eval_loss(&val));
     println!("RESULT mask before: held-out mask IoU {iou0:.4}, held-out loss {loss0:.4}");
-    run(&mut t, &train, 60, 4, "mask");
+    run(t.as_mut(), &train, 60, 4, "mask");
     let (iou1, loss1) = (mask_miou(&t.checkpoint(), &e.coco, &val_recs), t.eval_loss(&val));
     println!("RESULT mask after: held-out mask IoU {iou1:.4}, held-out loss {loss1:.4}");
     assert!(loss1 < loss0 && iou1 > iou0, "IoU {iou0} -> {iou1}, loss {loss0} -> {loss1}");
 }
 
-#[test]
-#[ignore = "acceptance experiment: minutes of host compute"]
-fn a_lora_fine_tune_is_served_by_the_model_and_equals_the_training_path() {
+fn a_lora_fine_tune_is_served_by_the_model_and_equals_the_training_path(device: bool) {
     use mirage::decoder::Positions;
     use mirage::model::Mirage;
     use mirage::train::net::{params_from_checkpoint, Net};
@@ -191,10 +198,10 @@ fn a_lora_fine_tune_is_served_by_the_model_and_equals_the_training_path() {
     let Some(e) = env("lora") else { return };
     let (train_recs, val_recs) = (records(&e.coco, "train", 60), records(&e.coco, "val", 12));
     let (train, val) = (prepared(&e, &e.coco, &train_recs), prepared(&e, &e.coco, &val_recs));
-    let mut t = trainer(&e, Mode::Lora { rank: 8, alpha: 16.0, seed: 3 }, weights(1.0, 0.0, 0.0, 0.0, 0.0), 2e-3);
+    let mut t = trainer(&e, device, Mode::Lora { rank: 8, alpha: 16.0, seed: 3 }, weights(1.0, 0.0, 0.0, 0.0, 0.0), 2e-3);
     let loss0 = t.eval_loss(&val);
     println!("RESULT lora before: held-out text loss {loss0:.4}");
-    run(&mut t, &train, 30, 2, "lora");
+    run(t.as_mut(), &train, 30, 2, "lora");
     let loss1 = t.eval_loss(&val);
     println!("RESULT lora after: held-out text loss {loss1:.4}");
     assert!(loss1 < loss0, "held-out text loss {loss0} -> {loss1}");
@@ -211,7 +218,8 @@ fn a_lora_fine_tune_is_served_by_the_model_and_equals_the_training_path() {
     let (h, w) = (p.sample.rh, p.sample.rw);
     let cfg = &e.ck.config;
     let params = params_from_checkpoint::<f32>(&e.ck);
-    let mut net = Net::<f32>::new(cfg, &params, t.adapter());
+    let adapter = t.adapter_set();
+    let mut net = Net::<f32>::new(cfg, &params, adapter.as_ref());
     let canvas = net.constant(p.sample.canvas.clone());
     let enc = net.encoder(canvas, h, w);
     let dense = net.dense(&enc, h, w);
@@ -237,26 +245,24 @@ fn a_lora_fine_tune_is_served_by_the_model_and_equals_the_training_path() {
     std::fs::remove_dir_all(&run_dir).unwrap();
 }
 
-#[test]
-#[ignore = "acceptance experiment: minutes of host compute"]
-fn a_resumed_run_on_the_released_weights_ends_exactly_where_the_uninterrupted_run_does() {
+fn a_resumed_run_on_the_released_weights_ends_exactly_where_the_uninterrupted_run_does(device: bool) {
     let Some(e) = env("resume") else { return };
     let train = prepared(&e, &e.coco, &records(&e.coco, "train", 3));
-    let make = || trainer(&e, Mode::Heads(vec![Head::Dense, Head::Reader]), weights(1.0, 1.0, 1.0, 1.0, 0.0), 1e-4);
-    let step = |t: &mut Trainer, k: usize| {
+    let make = || trainer(&e, device, Mode::Heads(vec![Head::Dense, Head::Reader]), weights(1.0, 1.0, 1.0, 1.0, 0.0), 1e-4);
+    let step = |t: &mut dyn FineTuner, k: usize| {
         t.step(std::slice::from_ref(&train[k])).unwrap();
     };
     let mut straight = make();
-    (0..3).for_each(|k| step(&mut straight, k));
+    (0..3).for_each(|k| step(straight.as_mut(), k));
     let mut first = make();
-    (0..2).for_each(|k| step(&mut first, k));
+    (0..2).for_each(|k| step(first.as_mut(), k));
     let dir = std::env::temp_dir().join(format!("mirage-resume-{}", std::process::id()));
     first.save(&dir).unwrap();
     let mut cfg = TrainConfig::new(Mode::Heads(vec![Head::Dense, Head::Reader]));
     cfg.weights = weights(1.0, 1.0, 1.0, 1.0, 0.0);
     cfg.lr = 1e-4;
-    let mut resumed = Trainer::resume(&dir, cfg).unwrap();
-    step(&mut resumed, 2);
+    let mut resumed: Box<dyn FineTuner> = if device { Box::new(DevTrainer::resume(Device::open().expect("a device"), &dir, cfg).unwrap()) } else { Box::new(Trainer::resume(&dir, cfg).unwrap()) };
+    step(resumed.as_mut(), 2);
     let identical = resumed.checkpoint().tensors == straight.checkpoint().tensors;
     println!("RESULT resume: weights after step 3 identical to the uninterrupted run: {identical}");
     std::fs::remove_dir_all(&dir).unwrap();
@@ -275,8 +281,80 @@ fn step_time_probe() {
         ("probe-dense", Mode::Heads(vec![Head::Dense]), weights(0.0, 1.0, 1.0, 0.0, 0.0)),
         ("probe-all", Mode::Full, weights(1.0, 1.0, 1.0, 1.0, 1.0)),
     ] {
-        let mut t = trainer(&e, mode, w, 1e-5);
-        run(&mut t, &train, 2, 1, label);
+        let mut t = trainer(&e, false, mode, w, 1e-5);
+        run(t.as_mut(), &train, 2, 1, label);
     }
     let _ = &e.dir;
+}
+
+// Each experiment on the host trainer and on the device the process selects (`BRAIN_BACKEND`, `BRAIN_DEVICE`).
+
+#[test]
+#[ignore = "acceptance experiment: minutes of host compute"]
+fn host_detection() {
+    detection_fine_tune_raises_held_out_ap50(false);
+}
+
+#[test]
+#[ignore = "acceptance experiment on the device the process selects"]
+fn device_detection() {
+    detection_fine_tune_raises_held_out_ap50(true);
+}
+
+#[test]
+#[ignore = "acceptance experiment: minutes of host compute"]
+fn host_ocr() {
+    ocr_fine_tune_lowers_held_out_cer(false);
+}
+
+#[test]
+#[ignore = "acceptance experiment on the device the process selects"]
+fn device_ocr() {
+    ocr_fine_tune_lowers_held_out_cer(true);
+}
+
+#[test]
+#[ignore = "acceptance experiment: minutes of host compute"]
+fn host_mask() {
+    mask_fine_tune_raises_held_out_iou(false);
+}
+
+#[test]
+#[ignore = "acceptance experiment on the device the process selects"]
+fn device_mask() {
+    mask_fine_tune_raises_held_out_iou(true);
+}
+
+#[test]
+#[ignore = "acceptance experiment: minutes of host compute"]
+fn host_lora() {
+    a_lora_fine_tune_is_served_by_the_model_and_equals_the_training_path(false);
+}
+
+#[test]
+#[ignore = "acceptance experiment on the device the process selects"]
+fn device_lora() {
+    a_lora_fine_tune_is_served_by_the_model_and_equals_the_training_path(true);
+}
+
+#[test]
+#[ignore = "acceptance experiment: minutes of host compute"]
+fn host_resume() {
+    a_resumed_run_on_the_released_weights_ends_exactly_where_the_uninterrupted_run_does(false);
+}
+
+#[test]
+#[ignore = "acceptance experiment on the device the process selects"]
+fn device_resume() {
+    a_resumed_run_on_the_released_weights_ends_exactly_where_the_uninterrupted_run_does(true);
+}
+
+/// A few full-model steps on the selected device: the workload `nsys` profiles (see the ledger).
+#[test]
+#[ignore = "profiling workload: run on the device the process selects (BRAIN_BACKEND, BRAIN_DEVICE)"]
+fn device_step_profile() {
+    let Some(e) = env("device_step_profile") else { return };
+    let train = prepared(&e, &e.coco, &records(&e.coco, "train", 2));
+    let mut t = trainer(&e, true, Mode::Full, weights(1.0, 1.0, 1.0, 1.0, 1.0), 1e-5);
+    run(t.as_mut(), &train, 3, 2, "device-profile");
 }

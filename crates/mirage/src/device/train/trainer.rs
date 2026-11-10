@@ -31,6 +31,9 @@ use crate::train::net::{params_from_checkpoint, AdapterSet, Net, Params};
 use crate::train::objective::sample_loss;
 use crate::train::trainer::{FineTuner, Mode, Prepared, StepReport, TrainConfig};
 
+/// The initial adapter and the store entries of each projection key's pair.
+type Lora = (AdapterSet<f32>, BTreeMap<String, (String, String)>);
+
 /// The device trainer's state.
 pub struct DevTrainer {
     dev: Device,
@@ -40,7 +43,7 @@ pub struct DevTrainer {
     /// Base tensors a full or head-only run trains (empty for LoRA).
     trainable: BTreeSet<String>,
     /// LoRA pairs: projection key -> (A entry, B entry); `None` outside LoRA runs.
-    lora: Option<(AdapterSet<f32>, BTreeMap<String, (String, String)>)>,
+    lora: Option<Lora>,
     cfg: TrainConfig,
     step: u32,
     origin_step: u64,

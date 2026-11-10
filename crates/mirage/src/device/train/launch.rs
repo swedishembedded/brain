@@ -73,7 +73,10 @@ impl<'d> Rec<'d> {
 
     /// `dst[c] += sum_r g[r, c] (* o[r, c])`.
     pub(crate) fn col_red(&mut self, g: &DeviceBuffer, o: &DeviceBuffer, dst: &DeviceBuffer, rows: usize, period: usize, use_o: bool) {
-        self.threads("mirage_t_col_red", &[g, o, dst], &[word(rows), word(period), u32::from(use_o)], period);
+        // Columns per workgroup: 8, fewer for a narrow period so the rest of the 64 threads become row lanes.
+        let cw = period.clamp(1, 8).next_power_of_two().min(8);
+        let cw = if cw > period { cw / 2 } else { cw }.max(1);
+        self.groups("mirage_t_col_red", &[g, o, dst], &[word(rows), word(period), u32::from(use_o), word(cw)], period.div_ceil(cw));
     }
 
     /// `dst[r] (+)= sum_c a[r, c] b[r, c]`.
@@ -118,7 +121,7 @@ impl<'d> Rec<'d> {
 
     /// RMS-norm scale gradient.
     pub(crate) fn rms_dscale(&mut self, x: &DeviceBuffer, g: &DeviceBuffer, stats: &DeviceBuffer, ds: &DeviceBuffer, rows: usize, d: usize) {
-        self.threads("mirage_t_rms_dscale", &[x, g, stats, ds], &[word(rows), word(d)], d);
+        self.groups("mirage_t_rms_dscale", &[x, g, stats, ds], &[word(rows), word(d)], d.div_ceil(8));
     }
 
     /// Row softmax.
@@ -211,11 +214,11 @@ impl<'d> Rec<'d> {
         match dense_cout {
             Some(cout) => {
                 let params: Vec<u32> = base.iter().copied().chain([word(cout)]).chain(tail).collect();
-                self.threads("mirage_t_conv_dk", &[x, gy, dk], &params, g.kh * g.kw * g.c * cout);
+                self.groups("mirage_t_conv_dk", &[x, gy, dk], &params, (g.kh * g.kw * g.c * cout).div_ceil(8));
             }
             None => {
                 let params: Vec<u32> = base.iter().copied().chain(tail).collect();
-                self.threads("mirage_t_dwconv_dk", &[x, gy, dk], &params, g.kh * g.kw * g.c);
+                self.groups("mirage_t_dwconv_dk", &[x, gy, dk], &params, (g.kh * g.kw * g.c).div_ceil(8));
             }
         }
     }
@@ -264,7 +267,7 @@ impl<'d> Rec<'d> {
 
     /// Attention probabilities of every (query, head) row.
     pub(crate) fn attn_probs(&mut self, q: &DeviceBuffer, k: &DeviceBuffer, pr: &DeviceBuffer, s: &AttnShape) {
-        self.threads("mirage_t_attn_probs", &[q, k, pr], &Self::attn_params(s), s.tq * s.hq);
+        self.groups("mirage_t_attn_probs", &[q, k, pr], &Self::attn_params(s), s.tq * s.hq);
     }
 
     /// Attention output `P v`.
@@ -274,7 +277,7 @@ impl<'d> Rec<'d> {
 
     /// Attention score gradient.
     pub(crate) fn attn_ds(&mut self, pr: &DeviceBuffer, go: &DeviceBuffer, v: &DeviceBuffer, ds: &DeviceBuffer, s: &AttnShape) {
-        self.threads("mirage_t_attn_ds", &[pr, go, v, ds], &Self::attn_params(s), s.tq * s.hq);
+        self.groups("mirage_t_attn_ds", &[pr, go, v, ds], &Self::attn_params(s), s.tq * s.hq);
     }
 
     /// Attention query gradient.

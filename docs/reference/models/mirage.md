@@ -177,11 +177,15 @@ reader, JSON). `extract` adds `memory_reused`.
 
 ## Fine-tunes
 
-Mirage fine-tunes on the host through the Rust crate (`mirage::train`): full,
-head-only (reader, dense head, decoder) or LoRA on the dense projections, with
-AdamW, exact resume and per-term loss weights. A training run writes a model
-directory: `mirage.safetensors` (the trained weights, or the unchanged base for
-a LoRA run) and, for LoRA, `adapter.safetensors`. After
+Mirage fine-tunes through the Rust crate (`mirage::train`): full, head-only
+(reader, dense head, decoder) or LoRA on the dense projections, with AdamW, a
+global gradient clip, exact resume and per-term loss weights. The host trainer
+(`train::trainer::Trainer`) and the device trainer
+(`device::train::trainer::DevTrainer`, selected by handing it a `Device` on any
+backend: CPU JIT, Vulkan, CUDA) take the same settings and write the same files,
+so a run can be resumed on either. A training run writes a model
+directory: `mirage.safetensors` (the trained weights in checkpoint layout, or the
+unchanged base for a LoRA run) and, for LoRA, `adapter.safetensors`. After
 `train::prepare::make_servable` (which copies `config.json` and the deployment
 file beside them) every surface that opens a model directory serves it
 unchanged; an `adapter.safetensors` next to the weights is folded into them when
