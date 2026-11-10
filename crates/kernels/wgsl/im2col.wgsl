@@ -16,7 +16,7 @@
 //         pixel feeding output position hw for tap (ci,kh,kw), 0 outside padding.
 //
 // With this, a conv is a plain matmul:  y[Cout, Ho*Wo] = W[Cout, Cin*K*K] ·
-// colᵀ, i.e. `matmul_reg2(x=W, w=col)` → y[Cout, HW]. On a compute-bound GPU
+// colᵀ, i.e. `matmul_reg3(x=W, w=col)` → y[Cout, HW]. On a compute-bound GPU
 // (a P40's ridge point is in the tens of FLOP per byte) the register GEMM's
 // far higher share of peak dwarfs the collapse the
 // direct register-tiled conv (`conv_act_reg`) suffers on deep small-spatial

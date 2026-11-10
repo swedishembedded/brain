@@ -1802,8 +1802,9 @@ pub struct ConvTrSpec {
     /// At `stride > 1` the far-side `pad` crop hides output positions that
     /// genuinely receive input, and `output_padding` is exactly what un-crops
     /// them — which is why torch documents it as resolving a strided conv's
-    /// output-shape ambiguity rather than as padding. Verified against PyTorch:
-    /// the extra bottom/right band is NOT zeros.
+    /// output-shape ambiguity rather than as padding. Verified against PyTorch
+    /// at `pad >= 1`: the extra bottom/right band is NOT zeros there. At
+    /// `pad == 0` nothing was cropped, so the band receives no input and is zero.
     pub out_pad: u32,
     pub dilation: u32,
     pub groups: u32,

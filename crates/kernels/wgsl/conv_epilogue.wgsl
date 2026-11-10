@@ -12,9 +12,9 @@
 //
 // Conv-as-GEMM epilogue: per-channel affine (BN-eval collapsed) + activation.
 //   dst[c, hw] = act( src[c, hw] * sb[2c] + sb[2c+1] )
-// `src` is the raw matmul_reg2 conv output [Cout, Ho*Wo]; `sb` is the same
+// `src` is the raw matmul_reg3 conv output [Cout, Ho*Wo]; `sb` is the same
 // [scale|bias] pair-per-channel `conv_act_reg` consumes, so im2col +
-// matmul_reg2 + this epilogue reproduces the fused conv exactly. act: 0 = id,
+// matmul_reg3 + this epilogue reproduces the fused conv exactly. act: 0 = id,
 // 1 = ReLU, 2 = SiLU, 3 = sigmoid. One invocation per output element.
 
 struct Params { cout: u32, hw: u32, act: u32 };

@@ -55,9 +55,7 @@ impl Shape {
     }
     /// Output shape of a `K x K` conv with the given stride/pad.
     pub fn conv_out(&self, cout: u32, k: u32, stride: u32, pad: u32) -> Shape {
-        let ho = (self.h + 2 * pad - k) / stride + 1;
-        let wo = (self.w + 2 * pad - k) / stride + 1;
-        Shape::new(self.n, cout, ho, wo)
+        self.conv_out_dilated(cout, k, stride, pad, 1)
     }
     /// Output shape of a dilated `K x K` conv: the kernel's effective extent is
     /// `dilation*(k-1) + 1`. Equals [`Self::conv_out`] at `dilation == 1`.
@@ -69,7 +67,17 @@ impl Shape {
         pad: u32,
         dilation: u32,
     ) -> Shape {
+        // Unsigned arithmetic: a kernel wider than the padded input would wrap
+        // to a huge shape in a release build, so refuse it, and a zero stride.
+        assert!(stride >= 1, "conv stride must be at least 1");
+        assert!(k >= 1 && dilation >= 1, "conv kernel size and dilation must be at least 1 (k {k}, dilation {dilation})");
         let eff = dilation * (k - 1) + 1;
+        assert!(
+            eff <= self.h + 2 * pad && eff <= self.w + 2 * pad,
+            "conv kernel extent {eff} is larger than the padded input {}x{} (pad {pad})",
+            self.h + 2 * pad,
+            self.w + 2 * pad
+        );
         let ho = (self.h + 2 * pad - eff) / stride + 1;
         let wo = (self.w + 2 * pad - eff) / stride + 1;
         Shape::new(self.n, cout, ho, wo)
@@ -166,6 +174,24 @@ impl<'g> Ctx<'g> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "conv stride must be at least 1")]
+    fn conv_out_refuses_a_zero_stride() {
+        Shape::new(1, 3, 8, 8).conv_out(4, 3, 0, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "larger than the padded input")]
+    fn conv_out_refuses_a_kernel_larger_than_the_padded_input() {
+        Shape::new(1, 3, 4, 4).conv_out(4, 7, 1, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "larger than the padded input")]
+    fn conv_out_dilated_refuses_an_extent_larger_than_the_padded_input() {
+        Shape::new(1, 3, 6, 6).conv_out_dilated(4, 3, 1, 0, 4);
+    }
 
     #[test]
     fn conv_out_matches_the_standard_formula() {
