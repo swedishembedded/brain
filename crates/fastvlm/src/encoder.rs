@@ -5,9 +5,9 @@
 //!
 //! Five stages (RepMixer conv token-mixing in 0–2, self-attention in 3–4) built
 //! from the shared `Conv`/`ConvSpec` primitives + the attention kernels; no
-//! net-new device kernels. This module grows the encoder incrementally; today it
-//! establishes the conv pipeline + `Ctx` scaffolding (the same pattern yolo/depth
-//! use) and a smoke that runs a `Conv` in this crate.
+//! net-new device kernels. The module holds the whole tower: the conv pipeline
+//! and `Ctx` scaffolding (the same pattern yolo/depth use), the five stages and
+//! the conv_exp head.
 
 use std::sync::OnceLock;
 
@@ -819,7 +819,7 @@ impl Layer {
 /// 0–2, RepCPE + AttentionBlocks in 3–4) with PatchEmbed downsamples between → a
 /// conv_exp MobileOne (last-dim → last-dim·cls_ratio) → feature_select (NCHW →
 /// `[tokens, feature_dim]`). Total downsample 64×, so a 1024² image → 256 tokens ×
-/// 3072. (conv_exp's SE gate is a later refinement.)
+/// 3072. conv_exp takes mobileclip's squeeze-excite gate when `se_reduction > 0`.
 pub struct Encoder {
     layers: Vec<Layer>,
     feature_dim: u32,

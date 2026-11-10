@@ -258,8 +258,8 @@ use brain_testutil::{read_f32, read_i32};
         let CAP_IDS = testdata("vl/parity/fastvlm_cap_ids.bin");
         let CAP_GEN = testdata("vl/parity/fastvlm_cap_gen.bin");
         // Full image → caption on real weights: brain's decoder consumes the 256 HF
-        // image embeddings (mobileclip vision + projector — brain's own FastViTHD
-        // still needs SE/head import to reach feature parity), splices them into the
+        // image embeddings (mobileclip vision + projector; this test isolates the
+        // decoder, brain's own FastViTHD tower has its own parity test), splices them into the
         // residual stream (enable_mm_splice), and greedy-decodes. It must reproduce
         // the HF caption token-for-token — for the DOSBox logo: "A wooden frame with
         // the letters B, D, and S in it.". Validates the image-token splice + decode

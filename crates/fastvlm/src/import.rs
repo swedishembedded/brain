@@ -32,9 +32,9 @@ pub fn map_projector(hf: &str) -> Option<String> {
     .to_string())
 }
 
-/// HF FastViTHD vision-tower name → the tower-relative key (prefix stripped). The
-/// exact mapping onto the FastViTHD block builders is finalized with the encoder;
-/// this identifies tower tensors so coverage can account for them.
+/// HF FastViTHD vision-tower name → the tower-relative key (prefix stripped), so
+/// coverage can account for tower tensors. The mapping onto the FastViTHD block
+/// builders lives in `vision_import`.
 pub fn map_vision(hf: &str) -> Option<String> {
     hf.strip_prefix("model.vision_tower.vision_tower.model.").map(String::from)
 }

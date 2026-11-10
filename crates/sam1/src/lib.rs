@@ -40,10 +40,9 @@
 //!   mmproj loader emits, and [`import`] reuses that loader's own classifier --
 //!   no second name table. A header-only coverage gate runs against the real
 //!   shipped checkpoint when it is present.
-//! * **Not** done: `pos_embed` is used at its native grid only. Real
-//!   multi-resolution SAM bicubically interpolates it to the input's grid.
-//!   `TODO(deepseek-ocr): pos-embed interpolation for grids other than the
-//!   checkpoint's.`
+//! * `pos_embed` is resampled to grids other than the checkpoint's
+//!   (antialiased bicubic, as the reference does): `resample.rs` and
+//!   [`SamViTConfig::at_grid`].
 //! * **Not** done: batch > 1. Every span offset would have to stay 256 B
 //!   aligned across the batch stride as well, which `grid_h*grid_w*d_model`
 //!   generally is not.
