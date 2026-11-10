@@ -462,6 +462,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **im2col**: the unrolling of an image into a matrix with one row per window position, so that a convolution becomes one matrix product with the weights, at the price of a matrix about $k^2$ times the input in size. *([Convolution](v07-vision/02-convolution.md))*
 
+**image generation pipeline**: the sequence of stages that turns a request into an image (text encoding, optional reference encoding, the sampled denoising loop and the decode) together with the contracts between them: shapes, latent scale and packing, row order and position ids, schedule, randomness, and which weights are on which device when. *([Latent Diffusion Systems End to End](v08-image-generation/10-latent-diffusion-systems.md))*
+
 **image resampling**: computing an image of a new size by looking up each output pixel at a source coordinate fixed by a convention (half-pixel, corner-aligned or asymmetric) and combining nearby source pixels with a kernel that is widened when the image shrinks. *([Images as Data](v07-vision/01-images.md))*
 
 **image token splicing**: replacing, in the embedding rows of a prompt, the rows at the placeholder ids by the projector's rows computed from a picture, in order, with a backward pass that carries their gradient to the projector and zeroes them where they were. *([Vision-Language Models](v07-vision/09-vlms.md))*
@@ -529,6 +531,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **label**: the answer attached to an example, the quantity a supervised model is asked to predict. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **label-smoothing**: replacing the one-hot target by a mixture of it with the uniform distribution, so that the loss is smallest at a finite gap between the scores instead of only in the limit of infinite confidence. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
+
+**latent diffusion**: running the iterated denoiser in the compressed latent space of an autoencoder that was trained earlier and is frozen at generation time, so that the full-resolution decoder runs once at the end and not at every step. *([Latent Diffusion Systems End to End](v08-image-generation/10-latent-diffusion-systems.md))*
 
 **latent space**: the space of codes of a latent-variable model together with its prior and its maps, an encoder into it and a decoder out of it that is defined and trained at every point the prior can produce; nearby codes decode to similar readings, and a typical draw from the prior decodes to a plausible one. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
 
@@ -1095,6 +1099,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **warmup runs**: the leading runs of a repeated measurement whose cost is dominated by a start-up transient (building pipelines, first-touch memory, cold caches, a clock that has not ramped up) and is not the cost of the steady state; they are detected and kept out of the summary, or reported as a separate cold row. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
 **weight decay**: shrinking every weight toward zero by the fraction $\eta\lambda$ at each step, as a regularizer of a neural network; the L2 penalty of Volume II, applied directly to the weights in the decoupled form of chapter 7. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
+
+**weight streaming**: moving the weights of a stage, or of a window of blocks, onto a device when their turn comes and off when it ends, so that the device holds the largest part and not the sum of all of them, at the price of the bytes uploaded each time. *([Latent Diffusion Systems End to End](v08-image-generation/10-latent-diffusion-systems.md))*
 
 **weight-name mapping**: the table and rules that turn the tensor names, orientations and groupings of a published layout into those of an implementation: renames, cuts of fused matrices and transposes, checked before they run for coverage and shape. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
 

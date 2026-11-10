@@ -1,0 +1,42 @@
+<!-- source-sha256: 2f77f131ce2e35f254624ffd8efecf3031a956ad9a405b2f3d4f038475062b05 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 402" width="640" height="402">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="402" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="14" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-0.5</text>
+<line x1="152" y1="314" x2="152" y2="14" stroke="#edf2f7"/>
+<text x="152" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="246" y1="314" x2="246" y2="14" stroke="#edf2f7"/>
+<text x="246" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.5</text>
+<line x1="340" y1="314" x2="340" y2="14" stroke="#edf2f7"/>
+<text x="340" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="434" y1="314" x2="434" y2="14" stroke="#edf2f7"/>
+<text x="434" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1.5</text>
+<line x1="528" y1="314" x2="528" y2="14" stroke="#edf2f7"/>
+<text x="528" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="622" y1="314" x2="622" y2="14" stroke="#edf2f7"/>
+<text x="622" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2.5</text>
+<line x1="58" y1="314" x2="622" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="248.78" x2="622" y2="248.78" stroke="#edf2f7"/>
+<text x="52" y="252.78" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="183.57" x2="622" y2="183.57" stroke="#edf2f7"/>
+<text x="52" y="187.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<line x1="58" y1="118.35" x2="622" y2="118.35" stroke="#edf2f7"/>
+<text x="52" y="122.35" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">30</text>
+<line x1="58" y1="53.13" x2="622" y2="53.13" stroke="#edf2f7"/>
+<text x="52" y="57.13" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">40</text>
+<rect x="58" y="14" width="564" height="300" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="14" width="564" height="300"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="152,41.48 340,41.48 528,41.48"/><circle cx="152" cy="41.48" r="3.5" fill="#2b6cb0"/><circle cx="340" cy="41.48" r="3.5" fill="#2b6cb0"/><circle cx="528" cy="41.48" r="3.5" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="152,263.28 340,112.59 528,192.17"/><circle cx="152" cy="263.28" r="3.5" fill="#c05621"/><circle cx="340" cy="112.59" r="3.5" fill="#c05621"/><circle cx="528" cy="192.17" r="3.5" fill="#c05621"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="152,263.28 340,163.31 528,242.89"/><circle cx="152" cy="263.28" r="3.5" fill="#2f855a"/><circle cx="340" cy="163.31" r="3.5" fill="#2f855a"/><circle cx="528" cy="242.89" r="3.5" fill="#2f855a"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="152,314 340,163.31 528,242.89"/><circle cx="152" cy="314" r="3.5" fill="#9b2c2c"/><circle cx="340" cy="163.31" r="3.5" fill="#9b2c2c"/><circle cx="528" cy="242.89" r="3.5" fill="#9b2c2c"/><line x1="58" y1="157.48" x2="622" y2="157.48" stroke="#a0aec0" stroke-dasharray="4 4"/><text x="612.6" y="149.65" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">24 GiB card</text></g>
+<text x="340" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">phase: 0 the prompt is encoded, 1 the denoiser runs, 2 the image is decoded</text>
+<text x="14" y="164" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 164)">GiB on the card</text>
+<line x1="97.81" y1="373" x2="117.81" y2="373" stroke="#2b6cb0" stroke-width="2"/>
+<text x="123.81" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">all parts resident on one card</text>
+<line x1="304.01" y1="373" x2="324.01" y2="373" stroke="#c05621" stroke-width="2"/>
+<text x="330.01" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">one card, encoder resident throughout</text>
+<line x1="92.75" y1="390" x2="112.75" y2="390" stroke="#2f855a" stroke-width="2"/>
+<text x="118.75" y="394" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">one card, encoder in a phase of its own</text>
+<line x1="349" y1="390" x2="369" y2="390" stroke="#9b2c2c" stroke-width="2"/>
+<text x="375" y="394" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">two cards: the denoiser&#x27;s card</text>
+</svg>

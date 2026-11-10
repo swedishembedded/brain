@@ -1,0 +1,45 @@
+<!-- source-sha256: c1bec28aa77e534f60744f10ea6424675309c09bd84cab7215223a261a2872ae -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 430" width="960" height="430"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="960" height="430" fill="#ffffff"/>
+<ellipse cx="66" cy="120" rx="48" ry="28" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="66" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">prompt</text>
+<rect x="158" y="74" width="156" height="92" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="236" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">text encoder</text>
+<text x="236" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Qwen3-4B, 27 blocks</text>
+<text x="236" y="132.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2.9 TFLOP once</text>
+<text x="236" y="148.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4.30 GiB weights</text>
+<rect x="405" y="54" width="230" height="132" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">denoising loop</text>
+<text x="520" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 passes of the DiT, Euler steps</text>
+<text x="520" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">139.3 TFLOP, 7.32 GiB</text>
+<text x="520" y="140.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">start: noise, or (1 - s) x0 + s eps</text>
+<text x="520" y="156.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">after each step: blend under a mask</text>
+<rect x="708" y="74" width="124" height="92" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="770" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decoder</text>
+<text x="770" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">10.5 TFLOP once</text>
+<text x="770" y="140.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">10.90 GiB graph</text>
+<ellipse cx="896" cy="120" rx="42" ry="28" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="896" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image</text>
+<ellipse cx="66" cy="272" rx="48" ry="28" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="66" y="268.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reference</text>
+<text x="66" y="284.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image</text>
+<rect x="158" y="226" width="156" height="92" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="236" y="252.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">VAE encoder</text>
+<text x="236" y="268.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4.9 TFLOP once</text>
+<text x="236" y="284.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8.13 GiB graph</text>
+<text x="236" y="300.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x0 and its tokens</text>
+<line x1="117" y1="120" x2="155" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="317" y1="120" x2="402" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="359.5" y="111.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">512 rows</text>
+<line x1="638" y1="120" x2="705" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="671.5" y="111.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">tokens</text>
+<line x1="835" y1="120" x2="851" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="117" y1="272" x2="155" y2="272" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M314,272 L386,272 Q396,272 396,262 L396,220 Q396,210 406,210 L460,210 Q470,210 470,200 L470,189" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="560" y="304.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">x0: the start, the preserved region,</text>
+<text x="560" y="320.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">and the reference tokens of the joint sequence</text>
+<ellipse cx="700" cy="262" rx="48" ry="28" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="700" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mask</text>
+<text x="700" y="274.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(optional)</text>
+<path d="M700,234 L700,189" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="480" y="400.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">klein-4b, int8 tier, 1024 x 1024; the bytes are the layout the constructors upload</text>
+</svg>
