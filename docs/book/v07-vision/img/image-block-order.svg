@@ -1,0 +1,91 @@
+<!-- source-sha256: 27b843efc24f8d8e2dfa279214df3860c2fb8c77996172c1f2527116eafc44a2 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 330" width="960" height="330"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="960" height="330" fill="#ffffff"/>
+<text x="480" y="26.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">image block of the toy page: 2 tiles of 2 x 2 tokens, then a global view of 3 x 3 tokens</text>
+<rect x="219" y="50" width="38" height="38" rx="4" fill="#bee3f8" stroke="#4a5568" stroke-width="1"/>
+<text x="238" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P9</text>
+<text x="238" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">0</text>
+<rect x="263" y="50" width="38" height="38" rx="4" fill="#bee3f8" stroke="#4a5568" stroke-width="1"/>
+<text x="282" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P10</text>
+<text x="282" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">1</text>
+<rect x="307" y="50" width="38" height="38" rx="4" fill="#c6f6d5" stroke="#4a5568" stroke-width="1"/>
+<text x="326" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P13</text>
+<text x="326" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">2</text>
+<rect x="351" y="50" width="38" height="38" rx="4" fill="#c6f6d5" stroke="#4a5568" stroke-width="1"/>
+<text x="370" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P14</text>
+<text x="370" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">3</text>
+<rect x="395" y="50" width="38" height="38" rx="4" fill="#e2e8f0" stroke="#4a5568" stroke-width="1"/>
+<text x="414" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">nl</text>
+<text x="414" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">4</text>
+<rect x="439" y="50" width="38" height="38" rx="4" fill="#bee3f8" stroke="#4a5568" stroke-width="1"/>
+<text x="458" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P11</text>
+<text x="458" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">5</text>
+<rect x="483" y="50" width="38" height="38" rx="4" fill="#bee3f8" stroke="#4a5568" stroke-width="1"/>
+<text x="502" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P12</text>
+<text x="502" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">6</text>
+<rect x="527" y="50" width="38" height="38" rx="4" fill="#c6f6d5" stroke="#4a5568" stroke-width="1"/>
+<text x="546" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P15</text>
+<text x="546" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">7</text>
+<rect x="571" y="50" width="38" height="38" rx="4" fill="#c6f6d5" stroke="#4a5568" stroke-width="1"/>
+<text x="590" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P16</text>
+<text x="590" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">8</text>
+<rect x="615" y="50" width="38" height="38" rx="4" fill="#e2e8f0" stroke="#4a5568" stroke-width="1"/>
+<text x="634" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">nl</text>
+<text x="634" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">9</text>
+<rect x="659" y="50" width="38" height="38" rx="4" fill="#fefcbf" stroke="#4a5568" stroke-width="1"/>
+<text x="678" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P0</text>
+<text x="678" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">10</text>
+<rect x="703" y="50" width="38" height="38" rx="4" fill="#fefcbf" stroke="#4a5568" stroke-width="1"/>
+<text x="722" y="73.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P1</text>
+<text x="722" y="103.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">11</text>
+<rect x="219" y="116" width="38" height="38" rx="4" fill="#fefcbf" stroke="#4a5568" stroke-width="1"/>
+<text x="238" y="139.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P2</text>
+<text x="238" y="169.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">12</text>
+<rect x="263" y="116" width="38" height="38" rx="4" fill="#e2e8f0" stroke="#4a5568" stroke-width="1"/>
+<text x="282" y="139.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">nl</text>
+<text x="282" y="169.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">13</text>
+<rect x="307" y="116" width="38" height="38" rx="4" fill="#fefcbf" stroke="#4a5568" stroke-width="1"/>
+<text x="326" y="139.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P3</text>
+<text x="326" y="169.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">14</text>
+<rect x="351" y="116" width="38" height="38" rx="4" fill="#fefcbf" stroke="#4a5568" stroke-width="1"/>
+<text x="370" y="139.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P4</text>
+<text x="370" y="169.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">15</text>
+<rect x="395" y="116" width="38" height="38" rx="4" fill="#fefcbf" stroke="#4a5568" stroke-width="1"/>
+<text x="414" y="139.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P5</text>
+<text x="414" y="169.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">16</text>
+<rect x="439" y="116" width="38" height="38" rx="4" fill="#e2e8f0" stroke="#4a5568" stroke-width="1"/>
+<text x="458" y="139.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">nl</text>
+<text x="458" y="169.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">17</text>
+<rect x="483" y="116" width="38" height="38" rx="4" fill="#fefcbf" stroke="#4a5568" stroke-width="1"/>
+<text x="502" y="139.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P6</text>
+<text x="502" y="169.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">18</text>
+<rect x="527" y="116" width="38" height="38" rx="4" fill="#fefcbf" stroke="#4a5568" stroke-width="1"/>
+<text x="546" y="139.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P7</text>
+<text x="546" y="169.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">19</text>
+<rect x="571" y="116" width="38" height="38" rx="4" fill="#fefcbf" stroke="#4a5568" stroke-width="1"/>
+<text x="590" y="139.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">P8</text>
+<text x="590" y="169.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">20</text>
+<rect x="615" y="116" width="38" height="38" rx="4" fill="#e2e8f0" stroke="#4a5568" stroke-width="1"/>
+<text x="634" y="139.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">nl</text>
+<text x="634" y="169.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">21</text>
+<rect x="659" y="116" width="38" height="38" rx="4" fill="#fed7d7" stroke="#4a5568" stroke-width="1"/>
+<text x="678" y="139.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">sep</text>
+<text x="678" y="169.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">22</text>
+<rect x="60" y="190" width="38" height="38" rx="4" fill="#bee3f8" stroke="#4a5568" stroke-width="1"/>
+<text x="79" y="213.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle"></text>
+<text x="106" y="213.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">tile 0 token</text>
+<rect x="240" y="190" width="38" height="38" rx="4" fill="#c6f6d5" stroke="#4a5568" stroke-width="1"/>
+<text x="259" y="213.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle"></text>
+<text x="286" y="213.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">tile 1 token</text>
+<rect x="420" y="190" width="38" height="38" rx="4" fill="#fefcbf" stroke="#4a5568" stroke-width="1"/>
+<text x="439" y="213.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle"></text>
+<text x="466" y="213.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">global view token</text>
+<rect x="600" y="190" width="38" height="38" rx="4" fill="#e2e8f0" stroke="#4a5568" stroke-width="1"/>
+<text x="619" y="213.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle"></text>
+<text x="646" y="213.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">learned newline</text>
+<rect x="780" y="190" width="38" height="38" rx="4" fill="#fed7d7" stroke="#4a5568" stroke-width="1"/>
+<text x="799" y="213.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle"></text>
+<text x="826" y="213.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">learned separator</text>
+<text x="480" y="250.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">P&lt;k&gt; is projector row k (the encoder numbers the global view first, then the tiles); the small number below a cell is its row of the block.</text>
+<text x="480" y="266.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">Rows 0 to 3 read tile 0 and tile 1 side by side along the first row of the mosaic; the newline ends the mosaic row,</text>
+<text x="480" y="282.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">not the tile row.</text>
+</svg>

@@ -254,6 +254,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **distributional hypothesis**: the idea that tokens occurring in similar contexts have similar meanings, so a model trained to predict from context gives such tokens similar vectors. *([Embeddings](v05-sequences/03-embeddings.md))*
 
+**document layout**: the two-dimensional arrangement of a page's content, columns, lines, tables and their order of reading, which a model must carry from a grid of pixels into a sequence of rows and back out as an ordered transcript. *([Reading Documents](v07-vision/10-ocr.md))*
+
 **dot product**: the number $\sum_i a_i b_i$ obtained from two vectors of equal length, equal to $\lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert\cos\theta$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **dropout**: randomly setting each unit of a layer to zero with probability $p_{\mathrm{drop}}$ during training, and scaling the kept units by $1/(1 - p_{\mathrm{drop}})$ so that the expected output is unchanged; the layer is the identity at prediction time. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
@@ -634,6 +636,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **ONNX graph**: the interchange form of an exported graph: typed and shaped inputs and outputs, constant tensors (initializers), nodes in an order that defines every input before use, each naming an operator, its inputs, its output and its attributes, and an opset number that fixes the meaning of every operator. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
 
+**optical character recognition**: turning the pixels of a page into the characters that were printed on it; in this chapter a decoder writes the page as text while it attends to rows computed from the picture. *([Reading Documents](v07-vision/10-ocr.md))*
+
 **ordinary differential equation**: an equation $dx/dt = f(t, x)$ that gives the rate of change of an unknown function of one variable in terms of the function itself; its solution is a curve that follows the prescribed slopes from a given starting value. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
 **orthogonal matrix**: a square matrix whose columns are orthonormal, so that $\mathbf{Q}^\top\mathbf{Q} = \mathbf{I}$, its inverse is its transpose, and it preserves lengths and angles. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
@@ -979,6 +983,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **vision projector**: the small trained map, a linear layer or a pair of them around a GELU, sometimes folding a block of neighbouring patches into one row, that takes the rows of a vision tower to the width of a language model's embedding rows so that they can be read like the rows of words. *([Vision-Language Models](v07-vision/09-vlms.md))*
+
+**vision token compression**: reducing the number of tokens that stand for a picture before the stages whose cost grows with that number, the quadratic attention of a global tower and the decoder's prefill and cache; here by a fixed convolution that folds 16 positions into 1, and by the choice of how many views a page gets. *([Reading Documents](v07-vision/10-ocr.md))*
 
 **vision transformer**: a model that applies a stack of unmasked transformer blocks to a sequence of patch embeddings with position information added, and reads out a class token or the mean of the tokens. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 

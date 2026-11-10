@@ -135,4 +135,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 7. [Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md): How can one model segment any object you point at, and follow it through a video?
 8. [Contrastive Vision-Language Learning](v07-vision/08-clip.md): How can images and texts be placed in one space where matching pairs land close together?
 9. [Vision-Language Models](v07-vision/09-vlms.md): How do we give a language model eyes?
+10. [Reading Documents](v07-vision/10-ocr.md): How does a model read a page of text from pixels, and how few tokens can a page be squeezed into?
 <!-- /contents -->

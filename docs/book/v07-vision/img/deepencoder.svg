@@ -1,0 +1,76 @@
+<!-- source-sha256: cd5d70c2b5d52a42e466abb69f51e4c00b06814debdb29e6b7aaea527eb2caf3 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 490" width="1000" height="490"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="490" fill="#ffffff"/>
+<rect x="14" y="14" width="972" height="208" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="28" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">first generation: SAM, a 16x compressor, CLIP-L</text>
+<rect x="14" y="240" width="972" height="208" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="28" y="262" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">second generation: SAM, a 16x compressor, 256 learned queries</text>
+<rect x="32" y="82" width="136" height="96" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">page view</text>
+<text x="100" y="134.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1024 x 1024</text>
+<text x="100" y="150.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pixels</text>
+<rect x="192" y="82" width="136" height="96" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="260" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">SAM ViT-B</text>
+<text x="260" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4,096 patches</text>
+<text x="260" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 windowed,</text>
+<text x="260" y="158.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 global blocks</text>
+<rect x="352" y="82" width="136" height="96" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="420" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">compressor</text>
+<text x="420" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 convs, stride 2</text>
+<text x="420" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 tokens</text>
+<text x="420" y="158.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">of width 1024</text>
+<rect x="512" y="82" width="136" height="96" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="580" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">CLIP-L</text>
+<text x="580" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">257 rows</text>
+<text x="580" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24 global blocks</text>
+<text x="580" y="158.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">width 1024</text>
+<rect x="672" y="82" width="136" height="96" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="740" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">concat, Linear</text>
+<text x="740" y="134.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2048 to 1280</text>
+<text x="740" y="150.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 rows</text>
+<rect x="832" y="82" width="136" height="96" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="900" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image block</text>
+<text x="900" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 + 16 newline</text>
+<text x="900" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ 1 separator</text>
+<text x="900" y="158.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">= 273 rows</text>
+<line x1="171" y1="130" x2="189" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="331" y1="130" x2="349" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="491" y1="130" x2="509" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="651" y1="130" x2="669" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="811" y1="130" x2="829" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M420,82 L420,68 Q420,60 428,60 L732,60 Q740,60 740,68 L740,79" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="580" y="54.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the 256 compressor tokens also go to the concat</text>
+<rect x="32" y="308" width="136" height="96" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="344.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">page view</text>
+<text x="100" y="360.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1024 x 1024</text>
+<text x="100" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pixels</text>
+<rect x="192" y="308" width="136" height="96" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="260" y="336.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">SAM ViT-B</text>
+<text x="260" y="352.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4,096 patches</text>
+<text x="260" y="368.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 windowed,</text>
+<text x="260" y="384.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 global blocks</text>
+<rect x="352" y="308" width="136" height="96" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="420" y="336.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">compressor</text>
+<text x="420" y="352.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 convs, stride 2</text>
+<text x="420" y="368.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 tokens</text>
+<text x="420" y="384.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">of width 896</text>
+<rect x="512" y="308" width="136" height="96" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="580" y="336.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24 blocks, mask</text>
+<text x="580" y="352.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 tokens +</text>
+<text x="580" y="368.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 queries</text>
+<text x="580" y="384.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">= 512 rows</text>
+<rect x="672" y="308" width="136" height="96" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="740" y="336.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">keep the queries,</text>
+<text x="740" y="352.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Linear 896 to</text>
+<text x="740" y="368.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1280</text>
+<text x="740" y="384.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 rows</text>
+<rect x="832" y="308" width="136" height="96" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="900" y="344.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image block</text>
+<text x="900" y="360.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">257 rows:</text>
+<text x="900" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 + 1 separator</text>
+<line x1="171" y1="356" x2="189" y2="356" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="331" y1="356" x2="349" y2="356" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="491" y1="356" x2="509" y2="356" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="651" y1="356" x2="669" y2="356" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="811" y1="356" x2="829" y2="356" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="500" y="476.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">Both generations compress the 4,096 patches of SAM by 16 before the global stage, and feed the same 1280-wide decoder.</text>
+</svg>
