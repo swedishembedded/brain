@@ -112,9 +112,18 @@ pub struct BatchState {
     hist: DeviceBuffer,
     /// Positions fed so far.
     pos: usize,
+    /// The position as a device word (`u32`), advanced by every step so a recorded step can be replayed.
+    posbuf: DeviceBuffer,
+    /// First position whose picked token is appended to the history (the prompt length).
+    pub first: u32,
 }
 
 impl BatchState {
+    /// Count `steps` replayed positions.
+    pub fn advance(&mut self, steps: usize) {
+        self.pos += steps;
+    }
+
     /// Positions fed so far.
     pub fn position(&self) -> usize {
         self.pos
@@ -213,6 +222,8 @@ impl DeviceDecoder {
             ones: dev.buf(&vec![1.0; batch * maxt]),
             hist: dev.alloc(batch * maxt),
             pos: 0,
+            posbuf: dev.gpu().storage(1),
+            first: 0,
         }
     }
 
@@ -221,11 +232,31 @@ impl DeviceDecoder {
     /// logits, writes each row's greedy token (as `f32`) into `picked` and appends it to the history, so a
     /// step costs one submission and no host round trip. Engram hashing runs on the device from the history.
     pub fn step(&self, dev: &Device, st: &mut BatchState, cross: &DeviceCross, want_logits: bool, pick: Option<(&DeviceBuffer, &DeviceBuffer)>) -> Option<DeviceBuffer> {
+        let (mut s, logits) = self.build_step(dev, st, cross, want_logits, pick);
+        st.pos += 1;
+        dev.flush(&mut s);
+        logits
+    }
+
+    /// Record one step as a replayable tape: nothing in it depends on the position except through the device
+    /// word `posbuf`, which the step itself advances. Replay it once per position with `Gpu::replay_tape`
+    /// and count the replays with [`BatchState::advance`].
+    pub fn record_step(&self, dev: &Device, st: &BatchState, cross: &DeviceCross, want_logits: bool, pick: Option<(&DeviceBuffer, &DeviceBuffer)>) -> gpu_core::tape::Tape {
+        let g = dev.gpu();
+        g.set_declines_library(true);
+        g.begin_tape();
+        let (s, _) = self.build_step(dev, st, cross, want_logits, pick);
+        g.submit(&[], &s);
+        let tape = g.end_tape();
+        g.set_declines_library(false);
+        tape
+    }
+
+    fn build_step(&self, dev: &Device, st: &BatchState, cross: &DeviceCross, want_logits: bool, pick: Option<(&DeviceBuffer, &DeviceBuffer)>) -> (Vec<gpu_core::Step>, Option<DeviceBuffer>) {
         let c = &self.cfg;
         let (b, d, n) = (st.batch, c.dim, c.lanes);
         let pos = st.pos;
         assert!(pos + 1 < st.maxt, "the state holds {} positions", st.maxt);
-        st.pos += 1;
         let g = dev.gpu();
         let tables = c.engram_tables();
         let tok_buf = g.storage(b as u64);
@@ -233,8 +264,8 @@ impl DeviceDecoder {
 
         let mut s = Vec::new();
         let (bu, du, nu) = (b as u32, d as u32, n as u32);
-        dev.tok_at(&mut s, &st.hist, &tok_buf, bu, st.maxt as u32, pos as u32);
-        dev.engram_rows(&mut s, &st.hist, &rows_buf, (bu, st.maxt as u32, pos as u32), (tables as u32, c.hashes as u32, c.slots as u32), &c.orders);
+        dev.tok_at(&mut s, &st.hist, &tok_buf, &st.posbuf, bu, st.maxt as u32);
+        dev.engram_rows(&mut s, &st.hist, &rows_buf, &st.posbuf, (bu, st.maxt as u32), (tables as u32, c.hashes as u32, c.slots as u32), &c.orders);
         let mut lanes = dev.alloc(b * n * d);
         dev.embed_lanes(&mut s, &tok_buf, &self.embedding, &lanes, (bu, nu, du), (d as f32).sqrt());
         for (l, ly) in self.layers.iter().enumerate() {
@@ -249,7 +280,7 @@ impl DeviceDecoder {
             dev.mhc_mix(&mut s, &lanes, &maps, &u, (bu, nu, du));
             let y = dev.alloc(b * d);
             dev.copy_rows(&mut s, &u, (1, 0), &y, (1, 0), 1, bu, du);
-            self.block(dev, &mut s, l, st, cross, &y, &rows_buf, pos);
+            self.block(dev, &mut s, l, st, cross, &y, &rows_buf);
             let next = dev.alloc(b * n * d);
             dev.mhc_post(&mut s, &lanes, &y, &u, &maps, &next, (bu, nu, du));
             lanes = next;
@@ -262,16 +293,16 @@ impl DeviceDecoder {
             if let Some((ban, picked)) = pick {
                 dev.add(&mut s, ban, &logits, bu * self.logits_w.n());
                 dev.argmax(&mut s, &logits, picked, bu, self.logits_w.n());
-                dev.tok_put(&mut s, picked, &st.hist, bu, st.maxt as u32, pos as u32);
+                dev.tok_put(&mut s, picked, &st.hist, &st.posbuf, bu, st.maxt as u32, st.first);
             }
             logits
         });
-        dev.flush(&mut s);
-        out
+        dev.pos_inc(&mut s, &st.posbuf);
+        (s, out)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn block(&self, dev: &Device, s: &mut Vec<gpu_core::Step>, l: usize, st: &BatchState, cross: &DeviceCross, y: &DeviceBuffer, engram_rows: &DeviceBuffer, pos: usize) {
+    fn block(&self, dev: &Device, s: &mut Vec<gpu_core::Step>, l: usize, st: &BatchState, cross: &DeviceCross, y: &DeviceBuffer, engram_rows: &DeviceBuffer) {
         let c = &self.cfg;
         let (b, d) = (st.batch as u32, c.dim as u32);
         let ly = &self.layers[l];
@@ -285,7 +316,7 @@ impl DeviceDecoder {
             let key = dev.linear_new(s, &e.key, &gathered, b);
             let value = dev.linear_new(s, &e.value, &gathered, b);
             let conv = dev.alloc(st.batch * c.dim);
-            dev.taps(s, &value, &st.engram_v[site], &e.taps, &conv, (b, d, maxt), pos as u32, ENGRAM_TAPS as u32, ENGRAM_DILATION);
+            dev.taps(s, &value, &st.engram_v[site], &e.taps, &conv, &st.posbuf, (b, d, maxt), ENGRAM_TAPS as u32, ENGRAM_DILATION);
             dev.engram_gate(s, y, &key, &conv, b, d);
         }
         // Self-attention with causal taps and rotary positions.
@@ -296,18 +327,18 @@ impl DeviceDecoder {
         for (i, &width) in widths.iter().enumerate() {
             let raw = dev.linear_new(s, &ly.qkv[i], &h, b);
             let out = dev.alloc(st.batch * width as usize);
-            dev.taps(s, &raw, &cache.raw[i], &ly.taps[i], &out, (b, width, maxt), pos as u32, c.taps as u32, 1);
+            dev.taps(s, &raw, &cache.raw[i], &ly.taps[i], &out, &st.posbuf, (b, width, maxt), c.taps as u32, 1);
             conv.push(out);
         }
         let q = dev.zc_new(s, &conv[0], &ly.q_norm, b * heads, hd);
         let k = dev.zc_new(s, &conv[1], &ly.k_norm, b * kvh, hd);
-        dev.rope_pos(s, &q, b * heads, hd, pos as u32, c.rope);
-        dev.rope_pos(s, &k, b * kvh, hd, pos as u32, c.rope);
-        dev.row_write(s, &k, &cache.k, (b, kvh * hd, maxt), pos as u32);
-        dev.row_write(s, &conv[2], &cache.v, (b, kvh * vh, maxt), pos as u32);
+        dev.rope_pos(s, &q, &st.posbuf, b * heads, hd, c.rope);
+        dev.rope_pos(s, &k, &st.posbuf, b * kvh, hd, c.rope);
+        dev.row_write(s, &k, &cache.k, &st.posbuf, (b, kvh * hd, maxt));
+        dev.row_write(s, &conv[2], &cache.v, &st.posbuf, (b, kvh * vh, maxt));
         let att = dev.alloc(st.batch * (heads * vh) as usize);
-        let shape = AttnShape { batch: b, nq: 1, heads, kvh, hd, vd: vh, nk: maxt, visible: pos as u32 + 1 };
-        dev.attention(s, shape, &q, &cache.k, &cache.v, &st.ones, &att);
+        let shape = AttnShape { batch: b, nq: 1, heads, kvh, hd, vd: vh, nk: maxt, visible: u32::MAX };
+        dev.attention_at(s, shape, &q, &cache.k, &cache.v, &st.ones, &st.posbuf, &att);
         self.gated_residual(dev, s, y, &h, &att, &ly.gate, &ly.out, &ly.post_attn, ly.attn_gate, b, heads * vh);
 
         // Cross-attention over the image memory.
@@ -365,9 +396,13 @@ impl DeviceDecoder {
             .collect();
         let ban = dev.buf(&ban);
         let picked = dev.alloc(b);
-        for pos in 0..plen {
-            self.step(dev, &mut st, &cross, pos + 1 == plen, Some((&ban, &picked)));
+        st.first = plen as u32;
+        // Record one full step once and replay it for every position: the position lives in a device word.
+        let tape = self.record_step(dev, &st, &cross, true, Some((&ban, &picked)));
+        for _ in 0..plen {
+            dev.gpu().replay_tape(&tape);
         }
+        st.advance(plen);
         let eos = tok.eos_id();
         let mut out: Vec<Option<Generation>> = (0..b).map(|_| None).collect();
         let mut generated: Vec<Vec<u32>> = vec![Vec::new(); b];
@@ -376,8 +411,9 @@ impl DeviceDecoder {
             // Token `consumed` of every sequence is already in the history; run a window of steps, then read it.
             let take = WINDOW.min(budget + 1 - consumed.min(budget));
             for _ in 0..take {
-                self.step(dev, &mut st, &cross, true, Some((&ban, &picked)));
+                dev.gpu().replay_tape(&tape);
             }
+            st.advance(take);
             let history = st.history(dev);
             for i in 0..b {
                 for m in consumed..consumed + take {

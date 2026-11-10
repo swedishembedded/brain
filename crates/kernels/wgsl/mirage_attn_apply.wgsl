@@ -11,13 +11,14 @@
 // @dtype f32
 //
 // probs: [batch, nq, heads, nk]; v: [batch, nk, kvh, vd]; out: [batch, nq, heads, vd].
-// Params: batch, nq, heads, kvh, vd, nk, visible. Dispatch: batch*nq*heads*vd threads.
+// `visible` 0xFFFFFFFF means pos[0] + 1. Params: batch, nq, heads, kvh, vd, nk, visible. Dispatch: batch*nq*heads*vd threads.
 
 struct Params { batch: u32, nq: u32, heads: u32, kvh: u32, vd: u32, nk: u32, visible: u32 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       probs: array<f32>;
 @group(0) @binding(2) var<storage, read>       v: array<f32>;
 @group(0) @binding(3) var<storage, read_write> out: array<f32>;
+@group(0) @binding(4) var<storage, read>       pos: array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -29,8 +30,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let h = row % p.heads;
     let b = row / (p.heads * p.nq);
     let kv = h / (p.heads / p.kvh);
+    var visible = p.visible;
+    if (visible == 0xFFFFFFFFu) { visible = pos[0] + 1u; }
     var acc = 0.0;
-    for (var s = 0u; s < p.visible; s = s + 1u) {
+    for (var s = 0u; s < visible; s = s + 1u) {
         acc = acc + probs[row * p.nk + s] * v[((b * p.nk + s) * p.kvh + kv) * p.vd + i];
     }
     out[idx] = acc;

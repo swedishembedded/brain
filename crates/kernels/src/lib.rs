@@ -896,6 +896,8 @@ pub const MIRAGE_MHC_MAPS: &str = include_str!("../wgsl/mirage_mhc_maps.wgsl");
 pub const MIRAGE_MHC_MIX: &str = include_str!("../wgsl/mirage_mhc_mix.wgsl");
 /// `wgsl/mirage_mhc_post.wgsl`
 pub const MIRAGE_MHC_POST: &str = include_str!("../wgsl/mirage_mhc_post.wgsl");
+/// `wgsl/mirage_pos_inc.wgsl`
+pub const MIRAGE_POS_INC: &str = include_str!("../wgsl/mirage_pos_inc.wgsl");
 /// `wgsl/mirage_rope2d.wgsl`
 pub const MIRAGE_ROPE2D: &str = include_str!("../wgsl/mirage_rope2d.wgsl");
 /// `wgsl/mirage_rope_pos.wgsl`
@@ -1928,6 +1930,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_mhc_maps", MIRAGE_MHC_MAPS),
     ("mirage_mhc_mix", MIRAGE_MHC_MIX),
     ("mirage_mhc_post", MIRAGE_MHC_POST),
+    ("mirage_pos_inc", MIRAGE_POS_INC),
     ("mirage_rope2d", MIRAGE_ROPE2D),
     ("mirage_rope_pos", MIRAGE_ROPE_POS),
     ("mirage_row_write", MIRAGE_ROW_WRITE),

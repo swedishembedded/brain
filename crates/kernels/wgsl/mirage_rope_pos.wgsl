@@ -10,11 +10,12 @@
 // @quant none
 // @dtype f32
 //
-// t: [rows, hd] (a row is one head of one sequence). Params: rows, hd, pos, base (f32 bits). Dispatch: rows*hd/2 threads.
+// t: [rows, hd] (a row is one head of one sequence). The position is read from `pos[0]`. Params: rows, hd, base (f32 bits). Dispatch: rows*hd/2 threads.
 
-struct Params { rows: u32, hd: u32, pos: u32, base: f32 };
+struct Params { rows: u32, hd: u32, base: f32 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read_write> t: array<f32>;
+@group(0) @binding(2) var<storage, read>       pos: array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -24,7 +25,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     if (idx >= p.rows * half) { return; }
     let i = idx % half;
     let r = idx / half;
-    let angle = f32(p.pos) * exp(-log(p.base) * f32(2u * i) / f32(p.hd));
+    let angle = f32(pos[0]) * exp(-log(p.base) * f32(2u * i) / f32(p.hd));
     let s = sin(angle);
     let co = cos(angle);
     let at = r * p.hd + i;

@@ -13,19 +13,21 @@
 // For table t of order o (orders list, `hashes` tables per order): acc = seed * (order_index * hashes + h + 1);
 // for j < o: acc = (acc ^ tok[pos - j]) * prime (tokens before position 0 count as 0); acc ^= acc >> 15;
 // row = t * slots + acc % slots. The host decoder computes the same values in u64 masked to 32 bits.
-// hist: [batch, maxt]; rows: [batch, tables]. Params: batch, maxt, pos, tables, hashes, slots, o0, o1, o2, o3.
+// hist: [batch, maxt]; rows: [batch, tables]. The position is read from `pos[0]`. Params: batch, maxt, tables, hashes, slots, o0, o1, o2, o3.
 // Dispatch: batch*tables threads.
 
-struct Params { batch: u32, maxt: u32, pos: u32, tables: u32, hashes: u32, slots: u32, o0: u32, o1: u32, o2: u32, o3: u32 };
+struct Params { batch: u32, maxt: u32, tables: u32, hashes: u32, slots: u32, o0: u32, o1: u32, o2: u32, o3: u32 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       hist: array<u32>;
 @group(0) @binding(2) var<storage, read_write> rows: array<u32>;
+@group(0) @binding(3) var<storage, read>       pos_buf: array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
     let idx = gid.y * (nwg.x * 64u) + gid.x;
     if (idx >= p.batch * p.tables) { return; }
+    let pos = pos_buf[0];
     let t = idx % p.tables;
     let b = idx / p.tables;
     let oi = t / p.hashes;
@@ -37,11 +39,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     var acc = 0x9E3779B9u * (oi * p.hashes + hh + 1u);
     for (var j = 0u; j < order; j = j + 1u) {
         var tok = 0u;
-        if (p.pos >= j) { tok = hist[b * p.maxt + p.pos - j]; }
+        if (pos >= j) { tok = hist[b * p.maxt + pos - j]; }
         acc = (acc ^ tok) * 0x01000193u;
     }
     acc = acc ^ (acc >> 15u);
     var r = 0xFFFFFFFFu;
-    if (p.pos + 1u >= order) { r = t * p.slots + acc % p.slots; }
+    if (pos + 1u >= order) { r = t * p.slots + acc % p.slots; }
     rows[idx] = r;
 }

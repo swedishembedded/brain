@@ -56,6 +56,7 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_mhc_post", kernels::MIRAGE_MHC_POST),
     ("mirage_taps", kernels::MIRAGE_TAPS),
     ("mirage_tok_at", kernels::MIRAGE_TOK_AT),
+    ("mirage_pos_inc", kernels::MIRAGE_POS_INC),
     ("mirage_tok_put", kernels::MIRAGE_TOK_PUT),
     ("mirage_engram_rows", kernels::MIRAGE_ENGRAM_ROWS),
     ("mirage_sigmoid_mul", kernels::MIRAGE_SIGMOID_MUL),
@@ -87,6 +88,8 @@ fn kernel_list() -> Vec<(&'static str, &'static str)> {
 pub struct Device {
     ops: Ops,
     kernel: std::collections::HashMap<&'static str, usize>,
+    /// One word that position-reading kernels bind when their position is a parameter instead.
+    pub(crate) pos_dummy: DeviceBuffer,
 }
 
 impl Device {
@@ -103,7 +106,8 @@ impl Device {
             let index = ops.gpu().kernel_index(name).ok_or_else(|| format!("the device lacks kernel `{name}`"))?;
             kernel.insert(name, index);
         }
-        Ok(Device { ops, kernel })
+        let pos_dummy = ops.gpu().storage(1);
+        Ok(Device { ops, kernel, pos_dummy })
     }
 
     /// The kernel list a [`Gpu`] must be created with for [`Device::new`].

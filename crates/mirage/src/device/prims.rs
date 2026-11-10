@@ -163,15 +163,21 @@ impl Device {
     /// Masked grouped-query attention with the usual `1 / sqrt(hd)` scale, key-parallel:
     /// a scores pass, a row softmax and a weighted-sum pass, each with a thread per element.
     pub fn attention(&self, s: &mut Vec<Step>, a: AttnShape, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, key_mask: &DeviceBuffer, out: &DeviceBuffer) {
+        self.attention_at(s, a, q, k, v, key_mask, &self.pos_dummy, out);
+    }
+
+    /// [`Device::attention`] where `a.visible == u32::MAX` means `pos[0] + 1` keys (position in a buffer).
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention_at(&self, s: &mut Vec<Step>, a: AttnShape, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, key_mask: &DeviceBuffer, pos: &DeviceBuffer, out: &DeviceBuffer) {
         assert!(a.heads.is_multiple_of(a.kvh), "attention shape {a:?}");
         let scale = (1.0 / (a.hd as f32).sqrt()).to_bits();
         let rows = a.batch * a.nq * a.heads;
         let scores = self.alloc((rows * a.nk) as usize);
         let p = [a.batch, a.nq, a.heads, a.kvh, a.hd, a.nk, a.visible, scale];
-        self.push(s, "mirage_attn_scores", &[q, k, key_mask, &scores], &p, rows * a.nk);
+        self.push(s, "mirage_attn_scores", &[q, k, key_mask, &scores, pos], &p, rows * a.nk);
         s.push(self.gpu().dispatch(self.k("mirage_attn_softmax"), &[&scores], &[rows, a.nk], gpu_core::Dispatch::Workgroups(rows)));
         let p = [a.batch, a.nq, a.heads, a.kvh, a.vd, a.nk, a.visible];
-        self.push(s, "mirage_attn_apply", &[&scores, v, out], &p, rows * a.vd);
+        self.push(s, "mirage_attn_apply", &[&scores, v, out, pos], &p, rows * a.vd);
     }
 
     /// The single-kernel reference attention (serial over keys); the parity oracle for [`Device::attention`].
@@ -277,8 +283,8 @@ impl Device {
 
     /// Causal tap convolution at `pos`: `src` is the current raw row, which is also stored into `hist`.
     #[allow(clippy::too_many_arguments)]
-    pub fn taps(&self, s: &mut Vec<Step>, src: &DeviceBuffer, hist: &DeviceBuffer, taps: &DeviceBuffer, out: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32), pos: u32, ntaps: u32, dilation: u32) {
-        self.push(s, "mirage_taps", &[src, hist, taps, out], &[rows, w, maxt, pos, ntaps, dilation], rows * w);
+    pub fn taps(&self, s: &mut Vec<Step>, src: &DeviceBuffer, hist: &DeviceBuffer, taps: &DeviceBuffer, out: &DeviceBuffer, pos: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32), ntaps: u32, dilation: u32) {
+        self.push(s, "mirage_taps", &[src, hist, taps, out, pos], &[rows, w, maxt, ntaps, dilation], rows * w);
     }
 
     /// `out = att * sigmoid(gate)`.
@@ -287,13 +293,13 @@ impl Device {
     }
 
     /// `hist[b, pos] = src[b]`.
-    pub fn row_write(&self, s: &mut Vec<Step>, src: &DeviceBuffer, hist: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32), pos: u32) {
-        self.push(s, "mirage_row_write", &[src, hist], &[rows, w, maxt, pos], rows * w);
+    pub fn row_write(&self, s: &mut Vec<Step>, src: &DeviceBuffer, hist: &DeviceBuffer, pos: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32)) {
+        self.push(s, "mirage_row_write", &[src, hist, pos], &[rows, w, maxt], rows * w);
     }
 
     /// Rotary embedding of position `pos` on `rows` head vectors of width `hd`.
-    pub fn rope_pos(&self, s: &mut Vec<Step>, t: &DeviceBuffer, rows: u32, hd: u32, pos: u32, base: f32) {
-        self.push(s, "mirage_rope_pos", &[t], &[rows, hd, pos, base.to_bits()], rows * (hd / 2));
+    pub fn rope_pos(&self, s: &mut Vec<Step>, t: &DeviceBuffer, pos: &DeviceBuffer, rows: u32, hd: u32, base: f32) {
+        self.push(s, "mirage_rope_pos", &[t, pos], &[rows, hd, base.to_bits()], rows * (hd / 2));
     }
 
     /// The Hadamard-MLP middle stage in place on `z`; `logits` are the pre-softmax conditioning scores.
@@ -311,22 +317,27 @@ impl Device {
     pub fn argmax(&self, s: &mut Vec<Step>, x: &DeviceBuffer, out: &DeviceBuffer, m: u32, n: u32) {
         self.push(s, "argmax_row", &[x, out], &[m, n], m);
     }
-    /// `tok[b] = hist[b, pos]`.
-    pub fn tok_at(&self, s: &mut Vec<Step>, hist: &DeviceBuffer, tok: &DeviceBuffer, batch: u32, maxt: u32, pos: u32) {
-        self.push(s, "mirage_tok_at", &[hist, tok], &[batch, maxt, pos], batch);
+    /// `tok[b] = hist[b, pos[0]]`.
+    pub fn tok_at(&self, s: &mut Vec<Step>, hist: &DeviceBuffer, tok: &DeviceBuffer, pos: &DeviceBuffer, batch: u32, maxt: u32) {
+        self.push(s, "mirage_tok_at", &[hist, tok, pos], &[batch, maxt], batch);
     }
 
-    /// `hist[b, pos + 1] = picked[b]`.
-    pub fn tok_put(&self, s: &mut Vec<Step>, picked: &DeviceBuffer, hist: &DeviceBuffer, batch: u32, maxt: u32, pos: u32) {
-        self.push(s, "mirage_tok_put", &[picked, hist], &[batch, maxt, pos], batch);
+    /// `hist[b, pos[0] + 1] = picked[b]` once `pos[0] + 1 >= first`.
+    pub fn tok_put(&self, s: &mut Vec<Step>, picked: &DeviceBuffer, hist: &DeviceBuffer, pos: &DeviceBuffer, batch: u32, maxt: u32, first: u32) {
+        self.push(s, "mirage_tok_put", &[picked, hist, pos], &[batch, maxt, first], batch);
+    }
+
+    /// `pos[0] += 1`.
+    pub fn pos_inc(&self, s: &mut Vec<Step>, pos: &DeviceBuffer) {
+        self.push(s, "mirage_pos_inc", &[pos], &[0], 1);
     }
 
     /// Engram table rows of position `pos`; `orders` has at most four entries.
     #[allow(clippy::too_many_arguments)]
-    pub fn engram_rows(&self, s: &mut Vec<Step>, hist: &DeviceBuffer, rows: &DeviceBuffer, (batch, maxt, pos): (u32, u32, u32), (tables, hashes, slots): (u32, u32, u32), orders: &[usize]) {
+    pub fn engram_rows(&self, s: &mut Vec<Step>, hist: &DeviceBuffer, rows: &DeviceBuffer, pos: &DeviceBuffer, (batch, maxt): (u32, u32), (tables, hashes, slots): (u32, u32, u32), orders: &[usize]) {
         assert!(orders.len() <= 4, "at most four engram orders");
         let o = |i: usize| orders.get(i).copied().unwrap_or(0) as u32;
-        self.push(s, "mirage_engram_rows", &[hist, rows], &[batch, maxt, pos, tables, hashes, slots, o(0), o(1), o(2), o(3)], batch * tables);
+        self.push(s, "mirage_engram_rows", &[hist, rows, pos], &[batch, maxt, tables, hashes, slots, o(0), o(1), o(2), o(3)], batch * tables);
     }
 }
 

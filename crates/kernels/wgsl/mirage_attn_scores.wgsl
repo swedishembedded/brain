@@ -12,7 +12,8 @@
 //
 // q: [batch, nq, heads, hd]; k: [batch, nk, kvh, hd]; key_mask: [batch, nk]; scores: [batch, nq, heads, nk].
 // Together with mirage_attn_softmax and mirage_attn_apply this is mirage_attn split so every key and output
-// element has its own thread. Params: batch, nq, heads, kvh, hd, nk, visible, scale (f32 bits).
+// element has its own thread. `visible` 0xFFFFFFFF means pos[0] + 1 (a causal decoder step whose position lives in a buffer, so it can be replayed).
+// Params: batch, nq, heads, kvh, hd, nk, visible, scale (f32 bits).
 // Dispatch: batch*nq*heads*nk threads.
 
 struct Params { batch: u32, nq: u32, heads: u32, kvh: u32, hd: u32, nk: u32, visible: u32, scale: f32 };
@@ -21,6 +22,7 @@ struct Params { batch: u32, nq: u32, heads: u32, kvh: u32, hd: u32, nk: u32, vis
 @group(0) @binding(2) var<storage, read>       k: array<f32>;
 @group(0) @binding(3) var<storage, read>       key_mask: array<f32>;
 @group(0) @binding(4) var<storage, read_write> scores: array<f32>;
+@group(0) @binding(5) var<storage, read>       pos: array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -31,8 +33,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let row = idx / p.nk;
     let h = row % p.heads;
     let b = row / (p.heads * p.nq);
+    var visible = p.visible;
+    if (visible == 0xFFFFFFFFu) { visible = pos[0] + 1u; }
     var r = -1.0e30;
-    if (s < p.visible && key_mask[b * p.nk + s] != 0.0) {
+    if (s < visible && key_mask[b * p.nk + s] != 0.0) {
         let kv = h / (p.heads / p.kvh);
         let kb = ((b * p.nk + s) * p.kvh + kv) * p.hd;
         var dot = 0.0;
