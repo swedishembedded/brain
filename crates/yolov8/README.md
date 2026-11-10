@@ -1,9 +1,9 @@
-# brain-yolo
+# brain-yolov8
 
 A from-scratch YOLOv8-style anchor-free object detector for the `brain`
 framework: CSP backbone → PAN-FPN neck → decoupled DFL head, with WGSL kernels
 run on the CPU backend (Cranelift JIT). Forward + backward are validated end to
-end by a finite-difference gradient check (`tests/p3_gradcheck.rs`).
+end by a finite-difference gradient check (`tests/it/p3_gradcheck.rs`).
 
 This document covers the **`brain yolo` CLI** (train / eval / detect /
 fine-tune on a synthetic dataset), the **`brain run` runtime integration**
@@ -14,7 +14,7 @@ reference-parity test.
 
 ---
 
-## CLI: `brain yolo …`
+## CLI: `brain yolov8 …`
 
 The detector trains on the synthetic detection dataset (`brain data gen detect`
 → a `Dataset::Detect` dir of RGB shapes + exact GT boxes). The tiny config's
@@ -27,7 +27,7 @@ images upload directly (no letterbox) during training. Everything runs on the
 BRAIN_DEVICE=cpu brain data gen detect --out data/detect --n 64
 
 # 2. Train the tiny YOLOv8 graph (real detection loss: assigner+BCE+CIoU+DFL).
-BRAIN_DEVICE=cpu brain yolo train data/detect --out out/yolo.safetensors \
+BRAIN_DEVICE=cpu brain yolov8 train data/detect --out out/yolo.safetensors \
     --steps 150 --batch 4 --lr 3e-3
 #   flags: --steps --batch --lr --wd --nc --input --seed
 #   prints the loss every 10 steps; saves a `.safetensors` checkpoint at the end.
@@ -39,21 +39,21 @@ BRAIN_DEVICE=cpu brain yolo train data/detect --out out/yolo.safetensors \
 #    `--dump-preds F.jsonl` writes one line per image with its index, ground-truth
 #    boxes and predictions ({class, score, xyxy}) for offline analysis such as a
 #    clustered bootstrap.
-BRAIN_DEVICE=cpu brain yolo eval --weights out/yolo.safetensors --data data/detect \
+BRAIN_DEVICE=cpu brain yolov8 eval --weights out/yolo.safetensors --data data/detect \
     --conf 0.001 --iou 0.45 --split all --dump-preds out/preds.jsonl
 
 # Where a training step spends its time: --kernel-profile prints the host stage times
 # (forward, loss, backward, optimiser) for every step and, for the second step, a
 # per-kernel DEVICE-time table. The first step pays one-time kernel compilation.
---kernel-profile brain yolo train data/detect --out out/yolo.safetensors --steps 3 --batch 4
+--kernel-profile brain yolov8 train data/detect --out out/yolo.safetensors --steps 3 --batch 4
 
 # 4. Detect on one image — a binary PPM (P6) file OR a dataset dir (image 0):
-BRAIN_DEVICE=cpu brain yolo detect --weights out/yolo.safetensors --image data/detect \
+BRAIN_DEVICE=cpu brain yolov8 detect --weights out/yolo.safetensors --image data/detect \
     --conf 0.1 --iou 0.45
 #   prints one JSON line per detection: [x1,y1,x2,y2,conf,class]
 
 # 5. Fine-tune from a pretrained checkpoint (e.g. an exported yolov8n.brain.safetensors):
-BRAIN_DEVICE=cpu brain yolo fine-tune data/detect --weights pretrained.safetensors \
+BRAIN_DEVICE=cpu brain yolov8 fine-tune data/detect --weights pretrained.safetensors \
     --out out/yolo-ft.safetensors --steps 150
 #   tensors present in BOTH checkpoint and model (matched by element count) are
 #   copied in; the rest keep their random init (e.g. a head with a different nc).
@@ -138,7 +138,7 @@ python3 tools/yolo_export/export_yolov8.py \
 `brain_names.txt` is regenerated from Rust (the canonical source of truth):
 
 ```bash
-cargo test -p brain-yolo --test p8_names dump_brain_names -- --nocapture \
+cargo test -p brain-yolov8 --test it p8_names dump_brain_names -- --nocapture \
   | grep -E '^(backbone|neck|head)\.' > tools/yolo_export/brain_names.txt
 ```
 
@@ -316,7 +316,7 @@ python3 tools/yolo_export/export_yolov8.py --weights yolov8n.pt \
     --acts-out yolov8n.acts.safetensors                   # per-stage activations
 YOLO_PARITY_WEIGHTS=yolov8n.brain.safetensors \
 YOLO_PARITY_ACTS=yolov8n.acts.safetensors \
-    cargo test -p brain-yolo --test parity -- --nocapture
+    cargo test -p brain-yolov8 --test it parity -- --nocapture
 ```
 
 ---
@@ -329,12 +329,12 @@ brain CI box** (no torch/GPU; a 640 forward on the CPU JIT is slow), so it is
 
 ```bash
 # Skips (prints a SKIP notice, returns OK) when the env var is unset/missing:
-cargo test -p brain-yolo --test parity
+cargo test -p brain-yolov8 --test it parity
 
 # Runs on a dev machine once you have the exported files:
 YOLO_PARITY_WEIGHTS=yolov8n.brain.safetensors \
 YOLO_PARITY_ACTS=yolov8n.acts.safetensors \
-    cargo test -p brain-yolo --test parity -- --nocapture
+    cargo test -p brain-yolov8 --test it parity -- --nocapture
 ```
 
 When the files exist the test:
@@ -365,8 +365,8 @@ When the files exist the test:
 ## Tests you CAN run here (no torch / no GPU)
 
 ```bash
-cargo test -p brain-yolo --test p8_names   # config builds; 271 names match the map
-cargo test -p brain-yolo --test parity     # compiles; skips cleanly (env unset)
+cargo test -p brain-yolov8 --test it p8_names   # config builds; 271 names match the map
+cargo test -p brain-yolov8 --test it parity     # compiles; skips cleanly (env unset)
 python3 -m py_compile tools/yolo_export/export_yolov8.py
 python3 tools/yolo_export/export_yolov8.py --check-map-only \
     --brain-names tools/yolo_export/brain_names.txt   # 271 names, 1:1

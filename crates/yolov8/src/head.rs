@@ -19,10 +19,9 @@
 //! [`Head`] wires the three scales; [`Head::forward`] runs them. The raw logit
 //! maps are concatenated across scales into `[A, nc]` (cls) and
 //! `[A, 4*reg_max]` (box) by [`Head::cls_logits_flat`] / [`Head::box_logits_flat`]
-//! (`A = sum of H*W over the 3 scales`) — the network's raw output. DFL decode
-//! (the `dfl_decode` kernel) and the anchor/stride tables are STUBBED here
-//! ([`Head::anchors`]/[`Head::strides`] return the geometry only); the full
-//! decode->box path is P6.
+//! (`A = sum of H*W over the 3 scales`): the network's raw output. The anchor
+//! and stride tables ([`Head::anchors`], [`Head::anchor_strides`]) give the
+//! geometry the DFL decode and box decode in `infer.rs` use.
 //!
 //! Param-naming: per scale `s`, the cls branch is `head.{s}.cls.0` / `.1` (the
 //! two Convs) + `head.{s}.cls.2.{weight,bias}` (the final biased 1x1); the reg
@@ -114,7 +113,7 @@ impl Branch {
         self.c2.out()
     }
 
-    /// Propagate the eval/train BN toggle to the two Convs (the final bias-free
+    /// Propagate the eval/train BN toggle to the two Convs (the final biased
     /// 1x1 has no BN, so nothing to flip there).
     pub fn set_eval(&self, eval: bool) {
         self.c0.set_eval(eval);
@@ -122,7 +121,7 @@ impl Branch {
     }
 
     /// Propagate the BN running-stat update toggle to the two Convs (the final
-    /// bias-free 1x1 has no BN, so nothing to toggle there).
+    /// biased 1x1 has no BN, so nothing to toggle there).
     pub fn set_update_running(&self, on: bool) {
         self.c0.set_update_running(on);
         self.c1.set_update_running(on);
@@ -393,8 +392,8 @@ impl Head {
         v
     }
 
-    /// STUB (P6): per-anchor stride, scale-major (each anchor inherits its
-    /// scale's stride). Full decode->box uses these to scale DFL expectations.
+    /// Per-anchor stride, scale-major (each anchor inherits its scale's
+    /// stride). Full decode->box uses these to scale DFL expectations.
     pub fn anchor_strides(&self) -> Vec<u32> {
         let mut v = Vec::with_capacity(self.num_anchors() as usize);
         for (s, sh) in self.in_shapes.iter().enumerate() {
