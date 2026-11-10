@@ -14,13 +14,13 @@ use brain_testutil::testdata;
 /// `default_z_image_sigmas`, which reads like duplication and invites a
 /// cleanup. It is not interchangeable: the two spellings associate their float
 /// operations differently, and f32 multiply/divide is not associative, so they
-/// disagree by one ULP for 1979 of the first 2001 step counts.
+/// disagree by an ULP or two for 1979 of the first 2001 step counts.
 ///
-/// The parity test below only exercises 4 and 50 steps, and both happen to
-/// fall in the 22 that agree - so it would not catch the swap, and neither
-/// would a spot check at other round numbers. This does, without needing a
-/// fixture, so the failure arrives at the refactor rather than at whatever
-/// consumes the goldens later.
+/// The ones that agree are 0 to 5 and the powers of two and one past them, so
+/// the parity test's 4-step cases would not catch the swap; its 50-step case
+/// would, but only where the fixture exists. This catches it without one, so
+/// the failure arrives at the refactor rather than at whatever consumes the
+/// goldens later.
 #[test]
 fn klein_ramp_is_not_the_shared_linspace_spelling() {
     let seq = (1024 / 16) * (1024 / 16);

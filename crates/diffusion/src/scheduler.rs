@@ -4,7 +4,9 @@
 //! Flow-matching (rectified-flow) Euler-discrete scheduler.
 //!
 //! A faithful port of diffusers' `FlowMatchEulerDiscreteScheduler` for the
-//! static-shift case used by Z-Image and FLUX.2 (`use_dynamic_shifting=false`).
+//! static-shift case (`use_dynamic_shifting=false`). Z-Image drives it with
+//! `shift: 1.0` over sigmas it has already shifted; FLUX.1 and FLUX.2 step
+//! their own `N+1`-entry lists directly instead.
 //! Reference: `resources/image-models/common/diffusers/src/diffusers/schedulers/
 //! scheduling_flow_match_euler_discrete.py`.
 //!
@@ -212,18 +214,20 @@ pub fn time_shift_exponential(mu: f32, sigmas: &[f32]) -> Vec<f32> {
 }
 
 /// The FLUX.2 Klein sigma schedule: `linspace(1, 1/N, N)` exponentially
-/// shifted by [`empirical_mu`], with the terminal 0 appended (`N+1` entries) -
-/// feed straight into [`FlowMatchEulerScheduler::set_timesteps`] with
-/// `shift: 1.0` (the shift is already applied).
+/// shifted by [`empirical_mu`], with the terminal 0 appended (`N+1` entries).
+/// Step it directly (`dt = sigmas[i+1] - sigmas[i]`), as `flux2::pipeline`
+/// does: [`FlowMatchEulerScheduler::set_timesteps`] appends its own terminal
+/// 0, so feeding it this list would add a step at `σ = 0`.
 ///
 /// The `base` below spells out the same ramp [`default_z_image_sigmas`] gives,
 /// and unifying the two is a standing temptation. **Do not**, without moving
 /// the FLUX.2 goldens deliberately and in the same change. The two spellings
 /// associate their float ops differently - `(i * span) / (n-1)` here against
 /// `((b - a) / (n-1)) * i` in [`linspace`] - and f32 multiply/divide is not
-/// associative, so they disagree by one ULP (5.96e-8) for 1979 of the first
-/// 2001 step counts. The handful that do agree includes the small round
-/// numbers a spot check reaches for, which is exactly how this reads as
+/// associative, so they disagree by an ULP or two (5.96e-8 each) for 1979 of
+/// the first 2001 step counts. The handful that do agree (0 to 5, and the
+/// powers of two and one past them) includes the small round numbers a spot
+/// check reaches for, which is exactly how this reads as
 /// duplication when it is really a second, load-bearing rounding.
 pub fn klein_sigmas(num_steps: usize, image_seq_len: usize) -> Vec<f32> {
     let n = num_steps;
