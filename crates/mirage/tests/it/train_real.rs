@@ -239,6 +239,32 @@ fn a_lora_fine_tune_is_served_by_the_model_and_equals_the_training_path() {
 
 #[test]
 #[ignore = "acceptance experiment: minutes of host compute"]
+fn a_resumed_run_on_the_released_weights_ends_exactly_where_the_uninterrupted_run_does() {
+    let Some(e) = env("resume") else { return };
+    let train = prepared(&e, &e.coco, &records(&e.coco, "train", 3));
+    let make = || trainer(&e, Mode::Heads(vec![Head::Dense, Head::Reader]), weights(1.0, 1.0, 1.0, 1.0, 0.0), 1e-4);
+    let step = |t: &mut Trainer, k: usize| {
+        t.step(std::slice::from_ref(&train[k])).unwrap();
+    };
+    let mut straight = make();
+    (0..3).for_each(|k| step(&mut straight, k));
+    let mut first = make();
+    (0..2).for_each(|k| step(&mut first, k));
+    let dir = std::env::temp_dir().join(format!("mirage-resume-{}", std::process::id()));
+    first.save(&dir).unwrap();
+    let mut cfg = TrainConfig::new(Mode::Heads(vec![Head::Dense, Head::Reader]));
+    cfg.weights = weights(1.0, 1.0, 1.0, 1.0, 0.0);
+    cfg.lr = 1e-4;
+    let mut resumed = Trainer::resume(&dir, cfg).unwrap();
+    step(&mut resumed, 2);
+    let identical = resumed.checkpoint().tensors == straight.checkpoint().tensors;
+    println!("RESULT resume: weights after step 3 identical to the uninterrupted run: {identical}");
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(identical);
+}
+
+#[test]
+#[ignore = "acceptance experiment: minutes of host compute"]
 fn step_time_probe() {
     let Some(e) = env("step_time_probe") else { return };
     let recs = records(&e.coco, "train", 2);
