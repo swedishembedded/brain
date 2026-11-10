@@ -93,7 +93,7 @@ fn a_device_batch_extracts_a_form_as_the_host_does() {
     let Some(cats) = crate::decoder::golden("device extract", "cats") else { return };
     crate::common::cap_threads();
     let gpu = gpu_core::Gpu::new(&Device::kernels());
-    let exact = gpu.kind().to_string() == "cpu";
+    let exact = gpu.kind() == "cpu";
     let host = Mirage::open(&dir).unwrap();
     let model = MirageModel::new(Mirage::open(&dir).unwrap(), gpu).unwrap();
     let rgb: Vec<u8> = cats["input_rgb"].iter().map(|&v| v as u8).collect();
@@ -149,7 +149,7 @@ fn describe_throughput_over_batch_size() {
     let (Some(cats), Some(text)) = (crate::decoder::golden("throughput", "cats"), crate::decoder::golden("throughput", "text")) else { return };
     crate::common::cap_threads();
     let gpu = gpu_core::Gpu::new(&Device::kernels());
-    if gpu.kind().to_string() == "cpu" {
+    if gpu.kind() == "cpu" {
         brain_testutil::skip_unavailable("throughput: the CPU backend is not a throughput target");
         return;
     }

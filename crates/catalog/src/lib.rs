@@ -57,6 +57,7 @@ pub mod resident_cosyvoice;
 pub mod resident_decision;
 pub mod resident_deepseekvl;
 pub mod resident_minicpmv;
+pub mod resident_mirage;
 pub mod resident_depth;
 pub mod resident_florence2;
 pub mod resident_flux1;
@@ -646,6 +647,15 @@ pub fn models() -> Vec<ModelEntry> {
             },
             spec: Some(("florence2", &florence2::spec::Florence2Spec)),
             resident: crate::resident_in_store!(crate::resident_florence2::Florence2Resident::from_env),
+        },
+        ModelEntry {
+            manifest: mirage::caps::manifest,
+            provider: |assembly: &Assembly| {
+                let dir = role_dir(assembly, "weights")?;
+                Ok(Arc::new(mirage::caps::MirageProvider::new(dir)) as Arc<dyn Provider>)
+            },
+            spec: Some(("mirage", &mirage::resolver::MirageSpec)),
+            resident: crate::resident_in_store!(crate::resident_mirage::MirageResident::from_env),
         },
         ModelEntry {
             manifest: arcface::caps::manifest,

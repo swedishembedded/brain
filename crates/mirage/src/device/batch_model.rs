@@ -34,6 +34,9 @@ use crate::vision::ops::valid_cells;
 use crate::vision::preprocess::{canvas, letterbox, Resized};
 use crate::vision::reader::{crop_rect, decode_windows, strip_from_crop, windows};
 
+/// A crop rectangle `(x0, y0, x1, y1)` in source pixels.
+type CropRect = (usize, usize, usize, usize);
+
 /// An RGB input image.
 #[derive(Debug, Clone, Copy)]
 pub struct Image<'a> {
@@ -334,7 +337,7 @@ impl MirageModel {
 
     /// Read many text lines at once: crops become strips, all windows of all strips run through the reader in
     /// batches, and the CTC path of each strip is collapsed on the host. `None` where a crop is unusable.
-    fn read_lines(&self, jobs: &[(Image, (usize, usize, usize, usize))]) -> Vec<Option<String>> {
+    fn read_lines(&self, jobs: &[(Image, CropRect)]) -> Vec<Option<String>> {
         const WINDOWS_PER_CALL: usize = 256;
         let strips: Vec<Option<crate::vision::preprocess::Resized>> = jobs
             .iter()

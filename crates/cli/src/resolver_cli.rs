@@ -128,6 +128,7 @@ fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R
         "arcface" => Some(f(&arcface::spec::ArcFaceSpec)),
         "clip" => Some(f(&clip::spec::ClipSpec)),
         "florence2" => Some(f(&florence2::spec::Florence2Spec)),
+        "mirage" => Some(f(&mirage::resolver::MirageSpec)),
         "flux1" => Some(f(&flux1::spec::Flux1Spec)),
         "llava" => Some(f(&llava::spec::LlavaSpec)),
         "pulid" => Some(f(&pulid::spec::PulidSpec)),

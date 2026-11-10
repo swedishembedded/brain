@@ -44,7 +44,11 @@ fn static_manifests() -> Vec<serde_json::Value> {
 ///
 /// `deepseek-ai/DeepSeek-OCR-2` is the same carve-out for the same reason,
 /// on v1's successor (`crates/deepseekocr2`).
-const DELIBERATE_NON_RESERVED_IDS: &[&str] = &["deepseek-ai/DeepSeek-OCR", "deepseek-ai/DeepSeek-OCR-2"];
+///
+/// `Cactus-Compute/mirage` is the same again: the released checkpoint is
+/// exactly one upstream repository (weights, config and the deployment file
+/// that holds its tokenizer), so its crate pins the case-exact upstream name.
+const DELIBERATE_NON_RESERVED_IDS: &[&str] = &["deepseek-ai/DeepSeek-OCR", "deepseek-ai/DeepSeek-OCR-2", "Cactus-Compute/mirage"];
 
 #[test]
 fn every_static_model_id_is_a_valid_ref_under_a_reserved_vendor() {

@@ -198,6 +198,10 @@ fn check_image(inv: &Invocation) -> Result<(), String> {
     if w == 0 || h == 0 || w.saturating_mul(h) > capability::blob::MAX_IMAGE_PIXELS {
         return Err(format!("'image' is {w}x{h}, at most {} pixels", capability::blob::MAX_IMAGE_PIXELS));
     }
+    let expected = w * h * 3 * std::mem::size_of::<f32>() as u64;
+    if blob.bytes.len() as u64 != expected {
+        return Err(format!("'image' payload is {} bytes, a {w}x{h} RGB f32 image is {expected}", blob.bytes.len()));
+    }
     Ok(())
 }
 
@@ -512,6 +516,8 @@ mod tests {
         let empty = Blob::new(Media::Image, Vec::new()).with_meta(json!({"w": 0, "h": 4, "c": 3}));
         assert!(check_request("describe", &Invocation::new().blob("image", empty)).is_err());
         assert!(check_request("describe", &Invocation::new()).is_err(), "the image is required");
+        let short = Blob::new(Media::Image, vec![0; 12]).with_meta(json!({"w": 4, "h": 4, "c": 3}));
+        assert!(check_request("describe", &Invocation::new().blob("image", short)).unwrap_err().contains("payload"));
     }
 
     fn extract(form: &str) -> Invocation {

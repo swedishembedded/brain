@@ -338,6 +338,22 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         files: &[],
         roles: &[("weights", ".")],
     },
+    // Mirage (`Cactus-Compute/mirage`): `config.json`, `mirage.safetensors` and the
+    // 2-bit `mirage.cact`. The weights are named `mirage.safetensors`, not
+    // `model.safetensors`, so `TransformersRecipe`'s curated fetch would land
+    // nothing it can use; the `.cact` carries the tokenizer and the reader
+    // charset, so it is part of the model rather than an optional extra. The
+    // published files are served exactly as they are (no conversion), the role
+    // is the directory that holds them, and the distinctive weights name is the
+    // signature.
+    FilesRecipe {
+        id: "mirage",
+        family: "mirage",
+        signature: &["mirage.safetensors", "mirage.cact", "config.json"],
+        repos: &[],
+        files: &["config.json", "mirage.safetensors", "mirage.cact"],
+        roles: &[("weights", ".")],
+    },
     // -- Kronos: ONE model, TWO upstream repos ---------------------------
     //
     // brain's fetch plan is one `ModelRef` -> one repo listing -> one `Plan`,
@@ -1457,6 +1473,22 @@ mod tests {
                 Err(e) => panic!("{} is not selectable from the real registry: {e}", row.id),
             }
         }
+    }
+
+    /// The published `Cactus-Compute/mirage` listing: the three model files are fetched exactly as published (no
+    /// conversion, no README or demo assets), the role is the directory, and the repo is not mistaken for a
+    /// transformers repo (its weights are not named `model.safetensors`).
+    #[test]
+    fn mirage_recipe_fetches_the_three_published_files_into_one_directory_role() {
+        let listing: Vec<String> = [".gitattributes", "README.md", "assets/demo.png", "config.json", "mirage.cact", "mirage.safetensors"].into_iter().map(String::from).collect();
+        let r = ModelRef::new("Cactus-Compute", "mirage", None);
+        let hub = crate::hub::FakeHub::new();
+        let picked = select(recipes(), &r, &listing).unwrap();
+        assert_eq!(picked.id(), "mirage");
+        let files: Vec<String> = picked.artifacts(&r, &listing, &hub).unwrap().into_iter().map(|a| a.file).collect();
+        assert_eq!(files, ["config.json", "mirage.safetensors", "mirage.cact"]);
+        let (family, roles) = files_recipe_roles("mirage").unwrap();
+        assert_eq!((family, roles), ("mirage", &[("weights", ".")][..]));
     }
 
     /// The exact `Wan-AI/Wan2.1-T2V-1.3B` file listing, confirmed live via
