@@ -37,6 +37,12 @@ const BAN: f32 = -1.0e30;
 pub const WINDOW: usize = 16;
 
 /// Rows of several `[out, in]` linears sharing one input, as one weight.
+/// The tap tables of q, k and v (`[taps, width]` each) as one `[taps, q | k | v]` table.
+fn side_by_side(parts: &[(&Vec<f32>, usize)]) -> Vec<f32> {
+    let taps = parts[0].0.len() / parts[0].1;
+    (0..taps).flat_map(|j| parts.iter().flat_map(move |(t, w)| t[j * w..(j + 1) * w].iter().copied())).collect()
+}
+
 fn cat(dev: &Device, name: &str, parts: &[&ops::Linear]) -> Weight {
     dev.linear_weight_cat(name, parts)
 }
@@ -56,7 +62,8 @@ fn lin(dev: &Device, name: &str, l: &ops::Linear) -> Weight {
 struct DLayer {
     norm: DeviceBuffer,
     qkvg: Weight,
-    taps: [DeviceBuffer; 3],
+    /// The causal taps of q, k and v side by side, `[taps, q | k | v]`.
+    taps: DeviceBuffer,
     q_norm: DeviceBuffer,
     k_norm: DeviceBuffer,
     out: Weight,
@@ -108,7 +115,8 @@ pub struct DeviceCross {
 struct LayerCache {
     k: DeviceBuffer,
     v: DeviceBuffer,
-    raw: [DeviceBuffer; 3],
+    /// The projections before the causal taps, `[batch, maxt, q | k | v]`: the tap history of all three in one table.
+    raw: DeviceBuffer,
 }
 
 /// Everything earlier tokens leave behind, for a batch.
@@ -168,6 +176,7 @@ impl DeviceDecoder {
     pub fn upload(dev: &Device, dec: &Decoder) -> DeviceDecoder {
         let cfg = dec.cfg.clone();
         let d = cfg.dim;
+        let c_widths = [cfg.heads() * cfg.qk_dim, cfg.kv_heads * cfg.qk_dim, cfg.kv_heads * cfg.v_dim];
         let layers = dec
             .layers
             .iter()
@@ -175,7 +184,7 @@ impl DeviceDecoder {
                 DLayer {
                     norm: dev.norm_weight(&l.norm),
                     qkvg: cat(dev, "dqkvg", &[&l.q, &l.k, &l.v, &l.gate]),
-                    taps: [dev.buf(&l.q_taps), dev.buf(&l.k_taps), dev.buf(&l.v_taps)],
+                    taps: dev.buf(&side_by_side(&[(&l.q_taps, c_widths[0]), (&l.k_taps, c_widths[1]), (&l.v_taps, c_widths[2])])),
                     q_norm: dev.norm_weight(&l.q_norm),
                     k_norm: dev.norm_weight(&l.k_norm),
                     out: lin(dev, "dout", &l.out),
@@ -242,7 +251,7 @@ impl DeviceDecoder {
         BatchState {
             batch,
             maxt,
-            layers: (0..self.layers.len()).map(|_| LayerCache { k: table(kd), v: table(vd), raw: [table(qd), table(kd), table(vd)] }).collect(),
+            layers: (0..self.layers.len()).map(|_| LayerCache { k: table(kd), v: table(vd), raw: table(qd + kd + vd) }).collect(),
             engram_v: (0..self.engrams.len()).map(|_| table(c.dim)).collect(),
             ones: dev.buf(&vec![1.0; batch * maxt]),
             hist: dev.alloc(batch * maxt),
@@ -268,9 +277,7 @@ impl DeviceDecoder {
         for (src, dst) in st.layers.iter().zip(&out.layers) {
             gather(&src.k, &dst.k, st.maxt * kd);
             gather(&src.v, &dst.v, st.maxt * vd);
-            for (i, w) in [qd, kd, vd].into_iter().enumerate() {
-                gather(&src.raw[i], &dst.raw[i], st.maxt * w);
-            }
+            gather(&src.raw, &dst.raw, st.maxt * (qd + kd + vd));
         }
         for (src, dst) in st.engram_v.iter().zip(&out.engram_v) {
             gather(src, dst, st.maxt * c.dim);
@@ -371,24 +378,19 @@ impl DeviceDecoder {
         // Self-attention with causal taps and rotary positions.
         let cache = &st.layers[l];
         let h = dev.zc_new(s, y, &ly.norm, b, d);
-        let widths = [heads * hd, kvh * hd, kvh * vh];
         // One fused projection: q, k, v, then the attention gate.
         let qkvg = dev.linear_new(s, &ly.qkvg, &h, b);
-        let stride = widths.iter().sum::<u32>() + heads * vh;
-        let mut conv = Vec::new();
-        let mut off = 0;
-        for (i, &width) in widths.iter().enumerate() {
-            let out = dev.alloc(st.batch * width as usize);
-            dev.taps(s, &qkvg, &cache.raw[i], &ly.taps[i], &out, &st.posbuf, (b, width, maxt), c.taps as u32, 1, (stride, off));
-            conv.push(out);
-            off += width;
-        }
+        let widths = [heads * hd, kvh * hd, kvh * vh];
+        let (qkv, stride) = (widths.iter().sum::<u32>(), widths.iter().sum::<u32>() + heads * vh);
+        // The three causal taps run as one over the q | k | v columns; q and k are then normalised and rotated where they lie
+        // (k straight into its cache row) and v is written to its cache row from the same table.
+        let conv = dev.alloc(st.batch * qkv as usize);
+        dev.taps(s, &qkvg, &cache.raw, &ly.taps, &conv, &st.posbuf, (b, qkv, maxt), c.taps as u32, 1, (stride, 0));
         let q = dev.alloc((b * heads * hd) as usize);
-        dev.zc_norm_rope(s, &conv[0], &ly.q_norm, &st.posbuf, b * heads, hd, c.rope, &q);
-        let k = dev.alloc((b * kvh * hd) as usize);
-        dev.zc_norm_rope(s, &conv[1], &ly.k_norm, &st.posbuf, b * kvh, hd, c.rope, &k);
-        dev.row_write(s, &k, &cache.k, &st.posbuf, (b, kvh * hd, maxt));
-        dev.row_write(s, &conv[2], &cache.v, &st.posbuf, (b, kvh * vh, maxt));
+        dev.zc_norm_rope_strided(s, (&conv, qkv, 0), &ly.q_norm, &st.posbuf, (b, heads, hd), c.rope, &q);
+        dev.zc_norm_rope_into_cache(s, (&conv, qkv, widths[0]), &ly.k_norm, &st.posbuf, (b, kvh, hd), c.rope, (&cache.k, maxt));
+        dev.row_write_strided(s, (&conv, qkv, widths[0] + widths[1]), &cache.v, &st.posbuf, (b, kvh * vh, maxt));
+        let off = qkv;
         let att = dev.alloc(st.batch * (heads * vh) as usize);
         let shape = AttnShape { batch: b, nq: 1, heads, kvh, hd, vd: vh, nk: maxt, visible: u32::MAX };
         dev.attention_gated(s, shape, [&q, &cache.k, &cache.v, &st.ones, &st.posbuf], (&qkvg, stride, off), &att);

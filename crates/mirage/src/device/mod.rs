@@ -303,7 +303,23 @@ impl Device {
     /// `rope(zc_norm(x))` per head row in one dispatch, at the position held in `pos` (see [`Device::rope_pos`]).
     #[allow(clippy::too_many_arguments)]
     pub fn zc_norm_rope(&self, s: &mut Vec<Step>, x: &DeviceBuffer, weight: &DeviceBuffer, pos: &DeviceBuffer, rows: u32, hd: u32, base: f32, y: &DeviceBuffer) {
-        s.push(self.gpu().dispatch(self.k("mirage_rms_rope"), &[x, weight, pos, y], &[hd, rows, NORM_EPS.to_bits(), base.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
+        s.push(self.gpu().dispatch(self.k("mirage_rms_rope"), &[x, weight, pos, y], &[hd, rows, NORM_EPS.to_bits(), base.to_bits(), 0, 0, 0, 0], gpu_core::Dispatch::Workgroups(rows)));
+    }
+
+    /// [`Device::zc_norm_rope`] over the `groups` heads of each of `batch` sequences read where they lie in a fused projection,
+    /// `x = (buffer, row stride, column offset)`, and stored straight into the position cache `cache` (`[batch, maxt, groups * hd]`)
+    /// at the position held in `pos`: the norm, the rotation and the cache write of a decoder key in one dispatch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn zc_norm_rope_into_cache(&self, s: &mut Vec<Step>, (x, stride, off): (&DeviceBuffer, u32, u32), weight: &DeviceBuffer, pos: &DeviceBuffer, (batch, groups, hd): (u32, u32, u32), base: f32, (cache, maxt): (&DeviceBuffer, u32)) {
+        let params = [hd, batch * groups, NORM_EPS.to_bits(), base.to_bits(), groups, stride, off, maxt];
+        s.push(self.gpu().dispatch(self.k("mirage_rms_rope"), &[x, weight, pos, cache], &params, gpu_core::Dispatch::Workgroups(batch * groups)));
+    }
+
+    /// [`Device::zc_norm_rope`] over the `groups` heads of each of `batch` sequences read where they lie in a fused projection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn zc_norm_rope_strided(&self, s: &mut Vec<Step>, (x, stride, off): (&DeviceBuffer, u32, u32), weight: &DeviceBuffer, pos: &DeviceBuffer, (batch, groups, hd): (u32, u32, u32), base: f32, y: &DeviceBuffer) {
+        let params = [hd, batch * groups, NORM_EPS.to_bits(), base.to_bits(), groups, stride, off, 0];
+        s.push(self.gpu().dispatch(self.k("mirage_rms_rope"), &[x, weight, pos, y], &params, gpu_core::Dispatch::Workgroups(batch * groups)));
     }
 
     /// The gated product of HConvGLU from a fused `[rows, 2n]` projection.

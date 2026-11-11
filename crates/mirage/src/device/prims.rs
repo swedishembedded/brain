@@ -397,7 +397,12 @@ impl Device {
 
     /// `hist[b, pos] = src[b]`.
     pub fn row_write(&self, s: &mut Vec<Step>, src: &DeviceBuffer, hist: &DeviceBuffer, pos: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32)) {
-        self.push(s, "mirage_row_write", &[src, hist, pos], &[rows, w, maxt], rows * w);
+        self.row_write_strided(s, (src, w, 0), hist, pos, (rows, w, maxt));
+    }
+
+    /// [`Device::row_write`] reading row `b` at `b * stride + off` of `src` (a slice of a wider projection), as `(buffer, stride, off)`.
+    pub fn row_write_strided(&self, s: &mut Vec<Step>, (src, stride, off): (&DeviceBuffer, u32, u32), hist: &DeviceBuffer, pos: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32)) {
+        self.push(s, "mirage_row_write", &[src, hist, pos], &[rows, w, maxt, stride, off], rows * w);
     }
 
     /// Rotary embedding of position `pos` on `rows` head vectors of width `hd` (the decoder step runs the norm and
