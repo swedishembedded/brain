@@ -57,10 +57,11 @@ pub fn is_wav(bytes: &[u8]) -> bool {
 /// surface that accepts a container file from a client: the HTTP `input_audio`
 /// content part (`apiserve::media`) and the CLI's `--in audio=clip.wav`
 /// (`brain do`). Multi-channel input is downmixed to mono by [`crate::wav::parse`]
-/// itself; any source rate is linearly resampled to 16 kHz.
+/// itself; any source rate is resampled to 16 kHz through the anti-aliasing
+/// filter of [`crate::decode`].
 pub fn audio_blob_from_wav(bytes: &[u8]) -> Result<Blob, String> {
     let wav = crate::wav::parse(bytes).map_err(|e| e.to_string())?;
-    let samples = crate::resample_linear(&wav.samples, wav.sample_rate, ASR_SAMPLE_RATE);
+    let samples = crate::decode::to_speech_rate(&wav.samples, wav.sample_rate);
     Ok(audio_blob_from_samples(&samples))
 }
 

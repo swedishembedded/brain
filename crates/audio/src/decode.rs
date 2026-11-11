@@ -98,7 +98,15 @@ fn wav(bytes: &[u8], max_seconds: u32) -> Result<Vec<f32>, DecodeError> {
     if wav.samples.len() as u64 > max_seconds as u64 * wav.sample_rate as u64 {
         return Err(DecodeError::TooLong { max_seconds });
     }
-    Ok(crate::resample_linear(&wav.samples, wav.sample_rate, ASR_SAMPLE_RATE))
+    Ok(to_speech_rate(&wav.samples, wav.sample_rate))
+}
+
+/// Resample mono samples at `rate` to the recogniser's 16 kHz through the
+/// Kaiser-windowed polyphase filter ([`crate::resample::rational`]), so that
+/// content above 8 kHz is removed rather than folded into the band. The one
+/// conversion every WAV surface uses.
+pub fn to_speech_rate(samples: &[f32], rate: u32) -> Vec<f32> {
+    crate::resample::rational(samples, ASR_SAMPLE_RATE, rate)
 }
 
 mod compressed {
@@ -265,6 +273,17 @@ mod tests {
         let out = decode_speech(&crate::wav::encode(&at_48k, 48_000), 30).unwrap();
         assert!((out.len() as i64 - 16_000).abs() <= 1, "{}", out.len());
         assert!((frequency(&out) - 440.0).abs() < 5.0);
+    }
+
+    /// Content above the 8 kHz the recogniser can represent must be filtered
+    /// out on the way down, not folded into the band it reads: a 10 kHz
+    /// whistle in a 48 kHz upload would otherwise arrive as a 6 kHz tone.
+    #[test]
+    fn a_wav_is_filtered_before_it_is_decimated() {
+        let whistle: Vec<f32> = (0..48_000).map(|i| 0.5 * (2.0 * std::f32::consts::PI * 10_000.0 * i as f32 / 48_000.0).sin()).collect();
+        let out = decode_speech(&crate::wav::encode(&whistle, 48_000), 30).unwrap();
+        let rms = (out.iter().map(|x| x * x).sum::<f32>() / out.len() as f32).sqrt();
+        assert!(rms < 0.01 * 0.5 / std::f32::consts::SQRT_2, "a 10 kHz tone survived the drop to 16 kHz at rms {rms}");
     }
 
     #[test]

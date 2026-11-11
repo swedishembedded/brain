@@ -53,8 +53,6 @@ enum Backend {
     Nemotron(Box<Nemotron>),
 }
 
-/// The rate recognition takes: 16 kHz mono.
-const ASR_SAMPLE_RATE: u32 = 16_000;
 
 /// The Nemotron model with its detokenizer, boxed in [`Backend`] because it is
 /// far larger than the other variant.
@@ -111,11 +109,11 @@ impl TranscribePipeline {
     }
 
     /// Transcribe a synthesized or loaded [`crate::Audio`] clip at whatever
-    /// rate it has, resampled to 16 kHz by the SAME `audio::resample_linear`
-    /// every surface in this workspace uses. This is the step a speech round
+    /// rate it has, resampled to 16 kHz by the SAME anti-aliased
+    /// `audio::decode::to_speech_rate` every upload surface uses. This is the step a speech round
     /// trip needs between [`crate::TtsPipeline`] (24 kHz) and recognition.
     pub fn transcribe_audio(&self, clip: &crate::Audio) -> Result<Transcript> {
-        self.transcribe(&audio::resample_linear(clip.samples(), clip.sample_rate(), ASR_SAMPLE_RATE))
+        self.transcribe(&audio::decode::to_speech_rate(clip.samples(), clip.sample_rate()))
     }
 
     /// The audio encoder's features of `clip` at any rate and length: what a
@@ -127,7 +125,7 @@ impl TranscribePipeline {
         let Backend::Qwen3Asr(provider) = &self.backend else {
             return Err(Error::MissingArgument("nemotronasr: has no spliceable audio features; use a Qwen3-ASR pipeline".to_string()));
         };
-        provider.features(&audio::resample_linear(clip.samples(), clip.sample_rate(), ASR_SAMPLE_RATE)).map_err(Error::Backend)
+        provider.features(&audio::decode::to_speech_rate(clip.samples(), clip.sample_rate())).map_err(Error::Backend)
     }
 
     /// [`Self::features`] for several clips with the audio encoder built once,
@@ -137,7 +135,7 @@ impl TranscribePipeline {
         let Backend::Qwen3Asr(provider) = &self.backend else {
             return Err(Error::MissingArgument("nemotronasr: has no spliceable audio features; use a Qwen3-ASR pipeline".to_string()));
         };
-        let resampled: Vec<Vec<f32>> = clips.iter().map(|c| audio::resample_linear(c.samples(), c.sample_rate(), ASR_SAMPLE_RATE)).collect();
+        let resampled: Vec<Vec<f32>> = clips.iter().map(|c| audio::decode::to_speech_rate(c.samples(), c.sample_rate())).collect();
         let views: Vec<&[f32]> = resampled.iter().map(Vec::as_slice).collect();
         provider.features_many(&views).map_err(Error::Backend)
     }

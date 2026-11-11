@@ -494,7 +494,7 @@ mod tests {
 
     /// A `--in audio=clip.wav` must be DECODED, not handed to the model as the
     /// literal RIFF bytes: same samples as a direct `wav::parse` +
-    /// `resample_linear`, and tagged with the 16 kHz meta the ASR guards check.
+    /// `decode::to_speech_rate`, and tagged with the 16 kHz meta the ASR guards check.
     #[test]
     fn an_input_blob_is_also_a_flag_unless_a_param_owns_the_name() {
         let spec = ActionSpec::new("act", "summary")
@@ -546,7 +546,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         let parsed = audio::wav::parse(&wav_bytes).expect("fixture parses");
-        let want = audio::resample_linear(&parsed.samples, parsed.sample_rate, 16000);
+        let want = audio::decode::to_speech_rate(&parsed.samples, parsed.sample_rate);
         assert!(!want.is_empty());
         assert_eq!(blob.media, Media::Audio);
         assert_eq!(blob.bytes.len(), want.len() * 4, "one f32 per resampled sample");
