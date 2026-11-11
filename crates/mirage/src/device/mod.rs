@@ -36,6 +36,7 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("mirage_rms_axpy", kernels::MIRAGE_RMS_AXPY),
     ("mirage_rms_axpy_norm", kernels::MIRAGE_RMS_AXPY_NORM),
+    ("mirage_rms_axpy_norm_wg", kernels::MIRAGE_RMS_AXPY_NORM_WG),
     ("mirage_rms_rope", kernels::MIRAGE_RMS_ROPE),
     ("hconv_glu", kernels::HCONV_GLU),
     ("mirage_conv2d", kernels::MIRAGE_CONV2D),
@@ -110,6 +111,8 @@ pub struct Device {
     /// Bytes of matrix weights uploaded through [`Device::weight`] (dense f32) and [`Device::linear_weight`] (packed).
     resident: ResidentWeights,
     form: WeightForm,
+    /// Whether the cooperative `*_wg` kernels (any number of workgroup barriers) replace the one-barrier originals.
+    coop: bool,
 }
 
 /// What the device holds for its matrix weights.
@@ -161,7 +164,8 @@ impl Device {
             kernel.insert(name, index);
         }
         let pos_dummy = ops.gpu().storage(1);
-        Ok(Device { ops, kernel, pos_dummy, resident: ResidentWeights::default(), form })
+        let coop = ops.gpu().caps().workgroup_reductions;
+        Ok(Device { ops, kernel, pos_dummy, resident: ResidentWeights::default(), form, coop })
     }
 
     /// The kernel list a [`Gpu`] must be created with for [`Device::new`].
@@ -172,6 +176,18 @@ impl Device {
     /// Pipeline index of a kernel by name.
     pub(crate) fn k(&self, name: &str) -> usize {
         self.kernel[name]
+    }
+
+    /// Whether the cooperative `*_wg` kernels run: they need workgroups that execute any number of barriers (the
+    /// CPU interpreter takes one per kernel and keeps the one-barrier originals).
+    pub(crate) fn cooperative(&self) -> bool {
+        self.coop
+    }
+
+    /// Choose between the cooperative kernels and the one-barrier originals (the originals are the parity oracle);
+    /// the cooperative ones stay off on a device that cannot run them.
+    pub fn set_cooperative(&mut self, on: bool) {
+        self.coop = on && self.gpu().caps().workgroup_reductions;
     }
 
     /// The underlying device.
@@ -272,7 +288,8 @@ impl Device {
     #[allow(clippy::too_many_arguments)]
     pub fn zc_norm_axpy_norm(&self, s: &mut Vec<Step>, scale: f32, x: &DeviceBuffer, w1: &DeviceBuffer, w2: &DeviceBuffer, rows: u32, d: u32, y: &DeviceBuffer) -> DeviceBuffer {
         let h = self.alloc((rows * d) as usize);
-        s.push(self.gpu().dispatch(self.k("mirage_rms_axpy_norm"), &[x, w1, y, w2, &h], &[d, rows, NORM_EPS.to_bits(), scale.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
+        let kernel = if self.cooperative() && d <= 512 && d % 4 == 0 { "mirage_rms_axpy_norm_wg" } else { "mirage_rms_axpy_norm" };
+        s.push(self.gpu().dispatch(self.k(kernel), &[x, w1, y, w2, &h], &[d, rows, NORM_EPS.to_bits(), scale.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
         h
     }
 
