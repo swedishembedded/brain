@@ -58,9 +58,9 @@ Z_DIM, AE_H = 4, 24                          # latent width and hidden width of 
 AE_STEPS, AE_BATCH, AE_LR = 2000, 32, 3e-3
 STAT_N = 1200                                # pictures whose codes fix the latent's per-channel mean and variance
 STAT_EPS = 1e-4
-EVAL_N, SAMPLE_N = 600, 100                  # evaluation items of the loss tables; starting values per class of the sampling tables
+EVAL_N, SAMPLE_N = 600, 100                  # evaluation items of the loss tables; starting vectors of the sampling tables (the same 100 serve every class)
 NET_STEPS = (4, 8, 16, 32)                   # evaluations of the field per sample in the solver table
-SOLVER_N = 50                                # starting values per class of the solver table
+SOLVER_N = 50                                # the first starting vectors, used for every class, of the solver table
 REF_STEPS = 100                              # Runge-Kutta steps of the reference trajectories
 BANDS = ((0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0))
 G_VALUES = (0.0, 1.0, 2.0, 4.0)
@@ -123,7 +123,7 @@ SQ = [sum(v * v for v in t) for t in TEMPLATES]
 
 
 def draw_picture(gen):
-    """One picture: c = integer(3), p = integer(4), then 36 pixel noises by normal() in row-major order; template + SIGMA_X normal()."""
+    """One picture: c = integer(3), p = integer(2), then 36 pixel noises by normal() in row-major order; template + SIGMA_X normal()."""
     c = gen.integer(N_CLASS)
     p = gen.integer(N_POS)
     t = TEMPLATES[N_POS * c + p]
@@ -425,7 +425,7 @@ PIXEL_NET, LATENT_NET = Net(D), Net(Z_DIM)
 # ------------------------------------------------------------------ training items
 
 def draw_training_item(gen, encode=None):
-    """One item: sigma = uniform(); the class c = integer(3) and the position p = integer(4); drop = uniform() (the class becomes NULL when
+    """One item: sigma = uniform(); the class c = integer(3) and the position p = integer(2); drop = uniform() (the class becomes NULL when
     drop < P_DROP); the picture by 36 normal() in row-major order (template + SIGMA_X normal()); the data value x_0 (the picture, or
     `encode(picture)` for the latent system); and the noise by D normal() in order. Returns (sigma, x_sigma, target, class label)
     with x_sigma = (1 - sigma) x_0 + sigma noise and target = noise - x_0."""
@@ -966,9 +966,11 @@ def exact_reference():
     ex = exact_guidance_rows()
     for g in G_VALUES:
         rows.append(["exact field, Euler", f"{G_STEPS}, g = {g:g}"] + _mrow(ex[g]))
-    return (f"The exact field as a generator: {SAMPLE_N} starting vectors per class (36 values each by normal() from {_seed(SAMPLE)}, the same for "
-            f"every row and for the networks later), carried from sigma = 1 to 0 by the exact class field (g = 1), by the guided field "
-            f"u_un + g (u_c - u_un) and by 100 Runge-Kutta steps. For g = 0 the three classes get the same pictures.\n\n"
+    return (f"The exact field as a generator: {SAMPLE_N} starting vectors in all (the first {SAMPLE_N} draws of 36 values each by normal() from "
+            f"{_seed(SAMPLE)}, the same for every row and for the networks later), each carried to a picture of each of the three classes, so "
+            f"that a row has {SAMPLE_N * N_CLASS} samples, class 0's first. They are carried from sigma = 1 to 0 by the exact class field (g = 1), by the guided field "
+            f"u_un + g (u_c - u_un) and by 100 Runge-Kutta steps (the classical rule, with the field evaluated at max(sigma, 1e-9) in the last "
+            f"stage of the last step, where it is 0/0 at sigma = 0). For g = 0 the three classes get the same pictures.\n\n"
             + _table(["sampler", "steps"] + MEASURE_HEAD, rows))
 
 
@@ -1077,7 +1079,7 @@ def solver_table():
         rows.append([n, _fx3(ex[("euler", n)]), _shared([r["solver"][("euler", n)] for r in px], _fixed(4)),
                      _fx3(ex[("heun", n)]), _shared([r["solver"][("heun", n)] for r in px], _fixed(4))])
     return (f"Class-conditional sampling (g = 1) without the null pass. For each sampler and each count of evaluations of the field, the mean over "
-            f"{SOLVER_N * N_CLASS} samples ({SOLVER_N} starting vectors of {_seed(SAMPLE)} per class) of the root-mean-square distance per pixel between "
+            f"{SOLVER_N * N_CLASS} samples (the first {SOLVER_N} of the {SAMPLE_N} starting vectors of {_seed(SAMPLE)}, used for each of the three classes) of the root-mean-square distance per pixel between "
             f"the sampler's end point and the 100-step Runge-Kutta end point of the exact field from the same start. Euler takes n steps, Heun n/2 "
             f"(two evaluations each). The exact-field columns are plain arithmetic; the network columns share digits across the five runs.\n\n"
             + _table(["evaluations", "Euler, exact field", "Euler, network", "Heun, exact field", "Heun, network"], rows))
@@ -1094,7 +1096,7 @@ def guidance_table():
     for g in G_VALUES:
         rows.append([f"network, g = {g:g}"] + _stable_measures([r["guidance"][g] for r in px]))
         rows.append([f"exact field, g = {g:g}"] + _mrow(ex[g]))
-    return (f"Guided Euler sampling in pixel space, {G_STEPS} steps, {SAMPLE_N} starting vectors per class from {_seed(SAMPLE)}, the same for the network "
+    return (f"Guided Euler sampling in pixel space, {G_STEPS} steps, the {SAMPLE_N} starting vectors of {_seed(SAMPLE)} used for each of the three classes, the same for the network "
             f"and the exact field. {NOTE}\n\n"
             + _table(["sampler"] + MEASURE_HEAD, rows))
 
@@ -1151,8 +1153,11 @@ def autoencoder_table():
             + f"\n\nTrained {AE_STEPS} steps of {AE_BATCH} pictures from {_seed(AE_RUN)} (after the initialization; per picture c, p and 36 pixel noises as for "
               f"`draw_picture`, then {Z_DIM} values xi by normal()), Adam at rate {AE_LR:g} (1 - (i - 1)/{AE_STEPS}). On {EVAL_N} fresh pictures "
               f"({_seed(AE_EVAL)}) decoded from the mean code: mean squared error per pixel {mse} (the pixel noise alone has {SIGMA_X ** 2:.4f}), "
-              f"mean KL {kl} nats per picture, and the six noise-free templates come back with a root-mean-square error per pixel of {rt}. "
-              f"The mean and the variance of the four channels of the mean code over the {STAT_N} pictures of {_seed(AE_STAT)}:\n\n"
+              f"mean KL {kl} nats per picture, and the six noise-free templates come back, each with its own root-mean-square error per pixel over its 36 pixels, "
+              f"the mean of the six being {rt}. The mean KL of a picture is 0.5 the sum over the four channels of m^2 + exp(v) - 1 - v "
+              f"for the mean m and log-variance v of its code. The {EVAL_N} pictures and the {STAT_N} pictures of the statistics are "
+              f"drawn as `draw_picture` and nothing else (c, p and the 36 pixel noises per picture, no xi). "
+              f"The mean and the variance (divisor {STAT_N}) of the four channels of the mean code over the {STAT_N} pictures of {_seed(AE_STAT)}:\n\n"
               + _table(["channel", "mean", "variance"], [[k, mean[k], var[k]] for k in range(Z_DIM)]) + f"\n\n{NOTE}")
 
 
@@ -1163,8 +1168,10 @@ def systems_table():
         rows.append(["pixel space", f"{g:g}"] + _stable_measures([r["guidance"][g] for r in px]))
     for g in G_VALUES:
         rows.append(["latent space", f"{g:g}"] + _stable_measures([r["guidance"][g] for r in lt]))
-    return (f"The two systems on the same measures. Each row: {SAMPLE_N} samples per class, {G_STEPS} guided Euler steps. Pixel space starts from "
-            f"{_seed(SAMPLE)}. Latent space starts from {_seed(LAT_START)} (4 values by normal() per sample), decodes the standardized code with the "
+    return (f"The two systems on the same measures. Each row: {SAMPLE_N} starting vectors used for each class (so {SAMPLE_N * N_CLASS} samples), {G_STEPS} guided Euler steps. Pixel space starts from "
+            f"{_seed(SAMPLE)}. Latent space starts from {_seed(LAT_START)} ({SAMPLE_N} vectors of 4 values by normal() in order, used for each class), "
+            f"with a denoiser initialized and trained from {_seed(LAT_RUN)} like the pixel one from {_seed(RUN)} (the same items, with the "
+            f"picture of each item replaced by its standardized code, and the same 2,000 steps); decodes the standardized code with the "
             f"autoencoder, and adds {SIGMA_X} normal() to every pixel from {_seed(DEC_NOISE)} (a fresh generator for every row, 36 draws per sample "
             f"in order). {NOTE}\n\n" + _table(["system", "g"] + MEASURE_HEAD, rows))
 

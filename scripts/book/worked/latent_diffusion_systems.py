@@ -243,10 +243,19 @@ def stage_work():
                      _pct(den / tot, 2), _pct(fdec / tot, 2)])
     return (
         "The work of one 1024 x 1024 image, stage by stage, at each pipeline's default pass count: the text encoders (the table of "
-        "Chapter 9, `text_conditioning.encoder_work_data`), all denoising passes (Chapter 8's pass counts; the base model runs two "
+        "Chapter 9), all denoising passes (Chapter 8's pass counts; the base model runs two "
         "passes a step for guidance) and the decode of the autoencoder of this pipeline (`latent_diffusion_systems.vae_work`). TFLOP "
         "is 10^12 operations, a multiply-add counted as two.\n\n"
         + _table(["pipeline", "text, TFLOP", "denoise, TFLOP", "decode, TFLOP", "total, TFLOP", "text (%)", "denoise (%)", "decode (%)"], rows, "lrrrrrrr"))
+
+
+PASS_RULE = (
+    "The pass rule for FLUX.2 (the one that reproduces Chapter 8's $34{,}819.8$ GFLOP for klein-4b), for n image rows, t text rows and "
+    "N = n + t: each double-stream block costs 2 N (4 d^2 + 3 m d) and each single-stream block 2 N ((3 d + 2 m) d + d (d + m)) "
+    "with m = 3 d the feed-forward width, attention costs 4 N^2 d in every block of both kinds, and the three embedders cost "
+    "2 n 128 d (image rows in), 2 t c d (text rows in, c = 7,680 for klein-4b and 12,288 for klein-9b) and 2 n d 128 (out). "
+    "The widths and block counts are Chapter 8's: d = 3,072 with 5 double and 20 single blocks (klein-4b), d = 4,096 with 8 and 24 "
+    "(klein-9b).")
 
 
 def reference_cost():
@@ -264,7 +273,8 @@ def reference_cost():
     return (
         "The denoising and autoencoding work of one 1024 x 1024 FLUX.2 image at four steps, with 512 text rows and no cost counted for "
         "the text encoder. A reference joins the image stream, so a 1024 x 1024 reference doubles the image rows from 4,096 to 8,192 in "
-        "every pass. The encoder runs once per encoded image, at 1024 x 1024 (`latent_diffusion_systems.vae_work`).\n\n"
+        "every pass. The encoder runs once per encoded image, at 1024 x 1024 (the table of `latent_diffusion_systems.vae_work`). "
+        + PASS_RULE + "\n\n"
         + _table(["variant", "request", "VAE encode, TFLOP", "denoise, TFLOP", "VAE decode, TFLOP", "total, TFLOP"], rows, "llrrrr"))
 
 
@@ -430,6 +440,23 @@ def arrangements(k, tier, n_ref_tokens, which):
     }
 
 
+BYTES_RULES = (
+    "The rules. Uploaded layout of the denoiser's weights: the six tensors of the clock and the modulations (the two layers of the "
+    "clock, the two double-stream modulations, the single-stream modulation and the final layer's modulation) stay on the host and "
+    "are not counted; at the f32 tier every other weight is 4 bytes; at the int8 tier the image and text input matrices, the final "
+    "linear, every vector (the query and key gains) and the second feed-forward matrix of each double block stay at 4 bytes a weight, "
+    "and every other matrix costs 36 bytes per 32 weights (32 int8 bytes and one 32-bit scale). Priced before: every "
+    "two-dimensional tensor at 1 byte under int8 and everything else, and everything at f32, at 4 bytes, the host tensors included. "
+    "Scratch for a joint sequence of J rows (4 bytes a word): J (16 d + 3 m + 2 x 128 + 128) words for the activations (m = 3 d, "
+    "128 the latent channels and the head width), t c words for the text context, 17 d for the clock, and for attention 2 words "
+    "under int8 (fused) and otherwise 2 H J^2 (H heads); under int8 also J (d + m) bytes of packed activations and 4 J "
+    "floor(max(d, m) / 32) bytes of scales (priced before: 4 J). Text encoder: the token table and 27 blocks (as deep as the deepest tap of "
+    "Chapter 9's table), with norms and the table at 4 bytes and each block's seven matrices at 4 bytes, or at 36 bytes per 32 weights "
+    "under int8. Autoencoder graphs: the weights at 4 bytes, plus 928 bytes per output pixel times 11 (decode) or 8 (encode) "
+    "live buffers, plus 768 MiB (928 = the 4-byte words of the channel ladder 128, 256, 512, 512 at 1, 1/4, 1/16, 1/64 of the "
+    "pixels).")
+
+
 def placement_table(card_gib=24):
     cap = card_gib * GIB
     blocks = []
@@ -463,7 +490,7 @@ def placement_table(card_gib=24):
         "the joint sequence of 512 text rows, 4,096 generated rows and the reference's 4,096 if there is one (DiT, priced before: what "
         "`flux2::pipeline::dit_bytes` summed before commit 38e8b2b7a; DiT, uploaded: the layout the constructor writes, "
         "`flux2_weight_bytes`, which `dit_bytes` has summed since), the truncated text "
-        "encoder's weights at the same tier, and the autoencoder's decode and encode graphs.\n\n" + t1 +
+        "encoder's weights at the same tier, and the autoencoder's decode and encode graphs. " + BYTES_RULES + "\n\n" + t1 +
         f"\n\nThe four arrangements on cards of {card_gib} GiB, charged as the planner charges them: a card holds its permanent parts and "
         "the heaviest single phase (the denoiser, with the reference encoder if there is one, is phase 1; the decode is phase 2).\n\n" + t2)
 
@@ -498,9 +525,9 @@ def traffic_table():
     rows.append(["FLUX.1 dev, f32", "resident across images", "0", "0", "-"])
     rows.append(["FLUX.1 dev, f32", "every weight uploaded again for every pass", _gib(50 * flux1_w), _gib(flux1_w), f"{f1 / flux1_w:,.0f}"])
     return (
-        "Bytes that cross onto the device per image, from the layouts of `latent_diffusion_systems.placement_table` and the parameter counts "
+        "Bytes that cross onto the device per image, from the uploaded layouts of the placement table above and the parameter counts "
         "of Chapters 8 and 9, and the operations a pass does for each byte it would have to upload (a pass of 1,024 x 1,024 with 512 text "
-        "rows). The columns are the GiB uploaded per image and per pass, and the operations per uploaded byte. FLUX.1's weights are counted from its manifest in 32-bit floats; its encoders are T5-XXL and CLIP-L in 32-bit floats.\n\n"
+        "rows, by the pass rule of the reference-cost table for FLUX.2 and by Chapter 9's rule for FLUX.1). The columns are the GiB uploaded per image and per pass, and the operations per uploaded byte. FLUX.1's weights are counted from its manifest in 32-bit floats; its encoders are T5-XXL and CLIP-L in 32-bit floats.\n\n"
         + _table(["pipeline", "scheme", "GiB per image", "GiB per pass", "FLOP per byte"], rows, "llrrr"))
 
 
@@ -535,7 +562,8 @@ def tiling_table():
                      f"{whole / (n_win * window):.2f}"])
     return (
         "Windows of 1,024 x 1,024 pixels (64 x 64 tokens) with an overlap of 256 pixels (16 tokens), `Tiling::new(1024)`, over a larger "
-        "canvas of FLUX.2 klein-4b, with the canvas-sized first reference that a windowed run always has (cropped to each window). "
+        "canvas of FLUX.2 klein-4b, with the canvas-sized first reference that a windowed run always has (cropped to each window), so "
+        "that a pass over n generated tokens has 2 n image rows by the pass rule of the reference-cost table above. "
         "Windows per axis come from `tile_starts`; the shared width is the number of pixels two neighbours have in common. TFLOP is one "
         "denoising step over all windows, and for comparison one step of a single forward over the whole canvas, with its generated and "
         "reference rows.\n\n"
@@ -747,7 +775,8 @@ def toy_setup():
         "(p00 + p01 + p10 + p11)/4 and (p00 + p10 - p01 - p11)/4; the latent is 2 x 4 x 4. Decoder: the left pixels of a patch "
         "are a + d and the right a - d. The latent is packed by the 2 x 2 pixel-unshuffle of `vae.latent_packing` into 8 channels of "
         "2 x 2 tokens (packed channel 4c + 2 pi + pj), and each packed channel is standardized by its own statistics, the mean and "
-        "the variance (divisor 12) over the 4 tokens of the three prototypes, with epsilon 1e-4:\n\n" + t1 +
+        "the variance (divisor 12) over the 4 tokens of the three prototypes, with epsilon 1e-4. The 32 values of a packed latent are "
+        "ordered packed channel slowest and then token in raster order, so value k = 4 (packed channel) + 2 (token row) + (token column):\n\n" + t1 +
         f"\n\nData: x0 given the class c is the standardized packed latent of prototype c plus noise of standard deviation {SPREAD} in each of the "
         "32 values; the three classes are equally likely. Distances between the class means (32 values):\n\n" + t3 +
         f"\n\nText: the table of 6 tokens by {WIDTH} numbers from {_seed(TEXT)}, `normal()` in row-major order:\n\n" + t4 +
@@ -781,11 +810,12 @@ def toy_stages():
     return (
         "Stage by stage. The text stage for five prompts:\n\n" + t1 +
         "\n\nThe codec, and the codec with the packing and the standardization after it: the largest pixel error of the round trip of each image. "
-        "The prototypes are in the codec's range, and the textured source is not; the texture (amplitude 0.25 on both diagonals of every "
-        "patch) is exactly what the codec cannot keep, so the error is the texture's amplitude:\n\n" + t2 +
+        "The prototypes are in the codec's range, and the textured source is not; the source is the bar plus a texture that adds +0.25 to "
+        "the pixel at row y and column x where x + y is even and -0.25 where it is odd (a checkerboard, amplitude 0.25 on both diagonals of every "
+        "patch), which is exactly what the codec cannot keep, so the error is the texture's amplitude:\n\n" + t2 +
         f"\n\nThe denoiser at sigma = 1 for the prompt `bar box` and the first noise draw of {_seed(NOISE)}: the field must be x minus the mean of "
         f"the class means weighted by the prompt, and the largest difference is {e1:.1e}. The posterior weights there are the prompt's: "
-        f"{w[0]:.4f}, {w[1]:.4f}, {w[2]:.4f}.\n\nThe schedule of 8 steps on FLUX.1's rule at 4 tokens (mu = {mu_flux1(4):.4f}):\n\n" + t3)
+        f"{w[0]:.4f}, {w[1]:.4f}, {w[2]:.4f}.\n\nThe schedule of 8 steps on FLUX.1's rule at 4 tokens (mu = {mu_flux1(4):.7f} unrounded: 0.5 + (4 - 256) x 0.65 / 3840, and all these digits are used):\n\n" + t3)
 
 
 def sampling_table(n=100):
@@ -866,7 +896,8 @@ def mask_table():
     hard_img = [[src[y][xp] + hard[xp] * (gen[y][xp] - src[y][xp]) for xp in range(8)] for y in range(8)]
     return (
         f"A masked run of the toy: the source with the texture, the prompt `box`, g = 2, 8 steps, the first noise of {_seed(NOISE)}, and the "
-        "mask 0 on the two left tokens and 1 on the two right ones (tokens in raster order 0 to 3). After every Euler step the kept "
+        "mask 0 on the two left tokens, at (row, column) = (0, 0) and (1, 0), raster indices 0 and 2, and 1 on the two right ones, "
+        "raster indices 1 and 3, for all 8 packed channels of each. After every Euler step the kept "
         "tokens are replaced by (1 - sigma) x0 + sigma eps at the sigma just reached (x0 itself when it is 0). The largest difference between "
         f"the final kept tokens and x0 is {err_lat:.1e}. Decoded, the left half of the picture differs from the *source* by up to "
         f"{left_err:.4f}, the amplitude of the texture, because the latent never held it; the left half equals the codec's round trip of the source to "

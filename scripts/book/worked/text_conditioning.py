@@ -157,6 +157,7 @@ def _streams(p, ids, allowed):
 def toy_setup():
     p = _toy()
     n_params = tg.parameter_count(p)
+    gains = (2 * len(p["blocks"]) + 1) * TOY_CFG["D"]
     rows = []
     for text in (PROMPT_1, PROMPT_2, SHORT):
         ids, n = _ids(text)
@@ -167,7 +168,8 @@ def toy_setup():
         "2 heads of width 4, SwiGLU width 12, L = 4 blocks and 16 learned positions, every matrix entry `0.5 * normal()` (instead "
         "of the 0.02 of a language model, so that attention has something to do), drawn row by row in the order embedding table, "
         "position table, then per block W_Q, W_K, W_V, W_O, W_gate, W_up, W_down (W_O and W_down multiplied by 1 / sqrt(2 L)); all "
-        f"norm gains are 1. That is {_int(n_params)} parameters. The pre-norm block is the one of Volume V, Chapter 9, the epsilon "
+        f"norm gains are 1 (two a block and a final one, {_int(gains)} numbers, not drawn). That is {_int(n_params)} parameters, "
+        f"{_int(n_params - gains)} of them drawn. The pre-norm block is the one of Volume V, Chapter 9, the epsilon "
         "of every RMS norm is 1e-6, and a text is `<s>`, its words, `</s>`, then `<pad>` up to the window. Vocabulary: "
         + vocab + ".\n\n"
         + _table(["text", "tokens", "ids"], rows, "lrl")
@@ -468,7 +470,11 @@ def encoder_work():
         "the work of all the denoising passes. Encoders: SDXL's two CLIP towers over 77 tokens; FLUX.1's T5-XXL over 512 tokens "
         "and CLIP-L over 77; FLUX.2's Qwen3 over 512 tokens and the first 27 of its 36 blocks, which is as deep as its deepest tap "
         "reads; Z-Image's Qwen3-4B over 512 tokens and the first 35 of 36. Denoisers: `denoiser_architectures` "
-        "(FLUX.1 by `text_conditioning.flux1_pass_flops`: 19 double and 38 single blocks of width 3072).\n\n"
+        "(FLUX.1 by this rule: 19 double and 38 single blocks of width d = 3072, n = (side / 16)^2 image rows and t text rows, "
+        "N = n + t; a double-stream or a single-stream block has 12 d^2 linear weights per row (a double block: the query-key-value "
+        "3 d^2, the projection d^2 and a feed-forward network of 2 x 4 d^2; a single block: 7 d^2 in and 5 d^2 out), so the "
+        "linear layers cost 2 x 12 d^2 N per block, attention 4 N^2 d per block, and the embedders 2 n 64 d (image rows in), "
+        "2 t 4096 d (text rows in) and 2 n d 64 (out); norms, softmax and modulation are left out).\n\n"
         + _table(["pipeline", "encoder params", "denoiser params", "ratio", "encode, GFLOP", "denoise, TFLOP", "work ratio"],
                  rows, "lrrrrrr")
     )

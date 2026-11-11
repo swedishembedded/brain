@@ -183,8 +183,11 @@ def degradations():
         f"along y with the edge value repeated beyond the border.\n\n{t1}\n\n"
         "The degraded 4 by 4 pictures. 'Box mean only' averages each non-overlapping 2 by 2 block of x; 'blur, then box mean' does so "
         f"after the blur; '+ noise' adds {NOISE_SD:g} times one draw of `normal()` of the stream {_seed(DEGRADE)} to each of the 16 "
-        f"pixels in row-major order; '+ quantised' rounds a block's mean to a multiple of {STEP_DC:g} and its three differences to a "
-        f"multiple of {STEP_AC:g} (rounding halves upward) as described in the text.\n\n{t2}\n\n"
+        f"pixels in row-major order; '+ quantised' takes each 2 by 2 block (p00 p01 / p10 p11) of the noisy picture as a mean "
+        f"m = (p00 + p01 + p10 + p11) / 4 and three differences h = (p00 + p01 - p10 - p11) / 4, v = (p00 - p01 + p10 - p11) / 4 and "
+        f"d = (p00 - p01 - p10 + p11) / 4, rounds m to a multiple of {STEP_DC:g} and each of h, v, d to a multiple of {STEP_AC:g} "
+        "(halves round upward: step times floor(value / step + 1/2)), and rebuilds the block as m + h + v + d, m + h - v - d, "
+        f"m - h + v - d, m - h - v + d.\n\n{t2}\n\n"
         f"How far each stage moves the 4 by 4 picture from the box mean of x alone (the mean over the 16 pixels of the squared "
         f"change).\n\n{t3}"
     )
@@ -632,7 +635,13 @@ def sr_setup():
     return (
         "The network and its starting point. The picture is 8 by 8, the input 4 by 4; the input and every hidden map are zero-padded by "
         "one pixel for the 3 by 3 convolutions. The 142 numbers are drawn from the stream `restoration.sr.init` with `normal()`, W1 first and W2 "
-        "second, each in row-major order of its shape.\n\n" + t1 + "\n\n" + t2
+        "second, each in row-major order of its shape. The pictures of the streams `restoration.sr.train` and `restoration.sr.test` are "
+        "drawn one after another, each from `uniform()` draws in this order: u1, u2, u3 give the plane, a = 0.4 + 0.2 u1, "
+        "b = 0.12 (u2 - 0.5), c = 0.12 (u3 - 0.5), pixel (row y, column x) a + b (x - 3.5) + c (y - 3.5); then, for each of the 8 blocks of "
+        "the right half in row-major order (low-resolution rows 0 to 3, columns 2 then 3) three draws h, v, d, each +1 if `uniform()` < 0.5 "
+        "and -1 otherwise, are added to the block's four pixels as 0.08 (h s_y + v s_x + d s_y s_x), where s_y is +1 for the block's top "
+        "row and -1 for its bottom row and s_x is +1 for its left column and -1 for its right column (h is the horizontal stripe, v the "
+        "vertical stripe, d the checkerboard). The low-resolution picture is the box mean of the 2 by 2 blocks.\n\n" + t1 + "\n\n" + t2
     )
 
 
@@ -700,7 +709,9 @@ def blind_restoration():
         f"{_seed(SR_LEVELS)}, then the noise of each picture drawn row-major from {_seed(SR_NOISE_TRAIN)} (16 draws per picture, every "
         "picture included, each multiplied by the level of its picture, so that a picture of level 0 is unchanged). Mean squared error on "
         "the 256 test pictures when 4 by 4 pixels of noise of the given standard deviation are added to every low-resolution picture "
-        "(from the stream `restoration.sr.noise.test.<level>`, 16 draws per picture, row-major; level 0 adds nothing).\n\n" + t
+        "(from the stream `restoration.sr.noise.test.<level>` with the level written as in the table, 0.02, 0.05 or 0.1: "
+        "`restoration.sr.noise.test.0.02`; 16 `normal()` draws per picture, pictures in order, row-major; level 0 adds nothing). "
+        "The `integer(4)` draw k of a training picture chooses the level 0, 0.02, 0.05 or 0.1 for k = 0, 1, 2, 3.\n\n" + t
     )
 
 
@@ -799,7 +810,8 @@ def codebook_prior():
         "(`integer(8)`, m = 0 .. 15, positions 0 .. 7). A degraded face has, at each position, the vector of its code plus the noise level times two "
         f"`normal()` draws (x then y) from the stream {_seed(CB_FACES)}, which draws first 2,000 face numbers (`integer(16)`), then the "
         "codes of 2,000 faces that are not templates (`integer(8)` for each of 8 positions), then the noise (two draws per position, "
-        "faces in order). 'Nearest code' replaces each position's vector by the index of the nearest code; the whole-face read picks "
+        "faces in order); the noise draws of face i are the same for the face i that is a template and for the face i that is not, so the "
+        "two sets of columns share their 2,000 x 16 noise numbers. 'Nearest code' replaces each position's vector by the index of the nearest code; the whole-face read picks "
         "the template with the smallest summed squared distance and returns its codes. Shares of the 16,000 positions that come out "
         "wrong, and of the 2,000 faces that come out right.\n\n" + t1 + "\n\n" + t2
     )
@@ -983,8 +995,14 @@ def diffusion_toy():
         "The sampler of the previous table run on a world of two pixels: the pair average is known to be 0.5, the half-difference t of "
         "the true pair is +1 or -1 with probability 1/2, and the denoiser is the exact posterior mean. The reference that the pull aims at "
         f"is the pair (0.9, 0.1), whose half-difference is +{TOY_CENTER:g}. {TOY_N:,} runs of {TOY_STEPS} steps on the equal-spaced grid, every "
-        f"configuration from the stream {_seed(TOY_STREAM)} read from its start (two draws for the first latent, then two per step when "
-        "the churn is on), so the first latents are the same in every row. Share of the runs whose half-difference ends positive, the mean "
+        f"configuration from the stream {_seed(TOY_STREAM)} read from its start (two `normal()` draws for the first latent, then two per "
+        "step when the churn is on), so the first latents are the same in every row. A run: x is the sigma_max = 14.6146 times the two first draws. "
+        f"At each step with level sigma and next level sigma': sigma-hat = sigma (1 + gamma); with churn, add {S_NOISE:g} "
+        "sqrt(sigma-hat^2 - sigma^2) times two fresh draws, one to each pixel (s_noise = 1.01); the estimate d is the exact denoiser "
+        "at sigma-hat; when a pull r is on and sigma' > 0.05, d moves to d - (d - c) (sigma / 14.6146)^r with c the reference pair "
+        "(sigma, not sigma-hat); then x <- x + (x - d) (sigma' - sigma-hat) / sigma-hat. The no-churn row uses gamma = 0 and draws "
+        "no noise per step. Every figure here moves with the fifth digit of s_noise on a few runs of the 2,000, so the "
+        "constant is part of the specification. Share of the runs whose half-difference ends positive, the mean "
         "of its absolute value, and the mean squared error per pixel against a true pair that is +1 or -1 with equal probability "
         "independently of the run (1 plus the mean square of the half-difference). The pair average of every run ends within "
         f"{'1e-12' if worst < 1e-12 else format(worst, '.0e')} of 0.5.\n\n"
@@ -1059,7 +1077,9 @@ def rrdbnet_counts():
     dense = 3 * sum(conv_params(64 + (c - 1) * 32, 64 if c == 5 else 32) for c in range(1, 6))
     return (
         "Real-ESRGAN's RRDBNet (64 channels, growth 32, 23 blocks, scale 4) counted from its configuration for a 128 by 128 input "
-        "and a 512 by 512 output. A multiply-add is two operations; bias additions, activations and the concatenations are not counted.\n\n"
+        "and a 512 by 512 output. A multiply-add is two operations; bias additions, activations and the concatenations are not counted. "
+        "conv_up1 runs at 256 by 256, conv_up2 and conv_hr are two different 64 to 64 convolutions that both run at 512 by 512, so "
+        "their rows are equal; the rows add up to the total.\n\n"
         + t1 + f"\n\nOne RRDB block has {_int(dense)} parameters (three dense blocks of {_int(dense // 3)}). The 6-block configuration "
         "keeps every other number of the architecture:\n\n" + t2
     )
@@ -1157,7 +1177,13 @@ def codeformer_counts():
         "residual blocks per level, attention at 16 by 16, a 1,024 by 256 codebook), the code predictor (width 512, 8 heads, 9 layers, feed-forward "
         "width 1,024, 256 positions, position embedding, a 256 to 512 input projection, a layer norm and a 512 to 1,024 head without bias), "
         "and the controllable feature transformation at four sizes (32, 64, 128, 256; 256, 256, 128, 128 channels). A multiply-add is two "
-        "operations; normalisations, activations, softmax and the elementwise feature mix are not counted.\n\n"
+        "operations; normalisations, activations, softmax and the elementwise feature mix are not counted. Each predictor layer has, "
+        f"with biases, the query, key and value projections and the output projection (512 to 512 each: {_int(4 * (512 * 512 + 512))}), "
+        f"the feed-forward pair 512 to 1,024 and back ({_int(2 * 512 * 1024 + 1024 + 512)}) and two layer norms of gain and offset "
+        f"({_int(4 * 512)}), so {_int(4 * (512 * 512 + 512) + 2 * 512 * 1024 + 1024 + 512 + 4 * 512)} parameters in 14 tensors "
+        "(the query and key matrices are stored as one tensor, with their biases as another). Each of the four feature "
+        "transformations is a residual block from twice the channels to the channels (two 3 x 3 convolutions and a 1 x 1 shortcut, "
+        "two norms) and two towers of two 3 x 3 convolutions at the channels, all with bias.\n\n"
         + _table(["part", "parameters", "tensors", "GFLOP", "share of the operations"], rows)
         + f"\n\nThe VQ autoencoder alone has {_int(vq[0])} parameters in {vq[1]} tensors; the rest is what CodeFormer adds. Stored in 32-bit "
         f"floats the parameters are {tot_p * 4 / 2 ** 20:,.1f} MiB."
@@ -1256,8 +1282,16 @@ def supir_counts():
     all_p = delta_p + backbone[0]
     return (
         "SUPIR counted from its configuration, at a 128 by 128 latent (a 1024 by 1024 image). The backbone and the trunk are the SDXL U-Net "
-        "of `denoiser_architectures` (the trunk cut after its middle block, plus the 4 to 320 convolution that embeds the hint). Multiply-adds "
-        "count two operations; normalisations, activations and softmax do not count.\n\n"
+        "of Chapter 8 (the trunk is its stages through the middle block, plus the 4 to 320 3 x 3 convolution that embeds the hint). Each of "
+        "the 10 joins (nine skip entries and the middle) is a ZeroSFT: a 3 x 3 convolution from the control tensor's channels c to 128, "
+        "then two 3 x 3 convolutions from 128 to the joined width (the scale and the shift), a norm of the joined width (gain and "
+        "offset) and a 1 x 1 convolution c to c, all with bias; each of the two ZeroCrossAttn sites has two norms (of the query "
+        "width x and the context width), a query matrix x to x, a fused key-value matrix from the context to 2 x, and an output "
+        "matrix x to x with bias, with 64-wide heads. The degradation-robust encoder is an autoencoder encoder run once at 1024 by 1024: a 3 x 3 "
+        "convolution to 128 channels, two residual blocks (two norms, two 3 x 3 convolutions, a 1 x 1 shortcut when the width "
+        "changes) at each of the widths 128, 256, 512, 512 with a stride-2 3 x 3 convolution between levels, a mid block of "
+        "residual block, attention (one norm, four 1 x 1 projections) and residual block, a norm and a 3 x 3 convolution to the 8 "
+        "channels of the moments of the 4 latent channels. Multiply-adds count two operations; normalisations, activations and softmax do not count.\n\n"
         + _table(["part", "parameters", "tensors", "GFLOP"], rows)
         + f"\n\nThe parts that SUPIR adds to SDXL (trunk, adaptors and encoder) have {_int(delta_p)} parameters in {trunk[1] + adt + enc[1]} tensors; "
         f"with the backbone the total is {_int(all_p)} parameters, {all_p * 4 / 1e9:.2f} GB in 32-bit floats. A restoration of 50 steps with "

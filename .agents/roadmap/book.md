@@ -77,7 +77,12 @@ reproduced its worked examples from the text alone in another language.
       and sub-blocks given only as shapes, constants printed nowhere, and a
       pseudocode routine behind its fixed prose). All were fixed in the
       following commits; a recheck has not been run.
-- [ ] Volume VIII, Generating Images: all 13 chapters written; reader pass pending.
+- [x] Volume VIII, Generating Images: all 13 chapters written.
+      Independent readers reproduced 1259 items in C from the page alone:
+      987 passed, 254 after a guess, 18 failed (draw and shuffle orders
+      stated loosely, seeds named but not printed, toy parts given by role
+      rather than formula, architecture counts without their conventions).
+      All were fixed in the following commits; a recheck has not been run.
 
 ## Open
 

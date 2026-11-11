@@ -639,6 +639,11 @@ def placement():
     swapped = list(sw)
     swapped[0], swapped[1] = sw[1], sw[0]
     bad = unet(P, x, E, res=swapped)
+    full = [_pattern(k, (n, c)) for k, (_, n, c) in enumerate(POINTS)]
+    full_ok = unet(P, x, E, res=full)
+    full_swapped = list(full)
+    full_swapped[0], full_swapped[1] = full[1], full[0]
+    full_bad = unet(P, x, E, res=full_swapped)
     return (
         "One input of the first training sample, one residual at a time. The residual of point k has entry (position p, channel c) "
         "equal to 0.05 (((3 p + 5 c + 7 k) mod 11) - 5), the other three are 0. The first two columns are the point and the shape "
@@ -650,7 +655,8 @@ def placement():
         + _table(["point", "shape", "output, skip only", "middle, skip only", "middle, also hidden", "output, also hidden"], rows,
                  "llrrrr")
         + f"\n\nExchanging the residuals of down.0 and down.1, which have the same shape (3 channels x 4 positions), runs without a shape "
-        f"error and moves the output by {_f(gap(bad, ok), 6)} (largest change); exchanging the residuals of down.1 and down.2 "
+        f"error and moves the output by {_f(gap(bad, ok), 6)} (largest change) when only those two residuals are present, and by "
+        f"{_f(gap(full_bad, full_ok), 6)} when all four are present (each with its own pattern); exchanging the residuals of down.1 and down.2 "
         f"({3 * 4} and {4 * 2} numbers) fails the element-count check before anything runs."
     )
 
@@ -771,9 +777,14 @@ def identity_tokens():
         f"The resampler of the toy on identity embeddings of 4 numbers (the identities of the stream {_seed(FACES)}: {N_FACES} of them, "
         "each 4 draws of `normal()` times 2, in order; the first two are used here). Its tensors are drawn from "
         f"{_seed(IDENTITY)} in the order `Win` (3 x 4), `bin`, the two latent rows (6 plain normal draws), `Wq`, `Wk`, `Wv`, `Wo`, "
-        "`Wp` (3 x 3 each, drawn as the base's matrices), then the two sites' key projections (4 x 3, 3 x 3). The key and value input "
-        f"of the resampler has {1 + len(R['Lat'])} rows (one for the projected embedding, one for each latent), which is one more "
-        "than the number of tokens. The columns: the length of the embedding, its cosine with identity 0's embedding, the relative "
+        "`Wp` (3 x 3 each, drawn as the base's matrices), then the two sites' key projections (4 x 3, 3 x 3). The computation, for "
+        "an embedding e: x = `Win` e + `bin`; the key and value input is the three rows LN(x), LN(latent 0), LN(latent 1), where LN "
+        "subtracts the mean and divides by sqrt(variance + 1e-5), with no gain or offset; the keys are `Wk` and the values `Wv` of those "
+        "rows; token i has the query `Wq` LN(latent i) (the latent itself, not its attention, is normalised for the query), scores "
+        "q . k / sqrt(3) with a softmax over the three rows, the attention result a, and the token `Wp` (latent i + `Wo` a), the "
+        "unnormalised latent being the residual. "
+        f"The key and value input has {1 + len(R['Lat'])} rows (one for the projected embedding, one for each latent), which is one "
+        "more than the number of tokens. The columns: the length of the embedding, its cosine with identity 0's embedding, the relative "
         "change of the 6 token numbers from identity 0's tokens, and the 6 numbers (token 0, then token 1).\n\n"
         + _table(["embedding", "length", "cosine with identity 0", "relative change of tokens", "tokens"], rows, "lrrrl")
     )
@@ -841,7 +852,9 @@ def injection_variants():
         + f"\n\nIn the joined variant the 2 ID tokens take between {min(mass):.4f} and {max(mass):.4f} of the attention weight at the 2 "
         f"positions of the site even when their values are zeroed. Scaling the added branch's context by {fold:g} and scaling its "
         f"value projection by {fold:g} give outputs that differ by less than 1e-15 ({'passed' if gap(folded, scaled) < 1e-15 else 'FAILED'}; "
-        f"the difference is rounding only); scaling the key projection by {fold:g} instead changes the output by {_f(gap(kscaled, dec_on), 6)}."
+        f"the difference is rounding only); scaling the key projection by {fold:g} instead gives an output that differs by "
+        f"{_f(gap(kscaled, dec_on), 6)} from the unscaled scale-1 output, by {_f(gap(kscaled, scaled), 6)} from the 0.3-context "
+        f"output and by {_f(gap(kscaled, text_only), 6)} from the text-only output."
     )
 
 
@@ -950,12 +963,27 @@ def identity_training():
     after = [_val(_id_loss(r[1][0], r[1][1], toks, hx, tg)) for r in runs]
     worst, count = _id_grad_check()
     return (
-        f"Training the key and value projections of the two sites (42 numbers: 4 x 3 and 3 x 3, twice) by gradient descent at rate "
-        f"{ID_LR:g} for {ID_STEPS} steps on {N_FACES} identities with their images, the resampler and the base fixed. The value projections "
-        "start at zero (the keys at the draws of the previous table); the target is the base output plus the offset G e at all "
-        "positions, with G = [[0.2, -0.1, 0.0, 0.15], [-0.05, 0.1, 0.2, -0.1]]; the images are "
-        f"{N_FACES} blocks of 8 normal draws from {_seed(IDATA)}. The identity scale is 1. The nudge changes the first key weight of "
-        "site 0.\n\n"
+        f"Training the key and value projections of the two sites (42 numbers: 4 x 3 and 3 x 3, twice) by full-batch gradient "
+        f"descent, with no momentum and no randomness after the data are drawn, at rate {ID_LR:g} for {ID_STEPS} steps on "
+        f"{N_FACES} identities with their images, the resampler and the base fixed. The added attention is present at both sites of "
+        "the toy: at site 0 on the middle activation and at site 1 on the up path's last activation. At "
+        "each site the queries are the site's own `q` of its input, the keys and values are the adapter's key and value projections "
+        "of the identity's 2 tokens (the resampler's output for that identity, fixed), the scores are divided by the square root of "
+        "the site's width, a softmax runs over the 2 tokens alone, and the result times the identity scale 1 is added to the text "
+        "attention's context before the site's output projection `o`. The first site's change therefore reaches the second site "
+        "and the output through the whole up path. The value projections "
+        "start at zero (the keys at the last two tensors of the stream "
+        f"{_seed(IDENTITY)}); the target for identity i is the base network's output on its image (no identity branch) plus the "
+        "offset G e_i at all 4 positions, where e_i is the identity's embedding and "
+        "G = [[0.2, -0.1, 0.0, 0.15], [-0.05, 0.1, 0.2, -0.1]]. The embeddings are the "
+        f"{N_FACES} identities of {_seed(FACES)} (4 draws of `normal()` times 2 each); the images are {N_FACES} blocks of 8 normal "
+        f"draws from {_seed(IDATA)}, a block being the input of one identity, position by position (2 numbers a position). The loss "
+        f"is the squared error summed over the 8 output numbers of each identity and over the {N_FACES} identities, divided by "
+        f"8 x {N_FACES}: the mean over all {8 * N_FACES} numbers, with the identities added in order. The two gradient columns are "
+        "the square root of the sum of squares of the 21 key (or 21 value) gradient entries of both sites at that step, before the "
+        "update, and every one of the 42 numbers is updated at once. The digits are those shared by the run and four copies whose "
+        "first key weight of site 0 is changed by +1e-12, -1e-12, +3e-12 and -3e-12 (the nudge rule introduced with the first trained "
+        "tables of Chapter 2).\n\n"
         + _table(["step", "loss", "grad keys", "grad values"], rows)
         + f"\n\nOn {N_FACES_HELD} identities with images from {_seed(FACES_HELDOUT)} (each: 4 draws of `normal()` times 2, then 8 normal "
         f"draws) the loss is {_f(base_l)} without the identity branch and {_shared(after, 6)} with the trained one. Gradient check "
@@ -1017,8 +1045,12 @@ def sdxl_control_counts():
     rows.append(["ControlNet total", _int(tot_p), tot_t, f"{tot_f / 1e9:,.1f}"])
     rows.append(["SDXL U-Net, for comparison", _int(SDXL_PARAMS), SDXL_TENSORS, f"{SDXL_PASS_GFLOP:,.1f}"])
     return (
-        "The SDXL ControlNet derived from the configuration of the SDXL U-Net (`denoiser_architectures.unet_count`, cut after the "
-        "middle block) at a 128 by 128 latent, a 1024 by 1024 control image of 3 channels and 77 text tokens. Tensors are counted in "
+        "The SDXL ControlNet derived from the configuration of the SDXL U-Net of Chapter 8 (the stages of its parameter and operation "
+        "tables from the clock through the middle block, the rows of those tables summed) at a 128 by 128 latent, a 1024 by 1024 control "
+        "image of 3 channels and 77 text tokens. The conditioning embedder is eight 3 x 3 convolutions with bias, "
+        "3 to 16, 16 to 16, 16 to 32 (stride 2), 32 to 32, 32 to 96 (stride 2), 96 to 96, 96 to 256 (stride 2) and 256 to 320 "
+        "channels, the first two at 1024 x 1024, and each of the ten zero-convolutions is a 1 x 1 convolution with bias at the width "
+        "and size of its injection point (the table of the next block). Tensors are counted in "
         "brain's layout (a fused query-key-value matrix is one tensor, the feed-forward's gated projection two); a multiply-add is two "
         "operations; norms, activations and softmax are not counted.\n\n"
         + _table(["part", "parameters", "tensors", "GFLOP per evaluation"], rows)
@@ -1108,7 +1140,12 @@ def instantid_counts():
         "`denoiser_architectures`, at a 128 by 128 latent) and the released resampler's shapes (width 1280, 4 layers, 20 heads of "
         "64, 16 queries, 512 in, 2048 out, feed-forward ratio 4). A site's added attention has two bias-free projections from the "
         "2048-wide tokens (`to_k_ip`, `to_v_ip`), its keys and values are computed from the 16 tokens and the scores and weighted sums "
-        "over 16 rows for each of the site's tokens (the queries are the text attention's own); operations in MFLOP per site.\n\n"
+        "over 16 rows for each of the site's tokens (the queries are the text attention's own); operations in MFLOP per site. The "
+        "resampler's count is, per layer, three layer norms (the input rows, the latents and the feed-forward's input, each a gain "
+        "and an offset: 6 x 1280 numbers), the bias-free query, fused key-value and output projections (1280 to 1280, 1280 to "
+        "2 x 1280 and 1280 to 1280, with 20 heads of 64) and the bias-free feed-forward pair (1280 to 5120 and back): 11 tensors a "
+        "layer; outside the layers, the input projection 512 to 1280 with its bias, the 16 learned latents, the output projection "
+        "1280 to 2048 with its bias and a last layer norm of 2048 (gain and offset): 7 tensors.\n\n"
         + _table(["site width", "sites", "tokens T", "numbers per site", "numbers, all sites", "keys and values, MFLOP", "scores and sums, MFLOP"],
                  rows, "rrrrrrr")
         + f"\n\nThe 70 sites hold {_int(tot_p)} numbers and the resampler {_int(rp)} in {rt} tensors, {_int(tot_p + rp)} in all "
@@ -1172,13 +1209,18 @@ def pulid_counts():
     return (
         "PuLID's adapter for FLUX.1 from its configuration (IdFormer width 1024, 10 layers, 16 heads of 64, 32 learned queries and 5 "
         "ID tokens, 577 tokens per tapped EVA-CLIP state, 5 states, ID condition of 1280 numbers; cross-attention sites of width "
-        "3072 with 16 heads of 128 and 2048-wide ID tokens). Tensors in brain's layout; a multiply-add is two operations.\n\n"
+        "3072 with 16 heads of 128 and 2048-wide ID tokens). Tensors in brain's layout; a multiply-add is two operations. One "
+        "site has seven tensors: the gain and offset of a layer normalisation of the ID tokens "
+        f"({_int(2 * PULID['out'])} numbers), the gain and offset of one of the image rows ({_int(2 * PULID['ca_dim'])}), the query "
+        f"projection ({_int(PULID['ca_dim'] * PULID['ca_heads'] * PULID['ca_head'])}, bias-free), the fused key and value projection "
+        f"({_int(2 * PULID['out'] * PULID['ca_heads'] * PULID['ca_head'])}) and the output projection "
+        f"({_int(PULID['ca_dim'] * PULID['ca_heads'] * PULID['ca_head'])}), which add up to the table's count of one site.\n\n"
         + _table(["part", "parameters", "tensors", "GFLOP"], rows, "lrrr")
         + f"\n\nThe schedule: one site after double-stream block b for b = {', '.join(map(str, dbl))} (every second of 19) and one "
         f"after single-stream block b for b = {', '.join(map(str, sgl))} (every fourth of 38), {len(sites)} in all; the sites take "
         "the module indices 0 to 19 in that order, one counter for both streams.\n\n"
         + _table(["part of one site, 4,096 image rows", "GFLOP"], rows2, "lr")
-        + f"\n\nOne FLUX.1 dev pass at 1024 by 1024 with 512 text rows is {_gf(flux_pass / 1e9)} (`text_conditioning.flux1_pass_flops`), "
+        + f"\n\nOne FLUX.1 dev pass at 1024 by 1024 with 512 text rows is {_gf(flux_pass / 1e9)} (Chapter 9's rule for a FLUX.1 pass, in the caption of its work table), "
         f"so the 20 sites add {20 * site_f / flux_pass * 100:.2f} percent to every pass they are present in; "
         f"the IdFormer's {_gf(enc_f / 1e9)} are paid once per identity."
     )
