@@ -1,0 +1,83 @@
+<!-- source-sha256: 847826ab2592949d6cd844ebe10ae50db390bbbce33823e979ebe4c29b6be680 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 660" width="900" height="660"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-2b6cb0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2b6cb0"/></marker></defs><rect width="900" height="660" fill="#ffffff"/>
+<ellipse cx="140" cy="52" rx="75" ry="17" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140" y="56.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">input 2 x 4</text>
+<ellipse cx="760" cy="52" rx="75" ry="17" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="760" y="56.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">output 2 x 4</text>
+<rect x="35" y="103" width="210" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">input convolution</text>
+<text x="140" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">skip 0, 3 x 4</text>
+<rect x="35" y="228" width="210" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140" y="251.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block at 4 positions</text>
+<text x="140" y="267.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">skip 1, 3 x 4</text>
+<rect x="35" y="353" width="210" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block at 2 positions</text>
+<text x="140" y="392.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">skip 2, 4 x 2</text>
+<rect x="35" y="478" width="210" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="140" y="501.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">middle block, site 0</text>
+<text x="140" y="517.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 2</text>
+<rect x="655" y="103" width="210" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="760" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">up block joins skip 0</text>
+<text x="760" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">site 1, output layer</text>
+<rect x="655" y="228" width="210" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="760" y="251.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">up block, doubled</text>
+<text x="760" y="267.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">joins skip 1</text>
+<rect x="655" y="353" width="210" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="760" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">up block joins</text>
+<text x="760" y="392.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">skip 2 and the middle</text>
+<line x1="140" y1="72" x2="140" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="760" y1="100" x2="760" y2="72" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="140" y1="160" x2="140" y2="225" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="140" y1="285" x2="140" y2="350" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="149" y="321.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">pool</text>
+<line x1="140" y1="410" x2="140" y2="475" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="760" y1="350" x2="760" y2="285" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="760" y1="225" x2="760" y2="160" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="248" y1="130" x2="652" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="450" y="121.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">skip 0</text>
+<circle cx="540" cy="130" r="9" fill="#ffffff" stroke="#2b6cb0" stroke-width="1.4"/>
+<text x="540" y="134.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#2b6cb0" text-anchor="middle">+</text>
+<line x1="248" y1="255" x2="652" y2="255" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="450" y="246.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">skip 1</text>
+<circle cx="540" cy="255" r="9" fill="#ffffff" stroke="#2b6cb0" stroke-width="1.4"/>
+<text x="540" y="259.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#2b6cb0" text-anchor="middle">+</text>
+<line x1="248" y1="380" x2="652" y2="380" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="450" y="371.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">skip 2</text>
+<circle cx="540" cy="380" r="9" fill="#ffffff" stroke="#2b6cb0" stroke-width="1.4"/>
+<text x="540" y="384.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#2b6cb0" text-anchor="middle">+</text>
+<path d="M245,505 L750,505 Q760,505 760,495 L760,410" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="690" y="495.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">middle</text>
+<circle cx="540" cy="505" r="9" fill="#ffffff" stroke="#2b6cb0" stroke-width="1.4"/>
+<text x="540" y="509.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#2b6cb0" text-anchor="middle">+</text>
+<rect x="230" y="171" width="220" height="42" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="188.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">copy of input convolution</text>
+<text x="340" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ embedding of the control image</text>
+<rect x="481" y="171" width="118" height="42" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="540" y="196.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">zero-conv 0</text>
+<line x1="453" y1="192" x2="478" y2="192" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<line x1="540" y1="168" x2="540" y2="142" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<rect x="230" y="296" width="220" height="42" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="321.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">copy of block, 4 positions</text>
+<rect x="481" y="296" width="118" height="42" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="540" y="321.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">zero-conv 1</text>
+<line x1="453" y1="317" x2="478" y2="317" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<line x1="540" y1="293" x2="540" y2="267" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<line x1="340" y1="216" x2="340" y2="293" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<rect x="230" y="421" width="220" height="42" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="446.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">copy of block, 2 positions</text>
+<rect x="481" y="421" width="118" height="42" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="540" y="446.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">zero-conv 2</text>
+<line x1="453" y1="442" x2="478" y2="442" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<line x1="540" y1="418" x2="540" y2="392" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<line x1="340" y1="341" x2="340" y2="418" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<rect x="230" y="546" width="220" height="42" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="563.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">copy of middle block</text>
+<text x="340" y="579.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and its site 0</text>
+<rect x="481" y="546" width="118" height="42" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="540" y="571.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">zero-conv mid</text>
+<line x1="453" y1="567" x2="478" y2="567" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<line x1="540" y1="543" x2="540" y2="517" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<line x1="340" y1="466" x2="340" y2="543" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<text x="450" y="612.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">blue: trained, starts as a copy of the base; yellow: zero-convolutions, start at exactly 0; grey: frozen.</text>
+<text x="450" y="628.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">A residual is added to the skip copy that the up path reads; the running hidden state of the down path is not touched.</text>
+</svg>

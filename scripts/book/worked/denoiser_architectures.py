@@ -268,12 +268,13 @@ ConvKinds = ("convolutions", "time projections", "norms", "self-attention", "cro
              "time and size embeddings", "self-attention scores", "cross-attention scores")
 
 
-def unet_count(cfg, h, w, t_enc=77):
+def unet_count(cfg, h, w, t_enc=77, through_mid=False):
     """Count the UNet2DConditionModel graph of `cfg` on a latent of h by w and t_enc text tokens, walking the stages in execution
     order: conv_in, the down blocks (layers resnets, each followed by a spatial transformer at an attention level, then a stride-2
     convolution between levels), the middle block, the up blocks (layers + 1 resnets that each read the hidden state concatenated
     with a skip popped from the stack, then a convolution after nearest-neighbour doubling between levels), conv_out. Returns the
-    Count and the list of stage rows."""
+    Count and the list of stage rows. With `through_mid` the walk stops after the middle block: the half of the network that a
+    trainable copy duplicates (Chapter 11), with its conditioning embeddings, input convolution, down blocks and middle block."""
     n = Count()
     c0, te = cfg["ch"][0], cfg["time_dim"]
     levels = len(cfg["ch"])
@@ -349,6 +350,8 @@ def unet_count(cfg, h, w, t_enc=77):
     transformer(cm, cfg["heads"][-1], cfg["tf"][-1], hh, ww)
     resnet(cm, cm, hh, ww)
     rows.append(["middle", f"{hh}x{ww}", f"{cm} -> {cm}", "2", str(cfg["tf"][-1]), str(hh * ww), "-"])
+    if through_mid:
+        return n, rows
     prev_out = cm
     for i in range(levels):
         level = levels - 1 - i

@@ -1,0 +1,54 @@
+<!-- source-sha256: fab471fb6e4ab5e7725c13d7e92b6a977ca19fd0c8128864c5c5705401329ca7 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 500" width="940" height="500"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-2b6cb0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2b6cb0"/></marker></defs><rect width="940" height="500" fill="#ffffff"/>
+<ellipse cx="70" cy="90" rx="60" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="70" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">text rows</text>
+<text x="70" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">77 x 2048</text>
+<rect x="175" y="65" width="150" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="250" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">site keys and</text>
+<text x="250" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">values (text)</text>
+<rect x="395" y="63" width="150" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">attention over</text>
+<text x="470" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the text rows</text>
+<ellipse cx="470" cy="250" rx="85" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">queries of the</text>
+<text x="470" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image tokens</text>
+<ellipse cx="70" cy="410" rx="60" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="70" y="406.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">identity</text>
+<text x="70" y="422.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">embedding</text>
+<rect x="160" y="385" width="100" height="50" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="210" y="414.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">resampler</text>
+<ellipse cx="330" cy="410" rx="50" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="406.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ID tokens</text>
+<text x="330" y="422.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 x 2048</text>
+<rect x="415" y="385" width="130" height="50" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="480" y="406.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">this site&#x27;s own</text>
+<text x="480" y="422.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">to_k_ip, to_v_ip</text>
+<rect x="570" y="383" width="140" height="54" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="406.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">attention over</text>
+<text x="640" y="422.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the ID tokens</text>
+<ellipse cx="640" cy="250" rx="75" ry="27" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">context =</text>
+<text x="640" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">text + s x ID</text>
+<rect x="760" y="225" width="100" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="810" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">shared</text>
+<text x="810" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">to_out</text>
+<ellipse cx="810" cy="130" rx="75" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="810" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">added to the</text>
+<text x="810" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image tokens</text>
+<line x1="133" y1="90" x2="172" y2="90" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="328" y1="90" x2="392" y2="90" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="470" y1="225" x2="470" y2="120" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M470,272 L470,325 Q470,335 480,335 L590,335 Q600,335 600,345 L600,380" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="535" y="325.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the same queries</text>
+<line x1="133" y1="410" x2="157" y2="410" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<line x1="263" y1="410" x2="277" y2="410" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<line x1="383" y1="410" x2="412" y2="410" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<line x1="548" y1="410" x2="567" y2="410" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<line x1="680" y1="380" x2="680" y2="277" stroke="#2b6cb0" stroke-width="1.4" marker-end="url(#head-2b6cb0)"/>
+<text x="689" y="332.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#2b6cb0" text-anchor="start">scale s</text>
+<path d="M545,90 L630,90 Q640,90 640,100 L640,220" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="718" y1="250" x2="757" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="810" y1="222" x2="810" y2="155" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="470" y="466.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">blue: the identity branch, with its own projections at every site (70 sites on SDXL). The text attention is unchanged;</text>
+<text x="470" y="482.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">its softmax never sees the identity tokens, so with s = 0 the site&#x27;s output is exactly the text-only output.</text>
+</svg>

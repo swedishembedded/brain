@@ -52,6 +52,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **attention backward**: the gradient of attention, obtained by undoing in order the weighted average, the softmax rule on each row, the score product with its scale and the three projections, with the input collecting three contributions and no step of its own for the mask. *([Self-Attention](v05-sequences/07-self-attention.md))*
 
+**attention injection**: adding the result of a second attention, over extra tokens with their own keys and values, to the context of an attention site (or to the residual stream where no site exists) with a strength, so that at strength zero the site's output is exactly what it was. *([Control, Identity and Adapters](v08-image-generation/11-control-and-identity.md))*
+
 **attention sink**: a key, usually at one of the first positions of the text, that most queries score high whatever their content and whose value is near zero, so that the softmax has somewhere to put its mass; a window that keeps the sink beside its recent keys keeps this behaviour. *([Attention Variants: Sharing and Compressing Keys](v06-language-models/03-attention-variants.md))*
 
 **autoencoder**: a network trained to output its own input after passing it through a bottleneck layer much narrower than the input, so that it must learn a short code from which the input can be rebuilt. *([First Complete Models](v03-neural-networks/13-first-models.md))*
@@ -193,6 +195,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **contrastive pretraining**: training two networks, here one for pictures and one for captions, so that the vectors they write into a shared space are close for the two members of a pair and far for the members of different pairs, with the other pairs of the batch as the negatives. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*
 
 **controlled experiment**: a comparison in which the two arms differ only in the thing the claim is about, with the data, recipe, seeds, compute, tuning effort and metric held the same, so that a difference can be attributed to that thing. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
+
+**ControlNet**: a trainable copy of a frozen generator's down and middle blocks, fed a control signal (an image brought to the latent grid) and joined to the generator by zero convolutions whose outputs are added to its skip entries and middle activation, so that a pose, an edge map or a depth map steers generation while the generator's own weights stay as they are. *([Control, Identity and Adapters](v08-image-generation/11-control-and-identity.md))*
 
 **convergence**: the approach of the iterates to the minimiser and of the loss to its minimum; for a quadratic loss it is geometric, with a speed set by the learning rate and the condition number. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
@@ -455,6 +459,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **hypothesis test**: a rule for deciding whether data are consistent with a claim that nothing is going on (the null hypothesis), by computing the probability, assuming the claim, of a test statistic at least as extreme as the one observed (the p-value) and comparing it with a threshold fixed in advance. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 ## I
+
+**identity adapter**: the weights added to a frozen generator to condition it on who a person is: a resampler that turns an identity embedding into a few tokens, and at each attention site its own key and value projections for them. *([Control, Identity and Adapters](v08-image-generation/11-control-and-identity.md))*
 
 **identity embedding**: a vector computed from a photograph of a person so that photographs of the same person point the same way and photographs of different people do not; two of them are compared by the cosine of the angle between them. *([Faces: Detection, Identity and Parsing](v07-vision/11-faces.md))*
 
@@ -1129,5 +1135,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **YaRN**: a rope scaling that gives each frequency pair a rate between its original and its original divided by the extension factor, by the number of turns it makes over the trained length, and multiplies the cosine and sine of every pair by $0.1\ln s + 1$ to restore the sharpness of the softmax. *([Long Context](v06-language-models/08-long-context.md))*
 
 ## Z
+
+**zero convolution**: a $1 \times 1$ convolution whose weights and bias start at exactly zero, so that a branch ending in it adds nothing at the first step, yet its own weights already have a gradient, and the layers behind it receive one from the second step on. *([Control, Identity and Adapters](v08-image-generation/11-control-and-identity.md))*
 
 **zero-shot classification**: assigning an input to the class whose caption vector is nearest, with the class vectors computed at the time of the question from sentences naming the classes (averaged over several templates), so that classes need no labelled examples and no trained weight of their own. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*

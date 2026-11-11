@@ -151,4 +151,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 8. [Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md): What network shapes are good at predicting noise, and how do they take in the prompt?
 9. [Conditioning on Text](v08-image-generation/09-text-conditioning.md): How does a sentence become the signal that steers image generation?
 10. [Latent Diffusion Systems End to End](v08-image-generation/10-latent-diffusion-systems.md): How do the encoder, denoiser, sampler and decoder combine into a working image generator?
+11. [Control, Identity and Adapters](v08-image-generation/11-control-and-identity.md): How do we steer a generator with a pose, an edge map or a particular person's face?
 <!-- /contents -->
