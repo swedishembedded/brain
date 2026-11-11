@@ -359,3 +359,24 @@ fn sinusoids(length: u32, channels: u32, max_timescale: f32) -> Vec<f32> {
     }
     pe
 }
+
+/// A requested window in seconds as the encoder can take it: the mel is cut
+/// into whole 100-frame (one-second) chunks, so the window is rounded up to
+/// whole seconds; `None` when it is not a positive finite number.
+pub fn whole_window_secs(secs: f32) -> Option<f32> {
+    (secs.is_finite() && secs > 0.0).then(|| secs.ceil())
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::whole_window_secs;
+
+    #[test]
+    fn a_window_is_whole_seconds_or_refused() {
+        assert_eq!(whole_window_secs(2.5), Some(3.0));
+        assert_eq!(whole_window_secs(30.0), Some(30.0));
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(whole_window_secs(bad), None, "{bad}");
+        }
+    }
+}

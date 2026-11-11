@@ -117,7 +117,9 @@ pub fn transcribe_spec() -> ActionSpec {
 
 /// The engine sizing an invocation names: `(window seconds, max new tokens)`.
 pub fn tuning(inv: &Invocation) -> (f32, usize) {
-    let window = inv.get_f64("window_secs").map_or(DEFAULT_WINDOW_SECS, |w| w as f32);
+    // The encoder works in whole one-second chunks: a window is rounded up to
+    // whole seconds, and one that is not a positive number keeps the default.
+    let window = inv.get_f64("window_secs").and_then(|w| crate::encoder::whole_window_secs(w as f32)).unwrap_or(DEFAULT_WINDOW_SECS);
     let max_new = inv.get_i64("max_new").map_or(DEFAULT_MAX_NEW, |n| n.max(1) as usize);
     (window, max_new)
 }
