@@ -131,13 +131,20 @@ pub fn cameras_from_json(raw: &str) -> Result<Vec<Camera>, String> {
                 .as_array()
                 .ok_or_else(|| format!("camera {i} has no 'c2w'"))?
                 .iter()
-                .map(|x| x.as_f64().unwrap_or(0.0) as f32)
-                .collect();
+                .enumerate()
+                .map(|(j, x)| x.as_f64().map(|v| v as f32).ok_or(format!("camera {i}: 'c2w' entry {j} is not a number")))
+                .collect::<Result<_, String>>()?;
             let c2w: [f32; 16] = c2w.try_into().map_err(|v: Vec<f32>| format!("camera {i}: 'c2w' has {} entries, expected 16", v.len()))?;
             let k = camera::Intrinsics::from_json(c).map_err(|e| format!("camera {i}: {e}"))?;
             let mut cam = Camera::with_intrinsics(c2w, &k);
             if let Some(sh) = c.get("shutter") {
-                let v: Vec<f32> = sh.as_array().ok_or(format!("camera {i}: 'shutter' must be an array"))?.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect();
+                let v: Vec<f32> = sh
+                    .as_array()
+                    .ok_or(format!("camera {i}: 'shutter' must be an array"))?
+                    .iter()
+                    .enumerate()
+                    .map(|(j, x)| x.as_f64().map(|v| v as f32).ok_or(format!("camera {i}: 'shutter' entry {j} is not a number")))
+                    .collect::<Result<_, String>>()?;
                 cam.shutter = v.try_into().map_err(|v: Vec<f32>| format!("camera {i}: 'shutter' has {} entries, expected 6", v.len()))?;
             }
             Ok(cam)
@@ -292,5 +299,22 @@ impl Default for RenderOpts {
             far: 1e10,
             ray: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod camera_json_tests {
+    use super::cameras_from_json;
+
+    /// A pose entry that is not a number is an error, not a zero.
+    #[test]
+    fn a_pose_entry_that_is_not_a_number_is_refused() {
+        let mut c2w: Vec<serde_json::Value> = (0..16).map(|i| serde_json::json!(if i % 5 == 0 { 1.0 } else { 0.0 })).collect();
+        let good = serde_json::json!([{"c2w": c2w, "fx": 50.0, "fy": 50.0, "cx": 32.0, "cy": 24.0, "width": 64, "height": 48}]);
+        assert!(cameras_from_json(&good.to_string()).is_ok());
+        c2w[3] = serde_json::json!("2.5");
+        let bad = serde_json::json!([{"c2w": c2w, "fx": 50.0, "fy": 50.0, "cx": 32.0, "cy": 24.0, "width": 64, "height": 48}]);
+        let err = cameras_from_json(&bad.to_string()).unwrap_err();
+        assert!(err.contains("'c2w' entry 3"), "{err}");
     }
 }

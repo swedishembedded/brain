@@ -158,3 +158,15 @@ fn sampling_rate_is_the_focal_length_on_axis() {
     // off axis a pinhole samples more densely per radian
     assert!(k.pixels_per_radian([0.5, 0.0, 1.0]).unwrap() > 500.0);
 }
+
+/// A coefficient that is not a number is an error, not a zero: a lens file
+/// with `"k": ["0.1"]` would otherwise load as an undistorted camera.
+#[test]
+fn a_coefficient_that_is_not_a_number_is_refused() {
+    for bad in [serde_json::json!("0.1"), serde_json::Value::Null] {
+        let c = serde_json::json!({"fx": 500.0, "fy": 500.0, "cx": 320.0, "cy": 240.0, "width": 640, "height": 480,
+                                   "model": "opencv", "k": [bad]});
+        let err = Intrinsics::from_json(&c).expect_err("a non-number coefficient loaded");
+        assert!(err.contains("'k'"), "{err}");
+    }
+}

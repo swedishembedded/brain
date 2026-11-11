@@ -521,7 +521,13 @@ impl Intrinsics {
             match c.get(k) {
                 None => Ok(vec![0.0; n]),
                 Some(a) => {
-                    let v: Vec<f64> = a.as_array().ok_or(format!("'{k}' must be an array"))?.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect();
+                    let v = a
+                        .as_array()
+                        .ok_or(format!("'{k}' must be an array"))?
+                        .iter()
+                        .enumerate()
+                        .map(|(i, x)| x.as_f64().ok_or(format!("'{k}' entry {i} is not a number")))
+                        .collect::<Result<Vec<f64>, String>>()?;
                     if v.len() > n {
                         return Err(format!("'{k}' has {} entries, at most {n}", v.len()));
                     }
