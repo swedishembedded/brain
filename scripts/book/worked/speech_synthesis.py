@@ -231,7 +231,15 @@ def talker_counts():
     return ("Parameters from the tensors of the configuration (a 1024-wide, 28-layer Talker with 16 query heads and 8 key-value heads "
             "of 128, feed-forward 3072; a 5-layer code predictor of the same layer shape; layer = q, k, v and output "
             "projections, gate, up and down matrices, two norms and the two query-key norm vectors). Multiply-adds per frame count "
-            "each matrix product once per row it is applied to; attention scores and norms are left out.\n\n"
+            "each matrix product once per row it is applied to; attention scores and norms are left out. "
+            f"A layer holds q ({T_D} x {hq}), k and v ({T_D} x {hkv} each), o ({hq} x {T_D}), gate and up ({T_D} x {T_FF} each) and "
+            f"down ({T_FF} x {T_D}), with no bias on any, two RMSNorm weights of {T_D} and a query norm and a key norm of {T_HEAD_DIM}: "
+            f"{_i(per_p)} parameters ({_i(per_m)} of them in the matrices, which is also the layer's multiply-adds a row). The Talker's "
+            f"embedding row is the codec table ({T_VOCAB} x {T_D}), the Talker's final norm ({T_D}), the text table "
+            f"({T_TEXT_VOCAB} x {T_TEXT_HIDDEN}) and the text projection ({T_TEXT_HIDDEN} -> {T_TEXT_HIDDEN} -> {T_D}, both with "
+            f"bias); the head row is the {T_D} x {T_VOCAB} codebook-0 head, counted separately from the codec table. The code "
+            f"predictor has {M_LAYERS} such layers, a final norm, and for each of the {NQ - 1} residual codes a head and an "
+            f"embedding table of {M_VOCAB} x {T_D}.\n\n"
             + _table(["component", "parameters", "decoder steps per frame", "multiply-adds per frame (millions)"], rows, "lrrr")
             + "\n\n" + _table(["total", "parameters", "multiply-adds (millions)"], tot_rows, "lrr")
             + f"\n\nThe Talker holds {_i(talker_params)} parameters and the code predictor {_i(mtp_params)}. "
@@ -456,7 +464,11 @@ def tokenizer_counts():
         t = sec * 25
         att.append((sec, t, _m(layers * 2 * heads * hd * t * t)))
     return ("Counted from the tensors of the released tokenizer (102 of them): weights and biases and the layer-norm gains, in the "
-            "layer shapes above; one second of audio is 100 mel frames, 50 after the first convolution and 25 after the second.\n\n"
+            "layer shapes above; one second of audio is 100 mel frames, 50 after the first convolution and 25 after the second. "
+            f"Both convolutions have k 3, stride 2 and a bias. A block has width {d} and {heads} heads of {hd}: attention q, v and "
+            f"output matrices with a bias, the k matrix without (each {d} x {d}), a depthwise filter of {d} x 31 along time without "
+            f"bias (added to the values, counted as {d} x 31 multiply-adds a position), two LayerNorms with gain and shift, and an "
+            f"MLP {d} -> {mlp} -> {d} with both biases; the projection to 8 digits has a bias.\n\n"
             + _table(["part", "parameters", "positions per second", "multiply-adds per second of audio (millions)"], rows, "lrrr")
             + f"\n\nIn all {_i(total)} parameters and {_m(total_macs)} million multiply-adds per second of reference audio "
               "before the attention scores. The scores cost 2 x heads x head width per query and key pair of each block "
@@ -500,7 +512,11 @@ def speech_lm_counts():
         a, b = _round_half_up(n * 2.0), _round_half_up(n * 20.0)
         bud.append((n, a, f"{a / S_RATE:.2f}", b, f"{b / S_RATE:.2f}"))
     return ("Counted from the tensors of the released speech-token model (295 in the file; the 151,936-wide output matrix of the "
-            "text backbone is a copy of the embedding table and is not read).\n\n"
+            "text backbone is a copy of the embedding table and is not read). "
+            f"A layer has width {LM_D}, {LM_HEADS} query heads and {LM_KV_HEADS} key-value heads of {LM_HEAD_DIM}: q ({LM_D} x "
+            f"{LM_HEADS * LM_HEAD_DIM}), k and v ({LM_D} x {LM_KV_HEADS * LM_HEAD_DIM}) each with a bias, o without, gate, up and down of "
+            f"{LM_D} x {LM_FF} without bias, two RMSNorm weights of {LM_D}, no query or key norm; the 'start and task rows' are two "
+            f"rows of {LM_D}.\n\n"
             + _table(["part", "parameters"], rows, "lr")
             + f"\n\nOne step of the model is {_m(macs_tok)} million multiply-adds (24 layers and the 6564-way head), so a second of "
               f"speech at 25 tokens costs {_gm(macs_tok * S_RATE, 2)} billion, attention scores aside.\n\n"
@@ -508,7 +524,8 @@ def speech_lm_counts():
             f"{ref_text} reference-text tokens and {tgt} target-text tokens. The rows it feeds before the first draw are "
             f"1 + {ref_text + tgt} + 1 + {ref_tokens} = {prefix}; the model may draw at most {mx} tokens "
             f"({mx / S_RATE:.1f} seconds) and is held from stopping before {mn}; the cache is sized for {prefix} + {mx} + 8 = {ctx} "
-            "positions.\n\nThe budget as a function of the number of target-text tokens n (minimum round(2 n), maximum "
+            "positions (the 8 is a margin that the pipeline adds to the cache; the rows actually written never exceed "
+            f"{prefix} + {mx}).\n\nThe budget as a function of the number of target-text tokens n (minimum round(2 n), maximum "
             "round(20 n), ties upward):\n\n"
             + _table(["target text tokens n", "minimum tokens", "seconds", "maximum tokens", "seconds"], bud, "rrrrr"))
 
@@ -762,6 +779,48 @@ def _cv3_frame_macs():
     return per_frame, fixed
 
 
+def flow_layout():
+    """The layers behind every row of flow_counts' parameter tables."""
+    d, ffe = 512, 2048
+    rows2 = [
+        ("token embedding, speaker map, output projection", f"embedding {S_TOK} x {d}; speaker vector 192 -> 80; encoder output {d} -> 80",
+         "the two linear maps have a bias"),
+        ("conformer encoder", f"a linear {d} -> {d} with a LayerNorm; a look-ahead pair of convolutions {d} -> {d} with k 4 (reading 3 "
+         f"later rows) and k 3, added to its input; 6 layers at 25 Hz; every row repeated twice (50 Hz) and a convolution "
+         f"{d} -> {d} with k 5, a linear {d} -> {d} with a LayerNorm; 4 layers at 50 Hz; a final LayerNorm. A layer, with its "
+         f"LayerNorm before the attention and before the feed-forward (no convolution module): {d // 64} heads of 64, q, k, v and o "
+         f"of {d} x {d} with bias, a relative-position matrix {d} x {d} without bias, two vectors u and v of {d}, one "
+         f"feed-forward {d} -> {ffe} -> {d} with both biases, two LayerNorms (weight and bias)", "every convolution and linear map biased except the position matrix"),
+        ("estimator", "input 320 channels (the noisy mel, the token mel, the speaker vector repeated and the reference mel, 80 each); "
+         "a time embedding of a sinusoid of width 320 through 320 -> 1024 -> 1024; 14 residual blocks (one going down, 12 in the "
+         "middle, one going up, whose input is 512 channels, the middle output and the skip from the down stage), each followed by "
+         "4 transformer blocks, so 56 in all; a convolution 256 -> 256 (k 3) after the down stage and one after the up stage, "
+         "a final convolution 256 -> 256 (k 3), a LayerNorm, Mish and a convolution 256 -> 80 (k 1)", "all convolutions and linear maps biased"),
+        ("residual block (ci -> co)", "convolution ci -> co (k 3), LayerNorm, Mish; the time embedding through a projection 1024 -> co "
+         "added to every position; convolution co -> co (k 3), LayerNorm, Mish; shortcut convolution ci -> co (k 1) added; "
+         "320 -> 256 once, 256 -> 256 twelve times, 512 -> 256 once",
+         "every convolution, LayerNorm and the time projection with bias"),
+        ("transformer block of the estimator", "LayerNorm 256; attention with 8 heads of 64, q, k, v 256 -> 512 without bias, o 512 -> 256 "
+         "with bias; LayerNorm 256; feed-forward 256 -> 1024 -> 256", "LayerNorm weight and bias, the feed-forward and o biased"),
+    ]
+    D = 1024
+    rows3 = [
+        ("token embedding, speaker map, look-ahead layer", f"embedding {S_TOK} x 80; speaker vector 192 -> 80; convolution 80 -> {D} (k 4) "
+         f"and convolution {D} -> 80 (k 3)", "biased"),
+        ("time embedding", f"a sinusoid of width 256 through 256 -> {D} -> {D}", "biased"),
+        ("input projection and position convolutions", f"320 -> {D} (the same four 80-channel pieces); then two convolutions of "
+         f"{D} channels with k 31 in 16 groups (each channel group of {D // 16} reads {D // 16} channels)", "all three biased"),
+        ("22 blocks", f"width {D}, 16 heads of 64 with rotary positions, a LayerNorm without gain or shift before attention and before the feed-forward, "
+         f"whose scale, shift and gate come from the time embedding by one matrix {D} -> {6 * D} per block; attention q, k, v, o "
+         f"({D} x {D}); feed-forward {D} -> 2048 -> {D}", "all matrices biased; the LayerNorms have no parameters"),
+        ("final scale-and-shift and output", f"a matrix {D} -> {2 * D} from the time embedding, then {D} -> 80", "biased"),
+    ]
+    return ("The layers behind the counts below: widths, heads, kernels, groups and which tensors carry a bias. A LayerNorm "
+            "has a weight and a bias of its width unless said otherwise.\n\nSecond generation\n\n"
+            + _table(["part", "layout", "biases and norms"], rows2, "lll")
+            + "\n\nThird generation\n\n" + _table(["part", "layout", "biases and norms"], rows3, "lll"))
+
+
 def flow_counts():
     h2, enc, blocks, resnets, rest = _cv2_parts()
     tot2 = h2 + enc + blocks + resnets + rest
@@ -805,8 +864,16 @@ def flow_counts():
             + "\n\nWork per second of speech: 50 mel frames a second, 10 Euler steps, and two evaluations of the estimator per step "
               "(the conditional one and the unconditioned one), so "
               f"{evals} evaluations of every frame. Matrix products are counted once per row they are applied to; attention costs "
-              "2 x width per pair of frames and block; norms and activations are left out. The conformer's relative-position "
-              "projection is counted over 2 rows per frame.\n\n" + t3)
+              "2 x width per pair of frames and block, where width is heads x head width: 8 x 64 = 512 inside each of the 56 "
+              "blocks of the second generation's estimator (the block's own width is 256) and 16 x 64 = 1024 in each of the 22 blocks "
+              "of the third generation's, so a pair costs 2 x 512 or 2 x 1024 multiply-adds, scores and weighted values together, "
+              "and the attention column is blocks x 2 x width x T; norms and activations are left out. The conformer's "
+              "relative-position projection is counted over 2 rows per frame. The 'independent of T' column per evaluation is, "
+              "for the second generation, the time embedding (320 -> 1024 -> 1024) and the 14 time projections (1024 -> 256), "
+              "and for the third the 22 scale-and-shift matrices (1024 -> 6144), the final one (1024 -> 2048) and the time "
+              "embedding (256 -> 1024 -> 1024); the third's 'matrix products per frame' are its 22 blocks (4 attention matrices of "
+              "1024 x 1024 and the feed-forward 1024 -> 2048 -> 1024), the input projection with the two grouped position "
+              "convolutions and the output projection.\n\n" + t3)
 
 
 def vocoder_geometry():
@@ -862,6 +929,32 @@ def _vocoder_rows():
         ("output convolution (64 -> 18, k 7) at 6000 Hz", _conv(64, 18, 7), MEL_RATE * 120 * 64 * 18 * 7),
         ("harmonic merge (9 -> 1)", 10, FS * 9),
     ]
+
+
+def vocoder_layout():
+    """The layers behind every row of vocoder_counts."""
+    rows = [
+        ("pitch predictor", "convolution 80 -> 512 (k 3), four convolutions 512 -> 512 (k 3), each followed by an ELU, then a linear "
+         "512 -> 1 whose absolute value is the pitch in Hz", "every convolution and the linear map biased"),
+        ("first convolution", "80 -> 512, k 7", "biased"),
+        ("upsampling stages", "before each, a leaky ReLU; transposed convolutions 512 -> 256 (k 16, stride 8), 256 -> 128 (k 11, "
+         "stride 5), 128 -> 64 (k 7, stride 3), taking 50, 400 and 2000 positions a second in", "biased"),
+        ("source branch", "the nine harmonic sinusoids at 24,000 samples a second are merged into one excitation by the linear map "
+         "9 -> 1, and a 16-point transform with hop 4 makes of it 9 complex bins, 18 real channels, at 6000 frames a second; one "
+         "strided convolution for each stage, 18 -> 256 (k 30, stride 15), 18 -> 128 (k 6, stride 3) and 18 -> 64 (k 1, stride "
+         "1); a residual block on its output with k 7, 7 and 11; the result is added to the trunk after the stage's "
+         "transposed convolution", "biased"),
+        ("residual block (c channels, kernel k)", "three branches in sequence on the same signal, each Snake, convolution c -> c "
+         "(kernel k, dilation 1, 3 or 5), Snake, convolution c -> c (kernel k, dilation 1), the branch added to its input; a "
+         "Snake multiplies by a learned per-channel alpha", "six convolutions with bias and six alpha vectors of c: 6 (c x c x k + c) + 6 c"),
+        ("trunk", "after each stage three residual blocks with k 3, 7 and 11 on the same input, their outputs averaged: 9 blocks in all",
+         ""),
+        ("output convolution", "after a leaky ReLU, 64 -> 18, k 7: for each of the 9 bins a logarithm of the magnitude and a "
+         "phase argument, at 6000 frames a second, then the inverse transform", "biased"),
+        ("harmonic merge", "linear map 9 -> 1 at each of the 24,000 samples a second", "biased (10 numbers)"),
+    ]
+    return ("The layers behind the counts below: widths, kernels, strides and which tensors carry a bias or a gain.\n\n"
+            + _table(["part", "layout", "biases and gains"], rows, "lll"))
 
 
 def vocoder_counts():
@@ -980,7 +1073,10 @@ def stream_reference():
                      pad_rows, "rrrrr")
             + f"\n\nThe chunks of a 250-token utterance (10 seconds) after a prompt of {prompt} tokens. A flow evaluation of "
               "T frames costs 20 x (T x matrix products + attention + the fixed part) multiply-adds, with the "
-              "third-generation numbers of the flow table; 'billions' are billions of multiply-adds.\n\n"
+              "third-generation numbers of the flow table: the matrix products per frame, the attention 22 blocks x 2 x 1024 x T x T "
+              "(each of T frames scores T keys, 2 x 1024 multiply-adds a pair), and the fixed part per evaluation; "
+              "'billions' are billions of multiply-adds. The cumulative column adds the unrounded flows, so it can differ "
+              "by one from the sum of the printed ones.\n\n"
             + _table(["chunk", "tokens already sent", "hop", "tokens through the flow", "frames T", "flow billions",
                       "cumulative billions"], rows, "lrrrrrr")
             + f"\n\nThe same utterance in one pass is T = {2 * (prompt + n_tok)} frames and {_gm(one, 0)} billion; the streamed "

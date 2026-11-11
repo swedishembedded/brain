@@ -460,7 +460,7 @@ def cam_counts():
             freq = fo
     freq //= 2
     w += fc * fc * 9; b += fc; tensors += 2; macs += freq * fc * fc * 9
-    rows.append(("stem: 7 2-D convolutions and 2 shortcuts", w, b, 0, tensors, macs * 100))
+    rows.append(("stem: 10 2-D convolutions and 2 shortcuts", w, b, 0, tensors, macs * 100))
     stem_out = fc * freq
     w1, b1 = _conv(stem_out, ts, 5)
     rows.append(("time-delay convolution, 320 to 128, k 5, stride 2", w1, b1, 0, 2, w1 * 50))
@@ -490,6 +490,55 @@ def cam_counts():
     dw, _ = _conv(2 * cin0, c["emb"], 1)
     rows.append(("projection 1024 to 192, final normalisation", dw, 0, 2 * c["emb"], 3, 0))
     return rows
+
+
+def layout():
+    """The layers behind every row of parameter_counts, printed from the constants the counts use."""
+    e, c = ECAPA, CAM
+    c0, cm, sc = e["channels"][0], e["channels"][4], e["scale"]
+    sub = c0 // sc
+    fc, ts, gr, md, ou = c["fcm"], c["tdnn"], c["growth"], c["mid"], c["out"]
+    layers, dil = c["layers"], c["dilation"]
+    widths, cin = [], ts
+    for n in layers:
+        widths.append((cin + n * gr, (cin + n * gr) // 2))
+        cin = widths[-1][1]
+    rows1 = [
+        ("first convolution", f"{e['mel']} -> {c0}, k {e['kernels'][0]}", "weight and bias"),
+        ("SE-Res2Net block (three, dilations " + ", ".join(map(str, ECAPA_DILATIONS)) + ")",
+         f"1 x 1 convolution {c0} -> {c0}; the {c0} channels split into {sc} chunks of {sub}, chunk 0 passed on, chunks 1 to "
+         f"{sc - 1} each a convolution {sub} -> {sub}, k 3, at the block's dilation; 1 x 1 convolution {c0} -> {c0}; "
+         f"squeeze-excitation {c0} -> {e['se']} -> {c0} (1 x 1, run once on the clip's mean)",
+         "weight and bias on every convolution; no normalisation tensor is stored"),
+        ("aggregation convolution", f"{3 * c0} -> {cm}, k 1 (the three block outputs side by side)", "weight and bias"),
+        ("attention of the pooling", f"{3 * cm} -> {e['att']} -> {cm}, k 1 (the channels, their mean and their deviation side by side)",
+         "weight and bias on both"),
+        ("projection", f"{2 * cm} -> {e['enc']} (the mean and the deviation of the {cm} channels)", "weight and bias"),
+    ]
+    rows2 = [
+        ("stem", f"{fc} channels, 3 x 3 over frequency and time: a convolution 1 -> {fc}; two groups of two residual blocks, each "
+         f"block two convolutions {fc} -> {fc}, the first block of each group striding by 2 over frequency (80 -> 40 -> 20) and "
+         f"carrying a 1 x 1 shortcut {fc} -> {fc}; a last convolution {fc} -> {fc}, stride 2 over frequency (-> 10): 1 + 8 + 1 = "
+         f"10 convolutions and 2 shortcuts, and {fc} x 10 = {fc * 10} channels leave it", "weight and bias on all 12"),
+        ("time-delay convolution", f"{fc * 10} -> {ts}, k 5, stride 2 over time", "weight and bias"),
+        ("dense layer", f"input of c_in channels (c_in is {ts} at the first layer of the first block and grows by {gr} with each "
+         f"layer): normalisation of the input (gain, shift, running mean, running variance), 1 x 1 convolution c_in -> {ts}, local "
+         f"convolution {ts} -> {ou}, k 3 at the block's dilation, and the context gate, two 1 x 1 convolutions {ts} -> {md} -> {ou}; "
+         f"the {ou} output channels are appended to the input; 11 tensors", "bias on the 1 x 1 convolutions and the gate, none on the local convolution"),
+        ("dense blocks", f"{layers[0]}, {layers[1]} and {layers[2]} layers at dilations {dil[0]}, {dil[1]} and {dil[2]}", ""),
+        ("transit", f"normalisation of the block's c channels (gain, shift, running mean and variance), then 1 x 1 convolution "
+         f"c -> c / 2; c is {widths[0][0]}, {widths[1][0]} and {widths[2][0]} for the three, and the channels left are "
+         f"{widths[0][1]}, {widths[1][1]} and {widths[2][1]}",
+         f"no bias on the first two; the third has a bias of {widths[2][1]} (the normalisation after it is folded into the "
+         "convolution in the released graph, which is why it has 6 tensors and the others 5)"),
+        ("projection", f"statistics pooling of the {widths[2][1]} channels (mean and deviation) -> {2 * widths[2][1]}, 1 x 1 convolution "
+         f"{2 * widths[2][1]} -> {c['emb']}, then a normalisation with running mean and variance only (no gain or shift)",
+         "no bias; 2 x 192 buffers"),
+    ]
+    return ("The layers behind the counts below: widths, kernels, chunking and which tensors exist. 'k 1' is a 1 x 1 "
+            "convolution, a matrix applied to every frame.\n\nEncoder 1\n\n"
+            + _table(["part", "layout", "biases and norms"], rows1, "lll")
+            + "\n\nEncoder 2\n\n" + _table(["part", "layout", "biases and norms"], rows2, "lll"))
 
 
 def parameter_counts():
@@ -650,7 +699,8 @@ def parity_metrics():
     for name, v in cases:
         after = _affine(v)
         rows.append((name, _f(_cos(v, PAR_V), 6), f"{_rel(v, PAR_V):.6f}", f"{_rel(after, base):.6f}"))
-    return (f"The reference vector is {_row(PAR_V, 1)} (length {_norm(PAR_V):g}). 'Cosine' and 'relative L2' compare a candidate with it "
+    return (f"The reference vector is {_row(PAR_V, 1)} (length {_norm(PAR_V):g}); 'one entry off' adds the stated amount to its first entry (the 3.0), "
+            f"with a plus sign. 'Cosine' and 'relative L2' compare a candidate with it "
             f"(relative L2 is the length of the difference over the length of the reference). The last column passes both vectors "
             f"through the same stand-in for a consumer that normalises first, divides each by its length and multiplies by "
             f"{', '.join(_row(r, 1) for r in PAR_A)}, and reports the relative L2 of the two results.\n\n"

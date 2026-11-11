@@ -346,6 +346,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **epsilon prediction**: asking the network for the noise that was added to the clean value, so that its output $\varepsilon_\theta$ is the estimate from which the clean value or the score follows. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
 
+**equal error rate**: the common value of the false acceptance rate and the false rejection rate at the threshold where the two cross, one number for a model and a set of recordings that says nothing of the cost of either error. *([Who Is Speaking](v09-audio/05-speaker-embeddings.md))*
+
 **estimator**: a rule that turns a sample into a number meant to approximate a quantity of the underlying world; because the sample is random, the number is a random variable with its own distribution, judged by its bias and spread. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **Euler's formula**: the identity $e^{it} = \cos t + i\sin t$, which names the point of the unit circle at angle $t$ and turns the law of exponents into the addition of angles. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*

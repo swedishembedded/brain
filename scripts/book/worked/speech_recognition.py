@@ -118,6 +118,8 @@ def _skip_ok(e, s):
 
 def ctc_path_count(labels, frames):
     """Number of length-`frames` sequences over blank and the labels that collapse to `labels`: paths of the lattice, each with weight 1."""
+    if frames < 1:
+        return 1 if not labels and frames == 0 else 0  # no frames write only the empty label sequence
     e = _ext(labels)
     n = [0] * len(e)
     n[0] = 1
@@ -363,7 +365,7 @@ def ctc_decoding():
             f"whose probability is {_f(d[greedy], 8)}. The most probable label is `{''.join(SYM[k] for k in exact[0])}` with {_f(exact[1], 8)}. "
             "Prefix beam search keeps the `width` prefixes of highest total probability after each frame (a prefix's probability split into "
             "the part that ends in a blank and the part that ends in a letter, ties broken by the order of the prefixes as tuples of symbol ids); the probability it "
-            "reports is the mass of the paths it did not discard, so it is a lower bound.\n\n"
+            "reports is the total of the two parts of that prefix after the last frame, the mass of the paths that were never discarded, so it is a lower bound.\n\n"
             + _table(["beam width", "best prefix at the end", "mass kept for it"], beam_rows))
 
 
@@ -861,12 +863,13 @@ def chunk_attention_toy():
         moved.append((name, ", ".join(map(str, rows))))
     return (f"A two-layer toy of the streaming identity: {TOY_T} rows of width {TOY_D}, one head per layer, the residual form y = x + attention(x) (no normalisation, "
             "no relative positions, queries, keys and values from the layer's input), scores q . k / 2 over the allowed keys, softmax with the maximum subtracted, "
-            "sums left to right. Draws from `bookrng.generator(\"speech_recognition.chunk_attention\")` "
-            f"(seed {bookrng.seed_of(TOY_NAME)}): first the {TOY_T * TOY_D} values of x as normals, row by row, then six {TOY_D} x {TOY_D} matrices "
+            "sums left to right. Draws from the book's `Generator(seed_of(\"speech_recognition.chunk_attention\"))` "
+            f"(`seed_of` of the pseudocode page, here {bookrng.seed_of(TOY_NAME)}, the generator's starting state): first the {TOY_T * TOY_D} values of x as normals, row by row, then six {TOY_D} x {TOY_D} matrices "
             "(Wq, Wk, Wv of layer 1, then of layer 2), each row by row and each value 0.5 times a normal. Chunk 4, two chunks of left context.\n\n"
             f"Streamed chunk by chunk with a cache of at most {TOY_LEFT} chunks of each layer's own keys and values, against the whole-sequence masked computation: "
-            f"largest difference of any output value {'below 1e-12' if worst < 1e-12 else f'{worst:.3e}'}; cache rows held at the end: {kept[0]} for each layer "
-            f"(two chunks) of the {TOY_T} rows.\n\n"
+            f"largest difference of any output value {'below 1e-12' if worst < 1e-12 else f'{worst:.3e}'}; rows kept in each layer's cache after the last chunk, "
+            f"for a further chunk to read: {kept[0]} (rows {TOY_T - kept[0]} to {TOY_T - 1}, the last {TOY_LEFT} chunks of the {TOY_T} rows), while the last "
+            f"chunk itself read {(TOY_LEFT + 1) * TOY_CHUNK} keys (its own {TOY_CHUNK} rows and the {TOY_LEFT} chunks before it).\n\n"
             "Add 1.0 to the first value of input row 9 (the second row of chunk 2). Output rows of the two-layer stack that change by more than 1e-12:\n\n"
             + _table(["mask", "output rows that change"], moved, "ll"))
 
@@ -918,6 +921,43 @@ def nemotron_counts():
             "lstm": lstm, "dproj": dproj, "head": head, "dec": dec, "total": enc + dec, "flat": N_SUBC * f}
 
 
+def layout():
+    """The layers behind every row of `parameters`, printed from the constants the counts use."""
+    c, f = N_D, 17
+    qrows = [
+        ("three strided convolutions", f"1 -> {Q_CONV}, {Q_CONV} -> {Q_CONV}, {Q_CONV} -> {Q_CONV}, each 3 x 3 over time and frequency",
+         "weight and bias, dense (no groups); conv_out has no bias"),
+        (f"{Q_LAYERS} transformer blocks", f"width {Q_D}; {Q_HEADS} heads of width {Q_D // Q_HEADS}; q, k, v, o matrices of {Q_D} x {Q_D}; "
+         f"feed-forward {Q_D} -> {Q_FFN} -> {Q_D}", "a bias on all six matrices; two LayerNorms (weight and bias)"),
+        ("final norm and projector", f"LayerNorm, {Q_D} -> {Q_D}, {Q_D} -> {Q_OUT}", "LayerNorm weight and bias; both matrices biased"),
+        (f"decoder layer, {D_LAYERS} of them", f"width {D_H}; {D_HEADS} query heads and {D_KV} key-value heads of width {D_HD}; "
+         f"q and o of {D_H} x {D_H}, k and v of {D_H} x {D_KV * D_HD}; gated feed-forward, three matrices of {D_H} x {D_FFN}",
+         f"no biases; two RMSNorms of {D_H} (weight only), and a q norm and a k norm of {D_HD} each (weight only) per layer: "
+         f"{2 * D_H + 2 * D_HD:,} numbers"),
+    ]
+    nrows = [
+        ("subsampling", f"stage 1: dense 3 x 3, 1 -> {N_SUBC}; stages 2 and 3: a depthwise 3 x 3 (one filter per channel) then a "
+         f"pointwise {N_SUBC} -> {N_SUBC}; flatten {N_SUBC} channels x {f} frequencies = {N_SUBC * f:,}, linear {N_SUBC * f:,} -> {c}",
+         "weight and bias on every convolution (depthwise and pointwise included) and on the linear map"),
+        (f"{N_LAYERS} Conformer blocks", f"width {c}; two feed-forwards {c} -> {N_FFN} -> {c}; attention of {N_HEADS} heads of width "
+         f"{c // N_HEADS} with q, k, v, o and a position matrix (all {c} x {c}); convolution module: pointwise {c} -> {2 * c}, GLU, "
+         f"depthwise k {N_K} along time, norm, SiLU, pointwise {c} -> {c}",
+         f"no biases on matrices or convolutions; two vectors u, v of {c} in attention; five block norms (before each feed-forward, "
+         f"attention and convolution module, and at the end of the block) and the norm inside the convolution module, every "
+         f"norm with weight and shift"),
+        ("language-prompt projector", f"the row ({c}) and a one-hot language prompt of {N_PROMPTS} entries side by side, "
+         f"{c + N_PROMPTS} -> {N_PROMPT_MID}, ReLU, {N_PROMPT_MID} -> {c}", "both matrices biased"),
+        ("encoder projector", f"{c} -> {N_DEC}", "biased"),
+        ("predictor", f"embedding {N_VOCAB:,} x {N_DEC}; {N_LSTM} LSTM layers of width {N_DEC} (input and recurrent matrices of "
+         f"{N_DEC} x {4 * N_DEC}, four gates); projector {N_DEC} -> {N_DEC}",
+         "embedding without bias; each LSTM layer has both bias vectors (input and recurrent), 2 x 4 x 640; the projector is biased"),
+        ("joint head", f"{N_DEC} -> {N_VOCAB:,}", "biased"),
+    ]
+    return ("The layers behind the counts below: widths, heads, kernels and which tensors carry a bias or a norm.\n\n"
+            "Qwen3-ASR\n\n" + _table(["part", "layout", "biases and norms"], qrows, "lll")
+            + "\n\nNemotron 3.5 ASR Streaming\n\n" + _table(["part", "layout", "biases and norms"], nrows, "lll"))
+
+
 def parameters():
     q, n = qwen_counts(), nemotron_counts()
     qrows = [("three strided convolutions (480 channels)", _int(q["conv"])), (f"conv_out, {q['flat']} -> 1024, no bias", _int(q["conv_out"])),
@@ -930,7 +970,9 @@ def parameters():
              ("predictor: embedding", _int(n["emb"])), (f"predictor: {N_LSTM} LSTM layers of width 640", _int(n["lstm"])),
              ("predictor: projector", _int(n["dproj"])), ("joint head 640 -> 13,088 with bias", _int(n["head"])), ("transducer", _int(n["dec"])),
              ("Nemotron in all", _int(n["total"]))]
-    return ("Parameters counted from the configurations of the two recognisers (weights and biases that exist, from the shapes the loaders read).\n\n"
+    return ("Parameters counted from the configurations of the two recognisers (weights and biases that exist, from the shapes the loaders read). "
+            "The decoder layer's count includes its q and k norm weights (2 x 128), which the operation counts of the work tables below leave out, "
+            "as they leave out every norm and bias.\n\n"
             "Qwen3-ASR\n\n" + _table(["part", "parameters"], qrows)
             + "\n\nNemotron 3.5 ASR Streaming\n\n" + _table(["part", "parameters"], nrows))
 
@@ -986,8 +1028,8 @@ def qwen_work():
     d = qwen_decoder_macs(13, 0)
     rows.append(("decoder prefill of the 13 rows (weights only)", _giga(2 * 13 * d["per_token"], 3)))
     return ("GFLOP of Qwen3-ASR for one second of audio (one full chunk of 100 frames, 13 rows), counted as 2 per multiply-add from the shapes of the layers; "
-            "normalisations, activations, softmaxes and biases are left out. The last line is what the decoder spends reading the same 13 rows as prompt tokens "
-            "(the weight matrices of its 28 layers, without the attention over the cache and without the head).\n\n"
+            "normalisations (the decoder's q and k norms too), activations, softmaxes and biases are left out. The last line is what the decoder spends reading the same 13 rows as prompt tokens "
+            "(the weight matrices of its 28 layers: 28 x 50,331,648 multiply-adds a token, without the attention over the cache and without the head).\n\n"
             + _table(["stage", "GFLOP"], rows))
 
 
@@ -1021,7 +1063,11 @@ def nemotron_work():
     drows = [("joint head at every evaluation", _mega(2 * head, 2)), ("predictor step (2 LSTM layers and the projector), per letter written", _mega(2 * lstm, 2))]
     return ("MFLOP of Nemotron per encoder row (80 milliseconds of audio, steady state of the streaming path) and GFLOP per second at 12.5 rows a second, counted as 2 per "
             "multiply-add from the shapes (normalisations, activations, softmaxes and biases left out; the relative-position table, 63 rows through each layer's "
-            f"matrix, is built once per layer: {_mega(2 * m['rel_table'])} MFLOP each).\n\n"
+            f"matrix, is built once per layer: {_mega(2 * m['rel_table'])} MFLOP each). One encoder row is 8 input frames: the three "
+            "subsampling stages produce 4, 2 and 1 time positions of it, at 65, 33 and 17 frequencies, and the linear map is applied once; "
+            "the projector row is the three matrices 1152 x 2048, 2048 x 1024 and 1024 x 640 of the layout table; a layer's convolution module "
+            "is its three matrices and the depthwise filter, and its attention projections are q, k, v, o (the position matrix is the "
+            "once-per-layer table).\n\n"
             + _table(["stage", "MFLOP per row", "GFLOP per second"], rows)
             + "\n\nThe transducer, per step:\n\n" + _table(["step", "MFLOP"], drows))
 
@@ -1063,7 +1109,9 @@ def fixed_window():
                      f"{(en_win + dec_win) / (en_exact + dec_exact):.2f}"))
     return ("A clip through the serving path of Qwen3-ASR, which assembles the decoder for a fixed window of 30 seconds (3,000 frames, 390 rows, a prompt of 10 + 390 + 6 "
             "tokens) and pads every clip to it, against a clip that is encoded at its own length (13 rows a second, a prompt of 10 + rows + 6). GFLOP of the "
-            "encoder, and of the decoder's prefill (weights and attention scores of the prompt, no generated tokens), 2 per multiply-add.\n\n"
+            "encoder, and of the decoder's prefill (the 28 layers' matrices, 50,331,648 multiply-adds a token with no norms, plus the attention of the causal prompt: "
+            "T (T + 1) / 2 pairs for T prompt tokens, each pair 2 x 2048 multiply-adds per layer, one product for the score and one for the weighted value; no generated tokens), "
+            "2 per multiply-add.\n\n"
             + _table(["clip (s)", "rows at its own length", "rows in the window", "encoder, own length", "encoder, window", "prefill, own length", "prefill, window",
                       "window / own length, total"], rows))
 

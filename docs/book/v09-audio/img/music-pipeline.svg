@@ -1,4 +1,4 @@
-<!-- source-sha256: 933c08434aa7c42558bfa8aba875ab7c6b811b88ee3a5fdb207b184887019a3b -->
+<!-- source-sha256: dc07459186ab52a84f06917387c4c8402a54c130ffc5b2c131b7d0574c8d0914 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 442" width="780" height="442"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="442" fill="#ffffff"/>
 <rect x="20" y="16" width="740" height="196" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Writing the whole song, one frame at a time (25 frames a second)</text>

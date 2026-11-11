@@ -575,9 +575,10 @@ def variants():
     padded_edge = edge_only(_log_mel(stft_power(zero_pad(x, n // 2), n, hop, per), slaney, ln))
     return ("The clip through one baseline front end and through six variants that each change one thing. Baseline: N = 400, "
             "H = 160, periodic Hann window, reflect padding of 200 on each side (51 frames), 40 Slaney filters with area "
-            "normalisation from 0 to 8000 Hz, power, ln(max(E, 1e-10)). Each row counts the cells (of the 40 per frame) that "
-            "differ from the baseline by more than 0.01 over the frames both have, and gives the largest and the mean absolute "
-            "difference over those cells, in nats.\n\n"
+            "normalisation from 0 to 8000 Hz, power, ln(max(E, 1e-10)). Pre-emphasis 0.97 means y[0] = x[0] and "
+            "y[n] = x[n] - 0.97 x[n-1] for n >= 1 on the whole clip, before the padding. Over the frames both versions have "
+            "(all 40 cells of every frame, so 40 x frames cells), each row counts the cells that differ from the baseline by "
+            "more than 0.01 and gives the largest and the mean absolute difference over all of those 40 x frames cells, in nats.\n\n"
             + _table(["change", "frames", "cells differing by > 0.01", "largest difference", "mean difference"], body, align="lrrrr")
             + f"\n\nWith constant padding the largest difference over the first two and the last two frames, the four that the padding touches, is {_f(padded_edge, 3)}.")
 
@@ -625,7 +626,10 @@ def recogniser_outputs():
     return ("The half-second clip through both front ends (the first padded with zeros to one whole second, as that front end does), "
             "128 filters each: output shape, smallest and largest value over the cells the encoder reads (for the first, the "
             "100 frames of the padded second; for the second, the 50 valid frames), and the value in any cell of a tenth of a second of digital "
-            "silence.\n\n"
+            "silence. The Nemotron style applies the pre-emphasis y[0] = x[0], y[n] = x[n] - 0.97 x[n-1] to the whole clip "
+            "first, then pads 256 zeros on each side, then cuts frames of 512 whose weights are zero except samples 56 .. 455, "
+            "which carry the 400-sample symmetric Hann window (centred: 56 zeros on each side of it); the frames from "
+            "floor(L / 160) on, with L the clip length, are set to zero.\n\n"
             + _table(["front end", "shape", "smallest", "largest", "value for silence"], rows, align="llrrr"))
 
 

@@ -226,7 +226,7 @@ PCM has to be put in a file, and the common container is the WAV file, a RIFF fi
 Samples of several channels are stored as frames. A **frame** is one sample of every channel at one instant, and the frames follow one another, so a stereo file reads left, right, left, right. Volume VII's discussion of pixels laid out channel by channel or channel by pixel is the same choice here: the file is interleaved, and a program that wants to process each channel separately splits it into planes. Here is a whole file, with two channels, three frames and a rate of 8000 Hz; the samples are written with the rule explained below.
 
 <!-- worked: sound.wav_layout -->
-Two channels, three frames, 8000 Hz, written with the write rule above. The file is 56 bytes.
+Two channels, three frames, 8000 Hz, each sample written as code = round(32767 x) with ties away from zero (the rule the section after this table justifies), two bytes little-endian. The file is 56 bytes.
 
 | offset | bytes | hex (little-endian) | field | value |
 |---:|---:|---|---|---|
@@ -316,7 +316,7 @@ with $h$ the sinc, when the new rate is the higher. When it is lower, the sum wo
 
 Three things stand between that formula and a program. The sinc never ends, so the sum must be cut. The cut kernel must be one whose error in the frequency domain is under control. And the offsets $s_j - i$ must be computed without the rounding that would make the ends of the sum differ from one implementation to another.
 
-The third has a clean answer when the rates have a common factor. Reduce the ratio, $f_{\mathrm{new}}/f_{\mathrm{old}} = \mathrm{up}/\mathrm{down}$ in lowest terms (for 16 kHz and 24 kHz, $\mathrm{up}/\mathrm{down}$ is $3/2$ or $2/3$). Then the offset is $s_j - i = (j\,\mathrm{down} - i\,\mathrm{up})/\mathrm{up}$, a whole number $m$ over $\mathrm{up}$, and only the whole numbers $m$ ever occur. The weights can be computed from $m$ alone, there are few distinct ones, and a program can loop over whole numbers. Equivalently: put $\mathrm{up} - 1$ zeros between input samples, filter, and keep every $\mathrm{down}$-th result; the zeros contribute nothing to the sum, and skipping them is what the loop does, which is called a polyphase implementation.
+The third has a clean answer when the rates have a common factor. Reduce the ratio, $f_{\mathrm{new}}/f_{\mathrm{old}} = \mathrm{up}/\mathrm{down}$ in lowest terms (for 16 kHz and 24 kHz, $\mathrm{up}/\mathrm{down}$ is $3/2$ or $2/3$). Then the offset is $s_j - i = (j\,\mathrm{down} - i\,\mathrm{up})/\mathrm{up}$, a whole number $m$ over $\mathrm{up}$, and only the whole numbers $m$ ever occur. The weights can be computed from $m$ alone, there are few distinct ones, and a program can loop over whole numbers. Each stored weight of the cut kernel is called a tap, the way a delay line is tapped at each of its stages, and the number of taps is the length of the filter. Equivalently: put $\mathrm{up} - 1$ zeros between input samples, filter, and keep every $\mathrm{down}$-th result; the zeros contribute nothing to the sum, and skipping them is what the loop does. Each output uses only the taps whose $m$ has one residue modulo $\mathrm{up}$, that is, one of $\mathrm{up}$ short sub-filters taken in turn, and this arrangement is called a polyphase implementation.
 
 For the cut and the taper, the plainest choice is to keep the sinc for $|d| \le \mathrm{hw}$ and drop the rest. It is a poor one, as the next table shows. Instead the kernel is multiplied by a smooth taper that falls to nearly zero at the ends. The one used in brain's accurate resampler is the Kaiser taper
 
@@ -454,15 +454,15 @@ An abrupt cut of the sinc leaves the response ripple that more taps do not remov
 The price of the accuracy is arithmetic. Each output reaches the 193 taps of the filter at its phase, which is $193/\mathrm{up}$ of them, so a second of audio needs about $8000 \times 193$ multiply-adds whichever way the conversion goes, because $8000$ is the common factor of the two rates:
 
 <!-- worked: sound.work_counts -->
-One second of input. Multiply-adds with a stored weight: linear interpolation counts the nonzero weights, the Kaiser design counts the filter taps n = 0 .. 192 that an output reaches (edges of the second included), the cos^2 design the inputs with |c d| < 6. The last column is the count of a dense convolution of the zero-stuffed signal at up x input rate with the 193 taps, before discarding all but every down-th output.
+One second of input (as many samples as the old rate). Multiply-adds with a stored weight, counting only inputs that exist inside the second in every column (a tap that would reach before the first or past the last sample multiplies the zero padding and is not counted): linear interpolation counts the nonzero weights (one at a whole input position, else two), the Kaiser design the filter taps n = 0 .. 192 that an output reaches, the cos^2 design the inputs with |c d| < 6. The last column is the count of a dense convolution of the zero-stuffed signal at up x input rate with the 193 taps, before discarding all but every down-th output.
 
 | conversion | outputs | linear per output | linear total | Kaiser per output | Kaiser total | cos^2 per output | cos^2 total | zero-stuffed, dense |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | 24000 to 16000 | 16000 | 1.500 | 24000 | 96.40 | 1542448 | 18.50 | 295943 | 9264000 |
-| 16000 to 24000 | 24000 | 1.667 | 40000 | 64.27 | 1542448 | 12.33 | 295943 | 9264000 |
+| 16000 to 24000 | 24000 | 1.667 | 39999 | 64.27 | 1542448 | 12.33 | 295943 | 9264000 |
 <!-- /worked -->
 
-That is 1 542 448 multiply-adds, or about 3.1 MFLOP, per second of audio for the Kaiser design (the count falls short of $8000 \times 193 = 1\,544\,000$ by the taps that would reach outside the second), against 24 000 or 40 000 for linear interpolation and 295 943 for the shorter cos² design, and against 9 264 000 for the filter run as written, on the zero-stuffed signal at the intermediate rate. Skipping the zeros saves a factor $\mathrm{up}$ and skipping the outputs that would be discarded a factor $\mathrm{down}$, together $\mathrm{up} \cdot \mathrm{down} = 6$ over the dense computation: $9\,264\,000 / 6 = 1\,544\,000$. The accurate design costs between 39 and 64 times what linear interpolation does, and the figures are counts of work, not measured times.
+That is 1 542 448 multiply-adds, or about 3.1 MFLOP, per second of audio for the Kaiser design (the count falls short of $8000 \times 193 = 1\,544\,000$ by the taps that would reach outside the second, which are not counted; linear interpolation falls one short of 40 000 in the same way, the last output of 16 000 to 24 000 having no second neighbour), against 24 000 or 39 999 for linear interpolation and 295 943 for the shorter cos² design, and against 9 264 000 for the filter run as written, on the zero-stuffed signal at the intermediate rate. Skipping the zeros saves a factor $\mathrm{up}$ and skipping the outputs that would be discarded a factor $\mathrm{down}$, together $\mathrm{up} \cdot \mathrm{down} = 6$ over the dense computation: $9\,264\,000 / 6 = 1\,544\,000$. The accurate design costs between 39 and 64 times what linear interpolation does, and the figures are counts of work, not measured times.
 
 ## What brain's audio crate does with a recording
 

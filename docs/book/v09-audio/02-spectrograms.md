@@ -478,10 +478,10 @@ The clip: 8000 samples at 16000 Hz, seed 6749870757344927309, one `uniform()` dr
 | 7999 | -0.565834 |
 <!-- /worked -->
 
-The baseline is the recipe the 25 millisecond frame suggests: $N = 400$, $H = 160$, a periodic Hann window, reflection of 200 on each side, 40 Slaney filters with area normalisation from 0 to 8000 Hz, power, and $\ln(\max(E, 10^{-10}))$. It gives 51 frames of 40 numbers. Six variants each change one thing.
+Pre-emphasis, which one variant uses, is a first-order high-pass step applied to the samples before framing: $y[0] = x[0]$ and $y[n] = x[n] - a\,x[n-1]$ for $n \ge 1$, with $a = 0.97$ here. It lifts the high frequencies relative to the low, because a slowly varying signal almost cancels against its predecessor. The baseline is the recipe the 25 millisecond frame suggests: $N = 400$, $H = 160$, a periodic Hann window, reflection of 200 on each side, 40 Slaney filters with area normalisation from 0 to 8000 Hz, power, and $\ln(\max(E, 10^{-10}))$. It gives 51 frames of 40 numbers. Six variants each change one thing.
 
 <!-- worked: spectrograms.variants -->
-The clip through one baseline front end and through six variants that each change one thing. Baseline: N = 400, H = 160, periodic Hann window, reflect padding of 200 on each side (51 frames), 40 Slaney filters with area normalisation from 0 to 8000 Hz, power, ln(max(E, 1e-10)). Each row counts the cells (of the 40 per frame) that differ from the baseline by more than 0.01 over the frames both have, and gives the largest and the mean absolute difference over those cells, in nats.
+The clip through one baseline front end and through six variants that each change one thing. Baseline: N = 400, H = 160, periodic Hann window, reflect padding of 200 on each side (51 frames), 40 Slaney filters with area normalisation from 0 to 8000 Hz, power, ln(max(E, 1e-10)). Pre-emphasis 0.97 means y[0] = x[0] and y[n] = x[n] - 0.97 x[n-1] for n >= 1 on the whole clip, before the padding. Over the frames both versions have (all 40 cells of every frame, so 40 x frames cells), each row counts the cells that differ from the baseline by more than 0.01 and gives the largest and the mean absolute difference over all of those 40 x frames cells, in nats.
 
 | change | frames | cells differing by > 0.01 | largest difference | mean difference |
 |---|---:|---:|---:|---:|
@@ -500,7 +500,7 @@ The symmetric window is the mildest change: the largest difference in any cell i
 Two complete re-implementations from the descriptions in brain's source, written for this chapter, give the other kind of difference, that between whole front ends. The first is the one of `crates/audio/src/asr_frontend.rs` for the Qwen3-ASR model, which pads the clip with zeros to a whole number of seconds, takes a periodic Hann window of 400 with reflection of 200, 128 Slaney filters, drops the last frame, and finishes with recipe E; the second is the one for the Nemotron model, with pre-emphasis 0.97, a symmetric Hann window of 400 centred in a transform of 512 samples, zero padding of 256, 128 Slaney filters, recipe B and the frames from $\lfloor L/H \rfloor$ on set to zero.
 
 <!-- worked: spectrograms.recogniser_outputs -->
-The half-second clip through both front ends (the first padded with zeros to one whole second, as that front end does), 128 filters each: output shape, smallest and largest value over the cells the encoder reads (for the first, the 100 frames of the padded second; for the second, the 50 valid frames), and the value in any cell of a tenth of a second of digital silence.
+The half-second clip through both front ends (the first padded with zeros to one whole second, as that front end does), 128 filters each: output shape, smallest and largest value over the cells the encoder reads (for the first, the 100 frames of the padded second; for the second, the 50 valid frames), and the value in any cell of a tenth of a second of digital silence. The Nemotron style applies the pre-emphasis y[0] = x[0], y[n] = x[n] - 0.97 x[n-1] to the whole clip first, then pads 256 zeros on each side, then cuts frames of 512 whose weights are zero except samples 56 .. 455, which carry the 400-sample symmetric Hann window (centred: 56 zeros on each side of it); the frames from floor(L / 160) on, with L the clip length, are set to zero.
 
 | front end | shape | smallest | largest | value for silence |
 |---|---|---:|---:|---:|
@@ -549,6 +549,8 @@ The last column is the one to look at. One second of 16 kHz audio is 16,000 numb
 | x-vector filterbank | symmetric Hann 400, power 0.85, in 512 | none (frames that fit) | mean removed per frame, pre-emphasis 0.97 |
 | evaluation | periodic Hann 1024 | reflect 512 | none |
 <!-- /worked -->
+
+In the x-vector row of the signal-path table, "mean removed per frame" means that the mean of the frame's own 400 samples is subtracted from each of them, frame by frame, before anything else; the pre-emphasis then acts inside each frame, with $y[0] = 0.03\,x[0]$ and $y[n] = x[n] - 0.97\,x[n-1]$, which is the toolkit's convention and differs from the whole-signal rule of the other pre-emphasis only in the first sample of each frame.
 
 <!-- worked: spectrograms.front_end_features -->
 | front end | mel filters | spectrum | compression |

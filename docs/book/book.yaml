@@ -754,7 +754,7 @@ volumes:
       - id: speaker-embeddings
         title: "Who Is Speaking"
         question: "How does a model capture the identity of a voice in a single vector?"
-        introduces: [speaker-embedding, attentive-statistics-pooling, time-delay-network]
+        introduces: [speaker-embedding, attentive-statistics-pooling, time-delay-network, equal-error-rate]
         requires: [log-mel-spectrogram, identity-embedding, convolution-2d]
         brain: [ecapatdnn, campplus]
       - id: speech-synthesis

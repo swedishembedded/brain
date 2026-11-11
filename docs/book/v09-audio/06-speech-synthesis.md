@@ -109,7 +109,7 @@ The Talker's position $p$ has read the frames up to $p$, so its output is scored
 The code predictor, the multi-token-prediction network of the crate (`crates/qwen3tts/src/mtp.rs`), is a 5-layer decoder of the same layer shape as the Talker. For each frame it reads a sequence of 16 rows: the Talker's hidden state at the position that wrote the first code, then the first code's embedding, then the embedding of each residual code as it is drawn, and its position $k$ reads the head that predicts code $k$. Writing a frame therefore costs one Talker step and sixteen decoder steps of a smaller network. Whether that is a good division of the work is a matter of counting.
 
 <!-- worked: speech_synthesis.talker_counts -->
-Parameters from the tensors of the configuration (a 1024-wide, 28-layer Talker with 16 query heads and 8 key-value heads of 128, feed-forward 3072; a 5-layer code predictor of the same layer shape; layer = q, k, v and output projections, gate, up and down matrices, two norms and the two query-key norm vectors). Multiply-adds per frame count each matrix product once per row it is applied to; attention scores and norms are left out.
+Parameters from the tensors of the configuration (a 1024-wide, 28-layer Talker with 16 query heads and 8 key-value heads of 128, feed-forward 3072; a 5-layer code predictor of the same layer shape; layer = q, k, v and output projections, gate, up and down matrices, two norms and the two query-key norm vectors). Multiply-adds per frame count each matrix product once per row it is applied to; attention scores and norms are left out. A layer holds q (1024 x 2048), k and v (1024 x 1024 each), o (2048 x 1024), gate and up (1024 x 3072 each) and down (3072 x 1024), with no bias on any, two RMSNorm weights of 1024 and a query norm and a key norm of 128: 15,730,944 parameters (15,728,640 of them in the matrices, which is also the layer's multiply-adds a row). The Talker's embedding row is the codec table (3072 x 1024), the Talker's final norm (1024), the text table (151936 x 2048) and the text projection (2048 -> 2048 -> 1024, both with bias); the head row is the 1024 x 3072 codebook-0 head, counted separately from the codec table. The code predictor has 5 such layers, a final norm, and for each of the 15 residual codes a head and an embedding table of 2048 x 1024.
 
 | component | parameters | decoder steps per frame | multiply-adds per frame (millions) |
 |---|---:|---:|---:|
@@ -340,7 +340,7 @@ function fsq_token(z: array<real>[8]) -> int
 The rest of the tokenizer is a stack of the familiar parts. A 128-bin log-mel of the 16 kHz clip (window 400, hop 160, 100 frames a second) goes through two convolutions of kernel 3 and stride 2, which leave 25 positions a second, and six transformer blocks of width 1280 with 20 heads, rotary positions and, beside each attention, a depthwise filter of 31 taps along time added to the value path; the head projects to 8 numbers. It is not causal, since the attention looks in both directions over the clip, so it needs the whole reference before it writes a token, and that costs nothing here because it is only ever run on the reference recording.
 
 <!-- worked: speech_synthesis.tokenizer_counts -->
-Counted from the tensors of the released tokenizer (102 of them): weights and biases and the layer-norm gains, in the layer shapes above; one second of audio is 100 mel frames, 50 after the first convolution and 25 after the second.
+Counted from the tensors of the released tokenizer (102 of them): weights and biases and the layer-norm gains, in the layer shapes above; one second of audio is 100 mel frames, 50 after the first convolution and 25 after the second. Both convolutions have k 3, stride 2 and a bias. A block has width 1280 and 20 heads of 64: attention q, v and output matrices with a bias, the k matrix without (each 1280 x 1280), a depthwise filter of 1280 x 31 along time without bias (added to the values, counted as 1280 x 31 multiply-adds a position), two LayerNorms with gain and shift, and an MLP 1280 -> 5120 -> 1280 with both biases; the projection to 8 digits has a bias.
 
 | part | parameters | positions per second | multiply-adds per second of audio (millions) |
 |---|---:|---:|---:|
@@ -386,7 +386,7 @@ $$
 where the text tokens are the reference's transcript followed by the target text, the $y$ are the reference clip's speech tokens, and the model then writes speech tokens autoregressively until it draws a stop id. Two facts about this prompt are consequences of the route. The reference's recording enters the language model as speech tokens, so that the model is shown how the sentence it transcribes was said, in the only terms the model reads; and the 192-number speaker vector does not enter it at all (the crate's `crates/cosyvoice/src/llm.rs` documents that the reference implementation accepts the vector and never reads it, and `prefill` has no argument for it). The voice reaches the pipeline later, at the flow decoder.
 
 <!-- worked: speech_synthesis.speech_lm_counts -->
-Counted from the tensors of the released speech-token model (295 in the file; the 151,936-wide output matrix of the text backbone is a copy of the embedding table and is not read).
+Counted from the tensors of the released speech-token model (295 in the file; the 151,936-wide output matrix of the text backbone is a copy of the embedding table and is not read). A layer has width 896, 14 query heads and 2 key-value heads of 64: q (896 x 896), k and v (896 x 128) each with a bias, o without, gate, up and down of 896 x 4864 without bias, two RMSNorm weights of 896, no query or key norm; the 'start and task rows' are two rows of 896.
 
 | part | parameters |
 |---|---:|
@@ -397,7 +397,7 @@ Counted from the tensors of the released speech-token model (295 in the file; th
 
 One step of the model is 363.7 million multiply-adds (24 layers and the 6564-way head), so a second of speech at 25 tokens costs 9.09 billion, attention scores aside.
 
-A prompt: reference of 3.3 seconds (82 speech tokens after the truncation of the last table), 10 reference-text tokens and 8 target-text tokens. The rows it feeds before the first draw are 1 + 18 + 1 + 82 = 102; the model may draw at most 160 tokens (6.4 seconds) and is held from stopping before 16; the cache is sized for 102 + 160 + 8 = 270 positions.
+A prompt: reference of 3.3 seconds (82 speech tokens after the truncation of the last table), 10 reference-text tokens and 8 target-text tokens. The rows it feeds before the first draw are 1 + 18 + 1 + 82 = 102; the model may draw at most 160 tokens (6.4 seconds) and is held from stopping before 16; the cache is sized for 102 + 160 + 8 = 270 positions (the 8 is a margin that the pipeline adds to the cache; the rows actually written never exceed 102 + 160).
 
 The budget as a function of the number of target-text tokens n (minimum round(2 n), maximum round(20 n), ties upward):
 
@@ -573,6 +573,30 @@ Three things are visible in the tables and the figure. Ten Euler steps on the co
 
 Counting this decoder's work is the point where the two routes' costs diverge most.
 
+<!-- worked: speech_synthesis.flow_layout -->
+The layers behind the counts below: widths, heads, kernels, groups and which tensors carry a bias. A LayerNorm has a weight and a bias of its width unless said otherwise.
+
+Second generation
+
+| part | layout | biases and norms |
+|---|---|---|
+| token embedding, speaker map, output projection | embedding 6561 x 512; speaker vector 192 -> 80; encoder output 512 -> 80 | the two linear maps have a bias |
+| conformer encoder | a linear 512 -> 512 with a LayerNorm; a look-ahead pair of convolutions 512 -> 512 with k 4 (reading 3 later rows) and k 3, added to its input; 6 layers at 25 Hz; every row repeated twice (50 Hz) and a convolution 512 -> 512 with k 5, a linear 512 -> 512 with a LayerNorm; 4 layers at 50 Hz; a final LayerNorm. A layer, with its LayerNorm before the attention and before the feed-forward (no convolution module): 8 heads of 64, q, k, v and o of 512 x 512 with bias, a relative-position matrix 512 x 512 without bias, two vectors u and v of 512, one feed-forward 512 -> 2048 -> 512 with both biases, two LayerNorms (weight and bias) | every convolution and linear map biased except the position matrix |
+| estimator | input 320 channels (the noisy mel, the token mel, the speaker vector repeated and the reference mel, 80 each); a time embedding of a sinusoid of width 320 through 320 -> 1024 -> 1024; 14 residual blocks (one going down, 12 in the middle, one going up, whose input is 512 channels, the middle output and the skip from the down stage), each followed by 4 transformer blocks, so 56 in all; a convolution 256 -> 256 (k 3) after the down stage and one after the up stage, a final convolution 256 -> 256 (k 3), a LayerNorm, Mish and a convolution 256 -> 80 (k 1) | all convolutions and linear maps biased |
+| residual block (ci -> co) | convolution ci -> co (k 3), LayerNorm, Mish; the time embedding through a projection 1024 -> co added to every position; convolution co -> co (k 3), LayerNorm, Mish; shortcut convolution ci -> co (k 1) added; 320 -> 256 once, 256 -> 256 twelve times, 512 -> 256 once | every convolution, LayerNorm and the time projection with bias |
+| transformer block of the estimator | LayerNorm 256; attention with 8 heads of 64, q, k, v 256 -> 512 without bias, o 512 -> 256 with bias; LayerNorm 256; feed-forward 256 -> 1024 -> 256 | LayerNorm weight and bias, the feed-forward and o biased |
+
+Third generation
+
+| part | layout | biases and norms |
+|---|---|---|
+| token embedding, speaker map, look-ahead layer | embedding 6561 x 80; speaker vector 192 -> 80; convolution 80 -> 1024 (k 4) and convolution 1024 -> 80 (k 3) | biased |
+| time embedding | a sinusoid of width 256 through 256 -> 1024 -> 1024 | biased |
+| input projection and position convolutions | 320 -> 1024 (the same four 80-channel pieces); then two convolutions of 1024 channels with k 31 in 16 groups (each channel group of 64 reads 64 channels) | all three biased |
+| 22 blocks | width 1024, 16 heads of 64 with rotary positions, a LayerNorm without gain or shift before attention and before the feed-forward, whose scale, shift and gate come from the time embedding by one matrix 1024 -> 6144 per block; attention q, k, v, o (1024 x 1024); feed-forward 1024 -> 2048 -> 1024 | all matrices biased; the LayerNorms have no parameters |
+| final scale-and-shift and output | a matrix 1024 -> 2048 from the time embedding, then 1024 -> 80 | biased |
+<!-- /worked -->
+
 <!-- worked: speech_synthesis.flow_counts -->
 Parameters counted from the tensor shapes of the two released flow files (the first matches the total of the released file's 1121 tensors, 112,549,360; the second matches its 330 tensors apart from a 32-entry rotary-frequency buffer that is recomputed, 332,257,088 + 32 = 332,257,120).
 
@@ -595,7 +619,7 @@ Parameters counted from the tensor shapes of the two released flow files (the fi
 | final scale-and-shift and output projection (1024 -> 80) | 2,181,200 |
 | total | 332,257,088 |
 
-Work per second of speech: 50 mel frames a second, 10 Euler steps, and two evaluations of the estimator per step (the conditional one and the unconditioned one), so 20 evaluations of every frame. Matrix products are counted once per row they are applied to; attention costs 2 x width per pair of frames and block; norms and activations are left out. The conformer's relative-position projection is counted over 2 rows per frame.
+Work per second of speech: 50 mel frames a second, 10 Euler steps, and two evaluations of the estimator per step (the conditional one and the unconditioned one), so 20 evaluations of every frame. Matrix products are counted once per row they are applied to; attention costs 2 x width per pair of frames and block, where width is heads x head width: 8 x 64 = 512 inside each of the 56 blocks of the second generation's estimator (the block's own width is 256) and 16 x 64 = 1024 in each of the 22 blocks of the third generation's, so a pair costs 2 x 512 or 2 x 1024 multiply-adds, scores and weighted values together, and the attention column is blocks x 2 x width x T; norms and activations are left out. The conformer's relative-position projection is counted over 2 rows per frame. The 'independent of T' column per evaluation is, for the second generation, the time embedding (320 -> 1024 -> 1024) and the 14 time projections (1024 -> 256), and for the third the 22 scale-and-shift matrices (1024 -> 6144), the final one (1024 -> 2048) and the time embedding (256 -> 1024 -> 1024); the third's 'matrix products per frame' are its 22 blocks (4 attention matrices of 1024 x 1024 and the feed-forward 1024 -> 2048 -> 1024), the input projection with the two grouped position convolutions and the output projection.
 
 | decoder | matrix products per frame per evaluation (millions) | attention scores and values per frame at T = 650 (millions) | per evaluation, independent of T (millions) | evaluations | billions per second of speech | attention, billions per second at T = 650 | encoder, once (billions per second) |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -636,6 +660,21 @@ The harmonic source for a pitch of 200 Hz: 9 sinusoids at multiples of the pitch
 <!-- /worked -->
 
 The trunk is given a periodic signal to start from. A small network predicts a pitch contour, in hertz, at 50 frames a second from the mel, and a source module turns the contour into an excitation: nine sinusoids at the multiples of the pitch, each with phase accumulated from its frequency, plus noise, where a frame is voiced when the pitch exceeds 10 Hz and unvoiced otherwise. This is the harmonic-plus-noise source of the neural source-filter family, and it is why the trunk, which would otherwise have to find periodicity in noise, has a periodic signal handed to it at every upsampling stage. (The reference's name for the pitch network mentions a recurrent layer, and the crate's comment records that it has none: it is five convolutions and a linear read-out.) The magnitude is the exponential of the network's output, capped at 100, and the final samples are clamped to $\pm 0.99$.
+
+<!-- worked: speech_synthesis.vocoder_layout -->
+The layers behind the counts below: widths, kernels, strides and which tensors carry a bias or a gain.
+
+| part | layout | biases and gains |
+|---|---|---|
+| pitch predictor | convolution 80 -> 512 (k 3), four convolutions 512 -> 512 (k 3), each followed by an ELU, then a linear 512 -> 1 whose absolute value is the pitch in Hz | every convolution and the linear map biased |
+| first convolution | 80 -> 512, k 7 | biased |
+| upsampling stages | before each, a leaky ReLU; transposed convolutions 512 -> 256 (k 16, stride 8), 256 -> 128 (k 11, stride 5), 128 -> 64 (k 7, stride 3), taking 50, 400 and 2000 positions a second in | biased |
+| source branch | the nine harmonic sinusoids at 24,000 samples a second are merged into one excitation by the linear map 9 -> 1, and a 16-point transform with hop 4 makes of it 9 complex bins, 18 real channels, at 6000 frames a second; one strided convolution for each stage, 18 -> 256 (k 30, stride 15), 18 -> 128 (k 6, stride 3) and 18 -> 64 (k 1, stride 1); a residual block on its output with k 7, 7 and 11; the result is added to the trunk after the stage's transposed convolution | biased |
+| residual block (c channels, kernel k) | three branches in sequence on the same signal, each Snake, convolution c -> c (kernel k, dilation 1, 3 or 5), Snake, convolution c -> c (kernel k, dilation 1), the branch added to its input; a Snake multiplies by a learned per-channel alpha | six convolutions with bias and six alpha vectors of c: 6 (c x c x k + c) + 6 c |
+| trunk | after each stage three residual blocks with k 3, 7 and 11 on the same input, their outputs averaged: 9 blocks in all |  |
+| output convolution | after a leaky ReLU, 64 -> 18, k 7: for each of the 9 bins a logarithm of the magnitude and a phase argument, at 6000 frames a second, then the inverse transform | biased |
+| harmonic merge | linear map 9 -> 1 at each of the 24,000 samples a second | biased (10 numbers) |
+<!-- /worked -->
 
 <!-- worked: speech_synthesis.vocoder_counts -->
 Counted from the tensors of the released second-generation vocoder, after the weight-normalisation gains are folded into the kernels (the file stores one extra gain per convolution, 14,738 numbers, which are not parameters of the folded model). A convolution costs c_out c_in k multiply-adds per output position and a transposed convolution c_in c_out k per input position, at the rates 50, 400, 2000 and 6000 positions a second; the inverse transform and the activations are not counted.
@@ -726,7 +765,7 @@ The chunk rule of the released reference's streaming loop (the third generation'
 | 82 | 18 | 43 | 46 | 1.84 |
 | 150 | 0 | 25 | 28 | 1.12 |
 
-The chunks of a 250-token utterance (10 seconds) after a prompt of 75 tokens. A flow evaluation of T frames costs 20 x (T x matrix products + attention + the fixed part) multiply-adds, with the third-generation numbers of the flow table; 'billions' are billions of multiply-adds.
+The chunks of a 250-token utterance (10 seconds) after a prompt of 75 tokens. A flow evaluation of T frames costs 20 x (T x matrix products + attention + the fixed part) multiply-adds, with the third-generation numbers of the flow table: the matrix products per frame, the attention 22 blocks x 2 x 1024 x T x T (each of T frames scores T keys, 2 x 1024 multiply-adds a pair), and the fixed part per evaluation; 'billions' are billions of multiply-adds. The cumulative column adds the unrounded flows, so it can differ by one from the sum of the printed ones.
 
 | chunk | tokens already sent | hop | tokens through the flow | frames T | flow billions | cumulative billions |
 |---|---:|---:|---:|---:|---:|---:|

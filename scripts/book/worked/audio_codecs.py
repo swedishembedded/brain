@@ -436,6 +436,42 @@ def _fmt_m(x):
     return f"{x / 1e6:,.1f}" if x else "0"
 
 
+def codec_layout():
+    """The layer layout behind every row of codec_counts, printed from the constants the counts are computed from."""
+    d, hq, ff = DEC_HIDDEN, DEC_HEADS * DEC_HEAD_DIM, DEC_FFN
+    c = LATENT
+    rows = [
+        ("encoder convolutions", f"head 1 -> {FILTERS} (k {K_HEAD}); four stages with strides {', '.join(map(str, STRIDES))}, "
+         f"each a residual branch c -> c/{COMPRESS} (k {K_RES}) then c/{COMPRESS} -> c (k 1) and a strided convolution "
+         f"c -> 2c (k 2 x stride); tail {FILTERS * 2 ** len(STRIDES)} -> {HIDDEN} (k {K_LAST})",
+         "weight and bias on every convolution; the activations carry nothing"),
+        ("encoder transformer", f"{ENC_LAYERS} layers of width {HIDDEN}; attention with {ENC_HEADS} heads of width "
+         f"{ENC_HEAD_DIM} (query, key, value and output matrices, {HIDDEN} x {ENC_HEADS * ENC_HEAD_DIM}); feed-forward "
+         f"{HIDDEN} -> {ENC_FFN} -> {HIDDEN} with two matrices",
+         f"no matrix has a bias; per layer two LayerNorms (weight and bias of width {HIDDEN} each, {2 * 2 * HIDDEN:,} numbers) and two layer scales "
+         f"(one number per channel, {2 * HIDDEN:,} numbers), so {2 * 2 * HIDDEN + 2 * HIDDEN:,} small numbers"),
+        ("frame-rate match", f"one convolution {HIDDEN} -> {HIDDEN}, k {DOWN_K}, stride {DOWN_STRIDE}", "no bias"),
+        ("quantizer projections", f"two of {HIDDEN} -> {CODE_DIM}, one for the semantic codebook and one for the acoustic ones",
+         "no bias"),
+        ("decoder pre-transformer", f"input projection {LATENT} -> {d}, {DEC_LAYERS} layers of width {d}, output projection "
+         f"{d} -> {LATENT}; attention with {DEC_HEADS} heads of width {DEC_HEAD_DIM} (matrices {d} x {hq}); feed-forward gated: "
+         f"three matrices of {d} x {ff} (gate, up, down)",
+         f"both projections have a bias; no matrix in a layer has one; per layer two RMSNorms (weight only, 2 x {d}) and two "
+         f"layer scales (2 x {d}); one final RMSNorm ({d})"),
+        ("decoder upsampling stages", f"two stages: a transposed convolution {c} -> {c} with k = stride = {UP[0]}, then a "
+         f"ConvNeXt block of width {c}: depthwise convolution k 7, LayerNorm, pointwise {c} -> {4 * c} -> {c}",
+         f"transposed convolution and all three convolutions with bias; LayerNorm weight and bias; one layer scale ({c})"),
+        ("SEANet decoder", f"first convolution {c} -> {DEC_DIM} (k 7); four blocks of rates {', '.join(map(str, RATES))}, each "
+         f"a SnakeBeta, a transposed convolution c_in -> c_out with k = 2 x rate, and three residual units (dilations 1, 3, 9) of "
+         f"SnakeBeta, convolution c_out -> c_out (k 7), SnakeBeta, convolution c_out -> c_out (k 1); a last SnakeBeta and a "
+         f"convolution 96 -> 1 (k 7)",
+         "weight and bias on every convolution; every SnakeBeta has an alpha and a beta per channel (2 x channels of its input)"),
+    ]
+    return ("The layers behind the counts below: widths, heads, kernels, and which tensors are counted. Where two matrices or "
+            "norms are named they are the tensors the code reads; nothing else carries a parameter.\n\n"
+            + _table(["component", "layout", "tensors counted besides the weights named"], rows, "lll"))
+
+
 def codec_counts():
     out = []
     totals = {}
@@ -450,7 +486,8 @@ def codec_counts():
             "transposed convolution c_in c_out k per input position; a matrix product costs its input width times its output "
             "width per row; the nearest-code search is counted as d multiply-adds per entry. The squared distances of the "
             "attention scores, the activations and the normalisations are not counted. Frames arrive at 12.5 per second, "
-            "25 per second inside the encoder, 50 per second after the upsampling stages.\n\n"
+            "25 per second inside the encoder, 50 per second after the upsampling stages. Each total is the sum of the unrounded "
+            "rows, so a printed total can differ by 0.1 from the sum of the printed rows.\n\n"
             + out[0] + "\n\n" + out[1])
 
 
@@ -464,8 +501,12 @@ def attention_work():
         dec = 2 * DEC_HEADS * DEC_HEAD_DIM * DEC_LAYERS * keys
         rows.append((secs, t25, _i(enc), t12, _i(dec)))
     return ("Per query and key a layer spends 2 x heads x head width multiply-adds (one product for the score, one for the weighted "
-            "value). The encoder's attention, as the code runs it, sees every earlier frame; the decoder's sees at most the 72 "
-            "most recent.\n\n"
+            f"value). The encoder has {ENC_LAYERS} layers of {ENC_HEADS} heads of width {ENC_HEAD_DIM} (2 x {ENC_HEADS * ENC_HEAD_DIM} "
+            f"per query and key per layer) and its attention, as the code runs it, sees every earlier frame, "
+            f"t (t + 1) / 2 pairs for t frames; the decoder has {DEC_LAYERS} layers of {DEC_HEADS} heads of width {DEC_HEAD_DIM} "
+            f"(2 x {DEC_HEADS * DEC_HEAD_DIM}) and sees at most the {WINDOW} most recent frames, the sum over frames i of "
+            f"min(i + 1, {WINDOW}) pairs. Frames are ceil(seconds x 24000 / 960) at 25 Hz and ceil(seconds x 24000 / 1920) at "
+            f"12.5 Hz.\n\n"
             + _table(["seconds", "encoder frames (25 Hz)", "encoder attention multiply-adds", "decoder frames (12.5 Hz)",
                       "decoder attention multiply-adds"], rows, "rrrrr"))
 

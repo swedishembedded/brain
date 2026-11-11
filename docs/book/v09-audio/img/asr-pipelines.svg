@@ -1,4 +1,4 @@
-<!-- source-sha256: e6dd0da879ffeee339d47f5a88a2ced3c5798321253095305308041d28b4bb73 -->
+<!-- source-sha256: 67b2580b260767ae11cd5784d66e305be815c06e59c665f1d52165a0aff07b93 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 330" width="800" height="330"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="330" fill="#ffffff"/>
 <rect x="20" y="16" width="760" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Qwen3-ASR: a decoder that reads the audio rows as part of its prompt</text>

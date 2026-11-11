@@ -345,7 +345,7 @@ def wav_layout():
                            " ".join(f"{b:02x}" for b in data[4 * i:4 * i + 4])))
     planes = [[brain_read(struct.unpack_from("<h", data, 4 * i + 2 * c)[0]) for i in range(3)] for c in range(2)]
     mono = [(planes[0][i] + planes[1][i]) / 2 for i in range(3)]
-    return ("Two channels, three frames, 8000 Hz, written with the write rule above. The file is "
+    return ("Two channels, three frames, 8000 Hz, each sample written as code = round(32767 x) with ties away from zero (the rule the section after this table justifies), two bytes little-endian. The file is "
             f"{len(header) + len(data)} bytes.\n\n"
             + _table(["offset", "bytes", "hex (little-endian)", "field", "value"], rows, "rrlll")
             + "\n\n"
@@ -636,11 +636,12 @@ def work_counts():
         n_in = old  # one second of input
         n_out = out_length(n_in, old, new)
         # linear: nonzero weights per output
-        ratio = new / old
         lin = 0
         for i in range(n_out):
-            s = i / ratio
-            lin += 1 if s - math.floor(s) == 0 else 2
+            # output i sits at input position i * old / new: a whole position has one weight, otherwise two,
+            # and a neighbour past the last input sample is not counted
+            first, rem = divmod(i * old, new)
+            lin += 1 if rem == 0 else (2 if first + 1 < n_in else 1)
         kz = KaiserSinc(old, new)
         hn = HannSinc(old, new)
         kz_taps = sum(len(taps_of(kz, j, n_in)) for j in range(n_out))
@@ -648,8 +649,10 @@ def work_counts():
         stuffed = (kz.flen) * (n_in * kz.up)  # direct zero-stuffed convolution at the intermediate rate
         rows.append((f"{old} to {new}", n_out, f"{lin / n_out:.3f}", lin, f"{kz_taps / n_out:.2f}", kz_taps,
                      f"{hn_taps / n_out:.2f}", hn_taps, stuffed))
-    return ("One second of input. Multiply-adds with a stored weight: linear interpolation counts the nonzero weights, the "
-            "Kaiser design counts the filter taps n = 0 .. 192 that an output reaches (edges of the second included), the "
+    return ("One second of input (as many samples as the old rate). Multiply-adds with a stored weight, counting only inputs that "
+            "exist inside the second in every column (a tap that would reach before the first or past the last sample "
+            "multiplies the zero padding and is not counted): linear interpolation counts the nonzero weights (one at a "
+            "whole input position, else two), the Kaiser design the filter taps n = 0 .. 192 that an output reaches, the "
             "cos^2 design the inputs with |c d| < 6. The last column is the count of a dense convolution of the zero-stuffed "
             "signal at up x input rate with the 193 taps, before discarding all but every down-th output.\n\n"
             + _table(["conversion", "outputs", "linear per output", "linear total", "Kaiser per output", "Kaiser total",

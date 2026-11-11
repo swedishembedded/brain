@@ -30,7 +30,7 @@ Five things from earlier chapters are needed first. The answers are at the end.
 1. ([Volume IX, Chapter 2](02-spectrograms.md), front ends.) A clip of 16,000 samples goes through a filterbank with 400-sample frames at a hop of 160 and no padding. How many frames does it make? A clip of 24,000 samples goes through a log-mel front end with 1024-sample frames at a hop of 256 after a reflect pad of 384 on each side. How many?
 2. ([Volume VII, Chapter 2](../v07-vision/02-convolution.md), two-dimensional convolution.) A convolution with 32 input channels, 32 output channels and a $3 \times 3$ kernel holds how many weights, and how many multiply-adds does it make over an output of $40 \times 100$ positions?
 3. ([Volume VII, Chapter 2](../v07-vision/02-convolution.md), receptive field.) Three stride-1 layers of kernel 3 have dilations 1, 2 and 4. How many input positions does one output of the last layer depend on?
-4. ([Volume VII, Chapter 11](../v07-vision/11-faces.md), identity embedding.) Two embeddings have cosine 0.7 and the threshold is 0.5. Are they called the same person? When the threshold is lowered, which of the two kinds of error becomes more frequent?
+4. ([Volume VII, Chapter 11](../v07-vision/11-faces.md), identity embedding.) Two embeddings have cosine 0.7 and the threshold $\tau_{\mathrm{id}}$ is 0.5: a pair is called the same person when its cosine is at or above $\tau_{\mathrm{id}}$. Are these called the same person? When the threshold is lowered, which of the two kinds of error, a false rejection (a pair of one person called two) or a false acceptance (a pair of two people called one), becomes more frequent? Where the two rates are equal, as the last section defines, the common value is the equal error rate.
 5. ([Volume III, Chapter 3](../v03-neural-networks/03-softmax.md), softmax.) What does a softmax over the four scores $(0, \ln 2, \ln 2, 0)$ return?
 
 ## A convolution that only moves in time
@@ -291,6 +291,31 @@ Nothing in the pooling or the convolutions knows what a speaker is. That comes f
 
 Both encoders are now described, and they can be counted from their configurations, the way the previous chapter counted the two recognisers.
 
+<!-- worked: speaker_embeddings.layout -->
+The layers behind the counts below: widths, kernels, chunking and which tensors exist. 'k 1' is a 1 x 1 convolution, a matrix applied to every frame.
+
+Encoder 1
+
+| part | layout | biases and norms |
+|---|---|---|
+| first convolution | 128 -> 512, k 5 | weight and bias |
+| SE-Res2Net block (three, dilations 2, 3, 4) | 1 x 1 convolution 512 -> 512; the 512 channels split into 8 chunks of 64, chunk 0 passed on, chunks 1 to 7 each a convolution 64 -> 64, k 3, at the block's dilation; 1 x 1 convolution 512 -> 512; squeeze-excitation 512 -> 128 -> 512 (1 x 1, run once on the clip's mean) | weight and bias on every convolution; no normalisation tensor is stored |
+| aggregation convolution | 1536 -> 1536, k 1 (the three block outputs side by side) | weight and bias |
+| attention of the pooling | 4608 -> 128 -> 1536, k 1 (the channels, their mean and their deviation side by side) | weight and bias on both |
+| projection | 3072 -> 1024 (the mean and the deviation of the 1536 channels) | weight and bias |
+
+Encoder 2
+
+| part | layout | biases and norms |
+|---|---|---|
+| stem | 32 channels, 3 x 3 over frequency and time: a convolution 1 -> 32; two groups of two residual blocks, each block two convolutions 32 -> 32, the first block of each group striding by 2 over frequency (80 -> 40 -> 20) and carrying a 1 x 1 shortcut 32 -> 32; a last convolution 32 -> 32, stride 2 over frequency (-> 10): 1 + 8 + 1 = 10 convolutions and 2 shortcuts, and 32 x 10 = 320 channels leave it | weight and bias on all 12 |
+| time-delay convolution | 320 -> 128, k 5, stride 2 over time | weight and bias |
+| dense layer | input of c_in channels (c_in is 128 at the first layer of the first block and grows by 32 with each layer): normalisation of the input (gain, shift, running mean, running variance), 1 x 1 convolution c_in -> 128, local convolution 128 -> 32, k 3 at the block's dilation, and the context gate, two 1 x 1 convolutions 128 -> 64 -> 32; the 32 output channels are appended to the input; 11 tensors | bias on the 1 x 1 convolutions and the gate, none on the local convolution |
+| dense blocks | 12, 24 and 16 layers at dilations 1, 2 and 2 |  |
+| transit | normalisation of the block's c channels (gain, shift, running mean and variance), then 1 x 1 convolution c -> c / 2; c is 512, 1024 and 1024 for the three, and the channels left are 256, 512 and 512 | no bias on the first two; the third has a bias of 512 (the normalisation after it is folded into the convolution in the released graph, which is why it has 6 tensors and the others 5) |
+| projection | statistics pooling of the 512 channels (mean and deviation) -> 1024, 1 x 1 convolution 1024 -> 192, then a normalisation with running mean and variance only (no gain or shift) | no bias; 2 x 192 buffers |
+<!-- /worked -->
+
 <!-- worked: speaker_embeddings.parameter_counts -->
 Stored values and operations of the two encoders, counted from their configurations. Weights are the entries of kernels and matrices (and, for encoder 2, the gain and shift of its normalisations); biases are the entries of bias vectors; buffers are the running means and variances of encoder 2's normalisations, which are stored but not trained. Operations count 2 per multiply-add of the convolutions and projections only.
 
@@ -313,7 +338,7 @@ Encoder 2 (16 kHz filterbank at 100 frames a second; the stem at that rate, the 
 
 | stage | weights | biases | buffers | tensors | operations per second of audio |
 |---|---:|---:|---:|---:|---:|
-| stem: 7 2-D convolutions and 2 shortcuts | 85,280 | 384 | 0 | 24 | 477,696,000 |
+| stem: 10 2-D convolutions and 2 shortcuts | 85,280 | 384 | 0 | 24 | 477,696,000 |
 | time-delay convolution, 320 to 128, k 5, stride 2 | 204,800 | 128 | 0 | 2 | 20,480,000 |
 | dense block 1: 12 layers, d 1 | 744,576 | 2,688 | 7,296 | 132 | 73,728,000 |
 | transit 1: 512 to 256 | 132,096 | 0 | 1,024 | 5 | 13,107,200 |
@@ -359,7 +384,7 @@ One threshold, that of the 8 second clips (0.439), applied to all four lengths:
 | 8 | 0.439 | 4.2% | 4.0% |
 <!-- /worked -->
 
-The error falls from 33.0% at 1 second to 4.1% at 8, and the table's means show where it comes from: the impostor cosines stay near 0 and the genuine cosines rise from 0.202 to 0.676, so the two groups move apart. A short calculation explains the numbers. The speaker's unit vector $\mathbf{u}$ and the noise vectors $\boldsymbol\nu_1$, $\boldsymbol\nu_2$ of two utterances are nearly orthogonal in width 16, and $\lVert\boldsymbol\nu\rVert^2$ is about $\rho^2/s$, so the cosine of $\mathbf{u} + \boldsymbol\nu_1$ with $\mathbf{u} + \boldsymbol\nu_2$ is about $1/(1 + \rho^2/s)$: $0.2$, $0.333$, $0.5$, $0.667$ for $s = 1, 2, 4, 8$, against the table's $0.202$, $0.338$, $0.508$, $0.676$.
+The error falls from 33.0% at 1 second to 4.1% at 8, and the table's means show where it comes from: the impostor cosines stay near 0 and the genuine cosines rise from 0.202 to 0.676, so the two groups move apart. A short calculation explains the numbers. The speaker's unit vector $\mathbf{z}$ (the centre of the simulation, not the bias $u$ of Chapter 4) and the noise vectors $\boldsymbol\nu_1$, $\boldsymbol\nu_2$ of two utterances are nearly orthogonal in width 16, and $\lVert\boldsymbol\nu\rVert^2$ is about $\rho^2/s$, so the cosine of $\mathbf{z} + \boldsymbol\nu_1$ with $\mathbf{z} + \boldsymbol\nu_2$ is about $1/(1 + \rho^2/s)$: $0.2$, $0.333$, $0.5$, $0.667$ for $s = 1, 2, 4, 8$, against the table's $0.202$, $0.338$, $0.508$, $0.676$.
 
 ![Two kinds of error against the cosine threshold for the simulated population, for clips of 1 and 8 seconds: the false acceptance rate falls and the false rejection rate rises with the threshold, and the two cross at the equal error rate, at a much lower threshold and a much higher error for the 1 second clips.](img/speaker-scoring.svg)
 
@@ -399,7 +424,7 @@ The vector leaves the encoder and enters a synthesiser, and the two crates of br
 That difference decides what a test of the encoder has to check, and the history of the crate shows it. Commit `d16050463` (25 August 2026) records that three parity gates, two for the audio codec and one for this encoder, all skipped, and that a skipped test counts as a pass here, so that the speaker encoder had no executable numerical check at all until the goldens were produced. Once it ran, the commit also noted that the encoder's test asserted a floor on the cosine and nothing else, and added a ceiling on the relative L2 distance, `1e-4` against a clean value of about `7e-7`, because cosine is scale invariant: a vector twice as large scores 1.0. That is the content of knowledge #2, whose lesson is to gate the relative L2 distance alongside the cosine. The table shows it on four numbers.
 
 <!-- worked: speaker_embeddings.parity_metrics -->
-The reference vector is (3.0, 4.0, 0.0, 12.0) (length 13). 'Cosine' and 'relative L2' compare a candidate with it (relative L2 is the length of the difference over the length of the reference). The last column passes both vectors through the same stand-in for a consumer that normalises first, divides each by its length and multiplies by (1.0, 0.0, -1.0, 0.5), (0.0, 1.0, 0.5, -0.5), and reports the relative L2 of the two results.
+The reference vector is (3.0, 4.0, 0.0, 12.0) (length 13); 'one entry off' adds the stated amount to its first entry (the 3.0), with a plus sign. 'Cosine' and 'relative L2' compare a candidate with it (relative L2 is the length of the difference over the length of the reference). The last column passes both vectors through the same stand-in for a consumer that normalises first, divides each by its length and multiplies by (1.0, 0.0, -1.0, 0.5), (0.0, 1.0, 0.5, -0.5), and reports the relative L2 of the two results.
 
 | candidate | cosine | relative L2 | relative L2 after normalising and multiplying |
 |---|---:|---:|---:|
@@ -464,6 +489,7 @@ The vector is the speaker half of the instruction that a voice-cloning synthesis
 - **speaker embedding**: a vector of fixed length computed from a recording of any length, such that recordings of one voice are close in cosine and recordings of different voices are not. <!-- concept: speaker-embedding -->
 - **attentive statistics pooling**: a pooling over time that learns a weight for each frame of each channel, by a softmax over a score from a small network, and returns the weighted mean and weighted standard deviation of every channel. <!-- concept: attentive-statistics-pooling -->
 - **time-delay network**: a network of one-dimensional convolutions along time, whose weights are shared across time and whose units read a layer at several delayed moments, so that a deeper unit sees a longer stretch of the signal. <!-- concept: time-delay-network -->
+- **equal error rate**: the common value of the false acceptance rate and the false rejection rate at the threshold where the two cross, one number for a model and a set of recordings that says nothing of the cost of either error. <!-- concept: equal-error-rate -->
 
 ## Answers
 

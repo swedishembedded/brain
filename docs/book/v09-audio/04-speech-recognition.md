@@ -162,7 +162,7 @@ Fewest frames in which a label sequence can be written, U plus the number of nei
 
 | label | U | equal neighbours | fewest frames | alignments, one fewer | at the minimum | one more | two more |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `a` | 1 | 0 | 1 | 1 | 1 | 3 | 6 |
+| `a` | 1 | 0 | 1 | 0 | 1 | 3 | 6 |
 | `ab` | 2 | 0 | 2 | 0 | 1 | 5 | 15 |
 | `aa` | 2 | 1 | 3 | 0 | 1 | 5 | 15 |
 | `aab` | 3 | 1 | 4 | 0 | 1 | 7 | 28 |
@@ -189,7 +189,7 @@ The same four frames. The 15 different label sequences that some path writes hav
 | `aa` | 0.10012500 |
 | `bab` | 0.05758750 |
 
-Greedy decoding takes the largest entry of each frame, `aaaa`, and collapses it to `a`, whose probability is 0.16338750. The most probable label is `ab` with 0.20516250. Prefix beam search keeps the `width` prefixes of highest total probability after each frame (a prefix's probability split into the part that ends in a blank and the part that ends in a letter, ties broken by the order of the prefixes as tuples of symbol ids); the probability it reports is the mass of the paths it did not discard, so it is a lower bound.
+Greedy decoding takes the largest entry of each frame, `aaaa`, and collapses it to `a`, whose probability is 0.16338750. The most probable label is `ab` with 0.20516250. Prefix beam search keeps the `width` prefixes of highest total probability after each frame (a prefix's probability split into the part that ends in a blank and the part that ends in a letter, ties broken by the order of the prefixes as tuples of symbol ids); the probability it reports is the total of the two parts of that prefix after the last frame, the mass of the paths that were never discarded, so it is a lower bound.
 
 | beam width | best prefix at the end | mass kept for it |
 |---|---:|---:|
@@ -201,7 +201,48 @@ Greedy decoding takes the largest entry of each frame, `aaaa`, and collapses it 
 
 The best single path overall is `aaaa`, row by row the largest entry, and it spells `a`; the best single path of `ab` is `aaab` with 0.04725000, less than that. But `ab` collects its 15 paths into 0.20516250, more than any other transcript. A transcript that needs more than four rows, such as `aaa` (two equal neighbours, five rows), has probability zero, and the fifteen transcripts that some path spells account for the whole probability, to the digit.
 
-Beam search keeps several candidates. For CTC the candidate is a prefix of the transcript, and its probability must be tracked in two parts, the paths that end in a blank and those that end in a letter, because the next row treats them differently: a letter equal to the last one extends the prefix only after a blank and merely continues it otherwise. After each row the best `width` prefixes are kept. The beam of width 2 finds `ab` here, with 0.19860000 of the 0.20516250 (the rest went to paths that fell off the beam). Brain's two recognisers decode greedily: the transducer takes the largest symbol of its joint distribution at each step, and Qwen3-ASR takes the largest token of its head. Both loops are the plain greedy decoding of Volume V, Chapter 11, and the table above is what is given up by it.
+Beam search keeps several candidates. For CTC the candidate is a prefix of the transcript, and its probability must be tracked in two parts, the paths that end in a blank and those that end in a letter, because the next row treats them differently: a letter equal to the last one extends the prefix only after a blank and merely continues it otherwise. After each row the best `width` prefixes are kept; written out, with the blank an id like any other and a prefix a tuple of ids:
+
+```text
+function ctc_prefix_beam(P: array<real>[T, K], blank: int, width: int) -> map<tuple, real>:
+    require T >= 1 and width >= 1
+    pb = map of tuple to real, empty
+    pnb = map of tuple to real, empty
+    pb[()] = 1.0
+    pnb[()] = 0.0
+    for t in 0 .. T:
+        nb = map of tuple to real, empty
+        nn = map of tuple to real, empty
+        for pre in keys(pb):
+            total = pb[pre] + pnb[pre]
+            nb[pre] = get(nb, pre, 0.0) + total * P[t, blank]
+            nn[pre] = get(nn, pre, 0.0)
+            for k in 0 .. K:
+                if k != blank:
+                    ext = pre + (k,)
+                    nb[ext] = get(nb, ext, 0.0)
+                    if len(pre) > 0 and pre[len(pre) - 1] == k:
+                        nn[ext] = get(nn, ext, 0.0) + pb[pre] * P[t, k]
+                        nn[pre] = nn[pre] + pnb[pre] * P[t, k]
+                    else:
+                        nn[ext] = get(nn, ext, 0.0) + total * P[t, k]
+        ranked = []
+        for pre in keys(nb):
+            append (-(nb[pre] + nn[pre]), pre) to ranked
+        sort ranked ascending
+        pb = map of tuple to real, empty
+        pnb = map of tuple to real, empty
+        for i in 0 .. min(width, len(ranked)):
+            pre = ranked[i][1]
+            pb[pre] = nb[pre]
+            pnb[pre] = nn[pre]
+    result = map of tuple to real, empty
+    for pre in keys(pb):
+        result[pre] = pb[pre] + pnb[pre]
+    return result
+```
+
+Equal prefixes reached by different paths merge, because their mass is added into the same entry of `nb` and `nn`; the start is the empty prefix with probability 1, entirely in the blank part; ranking is by the total of the two parts, largest first, ties to the smaller tuple; and the "mass kept" of a prefix in the table is its value in `result` after the last row. The beam of width 2 finds `ab` here, with 0.19860000 of the 0.20516250 (the rest went to paths that fell off the beam). Brain's two recognisers decode greedily: the transducer takes the largest symbol of its joint distribution at each step, and Qwen3-ASR takes the largest token of its head. Both loops are the plain greedy decoding of Volume V, Chapter 11, and the table above is what is given up by it.
 
 ## Letting the letters written so far speak
 
@@ -502,9 +543,9 @@ The sliding window's look-ahead grows by 240 milliseconds with every layer; the 
 Streaming is then a matter of bookkeeping, and a toy checks that the bookkeeping is exact before anything that is big is built.
 
 <!-- worked: speech_recognition.chunk_attention_toy -->
-A two-layer toy of the streaming identity: 16 rows of width 4, one head per layer, the residual form y = x + attention(x) (no normalisation, no relative positions, queries, keys and values from the layer's input), scores q . k / 2 over the allowed keys, softmax with the maximum subtracted, sums left to right. Draws from `bookrng.generator("speech_recognition.chunk_attention")` (seed 7429612239339004284): first the 64 values of x as normals, row by row, then six 4 x 4 matrices (Wq, Wk, Wv of layer 1, then of layer 2), each row by row and each value 0.5 times a normal. Chunk 4, two chunks of left context.
+A two-layer toy of the streaming identity: 16 rows of width 4, one head per layer, the residual form y = x + attention(x) (no normalisation, no relative positions, queries, keys and values from the layer's input), scores q . k / 2 over the allowed keys, softmax with the maximum subtracted, sums left to right. Draws from the book's `Generator(seed_of("speech_recognition.chunk_attention"))` (`seed_of` of the pseudocode page, here 7429612239339004284, the generator's starting state): first the 64 values of x as normals, row by row, then six 4 x 4 matrices (Wq, Wk, Wv of layer 1, then of layer 2), each row by row and each value 0.5 times a normal. Chunk 4, two chunks of left context.
 
-Streamed chunk by chunk with a cache of at most 2 chunks of each layer's own keys and values, against the whole-sequence masked computation: largest difference of any output value below 1e-12; cache rows held at the end: 8 for each layer (two chunks) of the 16 rows.
+Streamed chunk by chunk with a cache of at most 2 chunks of each layer's own keys and values, against the whole-sequence masked computation: largest difference of any output value below 1e-12; rows kept in each layer's cache after the last chunk, for a further chunk to read: 8 (rows 8 to 15, the last 2 chunks of the 16 rows), while the last chunk itself read 12 keys (its own 4 rows and the 2 chunks before it).
 
 Add 1.0 to the first value of input row 9 (the second row of chunk 2). Output rows of the two-layer stack that change by more than 1e-12:
 
@@ -564,7 +605,7 @@ Each token of the prompt costs 229,376 bytes of key-value cache in 32-bit floats
 It also decides how the recogniser is served. The decoder is assembled for a fixed number of placeholders, so the serving path of `crates/qwen3asr/src/caps.rs` loads the model for a window (30 seconds unless `BRAIN_QWEN3ASR_WINDOW` says otherwise), probes the encoder with a window of silence to learn how many rows that is, builds the prompt for exactly that many, and pads every clip with silence to the window or cuts it at the window's end; a clip longer than the window is transcribed only as far as the window, and the action reports that loudly in a warning and in a `truncated` field of its outcome. The encoder is told that all the frames of the window are valid, so it does the whole window's work.
 
 <!-- worked: speech_recognition.fixed_window -->
-A clip through the serving path of Qwen3-ASR, which assembles the decoder for a fixed window of 30 seconds (3,000 frames, 390 rows, a prompt of 10 + 390 + 6 tokens) and pads every clip to it, against a clip that is encoded at its own length (13 rows a second, a prompt of 10 + rows + 6). GFLOP of the encoder, and of the decoder's prefill (weights and attention scores of the prompt, no generated tokens), 2 per multiply-add.
+A clip through the serving path of Qwen3-ASR, which assembles the decoder for a fixed window of 30 seconds (3,000 frames, 390 rows, a prompt of 10 + 390 + 6 tokens) and pads every clip to it, against a clip that is encoded at its own length (13 rows a second, a prompt of 10 + rows + 6). GFLOP of the encoder, and of the decoder's prefill (the 28 layers' matrices, 50,331,648 multiply-adds a token with no norms, plus the attention of the causal prompt: T (T + 1) / 2 pairs for T prompt tokens, each pair 2 x 2048 multiply-adds per layer, one product for the score and one for the weighted value; no generated tokens), 2 per multiply-add.
 
 | clip (s) | rows at its own length | rows in the window | encoder, own length | encoder, window | prefill, own length | prefill, window | window / own length, total |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -584,8 +625,32 @@ The message adds that the transcripts of 20 clips were identical and that a take
 
 Both recognisers are about the same size where it counts, and very different in where the size is.
 
+<!-- worked: speech_recognition.layout -->
+The layers behind the counts below: widths, heads, kernels and which tensors carry a bias or a norm.
+
+Qwen3-ASR
+
+| part | layout | biases and norms |
+|---|---|---|
+| three strided convolutions | 1 -> 480, 480 -> 480, 480 -> 480, each 3 x 3 over time and frequency | weight and bias, dense (no groups); conv_out has no bias |
+| 24 transformer blocks | width 1024; 16 heads of width 64; q, k, v, o matrices of 1024 x 1024; feed-forward 1024 -> 4096 -> 1024 | a bias on all six matrices; two LayerNorms (weight and bias) |
+| final norm and projector | LayerNorm, 1024 -> 1024, 1024 -> 2048 | LayerNorm weight and bias; both matrices biased |
+| decoder layer, 28 of them | width 2048; 16 query heads and 8 key-value heads of width 128; q and o of 2048 x 2048, k and v of 2048 x 1024; gated feed-forward, three matrices of 2048 x 6144 | no biases; two RMSNorms of 2048 (weight only), and a q norm and a k norm of 128 each (weight only) per layer: 4,352 numbers |
+
+Nemotron 3.5 ASR Streaming
+
+| part | layout | biases and norms |
+|---|---|---|
+| subsampling | stage 1: dense 3 x 3, 1 -> 256; stages 2 and 3: a depthwise 3 x 3 (one filter per channel) then a pointwise 256 -> 256; flatten 256 channels x 17 frequencies = 4,352, linear 4,352 -> 1024 | weight and bias on every convolution (depthwise and pointwise included) and on the linear map |
+| 24 Conformer blocks | width 1024; two feed-forwards 1024 -> 4096 -> 1024; attention of 8 heads of width 128 with q, k, v, o and a position matrix (all 1024 x 1024); convolution module: pointwise 1024 -> 2048, GLU, depthwise k 9 along time, norm, SiLU, pointwise 1024 -> 1024 | no biases on matrices or convolutions; two vectors u, v of 1024 in attention; five block norms (before each feed-forward, attention and convolution module, and at the end of the block) and the norm inside the convolution module, every norm with weight and shift |
+| language-prompt projector | the row (1024) and a one-hot language prompt of 128 entries side by side, 1152 -> 2048, ReLU, 2048 -> 1024 | both matrices biased |
+| encoder projector | 1024 -> 640 | biased |
+| predictor | embedding 13,088 x 640; 2 LSTM layers of width 640 (input and recurrent matrices of 640 x 2560, four gates); projector 640 -> 640 | embedding without bias; each LSTM layer has both bias vectors (input and recurrent), 2 x 4 x 640; the projector is biased |
+| joint head | 640 -> 13,088 | biased |
+<!-- /worked -->
+
 <!-- worked: speech_recognition.parameters -->
-Parameters counted from the configurations of the two recognisers (weights and biases that exist, from the shapes the loaders read).
+Parameters counted from the configurations of the two recognisers (weights and biases that exist, from the shapes the loaders read). The decoder layer's count includes its q and k norm weights (2 x 128), which the operation counts of the work tables below leave out, as they leave out every norm and bias.
 
 Qwen3-ASR
 
@@ -623,7 +688,7 @@ Qwen3-ASR's 2.04 billion parameters are 15.6 percent audio tower and the rest th
 Work is another matter, because a parameter of the decoder is applied to a row for every row and a parameter of the encoder at a fixed rate.
 
 <!-- worked: speech_recognition.qwen_work -->
-GFLOP of Qwen3-ASR for one second of audio (one full chunk of 100 frames, 13 rows), counted as 2 per multiply-add from the shapes of the layers; normalisations, activations, softmaxes and biases are left out. The last line is what the decoder spends reading the same 13 rows as prompt tokens (the weight matrices of its 28 layers, without the attention over the cache and without the head).
+GFLOP of Qwen3-ASR for one second of audio (one full chunk of 100 frames, 13 rows), counted as 2 per multiply-add from the shapes of the layers; normalisations (the decoder's q and k norms too), activations, softmaxes and biases are left out. The last line is what the decoder spends reading the same 13 rows as prompt tokens (the weight matrices of its 28 layers: 28 x 50,331,648 multiply-adds a token, without the attention over the cache and without the head).
 
 | stage | GFLOP |
 |---|---:|
@@ -641,7 +706,7 @@ GFLOP of Qwen3-ASR for one second of audio (one full chunk of 100 frames, 13 row
 Of the 12.36 billion operations the audio tower spends on a second of audio, 4.41 billion are the three convolutions and the map after them, more than a third, because the second convolution applies 480 by 480 by 9 weights at 800 positions; the 24 blocks add 7.87 billion. The decoder's weights applied to the same 13 rows as tokens cost 36.64 billion, three times the encoder.
 
 <!-- worked: speech_recognition.nemotron_work -->
-MFLOP of Nemotron per encoder row (80 milliseconds of audio, steady state of the streaming path) and GFLOP per second at 12.5 rows a second, counted as 2 per multiply-add from the shapes (normalisations, activations, softmaxes and biases left out; the relative-position table, 63 rows through each layer's matrix, is built once per layer: 132.1 MFLOP each).
+MFLOP of Nemotron per encoder row (80 milliseconds of audio, steady state of the streaming path) and GFLOP per second at 12.5 rows a second, counted as 2 per multiply-add from the shapes (normalisations, activations, softmaxes and biases left out; the relative-position table, 63 rows through each layer's matrix, is built once per layer: 132.1 MFLOP each). One encoder row is 8 input frames: the three subsampling stages produce 4, 2 and 1 time positions of it, at 65, 33 and 17 frequencies, and the linear map is applied once; the projector row is the three matrices 1152 x 2048, 2048 x 1024 and 1024 x 640 of the layout table; a layer's convolution module is its three matrices and the depthwise filter, and its attention projections are q, k, v, o (the position matrix is the once-per-layer table).
 
 | stage | MFLOP per row | GFLOP per second |
 |---|---:|---:|
