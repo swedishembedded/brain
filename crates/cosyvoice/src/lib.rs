@@ -128,10 +128,11 @@
 //! scope of what is and is not covered, including the RNG-crossing gaps this
 //! pipeline inherits (not introduces) from `crate::llm`/`crate::hift`, and
 //! the kaldi-fbank front end's own honest gap (no bit-exact golden exists in
-//! this workspace to check `audio::kaldi_fbank` against). **CosyVoice 3
-//! pipeline reuse (composing `cv3_flow`/`cv3_hift`/the `CosyVoice3LM` branch
-//! into `pipeline::generate()`) is a deliberate follow-up, not implemented
-//! here** - `crate::pipeline` still wires CosyVoice 2's components only.
+//! this workspace to check `audio::kaldi_fbank` against). `crate::pipeline`
+//! runs both generations: CosyVoice 3's `cv3_flow`, `cv3_hift` and
+//! `CosyVoice3LM` branch compose into the same `pipeline::generate()`. (Its
+//! prompt tokens still come from the v2 speech tokenizer; the v3 tokenizer is
+//! a different architecture `crates/s3tokenizer` does not model.)
 //!
 //! [`caps`] wires `pipeline::generate` into brain's generic model-serving
 //! contract: one `synth` action (target text + a reference clip and its
@@ -139,10 +140,8 @@
 //! brain/cosyvoice synth …` / `brain cosyvoice synth …`, with D-Bus/HTTP
 //! surfaced for free through the same `Provider`/`ResidentModel` pair every
 //! other served model uses (`crates/catalog/src/resident_cosyvoice.rs` is the
-//! residency-facing half). `variant` accepts both generations' names but
-//! only `cosyvoice2` actually runs - see [`caps`]'s own doc for the
-//! CosyVoice 3 scope and the reference-audio blob-vs-path bridging this
-//! milestone needed.
+//! residency-facing half). `variant` selects the generation - see [`caps`]'s
+//! own doc for the reference-audio blob-vs-path bridging.
 //!
 //! Swedish Embedded AB implements solutions for from-scratch, dependency-light
 //! neural network inference on constrained and embedded targets for its

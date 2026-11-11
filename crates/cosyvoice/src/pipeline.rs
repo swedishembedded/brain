@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The full non-streaming CosyVoice 2 pipeline: text + a reference audio clip
+//! The full non-streaming CosyVoice pipeline (generations 2 and 3): text + a reference audio clip
 //! (zero-shot voice cloning) in, one real 24 kHz waveform out. ONE
 //! implementation of "run the whole five-component chain", composing the
 //! already individually-parity-proven pieces (`crate::llm`, `crate::flow`,
@@ -146,12 +146,6 @@ impl CosyVoicePaths {
     }
 }
 
-/// Generation knobs. `max_token_text_ratio`/`min_token_text_ratio` are the
-/// reference's own `Qwen2LM.inference` defaults (`20`/`2`) - the AR decode
-/// cap and the eos-ignore floor are BOTH sized off the TARGET text's own
-/// token count (excluding the prompt text), matching
-/// `min_len = int((text_len - prompt_text_len) * min_token_text_ratio)` read
-/// directly from `cosyvoice/llm/llm.py`.
 /// Which generation of the model to run.
 ///
 /// The two share this pipeline's SHAPE exactly - the same five stages in the
@@ -213,6 +207,12 @@ impl Variant {
     }
 }
 
+/// Generation knobs. `max_token_text_ratio`/`min_token_text_ratio` are the
+/// reference's own `Qwen2LM.inference` defaults (`20`/`2`) - the AR decode
+/// cap and the eos-ignore floor are BOTH sized off the TARGET text's own
+/// token count (excluding the prompt text), matching
+/// `min_len = int((text_len - prompt_text_len) * min_token_text_ratio)` read
+/// directly from `cosyvoice/llm/llm.py`.
 #[derive(Clone, Debug)]
 pub struct GenOpts {
     /// RNG seed for the LM sampler and the vocoder noise. [`GenOpts::default`]
@@ -352,6 +352,10 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
         let xvec = campplus_model.forward(&fbank, t);
 
         let audio::asr_frontend::LogMel { mel, n_mels, n_frames } = audio::asr_frontend::qwen_logmel(&samples_16k, samples_16k.len());
+        // Both generations take prompt tokens from the v2 tokenizer: the
+        // reference's CosyVoice 3 front end loads a separate 12-layer v3
+        // tokenizer that `crates/s3tokenizer` does not model, so a CosyVoice 3
+        // prompt is tokenized differently from the reference.
         let s3_cfg = s3tokenizer::config::S3TokenizerConfig::v2();
         if n_mels != s3_cfg.n_mels as usize {
             return Err(format!("cosyvoice::generate: whisper mel produced {n_mels} mels, s3tokenizer wants {}", s3_cfg.n_mels));

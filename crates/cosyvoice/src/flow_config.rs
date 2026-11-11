@@ -8,9 +8,7 @@
 //! `crate::flow_import`).
 //!
 //! CosyVoice 3's `CausalMaskedDiffWithDiT` (no encoder, a DiT estimator
-//! instead of this UNet) is a deliberate follow-up milestone, not implemented
-//! here - see `resources/cosyvoice/source/cosyvoice/flow/flow.py`'s
-//! `CausalMaskedDiffWithDiT` for the delta.
+//! instead of this UNet) has its own config and forward in `cv3_flow`.
 
 /// `UpsampleConformerEncoder` dims (`encoder:` block of `cosyvoice2.yaml`).
 #[derive(Clone, Debug)]

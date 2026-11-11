@@ -8,9 +8,7 @@
 //!
 //! CosyVoice 3's `CausalHiFTGenerator` (causal convs throughout, no
 //! `cache_source` state, `SineGen2(causal=True)`'s own frozen-noise-buffer
-//! branch) is a deliberate follow-up - see `resources/cosyvoice/source/
-//! cosyvoice/hifigan/generator.py`'s `CausalHiFTGenerator` for the delta.
-//! Nothing here models it.
+//! branch) is modelled in `cv3_hift`, not here.
 
 /// One (kernel, dilation) `ResBlock` shape, reused for both `resblocks` and
 /// `source_resblocks`.

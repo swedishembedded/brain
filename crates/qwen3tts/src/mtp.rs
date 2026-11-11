@@ -9,8 +9,9 @@
 //! `forward_finetune` / `forward_sub_talker_finetune`), one frame is processed as
 //! a length-`num_code_groups` sequence of *input embeddings* under full (causal)
 //! attention:
-//!   pos 0 : the Talker hidden state (`small_to_mtp_projection` is `Identity`
-//!           here, since the MTP and Talker share `hidden_size = 1024`),
+//!   pos 0 : the Talker hidden state through `small_to_mtp_projection`
+//!           (`Identity` for the 0.6B, whose widths match; a real projection
+//!           for the 1.7B),
 //!   pos 1 : `talker.codec_embedding(codebook0)`  (the Talker's table),
 //!   pos i (2..15) : `code_predictor.codec_embedding[i-2](codebook_{i-1})`.
 //! The per-position output head `lm_head[i-1]` reads `hidden[:, i]` to predict

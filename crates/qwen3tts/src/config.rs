@@ -4,10 +4,10 @@
 //! Talker + MTP code-predictor configuration, parsed from the official
 //! `Qwen3-TTS-12Hz-0.6B-Base` `config.json` (`talker_config`).
 //!
-//! NOTE the Talker uses **M-RoPE** (`rope_scaling.interleaved = true`,
-//! `mrope_section = [24,20,20]`), which differs from brain-qwen's half-split
-//! NeoX RoPE — the model code must apply the interleaved/mrope convention for
-//! HF parity.
+//! The Talker's config declares **M-RoPE** (`rope_scaling.interleaved = true`,
+//! `mrope_section = [24,20,20]`), but with text-only positions every section
+//! carries the same position, so it collapses to Qwen's half-split RoPE (see
+//! `to_qwen` and `talker.rs`).
 
 use serde_json::Value;
 
