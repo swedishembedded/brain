@@ -163,4 +163,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 4. [Speech Recognition](v09-audio/04-speech-recognition.md): How does a model turn speech into text when it does not know where each word starts?
 5. [Who Is Speaking](v09-audio/05-speaker-embeddings.md): How does a model capture the identity of a voice in a single vector?
 6. [Speech Synthesis](v09-audio/06-speech-synthesis.md): How does a model speak a sentence in a given voice?
+7. [Music Generation](v09-audio/07-music.md): What changes when the target is minutes of structured music rather than a sentence of speech?
 <!-- /contents -->

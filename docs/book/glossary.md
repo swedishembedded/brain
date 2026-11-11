@@ -616,6 +616,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **logit**: the logarithm of the odds of an event, $\log\frac{p}{1-p}$, a number on the whole real line that a weighted sum of features can model; the model's $z = \mathbf{w}\cdot\mathbf{x}$ is the logit of its predicted probability. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
+**long-form audio generation**: the production of audio longer than any one component can attend to at once, by generating it in overlapping windows, each started from the end of the last, and cropping and joining the results. *([Music Generation](v09-audio/07-music.md))*
+
 **looped transformer**: a transformer whose block, or whole stack of blocks, is applied repeatedly to its own output a fixed number of times, with the embedding applied once at the start and the head reading the final state. *([Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md))*
 
 **loss curve**: the loss plotted against the training step or epoch; it can show the minibatch loss, the loss on the whole training set or on a validation set, each with a different noise level and cost, and it is read by its start, direction, slope and gap. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
@@ -701,6 +703,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **multivariable chain rule**: the Jacobian of a composition of vector functions is the product of their Jacobians, the outer one evaluated at the inner function's output. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **multivariate Gaussian**: the distribution of a vector $\boldsymbol{\mu} + \mathbf{A}\mathbf{z}$ built from independent standard Gaussians $\mathbf{z}$, fixed by its mean vector and covariance matrix $\boldsymbol{\Sigma} = \mathbf{A}\mathbf{A}^\top$; its level curves are ellipses along the eigenvectors of $\boldsymbol{\Sigma}$. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
+
+**music generation**: the production of a long stereo signal from a description of its style and its lyrics by a chain of models that each see a different length of the song, a language model that writes it as codes, a denoiser that paints it as latents and a decoder that turns the latents into samples. *([Music Generation](v09-audio/07-music.md))*
 
 **mutual information**: the divergence of the joint distribution of two variables from the product of their marginals, $I(X; Y) = H(X) - H(X \mid Y)$, the amount by which learning one reduces the uncertainty of the other; it is zero only for independent variables. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 

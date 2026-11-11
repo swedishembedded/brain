@@ -23,6 +23,6 @@ You can say exactly which frequencies a sampled signal can carry, resample it be
 4. [Speech Recognition](04-speech-recognition.md): how does a model turn speech into text when it does not know where each word starts?
 5. [Who Is Speaking](05-speaker-embeddings.md): how does a model capture the identity of a voice in a single vector?
 6. [Speech Synthesis](06-speech-synthesis.md): how does a model speak a sentence in a given voice?
-7. Music Generation: what changes when the target is minutes of structured music rather than a sentence of speech?
+7. [Music Generation](07-music.md): what changes when the target is minutes of structured music rather than a sentence of speech?
 8. Models That Listen, See and Speak: how is one model built to take in audio, images and text and answer in speech?
 9. Project: From Waveform to Speech and Back: can you build a pipeline from a waveform to a learned representation and back to generated audio?

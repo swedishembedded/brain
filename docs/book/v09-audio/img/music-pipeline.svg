@@ -1,0 +1,62 @@
+<!-- source-sha256: 933c08434aa7c42558bfa8aba875ab7c6b811b88ee3a5fdb207b184887019a3b -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 442" width="780" height="442"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="442" fill="#ffffff"/>
+<rect x="20" y="16" width="740" height="196" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Writing the whole song, one frame at a time (25 frames a second)</text>
+<rect x="38" y="133" width="124" height="66" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="154.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">caption and</text>
+<text x="100" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">lyrics</text>
+<text x="100" y="186.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">as tokens</text>
+<rect x="186" y="133" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="248" y="154.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Global LLM</text>
+<text x="248" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">36 layers</text>
+<text x="248" y="186.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 semantic code</text>
+<rect x="186" y="71" width="124" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="248" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">second branch:</text>
+<text x="248" y="106.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">prompt masked</text>
+<rect x="334" y="133" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="396" y="154.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">depth decoder</text>
+<text x="396" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 layers</text>
+<text x="396" y="186.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">7 residual codes</text>
+<rect x="482" y="133" width="124" height="66" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="544" y="154.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 hidden vectors</text>
+<text x="544" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">of 4096 per frame</text>
+<text x="544" y="186.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">kept, not the codes</text>
+<rect x="630" y="133" width="124" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="692" y="154.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">end token</text>
+<text x="692" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">or the frame</text>
+<text x="692" y="186.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cap</text>
+<line x1="165" y1="166" x2="183" y2="166" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="248" y1="120" x2="248" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="313" y1="166" x2="331" y2="166" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="461" y1="166" x2="479" y2="166" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="609" y1="166" x2="627" y2="166" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="20" y="230" width="740" height="196" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="252" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Painting it in chunks of 689 latent steps, 200 frames each</text>
+<rect x="38" y="347" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="368.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">condition</text>
+<text x="100" y="384.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">encoder</text>
+<text x="100" y="400.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 x 4096 to 2048</text>
+<rect x="186" y="347" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="248" y="368.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">flow DiT</text>
+<text x="248" y="384.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">36 blocks, 30 steps</text>
+<text x="248" y="400.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 guidance passes</text>
+<rect x="186" y="285" width="124" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="248" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">172 steps carried</text>
+<text x="248" y="320.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">from the last chunk</text>
+<rect x="334" y="347" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="396" y="368.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">vocoder</text>
+<text x="396" y="384.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x512 upsampling</text>
+<text x="396" y="400.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">two streams</text>
+<rect x="482" y="347" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="544" y="368.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">crop and</text>
+<text x="544" y="384.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">join: 86 off the left,</text>
+<text x="544" y="400.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">258 off the right</text>
+<rect x="630" y="347" width="124" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="692" y="376.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
+<text x="692" y="392.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">stereo, 44,100 Hz</text>
+<line x1="165" y1="380" x2="183" y2="380" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="248" y1="334" x2="248" y2="344" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="313" y1="380" x2="331" y2="380" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="461" y1="380" x2="479" y2="380" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="609" y1="380" x2="627" y2="380" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>
