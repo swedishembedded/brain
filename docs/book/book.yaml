@@ -761,7 +761,7 @@ volumes:
         title: "Speech Synthesis"
         question: "How does a model speak a sentence in a given voice?"
         introduces: [text-to-speech, codec-language-model, speech-tokenizer, vocoder, voice-cloning]
-        requires: [audio-token, causal-language-model, flow-matching, speaker-embedding]
+        requires: [audio-token, causal-language-model, flow-matching, speaker-embedding, classifier-free-guidance, log-mel-spectrogram, top-p-sampling, repetition-penalty, kv-cache]
         brain: [qwen3tts, cosyvoice, s3tokenizer]
       - id: music
         title: "Music Generation"

@@ -162,4 +162,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 3. [Neural Audio Codecs](v09-audio/03-audio-codecs.md): How can audio become a stream of discrete tokens a language model can predict?
 4. [Speech Recognition](v09-audio/04-speech-recognition.md): How does a model turn speech into text when it does not know where each word starts?
 5. [Who Is Speaking](v09-audio/05-speaker-embeddings.md): How does a model capture the identity of a voice in a single vector?
+6. [Speech Synthesis](v09-audio/06-speech-synthesis.md): How does a model speak a sentence in a given voice?
 <!-- /contents -->

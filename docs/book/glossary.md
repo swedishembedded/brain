@@ -178,6 +178,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **codebook prior**: a learned codebook of clean-picture parts used as the space of allowed restorations, so that every restored feature is one of the codes the decoder was trained on and the codes are chosen from the whole degraded picture. *([Restoration and Super-Resolution](v08-image-generation/12-restoration.md))*
 
+**codec language model**: a causal language model whose vocabulary is the codes of a neural audio codec and whose context carries the text and the voice, so that it writes audio as a sequence of codes that the codec's decoder turns into a waveform. *([Speech Synthesis](v09-audio/06-speech-synthesis.md))*
+
 **color space**: the rule that turns a triple of numbers into a colour, made of three primary colours, a white point and a transfer curve, so that the same triple is a different colour in a different space. *([Images as Data](v07-vision/01-images.md))*
 
 **command recording**: appending many dispatches to one list and handing the list to the device as a single submission, so that the host pays the submission cost once instead of once per dispatch; a read-back or any other observation of the device ends the list. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
@@ -1010,6 +1012,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **speech encoder**: the stack that turns the frames of a log-mel spectrogram into fewer rows of one width, each informed by its neighbours, ready for an alignment loss or a decoder. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
 
+**speech tokenizer**: a network trained, with a supervised target such as the transcript and not by reconstruction, to turn speech into discrete tokens that carry what is said and little of who says it or how. *([Speech Synthesis](v09-audio/06-speech-synthesis.md))*
+
 **stable-softmax**: the softmax computed after subtracting the largest score from every score, which gives the same probabilities but keeps every exponent at most zero, so nothing overflows and the sum is at least one. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **standard error**: the standard deviation of an estimator over repeated samples, the typical size of its error; for the sample mean it is $\sigma/\sqrt{n}$, estimated by $s/\sqrt{n}$. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
@@ -1057,6 +1061,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **test-dimension choice**: choosing the sizes of the model a test runs on (batch, features, widths, heads) all different and above 1, so that bugs that confuse two sizes or depend on a size of 1 change the result. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
 **text-encoder conditioning**: turning a prompt into the generator's input with a separate pretrained text encoder that is run forward at generation time, so that the denoiser sees the prompt only through the arrays the encoder produced; the tokenizer, the window, the layer read and the padding are then part of the denoiser's input contract. *([Conditioning on Text](v08-image-generation/09-text-conditioning.md))*
+
+**text-to-speech**: the task of turning a text, and usually a description of a voice, into the waveform of someone saying it. *([Speech Synthesis](v09-audio/06-speech-synthesis.md))*
 
 **thread parallelism**: using several threads, each running on its own core with its own registers and first caches and sharing the later caches and memory, to carry out the pieces of one computation at the same time. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 
@@ -1157,6 +1163,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **vision transformer**: a model that applies a stack of unmasked transformer blocks to a sequence of patch embeddings with position information added, and reads out a class token or the mean of the tokens. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
 **vocabulary**: the list of every piece a tokenizer can produce, each with its id; its size $V$ is the number of rows the model's embedding table needs. *([Tokenization](v05-sequences/02-tokenization.md))*
+
+**vocoder**: a network that turns a spectrogram back into a waveform, supplying the phase and the fine periodic structure that the spectrogram discards. *([Speech Synthesis](v09-audio/06-speech-synthesis.md))*
+
+**voice cloning**: making a synthesiser speak in the voice of a person from whom it has only a short recording, without training on that person. *([Speech Synthesis](v09-audio/06-speech-synthesis.md))*
 
 ## W
 
