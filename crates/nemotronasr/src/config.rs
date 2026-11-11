@@ -30,7 +30,7 @@ pub struct NemotronConfig {
     // --- language prompt ---
     pub num_prompts: u32,          // 128
     pub prompt_intermediate: u32,  // 2048
-    pub default_prompt_id: u32,    // 101 (auto)
+    pub default_prompt_id: u32,    // 101 (auto); serving defaults to 0 (en) and does not read this
 }
 
 impl NemotronConfig {

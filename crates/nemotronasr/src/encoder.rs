@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Nemotron FastConformer encoder (offline / non-streaming). This file lands the
-//! stages incrementally, parity-gated against dumped HF activations:
-//!   1. depthwise-separable causal subsampling (×8) + linear   ← this pass
-//!   2. macaron Conformer blocks (rel-pos MHA + conv module)    (next)
+//! Nemotron FastConformer encoder, in three stages, each parity-gated against
+//! dumped HF activations:
+//!   1. depthwise-separable causal subsampling (×8) + linear
+//!   2. macaron Conformer blocks (rel-pos MHA + conv module)
 //!   3. prompt + encoder projectors
+//! This file runs them over a whole clip; `stream.rs` runs the same stages a
+//! chunk at a time, sharing this code.
 //!
 //! The causal Conv2d used by NeMo pads `(kernel-1, stride-1)` on BOTH the time and
 //! frequency axes (asymmetric), which brain's symmetric-pad conv2d kernel can't
@@ -498,6 +500,7 @@ impl Encoder {
         let cfg = &self.cfg;
         let c = cfg.hidden as usize;
         let (np, pi, dh) = (cfg.num_prompts as usize, cfg.prompt_intermediate as usize, cfg.decoder_hidden as usize);
+        assert!(prompt_id < np, "nemotronasr: prompt id {prompt_id} is past the model's {np} prompts");
         let mut cat = vec![0.0f32; tt * (c + np)];
         for i in 0..tt {
             cat[i * (c + np)..i * (c + np) + c].copy_from_slice(&h[i * c..i * c + c]);

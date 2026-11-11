@@ -258,6 +258,18 @@ impl Action for TranscribeAction {
 mod tests {
     use super::*;
 
+    /// A prompt id is a one-hot index into the projector's prompt columns, so
+    /// the served range must stop at the last prompt: one past it wrote past
+    /// the end of the concatenated row and panicked the server.
+    #[test]
+    fn the_served_prompt_ids_are_the_models_prompts() {
+        let prompts = crate::config::NemotronConfig::nemotron_3_5_asr_0_6b().num_prompts as f64;
+        for spec in [transcribe_spec(), transcribe_stream_spec()] {
+            let p = spec.params.iter().find(|p| p.name == "prompt_id").expect("prompt_id param");
+            assert_eq!(p.max, Some(prompts - 1.0), "{} serves prompt ids the model does not have", spec.name);
+        }
+    }
+
     /// Session semantics against the real checkpoint: windowed `step` calls emit
     /// text deltas whose concatenation equals the offline transcription, `eos`
     /// flushes the tail and closes the session. Heavy; run explicitly:
