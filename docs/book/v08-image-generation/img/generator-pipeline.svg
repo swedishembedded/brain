@@ -1,0 +1,66 @@
+<!-- source-sha256: 3ac95cdfd2d3ed8778d871a41ee3928291f8a1cd92dd5f24ca514f34a14c8ffe -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 440" width="980" height="440"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="980" height="440" fill="#ffffff"/>
+<text x="20" y="28.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">training: one item</text>
+<ellipse cx="100" cy="140" rx="55" ry="30" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="136.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">picture x</text>
+<text x="100" y="152.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">36 values</text>
+<rect x="220" y="98" width="160" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="300" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">encoder, then</text>
+<text x="300" y="144.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">standardize</text>
+<text x="300" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2,020 FLOPs</text>
+<rect x="420" y="98" width="160" height="84" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="500" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">straight path</text>
+<text x="500" y="144.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x_s = (1 - s) x0 + s e</text>
+<text x="500" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">target e - x0</text>
+<rect x="620" y="98" width="160" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="700" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">denoiser</text>
+<text x="700" y="144.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3,956 values</text>
+<text x="700" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8,164 FLOPs</text>
+<ellipse cx="880" cy="140" rx="60" ry="30" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="880" y="136.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">squared error</text>
+<text x="880" y="152.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">to the target</text>
+<line x1="158" y1="140" x2="217" y2="140" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="187.5" y="131.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">4 values</text>
+<line x1="383" y1="140" x2="417" y2="140" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="131.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">x0</text>
+<line x1="583" y1="140" x2="617" y2="140" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="600" y="131.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">x_s</text>
+<line x1="783" y1="140" x2="817" y2="140" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="500" cy="50" rx="85" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="500" y="54.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s uniform, e: 4 normal</text>
+<line x1="500" y1="75" x2="500" y2="95" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="700" cy="50" rx="75" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="700" y="46.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">class c, or null</text>
+<text x="700" y="62.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">with probability 0.15</text>
+<line x1="700" y1="75" x2="700" y2="95" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="20" y="228.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">sampling: one picture</text>
+<ellipse cx="100" cy="340" rx="55" ry="30" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="336.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">noise z</text>
+<text x="100" y="352.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 values</text>
+<rect x="220" y="298" width="160" height="84" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="300" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 Euler steps</text>
+<text x="300" y="344.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">u_un + g (u_c - u_un)</text>
+<text x="300" y="360.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">32 denoiser passes</text>
+<rect x="420" y="298" width="160" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="500" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">undo the</text>
+<text x="500" y="344.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">standardization</text>
+<text x="500" y="360.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">z0 sd + mean</text>
+<rect x="620" y="298" width="160" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="700" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decoder</text>
+<text x="700" y="344.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2,052 FLOPs</text>
+<text x="700" y="360.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">36 values out</text>
+<ellipse cx="880" cy="340" rx="60" ry="30" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="880" y="336.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">picture</text>
+<text x="880" y="352.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ 0.25 normal()</text>
+<line x1="158" y1="340" x2="217" y2="340" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="383" y1="340" x2="417" y2="340" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="400" y="331.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">z0</text>
+<line x1="583" y1="340" x2="617" y2="340" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="600" y="331.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">code</text>
+<line x1="783" y1="340" x2="817" y2="340" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="800" y="331.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">mean</text>
+<ellipse cx="300" cy="244" rx="75" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="300" y="248.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">class c, scale g</text>
+<line x1="300" y1="269" x2="300" y2="295" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="490" y="420.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the autoencoder (2,108 values) is trained first and frozen; the denoiser sees only standardized codes</text>
+</svg>

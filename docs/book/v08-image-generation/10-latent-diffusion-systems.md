@@ -424,9 +424,9 @@ For the same request without a reference, one card holds the encoder, the denois
 A phase is only a plan until something acts on it, and the part of the code that acts is a handful of lines. The denoiser shares a card with the decode graph, so before the decode allocates, `decode_tokens` releases the reference encoder's cache and then the denoiser itself, and the next forward rebuilds it (commit fa81ef938). The text encoder takes a card in a phase before the denoiser's, is released after it encodes, and is rebuilt for the next prompt. Both are **weight streaming** in its simplest form: moving a stage's weights onto a device when its turn comes and off when it ends, so that the card holds the largest stage and not the sum of all of them. Its finer form is a window of blocks rotating through a fixed pool of device buffers inside one network, which Chapter 8 met in the Z-Image family. What the schemes cost can be counted in bytes.
 
 <!-- worked: latent_diffusion_systems.traffic_table -->
-Bytes that cross onto the device per image, from the layouts of `latent_diffusion_systems.placement_table` and the parameter counts of Chapters 8 and 9, and the operations a pass does for each byte it would have to upload (a pass of 1,024 x 1,024 with 512 text rows). FLUX.1's weights are counted from its manifest in 32-bit floats; its encoders are T5-XXL and CLIP-L in 32-bit floats.
+Bytes that cross onto the device per image, from the layouts of `latent_diffusion_systems.placement_table` and the parameter counts of Chapters 8 and 9, and the operations a pass does for each byte it would have to upload (a pass of 1,024 x 1,024 with 512 text rows). The columns are the GiB uploaded per image and per pass, and the operations per uploaded byte. FLUX.1's weights are counted from its manifest in 32-bit floats; its encoders are T5-XXL and CLIP-L in 32-bit floats.
 
-| pipeline | scheme | uploaded per image, GiB | uploaded per pass, GiB | FLOP per uploaded byte |
+| pipeline | scheme | GiB per image | GiB per pass | FLOP per byte |
 |---|---|---:|---:|---:|
 | FLUX.2 klein-9b, int8 | resident across images | 0 | 0 | - |
 | FLUX.2 klein-9b, int8 | evicted for the decode, rebuilt for the next image | 11.49 | 11.49 | 24,487 |

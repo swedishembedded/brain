@@ -500,8 +500,8 @@ def traffic_table():
     return (
         "Bytes that cross onto the device per image, from the layouts of `latent_diffusion_systems.placement_table` and the parameter counts "
         "of Chapters 8 and 9, and the operations a pass does for each byte it would have to upload (a pass of 1,024 x 1,024 with 512 text "
-        "rows). FLUX.1's weights are counted from its manifest in 32-bit floats; its encoders are T5-XXL and CLIP-L in 32-bit floats.\n\n"
-        + _table(["pipeline", "scheme", "uploaded per image, GiB", "uploaded per pass, GiB", "FLOP per uploaded byte"], rows, "llrrr"))
+        "rows). The columns are the GiB uploaded per image and per pass, and the operations per uploaded byte. FLUX.1's weights are counted from its manifest in 32-bit floats; its encoders are T5-XXL and CLIP-L in 32-bit floats.\n\n"
+        + _table(["pipeline", "scheme", "GiB per image", "GiB per pass", "FLOP per byte"], rows, "llrrr"))
 
 
 # ------------------------------------------------------------------ windows over a large canvas
