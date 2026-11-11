@@ -26,7 +26,7 @@ The decoder of this model has one input width, 2,048 numbers, and everything tha
 ![Two panels. The first: 16 kHz sound goes through an audio tower of 32 blocks of width 1,280 giving 13 rows a second, frames of video and pictures through a vision tower of 27 blocks of width 1,152 giving 196 rows for a 448 by 448 picture, and text tokens through an embedding table of 152,064 by 2,048, and all three arrive at the Thinker, which has 48 layers of width 2,048 and 8 of 128 experts used. The second: the reply tokens of the Thinker, plus the layer-24 states of the media rows, go into the Talker of 20 layers with 6 of 128 experts, then a code predictor of 5 layers writing codes 1 to 15, then Code2Wav with 8 layers and an upsampling by 1,920, ending in speech at 24,000 samples a second.](img/omni-pipeline.svg)
 
 <!-- worked: omni_models.rows_per_medium -->
-Rows that each medium hands to the decoder. Sound: the audio tower cuts the 100-frames-a-second log-mel picture (hop 160 samples) into chunks of 100 frames, each of which gives 13 rows (a partial chunk fewer, by three halvings that round up). Picture: both sides rounded to a multiple of 32 (`smart_resize`, minimum area 56 x 56, maximum 3584 x 3584), a patch of 16 x 16 pixels, and 2 x 2 patches merged into one row. A pair of video frames is one picture's worth of rows.
+Rows that each medium hands to the decoder. Sound: the audio tower cuts the 100-frames-a-second log-mel picture (hop 160 samples) into chunks of 100 frames, each of which gives 13 rows (a partial chunk fewer, by three halvings that round up). Picture: both sides are resized by the rounding rule of Volume VII, Chapter 9 (called `smart_resize` there): each side goes to the nearest multiple of 32, a half way value to the even multiple, and at least 32; if the area is then over 3584 x 3584 both original sides are divided by sqrt(h w / 3584^2) and rounded down to a multiple of 32 (at least 32), and if it is under 56 x 56 both are multiplied by sqrt(56^2 / (h w)) and rounded up; none of the printed pictures reaches a tie or a limit. Then a patch of 16 x 16 pixels, and 2 x 2 patches merged into one row. A pair of video frames is one picture's worth of rows.
 
 | medium | input | frames or patches | rows | rows a second |
 |---|---|---:|---:|---:|
@@ -66,7 +66,7 @@ A clip of 60 seconds with its sound, the video sampled at 2 frames a second at 4
 | video: 120 frames, 60 pairs of 196 rows | 11,760 |
 | sequence the Thinker prefills | 12,594 |
 
-Multiply-adds, in trillions, that the clip costs before the first token of the reply (the three DeepStack mergers are not run, as in brain's serving path; norms, activations and the position-table resampling are left out).
+Multiply-adds, in trillions, that the clip costs before the first token of the reply (the vision tower's three DeepStack mergers, extra copies of the final merger that the checkpoint carries to inject early vision features into the decoder's first layers, are not run, as in brain's serving path; norms, activations and the position-table resampling are left out).
 
 | stage | trillions of multiply-adds | percent |
 |---|---:|---:|
@@ -170,6 +170,158 @@ The second is the position of a block in the sequence. Commit `36aa4c697` (13 Au
 ## One decoder that holds thirty billion parameters and uses three
 
 The decoder behind the rows is the mixture of experts of Volume VI at a size that makes the earlier chapter's arithmetic concrete: 48 layers of width 2,048, 32 query heads and 4 key-value heads of 128, and in every layer a router that scores 128 experts of width 768 and sends the token to 8. The crate's `thinker.rs` builds this layer from the shared pieces of `model::block` and `model::moe`, with attention and normalisation exactly those of the dense decoder of Volume V and one new operation, the expert dispatch. Counting what the whole model holds is the first thing to do with its configuration, and a count has a check available that most such counts do not: the crate's import test records that the released checkpoint has 28,010 tensors.
+
+The tensors come first, each with its shape, so that every count below can be derived and the tensor total checked group by group.
+
+<!-- worked: omni_models.architecture_layouts -->
+The tensors behind the next table, so that every parameter count and every tensor count in it can be re-derived. A shape lists outputs before inputs; a convolution is outputs x inputs x kernel; each copy is one tensor stored under its own name, so the experts of a layer are 128 gate, 128 up and 128 down tensors, and a weight and its bias are two tensors. A group's parameters are the product of its shape and its tensors. Where a bias is not listed the map has none.
+
+Audio tower (the stem takes the 128-bin log-mel picture of a chunk of 100 frames to 13 rows of 7,680 numbers; 32 blocks of width 1,280, 20 heads, a feed-forward of 5,120; every linear map of the blocks and of the projector has a bias):
+
+| tensor group | shape (outputs x inputs) | tensors | parameters |
+|---|---|---:|---:|
+| stem convolution 1 weight (stride 2, padding 1) | 480 x 1 x 3 x 3 | 1 | 4,320 |
+| stem convolution 1 bias | 480 | 1 | 480 |
+| stem convolution 2 weight | 480 x 480 x 3 x 3 | 1 | 2,073,600 |
+| stem convolution 2 bias | 480 | 1 | 480 |
+| stem convolution 3 weight | 480 x 480 x 3 x 3 | 1 | 2,073,600 |
+| stem convolution 3 bias | 480 | 1 | 480 |
+| stem output linear, 480 channels x 16 mel bins = 7,680 to 1,280 (no bias) | 1,280 x 7,680 | 1 | 9,830,400 |
+| per block: attention q, k, v, out weights | 1,280 x 1,280 | 128 | 209,715,200 |
+| per block: their four biases | 1,280 | 128 | 163,840 |
+| per block: feed-forward up weight | 5,120 x 1,280 | 32 | 209,715,200 |
+| per block: its bias | 5,120 | 32 | 163,840 |
+| per block: feed-forward down weight | 1,280 x 5,120 | 32 | 209,715,200 |
+| per block: its bias | 1,280 | 32 | 40,960 |
+| per block: two LayerNorms, gain and bias each | 1,280 | 128 | 163,840 |
+| final LayerNorm gain and bias | 1,280 | 2 | 2,560 |
+| projector, first linear 1,280 to 1,280, weight | 1,280 x 1,280 | 1 | 1,638,400 |
+| its bias | 1,280 | 1 | 1,280 |
+| projector, second linear 1,280 to 2,048, weight | 2,048 x 1,280 | 1 | 2,621,440 |
+| its bias | 2,048 | 1 | 2,048 |
+| total |  | 525 | 647,927,168 |
+
+Vision tower (27 blocks of width 1,152, 16 heads, a feed-forward of 4,304, fused query-key-value maps with bias):
+
+| tensor group | shape (outputs x inputs) | tensors | parameters |
+|---|---|---:|---:|
+| patch embedding, a 3-D convolution over 3 channels, 2 frames, 16 x 16 pixels: weight | 1,152 x 3 x 2 x 16 x 16 | 1 | 1,769,472 |
+| its bias | 1,152 | 1 | 1,152 |
+| position table, a 48 x 48 grid of learned positions (resampled to the picture's grid) | 2,304 x 1,152 | 1 | 2,654,208 |
+| per block: two LayerNorms, gain and bias each | 1,152 | 108 | 124,416 |
+| per block: fused q, k, v weight | 3,456 x 1,152 | 27 | 107,495,424 |
+| per block: its bias | 3,456 | 27 | 93,312 |
+| per block: attention output weight | 1,152 x 1,152 | 27 | 35,831,808 |
+| per block: its bias | 1,152 | 27 | 31,104 |
+| per block: feed-forward up weight | 4,304 x 1,152 | 27 | 133,871,616 |
+| per block: its bias | 4,304 | 27 | 116,208 |
+| per block: feed-forward down weight | 1,152 x 4,304 | 27 | 133,871,616 |
+| per block: its bias | 1,152 | 27 | 31,104 |
+| main merger: LayerNorm over 1,152, gain and bias | 1,152 | 2 | 2,304 |
+| main merger: first linear 4,608 to 4,608, weight | 4,608 x 4,608 | 1 | 21,233,664 |
+| its bias | 4,608 | 1 | 4,608 |
+| main merger: second linear 4,608 to 2,048, weight | 2,048 x 4,608 | 1 | 9,437,184 |
+| its bias | 2,048 | 1 | 2,048 |
+| three DeepStack mergers: LayerNorm over 4,608 (the four rows merged), gain and bias | 4,608 | 6 | 27,648 |
+| three DeepStack mergers: first linear weight | 4,608 x 4,608 | 3 | 63,700,992 |
+| their bias | 4,608 | 3 | 13,824 |
+| three DeepStack mergers: second linear weight | 2,048 x 4,608 | 3 | 28,311,552 |
+| their bias | 2,048 | 3 | 6,144 |
+| total |  | 351 | 538,631,408 |
+
+Thinker decoder (48 layers of width 2,048, 32 query and 4 key-value heads of 128, 128 experts of width 768; no biases):
+
+| tensor group | shape (outputs x inputs) | tensors | parameters |
+|---|---|---:|---:|
+| token embedding table | 152,064 x 2,048 | 1 | 311,427,072 |
+| output matrix | 152,064 x 2,048 | 1 | 311,427,072 |
+| final RMSNorm gain | 2,048 | 1 | 2,048 |
+| per layer: W_Q | 4,096 x 2,048 | 48 | 402,653,184 |
+| per layer: W_K | 512 x 2,048 | 48 | 50,331,648 |
+| per layer: W_V | 512 x 2,048 | 48 | 50,331,648 |
+| per layer: W_O | 2,048 x 4,096 | 48 | 402,653,184 |
+| per layer: query-norm and key-norm gains | 128 | 96 | 12,288 |
+| per layer: input and post-attention RMSNorm gains | 2,048 | 96 | 196,608 |
+| per layer: router | 128 x 2,048 | 48 | 12,582,912 |
+| per layer: expert gate and up weights | 768 x 2,048 | 12,288 | 19,327,352,832 |
+| per layer: expert down weights | 2,048 x 768 | 6,144 | 9,663,676,416 |
+| total |  | 18,867 | 30,532,646,912 |
+
+Talker (20 layers of width 1,024, 16 query and 2 key-value heads of 128, 128 experts of width 384 and a shared expert of width 768):
+
+| tensor group | shape (outputs x inputs) | tensors | parameters |
+|---|---|---:|---:|
+| codec embedding table | 3,072 x 1,024 | 1 | 3,145,728 |
+| codec head | 3,072 x 1,024 | 1 | 3,145,728 |
+| final RMSNorm gain | 1,024 | 1 | 1,024 |
+| per layer: W_Q | 2,048 x 1,024 | 20 | 41,943,040 |
+| per layer: W_K | 256 x 1,024 | 20 | 5,242,880 |
+| per layer: W_V | 256 x 1,024 | 20 | 5,242,880 |
+| per layer: W_O | 1,024 x 2,048 | 20 | 41,943,040 |
+| per layer: query-norm and key-norm gains | 128 | 40 | 5,120 |
+| per layer: input and post-attention RMSNorm gains | 1,024 | 40 | 40,960 |
+| per layer: router | 128 x 1,024 | 20 | 2,621,440 |
+| per layer: expert gate and up weights | 384 x 1,024 | 5,120 | 2,013,265,920 |
+| per layer: expert down weights | 1,024 x 384 | 2,560 | 1,006,632,960 |
+| per layer: shared expert gate and up weights | 768 x 1,024 | 40 | 31,457,280 |
+| per layer: shared expert down weight | 1,024 x 768 | 20 | 15,728,640 |
+| per layer: shared expert's gate, one row | 1,024 | 20 | 20,480 |
+| text_projection and hidden_projection: first linear 2,048 to 2,048, weights | 2,048 x 2,048 | 2 | 8,388,608 |
+| their biases | 2,048 | 2 | 4,096 |
+| the same two: second linear 2,048 to 1,024, weights | 1,024 x 2,048 | 2 | 4,194,304 |
+| their biases | 1,024 | 2 | 2,048 |
+| total |  | 7,951 | 3,183,026,176 |
+
+Code predictor (5 layers of width 1,024, 16 query and 8 key-value heads of 128, a feed-forward of 3,072):
+
+| tensor group | shape (outputs x inputs) | tensors | parameters |
+|---|---|---:|---:|
+| final RMSNorm gain | 1,024 | 1 | 1,024 |
+| per layer: W_Q | 2,048 x 1,024 | 5 | 10,485,760 |
+| per layer: W_K | 1,024 x 1,024 | 5 | 5,242,880 |
+| per layer: W_V | 1,024 x 1,024 | 5 | 5,242,880 |
+| per layer: W_O | 1,024 x 2,048 | 5 | 10,485,760 |
+| per layer: query-norm and key-norm gains | 128 | 10 | 1,280 |
+| per layer: input and post-attention RMSNorm gains | 1,024 | 10 | 10,240 |
+| per layer: gate and up weights | 3,072 x 1,024 | 10 | 31,457,280 |
+| per layer: down weight | 1,024 x 3,072 | 5 | 15,728,640 |
+| codec embedding tables, one per code 1 to 15 | 2,048 x 1,024 | 15 | 31,457,280 |
+| output heads, one per code 1 to 15 | 2,048 x 1,024 | 15 | 31,457,280 |
+| total |  | 86 | 141,570,304 |
+
+Code2Wav, first the code table and the transformer (8 layers of width 1,024, 16 heads of 64, a feed-forward of 3,072, no biases, two layer scales a layer):
+
+| tensor group | shape (outputs x inputs) | tensors | parameters |
+|---|---|---:|---:|
+| code table, 16 codes x 2,048 values | 32,768 x 1,024 | 1 | 33,554,432 |
+| per layer: q, k, v, out weights | 1,024 x 1,024 | 32 | 33,554,432 |
+| per layer: gate and up weights | 3,072 x 1,024 | 16 | 50,331,648 |
+| per layer: down weight | 1,024 x 3,072 | 8 | 25,165,824 |
+| per layer: two RMSNorm gains | 1,024 | 16 | 16,384 |
+| per layer: two layer-scale vectors | 1,024 | 16 | 16,384 |
+| final RMSNorm gain | 1,024 | 1 | 1,024 |
+| total |  | 90 | 142,640,128 |
+
+and then the two upsampling stages and the SEANet decoder, which have the widths of Chapter 3's codec decoder. Every convolution has a bias, and a Snake activation has two vectors, alpha and beta, of one number per channel. The multiply-adds are per position of the layer's axis (a transposed convolution at its input positions), and the last column is how many such positions one code frame has there:
+
+| layer | parameters, as a sum of tensors | parameters | tensors | multiply-adds a position | positions a frame |
+|---|---|---:|---:|---:|---:|
+| upsampling stage 1: transposed convolution (k = 2, stride 2) | 1,024 x 1,024 x 2 + 1,024 | 2,098,176 | 2 | 2,097,152 | 1 |
+| upsampling stage 1: ConvNeXt block | depthwise 1,024 x 7 + 1,024, norm 2 x 1,024, 1,024 x 4,096 + 4,096, 4,096 x 1,024 + 1,024, scale 1,024 | 8,404,992 | 9 | 8,395,776 | 2 |
+| upsampling stage 2: transposed convolution (k = 2, stride 2) | 1,024 x 1,024 x 2 + 1,024 | 2,098,176 | 2 | 2,097,152 | 2 |
+| upsampling stage 2: ConvNeXt block | depthwise 1,024 x 7 + 1,024, norm 2 x 1,024, 1,024 x 4,096 + 4,096, 4,096 x 1,024 + 1,024, scale 1,024 | 8,404,992 | 9 | 8,395,776 | 4 |
+| SEANet first convolution (k = 7) | 1,024 x 1,536 x 7 + 1,536 | 11,011,584 | 2 | 11,010,048 | 4 |
+| SEANet block 1: Snake (alpha and beta) and transposed convolution (k = 16, stride 8) | 2 x 1,536 + 1,536 x 768 x 16 + 768 | 18,878,208 | 4 | 18,874,368 | 4 |
+| SEANet block 1: three residual units (7-tap and 1-tap convolutions, two Snakes each) | 3 x (2 x 2 x 768 + 768^2 x 7 + 768 + 768^2 + 768) | 14,169,600 | 24 | 14,155,776 | 32 |
+| SEANet block 2: Snake (alpha and beta) and transposed convolution (k = 10, stride 5) | 2 x 768 + 768 x 384 x 10 + 384 | 2,951,040 | 4 | 2,949,120 | 32 |
+| SEANet block 2: three residual units (7-tap and 1-tap convolutions, two Snakes each) | 3 x (2 x 2 x 384 + 384^2 x 7 + 384 + 384^2 + 384) | 3,545,856 | 24 | 3,538,944 | 160 |
+| SEANet block 3: Snake (alpha and beta) and transposed convolution (k = 8, stride 4) | 2 x 384 + 384 x 192 x 8 + 192 | 590,784 | 4 | 589,824 | 160 |
+| SEANet block 3: three residual units (7-tap and 1-tap convolutions, two Snakes each) | 3 x (2 x 2 x 192 + 192^2 x 7 + 192 + 192^2 + 192) | 888,192 | 24 | 884,736 | 640 |
+| SEANet block 4: Snake (alpha and beta) and transposed convolution (k = 6, stride 3) | 2 x 192 + 192 x 96 x 6 + 96 | 111,072 | 4 | 110,592 | 640 |
+| SEANet block 4: three residual units (7-tap and 1-tap convolutions, two Snakes each) | 3 x (2 x 2 x 96 + 96^2 x 7 + 96 + 96^2 + 96) | 222,912 | 24 | 221,184 | 1,920 |
+| SEANet tail: Snake and convolution (k = 7, 96 to 1) | 2 x 96 + 96 x 7 + 1 | 865 | 4 | 672 | 1,920 |
+| total, after the transformer |  | 73,376,449 | 140 | 2,447,136,768 |  |
+<!-- /worked -->
 
 <!-- worked: omni_models.parameter_counts -->
 Parameters counted from the tensors that the configuration and the code of the crate imply (weights and the biases that exist, norm gains, layer scales, the Snake parameters of the vocoder), with the number of tensors beside them. The Talker's two projections are the one assumption: their middle width is not a field the crate parses, and 2,048 is taken.
@@ -283,7 +435,7 @@ A smaller commit shows how the Talker was built. `5121cfbcb` (7 August 2026) cha
 
 Frame $s$ of the speech is 16 integers: code 0 from the Talker, written from a vocabulary of 3,072 of which the top 1,024 are masked except the end token (the suppression window of Chapter 6, which leaves 2,048 usable ids), and codes 1 to 15 from the code predictor, a 5-layer decoder with the shape and the key-value cache of Chapter 6's, which `crates/qwen3omnimoe` borrows from `qwen3tts` unchanged and fills from `talker.code_predictor.*`. Speech at 12.5 frames a second is 200 integers, 2,200 bits.
 
-The decoder that turns frames into samples is called Code2Wav in the configuration, and it is the codec decoder of Chapter 3 with one part replaced. Chapter 3's decoder dequantised each of the 16 codes through its own table of 256 numbers and two output projections, and ran a pre-convolution and a pre-transformer of width 512. Here the 16 codes of a frame index one table of 32,768 rows of 1,024 numbers (code $q$ looks up the row numbered $q \cdot 2048$ plus its value, even for the semantic code whose range the configuration puts at 4,096) and the 16 rows are averaged, a mean and not a sum, straight into the working width of 1,024, with no projections. An 8-layer transformer of width 1,024 and a feed-forward of 3,072 follows, causal with a sliding window of 72 frames, which is 5.76 seconds; commit `0893002c3` found the window parsed and never applied, the story of Chapter 3. Two upsampling stages by 2 and the SEANet decoder of Chapter 3, with rates 8, 5, 4 and 3 and the same widths, complete it (`crates/mimi/src/model.rs`, `decode_omni`). The total factor is $2 \cdot 2 \cdot 8 \cdot 5 \cdot 4 \cdot 3 = 1920$, 24,000 samples over 12.5 frames, and the arithmetic of the lengths has one detail that surprised the crate's author.
+The decoder that turns frames into samples is called Code2Wav in the configuration, and it is the codec decoder of Chapter 3 with one part replaced. Chapter 3's decoder dequantised each of the 16 codes through its own table of 256 numbers and two output projections, and ran a pre-convolution and a pre-transformer of width 512. Here the 16 codes of a frame index one table of 32,768 rows of 1,024 numbers (code $q$ looks up the row numbered $q \cdot 2048$ plus its value; the configuration gives the semantic codebook a size of 4,096, but the Talker's masking keeps code 0 below 2,048 for every frame it writes, so its lookups stay inside its own slice of 2,048 rows and the table has exactly $16 \cdot 2048 = 32{,}768$ rows) and the 16 rows are averaged, a mean and not a sum, straight into the working width of 1,024, with no projections. An 8-layer transformer of width 1,024 and a feed-forward of 3,072 follows, causal with a sliding window of 72 frames, which is 5.76 seconds; commit `0893002c3` found the window parsed and never applied, the story of Chapter 3. Two upsampling stages by 2 and the SEANet decoder of Chapter 3, with rates 8, 5, 4 and 3 and the same widths, complete it (`crates/mimi/src/model.rs`, `decode_omni`). The total factor is $2 \cdot 2 \cdot 8 \cdot 5 \cdot 4 \cdot 3 = 1920$, 24,000 samples over 12.5 frames, and the arithmetic of the lengths has one detail that surprised the crate's author.
 
 <!-- worked: omni_models.code_to_wave -->
 Positions along the time axis for 8 code frames: the two upsampling stages (each by 2) turn 8 into 32, and each of the four SEANet blocks upsamples by its rate $\mathsf{u}_j$ in 8, 5, 4, 3 with a transposed convolution of kernel $2\mathsf{u}_j$ whose output is cropped by $\mathsf{u}_j$ on both sides, $L \mapsto (L - 1)\,\mathsf{u}_j$.
@@ -324,21 +476,28 @@ function wave_length(T: int, ups: list<int>, rates: list<int>) -> int
 With `ups` = [2, 2] and `rates` = [8, 5, 4, 3] this is $1920 T - 555$ for every $T$: 555 samples, 23 milliseconds, fewer than the total factor suggests, however long the speech. The crate found this the usual way, from a reference output of a different length: the `decode_omni` documentation says that a golden of 14,805 samples for 8 frames disagreed with the 15,360 that $L \cdot \mathrm{rate}$ gave, and the mismatch is what exposed the second convention. The table's row for 155 frames, 297,045 samples, is the length that commit `528cbde5f` (8 August 2026) reports for the first end-to-end run of the whole speech chain that completed, on a reply to "Say hello.": 12.38 seconds at 24 kHz.
 
 <!-- worked: omni_models.code2wav_work -->
-Multiply-adds of the code-to-wave decoder per code frame, in millions: the transformer's weights (width 1,024, feed-forward 3,072, no attention scores) and the upsampling stages and the SEANet decoder, whose widths are those of Chapter 3's codec decoder (each of that chapter's per-second counts divided by 12.5).
+Multiply-adds of the code-to-wave decoder per code frame: the multiply-adds a position of each layer, as in the layout above (the transformer's weights are counted per frame, with no attention scores), the positions that one frame has on that layer's axis, and their product in millions. A frame is 1 position at the transformer, 2 and then 4 at the upsampling stages, and 1,920 at the last SEANet block, so the SEANet decoder works at the sample rate. Chapter 3 counts the same layers per second, at 12.5 frames a second; the figures here are those divided by 12.5 and are derived above from the shapes.
 
-| stage | millions of multiply-adds |
-|---|---:|
-| mean of 16 embeddings (additions, not counted) | 0 |
-| 8-layer transformer, weights | 109.1 |
-| upsampling stages (2 x transposed convolution + ConvNeXt block) | 56.7 |
-| SEANet decoder: first convolution | 44.0 |
-| SEANet block 1: up by 8, 1536 -> 768 channels | 528.5 |
-| SEANet block 2: up by 5, 768 -> 384 channels | 660.6 |
-| SEANet block 3: up by 4, 384 -> 192 channels | 660.6 |
-| SEANet block 4: up by 3, 192 -> 96 channels | 495.5 |
-| SEANet tail (96 -> 1, k 7) | 1.3 |
-| **one frame** | 2,556.2 |
-| one second (12.5 frames) | 31,952.4 |
+| layer | multiply-adds a position | positions a frame | millions a frame |
+|---|---:|---:|---:|
+| mean of 16 embeddings (additions, not counted) |  |  | 0 |
+| 8-layer transformer, weights: 8 x (4 x 1,024^2 + 3 x 1,024 x 3,072) | 109,051,904 | 1 | 109.1 |
+| upsampling stage 1: transposed convolution (k = 2, stride 2) | 2,097,152 | 1 | 2.1 |
+| upsampling stage 1: ConvNeXt block | 8,395,776 | 2 | 16.8 |
+| upsampling stage 2: transposed convolution (k = 2, stride 2) | 2,097,152 | 2 | 4.2 |
+| upsampling stage 2: ConvNeXt block | 8,395,776 | 4 | 33.6 |
+| SEANet first convolution (k = 7) | 11,010,048 | 4 | 44.0 |
+| SEANet block 1: Snake (alpha and beta) and transposed convolution (k = 16, stride 8) | 18,874,368 | 4 | 75.5 |
+| SEANet block 1: three residual units (7-tap and 1-tap convolutions, two Snakes each) | 14,155,776 | 32 | 453.0 |
+| SEANet block 2: Snake (alpha and beta) and transposed convolution (k = 10, stride 5) | 2,949,120 | 32 | 94.4 |
+| SEANet block 2: three residual units (7-tap and 1-tap convolutions, two Snakes each) | 3,538,944 | 160 | 566.2 |
+| SEANet block 3: Snake (alpha and beta) and transposed convolution (k = 8, stride 4) | 589,824 | 160 | 94.4 |
+| SEANet block 3: three residual units (7-tap and 1-tap convolutions, two Snakes each) | 884,736 | 640 | 566.2 |
+| SEANet block 4: Snake (alpha and beta) and transposed convolution (k = 6, stride 3) | 110,592 | 640 | 70.8 |
+| SEANet block 4: three residual units (7-tap and 1-tap convolutions, two Snakes each) | 221,184 | 1,920 | 424.7 |
+| SEANet tail: Snake and convolution (k = 7, 96 to 1) | 672 | 1,920 | 1.3 |
+| **one frame** |  |  | 2,556.2 |
+| one second (12.5 frames) |  |  | 31,952.4 |
 <!-- /worked -->
 
 A frame costs the code-to-wave decoder 2.56 billion multiply-adds, the four SEANet blocks 2.35 billion of them, which is why the speech side of the previous section is not cheap: the sparse Talker that was the point of the architecture is 289 million of a frame's 4,135. The hardware-independent statement of what makes speech expensive is that the output waveform is 1,920 samples for every frame and the decoder works at the sample rate in its last blocks, in channels of 192 and 96.
@@ -352,7 +511,7 @@ Brain's crate does not run it that way, and the commit that added streaming says
 What this costs is a count of work, not of time.
 
 <!-- worked: omni_models.first_audio_work -->
-Multiply-adds, in billions, that must be done before the first sample of the reply exists, for a prompt of 40 rows, a user turn of 20 tokens for the Talker, a reply of n text tokens and F code frames. Brain's order runs the Thinker to the end of the reply, the Talker to the end of its frames and the code-to-wave front over all frames, and hands out audio in chunks of up to 300 frames, so for F up to 300 the first chunk is the whole reply. The order the interfaces allow starts the Talker when the reply has 4 tokens and hands out the first chunk after 8 frames (weights only; attention scores and the 25-layer second pass of a conversation are left out).
+Multiply-adds, in billions, that must be done before the first sample of the reply exists, for a prompt of 40 rows, a user turn of 20 tokens for the Talker, a reply of n text tokens and F code frames. Brain's order runs the Thinker to the end of the reply, the Talker to the end of its frames and the code-to-wave front over all frames, and hands out audio in chunks of up to 300 frames, so for F up to 300 the first chunk is the whole reply. The order the interfaces allow starts the Talker when the reply has 4 tokens and hands out the first chunk after 8 frames (weights only; attention scores and the 25-layer second pass of a conversation are left out). The count is by these rules. The Thinker's prefill of the prompt gives the reply's first token, so it costs the 40 rows through the 48 layers and the head once, and each of the n - 1 further tokens one row through the layers and the head; '4 tokens' is the prefill and 3 further steps. The Talker's prefill is the user turn's 20 rows and the template's 9, 29 rows, each through its 20 layers and the codec head (the crate computes the logits of every prefill row and reads the last); then each of the F frames costs a Talker step and the code predictor's 16 steps. The code-to-wave transformer costs its weights for each of the F frames, and the upsampling and SEANet back its per-frame count for each frame of the first chunk, the smaller of 300 and F frames.
 
 | reply tokens n | code frames F | brain's order | first chunk of 8 frames | ratio |
 |---|---:|---:|---:|---:|
@@ -379,12 +538,12 @@ In brain's order the work before the first sample is the whole reply's: for a re
 There is a second cost in the same path that has nothing to do with the order of the stages. The Talker, in this crate, is run in the way the crate's documentation calls validation tier: for every prefill and every decoded frame `talker_generate.rs` reads all of the Talker's weights again from the checkpoint, uploads them as 32-bit numbers and runs the step.
 
 <!-- worked: omni_models.talker_stream_bytes -->
-Bytes that the Talker's weights move in brain's validation-tier path, where every step re-reads all 20 layers of its 128 experts each from the checkpoint (32-bit values), against the bytes that the step's products use.
+Bytes that the Talker's weights move in brain's validation-tier path, where every step re-reads all 20 layers of its 128 experts each from the checkpoint (32-bit values), against the bytes that the step's products use. Both count what the `moe_layers` table counts, norms included: a layer holds 158,207,232 parameters and uses 14,290,176.
 
 | quantity | bytes |
 |---|---:|
 | every weight of the 20 layers uploaded for one step (32-bit) | 12,656,578,560 |
-| the weights that step's products use (32-bit) | 1,143,029,760 |
+| the weights that step's products use (32-bit) | 1,143,214,080 |
 | held / used | 11.07 |
 | prefill and 100 frames: 101 steps | 1,278,314,434,560 |
 | the same in gibibytes | 1,190.5 |

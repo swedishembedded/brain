@@ -158,7 +158,7 @@ The attention cache of one branch of the Global LLM: 2 tensors x 36 layers x 8 k
 | 300 | 7,700 | 567,705,600 | 2.271 | 4.542 |
 <!-- /worked -->
 
-The semantic code comes from the language model's output head at the last position. The seven residual codes need a second network, the **depth decoder**, a causal transformer of 4 layers of width 4,096 with 16 heads and a feed-forward width of 6,144, a table of position embeddings for at most 16 positions, and no rotary embedding, no grouped heads and no bias. For one frame it is run on a sequence of 8 positions: a projection of the language model's hidden vector, a projection of the embedding of the semantic code, and then the projected embedding of each residual code as it is drawn, with at each of the last seven positions an output head of its own (1,024 outputs) giving the logits of one residual codebook. It runs for the two guidance branches, which share the sampled code, so one code is drawn and fed to both. Its inference path keeps the keys and values of the earlier positions of a frame, which turns 35 position-forwards a branch into 8. The commit that did it, `f111e6cb3`, claims that nothing observable moves, and the file supports the claim in the strong form: the cached step is compared with the full forward by an equality of the 32-bit vectors, not a tolerance. The depth decoder is the memory-bound part of the loop. One position costs 570,425,344 multiply-adds per branch and reads 4 layers of weights, 2.28 gigabytes at 4 bytes a weight: a quarter of a multiply-add, half an operation, for each byte. That is why the two branches are batched into one pass over the weights (`depth_decoder::step_batch`) and not run one after the other.
+The semantic code comes from the language model's output head at the last position. The seven residual codes need a second network, the **depth decoder**, a causal transformer of 4 layers of width 4,096 with 16 heads and a feed-forward width of 6,144, a table of position embeddings for at most 16 positions, and no rotary embedding, no grouped heads and no bias. For one frame it is run on a sequence of 8 positions, each the output of one and the same bias-free 4,096 by 4,096 projection: the language model's hidden vector, the embedding of the semantic code, and then the embedding of each of the first six residual codes as it is drawn (the seventh is the last thing the frame needs, so it is not fed back). Each of the last seven positions has an output head of its own (1,024 outputs) giving the logits of one residual codebook, and each residual code is embedded by a table of its own, seven tables of 1,024 rows (the seventh serves only the sum that becomes the language model's next row). The tensors are listed with their counts in the section on what a song costs. It runs for the two guidance branches, which share the sampled code, so one code is drawn and fed to both. Its inference path keeps the keys and values of the earlier positions of a frame, which turns 35 position-forwards a branch into 8. The commit that did it, `f111e6cb3`, claims that nothing observable moves, and the file supports the claim in the strong form: the cached step is compared with the full forward by an equality of the 32-bit vectors, not a tolerance. The depth decoder is the memory-bound part of the loop. One position costs 570,425,344 multiply-adds per branch and reads 4 layers of weights, 2.28 gigabytes at 4 bytes a weight: a quarter of a multiply-add, half an operation, for each byte. That is why the two branches are batched into one pass over the weights (`depth_decoder::step_batch`) and not run one after the other.
 
 ## Drawing a code under two prompts
 
@@ -192,7 +192,7 @@ The hidden vectors reach the denoiser through the **condition encoder**, which i
 The denoiser itself, `crates/minimaxmusic3/src/dit.rs`, is a transformer of 36 blocks of width 2,048 (32 heads of 64) with full bidirectional attention over a chunk and no causal mask, because it denoises the whole chunk at once. Its input is built by concatenating three blocks of channels at every latent step: the 128 channels of the current latents, 128 channels of zeros, and the 2,048 channels of the condition, 2,304 channels in all, to which a convolution of one tap adds a residual and a projection takes the width to 2,048. The 128 channels of zeros are zero in this crate; what the checkpoint was trained to receive there the code does not say. Two things in the block stack set it apart from the image models of Volume VIII. The first is that the time is not injected into the blocks at all. The norms are plain LayerNorms with a gain and a bias, and no block is modulated by the time. The time $t$ becomes a vector (a random-Fourier embedding, $\cos(2\pi t w_i)$ and $\sin(2\pi t w_i)$ for 128 weights $w_i$, passed through two linear layers with a SiLU between them) that is placed as row 0 of the sequence, in front of the latent steps. The sequence therefore has one row more than the chunk, 690 for a chunk of 689, and the time is read the way any token is read, by attention. The second is the rotary embedding, which rotates only the first 32 of the 64 numbers of each head, at a base of 10,000 (`dit::rope_tables`), so that half of each head sees position and half does not. The feed-forward network is a gated one with a SiLU gate, a SwiGLU, whose up and gate projections are one stored matrix of 16,384 rows split into two halves.
 
 <!-- worked: music.dit_breakdown -->
-The multiply-adds of one DiT evaluation over a full chunk (689 latent steps, 690 rows with the timestep token), in giga, split by kind.
+The multiply-adds of one DiT evaluation over a full chunk (689 latent steps, 690 rows with the timestep token), in giga, split by kind. The blocks see all rows; the glue is applied to the latent steps only, as 1-tap convolutions 2,304 to 2,304, a projection 2,304 to 2,048, a projection 2,048 to 128 and a convolution 128 to 128, and the time embedding (256 to 2,048 to 2,048) is applied once.
 
 | part | multiply-adds (G) | share (%) |
 |---|---:|---:|
@@ -231,16 +231,32 @@ A window cannot be made by cutting the song into eight-second pieces and denoisi
 The constants of the crate say how the chunks are laid. A chunk is 200 frames. The next chunk starts 100 frames later. The first 172 latent steps of every chunk after the first are not generated afresh but taken from the previous chunk, and 172 is exactly $(689 - 345)/2$: the slice that the previous chunk hands over is its steps 345 to 517, which starts in the middle of the chunk and ends a quarter of its length before the right edge, and that is where the next chunk, which starts 344.53 steps later, begins.
 
 <!-- worked: music.chunk_constants -->
-The constants of the chunked denoiser in the units of the frame, the latent step and the clock. A latent step is $512/44100$ of a second; a frame is $1764/512 = 441/128 = 3.4453125$ latent steps.
+The constants of the chunked denoiser in the units of the frame, the latent step and the clock. A latent step is $512/44100$ of a second; a frame is $1764/512 = 441/128 = 3.4453125$ latent steps. The chunk and the hop are defined in frames, and their seconds and samples are the frame clock's, nominal; the other four rows are defined in latent steps, and their seconds and samples are the latent clock's. The 689 steps of a chunk are 352,768 samples, 7.9993 seconds, 32 samples short of the nominal 200 frames, because the latent length is truncated; the hop's 344.5312 steps are fractional, and the carried slice is placed at a whole step.
 
 | constant | in frames | in latent steps | seconds | samples at 44,100 Hz |
 |---|---:|---:|---:|---:|
-| chunk | 200 frames | 689 | 8.0000 | 352,800 |
-| hop between chunk starts | 100 frames | 344.5312 | 4.0000 | 176,400 |
+| chunk (on the frame clock) | 200 frames | 689 | 8.0000 | 352,800 |
+| hop between chunk starts (on the frame clock) | 100 frames | 344.5312 | 4.0000 | 176,400 |
 | carried prefix | 49.923 frames | 172 | 1.9969 | 88,064 |
 | crop off the left of a later chunk | 24.961 frames | 86 | 0.9985 | 44,032 |
 | crop off the right of an earlier chunk | 74.884 frames | 258 | 2.9954 | 132,096 |
 | kept from a chunk with a neighbour on each side | 100.136 frames | 345 | 4.0054 | 176,640 |
+<!-- /worked -->
+
+The rule that turns a number of frames into chunks is short, and the edges of it are where a reimplementation goes wrong.
+
+<!-- worked: music.chunk_rule -->
+A song of $F$ frames is one chunk when $F \le 200$, and otherwise $\lceil (F - 200) / 100 \rceil + 1$ chunks, starting at the frames $0, 100, 200, \ldots$ up to the last start that is below $F - 100$ (the starts are `range(0, F - 100, 100)`). Chunk $i$ has $\min(200, F - s_i)$ frames, so the last chunk has more than 100 and at most 200 frames, and its latent length is the truncated product of the first table. Every chunk but the first drops its first 86 latent steps and every chunk but the last drops its last 258; the last chunk therefore keeps steps 86 up to its own length. A song of 200 frames or fewer is a single chunk with no crop at all.
+
+| frames $F$ | chunks | first starts | frames of the last chunk | latents of the last chunk | kept of the last chunk |
+|---:|---:|---|---:|---:|---:|
+| 1 | 1 | 0 | 1 | 3 | 0 to 3 |
+| 200 | 1 | 0 | 200 | 689 | 0 to 689 |
+| 201 | 2 | 0, 100 | 101 | 347 | 86 to 347 |
+| 300 | 2 | 0, 100 | 200 | 689 | 86 to 689 |
+| 301 | 3 | 0, 100, 200 | 101 | 347 | 86 to 347 |
+| 450 | 4 | 0, 100, 200, ... | 150 | 516 | 86 to 516 |
+| 7,500 | 74 | 0, 100, 200, ... | 200 | 689 | 86 to 689 |
 <!-- /worked -->
 
 In `crates/minimaxmusic3/src/denoise.rs` the hold is written like the masked run of Volume VIII, applied at the top of every step and not at its end. With $\varepsilon_p$ the noise that the chunk was started from in its prefix of $P$ steps and $\mathbf{x}_{\mathrm{prev}}$ the slice carried over, the prefix is set before the network is called to
@@ -271,7 +287,7 @@ function hold_euler(u_cond: function(array<real>[C, L], real) -> array<real>[C, 
     return x
 ```
 
-A toy makes the loop exact. A song of 40 latent steps in two channels is cut into chunks of 16 steps with a hop of 8, so that the carried prefix is $(16 - 8)/2 = 4$ steps and the crops are 2 on the left and 6 on the right, the real rules ($86 = 172/2$, $258 = 2 \cdot 172 - 86$) at a smaller scale. Given the condition, which is the melody of each channel, the texture of a chunk is a Gaussian process with covariance $0.5^2\,0.9^{|i-j|}$. For a Gaussian target of mean $\mathbf{m}$ and covariance $\Sigma$ on the straight path $\mathbf{x}_t = (1 - t)\boldsymbol\varepsilon + t\mathbf{x}_1$, the posterior mean of the data is $\mathbf{m} + t\Sigma(t^2\Sigma + (1 - t)^2\mathbf{I})^{-1}(\mathbf{x}_t - t\mathbf{m})$, and the exact velocity is the difference between it and $\mathbf{x}_t$ divided by $1 - t$. This is the formula of Chapter 6's one-number toy with a variance replaced by a covariance, and it needs no network.
+A toy makes the loop exact. A song of 40 latent steps in two channels is cut into chunks of 16 steps with a hop of 8, so that the carried prefix is $(16 - 8)/2 = 4$ steps and the crops are 2 on the left and 6 on the right, the real rules ($86 = 172/2$, $258 = 2 \cdot 172 - 86$) at a smaller scale. Given the condition, which is the melody of each channel, the texture of a chunk is a Gaussian process with covariance $\Sigma_{ij} = \sigma^2\rho^{|i-j|}$, with $\sigma = 0.5$ and $\rho = 0.9$, so $0.5^2\,0.9^{|i-j|}$. For a Gaussian target of mean $\mathbf{m}$ and covariance $\Sigma$ on the straight path $\mathbf{x}_t = (1 - t)\boldsymbol\varepsilon + t\mathbf{x}_1$, the posterior mean of the data is $\mathbf{m} + t\Sigma(t^2\Sigma + (1 - t)^2\mathbf{I})^{-1}(\mathbf{x}_t - t\mathbf{m})$, and the exact velocity is the difference between it and $\mathbf{x}_t$ divided by $1 - t$. This is the formula of Chapter 6's one-number toy with a variance replaced by a covariance, and it needs no network.
 
 <!-- worked: music.chunk_flow_toy -->
 The chunked flow of the chapter's toy: a song of 40 latent steps in 2 channels, chunks of 16 steps, a hop of 8 (chunks start at 0, 8, 16 and 24), a carried prefix of 4, crops of 2 on the left and 6 on the right, and 30 Euler steps with $t_i = i/30$. Given the melody $m_c(g) = 0.6 \sin(2\pi g / 10 + 0.5c)$ of channel $c$, the texture $z = x_1 - m$ of each channel of a chunk is a Gaussian process with covariance $\Sigma_{ij} = 0.5^2\, 0.9^{|i-j|}$ (neighbouring steps are correlated), the two channels independent, and the velocity is the exact one of the posterior. The noise is `music.chunk_flow_toy` (seed 0xd9987001b06c2d28): four chunks in order, each 2 x 16 draws of `normal()`, channel 0's 16 first; both runs use the same draws. The table prints the texture of channel 0 at the six song positions 8 to 13 around the first seam (the seam is at position 10: the last kept step of chunk 0 is position 9, and the held prefix of chunk 1 ends, its join, at position 12), and the root mean square step of the texture (both channels) at the seams and at the joins against all other positions. The texture of the data itself has a step of 0.224 (rms).
@@ -337,14 +353,14 @@ The stitched length against the frame count's nominal length, in samples per cha
 | 300 | 74 | 13,247,488 | 13,230,000 | +17,488 | 0.3966 |
 <!-- /worked -->
 
-A song of four minutes is 0.31 seconds longer than its frames say, one of five minutes 0.40, a tempo error of about 0.14 percent. It is inaudible, and it is the sort of thing a length computation has to know. The crate says that it ports the constants of the reference, and I cannot say what the reference does about it.
+A song of four minutes is 0.31 seconds longer than its frames say, one of five minutes 0.40, a tempo error of about 0.13 percent. It is inaudible, and it is the sort of thing a length computation has to know. The crate says that it ports the constants of the reference, and I cannot say what the reference does about it.
 
 The geometry also says where a boundary lives. The first chunk's kept stretch ends at step 431, 5.0039 seconds into the song, and that is the seam: the next chunk's kept stretch begins at its step 86, and that step is the same latent, the previous chunk's step 431, by the rule that its first 172 steps are the previous chunk's 345 to 517. The join, where the new chunk's own generation begins, is at its step 172, 6.0024 seconds. Commit `7525154b5` measured a seam. Its message reports the largest sample-to-sample step at a boundary at four seconds into the song, 0.0031, against a 99.9th percentile of 0.0635 elsewhere, and concludes that a crossfade is not needed because the overlap is replaced in the latent domain before the vocoder sees it. The mechanism is right, and the code confirms it. The place is not the seam: four seconds is where the second chunk starts, and its first 86 steps never reach the song. I cannot tell from the message where the samples were taken, so what the commit supports is a conclusion about the seam, which is exact by construction, and not about the join, which the toy suggests is where a hold is least perfect.
 
 Why are 86 and 258 so large? The vocoder is a stack of convolutions and its reach in time is finite, and a walk backward through it says how finite.
 
 <!-- worked: music.vocoder_reach -->
-The interval of positions that can change one block of 512 output samples (those of latent step $q$ = 1000), found by walking the decoder backward from the output: each convolution widens the interval by its dilation times $(k-1)/2$ on each side, each transposed convolution maps it to the input positions that a window of its kernel touches. Positions are in the layer's own resolution.
+The interval of positions that can change one block of 512 output samples (those of latent step $q$ = 1000), found by walking the decoder backward from the output: each convolution widens the interval by its dilation times $(k-1)/2$ on each side, each transposed convolution maps it to the input positions that a window of its kernel touches. Positions are in the layer's own resolution. A residual unit is walked backward as its 1-tap convolution and then its 7-tap convolution at the unit's dilation (a convolution pads each side by dilation x 3 so that the length is kept), and the three units of a block with dilations 9, 3 and 1 in that order (forward they are 1, 3 and 9, after the upsampling). A transposed convolution of stride $s$ has a kernel of $k$ taps, twice $s$, and pads $s/2$ on each side: its output position $o$ takes input $i$ through tap $j$ when $o = i s - s/2 + j$, so an output interval $[a, b]$ needs the inputs from $\lceil (a + s/2 - k + 1)/s \rceil$ to $\lfloor (b + s/2)/s \rfloor$.
 
 | after walking back through | first position | last position | positions |
 |---|---:|---:|---:|
@@ -367,7 +383,7 @@ The decoder is a convolutional stack of the family of Chapter 3's codec decoder 
 The decoder has 54,157,665 parameters, counted from the shapes of its tensors. What decides what a card must hold to run it is not the weights, 207 mebibytes, but the activations, because the whole decoder is recorded as one tape and submitted once, so every intermediate lives until the end.
 
 <!-- worked: music.vocoder_memory -->
-The buffers of the vocoder for one chunk of 689 latent steps: the decoder is recorded as one tape and submitted once, so every intermediate is alive until the end. Floats per stream, and mebibytes ($2^{20}$ bytes) for the two streams at 4 bytes; a block holds the input Snake, the upsampling, and three residual units of five buffers each.
+The buffers of the vocoder for one chunk of 689 latent steps: the decoder is recorded as one tape and submitted once, so every intermediate is alive until the end. Floats per stream, and mebibytes ($2^{20}$ bytes) for the two streams at 4 bytes. A block of $c$ channels in and $c/2$ out, from $L$ to $sL$ steps, holds the input Snake ($c L$ floats, at the block's input resolution), the transposed convolution's output ($c s L / 2$), and three residual units of five buffers each (Snake, dilated convolution, Snake, 1-tap convolution and the sum, each $c s L / 2$), 17 buffers in all. The first row is the projection ($1{,}024 L$) and the first convolution ($1{,}536 L$); the last is the Snake over 96 channels and the one-channel output.
 
 | part | buffers | floats per stream | MiB, two streams |
 |---|---:|---:|---:|
@@ -386,10 +402,121 @@ The count says that the intermediates of one chunk are 11,554 mebibytes at 4 byt
 
 ## What a song costs
 
-The five components have these sizes, counted from the crate's configuration and the shapes of its tensors.
+The five components have these sizes, counted from the crate's configuration and the shapes of its tensors. The tensors come first, so that every count that follows can be derived from them.
+
+<!-- worked: music.architecture_layouts -->
+The tensors of the five components, the Global LLM in the layout of Volume VI, with the counting conventions. A shape lists outputs before inputs, so a linear map from 4,096 to 2,048 numbers is 2,048 x 4,096; a convolution is outputs x inputs x taps. A count is the product of the shape and the copies, and the total of each table is the count of the next one. Where a bias is not listed the map has none.
+
+Global LLM (the layout of Volume VI's Qwen3 8B, a vocabulary of 200,000, 36 layers, 32 query and 8 key-value heads of 128, a feed-forward width of 12,288):
+
+| tensor | shape (outputs x inputs) | copies | parameters |
+|---|---|---:|---:|
+| token embedding table | 200,000 x 4,096 | 1 | 819,200,000 |
+| output head (untied) | 200,000 x 4,096 | 1 | 819,200,000 |
+| final RMSNorm gain | 4,096 | 1 | 4,096 |
+| W_Q, per layer | 4,096 x 4,096 | 36 | 603,979,776 |
+| W_K, per layer | 1,024 x 4,096 | 36 | 150,994,944 |
+| W_V, per layer | 1,024 x 4,096 | 36 | 150,994,944 |
+| W_O, per layer | 4,096 x 4,096 | 36 | 603,979,776 |
+| query and key norm gains, per layer | 2 x 128 | 36 | 9,216 |
+| W_gate, per layer | 12,288 x 4,096 | 36 | 1,811,939,328 |
+| W_up, per layer | 12,288 x 4,096 | 36 | 1,811,939,328 |
+| W_down, per layer | 4,096 x 12,288 | 36 | 1,811,939,328 |
+| two RMSNorm gains, per layer | 2 x 4,096 | 36 | 294,912 |
+| total |  |  | 8,584,475,648 |
+
+RVQ depth decoder (4 layers of width 4,096, 16 heads, a feed-forward width of 6,144; no rotary embedding, no grouped heads, no bias; the table has 1,024 rows, the codebook size):
+
+| tensor | shape (outputs x inputs) | copies | parameters |
+|---|---|---:|---:|
+| audio embedding tables, one per residual codebook | 1,024 x 4,096 | 7 | 29,360,128 |
+| output heads, one per residual codebook | 1,024 x 4,096 | 7 | 29,360,128 |
+| input projection, one matrix applied to every input row | 4,096 x 4,096 | 1 | 16,777,216 |
+| position table | 16 x 4,096 | 1 | 65,536 |
+| final RMSNorm gain | 4,096 | 1 | 4,096 |
+| attention W_q, W_k, W_v, W_out, per layer | 4,096 x 4,096 | 16 | 268,435,456 |
+| W_gate and W_up, per layer | 6,144 x 4,096 | 8 | 201,326,592 |
+| W_down, per layer | 4,096 x 6,144 | 4 | 100,663,296 |
+| two RMSNorm gains, per layer | 2 x 4,096 | 4 | 32,768 |
+| total |  |  | 646,025,216 |
+
+Condition encoder (the 3-tap convolution runs along the frame axis and has a bias):
+
+| tensor | shape (outputs x inputs) | copies | parameters |
+|---|---|---:|---:|
+| softmax logits over the 8 hidden vectors of a frame | 8 | 1 | 8 |
+| scale | 1 | 1 | 1 |
+| convolution weight, 3 taps along the frame axis | 2,048 x 4,096 x 3 | 1 | 25,165,824 |
+| convolution bias | 2,048 | 1 | 2,048 |
+| total |  |  | 25,167,881 |
+
+Flow-matching DiT, one block listed once and then repeated 36 times in the full table:
+
+| tensor | shape (outputs x inputs) | copies | parameters |
+|---|---|---:|---:|
+| attention W_q, W_k, W_v, W_out (no bias) | 2,048 x 2,048 | 4 | 16,777,216 |
+| two LayerNorms, each a gain and a bias | 2 x 2 x 2,048 | 1 | 8,192 |
+| up and gate projections, one stored matrix | 16,384 x 2,048 | 1 | 33,554,432 |
+| their bias | 16,384 | 1 | 16,384 |
+| down projection | 2,048 x 8,192 | 1 | 16,777,216 |
+| its bias | 2,048 | 1 | 2,048 |
+| total |  |  | 67,135,488 |
+
+The whole denoiser, the block rows multiplied by 36:
+
+| tensor | shape (outputs x inputs) | copies | parameters |
+|---|---|---:|---:|
+| random-Fourier weights of the time embedding | 128 | 1 | 128 |
+| time MLP, first layer weight (256 sin and cos inputs) | 2,048 x 256 | 1 | 524,288 |
+| its bias | 2,048 | 1 | 2,048 |
+| time MLP, second layer weight | 2,048 x 2,048 | 1 | 4,194,304 |
+| its bias | 2,048 | 1 | 2,048 |
+| input convolution, 1 tap, 2,304 to 2,304 (no bias) | 2,304 x 2,304 | 1 | 5,308,416 |
+| input projection, 2,304 to 2,048 (no bias) | 2,048 x 2,304 | 1 | 4,718,592 |
+| per block: attention W_q, W_k, W_v, W_out (no bias) | 2,048 x 2,048 | 144 | 603,979,776 |
+| per block: two LayerNorms, each a gain and a bias | 2 x 2 x 2,048 | 36 | 294,912 |
+| per block: up and gate projections, one stored matrix | 16,384 x 2,048 | 36 | 1,207,959,552 |
+| per block: their bias | 16,384 | 36 | 589,824 |
+| per block: down projection | 2,048 x 8,192 | 36 | 603,979,776 |
+| per block: its bias | 2,048 | 36 | 73,728 |
+| output projection, 2,048 to 128 (no bias) | 128 x 2,048 | 1 | 262,144 |
+| output convolution, 1 tap, 128 to 128 (no bias) | 128 x 128 | 1 | 16,384 |
+| total |  |  | 2,431,905,920 |
+
+Vocoder, one 64-channel stream (the two ears share the weights). The multiply-adds are per position of the layer's own resolution, and the last column is that resolution as a multiple of the latent rate; a transposed convolution is counted at its input positions:
+
+| layer | parameters, as a sum of tensors | parameters | multiply-adds a position | positions per latent step |
+|---|---|---:|---:|---:|
+| input projection (1x1) | 1,024 x 64 + 1,024 | 66,560 | 65,536 | 1 |
+| first convolution (k=7) | 1,024 x 1,536 x 7 + 1,536 | 11,011,584 | 11,010,048 | 1 |
+| block 0: Snake | 1,536 alphas | 1,536 | 0 | 1 |
+| block 0: transposed convolution (k=16, stride 8) | 1,536 x 768 x 16 + 768 | 18,875,136 | 18,874,368 | 1 |
+| block 0, unit 0 (dilation 1) | 2 x 768 + (768^2 x 7 + 768) + (768^2 + 768) | 4,721,664 | 4,718,592 | 8 |
+| block 0, unit 1 (dilation 3) | 2 x 768 + (768^2 x 7 + 768) + (768^2 + 768) | 4,721,664 | 4,718,592 | 8 |
+| block 0, unit 2 (dilation 9) | 2 x 768 + (768^2 x 7 + 768) + (768^2 + 768) | 4,721,664 | 4,718,592 | 8 |
+| block 1: Snake | 768 alphas | 768 | 0 | 8 |
+| block 1: transposed convolution (k=16, stride 8) | 768 x 384 x 16 + 384 | 4,718,976 | 4,718,592 | 8 |
+| block 1, unit 0 (dilation 1) | 2 x 384 + (384^2 x 7 + 384) + (384^2 + 384) | 1,181,184 | 1,179,648 | 64 |
+| block 1, unit 1 (dilation 3) | 2 x 384 + (384^2 x 7 + 384) + (384^2 + 384) | 1,181,184 | 1,179,648 | 64 |
+| block 1, unit 2 (dilation 9) | 2 x 384 + (384^2 x 7 + 384) + (384^2 + 384) | 1,181,184 | 1,179,648 | 64 |
+| block 2: Snake | 384 alphas | 384 | 0 | 64 |
+| block 2: transposed convolution (k=8, stride 4) | 384 x 192 x 8 + 192 | 590,016 | 589,824 | 64 |
+| block 2, unit 0 (dilation 1) | 2 x 192 + (192^2 x 7 + 192) + (192^2 + 192) | 295,680 | 294,912 | 256 |
+| block 2, unit 1 (dilation 3) | 2 x 192 + (192^2 x 7 + 192) + (192^2 + 192) | 295,680 | 294,912 | 256 |
+| block 2, unit 2 (dilation 9) | 2 x 192 + (192^2 x 7 + 192) + (192^2 + 192) | 295,680 | 294,912 | 256 |
+| block 3: Snake | 192 alphas | 192 | 0 | 256 |
+| block 3: transposed convolution (k=4, stride 2) | 192 x 96 x 4 + 96 | 73,824 | 73,728 | 256 |
+| block 3, unit 0 (dilation 1) | 2 x 96 + (96^2 x 7 + 96) + (96^2 + 96) | 74,112 | 73,728 | 512 |
+| block 3, unit 1 (dilation 3) | 2 x 96 + (96^2 x 7 + 96) + (96^2 + 96) | 74,112 | 73,728 | 512 |
+| block 3, unit 2 (dilation 9) | 2 x 96 + (96^2 x 7 + 96) + (96^2 + 96) | 74,112 | 73,728 | 512 |
+| final Snake and convolution (k=7) | 96 alphas + 96 x 7 + 1 | 769 | 672 | 512 |
+| total, one stream |  | 54,157,665 |  |  |
+<!-- /worked -->
+
+The totals of those tables are the rows of the next one.
 
 <!-- worked: music.parameter_counts -->
-Parameters of the five components, counted from the shapes of the crate's configuration and tensors (norm gains, biases and the DiT's time embedding included), and the bytes of a 32-bit copy in gigabytes ($10^9$ bytes). The Global LLM is Volume VI's count of Qwen3 8B, 8,190,735,360 for a vocabulary of 151,936, with the two tables enlarged to 200,000 ids: 8,190,735,360 + 2 x 4096 x (200,000 - 151,936) = 8,584,475,648.
+Parameters of the five components, the totals of the tensor tables above (norm gains, biases and the DiT's time embedding included), and the bytes of a 32-bit copy in gigabytes ($10^9$ bytes). The Global LLM is Volume VI's count of Qwen3 8B, 8,190,735,360 for a vocabulary of 151,936, with the two tables enlarged to 200,000 ids: 8,190,735,360 + 2 x 4096 x (200,000 - 151,936) = 8,584,475,648.
 
 | component | parameters | GB at 32 bits | share (%) |
 |---|---:|---:|---:|
@@ -397,29 +524,54 @@ Parameters of the five components, counted from the shapes of the crate's config
 | RVQ depth decoder (4 layers, width 4096) | 646,025,216 | 2.58 | 5.5 |
 | condition encoder (8 layer logits, one 3-tap convolution 4096 to 2048) | 25,167,881 | 0.10 | 0.2 |
 | flow-matching DiT (36 blocks of width 2048) | 2,431,905,920 | 9.73 | 20.7 |
-| vocoder (DAC-style decoder, one 64-channel stream per ear) | 54,157,665 | 0.22 | 0.5 |
+| vocoder (convolutional decoder with Snake activations, one 64-channel stream per ear) | 54,157,665 | 0.22 | 0.5 |
 | all five | 11,741,732,330 | 46.97 | 100.0 |
 <!-- /worked -->
 
 Three quarters of the parameters are the language model, and a fifth is the denoiser, which is where almost all of the arithmetic goes. Two figures in the crate's own ledger, 19 billion parameters in all and 123 million for the vocoder, do not survive the count, which gives 11.7 billion and 54.2 million, and the sizes of the files agree with the count. The language model's 8.58 billion parameters are 17.2 gigabytes at 16 bits, the size that the ledger records for the language-model directory, and the vocoder's 54.2 million at 32 bits are 206.6 mebibytes, the 207 that `crates/minimaxmusic3/src/memory.rs` gives for the vocoder directory. A figure that no code checks is a claim, and a count that reproduces the size of the files is evidence.
 
-The arithmetic of making a song is the second ledger. The table counts it as Chapter 6 did, with every matrix product once for each row it is applied to, and takes a prompt of 200 tokens and a song of 4 minutes.
+The arithmetic of making a song is the second ledger. It counts as Chapter 6 did, with every matrix product once for each row it is applied to, and takes a prompt of 200 tokens and a song of 4 minutes. The terms come first, as formulas in the shapes above.
+
+<!-- worked: music.work_layout -->
+The terms of the count, as formulas in the shapes of the tables above. A product is counted once for every row it is applied to; norms, activations, embedding lookups and the sampling are left out. The output head is applied once per frame, to the frame's row, and so the prompt's rows and the loop's extra first iteration (the frame that the loop samples from the end of the prompt and does not keep) are counted as matrices and attention only, not as one more head and one more depth-decoder frame.
+
+| stage | term | multiply-adds |
+|---|---|---:|
+| Global LLM | matrices of one row, one branch: 36 x (2 x 4,096 x 4,096 + 2 x 4,096 x 1,024 + 3 x 4,096 x 12,288) | 6,945,767,424 |
+| Global LLM | output head, one row, one branch: 200,000 x 4,096 | 819,200,000 |
+| Global LLM | one frame, both branches: 2 x (matrices + head) | 15,529,934,848 |
+| Global LLM | attention of the 6,000 frames, both branches: 2 x 2 x 36 x 4,096 x the sum over t = 1 to 6,000 of the 200 + t positions that frame t reads | 11,326,390,272,000 |
+| Global LLM | the 200 prompt rows, both branches: matrices and attention (row p reads p keys), no head | 2,790,162,432,000 |
+| depth decoder | one position, one branch: 4 x (4 x 4,096^2 + 3 x 4,096 x 6,144) | 570,425,344 |
+| depth decoder | the 8 positions of a frame, both branches | 9,126,805,504 |
+| depth decoder | seven output heads, both branches: 2 x 7 x 4,096 x 1,024 | 58,720,256 |
+| depth decoder | input projection, applied to 9 rows (each branch's hidden vector, the semantic code's embedding and six residual ones, the last seven shared by the branches): 9 x 4,096^2 | 150,994,944 |
+| depth decoder | attention over the 8 positions, both branches: 2 x (4 x 2 x 4,096 x (1 + 2 + ... + 8)) | 2,359,296 |
+| depth decoder | one frame, the four terms above | 9,338,880,000 |
+| DiT | attention projections, one evaluation: 36 x 690 x 4 x 2,048^2 | 416,746,045,440 |
+| DiT | feed-forward, one evaluation: 36 x 690 x 3 x 8,192 x 2,048 | 1,250,238,136,320 |
+| DiT | attention scores and weighted sums: 36 x 2 x 690^2 x 2,048 | 70,203,801,600 |
+| DiT | glue, on the 689 latent steps: 689 x (2,304^2 + 2,304 x 2,048 + 2,048 x 128 + 128^2), plus the time embedding 256 x 2,048 + 2,048^2 once | 7,105,232,896 |
+| vocoder | one latent step, both streams: 2 x the sum over the layers of (multiply-adds a position x positions per step) | 1,608,286,208 |
+<!-- /worked -->
+
+The stages add up as follows.
 
 <!-- worked: music.work_per_stage -->
-Multiply-adds to make a song of 240 seconds (6,000 frames, 59 chunks), counted as in the speech chapter: every matrix product once per row, attention scores and weighted sums included, norms and elementwise functions left out; a prompt of 200 tokens is assumed. One DiT evaluation over a full chunk (length 689, 690 rows with the timestep token) is 1.744 tera-multiply-adds; one autoregressive frame costs 15.53 giga for the language model's two branches (without attention) and 9.34 for the depth decoder's.
+Multiply-adds to make a song of 240 seconds (6,000 frames, 59 chunks), counted as in the speech chapter and by the terms of the table above: every matrix product once per row, attention scores and weighted sums included, the 200 rows of the assumed prompt included, norms and elementwise functions left out. One DiT evaluation over a full chunk (length 689, 690 rows with the timestep token) is 1.744 tera-multiply-adds; one autoregressive frame costs 15.53 giga for the language model's two branches (without attention) and 9.34 for the depth decoder's.
 
 | stage | multiply-adds (T) | per second of music (T) | share (%) |
 |---|---:|---:|---:|
-| Global LLM, two branches (matrices, head and attention) | 104.5 | 0.435 | 1.63 |
+| Global LLM, two branches (matrices, head and attention) | 107.3 | 0.447 | 1.68 |
 | depth decoder, two branches | 56.0 | 0.233 | 0.88 |
-| DiT, 30 steps of 2 evaluations per chunk | 6,174.8 | 25.728 | 96.47 |
+| DiT, 30 steps of 2 evaluations per chunk | 6,174.8 | 25.728 | 96.43 |
 | vocoder, every chunk decoded in full | 65.4 | 0.272 | 1.02 |
-| total | 6,400.7 | 26.670 | 100.00 |
+| total | 6,403.5 | 26.681 | 100.00 |
 
-One second of the 16-codebook speech synthesiser of Chapter 6, its codec decoder included, costs 52.7 giga multiply-adds; 26.670 tera is 506 times that. The 6,401 tera multiply-adds of the song are 12.80 peta floating-point operations, a multiply-add being two.
+One second of the 16-codebook speech synthesiser of Chapter 6, its codec decoder included, costs 52.7 giga multiply-adds; 26.681 tera is 507 times that. The 6,404 tera multiply-adds of the song are 12.81 peta floating-point operations, a multiply-add being two.
 <!-- /worked -->
 
-The denoiser is 96 percent of it. One second of finished music costs about 26.7 tera multiply-adds, 506 times as much as a second of speech from the 16-codebook synthesiser of the last chapter, and almost all of the difference is one network evaluated 60 times a chunk. The next table builds the denoiser's number from the factors, in order.
+The denoiser is 96 percent of it. One second of finished music costs about 26.7 tera multiply-adds, 507 times as much as a second of speech from the 16-codebook synthesiser of the last chapter, and almost all of the difference is one network evaluated 60 times a chunk. The next table builds the denoiser's number from the factors, in order.
 
 <!-- worked: music.work_factors -->
 From one DiT evaluation to the denoiser's work per second of finished music (multiply-adds, in tera). The chunk of 8 seconds is paid once for every 4 seconds of song, so each second is denoised in two chunks, and the second factor of 2 of the guidance is paid on top of the 30 steps.
@@ -438,7 +590,7 @@ The number of operations also gives a floor for the time, and only a floor.
 
 <!-- worked: music.roof_floor -->
 <!-- perf-number: historical measurement, commit 3c5f30d77 -->
-Divided by the roof of the card of the crate's bench, 10.517 tera operations a second, the 12.80 peta operations of a four-minute song take at least 1,217 seconds, 20.3 minutes, and a real run is slower than its roof.
+Divided by the roof of the card of the crate's bench, 10.517 tera operations a second, the 12.81 peta operations of a four-minute song take at least 1,218 seconds, 20.3 minutes, and a real run is slower than its roof.
 <!-- /worked -->
 
 What a card must hold is a different question, and it has a different answer.
@@ -451,6 +603,17 @@ What one generation asks of a card, stage by stage. The stages run one after the
 | autoregressive: one Global LLM instance (int8 linears, fp32 tables) and the depth decoder | 16,087,553,408 | 16.09 | 6.95 GB measured for the linears |
 | denoise: the DiT's block stack in fp32 plus a margin | 10,066,329,600 | 10.07 | margin of 384 MiB measured |
 | vocoder: one full 689-step chunk | 12,859,736,064 | 12.86 | 12264 MiB measured |
+
+The first row, term by term:
+
+| part | bytes | how |
+|---|---:|---|
+| Global LLM linears, int8 | 6,950,000,000 | measured, 6.95 GB (three digits) |
+| Global LLM, two tables of 200,000 x 4,096 in fp32 | 6,553,600,000 | 2 x 200,000 x 4,096 x 4 bytes |
+| depth decoder, fp32, matrices and tables only | 2,583,953,408 | 4 x (4 x 4,096^2 + 3 x 4,096 x 6,144) + 2 x 7 x 1,024 x 4,096 + 4,096^2 + 16 x 4,096, times 4 bytes |
+| autoregressive stage | 16,087,553,408 | the three rows above |
+
+The closed form of the language model's int8 matrices, the 36 layers of 192,937,984 weights at one byte each, is 6,945,767,424 bytes; the measured 6.95 GB exceeds it by 4,232,576 bytes, 0.06 percent, which is inside the rounding of a figure given to three digits and so leaves no room to say where per-row scales or norm gains live. The depth decoder's closed form omits its 36,864 norm gains. The denoise row is the block stack without biases, 36 x (4 x 2,048^2 + 3 x 8,192 x 2,048) = 2,415,919,104 weights at 4 bytes, plus the margin of 384 MiB = 402,653,184 bytes.
 
 The autoregressive stage runs two instances of the language model, one for each guidance branch; 32,175,106,816 bytes (32.18 GB) is what one card would have to hold if both lived on it, against the 24 GiB (25.77 GB) of the cards of the validation machine.
 <!-- /worked -->
@@ -472,7 +635,7 @@ What the stages hand to one another for a song of 300 seconds (7,500 frames, 74 
 Nearly every component of the crate has a backward pass, and no component is trained on music. Both statements are true, and the difference is the subject of this section. The vocoder has a trainer (`crates/minimaxmusic3/src/train.rs`) whose gradients are checked against finite differences for every named parameter, and low-rank adapters on its convolutions; the depth decoder has a hand-derived backward and adapters on its seven linear maps per layer; the denoiser has a trainer in `crates/minimaxmusic3/src/dit_train.rs`, device-resident and built from the same block builders as its forward, with adapters on the six linear maps per block; and the language model has an objective that is ordinary cross-entropy restricted by position to the audio codes that follow the prompt (`global_llm::audio_code_batch` gives weight 0 to every position whose target lies inside the prompt and 1 from the first audio code on). The adapters are small next to the components.
 
 <!-- worked: music.adapter_sizes -->
-Parameters of the low-rank adapters of the three components that have them: the number of adapted matrices, and for a rank $r$ each matrix of $m \times n$ weights gets $r(m + n)$ trainable numbers. The percentage is against the component's own parameters.
+Parameters of the low-rank adapters of the three components that have them: the number of adapted matrices, and for a rank $r$ each matrix of $m \times n$ weights gets $r(m + n)$ trainable numbers. A convolution is adapted as the matrix of its outputs by its inputs times taps ($m = c_{\mathrm{out}}$, $n = c_{\mathrm{in}} k$), and a transposed convolution as $m = c_{\mathrm{in}}$, $n = c_{\mathrm{out}} k$; $r(m + n)$ is the same either way. The DiT adapts the 6 maps of each of its 36 blocks (4 attention maps, the up-and-gate matrix and the down matrix: 216), the depth decoder the 7 maps of each of its 4 layers (28), and the vocoder 31 convolutions: the input projection, the first convolution, per block one transposed convolution and three units of two, and the final convolution. The percentage is against the component's own parameters.
 
 | component | adapted matrices | rank | adapter parameters | % of the component |
 |---|---:|---:|---:|---:|

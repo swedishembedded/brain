@@ -193,6 +193,26 @@ def song_lengths():
                      rows, "rrrrrrr"))
 
 
+def chunk_rule():
+    """The rule that turns a frame count into chunks, with the cases at its edges."""
+    rows = []
+    for f in (1, 200, 201, 300, 301, 450, 7500):
+        plan = stitch_plan(f)
+        last = plan[-1]
+        rows.append((f"{f:,}", str(len(plan)), ", ".join(str(p["start"]) for p in plan[:3]) + (", ..." if len(plan) > 3 else ""),
+                     str(last["frames"]), str(last["length"]), f"{last['lo']} to {last['hi']}"))
+    return (f"A song of $F$ frames is one chunk when $F \\le {CHUNK_FRAMES}$, and otherwise "
+            f"$\\lceil (F - {CHUNK_FRAMES}) / {CHUNK_HOP} \\rceil + 1$ chunks, starting at the frames $0, {CHUNK_HOP}, "
+            f"{2 * CHUNK_HOP}, \\ldots$ up to the last start that is below $F - {CHUNK_HOP}$ (the starts are "
+            f"`range(0, F - {CHUNK_HOP}, {CHUNK_HOP})`). Chunk $i$ has $\\min({CHUNK_FRAMES}, F - s_i)$ frames, so the last chunk has "
+            f"more than {CHUNK_HOP} and at most {CHUNK_FRAMES} frames, and its latent length is the truncated product of the first "
+            f"table. Every chunk but the first drops its first {CROP_L} latent steps and every chunk but the last drops its last "
+            f"{CROP_R}; the last chunk therefore keeps steps {CROP_L} up to its own length. A song of {CHUNK_FRAMES} frames or "
+            "fewer is a single chunk with no crop at all.\n\n"
+            + _table(["frames $F$", "chunks", "first starts", "frames of the last chunk", "latents of the last chunk",
+                      "kept of the last chunk"], rows, "rrlrrr"))
+
+
 def chunk_geometry(n_frames=450):
     plan = stitch_plan(n_frames)
     rows = []
@@ -235,15 +255,20 @@ def length_drift():
 def chunk_constants():
     full = latent_length(CHUNK_FRAMES)
     mid = full - CROP_L - CROP_R
-    rows = [("chunk", f"{CHUNK_FRAMES} frames", f"{full}", CHUNK_FRAMES / FRAME_RATE),
-            ("hop between chunk starts", f"{CHUNK_HOP} frames", f"{CHUNK_HOP * HOP_AR * SR / SR_AR / HOP_LAT:.4f}", CHUNK_HOP / FRAME_RATE),
+    rows = [("chunk (on the frame clock)", f"{CHUNK_FRAMES} frames", f"{full}", CHUNK_FRAMES / FRAME_RATE),
+            ("hop between chunk starts (on the frame clock)", f"{CHUNK_HOP} frames", f"{CHUNK_HOP * HOP_AR * SR / SR_AR / HOP_LAT:.4f}", CHUNK_HOP / FRAME_RATE),
             ("carried prefix", f"{OVERLAP * HOP_LAT / (HOP_AR * SR / SR_AR):.3f} frames", f"{OVERLAP}", OVERLAP / LAT_RATE),
             ("crop off the left of a later chunk", f"{CROP_L * HOP_LAT / (HOP_AR * SR / SR_AR):.3f} frames", f"{CROP_L}", CROP_L / LAT_RATE),
             ("crop off the right of an earlier chunk", f"{CROP_R * HOP_LAT / (HOP_AR * SR / SR_AR):.3f} frames", f"{CROP_R}", CROP_R / LAT_RATE),
             ("kept from a chunk with a neighbour on each side", f"{mid * HOP_LAT / (HOP_AR * SR / SR_AR):.3f} frames", f"{mid}", mid / LAT_RATE)]
     body = [(n, fr, lat, _f(sec, 4), _i(round(sec * SR))) for n, fr, lat, sec in rows]
     return ("The constants of the chunked denoiser in the units of the frame, the latent step and the clock. A latent step is "
-            "$512/44100$ of a second; a frame is $1764/512 = 441/128 = 3.4453125$ latent steps.\n\n"
+            "$512/44100$ of a second; a frame is $1764/512 = 441/128 = 3.4453125$ latent steps. The chunk and the hop are "
+            "defined in frames, and their seconds and samples are the frame clock's, nominal; the other four rows are defined in "
+            f"latent steps, and their seconds and samples are the latent clock's. The {full} steps of a chunk are "
+            f"{full * HOP_LAT:,} samples, {full * HOP_LAT / SR:.4f} seconds, {CHUNK_FRAMES * HOP_AR * SR // SR_AR - full * HOP_LAT} "
+            "samples short of the nominal 200 frames, because the latent length is truncated; the hop's 344.5312 steps are "
+            "fractional, and the carried slice is placed at a whole step.\n\n"
             + _table(["constant", "in frames", "in latent steps", "seconds", "samples at 44,100 Hz"], body, "lrrrr"))
 
 
@@ -585,11 +610,90 @@ def lm_params():
     return mc.parameters_formula(LM["V"], LM["D"], LM["L"], LM["H"], LM["hkv"], LM["dh"], LM["F"], untied=True, qk_norm=True)
 
 
+def _prod(dims):
+    n = 1
+    for x in dims:
+        n *= x
+    return n
+
+
+def _shape(dims):
+    return " x ".join(f"{x:,}" for x in dims)
+
+
+def lm_rows():
+    """The tensors of the Global LLM as (name, dims, copies): the Qwen3 layout of Volume VI at a vocabulary of 200,000."""
+    d, h, hk, dh, f, v, n = LM["D"], LM["H"], LM["hkv"], LM["dh"], LM["F"], LM["V"], LM["L"]
+    return [("token embedding table", (v, d), 1), ("output head (untied)", (v, d), 1), ("final RMSNorm gain", (d,), 1),
+            ("W_Q, per layer", (h * dh, d), n), ("W_K, per layer", (hk * dh, d), n), ("W_V, per layer", (hk * dh, d), n),
+            ("W_O, per layer", (d, h * dh), n), ("query and key norm gains, per layer", (2, dh), n),
+            ("W_gate, per layer", (f, d), n), ("W_up, per layer", (f, d), n), ("W_down, per layer", (d, f), n),
+            ("two RMSNorm gains, per layer", (2, d), n)]
+
+
+def dd_rows():
+    """The tensors of the RVQ depth decoder as (name, dims, copies); every linear map is bias-free."""
+    h, i, v, n = DD["h"], DD["inter"], DD["vocab"], DD["layers"]
+    return [("audio embedding tables, one per residual codebook", (v, h), N_RES),
+            ("output heads, one per residual codebook", (v, h), N_RES),
+            ("input projection, one matrix applied to every input row", (h, h), 1),
+            ("position table", (DD["max_pos"], h), 1), ("final RMSNorm gain", (h,), 1),
+            ("attention W_q, W_k, W_v, W_out, per layer", (h, h), 4 * n),
+            ("W_gate and W_up, per layer", (i, h), 2 * n), ("W_down, per layer", (h, i), n),
+            ("two RMSNorm gains, per layer", (2, h), n)]
+
+
+def ce_rows():
+    """The condition encoder as (name, dims, copies)."""
+    return [("softmax logits over the 8 hidden vectors of a frame", (CE["layers"],), 1), ("scale", (1,), 1),
+            ("convolution weight, 3 taps along the frame axis", (CE["out"], CE["hidden"], CE["k"]), 1),
+            ("convolution bias", (CE["out"],), 1)]
+
+
+def dit_block_rows():
+    """The tensors of one DiT block as (name, dims, copies)."""
+    d, ff = DIT["inner"], DIT["ff"]
+    return [("attention W_q, W_k, W_v, W_out (no bias)", (d, d), 4),
+            ("two LayerNorms, each a gain and a bias", (2, 2, d), 1),
+            ("up and gate projections, one stored matrix", (2 * ff, d), 1), ("their bias", (2 * ff,), 1),
+            ("down projection", (d, ff), 1), ("its bias", (d,), 1)]
+
+
+def dit_rows():
+    """The tensors of the DiT as (name, dims, copies): the time embedding, the input path, 36 blocks, the output path."""
+    d, c = DIT["inner"], DIT["concat"]
+    rows = [("random-Fourier weights of the time embedding", (DIT["four"] // 2,), 1),
+            ("time MLP, first layer weight (256 sin and cos inputs)", (d, DIT["four"]), 1), ("its bias", (d,), 1),
+            ("time MLP, second layer weight", (d, d), 1), ("its bias", (d,), 1),
+            ("input convolution, 1 tap, 2,304 to 2,304 (no bias)", (c, c), 1),
+            ("input projection, 2,304 to 2,048 (no bias)", (d, c), 1)]
+    rows += [(f"per block: {n}", dims, copies * DIT["layers"]) for n, dims, copies in dit_block_rows()]
+    rows += [("output projection, 2,048 to 128 (no bias)", (DIT["cin"], d), 1),
+             ("output convolution, 1 tap, 128 to 128 (no bias)", (DIT["cin"], DIT["cin"]), 1)]
+    return rows
+
+
+def _rows_sum(rows):
+    return sum(_prod(dims) * copies for _, dims, copies in rows)
+
+
+def lm_params():
+    total = _rows_sum(lm_rows())
+    assert total == mc.parameters_formula(LM["V"], LM["D"], LM["L"], LM["H"], LM["hkv"], LM["dh"], LM["F"], untied=True,
+                                          qk_norm=True)
+    return total
+
+
 def dd_params():
-    h, i, v = DD["h"], DD["inter"], DD["vocab"]
-    books = N_RES
-    per_layer = 4 * h * h + 3 * h * i + 2 * h          # q, k, v, out; gate, up, down; two RMS-norm gains
-    return (per_layer * DD["layers"] + books * v * h * 2 + h * h + DD["max_pos"] * h + h)
+    return _rows_sum(dd_rows())
+
+
+def ce_params():
+    return _rows_sum(ce_rows())
+
+
+def dit_params():
+    return _rows_sum(dit_rows())
 
 
 def dd_macs_per_position():
@@ -597,41 +701,34 @@ def dd_macs_per_position():
     return DD["layers"] * (4 * h * h + 3 * h * i)
 
 
-def ce_params():
-    return CE["layers"] + 1 + CE["out"] * CE["hidden"] * CE["k"] + CE["out"]
-
-
-def dit_block_params():
-    d, ff = DIT["inner"], DIT["ff"]
-    return 4 * d * d + 2 * d * 2 + 2 * ff * d + 2 * ff + d * ff + d
-
-
-def dit_params():
-    d, c = DIT["inner"], DIT["concat"]
-    fixed = (DIT["four"] // 2 + DIT["four"] * d + d + d * d + d       # the Fourier weights and the two timestep layers
-             + c * c + d * c + DIT["cin"] * d + DIT["cin"] * DIT["cin"])   # preprocess conv, proj_in, proj_out, postprocess conv
-    return DIT["layers"] * dit_block_params() + fixed
-
-
-def voc_layers():
-    """(name, parameters, multiply-adds per output position of the layer's own resolution, ratio of that resolution to the latent
-    rate) for every layer of the decoder, one stereo stream (the two streams share the weights)."""
+def voc_layout():
+    """(name, formula, parameters, multiply-adds per output position of the layer's own resolution, ratio of that resolution to the
+    latent rate) for every layer of the decoder, one stereo stream (the two streams share the weights). Every convolution has
+    a bias; a Snake has one alpha per channel; a residual unit is Snake, 7-tap convolution at its dilation, Snake, 1-tap
+    convolution, and the sum with the unit's input."""
     layers = []
     half = VOC["latent"] // 2
     cur, up = VOC["dhid"], 1
-    layers.append(("input projection (1x1)", half * VOC["din"] + VOC["din"], half * VOC["din"], 1))
-    layers.append(("first convolution (k=7)", VOC["din"] * cur * 7 + cur, VOC["din"] * cur * 7, 1))
+    layers.append(("input projection (1x1)", f"{VOC['din']:,} x {half} + {VOC['din']:,}", half * VOC["din"] + VOC["din"],
+                   half * VOC["din"], 1))
+    layers.append(("first convolution (k=7)", f"{VOC['din']:,} x {cur:,} x 7 + {cur:,}", VOC["din"] * cur * 7 + cur,
+                   VOC["din"] * cur * 7, 1))
     for b, s in enumerate(VOC["ratios"]):
         out = cur // 2
-        layers.append((f"block {b}: Snake", cur, 0, up))
-        layers.append((f"block {b}: transposed convolution (k={2 * s}, stride {s})", cur * out * 2 * s + out, cur * out * 2 * s, up))
+        layers.append((f"block {b}: Snake", f"{cur:,} alphas", cur, 0, up))
+        layers.append((f"block {b}: transposed convolution (k={2 * s}, stride {s})",
+                       f"{cur:,} x {out:,} x {2 * s} + {out:,}", cur * out * 2 * s + out, cur * out * 2 * s, up))
         up *= s
         for u, d in enumerate((1, 3, 9)):
-            layers.append((f"block {b}, unit {u} (dilation {d})", 2 * out + out * out * 7 + out + out * out + out,
-                           out * out * 7 + out * out, up))
+            layers.append((f"block {b}, unit {u} (dilation {d})", f"2 x {out:,} + ({out:,}^2 x 7 + {out:,}) + ({out:,}^2 + {out:,})",
+                           2 * out + out * out * 7 + out + out * out + out, out * out * 7 + out * out, up))
         cur = out
-    layers.append(("final Snake and convolution (k=7)", cur + cur * 7 + 1, cur * 7, up))
+    layers.append(("final Snake and convolution (k=7)", f"{cur:,} alphas + {cur:,} x 7 + 1", cur + cur * 7 + 1, cur * 7, up))
     return layers
+
+
+def voc_layers():
+    return [(n, p, m, u) for n, _, p, m, u in voc_layout()]
 
 
 def voc_params():
@@ -644,19 +741,50 @@ def voc_macs(length):
     return 2 * sum(macs * length * up for _, _, macs, up in voc_layers())
 
 
+def architecture_layouts():
+    """The tensors behind every parameter count, so that each row of `parameter_counts` can be re-derived."""
+    def table(rows):
+        body = [(n, _shape(dims), f"{copies:,}", _i(_prod(dims) * copies)) for n, dims, copies in rows]
+        body.append(("total", "", "", _i(_rows_sum(rows))))
+        return _table(["tensor", "shape (outputs x inputs)", "copies", "parameters"], body, "llrr")
+
+    voc = [(n, f, _i(p), _i(m), f"{u:,}") for n, f, p, m, u in voc_layout()]
+    voc.append(("total, one stream", "", _i(voc_params()), "", ""))
+    return ("The tensors of the five components, the Global LLM in the layout of Volume VI, with the counting conventions. A shape lists outputs before inputs, so a linear map from 4,096 to 2,048 "
+            "numbers is 2,048 x 4,096; a convolution is outputs x inputs x taps. A count is the product of the shape and the "
+            "copies, and the total of each table is the count of the next one. Where a bias is not listed the map has none.\n\n"
+            "Global LLM (the layout of Volume VI's Qwen3 8B, a vocabulary of 200,000, 36 layers, 32 query and 8 key-value "
+            "heads of 128, a feed-forward width of 12,288):\n\n"
+            + table(lm_rows())
+            + "\n\nRVQ depth decoder (4 layers of width 4,096, 16 heads, a feed-forward width of 6,144; no rotary "
+              "embedding, no grouped heads, no bias; the table has 1,024 rows, the codebook size):\n\n"
+            + table(dd_rows())
+            + "\n\nCondition encoder (the 3-tap convolution runs along the frame axis and has a bias):\n\n"
+            + table(ce_rows())
+            + "\n\nFlow-matching DiT, one block listed once and then repeated 36 times in the full table:\n\n"
+            + table([(n, dims, copies) for n, dims, copies in dit_block_rows()])
+            + "\n\nThe whole denoiser, the block rows multiplied by 36:\n\n"
+            + table(dit_rows())
+            + "\n\nVocoder, one 64-channel stream (the two ears share the weights). The multiply-adds are per position of "
+              "the layer's own resolution, and the last column is that resolution as a multiple of the latent rate; a "
+              "transposed convolution is counted at its input positions:\n\n"
+            + _table(["layer", "parameters, as a sum of tensors", "parameters", "multiply-adds a position", "positions per latent step"],
+                     voc, "llrrr"))
+
+
 def parameter_counts():
     lm, dd, ce, dt, vc = lm_params(), dd_params(), ce_params(), dit_params(), voc_params()
     rows = [("Global LLM (Qwen3 8B decoder, 200,000-id vocabulary, untied head)", lm),
             ("RVQ depth decoder (4 layers, width 4096)", dd),
             ("condition encoder (8 layer logits, one 3-tap convolution 4096 to 2048)", ce),
             ("flow-matching DiT (36 blocks of width 2048)", dt),
-            ("vocoder (DAC-style decoder, one 64-channel stream per ear)", vc)]
+            ("vocoder (convolutional decoder with Snake activations, one 64-channel stream per ear)", vc)]
     total = sum(p for _, p in rows)
     body = [(n, _i(p), _g(p * 4 / 1e9, 2), f"{100 * p / total:.1f}") for n, p in rows]
     body.append(("all five", _i(total), _g(total * 4 / 1e9, 2), "100.0"))
     qwen8_151936 = mc.parameters_formula(151936, 4096, 36, 32, 8, 128, 12288)
-    return ("Parameters of the five components, counted from the shapes of the crate's configuration and tensors (norm gains, "
-            "biases and the DiT's time embedding included), and the bytes of a 32-bit copy in gigabytes ($10^9$ bytes). The "
+    return ("Parameters of the five components, the totals of the tensor tables above (norm gains, biases and the DiT's time "
+            "embedding included), and the bytes of a 32-bit copy in gigabytes ($10^9$ bytes). The "
             f"Global LLM is Volume VI's count of Qwen3 8B, {_i(qwen8_151936)} for a vocabulary of 151,936, with the two tables "
             f"enlarged to 200,000 ids: {_i(qwen8_151936)} + 2 x 4096 x (200,000 - 151,936) = {_i(lm)}.\n\n"
             + _table(["component", "parameters", "GB at 32 bits", "share (%)"], body, "lrrr"))
@@ -703,12 +831,28 @@ def lm_attention_macs(prompt, n_frames):
     return sum(2 * LM["L"] * width * (prompt + t) for t in range(1, n_frames + 1))
 
 
+def lm_prompt_macs(prompt):
+    """Multiply-adds of the prompt's rows through one branch of the Global LLM: the matrices of 36 layers for each of the `prompt`
+    rows, and attention in which row p reads p keys. The output head is not applied: its one use at the last prompt row is the
+    loop's extra first iteration, which the arithmetic leaves out."""
+    width = LM["H"] * LM["dh"]
+    return prompt * LM["L"] * _lm_layer_matrix_params() + sum(2 * LM["L"] * width * p for p in range(1, prompt + 1))
+
+
+def dd_attention_macs_per_branch():
+    """Attention of the depth decoder over the 8 positions of one frame: position p reads p keys, 2 products of the width."""
+    return DD["layers"] * 2 * DD["h"] * sum(range(1, N_HID + 1))
+
+
 def ar_frame_macs():
+    """(Global LLM, depth decoder) multiply-adds of one frame for both guidance branches."""
     lm = 2 * lm_frame_macs()                                     # two guidance branches
     depth_pos = 2 * N_HID * dd_macs_per_position()               # 8 positions per frame, two branches
     heads = 2 * N_RES * DD["h"] * DD["vocab"]                    # seven residual heads, two branches
-    proj = (2 + 1 + (N_RES - 1)) * DD["h"] * DD["h"]             # two seeds, one for the first code, one per later row (shared)
-    return lm, depth_pos + heads + proj
+    # the input projection is applied to 9 rows: each branch's own hidden vector (2), then the semantic code's embedding and
+    # the embeddings of the first six residual codes, which the two branches share because one code is drawn for both
+    proj = (2 + 1 + (N_RES - 1)) * DD["h"] * DD["h"]
+    return lm, depth_pos + heads + proj + 2 * dd_attention_macs_per_branch()
 
 
 def dit_forward_macs(length):
@@ -734,17 +878,61 @@ def dit_breakdown():
     body = [(n, _eng(v, "G", 1), f"{100 * v / total:.2f}") for n, v in parts]
     body.append(("one evaluation", _eng(total, "G", 1), "100.00"))
     return (f"The multiply-adds of one DiT evaluation over a full chunk ({length} latent steps, {rows_} rows with the timestep "
-            "token), in giga, split by kind.\n\n" + _table(["part", "multiply-adds (G)", "share (%)"], body, "lrr"))
+            "token), in giga, split by kind. The blocks see all rows; the glue is applied to the latent steps only, as 1-tap "
+            "convolutions 2,304 to 2,304, a projection 2,304 to 2,048, a projection 2,048 to 128 and a convolution 128 to 128, "
+            "and the time embedding (256 to 2,048 to 2,048) is applied once.\n\n" + _table(["part", "multiply-adds (G)", "share (%)"], body, "lrr"))
 
 
 def song_work(n_frames, prompt=200):
     plan = stitch_plan(n_frames)
     lm_mm, dd_mm = ar_frame_macs()
-    ar_lm = n_frames * lm_mm + 2 * lm_attention_macs(prompt, n_frames)
+    ar_lm = n_frames * lm_mm + 2 * lm_attention_macs(prompt, n_frames) + 2 * lm_prompt_macs(prompt)
     ar_dd = n_frames * dd_mm
     dit = sum(dit_forward_macs(p["length"]) * STEPS * 2 for p in plan)
     voc = sum(voc_macs(p["length"]) for p in plan)
     return dict(lm=ar_lm, dd=ar_dd, dit=dit, voc=voc, plan=plan)
+
+
+def work_layout(prompt=200, secs=240):
+    """The counting rules of `work_per_stage`: every term as a formula in the shapes of `architecture_layouts` and its value."""
+    L, D, h, hk, dh, f, V = LM["L"], LM["D"], LM["H"], LM["hkv"], LM["dh"], LM["F"], LM["V"]
+    H, I = DD["h"], DD["inter"]
+    d, ff, c, cin = DIT["inner"], DIT["ff"], DIT["concat"], DIT["cin"]
+    n_frames = secs * FRAME_RATE
+    length = latent_length(CHUNK_FRAMES)
+    rows_ = length + 1
+    lm_mm = _lm_layer_matrix_params() * L
+    rows = [
+        ("Global LLM", "matrices of one row, one branch: 36 x (2 x 4,096 x 4,096 + 2 x 4,096 x 1,024 + 3 x 4,096 x 12,288)", lm_mm),
+        ("Global LLM", "output head, one row, one branch: 200,000 x 4,096", V * D),
+        ("Global LLM", "one frame, both branches: 2 x (matrices + head)", ar_frame_macs()[0]),
+        ("Global LLM", f"attention of the {n_frames:,} frames, both branches: 2 x 2 x 36 x 4,096 x the sum over t = 1 to {n_frames:,} of "
+                       f"the {prompt} + t positions that frame t reads", 2 * lm_attention_macs(prompt, n_frames)),
+        ("Global LLM", f"the {prompt} prompt rows, both branches: matrices and attention (row p reads p keys), no head",
+         2 * lm_prompt_macs(prompt)),
+        ("depth decoder", "one position, one branch: 4 x (4 x 4,096^2 + 3 x 4,096 x 6,144)", dd_macs_per_position()),
+        ("depth decoder", "the 8 positions of a frame, both branches", 2 * N_HID * dd_macs_per_position()),
+        ("depth decoder", "seven output heads, both branches: 2 x 7 x 4,096 x 1,024", 2 * N_RES * H * DD["vocab"]),
+        ("depth decoder", "input projection, applied to 9 rows (each branch's hidden vector, the semantic code's embedding and six residual ones, the last seven shared by the branches): 9 x 4,096^2",
+         9 * H * H),
+        ("depth decoder", "attention over the 8 positions, both branches: 2 x (4 x 2 x 4,096 x (1 + 2 + ... + 8))",
+         2 * dd_attention_macs_per_branch()),
+        ("depth decoder", "one frame, the four terms above", ar_frame_macs()[1]),
+        ("DiT", f"attention projections, one evaluation: 36 x {rows_} x 4 x 2,048^2", DIT["layers"] * rows_ * 4 * d * d),
+        ("DiT", f"feed-forward, one evaluation: 36 x {rows_} x 3 x 8,192 x 2,048", DIT["layers"] * rows_ * 3 * ff * d),
+        ("DiT", f"attention scores and weighted sums: 36 x 2 x {rows_}^2 x 2,048", DIT["layers"] * 2 * rows_ * rows_ * d),
+        ("DiT", f"glue, on the {length} latent steps: {length} x (2,304^2 + 2,304 x 2,048 + 2,048 x 128 + 128^2), plus the time "
+                f"embedding 256 x 2,048 + 2,048^2 once", length * (c * c + c * d + d * cin + cin * cin) + DIT["four"] * d + d * d),
+        ("vocoder", f"one latent step, both streams: 2 x the sum over the layers of (multiply-adds a position x positions per step)",
+         voc_macs(1)),
+    ]
+    body = [(a, b, _i(v)) for a, b, v in rows]
+    return ("The terms of the count, as formulas in the shapes of the tables above. A product is counted once for every row it is "
+            "applied to; norms, activations, embedding lookups and the sampling are left out. The output head is applied once per "
+            "frame, to the frame's row, and so the prompt's rows and the loop's extra first iteration (the frame that the loop "
+            "samples from the end of the prompt and does not keep) are counted as matrices and attention only, not as one more "
+            "head and one more depth-decoder frame.\n\n"
+            + _table(["stage", "term", "multiply-adds"], body, "llr"))
 
 
 def work_per_stage():
@@ -763,8 +951,8 @@ def work_per_stage():
     speech = ss._talker_frame_macs()
     speech_s = (speech[0] + speech[1] + speech[2] + speech[3]) * ss.FRAME_RATE + sum(r[2] for r in ss.ac._decoder_rows())
     return (f"Multiply-adds to make a song of {secs} seconds ({f:,} frames, {len(w['plan'])} chunks), counted as in the speech "
-            "chapter: every matrix product once per row, attention scores and weighted sums included, norms and elementwise "
-            "functions left out; a prompt of 200 tokens is assumed. One DiT evaluation over a full chunk "
+            "chapter and by the terms of the table above: every matrix product once per row, attention scores and weighted sums "
+            "included, the 200 rows of the assumed prompt included, norms and elementwise functions left out. One DiT evaluation over a full chunk "
             f"(length {latent_length(CHUNK_FRAMES)}, {latent_length(CHUNK_FRAMES) + 1} rows with the timestep token) is "
             f"{_eng(one, 'T', 3)} tera-multiply-adds; one autoregressive frame costs {_eng(lm_mm, 'G', 2)} giga for the language "
             f"model's two branches (without attention) and {_eng(dd_mm, 'G', 2)} for the depth decoder's.\n\n"
@@ -826,7 +1014,11 @@ def vocoder_memory():
     body.append(("all of them", "", _i(total), _g(total * 2 * 4 / 2 ** 20, 1)))
     return ("The buffers of the vocoder for one chunk of 689 latent steps: the decoder is recorded as one tape and submitted once, "
             "so every intermediate is alive until the end. Floats per stream, and mebibytes ($2^{20}$ bytes) for the two streams "
-            "at 4 bytes; a block holds the input Snake, the upsampling, and three residual units of five buffers each.\n\n"
+            "at 4 bytes. A block of $c$ channels in and $c/2$ out, from $L$ to $sL$ steps, holds the input Snake ($c L$ floats, at the "
+            "block's input resolution), the transposed convolution's output ($c s L / 2$), and three residual units of five "
+            "buffers each (Snake, dilated convolution, Snake, 1-tap convolution and the sum, each $c s L / 2$), 17 buffers in "
+            "all. The first row is the projection ($1{,}024 L$) and the first convolution ($1{,}536 L$); the last is the "
+            "Snake over 96 channels and the one-channel output.\n\n"
             + _table(["part", "buffers", "floats per stream", "MiB, two streams"], body, "lrrr")
             + f"\n\nThe crate's ledger records a measured peak of {12264:,} MiB for such a chunk "
               f"(`VOCODER_CHUNK_DEVICE_PEAK_BYTES`); the activations account for {total * 8 / 2 ** 20 / 12264 * 100:.1f} percent of it.")
@@ -846,12 +1038,26 @@ def stage_memory():
             ("vocoder: one full 689-step chunk", voc, "12264 MiB measured")]
     body = [(n, _i(b), _g(b / 1e9, 2), note) for n, b, note in rows]
     two = 2 * ar
+    lin_closed = LM["L"] * _lm_layer_matrix_params()
+    parts = [("Global LLM linears, int8", gl - 2 * LM["V"] * LM["D"] * 4, "measured, 6.95 GB (three digits)"),
+             ("Global LLM, two tables of 200,000 x 4,096 in fp32", 2 * LM["V"] * LM["D"] * 4, "2 x 200,000 x 4,096 x 4 bytes"),
+             ("depth decoder, fp32, matrices and tables only", dd_closed,
+              "4 x (4 x 4,096^2 + 3 x 4,096 x 6,144) + 2 x 7 x 1,024 x 4,096 + 4,096^2 + 16 x 4,096, times 4 bytes")]
+    mem = [(n, _i(b), note) for n, b, note in parts] + [("autoregressive stage", _i(ar), "the three rows above")]
+    gap = gl - 2 * LM["V"] * LM["D"] * 4 - lin_closed
     return ("What one generation asks of a card, stage by stage. The stages run one after the other and drop their device state "
             "between them, so the need is the largest of the three, not the sum. A stage's weights are the closed form of its "
             "shapes where one exists; the three figures marked measured are measurements of the crate's ledger and cannot be "
             "derived from a configuration.\n\n"
             + _table(["stage", "bytes", "GB", "source"], body, "lrrl")
-            + f"\n\nThe autoregressive stage runs two instances of the language model, one for each guidance branch; {_i(two)} bytes "
+            + "\n\nThe first row, term by term:\n\n" + _table(["part", "bytes", "how"], mem, "lrl")
+            + f"\n\nThe closed form of the language model's int8 matrices, the 36 layers of "
+              f"{_lm_layer_matrix_params():,} weights at one byte each, is {_i(lin_closed)} bytes; the measured 6.95 GB exceeds it by "
+              f"{_i(gap)} bytes, {100 * gap / lin_closed:.2f} percent, which is inside the rounding of a figure given to three digits "
+              "and so leaves no room to say where per-row scales or norm gains live. The depth decoder's closed form omits its "
+              f"{_i(dd_params() - dd_closed // 4)} norm gains. The denoise row is the block stack without biases, 36 x (4 x 2,048^2 "
+              f"+ 3 x 8,192 x 2,048) = {_i(dit_blocks // 4)} weights at 4 bytes, plus the margin of 384 MiB = {_i(384 << 20)} bytes.\n\n"
+              f"The autoregressive stage runs two instances of the language model, one for each guidance branch; {_i(two)} bytes "
               f"({two / 1e9:.2f} GB) is what one card would have to hold if both lived on it, against the 24 GiB "
               f"({24 * 2 ** 30 / 1e9:.2f} GB) of the cards of the validation machine.")
 
@@ -889,7 +1095,12 @@ def vocoder_reach():
     return ("The interval of positions that can change one block of 512 output samples (those of latent step $q$ = 1000), found "
             "by walking the decoder backward from the output: each convolution widens the interval by its dilation times "
             "$(k-1)/2$ on each side, each transposed convolution maps it to the input positions that a window of its kernel "
-            "touches. Positions are in the layer's own resolution.\n\n"
+            "touches. Positions are in the layer's own resolution. A residual unit is walked backward as its 1-tap convolution and then its "
+            "7-tap convolution at the unit's dilation (a convolution pads each side by dilation x 3 so that the length is kept), "
+            "and the three units of a block with dilations 9, 3 and 1 in that order (forward they are 1, 3 and 9, after the "
+            "upsampling). A transposed convolution of stride $s$ has a kernel of $k$ taps, twice $s$, and pads $s/2$ on each side: its output "
+            "position $o$ takes input $i$ through tap $j$ when $o = i s - s/2 + j$, so an output interval $[a, b]$ needs the "
+            "inputs from $\\lceil (a + s/2 - k + 1)/s \\rceil$ to $\\lfloor (b + s/2)/s \\rfloor$.\n\n"
             + _table(["after walking back through", "first position", "last position", "positions"], rows, "lrrr")
             + f"\n\nAt the latent rate the 512 samples of step {q} depend on steps {lo} to {hi}: {left} before and {right} after. "
               f"The crops of the stitcher are {CROP_L} and {CROP_R} steps.")
@@ -916,8 +1127,13 @@ def adapter_sizes():
         for rank in (4, 16):
             rows.append((name, str(len(shapes) * reps), str(rank), _i(per_rank * rank), f"{100 * per_rank * rank / base:.2f}"))
     return ("Parameters of the low-rank adapters of the three components that have them: the number of adapted matrices, and for "
-            "a rank $r$ each matrix of $m \\times n$ weights gets $r(m + n)$ trainable numbers. The percentage is against the "
-            "component's own parameters.\n\n"
+            "a rank $r$ each matrix of $m \\times n$ weights gets $r(m + n)$ trainable numbers. A convolution is adapted as the "
+            "matrix of its outputs by its inputs times taps ($m = c_{\\mathrm{out}}$, $n = c_{\\mathrm{in}} k$), and a transposed "
+            "convolution as $m = c_{\\mathrm{in}}$, $n = c_{\\mathrm{out}} k$; $r(m + n)$ is the same either way. The DiT "
+            "adapts the 6 maps of each of its 36 blocks (4 attention maps, the up-and-gate matrix and the down matrix: 216), the "
+            "depth decoder the 7 maps of each of its 4 layers (28), and the vocoder 31 convolutions: the input projection, the "
+            "first convolution, per block one transposed convolution and three units of two, and the final convolution. The "
+            "percentage is against the component's own parameters.\n\n"
             + _table(["component", "adapted matrices", "rank", "adapter parameters", "% of the component"], rows, "lrrrr"))
 
 

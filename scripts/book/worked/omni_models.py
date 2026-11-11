@@ -108,8 +108,11 @@ def rows_per_medium():
     hb, wb, (gh, gw), n = _picture(448, 448)
     rows.append(("video, 2 frames a second", "448 x 448, one pair of frames a second", f"{gh} x {gw} patches", _i(n), f"{n:.1f}"))
     first = ("Rows that each medium hands to the decoder. Sound: the audio tower cuts the 100-frames-a-second log-mel picture (hop 160 samples) into chunks "
-             "of 100 frames, each of which gives 13 rows (a partial chunk fewer, by three halvings that round up). Picture: both sides rounded to a "
-             "multiple of 32 (`smart_resize`, minimum area 56 x 56, maximum 3584 x 3584), a patch of 16 x 16 pixels, and 2 x 2 patches merged into one row. "
+             "of 100 frames, each of which gives 13 rows (a partial chunk fewer, by three halvings that round up). Picture: both sides are resized by the "
+             "rounding rule of Volume VII, Chapter 9 (called `smart_resize` there): each side goes to the nearest multiple of 32, a half way value to the "
+             "even multiple, and at least 32; if the area is then over 3584 x 3584 both original sides are divided by sqrt(h w / 3584^2) and rounded "
+             "down to a multiple of 32 (at least 32), and if it is under 56 x 56 both are multiplied by sqrt(56^2 / (h w)) and rounded up; none of the "
+             "printed pictures reaches a tie or a limit. Then a patch of 16 x 16 pixels, and 2 x 2 patches merged into one row. "
              "A pair of video frames is one picture's worth of rows.\n\n"
              + _table(["medium", "input", "frames or patches", "rows", "rows a second"], rows, "llrrr"))
     out_rows = [
@@ -204,8 +207,9 @@ def minute_of_video():
     all_total = sum(m for _, m in stages)
     body = [(n, _t(m, 3), f"{100 * m / all_total:.1f}") for n, m in stages]
     body.append(("everything before the first reply token", _t(all_total, 3), "100.0"))
-    second = ("Multiply-adds, in trillions, that the clip costs before the first token of the reply (the three DeepStack mergers are not run, as in brain's "
-              "serving path; norms, activations and the position-table resampling are left out).\n\n" + _table(["stage", "trillions of multiply-adds", "percent"], body))
+    second = ("Multiply-adds, in trillions, that the clip costs before the first token of the reply (the vision tower's three DeepStack mergers, extra copies "
+              "of the final merger that the checkpoint carries to inject early vision features into the decoder's first layers, are not run, as in "
+              "brain's serving path; norms, activations and the position-table resampling are left out).\n\n" + _table(["stage", "trillions of multiply-adds", "percent"], body))
     kv = _kv_bytes_per_token()
     third = (f"The cache that the prefill leaves behind: 48 layers x 2 x 4 key-value heads x 128 x {KV_BYTES_PER_VALUE} bytes is {_i(kv)} bytes a position (32-bit floats, "
              f"as brain's caches are), so {_i(total)} positions hold {_i(kv * total)} bytes, {kv * total / 2**30:.2f} GiB.")
@@ -378,6 +382,189 @@ def _tensor_counts():
     return {"thinker": thinker, "talker": talker, "predictor": predictor, "audio": audio, "vision": vision, "code2wav": code2wav}
 
 
+def _prod(dims):
+    n = 1
+    for x in dims:
+        n *= x
+    return n
+
+
+def _shape(dims):
+    return " x ".join(f"{x:,}" for x in dims)
+
+
+def audio_rows():
+    """Every tensor group of the audio tower as (name, dims, tensors): one stored tensor per copy, shapes written outputs first
+    (a convolution as outputs x inputs x kernel height x kernel width)."""
+    d, ff, c, n = A_D, A_FFN, A_CONV, A_LAYERS
+    return [("stem convolution 1 weight (stride 2, padding 1)", (c, 1, 3, 3), 1), ("stem convolution 1 bias", (c,), 1),
+            ("stem convolution 2 weight", (c, c, 3, 3), 1), ("stem convolution 2 bias", (c,), 1),
+            ("stem convolution 3 weight", (c, c, 3, 3), 1), ("stem convolution 3 bias", (c,), 1),
+            ("stem output linear, 480 channels x 16 mel bins = 7,680 to 1,280 (no bias)", (d, c * 16), 1),
+            ("per block: attention q, k, v, out weights", (d, d), 4 * n), ("per block: their four biases", (d,), 4 * n),
+            ("per block: feed-forward up weight", (ff, d), n), ("per block: its bias", (ff,), n),
+            ("per block: feed-forward down weight", (d, ff), n), ("per block: its bias", (d,), n),
+            ("per block: two LayerNorms, gain and bias each", (d,), 4 * n),
+            ("final LayerNorm gain and bias", (d,), 2), ("projector, first linear 1,280 to 1,280, weight", (d, d), 1),
+            ("its bias", (d,), 1), ("projector, second linear 1,280 to 2,048, weight", (A_OUT, d), 1), ("its bias", (A_OUT,), 1)]
+
+
+def vision_rows():
+    """Every tensor group of the vision tower as (name, dims, tensors)."""
+    d, ff, n = V_D, V_FFN, V_DEPTH
+    merged = d * V_MERGE * V_MERGE
+    return [("patch embedding, a 3-D convolution over 3 channels, 2 frames, 16 x 16 pixels: weight", (d, V_CH, V_TEMPORAL, V_PATCH, V_PATCH), 1),
+            ("its bias", (d,), 1), ("position table, a 48 x 48 grid of learned positions (resampled to the picture's grid)", (V_POS, d), 1),
+            ("per block: two LayerNorms, gain and bias each", (d,), 4 * n), ("per block: fused q, k, v weight", (3 * d, d), n),
+            ("per block: its bias", (3 * d,), n), ("per block: attention output weight", (d, d), n), ("per block: its bias", (d,), n),
+            ("per block: feed-forward up weight", (ff, d), n), ("per block: its bias", (ff,), n),
+            ("per block: feed-forward down weight", (d, ff), n), ("per block: its bias", (d,), n),
+            ("main merger: LayerNorm over 1,152, gain and bias", (d,), 2),
+            ("main merger: first linear 4,608 to 4,608, weight", (merged, merged), 1), ("its bias", (merged,), 1),
+            ("main merger: second linear 4,608 to 2,048, weight", (V_OUT, merged), 1), ("its bias", (V_OUT,), 1),
+            ("three DeepStack mergers: LayerNorm over 4,608 (the four rows merged), gain and bias", (merged,), 2 * V_TAPS),
+            ("three DeepStack mergers: first linear weight", (merged, merged), V_TAPS), ("their bias", (merged,), V_TAPS),
+            ("three DeepStack mergers: second linear weight", (V_OUT, merged), V_TAPS), ("their bias", (V_OUT,), V_TAPS)]
+
+
+def _moe_attention_rows(d, heads, kv, hd, n, tag):
+    return [(f"{tag}: W_Q", (heads * hd, d), n), (f"{tag}: W_K", (kv * hd, d), n), (f"{tag}: W_V", (kv * hd, d), n),
+            (f"{tag}: W_O", (d, heads * hd), n), (f"{tag}: query-norm and key-norm gains", (hd,), 2 * n),
+            (f"{tag}: input and post-attention RMSNorm gains", (d,), 2 * n)]
+
+
+def thinker_rows():
+    """The Thinker's tensors as (name, dims, tensors); every expert is three tensors of its own."""
+    d, n, e, ff = T_D, T_LAYERS, T_EXPERTS, T_FF
+    return ([("token embedding table", (T_VOCAB, d), 1), ("output matrix", (T_VOCAB, d), 1), ("final RMSNorm gain", (d,), 1)]
+            + _moe_attention_rows(d, T_HEADS, T_KV, T_HD, n, "per layer")
+            + [("per layer: router", (e, d), n), ("per layer: expert gate and up weights", (ff, d), 2 * e * n),
+               ("per layer: expert down weights", (d, ff), e * n)])
+
+
+def talker_rows():
+    """The Talker's tensors, the two projections included (their middle width of 2,048 is the chapter's one assumption)."""
+    d, n, e, ff = K_D, K_LAYERS, K_EXPERTS, K_FF
+    return ([("codec embedding table", (K_VOCAB, d), 1), ("codec head", (K_VOCAB, d), 1), ("final RMSNorm gain", (d,), 1)]
+            + _moe_attention_rows(d, K_HEADS, K_KV, K_HD, n, "per layer")
+            + [("per layer: router", (e, d), n), ("per layer: expert gate and up weights", (ff, d), 2 * e * n),
+               ("per layer: expert down weights", (d, ff), e * n),
+               ("per layer: shared expert gate and up weights", (K_SHARED, d), 2 * n),
+               ("per layer: shared expert down weight", (d, K_SHARED), n), ("per layer: shared expert's gate, one row", (d,), n),
+               ("text_projection and hidden_projection: first linear 2,048 to 2,048, weights", (K_PROJ_MID, K_PROJ_IN), 2),
+               ("their biases", (K_PROJ_MID,), 2), ("the same two: second linear 2,048 to 1,024, weights", (d, K_PROJ_MID), 2),
+               ("their biases", (d,), 2)])
+
+
+def predictor_rows():
+    """The code predictor: 5 layers of 16 query and 8 key-value heads of 128, a feed-forward of 3,072, 15 tables and 15 heads."""
+    d, n = K_D, M_LAYERS
+    return ([("final RMSNorm gain", (d,), 1)] + _moe_attention_rows(d, 16, 8, 128, n, "per layer")
+            + [("per layer: gate and up weights", (3072, d), 2 * n), ("per layer: down weight", (d, 3072), n),
+               ("codec embedding tables, one per code 1 to 15", (M_VOCAB, d), NQ - 1), ("output heads, one per code 1 to 15", (M_VOCAB, d), NQ - 1)])
+
+
+def code2wav_front_rows():
+    """The Code2Wav's code table and transformer: 8 layers of 16 heads of 64, width 1,024, a feed-forward of 3,072, no biases."""
+    d, ff, n = C_HIDDEN, C_FF, C_LAYERS
+    return [("code table, 16 codes x 2,048 values", (C_CODEBOOK * NQ, d), 1), ("per layer: q, k, v, out weights", (d, d), 4 * n),
+            ("per layer: gate and up weights", (ff, d), 2 * n), ("per layer: down weight", (d, ff), n),
+            ("per layer: two RMSNorm gains", (d,), 2 * n), ("per layer: two layer-scale vectors", (d,), 2 * n),
+            ("final RMSNorm gain", (d,), 1)]
+
+
+def code2wav_layout():
+    """(layer, parameter formula, parameters, tensors, multiply-adds per code frame, positions per frame) of the part of Code2Wav after
+    its transformer: two upsampling stages and the SEANet decoder. A convolution is outputs x inputs x kernel, a transposed
+    convolution inputs x outputs x kernel; its multiply-adds are counted per input position, every other layer per output
+    position; `positions per frame` is the length of that axis for one code frame (the crop of Chapter 3's lengths ignored)."""
+    c = ac.LATENT
+    rows = []
+    pos = 1
+    for k, u in enumerate(ac.UP):
+        rows.append((f"upsampling stage {k + 1}: transposed convolution (k = {u}, stride {u})", f"{c:,} x {c:,} x {u} + {c:,}",
+                     c * c * u + c, 2, c * c * u, pos))
+        pos *= u
+        convnext = ac._conv_params(c, c, 7, groups=c) + 2 * c + ac._conv_params(c, 4 * c, 1) + ac._conv_params(4 * c, c, 1) + c
+        rows.append((f"upsampling stage {k + 1}: ConvNeXt block", f"depthwise {c:,} x 7 + {c:,}, norm 2 x {c:,}, "
+                     f"{c:,} x {4 * c:,} + {4 * c:,}, {4 * c:,} x {c:,} + {c:,}, scale {c:,}", convnext, 9,
+                     c * 7 + c * 4 * c * 2, pos))
+    d0 = ac.DEC_DIM
+    rows.append(("SEANet first convolution (k = 7)", f"{c:,} x {d0:,} x 7 + {d0:,}", ac._conv_params(c, d0, 7), 2, c * d0 * 7, pos))
+    cin = d0
+    for i, r in enumerate(ac.RATES):
+        cout = d0 >> (i + 1)
+        up = 2 * cin + cin * cout * 2 * r + cout
+        rows.append((f"SEANet block {i + 1}: Snake (alpha and beta) and transposed convolution (k = {2 * r}, stride {r})",
+                     f"2 x {cin:,} + {cin:,} x {cout:,} x {2 * r} + {cout:,}", up, 4, cin * cout * 2 * r, pos))
+        pos *= r
+        unit = 2 * (2 * cout) + ac._conv_params(cout, cout, 7) + ac._conv_params(cout, cout, 1)
+        rows.append((f"SEANet block {i + 1}: three residual units (7-tap and 1-tap convolutions, two Snakes each)",
+                     f"3 x (2 x 2 x {cout:,} + {cout:,}^2 x 7 + {cout:,} + {cout:,}^2 + {cout:,})", 3 * unit, 24,
+                     3 * (cout * cout * 7 + cout * cout), pos))
+        cin = cout
+    rows.append(("SEANet tail: Snake and convolution (k = 7, 96 to 1)", f"2 x {cin} + {cin} x 7 + 1", 2 * cin + ac._conv_params(cin, 1, 7), 4,
+                 cin * 7, pos))
+    return rows
+
+
+def _check_layouts():
+    """The layout tables must add up to the counts used everywhere else in the module, parameters and tensors alike."""
+    def tot(rows):
+        return sum(_prod(d) * k for _, d, k in rows), sum(k for _, _, k in rows)
+
+    au, vi, th, tk = _audio_counts(), _vision_counts(), _thinker_text_counts(), _talker_counts()
+    pr, cw, tc = _predictor_counts(), _code2wav_counts(), _tensor_counts()
+    assert tot(audio_rows()) == (au["total"], tc["audio"])
+    assert tot(vision_rows()) == (vi["total"], tc["vision"])
+    assert tot(thinker_rows()) == (th["total"], tc["thinker"])
+    assert tot(talker_rows()) == (tk["total"], tc["talker"])
+    assert tot(predictor_rows()) == (pr["total"], tc["predictor"])
+    front = tot(code2wav_front_rows())
+    layout = code2wav_layout()
+    assert front[0] + sum(r[2] for r in layout) == cw["total"]
+    assert front[1] + sum(r[3] for r in layout) == tc["code2wav"]
+    per_frame = sum(r[4] * r[5] for r in layout)
+    assert abs(per_frame - sum(m for _, _, m in ac._decoder_rows()[4:]) / FRAME_RATE) < 1e-6 * per_frame
+
+
+def architecture_layouts():
+    """The tensors behind every parameter and tensor count of `parameter_counts`."""
+    _check_layouts()
+
+    def table(rows):
+        body = [(n, _shape(dims), _i(k), _i(_prod(dims) * k)) for n, dims, k in rows]
+        body.append(("total", "", _i(sum(k for _, _, k in rows)), _i(sum(_prod(d) * k for _, d, k in rows))))
+        return _table(["tensor group", "shape (outputs x inputs)", "tensors", "parameters"], body, "llrr")
+
+    cw = code2wav_layout()
+    cw_body = [(n, f, _i(p), _i(t), _i(m), _i(u)) for n, f, p, t, m, u in cw]
+    cw_body.append(("total, after the transformer", "", _i(sum(r[2] for r in cw)), _i(sum(r[3] for r in cw)), _i(sum(r[4] * r[5] for r in cw)), ""))
+    return ("The tensors behind the next table, so that every parameter count and every tensor count in it can be re-derived. A shape lists outputs "
+            "before inputs; a convolution is outputs x inputs x kernel; each copy is one tensor stored under its own name, so the experts of a "
+            "layer are 128 gate, 128 up and 128 down tensors, and a weight and its bias are two tensors. A group's parameters are the product of "
+            "its shape and its tensors. Where a bias is not listed the map has none.\n\n"
+            "Audio tower (the stem takes the 128-bin log-mel picture of a chunk of 100 frames to 13 rows of 7,680 numbers; 32 blocks of width "
+            "1,280, 20 heads, a feed-forward of 5,120; every linear map of the blocks and of the projector has a bias):\n\n"
+            + table(audio_rows())
+            + "\n\nVision tower (27 blocks of width 1,152, 16 heads, a feed-forward of 4,304, fused query-key-value maps with bias):\n\n"
+            + table(vision_rows())
+            + "\n\nThinker decoder (48 layers of width 2,048, 32 query and 4 key-value heads of 128, 128 experts of width 768; no biases):\n\n"
+            + table(thinker_rows())
+            + "\n\nTalker (20 layers of width 1,024, 16 query and 2 key-value heads of 128, 128 experts of width 384 and a shared expert of "
+              "width 768):\n\n" + table(talker_rows())
+            + "\n\nCode predictor (5 layers of width 1,024, 16 query and 8 key-value heads of 128, a feed-forward of 3,072):\n\n"
+            + table(predictor_rows())
+            + "\n\nCode2Wav, first the code table and the transformer (8 layers of width 1,024, 16 heads of 64, a feed-forward of 3,072, "
+              "no biases, two layer scales a layer):\n\n" + table(code2wav_front_rows())
+            + "\n\nand then the two upsampling stages and the SEANet decoder, which have the widths of Chapter 3's codec decoder. Every convolution "
+              "has a bias, and a Snake activation has two vectors, alpha and beta, of one number per channel. The multiply-adds are per position "
+              "of the layer's axis (a transposed convolution at its input positions), and the last column is how many such positions one code "
+              "frame has there:\n\n"
+            + _table(["layer", "parameters, as a sum of tensors", "parameters", "tensors", "multiply-adds a position", "positions a frame"],
+                     cw_body, "llrrrr"))
+
+
 def parameter_counts():
     th, tk, pr, au, vi, cw = _thinker_text_counts(), _talker_counts(), _predictor_counts(), _audio_counts(), _vision_counts(), _code2wav_counts()
     tc = _tensor_counts()
@@ -422,11 +609,11 @@ def _per_role():
 
 
 def code2wav_frame_macs():
-    """Multiply-adds of the Code2Wav per code frame: the mean over the 16 embeddings, the 8-layer transformer without its attention scores, and
-    the upsampling stages and the SEANet decoder of Chapter 3 (their per-second counts divided by 12.5 frames a second)."""
+    """Multiply-adds of the Code2Wav per code frame: the mean over the 16 embeddings (additions), the 8-layer transformer without its
+    attention scores, and the upsampling stages and the SEANet decoder, each layer's multiply-adds a position times its positions a frame."""
     d, ff = C_HIDDEN, C_FF
     transformer = C_LAYERS * (4 * d * d + 3 * d * ff)
-    rest = sum(m for _, _, m in ac._decoder_rows()[4:]) / FRAME_RATE
+    rest = sum(m * u for _, _, _, _, m, u in code2wav_layout())
     return {"transformer": transformer, "rest": rest, "total": transformer + rest}
 
 
@@ -470,7 +657,7 @@ def moe_layers():
     tot_t = th["layer"]
     use_t = th["attn"] + th["norms"] + th["router"] + T_TOPK * expert
     tot_k = tk["layer"]
-    use_k = tk["attn"] + tk["norms"] + tk["router"] + K_TOPK * 3 * K_D * K_FF + tk["shared"] + tk["gate"]
+    use_k = _talker_used_params()
     rows.append(("**a layer**", _i(tot_t), _i(use_t), _i(tot_k), _i(use_k)))
     rows.append(("held / used", "", f"{tot_t / use_t:.2f}", "", f"{tot_k / use_k:.2f}"))
     return ("One decoder layer of the Thinker (width 2,048, experts of 768) and of the Talker (width 1,024, experts of 384, a shared expert of 768): parameters held, "
@@ -543,14 +730,18 @@ def code_to_wave():
 
 def code2wav_work():
     c = code2wav_frame_macs()
-    rows = [("mean of 16 embeddings (additions, not counted)", "0"), ("8-layer transformer, weights", _m(c["transformer"], 1))]
-    for name, _, m in ac._decoder_rows()[4:]:
-        rows.append((name, _m(m / FRAME_RATE, 1)))
-    rows.append(("**one frame**", _m(c["total"], 1)))
-    rows.append(("one second (12.5 frames)", _m(12.5 * c["total"], 1)))
-    return ("Multiply-adds of the code-to-wave decoder per code frame, in millions: the transformer's weights (width 1,024, feed-forward 3,072, no attention scores) and "
-            "the upsampling stages and the SEANet decoder, whose widths are those of Chapter 3's codec decoder (each of that chapter's per-second counts divided by 12.5).\n\n"
-            + _table(["stage", "millions of multiply-adds"], rows, "lr"))
+    rows = [("mean of 16 embeddings (additions, not counted)", "", "", "0"),
+            ("8-layer transformer, weights: 8 x (4 x 1,024^2 + 3 x 1,024 x 3,072)", _i(c["transformer"]), "1", _m(c["transformer"], 1))]
+    for name, _, _, _, m, u in code2wav_layout():
+        rows.append((name, _i(m), _i(u), _m(m * u, 1)))
+    rows.append(("**one frame**", "", "", _m(c["total"], 1)))
+    rows.append(("one second (12.5 frames)", "", "", _m(12.5 * c["total"], 1)))
+    return ("Multiply-adds of the code-to-wave decoder per code frame: the multiply-adds a position of each layer, as in the layout above (the "
+            "transformer's weights are counted per frame, with no attention scores), the positions that one frame has on that layer's axis, and "
+            "their product in millions. A frame is 1 position at the transformer, 2 and then 4 at the upsampling stages, and 1,920 at the "
+            "last SEANet block, so the SEANet decoder works at the sample rate. Chapter 3 counts the same layers per second, at 12.5 frames "
+            "a second; the figures here are those divided by 12.5 and are derived above from the shapes.\n\n"
+            + _table(["layer", "multiply-adds a position", "positions a frame", "millions a frame"], rows, "lrrr"))
 
 
 # ================================================================================================ first sound
@@ -586,7 +777,13 @@ def first_audio_work():
              f"reply of n text tokens and F code frames. Brain's order runs the Thinker to the end of the reply, the Talker to the end of its frames and the code-to-wave front "
              f"over all frames, and hands out audio in chunks of up to 300 frames, so for F up to 300 the first chunk is the whole reply. The order the interfaces allow starts the "
              f"Talker when the reply has 4 tokens and hands out the first chunk after {CHUNK} frames (weights only; attention scores and the 25-layer second pass of a "
-             "conversation are left out).\n\n"
+             "conversation are left out). The count is by these rules. The Thinker's prefill of the prompt gives the reply's first token, so it costs the "
+             f"{prompt} rows through the 48 layers and the head once, and each of the n - 1 further tokens one row through the layers and the head; "
+             "'4 tokens' is the prefill and 3 further steps. The Talker's prefill is the user turn's "
+             f"{N_USER} rows and the template's 9, {N_USER + 9} rows, each through its 20 layers and the codec head (the crate computes the logits of every "
+             "prefill row and reads the last); then each of the F frames costs a Talker step and the code predictor's 16 steps. The code-to-wave "
+             "transformer costs its weights for each of the F frames, and the upsampling and SEANet back its per-frame count for each frame of the "
+             "first chunk, the smaller of 300 and F frames.\n\n"
              + _table(["reply tokens n", "code frames F", "brain's order", f"first chunk of {CHUNK} frames", "ratio"], rows))
     b = _first_sound(prompt, 40, 100, N_USER)
     parts = [("Thinker: prefill of the prompt", b["thinker_prefill"]), ("Thinker: the rest of 40 reply tokens", b["thinker_decode"]),
@@ -597,16 +794,22 @@ def first_audio_work():
     return first + "\n\n" + second
 
 
+def _talker_used_params():
+    """Parameters whose products one token takes part in, in one Talker layer: attention, norms, router, 6 routed experts, the shared
+    expert and its gate (the `used` column of `moe_layers`)."""
+    tk = _talker_counts()
+    return tk["attn"] + tk["norms"] + tk["router"] + K_TOPK * 3 * K_D * K_FF + tk["shared"] + tk["gate"]
+
+
 def talker_stream_bytes():
     tk = _talker_counts()
-    layers = K_LAYERS * tk["layer"]
-    r = _per_role()
-    per_step = 4 * layers
-    used = 4 * K_LAYERS * r["talker_layer"]
+    per_step = 4 * K_LAYERS * tk["layer"]
+    used = 4 * K_LAYERS * _talker_used_params()
     rows = [("every weight of the 20 layers uploaded for one step (32-bit)", _i(per_step)),
             ("the weights that step's products use (32-bit)", _i(used)),
             ("held / used", f"{per_step / used:.2f}"),
             ("prefill and 100 frames: 101 steps", _i(101 * per_step)),
             ("the same in gibibytes", f"{101 * per_step / 2**30:,.1f}")]
     return ("Bytes that the Talker's weights move in brain's validation-tier path, where every step re-reads all 20 layers of its 128 experts each from the checkpoint "
-            "(32-bit values), against the bytes that the step's products use.\n\n" + _table(["quantity", "bytes"], rows, "lr"))
+            "(32-bit values), against the bytes that the step's products use. Both count what the `moe_layers` table counts, norms included: a layer holds "
+            f"{_i(tk['layer'])} parameters and uses {_i(_talker_used_params())}.\n\n" + _table(["quantity", "bytes"], rows, "lr"))

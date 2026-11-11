@@ -624,7 +624,9 @@ def world():
             "`integer(6)` draws: " + ", ".join(f"`{w}`" for w in WORDS) + ".\n\n"
             + _table(["speaker", "g", "role", "letter `a` first / second frequency (Hz)"], spk_rows, "rrll")
             + "\n\nThe first four training sentences, each from its own stream "
-            + f"`project_speech_pipeline.train.<n>` (the seed of n = 0 is {_seed(stream_name('train', 0))}): the sentence, the speaker "
+            + f"`project_speech_pipeline.train.<n>` (`seed_of` of the name, as defined in Pseudocode Conventions: the first 8 bytes of the SHA-256 digest of its UTF-8 bytes, big-endian; the seeds of n = 0 to 3 are "
+            + ", ".join(f"0x{bookrng.seed_of(stream_name('train', n)):016x}" for n in range(4))
+            + "): the sentence, the speaker "
             "(n mod 5 for the training sentences), the samples at 12 kHz, the samples after the resampler of milestone 2, the frames "
             "of milestone 2, the sum of the samples and the sum of their squares (6 decimals, tolerance 1e-6).\n\n"
             + _table(["n", "sentence", "speaker", "samples at 12 kHz", "samples at 8 kHz", "frames", "sum", "sum of squares"],
@@ -753,8 +755,9 @@ def recogniser():
 def training():
     ep = (1, 2, 3, 5, 10, 20)
     rows = [(e, e * (N_TRAIN // BATCH), curve_cell(e, "clean"), curve_cell(e, "shifted")) for e in ep]
-    return (f"{EPOCHS} epochs of {N_TRAIN // BATCH} steps at batch {BATCH}; each epoch `shuffle`s `range({N_TRAIN})` with the stream "
-            f"`{ORDER}` ({_seed(ORDER)}) and takes four consecutive sentences per step. AdamW (0.9, 0.999, 1e-8), rate {LR:g}, no "
+    return (f"{EPOCHS} epochs of {N_TRAIN // BATCH} steps at batch {BATCH}; one list `range({N_TRAIN})` is made once and "
+            f"`shuffle`d in place at the start of every epoch (so epoch e's order is the shuffle of epoch e - 1's, not of the identity) "
+            f"with the one continuing stream `{ORDER}` ({_seed(ORDER)}), and four consecutive sentences are taken per step. AdamW (0.9, 0.999, 1e-8), rate {LR:g}, no "
             "decay, no clipping, the gradient the mean over the batch. The first weight W1[0][0] is the one the nudges move. The "
             "table is the mean over the epoch's sentences of the CTC loss each had when its batch was formed (so the weights moved "
             "during the epoch). 'Clean' uses the ids of the alphabet; 'shifted' is the planted mistake of milestone 7.\n\n"
@@ -787,7 +790,9 @@ def rvq_table():
                      cell(f"rvq_cer{q}", f3)))
     n_fit = len([r for _, _, p, _ in data()[0] for r in p][::RVQ_EVERY])
     return (f"A residual quantizer of the standardized 16-value frames: {RVQ_Q} stages of {RVQ_K} codewords, trained by {RVQ_ITERS} Lloyd "
-            f"rounds on every {RVQ_EVERY}rd frame of the training sentences ({n_fit} frames), starting centres from one `shuffle` of "
+            f"rounds on every {RVQ_EVERY}rd frame of the training sentences: the standardized frames of all {N_TRAIN} sentences are "
+            f"concatenated in sentence order and the entries 0, {RVQ_EVERY}, {2 * RVQ_EVERY}, ... of that one list are taken, the "
+            f"count never restarted per sentence ({n_fit} frames), starting centres from one `shuffle` of "
             f"the rows per stage with `{RVQ_NAME}` ({_seed(RVQ_NAME)}). The test frames are quantized and summed back, stacked, and read "
             "by the recogniser of milestone 4, unchanged. Bits are per frame; the mean squared error is the sum over the 16 values "
             "of the squared difference, averaged over the test frames (q = 0 returns zeros).\n\n"
@@ -827,7 +832,7 @@ def speaker_block():
     tail = (f"\n\nThe map from embedding to speaker parameter is ridge regression of ln g on the embedding over the {N_TRAIN} training "
             f"sentences (the five heard speakers), penalty {EMB_RIDGE:g}, solved by Gaussian elimination with partial pivoting "
             f"on the 16 normal equations; its intercept is {_f(b, 4)} and its largest weight in magnitude {_f(max(abs(x) for x in w), 3)}. "
-            "'One clip' averages g over each clip estimated alone and gives the spread; 'eight clips' estimates g from the first "
+            "'One clip' averages g over each clip estimated alone and gives the spread (the standard deviation with divisor n, n the 30 clips of the speaker); 'eight clips' estimates g from the first "
             f"{ENROL} clips of the speaker together (the mean of ln g over them).")
     return head + _table(["speaker", "true g", "role", "clips", "mean g, one clip", "standard deviation", "g, eight clips"], rows, "rrlrrrr") + tail
 
@@ -872,7 +877,9 @@ def mistakes():
              cell("wer", f3, "shifted"), cell("cer", f3, "shifted"))]
     return ("Each mistake is planted alone in an otherwise correct pipeline (the first four at test time only, the recogniser being "
             "the one trained correctly; the last in training) and measured twice: by a number that needs no recogniser, and by "
-            "the recogniser's error on the 180 test sentences.\n\n"
+            "the recogniser's error on the 180 test sentences. One thing changes at a time: the HTK-scale bank keeps the triangles linear in "
+            "hertz and the area normalisation of the Slaney bank and moves only the scale of the edges, the bank without area "
+            "normalisation keeps the Slaney edges, and log10 changes only the base of the logarithm.\n\n"
             + _table(["mistake", "what it does, measured directly", "word error", "character error"], rows, "llrr"))
 
 
@@ -894,7 +901,9 @@ def bill():
     train_bwd = 2 * (D_IN * HID + HID * K + HID * K)
     steps = EPOCHS * (N_TRAIN // BATCH)
     train_total = EPOCHS * frames_total * (train_fwd + train_bwd) + steps * N_PARAMS * 16
-    text_chars = sum(len(t) for t, _, _, _ in data()[0]) / (sum(len(p) for _, _, p, _ in data()[0]) * HOP / FS_REC)
+    train_chars = sum(len(t) for t, _, _, _ in data()[0])
+    train_seconds = frames_total * HOP / FS_REC
+    text_chars = train_chars / train_seconds
     rows = [("resampler, 12 kHz to 8 kHz", _i(2 * taps), _i(4 * FS_SYN), _i(4 * FS_REC),
              f"{taps / FS_REC:.1f} taps per output, each a multiply-add"),
             ("window and transform", _i(fps * (N_FFT + fft)), _i(4 * FS_REC), _i(4 * fps * (N_FFT // 2 + 1)),
@@ -904,7 +913,10 @@ def bill():
             ("recogniser, forward", _i(fps * train_fwd), _i(4 * fps * N_MELS), _i(4 * fps * K), f"{N_PARAMS * 4:,} bytes of weights read once per frame"),
             ("quantizer, four stages", _i(fps * stage_ops), _i(4 * fps * N_MELS), _i(fps * RVQ_Q * 4 // 8), "3 per value per codeword, all stages")]
     train = (f"Training: {EPOCHS} epochs over {_i(frames_total)} frames is {_i(EPOCHS * frames_total)} frame passes of "
-             f"{_i(train_fwd)} forward and {_i(train_bwd)} backward operations, plus {_i(steps)} AdamW steps of 16 operations on each "
+             f"{_i(train_fwd)} forward operations, 2({D_IN} x {HID} + {HID} x {K}), and {_i(train_bwd)} backward ones: the outer product "
+             f"for the gradient of W1 ({D_IN} x {HID} multiply-adds), W2 transposed times the arriving gradient ({HID} x {K}) and the outer "
+             f"product for the gradient of W2 ({HID} x {K}), 2({D_IN * HID} + {HID * K} + {HID * K}) = {_i(train_bwd)} (the elementwise "
+             f"products and the sums over frames are left out), plus {_i(steps)} AdamW steps of 16 operations on each "
              f"of {N_PARAMS:,} parameters: {_i(train_total)} operations in all, before the lattice (about 8 S per frame for a label of "
              f"S states, a few percent of the network's).")
     return ("Operations (a multiply-add is 2) and bytes (32-bit values) for one second of audio through each stage, counted from the "
@@ -914,7 +926,8 @@ def bill():
             f"second of audio, of which the resampler is {100 * 2 * taps / (2 * taps + fps * (N_FFT + fft + 3 * (N_FFT // 2 + 1) + 2 * nz + train_fwd)):.0f}%. "
             f"One frame of the recogniser reads {N_PARAMS * 4:,} bytes of weights for {train_fwd:,} operations: "
             f"{train_fwd / (N_PARAMS * 4):.2f} operations per byte, the 2 operations per 4-byte weight of any vector-matrix product. "
-            f"The speech is {text_chars:.1f} characters a second.\n\n" + train)
+            f"The speech of the world is {text_chars:.1f} characters a second: the {_i(train_chars)} characters of the training transcripts "
+            f"(spaces included) over their {_i(frames_total)} frames at {fps} a second, {train_seconds:.2f} seconds.\n\n" + train)
 
 
 # ------------------------------------------------------------------------------------------------ acceptance tests

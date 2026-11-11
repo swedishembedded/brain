@@ -83,7 +83,13 @@ reproduced its worked examples from the text alone in another language.
       stated loosely, seeds named but not printed, toy parts given by role
       rather than formula, architecture counts without their conventions).
       All were fixed in the following commits; a recheck has not been run.
-- [ ] Volume IX, Audio, Speech and Music: all 9 chapters written; reader pass pending.
+- [x] Volume IX, Audio, Speech and Music: all 9 chapters written.
+      Independent readers reproduced 948 items in C from the page alone:
+      727 passed, 177 after a guess, 44 failed (architecture counts
+      without their layer layouts, a pseudocode shuffle that disagreed
+      with the module, conventions stated only in words, and three real
+      table slips). All were fixed in the following commits; a recheck
+      has not been run.
 
 ## Open
 
