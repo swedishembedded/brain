@@ -19,7 +19,7 @@ use onnx::walk::Manifest;
 /// CAM++ (`feat_dim=80, embedding_size=192`), the CosyVoice release's only
 /// shipped configuration.
 ///
-/// The D-TDNN backbone is three [`CamppusConfig::block_layers`]-sized
+/// The D-TDNN backbone is three [`CampplusConfig::block_layers`]-sized
 /// [`CAMDenseTDNNBlock`](crate::model)s, each a DenseNet-style stack of
 /// [`CAMDenseTDNNLayer`](crate::model)s that grow the channel count by
 /// `growth` per layer and are halved back down by a `TransitLayer` between
@@ -51,7 +51,7 @@ pub struct CampplusConfig {
     /// throughout; `pad = dilation`, since `(k-1)/2 * dilation == dilation`
     /// at `k=3`).
     pub block_dilation: [u32; 3],
-    /// `seg_pooling`'s fixed window (100 frames, about one second at CAM++'s 50Hz internal
+    /// `seg_pooling`'s fixed window (100 frames, two seconds at CAM++'s 50Hz internal
     /// rate after the TDNN's stride-2 downsample).
     pub seg_len: u32,
     /// `bn_eval`'s hardcoded epsilon; also what every BatchNorm in the release
