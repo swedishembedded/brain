@@ -62,6 +62,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **attention sink**: a key, usually at one of the first positions of the text, that most queries score high whatever their content and whose value is near zero, so that the softmax has somewhere to put its mass; a window that keeps the sink beside its recent keys keeps this behaviour. *([Attention Variants: Sharing and Compressing Keys](v06-language-models/03-attention-variants.md))*
 
+**attentive statistics pooling**: a pooling over time that learns a weight for each frame of each channel, by a softmax over a score from a small network, and returns the weighted mean and weighted standard deviation of every channel. *([Who Is Speaking](v09-audio/05-speaker-embeddings.md))*
+
 **audio resampling**: computing the samples of a recording at a new rate, by removing the frequencies the new rate cannot carry and evaluating the band-limited signal at the new sample times as a weighted sum of the old samples. *([Sound and Sampling](v09-audio/01-sound.md))*
 
 **audio token**: one integer of a codec's output, an index into one stage's table for one column, which a language model treats as a symbol. *([Neural Audio Codecs](v09-audio/03-audio-codecs.md))*
@@ -1002,6 +1004,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **sparse attention pattern**: the rule that gives each query the set of keys it reads, instead of all earlier keys, so that attention is a softmax over those keys only; fixed patterns depend on positions alone, such as a window, global tokens, a stride or blocks. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
 
+**speaker embedding**: a vector of fixed length computed from a recording of any length, such that recordings of one voice are close in cosine and recordings of different voices are not. *([Who Is Speaking](v09-audio/05-speaker-embeddings.md))*
+
 **special tokens**: ids that stand for no piece of text, such as the beginning or end of a sequence, padding, an unknown piece or the markers of a chat turn, matched from their literals before ordinary encoding and never to be produced from text a client wrote. *([Tokenization](v05-sequences/02-tokenization.md))*
 
 **speech encoder**: the stack that turns the frames of a log-mel spectrogram into fewer rows of one width, each informed by its neighbours, ready for an alignment loss or a decoder. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
@@ -1061,6 +1065,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **tiled attention**: the schedule that computes attention for a block of query rows by walking tiles of keys and values through fast memory, forming the block of scores of each tile only on chip and folding it into the running state of its rows, so that no score matrix is ever written to global memory. *([Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md))*
 
 **tiled matmul**: the matrix product computed one tile of the output at a time, with the matching tiles of the two inputs staged in a fast memory so that each number loaded is used once per row or column of the tile, cutting the loads from $2n^3$ to $2n^3/T$ for a tile of side $T$. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
+
+**time-delay network**: a network of one-dimensional convolutions along time, whose weights are shared across time and whose units read a layer at several delayed moments, so that a deeper unit sees a longer stretch of the signal. *([Who Is Speaking](v09-audio/05-speaker-embeddings.md))*
 
 **timestep embedding**: the vector made from the scalar noise level by a sinusoidal encoding (cosines of the scaled level at a ladder of rates, then the sines) and a small network, so that a model built from vectors can read how noisy its input is. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
 
