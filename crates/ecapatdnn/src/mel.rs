@@ -71,7 +71,7 @@ fn fft(re: &mut [f32], im: &mut [f32]) {
 }
 
 /// PyTorch-style `F.pad(mode="reflect")` of a 1-D signal by `p` on each side
-/// (no border-element repeat). Requires `p < len`.
+/// (no border-element repeat). For `p >= len`, where torch refuses, the positions with nothing to mirror are zero.
 fn reflect_pad_signal(x: &[f32], p: usize) -> Vec<f32> {
     let l = x.len();
     let mut o = vec![0.0f32; l + 2 * p];
@@ -83,7 +83,11 @@ fn reflect_pad_signal(x: &[f32], p: usize) -> Vec<f32> {
         if idx as usize >= l {
             idx = 2 * (l as isize - 1) - idx;
         }
-        *slot = x[idx as usize];
+        // A clip no longer than the pad has nothing to mirror at the far
+        // end; those positions stay zero, as `audio::mel` pads.
+        if (0..l as isize).contains(&idx) {
+            *slot = x[idx as usize];
+        }
     }
     o
 }
@@ -122,14 +126,31 @@ pub fn log_mel(samples: &[f32]) -> (Vec<f32>, usize) {
             re[i] = if i < WIN { padded[start + i] * window[i] } else { 0.0 };
         }
         fft(&mut re, &mut im);
+        let mag: Vec<f32> = (0..bins).map(|b| (re[b] * re[b] + im[b] * im[b] + 1e-9).sqrt()).collect();
         for m in 0..N_MELS {
             let mut acc = 0.0f32;
             for b in 0..bins {
-                let mag = (re[b] * re[b] + im[b] * im[b] + 1e-9).sqrt();
-                acc += fb[m * bins + b] * mag;
+                acc += fb[m * bins + b] * mag[b];
             }
             out[fr * N_MELS + m] = acc.max(1e-5).ln();
         }
     }
     (out, n_frames)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A clip no longer than the reflect pad cannot be mirrored once, as the
+    /// reference does; it must still give finite features, not an index panic.
+    #[test]
+    fn a_clip_shorter_than_the_pad_is_framed_not_panicked_on() {
+        for len in [1usize, 100, 300, (N_FFT - HOP) / 2] {
+            let clip: Vec<f32> = (0..len).map(|i| (i as f32 * 0.05).sin()).collect();
+            let (mel, frames) = log_mel(&clip);
+            assert_eq!(mel.len(), frames * N_MELS);
+            assert!(mel.iter().all(|v| v.is_finite()), "{len} samples: non-finite features");
+        }
+    }
 }
