@@ -215,22 +215,31 @@ pub fn exp_so3(w: V3) -> M3 {
 
 /// Inverse of [`exp_so3`].
 pub fn log_so3(r: &M3) -> V3 {
-    let c = ((r[0] + r[4] + r[8] - 1.0) / 2.0).clamp(-1.0, 1.0);
-    let th = c.acos();
+    // The angle from both of its witnesses, cos from the trace and sin from
+    // the skew part: acos of the trace alone is flat near a half turn and
+    // loses half its digits there.
+    let c = (r[0] + r[4] + r[8] - 1.0) / 2.0;
     let w = [r[7] - r[5], r[2] - r[6], r[3] - r[1]];
+    let th = (norm(w) / 2.0).atan2(c);
     if th < 1e-7 {
         return scale(w, 0.5);
     }
     if std::f64::consts::PI - th < 1e-6 {
-        // near pi: axis from the diagonal
-        let d = [(r[0] + 1.0) / 2.0, (r[4] + 1.0) / 2.0, (r[8] + 1.0) / 2.0];
+        // near pi: the axis from the symmetric part, (R + R^T)/2 = c I +
+        // (1 - c) a a^T, taking the largest diagonal entry as the pivot
+        let d = [r[0], r[4], r[8]];
         let i = (0..3).max_by(|&a, &b| d[a].total_cmp(&d[b])).unwrap();
         let mut ax = [0.0; 3];
-        ax[i] = d[i].max(0.0).sqrt();
+        ax[i] = ((d[i] - c) / (1.0 - c)).max(0.0).sqrt();
         for j in 0..3 {
             if j != i {
-                ax[j] = r[i * 3 + j] / (2.0 * ax[i]);
+                ax[j] = (r[i * 3 + j] + r[j * 3 + i]) / (2.0 * (1.0 - c) * ax[i]);
             }
+        }
+        // The diagonal fixes the axis only up to sign; the skew part, still
+        // nonzero short of an exact half turn, says which.
+        if dot(ax, w) < 0.0 {
+            ax = scale(ax, -1.0);
         }
         return scale(normalize(ax), th);
     }
@@ -386,6 +395,21 @@ pub fn inv3_spd(a: &M3) -> Option<M3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// acos is flat near -1, so an angle taken from the trace loses digits
+    /// close to a half turn; the rotation vector must survive the round trip
+    /// there too.
+    #[test]
+    fn log_so3_is_accurate_near_a_half_turn() {
+        let axis = normalize([0.48, -0.6, 0.64]);
+        for eps in [1e-7, 1.5e-6, 3e-6, 1e-5, 1e-3] {
+            let w = scale(axis, std::f64::consts::PI - eps);
+            let l = log_so3(&exp_so3(w));
+            for k in 0..3 {
+                assert!((l[k] - w[k]).abs() < 1e-8, "pi - {eps}: component {k} is {} not {}", l[k], w[k]);
+            }
+        }
+    }
 
     #[test]
     fn svd_reconstructs_and_rotations_round_trip() {
