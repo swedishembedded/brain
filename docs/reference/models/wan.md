@@ -26,7 +26,7 @@ is a matter of configuration, not a different model.
 | Inference (text to video) | [x] |
 | Inference (image to video) | [ ] |
 | LoRA fine-tune         | [x] (`lora_train`) |
-| INT8                   | [ ] |
+| INT8                   | [x] (`WanDtype::Int8`) |
 | CLI (`brain wan <action>`) | [x] |
 | HTTP API               | [ ] |
 | D-Bus                  | [x] |

@@ -83,9 +83,8 @@ pub struct LtxDitConfig {
     /// tied to the main DiT's own flag.
     pub connector_apply_gated_attention: bool,
     /// `video_embeddings_connector.transformer_1d_blocks` depth - real value
-    /// 8. Read but not yet consumed by `forward()`: the connector's own
-    /// forward pass is a later milestone (see `crate::dit::av_dit_tensor_
-    /// manifest`'s doc); this field only makes the real checkpoint's tensor
+    /// 8. The connector's forward is `crate::block::EmbeddingsConnector`;
+    /// this field also makes the real checkpoint's tensor
     /// count representable.
     pub connector_num_layers: u32,
     /// `video_embeddings_connector`'s own attention head count - real value
@@ -113,7 +112,7 @@ pub struct LtxDitConfig {
     /// Whether [`crate::dit::LtxDit::forward`]/[`crate::dit::LtxAvDit::
     /// forward`] route the given raw `context` through
     /// `video_embeddings_connector`/`audio_embeddings_connector`
-    /// ([`crate::connector`]) before the block stack consumes it - real
+    /// ([`crate::block::EmbeddingsConnector`]) before the block stack consumes it - real
     /// value `true`. Unlike every other `connector_*` field (read but not
     /// consumed until this flag was added), this one gates the actual forward
     /// path: `false` (the existing tiny configs' setting) reproduces their

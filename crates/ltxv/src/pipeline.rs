@@ -406,27 +406,27 @@ pub struct GenOpts {
     pub eta: f64,
     /// [`euler_ancestral_step`]'s `s_noise`; res_2s has none.
     pub s_noise: f64,
-    /// The stub text context's token count (see [`context_stub`] - there is
-    /// no real tokenizer, so this is just a shape parameter).
+    /// The stub text context's token count for the tiny config (see
+    /// [`context_stub`]); the real config tokenizes the prompt instead.
     pub context_len: usize,
-    /// [`dit_config_from_name`]'s key. `"tiny"` is the only value
-    /// implemented this milestone.
+    /// [`dit_config_from_name`]'s key: `"tiny"` (the random-weight parity
+    /// config) or `"ltx25_22b"` (the real checkpoint).
     pub dit_config: String,
     /// Generate the clip's SOUND as well as its picture.
     ///
     /// LTX-2.5 is natively audio-visual: one transformer denoises a video
     /// stream and an audio stream together, coupled every block by
-    /// cross-attention, and two thirds of the distilled checkpoint's tensors
-    /// are the audio half. Setting this runs the model that is in the file;
+    /// cross-attention, and two thirds of each block's tensors belong to the
+    /// audio stream and the cross-modal attention (about a quarter of its
+    /// parameters). Setting this runs the model that is in the file;
     /// leaving it off runs only its video half and the clip is silent.
     ///
     /// Off by default, and the default is about COST, not about correctness.
     /// The audio-extended block runs on the same streamed/quantized/
     /// device-resident path the video-only one does ([`RealAvDit`]), so a
     /// joint step costs modestly more than a video-only step at the same
-    /// shape rather than several times more - but it is still more, and the
-    /// audio-visual path still has no training support and no bandwidth
-    /// extension, so turning sound on stays something a caller asks for.
+    /// shape rather than several times more - but it is still more, so
+    /// turning sound on stays something a caller asks for.
     ///
     /// Requires `dit_config = "ltx25_22b"` and [`Paths::audio_vae`]; both are
     /// checked before any weight is read.

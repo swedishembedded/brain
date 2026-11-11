@@ -95,7 +95,7 @@ impl Default for WanVaeConfig {
 }
 
 impl WanVaeConfig {
-    /// The Wan2.1 / Wan2.2 VAE, transcribed from the shipped
+    /// The Wan2.1 VAE, transcribed from the shipped
     /// `vae/config.json` (`AutoencoderKLWan`) and cross-checked against
     /// `_video_vae`'s hardcoded `cfg` in the reference.
     pub fn wan21() -> WanVaeConfig {

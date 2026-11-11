@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! One `BasicAVTransformerBlock`'s video-only path, as a recorded brain
-//! kernel graph - `ltx_core.model.transformer.transformer.
-//! BasicAVTransformerBlock.forward`'s `run_vx` branch (the audio branch and
-//! the audio<->video cross-attention are entirely absent from this
-//! milestone; see `crates/ltxv/src/lib.rs`'s module doc).
+//! `BasicAVTransformerBlock` as a recorded brain kernel graph -
+//! `ltx_core.model.transformer.transformer.BasicAVTransformerBlock.forward`.
+//! The video-only path (`run_vx`) comes first below; the audio stream and
+//! the audio<->video cross-attention are [`LtxAvBlock`], further down, and
+//! the embeddings connector is [`EmbeddingsConnector`].
 //!
 //! ## Block order (pinned against source + the golden's real taps, not
 //! ## assumed from the class name)
@@ -179,7 +179,7 @@ const K_SOFTMAX_ROWS: usize = 19;
 /// real Q8_0 22B checkpoint) - because SELF-attention is O(T²) in the video token count
 /// where every other kernel in the block is O(T), so it overtakes the whole
 /// block once T passes a few thousand. The materialized `[32, 3520, 3520]`
-/// score AND probability slabs are 1.59 GiB *each*.
+/// score AND probability slabs are 1.48 GiB (1.59 GB) *each*.
 ///
 /// [`K_PACK_QKV`] + the flash ladder replace that whole scores/softmax/apply
 /// chain with ONE fused online-softmax dispatch for `attn1`; `attn2` gets the

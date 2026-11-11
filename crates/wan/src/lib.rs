@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Wan2.1 / Wan2.2 video diffusion transformer.
+//! Wan2.1 video diffusion transformer (the Wan2.2 variants are not
+//! modelled; see `block`).
 //!
 //! Wan generates video by denoising a **3D latent volume** - `(frames, height,
 //! width)` at a (4, 8, 8) VAE stride - with a diffusion transformer, under
