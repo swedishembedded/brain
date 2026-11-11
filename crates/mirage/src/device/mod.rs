@@ -39,6 +39,7 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_rms_axpy_norm", kernels::MIRAGE_RMS_AXPY_NORM),
     ("mirage_rms_axpy_norm_wg", kernels::MIRAGE_RMS_AXPY_NORM_WG),
     ("mirage_rms_rope", kernels::MIRAGE_RMS_ROPE),
+    ("mirage_qk_rope", kernels::MIRAGE_QK_ROPE),
     ("hconv_glu", kernels::HCONV_GLU),
     ("mirage_conv2d", kernels::MIRAGE_CONV2D),
     ("mirage_dwconv", kernels::MIRAGE_DWCONV),
@@ -88,6 +89,7 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_cq_gather", kernels::MIRAGE_CQ_GATHER),
     ("argmax_row", kernels::ARGMAX_ROW),
     ("mirage_argmax_wg", kernels::MIRAGE_ARGMAX_WG),
+    ("mirage_argmax_ban_wg", kernels::MIRAGE_ARGMAX_BAN_WG),
     ("silu", kernels::SILU),
     ("add", kernels::ADD),
     ("mul", kernels::MUL),
@@ -303,23 +305,18 @@ impl Device {
     /// `rope(zc_norm(x))` per head row in one dispatch, at the position held in `pos` (see [`Device::rope_pos`]).
     #[allow(clippy::too_many_arguments)]
     pub fn zc_norm_rope(&self, s: &mut Vec<Step>, x: &DeviceBuffer, weight: &DeviceBuffer, pos: &DeviceBuffer, rows: u32, hd: u32, base: f32, y: &DeviceBuffer) {
-        s.push(self.gpu().dispatch(self.k("mirage_rms_rope"), &[x, weight, pos, y], &[hd, rows, NORM_EPS.to_bits(), base.to_bits(), 0, 0, 0, 0], gpu_core::Dispatch::Workgroups(rows)));
+        s.push(self.gpu().dispatch(self.k("mirage_rms_rope"), &[x, weight, pos, y], &[hd, rows, NORM_EPS.to_bits(), base.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
     }
 
-    /// [`Device::zc_norm_rope`] over the `groups` heads of each of `batch` sequences read where they lie in a fused projection,
-    /// `x = (buffer, row stride, column offset)`, and stored straight into the position cache `cache` (`[batch, maxt, groups * hd]`)
-    /// at the position held in `pos`: the norm, the rotation and the cache write of a decoder key in one dispatch.
+    /// The self-attention front of a decoder step after the causal taps: the query and key head norms with rotary positions, the key
+    /// rows stored into `kcache` and the value rows copied into `vcache` at the position held in `pos`, one dispatch
+    /// (`mirage_qk_rope`). `x` holds the tapped `q | k | v` columns of each sequence at row stride `x_stride`; `norms` is the query
+    /// norm weight followed by the key norm weight. `shape = (batch, heads, kv heads, hd, vd)`.
     #[allow(clippy::too_many_arguments)]
-    pub fn zc_norm_rope_into_cache(&self, s: &mut Vec<Step>, (x, stride, off): (&DeviceBuffer, u32, u32), weight: &DeviceBuffer, pos: &DeviceBuffer, (batch, groups, hd): (u32, u32, u32), base: f32, (cache, maxt): (&DeviceBuffer, u32)) {
-        let params = [hd, batch * groups, NORM_EPS.to_bits(), base.to_bits(), groups, stride, off, maxt];
-        s.push(self.gpu().dispatch(self.k("mirage_rms_rope"), &[x, weight, pos, cache], &params, gpu_core::Dispatch::Workgroups(batch * groups)));
-    }
-
-    /// [`Device::zc_norm_rope`] over the `groups` heads of each of `batch` sequences read where they lie in a fused projection.
-    #[allow(clippy::too_many_arguments)]
-    pub fn zc_norm_rope_strided(&self, s: &mut Vec<Step>, (x, stride, off): (&DeviceBuffer, u32, u32), weight: &DeviceBuffer, pos: &DeviceBuffer, (batch, groups, hd): (u32, u32, u32), base: f32, y: &DeviceBuffer) {
-        let params = [hd, batch * groups, NORM_EPS.to_bits(), base.to_bits(), groups, stride, off, 0];
-        s.push(self.gpu().dispatch(self.k("mirage_rms_rope"), &[x, weight, pos, y], &params, gpu_core::Dispatch::Workgroups(batch * groups)));
+    pub fn qk_rope(&self, s: &mut Vec<Step>, (x, x_stride): (&DeviceBuffer, u32), norms: &DeviceBuffer, pos: &DeviceBuffer, shape: (u32, u32, u32, u32, u32), base: f32, (q, kcache, vcache, maxt): (&DeviceBuffer, &DeviceBuffer, &DeviceBuffer, u32)) {
+        let (batch, heads, kvh, hd, vd) = shape;
+        let params = [hd, vd, batch, heads, kvh, x_stride, maxt, NORM_EPS.to_bits(), base.to_bits()];
+        s.push(self.gpu().dispatch(self.k("mirage_qk_rope"), &[x, norms, pos, q, kcache, vcache], &params, gpu_core::Dispatch::Workgroups(batch * (heads + kvh))));
     }
 
     /// The gated product of HConvGLU from a fused `[rows, 2n]` projection.

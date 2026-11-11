@@ -365,6 +365,43 @@ fn the_fused_head_norm_and_rotary_equals_the_norm_then_the_rotation() {
 }
 
 #[test]
+fn the_fused_query_key_front_equals_two_norm_rotations_and_the_row_writes() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(dev) = device("qk_rope") else { return };
+    // (batch, heads, kv heads, hd, vd): the decoder's, a batch, and narrower heads.
+    for (batch, heads, kvh, hd, vd) in [(1usize, 8usize, 2usize, 48usize, 48usize), (3, 8, 2, 48, 48), (2, 4, 4, 16, 12)] {
+        let (qd, kd, vw) = (heads * hd, kvh * hd, kvh * vd);
+        let stride = qd + kd + vw;
+        let maxt = 40usize;
+        let x = noise(batch * stride, 71, 2.0);
+        let (wq, wk) = (noise(hd, 72, 0.3), noise(hd, 73, 0.3));
+        let (xd, wqd, wkd) = (upload(&dev, &x), dev.norm_weight(&wq), dev.norm_weight(&wk));
+        let norms = dev.norm_weight(&[wq.as_slice(), &wk].concat());
+        let pos = dev.gpu().storage(1);
+        dev.gpu().write(&pos, &[23u32]);
+        // Reference: the three dispatches this one replaces, from de-interleaved q, k and v rows.
+        let col = |from: usize, w: usize| -> Vec<f32> { (0..batch).flat_map(|b| x[b * stride + from..b * stride + from + w].to_vec()).collect() };
+        let (qx, kx, vx) = (upload(&dev, &col(0, qd)), upload(&dev, &col(qd, kd)), upload(&dev, &col(qd + kd, vw)));
+        let (want_q, want_k, want_v) = (dev.gpu().storage((batch * qd) as u64), dev.gpu().storage((batch * maxt * kd) as u64), dev.gpu().storage((batch * maxt * vw) as u64));
+        let mut s = Vec::new();
+        dev.zc_norm_rope(&mut s, &qx, &wqd, &pos, (batch * heads) as u32, hd as u32, 10000.0, &want_q);
+        let krot = dev.gpu().storage((batch * kd) as u64);
+        dev.zc_norm_rope(&mut s, &kx, &wkd, &pos, (batch * kvh) as u32, hd as u32, 10000.0, &krot);
+        dev.row_write(&mut s, &krot, &want_k, &pos, (batch as u32, kd as u32, maxt as u32));
+        dev.row_write(&mut s, &vx, &want_v, &pos, (batch as u32, vw as u32, maxt as u32));
+        dev.gpu().submit(&[], &s);
+        let (got_q, got_k, got_v) = (dev.gpu().storage((batch * qd) as u64), dev.gpu().storage((batch * maxt * kd) as u64), dev.gpu().storage((batch * maxt * vw) as u64));
+        let mut s = Vec::new();
+        dev.qk_rope(&mut s, (&xd, stride as u32), &norms, &pos, (batch as u32, heads as u32, kvh as u32, hd as u32, vd as u32), 10000.0, (&got_q, &got_k, &got_v, maxt as u32));
+        dev.gpu().submit(&[], &s);
+        let name = format!("qk_rope {batch}x{heads}/{kvh} hd {hd}");
+        assert_stage(&format!("{name} q"), &dev.gpu().read(&got_q, batch * qd), &dev.gpu().read(&want_q, batch * qd));
+        assert_stage(&format!("{name} k cache"), &dev.gpu().read(&got_k, batch * maxt * kd), &dev.gpu().read(&want_k, batch * maxt * kd));
+        assert_stage(&format!("{name} v cache"), &dev.gpu().read(&got_v, batch * maxt * vw), &dev.gpu().read(&want_v, batch * maxt * vw));
+    }
+}
+
+#[test]
 fn the_fused_residual_update_and_next_norm_equals_the_two_dispatches() {
     let _g = gpu_core::testgpu::exclusive();
     let Some(dev) = device("rms_axpy_norm") else { return };

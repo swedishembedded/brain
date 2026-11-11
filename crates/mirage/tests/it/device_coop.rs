@@ -220,3 +220,27 @@ fn the_single_dispatch_hadamard_mlp_matches_the_three_rotations() {
         assert_agree(&format!("hadamard mlp rows {rows}"), &plain, &coop);
     }
 }
+
+#[test]
+fn the_cooperative_banned_argmax_matches_add_then_argmax() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(mut dev) = cooperative_device("argmax_banned") else { return };
+    for (m, n) in [(1usize, 8299usize), (3, 8299), (2, 100), (1, 2048)] {
+        let mut logits = noise(m * n, 61, 5.0);
+        // Ties: the same maximum at two positions of row 0, the lower index must win.
+        logits[7] = 9.0;
+        logits[n - 3] = 9.0;
+        let mut ban = vec![0f32; m * n];
+        ban[n - 3] = -1.0e30;
+        ban[13] = -1.0e30;
+        let (plain, coop) = both(&mut dev, |dev| {
+            let g = dev.gpu();
+            let (lb, bb, out) = (g.storage_init("l", &logits), g.storage_init("b", &ban), g.storage(m as u64));
+            let mut s = Vec::new();
+            dev.argmax_banned(&mut s, &lb, &bb, &out, m as u32, n as u32);
+            g.submit(&[], &s);
+            vec![g.read(&out, m)]
+        });
+        assert_eq!(plain, coop, "argmax_banned {m}x{n}");
+    }
+}

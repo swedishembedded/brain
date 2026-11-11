@@ -64,8 +64,8 @@ struct DLayer {
     qkvg: Weight,
     /// The causal taps of q, k and v side by side, `[taps, q | k | v]`.
     taps: DeviceBuffer,
-    q_norm: DeviceBuffer,
-    k_norm: DeviceBuffer,
+    /// The query head norm weight followed by the key head norm weight.
+    qk_norm: DeviceBuffer,
     out: Weight,
     post_attn: DeviceBuffer,
     attn_gate: f32,
@@ -185,8 +185,7 @@ impl DeviceDecoder {
                     norm: dev.norm_weight(&l.norm),
                     qkvg: cat(dev, "dqkvg", &[&l.q, &l.k, &l.v, &l.gate]),
                     taps: dev.buf(&side_by_side(&[(&l.q_taps, c_widths[0]), (&l.k_taps, c_widths[1]), (&l.v_taps, c_widths[2])])),
-                    q_norm: dev.norm_weight(&l.q_norm),
-                    k_norm: dev.norm_weight(&l.k_norm),
+                    qk_norm: dev.norm_weight(&[l.q_norm.as_slice(), &l.k_norm].concat()),
                     out: lin(dev, "dout", &l.out),
                     post_attn: dev.norm_weight(&l.post_attn),
                     attn_gate: ops::sigmoid(l.attn_gate),
@@ -289,8 +288,8 @@ impl DeviceDecoder {
     }
 
     /// Feed the history token at the next position for every sequence; returns the logits
-    /// `[batch, vocabulary]` when `want_logits`. With `pick = (ban, picked)` the same submission adds `ban` to the
-    /// logits, writes each row's greedy token (as `f32`) into `picked` and appends it to the history, so a
+    /// `[batch, vocabulary]` when `want_logits`. With `pick = (ban, picked)` the same submission ranks `logits + ban` (the returned logits stay unbanned
+    /// on a multi-barrier device), writes each row's greedy token (as `f32`) into `picked` and appends it to the history, so a
     /// step costs one submission and no host round trip. Engram hashing runs on the device from the history.
     pub fn step(&self, dev: &Device, st: &mut BatchState, cross: &DeviceCross, want_logits: bool, pick: Option<(&DeviceBuffer, &DeviceBuffer)>) -> Option<DeviceBuffer> {
         let (mut s, logits) = self.build_step(dev, st, cross, want_logits, pick);
@@ -347,8 +346,7 @@ impl DeviceDecoder {
             let normed = dev.zc_new(&mut s, &mean, &self.final_norm, bu, du);
             let logits = dev.linear_new(&mut s, &self.logits_w, &normed, bu);
             if let Some((ban, picked)) = pick {
-                dev.add(&mut s, ban, &logits, bu * self.logits_w.n());
-                dev.argmax(&mut s, &logits, picked, bu, self.logits_w.n());
+                dev.argmax_banned(&mut s, &logits, ban, picked, bu, self.logits_w.n());
                 dev.tok_put(&mut s, picked, &st.hist, &st.posbuf, bu, st.maxt as u32, st.first);
             }
             logits
@@ -383,13 +381,11 @@ impl DeviceDecoder {
         let widths = [heads * hd, kvh * hd, kvh * vh];
         let (qkv, stride) = (widths.iter().sum::<u32>(), widths.iter().sum::<u32>() + heads * vh);
         // The three causal taps run as one over the q | k | v columns; q and k are then normalised and rotated where they lie
-        // (k straight into its cache row) and v is written to its cache row from the same table.
+        // (k straight into its cache row, with the value row copied alongside) in one dispatch.
         let conv = dev.alloc(st.batch * qkv as usize);
         dev.taps(s, &qkvg, &cache.raw, &ly.taps, &conv, &st.posbuf, (b, qkv, maxt), c.taps as u32, 1, (stride, 0));
         let q = dev.alloc((b * heads * hd) as usize);
-        dev.zc_norm_rope_strided(s, (&conv, qkv, 0), &ly.q_norm, &st.posbuf, (b, heads, hd), c.rope, &q);
-        dev.zc_norm_rope_into_cache(s, (&conv, qkv, widths[0]), &ly.k_norm, &st.posbuf, (b, kvh, hd), c.rope, (&cache.k, maxt));
-        dev.row_write_strided(s, (&conv, qkv, widths[0] + widths[1]), &cache.v, &st.posbuf, (b, kvh * vh, maxt));
+        dev.qk_rope(s, (&conv, qkv), &ly.qk_norm, &st.posbuf, (b, heads, kvh, hd, vh), c.rope, (&q, &cache.k, &cache.v, maxt));
         let off = qkv;
         let att = dev.alloc(st.batch * (heads * vh) as usize);
         let shape = AttnShape { batch: b, nq: 1, heads, kvh, hd, vd: vh, nk: maxt, visible: u32::MAX };

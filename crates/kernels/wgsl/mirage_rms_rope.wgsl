@@ -17,22 +17,13 @@
 //
 //   x : [rows, hd]   out: [rows, hd]   w: [hd] (1 + scale)   pos: one word
 //   angle_i = pos * base^(-2i / hd), the pairing of mirage_rope_pos (i, i + hd/2).
-//   params: hd, rows, eps (f32 bits), base (f32 bits), groups, x_stride, x_off, maxt. Dispatch: rows * 64 invocations (one workgroup per row).
-//
-// Row r of a decoder step is head r % groups of sequence r / groups. With groups == 0 (the plain form) rows are contiguous
-// in x and out. With groups > 0 row r is read at (r / groups) * x_stride + x_off + (r % groups) * hd, so the heads of a fused
-// projection are normalised where they lie; and with maxt > 0 the rotated row is stored straight into a position cache laid
-// out [sequence, maxt, groups * hd] at the position in `pos`, where a separate row-write dispatch would have copied it.
+//   params: hd, rows, eps (f32 bits), base (f32 bits). Dispatch: rows * 64 invocations (one workgroup per row).
 
 struct Params {
     hd: u32,
     rows: u32,
     eps: f32,
     base: f32,
-    groups: u32,
-    x_stride: u32,
-    x_off: u32,
-    maxt: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -50,11 +41,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     let row = wg.y * nwg.x + wg.x;
     let t = li.x;
     if (row >= p.rows) { return; }
-    // `let`s only: the CPU interpreter re-initialises a `var` read across the barrier.
-    let g = max(p.groups, 1u);
-    let strided = p.groups > 0u;
-    let base = select(row * p.hd, (row / g) * p.x_stride + p.x_off + (row % g) * p.hd, strided);
-    let obase = select(base, select(row * p.hd, ((row / g) * p.maxt + pos[0]) * (g * p.hd) + (row % g) * p.hd, p.maxt > 0u), strided);
+    let base = row * p.hd;
     var acc = 0.0;
     for (var c = t; c < p.hd; c = c + 64u) {
         let v = x[base + c];
@@ -74,7 +61,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         let co = cos(angle);
         let a = x[base + i] * inv * w[i];
         let b = x[base + i + half] * inv * w[i + half];
-        out[obase + i] = a * co - b * s;
-        out[obase + i + half] = b * co + a * s;
+        out[base + i] = a * co - b * s;
+        out[base + i + half] = b * co + a * s;
     }
 }

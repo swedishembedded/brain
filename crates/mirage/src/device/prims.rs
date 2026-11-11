@@ -397,12 +397,7 @@ impl Device {
 
     /// `hist[b, pos] = src[b]`.
     pub fn row_write(&self, s: &mut Vec<Step>, src: &DeviceBuffer, hist: &DeviceBuffer, pos: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32)) {
-        self.row_write_strided(s, (src, w, 0), hist, pos, (rows, w, maxt));
-    }
-
-    /// [`Device::row_write`] reading row `b` at `b * stride + off` of `src` (a slice of a wider projection), as `(buffer, stride, off)`.
-    pub fn row_write_strided(&self, s: &mut Vec<Step>, (src, stride, off): (&DeviceBuffer, u32, u32), hist: &DeviceBuffer, pos: &DeviceBuffer, (rows, w, maxt): (u32, u32, u32)) {
-        self.push(s, "mirage_row_write", &[src, hist, pos], &[rows, w, maxt, stride, off], rows * w);
+        self.push(s, "mirage_row_write", &[src, hist, pos], &[rows, w, maxt], rows * w);
     }
 
     /// Rotary embedding of position `pos` on `rows` head vectors of width `hd` (the decoder step runs the norm and
@@ -427,6 +422,18 @@ impl Device {
     pub fn argmax(&self, s: &mut Vec<Step>, x: &DeviceBuffer, out: &DeviceBuffer, m: u32, n: u32) {
         s.push(self.gpu().dispatch(self.k("mirage_argmax_wg"), &[x, out], &[m, n], gpu_core::Dispatch::Workgroups(m)));
     }
+    /// `out[row]` = the lowest index of the largest `logits + ban` of each of `m` rows of width `n`. Adds `ban` into `logits` and
+    /// runs [`Device::argmax`] in two dispatches; where workgroups may run any number of barriers, one dispatch that leaves `logits`
+    /// as it was.
+    pub fn argmax_banned(&self, s: &mut Vec<Step>, logits: &DeviceBuffer, ban: &DeviceBuffer, out: &DeviceBuffer, m: u32, n: u32) {
+        if self.cooperative() {
+            s.push(self.gpu().dispatch(self.k("mirage_argmax_ban_wg"), &[logits, ban, out], &[m, n], gpu_core::Dispatch::Workgroups(m)));
+            return;
+        }
+        self.add(s, ban, logits, m * n);
+        self.argmax(s, logits, out, m, n);
+    }
+
     /// `tok[b] = hist[b, pos[0]]`.
     pub fn tok_at(&self, s: &mut Vec<Step>, hist: &DeviceBuffer, tok: &DeviceBuffer, pos: &DeviceBuffer, batch: u32, maxt: u32) {
         self.push(s, "mirage_tok_at", &[hist, tok, pos], &[batch, maxt], batch);

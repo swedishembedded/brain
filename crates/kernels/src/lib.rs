@@ -870,6 +870,9 @@ pub const MAXPOOL2D_DX: &str = include_str!("../wgsl/maxpool2d_dx.wgsl");
 pub const MIRAGE_ADD_MASKED: &str = include_str!("../wgsl/mirage_add_masked.wgsl");
 /// `wgsl/mirage_argmax_wg.wgsl`
 pub const MIRAGE_ARGMAX_WG: &str = include_str!("../wgsl/mirage_argmax_wg.wgsl");
+
+/// `wgsl/mirage_argmax_ban_wg.wgsl`
+pub const MIRAGE_ARGMAX_BAN_WG: &str = include_str!("../wgsl/mirage_argmax_ban_wg.wgsl");
 /// `wgsl/mirage_attn.wgsl`
 pub const MIRAGE_ATTN: &str = include_str!("../wgsl/mirage_attn.wgsl");
 /// `wgsl/mirage_attn_apply.wgsl`
@@ -954,6 +957,9 @@ pub const MIRAGE_RMS_AXPY_NORM: &str = include_str!("../wgsl/mirage_rms_axpy_nor
 pub const MIRAGE_RMS_AXPY_NORM_WG: &str = include_str!("../wgsl/mirage_rms_axpy_norm_wg.wgsl");
 /// `wgsl/mirage_rms_rope.wgsl`
 pub const MIRAGE_RMS_ROPE: &str = include_str!("../wgsl/mirage_rms_rope.wgsl");
+
+/// `wgsl/mirage_qk_rope.wgsl`
+pub const MIRAGE_QK_ROPE: &str = include_str!("../wgsl/mirage_qk_rope.wgsl");
 /// `wgsl/mirage_rms_axpy.wgsl`
 pub const MIRAGE_RMS_AXPY: &str = include_str!("../wgsl/mirage_rms_axpy.wgsl");
 /// `wgsl/mirage_rope2d.wgsl`
@@ -2078,6 +2084,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("maxpool2d_dx", MAXPOOL2D_DX),
     ("mirage_add_masked", MIRAGE_ADD_MASKED),
     ("mirage_argmax_wg", MIRAGE_ARGMAX_WG),
+    ("mirage_argmax_ban_wg", MIRAGE_ARGMAX_BAN_WG),
     ("mirage_attn", MIRAGE_ATTN),
     ("mirage_attn_apply", MIRAGE_ATTN_APPLY),
     ("mirage_attn_decode", MIRAGE_ATTN_DECODE),
@@ -2118,6 +2125,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_rms_axpy_norm", MIRAGE_RMS_AXPY_NORM),
     ("mirage_rms_axpy_norm_wg", MIRAGE_RMS_AXPY_NORM_WG),
     ("mirage_rms_rope", MIRAGE_RMS_ROPE),
+    ("mirage_qk_rope", MIRAGE_QK_ROPE),
     ("mirage_rope2d", MIRAGE_ROPE2D),
     ("mirage_rope_pos", MIRAGE_ROPE_POS),
     ("mirage_row_write", MIRAGE_ROW_WRITE),
