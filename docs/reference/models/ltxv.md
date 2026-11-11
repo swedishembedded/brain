@@ -586,7 +586,10 @@ path, their timing and the background stay the source's. In order:
    frame cuts the person off, the canvas extends below it: the model draws
    a whole body at the person's scale there rather than shrinking the
    figure to fit, and the rows below the frame are discarded. An edit whose figure overlaps the person by less than
-   half (intersection over union) is retried with another seed; a guide
+   half (intersection over union) is retried with another seed. With
+   ArcFace in the model store every attempt is made, and of those that
+   cover the person the one whose face is closest to the sheet's is kept
+   (`--no-identity` keeps the first that covers the person); a guide
    frame with no edit that passes is dropped and reported, because a guide
    standing somewhere else pulls the clip away from the person's motion.
    Frame 0 with no passing edit stops the run.

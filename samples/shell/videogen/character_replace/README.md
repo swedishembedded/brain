@@ -95,6 +95,15 @@ brain pull facebook/sam2.1-hiera-tiny                   # the default
 brain pull facebook/sam2.1-hiera-large                  # optional: the larger tracker
 ```
 
+**ArcFace** (optional: picks, among each still's edits, the one whose face
+is closest to the sheet's; without it the first edit that covers the
+person is kept, and the run says so):
+
+```bash
+brain pull https://huggingface.co/DIAMONIK7777/antelopev2/blob/main/glintr100.onnx
+brain pull https://huggingface.co/DIAMONIK7777/antelopev2/blob/main/scrfd_10g_bnkps.onnx
+```
+
 **Adapters** - any LoRA in ComfyUI/PEFT `.safetensors` form. For the still
 edits, a FLUX.2-klein-4B LoRA (`--edit-adapter`); for the video pass, an
 LTX-2.5 LoRA (`--adapter`), such as one trained on your character, or a
@@ -185,7 +194,8 @@ parameter here. For `run`, from `brain ltxv replace --help`:
 |---|---|---|
 | `--guide-frames <list>` / `--guide-every <n>` | every 40th and the last | the frames painted as guides (`none` for none) |
 | `--guide-strength <s>` | 0.5 | how hard the video holds each guide; at 1.0 it cross-fades between stills instead of moving |
-| `--edit-attempts <n>` | 3 | seeds an edit gets to cover the person |
+| `--edit-attempts <n>` | 3 | edits made per still; with ArcFace in the store all are made and the one covering the person whose face is closest to the sheet's is kept, without it the first that covers the person |
+| `--no-identity` | | keep stills by overlap alone, without ArcFace |
 | `--min-overlap <f>` | 0.5 | the overlap (IoU) of figure and person a still needs |
 | `--edit-size <px>` | 768 | the long side the stills are painted at |
 | `--edit-prompt <text>` | put the sheet's character in the person's place | the instruction for the still edits |

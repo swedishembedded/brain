@@ -97,7 +97,12 @@ Guides:
                           between stills instead of moving between them)
 
 Stills:
-  --edit-attempts <n>     seeds an edit gets to cover the actor (default 3)
+  --edit-attempts <n>     edits made per still (default 3). With an identity
+                          model in the store (ArcFace), all are made and the
+                          one covering the actor whose face is closest to
+                          the sheet's is kept; without one, the first that
+                          covers the actor
+  --no-identity           keep stills by overlap alone, without ArcFace
   --min-overlap <f>       the least intersection over union of painted figure
                           and actor a still needs, 0..1 (default 0.5); a guide
                           below it is dropped, frame 0 below it stops the run
@@ -128,7 +133,8 @@ Model roles resolve from the models directory like every other command.
 Name LTX-2.5's outright with --dit/--vae/--text-encoder/--tokenizer, and
 the other models' with --component <model>.<role>=<path> (repeatable):
 flux2.dit, flux2.vae, flux2.text_encoder, flux2.tokenizer, flux2.variant
-(the stills), sam2.weights, sam2.variant (the tracking).
+(the stills), sam2.weights, sam2.variant (the tracking), arcface.weights
+(the face comparison).
 ";
 
 /// Every dial of the pipeline. The defaults are the values the pipeline was
@@ -254,6 +260,9 @@ struct Request {
     seed: u64,
     flux2_roles: Vec<String>,
     sam2_overrides: BTreeMap<String, String>,
+    arcface_overrides: BTreeMap<String, String>,
+    /// `--no-identity`: keep the stills by overlap alone.
+    no_identity: bool,
     ltxv_overrides: BTreeMap<String, String>,
     dit_config: Option<String>,
     steps: Option<usize>,
@@ -288,12 +297,13 @@ fn parse(args: &[String]) -> Result<Request, String> {
         Some("none") => Some(Vec::new()),
         Some(list) => Some(list.split(',').map(|f| f.trim().parse::<usize>().map_err(|e| format!("--guide-frames: '{f}': {e}"))).collect::<Result<_, _>>()?),
     };
-    let (mut flux2_roles, mut sam2_overrides) = (Vec::new(), BTreeMap::new());
+    let (mut flux2_roles, mut sam2_overrides, mut arcface_overrides) = (Vec::new(), BTreeMap::new(), BTreeMap::new());
     while let Some(c) = a.take_str("--component") {
         let (model, role, path) = parse_component(&c)?;
         match model {
             Component::Editor => flux2_roles.extend([format!("--{}", role.replace('_', "-")), path]),
             Component::Tracker => drop(sam2_overrides.insert(role, path)),
+            Component::Identity => drop(arcface_overrides.insert(role, path)),
         }
     }
     let req = Request {
@@ -319,6 +329,8 @@ fn parse(args: &[String]) -> Result<Request, String> {
         seed,
         flux2_roles,
         sam2_overrides,
+        arcface_overrides,
+        no_identity: a.take_flag("--no-identity"),
         ltxv_overrides,
     };
     a.finish();
@@ -367,6 +379,8 @@ enum Component {
     Editor,
     /// SAM 2.1, which tracks the actor and segments the painted figure.
     Tracker,
+    /// ArcFace, which compares a painted face with the sheet's.
+    Identity,
 }
 
 /// `--component <model>.<role>=<path>`: one role of one of the pipeline's
@@ -374,13 +388,14 @@ enum Component {
 /// The role must be one the model's resolver declares (or its `variant`),
 /// so a misspelt role is an error rather than a flag nobody reads.
 fn parse_component(text: &str) -> Result<(Component, String, String), String> {
-    let bad = || format!("--component '{text}' is not <model>.<role>=<path> (models: flux2, sam2)");
+    let bad = || format!("--component '{text}' is not <model>.<role>=<path> (models: flux2, sam2, arcface)");
     let (name, rest) = text.split_once('.').ok_or_else(bad)?;
     let (role, path) = rest.split_once('=').ok_or_else(bad)?;
     let role = role.replace('-', "_");
     let (component, roles): (Component, &[&str]) = match name {
         "flux2" => (Component::Editor, flux2::spec::Flux2Spec.roles()),
         "sam2" => (Component::Tracker, sam2::spec::Sam2Spec.roles()),
+        "arcface" => (Component::Identity, arcface::spec::ArcFaceSpec.roles()),
         _ => return Err(bad()),
     };
     if role != "variant" && !roles.contains(&role.as_str()) {
@@ -438,7 +453,8 @@ pub(crate) fn replace(args: &[String]) -> Result<(), String> {
     // The edited stills: frame 0 (the clip's own first frame) and the guides.
     let masks_gpu = gpu_core::Gpu::new(imaging::PIPELINES);
     let ctx = Ctx::new(&masks_gpu);
-    let editor = Editor { req: &req, tracker: &tracker, ctx: &ctx, w, h };
+    let identity = Identity::load(&req, &tracker.gpu)?;
+    let editor = Editor { req: &req, tracker: &tracker, identity, ctx: &ctx, w, h };
     let mut stills: Vec<Still> = Vec::new();
     for &k in std::iter::once(&0).chain(&guides) {
         if k > 0 && !actor[k].contains(&true) {
@@ -625,34 +641,107 @@ struct Still {
     iou: f32,
 }
 
+/// ArcFace and the character sheet's face embedding: how close a painted
+/// still's face is to the character's.
+struct Identity {
+    session: arcface::caps::ArcFaceSession,
+    sheet: Vec<f32>,
+}
+
+impl Identity {
+    /// The identity model from the store (or `--component arcface.weights`)
+    /// and the sheet's face. `None` - said, not silent - when the store holds
+    /// no ArcFace or the sheet shows no face a detector finds (a drawn or
+    /// masked character): the stills are then kept by overlap alone.
+    fn load(req: &Request, device: &gpu_core::Gpu) -> Result<Option<Identity>, String> {
+        if req.no_identity {
+            return Ok(None);
+        }
+        let spec = arcface::spec::ArcFaceSpec;
+        let assembly = match crate::resolver_cli::try_resolve(loader::model_dir::resolve(None).as_deref(), "arcface", &spec, &req.arcface_overrides) {
+            Ok(a) => a,
+            Err(loader::resolver::ResolveFailure::Missing(_)) => {
+                eprintln!("ltxv replace: no ArcFace in the model store - stills are kept by overlap alone, not by how close their face is to the sheet's (brain pull https://huggingface.co/DIAMONIK7777/antelopev2/blob/main/glintr100.onnx and .../scrfd_10g_bnkps.onnx to compare faces)");
+                return Ok(None);
+            }
+            Err(e) => return Err(format!("the identity model: {}", e.message())),
+        };
+        let weights = assembly.role_path("weights")?;
+        let dir = Path::new(&weights).parent().ok_or_else(|| format!("{weights} has no directory"))?.to_string_lossy().into_owned();
+        let session = arcface::caps::ArcFaceSession::load(&dir, device.new_like(&arcface::caps::SERVING_PIPELINES))?;
+        let sheet = imaging::load(&req.character)?;
+        let chw = imaging::pixels::hwc_to_chw(&sheet.to_hwc_unit(), 3, sheet.h as usize, sheet.w as usize);
+        match session.embed_raw_chw(&chw, sheet.w, sheet.h, true, true) {
+            Ok((raw, _)) => Ok(Some(Identity { session, sheet: model::hostmath::l2_normalize(&raw) })),
+            Err(_) => {
+                eprintln!("ltxv replace: no face found on {} - stills are kept by overlap alone", req.character);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Cosine similarity of the largest face on `still` to the sheet's;
+    /// `None` when no face is found there.
+    fn similarity(&self, still: &Still) -> Result<Option<f32>, String> {
+        let chw = imaging::pixels::hwc_to_chw(&still.image.to_hwc_unit(), 3, still.image.h as usize, still.image.w as usize);
+        let faces = self.session.detect_faces(&chw, still.image.w, still.image.h)?;
+        // The face on the figure, not a passer-by's: the largest one inside it.
+        let w = still.image.w as usize;
+        let on_figure: Vec<_> = faces
+            .into_iter()
+            .filter(|f| {
+                let (cx, cy) = (((f.bbox[0] + f.bbox[2]) / 2.0) as usize, ((f.bbox[1] + f.bbox[3]) / 2.0) as usize);
+                still.figure.get(cy * w + cx).copied().unwrap_or(false)
+            })
+            .collect();
+        if on_figure.is_empty() {
+            return Ok(None);
+        }
+        let face = arcface::caps::primary_face(&on_figure);
+        let e = model::hostmath::l2_normalize(&self.session.embed_face_chw(&chw, still.image.w, still.image.h, &face)?);
+        Ok(Some(e.iter().zip(&self.sheet).map(|(a, b)| a * b).sum()))
+    }
+}
+
 /// What every still edit shares.
 struct Editor<'a> {
     req: &'a Request,
     tracker: &'a sam2::Sam2,
+    /// The face the stills are matched against, when there is one to match.
+    identity: Option<Identity>,
     ctx: &'a Ctx<'a>,
     w: usize,
     h: usize,
 }
 
 impl Editor<'_> {
-    /// Up to `--edit-attempts` edits of frame `k`, each with its own seed;
-    /// the first whose figure overlaps the actor by `--min-overlap` wins,
-    /// else the best of them. The winner is `still_<k>.png`.
+    /// Up to `--edit-attempts` edits of frame `k`, each with its own seed,
+    /// kept by [`pick_still`]: with an identity model, every attempt is made
+    /// and the covering edit whose face is closest to the sheet's wins;
+    /// without one, the first covering edit. The winner is `still_<k>.png`.
     fn best_still(&self, k: usize, src: &[u8], actor: &[bool]) -> Result<Still, String> {
-        let mut best: Option<Still> = None;
         let t = &self.req.tuning;
+        let mut stills: Vec<(Still, Option<f32>)> = Vec::new();
         for attempt in 0..t.edit_attempts {
             let seed = self.req.seed.wrapping_add(k as u64 * t.edit_attempts + attempt);
             let still = self.edit(k, src, actor, seed)?;
-            eprintln!("ltxv replace: frame {k} edit {} (seed {seed}): figure/actor overlap {:.2}", attempt + 1, still.iou);
-            if best.as_ref().is_none_or(|b| still.iou > b.iou) {
-                best = Some(still);
-            }
-            if best.as_ref().is_some_and(|b| b.iou >= t.min_overlap) {
+            let face = self.identity.as_ref().map(|id| id.similarity(&still)).transpose()?.flatten();
+            let face_note = match (&self.identity, face) {
+                (None, _) => String::new(),
+                (Some(_), Some(f)) => format!(", face/sheet similarity {f:.2}"),
+                (Some(_), None) => ", no face found".to_string(),
+            };
+            eprintln!("ltxv replace: frame {k} edit {} (seed {seed}): figure/actor overlap {:.2}{face_note}", attempt + 1, still.iou);
+            let covers = still.iou >= t.min_overlap;
+            stills.push((still, face));
+            // Without a face to compare, the first edit that covers the actor
+            // is as good as any later one.
+            if covers && self.identity.is_none() {
                 break;
             }
         }
-        let best = best.expect("--edit-attempts is at least one");
+        let i = pick_still(&stills.iter().map(|(s, f)| (s.iou, *f)).collect::<Vec<_>>(), t.min_overlap);
+        let best = stills.swap_remove(i).0;
         imaging::save_png(self.req.work.join(format!("still_{k}.png")), &best.image)?;
         Ok(best)
     }
@@ -710,6 +799,24 @@ impl Editor<'_> {
         let image = Rgb8::new(w as u32, h as u32, blend(&painted, src, &alpha))?;
         Ok(Still { frame: k, image, iou: iou(&figure, actor), figure })
     }
+}
+
+/// Which of a frame's edits to keep, given each one's `(overlap with the
+/// actor, face similarity to the sheet)`: among those that cover the actor
+/// (`min_overlap`), the closest face, a measured face before none, then the
+/// best overlap; when none covers the actor, the best overlap.
+fn pick_still(candidates: &[(f32, Option<f32>)], min_overlap: f32) -> usize {
+    let covering = candidates.iter().any(|c| c.0 >= min_overlap);
+    let rank = |c: &(f32, Option<f32>)| -> (bool, f32, f32) {
+        if covering && c.0 >= min_overlap {
+            (true, c.1.unwrap_or(f32::NEG_INFINITY), c.0)
+        } else {
+            (false, f32::NEG_INFINITY, c.0)
+        }
+    };
+    (0..candidates.len())
+        .max_by(|&a, &b| rank(&candidates[a]).partial_cmp(&rank(&candidates[b])).unwrap_or(std::cmp::Ordering::Equal))
+        .expect("at least one edit")
 }
 
 /// Intersection over union of two masks; 0 when both are empty.
@@ -980,6 +1087,19 @@ mod tests {
         }
     }
 
+    /// Among the edits that cover the actor, the one whose face is closest
+    /// to the sheet's wins; without a measurable face, the best overlap; and
+    /// when none covers the actor, the best overlap (dropped or refused by
+    /// the caller).
+    #[test]
+    fn the_still_whose_face_matches_the_sheet_best_is_kept() {
+        assert_eq!(pick_still(&[(0.9, Some(0.1)), (0.6, Some(0.4)), (0.8, Some(0.3))], 0.5), 1);
+        assert_eq!(pick_still(&[(0.9, Some(0.1)), (0.4, Some(0.6))], 0.5), 0, "a face on a figure that misses the actor does not count");
+        assert_eq!(pick_still(&[(0.7, None), (0.9, None)], 0.5), 1, "no face measured: the best overlap");
+        assert_eq!(pick_still(&[(0.7, None), (0.6, Some(0.2))], 0.5), 1, "a measured face beats none");
+        assert_eq!(pick_still(&[(0.3, Some(0.5)), (0.4, None)], 0.5), 1, "nothing covers the actor: the best overlap");
+    }
+
     /// A figure follows the actor: shifted with the actor's centroid and
     /// scaled with the square root of the area change.
     #[test]
@@ -1048,7 +1168,7 @@ mod tests {
             "--input", "--character", "--prompt", "--output-path", "--point", "--exclude", "--guide-frames", "--component", "--work-dir",
             "--prompt-frame", "--edit-prompt", "--dit-config", "--steps", "--device", "--guide-strength", "--guide-every", "--edit-attempts",
             "--min-overlap", "--edit-size", "--repaint-grow", "--body-ratio", "--paste-grow", "--region-grow", "--frame0-inset", "--feather", "--no-conform",
-            "--fps", "--adapter", "--lora-scale", "--edit-adapter", "--edit-lora-scale", "--actor-mask", "--soundtrack",
+            "--fps", "--adapter", "--lora-scale", "--edit-adapter", "--edit-lora-scale", "--actor-mask", "--soundtrack", "--no-identity",
         ];
         for flag in parsed {
             assert!(HELP.contains(flag), "{flag} is parsed but not in --help");
