@@ -222,6 +222,8 @@ fn bundle_adjustment_self_calibrates() {
     let cfg = BaCfg { iters: 100, free: vec![vec![Param::Focal, Param::Coeff(0), Param::Coeff(1)]], anchor: Some(0), scale: Some(5), ..BaCfg::default() };
     let rep = bundle_adjust(&mut ks, &sensor, &mut est, &mut pts, &obs, &cfg);
     assert!(rep.rms_after < 0.45, "rms {:.3} px after, {:.3} before", rep.rms_after, rep.rms_before);
+    // it converges well inside the budget, and the report says how soon
+    assert!(rep.iterations < cfg.iters, "{} iterations reported, the whole budget", rep.iterations);
     // a narrow orbit separates focal length from depth only weakly
     let k = ks[0];
     assert!((k.fx - 800.0).abs() < 12.0, "focal {:.1} against 800", k.fx);

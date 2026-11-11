@@ -387,7 +387,8 @@ pub fn bundle_adjust(ks: &mut [Intrinsics], sensor: &[usize], poses: &mut [Pose]
     let total = |ks: &[Intrinsics], poses: &[Pose], points: &[V3]| huber_cost(ks, sensor, poses, points, obs, cfg.huber) + prior_cost(&priors, ks);
     let mut cost = total(ks, poses, points);
     let mut it = 0;
-    while it < cfg.iters {
+    let mut converged = false;
+    while it < cfg.iters && !converged {
         it += 1;
         // the scale camera's centre moves across its baseline only
         let across: Option<(V3, V3)> = match (cfg.anchor, cfg.scale) {
@@ -649,9 +650,7 @@ pub fn bundle_adjust(ks: &mut [Intrinsics], sensor: &[usize], poses: &mut [Pose]
                 cost = ncost;
                 lambda = (lambda / 3.0).max(1e-9);
                 accepted = true;
-                if gain < 1e-10 * cost.max(1e-300) {
-                    it = cfg.iters;
-                }
+                converged = gain < 1e-10 * cost.max(1e-300);
                 break;
             }
             lambda *= 5.0;

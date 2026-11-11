@@ -283,7 +283,7 @@ fn null_basis(rows: &[[f64; 9]; 5]) -> Option<[[f64; 9]; 4]> {
 }
 
 /// Every essential matrix consistent with five correspondences of unit
-/// bearings `a ↔ b` (`bᵀ E a = 0`): at most ten, each of unit matrix L2 norm
+/// bearings `a ↔ b` (`bᵀ E a = 0`): at most ten, each of unit matrix L2
 /// norm. Empty for a degenerate sample.
 pub fn essential_5pt(a: &[V3], b: &[V3]) -> Vec<M3> {
     assert!(a.len() == 5 && b.len() == 5, "the five-point solver takes exactly five correspondences");
