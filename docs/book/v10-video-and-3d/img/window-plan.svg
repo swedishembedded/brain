@@ -1,0 +1,15 @@
+<!-- source-sha256: 4d645e40bceb7f0b763e118df80865efefe8f2263b490dc849030c39b8141ef4 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 264" width="800" height="264"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="264" fill="#ffffff"/>
+<rect x="20" y="16" width="760" height="228" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Windows on the latent timeline of a 601-frame clip (76 latent frames)</text>
+<rect x="62" y="59" width="281.6" height="38" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="202.8" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">window 0: new 34</text>
+<rect x="280.4" y="115" width="63.2" height="38" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="312" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">carried 8</text>
+<rect x="347.6" y="115" width="172.4" height="38" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="433.8" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">window 1: new 21</text>
+<rect x="456.8" y="171" width="63.2" height="38" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="488.4" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">carried 8</text>
+<rect x="524" y="171" width="172.4" height="38" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="610.2" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">window 2: new 21</text>
+</svg>

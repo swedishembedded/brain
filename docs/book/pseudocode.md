@@ -525,6 +525,8 @@ The project chapter of the volume (Chapter 9) writes out `synthesise`, `ctc_scal
 
 The video chapter (Chapter 1) writes out `frame_start_ms` and `best_vector` where they are first used. `//` rounds toward minus infinity, and `frame_start_ms` takes it twice, first to whole nanoseconds and then to whole milliseconds. In `best_vector` the list `C` is the 25 pairs `(dx, dy)` with `dx` and `dy` in `-2 .. 2`, ordered by increasing `abs(dx) + abs(dy)`, then by increasing `dy`, then by increasing `dx`, the loop visits it in that order and only a strictly smaller sum replaces the best so far, and a pixel read outside the frame takes the nearest pixel inside it.
 
+The video generation chapter (Chapter 2) writes out `denoise_clip` and `window_plan` where they are first used. A scalar times a row of an array (`mask[n] * x[n, :]`) scales every element of the row, and a sum of two rows of equal shape is elementwise. In `window_plan` the result is a list of triples (carried latent frames, new latent frames, the output pixel frame at which the window's first emitted frame goes); `ceil` of a quotient is the smallest integer not below it, and `min` and `max` of integers are integers.
+
 ## Routines of the transformer chapters (Volume V)
 
 Chapters 9 to 12 use four routines of the normalization and attention chapters without writing them out again. Each is defined here by what it returns.

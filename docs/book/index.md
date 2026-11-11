@@ -170,4 +170,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume X: Video, Space and World Models](v10-video-and-3d/index.md)
 
 1. [Video as Data](v10-video-and-3d/01-video.md): How do we represent and compress a sequence of frames?
+2. [Generating Video](v10-video-and-3d/02-video-generation.md): How do diffusion models keep motion consistent across hundreds of frames?
 <!-- /contents -->

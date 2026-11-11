@@ -1,0 +1,32 @@
+<!-- source-sha256: 9e1ea4b297dbae32bfd7b73d01c0d25cddbcad7d53e15d46e80bd5e5f78458d6 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 340" width="560" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="340" fill="#ffffff"/>
+<line x1="212.82" y1="294" x2="212.82" y2="30" stroke="#edf2f7"/>
+<text x="212.82" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1,000</text>
+<line x1="434.32" y1="294" x2="434.32" y2="30" stroke="#edf2f7"/>
+<text x="434.32" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10,000</text>
+<line x1="97" y1="294" x2="540" y2="294" stroke="#edf2f7"/>
+<text x="91" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100,000</text>
+<line x1="97" y1="228" x2="540" y2="228" stroke="#edf2f7"/>
+<text x="91" y="232" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1,000,000</text>
+<line x1="97" y1="162" x2="540" y2="162" stroke="#edf2f7"/>
+<text x="91" y="166" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10,000,000</text>
+<line x1="97" y1="96" x2="540" y2="96" stroke="#edf2f7"/>
+<text x="91" y="100" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100,000,000</text>
+<line x1="97" y1="30" x2="540" y2="30" stroke="#edf2f7"/>
+<text x="91" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1,000,000,000</text>
+<rect x="97" y="30" width="443" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="97" y="30" width="443" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="120.75,282.87 187.43,263 226.43,251.38 254.1,243.13 307.94,227.09 342.25,216.87 367.49,209.35 387.46,203.4 418.09,194.27 451.08,184.44 489.05,173.13 516.2,165.04"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="120.75,282.79 187.43,262.85 226.43,251.16 254.1,242.84 307.94,226.57 342.25,216.13 367.49,208.39 387.46,202.23 418.09,192.67 451.08,182.21 489.05,169.88 516.2,160.81"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="120.75,282.87 187.43,243.13 226.43,219.89 254.1,203.4 307.94,171.32 342.25,150.87 367.49,135.83 387.46,123.92 418.09,105.67 451.08,86.01 489.05,63.38 516.2,47.2"/></g>
+<text x="318.5" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">tokens in the clip (latent frames x 384)</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">pairs scored per head</text>
+<text x="318.5" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Pairs of positions, 768 x 512 clips</text>
+<rect x="105" y="38" width="129.29" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="113" y1="53" x2="133" y2="53" stroke="#c05621" stroke-width="2"/>
+<text x="139" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">frame by frame</text>
+<line x1="113" y1="70" x2="133" y2="70" stroke="#2f855a" stroke-width="2"/>
+<text x="139" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">space then time</text>
+<line x1="113" y1="87" x2="133" y2="87" stroke="#2b6cb0" stroke-width="2"/>
+<text x="139" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">all at once</text>
+</svg>

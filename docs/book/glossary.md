@@ -540,6 +540,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **joint attention**: one attention in which the prompt tokens and the image tokens are queries and keys of the same softmax, so that each kind of token is updated by the other; a diffusion transformer built on it keeps the prompt as part of its sequence. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
 
+**joint audio-video generation**: one transformer that denoises a video latent and an audio latent together, each in a stream of its own, coupled in every block by cross-attention in both directions on a shared clock of seconds. *([Generating Video](v10-video-and-3d/02-video-generation.md))*
+
 **joint distribution**: the probability $p(x, y)$ of each pair of values of two random variables on the same experiment, whose row and column sums are the marginal distributions. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 ## K
@@ -1018,6 +1020,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **sparse attention pattern**: the rule that gives each query the set of keys it reads, instead of all earlier keys, so that attention is a softmax over those keys only; fixed patterns depend on positions alone, such as a window, global tokens, a stride or blocks. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
 
+**spatiotemporal attention**: self-attention in which the tokens of a clip, placed on a grid of frame, row and column, attend to one another across all three axes. *([Generating Video](v10-video-and-3d/02-video-generation.md))*
+
 **speaker embedding**: a vector of fixed length computed from a recording of any length, such that recordings of one voice are close in cosine and recordings of different voices are not. *([Who Is Speaking](v09-audio/05-speaker-embeddings.md))*
 
 **special tokens**: ids that stand for no piece of text, such as the beginning or end of a sequence, padding, an unknown piece or the markers of a chat turn, matched from their literals before ordinary encoding and never to be produced from text a client wrote. *([Tokenization](v05-sequences/02-tokenization.md))*
@@ -1175,6 +1179,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **video autoencoder**: an encoder that turns a clip into a short grid of numbers, smaller in space and in time, and a decoder that turns the grid back into frames. *([Video as Data](v10-video-and-3d/01-video.md))*
 
 **video codec**: a method that stores a clip in few bytes by predicting each frame from earlier ones, coding the prediction error coarsely, and decoding by repeating the same prediction. *([Video as Data](v10-video-and-3d/01-video.md))*
+
+**video diffusion**: diffusion or flow-matching generation on the latent grid of a video: a transformer predicts the velocity of every token of a noised clip, with a position on each of three axes and a timestep for each token, and a sampler turns the noise into a clip's latent. *([Generating Video](v10-video-and-3d/02-video-generation.md))*
 
 **vision projector**: the small trained map, a linear layer or a pair of them around a GELU, sometimes folding a block of neighbouring patches into one row, that takes the rows of a vision tower to the width of a language model's embedding rows so that they can be read like the rows of words. *([Vision-Language Models](v07-vision/09-vlms.md))*
 
