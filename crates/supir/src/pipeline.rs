@@ -63,7 +63,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use diffusion::discrete::{DiscreteConfig, Sigmas};
 use diffusion::restore::{
     apply_churn_noise, churn_gamma, euler_step, linear_cfg_scale, restore_guidance, sigma_hat as sigma_hat_of,
     DiscreteDenoiserWithControl, RestoreEDMSamplerConfig, SIGMA_MAX,
@@ -340,7 +339,9 @@ impl Restorer {
     ) -> Result<Vec<f32>, String> {
         let steps = o.steps.max(2);
         let grid = DiscreteDenoiserWithControl::new();
-        let sigmas = Sigmas::new(&DiscreteConfig::sdxl(), steps, 0.0).sigmas;
+        // The reference sampler's own levels, starting at SIGMA_MAX, where x_T
+        // is drawn - not the leading-spaced inference grid (`Sigmas::new`).
+        let sigmas = diffusion::restore::sampler_sigmas(steps);
         let do_cfg = o.cfg_scale > 1.0 || o.spt_linear_cfg > 1.0;
         let gamma = churn_gamma(o.s_churn, steps);
 

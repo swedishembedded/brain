@@ -101,6 +101,22 @@ impl DiscreteDenoiserWithControl {
     }
 }
 
+/// The `n` sampling levels of upstream's `LegacyDDPMDiscretization`,
+/// descending, with the terminal 0 appended (`n + 1` entries): the grid's
+/// values at training indices `floor(999 - 999 i / n)`, `i = 0..n`, so the
+/// first level is the grid's top ([`SIGMA_MAX`]), the level the starting
+/// noise is drawn at. This is not the discrete schedulers' leading-spaced
+/// inference grid, whose 50-step run starts at index 981.
+pub fn sampler_sigmas(n: usize) -> Vec<f32> {
+    assert!(n >= 1, "sampler_sigmas: at least one step");
+    let grid = DiscreteDenoiserWithControl::new();
+    let top = grid.sigmas().len() - 1;
+    let mut levels: Vec<f32> =
+        (0..n).map(|i| grid.sigmas()[(top as f64 - top as f64 * i as f64 / n as f64) as usize]).collect();
+    levels.push(0.0);
+    levels
+}
+
 /// `γ = min(s_churn/(n_steps-1), √2-1)` - the churn strength for one step of
 /// an `n_steps`-step run. Upstream's `s_tmin`/`s_tmax` default to `0`/`inf`,
 /// so churn is active at every step whenever `s_churn > 0`; `s_churn <= 0`
@@ -210,6 +226,28 @@ impl Default for RestoreEDMSamplerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sampler's levels are `LegacyDDPMDiscretization`'s: training
+    /// indices `floor(999 - 999 i / n)` for `i = 0..n`, descending from the
+    /// grid's top, then a terminal 0 - not the leading-spaced inference grid
+    /// of the discrete schedulers, which would start the run below the
+    /// `SIGMA_MAX` its noise is drawn at.
+    #[test]
+    fn sampler_levels_follow_the_legacy_ddpm_discretization() {
+        let grid = DiscreteDenoiserWithControl::new();
+        let n = 50;
+        let levels = sampler_sigmas(n);
+        assert_eq!(levels.len(), n + 1);
+        assert_eq!(levels[n], 0.0);
+        for (i, &s) in levels[..n].iter().enumerate() {
+            let idx = (999.0 - 999.0 * i as f64 / n as f64) as usize;
+            assert_eq!(s, grid.sigmas()[idx], "level {i} must sit at training index {idx}");
+        }
+        assert_eq!(levels[0], grid.sigmas()[999]);
+        assert_eq!(levels[n - 1], grid.sigmas()[19]);
+        let full = sampler_sigmas(1000);
+        assert!(full[..1000].iter().rev().eq(grid.sigmas().iter()), "1000 steps visit every training level");
+    }
 
     #[test]
     fn discrete_grid_has_1000_ascending_entries_ending_near_sigma_max() {

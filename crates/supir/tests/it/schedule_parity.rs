@@ -30,7 +30,7 @@
 use std::path::PathBuf;
 
 use brain_testutil::golden::Source;
-use diffusion::restore::{churn_gamma, control_scale_ramp, linear_cfg_scale, sigma_hat, SIGMA_MAX};
+use diffusion::restore::{churn_gamma, control_scale_ramp, linear_cfg_scale, sampler_sigmas, sigma_hat, SIGMA_MAX};
 use supir::config::SupirConfig;
 
 fn testdata_dir() -> PathBuf {
@@ -85,6 +85,13 @@ fn restore_scalar_math_matches_the_real_sampler_trajectory() {
         return;
     }
     let gold = Golden(checkpoint::safetensors::read(path).expect("read golden"));
+
+    // The sampler's levels are the reference discretization's, end to end.
+    let want = gold.need("schedule.sigmas_sampler");
+    let got = sampler_sigmas(want.len() - 1);
+    for (i, (&g, &w)) in got.iter().zip(want).enumerate() {
+        assert!((g - w).abs() <= 1e-5 * w.abs().max(1.0), "sampler level {i}: brain {g}, reference {w}");
+    }
 
     // Run parameters, read from the dump rather than hand-copied: a
     // re-dump at different sampler settings must not silently desync this
