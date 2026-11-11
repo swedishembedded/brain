@@ -35,6 +35,19 @@ impl Default for SpeakerConfig {
 }
 
 impl SpeakerConfig {
+    /// The largest reflect pad, in frames, of the encoder's "same" layers:
+    /// `dilation * (kernel - 1) / 2`.
+    pub fn max_pad_frames(&self) -> usize {
+        self.enc_kernel_sizes.iter().zip(&self.enc_dilations).map(|(&k, &d)| (d * (k - 1) / 2) as usize).max().unwrap_or(0)
+    }
+
+    /// The fewest 24 kHz samples the encoder can read: a reflect pad needs
+    /// more frames than it pads, and the front end gives
+    /// `1 + (n - HOP) / HOP` frames for `n >= HOP`.
+    pub fn min_samples(&self) -> usize {
+        (self.max_pad_frames() + 1) * crate::mel::HOP
+    }
+
     /// Parse from the top-level 0.6B/1.7B `config.json` (`speaker_encoder_config`
     /// only carries `enc_dim`/`sample_rate`; the rest are ECAPA defaults).
     pub fn from_json(root: &serde_json::Value) -> SpeakerConfig {
@@ -47,5 +60,22 @@ impl SpeakerConfig {
             c.sample_rate = sr as u32;
         }
         c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `min_samples` is the shortest clip whose log-mel has more frames than
+    /// the widest reflect pad, and one hop less is too short.
+    #[test]
+    fn min_samples_is_the_shortest_clip_every_layer_can_pad() {
+        let cfg = SpeakerConfig::default();
+        let pad = cfg.max_pad_frames();
+        assert_eq!(pad, 4);
+        let frames = |n: usize| crate::mel::log_mel(&vec![0.1f32; n]).1;
+        assert!(frames(cfg.min_samples()) > pad);
+        assert!(frames(cfg.min_samples() - crate::mel::HOP) <= pad);
     }
 }

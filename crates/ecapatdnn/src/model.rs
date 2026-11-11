@@ -371,12 +371,16 @@ impl SpeakerEncoder {
     }
 
     /// Front-end + encoder: resample `samples` to 24 kHz, compute the reference
-    /// log-mel, then [`embed`](Self::embed).
+    /// log-mel, then [`embed`](Self::embed). A clip too short for the encoder's
+    /// reflect padding ([`SpeakerConfig::min_samples`]) is zero-padded up to it, so a
+    /// sub-50 ms upload gives a (meaningless but finite) vector, not a panic.
     pub fn embed_wav(&self, samples: &[f32], sr: u32) -> Vec<f32> {
-        let wav = audio::resample_linear(samples, sr, 24000);
+        let mut wav = audio::resample_linear(samples, sr, 24000);
+        wav.resize(wav.len().max(self.cfg.min_samples()), 0.0);
         let (mel, _t) = crate::mel::log_mel(&wav);
         self.embed(&mel)
     }
+
 }
 
 fn clone_buf(c: &SpeakerEncoder, x: &DeviceBuffer, n: u32) -> DeviceBuffer {
