@@ -317,8 +317,8 @@ impl VqganTrainer {
         // VALUE is the quantised one (`z_q_st == q`, to fp32 rounding), while
         // the derivative w.r.t. `z` is the identity — the straight-through
         // estimator. `crates/mimi`'s `ConvReconAE::surrogate_loss` is
-        // the same construction on the host (it feeds the decoder the raw `z`,
-        // i.e. `sub0 == 0`; keeping `sub0` makes the forward value exact too).
+        // the same construction on the host, with its latch `q0 - z0` in the
+        // role of `sub0`.
         let z0 = gpu.storage(te);
         let sub0 = gpu.storage(te);
         let zq_st = gpu.storage(te);

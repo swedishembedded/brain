@@ -33,7 +33,7 @@
 //!   * the multi-scale log-mel L1 ([`multiscale_mel_l1`]) is wired as a forward
 //!     *metric* only — its STFT/mel backward is a TODO;
 //!   * the discriminator stack + feature-matching + WavLM distillation are not
-//!     implemented (see the codec README "Training" section and the TODOs below).
+//!     implemented (see the README's "Remaining research piece" and the TODOs below).
 //!
 //! No discriminator results are reported because none are computed.
 
@@ -161,7 +161,7 @@ impl StraightThroughVq {
 // TODO(gan): the production codec adds a raw-waveform GAN (multi-period +
 // multi-scale discriminators, adversarial + feature-matching losses) and WavLM
 // semantic distillation on top of this reconstruction loss. Those are the
-// remaining research piece — see the codec README "Training" section. Not
+// remaining research piece - see the README's "Remaining research piece". Not
 // implemented here; no discriminator results are reported.
 
 /// A tiny causal-conv reconstruction autoencoder over the shared engine.
@@ -265,18 +265,21 @@ impl ConvReconAE {
         r + c
     }
 
-    /// The **straight-through surrogate** loss: identical to [`Self::loss`] except
-    /// the decoder is fed the *continuous* latent `z` instead of the quantized
-    /// `q`. This is exactly the smooth objective the straight-through estimator
-    /// differentiates (decoder grad copied `q -> z` via identity), so its analytic
-    /// gradient — which [`Self::grads`] computes — matches finite differences.
-    pub fn surrogate_loss(&self, x: &[f32], frozen: &[usize]) -> f32 {
+    /// The **straight-through surrogate** loss: the decoder is fed
+    /// `z + latch`, where `latch = q0 - z0` is the quantization offset taken at
+    /// the latch point and then held fixed. At the latch it IS [`Self::loss`]
+    /// (the decoder sees `q`), and its gradient is the straight-through one:
+    /// the decoder differentiated at `q`, its input gradient passed to `z`
+    /// unchanged. That is what [`Self::grads`] computes, so the two agree under
+    /// finite differences. (Feeding the decoder `z` itself instead checks a
+    /// different function than the one trained.)
+    pub fn surrogate_loss(&self, x: &[f32], frozen: &[usize], latch: &[f32]) -> f32 {
         let l = x.len() as u32;
         let (z, _) = self.encode(x);
         let zf = Self::ncl_to_frames(&z, self.c as usize, l as usize);
         let (qf, _) = self.vq.quantize(&zf, Some(frozen));
-        let zn = Self::frames_to_ncl(&zf, self.c as usize, l as usize); // decoder sees z
-        let y = self.decode(&zn, l);
+        let fed: Vec<f32> = zf.iter().zip(latch).map(|(z, d)| z + d).collect();
+        let y = self.decode(&Self::frames_to_ncl(&fed, self.c as usize, l as usize), l);
         let (recon, _) = waveform_recon(&y, x);
         let (commit, _) = self.vq.commitment(&zf, &qf);
         recon + commit
@@ -284,26 +287,26 @@ impl ConvReconAE {
 
     /// Analytic gradients of the straight-through objective w.r.t. the
     /// encoder/decoder weights, via the real conv backward kernels. The decoder
-    /// backward runs on the latent `z` (straight-through identity `q -> z`), the
-    /// recon target is the quantized forward's output, and the commitment term is
-    /// added on the encoder side. Returns `(dWe, dWd)` for the frozen assignment.
+    /// runs forward and backward on the quantized latent `q`, as in the real
+    /// forward; its input gradient passes to `z` unchanged (straight-through)
+    /// and the commitment term is added on the encoder side. Returns `(dWe, dWd)` for the frozen assignment.
     pub fn grads(&self, x: &[f32], frozen: &[usize]) -> (Vec<f32>, Vec<f32>) {
         let l = x.len() as u32;
         let (z, _) = self.encode(x);
         let zf = Self::ncl_to_frames(&z, self.c as usize, l as usize);
         let (qf, _) = self.vq.quantize(&zf, Some(frozen));
-        let zn = Self::frames_to_ncl(&zf, self.c as usize, l as usize);
-        let y = self.decode(&zn, l); // straight-through: decoder differentiates z
+        let qn = Self::frames_to_ncl(&qf, self.c as usize, l as usize);
+        let y = self.decode(&qn, l);
 
         // dL/dy (recon) and dL/dz (commitment, straight-through identity on q).
         let (_, dy) = waveform_recon(&y, x);
         let (_, dz_commit) = self.vq.commitment(&zf, &qf);
 
-        // decoder backward on input z: dz_recon (input grad) + dWd (weight grad).
+        // decoder backward on input q: dq (input grad) + dWd (weight grad).
         let cdec = self.conv(self.c, 1, l);
         let kdec = ConvKernels { fwd: RC_CONV1D, dx: RC_CONV1D_DX, dw: RC_CONV1D_DW };
         let dyb = self.up(&dy);
-        let qb = self.up(&zn);
+        let qb = self.up(&qn);
         let wdb = self.up(&self.wd);
         let dqb = self.gpu.storage((self.c * l) as u64);
         let dwdb = self.gpu.storage((self.c * self.k) as u64);
@@ -354,16 +357,20 @@ impl ConvReconAE {
     pub fn gradcheck(&self, x: &[f32], eps: f32) -> f32 {
         let (_, _, _, idx) = self.forward(x, None);
         let (dwe, dwd) = self.grads(x, &idx);
+        let (z0, _) = self.encode(x);
+        let z0 = Self::ncl_to_frames(&z0, self.c as usize, x.len());
+        let (q0, _) = self.vq.quantize(&z0, Some(&idx));
+        let latch: Vec<f32> = q0.iter().zip(&z0).map(|(q, z)| q - z).collect();
 
         // Central difference of the loss w.r.t. weight `i` with the VQ assignment
         // frozen, for both the encoder (`enc=true`) and decoder weight tensors.
         let probe = |enc: bool, i: usize| -> f32 {
             let mut m = self.clone_weights();
             if enc { m.we[i] += eps } else { m.wd[i] += eps }
-            let lp = m.surrogate_loss(x, &idx);
+            let lp = m.surrogate_loss(x, &idx, &latch);
             let mut m = self.clone_weights();
             if enc { m.we[i] -= eps } else { m.wd[i] -= eps }
-            let lm = m.surrogate_loss(x, &idx);
+            let lm = m.surrogate_loss(x, &idx, &latch);
             (lp - lm) / (2.0 * eps)
         };
 
@@ -444,6 +451,27 @@ mod tests {
         let max_rel = ae.gradcheck(&x, 1e-3);
         eprintln!("conv-recon gradcheck max_rel = {max_rel:.2e}");
         assert!(max_rel < 2e-2, "reconstruction-path gradcheck failed: max_rel {max_rel:.3e}");
+    }
+
+    /// The decoder sees the QUANTIZED latent in the real forward, and with the
+    /// assignment frozen the loss is smooth in the decoder's weights, so their
+    /// straight-through gradient must be the plain gradient of the real loss.
+    #[test]
+    fn decoder_weight_grad_is_taken_at_the_quantized_latent() {
+        let ae = ConvReconAE::new(4, 3, 0.25, 42);
+        let x = toy_wav(48);
+        let (_, _, _, idx) = ae.forward(&x, None);
+        let (_, dwd) = ae.grads(&x, &idx);
+        let eps = 1e-3;
+        for i in [0usize, dwd.len() / 2, dwd.len() - 1] {
+            let mut p = ae.clone_weights();
+            p.wd[i] += eps;
+            let mut m = ae.clone_weights();
+            m.wd[i] -= eps;
+            let num = (p.loss(&x, Some(&idx)) - m.loss(&x, Some(&idx))) / (2.0 * eps);
+            let rel = (dwd[i] - num).abs() / dwd[i].abs().max(num.abs()).max(1e-6);
+            assert!(rel < 2e-2, "dWd[{i}] {} vs the real loss's {num}", dwd[i]);
+        }
     }
 
     #[test]

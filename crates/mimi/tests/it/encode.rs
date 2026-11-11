@@ -6,7 +6,7 @@
 //!
 //! Gated on the real checkpoint being present (a large external artifact, not
 //! committed). Run on the CPU backend:
-//!   BRAIN_DEVICE=cpu cargo test -p brain-mimi --test encode
+//!   BRAIN_DEVICE=cpu make test/one P=brain-mimi T=it ARGS=encode
 
 use mimi::Codec;
 

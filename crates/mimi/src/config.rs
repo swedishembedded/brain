@@ -2,8 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Codec configuration, parsed from the official `Qwen3-TTS-Tokenizer-12Hz`
-//! `config.json`. Only the fields the decode path needs are modeled here; the
-//! encoder fields are kept for the from-scratch trainer (Track B).
+//! `config.json`: the fields the decode and encode paths read.
 
 use serde_json::Value;
 

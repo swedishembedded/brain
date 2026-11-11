@@ -985,7 +985,7 @@ fn ids() -> KernelIds {
 }
 
 /// `nn.LayerNorm` over the last axis (C) of a row-major `[rows, C]` buffer,
-/// population variance, eps 1e-6, with affine γ/β. In place. Rows are
+/// population variance, the caller's eps, with affine γ/β. In place. Rows are
 /// independent, so they fan out across cores for large buffers (the per-row sum
 /// order is unchanged — bit-identical to the serial path).
 fn host_layernorm(x: &mut [f32], rows: usize, c: usize, gamma: &[f32], beta: &[f32], eps: f32) {

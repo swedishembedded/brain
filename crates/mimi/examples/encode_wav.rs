@@ -3,7 +3,7 @@
 
 //! Encode a wav to [T,16] codec codes and dump them (u64 count + u32 codes),
 //! the same format the reference dump scripts use.
-//! Usage: cargo run -p brain-codec --example encode_wav -- <codec.safetensors> <in.wav> <out_codes.bin>
+//! Usage: cargo run -p brain-mimi --example encode_wav -- <codec.safetensors> <in.wav> <out_codes.bin>
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();

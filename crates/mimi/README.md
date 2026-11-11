@@ -1,4 +1,4 @@
-# brain-codec — Qwen3-TTS 12 Hz neural audio codec (Mimi/Moshi-style)
+# brain-mimi - Qwen3-TTS 12 Hz neural audio codec (Mimi/Moshi-style)
 
 Pure Rust on brain's WGSL kernels, fp32, forward-exact against the official
 `Qwen3-TTS-Tokenizer-12Hz` checkpoint. Both directions are implemented:
@@ -29,7 +29,7 @@ Mirrors the HuggingFace `MimiModel` encoder (`encoder.*` in the checkpoint):
 LayerNorm / GELU / ELU and the argmin/residual loop run on the host for
 bit-faithfulness; conv / attention run on-device.
 
-**Verification** (`tests/encode.rs`, gated on the real checkpoint):
+**Verification** (`tests/it/encode.rs`, gated on the real checkpoint):
 
 - **Round-trip** `wav -> encode -> decode -> wav'`: finite, bounded, correct
   length, non-silent.
@@ -47,7 +47,7 @@ external `--ref-codes` dump.
 SplitResidualVectorQuantizer dequant -> pre-conv -> 8-layer GQA transformer
 (RoPE/RMSNorm/LayerScale) -> conv-transpose upsample -> SEANet decoder
 (SnakeBeta) -> 24 kHz waveform. Parity vs the fp32 PyTorch golden dump (T=24,
-CPU backend): max-abs 5.7e-4, log-mel L1 7.7e-4 (see `tests/decode.rs`).
+CPU backend): max-abs 5.7e-4, log-mel L1 7.7e-4 (see `tests/it/decode.rs`).
 
 ## Reconstruction trainer (`src/recon.rs`, Track C — scope-limited)
 
@@ -65,7 +65,10 @@ loss = waveform L1+L2  (+ multi-scale log-mel L1, reported)
 - `ConvReconAE` — tiny causal-conv encoder/decoder over the shared WGSL engine
   (`audio::conv` fwd + `conv1d_dx`/`conv1d_dw` bwd). `gradcheck()` verifies the
   **whole reconstruction path** against central finite differences of the
-  straight-through surrogate (frozen VQ assignment): **max rel err ≈ 3.8e-3**.
+  straight-through surrogate (frozen VQ assignment, the decoder fed
+  `z + (q0 - z0)` with the offset latched, so it decodes `q` at the latch):
+  **max rel err ≈ 3.8e-3** (measured before the decoder was moved from `z` to
+  `q`; the test bound is 2e-2).
   `train_step` overfits a toy waveform (loss 0.62 → 0.24).
 
 ### Remaining research piece (documented, NOT implemented — no faked results)
