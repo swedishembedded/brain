@@ -5,7 +5,7 @@
 //!
 //! The whole net is conv + LeakyReLU + channel concat + nearest-2x upsample, so
 //! it needs **no new kernel**: `conv`/`upsample`/`add` come from the shared
-//! block builder, and only `leaky_relu` and `concat2` are appended.
+//! block builder, and only `leaky_relu` and `scale_add` are appended.
 //!
 //! Why the activation is dispatched rather than folded into `ConvSpec::act`:
 //! `vision::blocks::Act` carries no slope, and its `fused_code` selector is

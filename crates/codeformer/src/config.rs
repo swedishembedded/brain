@@ -20,7 +20,7 @@
 //!   concatenation of the encoder and generator features followed by two
 //!   `Conv3×3 → LeakyReLU(0.2) → Conv3×3` towers producing a `scale` and a
 //!   `shift`;
-//! * the **fidelity dial `w`** — see [`CodeFormerConfig`]'s note on direction.
+//! * the **fidelity dial `w`** - its direction is documented in [`crate::model`].
 //!
 //! The fuse tap tables are transcribed from `codeformer_arch.py:200-206` rather
 //! than derived: the reference hardcodes them, and a derivation that happened to

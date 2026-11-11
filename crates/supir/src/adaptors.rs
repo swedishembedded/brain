@@ -45,13 +45,15 @@
 //! ## Deferred: flash-attention for `ZeroCrossAttn`
 //! `model::block::flash_cross_step` (gated by `flash_cross_supported`) would
 //! avoid materialising the `heads·T·T` score/probs pair `ZeroCrossAttn`'s two
-//! sites need - the wider one (`project_modules.7`, 20 heads, T up to
-//! 1024 at a 128x128 latent) is a real allocation. This implementation takes
+//! sites need. At a 128x128 latent the 20-head site sits at the 32x32 up
+//! level (T = 1024, 84 MB of fp32 scores) and the 10-head site at 64x64
+//! (T = 4096, 671 MB of scores, and as much again of probabilities), a real
+//! allocation. This implementation takes
 //! the materialised `Builder::cross_attn` path unconditionally, matching
 //! [`sdxlunet::model::Rec::cross_attention`]'s own non-cooperative fallback
 //! shape rather than the flash rung - **explicitly deferred**, not silently
-//! skipped: the two sites are small enough (`tkv <= 1024`) that the
-//! materialised pair is nowhere near the 2 GiB binding limit the frozen
+//! skipped: each materialised buffer stays under a third of the 2 GiB binding
+//! limit at that size, where the frozen
 //! backbone's OWN self-attention needed flash for, so correctness-first is
 //! the right trade for this pass. A later optimisation pass can wire the
 //! flash rung once parity is proven and frozen, and only then, per this

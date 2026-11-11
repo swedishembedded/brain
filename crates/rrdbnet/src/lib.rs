@@ -12,8 +12,8 @@
 //! **Kernels: none new.** The whole net is conv + LeakyReLU + channel concat +
 //! nearest-2x upsample. `conv`/`upsample`/`add` come from
 //! [`vae::blocks::Builder`] — the same shared conv-block builder `AutoencoderKL`
-//! and the VQGAN family are built from — and only `leaky_relu`, `concat2` and
-//! `scale_add` are appended. That is the second time in this workstream a port
+//! and the VQGAN family are built from - and only `leaky_relu` and
+//! `scale_add` are appended (`concat2` is already in the shared set). That is the second time in this workstream a port
 //! turned out to need zero kernels (`crates/controlnet` was the first), which is
 //! the payoff for the shared builder rather than a coincidence.
 //!

@@ -77,10 +77,10 @@ pub struct SupirConfig {
     /// The degradation-robust encoder (`first_stage_model.denoise_encoder.*`
     /// in the checkpoint): byte-identical topology to the frozen SDXL VAE
     /// encoder (verified against the real checkpoint header - see
-    /// [`denoise_encoder_manifest`]'s doc), only the weights differ. Not yet
-    /// wired into a forward (that is `pipeline.rs`'s job, still to be
-    /// written) - this field exists so [`SupirConfig::tensor_manifest`] can
-    /// cover its 106 tensors for the two-way import gate.
+    /// [`denoise_encoder_manifest`]'s doc), only the weights differ.
+    /// `pipeline.rs` runs it on the degraded input; this field also lets
+    /// [`SupirConfig::tensor_manifest`] cover its 106 tensors for the two-way
+    /// import gate.
     pub denoise_encoder: vae::config::VaeConfig,
 }
 
@@ -195,10 +195,9 @@ fn is_trunk_half(name: &str) -> bool {
 /// The degradation-robust encoder's manifest, CompVis/LDM-named exactly as
 /// the checkpoint ships it (`down.{i}.block.{j}.*`, `down.{i}.downsample.conv.*`,
 /// `mid.block_1`/`mid.attn_1`/`mid.block_2`, `norm_out`, `conv_in`,
-/// `conv_out`) - NOT diffusers' `down_blocks.*` naming, because nothing in
-/// this crate binds these tensors to a forward yet (that is `pipeline.rs`'s
-/// job, Step 6, deferred) and inventing a rename with no consumer would be
-/// speculative. Derived from [`vae::config::VaeConfig`]'s own fields
+/// `conv_out`) - NOT diffusers' `down_blocks.*` naming; the pipeline maps
+/// these names onto the encoder it builds
+/// (`crate::import::denoise_encoder_diffusers_names`). Derived from [`vae::config::VaeConfig`]'s own fields
 /// (`block_out_channels`, `layers_per_block`) rather than hand-listed, and
 /// verified to match the real checkpoint's 106 tensors exactly (see
 /// `crates/supir/tests`).

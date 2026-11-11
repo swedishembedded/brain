@@ -50,10 +50,9 @@ use crate::config::SupirConfig;
 
 /// The `edm_mix` slot appended to `sdxlunet::model::KERNELS`.
 const K_EDM_MIX: usize = sdxlunet::model::KERNELS.len();
-/// The `scale_row` slot - `Op::Mix`'s backward. Registered even though this
-/// crate never trains: `vae::blocks::Builder::set_mix_ids` requires both
-/// slots to exist, and a training build (Step 6's `finetune.rs`, not yet
-/// written) will need it resolved at the same index either way.
+/// The `scale_row` slot - `Op::Mix`'s backward. `vae::blocks::Builder::set_mix_ids`
+/// requires both slots to exist, and the training builds (`train.rs`,
+/// `finetune.rs`) resolve it at this index.
 const K_SCALE_ROW: usize = sdxlunet::model::KERNELS.len() + 1;
 
 /// This model's kernel set: `sdxlunet::model::KERNELS` verbatim, plus the
