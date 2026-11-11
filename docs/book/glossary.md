@@ -64,6 +64,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **audio resampling**: computing the samples of a recording at a new rate, by removing the frequencies the new rate cannot carry and evaluating the band-limited signal at the new sample times as a weighted sum of the old samples. *([Sound and Sampling](v09-audio/01-sound.md))*
 
+**audio token**: one integer of a codec's output, an index into one stage's table for one column, which a language model treats as a symbol. *([Neural Audio Codecs](v09-audio/03-audio-codecs.md))*
+
 **autoencoder**: a network trained to output its own input after passing it through a bottleneck layer much narrower than the input, so that it must learn a short code from which the input can be rebuilt. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 **autoregressive factorization**: writing the probability of a sequence as the product, over its positions, of the probability of each token given all the tokens before it, an identity that holds for every distribution over sequences. *([Language Modeling](v05-sequences/04-language-modeling.md))*
@@ -704,6 +706,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **negative log-likelihood**: minus the natural logarithm of the likelihood, a sum over independent examples of the surprise at each observed label; the loss that maximum likelihood minimises. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
+**neural audio codec**: a trained encoder, quantizer and decoder that turn a waveform into a short sequence of discrete codes and back to a waveform. *([Neural Audio Codecs](v09-audio/03-audio-codecs.md))*
+
 **Newton's method**: the iteration that replaces a function by its tangent line (or, for minimisation, by a quadratic with the same slope and curvature) and jumps to its zero (or bottom), $x \leftarrow x - f(x)/f'(x)$ or $x \leftarrow x - f'(x)/f''(x)$; its error is squared at each step near a simple root. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
 **next-token prediction**: the training task of giving high probability to each token of a text given the tokens before it, with the mean cross-entropy over all positions as the loss, so that the text supplies its own labels. *([Language Modeling](v05-sequences/04-language-modeling.md))*
@@ -891,6 +895,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **residual network**: a network of blocks that compute $\mathrm{relu}(f(\mathbf{x}) + \mathrm{sh}(\mathbf{x}))$, the sum of a short stack of convolutions and a shortcut (the identity, or a $1 \times 1$ projection when the shape changes), which lets gradients and signals pass a deep stack along a path without weights; the basic block has two $3 \times 3$ convolutions and the bottleneck block a $1 \times 1$ reduction, a $3 \times 3$ and a $1 \times 1$ expansion. *([Convolutional Networks and Residual Learning](v07-vision/03-cnns.md))*
 
 **residual stream**: the matrix of shape $[T, D]$ that enters a transformer block, is added to by each sublayer and leaves it, so that after $L$ blocks it is the embedding plus the $2L$ contributions that the sublayers wrote. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
+
+**residual vector quantization**: a chain of codebooks in which each quantizes the error left by the ones before it, so that the stored indices are one per stage and the reconstruction is the sum of the chosen entries. *([Neural Audio Codecs](v09-audio/03-audio-codecs.md))*
 
 **residual-connection**: a layer that returns its input plus a correction, $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, so that its Jacobian is $\mathbf{I} + \mathbf{J}_f$ and the gradient has a path through it that passes no weights. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 

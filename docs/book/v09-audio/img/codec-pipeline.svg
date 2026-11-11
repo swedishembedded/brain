@@ -1,0 +1,50 @@
+<!-- source-sha256: c543175d4070d8ae878281ccddb7ef548d1fff570b0b87e48528317fc1ceb9f5 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 310" width="780" height="310"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="310" fill="#ffffff"/>
+<rect x="20" y="16" width="740" height="130" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Encode: one clip in, T frames of 16 integers out</text>
+<rect x="38" y="65" width="124" height="66" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
+<text x="100" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24000 Hz x 1</text>
+<rect x="186" y="65" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="248" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">strided convs</text>
+<text x="248" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4, 5, 6, 8</text>
+<text x="248" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">25 Hz x 512</text>
+<rect x="334" y="65" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="396" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">transformer</text>
+<text x="396" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">25 Hz x 512</text>
+<rect x="482" y="65" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="544" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">strided conv</text>
+<text x="544" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">by 2</text>
+<text x="544" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12.5 Hz x 512</text>
+<rect x="630" y="65" width="124" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="692" y="94.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">residual quantizer</text>
+<text x="692" y="110.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12.5 Hz x 16 codes</text>
+<line x1="165" y1="98" x2="183" y2="98" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="313" y1="98" x2="331" y2="98" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="461" y1="98" x2="479" y2="98" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="609" y1="98" x2="627" y2="98" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="20" y="164" width="740" height="130" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="186" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Decode: 16 integers per frame in, a clip out</text>
+<rect x="38" y="213" width="124" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="242.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 codes</text>
+<text x="100" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12.5 Hz</text>
+<rect x="186" y="213" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="248" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gather, sum,</text>
+<text x="248" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">project</text>
+<text x="248" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12.5 Hz x 512</text>
+<rect x="334" y="213" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="396" y="242.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">conv, transformer</text>
+<text x="396" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12.5 Hz x 1024</text>
+<rect x="482" y="213" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="544" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">transposed convs</text>
+<text x="544" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2, 2</text>
+<text x="544" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">50 Hz x 1024</text>
+<rect x="630" y="213" width="124" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="692" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">transposed convs</text>
+<text x="692" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8, 5, 4, 3</text>
+<text x="692" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24000 Hz x 1</text>
+<line x1="165" y1="246" x2="183" y2="246" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="313" y1="246" x2="331" y2="246" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="461" y1="246" x2="479" y2="246" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="609" y1="246" x2="627" y2="246" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>
