@@ -1,0 +1,31 @@
+<!-- source-sha256: e62a7c86ffed46ee03f798df7428b135e1d439bd585d6a85f163848926e40828 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 320" width="560" height="320">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="320" fill="#ffffff"/>
+<line x1="58" y1="274" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="179" y1="274" x2="179" y2="30" stroke="#edf2f7"/>
+<text x="179" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="300" y1="274" x2="300" y2="30" stroke="#edf2f7"/>
+<text x="300" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="421" y1="274" x2="421" y2="30" stroke="#edf2f7"/>
+<text x="421" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">30</text>
+<line x1="542" y1="274" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="542" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">40</text>
+<line x1="58" y1="274" x2="542" y2="274" stroke="#edf2f7"/>
+<text x="52" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="219.78" x2="542" y2="219.78" stroke="#edf2f7"/>
+<text x="52" y="223.78" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="165.56" x2="542" y2="165.56" stroke="#edf2f7"/>
+<text x="52" y="169.56" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="111.33" x2="542" y2="111.33" stroke="#edf2f7"/>
+<text x="52" y="115.33" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<line x1="58" y1="57.11" x2="542" y2="57.11" stroke="#edf2f7"/>
+<text x="52" y="61.11" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">8</text>
+<rect x="58" y="30" width="484" height="244" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="244"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.2" points="58,274 154.8,57.11 251.6,274 348.4,57.11 445.2,274 542,57.11"/><line x1="154.8" y1="274" x2="154.8" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="251.6" y1="274" x2="251.6" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="348.4" y1="274" x2="348.4" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="445.2" y1="274" x2="445.2" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="542" y1="274" x2="542" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><circle cx="179" cy="111.33" r="4.5" fill="#9b2c2c"/><line x1="193.52" y1="78.8" x2="181.42" y2="105.91" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/><text x="195.94" y="78.8" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">10 kHz appears at 6 kHz</text></g>
+<text x="300" y="310" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">true frequency (kHz)</text>
+<text x="14" y="152" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 152)">apparent frequency (kHz)</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Folding at half the sampling rate, f_s = 16 kHz</text>
+</svg>

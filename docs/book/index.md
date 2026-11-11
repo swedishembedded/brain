@@ -154,4 +154,8 @@ historical sections draw on in the [Chronology](history/chronology.md).
 11. [Control, Identity and Adapters](v08-image-generation/11-control-and-identity.md): How do we steer a generator with a pose, an edge map or a particular person's face?
 12. [Restoration and Super-Resolution](v08-image-generation/12-restoration.md): How can a network recover detail that is not in the input?
 13. [Project: A Small Image Generator](v08-image-generation/13-project-image-generator.md): Can you train a small generator and grow it into a conditioned latent generation system?
+
+### [Volume IX: Audio, Speech and Music](v09-audio/index.md)
+
+1. [Sound and Sampling](v09-audio/01-sound.md): How is a sound wave turned into numbers without losing what we hear?
 <!-- /contents -->

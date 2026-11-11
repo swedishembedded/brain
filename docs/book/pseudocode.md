@@ -501,6 +501,10 @@ The face chapter (Chapter 11) writes out `fit_similarity`, `decode_level`, `iou_
 
 The vision project (Chapter 12) writes out `detector_view`, `segmenter_view`, `head_cells`, `detect_frame`, `admits`, `segment_box`, `read_memory`, `track_step` and `run_pipeline` where they are first used. Four helpers are defined by what they return: `cell_features(view)` is the `array<real>[256, 3]` of the means of the normalized colours of each `4 x 4` block of a `64 x 64` view (blocks in row-major order, the sum of a block taken row by row), `mask_cells(mask)` the `array<real>[256]` of the fraction of each block that a mask covers, `mean_colour(view, mask)` the mean colour over the pixels of a mask summed in row-major order, and `dilate3(on)` the `3 x 3` maximum of a `16 x 16` map of 0 and 1 clipped at the border. An inline choice is written `a if c else b`, `for (a, b) in L` takes the pair elements of a list of pairs, and `floor(x + 0.5)` is the rounding of the letterbox sizes (round half up, for `x >= 0`).
 
+## Routines of the audio chapters (Volume IX)
+
+The sound chapter (Chapter 1) writes out `apparent_frequency`, `sinc`, `bessel_i0`, `triangle_weight`, `kaiser_weight`, `cos2_weight` and `resample` where they are first used. `sinc(0)` is 1 (the limit), and `apparent_frequency` returns the pair `(frequency, sign)` with `r = fs / 2` counted as the lower branch (sign 1). In `resample` the input is zero outside `0 .. n - 1`, a weight is read only for a whole number `m` with `abs(m) <= reach`, the sum for one output runs over increasing `i`, and `(a + b - 1) // b` is the ceiling of `a / b` for a whole number `a` of either sign and `b > 0`, because `//` rounds toward minus infinity. The 16-bit write of the chapter is `round(clamp(x, -1.0, 1.0) * 32767.0, 0)` with ties away from zero, and the read is the code divided by `32768`.
+
 ## Routines of the transformer chapters (Volume V)
 
 Chapters 9 to 12 use four routines of the normalization and attention chapters without writing them out again. Each is defined here by what it returns.

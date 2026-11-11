@@ -731,7 +731,7 @@ volumes:
         title: "Sound and Sampling"
         question: "How is a sound wave turned into numbers without losing what we hear?"
         introduces: [waveform, sampling-theorem, aliasing, pcm-audio, resampling-audio]
-        requires: [sinusoid, discrete-fourier-transform, integer-quantized-format]
+        requires: [sinusoid, discrete-fourier-transform, convolution-theorem, variance, logarithm, twos-complement, integer-quantized-format]
         brain: [audio]
       - id: spectrograms
         title: "Spectrograms and the Mel Scale"

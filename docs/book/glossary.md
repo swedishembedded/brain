@@ -36,6 +36,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **algorithm**: a finite list of definite steps that turns any input of a stated kind into an output of a stated kind, whose correctness can be argued with an invariant that holds before and after every pass of its loops. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
+**aliasing**: the confusion, after sampling, of a tone above half the sampling rate with a slower one, because the two have the same samples. *([Sound and Sampling](v09-audio/01-sound.md))*
+
 **Amdahl's law**: the speedup of a whole from making a part that takes the share $p$ of the time $g$ times as fast, $1/((1 - p) + p/g)$, bounded by the ceiling $1/(1 - p)$ however fast the part becomes. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
 **amortized inference**: using one encoder network, with shared weights, to produce the approximate posterior of every reading in a single forward pass, so that the cost of finding a good guess is paid once in training and not again for each new reading. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
@@ -59,6 +61,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **attention injection**: adding the result of a second attention, over extra tokens with their own keys and values, to the context of an attention site (or to the residual stream where no site exists) with a strength, so that at strength zero the site's output is exactly what it was. *([Control, Identity and Adapters](v08-image-generation/11-control-and-identity.md))*
 
 **attention sink**: a key, usually at one of the first positions of the text, that most queries score high whatever their content and whose value is near zero, so that the softmax has somewhere to put its mass; a window that keeps the sink beside its recent keys keeps this behaviour. *([Attention Variants: Sharing and Compressing Keys](v06-language-models/03-attention-variants.md))*
+
+**audio resampling**: computing the samples of a recording at a new rate, by removing the frequencies the new rate cannot carry and evaluating the band-limited signal at the new sample times as a weighted sum of the old samples. *([Sound and Sampling](v09-audio/01-sound.md))*
 
 **autoencoder**: a network trained to output its own input after passing it through a bottleneck layer much narrower than the input, so that it must learn a short code from which the input can be rebuilt. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
@@ -762,6 +766,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **patch embedding**: the layer that turns a picture into a sequence of tokens by cutting it into non-overlapping square patches, flattening each and applying one shared linear map; identical to a convolution whose kernel size equals its stride. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
+**PCM audio**: pulse-code modulation, a recording stored as integer codes, each the nearest multiple of a fixed step to the waveform at one of equally spaced moments. *([Sound and Sampling](v09-audio/01-sound.md))*
+
 **per-kernel profile**: the table that divides the time of a pass among its dispatches or kernel kinds, with each row's counted FLOPs and bytes, device time, share of the pass and achieved fraction of the device's measured roofline; it explains where the time goes and does not add up to the pass. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
 **perceptron**: a neuron with a step activation together with Rosenblatt's rule for learning its weights, which adds each misclassified example, signed by its label, to the weights and the bias and repeats over the data until a pass has no mistake. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
@@ -913,6 +919,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **sample mean**: the average of the observations in a sample; it is an unbiased estimator of the true mean, and the accuracy, the mean loss and a minibatch gradient are all sample means. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **sampling from a distribution**: producing values whose long-run frequencies follow a given distribution from uniform random numbers, by a cumulative-sum lookup for a table, inverting the cumulative distribution, a transform such as Box-Muller, or rejection. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
+
+**sampling theorem**: a signal whose frequencies are all below half the sampling rate is completely determined by its samples, and is rebuilt between them as the sum of the samples weighted by a sinc. *([Sound and Sampling](v09-audio/01-sound.md))*
 
 **saved activations**: the values of the forward pass that are kept in memory because the backward pass reads them. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
@@ -1125,6 +1133,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## W
 
 **warmup runs**: the leading runs of a repeated measurement whose cost is dominated by a start-up transient (building pipelines, first-touch memory, cold caches, a clock that has not ramped up) and is not the cost of the steady state; they are detected and kept out of the summary, or reported as a separate cold row. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
+
+**waveform**: the pressure of a sound, or the voltage of a microphone that follows it, written as a function of time. *([Sound and Sampling](v09-audio/01-sound.md))*
 
 **weight decay**: shrinking every weight toward zero by the fraction $\eta\lambda$ at each step, as a regularizer of a neural network; the L2 penalty of Volume II, applied directly to the weights in the decoupled form of chapter 7. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
 

@@ -83,6 +83,7 @@ reproduced its worked examples from the text alone in another language.
       stated loosely, seeds named but not printed, toy parts given by role
       rather than formula, architecture counts without their conventions).
       All were fixed in the following commits; a recheck has not been run.
+- [ ] Volume IX, Audio, Speech and Music: chapter 1 written.
 
 ## Open
 
