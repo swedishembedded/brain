@@ -25,4 +25,4 @@ You can say exactly which frequencies a sampled signal can carry, resample it be
 6. [Speech Synthesis](06-speech-synthesis.md): how does a model speak a sentence in a given voice?
 7. [Music Generation](07-music.md): what changes when the target is minutes of structured music rather than a sentence of speech?
 8. [Models That Listen, See and Speak](08-omni-models.md): how is one model built to take in audio, images and text and answer in speech?
-9. Project: From Waveform to Speech and Back: can you build a pipeline from a waveform to a learned representation and back to generated audio?
+9. [Project: From Waveform to Speech and Back](09-project-speech-pipeline.md): can you build a pipeline from a waveform to a learned representation and back to generated audio?
