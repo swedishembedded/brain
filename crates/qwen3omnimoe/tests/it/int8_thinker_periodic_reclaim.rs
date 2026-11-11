@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Regression test for a real `ERROR_OUT_OF_DEVICE_MEMORY`: `run_shards`'s
-//! per-layer loop (`crates/omni/src/int8_thinker_resident.rs`) used to call
+//! per-layer loop (`crates/qwen3omnimoe/src/int8_thinker_resident.rs`) used to call
 //! `layer_fwd`/`layer_decode_step` for every layer with nothing forcing
 //! `backend-vulkan`'s deferred reclaim in between, so every prior layer's
 //! attention (scores/probs/ctx) and MoE (router/gate/expert scratch) buffers

@@ -19,7 +19,8 @@
 //! the same seam `glm` has is the "one
 //! implementation" answer and the natural following step). This module is
 //! deliberately narrower than `qwen3::Qwen` in every other respect
-//! (forward-only, single device, no sharding/LoRA/int8/KV-cache) so it can
+//! (forward-only, single device, no sharding/LoRA; the int8 expert path and
+//! the KV-cached `layer_decode_step` were added later) so it could
 //! be validated against real weights now - it composes the SAME shared
 //! primitives `qwen3::Qwen` itself is built from
 //! (`model::block::{rmsnorm_fwd,rope2d_fwd,gqa_fwd}`), not a re-derivation of
@@ -40,8 +41,8 @@
 //! RoPE kernel into a second, parallel path.
 //!
 //! **Multimodal splice**: not this module's concern. A caller with image/
-//! audio embeddings splices them into the token-embedding buffer via
-//! `model::vlm::splice_fwd` (`splice.wgsl`, in [`thinker_pipelines`]) BEFORE
+//! audio embeddings splices them into the token-embedding buffer (a host row
+//! copy, `crate::mm`) BEFORE
 //! calling [`decode`] - `decode` and [`layer_fwd`] only ever see an
 //! already-assembled `[n, d]` embedding sequence, exactly like `x` in
 //! `qwen3::Qwen::write_img_embeds`'s contract.
@@ -349,8 +350,8 @@ pub struct ThinkerWeights<'a> {
 /// `model.norm` - the piece [`layer_fwd`] deliberately leaves out (see its
 /// doc). `x` is an already-assembled embedding sequence: plain token
 /// embeddings for pure text, or the same buffer after a caller has spliced in
-/// image/audio embeddings via `model::vlm::splice_fwd` at the appropriate
-/// rows (`SPLICE`, in [`thinker_pipelines`]) - this function has no opinion
+/// image/audio embeddings at the appropriate rows (a host row copy,
+/// `crate::mm`) - this function has no opinion
 /// on how `x` was built, only on what to do with it. `cos`/`sin` are the
 /// M-RoPE tables for this same sequence (`qwen3vl::mrope`), shared unchanged
 /// across every layer (position doesn't change with depth).

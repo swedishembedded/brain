@@ -5,7 +5,7 @@
 //! the real transformers reference - reusing `qwen3vl::encoder::VisionEncoder`
 //! and `qwen3vl::encoder::PatchMerger` completely unchanged, at the new
 //! `VisionConfig::qwen3_omni()` preset (same "config bump, not a second
-//! copy" shape as `crates/omni/tests/audio_parity.rs`).
+//! copy" shape as `crates/qwen3omnimoe/tests/it/audio_parity.rs`).
 //!
 //! Real-weight-adjacent: skips cleanly when the checkpoint shard containing
 //! `thinker.visual.*` (shard 1 of 15, same shard the audio tower needs) is

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Real multimodal INPUT for the Thinker generation loop: audio and image
-//! (video: sampled frames through the same image path) encoded into
+//! (video: sampled frames patched in temporal pairs) encoded into
 //! decoder-width embedding rows and spliced into the token-embedding sequence
 //! `crate::generate` builds host-side, before the prompt is fed to the
 //! decoder - reusing the exact encoders `crate::caps`'s parity tests

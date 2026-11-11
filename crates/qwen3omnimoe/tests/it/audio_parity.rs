@@ -5,7 +5,7 @@
 //! reference - reusing `qwen3asr::encoder::AudioEncoder` completely
 //! unchanged, at the new `AudioEncoderConfig::qwen3_omni()` preset (the
 //! shared-encoder hoist is a config bump, not a second copy - see
-//! `crates/omni/src/import.rs`'s module doc).
+//! `crates/qwen3omnimoe/src/import.rs`'s module doc).
 //!
 //! Real-weight-adjacent: skips cleanly when the checkpoint shard containing
 //! `thinker.audio_tower.*` (shard 1 of 15 for the released model) is not on

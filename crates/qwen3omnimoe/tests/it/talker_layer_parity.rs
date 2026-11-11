@@ -6,7 +6,7 @@
 //! `qwen3omnimoe::talker::layer_fwd`: RMSNorm + GQA (QK-norm, table-driven M-RoPE) +
 //! sparse MoE FFN + the always-active shared expert
 //! (`model::moe::shared_expert_fwd`) - the one architectural difference from
-//! `qwen3omnimoe::thinker::layer_fwd`. See `crates/omni/src/talker.rs`'s module doc.
+//! `qwen3omnimoe::thinker::layer_fwd`. See `crates/qwen3omnimoe/src/talker.rs`'s module doc.
 //!
 //! Same `layer_out`-not-`hidden` comparison-target subtlety as
 //! `thinker_layer_parity.rs` (`Qwen3OmniMoeTalkerModel.forward` also applies

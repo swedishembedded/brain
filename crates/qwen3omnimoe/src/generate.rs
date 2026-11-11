@@ -414,7 +414,7 @@ fn argmax(row: &[f32]) -> u32 {
 }
 
 /// Opt-in (`BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS=1`) top-3 logit dump for one decode step
-/// — diagnoses exactly the failure mode `crates/omni/tests/generate_e2e.rs`
+/// - diagnoses exactly the failure mode `crates/qwen3omnimoe/tests/it/generate_e2e.rs`
 /// found on the real checkpoint: a reference comparison (HF's bf16 compute
 /// vs. this engine's fp32) diverging at a token whose top candidates are
 /// closely spaced, distinguishing "a near-tied logit flipped by accumulated

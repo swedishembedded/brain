@@ -123,7 +123,7 @@ pub fn with_multimodal_inputs(spec: ActionSpec) -> ActionSpec {
 /// `MockResident::generate_spec()`'s param list exactly. [`chat_generate_spec`]
 /// plus this path's real audio/image/video inputs ([`with_multimodal_inputs`]).
 pub fn generate_spec() -> ActionSpec {
-    with_multimodal_inputs(chat_generate_spec("Qwen3-Omni Thinker: greedy text completion (validation-tier -- no KV-cache; see this module's doc)"))
+    with_multimodal_inputs(chat_generate_spec("Qwen3-Omni Thinker: greedy text completion (KV-cached decode; see this module's doc)"))
 }
 
 /// The `speak` action schema: text in, spoken text + a real waveform out.
@@ -172,7 +172,7 @@ pub fn converse_spec() -> ActionSpec {
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
-        "Qwen3-Omni-30B-A3B -- text generation with optional real audio/image/video input, real speech output via speak, and real audio/image/video input fused with speech output via converse (validation-tier: streamed weights, no int8/GPU-sharded residency).",
+        "Qwen3-Omni-30B-A3B -- text generation with optional real audio/image/video input, real speech output via speak, and real audio/image/video input fused with speech output via converse (streamed weights; see this module's doc for the residency tiers).",
         vec![generate_spec(), speak_spec(), converse_spec()],
     )
 }
@@ -541,7 +541,7 @@ pub fn run_action(inner: &Arc<OmniInner>, action: &str, inv: &Invocation, progre
 
 impl OmniInner {
     /// The shared generate path (also used by the resident adapter,
-    /// `crate::resident_omni` - matches `qwen3asr::caps::QwenAsrInner::transcribe`'s
+    /// `catalog`'s `resident_omni` - matches `qwen3asr::caps::QwenAsrInner::transcribe`'s
     /// shared-between-Provider-and-resident shape). `prompt` is already
     /// resolved (via [`last_user_text`]) by the caller. Text-only: no media
     /// splice, plain-sequential M-RoPE positions (`crate::generate`'s doc).
@@ -576,8 +576,8 @@ impl OmniInner {
     /// `(hwc, w, h)` (`capability::blob::decode_image`'s output shape);
     /// `video` is per-frame `(hwc, w, h)` in order
     /// (`capability::blob::decode_video`'s output shape) - each frame
-    /// runs through `crate::mm::encode_video_frames`'s single-frame-path
-    /// approximation, per that function's own doc.
+    /// runs through `crate::mm::encode_video_frames`, which patches frames
+    /// in temporal pairs, per that function's own doc.
     pub fn generate_multimodal(
         &self,
         prompt: &str,
@@ -658,10 +658,10 @@ impl OmniInner {
         let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor)?;
         let codec_head_w = self.reader.tensor("talker.codec_head.weight").ok_or("omni: missing tensor talker.codec_head.weight")?;
 
-        // Talker's own kernel-index scheme (crate::talker::talker_pipelines,
-        // 18 entries) is NOT the same table as self.gpus[0]'s (built from
-        // thinker_pipelines, 16 entries) -- dispatching Talker's decode-cache
-        // kernels (indices 15-17) against self.gpus[0]'s table read out of bounds.
+        // Talker's own kernel-index scheme (crate::talker::talker_pipelines)
+        // is NOT the same table as self.gpus[0]'s (built from
+        // thinker_pipelines, which is shorter) -- dispatching Talker's
+        // decode-cache kernels against self.gpus[0]'s table read out of bounds.
         // A real bug this test's own real-weight run caught (`index 16, len
         // 16`, i.e. the thinker-sized table): a fresh Gpu handle on the same
         // device, with Talker's own pipeline table, is required here.

@@ -294,7 +294,7 @@ pub fn map_talker(hf: &str) -> Option<String> {
 /// concern that earlier reasoning raised doesn't hold. Reusing `mtp_hf_to_brain`
 /// (rather than re-deriving the same rename here) is the "one
 /// implementation" answer -- `qwen3tts::import::import_mtp` already validated it
-/// for the standalone Qwen3-TTS MTP, and `crates/omni/tests/
+/// for the standalone Qwen3-TTS MTP, and `crates/qwen3omnimoe/tests/it/
 /// code_predictor_parity.rs` already validated `MtpModel`'s forward pass
 /// against real Omni weights renamed this exact way.
 pub fn map_code_predictor(hf: &str) -> Option<String> {

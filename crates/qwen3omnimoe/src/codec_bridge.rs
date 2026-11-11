@@ -3,7 +3,7 @@
 
 //! Loading `qwen3tts::mtp::MtpModel` (the code predictor) and `mimi::Codec`
 //! (Code2Wav) straight from the real HF checkpoint via `reader` — the same
-//! recipe `crates/omni/tests/code_predictor_parity.rs` and `code2wav_parity.rs`
+//! recipe `crates/qwen3omnimoe/tests/it/code_predictor_parity.rs` and `code2wav_parity.rs`
 //! already validated against real weights (cosine 1.000000 each), lifted out
 //! of the test files so `crate::caps`'s `speak` action can build the same
 //! two models for real serving instead of only proving they're correct in
@@ -115,17 +115,20 @@ pub fn load_talker_projection(reader: &WeightReader, cfg: &TalkerConfig, which: 
         let name = format!("talker.{which}.{leaf}");
         reader.tensor(&name).ok_or_else(|| format!("omni: missing tensor {name}"))
     };
-    Ok(qwen3tts::talker::TextProjection {
-        text_embedding: None,
-        fc1_w: get("linear_fc1.weight")?,
-        fc1_b: get("linear_fc1.bias")?,
-        fc2_w: get("linear_fc2.weight")?,
-        fc2_b: get("linear_fc2.bias")?,
-        in_dim: cfg.thinker_hidden_size as usize,
-        inter: cfg.text.moe_intermediate as usize,
-        out: cfg.text.hidden as usize,
-        text_vocab: 0,
-    })
+    // The projection's inner width is the checkpoint's, read from the fc1 bias
+    // as `qwen3tts::talker` does: the Talker's MoE expert width is a different
+    // number and nothing in the config names this one.
+    let (fc1_w, fc1_b, fc2_w, fc2_b) = (get("linear_fc1.weight")?, get("linear_fc1.bias")?, get("linear_fc2.weight")?, get("linear_fc2.bias")?);
+    let (in_dim, inter, out) = (cfg.thinker_hidden_size as usize, fc1_b.len(), cfg.text.hidden as usize);
+    if fc1_w.len() != inter * in_dim || fc2_w.len() != out * inter || fc2_b.len() != out {
+        return Err(format!(
+            "omni: talker.{which} shapes disagree: fc1 {} for {inter}x{in_dim}, fc2 {} and bias {} for {out}x{inter}",
+            fc1_w.len(),
+            fc2_w.len(),
+            fc2_b.len()
+        ));
+    }
+    Ok(qwen3tts::talker::TextProjection { text_embedding: None, fc1_w, fc1_b, fc2_w, fc2_b, in_dim, inter, out, text_vocab: 0 })
 }
 
 pub fn talker_prompt_specials(oc: &crate::config::OmniConfig) -> TalkerPromptSpecials {

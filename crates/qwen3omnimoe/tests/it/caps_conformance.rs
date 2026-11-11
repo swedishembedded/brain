@@ -9,7 +9,7 @@
 //! zero new code) but the OpenAI/Anthropic surfaces additionally require
 //! `streaming` + a
 //! `messages`/`prompt`/`text` param + a `Media::Text` output — this test is
-//! the regression guard for that shape, since `crates/omni/src/caps.rs`'s
+//! the regression guard for that shape, since `crates/qwen3omnimoe/src/caps.rs`'s
 //! own module doc explaining WHY it has that shape is easy to silently
 //! break with an innocuous-looking edit.
 //!

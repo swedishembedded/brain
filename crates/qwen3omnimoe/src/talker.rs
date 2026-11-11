@@ -22,8 +22,7 @@
 //! Not this module's concern (same seam contract as `crate::thinker`):
 //! `accept_hidden_layer` (Talker consumes Thinker's hidden state at a given
 //! layer, not just its own token embeddings), the codec-id sampling loop,
-//! and the code predictor (`crate::code_predictor` /
-//! `qwen3tts::mtp`) are a caller's job, layered on top of [`decode`].
+//! and the code predictor (`qwen3tts::mtp`) are a caller's job, layered on top of [`decode`].
 
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::{self, gqa_attn_sublayer_decode_step, gqa_attn_sublayer_fwd, rmsnorm_fwd, GqaAttnDims, GqaAttnIds, GqaAttnWeights, GqaDecodeIds, KernelIds};
@@ -253,7 +252,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &TalkerLayerWeights, xmid: &Dev
                 steps.extend(expert_fwd(g, &mids, &shape, &xn2, &gate, gw, uw, dw, &scratch, &routed_out, e as u32, 0, e != 0));
             }
 
-            // Shared expert: always active (no gating), reads the SAME xn2 the
+            // Shared expert: always run, scaled by its sigmoid gate, reads the SAME xn2 the
             // routed experts read, added to routed_out via a fresh buffer (never
             // in place -- see shared_expert_fwd's doc).
             let se_ids = shared_expert_ids();
