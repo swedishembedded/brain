@@ -375,7 +375,7 @@ impl SpeakerEncoder {
     /// reflect padding ([`SpeakerConfig::min_samples`]) is zero-padded up to it, so a
     /// sub-50 ms upload gives a (meaningless but finite) vector, not a panic.
     pub fn embed_wav(&self, samples: &[f32], sr: u32) -> Vec<f32> {
-        let mut wav = audio::resample_linear(samples, sr, 24000);
+        let mut wav = audio::resample::rational(samples, 24000, sr);
         wav.resize(wav.len().max(self.cfg.min_samples()), 0.0);
         let (mel, _t) = crate::mel::log_mel(&wav);
         self.embed(&mel)

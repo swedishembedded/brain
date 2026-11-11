@@ -54,7 +54,7 @@ fn eval_mel_cfg() -> MelConfig {
 
 /// Resample to the common 24 kHz evaluation rate (no-op when already 24 kHz).
 fn to_eval_sr(wav: &[f32], sr: u32) -> Vec<f32> {
-    audio::resample_linear(wav, sr, EVAL_SR)
+    audio::resample::rational(wav, EVAL_SR, sr)
 }
 
 /// DCT-II of one log-mel frame `m[0..M]` into the first `n_cepstra+1`

@@ -592,7 +592,7 @@ impl ResidentEngine {
         if need_codes && cached.codes.is_none() {
             let codec = mimi::Codec::load_inference(&self.codec_path);
             let sr = codec.cfg.input_sample_rate;
-            cached.codes = Some(codec.encode(&audio::resample_linear(&wav.samples, wav.sample_rate, sr)));
+            cached.codes = Some(codec.encode(&audio::resample::rational(&wav.samples, sr, wav.sample_rate)));
         }
         Ok(())
     }

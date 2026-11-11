@@ -579,7 +579,7 @@ pub(crate) fn ref_codes_cached(codec_path: &str, reference: &Reference, cache_di
     let codec = mimi::Codec::load_inference(codec_path);
     let sr = codec.cfg.input_sample_rate;
     let wav = &reference.wav;
-    let codes = codec.encode(&audio::resample_linear(&wav.samples, wav.sample_rate, sr));
+    let codes = codec.encode(&audio::resample::rational(&wav.samples, sr, wav.sample_rate));
     if let Some(cf) = &cache_file {
         if let Some(p) = cf.parent() {
             std::fs::create_dir_all(p).ok();
@@ -638,7 +638,7 @@ pub fn clone(
         None if !ref_text.trim().is_empty() => {
             let codec = mimi::Codec::load_inference(&paths.codec);
             let sr = codec.cfg.input_sample_rate;
-            let wav24 = audio::resample_linear(&wav.samples, wav.sample_rate, sr);
+            let wav24 = audio::resample::rational(&wav.samples, sr, wav.sample_rate);
             Some(codec.encode(&wav24))
         }
         None => None,

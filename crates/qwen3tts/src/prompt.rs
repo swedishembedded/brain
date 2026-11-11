@@ -8,7 +8,7 @@
 //! Two conditioning modes are supported, matching the reference:
 //!
 //!   * **x-vector-only** ([`build_xvector_prompt`]) — the speaker timbre comes
-//!     from a 1024-d x-vector (from [`speaker`]); the target text drives content.
+//!     from a 1024-d x-vector (from `ecapatdnn`); the target text drives content.
 //!     The whole path is pure brain (no reference audio codes required), so this
 //!     is the one the end-to-end CLI demo runs.  Passing `speaker = None` yields
 //!     the speaker-free "synth" prompt.

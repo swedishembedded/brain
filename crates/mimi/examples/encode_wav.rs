@@ -14,7 +14,7 @@ fn main() {
     let codec = mimi::Codec::load_inference(&a[1]);
     let wav = audio::wav::read(&a[2]).expect("read wav");
     let sr = codec.cfg.input_sample_rate;
-    let w = audio::resample_linear(&wav.samples, wav.sample_rate, sr);
+    let w = audio::resample::rational(&wav.samples, sr, wav.sample_rate);
     let codes = codec.encode(&w); // [T*16] row-major
     let mut out = Vec::with_capacity(8 + codes.len() * 4);
     out.extend_from_slice(&(codes.len() as u64).to_le_bytes());
