@@ -58,7 +58,7 @@ use crate::config::{DepthDecoderConfig, DitConfig};
 /// Per-layer linear weights of the flow-matching DiT, in fp32 bytes.
 ///
 /// One block is `attn.to_{q,k,v,out}` (four `inner x inner` projections)
-/// plus the gated FF pair `ff_in` (`[2*ff_inner, inner]` - GEGLU, hence the
+/// plus the gated FF pair `ff_in` (`[2*ff_inner, inner]` - SwiGLU, hence the
 /// 2) and `ff_out` (`[inner, ff_inner]`), exactly as
 /// [`crate::dit::BlockW`] declares them. Norms and biases are `inner`-sized
 /// vectors and are dropped as a rounding error, the same simplification

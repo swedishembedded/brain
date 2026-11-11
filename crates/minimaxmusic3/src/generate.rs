@@ -101,11 +101,10 @@ impl Paths {
 }
 
 /// The AR stage's own frame rate (`ConditionEncoderConfig::real()`'s
-/// `input_sampling_rate / input_hop_length` = `24000/960`): by
-/// construction, one AR/depth-decoder frame always maps to exactly
-/// `1/25` s of the eventual audio, all the way through the condition
-/// encoder's resample and the vocoder's upsample - confirmed by hand in
-/// this module's own tests, not just asserted here.
+/// `input_sampling_rate / input_hop_length` = `24000/960`): one
+/// AR/depth-decoder frame stands for `1/25` s of audio. The stitched output
+/// is not exactly `frames / 25` s: each middle chunk's overlap splice adds
+/// 240 samples (0.40 s over a five-minute song).
 pub const AR_FRAME_RATE_HZ: f32 = 25.0;
 
 /// Generation knobs. `duration_seconds` is converted to an AR frame cap

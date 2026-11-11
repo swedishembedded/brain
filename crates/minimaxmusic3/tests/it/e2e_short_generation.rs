@@ -53,7 +53,7 @@ fn real_short_generation_produces_a_playable_wav() {
     };
     let paths = Paths { lm, depth, condition, dit, vocoder, tokenizer };
 
-    // Echo stage progress. This is the one gate that runs the real ~19B
+    // Echo stage progress. This is the one gate that runs the real ~11.7B
     // checkpoint end to end, and it is slow enough that silence is
     // indistinguishable from a hang - exactly the failure mode
     // `minimaxmusic3::ProgressSink` exists to remove. Visible under

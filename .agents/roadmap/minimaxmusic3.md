@@ -10,7 +10,7 @@ reads that PR (and the checkpoint's own real tensor shapes, read directly
 over HTTP range requests) as the reference, without vendoring any of its
 files into this tree.
 
-Five chained components, ~19B parameters total:
+Five chained components, ~11.7B parameters total:
 
 1. **Global LLM** - a real Qwen3-8B (`hidden=4096, layers=36, heads=32,
    kv_heads=8, head_dim=128, vocab=200000` - the checkpoint's own
@@ -33,7 +33,7 @@ Five chained components, ~19B parameters total:
    RoPE: 32-of-64 head dims rotate), denoises Flow-VAE latents in 200-frame
    chunks with a 100-frame hop, splicing consecutive chunks over a
    172-latent overlap.
-5. **Vocoder** (123M) - a DAC-style decoder (SnakeBeta + weight-normalized
+5. **Vocoder** (54M) - a DAC-style decoder (Snake + weight-normalized
    conv/conv-transpose) folding 128 latent channels into 2 (stereo) at
    44.1 kHz.
 
@@ -43,7 +43,7 @@ Real-weight tensor/layer parity for every component (streamed + int8 where
 fp32 won't fit in this machine's ~21 GB usable RAM), plus one real, short
 (a few seconds, a single denoise chunk, a short AR run) end-to-end
 generation producing an actual WAV on this machine. A full 5-minute
-generation (14 overlapping chunks, an AR loop over ~1500 frames on the 8B
+generation (74 overlapping chunks, an AR loop over ~7500 frames on the 8B
 LM) is not attempted here - recorded as a hardware-bound gap, not silently
 skipped.
 
@@ -683,7 +683,7 @@ For a 180 s song (4500 AR frames, 45 denoise windows) the **flow DiT is
 65-80% of wall-clock**: 45 windows x 30 Euler steps x 2 CFG branches, and
 its GEMMs sit at ~85 FLOP/byte, well past a P40's ~34 ridge point, so it is
 compute-bound. The 8B Global LM is bandwidth-bound and roughly a fifth of
-the budget; the 123M vocoder is negligible. **Optimise the DiT first** - an
+the budget; the 54M vocoder is negligible. **Optimise the DiT first** - an
 earlier working assumption in this session that the AR stage's host LM head
 dominated was wrong, and is recorded here because `.agents/rules/kernels.md`
 §F exists precisely for this failure mode.
@@ -728,7 +728,7 @@ checked on a real GPU rather than only the CPU JIT:
 |---|---|---|---|---|
 | condition encoder | 25M | CPU JIT | 1.000000000 | 3e-6 |
 | RVQ depth decoder | 0.65B | CPU JIT | 1.000000000 | 1.6e-5 |
-| vocoder (DAV) | 123M | CPU JIT + P40 | 1.000000000 | 1e-6 |
+| vocoder (DAV) | 54M | CPU JIT + P40 | 1.000000000 | 1e-6 |
 | flow-matching DiT | 2.4B | P40 | 1.000000000 | 1.3e-5 |
 | Global LLM (Qwen3-8B) | 8B | P40 | 1.000000000 | 1e-6 |
 

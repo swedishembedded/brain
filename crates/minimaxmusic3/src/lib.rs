@@ -31,12 +31,12 @@
 //!    [condition encoder: this crate: `condition_encoder`]
 //!        softmax layer-mix -> conv proj -> nearest-resample 25 Hz -> latent rate
 //!        v
-//! Flow-matching DiT (this crate: `dit`/`block`)
+//! Flow-matching DiT (this crate: `dit`, on `model::block`)
 //!    36-layer, partial-RoPE self-attn + gated FFN, denoises Flow-VAE latents
 //!    in 200-frame chunks (100-frame hop, 172-latent overlap splice)
 //!        v
 //! Vocoder (this crate: `vocoder`, DAC-style)
-//!    SnakeBeta + weight-normalized conv/conv-transpose -> 44.1 kHz stereo wav
+//!    Snake (one alpha per channel) + weight-normalized conv/conv-transpose -> 44.1 kHz stereo wav
 //! ```
 //!
 //! Reused as-is rather than reimplemented: `crates/qwen3` for the Global LLM
@@ -91,14 +91,12 @@
 //! e2e_short_generation.rs`, `caps::MinimaxMusic3Provider` (the direct/
 //! `brain do` path), and `crates/cli::resident_minimaxmusic3` (the
 //! D-Bus/scheduler path) - `brain minimaxmusic3 generate` and the
-//! `brain/minimaxmusic3` D-Bus model are both live and reachable. What
-//! **could not be validated on this development machine** is a real run
-//! all the way through: whole-8B-model residency fails on both of this
-//! machine's backends (CPU-JIT's `int8` request silently promotes to
-//! fp32; this machine's own Vulkan iGPU caps single buffers below the
-//! embedding/head tensors' size), both pre-existing `qwen3`/`gpu_core`/
-//! `backend-cpu` limits, not a defect here - see this crate's own
-//! roadmap ledger for the measured diagnosis.
+//! `brain/minimaxmusic3` D-Bus model are both live and reachable. Real runs
+//! all the way through were made on a machine whose card holds the whole
+//! language model (commits `594a3db3c`, `7525154b5`); a machine whose
+//! backends cannot (CPU-JIT promotes `int8` to fp32, a small Vulkan iGPU
+//! caps single buffers below the embedding/head tensors) cannot run it -
+//! see this crate's roadmap ledger.
 
 pub mod caps;
 pub mod condition_encoder;
