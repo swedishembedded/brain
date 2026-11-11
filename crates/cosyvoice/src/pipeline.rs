@@ -299,12 +299,12 @@ pub fn extract_prompt_mel(samples_24k: &[f32]) -> (Vec<f32>, usize) {
     let n_mels = cfg.n_mels;
     let mut out = vec![0.0f32; n_frames * n_mels];
     for fr in 0..n_frames {
+        let magnitude: Vec<f32> = power[fr * bins..(fr + 1) * bins].iter().map(|&p| (p + 1e-9).sqrt()).collect();
         for m in 0..n_mels {
             let row = &fb[m * bins..(m + 1) * bins];
             let mut acc = 0.0f32;
             for b in 0..bins {
-                let magnitude = (power[fr * bins + b] + 1e-9).sqrt();
-                acc += row[b] * magnitude;
+                acc += row[b] * magnitude[b];
             }
             out[fr * n_mels + m] = acc.max(1e-5).ln();
         }

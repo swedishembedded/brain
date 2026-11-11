@@ -429,8 +429,8 @@ pub struct LogMel {
     pub n_frames: usize,
 }
 
-/// `Qwen3ASRFeatureExtractor`: pad raw audio to a whole number of seconds
-/// (`target_samples`), STFT(n_fft 400, hop 160, 400-Hann periodic, reflect pad,
+/// `Qwen3ASRFeatureExtractor`: zero-pad raw audio to `target_samples` (the
+/// caller's whole number of seconds; a longer clip is kept whole), STFT(n_fft 400, hop 160, 400-Hann periodic, reflect pad,
 /// center=True), drop the last time frame, power → slaney mel(128, fmax 8000) →
 /// log10(clamp 1e-10) → dynamic-range compress (max−8) → (x+4)/4.
 /// Output `[128, n_frames]` (channels-first) row-major.
@@ -444,7 +444,6 @@ pub fn qwen_logmel(samples: &[f32], target_samples: usize) -> LogMel {
     for (i, &s) in samples.iter().enumerate() {
         x[i] = s as f64;
     }
-    x.truncate(target_samples.max(samples.len()));
 
     let window = hann(N_FFT, true);
     let padded = center_pad(&x, N_FFT / 2, Pad::Reflect);

@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! STFT + mel-spectrogram features (CPU, fp32). Used as the front-end for the
-//! ECAPA speaker encoder and the codec's mel reconstruction loss.
-//!
-//! The exact windowing / mel constants are matched to the Qwen3-TTS reference
-//! front-end in Phase 3; the parameters here are configurable so that match is a
-//! config change, not a rewrite. FFT is an iterative radix-2 when
+//! STFT + mel-spectrogram features (CPU, fp32): the codec's mel
+//! reconstruction loss and the TTS front ends, and the mel filterbank the
+//! speaker encoders borrow. Window, hop, centring and mel scale are
+//! configuration ([`MelConfig`]), so matching a model's reference front end is
+//! a config change, not a rewrite. FFT is an iterative radix-2 when
 //! `n_fft` is a power of two, else Bluestein's algorithm (arbitrary `n_fft`,
 //! e.g. CosyVoice's 1920 = 2^7*3*5) - see this module's `fft` function.
 
@@ -22,7 +21,8 @@ pub struct MelConfig {
     pub n_mels: usize,
     pub fmin: f32,
     pub fmax: f32,
-    /// Slaney-style mel (true) vs HTK (false).
+    /// Slaney-style mel with area-normalised filters (true) vs HTK mel with
+    /// unit-peak filters (false): the scale and the normalisation go together.
     pub slaney: bool,
     /// `torch.stft(center=True)` convention (reflect-pad by `n_fft/2`, the
     /// long-standing default here) vs `center=False` (reflect-pad by

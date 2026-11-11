@@ -276,8 +276,9 @@ mod tests {
         assert_eq!(manifest().model, MODEL);
     }
 
-    /// The encoder is told how many mel FRAMES are valid. `qwen_logmel` returns
-    /// `(mel, n_mels, n_frames)`; reading the second field as the frame count
+    /// The encoder is told how many mel FRAMES are valid. `qwen_logmel` used to
+    /// return `(mel, n_mels, n_frames)` (now the named `LogMel`); reading the
+    /// second field as the frame count
     /// told the encoder it had 128 frames (about 1.3 s) whatever the clip, so
     /// every transcript stopped after the first few words.
     #[test]
