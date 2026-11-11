@@ -1,0 +1,30 @@
+<!-- source-sha256: ee7f60a9318668443fa687e9965effc66d82a1424e8aa9b9a367ca75e440331f -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 347 526" width="347" height="526"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="347" height="526" fill="#ffffff"/>
+<ellipse cx="91.68" cy="47" rx="67.68" ry="23" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="91.68" y="43.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">world point</text>
+<text x="91.68" y="59.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(X, Y, Z)</text>
+<ellipse cx="91.68" cy="155" rx="67.68" ry="23" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="91.68" y="151.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">camera point</text>
+<text x="91.68" y="167.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(x, y, z)</text>
+<ellipse cx="91.68" cy="263" rx="67.68" ry="23" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="91.68" y="259.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">normalized point</text>
+<text x="91.68" y="275.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(x / z, y / z)</text>
+<ellipse cx="91.68" cy="371" rx="67.68" ry="23" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="91.68" y="367.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">distorted point</text>
+<text x="91.68" y="383.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(x_d, y_d)</text>
+<ellipse cx="91.68" cy="479" rx="67.68" ry="23" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="91.68" y="475.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pixel</text>
+<text x="91.68" y="491.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(u, v)</text>
+<line x1="91.68" y1="73" x2="91.68" y2="129" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="170.53" y="97.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">extrinsics: R and t</text>
+<text x="170.53" y="113.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">6 numbers</text>
+<line x1="91.68" y1="181" x2="91.68" y2="237" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="170.53" y="205.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">divide by z</text>
+<text x="170.53" y="221.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">no parameters</text>
+<line x1="91.68" y1="289" x2="91.68" y2="345" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="170.53" y="313.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">lens: k1, k2, p1, p2</text>
+<text x="170.53" y="329.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">4 numbers</text>
+<line x1="91.68" y1="397" x2="91.68" y2="453" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="170.53" y="421.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">intrinsics: fx, fy, cx, cy</text>
+<text x="170.53" y="437.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">4 numbers</text>
+</svg>

@@ -803,7 +803,7 @@ volumes:
         title: "Cameras and Projective Geometry"
         question: "How does a 3D point become a pixel, and how do we undo that?"
         introduces: [pinhole-camera, camera-intrinsics, camera-extrinsics, homogeneous-coordinates, lens-distortion]
-        requires: [matrix, rotation-matrix, vector]
+        requires: [matrix, rotation-matrix, vector, singular-value-decomposition, jacobian, monocular-depth]
         brain: [camera]
       - id: structure-from-motion
         title: "Structure from Motion and Multi-View Stereo"

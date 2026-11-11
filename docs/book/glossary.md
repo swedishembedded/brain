@@ -146,6 +146,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **calibration set**: the sample of inputs that is run through the float graph to record the range of every tensor; it must be representative of the deployment, because a range that is too narrow clamps real values and one that is too wide wastes codes. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
 
+**camera extrinsics**: the rotation and translation that carry a world point into the camera's own frame, six numbers that say where the camera stood and which way it faced for one photograph. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
+
+**camera intrinsics**: the numbers that belong to the camera itself and hold for every photograph it takes: the focal lengths in pixels along the two image axes and the principal point, collected in the matrix $\mathbf{K}$, together with the lens coefficients that bend the ray. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
+
 **capability declaration**: the statement of what a device can execute correctly, queried from the device and absent when unknown, matched against what each candidate needs, so that a candidate that cannot run is removed before any cost is considered. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
 **catastrophic cancellation**: the loss of leading digits when two nearly equal numbers that carry rounding errors are subtracted; the subtraction is exact but promotes the earlier errors to the leading digits of a much smaller result, losing about $\log_{10}$ of the ratio of the operands to the result. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
@@ -486,6 +490,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **hierarchical vision transformer**: a vision transformer arranged as a pyramid of stages, in which merging neighbouring patches between stages reduces the number of tokens and widens the channels, like the stages of a convolutional network. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
+**homogeneous coordinates**: a representation of a point by one more number than it has coordinates, defined up to a nonzero factor, in which a division by depth, a translation and a point at infinity become matrix products. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
+
 **hybrid architecture**: a stack that interleaves a few full-attention layers, whose cache grows with the context, with many layers of a fixed-size recurrence or convolution, whose cost does not. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **hypothesis space**: the set of all functions a model can express as its parameters vary. *([The Learning Problem](v02-learning/01-learning-problem.md))*
@@ -599,6 +605,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **learning-rate warmup**: a learning rate that rises from a small value to its peak over the first $W$ steps, $\eta_t = \eta_{\max}(t+1)/W$, so that the first updates of an adaptive optimizer, whose averages are not yet calibrated, are small. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
 
 **least squares**: the method of choosing parameters that minimise the sum of the squared differences between predictions and labels. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
+
+**lens distortion**: the departure of a real lens from the pinhole, modelled as a correction of the normalized image point (a radial polynomial and tangential terms) or as a polynomial in the angle of the ray, valid only where the polynomial still increases with the distance from the axis. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
 
 **likelihood**: the probability (or density) that a model with a given parameter assigns to the observed data, read as a function of the parameter; it is not the probability of the parameter. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
@@ -811,6 +819,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **perplexity**: the exponential of the cross-entropy, $\exp H(p, q)$ with natural logarithms, the number of equally likely choices that would give the same average surprise. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
 **piecewise function**: a function defined by different rules on different parts of its domain, such as the absolute value, ReLU and a schedule with a warmup. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
+
+**pinhole camera**: the camera that sends each point of the world along a straight ray through one point, the pinhole, to the image, so that the image position is the ratio of the lateral offset to the depth and the depth itself is lost. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
 
 **pixel**: one sample of an image, a point measurement of light (three numbers for a colour image, usually 8-bit codes), taken at the centre of its cell in a grid of width times height. *([Images as Data](v07-vision/01-images.md))*
 

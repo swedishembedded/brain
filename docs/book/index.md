@@ -171,4 +171,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 
 1. [Video as Data](v10-video-and-3d/01-video.md): How do we represent and compress a sequence of frames?
 2. [Generating Video](v10-video-and-3d/02-video-generation.md): How do diffusion models keep motion consistent across hundreds of frames?
+3. [Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md): How does a 3D point become a pixel, and how do we undo that?
 <!-- /contents -->

@@ -527,6 +527,7 @@ navigation:
           - docs/book/v10-video-and-3d/index.md
           - docs/book/v10-video-and-3d/01-video.md
           - docs/book/v10-video-and-3d/02-video-generation.md
+          - docs/book/v10-video-and-3d/03-camera-geometry.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md
