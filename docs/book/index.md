@@ -158,4 +158,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume IX: Audio, Speech and Music](v09-audio/index.md)
 
 1. [Sound and Sampling](v09-audio/01-sound.md): How is a sound wave turned into numbers without losing what we hear?
+2. [Spectrograms and the Mel Scale](v09-audio/02-spectrograms.md): How do we see which frequencies are present at each moment, the way an ear does?
 <!-- /contents -->

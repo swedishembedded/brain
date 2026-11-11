@@ -18,7 +18,7 @@ You can say exactly which frequencies a sampled signal can carry, resample it be
 ## Chapters
 
 1. [Sound and Sampling](01-sound.md): how is a sound wave turned into numbers without losing what we hear?
-2. Spectrograms and the Mel Scale: how do we see which frequencies are present at each moment, the way an ear does?
+2. [Spectrograms and the Mel Scale](02-spectrograms.md): how do we see which frequencies are present at each moment, the way an ear does?
 3. Neural Audio Codecs: how can audio become a stream of discrete tokens a language model can predict?
 4. Speech Recognition: how does a model turn speech into text when it does not know where each word starts?
 5. Who Is Speaking: how does a model capture the identity of a voice in a single vector?

@@ -596,6 +596,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **load balancing**: any way of making the experts receive about equal numbers of tokens, by an added loss on the router's probabilities or by a selection bias moved with the observed load. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
 
+**log-mel spectrogram**: the array of mel energies of every frame after a logarithm with a guard or a floor, the input of most speech models. *([Spectrograms and the Mel Scale](v09-audio/02-spectrograms.md))*
+
 **log-probabilities**: the logarithms of probabilities, at most 0, which a decoder reports and adds instead of multiplying probabilities, each stated for the distribution it belongs to: the model's or the sampler's. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
 
 **log-sum-exp**: the function $\log \sum_i e^{z_i}$, computed stably as $m + \log \sum_i e^{z_i - m}$ with $m = \max_i z_i$ so that no exponential overflows and the sum is at least $1$; it is the logarithm of a sum of probabilities given their logarithms, and the denominator of the log of a softmax. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
@@ -639,6 +641,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **mean squared error**: the average over the examples of the squared difference between prediction and label, $\frac{1}{N}\sum_n (\hat{y}_n - y_n)^2$. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
 **measured roofline**: the peak arithmetic rate and the memory bandwidth of the device itself, found by two probes that do nothing but arithmetic and nothing but streaming and whose work is counted, in whose terms every result is stated as a fraction. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
+
+**mel filterbank**: a set of overlapping triangular weights whose edges are equally spaced on the mel scale, which turns a spectrum into one energy for each band. *([Spectrograms and the Mel Scale](v09-audio/02-spectrograms.md))*
+
+**mel scale**: a function from frequency to pitch, nearly linear below 1000 Hz and logarithmic above, fitted to listening experiments, in an HTK form and a Slaney form. *([Spectrograms and the Mel Scale](v09-audio/02-spectrograms.md))*
 
 **memory attention**: the attention of a video frame's features onto a bank of memories of earlier frames and object pointers, with position encoded by rotation, which marks the cells that resemble the tracked object before the mask is decoded. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
 
@@ -958,6 +964,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **short convolution**: a causal filter of a few taps applied to each channel separately along the sequence, so that every token is mixed with its few predecessors before the recurrence; it needs the last $K - 1$ inputs as a small state when decoding. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
+**short-time Fourier transform**: the array of Fourier transforms of the frames of a signal, frames of $N$ samples taken every $H$ samples, each weighted by a window, so that time and frequency are both visible. *([Spectrograms and the Mel Scale](v09-audio/02-spectrograms.md))*
+
 **shuffling**: rearranging a list into an order chosen uniformly among all $n!$ orders, correctly done by swapping each position from the end with a uniformly chosen position at or before it (Fisher-Yates). *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **sigmoid**: the function $\sigma(z) = 1/(1 + e^{-z})$ that maps any real number to $(0, 1)$ and is the inverse of the logit; its slope is $\sigma(1 - \sigma)$, at most $1/4$. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
@@ -1149,6 +1157,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **WGSL**: the WebGPU Shading Language, a small kernel language that compiles to the native graphics interfaces and in which the book writes its kernel examples. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
 **whole-pass measurement**: the time of the whole unit of work a user waits for, with every dispatch, wait, copy and host-side step the real use performs inside the bracket, repeated and summarized with its spread; the number by which a change is judged. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
+
+**window function**: a list of weights applied to the samples of a frame before it is transformed, falling to zero at the ends so that the frame's edges do not leak energy into every frequency. *([Spectrograms and the Mel Scale](v09-audio/02-spectrograms.md))*
 
 **windowed attention**: attention in which each token reads only the tokens in its own non-overlapping window of the grid, so that the cost grows linearly with the number of tokens; shifting the windows between layers, or adding a few global layers, lets information cross the window borders. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
