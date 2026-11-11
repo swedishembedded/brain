@@ -34,6 +34,7 @@ use crate::vision::ops::{Linear, NORM_EPS};
 /// Kernels Mirage dispatches by name that the shared list may not carry.
 const OWN_KERNELS: &[(&str, &str)] = &[
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    ("rmsnorm_rows_wg", kernels::RMSNORM_ROWS_WG),
     ("mirage_rms_axpy", kernels::MIRAGE_RMS_AXPY),
     ("mirage_rms_axpy_norm", kernels::MIRAGE_RMS_AXPY_NORM),
     ("mirage_rms_axpy_norm_wg", kernels::MIRAGE_RMS_AXPY_NORM_WG),
@@ -54,6 +55,7 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_rope2d", kernels::MIRAGE_ROPE2D),
     ("mirage_attn", kernels::MIRAGE_ATTN),
     ("mirage_attn_decode", kernels::MIRAGE_ATTN_DECODE),
+    ("mirage_attn_step_wg", kernels::MIRAGE_ATTN_STEP_WG),
     ("mirage_attn_merge", kernels::MIRAGE_ATTN_MERGE),
     ("mirage_attn_scores", kernels::MIRAGE_ATTN_SCORES),
     ("mirage_attn_softmax", kernels::MIRAGE_ATTN_SOFTMAX),
@@ -78,7 +80,9 @@ const OWN_KERNELS: &[(&str, &str)] = &[
     ("mirage_band_cols", kernels::MIRAGE_BAND_COLS),
     ("mirage_hconv_band_glu", kernels::MIRAGE_HCONV_BAND_GLU),
     ("mirage_kron_rows", kernels::MIRAGE_KRON_ROWS),
+    ("mirage_kron_rows_wg", kernels::MIRAGE_KRON_ROWS_WG),
     ("mirage_kron_hada", kernels::MIRAGE_KRON_HADA),
+    ("mirage_kron_hada_wg", kernels::MIRAGE_KRON_HADA_WG),
     ("mirage_cq_gather", kernels::MIRAGE_CQ_GATHER),
     ("argmax_row", kernels::ARGMAX_ROW),
     ("mirage_argmax_wg", kernels::MIRAGE_ARGMAX_WG),
@@ -275,7 +279,8 @@ impl Device {
 
     /// `(1 + scale)`-weighted RMS norm over rows of width `d`: `weight` is `1 + scale`.
     pub fn zc_norm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, weight: &DeviceBuffer, rows: u32, d: u32, y: &DeviceBuffer) {
-        s.push(self.gpu().dispatch(self.k("rmsnorm_rows"), &[x, weight, y], &[d, rows, NORM_EPS.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
+        let kernel = if self.cooperative() && d <= 2048 && d % 4 == 0 { "rmsnorm_rows_wg" } else { "rmsnorm_rows" };
+        s.push(self.gpu().dispatch(self.k(kernel), &[x, weight, y], &[d, rows, NORM_EPS.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
     }
 
     /// `y += scale * zc_norm(x)` row by row, one dispatch (the norm and the residual add of a gated branch).

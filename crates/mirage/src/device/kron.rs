@@ -86,7 +86,8 @@ impl Device {
     /// Append the transform of `rows` rows of `x` into `out` (added to `out` when `acc`).
     pub fn kron(&self, s: &mut Vec<Step>, k: &Kron, x: &DeviceBuffer, rows: u32, out: &DeviceBuffer, acc: bool) {
         let bufs = [x, &k.b, &k.a, &k.aux, out];
-        s.push(self.gpu().dispatch(self.k("mirage_kron_rows"), &bufs, &[rows, k.fa, k.fb, u32::from(acc)], gpu_core::Dispatch::Workgroups(rows)));
+        let kernel = if self.cooperative() && k.fa <= 32 && k.fb <= 32 { "mirage_kron_rows_wg" } else { "mirage_kron_rows" };
+        s.push(self.gpu().dispatch(self.k(kernel), &bufs, &[rows, k.fa, k.fb, u32::from(acc)], gpu_core::Dispatch::Workgroups(rows)));
     }
 
     /// [`Device::kron`] fused with the Hadamard-MLP middle stage (`mirage_hada_mid`): `out = silu(d2 * (1 +
@@ -94,7 +95,8 @@ impl Device {
     #[allow(clippy::too_many_arguments)]
     pub fn kron_hada(&self, s: &mut Vec<Step>, k: &Kron, x: &DeviceBuffer, rows: u32, (logits, hp): (&DeviceBuffer, &DeviceBuffer), rank: u32, out: &DeviceBuffer) {
         let bufs = [x, &k.b, &k.a, &k.aux, logits, hp, out];
-        s.push(self.gpu().dispatch(self.k("mirage_kron_hada"), &bufs, &[rows, k.fa, k.fb, rank], gpu_core::Dispatch::Workgroups(rows)));
+        let kernel = if self.cooperative() && k.fa <= 32 && k.fb <= 32 && rank <= 32 { "mirage_kron_hada_wg" } else { "mirage_kron_hada" };
+        s.push(self.gpu().dispatch(self.k(kernel), &bufs, &[rows, k.fa, k.fb, rank], gpu_core::Dispatch::Workgroups(rows)));
     }
 
     /// Gate stage of HConvGLU on tap-major bands.

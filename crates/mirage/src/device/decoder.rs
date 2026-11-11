@@ -394,30 +394,28 @@ impl DeviceDecoder {
         dev.row_write(s, &conv[2], &cache.v, &st.posbuf, (b, kvh * vh, maxt));
         let att = dev.alloc(st.batch * (heads * vh) as usize);
         let shape = AttnShape { batch: b, nq: 1, heads, kvh, hd, vd: vh, nk: maxt, visible: u32::MAX };
-        dev.attention_at(s, shape, &q, &cache.k, &cache.v, &st.ones, &st.posbuf, &att);
-        let h = self.gated_residual(dev, s, y, (&qkvg, stride, off), &att, (&ly.out, &ly.post_attn, ly.attn_gate), &ly.cross_norm, b, heads * vh);
+        dev.attention_gated(s, shape, [&q, &cache.k, &cache.v, &st.ones, &st.posbuf], (&qkvg, stride, off), &att);
+        let h = self.residual_branch(dev, s, y, &att, (&ly.out, &ly.post_attn, ly.attn_gate), &ly.cross_norm, b);
 
         // Cross-attention over the image memory.
         let q0 = dev.linear_new(s, &ly.cq, &h, b);
         let q = dev.zc_new(s, &q0, &ly.cq_norm, b * heads, hd);
         let att = dev.alloc(st.batch * (heads * vh) as usize);
         let shape = AttnShape { batch: b, nq: 1, heads, kvh: heads, hd, vd: vh, nk: cross.stride as u32, visible: cross.stride as u32 };
-        dev.attention(s, shape, &q, &cross.k[l], &cross.v[l], &cross.mask, &att);
         let cg = dev.linear_new(s, &ly.cgate, &h, b);
-        let h = self.gated_residual(dev, s, y, (&cg, heads * vh, 0), &att, (&ly.cout, &ly.post_cross, ly.cross_gate), &ly.pre_hada, b, heads * vh);
+        dev.attention_gated(s, shape, [&q, &cross.k[l], &cross.v[l], &cross.mask, &dev.pos_dummy], (&cg, heads * vh, 0), &att);
+        let h = self.residual_branch(dev, s, y, &att, (&ly.cout, &ly.post_cross, ly.cross_gate), &ly.pre_hada, b);
 
         // Hadamard MLP.
         ly.mlp.encode_add(dev, s, &h, b, y);
     }
 
-    /// `y += scalar * zc((att * sigmoid(gate)) Wout)` for `branch = (Wout, post-norm weight, scalar)`, returning the next
-    /// sublayer's input `zc(y)` under `next_norm`; `gate` is (buffer, row stride, column offset).
+    /// `y += scalar * zc(att Wout)` for `branch = (Wout, post-norm weight, scalar)`, where `att` already carries the branch's
+    /// sigmoid gate; returns the next sublayer's input `zc(y)` under `next_norm`.
     #[allow(clippy::too_many_arguments)]
-    fn gated_residual(&self, dev: &Device, s: &mut Vec<gpu_core::Step>, y: &DeviceBuffer, gate: (&DeviceBuffer, u32, u32), att: &DeviceBuffer, branch: (&Weight, &DeviceBuffer, f32), next_norm: &DeviceBuffer, rows: u32, w: u32) -> DeviceBuffer {
+    fn residual_branch(&self, dev: &Device, s: &mut Vec<gpu_core::Step>, y: &DeviceBuffer, att: &DeviceBuffer, branch: (&Weight, &DeviceBuffer, f32), next_norm: &DeviceBuffer, rows: u32) -> DeviceBuffer {
         let (out, post, scalar) = branch;
-        let gated = dev.alloc((rows * w) as usize);
-        dev.sigmoid_mul(s, att, gate.0, &gated, rows * w, w, (gate.1, gate.2));
-        let o = dev.linear_new(s, out, &gated, rows);
+        let o = dev.linear_new(s, out, att, rows);
         dev.zc_norm_axpy_norm(s, scalar, &o, post, next_norm, rows, self.cfg.dim as u32, y)
     }
 

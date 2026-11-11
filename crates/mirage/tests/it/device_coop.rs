@@ -67,3 +67,105 @@ fn the_cooperative_residual_norm_matches_the_one_barrier_kernel() {
         assert_agree(&format!("rms_axpy_norm {rows}x{d}"), &plain, &coop);
     }
 }
+
+#[test]
+fn the_cooperative_row_norm_matches_the_one_barrier_kernel() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(mut dev) = cooperative_device("rmsnorm_rows") else { return };
+    // Lane norm (2048), model width (512), head width (48), a width past the vector loads' reach and an odd one.
+    for (rows, d) in [(1usize, 2048usize), (4, 512), (8, 48), (2, 4096), (3, 50)] {
+        let (x, w) = (noise(rows * d, 5, 3.0), noise(d, 6, 0.4));
+        let (plain, coop) = both(&mut dev, |dev| {
+            let g = dev.gpu();
+            let (xb, wb, out) = (g.storage_init("x", &x), g.storage_init("w", &w), g.storage((rows * d) as u64));
+            let mut s = Vec::new();
+            dev.zc_norm(&mut s, &xb, &wb, rows as u32, d as u32, &out);
+            g.submit(&[], &s);
+            vec![g.read(&out, rows * d)]
+        });
+        assert_agree(&format!("rmsnorm_rows {rows}x{d}"), &plain, &coop);
+    }
+}
+
+fn kron_factors(fa: usize, fb: usize, seed: u64) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u32>) {
+    let n = fa * fb;
+    let mut perm: Vec<u32> = (0..n as u32).collect();
+    let mut rng = Lcg::new(seed); // seed: a shuffled gather permutation compared between two paths
+    for i in (1..n).rev() {
+        perm.swap(i, (rng.signed().abs() * 7919.0) as usize % (i + 1));
+    }
+    (noise(fa * fa, seed + 1, 0.4), noise(fb * fb, seed + 2, 0.4), noise(n, seed + 3, 1.0), noise(n, seed + 4, 1.0), perm)
+}
+
+#[test]
+fn the_cooperative_kronecker_rows_match_the_one_barrier_kernel() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(mut dev) = cooperative_device("kron_rows") else { return };
+    for (fa, fb, rows) in [(16usize, 32usize, 1usize), (32, 16, 3), (8, 8, 5), (4, 32, 2)] {
+        let n = fa * fb;
+        let (a, b, pre, post, perm) = kron_factors(fa, fb, 10);
+        let (x, out0) = (noise(rows * n, 11, 1.0), noise(rows * n, 12, 1.0));
+        for acc in [false, true] {
+            let (plain, coop) = both(&mut dev, |dev| {
+                let k = mirage::device::kron::Kron::upload(dev, (fa, fb), &mirage::device::kron::KronParams { a: &a, b: &b, pre: Some(&pre), perm: Some(&perm), post: Some(&post) });
+                let g = dev.gpu();
+                let (xb, out) = (g.storage_init("x", &x), g.storage_init("out", &out0));
+                let mut s = Vec::new();
+                dev.kron(&mut s, &k, &xb, rows as u32, &out, acc);
+                g.submit(&[], &s);
+                vec![g.read(&out, rows * n)]
+            });
+            assert_agree(&format!("kron_rows {fa}x{fb} rows {rows} acc {acc}"), &plain, &coop);
+        }
+    }
+}
+
+#[test]
+fn the_cooperative_kronecker_mlp_stage_matches_the_one_barrier_kernel() {
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(mut dev) = cooperative_device("kron_hada") else { return };
+    for (fa, fb, rows, rank) in [(16usize, 32usize, 1usize, 4usize), (32, 16, 3, 8), (8, 8, 2, 1)] {
+        let n = fa * fb;
+        let (a, b, pre, post, perm) = kron_factors(fa, fb, 20);
+        let (x, lg, hp) = (noise(rows * n, 21, 1.0), noise(rows * rank, 22, 2.0), noise((rank + 2) * n, 23, 0.5));
+        let (plain, coop) = both(&mut dev, |dev| {
+            let k = mirage::device::kron::Kron::upload(dev, (fa, fb), &mirage::device::kron::KronParams { a: &a, b: &b, pre: Some(&pre), perm: Some(&perm), post: Some(&post) });
+            let g = dev.gpu();
+            let (xb, lgb, hpb, out) = (g.storage_init("x", &x), g.storage_init("lg", &lg), g.storage_init("hp", &hp), g.storage((rows * n) as u64));
+            let mut s = Vec::new();
+            dev.kron_hada(&mut s, &k, &xb, rows as u32, (&lgb, &hpb), rank as u32, &out);
+            g.submit(&[], &s);
+            vec![g.read(&out, rows * n)]
+        });
+        assert_agree(&format!("kron_hada {fa}x{fb} rows {rows} rank {rank}"), &plain, &coop);
+    }
+}
+
+#[test]
+fn the_single_workgroup_attention_matches_the_split_kernels_and_the_gate() {
+    use mirage::device::prims::AttnShape;
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(mut dev) = cooperative_device("attention_gated") else { return };
+    // (batch, heads, kv heads, hd, vd, nk, visible): the self step at position 150 (visible from the position word),
+    // the cross step over a padded memory, a batch, and a head width that is not a multiple of 16.
+    for (batch, heads, kvh, hd, vd, nk, visible) in [(1usize, 8usize, 2usize, 48usize, 48usize, 620usize, u32::MAX), (1, 8, 8, 48, 48, 700, 700), (3, 8, 2, 48, 48, 330, u32::MAX), (2, 4, 4, 20, 36, 70, 70), (1, 2, 1, 12, 44, 9, 9)] {
+        let (q, k, v) = (noise(batch * heads * hd, 31, 1.5), noise(batch * nk * kvh * hd, 32, 1.5), noise(batch * nk * kvh * vd, 33, 1.0));
+        // Padded memories: the last quarter of every sequence's keys is masked.
+        let mask: Vec<f32> = (0..batch * nk).map(|i| if i % nk < nk * 3 / 4 { 1.0 } else { 0.0 }).collect();
+        let stride = heads * vd + 17;
+        let gate = noise(batch * stride, 34, 2.0);
+        let (plain, coop) = both(&mut dev, |dev| {
+            let g = dev.gpu();
+            let pos = g.storage(1);
+            g.write(&pos, &[150]);
+            let bufs = [g.storage_init("q", &q), g.storage_init("k", &k), g.storage_init("v", &v), g.storage_init("m", &mask)];
+            let (gb, out) = (g.storage_init("g", &gate), g.storage((batch * heads * vd) as u64));
+            let shape = AttnShape { batch: batch as u32, nq: 1, heads: heads as u32, kvh: kvh as u32, hd: hd as u32, vd: vd as u32, nk: nk as u32, visible };
+            let mut s = Vec::new();
+            dev.attention_gated(&mut s, shape, [&bufs[0], &bufs[1], &bufs[2], &bufs[3], &pos], (&gb, stride as u32, 5), &out);
+            g.submit(&[], &s);
+            vec![g.read(&out, batch * heads * vd)]
+        });
+        assert_agree(&format!("attention {batch}x{heads} nk {nk} visible {visible}"), &plain, &coop);
+    }
+}

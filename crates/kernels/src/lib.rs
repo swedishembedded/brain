@@ -876,6 +876,9 @@ pub const MIRAGE_ATTN: &str = include_str!("../wgsl/mirage_attn.wgsl");
 pub const MIRAGE_ATTN_APPLY: &str = include_str!("../wgsl/mirage_attn_apply.wgsl");
 /// `wgsl/mirage_attn_decode.wgsl`
 pub const MIRAGE_ATTN_DECODE: &str = include_str!("../wgsl/mirage_attn_decode.wgsl");
+
+/// `wgsl/mirage_attn_step_wg.wgsl`
+pub const MIRAGE_ATTN_STEP_WG: &str = include_str!("../wgsl/mirage_attn_step_wg.wgsl");
 /// `wgsl/mirage_attn_merge.wgsl`
 pub const MIRAGE_ATTN_MERGE: &str = include_str!("../wgsl/mirage_attn_merge.wgsl");
 /// `wgsl/mirage_attn_scores.wgsl`
@@ -918,8 +921,14 @@ pub const MIRAGE_HADA_MID: &str = include_str!("../wgsl/mirage_hada_mid.wgsl");
 pub const MIRAGE_HCONV_BAND_GLU: &str = include_str!("../wgsl/mirage_hconv_band_glu.wgsl");
 /// `wgsl/mirage_kron_hada.wgsl`
 pub const MIRAGE_KRON_HADA: &str = include_str!("../wgsl/mirage_kron_hada.wgsl");
+
+/// `wgsl/mirage_kron_hada_wg.wgsl`
+pub const MIRAGE_KRON_HADA_WG: &str = include_str!("../wgsl/mirage_kron_hada_wg.wgsl");
 /// `wgsl/mirage_kron_rows.wgsl`
 pub const MIRAGE_KRON_ROWS: &str = include_str!("../wgsl/mirage_kron_rows.wgsl");
+
+/// `wgsl/mirage_kron_rows_wg.wgsl`
+pub const MIRAGE_KRON_ROWS_WG: &str = include_str!("../wgsl/mirage_kron_rows_wg.wgsl");
 /// `wgsl/mirage_lane_mean.wgsl`
 pub const MIRAGE_LANE_MEAN: &str = include_str!("../wgsl/mirage_lane_mean.wgsl");
 /// `wgsl/mirage_mean_h.wgsl`
@@ -1338,6 +1347,9 @@ pub const RMSNORM_DX_ROWS: &str = include_str!("../wgsl/rmsnorm_dx_rows.wgsl");
 pub const RMSNORM_QUANT_FUSED: &str = include_str!("../wgsl/rmsnorm_quant_fused.wgsl");
 /// `wgsl/rmsnorm_rows.wgsl`
 pub const RMSNORM_ROWS: &str = include_str!("../wgsl/rmsnorm_rows.wgsl");
+
+/// `wgsl/rmsnorm_rows_wg.wgsl`
+pub const RMSNORM_ROWS_WG: &str = include_str!("../wgsl/rmsnorm_rows_wg.wgsl");
 /// `wgsl/roof_dp4a.wgsl`
 pub const ROOF_DP4A: &str = include_str!("../wgsl/roof_dp4a.wgsl");
 /// `wgsl/roof_fma.wgsl`
@@ -2063,6 +2075,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_attn", MIRAGE_ATTN),
     ("mirage_attn_apply", MIRAGE_ATTN_APPLY),
     ("mirage_attn_decode", MIRAGE_ATTN_DECODE),
+    ("mirage_attn_step_wg", MIRAGE_ATTN_STEP_WG),
     ("mirage_attn_merge", MIRAGE_ATTN_MERGE),
     ("mirage_attn_scores", MIRAGE_ATTN_SCORES),
     ("mirage_attn_softmax", MIRAGE_ATTN_SOFTMAX),
@@ -2084,7 +2097,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_hada_mid", MIRAGE_HADA_MID),
     ("mirage_hconv_band_glu", MIRAGE_HCONV_BAND_GLU),
     ("mirage_kron_hada", MIRAGE_KRON_HADA),
+    ("mirage_kron_hada_wg", MIRAGE_KRON_HADA_WG),
     ("mirage_kron_rows", MIRAGE_KRON_ROWS),
+    ("mirage_kron_rows_wg", MIRAGE_KRON_ROWS_WG),
     ("mirage_lane_mean", MIRAGE_LANE_MEAN),
     ("mirage_mean_h", MIRAGE_MEAN_H),
     ("mirage_mhc_maps", MIRAGE_MHC_MAPS),
@@ -2282,6 +2297,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("rmsnorm_dx_rows", RMSNORM_DX_ROWS),
     ("rmsnorm_quant_fused", RMSNORM_QUANT_FUSED),
     ("rmsnorm_rows", RMSNORM_ROWS),
+    ("rmsnorm_rows_wg", RMSNORM_ROWS_WG),
     ("roof_dp4a", ROOF_DP4A),
     ("roof_fma", ROOF_FMA),
     ("rope", ROPE),

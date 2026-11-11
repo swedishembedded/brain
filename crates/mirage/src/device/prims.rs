@@ -41,6 +41,9 @@ impl ConvShape {
     }
 }
 
+/// Most keys one workgroup of `mirage_attn_step_wg` scores (the size of its score array).
+pub const SINGLE_BLOCK_KEYS: u32 = 1024;
+
 /// How the fused single-query attention covers `nk` keys: `splits` workgroups per (sequence, head), each over `chunk` keys.
 ///
 /// A slice is at most [`DecodePlan::MAX_CHUNK`] keys (the kernel's workgroup array holds 128): the weighted-sum
@@ -245,6 +248,24 @@ impl Device {
         let part = self.alloc((rows * plan.splits * (a.vd + 2)) as usize);
         s.push(self.gpu().dispatch(self.k("mirage_attn_decode"), &[q, k, v, key_mask, pos, &part], &p, groups));
         s.push(self.gpu().dispatch(self.k("mirage_attn_merge"), &[&part, out], &[rows, a.vd, plan.splits], gpu_core::Dispatch::Workgroups(rows)));
+    }
+
+    /// [`Device::attention_at`] followed by the sigmoid gate of the attention branch, `out = att * sigmoid(gate)` with the gate
+    /// read at `(buffer, row stride, column offset)`. Where workgroups may run any number of barriers a single-query
+    /// shape of at most [`SINGLE_BLOCK_KEYS`] keys and 64-wide heads is one dispatch (a workgroup per row, no split merge,
+    /// the gate in its epilogue); anything else runs the dispatches of [`Device::attention_at`] and `mirage_sigmoid_mul`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention_gated(&self, s: &mut Vec<Step>, a: AttnShape, [q, k, v, key_mask, pos]: [&DeviceBuffer; 5], gate: (&DeviceBuffer, u32, u32), out: &DeviceBuffer) {
+        let visible = if a.visible == u32::MAX { a.nk } else { a.visible.min(a.nk) };
+        if self.cooperative() && a.nq == 1 && a.hd <= 64 && a.vd <= 64 && a.hd % 4 == 0 && a.vd % 4 == 0 && visible <= SINGLE_BLOCK_KEYS && a.heads.is_multiple_of(a.kvh) {
+            let scale = (1.0 / (a.hd as f32).sqrt()).to_bits();
+            let p = [a.batch, a.heads, a.kvh, a.hd, a.vd, a.nk, a.visible, scale, gate.1, gate.2];
+            s.push(self.gpu().dispatch(self.k("mirage_attn_step_wg"), &[q, k, v, key_mask, pos, gate.0, out], &p, gpu_core::Dispatch::Workgroups(a.batch * a.heads)));
+            return;
+        }
+        let att = self.alloc((a.batch * a.heads * a.vd) as usize);
+        self.attention_at(s, a, q, k, v, key_mask, pos, &att);
+        self.sigmoid_mul(s, &att, gate.0, out, a.batch * a.heads * a.vd, a.heads * a.vd, (gate.1, gate.2));
     }
 
     /// The single-kernel reference attention (serial over keys); the parity oracle for [`Device::attention`].
