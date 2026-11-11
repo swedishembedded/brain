@@ -54,7 +54,7 @@ $$
 where $\mathrm{JS}(p, q) = \tfrac12 D_{\mathrm{KL}}(p \Vert p_{\mathrm{mix}}) + \tfrac12 D_{\mathrm{KL}}(q \Vert p_{\mathrm{mix}})$ is the **Jensen-Shannon divergence**: zero when the two distributions are equal, and never more than $\log 2$. The first step of the equality writes $\log\frac{p}{p+q} = \log\frac{p}{2 p_{\mathrm{mix}}} = \log\frac{p}{p_{\mathrm{mix}}} - \log 2$ and the same for $q$; the two $-\log 2$ terms add to $-\log 4$. A discriminator that has reached its best therefore reports, as the value of the game, how far apart the two populations are, on a scale from $-\log 4$ (identical) up to $0$ (never confused). The table computes it for the Gaussians, with the shift $\mu$ of the data growing:
 
 <!-- worked: gans.game_value -->
-Data N(mu, 1) against a generator output N(0, 1), for five values of mu. JS is the Jensen-Shannon divergence in nats, JS(p, q) = 1/2 KL(p || m) + 1/2 KL(q || m) with m = (p + q) / 2; the game value is V = E_p log D*(x) + E_q log(1 - D*(x)); the accuracy is the probability that D* labels a sample correctly when data and generated samples are equally likely (it says 'data' when D*(x) > 1/2), which is Phi(mu / 2) for the standard normal distribution function Phi, computed with the library erf. JS and V are midpoint sums with step 0.001 over [-14, mu + 14]. log 2 = 0.6931 and log 4 = 1.3863.
+Data N(mu, 1) against a generator output N(0, 1), for five values of mu. JS is the Jensen-Shannon divergence in nats, JS(p, q) = 1/2 KL(p || m) + 1/2 KL(q || m) with m = (p + q) / 2; the game value is V = E_p log D*(x) + E_q log(1 - D*(x)); the accuracy is the probability that D* labels a sample correctly when data and generated samples are equally likely (it says 'data' when D*(x) > 1/2), which is Phi(mu / 2) for the standard normal distribution function Phi, computed with the library erf. JS and V are midpoint sums with step 0.001 over [-14, mu + 14], at the midpoints; since D* underflows in the tails for large mu, log D*(x) is evaluated as -softplus(-a) and log(1 - D*(x)) as -softplus(a) with a = mu x - mu^2 / 2 and softplus(u) = max(u, 0) + log(1 + exp(-|u|)), never as the log of a rounded probability. log 2 = 0.6931 and log 4 = 1.3863.
 
 | shift mu | KL(p_data || q) = mu^2 / 2 | JS(p_data, q) | game value V(D*, q) | accuracy of D* |
 |---|---:|---:|---:|---:|
@@ -85,9 +85,9 @@ The middle factor is the discriminator's opinion of which way to move a sample t
 The choice of $\mathcal{L}_G$ is not obvious, and the obvious choice is a trap. The mirror of the discriminator's loss is to minimize $\log(1 - D)$ on fakes, the **saturating** loss, since the discriminator maximizes it. Its derivative with respect to the logit $\ell$ on a fake is $-\sigma(\ell)$, and when the discriminator is sure that a sample is fake, $\sigma(\ell)$ is near zero and so is the gradient. The **non-saturating** loss $-\log D$ asks for the same thing, that fakes be scored as real, and has derivative $-(1 - \sigma(\ell))$, which is nearly $-1$ exactly there. The least-squares loss $(\ell - 1)^2$, used by brain's discriminator below, has derivative $2(\ell - 1)$:
 
 <!-- worked: gans.generator_gradients -->
-A fake sample on which the discriminator has logit l, so D = sigmoid(l). Each column is the derivative of the generator's loss for that sample with respect to l.
+A fake sample on which the discriminator has logit l, so D = sigmoid(l). Each column is the derivative, with respect to l, of the generator's loss named in its heading, for that sample.
 
-| logit l | D = sigmoid(l) | log(1 - D) | -log D | (l - 1)^2 |
+| logit l | D = sigmoid(l) | d/dl log(1 - D) | d/dl (-log D) | d/dl (l - 1)^2 |
 |---|---:|---:|---:|---:|
 | -8 | 0.00034 | -0.00034 | -0.99966 | -18.0 |
 | -4 | 0.01799 | -0.01799 | -0.98201 | -10.0 |
@@ -136,7 +136,20 @@ This is the simplest case of a fact that shapes everything that follows. The tra
 
 To watch the dynamics, take a case small enough to write down in full and to train in two minutes. The data are a line with three narrow clusters, $x_{\mathrm{r}} = c + 0.25\,n$ with $c$ one of $-3$, $0$, $3$ chosen uniformly (draw `k = integer(3)`, then `n = normal()`) and $n \sim \mathcal{N}(0, 1)$. The standard deviation of the data is $\sqrt{6 + 0.0625} = 2.462$. A generator that has learned them puts a third of its samples in each cluster and none between: the centres are $3$ apart and each cluster is about $1.5$ wide at three standard deviations either side.
 
-The generator has a noise input of $2$ numbers and one output: $\mathbf{x}_{\mathrm{f}} = \mathbf{w}_2 \cdot \tanh(\mathbf{W}_1 \mathbf{z} + \mathbf{b}_1) + b_2$ with $16$ hidden units, $\mathbf{W}_1 \in \mathbb{R}^{16 \times 2}$, $65$ parameters in all. The discriminator reads one number: $\ell = \mathbf{w}_2 \cdot \mathrm{leaky}(\mathbf{w}_1 x + \mathbf{b}_1) + b_2$ with $16$ hidden units and the leaky rectifier $\mathrm{leaky}(a) = a$ for $a > 0$ and $0.1\,a$ otherwise, $49$ parameters. Each parameter vector is laid out as $\mathbf{W}_1$ (row-major), $\mathbf{b}_1$, $\mathbf{w}_2$, $b_2$. The weights are drawn from the run's generator as `normal() / sqrt(fan_in)`, all of $\mathbf{W}_1$ and then all of $\mathbf{w}_2$, for the generator ($32$ draws, then $16$) and then for the discriminator ($16$, then $16$); biases start at $0$. `init_net(rng, n_in, n_hid)` in the pseudocode below performs exactly those draws; `generator(theta, z)` and `logit(omega, x)` are the two formulas above.
+The generator has a noise input of $2$ numbers and one output: $\mathbf{x}_{\mathrm{f}} = \mathbf{w}_2 \cdot \tanh(\mathbf{W}_1 \mathbf{z} + \mathbf{b}_1) + b_2$ with $16$ hidden units, $\mathbf{W}_1 \in \mathbb{R}^{16 \times 2}$, $65$ parameters in all. The discriminator reads one number: $\ell = \mathbf{w}_2 \cdot \mathrm{leaky}(\mathbf{w}_1 x + \mathbf{b}_1) + b_2$ with $16$ hidden units and the leaky rectifier $\mathrm{leaky}(a) = a$ for $a > 0$ and $0.1\,a$ otherwise, $49$ parameters. Each parameter vector is laid out as $\mathbf{W}_1$ (row-major), $\mathbf{b}_1$, $\mathbf{w}_2$, $b_2$. The weights are drawn from the run's generator as `normal() / sqrt(fan_in)`, all of $\mathbf{W}_1$ and then all of $\mathbf{w}_2$, for the generator ($32$ draws, then $16$) and then for the discriminator ($16$, then $16$); biases start at $0$. `init_net(rng, n_in, n_hid)` in the pseudocode below performs exactly those draws:
+
+```text
+function init_net(rng: Generator, n_in: int, n_hid: int) -> array<real>[n_hid * n_in + 2 * n_hid + 1]
+    require n_in >= 1 and n_hid >= 1, "a network needs inputs and hidden units"
+    net = zeros(real, [n_hid * n_in + 2 * n_hid + 1])      # laid out W1, b1, w2, b2; biases stay 0
+    for i in 0 .. n_hid * n_in:
+        net[i] = rng.normal() / sqrt(n_in)                 # all of W1 first, row-major
+    for j in 0 .. n_hid:
+        net[n_hid * n_in + n_hid + j] = rng.normal() / sqrt(n_hid)     # then w2
+    return net
+```
+
+`generator(theta, z)` and `logit(omega, x)` are the two formulas above.
 
 The loop is the following, with the two updates in a fixed order:
 
@@ -214,7 +227,7 @@ twenty generator steps per discriminator step:
 
 The first table is a generator that works, with an honest account of how well. For the first $50$ steps it is a narrow blob near $0$ with a spread of about $0.4$: with its output bias at zero, that is where a freshly initialised generator puts everything. By step $200$ it has spread beyond the data (a spread of $3.036$ against $2.462$) and by step $400$ the three clusters are covered about equally ($216$, $176$ and $184$ samples), but $424$ of the $1000$ samples lie in the gaps. That is not a defect of the optimizer. A generator that is a smooth function of a Gaussian noise vector cannot send a continuous range of inputs to three separated intervals without sending some of them across the gaps in between, and the discriminator's pressure on those bridge samples is exactly what narrows them over time. Every digit of this table is shared by the run and its four nudged copies.
 
-![The spread of the generated samples against the number of discriminator steps. With one generator step per discriminator step the spread rises from 0.4 to about 3 and settles near the dashed spread of the data. With twenty it stays mostly below 1, with excursions near steps 40, 180 and 340.](img/sample-spread.svg)
+![The spread of the generated samples against the number of discriminator steps. With one generator step per discriminator step the spread rises from about 0.4 to a peak of 3.04 at steps 200 and 210 and then falls back to between 2.2 and 2.3 from step 330 on, around the dashed spread of the data (2.462). With twenty it stays mostly below 1, with excursions near steps 40, 180 and 340.](img/sample-spread.svg)
 
 ## A generator that runs ahead
 
@@ -259,7 +272,7 @@ A discriminator cannot repair this by looking harder, because it scores one samp
 The opposite failure is the one that the first section's table foreshadowed. When the discriminator is far ahead, the saturating loss gives the generator almost nothing to learn from. The next experiment sets this up by hand. A generator is given an output bias of $-8$, so that its samples start far to the left of every cluster. The discriminator trains alone for $600$ steps against it, until it is confident that those samples are fake. Then it is frozen, and the generator takes $100$ steps of plain gradient descent (no Adam, so that the size of the gradient is not rescaled away) on each of the three generator losses in turn, from the same start and with the same noise:
 
 <!-- worked: gans.dark_start -->
-A generator and a discriminator from the stream `gans.dark` (seed 0xd6eedb6549f6ec1b) (init_net for each, generator first), with -8 added to the generator's output bias so that its samples start near -8. The discriminator trains alone for 600 Adam steps against that generator (each step: 32 items, a real draw then a noise draw each, from the same stream) and is then frozen; its mean logit on the generator's samples is -3.80. The generator then takes 100 steps of plain gradient descent, rate 0.05, on each loss in turn, from the same start and the same noise (gans.dark.generator: 32 vectors per step), read out on 256 noise vectors from `gans.dark.evaluation` (seed 0x49799e7170c489bd).
+A generator and a discriminator from the stream `gans.dark` (seed 0xd6eedb6549f6ec1b) (init_net for each, generator first), with -8 added to the generator's output bias so that its samples start near -8. The discriminator trains alone for 600 Adam steps (rate 0.002, betas (0.5, 0.999), epsilon 1e-8, no weight decay, as in the training runs of this chapter) against that generator (each step: 32 items, for each item a real draw `real_sample` then a noise draw of 2 `normal()` values, all from the same stream, which continues after the two initialisations; the discriminator's gradient is the mean over the 32 items of the loss -log D(real) - log(1 - D(fake)), and the generator is not updated) and is then frozen; its mean logit on the generator's samples at the start, over the 256 noise vectors of the read-out below, is -3.80. The generator then takes 100 steps of plain gradient descent, rate 0.05, on each loss in turn, from the same start and the same noise (the stream `gans.dark.generator` (seed 0x58e303f0d019c5bb), restarted for each loss: 32 vectors of 2 `normal()` values per step, the gradient the mean over them), read out (the 'mean sample' and 'mean logit' columns) on 256 noise vectors drawn in order from `gans.dark.evaluation` (seed 0x49799e7170c489bd); the norm is that of the generator's full gradient at the first step.
 
 | generator loss | norm of its gradient at step 1 | mean sample at start | after 25 steps | after 100 steps | mean logit after 100 steps |
 |---|---:|---:|---:|---:|---:|
@@ -382,6 +395,9 @@ The limits are the method's. A GAN gives a sampler and no density, so the held-o
 - **generator network**: a network that maps a noise vector drawn from a simple distribution to a sample, so that the samples it makes are draws from a distribution whose density need not be computable; it is the decoder of an autoencoder with the encoder removed. <!-- concept: generator-network -->
 - **discriminator**: a classifier trained to tell real samples from a generator's samples, whose output is the probability that a sample is real; at its best it equals $p/(p + q)$. <!-- concept: discriminator -->
 - **adversarial loss**: the pair of losses in which a discriminator minimizes a classification loss on real and fake samples while the generator minimizes a loss on the discriminator's score of its samples, each holding the other fixed. <!-- concept: adversarial-loss -->
+- **Jensen-Shannon divergence**: the symmetric measure of the difference between two distributions p and q, the mean of the KL divergences of p and of q from their mixture, which is zero when they are equal and never more than log 2; it is the value of the adversarial game, up to a constant, at the best discriminator. <!-- concept: jensen-shannon-divergence -->
+- **non-saturating loss**: the generator loss that asks the discriminator to score fakes as real by minimizing -log D on them instead of log(1 - D), whose gradient stays near its largest value exactly when the discriminator is sure a sample is fake and the saturating loss gives none. <!-- concept: non-saturating-loss -->
+- **patch discriminator**: a convolutional discriminator whose output is a map of logits, each judging one patch of the image, with the loss averaged over the map, so that it scores texture and local structure and does not tie the network to one image size. <!-- concept: patch-discriminator -->
 - **mode collapse**: the failure in which a generator maps most of its noise to a few outputs, so its samples cover only a small part of the data's distribution even if each looks plausible. <!-- concept: mode-collapse -->
 
 ## Answers

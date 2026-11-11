@@ -469,12 +469,21 @@ def _cells(name, getter, fmt):
     return stable.text(vals[0], vals[1:], fmt)
 
 
+def _cells_one_digit(name, getter):
+    """One significant digit only, for a cell the nudge test passes at more digits but an independent implementation does not
+    reproduce (see `straight_through_and_beta`)."""
+    vals = [getter(evaluation(name, i)) for i in range(5)]
+    if len({stable.sig(x, 1) for x in vals}) == 1 and stable.agree(vals, f"{vals[0]:.0e}"):
+        return f"about {stable.sig(vals[0], 1)}"
+    return "unstable"
+
+
 NOTE = ("Every trained number is printed with the digits that the run and four copies of it, started with the first weight changed by +1e-12, "
         "-1e-12, +3e-12 and -3e-12, share (the rule of `stable.py`); here all five agree on every digit shown.")
 
 
 def _note(table):
-    return stable.RULE if ("about " in table or "unstable" in table) else NOTE
+    return stable.RULE + " " + vae.ABOUT if ("about " in table or "unstable" in table) else NOTE
 
 
 # ------------------------------------------------------------------ the budget of a token grid
@@ -688,7 +697,7 @@ def _recipe_text():
     return (f"Data: the 256 training readings of `first_models.curved_data` (16 sensors, noise sd {fm.SENSOR_NOISE}), tested on its 128 test readings. "
             f"Encoder 16-12-8 with GELU after the first layer, whose 8 outputs are read as {T} rows of {DZ} numbers; decoder 8-12-16 with GELU; "
             f"{N_NET} weights and biases outside the codebook. Weights N(0, 1/n_in) layer by layer in row-major order, biases 0, from {_seed(INIT)} "
-            f"(weights only, layer by layer). Batch {BATCH} (8 steps per epoch), {EPOCHS} epochs, one shuffle of 0 .. 255 per epoch from {_seed(BATCHES)}; "
+            f"(weights only, layer by layer). Batch {BATCH} (8 steps per epoch), {EPOCHS} epochs, one in-place shuffle per epoch from {_seed(BATCHES)} of the array 0 .. 255, set to the identity once before epoch 1 and left in the order each epoch leaves it; "
             f"Adam (0.9, 0.999, 1e-8), no decay and no clip, rate warming up over {EPOCHS * 8 // 10} steps to {PEAK:g} and following a cosine to {PEAK / 100:g}; "
             f"the codebook is trained by the same optimiser as the weights. Loss per reading: rec + codebook term + commitment term, rec the mean over the 16 sensors "
             f"of the squared error and each term the mean over the {T * DZ} entries of the squared distance, with beta = {BETA}.")
@@ -720,19 +729,26 @@ def rate_table():
     table = _table(["model", "bits per reading", "training reconstruction", "test reconstruction", "codes used", "perplexity"], rows)
     return ("The recipe of the previous table with the codebook size K changed (initialisation 'data', all else equal) and, in the first row, "
             f"the same network without a quantizer. The sensor noise has variance {_f(NOISE_FLOOR, 4)}. Codes used and perplexity count the 1024 "
-            "tokens of the 256 training readings after training.\n\n" + table + "\n\n" + _note(table))
+            "tokens of the 256 training readings encoded once more with the final parameters, after the last epoch; the training reconstruction "
+            "is instead the mean over the last epoch's eight batches, taken while the parameters moved (the last row of the training log), "
+            "and the test reconstruction uses the final parameters.\n\n" + table + "\n\n" + _note(table))
 
 
 def straight_through_and_beta():
     rows = []
     for label, name in (("straight-through, beta on the commitment term", "main"), ("straight-through, beta on the codebook term", "on_codebook"),
                         ("no straight-through (a plain lookup)", "no_ste")):
-        rows.append((label, _cells(name, lambda e: e["final"][1], lambda x: _f(x, 4)), _cells(name, lambda e: e["test"], lambda x: _f(x, 4)),
+        train = (_cells_one_digit(name, lambda e: e["final"][1]) if name == "on_codebook"
+                 else _cells(name, lambda e: e["final"][1], lambda x: _f(x, 4)))
+        rows.append((label, train, _cells(name, lambda e: e["test"], lambda x: _f(x, 4)),
                      _cells(name, lambda e: e["final"][2], lambda x: _f(x, 4)), _cells(name, lambda e: e["ppl"], lambda x: _f(x, 2))))
     table = _table(["variant", "training reconstruction", "test reconstruction", "mean (z_e - q)^2", "perplexity"], rows)
     return ("The recipe of the first table, K = 16, three ways of training the same network. In the last row the decoder's gradient goes to "
             "the codebook entry it read (the lookup is differentiable in the codebook), the encoder is trained by the commitment term alone, "
-            "and the loss is otherwise the same.\n\n" + table + "\n\n" + _note(table))
+            "and the loss is otherwise the same. The training reconstruction of the second row is printed to one digit although the five runs "
+            "of the nudge test agree on two (0.0034): five copies of an independent implementation of this chapter, summing in another order, ended at "
+            "values from 0.00327 to 0.00339, so the second digit is not reproducible across implementations, and a first digit is all that "
+            "the evidence supports.\n\n" + table + "\n\n" + _note(table))
 
 
 def dead_codes():
@@ -843,7 +859,7 @@ def sequence_model():
             "tokens; the chain has one table for the first token and one 16 x 16 table for each of the three steps, the independent model one "
             "table per position. Bits are the mean of -log2 of the model's probability of the 4 tokens of each of the 128 test readings.\n\n"
             + t1 + "\n\n" + f"Then {N_SAMPLES} readings are sampled from each model and decoded; the distance is the root-mean-square miss per sensor "
-            "of the nearest point of the noiseless curve (`vae.nearest_on_curve`). Draws: for each sample, one `uniform()` per token walked "
+            "of the nearest point of the noiseless curve, found as in Chapter 2's `vae.rescaled_codes` block (a grid of step 0.005 over [-1.25, 1.25], the first minimum kept). Draws: for each sample, one `uniform()` per token walked "
             f"through the cumulative probabilities in code order (a token is the first code whose running total exceeds the draw), or one "
             f"`integer(16)` per token for the uniform model, from {_seed(SAMPLE + '.chain')}, {_seed(SAMPLE + '.independent')} and "
             f"{_seed(SAMPLE + '.uniform')}.\n\n" + t2 + "\n\n" + _note(t1 + t2))
@@ -876,11 +892,11 @@ def blur_and_feature_distance():
     for label, p in (("picture A", a), ("picture B", b), ("the mean of A and B", mean)):
         vals = (0.5 * clip.pixel_mse(p, a) + 0.5 * clip.pixel_mse(p, b), 0.5 * _l1(p, a) + 0.5 * _l1(p, b), 0.5 * _fd(p, a) + 0.5 * _fd(p, b))
         rows.append((label, *[_f(v, 4) for v in vals]))
-    return ("The reference picture A of `clip.base_picture` (12 x 12, a vertical grating in the top six rows and a horizontal one below) and "
+    return ("The reference picture A of Volume VII, Chapter 8 (the picture printed in its `clip.toy_picture_text` block: 12 x 12, values 0.8 and 0.2, a vertical grating in the top six rows and a horizontal one below) and "
             "picture B, A shifted right by one pixel with wraparound (the top half inverts, the bottom half is unchanged). The code cannot "
             "tell which of the two was encoded, so each is the truth with probability 1/2. Each row is a candidate output; the cells are the "
             "expected loss, 1/2 loss(P, A) + 1/2 loss(P, B), under the pixel mean squared error, the pixel mean absolute error and the toy "
-            "feature distance of `clip.toy_distance` (both taps summed).\n\n"
+            "feature distance of that chapter's `clip.pixel_vs_feature` block (weights 1 on each channel, both taps summed).\n\n"
             + _table(["decoder output P", "expected squared error", "expected absolute error", "expected feature distance"], rows))
 
 

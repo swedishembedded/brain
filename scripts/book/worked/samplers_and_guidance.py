@@ -426,7 +426,7 @@ def eta_table():
     rows = [(n, *[_g(err[(0.0, n, eta)], 3) for eta in ETAS]) for n in ETA_STEPS]
     first = (f"The eta family on the straight path with the exact denoiser: {ETA_N} samples, the starting values one normal() each from "
              f"{_seed(START)}, n uniform steps from sigma = 1 to 0 (n evaluations). The fresh noise is one normal() per sample and per "
-             f"step except the last, in sample order and step order, from {_seed(FRESH)} (restarted for every cell). The score is the mean "
+             f"step except the last, drawn sample-major (the first sample takes all its steps in order, then the second sample takes all of its, and so on), from {_seed(FRESH)} (restarted for every cell; nothing is drawn at eta = 0). The score is the mean "
              f"of |sorted sample - quantile of the data| at the probabilities (k + 1/2)/N; the {ETA_N} exact end points T(noise) themselves "
              f"score {floor:.4f}, which is the noise of the score, not an error of the sampler.\n\n"
              + _table(["steps n", "eta = 0", "eta = 0.5", "eta = 1"], rows))
@@ -512,7 +512,8 @@ def step_coefficients():
     rows = [(n, *[f"{v:+.2e}" if abs(v) > 1e-13 else "below 1e-13" for v in vals]) for n, *vals in out]
     return text + (f"One step of each kind from sigma = 0.6 (x = 2) to 0.45 (h = {h:.4f}), with the history point at sigma = 0.8 and a guess that depends only on "
                    "lambda (so the exact step is (sigma'/sigma) x + (1 - sigma') I and the integral I is Simpson's rule with 4000 panels): "
-                   "the error of the step against it. 'first order' keeps the guess; 'predictor 1/2' adds the difference with weight 1/2; "
+                   "the error of the step against it. The guess is m(lambda) = 0.3 + 0.7 lambda for 'linear' and m(lambda) = 0.3 + 0.7 lambda - 0.2 lambda^2 for 'quadratic', "
+                   "with lambda = ln((1 - sigma)/sigma) at the sigma of each point, and the history point at sigma = 0.8 supplies m1, the starting point m0 and the new point mt. 'first order' keeps the guess; 'predictor 1/2' adds the difference with weight 1/2; "
                    "'predictor b_1' with weight b_1; 'corrector 1' uses the new guess with weight 1/2; 'corrector 2' solves the 2 x 2 system.\n\n"
                    + _table(["guess", "first order", "predictor 1/2", "predictor b_1", "corrector 1", "corrector 2"], rows))
 
@@ -539,7 +540,8 @@ def step_orders():
                      _f(gu[i], 6), pu, cu))
     return (f"The orders that two multistep solvers really run at on {n} steps. Left: DPM-Solver++(2M) on the grid sigma_i = 1 - i/{n} "
             "(lambda = ln((1 - sigma)/sigma), h = lambda_(i+1) - lambda_i); the order is 2 only where an earlier guess exists, the last step is "
-            f"first order, and a guess at sigma = 1 sits at lambda = -infinity. Right: UniPC on sigma_i = (1 - 1/1000 in 32-bit) (1 - i/{n}), "
+            f"first order, and a guess at sigma = 1 sits at lambda = -infinity. Right: UniPC on sigma_i = (1 - 1/1000 in 32-bit) (1 - i/{n}), a grid that starts "
+            "just below 1 as the shipped schedule does, unlike the solver table and the predictor check, whose grids start at sigma = 1, "
             "with the order of the predictor, min(2, n - i, i + 1), and of the corrector, the order the previous predictor ran at.\n\n"
             + _table(["i", "sigma_i", "lambda_i", "h_i", "effective order of DPM++(2M)", "UniPC sigma_i", "predictor order", "corrector order"],
                      rows, "lrrrlrrr"))
@@ -560,7 +562,7 @@ def solver_table():
     return (f"The 1000 starting values of {_seed(SAMPLE)} carried from sigma = 1 to 0 with the exact field by four solvers, each given the stated "
             "number of evaluations of the field. Euler and DPM-Solver++(2M) take one step per evaluation on sigma_i = 1 - i/n; Heun takes "
             "n/2 steps of two evaluations (the second at 1e-9 on the last step); UniPC takes one step per evaluation, its "
-            "history point at sigma = 1 (lambda = -infinity) given weight 0. Distance is the mean of |x_0 - T(noise)|, to three significant digits.\n\n"
+            "history point at sigma = 1 (lambda = -infinity) given weight 0, on the grid sigma_i = 1 - i/n that starts at sigma = 1 (the UniPC column of the table of orders instead starts at 1 - 1/1000 in 32-bit arithmetic, as the shipped schedule does). Distance is the mean of |x_0 - T(noise)|, to three significant digits.\n\n"
             + _table(["evaluations", *[sv[0] for sv in SOLVERS]], rows)
             + f"\n\nFor comparison, 200 steps of classical Runge-Kutta (800 evaluations) score {rk:.1e}. The factor by which the distance falls when the "
               "evaluations double (4 to 8, 8 to 16, 16 to 32, 32 to 64): " + "; ".join(ratios) + ".")
@@ -925,6 +927,7 @@ def student_table():
         teacher = [fl.euler(e, fl.uniform_grid(nfe // 2), teacher_velocity) for e in guide_noise()]
         rows.append((nfe, nfe // 2, _g(mean_distance(teacher, ref), 3), nfe, _shared([r["dist"][nfe] for r in runs], _fixed(3))))
     t_stats = stats(ref)
+    teacher32 = stats([fl.euler(e, fl.uniform_grid(STU_NFES[-1] // 2), teacher_velocity) for e in guide_noise()])
     s_stats = [r["stats"] for r in runs]
     fit = [_shared([r["fit"] for r in runs], _fixed(4))]
     vis = [_shared([r["visited"][i] for r in runs], _fixed(4)) for i in (2, 10, 18)]
@@ -936,7 +939,8 @@ def student_table():
             "mean of |x_0 - reference| over the 1000 starting values of the guidance tables, the reference being the teacher with 100 "
             "Runge-Kutta steps; Euler steps on the uniform grid for both.\n\n"
             + _table(["evaluations", "teacher: steps", "teacher: distance", "student: steps", "student: distance"], rows)
-            + f"\n\nAfter 32 evaluations the teacher's end points have mean {t_stats[0]:.3f}, standard deviation {t_stats[1]:.3f} and the student's "
+            + f"\n\nAfter 32 evaluations the teacher's end points (16 Euler steps of two evaluations) have mean {teacher32[0]:.3f} and standard deviation {teacher32[1]:.3f}, "
+              f"the reference's (100 Runge-Kutta steps of the same guided field) {t_stats[0]:.3f} and {t_stats[1]:.3f}, and the student's (32 Euler steps) "
               f"{_shared([s[0] for s in s_stats], _fixed(3))} and {_shared([s[1] for s in s_stats], _fixed(3))}. The student's mean squared error "
               f"against the teacher's velocity is {fit[0]} on {STU_EVAL_N} fresh items of the training distribution ({_seed(STUDENT_EVAL)}), and on the "
               f"states the teacher's own 20-step trajectories visit it is {vis[0]} at sigma = 0.9, {vis[1]} at 0.5 and {vis[2]} at 0.1.")

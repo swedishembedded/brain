@@ -34,7 +34,7 @@ The data are the three clusters (centres -3, 0, 3, standard deviation 0.25, equa
 | 0.7 | 2.7320 | 2.8862 | 1.1 |
 | 0.9 | 5.6397 | 6.2654 | 1.1 |
 
-Averaged over the six levels the error is 1.5108 when told and 1.6819 when not told. The guesses at three values of x:
+Averaged over the six levels the error is 1.5108 when told and 1.6820 when not told. The guesses at three values of x:
 
 | x | told, sigma = 0.02 | told, sigma = 0.1 | told, sigma = 0.3 | told, sigma = 0.5 | told, sigma = 0.7 | told, sigma = 0.9 | not told |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -43,7 +43,7 @@ Averaged over the six levels the error is 1.5108 when told and 1.6819 when not t
 | 2.0 | 2.0472 | 2.3505 | 2.9637 | 3.0564 | 2.8701 | 1.3525 | 2.8606 |
 <!-- /worked -->
 
-Averaged over the six levels the two errors are $1.5108$ and $1.6819$, an 11% difference that is dominated by the noisiest levels, where both errors are large because little of the clean value is left in $x$. The ratio column is the more telling one. At $\sigma = 0.02$ a denoiser that knows the level makes an error of $0.0004$, because the input is nearly the answer, and one that does not know makes $0.0148$, thirty-six times more: it has to allow for the possibility that this $x$ came from a much noisier level, and so it pulls every input toward the nearest cluster centre. At $x = 2.0$, which is four standard deviations from the cluster at 3 and so a point the data seldom produce, the guess for $\sigma = 0.02$ is $2.0472$ and for $\sigma = 0.9$ it is $1.3525$, while the blind guess is $2.8606$, the answer for a middling level. A sampler built from such a network would treat an almost finished picture as if it were still noisy and smooth away detail that was already there, and the detail is what the small levels decide. The noise level has to reach the network.
+Averaged over the six levels the two errors are $1.5108$ and $1.6820$, an 11% difference that is dominated by the noisiest levels, where both errors are large because little of the clean value is left in $x$. The ratio column is the more telling one. At $\sigma = 0.02$ a denoiser that knows the level makes an error of $0.0004$, because the input is nearly the answer, and one that does not know makes $0.0148$, thirty-six times more: it has to allow for the possibility that this $x$ came from a much noisier level, and so it pulls every input toward the nearest cluster centre. At $x = 2.0$, which is four standard deviations from the cluster at 3 and so a point the data seldom produce, the guess for $\sigma = 0.02$ is $2.0472$ and for $\sigma = 0.9$ it is $1.3525$, while the blind guess is $2.8606$, the answer for a middling level. A sampler built from such a network would treat an almost finished picture as if it were still noisy and smooth away detail that was already there, and the detail is what the small levels decide. The noise level has to reach the network.
 
 ## Where the noise level has to enter
 
@@ -113,7 +113,7 @@ The two orders give inner products that differ by less than 1e-12. Pairs with th
 
 So the models do not hand the embedding the fraction. SDXL's clock is the scheduler's timestep, a number from $0$ to $999$ on the 1000-step chain it was trained on. Z-Image's and FLUX.2's transformers receive a time value in $[0, 1]$ (for Z-Image $1 - \sigma$) multiplied by 1000, the `t_scale` field of `crates/s3dit/src/model.rs` and the `t * 1000.0` of `crates/flux2/src/model.rs`; with the scale, two noise fractions $0.01$ apart are $9.1149$ apart in the embedding, against $0.0273$ without it. The second table above shows a property that explains the next paragraph. Exchanging the halves of the embedding is a permutation of the coordinates, so every inner product between two embeddings is unchanged, to less than $10^{-12}$, and the inner product of two embeddings depends only on the difference of their arguments. No statistic computed from the embeddings alone can tell the two orders apart.
 
-That makes the order a trap. What follows the embedding is a learned layer, whose weight columns are tied to coordinates: a checkpoint trained against $[\cos \,\Vert\, \sin]$ and run against $[\sin \,\Vert\, \cos]$ feeds every column the wrong half. The result does not crash and is still a smooth, plausible vector, and commit `ca12c1f91` records what that looked like in Z-Image: text-to-image output that was clean at $256 \times 256$, had a coherent centre with speckle around it at $512 \times 512$ and was uniform speckle at $768 \times 768$, on the same weights, prompt and seed, in both precisions. The existing parity test ran at a 64-token toy scale where the error was too small to fail its cosine gate; the corruption showed up at the first main block of the 512-pixel run (cosine $0.80$ against $0.997$ for the refiners before it) and was fixed by calling the shared sinusoid with the other half order, with a regression test at the failing scale. The shared `model::hostmath::timestep_embedding` takes the order as an argument, and its documentation, extended by the same commit, warns that a sibling model's value is a fact about that model and not a default.
+That makes the order a trap. What follows the embedding is a learned layer, whose weight columns are tied to coordinates: a checkpoint trained against $[\cos \,\Vert\, \sin]$ and run against $[\sin \,\Vert\, \cos]$ feeds every column the wrong half. The result does not crash and is still a smooth, plausible vector, and commit `ca12c1f91` records what that looked like in Z-Image: text-to-image output that was clean at $256 \times 256$, had a coherent centre with speckle around it at $512 \times 512$ and was uniform speckle at $768 \times 768$, on the same weights, prompt and seed, in both precisions. The existing parity test ran at a 64-token toy scale where the error was too small to fail its cosine gate; the corruption showed up at the first main block of the 512-pixel run (cosine $0.80$ against $0.997$ for the refiners before it) and was fixed by calling the shared sinusoid with the cosine half first, $[\cos \,\Vert\, \sin]$, which is the order of the reference implementation's embedder and the one FLUX.1 and FLUX.2 already used (the faulty call had the sine half first), with a regression test at the failing scale. The shared `model::hostmath::timestep_embedding` takes the order as an argument, and its documentation, extended by the same commit, warns that a sibling model's value is a fact about that model and not a default.
 
 The embedding is the input of a small network, two linear layers with an activation between them, that turns it into the conditioning vector $c$. The shapes differ: SDXL's goes $320 \to 1280 \to 1280$ (the sinusoid's width is the width of the first level), Z-Image's $256 \to 1024 \to 256$ (`t_embedder.mlp` in `crates/s3dit/src/import.rs`; the second width is $\min(\mathrm{dim}, 256)$) and FLUX.2's $256 \to d \to d$. A third input joins SDXL's: the pooled text vector (1280 numbers) concatenated with six size values (the original size, the crop corner and the target size), each given its own 256-wide sinusoid, which makes $1280 + 6 \times 256 = 2816$ numbers, goes through a second two-layer network to the same width of 1280 and is added to the first one's output. The pooled text goes first in that concatenation, and `crates/sdxlunet/src/hostemb.rs` calls the reverse order the classic mistake: it type-checks, trains nothing and silently changes the framing of the image.
 
@@ -122,7 +122,7 @@ The embedding is the input of a small network, two linear layers with an activat
 Volume VII's segmenter was a U-Net of one level: convolve, halve, convolve, double, join the skip, convolve. The image generator's U-Net is the same shape with three changes. Its output has the shape of its input (a $4 \times 128 \times 128$ prediction for a $4 \times 128 \times 128$ latent), so there is no class count or depth at the end, only $4$ channels. The levels are many and wide: widths of $320$, $640$ and $1280$ channels at resolutions of $128$, $64$ and $32$. And every block can read the clock and, at the coarser levels, the prompt. The first table lists what the SDXL U-Net does at a $128 \times 128$ latent, walking down, across the middle and up.
 
 <!-- worked: denoiser_architectures.unet_walk -->
-The SDXL U-Net (320, 640, 1280 channels; resnets per down block 2; spatial-transformer blocks per level 1, 2, 10; attention at the two coarser levels) on the 128 by 128 latent of a 1024 by 1024 image. A row is a stage: its resolution, channels in and out, resnets, spatial-transformer blocks, tokens for the self-attention of those blocks, and what it does to the stack of skips. The skip stack is pushed in the order conv_in, down 0 (two resnets, then its stride-2 convolution), down 1 (the same), down 2 (two resnets, no convolution): nine entries of widths 320, 320, 320, 320, 640, 640, 640, 1280, 1280.
+The SDXL U-Net (320, 640, 1280 channels; resnets per down block 2; the configuration lists transformer blocks per level as 1, 2, 10 but attention is on the two coarser levels only, so the 1 of the first level is unused: 2 blocks per spatial transformer at 64 by 64, 10 at 32 by 32 and in the middle block) on the 128 by 128 latent of a 1024 by 1024 image. A row is a stage: its resolution, channels in and out, resnets, spatial-transformer blocks, tokens for the self-attention of those blocks, and what it does to the stack of skips. The skip stack is pushed in the order conv_in, down 0 (two resnets, then its stride-2 convolution), down 1 (the same), down 2 (two resnets, no convolution): nine entries of widths 320, 320, 320, 320, 640, 640, 640, 1280, 1280.
 
 | stage | resolution | channels | resnets | transformer blocks | tokens T | skips |
 |---|---|---|---:|---:|---:|---|
@@ -144,7 +144,19 @@ The bookkeeping of the skips is the part of a U-Net that is easy to get wrong wh
 Inside the table's rows there are two kinds of block. A resnet of the U-Net is the residual block of Volume III with the clock added in: group normalization, activation, a $3 \times 3$ convolution, a per-channel addition of the projected time embedding, group normalization, activation, a second $3 \times 3$ convolution, and the sum with the input (through a $1 \times 1$ convolution when the widths differ). The group norm uses 32 groups and an $\varepsilon$ of $10^{-5}$. At an attention level, each resnet is followed by a **spatial transformer**: a group norm (with $\varepsilon = 10^{-6}$, a second constant in the same graph, as the model's header notes), a flattening of the $H \times W$ map into $T = HW$ tokens, a linear layer, one or more transformer blocks, a linear layer back and a sum with the input. Each block has three sublayers in the pre-norm arrangement of Volume V: self-attention among the $T$ tokens, cross-attention to the $77$ text tokens (the queries come from the picture tokens and the keys and values from the prompt, whose $2048$-wide vectors are projected by weights of the block, so that the picture reads the prompt and the prompt is never rewritten), and a feed-forward network gated by the GEGLU rule, $\mathrm{hidden} \odot \mathrm{gelu}(\mathrm{gate})$. The transformer counts per level are $1$, $2$ and $10$ and are the largest lever on the size of the network.
 
 <!-- worked: denoiser_architectures.unet_params -->
-Every parameter of the SDXL U-Net derived from the configuration above, by what the weights do (a convolution's bias, a normalisation's gain and shift and a linear layer's bias are counted with their layer).
+The SDXL U-Net: 3 levels, resnets per down block 2, per up block 3, 4 latent channels in and 4 out, 32 groups in every group normalisation, time dimension 1280, cross-attention (text) dimension 2048. The middle block is a resnet, a spatial transformer of 10 blocks at 1280 channels with 20 heads, and a resnet. Per level:
+
+| level | resolution | channels | spatial transformers | blocks per transformer | heads | head width |
+|---|---|---:|---|---:|---:|---:|
+| 0 | 1/1 | 320 | no | - | - | - |
+| 1 | 1/2 | 640 | yes | 2 | 10 | 64 |
+| 2 | 1/4 | 1280 | yes | 10 | 20 | 64 |
+
+The conditioning vector comes from two networks, each a linear layer, an activation and a second linear layer, all with biases: the timestep network 320 -> 1280 -> 1280 (the sinusoid is 320 wide, the width of the first level) and the added-conditioning network 2816 -> 1280 -> 1280, whose input is the pooled text vector followed by six size values of 256 numbers each (1280 + 6 x 256 = 2816); their outputs are added.
+
+Counting rules. A convolution from ci to co channels with a k by k kernel has co ci k^2 weights and co biases. A group normalisation of c channels has a gain and a shift (2c). A linear layer from i to o numbers has i o weights and, where stated, o biases. A resnet from ci to co channels is: group normalisation of ci, 3 x 3 convolution ci -> co, a linear time projection (time dimension -> co, with bias) added to every pixel, group normalisation of co, 3 x 3 convolution co -> co, and a 1 x 1 shortcut convolution ci -> co only when ci differs from co. A spatial transformer at c channels is: group normalisation, a linear c -> c with bias (proj_in), then for each block a layer normalisation (2c), self-attention (query, key and value c -> c each without bias, 3c^2 in all; output c -> c with bias), a layer normalisation, cross-attention (query c -> c without bias, key and value text dimension -> c each without bias; output c -> c with bias), a layer normalisation, and the feed-forward (a gated projection c -> 4c computed twice, a gate and a value, each a weight and a bias, which is a single c -> 8c layer in the original checkpoint layout; the product of the activated gate and the value goes through 4c -> c with bias), and after the last block a linear c -> c with bias (proj_out). Between levels the down path has a stride-2 3 x 3 convolution at the channels of the level it leaves; the up path doubles the grid by nearest neighbour and applies a 3 x 3 convolution at the channels of the level it enters. The up resnets read the hidden state concatenated with the popped skip. The output is a group normalisation of the first level's channels, then a 3 x 3 convolution to the output channels. A tensor is one weight or one bias (a normalisation's gain and shift are two).
+
+Every parameter of the SDXL U-Net derived from that configuration, by what the weights do (a convolution's bias, a normalisation's gain and shift and a linear layer's bias are counted with their layer).
 
 | kind | parameters | share |
 |---|---:|---:|
@@ -160,13 +172,34 @@ Every parameter of the SDXL U-Net derived from the configuration above, by what 
 
 The network has 17 resnets and 70 spatial-transformer blocks, and 2,567,463,684 parameters: 10.27 GB in 32-bit floats and 5.13 GB in 16-bit floats. Counting one tensor for each weight or bias, with a fused query-key-value matrix and a fused key-value matrix of the cross-attention each as one tensor and the feed-forward's gated projection as two (the way brain stores them), the network has 1610 tensors; with the three separate attention matrices and the one gated projection of the original layout it has 1680.
 
-The same walk on the 32/64-channel, 2-level variant with one resnet per block that brain builds for its smoke tests (cross-attention dimension 24, time dimension 128, 8 groups) gives 1,322,852 parameters in 284 tensors.
+The same walk, with the same rules, on the variant that brain builds for its smoke tests gives 1,322,852 parameters in 284 tensors. Its configuration:
+
+The smoke-test U-Net: 2 levels, resnets per down block 1, per up block 2, 4 latent channels in and 4 out, 8 groups in every group normalisation, time dimension 128, cross-attention (text) dimension 24. The middle block is a resnet, a spatial transformer of 2 blocks at 64 channels with 4 heads, and a resnet. Per level:
+
+| level | resolution | channels | spatial transformers | blocks per transformer | heads | head width |
+|---|---|---:|---|---:|---:|---:|
+| 0 | 1/1 | 32 | no | - | - | - |
+| 1 | 1/2 | 64 | yes | 2 | 4 | 16 |
+
+The conditioning vector comes from two networks, each a linear layer, an activation and a second linear layer, all with biases: the timestep network 32 -> 128 -> 128 (the sinusoid is 32 wide, the width of the first level) and the added-conditioning network 104 -> 128 -> 128, whose input is the pooled text vector followed by six size values of 16 numbers each (8 + 6 x 16 = 104); their outputs are added.
+
+and its walk on a 16 by 16 latent:
+
+| stage | resolution | channels | resnets | transformer blocks | tokens T | skips |
+|---|---|---|---:|---:|---:|---|
+| conv_in | 16x16 | 4 -> 32 | 0 | 0 | - | push 1 |
+| down 0 | 16x16 | 32 -> 32 | 1 | 0 | - | push 2 |
+| down 1 | 8x8 | 32 -> 64 | 1 | 2 | 64 | push 1 |
+| middle | 8x8 | 64 -> 64 | 2 | 2 | 64 | - |
+| up 0 | 8x8 | 64 -> 64 | 2 | 4 | 64 | pop 2 (resnet inputs 128, 96) |
+| up 1 | 16x16 | 64 -> 32 | 2 | 0 | - | pop 2 (resnet inputs 96, 64) |
+| conv_out | 16x16 | 32 -> 4 | 0 | 0 | - | - |
 <!-- /worked -->
 
 Two things in the table are surprising for a network drawn as a convolutional U. Only $13.0\%$ of the weights are convolutions: the U-Net is a transformer by weight, mostly feed-forward ($47.9\%$) and attention ($16.0\% + 21.3\%$), with a thin convolutional frame around it. And the clock is nearly free in parameters: the two embedding networks and the 17 per-resnet projections together are $1.0\%$ of the total. The total itself is the figure that commit `c7d97a708` states as a measured residency, $2\,567\,463\,684$ parameters; the derivation from the configuration alone reproduces it exactly, and reproduces the commit's other count too, $1610$ tensors in brain's layout against $1680$ in the original one, the difference being the $70$ transformer blocks' three host-side fusions and splits. A configuration trap sits in the same file, and its header records it. The checkpoint's `attention_head_dim` field is `[5, 10, 20]`, and the library that defined it reads it as the number of heads, not the width of a head; read literally it gives 5 heads of width 5, a forward pass that runs, produces the right shapes and is wrong everywhere. The real head width is the level's channels over its heads, $64$ at every level.
 
 <!-- worked: denoiser_architectures.unet_flops -->
-One forward pass of the SDXL U-Net on the 128 by 128 grid of a 1024 by 1024 image with 77 text tokens, in GFLOP (a multiply-add is two operations; additions, normalisations, softmax and activations are not counted), by kind and by the resolution at which it is spent.
+One forward pass of the SDXL U-Net on the 128 by 128 grid of a 1024 by 1024 image with 77 text tokens, in GFLOP (a multiply-add is two operations; additions, normalisations, softmax and activations are not counted), by kind and by the resolution at which it is spent. Every layer of the counting rules above is counted, including the time projections of the resnets and the two conditioning networks (a matrix applied to a single vector, 50 million floating-point operations together). A convolution costs 2 ci co k^2 per output pixel, a linear layer 2 i o per token; the cross-attention key and value projections are applied to the 77 text tokens, 2 x 77 x 2048 x c each for a block of c channels; the scores q k^T and the weighted sum of the values cost 2 T^2 c each, 4 T^2 c together (T the tokens of the grid), and in cross-attention 4 T x 77 x c.
 
 | kind | GFLOP | share |
 |---|---:|---:|
@@ -248,6 +281,10 @@ function rotate_pairs(v: array<real>[2 * P], c: array<real>[P], s: array<real>[P
         out[2 * j + 1] = v[2 * j] * s[j] + v[2 * j + 1] * c[j]
     return out
 
+function rms_rows(x: array<real>[R, D], gamma: array<real>[D], eps: real) -> array<real>[R, D]:
+    (y, _, _) = rms_norm(x, gamma, eps)        # rms_norm of the pseudocode reference returns (y, xhat, inv_std); only y is wanted
+    return y
+
 function dit_block(x: array<real>[N, D], cvec: array<real>[C], prm, cos_t: array<real>[N, HD // 2],
                    sin_t: array<real>[N, HD // 2], H: int, eps: real) -> array<real>[N, D]:
     require D mod H == 0 and (D // H) mod 2 == 0, "heads of an even width, so that channels pair up"
@@ -257,15 +294,15 @@ function dit_block(x: array<real>[N, D], cvec: array<real>[C], prm, cos_t: array
     g_a = map(tanh, m[D : 2 * D])
     s_m = m[2 * D : 3 * D]
     g_m = map(tanh, m[3 * D : 4 * D])
-    n1 = rms_norm(x, prm.an1 * (1 + s_a), eps)
+    n1 = rms_rows(x, prm.an1 * (1 + s_a), eps)
     q = matmul(n1, transpose(prm.Wq))
     k = matmul(n1, transpose(prm.Wk))
     v = matmul(n1, transpose(prm.Wv))
     ctx = zeros(real, [N, D])
     for h in 0 .. H:
         c0 = h * HD
-        qh = rms_norm(q[:, c0 : c0 + HD], prm.nq, eps)
-        kh = rms_norm(k[:, c0 : c0 + HD], prm.nk, eps)
+        qh = rms_rows(q[:, c0 : c0 + HD], prm.nq, eps)
+        kh = rms_rows(k[:, c0 : c0 + HD], prm.nk, eps)
         for i in 0 .. N:
             qh[i, :] = rotate_pairs(qh[i, :], cos_t[i, :], sin_t[i, :])
             kh[i, :] = rotate_pairs(kh[i, :], cos_t[i, :], sin_t[i, :])
@@ -275,10 +312,10 @@ function dit_block(x: array<real>[N, D], cvec: array<real>[C], prm, cos_t: array
             weights[i, :] = softmax(scores[i, :])
         ctx[:, c0 : c0 + HD] = matmul(weights, v[:, c0 : c0 + HD])
     a = matmul(ctx, transpose(prm.Wo))
-    x1 = x + rms_norm(a, prm.an2 * g_a, eps)
-    f1 = rms_norm(x1, prm.fn1 * (1 + s_m), eps)
+    x1 = x + rms_rows(a, prm.an2 * g_a, eps)
+    f1 = rms_rows(x1, prm.fn1 * (1 + s_m), eps)
     hid = map(silu, matmul(f1, transpose(prm.W1))) * matmul(f1, transpose(prm.W3))
-    return x1 + rms_norm(matmul(hid, transpose(prm.W2)), prm.fn2 * g_m, eps)
+    return x1 + rms_rows(matmul(hid, transpose(prm.W2)), prm.fn2 * g_m, eps)
 ```
 
 The routine is the pre-norm block of Volume V with four additions, each visible in the figure that follows. The conditioning vector is projected to four vectors of width $D$ (the scale and the gate of the attention sublayer, the scale and the gate of the feed-forward). The norms come in pairs, one before each sublayer and one after, so that what a sublayer writes to the stream is normalized to unit mean square before the gate sets its size; the gate is $\tanh$ of the projection, so it lies in $(-1, 1)$ and is $0$ when the projection is $0$, which is what makes the zero-gate block an exact identity. The queries and the keys are normalized per head before the rotation, with a learned gain of $\mathrm{HD}$ values each. And there is no shift: Z-Image modulates by scale and gate only.
@@ -288,7 +325,7 @@ The routine is the pre-norm block of Volume V with four additions, each visible 
 The scale and the gate act on the gains of the norms, and that is how brain uses them. Since $\mathrm{rms\_norm}(x, \gamma) = \hat x \odot \gamma$ for the normalized row $\hat x$, multiplying the output by $(1 + s)$ or by $\tanh g$ channel by channel is the same as multiplying the gain $\gamma$ by it before the norm. So the host computes the four modified gains once per block and per pass from the timestep vector (`fold_adaln` in `crates/s3dit/src/block.rs`) and the device runs the plain norm kernel with the new gains: no kernel for scale or gate is needed at all. The check on the small denoiser below confirms that the folded and the unfolded forms agree to rounding.
 
 <!-- worked: denoiser_architectures.zimage_params -->
-Z-Image Turbo from its configuration: width 3840, 30 heads (head width 128), feed-forward width 3840*8//3 = 10240, conditioning width min(3840, 256) = 256, 30 main blocks and 2 blocks in each of the noise and context refiners, 16 latent channels in 2 by 2 patches (64 values per token), caption features of width 2560.
+Z-Image Turbo from its configuration: width 3840, 30 heads (head width 128), feed-forward width 3840*8//3 = 10240, conditioning width min(3840, 256) = 256, 30 main blocks and 2 blocks in each of the noise and context refiners, 16 latent channels in 2 by 2 patches (64 values per token), caption features of width 2560. Outside the blocks: the caption embedder (a gain of 2560, a 2560 -> 3840 matrix and its bias), two learned pad tokens of width 3840, one for the image stream and one for the caption stream (2 x 3840 parameters), the patch embedder (64 -> 3840 with bias), the timestep network (256 -> 1024 -> 256, both with biases) and the final layer (a 256 -> 3840 modulation with bias, then 3840 -> 64 with bias).
 
 | inside one block | parameters |
 |---|---:|
@@ -359,7 +396,7 @@ In the cross-attention design an image token's weights are a softmax over the tw
 The price is the sequence. A caption slot of $512$ tokens makes the sequence $4608$ instead of $4096$ at $1024 \times 1024$, and attention costs in proportion to its square. FLUX.2 pays the same for the same reason and differs in how it spends its weights.
 
 <!-- worked: denoiser_architectures.flux2_table -->
-FLUX.2 from the configurations of its two sizes (hidden width d, SwiGLU width 3d, 128 latent channels per token, caption features of width 7680 and 12288). A double-stream block holds two sets of attention, feed-forward and query-key gains, one for the image stream and one for the caption stream; a single-stream block holds one set with the attention and the feed-forward fused into two matrices. The shared modulation projections (6 d^2 for each double-stream stream, 3 d^2 for the single blocks, 2 d^2 for the final layer) serve every block of their kind.
+FLUX.2 from the configurations of its two sizes (hidden width d, SwiGLU width 3d, 128 latent channels per token, caption features of width 7680 and 12288). The total also holds what is outside the blocks, all of it without biases: the patch embedder (128 -> d), the caption embedder (caption width -> d), the timestep network (256 -> d -> d) and the final projection (d -> 128). A double-stream block holds two sets of attention, feed-forward and query-key gains, one for the image stream and one for the caption stream; a single-stream block holds one set with the attention and the feed-forward fused into two matrices. The shared modulation projections (6 d^2 for each double-stream stream, 3 d^2 for the single blocks, 2 d^2 for the final layer) serve every block of their kind.
 
 | variant | d | double + single | double blocks | single blocks | modulation | total | tensors |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -442,7 +479,7 @@ The output of the small denoiser at sigma = 0.8 and at sigma = 0.2 (time argumen
 The values are those of a function that was evaluated and not trained, in double precision, so another implementation should agree to the printed digits up to the differences of the library's cosine, sine, exponential and $\tanh$ (a few units in the last of the 16 digits, far below the six printed). The properties the chapter has claimed can be tested on it.
 
 <!-- worked: denoiser_architectures.small_checks -->
-Checks on the small denoiser (inputs and weights as above).
+Checks on the small denoiser (inputs and weights as above). The sequence is the 6 tokens of the joint stream, the 4 image tokens and then the 2 caption tokens. Every comparison of tokens ('after the blocks', the two exchange rows, the caption-token row) is on that 6-token sequence at sigma = 0.8 after the two blocks, before the final layer, not on the predicted latent; the exchange of the two patch columns permutes the image tokens 0 <-> 1 and 2 <-> 3 (the caption tokens stay), and the outputs are compared after permuting them the same way. The rows that say 'predicted latent' or 'output' compare the final layer's output.
 
 | change | measured | result |
 |---|---|---|
@@ -463,7 +500,7 @@ The first row is the adaLN-zero property: with both gates of every block at zero
 The architecture decides the work of a pass, and the work can be counted from the configuration alone. The next table puts the four networks side by side at $1024 \times 1024$.
 
 <!-- worked: denoiser_architectures.architecture_table -->
-Four denoisers at 1024 by 1024 pixels (SDXL: a 128 by 128 grid and 77 text tokens; the transformers: 4096 image tokens and 512 caption tokens, one token per 16 by 16 pixels). 'Time parameters' are the weights that turn the timestep (and for SDXL the size and pooled-text vector) into per-layer conditioning: SDXL's two embedding MLPs and the 17 per-resnet projections; Z-Image's timestep MLP, the per-block modulation projections and the final layer's; FLUX.2's timestep MLP, three shared modulation projections and the final layer's. GFLOP counts multiply-adds as two operations and leaves out norms, softmax and activations. The last column is the share spent in the T x T terms of attention.
+Four denoisers at 1024 by 1024 pixels (SDXL: a 128 by 128 grid and 77 text tokens; the transformers: 4096 image tokens and 512 caption tokens, one token per 16 by 16 pixels). 'Time parameters' are the weights that turn the timestep (and for SDXL the size and pooled-text vector) into per-layer conditioning: SDXL's two embedding MLPs and the 17 per-resnet projections; Z-Image's timestep MLP, the per-block modulation projections and the final layer's; FLUX.2's timestep MLP, three shared modulation projections and the final layer's. GFLOP counts multiply-adds as two operations and leaves out norms, softmax and activations. The last column is the share spent in the T x T terms of attention. What is counted differs by what a pass applies to: for SDXL, every layer of the counting rules of the U-Net table, including the matrices that act on the one conditioning vector (about 50 million floating-point operations); for the transformers, the attention and feed-forward matrices applied to every token of every block (refiner blocks to their own tokens only), the patch embedder, the caption embedder and the final projection, and 4 T^2 d per block for the scores and the weighted sum (T the tokens that attend), but not the matrices that act on the one conditioning vector: 255 million floating-point operations for Z-Image (the 32 modulation projections, the timestep network and the final layer's modulation) and 341 and 606 million floating-point operations for the two FLUX.2 sizes (the shared modulation projections and the timestep network), which would move the last printed digit.
 
 | network | stream | parameters | time parameters | share | GFLOP per pass | attention share |
 |---|---|---:|---:|---:|---:|---:|
@@ -478,7 +515,7 @@ The transformers have more parameters than the U-Net and spend far more arithmet
 The attention column grows with the image, because attention's cost in $T$ is quadratic and everything else is linear.
 
 <!-- worked: denoiser_architectures.cost_vs_side -->
-Z-Image with a 512-token caption at four image sides: the image tokens (one per 16 by 16 pixels), the joint sequence, the GFLOP of one pass and the share of them in attention's T x T terms, the bytes (in GB, 32-bit) of the score matrices of the 30 heads of ONE main block if they were stored, and, for comparison, the GFLOP of one SDXL U-Net pass at the same image side (grid side = image side / 8, 77 text tokens). The score elements of the 30 heads, 30 T^2, still fit the 32-bit count of a dispatch for T up to 11,965.
+Z-Image with a 512-token caption at four image sides: the image tokens (one per 16 by 16 pixels), the joint sequence, the GFLOP of one pass and the share of them in attention's T x T terms, the bytes (in GB, 32-bit) of the score matrices of the 30 heads of ONE main block if they were stored, and, for comparison, the GFLOP of one SDXL U-Net pass at the same image side (grid side = image side / 8, 77 text tokens; counted with the rules of the U-Net table, so with the conditioning matrices, while the Z-Image column leaves out the matrices that act on the one conditioning vector, as in the table of the four denoisers). The score elements of the 30 heads, 30 T^2, still fit the 32-bit count of a dispatch for T up to 11,965.
 
 | image side | image tokens | joint tokens N | GFLOP, Z-Image | attention share | scores of one block (GB) | GFLOP, SDXL |
 |---|---:|---:|---:|---:|---:|---:|

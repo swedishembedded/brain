@@ -646,25 +646,25 @@ volumes:
       - id: generative-modeling
         title: "What It Means to Generate"
         question: "What does it mean for a model to learn a distribution over images, and how can we sample from it?"
-        introduces: [generative-model, density-estimation, latent-variable, ancestral-sampling]
+        introduces: [generative-model, density-estimation, latent-variable, ancestral-sampling, expectation-maximization]
         requires: [probability-distribution, conditional-probability, independence, bayes-rule, expectation, categorical-distribution, gaussian-distribution, entropy, cross-entropy, kl-divergence, sampling-from-distribution, maximum-likelihood-estimation, prior, autoregressive-factorization]
         brain: []
       - id: vae
         title: "Variational Autoencoders"
         question: "How can an autoencoder be made into a generator, and why does that need a bound on likelihood?"
-        introduces: [evidence-lower-bound, reparameterization-trick, variational-autoencoder, latent-space]
+        introduces: [evidence-lower-bound, reparameterization-trick, variational-autoencoder, latent-space, amortized-inference, aggregate-posterior]
         requires: [autoencoder, kl-divergence, gaussian-distribution, latent-variable]
         brain: [vae]
       - id: vector-quantization
         title: "Discrete Latents and Vector Quantization"
         question: "How can an image be turned into a short sequence of discrete codes?"
-        introduces: [codebook, vector-quantization, straight-through-estimator, perceptual-loss]
+        introduces: [codebook, vector-quantization, straight-through-estimator, perceptual-loss, dead-code]
         requires: [variational-autoencoder, nearest-neighbors, k-means, perplexity, chain-rule, gradient-check, autoregressive-factorization, perceptual-distance]
         brain: [vqgan]
       - id: gans
         title: "Adversarial Training"
         question: "What happens when the loss itself is a network trained to catch the generator?"
-        introduces: [generator-network, discriminator, adversarial-loss, mode-collapse]
+        introduces: [generator-network, discriminator, adversarial-loss, mode-collapse, jensen-shannon-divergence, non-saturating-loss, patch-discriminator]
         requires: [generative-model, binary-cross-entropy, convolutional-network]
         brain: []
       - id: diffusion

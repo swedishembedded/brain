@@ -145,7 +145,7 @@ def toy_runs():
     return (f"Points (x, y): {points}. Model y = w x. Loss: L(w) = (1/8) sum over the eight points of (w x - y)^2. "
             f"Each visited point (x, y) updates w <- w - {LEARNING_RATE} * 2 (w x - y) x. Learning rate {LEARNING_RATE}, {EPOCHS} epochs "
             "of eight steps each. Generator: the book's SplitMix64 started at the printed seed (state = seed before the first draw). "
-            "Draw order: first w0 = 2 uniform() - 1; then, once per epoch, a new array [0, 1, ..., 7] is shuffled in place "
+            "Draw order: first w0 = 2 uniform() - 1; then, once per epoch, the array is rebuilt as [0, 1, ..., 7] (a fresh identity, not the previous epoch's order) and shuffled in place "
             "with the same generator (epoch 1 first) and the points are visited in that order. "
             "Final loss is L at the final w; \"last epoch order\" is the order of epoch 2.\n\n"
             + _table(head, rows, "llrlrr"))

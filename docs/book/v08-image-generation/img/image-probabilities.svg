@@ -1,4 +1,4 @@
-<!-- source-sha256: bdf7e74b4e11e77e5dcdde8202b80207245b85d18aac78921766f73432d3babe -->
+<!-- source-sha256: cb387f73134479a8475684a476385d710eb11e77f798ae48e815ce718d2aa66b -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 352 582" width="352" height="582"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="352" height="582" fill="#ffffff"/>
 <rect x="130" y="8" width="14" height="9" fill="#2b6cb0"/>
 <text x="150" y="16" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c">world</text>

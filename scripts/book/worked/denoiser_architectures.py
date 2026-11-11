@@ -99,14 +99,16 @@ def _mse(f, s):
 
 
 def blind_denoiser():
-    rows = []
+    rows, raw_aware, raw_blind = [], [], []
     for s in BLIND_SIGMAS:
         e_aware = _mse(lambda x, s=s: aware(x, s), s)
         e_blind = _mse(blind, s)
+        raw_aware.append(e_aware)
+        raw_blind.append(e_blind)
         rows.append([f"{s:g}", _f(e_aware, 4), _f(e_blind, 4), f"{e_blind / e_aware:.1f}"])
     top = [[f"{x:.1f}"] + [_f(aware(x, s), 4) for s in BLIND_SIGMAS] + [_f(blind(x), 4)] for x in (0.5, 1.5, 2.0)]
-    mean_aware = sum(float(r[1]) for r in rows) / len(rows)
-    mean_blind = sum(float(r[2]) for r in rows) / len(rows)
+    mean_aware = sum(raw_aware) / len(raw_aware)      # the mean of the unrounded errors, not of the printed cells
+    mean_blind = sum(raw_blind) / len(raw_blind)
     return (
         "The data are the three clusters (centres -3, 0, 3, standard deviation 0.25, equal weights) and x = (1 - sigma) x_0 + sigma "
         "noise. Two exact denoisers, no training: the posterior mean E[x_0 | x, sigma] that is told sigma, and the posterior mean "
@@ -369,7 +371,7 @@ def unet_count(cfg, h, w, t_enc=77, through_mid=False):
                 transformer(co, cfg["heads"][level], cfg["tf"][level], hh, ww)
                 tf += cfg["tf"][level]
         rows.append([f"up {i}", f"{hh}x{ww}", f"{prev_out} -> {co}", str(res), str(tf), str(hh * ww) if tf else "-",
-                     "pop 3 (resnet inputs " + ", ".join(popped) + ")"])
+                     f"pop {len(popped)} (resnet inputs " + ", ".join(popped) + ")"])
         if i + 1 < levels:
             hh, ww = hh * 2, ww * 2
             conv(co, co, 3, hh, ww)
@@ -381,12 +383,60 @@ def unet_count(cfg, h, w, t_enc=77, through_mid=False):
     return n, rows
 
 
+def _level_rows(cfg):
+    """One row per level of the configuration: resolution divisor, channels, whether the level's blocks carry spatial transformers (the
+    down and up path agree), transformer blocks per spatial transformer, heads and head width. The block count and the heads of a level
+    without attention are not used."""
+    rows = []
+    for i, ch in enumerate(cfg["ch"]):
+        attn = cfg["down"][i] == "attn"
+        assert (cfg["up"][len(cfg["ch"]) - 1 - i] == "attn") == attn, "down and up path must agree on where the attention is"
+        rows.append([str(i), f"1/{2 ** i}", str(ch), "yes" if attn else "no", str(cfg["tf"][i]) if attn else "-",
+                     str(cfg["heads"][i]) if attn else "-", str(ch // cfg["heads"][i]) if attn else "-"])
+    return rows
+
+
+def _unet_config_text(cfg, name):
+    """The configuration of one U-Net and the counting rules, so that every parameter, tensor and FLOP of the walk can be re-derived."""
+    c0, te, ccross = cfg["ch"][0], cfg["time_dim"], cfg["cross_dim"]
+    table = _table(["level", "resolution", "channels", "spatial transformers", "blocks per transformer", "heads", "head width"],
+                   _level_rows(cfg), "llrlrrr")
+    return (
+        f"{name}: {len(cfg['ch'])} levels, resnets per down block {cfg['layers']}, per up block {cfg['layers'] + 1}, {cfg['c_in']} latent channels "
+        f"in and {cfg['c_out']} out, {cfg['groups']} groups in every group normalisation, time dimension {te}, cross-attention (text) dimension "
+        f"{ccross}. The middle block is a resnet, a spatial transformer of {cfg['tf'][-1]} blocks at {cfg['ch'][-1]} channels with {cfg['heads'][-1]} heads, and a resnet. "
+        f"Per level:\n\n{table}\n\n"
+        f"The conditioning vector comes from two networks, each a linear layer, an activation and a second linear layer, all with biases: "
+        f"the timestep network {c0} -> {te} -> {te} (the sinusoid is {c0} wide, the width of the first level) and the added-conditioning network "
+        f"{cfg['class_dim']} -> {te} -> {te}, whose input is the pooled text vector followed by six size values of {cfg['add_time_dim']} numbers each "
+        f"({cfg['class_dim'] - 6 * cfg['add_time_dim']} + 6 x {cfg['add_time_dim']} = {cfg['class_dim']}); their outputs are added."
+    )
+
+
+_UNET_RULES = (
+    "Counting rules. A convolution from ci to co channels with a k by k kernel has co ci k^2 weights and co biases. A group normalisation of c "
+    "channels has a gain and a shift (2c). A linear layer from i to o numbers has i o weights and, where stated, o biases. A resnet from ci to co "
+    "channels is: group normalisation of ci, 3 x 3 convolution ci -> co, a linear time projection (time dimension -> co, with bias) added to every "
+    "pixel, group normalisation of co, 3 x 3 convolution co -> co, and a 1 x 1 shortcut convolution ci -> co only when ci differs from co. A spatial "
+    "transformer at c channels is: group normalisation, a linear c -> c with bias (proj_in), then for each block a layer normalisation (2c), "
+    "self-attention (query, key and value c -> c each without bias, 3c^2 in all; output c -> c with bias), a layer normalisation, cross-attention "
+    "(query c -> c without bias, key and value text dimension -> c each without bias; output c -> c with bias), a layer normalisation, and the "
+    "feed-forward (a gated projection c -> 4c computed twice, a gate and a value, each a weight and a bias, which is a single c -> 8c layer in "
+    "the original checkpoint layout; the product of the activated gate and the value goes through 4c -> c with bias), and after the last block a "
+    "linear c -> c with bias (proj_out). Between levels the down path has a stride-2 3 x 3 convolution at the channels of the level it leaves; the "
+    "up path doubles the grid by nearest neighbour and applies a 3 x 3 convolution at the channels of the level it enters. The up resnets read the "
+    "hidden state concatenated with the popped skip. The output is a group normalisation of the first level's channels, then a 3 x 3 convolution to "
+    "the output channels. A tensor is one weight or one bias (a normalisation's gain and shift are two)."
+)
+
+
 def unet_walk():
     n, rows = unet_count(SDXL_UNET, 128, 128)
     stack_widths = [320, 320, 320, 320, 640, 640, 640, 1280, 1280]
     return (
-        "The SDXL U-Net (320, 640, 1280 channels; resnets per down block 2; spatial-transformer blocks per level 1, 2, 10; "
-        "attention at the two coarser levels) on the 128 by 128 latent of a 1024 by 1024 image. A row is a stage: its resolution, "
+        "The SDXL U-Net (320, 640, 1280 channels; resnets per down block 2; the configuration lists transformer blocks per level as 1, 2, 10 "
+        "but attention is on the two coarser levels only, so the 1 of the first level is unused: 2 blocks per spatial transformer at 64 by 64, "
+        "10 at 32 by 32 and in the middle block) on the 128 by 128 latent of a 1024 by 1024 image. A row is a stage: its resolution, "
         "channels in and out, resnets, spatial-transformer blocks, tokens for the self-attention of those blocks, and what it does to "
         "the stack of skips. The skip stack is pushed in the order conv_in, down 0 (two resnets, then its stride-2 convolution), "
         "down 1 (the same), down 2 (two resnets, no convolution): nine entries of widths "
@@ -402,7 +452,7 @@ def _sdxl_totals():
 
 def unet_params():
     n = _sdxl_totals()
-    tiny, _ = unet_count(SDXL_TINY, 16, 16, t_enc=8)
+    tiny, tiny_rows = unet_count(SDXL_TINY, 16, 16, t_enc=8)
     rows = []
     for cat in ConvKinds:
         p = n.params.get(cat, 0)
@@ -427,7 +477,8 @@ def unet_params():
     # tensors: the counting rule counts a fused qkv / kv as one tensor and a split GEGLU projection as two, as in the manifest
     n_tensors_ckpt = n.tensors + tb      # per block: query, key, value are 3 tensors not 1 (+2), key, value 2 not 1 (+1), the gated projection 2 not 4 (-2)
     return (
-        "Every parameter of the SDXL U-Net derived from the configuration above, by what the weights do (a convolution's bias, a "
+        _unet_config_text(SDXL_UNET, "The SDXL U-Net") + "\n\n" + _UNET_RULES + "\n\n"
+        "Every parameter of the SDXL U-Net derived from that configuration, by what the weights do (a convolution's bias, a "
         "normalisation's gain and shift and a linear layer's bias are counted with their layer).\n\n"
         + _table(["kind", "parameters", "share"], rows)
         + f"\n\nThe network has {res} resnets and {tb} spatial-transformer blocks, and {_int(n.total_params())} parameters: "
@@ -435,8 +486,10 @@ def unet_params():
         f"fused query-key-value matrix and a fused key-value matrix of the cross-attention each as one tensor and the feed-forward's "
         f"gated projection as two (the way brain stores them), the network has {n.tensors} tensors; with the three separate "
         f"attention matrices and the one gated projection of the original layout it has {n_tensors_ckpt}.\n\n"
-        "The same walk on the 32/64-channel, 2-level variant with one resnet per block that brain builds for its smoke tests "
-        f"(cross-attention dimension 24, time dimension 128, 8 groups) gives {_int(tiny.total_params())} parameters in {tiny.tensors} tensors."
+        "The same walk, with the same rules, on the variant that brain builds for its smoke tests gives "
+        f"{_int(tiny.total_params())} parameters in {tiny.tensors} tensors. Its configuration:\n\n" + _unet_config_text(SDXL_TINY, "The smoke-test U-Net")
+        + "\n\nand its walk on a 16 by 16 latent:\n\n"
+        + _table(["stage", "resolution", "channels", "resnets", "transformer blocks", "tokens T", "skips"], tiny_rows, "lllrrrl")
     )
 
 
@@ -456,7 +509,11 @@ def unet_flops():
         p_rows.append([f"{128 >> l}x{128 >> l}", str(c), str(hts), _int(t), _int(hts * t * t * 4), "yes" if SDXL_UNET["down"][l] == "attn" else "no"])
     return (
         "One forward pass of the SDXL U-Net on the 128 by 128 grid of a 1024 by 1024 image with 77 text tokens, in GFLOP (a multiply-add is two operations; "
-        "additions, normalisations, softmax and activations are not counted), by kind and by the resolution at which it is spent.\n\n"
+        "additions, normalisations, softmax and activations are not counted), by kind and by the resolution at which it is spent. Every layer of the "
+        "counting rules above is counted, including the time projections of the resnets and the two conditioning networks (a matrix applied to a single "
+        f"vector, {(by_cat.get('time projections', 0) + by_cat.get('time and size embeddings', 0)) / 1e6:.0f} million floating-point operations together). A convolution costs 2 ci co k^2 per output pixel, a linear layer 2 i o per token; the cross-attention key "
+        "and value projections are applied to the 77 text tokens, 2 x 77 x 2048 x c each for a block of c channels; the scores q k^T and the weighted "
+        "sum of the values cost 2 T^2 c each, 4 T^2 c together (T the tokens of the grid), and in cross-attention 4 T x 77 x c.\n\n"
         + _table(["kind", "GFLOP", "share"], rows)
         + "\n\n"
         + _table(["resolution", "GFLOP", "share"], lv)
@@ -544,7 +601,10 @@ def zimage_params():
     return (
         "Z-Image Turbo from its configuration: width 3840, 30 heads (head width 128), feed-forward width 3840*8//3 = 10240, "
         "conditioning width min(3840, 256) = 256, 30 main blocks and 2 blocks in each of the noise and context refiners, "
-        "16 latent channels in 2 by 2 patches (64 values per token), caption features of width 2560.\n\n"
+        "16 latent channels in 2 by 2 patches (64 values per token), caption features of width 2560. Outside the blocks: the caption embedder "
+        "(a gain of 2560, a 2560 -> 3840 matrix and its bias), two learned pad tokens of width 3840, one for the image stream and one for the caption "
+        "stream (2 x 3840 parameters), the patch embedder (64 -> 3840 with bias), the timestep network (256 -> 1024 -> 256, both with biases) and the "
+        "final layer (a 256 -> 3840 modulation with bias, then 3840 -> 64 with bias).\n\n"
         + _table(["inside one block", "parameters"], rows)
         + "\n\n"
         + _table(["part of the network", "parameters"], stack)
@@ -617,6 +677,20 @@ FLUX2 = {
 }
 
 
+def zimage_vector_flops(c=ZIMAGE):
+    """The multiply-adds, as FLOPs, of the matrices that act on the one conditioning vector and not on tokens: the modulation projection
+    of every modulated block (256 -> 4 dim), the timestep network and the final layer's modulation (256 -> dim). `zimage_pass` leaves
+    them out."""
+    d, cdim = c["dim"], min(c["dim"], 256)
+    return ((c["layers"] + c["refiner"]) * 2 * cdim * 4 * d + 2 * (c["t_hidden"] * c["freq_dim"] + cdim * c["t_hidden"]) + 2 * cdim * d)
+
+
+def flux2_vector_flops(c):
+    """The same for FLUX.2: the shared modulation projections (17 d^2 weights) and the timestep network (256 -> d -> d)."""
+    d = c["d"]
+    return 2 * 17 * d * d + 2 * (256 * d + d * d)
+
+
 def flux2_params(c):
     d = c["d"]
     hd = d // c["heads"]
@@ -670,7 +744,14 @@ def architecture_table():
         "size and pooled-text vector) into per-layer conditioning: SDXL's two embedding MLPs and the 17 per-resnet projections; "
         "Z-Image's timestep MLP, the per-block modulation projections and the final layer's; FLUX.2's timestep MLP, three shared "
         "modulation projections and the final layer's. GFLOP counts multiply-adds as two operations and leaves out norms, softmax and "
-        "activations. The last column is the share spent in the T x T terms of attention.\n\n"
+        "activations. The last column is the share spent in the T x T terms of attention. What is counted differs by what a pass applies to: for "
+        "SDXL, every layer of the counting rules of the U-Net table, including the matrices that act on the one conditioning vector (about 50 million floating-point operations); "
+        "for the transformers, the attention and feed-forward matrices applied to every token of every block (refiner blocks to their own tokens "
+        "only), the patch embedder, the caption embedder and the final projection, and 4 T^2 d per block for the scores and the weighted sum "
+        "(T the tokens that attend), but not the matrices that act on the one conditioning vector: "
+        f"{zimage_vector_flops() / 1e6:.0f} million floating-point operations for Z-Image (the {ZIMAGE['layers'] + ZIMAGE['refiner']} modulation projections, the timestep network and "
+        f"the final layer's modulation) and {flux2_vector_flops(FLUX2['klein-4b']) / 1e6:.0f} and {flux2_vector_flops(FLUX2['klein-9b']) / 1e6:.0f} million floating-point operations "
+        "for the two FLUX.2 sizes (the shared modulation projections and the timestep network), which would move the last printed digit.\n\n"
         + _table(["network", "stream", "parameters", "time parameters", "share", "GFLOP per pass", "attention share"], rows,
                  "llrrrrr")
     )
@@ -715,7 +796,8 @@ def flux2_table():
                      _int(p["modulation"]), _int(p["total"]), str(flux2_tensors(cfg))])
     return (
         "FLUX.2 from the configurations of its two sizes (hidden width d, SwiGLU width 3d, 128 latent channels per token, caption "
-        "features of width 7680 and 12288). A double-stream block holds two sets of attention, feed-forward and query-key gains, one "
+        "features of width 7680 and 12288). The total also holds what is outside the blocks, all of it without biases: the patch embedder (128 -> d), "
+        "the caption embedder (caption width -> d), the timestep network (256 -> d -> d) and the final projection (d -> 128). A double-stream block holds two sets of attention, feed-forward and query-key gains, one "
         "for the image stream and one for the caption stream; a single-stream block holds one set with the attention and the "
         "feed-forward fused into two matrices. The shared modulation projections (6 d^2 for each double-stream stream, 3 d^2 for "
         "the single blocks, 2 d^2 for the final layer) serve every block of their kind.\n\n"
@@ -746,7 +828,8 @@ def cost_vs_side():
         "Z-Image with a 512-token caption at four image sides: the image tokens (one per 16 by 16 pixels), the joint sequence, the "
         "GFLOP of one pass and the share of them in attention's T x T terms, the bytes (in GB, 32-bit) of the score matrices of the 30 "
         "heads of ONE main block if they were stored, and, for comparison, the GFLOP of one SDXL U-Net pass at the same image side "
-        "(grid side = image side / 8, 77 text tokens). The score elements of the 30 heads, 30 T^2, still fit the 32-bit count of a dispatch for "
+        "(grid side = image side / 8, 77 text tokens; counted with the rules of the U-Net table, so with the conditioning matrices, while the Z-Image column "
+        "leaves out the matrices that act on the one conditioning vector, as in the table of the four denoisers). The score elements of the 30 heads, 30 T^2, still fit the 32-bit count of a dispatch for "
         f"T up to {math.isqrt((2 ** 32 - 1) // 30):,}.\n\n"
         + _table(["image side", "image tokens", "joint tokens N", "GFLOP, Z-Image", "attention share", "scores of one block (GB)",
                   "GFLOP, SDXL"], rows)
@@ -1209,6 +1292,10 @@ def small_checks():
     rows.append(["0.5 added to latent entry (0, 0, 0)", "largest change of the two caption tokens after the blocks",
                  f"{_maxdiff(e5[4:], e6[4:]):.4f}"])
     return (
-        "Checks on the small denoiser (inputs and weights as above).\n\n"
+        "Checks on the small denoiser (inputs and weights as above). The sequence is the 6 tokens of the joint stream, the 4 image tokens and then the 2 "
+        "caption tokens. Every comparison of tokens ('after the blocks', the two exchange rows, the caption-token row) is on that 6-token sequence at "
+        "sigma = 0.8 after the two blocks, before the final layer, not on the predicted latent; the exchange of the two patch columns permutes the "
+        "image tokens 0 <-> 1 and 2 <-> 3 (the caption tokens stay), and the outputs are compared after permuting them the same way. The rows that "
+        "say 'predicted latent' or 'output' compare the final layer's output.\n\n"
         + _table(["change", "measured", "result"], rows, "lll")
     )

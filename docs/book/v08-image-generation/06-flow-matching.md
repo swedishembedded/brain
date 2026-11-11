@@ -112,7 +112,7 @@ $$
 \mathcal{L}(\theta) = \mathbb{E}\bigl(u_\theta - u\bigr)^2 + 2\,\mathbb{E}\bigl[(u_\theta - u)(u - w)\bigr] + \mathbb{E}\bigl(u - w\bigr)^2 .
 $$
 
-Condition the cross term on $(x_\sigma, \sigma)$. Both $u_\theta$ and $u$ are fixed by that pair, and $\mathbb{E}[u - w \mid x_\sigma, \sigma] = 0$ by the definition of $u$, so the cross term vanishes. What is left is a term that is zero exactly when the network is the field, and a term that does not mention the network at all. Regressing on single pairs and regressing on the field differ by a constant, so they have the same minimizer and the same gradients, and the constant is the least loss any network can reach. For the clusters it can be estimated from the evaluation items of the training section below: it is about $3.26$, not $0$, and no amount of training lowers it.
+Condition the cross term on $(x_\sigma, \sigma)$. Both $u_\theta$ and $u$ are fixed by that pair, and $\mathbb{E}[u - w \mid x_\sigma, \sigma] = 0$ by the definition of $u$, so the cross term vanishes. What is left is a term that is zero exactly when the network is the field, and a term that does not mention the network at all. Regressing on single pairs and regressing on the field differ by a constant, so they have the same minimizer and the same gradients, and the constant is the least loss any network can reach. For the clusters it can be estimated from the evaluation items of the section "Teaching a network the field", further below: it is about $3.26$, not $0$, and no amount of training lowers it.
 
 The second question is whether following the field really produces the data. A cloud of particles, each moving with the velocity $u$ at its own position, has a density $p$ that changes only because mass flows across points, which is the continuity equation $\partial p/\partial\sigma + \partial(p\,u)/\partial x = 0$. The densities of the path obey it, by a short argument. Take any smooth function $f$ that is zero outside a bounded interval. Its average over the path changes as the points move:
 
@@ -148,10 +148,10 @@ The three clusters after the straight path to noise fraction sigma: each cluster
 | 0.8 | 0.20 | 0.8016 | 0.749 | 1 | 1.15 |
 | 1.0 | 0.00 | 1.0000 | 0.000 | 1 | 1 |
 
-By bisection on the mode count the three modes become one between sigma = 0.5890 and sigma = 0.5890.
+By bisection on the mode count (from the bracket [0.3, 0.97], halving until the interval is narrower than 1e-4) the three modes become one between sigma = 0.58895 and sigma = 0.58904.
 <!-- /worked -->
 
-The valley between two clusters is shallow at $\sigma = 0.5$ (the density halfway between two centres is $0.684$ of the density at a centre) and gone at $\sigma = 0.6$; bisection puts the merge between $0.5890$ and $0.5891$. Chapter 5's chain still had three modes at $t = 18$ (signal-to-noise ratio $0.79$) and one at $t = 25$ ($0.25$); the straight path merges at a signal-to-noise ratio of $((1 - 0.589)/0.589)^2 = 0.49$, of the same size. Where the commitment happens will matter again below, for the grid on which the field is sampled.
+The valley between two clusters is shallow at $\sigma = 0.5$ (the density halfway between two centres is $0.684$ of the density at a centre) and gone at $\sigma = 0.6$; bisection puts the merge between $0.58895$ and $0.58904$. Chapter 5's chain still had three modes at $t = 18$ (signal-to-noise ratio $0.79$) and one at $t = 25$ ($0.25$); the straight path merges at a signal-to-noise ratio of $((1 - 0.589)/0.589)^2 = 0.49$, of the same size. Where the commitment happens will matter again below, for the grid on which the field is sampled.
 
 ## Running the field backwards
 
@@ -177,7 +177,7 @@ The update can be read as a weighted average. Substituting $u = (x - \hat x_0)/\
 Because the exact transport of this one-dimensional problem is known, the sampler can be scored without a second sampler. Let $F$ be the cumulative distribution of the data and $\Phi$ that of the standard normal; then $T(\varepsilon) = F^{-1}(\Phi(\varepsilon))$ is the increasing map that carries $\mathcal{N}(0, 1)$ onto the data. Two trajectories of an ordinary differential equation never meet (Recall question 3), so the flow map from $\varepsilon$ to $x_0$ keeps the order of the starting values; there is exactly one increasing map between the two distributions, and so the exact flow of the field is $T$. The table scores Euler on the exact field by the mean of $|x_0 - T(\varepsilon)|$, and the last line checks the claim: a fourth-order Runge-Kutta run with $200$ steps lands within $10^{-6}$ of $T$.
 
 <!-- worked: flow_matching.euler_exact -->
-1000 starting values x_1 = noise from the stream `flow_matching.sample` (seed 0x40611b1c8371ae36) (one normal() each, in order), carried from sigma = 1 to 0 by n Euler steps on the grid s_i = 1 - i/n with the exact velocity u at the left end of each step. 'Distance' is the mean of |x_0 - T(noise)|, with T = F^-1(Phi(noise)) the exact transport map of one dimension (F the cumulative distribution of the data, 46 bisection steps); the counts are the samples within 0.75 of each centre and the rest.
+1000 starting values x_1 = noise from the stream `flow_matching.sample` (seed 0x40611b1c8371ae36) (one normal() each, in order), carried from sigma = 1 to 0 by n Euler steps on the grid s_i = 1 - i/n with the exact velocity u at the left end of each step. 'Distance' is the mean of |x_0 - T(noise)|, with T = F^-1(Phi(noise)) the exact transport map of one dimension (F the cumulative distribution of the data, 46 bisection steps on the bracket [-4.6, 4.6], keeping the lower half when F(mid) < Phi(noise), and the midpoint of the last bracket as the answer); the counts are the samples within 0.75 of each centre and the rest.
 
 | Euler steps n | distance | near -3 | near 0 | near +3 | elsewhere |
 |---|---:|---:|---:|---:|---:|
@@ -190,7 +190,7 @@ Because the exact transport of this one-dimensional problem is known, the sample
 | 32 | 0.0798 | 331 | 334 | 332 | 3 |
 | 64 | 0.0352 | 339 | 321 | 339 | 1 |
 
-For the first 20 starting values, 200 steps of classical fourth-order Runge-Kutta on the same field end within 1e-6 of T(noise).
+For the first 20 starting values, 200 steps of classical fourth-order Runge-Kutta on the same field (the exact velocity is 0/0 at sigma = 0, so the one evaluation that would fall there, the last stage of the last step, is made at sigma = 1e-9) end within 1e-6 of T(noise).
 <!-- /worked -->
 
 The first row after the reference is the "one jump" of the last chapter: with one step every sample lands on the posterior mean at $\sigma = 1$, which is the mean of the data, $0$. As steps are added, the distance falls by a factor of about $2$ per doubling ($2.11$, $1.51$, $0.694$, $0.349$, $0.164$, $0.0798$, $0.0352$ at $n = 1, 2, 4, \dots, 64$), the first-order convergence of Euler's method from Volume I, and the number of samples left between the clusters falls from $184$ at two steps to $1$ at sixty-four. Reading the error as the cost of curvature is the right instinct: if the velocity were constant along each trajectory, one step would be exact, and every doubling of steps would buy nothing.
@@ -407,7 +407,7 @@ Z-Image's static schedule, 8 steps and shift 3: linspace(1, 1/8, 8) shifted by s
 
 The exponential form with mu = ln 3 gives the same nine values to below 1e-15.
 
-The strength mu of FLUX.2's exponential shift as a function of the number of image tokens and the number of steps, mu = a_2 n + b_2 above 4300 tokens and the line through (10, a_1 n + b_1) and (200, a_2 n + b_2) below, with a_1 = 8.7381e-05, b_1 = 1.89833, a_2 = 0.00016927, b_2 = 0.456667.
+The strength mu of FLUX.2's exponential shift as a function of the number of image tokens and the number of steps, mu = a_2 n + b_2 above 4300 tokens and the line through (10, a_1 n + b_1) and (200, a_2 n + b_2) below, with a_1 = 8.73809524e-05, b_1 = 1.89833333, a_2 = 0.00016927, b_2 = 0.45666666.
 
 | tokens n | 4 steps | 10 steps | 50 steps | 200 steps |
 |---|---:|---:|---:|---:|
@@ -439,10 +439,10 @@ A schedule is not the whole of a convention. The loss of `crates/s3dit/src/train
 
 The terminal value is a second place for an off-by-one. `klein_sigmas` returns $n + 1$ values ending in $0$, and `set_timesteps` appends a terminal $0$ itself; the sampling loops of FLUX.1 and FLUX.2 therefore step the list directly, with `dt = sigmas[i + 1] - sigmas[i]`, and the module documentation of `crates/flux1/src/pipeline.rs` records that passing such a list through the scheduler would count the terminal value twice.
 
-The last piece of history concerns the one arithmetic detail that the shift hides. `klein_sigmas` builds its ramp $\mathrm{linspace}(1, 1/n, n)$ inline, while `default_z_image_sigmas` builds the same ramp with another spelling, and the two read as duplicates that a cleanup would unify. Commit a8bdc4ee2 says they are not interchangeable: in 32-bit arithmetic they disagree by one unit in the last place for $1979$ of the first $2001$ step counts. The block reproduces the count from the two spellings, rounding every operation to a 32-bit float; for step counts $1$ to $2000$ it finds $1979$ disagreements, and the counts that agree are the small numbers $1$ to $5$ and the powers of two with their successors, which are exactly the counts a spot check tries.
+The last piece of history concerns the one arithmetic detail that the shift hides. `klein_sigmas` builds its ramp $\mathrm{linspace}(1, 1/n, n)$ inline, while `default_z_image_sigmas` builds the same ramp with another spelling, and the two read as duplicates that a cleanup would unify. Commit a8bdc4ee2 says they are not interchangeable: in 32-bit arithmetic they disagree by one unit in the last place for $1979$ of the first $2001$ step counts, that is $n = 0$ to $2000$, where the empty ramp $n = 0$ trivially agrees. The block reproduces the count from the two spellings, rounding every operation to a 32-bit float; for step counts $n = 1$ to $2000$ it finds the same $1979$ disagreements, and the counts that agree are the small numbers $1$ to $5$ and the powers of two with their successors, which are exactly the counts a spot check tries.
 
 <!-- worked: flow_matching.ramp_table -->
-The first sigma of a 4-step or 50-step schedule is the same however the ramp linspace(1, 1/n, n) is spelled; in 32-bit arithmetic the two spellings (A) 1 - i (1 - 1/n) / (n - 1) and (B) 1 + i (1/n - 1) / (n - 1), each operation rounded to nearest 32-bit float, are compared over i = 0 .. n - 1 for each n = 1 .. 2000 (for n = 1 the single entry is 1; the maximum with 1 keeps n - 1 from being 0 in (A)).
+The first sigma of a 4-step or 50-step schedule is the same however the ramp linspace(1, 1/n, n) is spelled; in 32-bit arithmetic the two spellings, (A) 1 - ((i * (1 - 1/n)) / (n - 1)) (the product of i and the rounded 1 - 1/n first, then the quotient, then the subtraction) and (B) 1 + (step * i) with step = (1/n - 1) / (n - 1) rounded once and then multiplied by i, each operation rounded to nearest 32-bit float (i converted to 32 bits first), are compared over i = 0 .. n - 1 for each n = 1 .. 2000 (for n = 1 the single entry is 1; the maximum with 1 keeps n - 1 from being 0 in (A)).
 
 | quantity | value |
 |---|---:|

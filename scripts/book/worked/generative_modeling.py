@@ -287,7 +287,8 @@ def heldout_table():
     return ("Held-out bits = the expected -log2 q(x) over images drawn from the world, computed exactly as the sum over the 16 "
             "images in index order of p(x) times -log2 q(x) (that is what an unlimited held-out set would give). Training "
             "sets are the first N images of the dataset. Smoothed = counts plus 1 imaginary observation per image. The "
-            f"latent model is fitted by {EM_PASSES} passes of the update of the section on the latent model. The entropy of "
+            f"latent model is fitted on each prefix by {EM_PASSES} passes of the update of the section on the latent model, every fit started from the prior "
+            f"({', '.join(f'{v:g}' for v in EM_START_PRIOR)}) and flip probability {EM_START_FLIP:g}. The entropy of "
             f"the world, the best any model can do, is {ent:.4f} bits; the uniform table gives 4.0000.\n\n"
             + _table(["N", "counting table, training", "counting table, held-out", "smoothed table, held-out",
                       "independent pixels, held-out", "latent model, held-out"], rows))

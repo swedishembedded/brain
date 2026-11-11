@@ -179,7 +179,7 @@ def noised_marginals():
         p0, pv = marginal_density(0.0, t), marginal_density(1.5, t)
         rows.append((t, _f(p0, 4), _f(pv, 4), _g(pv / p0, 3), _count_modes(t), _f(_kl_to_standard_normal(t), 4)))
     return ("The three clusters (centres -3, 0, 3, standard deviation 0.25, weight 1/3 each) after t steps of the chain: "
-            "p_t(x) = (1/3) sum_k N(x; a_t m_k, a_t^2 0.25^2 + b_t^2). The valley is x = 1.5, between the clusters at 0 and 3. "
+            "p_t(x) = (1/3) sum_k N(x; a_t m_k, a_t^2 0.25^2 + b_t^2). The valley is x = 1.5, between the clusters at 0 and 3, and 'valley / peak' is p_t(1.5) / p_t(0), the peak being the density at the centre of the middle cluster. "
             "Modes are local maxima on the grid -8, -7.99, ..., 8. The distance is KL(p_t || N(0, 1)) in nats by the midpoint rule with "
             "step 0.002 on [-12, 12].\n\n"
             + _table(["t", "p_t(0)", "p_t(1.5)", "valley / peak", "modes", "KL(p_t \\|\\| N(0, 1))"], rows))
@@ -377,7 +377,7 @@ def floor_table():
     fl = floor_losses()
     rows = [(t, _f(fl[t - 1], 4)) for t in (1, 2, 5, 10, 20, 30, 40, 50)]
     return ("The least mean squared error of any predictor of the noise from (x_t, t), computed from the exact denoiser: "
-            "1 - E[E(noise | x_t)^2], the expectation by the midpoint rule with step 0.005 on [-14, 14].\n\n"
+            "1 - E[E(noise | x_t)^2], the expectation by the midpoint rule with step 0.005 on [-14, 14]. The weights of the three clusters in the exact denoiser are computed as a softmax in the log domain, the largest log-weight subtracted before exponentiating, because at t = 1 and 2 the density of a far cluster underflows otherwise.\n\n"
             + _table(["t", "least error"], rows) + f"\n\nThe mean over the {T} steps (the least value of the training loss when t is uniform) is {sum(fl) / T:.4f}.")
 
 
@@ -671,7 +671,7 @@ def sample_table():
                  _shared([SAMPLE_N - sum(rd[0]) for rd in reads], _int), _shared([rd[1] for rd in reads], _fixed(3))))
     return (f"{SAMPLE_N} samples from the stream {_seed(SAMPLE)}: first the {SAMPLE_N} starting values x_T = normal(), then, for t = {T}, "
             f"{T - 1}, ..., 2, one normal() for each sample in order (none at t = 1). The columns count the samples within {NEAR:g} of "
-            f"each centre; 'elsewhere' is the rest; the spread is the standard deviation of all samples (the data's is {DATA_STD:.3f}). "
+            f"each centre; 'elsewhere' is the rest; the spread is the population standard deviation of all samples (divisor the number of samples, not one less; the data's is {DATA_STD:.3f}). "
             f"The one jump replaces each x_T by E[x_0 | x_T] and stops. The network row keeps the digits shared with the four nudged copies.\n\n"
             + _table(["sampler", "near -3", "near 0", "near +3", "elsewhere", "spread"], rows))
 

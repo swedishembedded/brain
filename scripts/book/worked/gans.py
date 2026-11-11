@@ -137,7 +137,9 @@ def game_value():
             f"JS(p, q) = 1/2 KL(p || m) + 1/2 KL(q || m) with m = (p + q) / 2; the game value is V = E_p log D*(x) + E_q log(1 - D*(x)); "
             f"the accuracy is the probability that D* labels a sample correctly when data and generated samples are equally likely (it "
             f"says 'data' when D*(x) > 1/2), which is Phi(mu / 2) for the standard normal distribution function Phi, computed with the "
-            f"library erf. JS and V are midpoint sums with step {QUAD_STEP:g} over [-14, mu + 14]. log 2 = {math.log(2.0):.4f} and "
+            f"library erf. JS and V are midpoint sums with step {QUAD_STEP:g} over [-14, mu + 14], at the midpoints; since D* underflows in the tails for "
+            f"large mu, log D*(x) is evaluated as -softplus(-a) and log(1 - D*(x)) as -softplus(a) with a = mu x - mu^2 / 2 and softplus(u) = max(u, 0) + log(1 + exp(-|u|)), "
+            f"never as the log of a rounded probability. log 2 = {math.log(2.0):.4f} and "
             f"log 4 = {math.log(4.0):.4f}.\n\n{table}\n\n"
             + ("The largest difference between V and 2 JS - log 4 over the five rows is below 1e-9." if worst < 1e-9 else "CHECK FAILED"))
 
@@ -168,9 +170,9 @@ def generator_gradients():
         d = sigmoid(l)
         rows.append((l, _f(d, 5), _f(generator_gradient("saturating", l), 5), _f(generator_gradient("non-saturating", l), 5),
                      _f(generator_gradient("least-squares", l), 1)))
-    return ("A fake sample on which the discriminator has logit l, so D = sigmoid(l). Each column is the derivative of the generator's "
-            "loss for that sample with respect to l.\n\n"
-            + _table(["logit l", "D = sigmoid(l)", "log(1 - D)", "-log D", "(l - 1)^2"], rows))
+    return ("A fake sample on which the discriminator has logit l, so D = sigmoid(l). Each column is the derivative, with respect to l, of the "
+            "generator's loss named in its heading, for that sample.\n\n"
+            + _table(["logit l", "D = sigmoid(l)", "d/dl log(1 - D)", "d/dl (-log D)", "d/dl (l - 1)^2"], rows))
 
 
 # ------------------------------------------------------------------ a game with no minimum
@@ -594,10 +596,14 @@ def dark_start():
     start = dark_data("saturating")[0]
     return (f"A generator and a discriminator from the stream {_seed(DARK_NAME)} (init_net for each, generator first), with {DARK_SHIFT:g} "
             f"added to the generator's output bias so that its samples start near {DARK_SHIFT:g}. The discriminator trains alone "
-            f"for {DARK_D_STEPS} Adam steps against that generator (each step: 32 items, a real draw then a noise draw each, from the same "
-            f"stream) and is then frozen; its mean logit on the generator's samples is {start[2]:.2f}. The generator then takes {DARK_STEPS} steps of plain "
-            f"gradient descent, rate {DARK_RATE:g}, on each loss in turn, from the same start and the same noise ({DARK_GEN}: 32 vectors "
-            f"per step), read out on 256 noise vectors from {_seed(DARK_EVAL)}.\n\n"
+            f"for {DARK_D_STEPS} Adam steps (rate {LR:g}, betas ({ADAM_B1}, 0.999), epsilon 1e-8, no weight decay, as in the training runs of this chapter) against that generator "
+            f"(each step: 32 items, for each item a real draw `real_sample` then a noise draw of {DZ} `normal()` values, all from the same "
+            f"stream, which continues after the two initialisations; the discriminator's gradient is the mean over the 32 items of the loss "
+            f"-log D(real) - log(1 - D(fake)), and the generator is not updated) and is then frozen; its mean logit on the generator's "
+            f"samples at the start, over the 256 noise vectors of the read-out below, is {start[2]:.2f}. The generator then takes {DARK_STEPS} steps of plain "
+            f"gradient descent, rate {DARK_RATE:g}, on each loss in turn, from the same start and the same noise (the stream {_seed(DARK_GEN)}, "
+            f"restarted for each loss: {BATCH} vectors of {DZ} `normal()` values per step, the gradient the mean over them), read out (the 'mean sample' and 'mean logit' columns) on "
+            f"256 noise vectors drawn in order from {_seed(DARK_EVAL)}; the norm is that of the generator's full gradient at the first step.\n\n"
             + _table(["generator loss", "norm of its gradient at step 1", "mean sample at start", "after 25 steps", "after 100 steps",
                       "mean logit after 100 steps"], rows))
 

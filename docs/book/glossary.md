@@ -30,11 +30,15 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **affine quantization**: the map from a real number to an $n_b$-bit integer code and back, $q = \mathrm{clamp}(\mathrm{round}(w/\Delta) + q_0, 0, 2^{n_b} - 1)$ and $w' = \Delta(q - q_0)$, a multiplication and an offset applied to a group of weights. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
+**aggregate posterior**: the distribution of codes obtained when a reading is chosen at random from the data and encoded, the average of the per-reading posteriors over the data; the KL term of the bound splits into a part that measures how much the code tells about the reading and a part that measures how far this average lies from the prior. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
+
 **ahead-of-time compilation**: compiling kernels for a list of known device architectures before the program ships and loading the results at run time with a key that identifies their inputs, so that a machine without a compiler can run them, at the price of storage and of devices outside the list. *([One Program, Many Devices](v04-computation/09-backends.md))*
 
 **algorithm**: a finite list of definite steps that turns any input of a stated kind into an output of a stated kind, whose correctness can be argued with an invariant that holds before and after every pass of its loops. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
 **Amdahl's law**: the speedup of a whole from making a part that takes the share $p$ of the time $g$ times as fast, $1/((1 - p) + p/g)$, bounded by the ceiling $1/(1 - p)$ however fast the part becomes. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
+
+**amortized inference**: using one encoder network, with shared weights, to produce the approximate posterior of every reading in a single forward pass, so that the cost of finding a good guess is paid once in training and not again for each new reading. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
 
 **ancestral sampling**: drawing the variables of a model one at a time, parents before children, each from its distribution given the values already drawn, so that the joint draw follows the product of the conditionals. *([What It Means to Generate](v08-image-generation/01-generative-modeling.md))*
 
@@ -244,6 +248,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **dataset**: a collection of $N$ examples, each a vector of features paired with a label, written as the pairs $(\mathbf{x}_n, y_n)$. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
+**dead code**: a code of a codebook that is never the nearest to any encoder row, so that it receives no gradient, is never chosen again and costs bits in the format while buying nothing; it is revived by moving it onto an encoder row. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
+
 **dead-units**: ReLU units whose pre-activation is not positive on any input, so that their output and slope are zero, their incoming gradient is exactly zero and no gradient step can revive them. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
 **decision boundary**: the set of inputs where the model switches its decision, for a linear logit the line, plane or flat sheet $\mathbf{w}\cdot\mathbf{x} = 0$ (at threshold $1/2$), which separates the two predicted classes. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
@@ -332,11 +338,13 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Euler's method**: the rule $x_{i+1} = x_i + h\,f(t_i, x_i)$ that follows the slope of an ODE for a short step $h$ and repeats; with a gradient as the slope it is gradient descent. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
-**evidence lower bound**: for any distribution $r(z \mid \mathbf{x})$ over the latent, the quantity $\mathbb{E}_r[\log p_\theta(\mathbf{x} \mid z)] - D_{\mathrm{KL}}(r \,\Vert\, p(z))$; it is never above the log-likelihood of the reading, and the gap is the KL divergence from $r$ to the model's posterior. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
+**evidence lower bound (ELBO)**: for any distribution $r(z \mid \mathbf{x})$ over the latent, the quantity $\mathbb{E}_r[\log p_\theta(\mathbf{x} \mid z)] - D_{\mathrm{KL}}(r \,\Vert\, p(z))$; it is never above the log-likelihood of the reading, and the gap is the KL divergence from $r$ to the model's posterior. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
 
 **exact match**: the share of test questions whose generated answer equals the single reference answer as a string, after a stated normalization; all or nothing, with no partial credit. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **expectation**: the probability-weighted average $\sum_x x\,p(x)$ (or $\int x f(x)\,dx$) of a random variable, the value its long-run average approaches; it is linear, $\mathbb{E}[X + Y] = \mathbb{E}[X] + \mathbb{E}[Y]$. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
+
+**expectation-maximization**: the procedure that fits a latent-variable model by repeating one pass in two halves: compute, for every training example, the posterior probability of each value of the latent under the current parameters (the expectation), then replace the parameters by the posterior-weighted averages that the counting formulas would give if the latent had been observed (the maximization); the training likelihood never falls from one pass to the next. *([What It Means to Generate](v08-image-generation/01-generative-modeling.md))*
 
 **expert**: one of several feed-forward networks of the same shape inside a layer, each used only by the tokens that are routed to it; the word does not say what it knows. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
 
@@ -505,6 +513,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## J
 
 **Jacobian**: the matrix of shape outputs by inputs whose entry $(i, j)$ is $\partial f_i/\partial x_j$; it is the best linear approximation of a vector function near a point. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**Jensen-Shannon divergence**: the symmetric measure of the difference between two distributions p and q, the mean of the KL divergences of p and of q from their mixture, which is zero when they are equal and never more than log 2; it is the value of the adversarial game, up to a constant, at the best discriminator. *([Adversarial Training](v08-image-generation/04-gans.md))*
 
 **JIT compilation**: compiling a kernel to machine code at the moment a program needs it, on the machine that runs it, so that it fits the device present; the work of the compiler is paid at run time, usually saved in a cache. *([One Program, Many Devices](v04-computation/09-backends.md))*
 
@@ -692,6 +702,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **non-maximum suppression**: the greedy removal of duplicate detections, visiting candidates by falling confidence and dropping each one whose overlap with an already kept candidate (of its class, unless the suppression is class-agnostic) exceeds a threshold. *([Object Detection](v07-vision/04-detection.md))*
 
+**non-saturating loss**: the generator loss that asks the discriminator to score fakes as real by minimizing -log D on them instead of log(1 - D), whose gradient stays near its largest value exactly when the discriminator is sure a sample is fake and the saturating loss gives none. *([Adversarial Training](v08-image-generation/04-gans.md))*
+
 **norm**: the length of a vector; the L2 norm is $\sqrt{\mathbf{a}\cdot\mathbf{a}}$, and the L1 and max norms measure total and largest-entry size. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **normal equations**: the system $\mathbf{X}^\top\mathbf{X}\mathbf{w} = \mathbf{X}^\top\mathbf{y}$ obtained by setting the gradient of the squared error to zero; it says the residual is orthogonal (normal) to every column of the design matrix. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
@@ -745,6 +757,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **parity tolerance**: the largest difference between two implementations of the same function that rounding alone can explain, derived from the count of roundings along the longest chain of dependent operations times the unit round-off, so that anything above it is evidence of a bug. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
 
 **partial derivative**: the derivative of a function of several variables with respect to one of them while all the others are held fixed, $\partial L/\partial w_j$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**patch discriminator**: a convolutional discriminator whose output is a map of logits, each judging one patch of the image, with the loss averaged over the map, so that it scores texture and local structure and does not tie the network to one image size. *([Adversarial Training](v08-image-generation/04-gans.md))*
 
 **patch embedding**: the layer that turns a picture into a sequence of tokens by cutting it into non-overlapping square patches, flattening each and applying one shared linear map; identical to a convolution whose kernel size equals its stride. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 

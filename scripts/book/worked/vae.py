@@ -328,9 +328,13 @@ NOTE = ("Every trained number is printed with the digits that the run and four c
         "-1e-12, +3e-12 and -3e-12, share (the rule of `stable.py`); here all five agree on every digit shown.")
 
 
+ABOUT = ("'About x' means x rounded to three, two or one significant digits, as many as the five values round to alike while lying within half a "
+         "unit of that last digit, so 'about 0.003' stands for a value anywhere from 0.0025 to 0.0035.")
+
+
 def _note(table):
     """The reproducibility note of a table of trained numbers: short when every cell is in full, the full rule when some digits did not survive."""
-    return stable.RULE if ("about " in table or "unstable" in table) else NOTE
+    return stable.RULE + " " + ABOUT if ("about " in table or "unstable" in table) else NOTE
 
 
 def _cell(vals, fmt):
@@ -469,8 +473,8 @@ def training_log():
     ae += ["", ""]
     steps = EPOCHS * 8
     head = (f"Training readings 0 .. 255 of `first_models.curved_data`, batch 32 (8 steps per epoch, {steps} steps), Adam (0.9, 0.999, 1e-8) with no decay and no clip, "
-            f"rate warming up over {steps // 10} steps to {PEAK:g} and following a cosine to {PEAK / 100:g}. Initial parameters from {_seed(INIT)}, one shuffle "
-            f"of 0 .. 255 per epoch from {_seed(BATCHES)}, one normal per example, batch by batch, from {_seed(NOISE)}. Each cell is the mean over the epoch's 8 batches "
+            f"rate warming up over {steps // 10} steps to {PEAK:g} and following a cosine to {PEAK / 100:g}. Initial parameters from {_seed(INIT)}, one in-place shuffle "
+            f"per epoch from {_seed(BATCHES)} of the array 0 .. 255, which is set to the identity once, before epoch 1, and left in the order each epoch leaves it; the noise is one normal per example, batch by batch, from {_seed(NOISE)}. Each cell is the mean over the epoch's 8 batches "
             f"of the single-draw loss, in nats per reading.\n\n")
     table = _table(["epoch", "loss = -bound", "reconstruction", "KL"], rows + [ae])
     body = head + table
@@ -614,7 +618,9 @@ def generation_bins():
         rows.append([name] + [_cell([c[k] for c in cs], lambda x: str(int(round(x)))) for k in range(6)])
     rows.append(["the data (uniform s)"] + [f"{N_DRAWS / 5:g}"] * 5 + ["0"])
     head = (f"The {N_DRAWS} draws z ~ N(0, 1) of {_seed(PRIOR_DRAWS)}, decoded by each model; counts of the nearest point of the curve in five bins of s of width 0.4, and "
-            f"the count that falls outside [-1, 1) (the training data never do).\n\n")
+            f"the count that falls outside [-1, 1) (the training data never do). The nearest point is searched on the grid s = -{SLIM} + {SGRID_STEP} k, k = 0 .. {len(S_GRID) - 1}, "
+            f"with s computed in 64-bit floats as written and the first minimum of the squared distance kept on a tie; a draw is put in bin floor((s + 1) / 0.4) if -1 <= s < 1, "
+            f"so the edges -0.2, 0.2 and 0.6, which are nodes of the grid, go by the float: -0.2 (stored as -0.19999999999999996) and 0.6 (0.6000000000000001) fall in the bin on their right, 0.2 (0.19999999999999996) in the bin on its left.\n\n")
     body = head + _table(["draws from", "[-1, -0.6)", "[-0.6, -0.2)", "[-0.2, 0.2)", "[0.2, 0.6)", "[0.6, 1)", "outside"], rows)
     return body + "\n\n" + _note(body)
 
@@ -851,5 +857,11 @@ def decoder_footprint():
         rows.append([f"{side} x {side}", f"{px:,}", f"{act / 2 ** 30:.2f}", f"{total / 2 ** 30:.2f}"])
     head = (f"Channels (128, 256, 512, 512), so one live 32-bit buffer at every resolution level costs 4 (128 + 256/4 + 512/16 + 512/64) = {per_pixel} bytes per output pixel; "
             f"11 such sets are live at once; the decoder has {params:,} parameters ({params * 4 / 2 ** 20:.1f} MiB in 32-bit floats); a fixed scratch of 768 MiB is added. "
-            f"GiB = 2^30 bytes.\n\n")
+            f"GiB = 2^30 bytes. The parameter count is that of this decoder, input to output: a 1x1 convolution on the 32 latent channels, a 3x3 convolution from 32 to 512 "
+            f"channels, a middle block (resnet, attention, resnet) at 512 channels, then four up levels with channels 512, 512, 256, 128 (the channel list reversed), each of "
+            f"3 resnets (layers + 1, layers = 2), the first three levels followed by a nearest-neighbour doubling and a 3x3 convolution at the level's channels, and finally a "
+            f"group norm and a 3x3 convolution from 128 to 3 channels. A resnet from ci to co channels is group norm (2 ci scale and shift), 3x3 convolution, group norm "
+            f"(2 co), 3x3 convolution, plus a 1x1 shortcut convolution when ci differs from co. An attention block is a group norm (2 c) and four 1x1 convolutions (query, key, "
+            f"value, output) on c channels, single head. A convolution from ci to co channels with a k x k kernel has co ci k^2 weights and co biases. "
+            f"These terms are summed to the total above; nothing else carries parameters.\n\n")
     return head + _table(["output image", "output pixels", "activations (GiB)", "total (GiB)"], rows)

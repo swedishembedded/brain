@@ -133,6 +133,7 @@ function quantizer_backward(Z: array<real>[T, d], C: array<real>[K, d], idx: arr
                             dQ: array<real>[T, d], w_cb: real, w_com: real)
         -> (array<real>[T, d], array<real>[K, d])
     # dQ is the gradient of the reconstruction loss at the decoder's input
+    # one image; a batch of B images has the mean of the losses, so the caller divides every dZ and dC (and dQ) by B
     n = T * d
     dZ = zeros(real, [T, d])
     dC = zeros(real, [K, d])
@@ -186,7 +187,7 @@ All 656 parameters agree for both placements, below $10^{-6}$, which is the gate
 Now the training, with the codebook of $K = 16$ and the placement of the paper:
 
 <!-- worked: vector_quantization.training_log -->
-Data: the 256 training readings of `first_models.curved_data` (16 sensors, noise sd 0.05), tested on its 128 test readings. Encoder 16-12-8 with GELU after the first layer, whose 8 outputs are read as 4 rows of 2 numbers; decoder 8-12-16 with GELU; 624 weights and biases outside the codebook. Weights N(0, 1/n_in) layer by layer in row-major order, biases 0, from `vector_quantization.init` (seed 0xc5fea9a6298d9c2c) (weights only, layer by layer). Batch 32 (8 steps per epoch), 200 epochs, one shuffle of 0 .. 255 per epoch from `vector_quantization.batches` (seed 0x8bedc66ba4885b5b); Adam (0.9, 0.999, 1e-8), no decay and no clip, rate warming up over 160 steps to 0.01 and following a cosine to 0.0001; the codebook is trained by the same optimiser as the weights. Loss per reading: rec + codebook term + commitment term, rec the mean over the 16 sensors of the squared error and each term the mean over the 8 entries of the squared distance, with beta = 0.25. K = 16; the codebook starts at 16 encoder rows (reading by `integer(256)`, then position by `integer(4)`, code by code, from `vector_quantization.codebook` (seed 0xdb1fe8fc132e588a)). Each cell is the mean over the epoch's 8 batches (the codes used and the perplexity count the epoch's 1024 tokens).
+Data: the 256 training readings of `first_models.curved_data` (16 sensors, noise sd 0.05), tested on its 128 test readings. Encoder 16-12-8 with GELU after the first layer, whose 8 outputs are read as 4 rows of 2 numbers; decoder 8-12-16 with GELU; 624 weights and biases outside the codebook. Weights N(0, 1/n_in) layer by layer in row-major order, biases 0, from `vector_quantization.init` (seed 0xc5fea9a6298d9c2c) (weights only, layer by layer). Batch 32 (8 steps per epoch), 200 epochs, one in-place shuffle per epoch from `vector_quantization.batches` (seed 0x8bedc66ba4885b5b) of the array 0 .. 255, set to the identity once before epoch 1 and left in the order each epoch leaves it; Adam (0.9, 0.999, 1e-8), no decay and no clip, rate warming up over 160 steps to 0.01 and following a cosine to 0.0001; the codebook is trained by the same optimiser as the weights. Loss per reading: rec + codebook term + commitment term, rec the mean over the 16 sensors of the squared error and each term the mean over the 8 entries of the squared distance, with beta = 0.25. K = 16; the codebook starts at 16 encoder rows (reading by `integer(256)`, then position by `integer(4)`, code by code, from `vector_quantization.codebook` (seed 0xdb1fe8fc132e588a)). Each cell is the mean over the epoch's 8 batches (the codes used and the perplexity count the epoch's 1024 tokens).
 
 | epoch | loss | reconstruction | mean (z_e - q)^2 | codes used (of 16) | perplexity of the codes |
 |---|---:|---:|---:|---:|---:|
@@ -210,7 +211,7 @@ The map of the latent space shows what the tokens are. The readings are all poin
 The rate of the tokenizer is $4\log_2 K$ bits per reading, and the cost of the codes is the error that the same network makes without them: a continuous code of 8 numbers has no limit on its bits.
 
 <!-- worked: vector_quantization.rate_table -->
-The recipe of the previous table with the codebook size K changed (initialisation 'data', all else equal) and, in the first row, the same network without a quantizer. The sensor noise has variance 0.0025. Codes used and perplexity count the 1024 tokens of the 256 training readings after training.
+The recipe of the previous table with the codebook size K changed (initialisation 'data', all else equal) and, in the first row, the same network without a quantizer. The sensor noise has variance 0.0025. Codes used and perplexity count the 1024 tokens of the 256 training readings encoded once more with the final parameters, after the last epoch; the training reconstruction is instead the mean over the last epoch's eight batches, taken while the parameters moved (the last row of the training log), and the test reconstruction uses the final parameters.
 
 | model | bits per reading | training reconstruction | test reconstruction | codes used | perplexity |
 |---|---:|---:|---:|---:|---:|
@@ -221,7 +222,7 @@ The recipe of the previous table with the codebook size K changed (initialisatio
 | K = 32 | 20 | about 0.003 | unstable | 32 | about 30 |
 | K = 64 | 24 | about 0.003 | about 0.003 | about 60 | about 50 |
 
-A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
+A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation. 'About x' means x rounded to three, two or one significant digits, as many as the five values round to alike while lying within half a unit of that last digit, so 'about 0.003' stands for a value anywhere from 0.0025 to 0.0035.
 <!-- /worked -->
 
 Two caveats come with the table. The continuous autoencoder reconstructs the readings to 0.0019 on the test readings, below the noise variance of 0.0025, because eight free numbers can carry some of the sensor noise as well as the curve; the noise variance is a floor for a model of the curve and not for an autoencoder of the readings. And the digits that remain are fewer for the larger codebooks. When a code is added the assignments of a few rows change, and a training run that depends on discrete assignments is not a smooth function of its start: the runs that began a part in $10^{12}$ apart end with test errors that agree to one digit for $K = 64$ and to none for $K = 32$. The rule of Volume III prints only what survives. What survives is the order: the error falls with every doubling of the codebook, from 0.0071 at $K = 4$ through 0.0049 and 0.0046 to about 0.003 at $K = 64$, and the codebook of 64 comes within a factor of two of the continuous code at 24 bits per reading.
@@ -229,15 +230,15 @@ Two caveats come with the table. The continuous autoencoder reconstructs the rea
 Cutting the gradient and moving $\beta$ both change the training of the same network:
 
 <!-- worked: vector_quantization.straight_through_and_beta -->
-The recipe of the first table, K = 16, three ways of training the same network. In the last row the decoder's gradient goes to the codebook entry it read (the lookup is differentiable in the codebook), the encoder is trained by the commitment term alone, and the loss is otherwise the same.
+The recipe of the first table, K = 16, three ways of training the same network. In the last row the decoder's gradient goes to the codebook entry it read (the lookup is differentiable in the codebook), the encoder is trained by the commitment term alone, and the loss is otherwise the same. The training reconstruction of the second row is printed to one digit although the five runs of the nudge test agree on two (0.0034): five copies of an independent implementation of this chapter, summing in another order, ended at values from 0.00327 to 0.00339, so the second digit is not reproducible across implementations, and a first digit is all that the evidence supports.
 
 | variant | training reconstruction | test reconstruction | mean (z_e - q)^2 | perplexity |
 |---|---:|---:|---:|---:|
 | straight-through, beta on the commitment term | 0.0041 | 0.0046 | 0.0060 | 14.26 |
-| straight-through, beta on the codebook term | 0.0034 | about 0.004 | about 0.001 | about 14 |
+| straight-through, beta on the codebook term | about 0.003 | about 0.004 | about 0.001 | about 14 |
 | no straight-through (a plain lookup) | 0.0503 | 0.0701 | 0.0005 | 11.34 |
 
-A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
+A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation. 'About x' means x rounded to three, two or one significant digits, as many as the five values round to alike while lying within half a unit of that last digit, so 'about 0.003' stands for a value anywhere from 0.0025 to 0.0035.
 <!-- /worked -->
 
 Without the straight-through gradient the encoder is trained by the commitment term alone, which asks it only to stay near the codes. It never hears from the decoder. The reconstruction error stays at 0.0503, twelve times that of the network that does hear, and the distance between rows and codes is a mere 0.0005, small and useless: the encoder has become a faithful follower of codes that were chosen at random at the start. The loss, which includes this small distance, looks like the loss of a network that is training.
@@ -259,7 +260,7 @@ K = 64, the recipe of the first table. 'wide' draws both coordinates of every co
 | uniform in (-4, 4) ('wide') | 5 | 18 | 10.64 | 0.0036 |
 | 'wide', and dead codes revived each epoch | 61 | 64 | about 60 | about 0.003 |
 
-A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
+A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation. 'About x' means x rounded to three, two or one significant digits, as many as the five values round to alike while lying within half a unit of that last digit, so 'about 0.003' stands for a value anywhere from 0.0025 to 0.0035.
 <!-- /worked -->
 
 A start on encoder rows keeps about 60 of the codes in use. The uniform start has used 5 by epoch 5 and ends with 18, and 46 codes of the table are dead weight. The test error with these 18 codes is 0.0036, only a little worse than that of the 60-code table, because these readings lie on a curve that 18 codes cover well; a tokenizer for photographs has no such curve to hide behind. The revival rule restores all 64 at the price of some randomness, a draw from the stream `vector_quantization.reset` for each dead code.
@@ -279,7 +280,7 @@ The tokenizer of the first table (K = 16). Counts: every entry of the tables sta
 | the four positions independent | 10.88 |
 | a chain, each token given the one before | 7.72 |
 
-Then 300 readings are sampled from each model and decoded; the distance is the root-mean-square miss per sensor of the nearest point of the noiseless curve (`vae.nearest_on_curve`). Draws: for each sample, one `uniform()` per token walked through the cumulative probabilities in code order (a token is the first code whose running total exceeds the draw), or one `integer(16)` per token for the uniform model, from `vector_quantization.sample.chain` (seed 0xca0a268fc3bd200e), `vector_quantization.sample.independent` (seed 0xcc1eefb48f2c0720) and `vector_quantization.sample.uniform` (seed 0x87066d983ea9d0c6).
+Then 300 readings are sampled from each model and decoded; the distance is the root-mean-square miss per sensor of the nearest point of the noiseless curve, found as in Chapter 2's `vae.rescaled_codes` block (a grid of step 0.005 over [-1.25, 1.25], the first minimum kept). Draws: for each sample, one `uniform()` per token walked through the cumulative probabilities in code order (a token is the first code whose running total exceeds the draw), or one `integer(16)` per token for the uniform model, from `vector_quantization.sample.chain` (seed 0xca0a268fc3bd200e), `vector_quantization.sample.independent` (seed 0xcc1eefb48f2c0720) and `vector_quantization.sample.uniform` (seed 0x87066d983ea9d0c6).
 
 | token model | decoded within 0.03 of the curve | within 0.1 |
 |---|---:|---:|
@@ -299,7 +300,7 @@ CodeFormer in brain uses the codebook in exactly this way, with a twist (`crates
 The reconstruction error of the model above is a squared error. A decoder facing a code that cannot tell two pictures apart cannot pick one, and the loss decides how it hedges. Let the two pictures be the toy picture of Volume VII (a vertical grating in the top half, a horizontal one below) and the same picture shifted right by one pixel, which inverts the top grating and leaves the bottom one unchanged. Each is the truth half of the time. The decoder may output either picture or their mean:
 
 <!-- worked: vector_quantization.blur_and_feature_distance -->
-The reference picture A of `clip.base_picture` (12 x 12, a vertical grating in the top six rows and a horizontal one below) and picture B, A shifted right by one pixel with wraparound (the top half inverts, the bottom half is unchanged). The code cannot tell which of the two was encoded, so each is the truth with probability 1/2. Each row is a candidate output; the cells are the expected loss, 1/2 loss(P, A) + 1/2 loss(P, B), under the pixel mean squared error, the pixel mean absolute error and the toy feature distance of `clip.toy_distance` (both taps summed).
+The reference picture A of Volume VII, Chapter 8 (the picture printed in its `clip.toy_picture_text` block: 12 x 12, values 0.8 and 0.2, a vertical grating in the top six rows and a horizontal one below) and picture B, A shifted right by one pixel with wraparound (the top half inverts, the bottom half is unchanged). The code cannot tell which of the two was encoded, so each is the truth with probability 1/2. Each row is a candidate output; the cells are the expected loss, 1/2 loss(P, A) + 1/2 loss(P, B), under the pixel mean squared error, the pixel mean absolute error and the toy feature distance of that chapter's `clip.pixel_vs_feature` block (weights 1 on each channel, both taps summed).
 
 | decoder output P | expected squared error | expected absolute error | expected feature distance |
 |---|---:|---:|---:|
@@ -379,6 +380,7 @@ The limits are the model's. The tokenizer's hedge under a squared error is a blu
 - **codebook**: a table of $K$ vectors of $d$ numbers each, the only values a quantized vector may take; a position of a tokenizer stores the index of a row. <!-- concept: codebook -->
 - **vector quantization**: replacing a vector by the nearest row of a codebook (smallest squared distance, lowest index on a tie), so that it is stored as one index of $\log_2 K$ bits. <!-- concept: vector-quantization -->
 - **straight-through estimator**: the rule that passes the gradient at a quantizer's output to its input unchanged, written $\mathbf{z} + \mathrm{sg}[\mathbf{z}_q - \mathbf{z}]$ with a stop-gradient $\mathrm{sg}$; it replaces a derivative that is zero by a biased one that trains the encoder. <!-- concept: straight-through-estimator -->
+- **dead code**: a code of a codebook that is never the nearest to any encoder row, so that it receives no gradient, is never chosen again and costs bits in the format while buying nothing; it is revived by moving it onto an encoder row. <!-- concept: dead-code -->
 - **perceptual loss**: a training loss that is a perceptual distance, the difference of the features that a frozen pretrained network computes for the output and the target, which prefers a sharp output where a squared error prefers the blurred mean. <!-- concept: perceptual-loss -->
 
 ## Answers

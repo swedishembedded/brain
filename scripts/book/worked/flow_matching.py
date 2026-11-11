@@ -266,7 +266,7 @@ def path_marginals():
             "'valley / peak' the density halfway between two centres, 1.5 (1 - sigma), over the density at the centre 3 (1 - sigma). Modes are local "
             "maxima on the grid -6, -5.99, ..., 6.\n\n"
             + _table(["sigma", "1 - sigma", "spread", "gap / spread", "modes", "valley / peak"], rows)
-            + f"\n\nBy bisection on the mode count the three modes become one between sigma = {lo:.4f} and sigma = {hi:.4f}.")
+            + f"\n\nBy bisection on the mode count (from the bracket [0.3, 0.97], halving until the interval is narrower than 1e-4) the three modes become one between sigma = {lo:.5f} and sigma = {hi:.5f}.")
 
 
 # ------------------------------------------------------------------ sampling with the exact field
@@ -281,9 +281,9 @@ def euler_exact():
     return (f"{SAMPLE_N} starting values x_1 = noise from the stream {_seed(SAMPLE)} (one normal() each, in order), carried from sigma = 1 to 0 "
             f"by n Euler steps on the grid s_i = 1 - i/n with the exact velocity u at the left end of each step. 'Distance' is the mean of "
             f"|x_0 - T(noise)|, with T = F^-1(Phi(noise)) the exact transport map of one dimension (F the cumulative distribution of the data, "
-            f"46 bisection steps); the counts are the samples within {NEAR:g} of each centre and the rest.\n\n"
+            f"46 bisection steps on the bracket [-4.6, 4.6], keeping the lower half when F(mid) < Phi(noise), and the midpoint of the last bracket as the answer); the counts are the samples within {NEAR:g} of each centre and the rest.\n\n"
             + _table(["Euler steps n", "distance", "near -3", "near 0", "near +3", "elsewhere"], rows)
-            + "\n\nFor the first 20 starting values, 200 steps of classical fourth-order Runge-Kutta on the same field end within "
+            + "\n\nFor the first 20 starting values, 200 steps of classical fourth-order Runge-Kutta on the same field (the exact velocity is 0/0 at sigma = 0, so the one evaluation that would fall there, the last stage of the last step, is made at sigma = 1e-9) end within "
             + ("1e-6" if worst < 1e-6 else f"{worst:.1e} (CHECK FAILED)") + " of T(noise).")
 
 
@@ -694,8 +694,9 @@ def ramp_spellings():
 def ramp_table():
     differ, worst, agree = ramp_spellings()
     return ("The first sigma of a 4-step or 50-step schedule is the same however the ramp linspace(1, 1/n, n) is spelled; in 32-bit arithmetic "
-            "the two spellings (A) 1 - i (1 - 1/n) / (n - 1) and (B) 1 + i (1/n - 1) / (n - 1), each operation rounded to nearest 32-bit "
-            "float, are compared over i = 0 .. n - 1 for each n = 1 .. 2000 (for n = 1 the single entry is 1; the maximum with 1 keeps n - 1 from being 0 in (A)).\n\n"
+            "the two spellings, (A) 1 - ((i * (1 - 1/n)) / (n - 1)) (the product of i and the rounded 1 - 1/n first, then the quotient, then the subtraction) and "
+            "(B) 1 + (step * i) with step = (1/n - 1) / (n - 1) rounded once and then multiplied by i, each operation rounded to nearest 32-bit "
+            "float (i converted to 32 bits first), are compared over i = 0 .. n - 1 for each n = 1 .. 2000 (for n = 1 the single entry is 1; the maximum with 1 keeps n - 1 from being 0 in (A)).\n\n"
             + _table(["quantity", "value"], [("step counts n at which some entry differs", f"{differ} of 2000"),
                                              ("largest difference", f"{worst:.3e} ({worst / 2.0 ** -24:.0f} times 2^-24 = 5.96e-8)"),
                                              ("step counts below 60 at which they agree", ", ".join(str(n) for n in agree))]))
@@ -716,7 +717,7 @@ def brain_schedules():
             + f"\n\nThe exponential form with mu = ln 3 gives the same nine values to {'below 1e-15' if zdiff < 1e-15 else f'{zdiff:.1e} (CHECK FAILED)'}.\n\n"
               "The strength mu of FLUX.2's exponential shift as a function of the number of image tokens and the number of steps, "
               f"mu = a_2 n + b_2 above {KLEIN['knee']} tokens and the line through (10, a_1 n + b_1) and (200, a_2 n + b_2) below, with "
-              f"a_1 = {KLEIN['a1']:g}, b_1 = {KLEIN['b1']:g}, a_2 = {KLEIN['a2']:g}, b_2 = {KLEIN['b2']:g}.\n\n"
+              f"a_1 = {KLEIN['a1']:.9g}, b_1 = {KLEIN['b1']:.9g}, a_2 = {KLEIN['a2']:.9g}, b_2 = {KLEIN['b2']:.9g}.\n\n"
             + _table(["tokens n", "4 steps", "10 steps", "50 steps", "200 steps"], rows)
             + "\n\nThe 4-step schedule of FLUX.2 Klein (linspace(1, 1/4, 4) shifted by e^mu / (e^mu + 1/sigma - 1), a terminal 0 after the fourth), with "
               "one token per 16 x 16 pixels, computed in float64; the first four entries are the values the model sees.\n\n"

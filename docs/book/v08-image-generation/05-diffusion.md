@@ -77,7 +77,7 @@ $$
 The three bumps slide toward the origin, since their centres are $a_t m_k$, and widen, since their variance moves from $s^2$ toward $1$. The table follows the density at the middle cluster and in the valley between the clusters at $0$ and $3$, counts the local maxima on a grid, and measures how far $p_t$ is from the standard normal in Kullback-Leibler divergence.
 
 <!-- worked: diffusion.noised_marginals -->
-The three clusters (centres -3, 0, 3, standard deviation 0.25, weight 1/3 each) after t steps of the chain: p_t(x) = (1/3) sum_k N(x; a_t m_k, a_t^2 0.25^2 + b_t^2). The valley is x = 1.5, between the clusters at 0 and 3. Modes are local maxima on the grid -8, -7.99, ..., 8. The distance is KL(p_t || N(0, 1)) in nats by the midpoint rule with step 0.002 on [-12, 12].
+The three clusters (centres -3, 0, 3, standard deviation 0.25, weight 1/3 each) after t steps of the chain: p_t(x) = (1/3) sum_k N(x; a_t m_k, a_t^2 0.25^2 + b_t^2). The valley is x = 1.5, between the clusters at 0 and 3, and 'valley / peak' is p_t(1.5) / p_t(0), the peak being the density at the centre of the middle cluster. Modes are local maxima on the grid -8, -7.99, ..., 8. The distance is KL(p_t || N(0, 1)) in nats by the midpoint rule with step 0.002 on [-12, 12].
 
 | t | p_t(0) | p_t(1.5) | valley / peak | modes | KL(p_t \|\| N(0, 1)) |
 |---|---:|---:|---:|---:|---:|
@@ -222,10 +222,28 @@ function noise_loss(theta, abar: array<real>[51], T: int, B: int, rng: Generator
     return total / B
 ```
 
-The loss is a plain regression, and a regression has a floor. From Recall question 3, the squared error is smallest at the conditional mean, so the best any function of $(x_t, t)$ can do is $\varepsilon^\star(x_t, t) = \mathbb{E}[\varepsilon \mid x_t]$, and the least loss at step $t$ is $\mathbb{E}\varepsilon^2 - \mathbb{E}[\varepsilon^\star{}^2] = 1 - \mathbb{E}[\varepsilon^{\star 2}]$. For the clusters, everything is Gaussian inside a cluster. Given that $x_0$ came from cluster $k$, the pair $(x_0, x_t)$ is jointly Gaussian and the posterior mean of $x_0$ is $m_k + \frac{a_t s^2}{s^2 a_t^2 + b_t^2}(x_t - a_t m_k)$; the cluster's weight is its prior $\tfrac13$ times the density of $x_t$ under it. The posterior mean of $x_0$ given only $x_t$ is the weighted average over the three clusters, and the noise estimate follows from $x_t = a_t x_0 + b_t\varepsilon$: $\varepsilon^\star = (x_t - a_t\,\mathbb{E}[x_0\mid x_t])/b_t$. The table lists the **exact denoiser** at three steps and four noisy values, and the floor.
+with the two routines it calls defined by the toy of this chapter (three clusters, centres $-3$, $0$, $3$, width $0.25$; the network of the section "A noise predictor small enough to check", whose parameters `theta` are stored in the order $\mathbf{W}_1, \mathbf{b}_1, \mathbf{W}_2, \mathbf{b}_2, \mathbf{w}_3, b_3$, each matrix row-major):
+
+```text
+function draw_data(rng: Generator) -> real:
+    k = rng.integer(3)                              # the cluster, drawn first
+    return [-3.0, 0.0, 3.0][k] + 0.25 * rng.normal()
+
+function eps_theta(theta, x: real, t: int) -> real:
+    tau = t / 50                                    # the step as a fraction of the chain
+    h1 = zeros(real, [32])
+    for i in 0 .. 32:
+        h1[i] = tanh(W1[i, 0] * x + W1[i, 1] * tau + b1[i])
+    h2 = zeros(real, [32])
+    for j in 0 .. 32:
+        h2[j] = tanh(dot(W2[j, :], h1) + b2[j])
+    return dot(w3, h2) + b3
+```
+
+The loss is a plain regression, and a regression has a floor. From Recall question 3, the squared error is smallest at the conditional mean, so the best any function of $(x_t, t)$ can do is $\varepsilon^\star(x_t, t) = \mathbb{E}[\varepsilon \mid x_t]$, and the least loss at step $t$ is $\mathbb{E}\varepsilon^2 - \mathbb{E}[\varepsilon^\star{}^2] = 1 - \mathbb{E}[\varepsilon^{\star 2}]$. For the clusters, everything is Gaussian inside a cluster. Given that $x_0$ came from cluster $k$, the pair $(x_0, x_t)$ is jointly Gaussian and the posterior mean of $x_0$ is $m_k + \frac{a_t s^2}{s^2 a_t^2 + b_t^2}(x_t - a_t m_k)$; the cluster's weight is its prior $\tfrac13$ times the density of $x_t$ under it. The posterior mean of $x_0$ given only $x_t$ is the weighted average over the three clusters, and the noise estimate follows from $x_t = a_t x_0 + b_t\varepsilon$: $\varepsilon^\star = (x_t - a_t\,\mathbb{E}[x_0\mid x_t])/b_t$. The first table below is the floor; the **exact denoiser** at three steps and four noisy values is tabulated in the next section.
 
 <!-- worked: diffusion.floor_table -->
-The least mean squared error of any predictor of the noise from (x_t, t), computed from the exact denoiser: 1 - E[E(noise | x_t)^2], the expectation by the midpoint rule with step 0.005 on [-14, 14].
+The least mean squared error of any predictor of the noise from (x_t, t), computed from the exact denoiser: 1 - E[E(noise | x_t)^2], the expectation by the midpoint rule with step 0.005 on [-14, 14]. The weights of the three clusters in the exact denoiser are computed as a softmax in the log domain, the largest log-weight subtracted before exponentiating, because at t = 1 and 2 the density of a far cluster underflows otherwise.
 
 | t | least error |
 |---|---:|
@@ -253,7 +271,7 @@ $$
 s(x, t) = -\,\mathbb{E}\!\left[\frac{x - a_t x_0}{b_t^2}\;\middle|\; x_t = x\right] = -\frac{1}{b_t}\,\mathbb{E}[\varepsilon \mid x_t = x] = -\frac{\varepsilon^\star(x, t)}{b_t}.
 $$
 
-A network trained to predict the noise has therefore learned the score of the noised data, $s_\theta = -\varepsilon_\theta/b_t$, and the denoising objective is a weighted case of **denoising score matching**, whose weight on the error of the score is $b_t^2$. The table above checks the identity numerically: at 24 points the score, computed as $-\varepsilon^\star/b_t$ from the closed-form denoiser, differs from a central difference of $\ln p_t$ (step $10^{-5}$) by less than $10^{-6}$.
+A network trained to predict the noise has therefore learned the score of the noised data, $s_\theta = -\varepsilon_\theta/b_t$, and the denoising objective is a weighted case of **denoising score matching**, whose weight on the error of the score is $b_t^2$. The table below checks the identity numerically: at 24 points the score, computed as $-\varepsilon^\star/b_t$ from the closed-form denoiser, differs from a central difference of $\ln p_t$ (step $10^{-5}$) by less than $10^{-6}$.
 
 <!-- worked: diffusion.denoiser_table -->
 The exact denoiser of the three clusters at three steps and four noisy values x_t each: the posterior mean E[x_0 | x_t], the noise estimate E[noise | x_t] = (x_t - a_t E[x_0 | x_t]) / b_t and the score -E[noise | x_t] / b_t.
@@ -391,7 +409,7 @@ function sample(theta, beta: array<real>[50], abar: array<real>[51], rng: Genera
 Here `beta` is indexed from $0$, so `beta[t - 1]` is $\beta_t$. The table draws $1000$ samples at once from the stream `diffusion.sample` (seed `0x58b6a5504aeccd7a`): first the $1000$ starting values, one `normal()` each, then for $t = 50, \dots, 2$ one `normal()` per sample in order. It runs three samplers on the same stream. The first uses the exact denoiser, which tests the sampler itself, apart from any network. The second uses the exact denoiser once, as a single jump from $x_{50}$ to $\mathbb{E}[x_0\mid x_{50}]$. The third is the trained network.
 
 <!-- worked: diffusion.sample_table -->
-1000 samples from the stream `diffusion.sample` (seed 0x58b6a5504aeccd7a): first the 1000 starting values x_T = normal(), then, for t = 50, 49, ..., 2, one normal() for each sample in order (none at t = 1). The columns count the samples within 0.75 of each centre; 'elsewhere' is the rest; the spread is the standard deviation of all samples (the data's is 2.462). The one jump replaces each x_T by E[x_0 | x_T] and stops. The network row keeps the digits shared with the four nudged copies.
+1000 samples from the stream `diffusion.sample` (seed 0x58b6a5504aeccd7a): first the 1000 starting values x_T = normal(), then, for t = 50, 49, ..., 2, one normal() for each sample in order (none at t = 1). The columns count the samples within 0.75 of each centre; 'elsewhere' is the rest; the spread is the population standard deviation of all samples (divisor the number of samples, not one less; the data's is 2.462). The one jump replaces each x_T by E[x_0 | x_T] and stops. The network row keeps the digits shared with the four nudged copies.
 
 | sampler | near -3 | near 0 | near +3 | elsewhere | spread |
 |---|---:|---:|---:|---:|---:|
