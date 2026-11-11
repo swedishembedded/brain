@@ -37,6 +37,7 @@ mod huginn_cli;
 mod load_line;
 mod ltxv_cli;
 mod ltxv_replace;
+mod ltxv_replace_resume;
 mod minicpmv_cli;
 mod mirror_cli;
 mod import_gguf_cli;

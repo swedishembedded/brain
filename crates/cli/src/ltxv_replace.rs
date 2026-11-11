@@ -42,6 +42,14 @@
 //! sequence, the clip the video pass sees, the generated clip) is written to
 //! `--work-dir`, so a bad result
 //! can be traced to the step that produced it.
+//!
+//! The run is resumable: each expensive step (the track, each edited still,
+//! the video pass) records the key of everything its output depends on
+//! ([`crate::ltxv_replace_resume`]), and a run that finds the same key
+//! loads the output instead of making it again. A run that failed in the
+//! video pass, say out of memory, repeated with the same arguments goes
+//! straight back to that pass. Change a setting and only the steps that
+//! depend on it are redone; `--fresh` redoes all of them.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -50,6 +58,7 @@ use brain_modelstore::resolve::ArchSpec;
 use imaging::{AlignCorners, Ctx, Filter, Rgb8, Shape};
 
 use crate::args::Args;
+use crate::ltxv_replace_resume::{digest, digest_mask, stamp, Resume};
 
 pub(crate) const HELP: &str = "\
 brain ltxv replace - replace a person in a clip with a character from a sheet
@@ -84,7 +93,10 @@ USAGE:
   --soundtrack <wav>      the sound to carry into the result, cut to the
                           clip's length; brain reads no sound out of a
                           video container, so without it the result is silent
-  --work-dir <dir>        where the intermediates go (default: <output>.work)
+  --work-dir <dir>        where the intermediates go (default: <output>.work).
+                          A run repeated with the same work dir reuses every
+                          step whose inputs and settings are unchanged
+  --fresh                 redo every step, reusing nothing from the work dir
   --seed <n>              seed for the edits and the video pass
 
 Guides:
@@ -210,6 +222,15 @@ impl Tuning {
         })
     }
 
+    /// The settings an edited still depends on; the video pass's settings
+    /// are left out, so changing one does not repaint the stills.
+    fn edit_record(&self) -> serde_json::Value {
+        serde_json::json!({
+            "edit_attempts": self.edit_attempts, "min_overlap": self.min_overlap, "edit_size": self.edit_long_side, "repaint_grow": self.repaint_grow,
+            "body_ratio": self.body_ratio, "paste_grow": self.paste_grow_px, "feather": self.feather_px,
+        })
+    }
+
     fn parse(a: &mut Args) -> Result<Tuning, String> {
         let d = Tuning::default();
         let t = Tuning {
@@ -248,6 +269,8 @@ struct Request {
     edit_prompt: String,
     out: String,
     work: PathBuf,
+    /// `--fresh`: reuse nothing from the work directory.
+    fresh: bool,
     guide_frames: Option<Vec<usize>>,
     tuning: Tuning,
     conform: bool,
@@ -308,6 +331,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
     }
     let req = Request {
         work: a.take_str("--work-dir").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("{out}.work"))),
+        fresh: a.take_flag("--fresh"),
         prompt_frame: a.usize_or("--prompt-frame", 0),
         edit_prompt: a.take_str("--edit-prompt").unwrap_or_else(|| default_edit_prompt(&prompt)),
         dit_config: a.take_str("--dit-config"),
@@ -433,13 +457,25 @@ pub(crate) fn replace(args: &[String]) -> Result<(), String> {
         eprintln!("ltxv replace: {}: {note}; the output is the conformed clip", req.input);
     }
     let (w, h, n) = (source.width as usize, source.height as usize, source.frames.len());
+    let source_fps = source.fps;
     let grid = ltxv::maskcond::latent_grid(n, w, h)?;
     let guides = guide_frames(req.guide_frames.as_deref(), req.tuning.guide_every, n)?;
     eprintln!("ltxv replace: {n} frames at {w}x{h}, edited stills at frames {:?}", std::iter::once(0).chain(guides.iter().copied()).collect::<Vec<_>>());
 
     let tracker = crate::sam2_cli::load_tracker(&req.sam2_overrides)?;
+    let resume = Resume::new(&req.work, req.fresh);
+    let track_key = serde_json::json!({
+        "input": stamp(&req.input), "conform": req.conform, "frames": n, "size": [w, h], "points": points,
+        "prompt_frame": req.prompt_frame, "tracker": req.sam2_overrides,
+    })
+    .to_string();
+    let actor_dir = req.work.join("actor");
     let actor: Vec<Vec<bool>> = match given_track {
         Some(track) => track,
+        None if resume.holds("actor", &track_key) => {
+            eprintln!("ltxv replace: the actor's track is reused from {}", actor_dir.display());
+            read_track(&actor_dir, w as u32, h as u32, n)?
+        }
         None => {
             let unit: Vec<Vec<f32>> = source.frames.iter().map(|px| px.iter().map(|&v| v as f32 / 255.0).collect()).collect();
             crate::sam2_cli::track_frames(&tracker, &unit, w as u32, h as u32, req.prompt_frame, &points, 0)?
@@ -448,13 +484,18 @@ pub(crate) fn replace(args: &[String]) -> Result<(), String> {
                 .collect()
         }
     };
-    write_masks(&req.work.join("actor"), &actor, w, h, source.fps, &req.input)?;
+    if !resume.holds("actor", &track_key) {
+        write_masks(&actor_dir, &actor, w, h, source.fps, &req.input)?;
+        if req.actor_mask.is_none() {
+            resume.record("actor", &track_key)?;
+        }
+    }
 
     // The edited stills: frame 0 (the clip's own first frame) and the guides.
     let masks_gpu = gpu_core::Gpu::new(imaging::PIPELINES);
     let ctx = Ctx::new(&masks_gpu);
     let identity = Identity::load(&req, &tracker.gpu)?;
-    let editor = Editor { req: &req, tracker: &tracker, identity, ctx: &ctx, w, h };
+    let editor = Editor { req: &req, resume: &resume, tracker: &tracker, identity, ctx: &ctx, w, h };
     let mut stills: Vec<Still> = Vec::new();
     for &k in std::iter::once(&0).chain(&guides) {
         if k > 0 && !actor[k].contains(&true) {
@@ -480,6 +521,8 @@ pub(crate) fn replace(args: &[String]) -> Result<(), String> {
             req.work.display()
         ));
     }
+    // The edit models are done: the video pass gets the memory they held.
+    drop(editor);
     drop(tracker);
 
     // The region to regenerate on every frame. Frame 0 is the edited still,
@@ -510,9 +553,32 @@ pub(crate) fn replace(args: &[String]) -> Result<(), String> {
     // The clip the video pass sees, kept so the pass can be run again alone
     // (`ltxv v2v --input <work>/input.mp4 --mask <work>/region ...`).
     crate::ltxv_cli::write_clip(spliced.clone(), &req.work.join("input.mp4").to_string_lossy())?;
-    let generated = generate(&req, &spliced, &region_dir, &stills[1..])?;
     let generated_path = req.work.join("generated.mp4");
-    crate::ltxv_cli::write_clip(generated.clone(), &generated_path.to_string_lossy())?;
+    let video_key = serde_json::json!({
+        "input": stamp(&req.input), "regions": digest(regions.iter().map(|r| digest_mask(r)).flat_map(u64::to_le_bytes)),
+        "stills": stills.iter().map(|s| (s.frame, digest(s.image.px.iter().copied()))).collect::<Vec<_>>(),
+        "prompt": req.prompt, "seed": req.seed, "steps": req.steps, "dit_config": req.dit_config, "guide_strength": req.tuning.guide_strength,
+        "adapters": req.adapters.iter().map(|a| serde_json::json!({"path": a.path, "scale": a.scale})).collect::<Vec<_>>(),
+        "video_models": req.ltxv_overrides,
+    })
+    .to_string();
+    let reused = if resume.holds("generated", &video_key) {
+        crate::ltxv_cli::read_clip(&generated_path.to_string_lossy(), source_fps).ok().filter(|v| v.frames.len() == n)
+    } else {
+        None
+    };
+    let generated = match reused {
+        Some(video) => {
+            eprintln!("ltxv replace: the video pass is reused from {}", generated_path.display());
+            video
+        }
+        None => {
+            let video = generate(&req, &spliced, &region_dir, &stills[1..])?;
+            crate::ltxv_cli::write_clip(video.clone(), &generated_path.to_string_lossy())?;
+            resume.record("generated", &video_key)?;
+            video
+        }
+    };
 
     // Outside the region every pixel is the source's - the still's, on frame 0.
     let mut out = spliced;
@@ -706,6 +772,7 @@ impl Identity {
 /// What every still edit shares.
 struct Editor<'a> {
     req: &'a Request,
+    resume: &'a Resume,
     tracker: &'a sam2::Sam2,
     /// The face the stills are matched against, when there is one to match.
     identity: Option<Identity>,
@@ -720,6 +787,13 @@ impl Editor<'_> {
     /// and the covering edit whose face is closest to the sheet's wins;
     /// without one, the first covering edit. The winner is `still_<k>.png`.
     fn best_still(&self, k: usize, src: &[u8], actor: &[bool]) -> Result<Still, String> {
+        let (step, key) = (format!("still_{k}"), self.still_key(k, src, actor));
+        if self.resume.holds(&step, &key) {
+            if let Ok(still) = self.load_still(k, actor) {
+                eprintln!("ltxv replace: frame {k} reused from {}, figure/actor overlap {:.2}", self.req.work.display(), still.iou);
+                return Ok(still);
+            }
+        }
         let t = &self.req.tuning;
         let mut stills: Vec<(Still, Option<f32>)> = Vec::new();
         for attempt in 0..t.edit_attempts {
@@ -743,7 +817,34 @@ impl Editor<'_> {
         let i = pick_still(&stills.iter().map(|(s, f)| (s.iou, *f)).collect::<Vec<_>>(), t.min_overlap);
         let best = stills.swap_remove(i).0;
         imaging::save_png(self.req.work.join(format!("still_{k}.png")), &best.image)?;
+        let figure: Vec<u8> = best.figure.iter().flat_map(|&f| [if f { 255 } else { 0 }; 3]).collect();
+        imaging::save_png(self.req.work.join(format!("figure_{k}.png")), &Rgb8::new(self.w as u32, self.h as u32, figure)?)?;
+        self.resume.record(&step, &key)?;
         Ok(best)
+    }
+
+    /// Everything the winning still of frame `k` depends on. The source
+    /// frame and the actor's mask are named by their pixels, so a changed
+    /// clip, click or track gives another key without the key knowing how
+    /// the track was made.
+    fn still_key(&self, k: usize, src: &[u8], actor: &[bool]) -> String {
+        let r = self.req;
+        serde_json::json!({
+            "frame": k, "source": digest(src.iter().copied()), "actor": digest_mask(actor), "character": stamp(&r.character),
+            "edit_prompt": r.edit_prompt, "seed": r.seed, "editor": r.flux2_roles, "edit_adapters": r.edit_adapter_flags,
+            "no_identity": r.no_identity, "identity": r.arcface_overrides, "tuning": r.tuning.edit_record(),
+        })
+        .to_string()
+    }
+
+    /// The still [`Editor::best_still`] saved: its image and its figure.
+    fn load_still(&self, k: usize, actor: &[bool]) -> Result<Still, String> {
+        let image = imaging::load(self.req.work.join(format!("still_{k}.png")))?;
+        let figure: Vec<bool> = imaging::load(self.req.work.join(format!("figure_{k}.png")))?.px.as_chunks::<3>().0.iter().map(|p| p[0] > 127).collect();
+        if (image.w as usize, image.h as usize, figure.len()) != (self.w, self.h, self.w * self.h) {
+            return Err(format!("saved still {k} is not {}x{}", self.w, self.h));
+        }
+        Ok(Still { frame: k, iou: iou(&figure, actor), image, figure })
     }
 
     fn edit(&self, k: usize, src: &[u8], actor: &[bool], seed: u64) -> Result<Still, String> {
@@ -1168,12 +1269,26 @@ mod tests {
             "--input", "--character", "--prompt", "--output-path", "--point", "--exclude", "--guide-frames", "--component", "--work-dir",
             "--prompt-frame", "--edit-prompt", "--dit-config", "--steps", "--device", "--guide-strength", "--guide-every", "--edit-attempts",
             "--min-overlap", "--edit-size", "--repaint-grow", "--body-ratio", "--paste-grow", "--region-grow", "--frame0-inset", "--feather", "--no-conform",
-            "--fps", "--adapter", "--lora-scale", "--edit-adapter", "--edit-lora-scale", "--actor-mask", "--soundtrack", "--no-identity",
+            "--fps", "--adapter", "--lora-scale", "--edit-adapter", "--edit-lora-scale", "--actor-mask", "--soundtrack", "--no-identity", "--fresh",
         ];
         for flag in parsed {
             assert!(HELP.contains(flag), "{flag} is parsed but not in --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in --help but not parsed");
         }
+    }
+
+    /// A track written to the work directory reads back as it was: it is
+    /// what a resumed run takes in place of tracking again.
+    #[test]
+    fn a_written_track_reads_back_unchanged() {
+        let (w, h, n) = (32usize, 32usize, 3usize);
+        let track: Vec<Vec<bool>> = (0..n).map(|f| (0..w * h).map(|i| i % w >= 4 + f && i / w >= 8 && i / w < 20).collect()).collect();
+        let dir = std::env::temp_dir().join(format!("brain-replace-track-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_masks(&dir, &track, w, h, 24, "clip.mp4").unwrap();
+        let back = read_track(&dir, w as u32, h as u32, n);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(back.unwrap(), track);
     }
 
     #[test]

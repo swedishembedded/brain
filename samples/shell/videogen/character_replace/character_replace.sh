@@ -46,7 +46,10 @@ Outputs:
   --out <path>            the result: a clip (run, video) or a mask
                           directory (track). Default:
                           out/character_replace/<input name>-<mode>[.mp4]
-  --work-dir <dir>        the intermediates of `run` (default <out>.work)
+  --work-dir <dir>        the intermediates of `run` (default <out>.work); a
+                          repeated `run` resumes from them - steps whose
+                          inputs and settings are unchanged are not redone
+  --fresh                 redo every step of `run`
 
 Models (each defaults to what the model store resolves):
   --video-dit <file>      the LTX-2.5 DiT (a .gguf)

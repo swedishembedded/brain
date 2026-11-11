@@ -164,6 +164,14 @@ $S track --input street.mp4 --point 405,100 --point 405,195 --point 405,368
 $S run --input street.mp4 --character sheet.png --actor-mask out/character_replace/street-track --prompt "..."
 ```
 
+A run is resumable. If it stops in the video pass (out of memory, say), run
+the same command again: the person's track and the painted stills are loaded
+from the work directory, and only the video pass and the composite run. Each
+step is reused only when its inputs and settings are unchanged, so changing
+`--prompt`, `--steps` or `--seed` redoes just the video pass, and a new
+`--character` or `--edit-prompt` repaints the stills. `--fresh` redoes
+everything.
+
 Redo only the video pass of a previous run, with other settings - over the
 clip that pass saw (conformed, with the painted frame 0). The result is the
 pass itself, not composited over the source:
@@ -206,7 +214,8 @@ parameter here. For `run`, from `brain ltxv replace --help`:
 | `--frame0-inset <px>` | 16 | how far inside the figure frame 0 is redrawn |
 | `--feather <px>` | 3 | the feather across every composite edge |
 | `--seed`, `--steps`, `--dit-config`, `--device` | | the run's seed, the video's steps, DiT and placement |
-| `--work-dir <dir>` | `<out>.work` | where the intermediates go |
+| `--work-dir <dir>` | `<out>.work` | where the intermediates go, and what a repeated run reuses |
+| `--fresh` | | redo every step instead of reusing the work directory's |
 
 ## Outputs
 
@@ -219,6 +228,7 @@ parameter here. For `run`, from `brain ltxv replace --help`:
 | `<out>.work/region/` | the regenerated region per frame (a mask sequence) |
 | `<out>.work/input.mp4` | the clip the video pass sees: conformed, with the painted frame 0 |
 | `<out>.work/generated.mp4` | the video pass before compositing |
+| `<out>.work/*.key`, `figure_<k>.png` | what a repeated run checks, and loads, to skip finished steps |
 
 ## What it needs
 
