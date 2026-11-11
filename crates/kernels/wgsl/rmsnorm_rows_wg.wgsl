@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  RMSNorm, one workgroup per row, for rows of at most 2048 columns, with a tree reduction
-// @how   128 threads, four adjacent columns per load, up to four loads per thread held in registers, log2(128)-step fold
+// @how   128 threads, four adjacent columns per load, up to four loads per thread held in registers, tree fold of 128 partials down to 16 then a serial sum of those
 // @opt   4
 // @cpu   no
 // @gpu   yes
@@ -13,7 +13,7 @@
 // The operator of rmsnorm_rows (x * rsqrt(mean(x^2) + eps) * w) for a device whose workgroups execute any number of
 // barriers. rmsnorm_rows has every thread fold the 64 partials serially after its one barrier and reads the row twice;
 // here a thread reads its columns once into registers (the weights are requested together with them), the sum of
-// squares folds in seven steps, and the same registers are scaled and stored.
+// squares folds in five steps and a sum of sixteen, and the same registers are scaled and stored.
 // Contract: d a multiple of 4 and at most 2048; the caller keeps rmsnorm_rows for anything else. Same params and
 // bindings; the result differs from rmsnorm_rows by the order of the reduction only.
 //
@@ -74,13 +74,15 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     }
     red[t] = dot(v0, v0) + dot(v1, v1) + dot(v2, v2) + dot(v3, v3);
     workgroupBarrier();
-    for (var s = 64u; s > 0u; s = s >> 1u) {
+    for (var s = 64u; s > 8u; s = s >> 1u) {
         if (t < s) {
             red[t] = red[t] + red[t + s];
         }
         workgroupBarrier();
     }
-    let inv = 1.0 / sqrt(red[0] / f32(p.d) + p.eps);
+    var ss = 0.0;
+    for (var i = 0u; i < 16u; i = i + 1u) { ss = ss + red[i]; }
+    let inv = 1.0 / sqrt(ss / f32(p.d) + p.eps);
     if (live) {
         var c = 4u * t;
         if (t < d4) {

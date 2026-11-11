@@ -327,11 +327,8 @@ impl DeviceDecoder {
             let phi = dev.linear_new(&mut s, &ly.phi, &nx, bu);
             let maps = dev.alloc(b * (2 * n + n * n));
             let shape = MhcShape { rows: bu, n: nu, lane_id: (l % n) as u32, iters: SINKHORN_ITERATIONS as u32 };
-            dev.mhc_maps(&mut s, shape, ly.a, &phi, [&ly.b[0], &ly.b[1], &ly.b[2]], &maps);
-            let u = dev.alloc(b * d);
-            dev.mhc_mix(&mut s, &lanes, &maps, &u, (bu, nu, du));
-            let y = dev.alloc(b * d);
-            dev.copy_rows(&mut s, &u, (1, 0), &y, (1, 0), 1, bu, du);
+            let (u, y) = (dev.alloc(b * d), dev.alloc(b * d));
+            dev.mhc_front(&mut s, shape, ly.a, &lanes, &phi, [&ly.b[0], &ly.b[1], &ly.b[2]], du, (&maps, &u, &y));
             self.block(dev, &mut s, l, st, cross, &y, &rows_buf);
             let next = dev.alloc(b * n * d);
             dev.mhc_post(&mut s, &lanes, &y, &u, &maps, &next, (bu, nu, du));

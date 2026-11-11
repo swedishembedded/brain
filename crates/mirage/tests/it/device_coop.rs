@@ -169,3 +169,54 @@ fn the_single_workgroup_attention_matches_the_split_kernels_and_the_gate() {
         assert_agree(&format!("attention {batch}x{heads} nk {nk} visible {visible}"), &plain, &coop);
     }
 }
+
+#[test]
+fn the_cooperative_lane_front_matches_maps_mix_and_copy() {
+    use mirage::device::prims::MhcShape;
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(mut dev) = cooperative_device("mhc_front") else { return };
+    for (rows, d, lane_id) in [(1usize, 512usize, 0u32), (3, 512, 3), (2, 256, 1)] {
+        let n = 4usize;
+        let stride = 2 * n + n * n;
+        let (lanes, phi) = (noise(rows * n * d, 41, 1.5), noise(rows * stride, 42, 2.0));
+        let (bp, bq, br) = (noise(n, 43, 0.5), noise(n, 44, 0.5), noise(n * n, 45, 0.5));
+        let (plain, coop) = both(&mut dev, |dev| {
+            let g = dev.gpu();
+            let (lb, pb) = (g.storage_init("l", &lanes), g.storage_init("p", &phi));
+            let (b0, b1, b2) = (g.storage_init("b0", &bp), g.storage_init("b1", &bq), g.storage_init("b2", &br));
+            let (maps, u, y) = (g.storage((rows * stride) as u64), g.storage((rows * d) as u64), g.storage((rows * d) as u64));
+            let shape = MhcShape { rows: rows as u32, n: n as u32, lane_id, iters: 20 };
+            let mut s = Vec::new();
+            dev.mhc_front(&mut s, shape, [0.3, 0.2, 0.5], &lb, &pb, [&b0, &b1, &b2], d as u32, (&maps, &u, &y));
+            g.submit(&[], &s);
+            vec![g.read(&maps, rows * stride), g.read(&u, rows * d), g.read(&y, rows * d)]
+        });
+        assert_agree(&format!("mhc_front rows {rows} d {d}"), &plain, &coop);
+    }
+}
+
+#[test]
+fn the_single_dispatch_hadamard_mlp_matches_the_three_rotations() {
+    use mirage::decoder::hadamard::HadamardMlp;
+    let _g = gpu_core::testgpu::exclusive();
+    let Some(mut dev) = cooperative_device("hada_mlp") else { return };
+    let Some(dir) = crate::common::released_dir() else { return };
+    let ck = mirage::import::load_dir(&dir, &mirage::import::ImportOptions::default()).unwrap();
+    let weights = mirage::vision::weights::Weights::new(&ck);
+    let dec = mirage::decoder::Decoder::new(&ck.config, &weights);
+    let mlp = HadamardMlp::new(&ck.config, &weights, 3);
+    let n = ck.config.hadamard_width();
+    let resident = mirage::device::hadamard::DeviceHadamard::upload(&dev, &mlp, dec.permutations());
+    for rows in [1usize, 4] {
+        let (h, y0) = (noise(rows * n, 51, 1.0), noise(rows * n, 52, 1.0));
+        let (plain, coop) = both(&mut dev, |dev| {
+            let g = dev.gpu();
+            let (hb, yb) = (g.storage_init("h", &h), g.storage_init("y", &y0));
+            let mut s = Vec::new();
+            resident.encode_add(dev, &mut s, &hb, rows as u32, &yb);
+            g.submit(&[], &s);
+            vec![g.read(&yb, rows * n)]
+        });
+        assert_agree(&format!("hadamard mlp rows {rows}"), &plain, &coop);
+    }
+}

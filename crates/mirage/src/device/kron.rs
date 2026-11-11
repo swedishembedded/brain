@@ -38,6 +38,25 @@ pub struct KronParams<'a> {
     pub post: Option<&'a [f32]>,
 }
 
+impl KronParams<'_> {
+    /// `[pre | perm | post]` for rows of width `n`: the scale of the input, the output gather permutation (entries ride in f32
+    /// words, exact below 2^24) and the scale of the output, identity values for the parts that are `None`.
+    pub fn aux(&self, n: usize) -> Vec<f32> {
+        let ones = vec![1.0f32; n];
+        let perm: Vec<f32> = match self.perm {
+            Some(perm) => perm.iter().map(|&v| v as f32).collect(),
+            None => (0..n).map(|v| v as f32).collect(),
+        };
+        assert!(perm.len() == n && perm.iter().all(|&v| (v as usize) < n), "a permutation of 0..{n}");
+        [self.pre.unwrap_or(&ones), &perm, self.post.unwrap_or(&ones)].concat()
+    }
+
+    /// The factors and `aux` back to back, `[b | a | pre | perm | post]`: one rotation as the fused Hadamard MLP kernel reads it.
+    pub fn packed(&self, n: usize) -> Vec<f32> {
+        [self.b, self.a, &self.aux(n)].concat()
+    }
+}
+
 /// Largest transform one workgroup holds (the kernel's workgroup array).
 pub const MAX_WIDTH: usize = 1024;
 
@@ -47,16 +66,13 @@ impl Kron {
         let n = fa * fb;
         assert!(n <= MAX_WIDTH, "a Kronecker transform of width {n} exceeds the {MAX_WIDTH} one workgroup holds");
         assert!(p.a.len() == fa * fa && p.b.len() == fb * fb, "factors are {fa}x{fa} and {fb}x{fb}");
-        let ones = vec![1.0f32; n];
-        let perm: Vec<f32> = match p.perm {
-            Some(perm) => perm.iter().map(|&v| v as f32).collect(),
-            None => (0..n).map(|v| v as f32).collect(),
-        };
-        // Permutation entries ride in f32 words; they are exact below 2^24.
-        assert!(perm.len() == n && perm.iter().all(|&v| (v as usize) < n), "a permutation of 0..{n}");
         let up = |name: &str, v: &[f32]| dev.param_buffer(name, v);
-        let aux = [p.pre.unwrap_or(&ones), &perm, p.post.unwrap_or(&ones)].concat();
-        Kron { fa: fa as u32, fb: fb as u32, b: up("kron_b", p.b), a: up("kron_a", p.a), aux: up("kron_aux", &aux) }
+        Kron { fa: fa as u32, fb: fb as u32, b: up("kron_b", p.b), a: up("kron_a", p.a), aux: up("kron_aux", &p.aux(n)) }
+    }
+
+    /// The factors `(fa, fb)` the row is viewed as.
+    pub fn factors(&self) -> (u32, u32) {
+        (self.fa, self.fb)
     }
 
     /// The normalised sequency Walsh transform of rows of width `n` (a power of two).

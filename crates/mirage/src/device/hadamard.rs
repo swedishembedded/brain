@@ -26,7 +26,9 @@ pub struct DeviceHadamard {
 enum Form {
     Folded { cond_rot: Weight, rot: [Weight; 2], cond_u: DeviceBuffer, d2: DeviceBuffer, b2: DeviceBuffer },
     /// `hp` is `[cond_u | d2 | b2]` for the fused first rotation and middle stage.
-    Structured { cond_v: Weight, rot: [Kron; 3], hp: DeviceBuffer },
+    ///
+    /// `packed` holds the three rotations back to back for the single-dispatch kernel of devices with multi-barrier workgroups.
+    Structured { cond_v: Weight, rot: [Kron; 3], hp: DeviceBuffer, packed: DeviceBuffer },
 }
 
 impl DeviceHadamard {
@@ -45,17 +47,19 @@ impl DeviceHadamard {
                 }
             }
             WeightForm::Structured => {
-                let rotation = |i: usize, pre: Option<&[f32]>, perm: Option<&[u32]>, post: Option<&[f32]>| {
-                    Kron::upload(dev, mlp.factors, &KronParams { a: &mlp.w[i].0, b: &mlp.w[i].1, pre, perm, post })
+                let spec = |i: usize| -> KronParams<'_> {
+                    match i {
+                        0 => KronParams { a: &mlp.w[0].0, b: &mlp.w[0].1, pre: Some(&mlp.d[0]), perm: Some(&perms.0), post: None },
+                        1 => KronParams { a: &mlp.w[1].0, b: &mlp.w[1].1, pre: None, perm: Some(&perms.1), post: None },
+                        _ => KronParams { a: &mlp.w[2].0, b: &mlp.w[2].1, pre: Some(&mlp.d[2]), perm: None, post: Some(&mlp.d[3]) },
+                    }
                 };
+                let n = mlp.n;
                 Form::Structured {
                     cond_v: dev.linear_weight("cond_v", &mlp.cond_v),
-                    rot: [
-                        rotation(0, Some(&mlp.d[0]), Some(&perms.0), None),
-                        rotation(1, None, Some(&perms.1), None),
-                        rotation(2, Some(&mlp.d[2]), None, Some(&mlp.d[3])),
-                    ],
+                    rot: [0, 1, 2].map(|i| Kron::upload(dev, mlp.factors, &spec(i))),
                     hp: dev.buf(&[mlp.cond_u.as_slice(), &mlp.d[1], &mlp.b2].concat()),
+                    packed: dev.buf(&(0..3).flat_map(|i| spec(i).packed(n)).collect::<Vec<f32>>()),
                 }
             }
         };
@@ -65,17 +69,24 @@ impl DeviceHadamard {
     /// Append the steps adding the MLP of the normalised rows `h` to the residual rows `y`.
     pub fn encode_add(&self, dev: &Device, s: &mut Vec<Step>, h: &DeviceBuffer, rows: u32, y: &DeviceBuffer) {
         let (n, rank) = (self.n, HADAMARD_COND_RANK as u32);
-        let z1 = dev.alloc((rows * n) as usize);
         match &self.form {
             Form::Folded { cond_rot, rot, cond_u, d2, b2 } => {
+                let z1 = dev.alloc((rows * n) as usize);
                 let zc = dev.linear_new(s, cond_rot, h, rows);
                 dev.hada_mid(s, (&zc, rank + n, 0), (&zc, rank + n, rank), cond_u, (d2, b2), &z1, (rows, n, rank));
                 let z2 = dev.linear_new(s, &rot[0], &z1, rows);
                 let z3 = dev.linear_new(s, &rot[1], &z2, rows);
                 dev.add(s, &z3, y, rows * n);
             }
-            Form::Structured { cond_v, rot, hp } => {
+            Form::Structured { cond_v, rot, hp, packed } => {
                 let logits = dev.linear_new(s, cond_v, h, rows);
+                let (fa, fb) = rot[0].factors();
+                if dev.cooperative() && n <= 512 && fa <= 32 && fb <= 32 && rank <= 32 {
+                    let bufs = [h, packed, &logits, hp, y];
+                    s.push(dev.gpu().dispatch(dev.k("mirage_hada_mlp_wg"), &bufs, &[rows, fa, fb, rank], gpu_core::Dispatch::Workgroups(rows)));
+                    return;
+                }
+                let z1 = dev.alloc((rows * n) as usize);
                 dev.kron_hada(s, &rot[0], h, rows, (&logits, hp), rank, &z1);
                 let z2 = dev.alloc((rows * n) as usize);
                 dev.kron(s, &rot[1], &z1, rows, &z2, false);

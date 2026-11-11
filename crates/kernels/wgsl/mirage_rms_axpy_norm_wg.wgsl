@@ -14,7 +14,7 @@
 // squares expanded over the first pass's four sums), built for a device whose workgroups execute any number of
 // barriers. The one-barrier original folds 64 partials of each sum serially in every thread, which at one row is a
 // chain of a few hundred dependent shared-memory reads on a single multiprocessor; here every column is read once
-// into registers, the sums fold in seven steps, and the update and both stores reuse the registers.
+// into registers, the sums fold in five tree steps and a sum of sixteen, and the update and both stores reuse the registers.
 // Contract: d <= 512 and a multiple of 4 (the caller falls back to mirage_rms_axpy_norm otherwise); same params,
 // bindings and result as the original up to the reduction order.
 // Dispatch: rows * 128 invocations (one workgroup per row).
@@ -58,13 +58,14 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     // sum x^2, sum y^2, sum y u, sum u^2
     red[t] = vec4<f32>(dot(xv, xv), dot(yv, yv), dot(yv, u), dot(u, u));
     workgroupBarrier();
-    for (var s = 64u; s > 0u; s = s >> 1u) {
+    for (var s = 64u; s > 8u; s = s >> 1u) {
         if (t < s) {
             red[t] = red[t] + red[t + s];
         }
         workgroupBarrier();
     }
-    let sums = red[0];
+    var sums = vec4<f32>(0.0);
+    for (var i = 0u; i < 16u; i = i + 1u) { sums = sums + red[i]; }
     let inv1 = 1.0 / sqrt(sums.x / f32(p.d) + p.eps);
     let ss = sums.y + 2.0 * p.a * inv1 * sums.z + p.a * p.a * inv1 * inv1 * sums.w;
     let inv2 = 1.0 / sqrt(max(ss, 0.0) / f32(p.d) + p.eps);

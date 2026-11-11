@@ -924,6 +924,9 @@ pub const MIRAGE_KRON_HADA: &str = include_str!("../wgsl/mirage_kron_hada.wgsl")
 
 /// `wgsl/mirage_kron_hada_wg.wgsl`
 pub const MIRAGE_KRON_HADA_WG: &str = include_str!("../wgsl/mirage_kron_hada_wg.wgsl");
+
+/// `wgsl/mirage_hada_mlp_wg.wgsl`
+pub const MIRAGE_HADA_MLP_WG: &str = include_str!("../wgsl/mirage_hada_mlp_wg.wgsl");
 /// `wgsl/mirage_kron_rows.wgsl`
 pub const MIRAGE_KRON_ROWS: &str = include_str!("../wgsl/mirage_kron_rows.wgsl");
 
@@ -935,6 +938,9 @@ pub const MIRAGE_LANE_MEAN: &str = include_str!("../wgsl/mirage_lane_mean.wgsl")
 pub const MIRAGE_MEAN_H: &str = include_str!("../wgsl/mirage_mean_h.wgsl");
 /// `wgsl/mirage_mhc_maps.wgsl`
 pub const MIRAGE_MHC_MAPS: &str = include_str!("../wgsl/mirage_mhc_maps.wgsl");
+
+/// `wgsl/mirage_mhc_front_wg.wgsl`
+pub const MIRAGE_MHC_FRONT_WG: &str = include_str!("../wgsl/mirage_mhc_front_wg.wgsl");
 /// `wgsl/mirage_mhc_mix.wgsl`
 pub const MIRAGE_MHC_MIX: &str = include_str!("../wgsl/mirage_mhc_mix.wgsl");
 /// `wgsl/mirage_mhc_post.wgsl`
@@ -2098,11 +2104,13 @@ pub const ALL: &[(&str, &str)] = &[
     ("mirage_hconv_band_glu", MIRAGE_HCONV_BAND_GLU),
     ("mirage_kron_hada", MIRAGE_KRON_HADA),
     ("mirage_kron_hada_wg", MIRAGE_KRON_HADA_WG),
+    ("mirage_hada_mlp_wg", MIRAGE_HADA_MLP_WG),
     ("mirage_kron_rows", MIRAGE_KRON_ROWS),
     ("mirage_kron_rows_wg", MIRAGE_KRON_ROWS_WG),
     ("mirage_lane_mean", MIRAGE_LANE_MEAN),
     ("mirage_mean_h", MIRAGE_MEAN_H),
     ("mirage_mhc_maps", MIRAGE_MHC_MAPS),
+    ("mirage_mhc_front_wg", MIRAGE_MHC_FRONT_WG),
     ("mirage_mhc_mix", MIRAGE_MHC_MIX),
     ("mirage_mhc_post", MIRAGE_MHC_POST),
     ("mirage_pos_inc", MIRAGE_POS_INC),

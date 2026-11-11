@@ -80,11 +80,12 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     }
     red[t] = m;
     workgroupBarrier();
-    for (var st = 256u; st > 0u; st = st >> 1u) {
+    for (var st = 256u; st > 8u; st = st >> 1u) {
         if (t < st) { red[t] = max(red[t], red[t + st]); }
         workgroupBarrier();
     }
-    let gm = red[0];
+    var gm = red[0];
+    for (var i = 1u; i < 16u; i = i + 1u) { gm = max(gm, red[i]); }
     workgroupBarrier();
     var l = 0.0;
     if (gm > -1.0e29) {
@@ -96,11 +97,12 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     }
     red[t] = l;
     workgroupBarrier();
-    for (var st = 256u; st > 0u; st = st >> 1u) {
+    for (var st = 256u; st > 8u; st = st >> 1u) {
         if (t < st) { red[t] = red[t] + red[t + st]; }
         workgroupBarrier();
     }
-    let total = red[0];
+    var total = 0.0;
+    for (var i = 0u; i < 16u; i = i + 1u) { total = total + red[i]; }
     let groups = min(512u / vd4, 24u);
     let g = t / vd4;
     let col = t % vd4;

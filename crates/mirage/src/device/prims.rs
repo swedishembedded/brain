@@ -358,6 +358,21 @@ impl Device {
         self.push(s, "mirage_mhc_maps", &[phi, b[0], b[1], b[2], maps], &p, g.rows);
     }
 
+    /// The front of a decoder layer: the lane maps ([`Device::mhc_maps`]), the lane mix `u` ([`Device::mhc_mix`]) and `y = u`, the
+    /// block input the layer updates in place while `u` stays for [`Device::mhc_post`]. Where workgroups may run any number of
+    /// barriers and the lanes are the released four (a width of at most 512) this is one dispatch; elsewhere the three.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mhc_front(&self, s: &mut Vec<Step>, g: MhcShape, a: [f32; 3], lanes: &DeviceBuffer, phi: &DeviceBuffer, b: [&DeviceBuffer; 3], d: u32, (maps, u, y): (&DeviceBuffer, &DeviceBuffer, &DeviceBuffer)) {
+        if self.cooperative() && g.n == 4 && d <= 512 && d % 4 == 0 {
+            let p = [g.rows, g.n, g.lane_id, g.iters, a[0].to_bits(), a[1].to_bits(), a[2].to_bits(), d];
+            s.push(self.gpu().dispatch(self.k("mirage_mhc_front_wg"), &[lanes, phi, b[0], b[1], b[2], maps, u, y], &p, gpu_core::Dispatch::Workgroups(g.rows)));
+            return;
+        }
+        self.mhc_maps(s, g, a, phi, b, maps);
+        self.mhc_mix(s, lanes, maps, u, (g.rows, g.n, d));
+        self.copy_rows(s, u, (1, 0), y, (1, 0), 1, g.rows, d);
+    }
+
     /// `u = sum_j h_pre[j] * lanes[j]`.
     pub fn mhc_mix(&self, s: &mut Vec<Step>, lanes: &DeviceBuffer, maps: &DeviceBuffer, u: &DeviceBuffer, (rows, n, d): (u32, u32, u32)) {
         self.push(s, "mirage_mhc_mix", &[lanes, maps, u], &[rows, n, d], rows * d);
