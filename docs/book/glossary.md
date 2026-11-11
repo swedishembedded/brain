@@ -200,6 +200,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **config default**: the value a reader substitutes for a field a configuration omits, which is a guess about the publisher: loud when the field fixes a shape and silent when it only changes a value. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
 
+**conformer**: an encoder block in which attention and a convolution module sit between two half-step feed-forwards, so that it relates both distant rows and close ones. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
+
+**connectionist temporal classification**: a loss and a decoding rule for a model that writes a distribution over a vocabulary and a blank at every row, scoring a transcript by the total probability of all the paths that collapse to it. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
+
 **context extension**: making a model trained on texts of one length usable at a longer one, by choosing a scaling table for the new length and, usually, continuing to train it on texts of that length. *([Long Context](v06-language-models/08-long-context.md))*
 
 **context vector**: the vector that carries what an encoder has read to the decoder; in the first design a single vector, the encoder's last state, and in attention a vector of its own at every output step, a weighted average of the encoder states. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
@@ -1000,6 +1004,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **special tokens**: ids that stand for no piece of text, such as the beginning or end of a sequence, padding, an unknown piece or the markers of a chat turn, matched from their literals before ordinary encoding and never to be produced from text a client wrote. *([Tokenization](v05-sequences/02-tokenization.md))*
 
+**speech encoder**: the stack that turns the frames of a log-mel spectrogram into fewer rows of one width, each informed by its neighbours, ready for an alignment loss or a decoder. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
+
 **stable-softmax**: the softmax computed after subtracting the largest score from every score, which gives the same probabilities but keeps every exponent at most zero, so nothing overflows and the sum is at least one. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **standard error**: the standard deviation of an estimator over repeated samples, the typical size of its error; for the sample mean it is $\sigma/\sqrt{n}$, estimated by $s/\sqrt{n}$. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
@@ -1075,6 +1081,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **training throughput**: the rate at which a training run consumes tokens, stated as the FLOPs and bytes each token costs and the fraction of the device's roofline that the run reaches, not as seconds. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
+
+**transducer**: a recogniser with an encoder, a predictor over the labels written so far and a joint network over every node of the lattice of rows and labels, in which a blank moves to the next row and a label is written on the same row. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
 
 **transformer block**: the repeating unit of a transformer, one attention sublayer and one feed-forward sublayer, each with its normalization and its addition to the residual stream. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 

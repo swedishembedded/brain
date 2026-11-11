@@ -516,6 +516,7 @@ navigation:
           - docs/book/v09-audio/01-sound.md
           - docs/book/v09-audio/02-spectrograms.md
           - docs/book/v09-audio/03-audio-codecs.md
+          - docs/book/v09-audio/04-speech-recognition.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

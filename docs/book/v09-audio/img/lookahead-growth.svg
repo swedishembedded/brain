@@ -1,0 +1,34 @@
+<!-- source-sha256: 4400e24c365751a13848c06a4f3fdc510d5954c99b1251e954ab63f92f891166 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 340" width="560" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="340" fill="#ffffff"/>
+<line x1="58" y1="294" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="156.78" y1="294" x2="156.78" y2="30" stroke="#edf2f7"/>
+<text x="156.78" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="255.55" y1="294" x2="255.55" y2="30" stroke="#edf2f7"/>
+<text x="255.55" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="354.33" y1="294" x2="354.33" y2="30" stroke="#edf2f7"/>
+<text x="354.33" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">15</text>
+<line x1="453.1" y1="294" x2="453.1" y2="30" stroke="#edf2f7"/>
+<text x="453.1" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="58" y1="294" x2="542" y2="294" stroke="#edf2f7"/>
+<text x="52" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="208.84" x2="542" y2="208.84" stroke="#edf2f7"/>
+<text x="52" y="212.84" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="123.68" x2="542" y2="123.68" stroke="#edf2f7"/>
+<text x="52" y="127.68" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="38.52" x2="542" y2="38.52" stroke="#edf2f7"/>
+<text x="52" y="42.52" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<rect x="58" y="30" width="484" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="77.76,283.78 97.51,273.56 117.27,263.34 137.02,253.12 156.78,242.9 176.53,232.68 196.29,222.46 216.04,212.25 235.8,202.03 255.55,191.81 275.31,181.59 295.06,171.37 314.82,161.15 334.57,150.93 354.33,140.71 374.08,130.49 393.84,120.27 413.59,110.05 433.35,99.83 453.1,89.61 472.86,79.39 492.61,69.17 512.37,58.95 532.12,48.74"/><circle cx="77.76" cy="283.78" r="2.5" fill="#c05621"/><circle cx="97.51" cy="273.56" r="2.5" fill="#c05621"/><circle cx="117.27" cy="263.34" r="2.5" fill="#c05621"/><circle cx="137.02" cy="253.12" r="2.5" fill="#c05621"/><circle cx="156.78" cy="242.9" r="2.5" fill="#c05621"/><circle cx="176.53" cy="232.68" r="2.5" fill="#c05621"/><circle cx="196.29" cy="222.46" r="2.5" fill="#c05621"/><circle cx="216.04" cy="212.25" r="2.5" fill="#c05621"/><circle cx="235.8" cy="202.03" r="2.5" fill="#c05621"/><circle cx="255.55" cy="191.81" r="2.5" fill="#c05621"/><circle cx="275.31" cy="181.59" r="2.5" fill="#c05621"/><circle cx="295.06" cy="171.37" r="2.5" fill="#c05621"/><circle cx="314.82" cy="161.15" r="2.5" fill="#c05621"/><circle cx="334.57" cy="150.93" r="2.5" fill="#c05621"/><circle cx="354.33" cy="140.71" r="2.5" fill="#c05621"/><circle cx="374.08" cy="130.49" r="2.5" fill="#c05621"/><circle cx="393.84" cy="120.27" r="2.5" fill="#c05621"/><circle cx="413.59" cy="110.05" r="2.5" fill="#c05621"/><circle cx="433.35" cy="99.83" r="2.5" fill="#c05621"/><circle cx="453.1" cy="89.61" r="2.5" fill="#c05621"/><circle cx="472.86" cy="79.39" r="2.5" fill="#c05621"/><circle cx="492.61" cy="69.17" r="2.5" fill="#c05621"/><circle cx="512.37" cy="58.95" r="2.5" fill="#c05621"/><circle cx="532.12" cy="48.74" r="2.5" fill="#c05621"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="77.76,283.78 97.51,283.78 117.27,283.78 137.02,283.78 156.78,283.78 176.53,283.78 196.29,283.78 216.04,283.78 235.8,283.78 255.55,283.78 275.31,283.78 295.06,283.78 314.82,283.78 334.57,283.78 354.33,283.78 374.08,283.78 393.84,283.78 413.59,283.78 433.35,283.78 453.1,283.78 472.86,283.78 492.61,283.78 512.37,283.78 532.12,283.78"/><circle cx="77.76" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="97.51" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="117.27" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="137.02" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="156.78" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="176.53" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="196.29" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="216.04" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="235.8" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="255.55" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="275.31" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="295.06" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="314.82" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="334.57" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="354.33" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="374.08" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="393.84" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="413.59" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="433.35" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="453.1" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="472.86" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="492.61" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="512.37" cy="283.78" r="2.5" fill="#2b6cb0"/><circle cx="532.12" cy="283.78" r="2.5" fill="#2b6cb0"/></g>
+<text x="300" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">attention layers in the stack</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">audio the last layer reads ahead (seconds)</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Look-ahead of a stack of masked attention layers</text>
+<rect x="66" y="38" width="226.42" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">window sliding with 3 rows ahead</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chunks of 4 rows (Nemotron)</text>
+</svg>

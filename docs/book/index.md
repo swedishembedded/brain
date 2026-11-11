@@ -160,4 +160,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 1. [Sound and Sampling](v09-audio/01-sound.md): How is a sound wave turned into numbers without losing what we hear?
 2. [Spectrograms and the Mel Scale](v09-audio/02-spectrograms.md): How do we see which frequencies are present at each moment, the way an ear does?
 3. [Neural Audio Codecs](v09-audio/03-audio-codecs.md): How can audio become a stream of discrete tokens a language model can predict?
+4. [Speech Recognition](v09-audio/04-speech-recognition.md): How does a model turn speech into text when it does not know where each word starts?
 <!-- /contents -->

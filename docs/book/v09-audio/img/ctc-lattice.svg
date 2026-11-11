@@ -1,0 +1,59 @@
+<!-- source-sha256: d33343e656ce7e0949468d4c94ac06fb324a97ddac3d2d13600f613ff168740c -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 388" width="600" height="388"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="600" height="388" fill="#ffffff"/>
+<text x="150" y="34.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">frame 0</text>
+<text x="270" y="34.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">frame 1</text>
+<text x="390" y="34.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">frame 2</text>
+<text x="510" y="34.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">frame 3</text>
+<text x="24" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="start">state 0</text>
+<text x="24" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="start">blank</text>
+<text x="24" y="136.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="start">state 1</text>
+<text x="24" y="152.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="start">letter a</text>
+<text x="24" y="198.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="start">state 2</text>
+<text x="24" y="214.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="start">blank</text>
+<text x="24" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="start">state 3</text>
+<text x="24" y="276.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="start">letter b</text>
+<text x="24" y="322.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="start">state 4</text>
+<text x="24" y="338.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="start">blank</text>
+<ellipse cx="150" cy="78" rx="38" ry="18" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.2500</text>
+<ellipse cx="150" cy="140" rx="38" ry="18" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="150" y="144.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.6000</text>
+<ellipse cx="270" cy="78" rx="38" ry="18" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="270" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.0375</text>
+<ellipse cx="270" cy="140" rx="38" ry="18" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="270" y="144.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.3825</text>
+<ellipse cx="270" cy="202" rx="38" ry="18" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="270" y="206.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.0900</text>
+<ellipse cx="270" cy="264" rx="38" ry="18" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="270" y="268.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.2400</text>
+<ellipse cx="390" cy="140" rx="38" ry="18" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="144.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.2100</text>
+<ellipse cx="390" cy="202" rx="38" ry="18" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="206.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.1418</text>
+<ellipse cx="390" cy="264" rx="38" ry="18" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="268.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.1425</text>
+<ellipse cx="390" cy="326" rx="38" ry="18" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="330.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.0720</text>
+<ellipse cx="510" cy="264" rx="38" ry="18" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="510" y="268.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.1730</text>
+<ellipse cx="510" cy="326" rx="38" ry="18" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="510" y="330.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">0.0322</text>
+<line x1="191" y1="78" x2="229" y2="78" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="191" y1="140" x2="229" y2="140" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="178.34" y1="92.64" x2="241.66" y2="125.36" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="178.34" y1="154.64" x2="241.66" y2="187.36" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="167.92" y1="158.52" x2="252.08" y2="245.48" stroke="#1a202c" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<line x1="311" y1="140" x2="349" y2="140" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="298.34" y1="92.64" x2="361.66" y2="125.36" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="311" y1="202" x2="349" y2="202" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="298.34" y1="154.64" x2="361.66" y2="187.36" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="311" y1="264" x2="349" y2="264" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="298.34" y1="216.64" x2="361.66" y2="249.36" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="287.92" y1="158.52" x2="372.08" y2="245.48" stroke="#1a202c" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<line x1="298.34" y1="278.64" x2="361.66" y2="311.36" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="431" y1="264" x2="469" y2="264" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="418.34" y1="216.64" x2="481.66" y2="249.36" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="407.92" y1="158.52" x2="492.08" y2="245.48" stroke="#1a202c" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#head)"/>
+<line x1="431" y1="326" x2="469" y2="326" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="418.34" y1="278.64" x2="481.66" y2="311.36" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>
