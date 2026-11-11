@@ -1,4 +1,4 @@
-<!-- source-sha256: 31797b43b111ef16c2d1a9205e4fd7d0c312602d7c07942dd06f358fedd3bff1 -->
+<!-- source-sha256: e98ad512e52efa6df79c3808a568683e8d3144c88933cbcf6fb3f3a1619cc57e -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300" width="800" height="300"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="300" fill="#ffffff"/>
 <text x="40" y="24.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">360 pumps, 4 rows each</text>
 <line x1="40" y1="48" x2="634" y2="48" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="None"/>

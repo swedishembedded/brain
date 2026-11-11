@@ -1,4 +1,4 @@
-<!-- source-sha256: 46f9f059c22066078dabf96726d7366fc9206e5430398bcca1f7f7e11c05531c -->
+<!-- source-sha256: 710d315218e916bad22feda0b2981d1572201e14455d9a75a76acc96b5f5e325 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 408" width="800" height="408"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="408" fill="#ffffff"/>
 <rect x="305" y="23" width="190" height="54" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
 <text x="400" y="46.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  Splits and leakage</text>

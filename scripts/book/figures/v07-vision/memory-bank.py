@@ -16,7 +16,7 @@ import segment_anything as sa  # noqa: E402
 from svgdiagram import FRAME, INK, MUTED, Diagram  # noqa: E402
 
 W, H = 940, 400
-BOX, STEP, X0, Y = 60, 66, 40, 120
+BOX, STEP, X0, Y = 66, 68, 40, 120
 
 
 def render() -> str:
@@ -41,7 +41,7 @@ def render() -> str:
         d.line((cx(t), Y + 39), (W / 2 - 150, 248), dash="3 3")
     d.arrow(bank["r"], cur["l"])
     d.path([(cx(f), Y + 39), (cx(f), 200), (cur["t"][0], 200), (cur["t"][0], cur["t"][1])], radius=8)
-    d.text(W / 2 + 250, 186, ["the current frame's features are the queries"], size=12, color=MUTED)
+    d.text(790, 232, ["the current frame's", "features are the queries"], size=12, color=MUTED)
     d.text(W / 2, H - 14, ["Every frame before 12 also lends an object pointer (12 pointers). Slot 6 is the previous frame, slot 1 "
                            "six frames back; the prompted frame is always read, as slot 0."], size=12, color=MUTED)
     return d.svg()

@@ -1,4 +1,4 @@
-<!-- source-sha256: 4a30dc9042fdf79aae72a30f441a448f21472dbcf75e5338f54bf7d99afd4f99 -->
+<!-- source-sha256: 1e849cde04235be40822a6e1f9c67e39d3370fc97b516d1a0ca2dfa1584ac7f2 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" width="1000" height="560"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="560" fill="#ffffff"/>
 <text x="24" y="52.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">A network that returns the picture: Real-ESRGAN</text>
 <ellipse cx="80" cy="110" rx="60" ry="23" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>

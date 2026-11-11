@@ -17,9 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import project_speech_pipeline as ps  # noqa: E402
 from svgdiagram import Diagram  # noqa: E402
 
-W, GAP, TOP = 800, 18, 16
-COLS = (80, 210, 340, 470, 600, 730)
-BOX_W, BOX_H = 112, 70
+W, GAP, TOP = 880, 18, 16
+COLS = (85, 225, 365, 505, 645, 785)
+BOX_W, BOX_H = 120, 70
 H1, H2 = 140, 190
 
 

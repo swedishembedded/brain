@@ -1,4 +1,4 @@
-<!-- source-sha256: e9ea0d83dfffdcd613bf92eb1d99589df695bfbe30c6c0b7d54dead64641bbc1 -->
+<!-- source-sha256: ca48bad588605fcebd969afe62d9c526a7c605f1216529c43dfe962bea885d75 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400" width="700" height="400"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="700" height="400" fill="#ffffff"/>
 <rect x="44" y="44" width="320" height="320" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
 <rect x="84" y="104" width="20" height="20" fill="#bee3f8"/>
@@ -155,8 +155,8 @@
 <rect x="104" y="124" width="160" height="160" fill="none" fill-opacity="1.0" stroke="#1a202c" stroke-width="2.0" stroke-dasharray="6 4"/>
 <text x="144" y="95.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#2b6cb0" text-anchor="middle">a (2, 3, 10, 11)</text>
 <text x="270" y="352.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c05621" text-anchor="middle">b (7, 6, 14, 14)</text>
-<text x="328" y="112.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">prediction</text>
-<text x="328" y="128.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">(3, 4, 11, 12)</text>
+<text x="272" y="112.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">prediction</text>
+<text x="272" y="128.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">(3, 4, 11, 12)</text>
 <rect x="104" y="124" width="140" height="140" fill="#1a202c" fill-opacity="0.12" stroke="none" stroke-width="0"/>
 <text x="420" y="70.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="start">IoU of the prediction with a</text>
 <text x="420" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="start">overlap width  min(10, 11) - max(2, 3) = 7</text>

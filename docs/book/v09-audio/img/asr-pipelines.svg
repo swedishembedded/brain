@@ -1,61 +1,61 @@
-<!-- source-sha256: 67b2580b260767ae11cd5784d66e305be815c06e59c665f1d52165a0aff07b93 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 330" width="800" height="330"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="330" fill="#ffffff"/>
-<rect x="20" y="16" width="760" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<!-- source-sha256: 39e9b629a862c8a65cb26013ec2ae6c81796c19c39c4b07d4d568828e17aa427 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 330" width="880" height="330"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="880" height="330" fill="#ffffff"/>
+<rect x="20" y="16" width="840" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Qwen3-ASR: a decoder that reads the audio rows as part of its prompt</text>
-<rect x="24" y="69" width="112" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
-<text x="80" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
-<text x="80" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16,000 / s</text>
-<rect x="154" y="69" width="112" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="210" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">log-mel</text>
-<text x="210" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">100 / s x 128</text>
-<rect x="284" y="69" width="112" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="340" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 strided convs</text>
-<text x="340" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">13 rows / s</text>
-<text x="340" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 1024</text>
-<rect x="414" y="69" width="112" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="470" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24 blocks</text>
-<text x="470" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">windows of</text>
-<text x="470" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">104 rows</text>
-<rect x="544" y="69" width="112" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="600" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">projector</text>
-<text x="600" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">13 rows / s</text>
-<text x="600" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 2048</text>
-<rect x="674" y="69" width="112" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
-<text x="730" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decoder, 28 layers</text>
-<text x="730" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">writes the</text>
-<text x="730" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">text</text>
-<line x1="139" y1="104" x2="151" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="269" y1="104" x2="281" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="399" y1="104" x2="411" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="529" y1="104" x2="541" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="659" y1="104" x2="671" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<rect x="20" y="174" width="760" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<rect x="25" y="69" width="120" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="85" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
+<text x="85" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16,000 / s</text>
+<rect x="165" y="69" width="120" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">log-mel</text>
+<text x="225" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">100 / s x 128</text>
+<rect x="305" y="69" width="120" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="365" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 strided convs</text>
+<text x="365" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">13 rows / s</text>
+<text x="365" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 1024</text>
+<rect x="445" y="69" width="120" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="505" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24 blocks</text>
+<text x="505" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">windows of</text>
+<text x="505" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">104 rows</text>
+<rect x="585" y="69" width="120" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="645" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">projector</text>
+<text x="645" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">13 rows / s</text>
+<text x="645" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 2048</text>
+<rect x="725" y="69" width="120" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="785" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decoder, 28 layers</text>
+<text x="785" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">writes the</text>
+<text x="785" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">text</text>
+<line x1="148" y1="104" x2="162" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="288" y1="104" x2="302" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="428" y1="104" x2="442" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="568" y1="104" x2="582" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="708" y1="104" x2="722" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="20" y="174" width="840" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="196" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Nemotron: a transducer that writes at most a few letters at each row</text>
-<rect x="24" y="227" width="112" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
-<text x="80" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
-<text x="80" y="274.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16,000 / s</text>
-<rect x="154" y="227" width="112" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="210" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">log-mel</text>
-<text x="210" y="274.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">100 / s x 128</text>
-<rect x="284" y="227" width="112" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="340" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 strided convs</text>
-<text x="340" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12.5 rows / s</text>
-<text x="340" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 1024</text>
-<rect x="414" y="227" width="112" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="470" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24 Conformer</text>
-<text x="470" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">blocks, chunks</text>
-<text x="470" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">of 4 rows</text>
-<rect x="544" y="227" width="112" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="600" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">projectors</text>
-<text x="600" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12.5 rows / s</text>
-<text x="600" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 640</text>
-<rect x="674" y="227" width="112" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
-<text x="730" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">predictor and</text>
-<text x="730" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">joint: blank</text>
-<text x="730" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">or a piece</text>
-<line x1="139" y1="262" x2="151" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="269" y1="262" x2="281" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="399" y1="262" x2="411" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="529" y1="262" x2="541" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="659" y1="262" x2="671" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="25" y="227" width="120" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="85" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
+<text x="85" y="274.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16,000 / s</text>
+<rect x="165" y="227" width="120" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">log-mel</text>
+<text x="225" y="274.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">100 / s x 128</text>
+<rect x="305" y="227" width="120" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="365" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 strided convs</text>
+<text x="365" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12.5 rows / s</text>
+<text x="365" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 1024</text>
+<rect x="445" y="227" width="120" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="505" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24 Conformer</text>
+<text x="505" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">blocks, chunks</text>
+<text x="505" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">of 4 rows</text>
+<rect x="585" y="227" width="120" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="645" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">projectors</text>
+<text x="645" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12.5 rows / s</text>
+<text x="645" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 640</text>
+<rect x="725" y="227" width="120" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="785" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">predictor and</text>
+<text x="785" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">joint: blank</text>
+<text x="785" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">or a piece</text>
+<line x1="148" y1="262" x2="162" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="288" y1="262" x2="302" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="428" y1="262" x2="442" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="568" y1="262" x2="582" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="708" y1="262" x2="722" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
 </svg>

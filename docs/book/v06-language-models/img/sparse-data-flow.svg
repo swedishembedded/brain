@@ -1,4 +1,4 @@
-<!-- source-sha256: 6feb185a35333fb820034375c6c6ce2585e68d9e0ddea365394970db50084427 -->
+<!-- source-sha256: b2cf223d9d9fa53c68516ad887d3dad9b21b953daab45a902d781c1fe05d3648 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 570" width="980" height="570"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="980" height="570" fill="#ffffff"/>
 <rect x="10" y="10" width="470" height="290" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Key-level indexer: a score for every cached key</text>

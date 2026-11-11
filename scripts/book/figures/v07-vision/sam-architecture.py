@@ -36,7 +36,7 @@ def render() -> str:
     d.path([(emb["r"][0], emb["r"][1] + 30), (390, 330), (690, 330), (690, dec["b"][1])], radius=8, dash="5 3")
     d.text(640, 346, ["the stored embedding is read again for every prompt"], size=12, color=MUTED)
     d.arrow(dec["r"], out["l"])
-    d.text(W / 2, H - 6, [f"{data['cache_bytes'] / 2 ** 20:.0f} MiB of features per image are kept in 32-bit numbers; "
+    d.text(W / 2, H - 12, [f"{data['cache_bytes'] / 2 ** 20:.0f} MiB of features per image are kept in 32-bit numbers; "
                           f"one click costs {100 * data['decoder'] / data['trunk']:.2f} percent of the encoder's FLOPs."],
            size=12, color=MUTED)
     return d.svg()

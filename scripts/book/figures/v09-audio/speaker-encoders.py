@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import speaker_embeddings as se  # noqa: E402
 from svgdiagram import Diagram  # noqa: E402
 
-W, PANEL_H, GAP, TOP = 800, 140, 18, 16
-COLS = (75, 185, 295, 405, 515, 625, 735)
+W, PANEL_H, GAP, TOP = 900, 140, 18, 16
+COLS = (85, 205, 325, 445, 565, 685, 805)
 BOX_W, BOX_H = 100, 70
 
 

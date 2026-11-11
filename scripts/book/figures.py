@@ -18,7 +18,10 @@ cannot disagree.
 
 Each SVG records the SHA-256 of its source. `--check` verifies that every
 source has its SVG, that the recorded hash matches (the SVG is not stale),
-and that no SVG lacks a source. The check does not re-render: Graphviz
+that no SVG lacks a source, and that no figure overflows: no label wider
+than its box, no box across the edge of its panel, nothing off the canvas
+(`svgcheck`, which measures text with Helvetica's advance widths). Rendering
+fails on the same check. The check does not re-render: Graphviz
 layouts depend on the installed fonts, so byte-for-byte comparison across
 machines would fail for reasons unrelated to the figure.
 
@@ -44,6 +47,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import deps  # noqa: E402
+import svgcheck  # noqa: E402
 ROOT = HERE.parents[1]
 SRC = HERE / "figures"
 BOOK = ROOT / "docs" / "book"
@@ -111,9 +115,11 @@ def check() -> int:
         if not out.is_file():
             errors.append(f"{out.relative_to(ROOT)}: missing (render {src.relative_to(ROOT)})")
             continue
-        m = STAMP.search(out.read_text(encoding="utf-8"))
+        text = out.read_text(encoding="utf-8")
+        m = STAMP.search(text)
         if not m or m.group(1) != digest(src):
             errors.append(f"{out.relative_to(ROOT)}: stale, its source changed")
+        errors += [f"{out.relative_to(ROOT)}: {p}" for p in svgcheck.problems(text)]
     for svg in BOOK.rglob("img/*.svg"):
         if svg not in expected:
             errors.append(f"{svg.relative_to(ROOT)}: no source under scripts/book/figures")
@@ -133,6 +139,7 @@ def main() -> int:
         png_dir = Path(sys.argv[sys.argv.index("--png") + 1])
         png_dir.mkdir(parents=True, exist_ok=True)
     everything = "--all" in sys.argv
+    overflow = []
     for src in sources():
         out = target(src)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -140,11 +147,18 @@ def main() -> int:
         # A figure whose recorded source digest still matches is not
         # re-rendered: some recompute whole training runs.
         if everything or not stamp or stamp.group(1) != digest(src):
-            out.write_text(render(src), encoding="utf-8")
+            svg = render(src)
+            out.write_text(svg, encoding="utf-8")
             print(f"{out.relative_to(ROOT)} ({out.stat().st_size // 1024} KiB)")
+            overflow += [f"{out.relative_to(ROOT)}: {p}" for p in svgcheck.problems(svg)]
         if png_dir:
             subprocess.run(["rsvg-convert", "-z", "1.5", "-o", str(png_dir / (src.stem + ".png")), str(out)],
                            check=True)
+    if overflow:
+        # Written anyway, so the PNG can be looked at; but the figure is wrong.
+        print("\n".join(overflow), file=sys.stderr)
+        print("figures: the figures above overflow (see scripts/book/svgcheck.py)", file=sys.stderr)
+        return 1
     return 0
 
 

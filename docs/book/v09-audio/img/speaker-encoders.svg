@@ -1,73 +1,73 @@
-<!-- source-sha256: 5417aafa74c65b7a9e3008fdf09a93d875e390059ff9c027a3add36beb5731e7 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 330" width="800" height="330"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="330" fill="#ffffff"/>
-<rect x="20" y="16" width="760" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<!-- source-sha256: 0e6ed069536f9d88d4b8b1e0de50a82b226f2d367f9b4697da6a567451dbd36a -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 330" width="900" height="330"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="900" height="330" fill="#ffffff"/>
+<rect x="20" y="16" width="860" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Encoder 1 (ECAPA-TDNN): the speaker vector that a voice-cloning synthesiser reads as one position</text>
-<rect x="25" y="69" width="100" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
-<text x="75" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
-<text x="75" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24,000 / s</text>
-<rect x="135" y="69" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="185" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">log-mel</text>
-<text x="185" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">93.75 / s</text>
-<text x="185" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 128</text>
-<rect x="245" y="69" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="295" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">time-delay</text>
-<text x="295" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">convolution</text>
-<text x="295" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">k 5, x 512</text>
-<rect x="355" y="69" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="405" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 SE-Res2Net</text>
-<text x="405" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">blocks, d 2 3 4</text>
-<text x="405" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 512 each</text>
-<rect x="465" y="69" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="515" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">concatenate</text>
-<text x="515" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and convolve</text>
-<text x="515" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 1536</text>
-<rect x="575" y="69" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="625" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">attentive</text>
-<text x="625" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">statistics</text>
-<text x="625" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 3072</text>
-<rect x="685" y="69" width="100" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
-<text x="735" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">projection</text>
-<text x="735" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1024 numbers</text>
-<text x="735" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per clip</text>
-<line x1="128" y1="104" x2="132" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="238" y1="104" x2="242" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="348" y1="104" x2="352" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="458" y1="104" x2="462" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="568" y1="104" x2="572" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="678" y1="104" x2="682" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<rect x="20" y="174" width="760" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<rect x="35" y="69" width="100" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="85" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
+<text x="85" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24,000 / s</text>
+<rect x="155" y="69" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="205" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">log-mel</text>
+<text x="205" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">93.75 / s</text>
+<text x="205" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 128</text>
+<rect x="275" y="69" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="325" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">time-delay</text>
+<text x="325" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">convolution</text>
+<text x="325" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">k 5, x 512</text>
+<rect x="395" y="69" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="445" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 SE-Res2Net</text>
+<text x="445" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">blocks, d 2 3 4</text>
+<text x="445" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 512 each</text>
+<rect x="515" y="69" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="565" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">concatenate</text>
+<text x="565" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and convolve</text>
+<text x="565" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 1536</text>
+<rect x="635" y="69" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="685" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">attentive</text>
+<text x="685" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">statistics</text>
+<text x="685" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 3072</text>
+<rect x="755" y="69" width="100" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="805" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">projection</text>
+<text x="805" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1024 numbers</text>
+<text x="805" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per clip</text>
+<line x1="138" y1="104" x2="152" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="258" y1="104" x2="272" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="378" y1="104" x2="392" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="498" y1="104" x2="512" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="618" y1="104" x2="632" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="738" y1="104" x2="752" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="20" y="174" width="860" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="196" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Encoder 2 (CAM++): the speaker vector that a flow-matching decoder reads after a normalisation</text>
-<rect x="25" y="227" width="100" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
-<text x="75" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
-<text x="75" y="274.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16,000 / s</text>
-<rect x="135" y="227" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="185" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">filterbank</text>
-<text x="185" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">100 / s</text>
-<text x="185" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 80</text>
-<rect x="245" y="227" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="295" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2-D stem</text>
-<text x="295" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">frequency /8</text>
-<text x="295" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 320</text>
-<rect x="355" y="227" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="405" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">time-delay</text>
-<text x="405" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">conv, stride 2</text>
-<text x="405" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">50 / s x 128</text>
-<rect x="465" y="227" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="515" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">52 dense</text>
-<text x="515" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">context-gated</text>
-<text x="515" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layers</text>
-<rect x="575" y="227" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="625" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">statistics</text>
-<text x="625" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mean and std</text>
-<text x="625" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 1024</text>
-<rect x="685" y="227" width="100" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
-<text x="735" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">projection</text>
-<text x="735" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">192 numbers</text>
-<text x="735" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per clip</text>
-<line x1="128" y1="262" x2="132" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="238" y1="262" x2="242" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="348" y1="262" x2="352" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="458" y1="262" x2="462" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="568" y1="262" x2="572" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="678" y1="262" x2="682" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="35" y="227" width="100" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="85" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
+<text x="85" y="274.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16,000 / s</text>
+<rect x="155" y="227" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="205" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">filterbank</text>
+<text x="205" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">100 / s</text>
+<text x="205" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 80</text>
+<rect x="275" y="227" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="325" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2-D stem</text>
+<text x="325" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">frequency /8</text>
+<text x="325" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 320</text>
+<rect x="395" y="227" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="445" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">time-delay</text>
+<text x="445" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">conv, stride 2</text>
+<text x="445" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">50 / s x 128</text>
+<rect x="515" y="227" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="565" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">52 dense</text>
+<text x="565" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">context-gated</text>
+<text x="565" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layers</text>
+<rect x="635" y="227" width="100" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="685" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">statistics</text>
+<text x="685" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mean and std</text>
+<text x="685" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 1024</text>
+<rect x="755" y="227" width="100" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="805" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">projection</text>
+<text x="805" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">192 numbers</text>
+<text x="805" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per clip</text>
+<line x1="138" y1="262" x2="152" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="258" y1="262" x2="272" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="378" y1="262" x2="392" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="498" y1="262" x2="512" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="618" y1="262" x2="632" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="738" y1="262" x2="752" y2="262" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
 </svg>

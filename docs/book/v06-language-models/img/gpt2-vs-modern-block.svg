@@ -1,4 +1,4 @@
-<!-- source-sha256: 7d7762ae2bccc8e71d3bad4734332e7847113b6f8bbb708c061e863c877ecf3c -->
+<!-- source-sha256: 7ec569495c462d59ddb5ff3c2ec91feab821a6548338e952dbe8ea0a47bae2a7 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 690" width="900" height="690"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="900" height="690" fill="#ffffff"/>
 <rect x="15" y="10" width="420" height="670" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="29" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">GPT-2 small (2019)</text>

@@ -1,4 +1,4 @@
-<!-- source-sha256: 26757421ae5c700890c561f95ecfeca1d38449548ab728705f7b58c7f422b1fe -->
+<!-- source-sha256: 491dab79141c592632e2b7329b55dbfb3309b9c7864f290f496319344ac4d8c8 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 430" width="800" height="430"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="430" fill="#ffffff"/>
 <rect x="10" y="10" width="780" height="410" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">One LSTM step: the cell state c is kept by a gate and added to by a gate</text>

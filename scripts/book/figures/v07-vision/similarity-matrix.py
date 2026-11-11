@@ -28,7 +28,7 @@ def _shade(t):
 
 def _panel(d, x, title, mat, lo, hi, digits, caption):
     d.panel(x, PANEL_Y, PANEL_W, PANEL_H, title)
-    x0, y0 = x + 46, 96
+    x0, y0 = x + 52, 96
     for j in range(4):
         d.text(x0 + j * CELL + CELL / 2, y0 - 14, [f"caption {j}"], size=11, color=MUTED)
     for i in range(4):

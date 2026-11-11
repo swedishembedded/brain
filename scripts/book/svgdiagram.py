@@ -17,6 +17,7 @@ procure our services by sending an email to info@swedishembedded.com.
 """
 from html import escape
 
+import svgcheck
 from svgplot import FONT, fmt
 
 INK = "#1a202c"
@@ -25,13 +26,14 @@ FRAME = "#a0aec0"
 RED = "#c53030"  # backward (gradient) flow
 FILL = {"plain": "#ffffff", "model": "#e2e8f0", "result": "#fefcbf", "accent": "#ebf4ff"}
 LINE_H = 16  # px between text lines at the body size
-CHAR_W = 0.56  # average glyph advance as a fraction of the font size
 
 
 def text_width(lines, size=13):
-    """Estimated width in px of the widest of `lines`, for sizing boxes."""
+    """Width in px of the widest of `lines` set in the book's face, for sizing
+    boxes; the same measure `svgcheck` holds a rendered figure to (a box
+    needs this plus 2 * svgcheck.TEXT_MARGIN)."""
     lines = [lines] if isinstance(lines, str) else lines
-    return max(len(line) for line in lines) * CHAR_W * size
+    return max(svgcheck.text_width(line, size) for line in lines)
 
 
 def ellipse_x(ell, side, dy=0.0):

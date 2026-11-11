@@ -33,9 +33,9 @@ def render() -> str:
         d.arrow(proj[name]["r"], vals[name]["l"])
     # scores: a taller box so that Q and K arrive at their own points of its left edge
     sc_x, row = 505, 145
-    scores = d.box(sc_x, row, 110, 120, ["Q K^T", "divided by", f"sqrt(d_k) = sqrt({DK})"], "model")
-    d.arrow(vals["Q"]["r"], (sc_x - 55, row - 30))
-    d.arrow(vals["K"]["r"], (sc_x - 55, row + 30))
+    scores = d.box(sc_x, row, 120, 120, ["Q K^T", "divided by", f"sqrt(d_k) = sqrt({DK})"], "model")
+    d.arrow(vals["Q"]["r"], (sc_x - 60, row - 30))
+    d.arrow(vals["K"]["r"], (sc_x - 60, row + 30))
     soft = d.box(660, row, 100, 60, ["softmax", "of each row"], "model")
     mask = d.oval(660, 45, 100, 36, ["mask (optional)"], "plain")
     d.arrow(mask["b"], soft["t"], "adds -inf where hidden", side="right")

@@ -1,4 +1,4 @@
-<!-- source-sha256: 8346a6eccb232b78b1c1efe0f3c1b700c276fdcc62617582e548222012d12e0f -->
+<!-- source-sha256: 9cd7bfd18ec56a1a6681bd0623f6bb530c8fdb2afe218eae3962d0dd6d1e88a8 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 340" width="840" height="340"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="840" height="340" fill="#ffffff"/>
 <rect x="20" y="37" width="220" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
 <text x="130" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  Tokenizer</text>

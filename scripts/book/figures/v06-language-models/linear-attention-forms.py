@@ -16,8 +16,8 @@ import linear_attention as la  # noqa: E402
 from svgdiagram import MUTED, Diagram  # noqa: E402
 
 W, PANEL_H, GAP, TOP = 780, 176, 18, 16
-COLS = (105, 255, 405, 555, 705)
-BOX_W, BOX_H = 124, 62
+COLS = (97, 242, 387, 532, 677)
+BOX_W, BOX_H = 120, 62
 
 
 def render() -> str:

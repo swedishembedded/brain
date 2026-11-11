@@ -1,4 +1,4 @@
-<!-- source-sha256: f7b6adc44b23e482e344e67fed06b2649aaeb75e3c5a2e0a9c45932378f71507 -->
+<!-- source-sha256: f0f7582dd27828113275c68a566c877a8e074acadb26e3942f61ed1bf93e9272 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 600" width="1000" height="600"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="600" fill="#ffffff"/>
 <rect x="10" y="10" width="980" height="150" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">three distinct blocks: three sets of weights</text>

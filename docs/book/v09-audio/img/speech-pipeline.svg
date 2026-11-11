@@ -1,59 +1,59 @@
-<!-- source-sha256: c40714f1100ca1e7af4df0c4ebc867ee7fc3c152bd9a64f047c630ca0bd3f024 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 380" width="800" height="380"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="380" fill="#ffffff"/>
-<rect x="20" y="16" width="760" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<!-- source-sha256: 8331ec186bacc7e2550fc00473fc4f2fe8b7e3bdbb4ae37056a6856f5ab12424 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 380" width="880" height="380"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="880" height="380" fill="#ffffff"/>
+<rect x="20" y="16" width="840" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Listening: a waveform becomes text</text>
-<rect x="24" y="69" width="112" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
-<text x="80" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
-<text x="80" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12,000 / s</text>
-<rect x="154" y="69" width="112" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="210" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Kaiser sinc</text>
-<text x="210" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">resampler</text>
-<text x="210" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8,000 / s</text>
-<rect x="284" y="69" width="112" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="340" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">log-mel</text>
-<text x="340" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">50 frames / s</text>
-<text x="340" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 16, standardized</text>
-<rect x="414" y="69" width="112" height="70" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
-<text x="470" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">residual</text>
-<text x="470" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">quantizer</text>
-<text x="470" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 16 codewords</text>
-<rect x="544" y="69" width="112" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="600" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">CTC recogniser</text>
-<text x="600" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">80 - 24 - 6</text>
-<text x="600" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">greedy decode</text>
-<rect x="674" y="69" width="112" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
-<text x="730" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">text</text>
-<text x="730" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">letters and</text>
-<text x="730" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">spaces</text>
-<line x1="139" y1="104" x2="151" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="269" y1="104" x2="281" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="399" y1="104" x2="411" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="529" y1="104" x2="541" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="659" y1="104" x2="671" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<rect x="20" y="174" width="760" height="190" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<rect x="25" y="69" width="120" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="85" y="100.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
+<text x="85" y="116.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12,000 / s</text>
+<rect x="165" y="69" width="120" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Kaiser sinc</text>
+<text x="225" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">resampler</text>
+<text x="225" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8,000 / s</text>
+<rect x="305" y="69" width="120" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="365" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">log-mel</text>
+<text x="365" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">50 frames / s</text>
+<text x="365" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x 16, standardized</text>
+<rect x="445" y="69" width="120" height="70" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="505" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">residual</text>
+<text x="505" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">quantizer</text>
+<text x="505" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 x 16 codewords</text>
+<rect x="585" y="69" width="120" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="645" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">CTC recogniser</text>
+<text x="645" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">80 - 24 - 6</text>
+<text x="645" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">greedy decode</text>
+<rect x="725" y="69" width="120" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="785" y="92.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">text</text>
+<text x="785" y="108.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">letters and</text>
+<text x="785" y="124.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">spaces</text>
+<line x1="148" y1="104" x2="162" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="288" y1="104" x2="302" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="428" y1="104" x2="442" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="568" y1="104" x2="582" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="708" y1="104" x2="722" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="20" y="174" width="840" height="190" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="196" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Speaking: the transcript is spoken again in the voice of a reference clip</text>
-<rect x="24" y="220" width="112" height="56" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
-<text x="80" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reference clip</text>
-<text x="80" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 clips enrol</text>
-<rect x="154" y="220" width="112" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="210" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">embedding</text>
-<text x="210" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 values, unit</text>
-<rect x="284" y="220" width="112" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="340" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ridge map</text>
-<text x="340" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">speaker g</text>
-<rect x="284" y="292" width="112" height="56" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
-<text x="340" y="316.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">transcript</text>
-<text x="340" y="332.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">from the recogniser</text>
-<rect x="439" y="252" width="122" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
-<text x="500" y="272.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">synthesiser</text>
-<text x="500" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 sinusoids a letter</text>
-<text x="500" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">scaled by g</text>
-<rect x="639" y="256" width="122" height="56" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
-<text x="700" y="280.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">generated audio</text>
-<text x="700" y="296.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12,000 / s</text>
-<line x1="139" y1="248" x2="151" y2="248" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="269" y1="248" x2="281" y2="248" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="399" y1="248.12" x2="497" y2="251.88" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="399" y1="319.88" x2="497" y2="316.12" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
-<line x1="564" y1="284" x2="636" y2="284" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="25" y="220" width="120" height="56" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="85" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reference clip</text>
+<text x="85" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 clips enrol</text>
+<rect x="165" y="220" width="120" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">embedding</text>
+<text x="225" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 values, unit</text>
+<rect x="305" y="220" width="120" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="365" y="244.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ridge map</text>
+<text x="365" y="260.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">speaker g</text>
+<rect x="305" y="292" width="120" height="56" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="365" y="316.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">transcript</text>
+<text x="365" y="332.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">from the recogniser</text>
+<rect x="470" y="252" width="130" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="535" y="272.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">synthesiser</text>
+<text x="535" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 sinusoids a letter</text>
+<text x="535" y="304.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">scaled by g</text>
+<rect x="690" y="256" width="130" height="56" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="755" y="280.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">generated audio</text>
+<text x="755" y="296.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12,000 / s</text>
+<line x1="148" y1="248" x2="162" y2="248" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="288" y1="248" x2="302" y2="248" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="428" y1="248.11" x2="532" y2="251.89" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="428" y1="319.89" x2="532" y2="316.11" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="603" y1="284" x2="687" y2="284" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
 </svg>

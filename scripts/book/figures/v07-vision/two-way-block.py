@@ -38,6 +38,6 @@ def render() -> str:
     d.arrow(i2t["b"], iout["t"])
     d.text(xt + 14, 388, ["LayerNorm after each step,", "a residual add around each"], size=12, color=MUTED, anchor="start")
     d.text(xi + 14, 388, ["the same, on the 4,096 cells"], size=12, color=MUTED, anchor="start")
-    d.text(W / 2, H - 6, ["Two such layers, then one more token-to-image attention; the tokens that leave are the ones that make masks."],
+    d.text(W / 2, H - 12, ["Two such layers, then one more token-to-image attention; the tokens that leave are the ones that make masks."],
            size=12, color=MUTED)
     return d.svg()

@@ -16,9 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import speech_recognition as sr  # noqa: E402
 from svgdiagram import Diagram  # noqa: E402
 
-W, PANEL_H, GAP, TOP = 800, 140, 18, 16
-COLS = (80, 210, 340, 470, 600, 730)
-BOX_W, BOX_H = 112, 70
+W, PANEL_H, GAP, TOP = 880, 140, 18, 16
+COLS = (85, 225, 365, 505, 645, 785)
+BOX_W, BOX_H = 120, 70
 
 
 def render() -> str:

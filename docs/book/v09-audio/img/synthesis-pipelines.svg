@@ -1,4 +1,4 @@
-<!-- source-sha256: 9237d806de7463b2c2bb95ba4ad80fcc2994a2db46445c8c7ebb050f5dbfaefa -->
+<!-- source-sha256: ce4695e16676d4a7415190b58682b1ca0fc0e3229bf70d4a67b702d59d26bd11 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 442" width="780" height="442"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="442" fill="#ffffff"/>
 <rect x="20" y="16" width="740" height="196" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Codec synthesiser: text to 16 codes per frame, then audio</text>

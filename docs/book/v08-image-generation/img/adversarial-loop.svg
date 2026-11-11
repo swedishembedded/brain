@@ -1,4 +1,4 @@
-<!-- source-sha256: 0dde7a5cb79a3760e6bad9800a119bfdffae92485660f318bb6001f827984721 -->
+<!-- source-sha256: dfaf2c16ae82ced503dfee093c0bc084538b7ac80f2cec1017e4c398b69aaa6b -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300" width="800" height="300"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="800" height="300" fill="#ffffff"/>
 <ellipse cx="52" cy="80" rx="36" ry="25" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="52" y="84.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">noise z</text>

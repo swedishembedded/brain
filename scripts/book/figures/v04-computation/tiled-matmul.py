@@ -52,7 +52,7 @@ def render() -> str:
     d.text((xs["B"] + side + xs["C"]) / 2, mid, ["="], size=20, color="#4a5568")
     # shared memory box under the grids, fed from the two active blocks, feeding the C block
     by = 300
-    box = d.box(380, by, 360, 56, [f"shared memory of the workgroup: a_tile and b_tile, {T} x {T} each", "(a barrier before and after the multiply-adds)"],
+    box = d.box(380, by, 372, 56, [f"shared memory of the workgroup: a_tile and b_tile, {T} x {T} each", "(a barrier before and after the multiply-adds)"],
                 "model")
     ax = xs["A"] + STEP * CELL + CELL / 2
     bx = xs["B"] + COL_BAND * CELL + CELL / 2

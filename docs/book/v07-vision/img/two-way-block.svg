@@ -1,4 +1,4 @@
-<!-- source-sha256: 914767d67f3527ca4ae60e46c4f8b7def37085b01ae797b79ee005e65965465f -->
+<!-- source-sha256: 0c59d8acecf992d71a1e04a8cf5b804b0bd0e6bc94e546f00f5211d809a00aa6 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" width="900" height="500"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="900" height="500" fill="#ffffff"/>
 <ellipse cx="230" cy="44" rx="95" ry="26" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="230" y="40.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokens</text>
@@ -37,5 +37,5 @@
 <text x="244" y="384.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">LayerNorm after each step,</text>
 <text x="244" y="400.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">a residual add around each</text>
 <text x="684" y="392.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">the same, on the 4,096 cells</text>
-<text x="450" y="498.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">Two such layers, then one more token-to-image attention; the tokens that leave are the ones that make masks.</text>
+<text x="450" y="492.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">Two such layers, then one more token-to-image attention; the tokens that leave are the ones that make masks.</text>
 </svg>

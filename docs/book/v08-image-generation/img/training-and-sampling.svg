@@ -1,4 +1,4 @@
-<!-- source-sha256: fd4dbb4a5b552cb79ad12f2afbdab2eb1122e5d9b3ed27a481141c76ea850f3b -->
+<!-- source-sha256: 9d0b800514bf6ed2fb9e4efa16878cf72e65897b50c893c1c68d2ea0b34ee8e1 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 320" width="800" height="320"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="800" height="320" fill="#ffffff"/>
 <rect x="10" y="10" width="380" height="300" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="24" y="32" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">training: one step</text>

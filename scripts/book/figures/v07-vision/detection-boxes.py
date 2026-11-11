@@ -56,7 +56,7 @@ def render() -> str:
     rect(d, PRED, INK, width=2.0, dash="6 4")
     d.text(px(5.0), py(2.35), ["a (2, 3, 10, 11)"], size=12, color=COLORS["a"])
     d.text(px(11.3), py(15.2), ["b (7, 6, 14, 14)"], size=12, color=COLORS["b"])
-    d.text(px(14.2), py(3.6), ["prediction", "(3, 4, 11, 12)"], size=12, color=INK)
+    d.text(px(11.4), py(3.6), ["prediction", "(3, 4, 11, 12)"], size=12, color=INK, anchor="start")
     # the overlap of the prediction with a, hatched
     ov = (max(PRED[0], dt.RECT_A[2][0]), max(PRED[1], dt.RECT_A[2][1]), min(PRED[2], dt.RECT_A[2][2]), min(PRED[3], dt.RECT_A[2][3]))
     rect(d, ov, "none", width=0, fill=INK, opacity=0.12)

@@ -1,4 +1,4 @@
-<!-- source-sha256: 701b852b54c3e9458005f835c70633d5198f7b5ca11cb7b87e875871d51560f6 -->
+<!-- source-sha256: 6605525fc67b2444c7c388153a0ad074ddd9b220ff2fa3dbe09f10109a0b82fc -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 444" width="780" height="444"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="444" fill="#ffffff"/>
 <rect x="20" y="12" width="740" height="420" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="34" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">One core&#x27;s memory, nearest the arithmetic at the top (typical values)</text>

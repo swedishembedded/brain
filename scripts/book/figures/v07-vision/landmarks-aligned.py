@@ -81,7 +81,7 @@ def render() -> str:
     # names of the landmarks beside the first photograph's aligned points
     for i, name in enumerate(faces.POINTS):
         p = faces.TEMPLATE_112[i]
-        dx = -10 if i in (0, 3) else 10
+        dx = -10 if i in (0, 1, 3) else 10
         dy = 24 if i in (3, 4) else -13
         d.text(sx(p[0]) + dx, sy(p[1]) + dy, [name], size=10, color=MUTED, anchor="end" if dx < 0 else "start")
     ly = PY + PH + 30
