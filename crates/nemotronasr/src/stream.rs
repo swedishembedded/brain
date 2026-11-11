@@ -27,8 +27,8 @@
 //!     (the same loop the offline `rnnt_greedy` runs).
 //!
 //! Rows pass through the blocks in complete 4-row chunks (a chunk's queries may
-//! attend *within* the whole chunk, so it is the emission granularity): a third
-//! of a second of audio per chunk of algorithmic latency. `stream_finish`
+//! attend *within* the whole chunk, so it is the emission granularity): 320 ms
+//! (4 rows of 80 ms) of audio per chunk of algorithmic latency. `stream_finish`
 //! flushes the tails - feeding each subsampling stage the zero rows the
 //! offline mask supplies - and
 //! processes the final partial chunk.
