@@ -1,0 +1,48 @@
+<!-- source-sha256: 3b1511419952cae6fc38e0f547da819a6a5c269aa669da170e1b31d86af36833 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 922 336" width="922" height="336"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="922" height="336" fill="#ffffff"/>
+<rect x="20" y="12" width="882" height="130" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="34" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">crates/sfm</text>
+<rect x="50" y="61" width="145.39" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="122.7" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">features</text>
+<text x="122.7" y="106.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">RootSIFT</text>
+<rect x="225.39" y="61" width="145.39" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="298.09" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">matching</text>
+<text x="298.09" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ratio, mutual,</text>
+<text x="298.09" y="114.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">essential RANSAC</text>
+<rect x="400.79" y="61" width="145.39" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="473.49" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tracks</text>
+<text x="473.49" y="106.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">union-find</text>
+<rect x="576.18" y="61" width="145.39" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="648.88" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">initial cameras</text>
+<text x="648.88" y="106.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">global or incremental</text>
+<rect x="751.58" y="61" width="145.39" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="824.27" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bundle adjustment</text>
+<text x="824.27" y="106.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and lens choice</text>
+<line x1="198.39" y1="94" x2="222.39" y2="94" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="373.79" y1="94" x2="397.79" y2="94" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="549.18" y1="94" x2="573.18" y2="94" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="724.58" y1="94" x2="748.58" y2="94" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="20" y="194" width="882" height="130" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="216" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">crates/mvs</text>
+<rect x="50" y="243" width="145.39" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="122.7" y="272.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">source views</text>
+<text x="122.7" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and range bounds</text>
+<rect x="225.39" y="243" width="145.39" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="298.09" y="272.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">PatchMatch</text>
+<text x="298.09" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pyramid</text>
+<rect x="400.79" y="243" width="145.39" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="473.49" y="272.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">consistency</text>
+<text x="473.49" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">filter</text>
+<rect x="576.18" y="243" width="145.39" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="648.88" y="272.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fusion</text>
+<text x="648.88" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">one point per sample</text>
+<rect x="751.58" y="243" width="145.39" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="824.27" y="272.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">splat start</text>
+<text x="824.27" y="288.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">thin gaussians</text>
+<line x1="198.39" y1="276" x2="222.39" y2="276" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="373.79" y1="276" x2="397.79" y2="276" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="549.18" y1="276" x2="573.18" y2="276" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="724.58" y1="276" x2="748.58" y2="276" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M824.27,127 L824.27,158 Q824.27,168 814.27,168 L132.7,168 Q122.7,168 122.7,178 L122.7,240" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="461" y="162.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">cameras, calibration and sparse tracks</text>
+</svg>

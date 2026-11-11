@@ -22,7 +22,7 @@ You can say how many bytes a minute of video is as pixels, as planes and as a co
 1. [Video as Data](01-video.md): how do we represent and compress a sequence of frames?
 2. [Generating Video](02-video-generation.md): how do diffusion models keep motion consistent across hundreds of frames?
 3. [Cameras and Projective Geometry](03-camera-geometry.md): how does a 3D point become a pixel, and how do we undo that?
-4. Structure from Motion and Multi-View Stereo: how can we recover a 3D scene and the camera positions from ordinary photographs?
+4. [Structure from Motion and Multi-View Stereo](04-structure-from-motion.md): how can we recover a 3D scene and the camera positions from ordinary photographs?
 5. Learning 3D Directly: can one network look at a few images and output the scene's geometry in a single pass?
 6. 3D Gaussian Splatting: how do millions of small, differentiable blobs render a photorealistic scene?
 7. World Models: can a network learn to simulate an environment well enough to be played?

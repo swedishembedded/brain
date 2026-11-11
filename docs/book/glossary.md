@@ -130,6 +130,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **buffer alignment**: the rule that a value starts at an address that is a multiple of its alignment, which fixes where the fields of a parameter block and the slices of a buffer may begin and leaves padding between them. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
+**bundle adjustment**: the joint nonlinear least-squares refinement of every camera pose, every 3D point and optionally the calibration against the observed pixels, solved by Levenberg-Marquardt with the points eliminated by the Schur complement, and fixing the gauge. *([Structure from Motion and Multi-View Stereo](v10-video-and-3d/04-structure-from-motion.md))*
+
 **byte-level BPE**: byte-pair encoding whose starting symbols are the 256 byte values of a text's UTF-8, so no piece of any input is unknown; GPT-2-style files spell each byte as a printable stand-in character. *([Tokenization](v05-sequences/02-tokenization.md))*
 
 **byte-pair encoding**: a way to learn a vocabulary by repeatedly merging the most frequent pair of adjacent symbols, and to encode text by replaying those merges in the order they were learned. *([Tokenization](v05-sequences/02-tokenization.md))*
@@ -350,6 +352,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **entropy**: the expected surprise of a distribution, $H(p) = -\sum_k p_k \log p_k$; it is $0$ for a certain outcome, at most $\log K$ for $K$ outcomes, and the lower bound on the average length of a code for data from the distribution. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
+**epipolar geometry**: the constraint that two views of one scene impose on each other: the image of a point in one view lies on a line, the epipolar line, in the other, expressed for calibrated cameras by $\mathbf{x}_2^\top\mathbf{E}\mathbf{x}_1 = 0$ with the essential matrix $\mathbf{E} = [\mathbf{t}]_\times\mathbf{R}$. *([Structure from Motion and Multi-View Stereo](v10-video-and-3d/04-structure-from-motion.md))*
+
 **epsilon prediction**: asking the network for the noise that was added to the clean value, so that its output $\varepsilon_\theta$ is the estimate from which the clean value or the score follows. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
 
 **equal error rate**: the common value of the false acceptance rate and the false rejection rate at the threshold where the two cross, one number for a model and a set of recordings that says nothing of the cost of either error. *([Who Is Speaking](v09-audio/05-speaker-embeddings.md))*
@@ -389,6 +393,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **fast Fourier transform**: an algorithm for the discrete Fourier transform that splits the samples into even and odd indices and combines the two half-size transforms with one twiddle multiplication per output pair, using about $\tfrac N2\log_2 N$ multiplications instead of $N^2$ and giving the same result up to rounding. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
 **feature**: one measurable property of an example that a prediction may depend on; the features of one example form a vector. *([The Learning Problem](v02-learning/01-learning-problem.md))*
+
+**feature matching**: pairing the keypoints of two images by the similarity of their descriptors, usually by the nearest neighbour under a ratio test and a mutual test, so that the pairs are views of the same scene point. *([Structure from Motion and Multi-View Stereo](v10-video-and-3d/04-structure-from-motion.md))*
 
 **feature pyramid**: a set of maps of the same width at several strides built from a backbone's levels, each coarse level's context upsampled and added to the finer level's projection (top-down) and, in the path aggregation form, the fine level's detail carried back to the coarse ones by strided convolutions (bottom-up), so that every scale has both resolution and meaning. *([Convolutional Networks and Residual Learning](v07-vision/03-cnns.md))*
 
@@ -806,6 +812,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **patch embedding**: the layer that turns a picture into a sequence of tokens by cutting it into non-overlapping square patches, flattening each and applying one shared linear map; identical to a convolution whose kernel size equals its stride. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
+**patch-match stereo**: dense depth estimation in which every pixel holds a plane hypothesis (range and normal), scored by correlation of its patch across views, and a randomized search propagates good hypotheses between neighbouring pixels and refines them, so that a small fraction of the hypothesis space is tried. *([Structure from Motion and Multi-View Stereo](v10-video-and-3d/04-structure-from-motion.md))*
+
 **PCM audio**: pulse-code modulation, a recording stored as integer codes, each the nearest multiple of a fixed step to the waveform at one of equally spaced moments. *([Sound and Sampling](v09-audio/01-sound.md))*
 
 **per-kernel profile**: the table that divides the time of a pass among its dispatches or kernel kinds, with each row's counted FLOPs and bytes, device time, share of the pass and achieved fraction of the device's measured roofline; it explains where the time goes and does not add up to the pass. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
@@ -1133,6 +1141,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **transposed convolution**: the adjoint of a strided convolution, used as a layer that enlarges a map: every input value stamps the kernel onto the output at stride spacing and overlapping stamps add, so unequal overlap (unequal phase sums of the kernel) gives a checkerboard pattern. *([Convolution](v07-vision/02-convolution.md))*
 
 **tree reduction**: a parallel reduction that combines the values in pairs, then the pairs in pairs, so that $n$ values need $n - 1$ combinations in only $\lceil \log_2 n \rceil$ dependent steps; inside a workgroup it is a loop over strides with a barrier after each step. *([Parallel Reductions, Scans and Sorting](v04-computation/07-reductions.md))*
+
+**triangulation**: finding a 3D point from its images in two or more cameras of known pose, as the point where the rays meet or, with noise, the one that fits them best, whose depth error falls as the angle between the rays grows. *([Structure from Motion and Multi-View Stereo](v10-video-and-3d/04-structure-from-motion.md))*
 
 **two's complement**: the representation of negative whole numbers in which the pattern of $-x$ is $2^n - x$ (the bits of $x$ inverted, plus one), so that the same addition works for both signs, the top bit is the sign, and the range is $-2^{n-1} \dots 2^{n-1} - 1$. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
 
