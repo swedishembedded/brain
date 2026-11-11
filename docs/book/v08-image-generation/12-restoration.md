@@ -440,7 +440,7 @@ The 1000 noise levels of the SDXL training schedule, sigma_t = sqrt((1 - abar_t)
 
 Two ways to take 50 of them, largest first with a final 0: the grid at the indices floor(999 - 999 i / 50), and the grid at the indices 20 i + 1 for i = 49 down to 0.
 
-| step i | equal-spaced grid | diffusers 'leading' grid |
+| step i | equal-spaced grid | leading-spaced grid |
 |---|---:|---:|
 | 0 | 14.6146 | 13.1204 |
 | 1 | 12.9663 | 11.6760 |
@@ -452,7 +452,7 @@ Two ways to take 50 of them, largest first with a final 0: the grid at the indic
 | 50 | 0.0000 | 0.0000 |
 <!-- /worked -->
 
-The two grids differ from the very first value. The first starts at the training schedule's own largest level, $\sigma_{999} = 14.6146$; a grid that takes the indices $20i + 1$ from $981$ down to $1$ starts at $\sigma_{981} = 13.1204$. The sampler's first latent has the standard deviation 14.6146 either way, since that constant is part of the algorithm, and an invariant that a sampler has to keep is that the first latent's standard deviation is the noise level the schedule says it has at its first step. With the first grid it is; with the second the latent is 11 percent noisier than the first step assumes. The schedule in the table that follows uses the first, which is what the reference's own dump script derives (`_hand_sigma_schedule` in `tools/goldens/supir_dump_reference.py`); as of this chapter, `crates/supir/src/pipeline.rs` builds its levels with `Sigmas::new` of `crates/diffusion/src/discrete.rs`, which spaces them the second way.
+The two grids differ from the very first value. The first starts at the training schedule's own largest level, $\sigma_{999} = 14.6146$; a grid that takes the indices $20i + 1$ from $981$ down to $1$ starts at $\sigma_{981} = 13.1204$. The sampler's first latent has the standard deviation 14.6146 either way, since that constant is part of the algorithm, and an invariant that a sampler has to keep is that the first latent's standard deviation is the noise level the schedule says it has at its first step. With the first grid it is; with the second the latent is 11 percent noisier than the first step assumes. The schedule in the table that follows uses the first, which is what the reference's own dump script derives (`_hand_sigma_schedule` in `tools/goldens/supir_dump_reference.py`). Until this chapter compared the two, `crates/supir/src/pipeline.rs` built its levels with `Sigmas::new` of `crates/diffusion/src/discrete.rs`, which spaces them the second way, and nothing read the dumped schedule to notice; commit `24aa37f39` gave `crates/diffusion/src/restore.rs` a `sampler_sigmas` that builds the first grid, pinned it with a test, and made the schedule parity test compare it with the dump.
 
 <!-- worked: restoration.sampler_schedule -->
 The numbers of the sampler for 50 steps on the equal-spaced grid, with churn 5 (so gamma = min(5 / 49, sqrt(2) - 1) = 0.102041, sigma-hat = sigma (1 + gamma)), the guidance scale ramp g = (1 - 4) sigma-hat / 14.6146 + 4 (1 at the largest level, 4 at 0), the factor (sigma / 14.6146)^r that scales the restoration pull for r = 1 and r = 4, and whether the pull is applied (only while the next level exceeds 0.05).

@@ -881,7 +881,7 @@ def reference_grid(n):
 
 
 def leading_grid(n):
-    """n levels at the indices i (1000 // n) + 1, i = n-1 down to 0, then 0 (the spacing diffusers calls 'leading', offset 1)."""
+    """n levels at the indices i (1000 // n) + 1, i = n-1 down to 0, then 0 (leading spacing with offset 1)."""
     sig = sdxl_sigmas()
     return [sig[i * (1000 // n) + 1] for i in range(n - 1, -1, -1)] + [0.0]
 
@@ -896,7 +896,7 @@ def sampler_grids():
     rows = [[f"sigma[{i}]", f"{sig[i]:.6f}"] for i in (0, 1, 20, 500, 981, 999)]
     t1 = _table(["training level", "value"], rows, "lr")
     rows2 = [[i, f"{ref[i]:.4f}", f"{lead[i]:.4f}"] for i in (0, 1, 2, 3, 47, 48, 49)] + [[50, f"{ref[50]:.4f}", f"{lead[50]:.4f}"]]
-    t2 = _table(["step i", "equal-spaced grid", "diffusers 'leading' grid"], rows2)
+    t2 = _table(["step i", "equal-spaced grid", "leading-spaced grid"], rows2)
     return (
         "The 1000 noise levels of the SDXL training schedule, sigma_t = sqrt((1 - abar_t) / abar_t) with beta_t the square of a line from "
         "sqrt(0.00085) to sqrt(0.012) in 1000 equal steps, t = 0 .. 999 (abar_t the running product of 1 - beta_s), at a few indices.\n\n"
