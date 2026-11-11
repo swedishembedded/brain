@@ -1,0 +1,39 @@
+<!-- source-sha256: 0ec69765fd3cb7903dd0c4408737a7f65eda20e31af310f45c12de85a9579c55 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 178" width="800" height="178"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="178" fill="#ffffff"/>
+<rect x="20" y="16" width="760" height="150" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Encoder: channels x frames, then height x width, after each stage</text>
+<rect x="26" y="66" width="100" height="84" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="76" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">video</text>
+<text x="76" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 x 121</text>
+<text x="76" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">512 x 768</text>
+<rect x="134" y="66" width="100" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="184" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">patch 4</text>
+<text x="184" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">128 x 121</text>
+<text x="184" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">128 x 192</text>
+<rect x="242" y="66" width="100" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="292" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">space down</text>
+<text x="292" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 x 121</text>
+<text x="292" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">64 x 96</text>
+<rect x="350" y="66" width="100" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">time down</text>
+<text x="400" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">512 x 61</text>
+<text x="400" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">64 x 96</text>
+<rect x="458" y="66" width="100" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="508" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">all down</text>
+<text x="508" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1024 x 31</text>
+<text x="508" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">32 x 48</text>
+<rect x="566" y="66" width="100" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="616" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">all down</text>
+<text x="616" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1024 x 16</text>
+<text x="616" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 x 24</text>
+<rect x="674" y="66" width="100" height="84" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="724" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">latent</text>
+<text x="724" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">128 x 16</text>
+<text x="724" y="128.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 x 24</text>
+<line x1="129" y1="108" x2="131" y2="108" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="237" y1="108" x2="239" y2="108" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="345" y1="108" x2="347" y2="108" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="453" y1="108" x2="455" y2="108" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="561" y1="108" x2="563" y2="108" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="669" y1="108" x2="671" y2="108" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

@@ -152,6 +152,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **categorical distribution**: a table of $K$ non-negative probabilities summing to $1$, one per outcome of a choice among $K$ possibilities such as the next word; the case $K = 2$ is the Bernoulli distribution. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
+**causal 3D convolution**: a convolution over height, width and time whose output at one time uses only that time and earlier ones, the missing earlier frames at the start of a clip being copies of the first. *([Video as Data](v10-video-and-3d/01-video.md))*
+
 **causal language model**: a model whose output at each position depends only on the tokens up to that position and gives the distribution of the next one, so that its probabilities multiply into a valid probability of a sequence; in the data it means that the targets are the inputs shifted by one place. *([Language Modeling](v05-sequences/04-language-modeling.md))*
 
 **causal mask**: the matrix of zeros and minus infinities added to the scores before the softmax so that position $i$ gives no weight to positions after it, which makes the output at each position a function of its prefix alone and lets all positions of a sequence be trained in one pass. *([Self-Attention](v05-sequences/07-self-attention.md))*
@@ -413,6 +415,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **fp32 format**: the 32-bit floating-point layout of 1 sign bit, 8 exponent bits (bias 127) and 23 fraction bits, with about 7 decimal digits and a range of 83 decades. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
 
 **fp8 format**: either of the two 8-bit floating-point layouts, E4M3 (4 exponent, 3 fraction bits, no infinity, one NaN pattern, largest finite number 448) and E5M2 (5 exponent, 2 fraction bits, IEEE infinities and NaNs, largest finite number 57344), used with a scale per block of values. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
+
+**frame sequence**: a video as an ordered list of pictures of one size, each shown at its own time, usually at a fixed rate in frames per second. *([Video as Data](v10-video-and-3d/01-video.md))*
 
 **function**: a rule that assigns exactly one output to each input from its domain; the range is the set of outputs that actually occur. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
@@ -1167,6 +1171,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **velocity field**: the average velocity $u(x, \sigma) = \mathbb{E}[\varepsilon - x_0 \mid x_\sigma = x]$ of all the straight lines through a point; following it as an ordinary differential equation carries the standard normal onto the data. *([Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md))*
+
+**video autoencoder**: an encoder that turns a clip into a short grid of numbers, smaller in space and in time, and a decoder that turns the grid back into frames. *([Video as Data](v10-video-and-3d/01-video.md))*
+
+**video codec**: a method that stores a clip in few bytes by predicting each frame from earlier ones, coding the prediction error coarsely, and decoding by repeating the same prediction. *([Video as Data](v10-video-and-3d/01-video.md))*
 
 **vision projector**: the small trained map, a linear layer or a pair of them around a GELU, sometimes folding a block of neighbouring patches into one row, that takes the rows of a vision tower to the width of a language model's embedding rows so that they can be read like the rows of words. *([Vision-Language Models](v07-vision/09-vlms.md))*
 

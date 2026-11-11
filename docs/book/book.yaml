@@ -791,7 +791,7 @@ volumes:
         title: "Video as Data"
         question: "How do we represent and compress a sequence of frames?"
         introduces: [frame-sequence, video-codec, causal-3d-convolution, video-autoencoder]
-        requires: [variational-autoencoder, convolution-2d, pixel]
+        requires: [variational-autoencoder, convolution-2d, receptive-field, pixel, color-space, aliasing, entropy]
         brain: [videocodec, ltxv]
       - id: video-generation
         title: "Generating Video"

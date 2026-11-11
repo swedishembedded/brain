@@ -90,6 +90,7 @@ reproduced its worked examples from the text alone in another language.
       with the module, conventions stated only in words, and three real
       table slips). All were fixed in the following commits; a recheck
       has not been run.
+- [ ] Volume X, Video, Space and World Models: chapter 1 written.
 
 ## Open
 

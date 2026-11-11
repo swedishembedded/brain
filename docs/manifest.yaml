@@ -522,6 +522,10 @@ navigation:
           - docs/book/v09-audio/07-music.md
           - docs/book/v09-audio/08-omni-models.md
           - docs/book/v09-audio/09-project-speech-pipeline.md
+      - title: "Volume X: Video, Space and World Models"
+        pages:
+          - docs/book/v10-video-and-3d/index.md
+          - docs/book/v10-video-and-3d/01-video.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

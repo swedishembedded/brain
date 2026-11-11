@@ -1,0 +1,30 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
+
+# Volume X: Video, Space and World Models
+
+A photograph is one moment seen from one place. Everything that makes the world more than a photograph is missing from it: how the scene moves, what it looks like from a step to the left, how far away the table is, what happens when the door is pushed. A second of film at 24 frames per second is 24 photographs, and it already shows motion, but it is 24 times the data, and almost none of that data is news: from one frame to the next nearly every pixel stays where it was or slides a little. A person walking round a statue with a phone produces a few hundred photographs from places nobody wrote down, and the statue is in all of them, in different positions, so that the pictures together fix a shape that none of them shows. A model that can be steered with a button press and answers with the next frame is a simulation of a world, learned from nothing but recordings of one.
+
+These are three views of one question, how a model should represent a world that has time and depth in it, and this volume follows it through a sequence of representations. A clip is a stack of frames, and the first task is to say what it costs and how it is made smaller: by predicting each frame from the last, which is what a video codec does, and by squeezing space and time into a short grid of numbers, which is what a video autoencoder does. A scene is a set of three-dimensional points seen through cameras, and the next tasks are the geometry that links a point to its pixel, the methods that recover the points and the cameras from ordinary photographs, the networks that now do it in one pass, and the cloud of small Gaussian blobs that renders the result from any viewpoint fast enough to move through. The last tasks put the pieces back together: models that predict how a scene changes when something acts on it, and, at the far end, the simulated bodies and nervous systems that such models are tested against.
+
+## Why it comes here
+
+The volume leans on the three before it. Volume VII supplied the image as data, the convolution that reads it, the vision transformer, and the networks that estimate depth from one picture; Volume VIII supplied the variational autoencoder, the discrete codebook, and the diffusion and flow-matching generators with their transformer denoisers, which are what a video generator is made of once the frames have been compressed into a latent grid; Volume IX supplied sampling and the aliasing that a wrong sampling rate causes, the codec that turns a signal into tokens, and the joint generation of sound with the picture. Under them lie Volume I's matrices, rotations and least squares, which are the whole language of cameras and of recovering a scene from its photographs, and Volume IV's sorting and kernel work, which decide whether a rendering of millions of blobs runs at the speed of a screen.
+
+The order follows what each representation needs from the last. A video model starts from the video itself, so the volume starts with a sequence of frames and what it means to compress one. Generation of video then reuses the diffusion machinery on the compressed grid. Three-dimensional work needs a camera model before anything else, so the geometry of the camera comes next, followed by the two ways of recovering structure from it, by measurement and by learning, and by the representation that renders it. World models close the circle, because they take the latent grids of the first chapters and the idea of a scene state, and add the one thing a film does not have, a choice that someone makes. A last chapter on simulated brains and bodies shows what the learned worlds are measured against. The volume ends with a project that reconstructs a scene from images and predicts how it changes.
+
+## What you can do after it
+
+You can say how many bytes a minute of video is as pixels, as planes and as a coded stream, why a decoder must start at a key frame, which timestamps a container stores and how far they differ from the true ones, and how the sound track of a file is aligned with its pictures. You can describe how a causal three-dimensional convolution and a video autoencoder turn a clip into a latent grid of a known shape, and say which frame counts and sizes such a model accepts. You can project a three-dimensional point into an image and back from its intrinsic and extrinsic parameters, recover cameras and points from matched features by epipolar geometry, triangulation and bundle adjustment, and say what a network that predicts a pointmap in one pass gives up and gains against that pipeline. You can describe how a Gaussian splat is projected, sorted, composited and densified, and how a world model predicts the next frame from the last and an action, with a latent action learned from video alone. You can read the cost of a clip, a reconstruction and a rendered view in values, pairs and passes before running anything.
+
+## Chapters
+
+1. [Video as Data](01-video.md): how do we represent and compress a sequence of frames?
+2. Generating Video: how do diffusion models keep motion consistent across hundreds of frames?
+3. Cameras and Projective Geometry: how does a 3D point become a pixel, and how do we undo that?
+4. Structure from Motion and Multi-View Stereo: how can we recover a 3D scene and the camera positions from ordinary photographs?
+5. Learning 3D Directly: can one network look at a few images and output the scene's geometry in a single pass?
+6. 3D Gaussian Splatting: how do millions of small, differentiable blobs render a photorealistic scene?
+7. World Models: can a network learn to simulate an environment well enough to be played?
+8. Simulating Brains and Bodies: what can we learn by running a real animal's wiring diagram inside a simulated body?
+9. Project: Reconstructing and Predicting a Scene: can you reconstruct a scene from images and predict how it changes?

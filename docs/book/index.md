@@ -166,4 +166,8 @@ historical sections draw on in the [Chronology](history/chronology.md).
 7. [Music Generation](v09-audio/07-music.md): What changes when the target is minutes of structured music rather than a sentence of speech?
 8. [Models That Listen, See and Speak](v09-audio/08-omni-models.md): How is one model built to take in audio, images and text and answer in speech?
 9. [Project: From Waveform to Speech and Back](v09-audio/09-project-speech-pipeline.md): Can you build a pipeline from a waveform to a learned representation and back to generated audio?
+
+### [Volume X: Video, Space and World Models](v10-video-and-3d/index.md)
+
+1. [Video as Data](v10-video-and-3d/01-video.md): How do we represent and compress a sequence of frames?
 <!-- /contents -->
