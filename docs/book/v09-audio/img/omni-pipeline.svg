@@ -1,0 +1,67 @@
+<!-- source-sha256: afe2810d4c648843dbe7f351b87fc6ba6a663f88221e233c757f6a7277e0cada -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 560" width="800" height="560"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="560" fill="#ffffff"/>
+<rect x="20" y="16" width="760" height="262" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Reading: three inputs become rows of 2,048 numbers</text>
+<rect x="39" y="53" width="130" height="62" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="104" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 kHz sound</text>
+<rect x="215" y="53" width="170" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="300" y="72.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">audio tower</text>
+<text x="300" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">32 blocks, width 1,280</text>
+<text x="300" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">13 rows a second</text>
+<line x1="172" y1="84" x2="212" y2="84" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="39" y="119" width="130" height="62" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="104" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">frames of video,</text>
+<text x="104" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pictures</text>
+<rect x="215" y="119" width="170" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="300" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">vision tower</text>
+<text x="300" y="154.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">27 blocks, width 1,152</text>
+<text x="300" y="170.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">196 rows a picture</text>
+<line x1="172" y1="150" x2="212" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="39" y="185" width="130" height="62" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="104" y="220.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">text tokens</text>
+<rect x="215" y="185" width="170" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="300" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">embedding table</text>
+<text x="300" y="220.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">152,064 x 2,048</text>
+<text x="300" y="236.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">one row a token</text>
+<line x1="172" y1="216" x2="212" y2="216" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="530" y="61" width="220" height="178" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="114.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Thinker</text>
+<text x="640" y="130.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">48 layers, width 2,048</text>
+<text x="640" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">128 experts, 8 used</text>
+<text x="640" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle"></text>
+<text x="640" y="178.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reads the rows in one</text>
+<text x="640" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sequence, writes text</text>
+<line x1="388" y1="84" x2="527" y2="84" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="388" y1="150" x2="527" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="388" y1="216" x2="527" y2="216" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="20" y="294" width="760" height="250" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="316" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Answering: the reply is spoken by a second decoder</text>
+<rect x="26" y="439" width="128" height="62" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="90" y="466.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reply tokens</text>
+<text x="90" y="482.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">of the Thinker</text>
+<rect x="181" y="439" width="128" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="245" y="458.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Talker</text>
+<text x="245" y="474.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">20 layers</text>
+<text x="245" y="490.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 of 128 experts</text>
+<rect x="336" y="439" width="128" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="458.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">code predictor</text>
+<text x="400" y="474.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5 layers</text>
+<text x="400" y="490.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">codes 1 to 15</text>
+<rect x="491" y="439" width="128" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="555" y="458.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Code2Wav</text>
+<text x="555" y="474.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 layers, then</text>
+<text x="555" y="490.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">upsamples x1,920</text>
+<rect x="646" y="439" width="128" height="62" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="710" y="458.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">speech</text>
+<text x="710" y="474.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24,000 samples</text>
+<text x="710" y="490.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a second</text>
+<rect x="155" y="374" width="180" height="44" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="245" y="392.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layer-24 states of</text>
+<text x="245" y="408.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the media rows</text>
+<line x1="157" y1="470" x2="178" y2="470" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="312" y1="470" x2="333" y2="470" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="467" y1="470" x2="488" y2="470" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="622" y1="470" x2="643" y2="470" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="245" y1="421" x2="245" y2="436" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M640,239 L640,332 Q640,342 630,342 L100,342 Q90,342 90,352 L90,436" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

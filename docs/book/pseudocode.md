@@ -515,6 +515,8 @@ The speech-synthesis chapter (Chapter 6) writes out `chain_draw`, `fsq_token` an
 
 The music chapter (Chapter 7) writes out `hold_euler` where it is first used. It is `cfg_euler` on the uniform grid $t_i = i/n$ (so $n$ steps of $1/n$, the network evaluated at $t = 0, 1/n, \ldots, (n-1)/n$ and never at 1) with one addition: when a carried prefix `prev` of `P` steps is present, then before every evaluation the first `P` steps of `x` are set to `(1 - (1 - 0.000001) * t) * noise[:, 0:P] + t * prev`, the noise being the chunk's own starting noise, and after the last step they are set to `prev` exactly. `prev` is `optional`: `prev is present` is false for the first chunk of a song.
 
+The omni-model chapter (Chapter 8) writes out `clip_positions` and `wave_length` where they are first used. `clip_positions` returns the list of position triples `(T, H, W)` of the rows of a clip in the order of the sequence (the picture rows of each group first, then the sound rows, chunk by chunk) and the counter after the clip, one more than the largest entry of any triple (or of `p0`, for an empty clip); it requires that the number of seconds is a multiple of the chunk length. `wave_length` composes `n = n * u` for each entry of `ups` and then `n = (n - 1) * r` for each entry of `rates`, in the order given, and requires `n >= 1` before every `(n - 1) * r`.
+
 ## Routines of the transformer chapters (Volume V)
 
 Chapters 9 to 12 use four routines of the normalization and attention chapters without writing them out again. Each is defined here by what it returns.

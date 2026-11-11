@@ -520,6 +520,7 @@ navigation:
           - docs/book/v09-audio/05-speaker-embeddings.md
           - docs/book/v09-audio/06-speech-synthesis.md
           - docs/book/v09-audio/07-music.md
+          - docs/book/v09-audio/08-omni-models.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

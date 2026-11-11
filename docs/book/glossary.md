@@ -744,6 +744,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **ODE solver**: a rule that turns evaluations of a velocity field into the next point of a trajectory, judged by how fast its error falls as the steps shrink (its order) and by how many evaluations of the field each step costs; Euler, Heun and the multistep methods of this chapter are examples. *([Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md))*
 
+**omni model**: one network whose decoder reads rows from the encoders of several media (sound, pictures, video and text) in a single sequence, and that answers in more than one medium, here in text and in speech. *([Models That Listen, See and Speak](v09-audio/08-omni-models.md))*
+
 **one-hot-encoding**: writing a class index as a vector with a one in the position of that class and zeros elsewhere, the probability vector that puts all its weight on that class. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **online softmax**: the way of computing a softmax and the weighted sum of values in one pass over a row of scores read in chunks, by carrying the running maximum $m$, the running sum $\ell$ of exponentials relative to it and the running weighted sum $\mathbf{o}$, and multiplying the old sum and the old output by $e^{m - m'}$ whenever a chunk raises the maximum from $m$ to $m'$. *([Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md))*
@@ -1030,6 +1032,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **straight-through estimator**: the rule that passes the gradient at a quantizer's output to its input unchanged, written $\mathbf{z} + \mathrm{sg}[\mathbf{z}_q - \mathbf{z}]$ with a stop-gradient $\mathrm{sg}$; it replaces a derivative that is zero by a biased one that trains the encoder. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
 
+**streaming speech output**: speech that begins to leave the model while the text it says is still being written and its own later frames are still being drawn, so that the work before the first sound is that of a prefix of the reply and not of the whole reply. *([Models That Listen, See and Speak](v09-audio/08-omni-models.md))*
+
 **stride**: the distance in memory, counted in elements, between two neighbours along one axis; a view is described by one stride per axis, and stride 0 repeats one number. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **subgroup**: the group of consecutive invocations of a workgroup, 32 in this book's model, that the hardware executes with one instruction at a time. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
@@ -1067,6 +1071,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **text-encoder conditioning**: turning a prompt into the generator's input with a separate pretrained text encoder that is run forward at generation time, so that the denoiser sees the prompt only through the arrays the encoder produced; the tokenizer, the window, the layer read and the padding are then part of the denoiser's input contract. *([Conditioning on Text](v08-image-generation/09-text-conditioning.md))*
 
 **text-to-speech**: the task of turning a text, and usually a description of a voice, into the waveform of someone saying it. *([Speech Synthesis](v09-audio/06-speech-synthesis.md))*
+
+**thinker-talker split**: the division of an omni model's decoding into a Thinker, which reads the whole request and writes the reply as text, and a Talker, which reads the reply's words and the Thinker's states at the media rows and writes the speech as codec frames, with its own weights, vocabulary and clock. *([Models That Listen, See and Speak](v09-audio/08-omni-models.md))*
 
 **thread parallelism**: using several threads, each running on its own core with its own registers and first caches and sharing the later caches and memory, to carry out the pieces of one computation at the same time. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 

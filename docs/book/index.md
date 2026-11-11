@@ -164,4 +164,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 5. [Who Is Speaking](v09-audio/05-speaker-embeddings.md): How does a model capture the identity of a voice in a single vector?
 6. [Speech Synthesis](v09-audio/06-speech-synthesis.md): How does a model speak a sentence in a given voice?
 7. [Music Generation](v09-audio/07-music.md): What changes when the target is minutes of structured music rather than a sentence of speech?
+8. [Models That Listen, See and Speak](v09-audio/08-omni-models.md): How is one model built to take in audio, images and text and answer in speech?
 <!-- /contents -->

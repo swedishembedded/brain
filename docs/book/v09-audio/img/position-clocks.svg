@@ -1,0 +1,42 @@
+<!-- source-sha256: 13b9e09d4cbee8ded407f3667c88cc4c60ca38ef38383839fd9e62d39141ec93 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 320" width="620" height="320">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="320" fill="#ffffff"/>
+<line x1="58" y1="274" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="148.67" y1="274" x2="148.67" y2="30" stroke="#edf2f7"/>
+<text x="148.67" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="239.33" y1="274" x2="239.33" y2="30" stroke="#edf2f7"/>
+<text x="239.33" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="330" y1="274" x2="330" y2="30" stroke="#edf2f7"/>
+<text x="330" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">30</text>
+<line x1="420.67" y1="274" x2="420.67" y2="30" stroke="#edf2f7"/>
+<text x="420.67" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">40</text>
+<line x1="511.33" y1="274" x2="511.33" y2="30" stroke="#edf2f7"/>
+<text x="511.33" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">50</text>
+<line x1="602" y1="274" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">60</text>
+<line x1="58" y1="274" x2="602" y2="274" stroke="#edf2f7"/>
+<text x="52" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="217.26" x2="602" y2="217.26" stroke="#edf2f7"/>
+<text x="52" y="221.26" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">200</text>
+<line x1="58" y1="160.51" x2="602" y2="160.51" stroke="#edf2f7"/>
+<text x="52" y="164.51" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">400</text>
+<line x1="58" y1="103.77" x2="602" y2="103.77" stroke="#edf2f7"/>
+<text x="52" y="107.77" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">600</text>
+<line x1="58" y1="47.02" x2="602" y2="47.02" stroke="#edf2f7"/>
+<text x="52" y="51.02" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">800</text>
+<rect x="58" y="30" width="544" height="244" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="244"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="3.0" points="58,274 67.07,270.31 76.13,266.62 85.2,262.93 94.27,259.25 103.33,255.56 112.4,251.87 121.47,248.18 130.53,244.49 139.6,240.8 148.67,237.12 157.73,233.43 166.8,229.74 175.87,226.05 184.93,222.36 194,218.67 203.07,214.99 212.13,211.3 221.2,207.61 230.27,203.92 239.33,200.23 248.4,196.54 257.47,192.86 266.53,189.17 275.6,185.48 284.67,181.79 293.73,178.1 302.8,174.41 311.87,170.73 320.93,167.04 330,163.35 339.07,159.66 348.13,155.97 357.2,152.28 366.27,148.6 375.33,144.91 384.4,141.22 393.47,137.53 402.53,133.84 411.6,130.15 420.67,126.47 429.73,122.78 438.8,119.09 447.87,115.4 456.93,111.71 466,108.02 475.07,104.33 484.13,100.65 493.2,96.96 502.27,93.27 511.33,89.58 520.4,85.89 529.47,82.2 538.53,78.52 547.6,74.83 556.67,71.14 565.73,67.45 574.8,63.76 583.87,60.07 592.93,56.39"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="58,274 67.07,270.31 76.13,266.62 85.2,262.93 94.27,259.25 103.33,255.56 112.4,251.87 121.47,248.18 130.53,244.49 139.6,240.8 148.67,237.12 157.73,233.43 166.8,229.74 175.87,226.05 184.93,222.36 194,218.67 203.07,214.99 212.13,211.3 221.2,207.61 230.27,203.92 239.33,200.23 248.4,196.54 257.47,192.86 266.53,189.17 275.6,185.48 284.67,181.79 293.73,178.1 302.8,174.41 311.87,170.73 320.93,167.04 330,163.35 339.07,159.66 348.13,155.97 357.2,152.28 366.27,148.6 375.33,144.91 384.4,141.22 393.47,137.53 402.53,133.84 411.6,130.15 420.67,126.47 429.73,122.78 438.8,119.09 447.87,115.4 456.93,111.71 466,108.02 475.07,104.33 484.13,100.65 493.2,96.96 502.27,93.27 511.33,89.58 520.4,85.89 529.47,82.2 538.53,78.52 547.6,74.83 556.67,71.14 565.73,67.45 574.8,63.76 583.87,60.07 592.93,56.39"/><polyline fill="none" stroke="#2f855a" stroke-width="2.5" points="58,52.7 67.07,52.41 76.13,52.13 85.2,51.85 94.27,51.56 103.33,51.28 112.4,51 121.47,50.71 130.53,50.43 139.6,50.14 148.67,49.86 157.73,49.58 166.8,49.29 175.87,49.01 184.93,48.73 194,48.44 203.07,48.16 212.13,47.87 221.2,47.59 230.27,47.31 239.33,47.02 248.4,46.74 257.47,46.46 266.53,46.17 275.6,45.89 284.67,45.6 293.73,45.32 302.8,45.04 311.87,44.75 320.93,44.47 330,44.19 339.07,43.9 348.13,43.62 357.2,43.33 366.27,43.05 375.33,42.77 384.4,42.48 393.47,42.2 402.53,41.92 411.6,41.63 420.67,41.35 429.73,41.07 438.8,40.78 447.87,40.5 456.93,40.21 466,39.93 475.07,39.65 484.13,39.36 493.2,39.08 502.27,38.8 511.33,38.51 520.4,38.23 529.47,37.94 538.53,37.66 547.6,37.38 556.67,37.09 565.73,36.81 574.8,36.53 583.87,36.24 592.93,35.96"/></g>
+<text x="330" y="310" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">second of the clip</text>
+<text x="14" y="152" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 152)">position on the T axis</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Where second s of a minute sits on the T axis</text>
+<rect x="364.83" y="205" width="229.17" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="372.83" y1="220" x2="392.83" y2="220" stroke="#2b6cb0" stroke-width="2"/>
+<text x="398.83" y="224" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">sound row of second s (both rules)</text>
+<line x1="372.83" y1="237" x2="392.83" y2="237" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="398.83" y="241" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">video group, time-aligned</text>
+<line x1="372.83" y1="254" x2="392.83" y2="254" stroke="#2f855a" stroke-width="2"/>
+<text x="398.83" y="258" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">video group, frame-ordinal</text>
+</svg>
