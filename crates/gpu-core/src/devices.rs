@@ -83,33 +83,74 @@ static REGISTRY: std::sync::OnceLock<DeviceRegistry> = std::sync::OnceLock::new(
 /// CUDA is last and is a *fallback*, not a preference - a headless box with
 /// the NVIDIA kernel driver but no Vulkan ICD enumerates nothing through
 /// either of the first two, and would otherwise have an empty registry and no
-/// `gpu0` at all. Whichever source answers, identity is the same 16-byte
-/// device UUID, so the canonical index means the same physical card either
-/// way (see [`cuda_identities`]).
+/// `gpu0` at all. So does a box whose only adapter from the first two is a
+/// software rasteriser: WSL2 mounts Mesa's ICDs but ships no NVIDIA Vulkan
+/// ICD, so Vulkan reports exactly one llvmpipe adapter there - a non-empty
+/// list that holds no physical card. The fallback therefore fires when the
+/// first two sources yield no *physical* card, never on raw emptiness.
+/// Whichever source answers, identity is the same 16-byte device UUID, so the
+/// canonical index means the same physical card either way (see
+/// [`cuda_identities`]).
 pub fn registry() -> &'static DeviceRegistry {
     REGISTRY.get_or_init(|| {
-        let (mut ids, mut source) = match backend_vulkan::enumerate_physical_gpus() {
-            Ok(v) if !v.is_empty() => (v, "vulkan"),
-            Err(e) => {
-                tracing::debug!(error = %e, "native Vulkan enumeration unavailable; falling back to wgpu");
-                (backend_wgpu::enumerate_gpus(), "wgpu")
-            }
-            Ok(_) => (backend_wgpu::enumerate_gpus(), "wgpu"),
-        };
-        if ids.is_empty() {
-            match cuda_identities() {
-                Ok(v) if !v.is_empty() => {
-                    ids = v;
-                    source = "cuda";
-                }
-                Ok(_) => {}
-                Err(e) => tracing::debug!(error = %e, "CUDA enumeration unavailable too"),
-            }
+        let (ids, source, why) = resolve_registry_sources(
+            backend_vulkan::enumerate_physical_gpus,
+            backend_wgpu::enumerate_gpus,
+            cuda_identities,
+        );
+        for e in &why {
+            tracing::debug!(error = %e, "device enumeration source passed over");
         }
         let reg = DeviceRegistry::from_identities(ids, source);
         tracing::info!(source, gpus = reg.devices().len(), "device registry built (one-time, process lifetime)");
         reg
     })
+}
+
+/// Which enumeration builds the canonical registry: a declarative walk of the
+/// three sources, pure in its inputs and so testable without hardware. Each
+/// closure is tried at most once, in precedence order, and CUDA is only
+/// *probed* where the first two have yielded no physical card - on a box
+/// whose Vulkan already answers, the driver is never `dlopen`ed.
+///
+/// A source counts only when it yields at least one identity whose class is
+/// not [`backend_api::DeviceClass::Cpu`] - a software rasteriser (llvmpipe,
+/// lavapipe) is dropped by [`DeviceRegistry::from_identities`] anyway, so
+/// accepting it here would strand a real card on a lower-precedence source.
+///
+/// Returns the winning identities, their source label (as
+/// `DeviceRegistry::source` reports it) and, for the trace, why each
+/// higher-precedence source was passed over.
+fn resolve_registry_sources(
+    vulkan: impl FnOnce() -> Result<Vec<backend_api::GpuIdentity>, String>,
+    wgpu: impl FnOnce() -> Vec<backend_api::GpuIdentity>,
+    cuda: impl FnOnce() -> Result<Vec<backend_api::GpuIdentity>, String>,
+) -> (Vec<backend_api::GpuIdentity>, &'static str, Vec<String>) {
+    let mut passed_over: Vec<String> = Vec::new();
+    match vulkan() {
+        Ok(v) if has_physical_card(&v) => return (v, "vulkan", passed_over),
+        Ok(_) => passed_over.push("native Vulkan enumeration held no physical card".into()),
+        Err(e) => passed_over.push(format!("native Vulkan enumeration unavailable: {e}")),
+    }
+    let w = wgpu();
+    if has_physical_card(&w) {
+        return (w, "wgpu", passed_over);
+    }
+    passed_over.push("wgpu enumeration held no physical card".into());
+    match cuda() {
+        Ok(v) if !v.is_empty() => return (v, "cuda", passed_over),
+        Ok(_) => passed_over.push("the CUDA enumeration held no device".into()),
+        Err(e) => passed_over.push(format!("CUDA enumeration unavailable: {e}")),
+    }
+    (Vec::new(), "wgpu", passed_over)
+}
+
+/// Whether `ids` holds a physical card - anything but a software rasteriser,
+/// which [`DeviceRegistry::from_identities`] would drop from the canonical
+/// registry anyway.
+fn has_physical_card(ids: &[backend_api::GpuIdentity]) -> bool {
+    use backend_api::DeviceClass;
+    ids.iter().any(|d| d.class != DeviceClass::Cpu)
 }
 
 /// Every CUDA-visible device, as an identity, in CUDA ordinal order - the
@@ -1887,6 +1928,70 @@ mod tests {
         );
         assert_eq!(reg.devices().len(), 1);
         assert_eq!(reg.devices()[0].identity.name, "P40");
+    }
+
+    /// A Vulkan source that answers with only a software rasteriser must not
+    /// consume the fallback window: WSL2 ships Mesa's ICDs but no NVIDIA Vulkan
+    /// ICD, so Vulkan reports exactly one llvmpipe adapter there while the real
+    /// card is visible only to the CUDA driver. The registry fell back on raw
+    /// emptiness, so such a machine reported *no* GPUs and brain ran on the CPU
+    /// despite a working driver (`brain devices` printed "no physical GPUs").
+    #[test]
+    fn a_software_rasteriser_alone_leaves_the_cuda_fallback_open() {
+        use backend_api::DeviceClass::Cpu;
+        // Vulkan: llvmpipe only. wgpu: empty. CUDA: the real card.
+        let vulkan = || Ok::<_, String>(vec![ident("llvmpipe", None, 0, Cpu)]);
+        let wgpu = || Vec::new();
+        let cuda = || Ok(vec![ident("Quadro M2000M", Some("0000:01:00.0"), 0, backend_api::DeviceClass::DiscreteGpu)]);
+        let (ids, source, why) = resolve_registry_sources(vulkan, wgpu, cuda);
+        assert_eq!(source, "cuda", "the card only CUDA sees must win the registry");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].name, "Quadro M2000M");
+        assert!(why[0].contains("Vulkan"), "{why:?}");
+
+        // A driver failure must fall through the same window.
+        let vulkan_err = || Err::<Vec<_>, String>("no loader".into());
+        let (ids, source, _) = resolve_registry_sources(vulkan_err, wgpu, cuda);
+        assert_eq!(source, "cuda");
+        assert_eq!(ids[0].name, "Quadro M2000M");
+
+        // CUDA itself unusable: the registry stays empty - the honest answer
+        // this machine had before, with the reasons recorded for the trace.
+        let cuda_err = || Err::<Vec<_>, String>("libcuda.so.1 could not be loaded: not found".into());
+        let (ids, source, why) = resolve_registry_sources(vulkan, wgpu, cuda_err);
+        assert_eq!(source, "wgpu");
+        assert!(ids.is_empty());
+        assert!(why.iter().any(|e| e.contains("libcuda.so.1")), "{why:?}");
+    }
+
+    /// The happy paths: a real Vulkan adapter wins without CUDA ever being
+    /// probed, and a software rasteriser beside a real card changes nothing -
+    /// the card still comes from the higher-precedence source.
+    #[test]
+    fn a_real_vulkan_card_beats_the_cuda_fallback_and_never_probes_it() {
+        use backend_api::DeviceClass::{Cpu, DiscreteGpu};
+        let cards = vec![ident("RTX", Some("0000:01:00.0"), 0, DiscreteGpu)];
+        let mut cuda_probed = false;
+        let vulkan = || Ok(cards.clone());
+        let wgpu = || -> Vec<backend_api::GpuIdentity> { panic!("wgpu must not be reached when Vulkan answered") };
+        let cuda = || {
+            cuda_probed = true;
+            Ok(Vec::new())
+        };
+        let (ids, source, _) = resolve_registry_sources(vulkan, wgpu, cuda);
+        assert_eq!(source, "vulkan");
+        assert_eq!(ids[0].name, "RTX");
+        assert!(!cuda_probed, "CUDA must not be probed where Vulkan already answers");
+
+        // A rasteriser *beside* the card is noise; the card still wins here.
+        let vulkan = || Ok(vec![ident("llvmpipe", None, 0, Cpu), ident("RTX", Some("0000:01:00.0"), 0, DiscreteGpu)]);
+        let (ids, source, _) = resolve_registry_sources(vulkan, Vec::new, || panic!("CUDA must not be probed"));
+        assert_eq!(source, "vulkan");
+        // The rasteriser travels through to `from_identities`, which drops it
+        // there: the canonical registry still holds exactly the card.
+        let reg = DeviceRegistry::from_identities(ids, "vulkan");
+        assert_eq!(reg.devices().len(), 1, "the rasteriser is dropped from the registry");
+        assert_eq!(reg.devices()[0].identity.name, "RTX");
     }
 
     #[test]
