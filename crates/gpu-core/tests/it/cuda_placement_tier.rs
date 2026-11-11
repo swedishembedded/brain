@@ -22,7 +22,7 @@ const MIB: u64 = 1 << 20;
 fn child(helper: &str, env: &[(&str, &str)]) -> String {
     let exe = std::env::current_exe().expect("current_exe");
     let mut cmd = Command::new(exe);
-    cmd.args(["--exact", helper, "--ignored", "--nocapture", "--test-threads=1"]);
+    cmd.args(["--exact", &format!("{}::{helper}", module_path!().rsplit("::").next().unwrap_or_default()), "--ignored", "--nocapture", "--test-threads=1"]);
     for k in ["BRAIN_LIMIT_VRAM_TOTAL", "BRAIN_LIMIT_RAM_TOTAL", "BRAIN_COHERENT_TIER"] {
         cmd.env_remove(k);
     }

@@ -202,7 +202,7 @@ fn two_transients_may_be_alive_at_once() {
 fn child(helper: &str) -> (bool, String) {
     let exe = std::env::current_exe().expect("current_exe");
     let out = std::process::Command::new(exe)
-        .args(["--exact", helper, "--ignored", "--nocapture", "--test-threads=1"])
+        .args(["--exact", &format!("{}::{helper}", module_path!().rsplit("::").next().unwrap_or_default()), "--ignored", "--nocapture", "--test-threads=1"])
         .output()
         .expect("spawn subprocess");
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));

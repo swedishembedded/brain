@@ -34,7 +34,7 @@ const KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];
 fn child(helper: &str, env: &[(&str, &str)]) -> String {
     let exe = std::env::current_exe().expect("current_exe");
     let mut cmd = Command::new(exe);
-    cmd.args(["--exact", helper, "--ignored", "--nocapture", "--test-threads=1"]);
+    cmd.args(["--exact", &format!("{}::{helper}", module_path!().rsplit("::").next().unwrap_or_default()), "--ignored", "--nocapture", "--test-threads=1"]);
     // The parent's own environment must never leak a ceiling into a child that
     // is supposed to have none.
     cmd.env_remove("BRAIN_LIMIT_VRAM_TOTAL");
