@@ -8,7 +8,8 @@
 //!
 //! * a **face-keypoint ControlNet** — already landed as `crates/controlnet`,
 //!   whose SDXL implementation was imported from *this* release
-//!   (`InstantX/InstantID/ControlNetModel`, 810 tensors / 5.00 GB);
+//!   (`InstantX/InstantID/ControlNetModel`, 844 tensors / 5.00 GB, 810 in
+//!   brain's fused manifest);
 //! * **IP-Adapter-FaceID decoupled cross-attention** — this crate. An ArcFace
 //!   embedding becomes 16 ID tokens through a Perceiver `Resampler`, and every
 //!   one of SDXL's 70 cross-attention sites gains its OWN bias-free `to_k_ip` /

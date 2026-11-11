@@ -23,8 +23,8 @@
 //! built, i.e. on every forward, so changing it is a field write, not a graph
 //! rebuild. The reference's `start_step` is *not* modelled here because it is a
 //! sampler-loop property: `flux/sampling.py` passes `id=None` for steps below
-//! it, which in brain is the plain `Flux1Model::forward`. `crates/flux1` has no
-//! sampler loop, so nothing here could schedule against one.
+//! it, which in brain is the plain `Flux1Model::forward`; the schedule lives in
+//! the sampler, `flux1::pipeline::Flux1::generate_injected`.
 
 use std::cell::Cell;
 

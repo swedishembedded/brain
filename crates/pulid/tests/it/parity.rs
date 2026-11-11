@@ -15,9 +15,10 @@
 //!    the reduced-depth FLUX.1 backbone with the ID injected at the reference
 //!    sites, per block boundary and at the output.
 //!
-//! **End-to-end generation is NOT gated and is not claimed** — `crates/flux1`
-//! has no sampler loop and no VAE glue, so there is no image to compare.
-//! Neither is full-depth conditioning: fp32 FLUX.1 is 47.6 GiB and does not fit
+//! **End-to-end generation is NOT gated and is not claimed**: the sampler
+//! exists (`flux1::pipeline::Flux1::generate_injected`) but there is no
+//! reference image to compare. Neither is full-depth conditioning: fp32 FLUX.1
+//! is 44.3 GiB and does not fit
 //! one 24 GiB card, which is why `crates/flux1`'s own fp32 gate is also reduced
 //! depth. The 20-site full-depth schedule is gated as a schedule, in
 //! `pulid::config`'s unit tests.

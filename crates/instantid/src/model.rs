@@ -301,8 +301,10 @@ impl SiteAttn {
         }
     }
 
-    /// Upload the ID tokens. Once per identity, not once per step — the `k`/`v`
-    /// projection depends only on them, so it is recorded here and reused.
+    /// Upload the ID tokens, once per identity. The `k`/`v` projection of
+    /// them depends on nothing else, but it is still recomputed on every
+    /// pass (`run` and `SiteAttnSet::inject`); caching it is a small saving
+    /// left on the table.
     pub fn set_id(&self, id: &[f32]) {
         assert_eq!(id.len(), self.num_queries * self.cfg.token_dim, "instantid: id token slab");
         self.gpu.write_f32(&self.id, id);

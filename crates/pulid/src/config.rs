@@ -34,8 +34,8 @@
 //!    `id=id if i >= start_step else None`, i.e. before `start_step` the
 //!    injection is simply absent. brain expresses that the same way — a caller
 //!    that wants step `i` unconditioned calls the plain
-//!    `Flux1Model::forward`. `crates/flux1` has no sampler loop, so no
-//!    schedule is implemented here.
+//!    `Flux1Model::forward`. The schedule is the sampler's, in
+//!    `flux1::pipeline::Flux1::generate_injected`, not this file's.
 
 /// Which stream a cross-attention site sits after.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

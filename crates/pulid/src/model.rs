@@ -394,7 +394,7 @@ impl IdFormer {
     ///
     /// Every scratch buffer here is REUSED across layers, so a stage is only
     /// readable immediately after the step that wrote it — hence the replay
-    /// rather than one forward and 20 reads. Cheap: the whole graph is ~140 M
+    /// rather than one forward and 20 reads. Cheap: the whole graph is ~151 M
     /// params and a few hundred dispatches.
     pub fn read_tap(&self, name: &str) -> Vec<f32> {
         let t = self.taps.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("pulid: no tap `{name}`"));
