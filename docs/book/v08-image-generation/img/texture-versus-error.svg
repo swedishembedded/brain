@@ -1,0 +1,42 @@
+<!-- source-sha256: c78ac445607aff926fcfdc55013426e8b3c828b955bfff4983472c08c66bb705 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 340" width="560" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="340" fill="#ffffff"/>
+<line x1="58" y1="294" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="142.17" y1="294" x2="142.17" y2="30" stroke="#edf2f7"/>
+<text x="142.17" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.2</text>
+<line x1="226.35" y1="294" x2="226.35" y2="30" stroke="#edf2f7"/>
+<text x="226.35" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.4</text>
+<line x1="310.52" y1="294" x2="310.52" y2="30" stroke="#edf2f7"/>
+<text x="310.52" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.6</text>
+<line x1="394.7" y1="294" x2="394.7" y2="30" stroke="#edf2f7"/>
+<text x="394.7" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.8</text>
+<line x1="478.87" y1="294" x2="478.87" y2="30" stroke="#edf2f7"/>
+<text x="478.87" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="58" y1="273.69" x2="542" y2="273.69" stroke="#edf2f7"/>
+<text x="52" y="277.69" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="222.92" x2="542" y2="222.92" stroke="#edf2f7"/>
+<text x="52" y="226.92" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.25</text>
+<line x1="58" y1="172.15" x2="542" y2="172.15" stroke="#edf2f7"/>
+<text x="52" y="176.15" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.5</text>
+<line x1="58" y1="121.38" x2="542" y2="121.38" stroke="#edf2f7"/>
+<text x="52" y="125.38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.75</text>
+<line x1="58" y1="70.62" x2="542" y2="70.62" stroke="#edf2f7"/>
+<text x="52" y="74.62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<rect x="58" y="30" width="484" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#a0aec0" stroke-width="1.6" points="58,273.69 62.21,273.67 66.42,273.61 70.63,273.51 74.83,273.37 79.04,273.18 83.25,272.96 87.46,272.7 91.67,272.39 95.88,272.05 100.09,271.66 104.3,271.24 108.5,270.77 112.71,270.26 116.92,269.71 121.13,269.12 125.34,268.49 129.55,267.82 133.76,267.11 137.97,266.36 142.17,265.57 146.38,264.74 150.59,263.86 154.8,262.95 159.01,262 163.22,261 167.43,259.96 171.63,258.89 175.84,257.77 180.05,256.61 184.26,255.42 188.47,254.18 192.68,252.9 196.89,251.58 201.1,250.22 205.3,248.82 209.51,247.37 213.72,245.89 217.93,244.37 222.14,242.8 226.35,241.2 230.56,239.56 234.77,237.87 238.97,236.14 243.18,234.38 247.39,232.57 251.6,230.72 255.81,228.83 260.02,226.9 264.23,224.93 268.43,222.92 272.64,220.87 276.85,218.78 281.06,216.65 285.27,214.48 289.48,212.26 293.69,210.01 297.9,207.71 302.1,205.38 306.31,203 310.52,200.58 314.73,198.13 318.94,195.63 323.15,193.09 327.36,190.51 331.57,187.89 335.77,185.23 339.98,182.53 344.19,179.79 348.4,177.01 352.61,174.18 356.82,171.32 361.03,168.42 365.23,165.47 369.44,162.49 373.65,159.46 377.86,156.4 382.07,153.29 386.28,150.14 390.49,146.95 394.7,143.72 398.9,140.45 403.11,137.14 407.32,133.79 411.53,130.4 415.74,126.97 419.95,123.5 424.16,119.98 428.37,116.43 432.57,112.84 436.78,109.2 440.99,105.52 445.2,101.81 449.41,98.05 453.62,94.25 457.83,90.42 462.03,86.54 466.24,82.62 470.45,78.66 474.66,74.66 478.87,70.62 483.08,66.53 487.29,62.41 491.5,58.25 495.7,54.04 499.91,49.8 504.12,45.52 508.33,41.19 512.54,36.82 516.75,32.42 520.96,27.97 525.17,23.48 529.37,18.95 533.58,14.38 537.79,9.77 542,5.12"/><circle cx="58" cy="273.69" r="4.5" fill="#2b6cb0"/><circle cx="142.17" cy="265.57" r="4.5" fill="#2b6cb0"/><circle cx="268.43" cy="222.92" r="4.5" fill="#2b6cb0"/><circle cx="394.7" cy="143.72" r="4.5" fill="#2b6cb0"/><circle cx="454.11" cy="93.8" r="4.5" fill="#2b6cb0"/><circle cx="478.87" cy="70.62" r="5.5" fill="#c05621"/><circle cx="58" cy="273.69" r="5.5" fill="#2f855a"/></g>
+<text x="300" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">amplitude of the produced texture a (real texture = 1)</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">error per pixel (units of the real texture squared)</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">What each unit of texture costs</text>
+<rect x="66" y="38" width="238.19" height="78" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#a0aec0" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">1 + a squared</text>
+<circle cx="84" cy="70" r="3.5" fill="#2b6cb0"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">squared error plus a feature weight</text>
+<circle cx="84" cy="87" r="3.5" fill="#c05621"/>
+<text x="100" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">a sample (the sampler of the toy)</text>
+<circle cx="84" cy="104" r="3.5" fill="#2f855a"/>
+<text x="100" y="108" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">the mean (squared-error optimum)</text>
+</svg>

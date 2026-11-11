@@ -28,5 +28,5 @@ You can say what a generative model of images offers (a sampler, a density, or b
 9. [Conditioning on Text](09-text-conditioning.md): how a sentence becomes the signal that steers image generation.
 10. [Latent Diffusion Systems End to End](10-latent-diffusion-systems.md): how the encoder, denoiser, sampler and decoder combine into a working image generator.
 11. [Control, Identity and Adapters](11-control-and-identity.md): how to steer a generator with a pose, an edge map or a particular person's face.
-12. Restoration and Super-Resolution: how a network can recover detail that is not in the input.
+12. [Restoration and Super-Resolution](12-restoration.md): how a network can recover detail that is not in the input.
 13. Project: A Small Image Generator: whether you can train a small generator and grow it into a conditioned latent generation system.

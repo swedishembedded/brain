@@ -462,6 +462,7 @@ navigation:
           - docs/book/v08-image-generation/09-text-conditioning.md
           - docs/book/v08-image-generation/10-latent-diffusion-systems.md
           - docs/book/v08-image-generation/11-control-and-identity.md
+          - docs/book/v08-image-generation/12-restoration.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

@@ -106,6 +106,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **BiSeNet**: a segmentation network with two paths, a shallow spatial path that keeps one eighth of the resolution to place boundaries and a fast-shrinking context path with a global pool that supplies the meaning, joined by a learned fusion and followed by a head that predicts per-pixel class scores. *([Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md))*
 
+**blind restoration**: restoration in which the degradation that produced the input is not given and varies from picture to picture, so that the restorer must work without being told what was done, in practice by being trained on a wide family of degradations. *([Restoration and Super-Resolution](v08-image-generation/12-restoration.md))*
+
 **bootstrap**: a method that estimates the sampling distribution of a statistic by repeatedly drawing a sample of the same size with replacement from the sample itself and recomputing the statistic, giving a standard error or interval without a formula. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
 **bounding box**: the smallest axis-aligned rectangle that holds an object, written as corners $(x_1, y_1, x_2, y_2)$, as a centre and size $(c_x, c_y, w, h)$, or in either form divided by the image size; a box covers the pixels $x_1 \le x < x_2$, $y_1 \le y < y_2$. *([Object Detection](v07-vision/04-detection.md))*
@@ -161,6 +163,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **classifier-free guidance**: sampling with the prediction $u_{\mathrm{un}} + g(u_c - u_{\mathrm{un}})$, the prediction made with the prompt pushed away from the prediction made without it by a scale $g$; $g = 1$ is the plain conditional model, and a larger $g$ follows the prompt harder at the cost of variety and of a second network pass per step. *([Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md))*
 
 **codebook**: a table of $K$ vectors of $d$ numbers each, the only values a quantized vector may take; a position of a tokenizer stores the index of a row. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
+
+**codebook prior**: a learned codebook of clean-picture parts used as the space of allowed restorations, so that every restored feature is one of the codes the decoder was trained on and the codes are chosen from the whole degraded picture. *([Restoration and Super-Resolution](v08-image-generation/12-restoration.md))*
 
 **color space**: the rule that turns a triple of numbers into a colour, made of three primary colours, a white point and a transfer curve, so that the same triple is a different colour in a different space. *([Images as Data](v07-vision/01-images.md))*
 
@@ -269,6 +273,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **device-synchronized timing**: timing in which the clock stops only after the device has finished the work being timed, either by the host waiting for it or by reading timestamps the device wrote itself; a clock stopped when the call returns reads the host's cost of handing over the work. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
 **differentiation rules**: the short list (constants and multiples, sums, products, quotients, powers) from which the derivative of any formula built from simple pieces is computed without returning to the limit. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
+
+**diffusion restoration**: restoration by running a diffusion sampler from noise while conditioning every step on the degraded picture, so that the output is a draw from the model's distribution of pictures consistent with the input and not their mean. *([Restoration and Super-Resolution](v08-image-generation/12-restoration.md))*
 
 **diffusion transformer**: a denoiser made of transformer blocks over the patch tokens of a latent, with the noise level entering through adaptive layer normalization, and a last layer that maps the tokens back to patches. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
 
@@ -975,6 +981,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **subgroup**: the group of consecutive invocations of a workgroup, 32 in this book's model, that the hardware executes with one instruction at a time. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
 **summation notation**: the symbol $\sum_{i=a}^{b} x_i$ for the sum of the terms $x_i$ as the index $i$ runs from $a$ to $b$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
+
+**super-resolution**: producing a picture with more pixels than the one in hand, by estimating the detail that the downsampling removed; because many pictures share one downsampling, the output is a choice among them. *([Restoration and Super-Resolution](v08-image-generation/12-restoration.md))*
 
 **supervised learning**: learning from examples that all carry labels, in order to predict the label of a new example. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
