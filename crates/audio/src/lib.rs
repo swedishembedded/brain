@@ -4,7 +4,7 @@
 //! Shared audio engine infrastructure - the front-end/back-end pieces every
 //! spectrogram- or waveform-based model composes from, all fp32 and
 //! dependency-light so they share the brain engine's portability constraints:
-//!   * [`wav`]   - canonical PCM WAV read/write (mono f32).
+//!   * [`wav`]   - canonical PCM WAV read/write (f32, mono or per channel).
 //!   * [`conv`]  - 1D conv / transposed-conv `Step`-builders over the shared
 //!     WGSL engine (+ CPU reference oracles), the audio analogue of
 //!     `model::block`. Backs the codec, ECAPA speaker encoder and GAN vocoder.

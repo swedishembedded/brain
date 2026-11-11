@@ -3,8 +3,9 @@
 
 //! Minimal dependency-light WAV I/O (canonical PCM RIFF) for the TTS stack.
 //! Reads 16/24/32-bit integer PCM and 32-bit float; writes 16-bit PCM. Samples
-//! are normalized f32 in roughly [-1, 1]. Multi-channel input is downmixed to
-//! mono (mean) since the codec/speaker paths are mono at 24 kHz.
+//! are normalized f32 in roughly [-1, 1]. [`parse`] downmixes multi-channel
+//! input to mono (mean) for the codec and speaker paths; [`parse_planar`] keeps
+//! the channels apart, and [`encode_multi`] writes several.
 
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -22,9 +23,6 @@ fn u32le(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
-/// Parse a RIFF/WAVE byte stream into its sample rate and one plane per
-/// channel, each in `[-1, 1]` - the channels kept apart, for a caller that
-/// carries the sound on rather than analysing it.
 /// The lowest sample rate brain reads, in Hz. Every resampler's output length
 /// and filter size scale with the ratio of two rates, so a rate a file or a
 /// client declares is held to [`MIN_SAMPLE_RATE`]..=[`MAX_SAMPLE_RATE`]
@@ -45,6 +43,9 @@ pub fn checked_rate(rate: u64) -> Result<u32, String> {
         .ok_or_else(|| format!("a sample rate of {rate} Hz is outside {MIN_SAMPLE_RATE}..={MAX_SAMPLE_RATE}"))
 }
 
+/// Parse a RIFF/WAVE byte stream into its sample rate and one plane per
+/// channel, each in `[-1, 1]` - the channels kept apart, for a caller that
+/// carries the sound on rather than analysing it.
 pub fn parse_planar(bytes: &[u8]) -> io::Result<(u32, Vec<Vec<f32>>)> {
     let err = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
@@ -105,7 +106,6 @@ pub fn parse_planar(bytes: &[u8]) -> io::Result<(u32, Vec<Vec<f32>>)> {
     Ok((rate, planes))
 }
 
-/// Read a WAV file into mono f32 samples.
 /// [`parse_planar`], downmixed to mono by averaging the channels.
 pub fn parse(bytes: &[u8]) -> io::Result<Wav> {
     let (sample_rate, planes) = parse_planar(bytes)?;
@@ -114,6 +114,7 @@ pub fn parse(bytes: &[u8]) -> io::Result<Wav> {
     Ok(Wav { sample_rate, samples })
 }
 
+/// Read a WAV file into mono f32 samples ([`parse`] of its bytes).
 pub fn read(path: impl AsRef<Path>) -> io::Result<Wav> {
     let mut f = std::fs::File::open(path)?;
     let mut bytes = Vec::new();
