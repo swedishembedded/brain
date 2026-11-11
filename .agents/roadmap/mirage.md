@@ -992,3 +992,7 @@ still 1.4-1.6x slower per image (decode 0.35-0.39 s = ~236 steps x 1.4-1.6 ms; t
 Open, optional: batch-1 below the vendor's per-token time needs fewer launches per step (276 FP32 / 329 CQ dispatches)
 - the remaining launch chain is listed in "Item 6 continued"; CQ-A8 at batch >= 8 stays on the cooperative int8
 product (no dense int8 GEMM).
+- Found while closing item 6 (2026-11-11): gpu-core's `the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with_it`
+  fails on an IDLE gpu1 at 2.35x against its 8x floor - and equally at the commit before the skinny-kernel change
+  (2.41-2.44x, measured in a scratch worktree), so it is pre-existing and not caused by this campaign (512x512x512 is
+  outside the skinny range). The floor or the tuned tile needs a decision in the shared CUDA layer.
