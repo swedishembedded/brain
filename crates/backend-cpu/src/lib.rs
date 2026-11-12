@@ -452,6 +452,7 @@ impl CpuBackend {
     /// word_len)` - the dispatch sees the buffer starting at `word_offset`
     /// (`word_len` is advisory on CPU; the kernel self-bounds via params).
     pub fn step_sliced(&self, kind: usize, bufs: &[&CpuBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> CpuStep {
+backend_api::check_binding_offsets(&self.shared.names[kind], offsets);
         self.stats.uniform_allocs.fetch_add(1, Ordering::Relaxed);
         self.stats.bind_groups.fetch_add(1, Ordering::Relaxed);
         let ubuf = CpuBuffer::with_words(Self::pad_uniform(params));

@@ -2645,6 +2645,7 @@ impl WgpuBackend {
     /// >128MB embedding into vocab slices). Offsets must satisfy the adapter's
     /// > `min_storage_buffer_offset_alignment` (256B); row-aligned tiles do.
     pub fn step_sliced(&self, kind: usize, bufs: &[&wgpu::Buffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> WgpuStep {
+        backend_api::check_binding_offsets(self.kernel_name(kind), offsets);
         let ubuf = self.uniform(params);
         let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }];
         // A non-zero word offset makes this dispatch `sliced` -- see

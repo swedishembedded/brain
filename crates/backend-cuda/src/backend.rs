@@ -1633,6 +1633,8 @@ impl backend_api::Backend for CudaBackend {
             offsets.len(),
             bufs.len()
         );
+        // Names the kind, not the kernel: resolving the name compiles it, which a recording must not do.
+        backend_api::check_binding_offsets(&format!("kind {kind}"), offsets);
         self.record(kind, bufs, Some(offsets), params, threads)
     }
 

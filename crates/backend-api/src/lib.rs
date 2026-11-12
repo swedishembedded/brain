@@ -83,6 +83,27 @@ impl<T: ?Sized> ThreadSafe for T {}
 /// reproduces the same tiling so the kernels' index math is identical.
 pub const MAX_GROUPS_PER_DIM: u32 = 65535;
 
+/// The finest byte offset at which a storage buffer may be bound as a sub-range (`Backend::step_sliced`):
+/// the strictest `min_storage_buffer_offset_alignment` of any supported device (wgpu on Intel and AMD).
+/// Every backend enforces it through [`check_binding_offsets`], so a misaligned slice fails on the CPU
+/// backend the same way it fails on that device. A caller that needs a finer start passes the offset as a
+/// kernel param and binds the whole buffer.
+pub const STORAGE_BINDING_OFFSET_ALIGN_BYTES: u64 = 256;
+
+/// Panic unless every `(word_offset, _)` in `offsets` honours [`STORAGE_BINDING_OFFSET_ALIGN_BYTES`]; the
+/// message names the kernel, the binding (0-based, in `bufs` order) and the offset.
+pub fn check_binding_offsets(kernel: &str, offsets: &[(u64, u64)]) {
+    for (binding, &(off_words, _)) in offsets.iter().enumerate() {
+        let bytes = off_words * 4;
+        assert!(
+            bytes % STORAGE_BINDING_OFFSET_ALIGN_BYTES == 0,
+            "step_sliced: kernel `{kernel}` binding {binding} offset {bytes} bytes ({off_words} words) is not a multiple of \
+             {STORAGE_BINDING_OFFSET_ALIGN_BYTES} bytes (min_storage_buffer_offset_alignment); pass the offset as a kernel \
+             param and bind the whole buffer"
+        );
+    }
+}
+
 /// The workgroup size a kernel gets when its source declares none - and the
 /// size all but the register-tiled GEMMs use.
 pub const DEFAULT_WORKGROUP_SIZE: u32 = 64;
