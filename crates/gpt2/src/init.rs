@@ -6,7 +6,7 @@
 //! - residual projections (`attn.out.weight`, `mlp.proj.weight`): Normal(0,
 //!   0.02 / sqrt(2 * n_layers)) — the GPT-2 scaled init
 //! - LayerNorm weight = 1, all biases = 0
-//! - `lm_head.weight`: Normal(0, 0.02) (untied — see `model.rs`).
+//! - the output head is `tok.weight` itself (tied, as in GPT-2), so it has no initialiser of its own
 
 use std::collections::HashMap;
 

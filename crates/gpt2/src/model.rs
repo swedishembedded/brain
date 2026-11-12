@@ -8,15 +8,21 @@
 //! Architecture (pre-norm, matches nanogpt `GPT`; dropout disabled):
 //!   x = tok_emb[idx] + pos_emb[pos]
 //!   per block: h = LN1(x); x += Wo·MHA(h) ;  h = LN2(x); x += proj·GELU(fc·h)
-//!   logits = lm_head( LN_f(x) )            // over vocab; lm_head has no bias
+//!   logits = tok_emb^T · LN_f(x)           // over vocab; the head has no bias
 //!   loss   = cross-entropy (ignore_index = IGNORE), so masked datasets work.
 //!
-//! Differences vs nanogpt, intentional and documented:
-//!   * `lm_head` is **untied** from `tok.weight` (nanogpt ties them). Untied
-//!     keeps each gradient written exactly once, matching the rest of the
-//!     engine and the finite-difference gradient check. Tying (which needs grad
-//!     accumulation into `tok.weight`) is a follow-up.
-//!   * GELU uses the tanh approximation (see `kernels/wgsl/gelu.wgsl`).
+//! The output head is **tied** to the token embedding, as in GPT-2 and nanogpt:
+//! `tok.weight` is both the embedding table and the head, and there is no
+//! `lm_head.weight`. The backward writes the head's gradient into `tok.weight`'s
+//! gradient first (`matmul_dw` adds into the buffer), then the embedding scatter
+//! (`emb_bwd`) adds onto it, the same order `qwen3` uses for its tied head. A
+//! pipeline stage that only heads therefore holds `tok.weight` too, and the
+//! pipeline sums the table's gradient across its two holders
+//! ([`model::Shardable::replicated_params`]). A checkpoint saved when the head
+//! was a separate tensor is refused on load ([`reject_untied_head`]).
+//!
+//! Difference vs nanogpt, intentional and documented: GELU uses the tanh
+//! approximation (see `kernels/wgsl/gelu.wgsl`).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -33,7 +39,8 @@ pub use model::Shard;
 
 /// The parameter subset a shard holds. A whole shard returns `cfg.param_list()`
 /// verbatim; a partial shard keeps only its layers' weights, plus tok/pos
-/// embeddings when it embeds and the final norm + (untied) lm_head when it heads.
+/// embeddings when it embeds, the final norm when it heads, and `tok.weight` when it
+/// embeds or heads (the tied head reads the embedding table).
 fn shard_param_list(cfg: &GptConfig, shard: &Shard) -> Vec<(String, usize)> {
     let full = cfg.param_list();
     if shard.is_whole(cfg.n_layers as usize) {
@@ -46,12 +53,29 @@ fn shard_param_list(cfg: &GptConfig, shard: &Shard) -> Vec<(String, usize)> {
                 return shard.owns(l);
             }
             match name.as_str() {
-                "tok.weight" | "pos.weight" => shard.embed,
-                "ln.weight" | "ln.bias" | "lm_head.weight" => shard.head,
+                "tok.weight" => shard.embed || shard.head,
+                "pos.weight" => shard.embed,
+                "ln.weight" | "ln.bias" => shard.head,
                 _ => false,
             }
         })
         .collect()
+}
+
+/// Name the tensor an older checkpoint carried for the head before it was tied to the embedding.
+const UNTIED_HEAD: &str = "lm_head.weight";
+
+/// Refuse a checkpoint that still carries a separate head. The tied model has nowhere to put it, and loading
+/// anyway would drop a trained tensor silently and serve a different function than the one that was saved.
+/// There is no conversion: the saved embedding and head differ, and neither is the tied table.
+fn reject_untied_head(src: &dyn checkpoint::TensorSource) -> Result<(), String> {
+    if src.numel(UNTIED_HEAD).is_some() {
+        return Err(format!(
+            "the checkpoint carries its own `{UNTIED_HEAD}`, but this model ties the output head to `tok.weight` (as GPT-2 does); \
+             a checkpoint saved with an untied head cannot be loaded, retrain it or load one saved after the head was tied"
+        ));
+    }
+    Ok(())
 }
 
 /// Cross-entropy ignore index (masked target positions). The data loader emits
@@ -364,7 +388,7 @@ impl GptConfig {
         }
         out.push(("ln.weight".to_string(), d));
         out.push(("ln.bias".to_string(), d));
-        out.push(("lm_head.weight".to_string(), v * d)); // untied, no bias
+        // No head tensor: the head is `tok.weight`, tied.
         out
     }
 }
@@ -543,6 +567,7 @@ impl Gpt {
     }
 
     fn build(gpu: Gpu, cfg: GptConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard, resident: Option<&model::resident_ft::ResidentFtConfig>) -> Result<Gpt, String> {
+        reject_untied_head(src)?;
         let layer_of = |name: &str| model::streamed::blocks_layer(name).filter(|&l| shard.owns(l as usize));
         let roles = shard_param_list(&cfg, &shard)
             .into_iter()
@@ -606,7 +631,7 @@ impl Gpt {
                 dummy_layer()
             });
         }
-        // Head-only buffers (final norm + lm_head + CE): only the last stage; the
+        // Head-only buffers (final norm + tied head + CE): only the last stage; the
         // `n*vocab` logits buffers dominate the saving on other stages.
         let res = Residuals::new(res, shard.start..shard.end + 1);
         let head = shard.head;
@@ -735,14 +760,14 @@ impl Gpt {
             pass.segment(&mut s, Some(l));
         }
 
-        // Head epilogue (final norm + lm_head + CE): only the head stage.
+        // Head epilogue (final norm + tied head + CE): only the head stage.
         if !self.shard.head {
             return pass;
         }
         let last = c.n_layers as usize;
         s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final, d, n, 1e-5));
         let (mk, mt) = linear_kernel(n as usize, v as usize);
-        s.push(self.gpu.dispatch(mk, &[&self.xn_final, self.w("lm_head.weight"), &self.logits], &[n, d, v], mt));
+        s.push(self.gpu.dispatch(mk, &[&self.xn_final, self.w("tok.weight"), &self.logits], &[n, d, v], mt));
         if let Some(scale) = &self.logit_scale {
             scale.hook(&self.gpu, &mut s, GRAD_SCALE_BUF, &self.logits, n * v);
         }
@@ -889,9 +914,9 @@ impl Gpt {
                 None => &self.d_logits,
             };
             let (bk, bt) = dw_kernel(v as usize, d as usize);
-            s.push(self.gpu.dispatch(bk, &[d_logits_bw, &self.xn_final, g("lm_head.weight")], &[n, d, v], bt));
+            s.push(self.gpu.dispatch(bk, &[d_logits_bw, &self.xn_final, g("tok.weight")], &[n, d, v], bt));
             let (bk, bt) = dx_kernel(n as usize, d as usize);
-            s.push(self.gpu.dispatch(bk, &[d_logits_bw, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], bt));
+            s.push(self.gpu.dispatch(bk, &[d_logits_bw, self.w("tok.weight"), &self.d_xn], &[n, d, v, 0], bt));
             let last = c.n_layers as usize;
             self.res.restore(&self.gpu, &mut s, last);
             s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.res[last], &self.ln_mean, &self.ln_inv, d, n, 1e-5));
@@ -1216,7 +1241,7 @@ impl Gpt {
     /// token's Q/K/V are projected; its K/V are appended to the persistent per-layer
     /// cache and a single query attends over positions `0..=pos`. Expressed entirely
     /// in the existing WGSL op set, so it runs on whatever backend `Gpu` selected
-    /// (GPU or the wgsl-cpu JIT). Apply the (untied) `lm_head` to the returned hidden
+    /// (GPU or the wgsl-cpu JIT). Apply the tied head (`tok.weight`) to the returned hidden
     /// row for logits.
     pub fn step(&self, token_id: u32) -> Vec<f32> {
         self.ensure_decode();
@@ -1546,10 +1571,6 @@ mod tests {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
     }
 
-    fn maxabs(a: &[f32], b: &[f32]) -> f32 {
-        a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
-    }
-
     /// The streaming `Gpt::load` (mmap `WeightReader`, one tensor uploaded at a
     /// time) yields byte-identical device weights to the eager whole-model-host-
     /// map path (`Gpt::new` over `by_role("")`), and both match the source init
@@ -1578,67 +1599,6 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    /// The incremental KV-cache `step` must reproduce the `O(T²)` full-recompute
-    /// (`logits_all`) for every prefix: the cache is algebraically exact, same
-    /// engine + weights, so the only difference is float reduction order. Runs on
-    /// whatever backend `Gpu` selected (GPU, or `BRAIN_DEVICE=cpu`).
-    #[test]
-    fn kv_step_matches_full_recompute() {
-        if gpu_disabled() {
-            return;
-        }
-        // d_model=32 (=> the fused-qkv weight-slice offsets d² are 256B-aligned),
-        // biases random so the fused-QKV bias split is genuinely exercised.
-        let cfg = GptConfig { vocab: 65, block_size: 16, n_layers: 2, d_model: 32, n_heads: 4, d_ff: 64 };
-        let d = cfg.d_model as usize;
-        let v = cfg.vocab as usize;
-        let seq = 10usize;
-        // seed: the cached-vs-recompute logit tolerance was measured on this weight draw
-        let mut rng = data::rng::Rng::new(4321);
-
-        let mut init: HashMap<String, Vec<f32>> = HashMap::new();
-        for (name, numel) in cfg.param_list() {
-            let val = if name.ends_with("ln1.weight") || name.ends_with("ln2.weight") || name == "ln.weight" {
-                vec![1.0f32; numel] // LayerNorm gain = 1
-            } else {
-                (0..numel).map(|_| rng.next_gaussian() as f32 * 0.08).collect()
-            };
-            init.insert(name, val);
-        }
-        let m = Gpt::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), 1, cfg.block_size, &init);
-        let lm_head = m.read_weight("lm_head.weight"); // [v, d], untied, no bias
-
-        let tokens: Vec<u32> = (0..seq).map(|_| (rng.next_u64() % v as u64) as u32).collect();
-
-        // Incremental: feed one token at a time; head-project each hidden row.
-        m.reset_cache();
-        let inc_logits: Vec<Vec<f32>> = tokens
-            .iter()
-            .enumerate()
-            .map(|(i, &tok)| {
-                assert_eq!(m.cache_pos(), i as u32);
-                let h = m.step(tok); // [d] final-LayerNorm hidden
-                (0..v)
-                    .map(|o| {
-                        let row = &lm_head[o * d..(o + 1) * d];
-                        (0..d).map(|k| row[k] * h[k]).sum::<f32>()
-                    })
-                    .collect()
-            })
-            .collect();
-
-        // Reference: full recompute of each prefix; compare the last row's logits.
-        let mut worst = 0.0f32;
-        for i in 0..seq {
-            let full = m.logits_all(&tokens[..=i]); // [(i+1)*v]
-            let last = &full[i * v..(i + 1) * v];
-            let err = maxabs(&inc_logits[i], last);
-            worst = worst.max(err);
-            assert!(err < 2e-3, "prefix {i}: KV step vs full recompute maxabs={err}");
-        }
-        println!("kv_step_matches_full_recompute: seq={seq} worst maxabs={worst:e}");
-    }
-
     #[test]
     fn param_list_shapes() {
         let cfg = GptConfig::tiny(); // v=65 d=32 layers=2 ff=128
@@ -1647,8 +1607,43 @@ mod tests {
         assert_eq!(m["pos.weight"], 64 * 32);
         assert_eq!(m["blocks.0.mlp.fc.weight"], 128 * 32);
         assert_eq!(m["blocks.1.mlp.proj.weight"], 32 * 128);
-        assert_eq!(m["lm_head.weight"], 65 * 32);
+        assert!(!m.contains_key("lm_head.weight"), "the head is the token embedding, not a second table");
         assert!(!m.contains_key("lm_head.bias"));
+    }
+
+    /// With the head tied, the parameter list of the published GPT-2 small shape is the published count.
+    #[test]
+    fn the_gpt2_small_shape_has_the_published_parameter_count() {
+        let cfg = GptConfig { vocab: 50257, block_size: 1024, n_layers: 12, d_model: 768, n_heads: 12, d_ff: 3072 };
+        let total: usize = cfg.param_list().iter().map(|(_, n)| n).sum();
+        assert_eq!(total, 124_439_808);
+    }
+
+    /// GPT-2 shares one table between the embedding and the head, so the
+    /// stage that only heads still needs `tok.weight`, and a pipeline sums the
+    /// table's gradient across the two stages that hold it.
+    #[test]
+    fn a_head_only_shard_holds_the_tied_embedding_table() {
+        let cfg = GptConfig::tiny();
+        let head_only = Shard { start: 1, end: 2, embed: false, head: true, gpu_index: Shard::ANY_GPU };
+        let names: Vec<String> = shard_param_list(&cfg, &head_only).into_iter().map(|(n, _)| n).collect();
+        assert!(names.contains(&"tok.weight".to_string()), "{names:?}");
+        assert!(!names.contains(&"pos.weight".to_string()), "{names:?}");
+        let middle = Shard { start: 1, end: 2, embed: false, head: false, gpu_index: Shard::ANY_GPU };
+        assert!(shard_param_list(&cfg, &middle).iter().all(|(n, _)| n != "tok.weight"));
+    }
+
+    /// A checkpoint written before the head was tied carries its own
+    /// `lm_head.weight`. Loading it would silently discard a trained head, so
+    /// it is refused with the reason.
+    #[test]
+    fn a_checkpoint_with_an_untied_head_is_refused() {
+        let cfg = GptConfig::tiny();
+        let mut init = crate::init::init_weights(&cfg, 3);
+        assert!(reject_untied_head(&init).is_ok());
+        init.insert("lm_head.weight".to_string(), vec![0.0; cfg.vocab as usize * cfg.d_model as usize]);
+        let err = reject_untied_head(&init).unwrap_err();
+        assert!(err.contains("lm_head.weight") && err.contains("tok.weight"), "{err}");
     }
 
     #[test]

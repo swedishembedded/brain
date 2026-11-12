@@ -134,11 +134,12 @@ mod tests {
         crate::GptConfig { vocab: 8, block_size: BLOCK, n_layers: 1, d_model: 8, n_heads: 2, d_ff: 16 }
     }
 
-    /// A model whose output ignores its input. Every weight is zero, so the
-    /// residual stream stays zero, the final layer norm returns its bias, and
-    /// the logits are `lm_head * bias`. With `lm_head` the identity and a bias
-    /// of `MARGIN` on token `favoured`, that token wins by exactly `MARGIN`
-    /// everywhere; with no favoured token all logits are zero (uniform).
+    /// A model whose output ignores its input. The final layer norm has gain
+    /// zero, so it returns its bias whatever the residual stream holds, and the
+    /// logits are `tok.weight * bias` (the head is tied to the embedding). With
+    /// `tok.weight` the identity and a bias of `MARGIN` on token `favoured`,
+    /// that token wins by exactly `MARGIN` everywhere; with no favoured token
+    /// all logits are zero (uniform). Every other weight is zero.
     fn constant_model(dir: &Path, favoured: Option<usize>) -> String {
         let cfg = config();
         let d = cfg.d_model as usize;
@@ -148,13 +149,12 @@ mod tests {
             .map(|(name, n)| {
                 let mut v = vec![0.0f32; n];
                 match name.as_str() {
-                    "ln.weight" => v.fill(1.0),
                     "ln.bias" => {
                         if let Some(j) = favoured {
                             v[j] = MARGIN;
                         }
                     }
-                    "lm_head.weight" => (0..d).for_each(|i| v[i * d + i] = 1.0),
+                    "tok.weight" => (0..d).for_each(|i| v[i * d + i] = 1.0),
                     _ => {}
                 }
                 (name, vec![n as u64], v)

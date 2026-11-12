@@ -76,8 +76,9 @@ baseline's `generate` returns its text in one piece.
 
 ## Hardware and limits
 
-Runs on the cpu and gpu backends. The output head is untied from the token
-embedding (unlike classic nanoGPT's weight tying), and GELU uses the tanh
+Runs on the cpu and gpu backends. The output head is tied to the token
+embedding, as in GPT-2 and nanoGPT, so a checkpoint carries no separate head
+tensor and one saved with an untied head is refused on load. GELU uses the tanh
 approximation rather than exact erf. There's no HuggingFace import, no INT8
 quantization, and no paged-KV concurrent serving engine - those are Qwen3's.
 Context length is whatever `--block` you train with; there's no fixed cap

@@ -3,8 +3,8 @@
 
 //! Generic pipeline sharding (`model::Pipeline<Gpt>`) is bit-exact against the
 //! single-device GPT — proving the sharding seam is not Qwen-specific. GPT's
-//! lm_head is untied, so stages hold fully disjoint parameters (no replicated
-//! gradient). The cut is placed automatically by `plan_balanced`.
+//! head is tied to the token embedding, so the embed stage and the head stage both
+//! hold `tok.weight` and the pipeline sums its gradient (`replicated_params`). The cut is placed automatically by `plan_balanced`.
 //!
 //! Two stages on GPUs 0 and 1 by default; `SHARD_TEST_GPUS=1,1` pins both to one
 //! card. Skipped under `MOE_SKIP_GPU_TESTS`.

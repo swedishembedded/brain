@@ -47,36 +47,7 @@
 use gpt2::model::{Gpt, GptConfig, PIPELINES};
 use gpu_core::Gpu;
 
-/// Per-logit bound inside which every pair of backends must agree, derived from the binary32 round-off bound
-/// `k u S / (1 - k u)` ([`brain_testutil::rounding`]) for this model's own shapes and weights.
-///
-/// A logit is `sum_j W[v, j] h_j` over the final-norm output `h`. A normalised row has unit mean square, so
-/// `|x_hat_j| <= sqrt(d)` and `|h_j| <= H = sqrt(d) max|g| + max|b|` for the norm's gain `g` and shift `b`; the terms
-/// of logit `v` therefore sum in absolute value to `S_v <= H sum_j |W[v, j]|`. `k` is the number of rounded operations
-/// on the longest chain from a token to a logit: every reduction of every stage in turn (norm statistics, projection
-/// widths, attention over `t` keys, the 4d feed-forward contraction) plus the head's own `d` adds, and a few for each
-/// elementwise step. The bound takes each stage to carry relative error through with gain at most one, which the norms
-/// and the residual stream are there to make true; the full forward bound is the ledger item "derive the forward
-/// bound". Two backends each within the bound of the exact logit are within twice the bound of each other.
-///
-/// A real miscompile (a barrier some threads never reach, a uniform member read at the wrong offset, a shift the PTX ISA
-/// clamps) moves a logit by orders of magnitude more than this.
-///
-/// perf-number: a numerical-tolerance ratio, not a throughput claim.
-fn logit_bounds(cfg: &GptConfig, init: &std::collections::HashMap<String, Vec<f32>>) -> Vec<f32> {
-    let (d, ff, t) = (cfg.d_model as usize, cfg.d_ff as usize, T as usize);
-    let hd = d / cfg.n_heads as usize;
-    let norm = 2 * d + 4; // mean, variance, then the rsqrt and scale
-    let layer = norm + d + (hd + t + 4 + t) + d + 1 + norm + d + 10 + ff + 1;
-    let k = cfg.n_layers as usize * layer + norm + d;
-
-    let max_abs = |name: &str| init[name].iter().fold(0.0f64, |m, v| m.max(f64::from(v.abs())));
-    let h = (d as f64).sqrt() * max_abs("ln.weight") + max_abs("ln.bias");
-    init["lm_head.weight"]
-        .chunks(d)
-        .map(|row| brain_testutil::rounding::agreement_bound(k, h * row.iter().map(|w| f64::from(w.abs())).sum::<f64>()) as f32)
-        .collect()
-}
+use crate::logit_bound::logit_bounds;
 
 /// Worst excess of `|a - b|` over its per-vocab bound `bounds[i % vocab]`, as `(excess, index)`; `excess <= 0` is agreement.
 fn worst_excess(a: &[f32], b: &[f32], bounds: &[f32]) -> (f32, usize) {
@@ -151,7 +122,7 @@ fn the_cuda_forward_agrees_with_every_other_backend_on_this_box() {
     let got = logits_on(cuda, &cfg, &init);
 
     assert!(got.iter().all(|v| v.is_finite()), "the CUDA forward produced non-finite logits");
-    let bounds = logit_bounds(&cfg, &init);
+    let bounds = logit_bounds(&cfg, &init, T as usize);
     let (excess, at) = worst_excess(&got, &want, &bounds);
     println!("gpt2 tiny forward, cpu vs cuda: worst excess over the derived bound {excess:e} (logit {at} of {})", got.len());
     assert!(excess <= 0.0, "the CUDA forward diverges from the CPU reference at logit {at}: {} vs {}, bound {}", got[at], want[at], bounds[at % bounds.len()]);
@@ -190,7 +161,7 @@ fn the_derived_bound_contains_the_cpu_vs_default_device_difference() {
     let init = gpt2::init_weights(&cfg, 7);
     let want = logits_on(Gpu::new_cpu(PIPELINES), &cfg, &init);
     let got = logits_on(Gpu::new(PIPELINES), &cfg, &init);
-    let bounds = logit_bounds(&cfg, &init);
+    let bounds = logit_bounds(&cfg, &init, T as usize);
     let (excess, at) = worst_excess(&got, &want, &bounds);
     println!("gpt2 tiny forward, cpu vs default device: worst excess {excess:e} at logit {at}, bound there {}", bounds[at % bounds.len()]);
     assert!(excess <= 0.0, "two backends differ beyond the round-off bound at logit {at}: {} vs {}", got[at], want[at]);

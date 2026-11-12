@@ -4,8 +4,9 @@
 //! GPT implements the generic [`model::Shardable`] seam so the shared
 //! [`model::Pipeline`] can pipeline-parallel it across GPUs. The layer-range
 //! parameterisation of the forward/backward graph lives in [`crate::model`];
-//! this just wires it onto the trait. GPT's lm_head is untied, so no parameter is
-//! replicated across stages (`replicated_params` is empty).
+//! this just wires it onto the trait. GPT's head is tied to the token embedding, so
+//! the embed stage and the head stage both hold `tok.weight` and the pipeline sums
+//! its gradient across them (`replicated_params`).
 
 use model::{Shard, ShardCost, Shardable};
 
@@ -22,13 +23,17 @@ impl Shardable for Gpt {
             n_layers: cfg.n_layers as usize,
             per_layer,
             embed: vocab * d + cfg.block_size as f64 * d, // tok + pos embeddings
-            head: vocab * d,                              // untied lm_head
+            head: vocab * d,                              // tied head: the same table, resident on the head stage too
             boundary_words: (b * t) as usize * cfg.d_model as usize,
         }
     }
 
     fn new_shard(cfg: GptConfig, b: u32, t: u32, init: &std::collections::HashMap<String, Vec<f32>>, shard: Shard) -> Gpt {
         Gpt::new_shard(cfg, b, t, init, shard)
+    }
+
+    fn replicated_params(&self) -> Vec<String> {
+        vec!["tok.weight".to_string()]
     }
 
     fn run_forward_stage(&self) -> Option<f32> {
@@ -53,5 +58,19 @@ impl Shardable for Gpt {
     }
     fn write_out_dres(&self, data: &[f32]) {
         Gpt::write_out_dres(self, data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tied table lives on the embed stage and the head stage, so a pipeline must sum its gradient.
+    #[test]
+    fn the_tied_embedding_table_is_the_one_replicated_parameter() {
+        let cfg = GptConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 5);
+        let model = Gpt::new_on(gpu_core::testgpu::dev(crate::model::PIPELINES), cfg, 1, 8, &init);
+        assert_eq!(model.replicated_params(), vec!["tok.weight".to_string()]);
     }
 }

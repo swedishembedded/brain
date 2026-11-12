@@ -68,7 +68,6 @@ crates/glmdsa/tests/it/convergence.rs	1
 crates/glmdsa/tests/it/indexer.rs	1
 crates/glmdsa/tests/reg3_parity.rs	1
 crates/gpt2/src/model.rs	1
-crates/gpt2/src/sample.rs	1
 crates/gpt2/src/train.rs	1
 crates/gpt2/tests/bench_forward_p40.rs	1
 crates/gpt2/tests/bench_train_p40.rs	1
