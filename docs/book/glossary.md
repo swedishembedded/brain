@@ -38,6 +38,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **aliasing**: the confusion, after sampling, of a tone above half the sampling rate with a slower one, because the two have the same samples. *([Sound and Sampling](v09-audio/01-sound.md))*
 
+**alpha compositing**: combining translucent layers front to back, each contributing its colour weighted by its opacity and by the fraction of light the layers in front have let through, so that the weights add up to the pixel's coverage. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
+
 **Amdahl's law**: the speedup of a whole from making a part that takes the share $p$ of the time $g$ times as fast, $1/((1 - p) + p/g)$, bounded by the ceiling $1/(1 - p)$ however fast the part becomes. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 
 **amortized inference**: using one encoder network, with shared weights, to produce the approximate posterior of every reading in a single forward pass, so that the cost of finding a good guess is paid once in training and not again for each new reading. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
@@ -286,6 +288,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **denoising objective**: the training loss of a diffusion model: the mean squared error between the network's output for a noisy input and the target that the noising supplied, averaged over the data, the step and the noise. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
 
+**densification**: changing the number of primitives during a fit by adding them where the image error is concentrated (splitting a large one, cloning a small one, relocating a transparent one onto an opaque one) and removing those that carry nothing. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
+
 **density estimation**: choosing from a family of candidate distributions the one that best explains observed data, usually by maximizing the likelihood and judging it by the likelihood of data that were held out. *([What It Means to Generate](v08-image-generation/01-generative-modeling.md))*
 
 **depth-vs-width**: the tradeoff between a network of many layers and one of few wide layers; for the sawtooth, $d$ layers of width $2$ make $2^d$ linear pieces, while one layer with $u$ units makes at most $u + 1$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
@@ -299,6 +303,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **deterministic sampler**: a sampler whose output is a function of its starting noise alone, with no random draw after the first, so that the same noise always gives the same image; the step that re-noises the denoiser's guess to the next level with the noise the old level implies, and Euler's method on the velocity field, are such samplers. *([Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md))*
 
 **device-synchronized timing**: timing in which the clock stops only after the device has finished the work being timed, either by the host waiting for it or by reading timestamps the device wrote itself; a clock stopped when the call returns reads the host's cost of handing over the work. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
+
+**differentiable rendering**: a renderer whose image is a smooth function of the scene's parameters, with a backward pass that turns the gradient of a loss on the pixels into gradients on every parameter, so that a scene can be fitted to photographs by gradient descent. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
 
 **differentiation rules**: the short list (constants and multiples, sums, products, quotients, powers) from which the derivative of any formula built from simple pieces is computed without returning to the limit. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
 
@@ -447,6 +453,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **gating**: multiplying a signal elementwise by a vector of sigmoid outputs, each between 0 and 1 and computed from the current input and state, so that the network decides for each unit and each step how much of the signal passes. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
 
 **Gaussian distribution**: the bell-shaped distribution with density $\frac{1}{\sigma\sqrt{2\pi}}e^{-(x-\mu)^2/(2\sigma^2)}$, fixed by its mean $\mu$ and variance $\sigma^2$, written $\mathcal{N}(\mu, \sigma^2)$ and also called the normal distribution. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
+
+**gaussian primitive**: a three-dimensional bell $\exp(-\frac12(\mathbf{x}-\boldsymbol\mu)^\top\boldsymbol\Sigma^{-1}(\mathbf{x}-\boldsymbol\mu))$ with a position, a covariance built from a rotation and three scales so that it is positive definite, an opacity and a colour, fourteen numbers in all as the optimizer holds them. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
 
 **gelu**: the Gaussian error linear unit $z\,\Phi(z)$, the input times the probability that a standard Gaussian variable lies below it, a smooth cousin of the ReLU that dips slightly below zero for negative inputs; it is computed exactly with the error function or approximately by a tanh form or a sigmoid form that are different functions. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
@@ -1052,6 +1060,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **speech tokenizer**: a network trained, with a supervised target such as the transcript and not by reconstruction, to turn speech into discrete tokens that carry what is said and little of who says it or how. *([Speech Synthesis](v09-audio/06-speech-synthesis.md))*
 
+**splat projection**: the map of a three-dimensional Gaussian to a two-dimensional one on the image, with the pixel of its centre and the covariance $\mathbf{J}\mathbf{R}\boldsymbol\Sigma\mathbf{R}^\top\mathbf{J}^\top$ of the camera's Jacobian, plus a small dilation; its inverse, the conic, gives the exponent at any pixel. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
+
 **stable-softmax**: the softmax computed after subtracting the largest score from every score, which gives the same probabilities but keeps every exponent at most zero, so nothing overflows and the sum is at least one. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **standard error**: the standard deviation of an estimator over repeated samples, the typical size of its error; for the sample mean it is $\sigma/\sqrt{n}$, estimated by $s/\sqrt{n}$. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
@@ -1113,6 +1123,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **tiled attention**: the schedule that computes attention for a block of query rows by walking tiles of keys and values through fast memory, forming the block of scores of each tile only on chip and folding it into the running state of its rows, so that no score matrix is ever written to global memory. *([Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md))*
 
 **tiled matmul**: the matrix product computed one tile of the output at a time, with the matching tiles of the two inputs staged in a fast memory so that each number loaded is used once per row or column of the tile, cutting the loads from $2n^3$ to $2n^3/T$ for a tile of side $T$. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
+
+**tiled rasterization**: drawing the Gaussians of a frame by giving each square tile of the image the list of the Gaussians that touch it, built by counting, a scan and one radix sort of keys that hold the tile number and the depth, so that every pixel walks a depth-sorted list shared with its tile. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
 
 **time-delay network**: a network of one-dimensional convolutions along time, whose weights are shared across time and whose units read a layer at several delayed moments, so that a deeper unit sees a longer stretch of the signal. *([Who Is Speaking](v09-audio/05-speaker-embeddings.md))*
 

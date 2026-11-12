@@ -530,6 +530,7 @@ navigation:
           - docs/book/v10-video-and-3d/03-camera-geometry.md
           - docs/book/v10-video-and-3d/04-structure-from-motion.md
           - docs/book/v10-video-and-3d/05-feed-forward-3d.md
+          - docs/book/v10-video-and-3d/06-gaussian-splatting.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

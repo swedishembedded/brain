@@ -1,0 +1,53 @@
+<!-- source-sha256: 4fd73ee00a4d7fa4c2879c565ed80bd231d6d46fccc156b6de452f31d737356d -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 893 252" width="893" height="252"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="893" height="252" fill="#ffffff"/>
+<rect x="24" y="24" width="116" height="74" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="82" y="57.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Gaussians</text>
+<text x="82" y="73.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">14 numbers each</text>
+<rect x="24" y="154" width="116" height="74" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="82" y="187.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gradients</text>
+<text x="82" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">14 numbers each</text>
+<rect x="180" y="24" width="91" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225.5" y="49.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">project</text>
+<text x="225.5" y="65.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mean, conic,</text>
+<text x="225.5" y="81.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">depth, radius</text>
+<rect x="180" y="154" width="91" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="225.5" y="187.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">projection</text>
+<text x="225.5" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">backward</text>
+<rect x="311" y="24" width="139" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="380.5" y="49.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">count, scan,</text>
+<text x="380.5" y="65.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">emit keys</text>
+<text x="380.5" y="81.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(tile | depth)</text>
+<rect x="311" y="154" width="139" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="380.5" y="187.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sum each Gaussian&#x27;s</text>
+<text x="380.5" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">instances</text>
+<rect x="490" y="24" width="106" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="543" y="57.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">radix sort,</text>
+<text x="543" y="73.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tile ranges</text>
+<rect x="490" y="154" width="106" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="543" y="187.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reduce over the</text>
+<text x="543" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tile&#x27;s pixels</text>
+<rect x="636" y="24" width="112" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="692" y="49.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">composite</text>
+<text x="692" y="65.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per pixel, front</text>
+<text x="692" y="81.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">to back</text>
+<rect x="636" y="154" width="112" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="692" y="187.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">walk each pixel</text>
+<text x="692" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">again, in reverse</text>
+<rect x="788" y="24" width="81" height="74" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="828.5" y="65.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image</text>
+<rect x="788" y="154" width="81" height="74" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="828.5" y="187.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">image loss,</text>
+<text x="828.5" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">dL / d pixel</text>
+<line x1="143" y1="61" x2="177" y2="61" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="177" y1="191" x2="143" y2="191" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="274" y1="61" x2="308" y2="61" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="308" y1="191" x2="274" y2="191" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="453" y1="61" x2="487" y2="61" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="487" y1="191" x2="453" y2="191" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="599" y1="61" x2="633" y2="61" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="633" y1="191" x2="599" y2="191" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="751" y1="61" x2="785" y2="61" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="785" y1="191" x2="751" y2="191" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<line x1="828.5" y1="101" x2="828.5" y2="151" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<text x="837.5" y="130.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="start">loss</text>
+</svg>
