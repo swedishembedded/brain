@@ -5,7 +5,11 @@
 //! `torch.optim.AdamW` + `torch.nn.utils.clip_grad_norm_`.
 //!
 //! Generic over either model: it only needs the pipeline indices of the
-//! `adamw`, `gradnorm_sq`, and `grad_scale` kernels in that model's `Gpu`.
+//! `adamw`, `gradnorm_sq`, and `grad_scale` kernels in that model's `Gpu`. The
+//! global grad-norm runs as the cooperative tree reduction (`gradnorm_part` +
+//! `clip_coef_wg`) the `Gpu` carries beside `gradnorm_sq`; the serial
+//! single-thread kernel runs only on a device that cannot do a workgroup
+//! reduction.
 //!
 //! ## The multi-tensor dispatch graph (M6.4)
 //!
@@ -395,7 +399,7 @@ impl Optim {
                 }
                 total
             } else {
-                // Reference: one single-threaded dispatch per tensor.
+                // No workgroup reductions on this device: one single-threaded dispatch per tensor.
                 for (i, (name, numel)) in ps.opt_params().iter().enumerate() {
                     let ub = gpu.uniform_dynamic(2);
                     gpu.write(&ub, &[*numel as u32, i as u32]);
@@ -501,15 +505,16 @@ impl Optim {
     }
 
     /// The cooperative grad-norm pair `(gradnorm_part, clip_coef_wg)` for this
-    /// device, or `None` to run the reference `gradnorm_sq` + `clip_coef`.
+    /// device, or `None` to run the serial `gradnorm_sq` + `clip_coef`, which a
+    /// device without workgroup reductions (the CPU JIT) has no alternative to.
     ///
     /// Resolved **by name** through `Gpu::kernel_index`, not by a per-model
-    /// index constant: a model opts in by appending the two kernels to its
-    /// PIPELINES list and nothing else changes — no `Optim::new` signature
-    /// churn across the ~15 crates that construct one, and a model that has not
-    /// adopted them still runs. Policy comes from `backend_api::select` so the
-    /// capability gate (the CPU JIT cannot execute the barrier) and the
-    /// `--no-coop-gradnorm` A/B switch (`select::set_coop_gradnorm`) live in one place.
+    /// index constant: the `Gpu` appends the pair beside the canonical
+    /// `gradnorm_sq` + `clip_coef` every model registers for [`Optim::new`], so
+    /// no model opts in and no `Optim::new` signature churns across the ~15
+    /// crates that construct one. Policy comes from `backend_api::select` so the
+    /// capability gate and the `--no-coop-gradnorm` A/B switch
+    /// (`select::set_coop_gradnorm`) live in one place.
     fn coop_gradnorm(&self, gpu: &Gpu) -> Option<(usize, usize)> {
         use gpu_core::select::{candidates, Dtype, Op, OpShape};
         let caps = gpu.caps();
@@ -520,6 +525,11 @@ impl Optim {
             return None;
         }
         Some((gpu.kernel_index("gradnorm_part")?, gpu.kernel_index("clip_coef_wg")?))
+    }
+
+    /// Whether a clipped step on `gpu` runs the cooperative grad-norm pair rather than the serial `gradnorm_sq`.
+    pub fn uses_cooperative_gradnorm(&self, gpu: &Gpu) -> bool {
+        self.coop_gradnorm(gpu).is_some()
     }
 
     /// One optimiser step at (1-based) step index `t`, run entirely on-device in
@@ -692,57 +702,6 @@ mod tests {
         // expected: clip to g=0.5; AdamW t=1: mhat=g, vhat=g^2 => step = lr*g/|g| = lr.
         for &v in &w {
             assert!((v - 0.9).abs() < 1e-4, "AdamW+clip got {v}, expected ~0.9");
-        }
-    }
-
-    /// The cooperative grad-norm path (`gradnorm_part` + `clip_coef_wg`) must
-    /// produce the SAME clipped step as the serial one, at sizes that exercise
-    /// several workgroups per tensor and several tensors per step. The kernels
-    /// are resolved by name, so registering them is the whole opt-in — that is
-    /// what this asserts as much as the arithmetic.
-    #[test]
-    fn cooperative_gradnorm_matches_the_serial_path() {
-        if brain_testutil::gpu_tests_skipped() {
-            return;
-        }
-        static BASE: &[(&str, &str)] = &[
-            ("adamw", kernels::ADAMW),
-            ("gradnorm_sq", kernels::GRADNORM_SQ),
-            ("grad_scale", kernels::GRAD_SCALE),
-            ("clip_coef", kernels::CLIP_COEF),
-            ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
-        ];
-        static COOP: &[(&str, &str)] = &[
-            ("adamw", kernels::ADAMW),
-            ("gradnorm_sq", kernels::GRADNORM_SQ),
-            ("grad_scale", kernels::GRAD_SCALE),
-            ("clip_coef", kernels::CLIP_COEF),
-            ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
-            ("gradnorm_part", kernels::GRADNORM_PART),
-            ("clip_coef_wg", kernels::CLIP_COEF_WG),
-        ];
-        // A tiny bias, a mid tensor and one spanning several workgroups.
-        let shapes = [("b".to_string(), 7usize), ("w".to_string(), 20_000), ("e".to_string(), 3_000)];
-        let mut init = HashMap::new();
-        let mut grads = HashMap::new();
-        for (n, c) in &shapes {
-            init.insert(n.clone(), (0..*c).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect::<Vec<f32>>());
-            grads.insert(n.clone(), (0..*c).map(|i| ((i % 29) as f32 - 14.0) * 0.001).collect::<Vec<f32>>());
-        }
-        let run = |ks: &'static [(&'static str, &'static str)]| -> Vec<Vec<f32>> {
-            let gpu = gpu_core::testgpu::dev(ks);
-            let opt = Optim::new(0, 1, 2, 3, 4);
-            let ps = ParamStore::new(&gpu, shapes.to_vec(), &init);
-            for (n, _) in &shapes {
-                gpu.write(ps.g(n), bytemuck::cast_slice(&grads[n]));
-            }
-            opt.step(&gpu, &ps, 1, 0.01, 0.01, Adam::default(), Some(0.5), 1.0);
-            shapes.iter().map(|(n, _)| ps.read_weight(&gpu, n)).collect()
-        };
-        let (a, b) = (run(BASE), run(COOP));
-        for (i, (x, y)) in a.iter().zip(&b).enumerate() {
-            let md = x.iter().zip(y).fold(0f32, |m, (p, q)| m.max((p - q).abs()));
-            assert!(md < 2e-6, "tensor {i}: cooperative grad-norm changed the step by {md}");
         }
     }
 

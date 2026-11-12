@@ -43,6 +43,16 @@
 //! 4. **Capability-gated through `backend_api::select`** — the policy lives
 //!    there with everything else, never in a backend-name test here.
 //!
+//! ## Cooperative twins, resolved by name
+//!
+//! A *sum* reduction cannot be a transparent rewrite (bar 2), but it can still be made **available**: the second table,
+//! [`TWINS`], appends the workgroup-per-row twin of a kernel the model registered (`rmsnorm` -> `rmsnorm_rows`, the
+//! LayerNorm family, the optimiser's `gradnorm_sq` + `clip_coef` -> `gradnorm_part` + `clip_coef_wg`) WITHOUT rewriting
+//! any dispatch. The explicit seams (`model::block::rms_variant`/`ln_variant`, `optim::Optim`) then find the twin by name
+//! and keep their numerical gates visible at the call site, so no model opts in by listing the twin in its own PIPELINES.
+//! A twin is appended only to a handle whose registered base kernel is byte-for-byte the canonical source, because the
+//! twin's `Params` and bindings are those of that source.
+//!
 //! A row resolved here may be superseded one tier up by a native
 //! kernel on a backend that can compile it - see [`crate::native_upgrade`].
 //!
@@ -295,6 +305,35 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
     },
 ];
 
+/// One cooperative kernel made available beside a registered reference: same `Params`, same bindings, but a different
+/// dispatch geometry and (for a sum) a different reduction order, so the seam that dispatches it owns the numerical gate.
+pub(crate) struct Twin {
+    /// The reference kernel's registered name.
+    pub base: &'static str,
+    /// The only source `base` may carry for the twin to apply: the twin's contract is that source's contract.
+    pub base_src: &'static str,
+    /// The workgroup-per-row (or workgroup-cooperative) kernel appended beside it.
+    pub twin: &'static str,
+    pub twin_src: &'static str,
+}
+
+/// The cooperative twins. Every twin needs a workgroup reduction, so none is appended for the CPU JIT, whose
+/// `workgroup_reductions` capability is false: it can never select them.
+pub(crate) const TWINS: &[Twin] = &[
+    Twin { base: "rmsnorm", base_src: kernels::RMSNORM, twin: "rmsnorm_rows", twin_src: kernels::RMSNORM_ROWS },
+    Twin { base: "rmsnorm_dx", base_src: kernels::RMSNORM_DX, twin: "rmsnorm_dx_rows", twin_src: kernels::RMSNORM_DX_ROWS },
+    Twin { base: "layernorm", base_src: kernels::LAYERNORM, twin: "layernorm_rows", twin_src: kernels::LAYERNORM_ROWS },
+    Twin { base: "ln_stats", base_src: kernels::LN_STATS, twin: "ln_stats_rows", twin_src: kernels::LN_STATS_ROWS },
+    Twin { base: "layernorm_dx", base_src: kernels::LAYERNORM_DX, twin: "layernorm_dx_rows", twin_src: kernels::LAYERNORM_DX_ROWS },
+    Twin { base: "gradnorm_sq", base_src: kernels::GRADNORM_SQ, twin: "gradnorm_part", twin_src: kernels::GRADNORM_PART },
+    Twin { base: "clip_coef", base_src: kernels::CLIP_COEF, twin: "clip_coef_wg", twin_src: kernels::CLIP_COEF_WG },
+];
+
+/// The registered name of `base`'s cooperative twin, if it has one in [`TWINS`].
+pub(crate) fn twin_name(base: &str) -> Option<&'static str> {
+    TWINS.iter().find(|t| t.base == base).map(|t| t.twin)
+}
+
 static DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether models get the transparent kernel upgrade (`true`, the default) or each keeps the kernel it registered
@@ -324,6 +363,14 @@ pub(crate) fn expand<'a>(
         return None;
     }
     let mut add: Vec<(&'static str, &'static str)> = Vec::new();
+    if !cpu_jit {
+        for t in TWINS {
+            let registered = kernels.iter().any(|(n, src)| *n == t.base && *src == t.base_src);
+            if registered && !kernels.iter().any(|(n, _)| *n == t.twin) {
+                add.push((t.twin, t.twin_src));
+            }
+        }
+    }
     for u in UPGRADES {
         if (u.gpu_only && cpu_jit) || !kernels.iter().any(|(n, _)| *n == u.slow) {
             continue;
@@ -463,6 +510,19 @@ mod tests {
 
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A model that registers a canonical reference norm gets its cooperative twin appended after its own kernels; a
+    /// handle that cannot run a workgroup reduction, and a kernel that merely shares the name, get nothing.
+    #[test]
+    fn a_canonical_reference_gets_its_twin_appended_and_nothing_else_does() {
+        let own: &[(&str, &str)] = &[("rmsnorm", kernels::RMSNORM), ("gradnorm_sq", kernels::GRADNORM_SQ)];
+        let out = expand(own, false).expect("twins to append");
+        assert_eq!(&out[..2], own, "existing indices must be untouched");
+        assert_eq!(out[2..].iter().map(|k| k.0).collect::<Vec<_>>(), ["rmsnorm_rows", "gradnorm_part"]);
+        assert!(expand(own, true).is_none(), "the CPU JIT cannot run the twins");
+        assert!(expand(&[("rmsnorm", "// a model's own rmsnorm")], false).is_none(), "the twin's contract is the canonical source's");
+        assert_eq!(twin_name("layernorm_dx"), Some("layernorm_dx_rows"));
     }
 
     /// A model that registers the slow kernel gets the fast one appended — at

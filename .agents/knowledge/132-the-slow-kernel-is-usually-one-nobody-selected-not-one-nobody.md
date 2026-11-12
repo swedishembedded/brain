@@ -46,3 +46,9 @@ That is the right default for correctness and the worst possible one for discove
 
 `decide/tests/ optimizer_kernels.rs` asserts the pair is registered, because the failure produces
 identical numbers 30x slower and no other test can tell.
+
+## Since
+The norm seams no longer fail open: `gpu_core::upgrade::TWINS` makes the cooperative twin of a canonical `rmsnorm`,
+`layernorm` family kernel or `gradnorm_sq` + `clip_coef` pair present on every `Gpu` that registers the reference, and
+`rms_variant`, `ln_variant` and `Optim` resolve it (`Gpu::twin_of`, by name). A model registers nothing and gets the
+fast kernel; only a device with no workgroup reduction keeps the serial one.

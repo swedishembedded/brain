@@ -3013,6 +3013,14 @@ mod native_facade {
         pub fn kernel_index(&self, name: &str) -> Option<usize> {
             self.names.iter().position(|n| n == name)
         }
+
+        /// The pipeline slot of the cooperative twin of the kernel at slot `kind` (`rmsnorm` -> `rmsnorm_rows`, ...), or
+        /// `None` when that kernel has no twin or this handle does not carry it (the CPU JIT, `--no-kernel-upgrade`).
+        /// The handle appends the twin itself when the model registered the canonical reference - see
+        /// [`crate::upgrade`] - so a shared seam asks here instead of requiring each model to list the twin.
+        pub fn twin_of(&self, kind: usize) -> Option<usize> {
+            self.kernel_index(crate::upgrade::twin_name(self.names.get(kind)?)?)
+        }
     }
 
     /// The open scratch scope returned by [`Gpu::scratch_scope`]. While it is
@@ -3320,6 +3328,11 @@ mod wasm_facade {
         /// kernel variant without changing every model's `KernelIds`.
         pub fn kernel_index(&self, name: &str) -> Option<usize> {
             self.names.iter().position(|n| n == name)
+        }
+
+        /// See the native facade's `twin_of`.
+        pub fn twin_of(&self, kind: usize) -> Option<usize> {
+            self.kernel_index(crate::upgrade::twin_name(self.names.get(kind)?)?)
         }
     }
 }

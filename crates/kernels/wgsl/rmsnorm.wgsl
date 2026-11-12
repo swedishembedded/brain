@@ -11,7 +11,10 @@
 // @dtype f32
 //
 // RMSNorm:  out[t, c] = weight[c] * x[t, c] / sqrt(mean_c(x[t, c]^2) + eps)
-// One invocation per row (token). d_model is small, so the per-row loop is fine.
+// One invocation per row (token): the reference, and the kernel of a device with no workgroup reduction. It is
+// uncoalesced (a warp's loads are d_model floats apart) and walks a wide row serially, so on any device that can
+// run `rmsnorm_rows.wgsl` the shared builder (`model::block::rms_variant`) dispatches that workgroup-per-row twin
+// instead; the `Gpu` appends it beside this kernel, so a model does not register it.
 
 struct Params {
     d_model: u32,

@@ -72,8 +72,8 @@ pub struct KernelIds {
     /// The COALESCED RMSNorm forward twin (`rmsnorm_rows`), or [`UNREGISTERED`]
     /// when the model has not registered that pipeline. Purely a performance
     /// slot: [`rmsnorm_fwd`] selects between it and `rmsnorm` through
-    /// [`rms_variant`], and a model that leaves it unregistered keeps
-    /// dispatching the per-element reference exactly as before.
+    /// [`rms_variant`], and a model that leaves it unregistered gets the twin
+    /// the `Gpu` appends beside a canonical `rmsnorm` (`Gpu::twin_of`).
     ///
     /// It is a slot on [`KernelIds`] rather than an argument because the
     /// builders that pay the most for the naive kernel are the SHARED ones -
@@ -164,9 +164,10 @@ impl Gqa {
 /// per-model fix cannot reach those norms at all.
 ///
 /// NOT a bit-identical swap: 64 partial sums fold in a different order,
-/// agreeing to ~3e-6 max_abs. That is why it lives behind a registration a
-/// model opts into, and why every adopting model gates it with a
-/// variant-agreement test against a HOST reference.
+/// agreeing to ~3e-6 max_abs. That is why the swap is made here, at an explicit
+/// seam, and not as a transparent dispatch rewrite, and why the shared
+/// variant-agreement gate ([`assert_rmsnorm_variant_agrees`]) checks it against
+/// a HOST reference.
 pub fn rmsnorm_fwd(g: &Gpu, k: &KernelIds, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32, eps: f32) -> Step {
     let coop = (k.rmsnorm_rows != UNREGISTERED).then_some(k.rmsnorm_rows);
     let (kind, grid) = rms_variant(g, k.rmsnorm, coop, rows, dim);
@@ -2958,7 +2959,9 @@ pub fn rmsnorm_fwd_at(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, o
 /// measured a win at *every* row width, widest where rows are narrow, because
 /// the per-element kernel's one-thread-per-row layout is uncoalesced) where the
 /// model registered it and the device can run a workgroup reduction, else the
-/// per-element reference (`rmsnorm`).
+/// per-element reference (`rmsnorm`). `coop` is the twin the model registered, or `None` to take the one the `Gpu`
+/// carries beside its `rmsnorm` ([`Gpu::twin_of`]): the handle appends `rmsnorm_rows` itself, so a model that never
+/// listed it still gets the coalesced kernel and only the capability gate (or `--no-kernel-upgrade`) keeps the reference.
 ///
 /// Both variants take the same buffers `[x, w, out]` and the same Params
 /// `[d, rows, eps]`, so only the index and the thread count change - which is
@@ -2979,6 +2982,7 @@ pub fn rmsnorm_fwd_at(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, o
 pub fn rms_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, gpu_core::Dispatch) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
+    let coop = coop.or_else(|| g.twin_of(reference));
     match coop {
         Some(i)
             if gpu_core::select::DefaultSelector.select(Op::RmsNorm, shape, &g.caps())
@@ -3139,12 +3143,13 @@ impl LayerNormIds {
     /// Reference indices supplied by the model; the `*_rows` variants resolved
     /// **by name** from this handle's pipeline list.
     ///
-    /// This is how a model adopts the coalesced kernels without every
-    /// `KernelIds`-style struct literal in the workspace growing a field: add
-    /// `layernorm_rows` / `ln_stats_rows` / `layernorm_dx_rows` to its
-    /// PIPELINES and it is opted in; leave them out and it keeps the reference
-    /// kernels. A model with its own fixed indices should build the struct
-    /// literally instead (cheaper, and the indices stay greppable).
+    /// The `Gpu` appends `layernorm_rows` / `ln_stats_rows` / `layernorm_dx_rows`
+    /// beside the canonical reference kernels a model registered, so a model
+    /// adopts the coalesced kernels without listing them and without every
+    /// `KernelIds`-style struct literal in the workspace growing a field. A
+    /// handle that carries no twin (the CPU JIT) resolves them to `None`. A
+    /// model with its own fixed indices should build the struct literally
+    /// instead (cheaper, and the indices stay greppable).
     pub fn resolve(g: &Gpu, layernorm: usize, ln_stats: usize, layernorm_dx: usize) -> LayerNormIds {
         LayerNormIds {
             layernorm,
@@ -3174,6 +3179,9 @@ impl LayerNormIds {
 /// cooperative kernel where the model registered it and the device can run a
 /// workgroup reduction, else the reference.
 ///
+/// `coop` is the twin the model registered, or `None` to take the one the `Gpu` carries beside the reference
+/// ([`Gpu::twin_of`]); the handle appends the LayerNorm family's `_rows` kernels itself.
+///
 /// The policy itself lives in `backend_api::select` (`Op::LayerNorm`) and is
 /// keyed on `DeviceCaps`, never a backend name. The `*_rows` kernels are
 /// `@workgroup_size(64)` - at or below the WebGPU floor of 256 - so no
@@ -3188,6 +3196,7 @@ impl LayerNormIds {
 pub fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, gpu_core::Dispatch) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
+    let coop = coop.or_else(|| g.twin_of(reference));
     match coop {
         Some(i)
             if gpu_core::select::DefaultSelector.select(Op::LayerNorm, shape, &g.caps())

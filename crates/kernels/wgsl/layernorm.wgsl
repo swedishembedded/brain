@@ -13,7 +13,10 @@
 // LayerNorm forward (matches torch.nn.LayerNorm):
 //   mean = mean_c(x);  var = mean_c((x-mean)^2)   (biased/population variance)
 //   y[c] = (x[c]-mean) / sqrt(var+eps) * gamma[c] + beta[c],   eps a param (1e-5 torch default)
-// One invocation per row (d_model small => per-row loop is fine).
+// One invocation per row: the reference, and the kernel of a device with no workgroup reduction. It is uncoalesced
+// and makes three serial passes over a wide row, so on any device that can run `layernorm_rows.wgsl` the shared
+// builder (`model::block::ln_variant`) dispatches that workgroup-per-row twin instead; the `Gpu` appends it beside
+// this kernel, so a model does not register it.
 
 struct Params {
     d_model: u32,

@@ -46,6 +46,12 @@ Before adding a kernel:
    model's int8 prefill. The bar is high on purpose — read that module's header
    before adding a row; a *sum* reduction fails the bit-identical rule and stays
    in the explicit seams, where a trajectory gate is visible at the call site.
+   Those seams still must not need an opt-in: the module's `TWINS` table makes
+   the cooperative twin of a canonical reference (`rmsnorm` -> `rmsnorm_rows`,
+   the LayerNorm family, `gradnorm_sq` + `clip_coef` -> `gradnorm_part` +
+   `clip_coef_wg`) *available* on every handle without rewriting a dispatch,
+   and `rms_variant`/`ln_variant`/`Optim` find it by `Gpu::twin_of` or by name.
+   A new reduction twin goes in that table, not in each model's list.
    **Keep the recorded `StepMeta` in the caller's index space**: profilers map
    `meta.kernel` through their own kernel list, and an early version of this
    seam crashed a bench tool by handing it an appended slot. A row may also be

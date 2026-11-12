@@ -11,9 +11,10 @@
 // @dtype f32
 //
 // Per-parameter sum of squares of its gradient, written to norms[slot].
-// One single-thread dispatch per parameter buffer (numel small enough); the
-// host reads the tiny `norms` array, sums it, and computes the global clip
-// coefficient on the CPU (mirrors how forward() reduces ce_buf on the host).
+// One single-thread dispatch per parameter buffer, then `clip_coef.wgsl` folds the `norms` slots into the clip
+// coefficient on the device. This is the serial reference and the kernel of a device with no workgroup reduction
+// (the CPU JIT); everywhere else `optim::Optim` runs `gradnorm_part.wgsl` + `clip_coef_wg.wgsl`, which the `Gpu`
+// appends beside this kernel, so a model does not register them.
 
 struct Params {
     numel: u32,

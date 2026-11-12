@@ -76,10 +76,10 @@ fn the_shared_rmsnorm_builder_matches_the_host_reference_at_every_builder_shape(
     let (picked, _) = block::rms_variant(&gpu, 0, Some(1), 1, 5120);
     println!("device selects {} for a one-row RMSNorm", PIPELINES[picked].0);
 
-    // Both arms of the seam on the same inputs: registered (the device's own
-    // `select` policy then decides) and UNREGISTERED (always the per-element
-    // reference). A model adopting the coalesced kernel must land inside
-    // tolerance of the reference AND of the tape it had before.
+    // Both ways into the seam on the same inputs: the slot a model registered,
+    // and UNREGISTERED (the twin the `Gpu` carries beside `rmsnorm`, which
+    // `norm_rows_default` covers on its own). Either must land inside
+    // tolerance of the host reference.
     assert_rmsnorm_variant_agrees(&gpu, &ids(1), 1e-6, SHAPES);
     assert_rmsnorm_variant_agrees(&gpu, &ids(block::UNREGISTERED), 1e-6, SHAPES);
 }

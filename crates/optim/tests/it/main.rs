@@ -13,6 +13,7 @@ mod adamw_q8_parity;
 mod bench_gradnorm;
 mod bench_host_update;
 mod bench_q8;
+mod coop_gradnorm;
 mod bench_step;
 mod full_ft_state;
 mod fused_update;
