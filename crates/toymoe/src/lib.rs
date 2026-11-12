@@ -15,6 +15,9 @@
 pub const RMS_EPS: f32 = 1e-6;
 
 pub mod caps;
+/// RoPE base the toy MoE is trained and served with; the trainer's `rope_train` and the engine's `rope` get the same value.
+pub const ROPE_THETA: f32 = 10_000.0;
+
 pub mod model;
 pub mod train;
 

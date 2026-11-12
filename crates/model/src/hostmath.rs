@@ -324,7 +324,7 @@ pub fn timestep_embedding(
 /// `buf` is `rows × heads × head_dim`; row `r` is rotated at absolute position
 /// `pos0 + r`. The half-split pairs element `j` with `j + hd/2` (as opposed to
 /// the interleaved layout that pairs `2j` with `2j+1`) — matching
-/// `crates/kernels/wgsl/rope.wgsl`.
+/// `crates/kernels/wgsl/rope_neox.wgsl`.
 pub fn rope_neox(buf: &mut [f32], rows: usize, heads: usize, hd: usize, pos0: usize, theta: f32) {
     assert!(hd.is_multiple_of(2), "rope: head_dim {hd} must be even");
     assert!(buf.len() >= rows * heads * hd, "rope: buffer too small");

@@ -12,7 +12,7 @@
 //
 // Rotary position embedding, applied in place to either the q or k region of
 // the fused qkv buffer (select via base_off). Matches the Python apply_rope:
-// channel pair (2j, 2j+1) within a head is rotated by angle = t * base^(-2j/hd).
+// channel pair (2j, 2j+1) within a head is rotated by angle = t * theta^(-2j/hd), theta being the Params field (the model's rope_theta).
 //
 // Buffer layout per token row: [ q(d_model) | k(d_model) | v(d_model) ], so
 // row_stride = 3*d_model and a head occupies head_dim contiguous channels.
@@ -24,6 +24,7 @@ struct Params {
     head_dim: u32,
     row_stride: u32,
     base_off: u32,   // 0 for q, d_model for k
+    theta: f32,      // RoPE base
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -45,7 +46,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let t = tmp / p.n_heads;
 
     let base = t * p.row_stride + p.base_off + h * p.head_dim + 2u * j;
-    let angle = f32(t) * pow(10000.0, -f32(2u * j) / f32(p.head_dim));
+    let angle = f32(t) * pow(p.theta, -f32(2u * j) / f32(p.head_dim));
     let c = cos(angle);
     let s = sin(angle);
     let e = buf[base];

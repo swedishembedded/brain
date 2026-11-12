@@ -219,13 +219,13 @@ impl Engine {
             steps.push(self.gpu.step(
                 K_ROPE,
                 &[&self.qkv],
-                &[t, c.n_heads, c.head_dim(), 3 * d, 0],
+                &[t, c.n_heads, c.head_dim(), 3 * d, 0, f(crate::ROPE_THETA)],
                 t * c.n_heads * half,
             ));
             steps.push(self.gpu.step(
                 K_ROPE,
                 &[&self.qkv],
-                &[t, c.n_heads, c.head_dim(), 3 * d, d],
+                &[t, c.n_heads, c.head_dim(), 3 * d, d, f(crate::ROPE_THETA)],
                 t * c.n_heads * half,
             ));
             steps.push(self.gpu.step(

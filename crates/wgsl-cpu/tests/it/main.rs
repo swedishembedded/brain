@@ -10,5 +10,6 @@
 mod aggregates;
 mod compile_all;
 mod math_builtins;
+mod rope_theta;
 mod workgroup_locals;
 mod workgroup_semantics;
