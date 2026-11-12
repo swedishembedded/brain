@@ -177,8 +177,37 @@ mod tests {
         }
     }
 
+    /// Analytic directional derivatives of `L = <geglu(h, g), dy>` against central differences of the kernel's own
+    /// forward, on random inputs, with a tolerance derived from the computation instead of `rel < 1e-2` against
+    /// `max(|d|, 1e-3)`.
+    ///
+    /// The old gate scaled the tolerance by the derivative's own magnitude, but a directional derivative is a sum of
+    /// `n` signed terms: when they cancel to near zero the tolerance collapsed below the f32 noise of a central
+    /// difference (`~u S / eps`, `S` the absolute sum of the terms), and a random draw failed (seen once, passed on
+    /// rerun). The error of the comparison is bounded by the sum of
+    ///
+    /// * the analytic side: the kernel's per-element chain plus the host dot over `n` terms, `gamma_{K+n} * S_d`,
+    ///   `S_d = sum |d_i v_i|` (`rounding::accumulation_bound`);
+    /// * the numeric side: two evaluations of `L`, each within `gamma_{K+n} * S_L` of the exact value
+    ///   (`S_L = sum |out_i dy_i|`), divided by `2 eps`;
+    /// * the rounded perturbation `x + eps v` (each input is off by at most `u |x|`, which moves `L` by at most
+    ///   `u max|x| S_d`, again divided by `eps` over the two evaluations);
+    /// * truncation of the central difference, `eps^2 / 6 * sup|gelu'''| * sum |dy_i| (g_i + 1)` with
+    ///   `gelu'''(x) = -x phi(x) (4 - x^2)`, at most `0.7` for `|x| <= 0.5`;
+    /// * the forward uses the Abramowitz-Stegun erf polynomial while the analytic backward uses the exact
+    ///   `Phi + x phi`: their derivatives differ by at most `3e-7` on `|x| <= 0.5` (measured in f64 on a 1e-4 grid).
+    ///
+    /// `K = 48` bounds the rounded operations from an input to `out_i`: about 22 (the Horner polynomial, the
+    /// reciprocal, `exp` counted at its WGSL accuracy of `3 + 2|x|` ULP, and the products), doubled because
+    /// `1 + erf >= 0.47` for `|x| <= 0.5` amplifies the relative error of the erf term by at most 2.1.
     #[test]
     fn geglu_shift_grads_match_finite_differences() {
+        use brain_testutil::rounding::{accumulation_bound, U};
+        const K_ELEMENT: usize = 48;
+        const MAX_INPUT: f64 = 0.5;
+        const GELU_THIRD_DERIVATIVE_SUP: f64 = 0.7;
+        const ERF_APPROX_DERIVATIVE_ERROR: f64 = 3e-7;
+
         let g = gpu();
         let n = 32usize;
         let mut rng = Rng::random();
@@ -193,16 +222,32 @@ mod tests {
         let dg = geglu_dg(&g, &dy, &h);
         let (an_h, an_g) = (dot(&dh, &vh), dot(&dg, &vg));
 
-        let eps = 1e-3f32;
+        let eps = 1e-2f32;
         let perturb = |base: &[f32], v: &[f32], s: f32| base.iter().zip(v).map(|(b, d)| b + s * eps * d).collect::<Vec<f32>>();
         // d/dh
         let num_h = (loss(&geglu(&g, &perturb(&h, &vh, 1.0), &gg), &dy) - loss(&geglu(&g, &perturb(&h, &vh, -1.0), &gg), &dy)) / (2.0 * eps);
         // d/dg
         let num_g = (loss(&geglu(&g, &h, &perturb(&gg, &vg, 1.0)), &dy) - loss(&geglu(&g, &h, &perturb(&gg, &vg, -1.0)), &dy)) / (2.0 * eps);
 
-        for (name, a, nnum) in [("dh", an_h, num_h), ("dg", an_g, num_g)] {
-            let rel = (a - nnum).abs() / a.abs().max(nnum.abs()).max(1e-3);
-            assert!(rel < 1e-2, "geglu_shift {name}: analytic {a} vs numeric {nnum} (rel {rel})");
+        let abs_sum = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| f64::from(*x).abs() * f64::from(*y).abs()).sum::<f64>();
+        let s_out = abs_sum(&geglu(&g, &h, &gg), &dy);
+        let s_dy_g1: f64 = dy.iter().zip(&gg).map(|(d, g1)| f64::from(*d).abs() * (f64::from(*g1) + 1.0)).sum();
+        let eps = f64::from(eps);
+        // `s_trunc` is the sum the central-difference truncation and the erf-approximation mismatch scale with (zero
+        // for `dg`, which is linear in `g` and whose backward is the forward's own `gh`).
+        let tolerance = |s_d: f64, s_trunc: f64| {
+            let analytic = accumulation_bound(K_ELEMENT + n, s_d);
+            let numeric = accumulation_bound(K_ELEMENT + n, s_out) / eps;
+            let perturbed = U * MAX_INPUT * s_d / eps;
+            let truncation = eps * eps / 6.0 * GELU_THIRD_DERIVATIVE_SUP * s_trunc;
+            let model = ERF_APPROX_DERIVATIVE_ERROR * s_trunc;
+            analytic + numeric + perturbed + truncation + model
+        };
+        let s_dh: f64 = dh.iter().map(|v| f64::from(*v).abs()).sum();
+        let s_dg: f64 = dg.iter().map(|v| f64::from(*v).abs()).sum();
+        for (name, a, nnum, tol) in [("dh", an_h, num_h, tolerance(s_dh, s_dy_g1)), ("dg", an_g, num_g, tolerance(s_dg, 0.0))] {
+            let err = f64::from((a - nnum).abs());
+            assert!(err <= tol, "geglu_shift {name}: analytic {a} vs numeric {nnum} differ by {err:e}, derived bound {tol:e}");
         }
     }
 }
