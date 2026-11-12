@@ -241,6 +241,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(("matmul_tile16", kernels::MATMUL_TILE16));
         v.push(("gqa_scores_win", kernels::GQA_SCORES_WIN));
         v.push(("gqa_ring_chunk_attn", kernels::GQA_RING_CHUNK_ATTN));
+        v.extend(model::gqa_mixer::ring_copy_pipelines());
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
         v.extend(optim::MOMENT_KERNELS);
         v.push(("gradnorm_part", kernels::GRADNORM_PART));
@@ -3682,10 +3683,8 @@ impl Qwen35 {
                         window: rc.window,
                         start: rc.start,
                         scores_win: g.kernel_index("gqa_scores_win").unwrap_or_else(|| panic!("qwen35: gqa_scores_win is not registered on this Gpu")),
-                        splice: SPLICE,
+                        copy: model::gqa_mixer::RingCopyIds::resolve(g),
                         ring_attn: g.kernel_index("gqa_ring_chunk_attn"),
-                        pack: g.kernel_index("pack_bf16").unwrap_or_else(|| panic!("qwen35: pack_bf16 is not registered on this Gpu")),
-                        unpack: g.kernel_index("unpack_bf16").unwrap_or_else(|| panic!("qwen35: unpack_bf16 is not registered on this Gpu")),
                     },
                     &shape,
                     &weights,
@@ -7080,9 +7079,11 @@ impl Qwen35 {
                 continue;
             }
             for (pooled, work, len) in [(&pool.gdn_state[l], &pool.work_state[l], state_len), (&pool.gdn_hist[l], &pool.work_hist[l], hist_len)] {
-                let row = (u64::from(slot) * u64::from(len), u64::from(len));
-                let (bufs, offs) = if into_work { ([pooled, work], [row, (0, u64::from(len))]) } else { ([work, pooled], [(0, u64::from(len)), row]) };
-                steps.push(self.gpu.step_sliced(REGION_COPY, &bufs, &offs, &[1, len, len, 0], len));
+                // The slot's row sits at `slot * len` words, which is not a multiple of the device's storage-binding
+                // offset grain, so it is a kernel parameter rather than a sliced binding.
+                let row = slot * len;
+                let (bufs, params) = if into_work { ([pooled, work], [len, row, 0]) } else { ([work, pooled], [len, 0, row]) };
+                steps.push(self.gpu.step(self.kernel_by_name("splice_at"), &bufs, &params, len));
             }
         }
         self.gpu.submit(&[], &steps);

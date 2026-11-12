@@ -289,21 +289,50 @@ pub struct RingChunk<'a> {
     pub window: u32,
     /// Absolute position of the chunk's first token.
     pub start: u32,
-    /// Pipeline indices of `gqa_scores_win` and `splice` in the caller's kernel list.
+    /// Pipeline index of `gqa_scores_win` in the caller's kernel list.
     pub scores_win: usize,
-    pub splice: usize,
+    /// The row copies in and out of the ring.
+    pub copy: RingCopyIds,
     /// `gqa_ring_chunk_attn`, the fused windowed attention of a chunk (workgroup-cooperative): used where the device
     /// runs such kernels and the window fits it; `None` keeps the three-kernel path, the reference.
     pub ring_attn: Option<usize>,
-    /// Pipeline indices of `pack_bf16` and `unpack_bf16` (`model::saved::kernels`), used when the ring is bf16.
-    pub pack: usize,
-    pub unpack: usize,
+}
+
+/// The kernels that move rows between a ring plane and the f32 working buffers of a chunk. All three take their source
+/// and destination offsets as parameters and bind both buffers whole: a ring row's word offset (`row * kvd`) is not
+/// a multiple of the device's `min_storage_buffer_offset_alignment`, so it cannot be a `step_sliced` binding offset.
+#[derive(Clone, Copy)]
+pub struct RingCopyIds {
+    /// `splice_at`: a word copy (f32 ring, and every f32 working-buffer to working-buffer move).
+    pub splice_at: usize,
+    /// `pack_bf16_at` / `unpack_bf16_at`: the rounding into, and exact widening out of, a bf16 ring.
+    pub pack_at: usize,
+    pub unpack_at: usize,
+}
+
+/// The ring-copy kernels a caller registers next to its own list (resolved by name through [`RingCopyIds::resolve`]).
+#[must_use]
+pub fn ring_copy_pipelines() -> [(&'static str, &'static str); 3] {
+    [("splice_at", kernels::SPLICE_AT), ("pack_bf16_at", kernels::PACK_BF16_AT), ("unpack_bf16_at", kernels::UNPACK_BF16_AT)]
+}
+
+impl RingCopyIds {
+    /// The indices of [`ring_copy_pipelines`] on `g`. Panics when a kernel is not registered: the ring cannot run without them.
+    pub fn resolve(g: &Gpu) -> RingCopyIds {
+        let at = |name: &str| g.kernel_index(name).unwrap_or_else(|| panic!("{name} is not registered on this Gpu (see model::gqa_mixer::ring_copy_pipelines)"));
+        RingCopyIds { splice_at: at("splice_at"), pack_at: at("pack_bf16_at"), unpack_at: at("unpack_bf16_at") }
+    }
+}
+
+/// A word offset or count as the kernels' `u32` parameter; the planes are bounded to a `u32` element index ([`crate::kv_tier::KvTier::fits_addressing`]).
+fn word(x: u64) -> u32 {
+    u32::try_from(x).expect("ring copy: word offset exceeds the kernels' u32 element index")
 }
 
 /// Copy `rows` rows of `kvd` words from `src` (starting at row `src_row`) to `dst` (from row `dst_row`).
-fn copy_rows(g: &Gpu, splice: usize, src: &DeviceBuffer, src_row: u64, dst: &DeviceBuffer, dst_row: u64, rows: u64, kvd: u64) -> Option<Step> {
+fn copy_rows(g: &Gpu, copy: RingCopyIds, src: &DeviceBuffer, src_row: u64, dst: &DeviceBuffer, dst_row: u64, rows: u64, kvd: u64) -> Option<Step> {
     let n = rows * kvd;
-    (n > 0).then(|| g.step_sliced(splice, &[src, dst], &[(src_row * kvd, n), (dst_row * kvd, n)], &[n as u32, 0], n as u32))
+    (n > 0).then(|| g.step(copy.splice_at, &[src, dst], &[word(n), word(src_row * kvd), word(dst_row * kvd)], n as u32))
 }
 
 /// [`gqa_mixer_fwd`] for ONE CHUNK of `n` rows at positions `start ..` of a sliding-window layer, against the
@@ -320,19 +349,19 @@ fn copy_rows(g: &Gpu, splice: usize, src: &DeviceBuffer, src_row: u64, dst: &Dev
 /// widening for a bf16 one.
 fn ring_read(g: &Gpu, ring: &RingChunk, plane: &crate::kv_tier::KvPlane, row: u64, dst: &DeviceBuffer, dst_row: u64, rows: u64, kvd: u64) -> Option<Step> {
     if plane.tier() == crate::kv_tier::KvTier::F32 {
-        return copy_rows(g, ring.splice, plane.data(), row, dst, dst_row, rows, kvd);
+        return copy_rows(g, ring.copy, plane.data(), row, dst, dst_row, rows, kvd);
     }
     let n = rows * kvd;
-    (n > 0).then(|| g.step_sliced(ring.unpack, &[plane.data(), dst], &[(row * kvd / 2, n.div_ceil(2)), (dst_row * kvd, n)], &[n as u32], n as u32))
+    (n > 0).then(|| g.step(ring.copy.unpack_at, &[plane.data(), dst], &[word(n), word(row * kvd), word(dst_row * kvd)], n as u32))
 }
 
 /// f32 rows of `src` (from row `src_row`) into rows `row ..` of a ring plane: a word copy, or a rounding to bf16.
 fn ring_write(g: &Gpu, ring: &RingChunk, plane: &crate::kv_tier::KvPlane, row: u64, src: &DeviceBuffer, src_row: u64, rows: u64, kvd: u64) -> Option<Step> {
     if plane.tier() == crate::kv_tier::KvTier::F32 {
-        return copy_rows(g, ring.splice, src, src_row, plane.data(), row, rows, kvd);
+        return copy_rows(g, ring.copy, src, src_row, plane.data(), row, rows, kvd);
     }
     let n = rows * kvd;
-    (n > 0).then(|| g.step_sliced(ring.pack, &[src, plane.data()], &[(src_row * kvd, n), (row * kvd / 2, n.div_ceil(2))], &[n as u32], n.div_ceil(2) as u32))
+    (n > 0).then(|| g.step(ring.copy.pack_at, &[src, plane.data()], &[word(n), word(src_row * kvd), word(row * kvd / 2)], n.div_ceil(2) as u32))
 }
 
 pub fn gqa_mixer_ring_chunk_fwd(g: &Gpu, ids: &GqaMixerIds, ring: &RingChunk, shape: &GqaMixerShape, w: &GqaMixerWeights, q_full: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, n: u32) -> DeviceBuffer {
@@ -360,8 +389,8 @@ pub fn gqa_mixer_ring_chunk_fwd(g: &Gpu, ids: &GqaMixerIds, ring: &RingChunk, sh
         }
         p += run;
     }
-    steps.extend(copy_rows(g, ring.splice, &prep.k_normed, 0, &ctx_k, u64::from(m), u64::from(n), kvd));
-    steps.extend(copy_rows(g, ring.splice, v, 0, &ctx_v, u64::from(m), u64::from(n), kvd));
+    steps.extend(copy_rows(g, ring.copy, &prep.k_normed, 0, &ctx_k, u64::from(m), u64::from(n), kvd));
+    steps.extend(copy_rows(g, ring.copy, v, 0, &ctx_v, u64::from(m), u64::from(n), kvd));
     let fused = ring.ring_attn.filter(|_| g.caps().workgroup_reductions && win <= 2048 && hd <= 256);
     let ctx = if let Some(attn) = fused {
         g.submit(&[], &steps);
@@ -371,7 +400,7 @@ pub fn gqa_mixer_ring_chunk_fwd(g: &Gpu, ids: &GqaMixerIds, ring: &RingChunk, sh
     } else {
         // Queries sit at logical rows `m ..` of the run; the rows before them are idle.
         let q_pad = g.storage_uninit(u64::from(len) * qd);
-        steps.extend(copy_rows(g, ring.splice, &prep.q_normed, 0, &q_pad, u64::from(m), u64::from(n), qd));
+        steps.extend(copy_rows(g, ring.copy, &prep.q_normed, 0, &q_pad, u64::from(m), u64::from(n), qd));
         g.submit(&[], &steps);
 
         let slabs = u64::from(nh) * u64::from(len) * u64::from(len);
@@ -380,7 +409,7 @@ pub fn gqa_mixer_ring_chunk_fwd(g: &Gpu, ids: &GqaMixerIds, ring: &RingChunk, sh
         let ga = Gqa { b: 1, t: len, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
         g.submit(&[], &gqa_fwd_win(g, ring.scores_win, &ids.kernels, &ga, win, &q_pad, &ctx_k, &ctx_v, &scores, &probs, &ctx_pad));
         let ctx = g.storage_uninit(u64::from(n) * qd);
-        g.submit(&[], &copy_rows(g, ring.splice, &ctx_pad, u64::from(m), &ctx, 0, u64::from(n), qd).into_iter().collect::<Vec<_>>());
+        g.submit(&[], &copy_rows(g, ring.copy, &ctx_pad, u64::from(m), &ctx, 0, u64::from(n), qd).into_iter().collect::<Vec<_>>());
         ctx
     };
 
@@ -993,4 +1022,33 @@ pub fn gqa_mixer_bwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaM
     g.submit(&[], &[g.step(ids.concat2, &[&d_q_value, &d_q_gate, &d_q_full], &[n * nh, 1, 1, 1, hd], n * nh * 2 * hd)]);
 
     (d_q_full, d_k, d_v)
+}
+
+#[cfg(test)]
+mod ring_copy_tests {
+    use super::*;
+    use crate::kv_tier::{KvLayer, KvTier};
+
+    /// A ring write then read at row offsets that are NOT multiples of the 64-word binding grain (`row * kvd` with
+    /// `kvd = 10`), through both ring tiers: the copies carry their offsets as kernel parameters, so the result does
+    /// not depend on the device's `min_storage_buffer_offset_alignment` (the qwen35 `edgerock_serve` tests are the
+    /// end-to-end check on a device that enforces it).
+    #[test]
+    fn ring_rows_round_trip_at_offsets_off_the_binding_grain() {
+        let (kvd, window, row0) = (10u64, 7u32, 3u32);
+        let g = Gpu::new_cpu(&ring_copy_pipelines());
+        let copy = RingCopyIds::resolve(&g);
+        for tier in [KvTier::F32, KvTier::BF16] {
+            let layer = KvLayer::new(&g, tier, u64::from(row0 + window), kvd, 2);
+            let ring = RingChunk { layer: &layer, row0, window, start: 0, scores_win: 0, copy, ring_attn: None };
+            // 5 source rows of small integers (exact in bf16); ring rows 2..5 take source rows 1..4.
+            let src_data: Vec<f32> = (0..50).map(|i| i as f32 - 20.0).collect();
+            let src = g.storage_init("src", &src_data);
+            g.submit(&[], &ring_write(&g, &ring, &layer.k, u64::from(row0) + 2, &src, 1, 3, kvd).into_iter().collect::<Vec<_>>());
+            let dst = g.storage_uninit(5 * kvd);
+            g.submit(&[], &ring_read(&g, &ring, &layer.k, u64::from(row0) + 2, &dst, 2, 3, kvd).into_iter().collect::<Vec<_>>());
+            let got = g.read(&dst, 50);
+            assert_eq!(&got[20..50], &src_data[10..40], "{tier}: rows 2..5 of dst are rows 1..4 of src");
+        }
+    }
 }

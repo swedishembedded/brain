@@ -822,6 +822,8 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
         // params [n, base] (compact block copy into/out of the residual).
         "splice" => f(0, 8 * n0()),
+        // params [n, src_base, dst_base]: a word copy with independent offsets.
+        "splice_at" => f(0, 8 * n0()),
         "splice_bwd" => f(0, 12 * n0()),
         "splice_add" => f(n0(), 12 * n0()),
         // params [n, src_base, dst_base]: same op as splice_add, independent offsets.
@@ -1358,7 +1360,8 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(total, 4 * (2 * total + p(1)?))
         }
         // params [total]: bf16 pack reads 4 B and writes 2 B per element, unpack the reverse; integer rounding only.
-        "pack_bf16" | "unpack_bf16" => {
+        // The `_at` forms take [total, src, dst] and cost the same.
+        "pack_bf16" | "unpack_bf16" | "pack_bf16_at" | "unpack_bf16_at" => {
             let total = p(0)?;
             c(0, 3 * total, 6 * total)
         }
