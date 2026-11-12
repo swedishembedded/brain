@@ -436,6 +436,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **forecast calibration**: the property that the probability integral transform of the outcomes under the forecast distributions is uniform, so that each quantile is exceeded and each interval covers as often as it claims. *([Probabilistic Forecasts](v11-forecasting/02-probabilistic-forecasting.md))*
 
+**forecast skill score**: one minus the ratio of a forecaster's mean loss to a baseline's over the same origins, the fraction of the baseline's error that the forecaster removes; zero for no better, one for perfect, negative for worse. *([Evaluating Forecasters Honestly](v11-forecasting/04-evaluating-forecasts.md))*
+
 **forward noising process**: the chain that turns a data value into noise by adding a little Gaussian noise at each step, $x_t = \sqrt{1 - \beta_t}\,x_{t-1} + \sqrt{\beta_t}\,\varepsilon_t$, which by the addition of Gaussians gives any step directly from the clean value, $x_t = \sqrt{\bar\alpha_t}\,x_0 + \sqrt{1 - \bar\alpha_t}\,\varepsilon$. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
 
 **forward pass**: computing every value of the computational graph in order, from the inputs to the loss. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
@@ -817,6 +819,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **orthogonal matrix**: a square matrix whose columns are orthonormal, so that $\mathbf{Q}^\top\mathbf{Q} = \mathbf{I}$, its inverse is its transpose, and it preserves lengths and angles. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
 **orthogonality**: the property of two vectors having dot product 0, that is, being at right angles. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
+
+**out-of-sample test**: a score on bars that came after, and played no part in, the fitting of a model, the choice among models and settings, and the choice of what to report; a score that has been looked at before the choice is made is no longer one. *([Evaluating Forecasters Honestly](v11-forecasting/04-evaluating-forecasts.md))*
 
 **output stride**: the ratio of the picture's side to the side of the map a network predicts on before any enlargement, so that a stride-4 output holds one prediction per $4 \times 4$ block of pixels. *([Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md))*
 
@@ -1275,6 +1279,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **voice cloning**: making a synthesiser speak in the voice of a person from whom it has only a short recording, without training on that person. *([Speech Synthesis](v09-audio/06-speech-synthesis.md))*
 
 ## W
+
+**walk-forward evaluation**: scoring a forecaster at a sequence of origins that move forward through a series, forecasting at each from the bars before it alone (refitting or not as stated), comparing with the bars that follow, and aggregating the losses, with first origin, horizon, stride and form of the past reported. *([Evaluating Forecasters Honestly](v11-forecasting/04-evaluating-forecasts.md))*
 
 **warmup runs**: the leading runs of a repeated measurement whose cost is dominated by a start-up transient (building pipelines, first-touch memory, cold caches, a clock that has not ramped up) and is not the cost of the steady state; they are detected and kept out of the summary, or reported as a separate cold row. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
 

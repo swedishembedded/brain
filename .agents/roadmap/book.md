@@ -96,7 +96,7 @@ reproduced its worked examples from the text alone in another language.
       that lived only in the worked modules, unprinted layer inventories,
       a pseudocode order that disagreed with its module, three real slips).
       All were fixed in the following commits; a recheck has not been run.
-- [ ] Volume XI, Forecasting, Decisions and Uncertainty: chapters 1 to 3 written.
+- [ ] Volume XI, Forecasting, Decisions and Uncertainty: chapters 1 to 4 written.
 
 ## Open
 

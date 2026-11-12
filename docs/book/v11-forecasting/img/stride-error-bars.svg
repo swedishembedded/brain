@@ -1,0 +1,41 @@
+<!-- source-sha256: 9ec98e77dbee19948c5bcfe881cf08bfc4e64d27ef635e8062a9d1167b800e33 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 362" width="560" height="362">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="362" fill="#ffffff"/>
+<line x1="102" y1="274" x2="102" y2="30" stroke="#edf2f7"/>
+<text x="102" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="190" y1="274" x2="190" y2="30" stroke="#edf2f7"/>
+<text x="190" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="278" y1="274" x2="278" y2="30" stroke="#edf2f7"/>
+<text x="278" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="366" y1="274" x2="366" y2="30" stroke="#edf2f7"/>
+<text x="366" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">8</text>
+<line x1="454" y1="274" x2="454" y2="30" stroke="#edf2f7"/>
+<text x="454" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="542" y1="274" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="542" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">12</text>
+<line x1="58" y1="274" x2="542" y2="274" stroke="#edf2f7"/>
+<text x="52" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="225.2" x2="542" y2="225.2" stroke="#edf2f7"/>
+<text x="52" y="229.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.05</text>
+<line x1="58" y1="176.4" x2="542" y2="176.4" stroke="#edf2f7"/>
+<text x="52" y="180.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.1</text>
+<line x1="58" y1="127.6" x2="542" y2="127.6" stroke="#edf2f7"/>
+<text x="52" y="131.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.15</text>
+<line x1="58" y1="78.8" x2="542" y2="78.8" stroke="#edf2f7"/>
+<text x="52" y="82.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="30" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.25</text>
+<rect x="58" y="30" width="484" height="244" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="244"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,73.51 102,74.04 146,74.47 190,74.79 278,75.77 542,77.12"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="58,216.94 102,193.42 146,175.52 190,160.43 278,135.43 542,80.49"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,84.08 102,83.69 146,83.35 190,82.96 278,82.36 542,80.49"/></g>
+<text x="300" y="310" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">stride between origins (bars), horizon 12</text>
+<text x="14" y="152" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 152)">error bar on the mean difference</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">More origins, no more information</text>
+<line x1="68.53" y1="333" x2="88.53" y2="333" stroke="#2b6cb0" stroke-width="2"/>
+<text x="94.53" y="337" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">true spread of the mean</text>
+<line x1="243.38" y1="333" x2="263.38" y2="333" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="269.38" y="337" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">reported, origins treated as independent</text>
+<line x1="177.96" y1="350" x2="197.96" y2="350" stroke="#2f855a" stroke-width="2"/>
+<text x="203.96" y="354" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">reported, overlap accounted for</text>
+</svg>
