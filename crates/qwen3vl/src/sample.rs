@@ -46,7 +46,7 @@ pub fn argmax(logits: &[f32]) -> u32 {
 
 /// Temperature + top-k + nucleus (top-p) sampling - identical contract to
 /// `qwen3::sample::sample_logits`: `temperature <= 0.0` is greedy argmax,
-/// `top_k == 0` disables top-k filtering, `top_p` outside `(0,1)` disables
+/// `top_k == 0` disables top-k filtering (otherwise exactly `top_k` tokens survive, lowest id first on ties), `top_p` outside `(0,1)` disables
 /// nucleus filtering. Robust to a NaN logit (treated as least-preferred, like
 /// `-inf`), so a serving process never panics on one.
 pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32, rng: &mut Rng) -> u32 {
@@ -55,13 +55,12 @@ pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32,
     }
     let mut scaled: Vec<f32> = logits.iter().map(|&l| if l.is_nan() { f32::NEG_INFINITY } else { l / temperature }).collect();
     if top_k > 0 && top_k < scaled.len() {
+        // Exactly `top_k` survive. A stable sort puts equal logits in ascending id order, so
+        // a tie at the cut keeps the lowest ids, as `model::serve::sample_from_topk` does.
         let mut idx: Vec<usize> = (0..scaled.len()).collect();
-        idx.sort_unstable_by(|&a, &b| cmp_nan_last(scaled[b], scaled[a]));
-        let threshold = scaled[idx[top_k - 1]];
-        for v in scaled.iter_mut() {
-            if *v < threshold {
-                *v = f32::NEG_INFINITY;
-            }
+        idx.sort_by(|&a, &b| cmp_nan_last(scaled[b], scaled[a]));
+        for &i in &idx[top_k..] {
+            scaled[i] = f32::NEG_INFINITY;
         }
     }
     let max = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -72,7 +71,7 @@ pub fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32,
     }
     if top_p > 0.0 && top_p < 1.0 && sum > 0.0 {
         let mut idx: Vec<usize> = (0..scaled.len()).collect();
-        idx.sort_unstable_by(|&a, &b| cmp_nan_last(scaled[b], scaled[a]));
+        idx.sort_by(|&a, &b| cmp_nan_last(scaled[b], scaled[a]));
         let mut kept = 0.0f32;
         let mut cut = idx.len();
         for (rank, &i) in idx.iter().enumerate() {
@@ -112,6 +111,20 @@ mod tests {
     #[test]
     fn ties_break_to_the_lowest_index() {
         assert_eq!(argmax(&[1.0, 3.0, 3.0, 0.0]), 1);
+    }
+
+    /// Top-k keeps exactly `k` tokens and, among equal logits, the lowest ids
+    /// first: the rule `model::serve::sample_from_topk` applies to the decoder's
+    /// candidate list (sorted descending, equal values in ascending id order).
+    #[test]
+    fn top_k_keeps_exactly_k_and_breaks_ties_to_the_lowest_ids() {
+        let tied = [2.0f32, 2.0, 2.0, 2.0, 1.0];
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            let mut rng = Rng::new(random_seed());
+            seen.insert(sample_logits(&tied, 1.0, 2, 1.0, &mut rng));
+        }
+        assert_eq!(seen.into_iter().collect::<Vec<_>>(), [0, 1], "only the two lowest ids of the tie survive k = 2");
     }
 
     #[test]
