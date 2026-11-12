@@ -56,8 +56,13 @@
 //! from BELOW. A plain log score is unbounded, so one confidently-wrong
 //! sample would dominate a whole group's advantage estimate; clamping bounds
 //! the penalty at `-9.21` per option. `torch.log(q.clamp_min(1e-12)).
-//! clamp_min(log_floor)` is the reference's own spelling, and the 1e-12
-//! clamp is unreachable as a separate case underneath the `-9.21` one.
+//! clamp_min(log_floor)` is the reference's own spelling. The first clamp is
+//! the crate-wide [`crate::PROB_FLOOR`] (`1e-12`, `ln = -27.63`), the numerical
+//! guard every log score here shares; `log_floor` must stay above it, which
+//! makes the guard unreachable as a separate case underneath the `-9.21` one.
+//! The evaluation metrics in [`crate::metrics`] have only the guard, so they
+//! report a wrong report's cost up to `27.63` nats where this reward stops at
+//! `9.21`.
 //!
 //! Swedish Embedded AB builds decision models whose reported probabilities
 //! can be acted on, by training them against scoring rules that make honesty
@@ -109,7 +114,7 @@ pub fn proper_reward(q: &[f32], target: &[f32], ordinal: bool, cfg: &ProperScore
     // --- log score, clamped from below (see the module doc) ---
     let mut log_score = 0.0f64;
     for i in 0..n {
-        let lg = (q[i] as f64).max(1e-12).ln().max(floor);
+        let lg = (q[i] as f64).max(crate::PROB_FLOOR).ln().max(floor);
         log_score += target[i] as f64 * lg;
     }
 
@@ -205,6 +210,14 @@ mod tests {
                 "reward {got} vs reference {want} (scores {scores:?})"
             );
         }
+    }
+
+    /// The reward's log floor must bind before the shared numerical guard, or
+    /// the guard would be the reward's real floor and the documented `-9.21`
+    /// would be a lie.
+    #[test]
+    fn the_log_floor_sits_above_the_shared_numerical_guard() {
+        assert!((ProperScore::default().log_floor as f64) > crate::PROB_FLOOR.ln());
     }
 
     /// Past the log floor the per-option log-score term is CONSTANT, which is

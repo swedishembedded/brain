@@ -173,7 +173,7 @@ pub fn nll(probs: &[Vec<f32>], labels: &[usize]) -> f32 {
     let sum: f64 = probs
         .iter()
         .zip(labels)
-        .map(|(p, &y)| -((p[y] as f64).max(1e-12)).ln())
+        .map(|(p, &y)| -((p[y] as f64).max(crate::PROB_FLOOR)).ln())
         .sum();
     (sum / probs.len() as f64) as f32
 }
@@ -228,7 +228,7 @@ pub fn soft_nll(probs: &[Vec<f32>], targets: &[Vec<f32>]) -> f32 {
             assert_eq!(p.len(), q.len(), "a row and its target must have the same arity");
             q.iter()
                 .zip(p)
-                .map(|(&qi, &pi)| -(qi as f64) * (pi as f64).max(1e-12).ln())
+                .map(|(&qi, &pi)| -(qi as f64) * (pi as f64).max(crate::PROB_FLOOR).ln())
                 .sum::<f64>()
         })
         .sum();
@@ -283,7 +283,7 @@ pub fn posterior_kl(probs: &[Vec<f32>], targets: &[Vec<f32>]) -> f32 {
                 .zip(p)
                 .filter(|(&qi, _)| qi > 0.0)
                 .map(|(&qi, &pi)| {
-                    let (qi, pi) = (qi as f64, (pi as f64).max(1e-12));
+                    let (qi, pi) = (qi as f64, (pi as f64).max(crate::PROB_FLOOR));
                     qi * (qi / pi).ln()
                 })
                 .sum::<f64>()
@@ -576,6 +576,13 @@ mod tests {
         assert!(top1 <= 1e-6, "top-1 ECE {top1} should look perfect");
         let cw = classwise_ece(&probs, &labels, 10);
         assert!(cw > 0.1, "classwise ECE {cw} must see the misplaced 0.3");
+    }
+
+    /// A zero probability scores the shared floor's finite bound, not infinity.
+    #[test]
+    fn nll_of_a_zero_probability_is_the_shared_floors_bound() {
+        let n = nll(&[vec![0.0, 1.0]], &[0]);
+        assert!((n as f64 + crate::PROB_FLOOR.ln()).abs() < 1e-3, "nll {n}");
     }
 
     #[test]

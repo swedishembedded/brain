@@ -25,7 +25,10 @@
 //! calibrated at test time, because it under-confidences the training set by
 //! exactly the amount the gap re-inflates. The squared-error probability score is a proper scoring rule that
 //! penalizes the whole distribution rather than only the correct option's
-//! mass. Which combination wins is measured, not assumed.
+//! mass. The mixture is therefore proper at `gamma = 0` (cross-entropy plus a
+//! proper score) and improper for `gamma > 0` with `lambda < 1`, where the
+//! focal term's pull toward under-confidence is not cancelled. Which
+//! combination wins is measured, not assumed.
 //!
 //! ## Soft targets
 //!
@@ -227,7 +230,7 @@ mod tests {
 
     fn ce_reference(scores: &[f32], gold: usize) -> (f32, Vec<f32>) {
         let p = softmax(scores);
-        let loss = -(p[gold].max(1e-12)).ln();
+        let loss = -(p[gold].max(crate::PROB_FLOOR as f32)).ln();
         let d: Vec<f32> = p
             .iter()
             .enumerate()
@@ -242,7 +245,7 @@ mod tests {
     fn old_hard_label_reference(scores: &[f32], gold: usize, cfg: &LossConfig) -> (f32, Vec<f32>) {
         let p = softmax(scores);
         let n = p.len();
-        let t = (p[gold] as f64).max(1e-12);
+        let t = (p[gold] as f64).max(crate::PROB_FLOOR);
         let (g, lam) = (cfg.gamma as f64, cfg.lambda as f64);
 
         let one_minus = (1.0 - t).max(0.0);
@@ -363,7 +366,7 @@ mod tests {
     #[test]
     fn cross_entropy_keeps_its_gradient_when_a_prediction_saturates() {
         let target = [0.8f32, 0.2];
-        // 27.6 nats is where p dips under the old 1e-12 floor; the last two
+        // 27.6 nats is where p dips under `PROB_FLOOR`, the old clamp; the last two
         // are far past anything f32 can represent as a normal number.
         for gap in [10.0f32, 27.0, 30.0, 100.0, 400.0] {
             let scores = [-gap, 0.0];
@@ -378,7 +381,7 @@ mod tests {
                 );
             }
             // The loss itself must keep growing with the gap rather than
-            // saturating at -ln(1e-12): a confidently wrong prediction is
+            // saturating at -ln(PROB_FLOOR): a confidently wrong prediction is
             // not equally wrong at 30 nats and at 400.
             assert!(loss.is_finite() && loss >= 0.8 * gap * 0.99, "gap {gap}: loss {loss} saturated");
         }
