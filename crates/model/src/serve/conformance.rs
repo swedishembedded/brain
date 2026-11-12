@@ -47,8 +47,11 @@
 //!   once it does, the property applies with no change to its factory.
 //! * [`full_rows_rank_what_the_candidate_list_ranks`]: a decoder that reads its
 //!   logits rows back ([`PagedDecoder::full_row_readback`]) returns, for the
-//!   same step, rows whose best entries are the candidate list's and which
-//!   hold nothing above its last entry.
+//!   same step (and, for a decoder that speculates, the same verify step),
+//!   rows whose best entries are the candidate list's and which hold nothing
+//!   above its last entry. The gate `check/serve-conformance` requires every
+//!   serving engine to read its rows back, so the property never passes
+//!   trivially for a real engine.
 //!
 //!   Bit identity: the property compares token streams exactly, so a verify
 //!   kernel whose floating-point order differs from plain decode may flip an
@@ -341,7 +344,9 @@ pub fn speculation_equals_plain_greedy<D: PagedDecoder>(c: &Conformance<D>) {
 
 /// One decode step read back as a whole logits row and as a candidate list, on two identical decoders (a step
 /// advances a sequence, so it cannot be run twice on one): every candidate's logit is the row's at its token, and no
-/// token outside the list outranks the list's last entry. A decoder without row readback passes trivially.
+/// token outside the list outranks the list's last entry. A decoder that speculates is held to the same for a verify
+/// step, row by row. A decoder without row readback passes trivially; `make check/serve-conformance` requires every
+/// serving engine to implement it.
 pub fn full_rows_rank_what_the_candidate_list_ranks<D: PagedDecoder>(c: &Conformance<D>) {
     let (mut by_list, mut by_row) = ((c.make)(), (c.make)());
     if !by_row.full_row_readback() {
@@ -356,9 +361,31 @@ pub fn full_rows_rank_what_the_candidate_list_ranks<D: PagedDecoder>(c: &Conform
     let k = by_list.topk_capacity().clamp(1, 8);
     let candidates = by_list.forward_batched_topk(&mut [&mut list_table], &[next], k).remove(0);
     let row = by_row.forward_batched_logit_rows(&mut [&mut row_table], &[next]).remove(0);
+    assert_row_ranks_list(&row, &candidates, vocab);
+    by_list.release_table(&mut list_table);
+    by_row.release_table(&mut row_table);
+
+    if by_row.spec_max_draft() == 0 {
+        return;
+    }
+    // A verify step over the next input and two proposals: three rows, each read back both ways.
+    let rows = vec![vec![next, tokens(vocab, 5, 1)[0], tokens(vocab, 6, 1)[0]]];
+    let (mut list_table, mut row_table) = (crate::paged::BlockTable::new(), crate::paged::BlockTable::new());
+    by_list.prefill(&mut list_table, &prompt);
+    by_row.prefill(&mut row_table, &prompt);
+    let listed = by_list.forward_batched_verify(&mut [&mut list_table], &rows, k).remove(0);
+    let whole = by_row.forward_batched_verify_logit_rows(&mut [&mut row_table], &rows).remove(0);
+    assert_eq!(whole.len(), rows[0].len(), "a verify step answers one row per input");
+    for (row, candidates) in whole.iter().zip(&listed) {
+        assert_row_ranks_list(row, candidates, vocab);
+    }
+}
+
+/// `row` holds every candidate's logit at its token and no token outside `candidates` outranks the last of them.
+fn assert_row_ranks_list(row: &[f32], candidates: &[(u32, f32)], vocab: usize) {
     assert_eq!(row.len(), vocab, "a logits row must hold one logit per vocabulary token");
     let close = |a: f32, b: f32| (a - b).abs() <= 1e-3 * (1.0 + a.abs().max(b.abs()));
-    for &(token, logit) in &candidates {
+    for &(token, logit) in candidates {
         assert!(close(row[token as usize], logit), "candidate {token} has logit {logit} but the row holds {}", row[token as usize]);
     }
     let floor = candidates.last().expect("a step offers at least one candidate").1;
@@ -407,7 +434,7 @@ pub fn embedded_prompts_batch_and_never_share_a_prefix<D: PagedDecoder>(c: &Conf
     let prompt = tokens(vocab, 7, len);
     // Rows early in the prompt (inside any prefix a decoder may cache) and rows ending at its last position: a model
     // whose greedy output is decided by its last tokens (a recurrent one forgets the early rows) is moved by the latter.
-    let positions: Vec<u32> = (4..16u32).chain(len as u32 - 12..len as u32).collect();
+    let positions: Vec<u32> = (4..16u32).chain((len as u32 - 12).max(16)..len as u32).collect();
     let run = |seed: usize| PromptEmbeds::new(width, positions.clone(), rows(width, positions.len(), seed)).expect("rows");
     let (ea, eb) = (run(1), run(2));
     let (out_a, out_b) = (alone_embedded(c, &prompt, &ea, 6), alone_embedded(c, &prompt, &eb, 6));
@@ -445,7 +472,7 @@ pub fn adapters_serve_embedded_prompts_apart_from_the_base<D: PagedDecoder>(c: &
     let vocab = sched.decoder_mut().vocab();
     let len = c.prefix_prompt_tokens.max(24);
     let prompt = tokens(vocab, 8, len);
-    let positions: Vec<u32> = (4..16u32).chain(len as u32 - 12..len as u32).collect();
+    let positions: Vec<u32> = (4..16u32).chain((len as u32 - 12).max(16)..len as u32).collect();
     let e = PromptEmbeds::new(width, positions.clone(), rows(width, positions.len(), 3)).expect("rows");
     let hits = |sched: &Scheduler<D>| sched.prefix_stats().0;
     let embedded = |sched: &mut Scheduler<D>, adapter: Option<AdapterId>| {

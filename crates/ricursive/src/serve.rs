@@ -1033,20 +1033,10 @@ fn argmax(logits: &[f32]) -> u32 {
     logits.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |best, (i, &v)| if v > best.1 { (i, v) } else { best }).0 as u32
 }
 
-fn top_k(logits: &[f32], k: usize) -> Vec<(u32, f32)> {
-    let mut ranked: Vec<(u32, f32)> = logits.iter().enumerate().map(|(i, &v)| (i as u32, v)).collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    ranked.truncate(k);
-    ranked
-}
-
-/// Speculation: the rows of a verify are consecutive new positions of a sequence, scored in one forward exactly as a
-/// prefill chunk is. The scheduler truncates a rejected row's block table entries; the sliding rings need no
-/// rollback, because the ring holds `window + prefill_chunk` rows and a verify has at most `prefill_chunk` rows, so no
-/// row of a verify overwrites a key a position at or before the last accepted one still reads, and a later write at
-/// a rolled-back position replaces what the rejected row left.
-impl RowsForward for RicursiveEngine {
-    fn forward_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
+impl RicursiveEngine {
+    /// A verify's rows forwarded as consecutive new positions of each sequence, and the `[rows, vocab]` logits of
+    /// every row (sequence by sequence, in `rows` order).
+    fn verify_logits(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<f32> {
         assert_eq!(tables.len(), rows.len(), "ricursive serve: tables/rows length mismatch");
         let total: usize = rows.iter().map(Vec::len).sum();
         if !self.lsa.is_empty() {
@@ -1080,11 +1070,27 @@ impl RowsForward for RicursiveEngine {
         }
         let row_plans: Vec<RowPlan<'_>> = plans.iter().map(|&(token, pos, ring, seq, namespace)| RowPlan { token, pos, ring, blocks: &blocks[seq], namespace }).collect();
         let x = self.forward_hidden(&row_plans).unwrap_or_else(|e| panic!("{e}"));
-        let k = cands.clamp(1, self.topk_capacity());
         let namespaces: Vec<KvNamespace> = row_plans.iter().map(|r| r.namespace).collect();
-        let logits = self.head(&x, total as u32, &namespaces).1;
-        let mut ranked = logits.chunks(self.cfg.vocab_size).map(|l| top_k(l, k));
+        self.head(&x, total as u32, &namespaces).1
+    }
+}
+
+/// Speculation: the rows of a verify are consecutive new positions of a sequence, scored in one forward exactly as a
+/// prefill chunk is. The scheduler truncates a rejected row's block table entries; the sliding rings need no
+/// rollback, because the ring holds `window + prefill_chunk` rows and a verify has at most `prefill_chunk` rows, so no
+/// row of a verify overwrites a key a position at or before the last accepted one still reads, and a later write at
+/// a rolled-back position replaces what the rejected row left.
+impl RowsForward for RicursiveEngine {
+    fn forward_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
+        let k = cands.clamp(1, self.topk_capacity());
+        let logits = self.verify_logits(tables, rows);
+        let mut ranked = logits.chunks(self.cfg.vocab_size).map(|l| model::serve::best_candidates(l, k));
         rows.iter().map(|row| ranked.by_ref().take(row.len()).collect()).collect()
+    }
+    fn forward_row_logits(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<Vec<Vec<f32>>> {
+        let logits = self.verify_logits(tables, rows);
+        let mut per_row = logits.chunks(self.cfg.vocab_size).map(<[f32]>::to_vec);
+        rows.iter().map(|row| per_row.by_ref().take(row.len()).collect()).collect()
     }
 }
 
@@ -1257,7 +1263,7 @@ impl PagedDecoder for RicursiveEngine {
     }
     fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<(u32, f32)>> {
         let k = k.clamp(1, self.topk_capacity());
-        self.decode_logits(tables, inputs).iter().map(|l| top_k(l, k)).collect()
+        self.decode_logits(tables, inputs).iter().map(|l| model::serve::best_candidates(l, k)).collect()
     }
     fn prefix_stats(&self) -> (u64, u64, usize) {
         self.cache.stats()
@@ -1281,6 +1287,12 @@ impl PagedDecoder for RicursiveEngine {
     }
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY.min(self.cfg.vocab_size)
+    }
+    fn full_row_readback(&self) -> bool {
+        true
+    }
+    fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        self.decode_logits(tables, inputs)
     }
     /// Proposals per sequence a verify scores: one forward of `1 + proposals` rows, which must fit the ring slack. With
     /// a draft model that is at most the rest of its block.
@@ -1326,6 +1338,9 @@ impl PagedDecoder for RicursiveEngine {
     }
     fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
         self.forward_rows(tables, rows, cands)
+    }
+    fn forward_batched_verify_logit_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<Vec<Vec<f32>>> {
+        self.forward_row_logits(tables, rows)
     }
 }
 

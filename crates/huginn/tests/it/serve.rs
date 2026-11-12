@@ -19,6 +19,7 @@ use huginn::model::Huginn;
 use huginn::serve::Engine;
 
 use ::model::paged::BlockTable;
+use ::model::serve::conformance::{self, Conformance};
 use ::model::serve::PagedDecoder;
 
 fn state_vector(cfg: &HuginnConfig) -> Vec<f32> {
@@ -232,4 +233,19 @@ fn the_model_runs_on_the_backend_the_run_requested() {
     let got = gpu_core::backend_name();
     eprintln!("requested backend {want:?}, running on {got:?}");
     assert_eq!(got, want, "asked for {want}, ran on {got}");
+}
+
+/// A tiny engine the generic serving suite can build fresh: a pool far larger than the suite's four
+/// 48-token sequences, with the recurrence state fixed as in the tests above.
+fn conformance_engine() -> Engine {
+    let cfg = HuginnConfig::tiny();
+    let w = init_weights(&cfg, 59);
+    let eng = Engine::from_source(cfg.clone(), cfg.mean_recurrence, &w, 1024, 4);
+    eng.set_state(&state_vector(&cfg));
+    eng
+}
+
+#[test]
+fn the_engine_passes_the_serving_conformance_suite() {
+    conformance::run_all(&Conformance { make: conformance_engine, prefix_reuse: false, prefix_prompt_tokens: 24, load_adapter: None });
 }

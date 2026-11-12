@@ -17,6 +17,12 @@
 # checkpoint too large for CI) carries `conformance-exempt: <reason>` on the
 # line before its impl, and the reason names the real-model test that covers it.
 #
+# Every engine also reads its whole logits rows back (`full_row_readback`,
+# `forward_batched_logit_rows`), so that a request whose nucleus, min-p set or
+# penalties a candidate list cannot answer is sampled exactly on every engine;
+# the suite's row property checks the rows against the candidate lists. An impl
+# in a file with no `fn full_row_readback` fails the gate.
+#
 # Usage: scripts/gates/check-serve-conformance.sh [--root DIR]
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -27,8 +33,12 @@ while IFS=: read -r file line _; do
   crate_dir="$(echo "$file" | sed -E 's#^(crates/[^/]+)/.*#\1#')"
   [ "$crate_dir" = "crates/model" ] && continue
   prev="$(sed -n "$((line - 1))p" "$root/$file")"
-  case "$prev" in *"conformance-exempt:"*) continue ;; esac
   engine="$(sed -n "${line}p" "$root/$file" | sed -E 's/.* PagedDecoder for ([A-Za-z0-9_]+).*/\1/')"
+  if ! grep -q 'fn full_row_readback' "$root/$file"; then
+    echo "check-serve-conformance: $file:$line: $engine implements PagedDecoder without reading its logits rows back (fn full_row_readback / forward_batched_logit_rows)" >&2
+    rc=1
+  fi
+  case "$prev" in *"conformance-exempt:"*) continue ;; esac
   # A file of the engine's crate that runs the suite AND names this engine type.
   covered=0
   for f in $(grep -rlE 'conformance::run_all' "$root/$crate_dir/tests" "$root/$crate_dir/src" 2>/dev/null); do

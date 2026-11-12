@@ -29,4 +29,8 @@ pub trait RowsForward: PagedDecoder {
     /// row, best first. Each row's result must equal what a plain decode step
     /// at that position returns, so greedy speculation is output-identical.
     fn forward_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>>;
+
+    /// [`Self::forward_rows`] with each row's whole `[vocab]` logits read back instead of its best candidates: what a
+    /// request whose nucleus, min-p set or penalties a candidate list cannot answer is verified against.
+    fn forward_row_logits(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<Vec<Vec<f32>>>;
 }

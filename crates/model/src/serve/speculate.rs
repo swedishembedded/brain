@@ -41,6 +41,7 @@
 
 use super::*;
 use super::budget::StepCost;
+use super::fullrow::{survivors_of_row, Survivors};
 
 /// What a drafter may look at for one sequence.
 pub struct DraftQuery<'a> {
@@ -636,6 +637,9 @@ pub(super) struct Proposals {
     pub(super) rows: Vec<Vec<u32>>,
     /// Candidates the verify forward returns per row.
     pub(super) cands: usize,
+    /// Whether the verify returns whole logits rows instead of candidate lists: the decoder reads rows back and some
+    /// sequence samples a distribution a list cannot answer exactly ([`SampleParams::needs_full_row`]).
+    pub(super) full_rows: bool,
     /// Per sequence, the positions its table held before the verify appended its rows.
     before: Vec<u32>,
     started: f64,
@@ -666,46 +670,55 @@ pub struct Verdict {
 /// tokens are then distributed exactly as plain sampling would produce them.
 pub fn verify_proposals(proposals: &[u32], rows: &[Vec<(u32, f32)>], params: SampleParams, rng: &mut data::rng::Rng) -> Verdict {
     assert_eq!(rows.len(), proposals.len() + 1, "verify_proposals: {} candidate rows for {} proposals", rows.len(), proposals.len());
+    let rows: Vec<Survivors> = rows.iter().map(|row| Survivors::of_list(row, params)).collect();
+    verify_survivors(proposals, &rows, params, rng)
+}
+
+/// [`verify_proposals`] over each position's [`Survivors`]: the candidate list's, or the whole logits row's when the
+/// decoder reads rows back, so the test and the correction are exact whatever the width of the nucleus.
+pub(super) fn verify_survivors(proposals: &[u32], rows: &[Survivors], params: SampleParams, rng: &mut data::rng::Rng) -> Verdict {
     if params.is_greedy() {
-        let accepted = proposals.iter().zip(rows).take_while(|(d, row)| row[0].0 == **d).count();
-        return Verdict { accepted, next: rows[accepted][0].0 };
+        let accepted = proposals.iter().zip(rows).take_while(|(d, row)| row.best() == **d).count();
+        return Verdict { accepted, next: rows[accepted].best() };
     }
     for (j, &d) in proposals.iter().enumerate() {
-        let (weights, kept_sum) = truncated_weights(&rows[j], params);
-        let at = rows[j][..weights.len()].iter().position(|&(t, _)| t == d);
-        let p_d = at.map_or(0.0, |i| weights[i]);
+        let (p_d, kept_sum) = (rows[j].weight(d), rows[j].kept_sum());
         if rng.next_f32() * kept_sum < p_d {
             continue;
         }
         // Rejected: draw from the target distribution without `d`.
-        let rest = kept_sum - p_d;
-        let r = rng.next_f32() * rest;
-        let mut acc = 0.0f32;
-        let mut last = None;
-        for (i, &w) in weights.iter().enumerate() {
-            if Some(i) == at {
-                continue;
-            }
-            last = Some(rows[j][i].0);
-            acc += w;
-            if acc >= r {
-                return Verdict { accepted: j, next: rows[j][i].0 };
-            }
-        }
-        // Rounding left `r` past the last weight; the last candidate is the tail of the CDF.
-        return Verdict { accepted: j, next: last.expect("a rejected proposal had probability < 1, so another candidate exists") };
+        let r = rng.next_f32() * (kept_sum - p_d);
+        let next = rows[j].draw_at(r, Some(d)).expect("a rejected proposal had probability < 1, so another candidate exists");
+        return Verdict { accepted: j, next };
     }
     let k = proposals.len();
-    let (weights, kept_sum) = truncated_weights(&rows[k], params);
-    let r = rng.next_f32() * kept_sum;
-    let mut acc = 0.0f32;
-    for (i, &w) in weights.iter().enumerate() {
-        acc += w;
-        if acc >= r {
-            return Verdict { accepted: k, next: rows[k][i].0 };
+    let r = rng.next_f32() * rows[k].kept_sum();
+    Verdict { accepted: k, next: rows[k].draw_at(r, None).expect("a position has a survivor") }
+}
+
+/// What a verify step returned per sequence and row: a candidate list (best first), or the whole logits row of a
+/// decoder that reads rows back.
+pub(super) enum Scored {
+    Lists(Vec<Vec<Vec<(u32, f32)>>>),
+    Rows(Vec<Vec<Vec<f32>>>),
+}
+
+impl Scored {
+    /// Sequence count.
+    fn len(&self) -> usize {
+        match self {
+            Scored::Lists(l) => l.len(),
+            Scored::Rows(r) => r.len(),
         }
     }
-    Verdict { accepted: k, next: rows[k][weights.len() - 1].0 }
+
+    /// Each position's survivors under its sequence's own sampling (`params[i]` for sequence `i`).
+    fn survivors(self, params: &[SampleParams]) -> Vec<Vec<Survivors>> {
+        match self {
+            Scored::Lists(lists) => lists.iter().zip(params).map(|(rows, &p)| rows.iter().map(|row| Survivors::of_list(row, p)).collect()).collect(),
+            Scored::Rows(rows) => rows.iter().zip(params).map(|(rows, &p)| rows.iter().map(|row| survivors_of_row(row, p)).collect()).collect(),
+        }
+    }
 }
 
 /// The block tables of the `active` sequences, in `active` order.
@@ -746,7 +759,14 @@ impl<D: PagedDecoder> Scheduler<D> {
         let (scored, verify_secs) = {
             let _verify = gpu_core::markers::range(c"spec.verify");
             let started = (self.clock)();
-            let verified = super::catch_device_oom(|| self.dec.forward_batched_verify(&mut active_tables(&mut self.running, active), &proposals.rows, proposals.cands));
+            let verified = super::catch_device_oom(|| {
+                let mut tables = active_tables(&mut self.running, active);
+                if proposals.full_rows {
+                    Scored::Rows(self.dec.forward_batched_verify_logit_rows(&mut tables, &proposals.rows))
+                } else {
+                    Scored::Lists(self.dec.forward_batched_verify(&mut tables, &proposals.rows, proposals.cands))
+                }
+            });
             match verified {
                 Ok(scored) => (scored, (self.clock)() - started),
                 Err(oom) => {
@@ -855,24 +875,27 @@ impl<D: PagedDecoder> Scheduler<D> {
         let rows: Vec<Vec<u32>> = active.iter().zip(&props).map(|(&i, p)| std::iter::once(self.running[i].next_input).chain(p.iter().copied()).collect()).collect();
         let all_greedy = active.iter().all(|&i| !self.running[i].sample.needs_candidates());
         let cands = if all_greedy { 1 } else { self.dec.topk_capacity().max(1) };
+        let full_rows = self.wants_full_rows(active);
         let before: Vec<u32> = active.iter().map(|&i| self.running[i].table.len()).collect();
-        Some(Proposals { props, ks, rows, cands, before, started, bucket, gated })
+        Some(Proposals { props, ks, rows, cands, full_rows, before, started, bucket, gated })
     }
 
     /// **Settle a verify step**: `scored[i][j]` are the target's candidates for row `j` of sequence `active[i]`
     /// (`proposals.rows`, scored as one forward). Each sequence keeps the longest prefix of its proposals the target
     /// agrees with ([`verify_proposals`]) and the target's own next token; the decoder rolls back the rest of its
     /// state and the tables are truncated to what stands.
-    pub(super) fn settle_verified(&mut self, active: &[usize], proposals: Proposals, scored: Vec<Vec<Vec<(u32, f32)>>>) {
+    pub(super) fn settle_verified(&mut self, active: &[usize], proposals: Proposals, scored: Scored) {
         let Proposals { props, ks, before, started, bucket, gated, .. } = proposals;
         self.spec_stats.mixed_verify_steps += u64::from(!gated);
         assert_eq!(scored.len(), active.len(), "forward_batched_verify must answer every sequence");
+        let sampling: Vec<SampleParams> = active.iter().map(|&si| self.running[si].sample).collect();
+        let scored = scored.survivors(&sampling);
 
         let mut keep = Vec::with_capacity(active.len());
         let mut verdicts = Vec::with_capacity(active.len());
         for (bi, &si) in active.iter().enumerate() {
             let r = &mut self.running[si];
-            let v = verify_proposals(&props[bi], &scored[bi], r.sample, &mut r.rng);
+            let v = verify_survivors(&props[bi], &scored[bi], r.sample, &mut r.rng);
             // The input row and every accepted proposal keep their state; the
             // rest of the verified block is rolled back.
             keep.push(v.accepted + 1);
@@ -898,7 +921,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             }
             for (j, &tok) in props[bi][..v.accepted].iter().chain(std::iter::once(&v.next)).enumerate() {
                 // Row `j` scored the position `tok` was emitted at.
-                accept_token(r, tok, candidate_logprob(&scored[bi][j], r.sample, tok));
+                accept_token(r, tok, scored[bi][j].logprob(tok, r.sample));
                 if r.done {
                     break;
                 }
@@ -944,6 +967,37 @@ impl<D: PagedDecoder> Scheduler<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A flat row of 300 tokens with `top_p = 0.9` has a 270-token nucleus, wider than any candidate list the
+    /// decoders offer (64). A proposal inside it is accepted with probability 1/270, one outside never is, and a
+    /// correction is drawn over the rest of the nucleus, which reaches well past a 64-token list.
+    #[test]
+    fn a_proposal_is_tested_against_the_whole_row_nucleus() {
+        let params = SampleParams { temp: 1.0, top_p: 0.9, ..SampleParams::greedy() };
+        let row = survivors_of_row(&[1.0f32; 300], params);
+        let rows = [row];
+        let mut rng = data::rng::Rng::new(5);
+        let trials = 20_000;
+        let (mut accepted_inside, mut accepted_outside, mut widest) = (0usize, 0usize, 0u32);
+        for _ in 0..trials {
+            let v = verify_survivors(&[100], &[survivors_of_row(&[1.0f32; 300], params), survivors_of_row(&[1.0f32; 300], params)], params, &mut rng);
+            if v.accepted == 1 {
+                accepted_inside += 1;
+            } else {
+                assert_ne!(v.next, 100, "a correction repeated the rejected proposal");
+                assert!(v.next < 270, "correction {} is outside the nucleus", v.next);
+                widest = widest.max(v.next);
+            }
+            let v = verify_survivors(&[280], &[survivors_of_row(&[1.0f32; 300], params), survivors_of_row(&[1.0f32; 300], params)], params, &mut rng);
+            accepted_outside += usize::from(v.accepted == 1);
+        }
+        // Rejected corrections are 269 of the 270 tokens apiece, so the correction path alone proves the width.
+        assert!(widest >= 64, "no correction past a 64-token list: widest {widest}");
+        // The accept test passes with probability 1/270, i.e. 74 of 20000, give or take a few standard deviations.
+        assert!((35..=125).contains(&accepted_inside), "accepted {accepted_inside} of {trials}, want about {}", trials / 270);
+        assert_eq!(accepted_outside, 0, "a token outside the nucleus was accepted");
+        assert_eq!(rows[0].weight(100), rows[0].weight(0));
+    }
 
     #[test]
     fn a_stalled_round_does_not_move_a_rate_and_a_change_of_text_does() {

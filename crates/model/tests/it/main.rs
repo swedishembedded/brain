@@ -139,6 +139,7 @@ mod serve_inflight_prefix;
 mod serve_kv_pressure;
 mod serve_mixed_step;
 mod serve_prefix_admission;
+mod serve_row_paths;
 mod serve_row_sampling;
 mod serve_sampling;
 mod serve_speculative;

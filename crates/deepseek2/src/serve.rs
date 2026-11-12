@@ -909,6 +909,17 @@ impl PagedDecoder for Engine {
     fn topk_capacity(&self) -> usize {
         self.ec.topk as usize
     }
+    fn full_row_readback(&self) -> bool {
+        true
+    }
+    fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        if tables.is_empty() {
+            return Vec::new();
+        }
+        self.decode_batch(tables, inputs);
+        let vocab = self.cfg.vocab() as usize;
+        self.gpu.read(&self.sc.logits, tables.len() * vocab).chunks(vocab).map(<[f32]>::to_vec).collect()
+    }
     fn prefix_stats(&self) -> (u64, u64, usize) {
         (0, 0, 0)
     }

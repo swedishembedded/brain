@@ -4105,6 +4105,21 @@ impl KvOffload for Engine {
     }
 }
 
+impl Engine {
+    /// Forward `inputs` as the next `inputs.len()` rows of `table` (the `spec_decode` verify of one sequence), leaving
+    /// their hidden states in the batch buffers for a head to read; returns the row count.
+    fn forward_chunk(&mut self, table: &mut BlockTable, inputs: &[u32]) -> u32 {
+        let n = inputs.len() as u32;
+        assert!(n >= 1 && n <= self.max_batch, "forward_rows: {n} rows for a decoder sized for {} rows per step", self.max_batch);
+        let base = table.len();
+        self.lsa_prepare_chunk(table, base, n);
+        table.reserve(n, &mut self.alloc).expect("KV pool exhausted");
+        let meta = self.chunk_meta(table, base, n);
+        self.run_batched_submit(&meta, Input::Tokens(inputs), false);
+        n
+    }
+}
+
 impl model::serve::rows::RowsForward for Engine {
     /// One batched forward per sequence over its `1 + proposals` rows (the
     /// `spec_decode` verify), reading the top-`cands` of every row from the
@@ -4116,14 +4131,26 @@ impl model::serve::rows::RowsForward for Engine {
             .iter_mut()
             .zip(rows)
             .map(|(table, inputs)| {
-                let n = inputs.len() as u32;
-                assert!(n >= 1 && n <= self.max_batch, "forward_rows: {n} rows for a decoder sized for {} rows per step", self.max_batch);
-                let base = table.len();
-                self.lsa_prepare_chunk(table, base, n);
-                table.reserve(n, &mut self.alloc).expect("KV pool exhausted");
-                let meta = self.chunk_meta(table, base, n);
-                self.run_batched_submit(&meta, Input::Tokens(inputs), false);
+                let n = self.forward_chunk(table, inputs);
                 self.topk_from_hidden(n, cands as u32)
+            })
+            .collect()
+    }
+
+    /// [`Self::forward_rows`] reading each row's whole logits back, as [`Engine::forward_batched_logit_rows`] does for
+    /// a decode step.
+    fn forward_row_logits(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<Vec<Vec<f32>>> {
+        assert_eq!(tables.len(), rows.len(), "forward_row_logits: one row set per table");
+        let vocab = self.cfg.vocab as usize;
+        tables
+            .iter_mut()
+            .zip(rows)
+            .map(|(table, inputs)| {
+                let n = self.forward_chunk(table, inputs);
+                let mut steps: Vec<Step> = Vec::new();
+                self.head_steps(&mut steps, n);
+                self.gpu.submit(&[], &steps);
+                self.gpu.read(&self.logits_dev, n as usize * vocab).chunks(vocab).map(<[f32]>::to_vec).collect()
             })
             .collect()
     }
@@ -4254,6 +4281,9 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
         model::serve::rows::RowsForward::forward_rows(self, tables, rows, cands)
+    }
+    fn forward_batched_verify_logit_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<Vec<Vec<f32>>> {
+        model::serve::rows::RowsForward::forward_row_logits(self, tables, rows)
     }
     fn kv_offload_bytes(&self) -> u64 {
         Engine::kv_offload_bytes(self)

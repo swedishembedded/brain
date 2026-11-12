@@ -17,6 +17,7 @@ use ouro::model::Ouro;
 use ouro::serve::Engine;
 
 use ::model::paged::BlockTable;
+use ::model::serve::conformance::{self, Conformance};
 use ::model::serve::PagedDecoder;
 
 fn reference_next(cfg: &OuroConfig, w: &std::collections::HashMap<String, Vec<f32>>, seq: &[u32]) -> u32 {
@@ -96,4 +97,17 @@ fn a_long_prompt_prefill_selects_the_tiled_linear_and_still_matches() {
     let mut refs = [&mut table];
     let next = eng.forward_batched_greedy(&mut refs, &[first])[0];
     assert_eq!(next, reference_next(&cfg, &w, &seq));
+}
+
+/// A tiny engine the generic serving suite can build fresh: a pool far larger than the suite's four
+/// 48-token sequences.
+fn conformance_engine() -> Engine {
+    let cfg = OuroConfig::tiny();
+    let w = init_weights(&cfg, 61);
+    Engine::from_source(cfg, &w, 2048, 4)
+}
+
+#[test]
+fn the_engine_passes_the_serving_conformance_suite() {
+    conformance::run_all(&Conformance { make: conformance_engine, prefix_reuse: false, prefix_prompt_tokens: 24, load_adapter: None });
 }

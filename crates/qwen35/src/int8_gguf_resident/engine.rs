@@ -98,7 +98,7 @@ type PrefixCache = SnapshotPrefixCache<Resume>;
 use super::background::{PrefillDone, PrefillTask, TaskStart};
 use super::mtp::{FeedStart, FeedStep, PromptFeed};
 use super::pace::PrefillPace;
-use super::{HeadOut, KvLayout, KvWindow, MultiPrefillJob, Qwen35GgufInstance, MODEL};
+use super::{HeadOut, KvLayout, KvWindow, MultiPrefillJob, Qwen35GgufInstance, Readout, MODEL};
 use crate::decode_tape::HeadKind;
 
 /// Candidates a non-greedy pick can sample from. Real sampling is exact
@@ -655,7 +655,7 @@ impl Qwen35GgufEngine {
     /// hidden block.
     /// One decode step's layers and then `head` over the hidden block they leave on the card, as ONE submission:
     /// nothing is read back between the last layer and the head.
-    fn decode_then(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], kind: HeadKind) -> HeadOut {
+    fn decode_then(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], readout: Readout) -> HeadOut {
         assert_eq!(tables.len(), inputs.len(), "{MODEL}: tables/inputs length mismatch");
         let adapter_slots: Vec<u32> = tables.iter().map(|t| adapters::slot_of(self.inst.stage_models(), t.kv_namespace())).collect();
         let (slots, positions) = self.next_positions(tables);
@@ -671,7 +671,7 @@ impl Qwen35GgufEngine {
         let tap = if track { inst.mtp_note_step(&slots, inputs) } else { Vec::new() };
         let inst = &mut *inst;
         // A batch of base rows only replays its recording; an adapter bank correcting any row changes the dispatches.
-        if adapter_slots.iter().all(|&s| s == LORA_SLOT_NONE) {
+        if let (Readout::Head(kind), true) = (readout, adapter_slots.iter().all(|&s| s == LORA_SLOT_NONE)) {
             if let Some(out) = inst.decode_planned(inputs, &slots, &positions, kind, &tap) {
                 inst.mtp_step_done(&slots);
                 return out;
@@ -684,7 +684,7 @@ impl Qwen35GgufEngine {
         if !tap.is_empty() {
             inst.mtp_tap(&hidden, &tap);
         }
-        let out = inst.head_rows(&hidden, rows, kind);
+        let out = inst.head_rows(&hidden, rows, readout);
         drop(_step);
         inst.mtp_step_done(&slots);
         out
@@ -1596,7 +1596,7 @@ impl PagedDecoder for Qwen35GgufEngine {
         if tables.is_empty() {
             return Vec::new();
         }
-        decode_lane(self.background_on, || self.decode_then(tables, inputs, HeadKind::Argmax).into_ids())
+        decode_lane(self.background_on, || self.decode_then(tables, inputs, Readout::Head(HeadKind::Argmax)).into_ids())
     }
     fn forward_batched_greedy_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<u32>> {
         assert!((1..=self.decode_window_capacity()).contains(&k), "window {k} exceeds this engine's decode_window_capacity {}", self.decode_window_capacity());
@@ -1607,7 +1607,7 @@ impl PagedDecoder for Qwen35GgufEngine {
             return Vec::new();
         }
         let k = k.clamp(1, TOPK_CAPACITY) as u32;
-        decode_lane(self.background_on, || self.decode_then(tables, inputs, HeadKind::TopK(k)).into_topk())
+        decode_lane(self.background_on, || self.decode_then(tables, inputs, Readout::Head(HeadKind::TopK(k))).into_topk())
     }
     fn step_latency_target(&self) -> Option<std::time::Duration> {
         Some(self.prefill.step_target.unwrap_or(DEFAULT_STEP_TARGET))
@@ -1644,6 +1644,15 @@ impl PagedDecoder for Qwen35GgufEngine {
     }
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY
+    }
+    fn full_row_readback(&self) -> bool {
+        true
+    }
+    fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        if tables.is_empty() {
+            return Vec::new();
+        }
+        decode_lane(self.background_on, || self.decode_then(tables, inputs, Readout::Rows).into_rows())
     }
     fn adapter_availability(&mut self, adapter: AdapterId) -> AdapterAvailability {
         let (answer, purged) = adapters::availability(self.inst.stage_models(), adapter);
@@ -1689,7 +1698,11 @@ impl PagedDecoder for Qwen35GgufEngine {
     /// consecutive positions of each sequence's own block, so the table just
     /// grows by `rows[i].len()`.
     fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
-        decode_lane(self.background_on, || self.verify_rows(tables, rows, cands))
+        let kind = if cands <= 1 { HeadKind::Argmax } else { HeadKind::TopK(cands.min(TOPK_CAPACITY) as u32) };
+        decode_lane(self.background_on, || self.verify_rows(tables, rows, Readout::Head(kind))).into_lists()
+    }
+    fn forward_batched_verify_logit_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<Vec<Vec<f32>>> {
+        decode_lane(self.background_on, || self.verify_rows(tables, rows, Readout::Rows)).into_rows()
     }
     fn commit_verified(&mut self, _tables: &mut [&mut BlockTable], keep: &[usize]) {
         decode_lane(self.background_on, || self.commit_rows(keep))
@@ -1701,9 +1714,31 @@ impl PagedDecoder for Qwen35GgufEngine {
     }
 }
 
+/// A verify step's answers, per sequence and row: candidate lists, or whole logits rows.
+enum Verified {
+    Lists(Vec<Vec<Vec<(u32, f32)>>>),
+    Rows(Vec<Vec<Vec<f32>>>),
+}
+
+impl Verified {
+    fn into_lists(self) -> Vec<Vec<Vec<(u32, f32)>>> {
+        match self {
+            Verified::Lists(lists) => lists,
+            Verified::Rows(_) => unreachable!("a candidate verify answered with whole rows"),
+        }
+    }
+
+    fn into_rows(self) -> Vec<Vec<Vec<f32>>> {
+        match self {
+            Verified::Rows(rows) => rows,
+            Verified::Lists(_) => unreachable!("a rows verify answered with candidates"),
+        }
+    }
+}
+
 impl Qwen35GgufEngine {
     /// [`PagedDecoder::forward_batched_verify`]'s work.
-    fn verify_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
+    fn verify_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], readout: Readout) -> Verified {
         assert_eq!(tables.len(), rows.len(), "{MODEL}: tables/rows length mismatch");
         let t0 = std::time::Instant::now();
         let mut slots = Vec::with_capacity(tables.len());
@@ -1729,14 +1764,15 @@ impl Qwen35GgufEngine {
         }
         let row_refs: Vec<&[u32]> = work.iter().map(|r| r.as_slice()).collect();
         let n = work.iter().map(|r| r.len()).sum::<usize>() as u32;
-        let kind = if cands <= 1 { HeadKind::Argmax } else { HeadKind::TopK(cands.min(TOPK_CAPACITY) as u32) };
         // Where each row's hidden state goes in the drafter's pending store (the rows that stand are counted at the commit).
         let counts: Vec<u32> = work.iter().map(|r| r.len() as u32).collect();
         let dests = self.inst.mtp_verify_destinations(&slots, &counts);
-        let planned = padded.as_ref().and_then(|_| self.inst.verify_planned(&row_refs, &slots, &positions, kind, &dests));
-        let picked: Vec<Vec<(u32, f32)>> = match planned {
-            Some(HeadOut::Ids(ids)) => ids.into_iter().map(|t| vec![(t, 0.0)]).collect(),
-            Some(HeadOut::TopK(top)) => top,
+        let planned = match readout {
+            Readout::Head(kind) => padded.as_ref().and_then(|_| self.inst.verify_planned(&row_refs, &slots, &positions, kind, &dests)),
+            Readout::Rows => None,
+        };
+        let picked: HeadOut = match planned {
+            Some(out) => out,
             None => {
                 self.inst.set_adapter_rows(&adapter_rows);
                 let layers = gpu_core::markers::range(c"verify.layers");
@@ -1747,14 +1783,23 @@ impl Qwen35GgufEngine {
                     self.inst.mtp_tap(&hidden, &dests);
                 }
                 let _head = gpu_core::markers::range(c"verify.head");
-                if cands <= 1 { self.inst.head_argmax_rows(&hidden, n).into_iter().map(|t| vec![(t, 0.0)]).collect() } else { self.inst.head_topk_rows(&hidden, n, cands.min(TOPK_CAPACITY) as u32) }
+                self.inst.head_rows(&hidden, n, readout)
             }
         };
         self.verifying = Some(Verifying { slots, rows: work.to_vec() });
         self.times.verify += t0.elapsed();
-        let mut flat = picked.into_iter();
-        // What was asked for: the padding rows' answers are dropped, and their positions leave the tables
-        // (the caller's tables hold exactly the rows it sent).
+        match picked {
+            HeadOut::Ids(ids) => Verified::Lists(self.drop_padding(ids.into_iter().map(|t| vec![(t, 0.0)]).collect(), tables, rows, work)),
+            HeadOut::TopK(top) => Verified::Lists(self.drop_padding(top, tables, rows, work)),
+            HeadOut::Rows(whole) => Verified::Rows(self.drop_padding(whole, tables, rows, work)),
+        }
+    }
+
+    /// One answer per row of `work` (`rows` padded for a replayed graph), grouped by sequence. What was asked for is
+    /// `rows`: the padding rows' answers are dropped and their positions leave the tables (the caller's tables hold
+    /// exactly the rows it sent).
+    fn drop_padding<T>(&mut self, flat: Vec<T>, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], work: &[Vec<u32>]) -> Vec<Vec<T>> {
+        let mut flat = flat.into_iter();
         rows.iter()
             .zip(work)
             .zip(tables.iter_mut())

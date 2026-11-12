@@ -388,4 +388,16 @@ impl PagedDecoder for RingEngine {
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY
     }
+    fn full_row_readback(&self) -> bool {
+        true
+    }
+    fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        if tables.is_empty() {
+            return Vec::new();
+        }
+        let hidden = self.decode_hidden(tables, inputs);
+        let (rows, vocab) = (inputs.len() as u32, self.model.cfg.vocab as usize);
+        let logits = self.model.head_logits_rows_dev(&hidden, rows);
+        self.model.gpu.read(&logits, rows as usize * vocab).chunks(vocab).map(<[f32]>::to_vec).collect()
+    }
 }

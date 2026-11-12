@@ -1589,24 +1589,40 @@ pub struct Qwen35GgufInstance {
     ledger: Option<unipool::StateLedger>,
 }
 
+/// What a step reads back from the head: a head a recorded plan can end in, or every row's whole logits (never
+/// recorded: a request the candidate lists cannot answer exactly is sampled from them).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Readout {
+    Head(HeadKind),
+    Rows,
+}
+
 /// What a decode step's head hands the host.
 pub(crate) enum HeadOut {
     Ids(Vec<u32>),
     TopK(Vec<Vec<(u32, f32)>>),
+    Rows(Vec<Vec<f32>>),
 }
 
 impl HeadOut {
     pub(crate) fn into_ids(self) -> Vec<u32> {
         match self {
             HeadOut::Ids(ids) => ids,
-            HeadOut::TopK(_) => unreachable!("a greedy head answered with candidates"),
+            _ => unreachable!("a greedy head answered with something else"),
         }
     }
 
     pub(crate) fn into_topk(self) -> Vec<Vec<(u32, f32)>> {
         match self {
             HeadOut::TopK(top) => top,
-            HeadOut::Ids(_) => unreachable!("a top-k head answered with ids"),
+            _ => unreachable!("a top-k head answered with something else"),
+        }
+    }
+
+    pub(crate) fn into_rows(self) -> Vec<Vec<f32>> {
+        match self {
+            HeadOut::Rows(rows) => rows,
+            _ => unreachable!("a logits head answered with something else"),
         }
     }
 }
@@ -2158,15 +2174,17 @@ impl Qwen35GgufInstance {
     }
 
     /// `[rows, vocab]` logits of a `[rows, d_model]` hidden block, on the host.
-    fn head_logits_rows(&self, hidden: &[f32], rows: u32) -> Vec<f32> {
+    fn head_logits_rows<'h>(&self, hidden: impl Into<HeadRows<'h>>, rows: u32) -> Vec<f32> {
         let (g, ops, norm, w) = self.head_parts();
-        let d = self.cfg.d_model as usize;
+        let hidden = hidden.into();
         let Some(step) = self.exact_head_step().filter(|&s| rows > s) else {
             return crate::stream::head_logits_rows_on(g, ops, &self.cfg, norm, w, hidden, rows);
         };
+        let d = self.cfg.d_model as usize;
+        let host = hidden.to_host(g, rows as usize * d);
         let mut out = Vec::with_capacity(rows as usize * self.cfg.vocab as usize);
         for (start, end) in head_groups(rows, step) {
-            out.extend(crate::stream::head_logits_rows_on(g, ops, &self.cfg, norm, w, &hidden[start * d..end * d], (end - start) as u32));
+            out.extend(crate::stream::head_logits_rows_on(g, ops, &self.cfg, norm, w, &host[start * d..end * d], (end - start) as u32));
         }
         out
     }
@@ -2188,11 +2206,15 @@ impl Qwen35GgufInstance {
         out
     }
 
-    /// The head of `kind` over `hidden`, read back.
-    fn head_rows(&self, hidden: &DeviceBuffer, rows: u32, kind: HeadKind) -> HeadOut {
-        match kind {
-            HeadKind::Argmax => HeadOut::Ids(self.head_argmax_rows(hidden, rows)),
-            HeadKind::TopK(cap) => HeadOut::TopK(self.head_topk_rows(hidden, rows, cap)),
+    /// The head `readout` names over `hidden`, read back.
+    fn head_rows<'h>(&self, hidden: impl Into<HeadRows<'h>>, rows: u32, readout: Readout) -> HeadOut {
+        match readout {
+            Readout::Head(HeadKind::Argmax) => HeadOut::Ids(self.head_argmax_rows(hidden, rows)),
+            Readout::Head(HeadKind::TopK(cap)) => HeadOut::TopK(self.head_topk_rows(hidden, rows, cap)),
+            Readout::Rows => {
+                let vocab = self.cfg.vocab as usize;
+                HeadOut::Rows(self.head_logits_rows(hidden, rows).chunks(vocab).map(<[f32]>::to_vec).collect())
+            }
         }
     }
 

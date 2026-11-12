@@ -862,15 +862,20 @@ impl PagedDecoder for Engine {
     }
 
     fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<(u32, f32)>> {
+        self.forward_batched_logit_rows(tables, inputs).iter().map(|row| ::model::serve::best_candidates(row, k)).collect()
+    }
+
+    fn full_row_readback(&self) -> bool {
+        true
+    }
+
+    fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
         let mut out = Vec::with_capacity(tables.len());
         for (t, input) in tables.iter_mut().zip(inputs) {
             let t: &mut BlockTable = t;
             let row = self.ensure_row(t);
             let hidden = self.advance(t, row, *input);
-            let mut candidates: Vec<(u32, f32)> = self.logits(&hidden).into_iter().enumerate().map(|(i, v)| (i as u32, v)).collect();
-            candidates.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            candidates.truncate(k.max(1));
-            out.push(candidates);
+            out.push(self.logits(&hidden));
         }
         out
     }

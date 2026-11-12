@@ -32,9 +32,10 @@ pub mod rows;
 pub mod conformance;
 pub use budget::{MixedLimits, StepCost};
 pub use embeds::{ContentKey, PromptEmbeds};
-pub use fullrow::sample_logits_row;
+pub use fullrow::{best_candidates, sample_logits_row};
 pub use sampler::{apply_processors, apply_processors_to_row, apply_processors_with, ngram_followers, DryParams, NoRepeatNgram, ProcessorState, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_NGRAM_ALLOW, MAX_THINK_CLOSE, MAX_THINK_LEAD};
 pub use taps::TapPool;
+use speculate::Scored;
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
 
 /// The seam a model's paged serving engine implements. Every method mirrors
@@ -270,6 +271,16 @@ pub trait PagedDecoder {
         unimplemented!("this decoder does not read its logits rows back (full_row_readback is false)")
     }
 
+    /// [`forward_batched_verify`](Self::forward_batched_verify) with each row's whole `[vocab]` logits read back
+    /// instead of its best candidates: `rows[i][j]` is the distribution after row `j` of sequence `i`. Called only when
+    /// [`full_row_readback`](Self::full_row_readback) is true and the decoder speculates
+    /// ([`spec_max_draft`](Self::spec_max_draft) above zero); the verify is settled with
+    /// [`commit_verified`](Self::commit_verified) as usual.
+    fn forward_batched_verify_logit_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<Vec<Vec<f32>>> {
+        let _ = (tables, rows);
+        unimplemented!("this decoder does not read its verify rows back (full_row_readback is false or it does not speculate)")
+    }
+
     // ---- prefill interleaved with decode (optional) ----
     //
     // A decoder that can prefill a prompt in slices says so with
@@ -434,6 +445,24 @@ pub trait PagedDecoder {
         let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
         let scored = self.forward_batched_verify(tables, rows, cands);
         MixedVerifyOutcome { scored, prefilled, first: Vec::new() }
+    }
+
+    /// [`Self::forward_mixed`] for a step whose decode rows are sampled from their whole logits rows
+    /// ([`Self::forward_batched_logit_rows`]); `first` stays empty, so a prompt that finished takes its first token
+    /// from its hidden state. The default runs the two passes one after the other, which a decoder that fuses them
+    /// for candidates need not improve on: the rows are exact either way.
+    fn forward_mixed_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], jobs: &mut [PrefillJob<'_>]) -> MixedRowsOutcome {
+        let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
+        let decoded = if tables.is_empty() { Vec::new() } else { self.forward_batched_logit_rows(tables, inputs) };
+        MixedRowsOutcome { decoded, prefilled }
+    }
+
+    /// [`Self::forward_mixed_verify`] over whole logits rows ([`Self::forward_batched_verify_logit_rows`]); the same
+    /// two-pass default as [`Self::forward_mixed_logit_rows`].
+    fn forward_mixed_verify_logit_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], jobs: &mut [PrefillJob<'_>]) -> MixedVerifyRowsOutcome {
+        let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
+        let scored = self.forward_batched_verify_logit_rows(tables, rows);
+        MixedVerifyRowsOutcome { scored, prefilled }
     }
 
     /// A prefill call unwound with a device allocation failure
@@ -708,6 +737,22 @@ pub struct MixedVerifyOutcome {
     pub prefilled: Vec<PrefillProgress>,
     /// As [`MixedOutcome::first`].
     pub first: Vec<Vec<(u32, f32)>>,
+}
+
+/// What one [`PagedDecoder::forward_mixed_logit_rows`] call produced.
+pub struct MixedRowsOutcome {
+    /// Per decode row, its whole logits row.
+    pub decoded: Vec<Vec<f32>>,
+    /// One answer per job, in job order.
+    pub prefilled: Vec<PrefillProgress>,
+}
+
+/// What one [`PagedDecoder::forward_mixed_verify_logit_rows`] call produced.
+pub struct MixedVerifyRowsOutcome {
+    /// Per sequence, per verify row, its whole logits row.
+    pub scored: Vec<Vec<Vec<f32>>>,
+    /// One answer per job, in job order.
+    pub prefilled: Vec<PrefillProgress>,
 }
 
 /// `f`, with a device allocation failure it unwinds with
@@ -2866,24 +2911,34 @@ impl<D: PagedDecoder> Scheduler<D> {
         } else {
             self.candidates_wanted(active, banned_max)
         };
+        // Whole rows when a sequence's distribution is wider than a candidate list can answer.
+        let full_rows = proposals.as_ref().map_or_else(|| self.wants_full_rows(active), |p| p.full_rows);
         let mut tables = active_tables(&mut self.running, in_batch);
         let mut jobs: Vec<PrefillJob<'_>> =
             self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take, embeds: p.embeds.as_deref() }).collect();
         let outcome = {
             let _forward = gpu_core::markers::range(c"serve.mixed");
-            catch_device_oom(|| match &proposals {
-                Some(p) => {
-                    let o = self.dec.forward_mixed_verify(&mut tables, &p.rows, cands.max(p.cands), &mut jobs);
-                    (o.scored, Vec::new(), o.prefilled, o.first)
+            catch_device_oom(|| match (&proposals, full_rows) {
+                (Some(_), true) => {
+                    let o = self.dec.forward_mixed_verify_logit_rows(&mut tables, &proposals.as_ref().expect("matched Some").rows, &mut jobs);
+                    (Some(Scored::Rows(o.scored)), Vec::new(), None, o.prefilled, Vec::new())
                 }
-                None => {
+                (Some(p), false) => {
+                    let o = self.dec.forward_mixed_verify(&mut tables, &p.rows, cands.max(p.cands), &mut jobs);
+                    (Some(Scored::Lists(o.scored)), Vec::new(), None, o.prefilled, o.first)
+                }
+                (None, true) => {
+                    let o = self.dec.forward_mixed_logit_rows(&mut tables, &inputs, &mut jobs);
+                    (None, Vec::new(), Some(o.decoded), o.prefilled, Vec::new())
+                }
+                (None, false) => {
                     let o = self.dec.forward_mixed(&mut tables, &inputs, cands, &mut jobs);
-                    (Vec::new(), o.decoded, o.prefilled, o.first)
+                    (None, o.decoded, None, o.prefilled, o.first)
                 }
             })
         };
         drop((tables, jobs));
-        let (scored, decoded, prefilled, first) = match outcome {
+        let (scored, decoded, decoded_rows, prefilled, first) = match outcome {
             Ok(outcome) => outcome,
             Err(oom) => {
                 // The forward carried every sequence and prompt in flight and its answers are lost with the unwind.
@@ -2895,10 +2950,14 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.step_cost.observe(rows, iteration_secs);
         self.spec_costs.observe_mixed(iteration_secs);
         match proposals {
-            Some(proposals) => self.settle_verified(active, proposals, scored),
+            Some(proposals) => self.settle_verified(active, proposals, scored.expect("a verify answers with scores")),
             None => {
                 let sampled = gpu_core::markers::range(c"serve.sample");
-                let window = if all_greedy { decoded } else { sample_rows(&mut self.running, active, &decoded) };
+                let window = match decoded_rows {
+                    Some(rows) => sample_full_rows(&mut self.running, active, rows),
+                    None if all_greedy => decoded,
+                    None => sample_rows(&mut self.running, active, &decoded),
+                };
                 drop(sampled);
                 let accepted = gpu_core::markers::range(c"serve.accept");
                 self.accept_window(active, &window, 1);
