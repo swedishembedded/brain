@@ -376,6 +376,17 @@ __device__ __forceinline__ void brain_fa_core(const BrainFaRows& a, const Rows& 
         if (next.valid()) { brain_fa_fetch(pre, a, a.k, idx_next, next.left()); }
 
         // Output: key j = g + 8k's probabilities come from lane g of the row group.
+        // The tile's 32 keys are summed on their own and the tile joins `o` once:
+        // added straight into `o`, each of a few thousand keys rounds at the
+        // magnitude of everything before it, and over 3520 equal keys that
+        // drifted sixteen times further than the WGSL kernel's tile-summed
+        // accumulation.
+        float4 t[4][4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+#pragma unroll
+            for (int d = 0; d < 4; ++d) { t[i][d] = make_float4(0.f, 0.f, 0.f, 0.f); }
+        }
         const unsigned int lane0 = lane & ~7u;
 #pragma unroll 1
         for (unsigned int g = 0; g < 8; ++g) {
@@ -390,12 +401,22 @@ __device__ __forceinline__ void brain_fa_core(const BrainFaRows& a, const Rows& 
                     const float4 v = kv[j * BRAIN_FA_CH + ((cg + 8u * d) ^ g)];
 #pragma unroll
                     for (int i = 0; i < 4; ++i) {
-                        o[i][d].x = fmaf(p[i], v.x, o[i][d].x);
-                        o[i][d].y = fmaf(p[i], v.y, o[i][d].y);
-                        o[i][d].z = fmaf(p[i], v.z, o[i][d].z);
-                        o[i][d].w = fmaf(p[i], v.w, o[i][d].w);
+                        t[i][d].x = fmaf(p[i], v.x, t[i][d].x);
+                        t[i][d].y = fmaf(p[i], v.y, t[i][d].y);
+                        t[i][d].z = fmaf(p[i], v.z, t[i][d].z);
+                        t[i][d].w = fmaf(p[i], v.w, t[i][d].w);
                     }
                 }
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+#pragma unroll
+            for (int d = 0; d < 4; ++d) {
+                o[i][d].x += t[i][d].x;
+                o[i][d].y += t[i][d].y;
+                o[i][d].z += t[i][d].z;
+                o[i][d].w += t[i][d].w;
             }
         }
 
