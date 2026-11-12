@@ -40,8 +40,8 @@ pub struct Score {
 }
 
 impl Score {
-    /// Score a distributional forecast: CRPS from the sample ensemble (the
-    /// model's native representation) and pinball from its quantile grid.
+    /// Score a distributional forecast: CRPS from the sample ensemble when there
+    /// is one, else from the quantile grid, and pinball from the quantile grid.
     fn probabilistic(pred: &[f32], tf: &TargetForecast, actual: &[f32]) -> Score {
         let h = actual.len();
         let crps = match &tf.samples {
@@ -55,8 +55,14 @@ impl Score {
                 }
                 acc / h as f32
             }
-            // No ensemble: the point path IS the distribution, and its CRPS is
-            // its MAE.
+            // No ensemble but a quantile grid (a quantile-native model): CRPS
+            // read off the grid.
+            _ if tf.quantiles.as_ref().is_some_and(|q| !tf.levels.is_empty() && q.data.len() >= h * tf.levels.len()) => {
+                let q = tf.quantiles.as_ref().expect("checked above");
+                forecast::metrics::crps_quantile_grid(&q.data[..h * tf.levels.len()], &tf.levels, actual)
+            }
+            // Neither: the point path IS the distribution, and its CRPS is its
+            // MAE.
             _ => forecast::metrics::mae(pred, actual),
         };
         let pinball = match &tf.quantiles {

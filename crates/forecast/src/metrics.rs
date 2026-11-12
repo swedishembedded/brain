@@ -96,6 +96,15 @@ pub fn mean_pinball(quantiles: &[f32], levels: &[f32], actual: &[f32]) -> f32 {
     total / (h * qn) as f32
 }
 
+/// CRPS read off a quantile grid instead of a sample ensemble: twice the mean
+/// pinball loss over the levels, averaged over the horizon. CRPS is the
+/// integral of `2 * pinball` over all levels in (0, 1), so for an evenly spaced
+/// grid this is its midpoint-rule estimate; a degenerate grid (every level at
+/// the point) on a symmetric set of levels gives back the point's MAE.
+pub fn crps_quantile_grid(quantiles: &[f32], levels: &[f32], actual: &[f32]) -> f32 {
+    2.0 * mean_pinball(quantiles, levels, actual)
+}
+
 /// Weighted quantile loss: `2 * sum(pinball)` over the `[H, Q]` grid normalised
 /// by `sum|actual|` (gluonts / GIFT-Eval convention). Returns 0 when the actuals
 /// are all zero.
@@ -324,6 +333,21 @@ pub fn erf(x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A quantile model's CRPS comes from its grid: it approximates the exact
+    /// Gaussian CRPS on a fine grid, and a degenerate grid gives the MAE.
+    #[test]
+    fn crps_from_a_quantile_grid() {
+        let levels: Vec<f32> = (1..100).map(|i| i as f32 / 100.0).collect();
+        let (mu, sig, y) = (1.0f32, 2.0f32, 2.5f32);
+        let grid: Vec<f32> = levels.iter().map(|&p| mu + sig * crate::convert::norm_ppf(p)).collect();
+        let approx = crps_quantile_grid(&grid, &levels, &[y]);
+        let exact = crps_gaussian(y, mu, sig);
+        assert!((approx - exact).abs() < 0.02 * exact, "grid {approx} vs exact {exact}");
+        let sym = [0.1f32, 0.5, 0.9];
+        let point = crps_quantile_grid(&[3.0, 3.0, 3.0], &sym, &[1.0]);
+        assert!((point - 2.0).abs() < 1e-6, "degenerate grid {point}, MAE 2");
+    }
 
     #[test]
     fn pinball_is_asymmetric_about_the_quantile_level() {
