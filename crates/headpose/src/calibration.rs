@@ -14,15 +14,16 @@
 //! uncalibrated laptop actually shows:
 //!
 //! * [`Calibration::recentre`] - "I am sitting centred in front of the
-//!   screen": the residual horizontal offset is the camera's mounting error,
-//!   absorbed into the mount.
+//!   screen": the residual offset, horizontal and vertical, is the camera's
+//!   aiming error (a laptop lid tips the camera with it), absorbed as the
+//!   camera's pitch and yaw.
 //! * [`Calibration::set_distance`] - "my eyes are this far from the glass":
 //!   monocular depth is only as good as the face's assumed size, so a
 //!   measured distance rescales the interpupillary distance.
 
 use camera::Intrinsics;
 use serde::{Deserialize, Serialize};
-use sfm::linalg::{add, dot, mm, mv, scale, M3};
+use sfm::linalg::{add, dot, mm, mtv, mv, norm, normalize, scale, sub, M3};
 
 use crate::display::Display;
 use crate::{GeometryError, V3};
@@ -52,14 +53,28 @@ impl CameraMount {
         CameraMount { position: add(top_centre, scale(u, gap_m)), rotation }
     }
 
-    /// The same mount with the camera pitched `degrees` downward (positive
-    /// looks toward the viewer's lap), about its own X axis.
-    pub fn pitched(self, degrees: f64) -> CameraMount {
-        let (s, c) = degrees.to_radians().sin_cos();
-        // the new camera axes in the old camera frame (columns): +Z tips
-        // toward +Y (down), +Y toward -Z
-        let rx: M3 = [1.0, 0.0, 0.0, 0.0, c, s, 0.0, -s, c];
-        CameraMount { rotation: mm(&self.rotation, &rx), ..self }
+    /// The same mount with the camera aimed `pitch_deg` downward (positive
+    /// looks toward the viewer's lap) and then `yaw_deg` sideways (positive
+    /// looks toward the viewer's right): `rotation * Ry(yaw) * Rx(pitch)` in
+    /// the camera's own axes, no roll.
+    pub fn aimed(self, pitch_deg: f64, yaw_deg: f64) -> CameraMount {
+        let (sp, cp) = pitch_deg.to_radians().sin_cos();
+        let (sy, cy) = yaw_deg.to_radians().sin_cos();
+        // the new camera axes in the old camera frame (columns). Pitch: +Z
+        // tips toward +Y (down). Yaw: +Z turns toward -X, which is the
+        // viewer's right because the camera faces them.
+        let rx: M3 = [1.0, 0.0, 0.0, 0.0, cp, sp, 0.0, -sp, cp];
+        let ry: M3 = [cy, 0.0, -sy, 0.0, 1.0, 0.0, sy, 0.0, cy];
+        CameraMount { rotation: mm(&self.rotation, &mm(&ry, &rx)), ..self }
+    }
+
+    /// The `(pitch_deg, yaw_deg)` of this mount relative to `base`, the
+    /// inverse of [`Self::aimed`] for a mount built by it.
+    pub fn aim_relative_to(&self, base: &CameraMount) -> (f64, f64) {
+        // the optical axis in the base camera's frame is Ry * Rx * (0,0,1)
+        // = (-sin(yaw) cos(pitch), sin(pitch), cos(yaw) cos(pitch))
+        let z = mtv(&base.rotation, [self.rotation[2], self.rotation[5], self.rotation[8]]);
+        (z[1].clamp(-1.0, 1.0).asin().to_degrees(), (-z[0]).atan2(z[2]).to_degrees())
     }
 
     /// A camera-frame point in the screen frame.
@@ -85,6 +100,7 @@ const DISPLAY_SIZE_M: (f64, f64) = (0.05, 3.0);
 const IPD_M: (f64, f64) = (0.045, 0.080);
 const CAMERA_GAP_M: (f64, f64) = (-0.2, 0.2);
 const CAMERA_PITCH_DEG: (f64, f64) = (-45.0, 45.0);
+const CAMERA_YAW_DEG: (f64, f64) = (-45.0, 45.0);
 const HFOV_DEG: (f64, f64) = (20.0, 140.0);
 
 impl Calibration {
@@ -97,6 +113,7 @@ impl Calibration {
             display_height_m: display_h_m,
             camera_gap_m,
             camera_pitch_deg: 0.0,
+            camera_yaw_deg: 0.0,
             camera_offset_x_m: 0.0,
             camera: CameraProfile::Fov { width, height, hfov_deg },
             ipd_m: crate::face::CANONICAL_IPD_M,
@@ -109,14 +126,58 @@ impl Calibration {
         self.mount.to_screen(p_cam)
     }
 
-    /// Absorb a viewer's horizontal offset into the mount, given where their
-    /// cyclopean eye measures while they sit centred in front of the display.
-    /// Only the display-horizontal component is corrected: people sit at
-    /// whatever height they sit at, so vertical offset is real, not error.
-    pub fn recentre(&mut self, measured_eye_screen: V3) {
-        let r = self.display.right();
-        let off = dot(add(measured_eye_screen, scale(self.display.centre(), -1.0)), r);
-        self.mount.position = add(self.mount.position, scale(r, -off));
+    /// Re-aim the camera so `measured_eye_screen`, where the viewer's
+    /// cyclopean eye measures while they sit centred in front of the
+    /// display, reads as exactly on the display's normal through its centre.
+    ///
+    /// The error is modelled as the camera's aim (pitch and yaw about its
+    /// optical centre), not its position: a lid angle or a tilted bezel
+    /// camera shifts the measurement in proportion to the viewer's distance,
+    /// so an aim fixed at one distance stays right when they lean back,
+    /// where a position shift would not. The camera-to-eye distance is
+    /// kept, so the target is the point on the centre normal at that
+    /// distance from the camera; roll stays zero. The new aim replaces the
+    /// old one; it does not accumulate.
+    pub fn recentre(&mut self, measured_eye_screen: V3) -> Result<(), GeometryError> {
+        let cam = self.mount.position;
+        let d = norm(sub(measured_eye_screen, cam));
+        let (centre, n) = (self.display.centre(), self.display.normal());
+        let q = sub(cam, centre);
+        let qn = dot(q, n);
+        let disc = d * d - dot(q, q) + qn * qn;
+        if !(d > 0.05 && disc > 0.0) {
+            return Err(GeometryError::OutOfRange(format!("the eye {measured_eye_screen:?} is too close to the camera to recentre on")));
+        }
+        let target = add(centre, scale(n, qn + disc.sqrt()));
+        let base = self.unaimed();
+        // v: the measured eye direction in the camera's own frame; w: where
+        // it has to point, in the unaimed camera's frame. Solve
+        // Ry(yaw) Rx(pitch) v = w.
+        let v = normalize(mtv(&self.mount.rotation, sub(measured_eye_screen, cam)));
+        let w = normalize(mtv(&base.rotation, sub(target, cam)));
+        // Rx keeps x and mixes (y, z); Ry keeps y: so cos(p) vy + sin(p) vz = wy
+        let (rho, phi) = (v[1].hypot(v[2]), v[2].atan2(v[1]));
+        if rho < 1e-9 || (w[1] / rho).abs() > 1.0 {
+            return Err(GeometryError::OutOfRange("no camera aim puts that eye on the centre normal".into()));
+        }
+        let a = (w[1] / rho).acos();
+        // the branch nearer zero tilt: a lid tips the camera by tens of degrees, not by half turns
+        let pitch = [phi + a, phi - a].into_iter().map(wrap_pi).min_by(|x, y| x.abs().total_cmp(&y.abs())).unwrap_or(0.0);
+        let (sp, cp) = pitch.sin_cos();
+        let u = [v[0], cp * v[1] + sp * v[2], -sp * v[1] + cp * v[2]];
+        let yaw = wrap_pi(w[2].atan2(w[0]) - u[2].atan2(u[0]));
+        let (pitch_deg, yaw_deg) = (pitch.to_degrees(), yaw.to_degrees());
+        check("camera_pitch_deg", pitch_deg, CAMERA_PITCH_DEG)?;
+        check("camera_yaw_deg", yaw_deg, CAMERA_YAW_DEG)?;
+        self.mount = base.aimed(pitch_deg, yaw_deg);
+        Ok(())
+    }
+
+    /// The mount with its aim removed: the bezel position, looking along
+    /// the display normal.
+    fn unaimed(&self) -> CameraMount {
+        let level = CameraMount::above(&self.display, 0.0);
+        CameraMount { position: self.mount.position, ..level }
     }
 
     /// Rescale the interpupillary distance so a viewer measured at
@@ -155,10 +216,15 @@ pub struct Profile {
     /// below it, a camera in the glass).
     pub camera_gap_m: f64,
     /// Downward tilt of the camera relative to the display.
+    /// [`Calibration::recentre`] writes this.
     #[serde(default)]
     pub camera_pitch_deg: f64,
+    /// Sideways turn of the camera, toward the viewer's right.
+    /// [`Calibration::recentre`] writes this.
+    #[serde(default)]
+    pub camera_yaw_deg: f64,
     /// Horizontal offset of the camera from the display centre, toward the
-    /// viewer's right. [`Calibration::recentre`] writes this.
+    /// viewer's right: a measured fact for a camera that is not centred.
     #[serde(default)]
     pub camera_offset_x_m: f64,
     pub camera: CameraProfile,
@@ -180,6 +246,7 @@ impl Profile {
         check("display_height_m", self.display_height_m, DISPLAY_SIZE_M)?;
         check("camera_gap_m", self.camera_gap_m, CAMERA_GAP_M)?;
         check("camera_pitch_deg", self.camera_pitch_deg, CAMERA_PITCH_DEG)?;
+        check("camera_yaw_deg", self.camera_yaw_deg, CAMERA_YAW_DEG)?;
         check("camera_offset_x_m", self.camera_offset_x_m, (-self.display_width_m, self.display_width_m))?;
         check("ipd_m", self.ipd_m, IPD_M)?;
         let camera = match &self.camera {
@@ -196,8 +263,9 @@ impl Profile {
             }
         };
         let display = Display::flat(self.display_width_m, self.display_height_m)?;
-        let mut mount = CameraMount::above(&display, self.camera_gap_m).pitched(self.camera_pitch_deg);
+        let mut mount = CameraMount::above(&display, self.camera_gap_m);
         mount.position = add(mount.position, scale(display.right(), self.camera_offset_x_m));
+        let mount = mount.aimed(self.camera_pitch_deg, self.camera_yaw_deg);
         Ok(Calibration { camera, mount, display, ipd_m: self.ipd_m })
     }
 
@@ -228,12 +296,22 @@ impl Profile {
         Ok(c)
     }
 
-    /// The profile of a calibration built from a flat display, after
-    /// [`Calibration::recentre`] / [`Calibration::set_distance`] moved it.
-    /// Pitch and the lens record are carried from `self`.
+    /// The profile of a calibration built from this one, after
+    /// [`Calibration::recentre`] re-aimed the camera and
+    /// [`Calibration::set_distance`] rescaled the face. The position and
+    /// the lens record are carried from `self`.
     pub fn updated(&self, c: &Calibration) -> Profile {
-        let base = CameraMount::above(&c.display, self.camera_gap_m);
-        let offset = dot(add(c.mount.position, scale(base.position, -1.0)), c.display.right());
-        Profile { camera_offset_x_m: offset, ipd_m: c.ipd_m, ..self.clone() }
+        let (camera_pitch_deg, camera_yaw_deg) = c.mount.aim_relative_to(&CameraMount::above(&c.display, self.camera_gap_m));
+        Profile { camera_pitch_deg, camera_yaw_deg, ipd_m: c.ipd_m, ..self.clone() }
+    }
+}
+
+/// `a` in radians folded into (-pi, pi].
+fn wrap_pi(a: f64) -> f64 {
+    let t = a.rem_euclid(std::f64::consts::TAU);
+    if t > std::f64::consts::PI {
+        t - std::f64::consts::TAU
+    } else {
+        t
     }
 }

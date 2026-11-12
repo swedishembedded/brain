@@ -28,7 +28,7 @@ fn a_laptop_camera_sees_the_viewer_mirrored_and_from_above_the_glass() {
     let dn = m.to_screen([0.0, 0.1, 0.5]);
     assert!(dn[1] < p[1]);
     // pitching the camera down tips its axis toward the viewer's lap
-    let pitched = m.pitched(10.0).to_screen([0.0, 0.0, 0.5]);
+    let pitched = m.aimed(10.0, 0.0).to_screen([0.0, 0.0, 0.5]);
     assert!(pitched[1] < p[1] && close(pitched[1] - p[1], -0.5 * 10f64.to_radians().sin(), 1e-12));
 }
 
@@ -49,26 +49,41 @@ fn a_profile_is_strict_about_fields_and_units() {
     assert!(e.contains("display_width_m"), "a unit mistake names the field: {e}");
 }
 
-#[test]
-fn recentring_absorbs_a_horizontal_mount_error_and_keeps_the_height() {
-    let mut c = Calibration::laptop(0.344, 0.194, 0.008, 640, 480, 60.0).unwrap();
-    // the camera is really 2 cm right of centre, so a centred viewer measures 2 cm left
-    let measured = c.to_screen([0.02, 0.05, 0.55]);
-    assert!(measured[0] < -0.019);
-    c.recentre(measured);
-    let fixed = c.to_screen([0.02, 0.05, 0.55]);
-    assert!(close(fixed[0], 0.0, 1e-12) && close(fixed[1], measured[1], 1e-12) && close(fixed[2], measured[2], 1e-12));
-    let p = Profile {
+fn profile(pitch_deg: f64, yaw_deg: f64) -> Profile {
+    Profile {
         display_width_m: 0.344,
         display_height_m: 0.194,
         camera_gap_m: 0.008,
-        camera_pitch_deg: 0.0,
+        camera_pitch_deg: pitch_deg,
+        camera_yaw_deg: yaw_deg,
         camera_offset_x_m: 0.0,
         camera: headpose::calibration::CameraProfile::Fov { width: 640, height: 480, hfov_deg: 60.0 },
         ipd_m: 0.063,
-    };
-    let saved = p.updated(&c);
-    assert_eq!(saved.calibration().unwrap().mount, c.mount, "the correction survives a save and load");
+    }
+}
+
+#[test]
+fn recentring_aims_the_camera_so_a_centred_viewer_is_centred_at_every_distance() {
+    // the lid really tips the camera 9 degrees down and 4 to the side, the
+    // profile knows neither, so a viewer centred on the glass measures off
+    // centre in both directions
+    let truth = profile(9.0, 4.0).calibration().unwrap();
+    let seen_from = |screen: [f64; 3]| sfm::linalg::mtv(&truth.mount.rotation, sfm::linalg::sub(screen, truth.mount.position));
+    let saved = profile(0.0, 0.0);
+    let mut c = saved.calibration().unwrap();
+    let measured = c.to_screen(seen_from([0.0, 0.0, 0.55]));
+    assert!(measured[0].abs() > 0.02 && measured[1].abs() > 0.05, "the uncorrected error is visible: {measured:?}");
+
+    c.recentre(measured).unwrap();
+    for z in [0.35, 0.55, 0.9] {
+        let fixed = c.to_screen(seen_from([0.0, 0.0, z]));
+        assert!(close(fixed[0], 0.0, 1e-9) && close(fixed[1], 0.0, 1e-9) && close(fixed[2], z, 1e-9), "centred viewer at {z} m reads {fixed:?}");
+    }
+    let saved = saved.updated(&c);
+    assert!(close(saved.camera_pitch_deg, 9.0, 1e-9) && close(saved.camera_yaw_deg, 4.0, 1e-9), "the angles are recovered: {saved:?}");
+    let back = saved.calibration().unwrap().mount;
+    let same = back.rotation.iter().zip(c.mount.rotation).all(|(a, b)| close(*a, b, 1e-12)) && back.position.iter().zip(c.mount.position).all(|(a, b)| close(*a, b, 1e-12));
+    assert!(same, "the correction survives a save and load: {back:?} vs {:?}", c.mount);
 }
 
 #[test]
