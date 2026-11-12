@@ -33,11 +33,11 @@ Training kernels and graphs:
 - [x] gpt2: lm_head is tied to the token embedding (`check_gpt_tied`); a checkpoint with a separate `lm_head.weight` is refused on load (v05 ch03, ch10, ch15).
 - [x] gpt2: the cached-decode bound is derived from the round-off bound and the greedy test asserts the top-2 gap (`tests/it/kv_decode.rs`, v05 ch15).
 - [x] rope.wgsl: theta as a parameter (v05 ch08).
-- [ ] modernbert: banded local attention over a [rows, 2w+1] slab (v05 ch14).
+- [x] modernbert: banded local attention over a [rows, 2w+1] slab (v05 ch14); a span no longer than the band keeps the dense windowed form.
 - [x] checkpoint: `read_model_dir` errors on an index key no shard returned (v06 ch02).
 - [x] gradcheck: `check_moe` and `check_moe_balance` differentiate a host loss that includes the aux and z terms (v06 ch04).
-- [ ] modelcost: register gemma4 and minimaxh3, wire Recording in qwen35/qwen35moe, real-config pins (v06 ch10).
-- [ ] serve sampler: exact top-p/min-p over the full row, exact penalties (v05 ch11); the one top-k tie rule is done (qwen3vl keeps exactly k, lowest id first).
+- [x] modelcost: gemma4 and minimaxh3 registered, Recording wired in qwen35/qwen35moe, real-config pins, held/peak device bytes in `measure`; every kernel the registered pricers dispatch has a `gpu_core::cost` formula (coverage 1.0 gated on all seven); open: gemma4/minimaxh3/qwen35* have no `measure` (v06 ch10).
+- [x] serve sampler: exact top-p/min-p and exact penalties over the full logits row on every serving engine and every sampling path (decode, first token, rollout, speculative verification, mixed iteration); `check/serve-conformance` requires the row readback (v05 ch11); the one top-k tie rule is done (qwen3vl keeps exactly k, lowest id first).
 
 Vision and generation:
 - [ ] imaging letterbox: pixels and boxes share one pad; half-pixel nearest resize and pad value on device; retire the
