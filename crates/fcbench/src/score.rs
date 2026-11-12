@@ -8,24 +8,28 @@
 use forecast::{metrics, ForecastModel, ForecastSpec, Item, Panel, Representation, TargetForecast, Variate};
 use std::collections::BTreeMap;
 
-/// The quantile grid used for probabilistic scoring (10/50/90 → 80% interval).
-pub const LEVELS: [f32; 3] = [0.1, 0.5, 0.9];
+/// The quantile grid scored when the caller names none (10/50/90 → 80%
+/// interval). A backtest scores at `BacktestSpec::quantile_levels` instead.
+pub const DEFAULT_LEVELS: [f32; 3] = [0.1, 0.5, 0.9];
 
 /// Number of samples requested for CRPS.
 pub const CRPS_SAMPLES: usize = 200;
 
-fn spec_for(horizon: usize, metrics_want: &[String], seed: u64) -> ForecastSpec {
+fn spec_for(horizon: usize, levels: &[f32], metrics_want: &[String], seed: u64) -> ForecastSpec {
     let need_samples = metrics_want.iter().any(|w| w == "crps");
     ForecastSpec {
         horizon,
         representations: {
-            let mut r = vec![Representation::Quantiles, Representation::Point];
+            let mut r = vec![Representation::Point];
+            if !levels.is_empty() {
+                r.push(Representation::Quantiles);
+            }
             if need_samples {
                 r.push(Representation::Samples);
             }
             r
         },
-        quantile_levels: LEVELS.to_vec(),
+        quantile_levels: levels.to_vec(),
         num_samples: if need_samples { CRPS_SAMPLES } else { 0 },
         seed,
     }
@@ -35,11 +39,18 @@ fn spec_for(horizon: usize, metrics_want: &[String], seed: u64) -> ForecastSpec 
 /// one target's forecast plus the window it was scored against, compute every
 /// requested metric. An empty map for a target with nothing usable is the
 /// same "no score" convention both callers already relied on.
-fn score_from_target(tf: &TargetForecast, context: &[f32], future: &[f32], season: usize, metrics_want: &[String]) -> BTreeMap<String, f32> {
+fn score_from_target(
+    tf: &TargetForecast,
+    context: &[f32],
+    future: &[f32],
+    season: usize,
+    levels: &[f32],
+    metrics_want: &[String],
+) -> BTreeMap<String, f32> {
     let want = |m: &str| metrics_want.iter().any(|w| w == m);
     let origin = *context.last().unwrap_or(&0.0);
     let h = future.len();
-    let ql = LEVELS.len();
+    let ql = levels.len();
     let mut out = BTreeMap::new();
 
     if let Some(mean) = &tf.mean {
@@ -55,7 +66,7 @@ fn score_from_target(tf: &TargetForecast, context: &[f32], future: &[f32], seaso
     }
     if let Some(q) = &tf.quantiles {
         if want("wql") {
-            out.insert("wql".into(), metrics::weighted_quantile_loss(&q.data, &LEVELS, future));
+            out.insert("wql".into(), metrics::weighted_quantile_loss(&q.data, levels, future));
         }
         if want("coverage") && ql >= 2 {
             let lo: Vec<f32> = (0..h).map(|t| q.data[t * ql]).collect();
@@ -83,7 +94,9 @@ fn score_from_target(tf: &TargetForecast, context: &[f32], future: &[f32], seaso
 
 /// Forecast `context` with `model` and score against `future`. Returns a metric
 /// map; an empty map if the model errors or emits nothing usable. `metrics_want`
-/// selects which metrics to compute (unknown names are ignored).
+/// selects which metrics to compute (unknown names are ignored). `levels` is
+/// the quantile grid requested and scored (strictly increasing; `"coverage"`
+/// is the interval between its first and last level).
 pub fn score_split(
     model: &dyn ForecastModel,
     item_id: &str,
@@ -92,10 +105,11 @@ pub fn score_split(
     context: &[f32],
     future: &[f32],
     season: usize,
+    levels: &[f32],
     metrics_want: &[String],
     seed: u64,
 ) -> BTreeMap<String, f32> {
-    let spec = spec_for(future.len(), metrics_want, seed);
+    let spec = spec_for(future.len(), levels, metrics_want, seed);
     let panel = Panel::single(freq, item_id, vec![Variate::target(target_name, context.to_vec())]);
     let fc = match model.forecast(&panel, &spec) {
         Ok(f) => f,
@@ -104,7 +118,7 @@ pub fn score_split(
     let Some(tf) = fc.targets.iter().find(|t| t.name == target_name).or_else(|| fc.targets.first()) else {
         return BTreeMap::new();
     };
-    score_from_target(tf, context, future, season, metrics_want)
+    score_from_target(tf, context, future, season, levels, metrics_want)
 }
 
 /// Batched sibling of `score_split`: scores several `(context, future)`
@@ -128,6 +142,7 @@ pub fn score_windows(
     freq: &str,
     windows: &[(&[f32], &[f32])],
     season: usize,
+    levels: &[f32],
     metrics_want: &[String],
     seed: u64,
 ) -> Vec<BTreeMap<String, f32>> {
@@ -135,7 +150,7 @@ pub fn score_windows(
         return Vec::new();
     }
     let horizon = windows[0].1.len();
-    let spec = spec_for(horizon, metrics_want, seed);
+    let spec = spec_for(horizon, levels, metrics_want, seed);
     let items: Vec<Item> = windows
         .iter()
         .enumerate()
@@ -154,7 +169,7 @@ pub fn score_windows(
             let Some(tf) = fc.targets.iter().find(|t| t.item_id == id && t.name == target_name) else {
                 return BTreeMap::new();
             };
-            score_from_target(tf, context, future, season, metrics_want)
+            score_from_target(tf, context, future, season, levels, metrics_want)
         })
         .collect()
 }
@@ -184,19 +199,38 @@ mod tests {
         let origins = [20usize, 24, 28, 32];
 
         let windows: Vec<(&[f32], &[f32])> = origins.iter().map(|&o| (&series[..o], &series[o..o + h])).collect();
-        let batched = score_windows(&model, "s", "t", "1d", &windows, 1, &metrics_want, 7);
+        let batched = score_windows(&model, "s", "t", "1d", &windows, 1, &DEFAULT_LEVELS, &metrics_want, 7);
         assert_eq!(batched.len(), origins.len());
 
         for (i, &o) in origins.iter().enumerate() {
-            let want = score_split(&model, "s", "t", "1d", &series[..o], &series[o..o + h], 1, &metrics_want, 7);
+            let want = score_split(&model, "s", "t", "1d", &series[..o], &series[o..o + h], 1, &DEFAULT_LEVELS, &metrics_want, 7);
             assert_eq!(batched[i], want, "origin {o}: score_windows must match score_split called individually");
         }
+    }
+
+    /// The scorer scores at the levels it is given: wQL is the mean over them
+    /// (so a 5-level grid is not 5/3 times a 3-level one) and coverage is the
+    /// interval between the outermost.
+    #[test]
+    fn the_scorer_reads_the_levels_it_is_given() {
+        let model = RandomWalk;
+        let series: Vec<f32> = (0..40).map(|i| (i as f32 * 0.37).sin() * 5.0 + i as f32 * 0.1).collect();
+        let want = vec!["wql".to_string(), "coverage".to_string()];
+        let score = |levels: &[f32]| score_split(&model, "s", "t", "1d", &series[..30], &series[30..34], 1, levels, &want, 1);
+        let three = score(&[0.1, 0.5, 0.9]);
+        let five = score(&[0.1, 0.3, 0.5, 0.7, 0.9]);
+        assert!(five["wql"] < 1.3 * three["wql"], "wql must not scale with the grid: {three:?} vs {five:?}");
+        // a wider outer interval covers at least as much
+        let wide = score(&[0.01, 0.5, 0.99]);
+        assert!(wide["coverage"] >= three["coverage"]);
+        // no levels, no probabilistic scores
+        assert!(score(&[]).is_empty());
     }
 
     #[test]
     fn score_windows_of_an_empty_slice_is_empty() {
         let model = RandomWalk;
-        let out: Vec<BTreeMap<String, f32>> = score_windows(&model, "s", "t", "1d", &[], 1, &default_metrics(), 0);
+        let out: Vec<BTreeMap<String, f32>> = score_windows(&model, "s", "t", "1d", &[], 1, &DEFAULT_LEVELS, &default_metrics(), 0);
         assert!(out.is_empty());
     }
 }

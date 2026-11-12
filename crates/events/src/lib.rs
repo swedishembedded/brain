@@ -721,8 +721,8 @@ mod tests {
         use forecast::BacktestRow;
         BacktestReport {
             rows: vec![
-                BacktestRow { model: "chronos2".into(), metric: "mase".into(), value: 0.5, n_origins: 30 },
-                BacktestRow { model: "naive".into(), metric: "mase".into(), value: 1.0, n_origins: 30 },
+                BacktestRow { model: "chronos2".into(), metric: "mase".into(), value: 0.5, n_origins: 30, std_err: 0.02, vs_naive: Some(forecast::PairedDiff { mean: -0.5, std_err: 0.1 }) },
+                BacktestRow { model: "naive".into(), metric: "mase".into(), value: 1.0, n_origins: 30, std_err: 0.0, vs_naive: None },
             ],
         }
     }

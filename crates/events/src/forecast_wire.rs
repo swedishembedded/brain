@@ -278,6 +278,8 @@ pub fn backtest_report_to_value(r: &BacktestReport) -> Value {
             "metric": row.metric,
             "value": row.value,
             "n_origins": row.n_origins,
+            "std_err": row.std_err,
+            "vs_naive": row.vs_naive.map(|d| json!({ "mean": d.mean, "std_err": d.std_err })),
         })).collect::<Vec<_>>(),
     })
 }
@@ -291,6 +293,11 @@ pub fn backtest_report_from_value(v: &Value) -> BacktestReport {
                 metric: row["metric"].as_str().unwrap_or_default().to_string(),
                 value: row["value"].as_f64().unwrap_or(0.0) as f32,
                 n_origins: row["n_origins"].as_u64().unwrap_or(0) as usize,
+                std_err: row["std_err"].as_f64().unwrap_or(0.0) as f32,
+                vs_naive: row["vs_naive"].as_object().map(|d| forecast::PairedDiff {
+                    mean: d.get("mean").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                    std_err: d.get("std_err").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                }),
             })
             .collect(),
     }

@@ -41,6 +41,48 @@ pub fn diff_n(x: &[f32], d: usize) -> Vec<f32> {
     y
 }
 
+/// Mean of `values` and the Newey-West standard error of that mean: the
+/// Bartlett-weighted sum of autocovariances up to `lag`, which accounts for
+/// values that are correlated because their windows overlap. `lag = 0` is the
+/// plain `sigma / sqrt(n)` of independent values (population variance). A
+/// single value has no spread and gets `0`.
+pub fn mean_and_se(values: &[f32], lag: usize) -> (f32, f32) {
+    let n = values.len();
+    if n < 2 {
+        return (mean(values), 0.0);
+    }
+    let m = mean(values);
+    let dev: Vec<f64> = values.iter().map(|&v| (v - m) as f64).collect();
+    let gamma = |k: usize| dev[k..].iter().zip(&dev).map(|(a, b)| a * b).sum::<f64>() / n as f64;
+    let lag = lag.min(n - 1);
+    let mut var = gamma(0);
+    for k in 1..=lag {
+        var += 2.0 * (1.0 - k as f64 / (lag as f64 + 1.0)) * gamma(k);
+    }
+    (m, (var.max(0.0) / n as f64).sqrt() as f32)
+}
+
+/// A paired difference of two score series with its standard error.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Paired {
+    pub mean: f32,
+    pub std_err: f32,
+    /// Origins or windows that both series scored.
+    pub n: usize,
+}
+
+/// `a - b` over the positions where both series have a score, as a
+/// [`Paired`] with its Newey-West standard error at `lag`. `None` when no
+/// position is shared.
+pub fn paired_diff(a: &[Option<f32>], b: &[Option<f32>], lag: usize) -> Option<Paired> {
+    let diffs: Vec<f32> = a.iter().zip(b).filter_map(|(x, y)| Some((*x)? - (*y)?)).collect();
+    if diffs.is_empty() {
+        return None;
+    }
+    let (mean, std_err) = mean_and_se(&diffs, lag);
+    Some(Paired { mean, std_err, n: diffs.len() })
+}
+
 /// Standard deviation of the first differences — the 1-step innovation scale of
 /// a random walk.
 pub fn diff_std(x: &[f32]) -> f32 {
@@ -107,6 +149,32 @@ mod tests {
         assert!((std(&[1.0, 1.0, 1.0])).abs() < 1e-6);
         assert_eq!(diff(&[1.0, 3.0, 6.0]), vec![2.0, 3.0]);
         assert_eq!(diff_n(&[1.0, 3.0, 6.0, 10.0], 2), vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn newey_west_at_lag_zero_is_the_plain_standard_error() {
+        // population variance of 1..5 is 2, so se of the mean = sqrt(2/5)
+        let (m, se) = mean_and_se(&[1.0, 2.0, 3.0, 4.0, 5.0], 0);
+        assert!((m - 3.0).abs() < 1e-6 && (se - (2.0f32 / 5.0).sqrt()).abs() < 1e-6);
+        assert_eq!(mean_and_se(&[7.0], 3), (7.0, 0.0));
+    }
+
+    #[test]
+    fn newey_west_widens_the_error_of_positively_correlated_values() {
+        // runs of equal values: neighbours move together, so the mean is
+        // less certain than independence would claim.
+        let v: Vec<f32> = (0..24).map(|i| if (i / 6) % 2 == 0 { 0.0 } else { 4.0 }).collect();
+        assert!(mean_and_se(&v, 3).1 > 1.4 * mean_and_se(&v, 0).1);
+    }
+
+    #[test]
+    fn paired_difference_uses_only_origins_both_models_scored() {
+        let a = [Some(1.0), None, Some(3.0), Some(5.0)];
+        let b = [Some(2.0), Some(9.0), Some(3.5), None];
+        let d = paired_diff(&a, &b, 0).unwrap();
+        assert_eq!(d.n, 2);
+        assert!((d.mean - (-0.75)).abs() < 1e-6); // mean of -1.0 and -0.5
+        assert!(paired_diff(&[None], &[Some(1.0)], 0).is_none());
     }
 
     #[test]

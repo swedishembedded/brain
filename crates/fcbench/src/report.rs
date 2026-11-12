@@ -158,7 +158,8 @@ fn negative_control_section(cmp: &Comparison) -> String {
         out.push_str("_no control scenario present._\n");
         return out;
     }
-    let violations = cmp.negative_control_violations(control, 0.10);
+    let violations = cmp.negative_control_violations(control, crate::harness::CONTROL_Z);
+    out.push_str(&paired_lines(cmp, control));
     if violations.is_empty() {
         out.push_str(
             "✅ **PASS** — no model beats the naive baseline on the random-walk \
@@ -171,6 +172,29 @@ fn negative_control_section(cmp: &Comparison) -> String {
             violations.join(", ")
         ));
     }
+    out
+}
+
+/// One line per model: its MASE difference from naive on the control with the
+/// `CONTROL_Z` interval the verdict is read from.
+fn paired_lines(cmp: &Comparison, control: &str) -> String {
+    let z = crate::harness::CONTROL_Z;
+    let mut out = String::from(
+        "MASE minus naive, mean and the 99% interval the verdict uses (a model is flagged only if the whole interval is below 0):\n\n",
+    );
+    for c in cmp.cells.iter().filter(|c| c.scenario == control && c.metric == "mase") {
+        if let Some(d) = c.vs_naive {
+            out.push_str(&format!(
+                "- {}: {:+.4} [{:+.4}, {:+.4}] over {} windows\n",
+                c.model,
+                d.mean,
+                d.mean - z * d.std_err,
+                d.mean + z * d.std_err,
+                d.n
+            ));
+        }
+    }
+    out.push('\n');
     out
 }
 
@@ -213,7 +237,7 @@ pub fn html(cmp: &Comparison) -> String {
     let has_control = cmp.cells.iter().any(|c| c.scenario == "random_walk");
     let verdict = if !has_control {
         "no control scenario present."
-    } else if cmp.negative_control_violations("random_walk", 0.10).is_empty() {
+    } else if cmp.negative_control_violations("random_walk", crate::harness::CONTROL_Z).is_empty() {
         "PASS - no model beats naive on the random-walk control."
     } else {
         "FAIL - a model falsely beats naive on a random walk."
@@ -257,6 +281,13 @@ mod tests {
         // the control must PASS for the baseline set
         assert!(md.contains("negative control"));
         assert!(md.contains("✅ **PASS**"), "control should pass:\n{md}");
+    }
+
+    #[test]
+    fn the_control_section_reports_each_models_paired_interval() {
+        let md = markdown(&sample_comparison());
+        assert!(md.contains("- drift: "), "drift's interval against naive is reported:\n{md}");
+        assert!(md.contains("99% interval"));
     }
 
     #[test]

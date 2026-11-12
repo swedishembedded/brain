@@ -46,7 +46,7 @@ pub fn run_compare(models: Vec<Box<dyn ForecastModel>>, inv: &Invocation) -> Act
     all.extend(models);
     let cmp = fcbench::harness::run(&all, &fcbench::scenarios::default_battery(), windows, seed);
     let markdown = fcbench::report::markdown(&cmp);
-    let violations = cmp.negative_control_violations("random_walk", 0.10);
+    let violations = cmp.negative_control_violations("random_walk", fcbench::harness::CONTROL_Z);
     if !violations.is_empty() {
         return Err(format!("negative-control FAILED: {} falsely beat naive on the random walk\n\n{markdown}", violations.join(", ")));
     }
