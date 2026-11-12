@@ -208,6 +208,8 @@ pub use prune::{ModelPruner, ModelPrunerOutcome};
 #[cfg(feature = "study")]
 pub use modelopt::{Baseline as OptimizerBaseline, Progress as OptimizerSearchProgress, PruneReport, Report as OptimizerReport, SiteReport as OptimizerSiteReport};
 #[cfg(feature = "study")]
+pub mod toy;
+#[cfg(feature = "study")]
 mod preference;
 #[cfg(feature = "study")]
 pub mod preference_dataset;
