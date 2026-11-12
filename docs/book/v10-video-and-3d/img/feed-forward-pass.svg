@@ -1,0 +1,64 @@
+<!-- source-sha256: 15497bdfa4d52d10519835a68d67d303e6ee2563649ad119bbc66f6f40779b46 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1150 424" width="1150" height="424"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1150" height="424" fill="#ffffff"/>
+<rect x="24" y="175" width="112" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="80" y="200.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">S photographs</text>
+<text x="80" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">no poses,</text>
+<text x="80" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">no calibration</text>
+<rect x="172" y="168" width="114" height="88" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="229" y="192.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">patch encoder</text>
+<text x="229" y="208.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24 blocks, one</text>
+<text x="229" y="224.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">frame at a time</text>
+<text x="229" y="240.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1,369 tokens</text>
+<rect x="322" y="162" width="142" height="100" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="393" y="184.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">token assembly</text>
+<text x="393" y="200.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">camera, 4 registers,</text>
+<text x="393" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pose, intrinsics,</text>
+<text x="393" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">patches: 1,376</text>
+<text x="393" y="248.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokens a frame</text>
+<rect x="500" y="156" width="119" height="112" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="559.5" y="184.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">trunk, 24 times:</text>
+<text x="559.5" y="200.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">frame block,</text>
+<text x="559.5" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">global block</text>
+<text x="559.5" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">taps after levels</text>
+<text x="559.5" y="248.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4, 11, 17, 23</text>
+<rect x="859" y="175" width="113" height="74" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="915.5" y="200.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">assembly</text>
+<text x="915.5" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fuse the views,</text>
+<text x="915.5" y="232.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">filter pixels</text>
+<rect x="1008" y="181" width="118" height="62" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="1067" y="208.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gaussian scene</text>
+<text x="1067" y="224.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and S cameras</text>
+<rect x="24" y="261" width="112" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="80" y="282.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">known cameras</text>
+<text x="80" y="298.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(optional)</text>
+<rect x="655" y="24" width="168" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="739" y="52.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">camera head</text>
+<text x="739" y="68.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9 numbers a frame</text>
+<rect x="655" y="102" width="168" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="739" y="130.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">depth head</text>
+<text x="739" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">depth, confidence, mask</text>
+<rect x="655" y="180" width="168" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="739" y="208.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pointmap head</text>
+<text x="739" y="224.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">xyz, confidence</text>
+<rect x="655" y="258" width="168" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="739" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">normal head</text>
+<text x="739" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">normal, confidence</text>
+<rect x="655" y="336" width="168" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="739" y="364.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gaussian head</text>
+<text x="739" y="380.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">depth, mask, 12 values</text>
+<line x1="139" y1="212" x2="169" y2="212" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="289" y1="212" x2="319" y2="212" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="467" y1="212" x2="497" y2="212" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M136,286 L383,286 Q393,286 393,276 L393,265" fill="none" stroke="#1a202c" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head)"/>
+<line x1="619.79" y1="185.11" x2="654.21" y2="58.89" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="823.79" y1="58.89" x2="858.21" y2="185.11" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="620.44" y1="197.37" x2="653.56" y2="136.63" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="824.44" y1="136.63" x2="857.56" y2="197.37" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="622" y1="212" x2="652" y2="212" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="826" y1="212" x2="856" y2="212" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="620.44" y1="226.63" x2="653.56" y2="287.37" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="824.44" y1="287.37" x2="857.56" y2="226.63" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="619.79" y1="238.89" x2="654.21" y2="365.11" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="823.79" y1="365.11" x2="858.21" y2="238.89" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="975" y1="212" x2="1005" y2="212" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

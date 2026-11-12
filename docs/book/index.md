@@ -173,4 +173,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 2. [Generating Video](v10-video-and-3d/02-video-generation.md): How do diffusion models keep motion consistent across hundreds of frames?
 3. [Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md): How does a 3D point become a pixel, and how do we undo that?
 4. [Structure from Motion and Multi-View Stereo](v10-video-and-3d/04-structure-from-motion.md): How can we recover a 3D scene and the camera positions from ordinary photographs?
+5. [Learning 3D Directly](v10-video-and-3d/05-feed-forward-3d.md): Can one network look at a few images and output the scene's geometry in a single pass?
 <!-- /contents -->

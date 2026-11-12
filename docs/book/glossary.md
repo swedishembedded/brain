@@ -400,6 +400,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **feed-forward network**: the sublayer that applies one small network, two or three matrices and an activation, to each position on its own, so that it computes with what attention has gathered and moves nothing between positions. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 
+**feed-forward reconstruction**: recovering cameras and scene geometry from images by one evaluation of a trained network, with no optimisation over the images at the time of use, in place of the matching, robust estimation and adjustment of structure from motion. *([Learning 3D Directly](v10-video-and-3d/05-feed-forward-3d.md))*
+
 **finite difference**: an estimate of a derivative built from values of the function at nearby points, such as the forward difference $(f(x+h) - f(x))/h$. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
 **flash attention**: tiled attention with the online softmax in one fused kernel: exact attention whose only results are the output and one log-sum-exp per row, using memory linear in the sequence length and global-memory traffic of $\Theta(T^2 d_h^2 / M)$ for a fast memory of $M$ numbers. *([Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md))*
@@ -831,6 +833,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **pinhole camera**: the camera that sends each point of the world along a straight ray through one point, the pinhole, to the image, so that the image position is the ratio of the lateral offset to the depth and the depth itself is lost. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
 
 **pixel**: one sample of an image, a point measurement of light (three numbers for a colour image, usually 8-bit codes), taken at the centre of its cell in a grid of width times height. *([Images as Data](v07-vision/01-images.md))*
+
+**pointmap**: an array with one world point per pixel of an image, the point the pixel sees, written in the coordinates of one shared frame (the first camera's), so that a depth map and the camera that took it are one object and two pixels of two images that see the same surface hold the same point. *([Learning 3D Directly](v10-video-and-3d/05-feed-forward-3d.md))*
 
 **polynomial**: a sum of constant multiples of powers of $x$; one of degree $n$ has $n + 1$ parameters and is fixed by $n + 1$ points. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
