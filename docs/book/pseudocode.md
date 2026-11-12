@@ -162,6 +162,7 @@ row of `x: [T, D]`".
 | `fma(a, b, c)` | the fused multiply-add of Volume IV, Chapter 9: `a * b + c` formed exactly and rounded **once** to the stated format (ties to even), where the expression `a * b + c` evaluated one operation at a time rounds twice (the product, then the sum); on `f32` operands `fma(a, b, c)` is the `f32` nearest to the exact value of `a * b + c` |
 | `floor(x)`, `ceil(x)` | the largest integer not above `x`, the smallest integer not below `x`; both return an `int` |
 | `sqrt`, `exp`, `log`, `sin`, `cos` | the usual functions; `log` is the natural logarithm and `sin`, `cos` take radians |
+| `sinh(x)`, `asinh(x)` | the hyperbolic sine $(e^x - e^{-x})/2$ and its inverse $\ln(x + \sqrt{x^2 + 1})$, the library functions `sinh` and `asinh` of the C math library; both are odd, increasing and defined for every real `x`, and `sinh(asinh(x)) = x` to rounding |
 | `log1p(x)` | `log(1 + x)` for `x > -1`, computed so that it stays accurate when `x` is tiny (Volume I, Chapter 15); where `1 + x` would round to 1, `log1p(x)` still returns about `x` |
 | `log2(x)`, `log10(x)` | logarithms to base 2 and 10 |
 | `round(x, n)` | `x` rounded to `n >= 0` decimal places, **ties away from zero**: take the exact decimal value of `x` as written or computed, find the two multiples of `10^(-n)` that enclose it, and pick the nearer one; when `x` is exactly halfway, pick the one farther from zero (`round(2.5, 0) = 3`, `round(-2.5, 0) = -3`, `round(0.125, 2) = 0.13`). It returns a `real`. The book avoids a printed value that depends on this rule: where a table is rounded, the underlying quantity is not a tie, or the text says which way it was rounded. A binary floating-point number is rarely exactly halfway, so a reproduction compares unrounded values with a tolerance (see "Numerical tolerance") before it rounds |
@@ -544,6 +545,44 @@ The dynamic-scene project (Chapter 9) writes out `floor_plane`, `ray_on_plane`, 
 The time-series chapter (Chapter 1) writes out `autocorrelation`, `fit_ar`, `seasonal_ar_forecast`, `temporal_split` and `window_scale` where they are first used. `mean(x)` and `sum(... for i in 0 .. c)` are those of the arrays section above, `ys[0:n] = y` assigns a slice and `ys[n:n + H]` reads one, and `c / c[0]` divides every element of the array `c` by its first. `solve(A, b, true)` is the elimination of Volume I, chapter 4. In `fit_ar` the entries of `A` and `b` are accumulated row by row in increasing `t`, which fixes the order of every sum. In `seasonal_ar_forecast` the array `z` holds the seasonal differences of the past in its first `n - m` cells, and each step writes one forecast difference in the next cell and one forecast value in `ys`. `floor` of a product in `temporal_split` is the largest integer not above it, so `floor(120 * 0.7)` is 84 (single or double precision give the same value for the sizes of the chapter); the three lists it returns hold origins in increasing order, and a window in none of the three bands is not returned.
 
 The probabilistic-forecast chapter (Chapter 2) writes out `pinball`, `crps_from_levels`, `fit_head`, `fit_quantile_line` and `conformal_halfwidth` where they are first used. `fit_head` takes `nu = infinity` for the Gaussian head, where the weight of every row is exactly 1.0; its sums over rows run in increasing `i`, the weights of a round are computed from the parameters at the start of the round and also weight the residuals of the variance at its end, and `n` is the number of rows. `fit_quantile_line` tries the pairs `(i, j)` with `i < j` in lexicographic order and keeps the first pair whose total pinball loss is strictly smaller than every earlier one. In `conformal_halfwidth` the product `(n + 1) * (1.0 - alpha)` is formed on exact decimals (for `alpha = 0.1` and `n = 19` it is exactly 18), because a binary product such as `20 * 0.9` can come out a rounding step above its integer value and `ceil` would then return one too many; `sort(scores)[k - 1]` is the `k`-th smallest score counting from 1.
+
+Chapter 2 also needs three reference routines that a C math library does not have. `Phi(z)` is `0.5 * (1.0 + erf(z / sqrt(2.0)))`. `Phi_inv(p)` for `p` in `(0, 1)` is found by bisection on `Phi`, and agrees with a library inverse to better than 1e-11 for `p` between 1e-6 and `1 - 1e-6`. `t_cdf(x, nu)` is the distribution function of the standard Student-t for an even number `nu` of degrees of freedom, a finite sum, and `t_quantile(p, nu)` is the same bisection on `t_cdf`.
+
+```text
+function Phi_inv(p: real) -> real:
+    require 0.0 < p and p < 1.0, "a probability strictly inside (0, 1)"
+    lo = -40.0
+    hi = 40.0
+    for i in 0 .. 200:                       # 200 halvings of 80 reach the spacing of doubles
+        mid = 0.5 * (lo + hi)
+        if Phi(mid) < p:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+function t_cdf(x: real, nu: int) -> real:
+    require nu >= 2 and nu mod 2 == 0, "an even number of degrees of freedom"
+    u = nu / (nu + x ^ 2)
+    total = 0.0
+    term = 1.0                               # term k is (1 * 3 * ... * (2k - 1)) / (2 * 4 * ... * 2k) * u^k
+    for k in 0 .. nu // 2:
+        total = total + term
+        term = term * (2 * k + 1) / (2 * k + 2) * u
+    return 0.5 + x / (2.0 * sqrt(nu + x ^ 2)) * total
+
+function t_quantile(p: real, nu: int) -> real:
+    require 0.0 < p and p < 1.0, "a probability strictly inside (0, 1)"
+    lo = -1.0e6
+    hi = 1.0e6
+    for i in 0 .. 200:
+        mid = 0.5 * (lo + hi)
+        if t_cdf(mid, nu) < p:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+```
 
 The evaluation chapter (Chapter 4) writes out `walk_forward`, `mase`, `skill`, `bootstrap_skill` and `dm_statistic` where they are first used. `walk_forward` takes a forecaster as a parameter of function type and gives it `y[0:o]` and the horizon, so a forecaster never sees a bar at or after its origin; `floor` in the number of origins is the largest integer not above the quotient. In `bootstrap_skill` one resample draws `ceil(K / blk)` starting positions, each one call `rng.integer(K - blk + 1)`, in order, lays the blocks end to end and keeps the first `K` indices; `rows(E_model, idx)` gathers the elements of a vector at the indices, in order and with repeats; the generator is shared by every call of a table, in the table's order. `dm_statistic` forms every autocovariance with the mean of all `K` values removed and the divisor `K`, weights lag `k` by `1 - k / (lag + 1)` when `bartlett` is true and by 1 otherwise, and refuses (`require`) a long-run variance that is not positive.
 

@@ -40,7 +40,7 @@ A family of series: y_t = L (1 + s t + a sin(2 pi t / m + phi) + v_t) for t = 0 
 
 On series of the family it was fitted to, the idea works. A map fitted to five series already forecasts the twelve bars with a scaled error of $0.466$, below the $0.508$ of the autoregression that was fitted to the 48 bars of the very series it forecasts, and with $400$ series the error is $0.398$, about a fifth below the fitted baseline. The seasonal naive forecast, which needs no fitting at all, gives $0.587$. The map has seen $400 \times 61 = 24{,}400$ windows where the autoregression has seen $35$, and that is the whole advantage: the data it learned from is spread over other series, and the series it is asked about only has to resemble them.
 
-Where the resemblance fails, so does the map. Its columns for period $8$ and period $10$ are the same family with a different season, and the map pretrained on period $12$ is far worse there than doing nothing clever: $0.858$ and $1.016$ at $400$ series against $0.559$ and $0.554$ for the seasonal naive forecast. More data of the wrong family makes it worse, from $0.792$ to $0.858$ on period $8$, which is what one would expect of a map that is fitted ever more tightly to a season of twelve. Putting $200$ series of period $8$ into the corpus repairs period $8$ ($0.412$) and costs period $12$ almost nothing ($0.410$ for $0.398$), and it does nothing for period $10$, which is between the two and in neither: a linear map fitted to two seasons has learned two seasons, not the idea of a season.
+Where the resemblance fails, so does the map. Its columns for period $8$ and period $10$ are the same family with a different season, and the map pretrained on period $12$ is far worse there than doing nothing clever: $0.858$ and $1.016$ at $400$ series against $0.559$ and $0.554$ for the seasonal naive forecast. More data of the wrong family does not help: on period $8$ the error is $0.792$, $0.782$, $0.801$ and $0.858$ as the corpus grows from $5$ to $400$ series, with no improvement and the largest corpus the worst, which is what one would expect of a map that is fitted ever more tightly to a season of twelve. Putting $200$ series of period $8$ into the corpus repairs period $8$ ($0.412$) and costs period $12$ almost nothing ($0.410$ for $0.398$), and it does nothing for period $10$, which is between the two and in neither: a linear map fitted to two seasons has learned two seasons, not the idea of a season.
 
 So "any series it has never seen" has to be read as any series like those the model was fitted to, and the claim is only as wide as the collection. Two things follow for a real model. It needs a much richer function than one linear map, so that one set of weights can carry many seasons, many noise structures and many ways of failing to be seasonal at all; the transformer block of Volume V is that function. And it needs the unit it reads to be as free as possible of everything incidental to a series: its scale, its length, its gaps, the number of bars to be forecast. Each of the next sections removes one of these.
 
@@ -60,7 +60,7 @@ The first 64 bars of the series of Chapter 1 (seed 0xbfe805a9e24a1b3c), cut into
 | first patch | below 1e-9 | 0 of 56 |
 | running, patch by patch | below 1e-9 | 0 of 56 |
 
-The merged running mean and standard deviation after each patch differ from the mean and standard deviation of the whole prefix by at most 1.8e-15, which is rounding.
+The merged running mean and standard deviation after each patch differ from the mean and standard deviation of the whole prefix (each computed in one pass, the sum of the values taken in increasing order, then the sum of the squared deviations from their mean, in double precision) by less than 1e-14, which is rounding.
 <!-- /worked -->
 
 Two things can be read from the table. First, every scaler is invariant to the unit of the series, which is the point of it: the series $x$ and the series $10x + 100$ give the same scaled values to below $10^{-9}$ for three of them, and to $7.65 \times 10^{-6}$ for the z-score of `crates/kronos/src/preprocess.rs`, whose $10^{-5}$ is added to the deviation rather than used as its floor, so that rescaling the series changes the divisor by a fraction of that size. Second, the last column separates the scalers by what they let the future do. Adding $50$ to the last patch moves all $56$ scaled values of the earlier patches under whole-context standardisation and under the z-score, because the mean and deviation they divide by include the last patch; it moves none under the first-patch scaler and none under running statistics. The whole-context scaler and the z-score are Chapter 1's per-window scaler applied to a whole context, which is honest as long as the context is all past, but they are not causal inside the context: if a model is trained with a loss on every patch's prediction, as the decoders below are, an early patch has been scaled by statistics that include the patches it is supposed to predict.
@@ -126,7 +126,7 @@ function running_scale(y: array<real>[n], P: int, tol: real) -> array<real>[n]:
     return z
 ```
 
-The merged statistics after each patch of the $64$-bar context differ from those of the whole prefix by at most $1.8 \times 10^{-15}$, which is rounding, and a deviation below $10^{-6}$ is replaced by $1$ rather than clamped up to $10^{-6}$ (the `revin` function of `crates/timesfm3/src/preprocess.rs`), so a constant stretch is shifted but not blown up. The real routine also skips missing bars in the counts, which is how left-padding and gaps leave the statistics alone.
+The merged statistics after each patch of the $64$-bar context differ from those of the whole prefix by less than $10^{-14}$, which is rounding, and a deviation below $10^{-6}$ is replaced by $1$ rather than clamped up to $10^{-6}$ (the `revin` function of `crates/timesfm3/src/preprocess.rs`), so a constant stretch is shifted but not blown up. The real routine also skips missing bars in the counts, which is how left-padding and gaps leave the statistics alone.
 
 The horizon needs a scale too, because the model's output for a patch is expressed in that patch's scaled units. For a patch beyond the context there is nothing to observe, so TimesFM-3 continues the running statistics through the horizon patches using the model's own median prediction in place of the observations it does not have (`cpm_iterative_revin_refine`), and then reverses the scaling of each output patch with the statistics of the patch that produced it. The routine has an easily missed rule, recorded in a comment in the code: the stored prediction grid is refreshed at every patch, context patches included, so that when the first horizon patch arrives the grid holds the reconstruction of the last context patch rather than zeros. An implementation that only touches the grid at horizon patches produces the same values for every context patch and then starts the refinement from a stale grid. Commit `64624e4a7` (1 September 2026), which added the whole preprocessing pipeline, records it as one of two bugs, found by isolating the refinement stage against the reference's own tap rather than trusting the end-to-end number alone, and the comment in `cpm_iterative_revin_refine` states the reason: a gate on the input of the transformer cannot see it, because the context patches look identical either way.
 
@@ -193,7 +193,7 @@ The series was standardised first, over the observed values only, which is why t
 A row of tokens becomes a forecast through a transformer block of Volume V and a head, and the choice that matters is whether the block may look at the tokens after the one it is working on. A **decoder** is causal: the output at patch $p$ depends on patches $0$ through $p$ and on nothing later. That gives a training signal at every position at once: a context of $N$ patches supervises $N - 1$ predictions in one forward pass, each position being asked for the patch after it, and the quantity trained is the pinball loss of Chapter 2 on the quantile outputs of every position. A model whose attention sees the whole sequence cannot be trained that way, because the answer would be among its inputs; Chronos-2, which is such a model, reads empty patches after its context and its head is applied to those alone. The smallest example is $4$ patches of $2$ bars.
 
 <!-- worked: foundation_forecasters.decoder_toy -->
-The eight bars 10.0, 10.8, 11.5, 11.0, 12.2, 12.9, 12.4, 13.6, standardised with their own mean 11.8000 and population standard deviation 1.1147, cut into 4 patches of 2. Each patch is embedded as in the previous example (the vector [2 values, 2 mask bits], all mask bits 1) by a residual block, then one pre-norm block of Volume V (RMS norm, causal attention with 2 heads of width 2, SwiGLU of hidden width 6, no position information), then a linear head of 6 outputs per position, laid out step by step (for each of the 2 output bars the levels 0.1, 0.5, 0.9). Generator: the book's SplitMix64, seed 0x6b8c1f5ce07f264a (7749603542561662538). Draws in this order: W_hidden (4 by 4), W_res (4 by 4) and W_out (4 by 4) of the embedding, each entry 0.5 normal(), each matrix row by row; the block by `init_block` of Volume V (W_Q, W_K, W_V, W_O, W_gate, W_up, W_down, each normal() / sqrt(fan_in), gains 1); the head (6 by 4), each entry normal() / sqrt(4). The 216 weights are random, so the pinball losses below are those of an untrained net and say nothing about skill. Position p predicts the standardised bars of patch p + 1.
+The eight bars 10.0, 10.8, 11.5, 11.0, 12.2, 12.9, 12.4, 13.6, standardised with their own mean 11.8000 and population standard deviation 1.1147, cut into 4 patches of 2. Each patch is embedded as in the previous example (the vector [2 values, 2 mask bits], all mask bits 1, a column x; out = W_out relu(W_hidden x) + W_res x) by a residual block, giving a row of 4 numbers per patch. Then one pre-norm block of Volume V on these rows, with the row-vector convention of that volume, y = x W with W of shape (fan_in, fan_out): n = RMS norm of x (gain 1, epsilon 1e-6), causal attention of n with 2 heads of width 2, scores q . k / sqrt(2) (the 1 / sqrt(head width) factor is present), a softmax over the allowed keys, no position information, x1 = x + (the concatenated head outputs) W_O, then x1 + SwiGLU(RMS norm of x1) with hidden width 6, SwiGLU(n) = (silu(n W_gate) * (n W_up)) W_down. There is no final norm: the linear head, which maps the row of 4 numbers to 6 outputs per position as the column product W_head h, reads the block's output directly, and is laid out step by step (for each of the 2 output bars the levels 0.1, 0.5, 0.9). Generator: the book's SplitMix64, seed 0x6b8c1f5ce07f264a (7749603542561662538). Draws in this order: W_hidden (4 by 4), W_res (4 by 4) and W_out (4 by 4) of the embedding, each entry 0.5 normal(), each matrix row by row; then the block: W_Q, W_K, W_V, W_O (each 4 by 4), W_gate, W_up (4 by 6) and W_down (6 by 4), each entry normal() / sqrt(fan_in) with fan_in the number of rows of that matrix, drawn row by row; the two RMS gains are 1 and are not drawn; then the head (6 by 4), each entry normal() / sqrt(4), row by row. The 216 weights (48 of the embedding, 136 in the seven matrices of the block, 8 in its two gains, 24 in the head) are random, so the pinball losses below are those of an untrained net and say nothing about skill. Position p predicts the standardised bars of patch p + 1; its pinball loss is the mean over the 6 outputs of the pinball loss of Chapter 2.
 
 | position | target bars | o0 q0.1 | o0 q0.5 | o0 q0.9 | o1 q0.1 | o1 q0.5 | o1 q0.9 | pinball | crossed |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -201,10 +201,10 @@ The eight bars 10.0, 10.8, 11.5, 11.0, 12.2, 12.9, 12.4, 13.6, standardised with
 | 1 | +0.359, +0.987 | 0.881 | 0.612 | -1.464 | 0.305 | 2.512 | -2.528 | 1.0386 | 2 |
 | 2 | +0.538, +1.615 | 1.283 | -0.829 | -1.716 | -0.285 | 1.978 | -3.089 | 1.3314 | 2 |
 
-One pass gives 3 supervised positions from 8 bars; the fourth position predicts the two bars after the context, for which training has no target in this window. Adding 1 to every entry of the last token and running the block again changes the outputs of positions 0, 1 and 2 by 0.0, 0.0, 0.0 (largest absolute change) and the output of position 3 by 1.394.
+One pass gives 3 supervised positions from 8 bars; the fourth position predicts the two bars after the context, for which training has no target in this window. Adding 1 to every entry of the last token and running the block again changes the block's output (the residual stream after the block, before the head) at positions 0, 1 and 2 by 0.0, 0.0, 0.0 (largest absolute change over the 4 entries of the row) and at position 3 by 1.394.
 <!-- /worked -->
 
-The weights are random, so the pinball losses of the three supervised positions are those of an untrained network, about $1.0$ to $1.6$ in scaled units, and the quantiles of every output bar cross (the column `crossed` counts the bars whose three levels are out of order). The shape is what the example is for. The head emits $P \times K = 6$ numbers per position, step by step, and the last position, which has no target inside the context, is the one whose output is the forecast: its output changes when the last token changes, by $1.394$ in this run, while the outputs of positions $0$, $1$ and $2$ do not change at all, which is the causal mask doing its work and is the property that lets a single pass train every position.
+The weights are random, so the pinball losses of the three supervised positions are those of an untrained network, about $1.0$ to $1.6$ in scaled units, and the quantiles of every output bar cross (the column `crossed` counts the bars whose three levels are out of order). The shape is what the example is for. The head emits $P \times K = 6$ numbers per position, step by step, and the last position, which has no target inside the context, is the one whose output is the forecast: the block's output there (the residual stream, before the head) changes when the last token changes, by $1.394$ in this run, while the block's outputs at positions $0$, $1$ and $2$ do not change at all, which is the causal mask doing its work and is the property that lets a single pass train every position.
 
 Output patches in the real models are longer than input patches. TimesFM-3 reads patches of $32$ bars and writes $64$ bars at each position, nine quantiles each, through a biased linear head of $64 \times 9 = 576$ outputs; FinCast reads $32$ and writes $128$, a mean and nine quantiles per bar, through a residual block of $1{,}280$ outputs; Chronos-2 reads and writes $16$ and puts $21$ quantiles on every bar, with a head of $21 \times 16 = 336$ outputs. Writing more than one input patch ahead is what makes a long horizon possible without a long autoregression, which a later section takes up. Separately, no quantile head constrains the order of its levels, so they can cross, and the adapters of Chapter 2 sort them.
 
@@ -337,7 +337,7 @@ The same family of maps, with the $48 + 12 = 60$ promotion bits of the context a
 Chronos-2 does the reading with **group attention**. Each series in a group has its own row of tokens, the encoder's time attention runs along each row as before, and a second sublayer runs across the rows: at every patch position, the tokens of all series in the group attend to one another, with no positions (the position is already the patch position), so that a patch of the target can read the same patch of the covariate. A known-future covariate also carries its values on the horizon patches, with its mask set; the horizon patches of the target are empty. In brain's adapter an item's target and its covariates form one group and each target is forecast separately (`crates/chronos2/src/forecaster.rs`), so that a second target in the same item is not used to forecast the first.
 
 <!-- worked: foundation_forecasters.group_attention -->
-Three token states at one patch position, one per series of a group (width 4, one head of width 4): target (0.9, -0.4, 0.2, 1.1); covariate A (1.0, -0.5, 0.1, 1.0); covariate B (-0.8, 0.9, -1.2, 0.1). Each is RMS-normalised (gain 1, epsilon 1e-6), projected by W_Q, W_K and W_V, the three rows of scores q_i . k_j go through a softmax with no position information, the mixed values go through W_O. Generator: the book's SplitMix64, seed 0xa4f8abce6a4568a4 (11887440119478970532). Draws: W_Q, W_K, W_V, W_O in this order, each 4 by 4, each entry 0.7 normal(), row by row. The attention weights, once with the scores as they are and once divided by sqrt(4):
+Three token states at one patch position, one per series of a group (width 4, one head of width 4): target (0.9, -0.4, 0.2, 1.1); covariate A (1.0, -0.5, 0.1, 1.0); covariate B (-0.8, 0.9, -1.2, 0.1). Each is RMS-normalised (gain 1, epsilon 1e-6), projected by W_Q, W_K and W_V, the three rows of scores q_i . k_j go through a softmax with no position information, the mixed values go through W_O. Generator: the book's SplitMix64, seed 0xa4f8abce6a4568a4 (11887440119478970532). Draws: W_Q, W_K, W_V, W_O in this order, each 4 by 4, each entry 0.7 normal(), row by row. A matrix W acts on a column, the projection of a state x being the product W x with output r the dot product of row r of W with x; q_i = W_Q x_i, and likewise k_i and v_i from the same normalised x_i. The attention weights, once with the scores as they are and once divided by sqrt(4):
 
 | row (query) | to target | to covariate A | to covariate B |
 |---|---:|---:|---:|
@@ -348,14 +348,14 @@ Three token states at one patch position, one per series of a group (width 4, on
 | covariate A, divided by sqrt(4) | 0.144 | 0.125 | 0.731 |
 | covariate B, divided by sqrt(4) | 0.356 | 0.348 | 0.296 |
 
-The update the target token receives from the group sublayer is W_O (sum_j a_0j v_j); the euclidean distance between it and the update of a target alone in its group, W_O v_0, is 2.366 against a length of 1.613.
+The update the target token receives from the group sublayer is W_O (sum_j a_0j v_j); the euclidean distance between it and the update of a target alone in its group, W_O v_0, is 2.366; the update with the covariates has length 1.613 and the shortcut's has length 1.937.
 
 | update of the target token | c0 | c1 | c2 | c3 |
 |---|---:|---:|---:|---:|
 | with the two covariates in the group | -1.340 | -0.224 | -0.439 | -0.751 |
 | alone in its group (weight 1 on itself) | -0.975 | -0.674 | 1.404 | 0.616 |
 
-Why the scale of a score matters: for q and three keys with independent standard Gaussian entries of width d_k, the largest of the three weights averaged over 2000 draws. Generator: the book's SplitMix64, seed 0x0358fcfd2165c891 (241220744181565585). Per draw: q (d_k calls of normal()), then the three keys in order.
+Why the scale of a score matters: for q and three keys with independent standard Gaussian entries of width d_k, the largest of the three weights averaged over 2000 draws. Generator: the book's SplitMix64, seed 0x0358fcfd2165c891 (241220744181565585). Per draw: q (d_k calls of normal()), then the three keys in order, each d_k calls. One generator runs through the three rows in the order printed (d_k = 4, then 16, then 64), never restarted between rows; the scaled column uses the same draws as the unscaled one.
 
 | key width d_k | mean largest weight, unscaled | mean largest weight, divided by sqrt(d_k) |
 |---|---:|---:|
@@ -364,7 +364,7 @@ Why the scale of a score matters: for q and three keys with independent standard
 | 64 | 0.930 | 0.594 |
 <!-- /worked -->
 
-The numbers are those of a random network, so which covariate the target pays attention to means nothing here; the mechanics are the point. Each token is normalised, projected to a query, a key and a value, the target's weights over the three tokens are a softmax of three scores, and the update the target receives is the output projection of the weighted values, which for a series alone in its group collapses to the output projection of its own value, the case the code takes as a shortcut for a single series. With the covariates present the update is a different vector, $2.366$ away from the shortcut's in a vector of length $1.613$. The last table is a fact about Chronos-2's attention that its configuration insists on: there is **no** $1/\sqrt{d_k}$ in it. With keys of width $64$ the largest of three weights averages $0.930$ without the factor and $0.594$ with it, so a port that divided by $\sqrt{d_k}$ out of habit would give a flatter attention than the one the weights were fitted for, with every kernel taken alone still correct.
+The numbers are those of a random network, so which covariate the target pays attention to means nothing here; the mechanics are the point. Each token is normalised, projected to a query, a key and a value, the target's weights over the three tokens are a softmax of three scores, and the update the target receives is the output projection of the weighted values, which for a series alone in its group collapses to the output projection of its own value, the case the code takes as a shortcut for a single series. With the covariates present the update is a different vector: it is $2.366$ away from the shortcut's, and the two vectors have lengths $1.613$ and $1.937$, so the covariates move the update by more than the length of either. The last table is a fact about Chronos-2's attention that its configuration insists on: there is **no** $1/\sqrt{d_k}$ in it. With keys of width $64$ the largest of three weights averages $0.930$ without the factor and $0.594$ with it, so a port that divided by $\sqrt{d_k}$ out of habit would give a flatter attention than the one the weights were fitted for, with every kernel taken alone still correct.
 
 TimesFM-3 conditions differently, and the difference shows in its input, the $192$-wide vector that the patch embedding reads. For each patch, the vector holds the patch's own $32$ values, then the values of the next *two* patches, $64$ numbers, then the mask of each. For a target the second block is always masked and zero. For a known-future covariate it holds what is coming.
 
@@ -416,7 +416,7 @@ For TimesFM-3, with input patches of $32$ and outputs of $64$, the first output 
 
 ```text
 function stitch(preds: array<real>[F, E], P: int) -> array<real>[F * P + E - P]:
-    require F >= 1 and 1 <= P and P <= E, "forecast patches of E bars, input patches of P bars"
+    require F >= 1 and 1 <= P and P <= E and E <= 2 * P, "forecast patches of E bars, input patches of P bars, an overlap of at most one patch"
     ov = E - P
     if F == 1:
         return preds[0, :]                      # a single patch is returned whole
@@ -431,7 +431,7 @@ function stitch(preds: array<real>[F, E], P: int) -> array<real>[F * P + E - P]:
     return out
 ```
 
-Two details are easy to drop, and the comment above `stitch_patches` in the crate records both: at exactly one patch the whole patch comes back, not its first $P$ bars, and the last patch's own overlap tail is appended once at the end. Commit `64624e4a7` records them together as the second of its two bugs.
+The routine requires $E \le 2P$, an overlap of at most one input patch, so that every bar is written by at most two forecast patches and the blend has two weights; TimesFM-3's $E = 64$ and $P = 32$ is the extreme case, and a longer overlap would need a rule for blending three or more patches, which the code does not have and this chapter does not define. Two details are easy to drop, and the comment above `stitch_patches` in the crate records both: at exactly one patch the whole patch comes back, not its first $P$ bars, and the last patch's own overlap tail is appended once at the end. Commit `64624e4a7` records them together as the second of its two bugs.
 
 <!-- worked: foundation_forecasters.stitching -->
 Output patches of 8 bars from input patches of 4, so consecutive output patches overlap in 4 bars and a horizon of 20 needs max(ceil((20 - 4) / 4), 1) = 4 forecast patches, which together cover 4 * 4 + 4 = 20 bars. Forecast patch f covers bars 4 f .. 4 f + 7. Over its overlap with the next patch the earlier patch gets the weight 1 - k / (4 - 1) at step k = 0 .. 3 and the later patch the rest:
@@ -464,67 +464,67 @@ Training does not run the long horizon at all. The trainer of `crates/timesfm3/s
 The size of a model is a count, and the counts here can be rebuilt from the configuration alone. The layer inventory below gives every part of every model; the totals are the numbers the crates assert in their own tests ($330{,}710{,}976$, $119{,}477{,}664$, $991{,}436{,}960$) and the two Kronos counts that follow from the lists in `crates/kronos/src/config.rs`.
 
 <!-- worked: foundation_forecasters.parameter_counts -->
-The weights of each forecaster by part, from the shapes of its published configuration (every linear counts its weight matrix, and its bias where the model has one; every norm its gain vector and, for a layer norm, its bias). Hidden widths and block counts are those of the layer lists in the text.
+The weights of each forecaster by part, from the shapes of its published configuration, which are printed with each table: every linear counts its weight matrix (output width x input width) and its bias where the model has one; every norm its gain vector and, for a layer norm, its bias. 'counted as' is the sum, in numbers of weights, that gives the row; a product axb is a matrix of a rows and b columns.
 
-TimesFM-3. The count of the crate's own test is 330,710,976: equal.
+TimesFM-3: model width 1280, 20 blocks, head width 80, input vector 192 = 2 (32 + 64) numbers per patch, output 64 x 9 = 576 numbers per position. The embedding is a residual block with hidden width 1280 and no biases. A block has a sequence attention, a variate attention and a feed-forward network; each sublayer has a norm gain vector of 1280 before and another after it; an attention has four projections 1280x1280 without bias and three vectors of the head width 80 (query norm, key norm, per-dimension scale); the feed-forward network has two matrices 1280x1280 and no bias. The head is one linear with a bias. The count of the crate's own test is 330,710,976: equal.
 
-| part | weights |
-|---|---:|
-| patch embedding (3 linears, no bias) | 2,129,920 |
-| sequence attention, 20 layers | 131,128,000 |
-| variate attention, 20 layers | 131,128,000 |
-| feed-forward, 20 layers | 65,587,200 |
-| output head (weight and bias) | 737,856 |
-| **total** | **330,710,976** |
+| part | counted as | weights |
+|---|---|---:|
+| patch embedding, input 192 | 1280x192 + 1280x1280 + 1280x192, no biases | 2,129,920 |
+| sequence attention, 20 layers | 20 x (4x1280x1280 + 2x1280 + 3x80) | 131,128,000 |
+| variate attention, 20 layers | 20 x (4x1280x1280 + 2x1280 + 3x80) | 131,128,000 |
+| feed-forward, 20 layers | 20 x (2x1280x1280 + 2x1280) | 65,587,200 |
+| output head (weight and bias) | 576x1280 + 576 | 737,856 |
+| **total** |  | **330,710,976** |
 
-Chronos-2. The count of the crate's own test is 119,477,664: equal.
+Chronos-2: model width 768, 12 blocks, feed-forward width 3072, attention inner width 768, patches of 16 bars, input 48 = 3 x 16 numbers per patch, output 21 x 16 = 336 numbers per horizon patch. The embedding and the head are residual blocks with hidden width 3072 and biases. A block has a time attention, a group attention and a feed-forward network; each sublayer has one norm gain vector of 768 (before it) and no other bias or norm; an attention has four projections 768x768 without bias; the feed-forward network has two matrices 768x3072 without bias. One final norm gain, and a table of 2 special tokens. The count of the crate's own test is 119,477,664: equal.
 
-| part | weights |
-|---|---:|
-| special-token table [PAD], [REG] | 1,536 |
-| patch embedding (residual block) | 2,548,224 |
-| time attention, 12 layers | 28,320,768 |
-| group attention, 12 layers | 28,320,768 |
-| feed-forward, 12 layers | 56,632,320 |
-| final norm | 768 |
-| quantile head (residual block) | 3,653,280 |
-| **total** | **119,477,664** |
+| part | counted as | weights |
+|---|---|---:|
+| special-token table [PAD], [REG] | 2x768 | 1,536 |
+| patch embedding, input 48 | 3072x48 + 768x3072 + 768x48 + 3072 + 2x768 biases | 2,548,224 |
+| time attention, 12 layers | 12 x (4x768x768 + 768) | 28,320,768 |
+| group attention, 12 layers | 12 x (4x768x768 + 768) | 28,320,768 |
+| feed-forward, 12 layers | 12 x (2x768x3072 + 768) | 56,632,320 |
+| final norm | 768 | 768 |
+| quantile head, output 336 | 3072x768 + 336x3072 + 336x768 + 3072 + 2x336 biases | 3,653,280 |
+| **total** |  | **119,477,664** |
 
-FinCast. The count of the crate's own test is 991,436,960: equal.
+FinCast: model width 1280, 50 blocks, 16 heads of width 80 (attention inner width 1280, queries, keys and values all with 16 heads), patches of 32 bars, input 64 = 2 x 32 numbers per patch, output 128 x (1 + 9) = 1280 numbers per position (a mean and 9 quantiles per bar). The embedding and the head are residual blocks with hidden width 1280 and biases; the frequency embedding is a table of 3 rows. A block has an input norm gain of 1280, a causal attention (one fused 3840x1280 projection with a bias, a per-dimension query scale of 80, an output projection 1280x1280 with a bias) and a mixture of 4 experts: a norm gain of 1280, a router matrix 4x1280 without bias, and 4 experts of two linears 1280x1280 with biases and a layer norm (weight and bias, 2x1280). The count of the crate's own test is 991,436,960: equal.
 
-| part | weights |
-|---|---:|
-| patch embedding (residual block) | 1,806,080 |
-| frequency embedding | 3,840 |
-| attention, 50 layers | 328,004,000 |
-| experts, 50 layers of 4 | 656,384,000 |
-| gates and norms of the mixture, 50 layers | 320,000 |
-| horizon head (residual block) | 4,919,040 |
-| **total** | **991,436,960** |
+| part | counted as | weights |
+|---|---|---:|
+| patch embedding, input 64 | 1280x64 + 1280x1280 + 1280x64 + 1280 + 2x1280 biases | 1,806,080 |
+| frequency embedding | 3x1280 | 3,840 |
+| attention, 50 layers | 50 x (1280 + 80 + 3840x1280 + 3840 + 1280x1280 + 1280) | 328,004,000 |
+| experts, 50 layers of 4 | 50 x 4 x (2 (1280x1280 + 1280) + 2x1280) | 656,384,000 |
+| gates and norms of the mixture, 50 layers | 50 x (1280 + 4x1280) | 320,000 |
+| horizon head, output 1280 | 1280x1280 + 1280x1280 + 1280x1280 + 1280 + 2x1280 biases | 4,919,040 |
+| **total** |  | **991,436,960** |
 
-Kronos decoder (small).
+Kronos decoder (small): model width 512, 8 blocks, feed-forward width 1024, two token vocabularies of 1024 = 2^10. A block has four attention projections 512x512 with biases, two norm gains of 512 and a SwiGLU network of three matrices 512x1024 without biases. The fusion linear maps the two token embeddings (1024 numbers) to 512, with a bias; the dependency layer is a cross-attention of four projections 512x512 with biases and one norm gain; the two heads map 512 to 1024 with biases. 
 
-| part | weights |
-|---|---:|
-| token tables emb_s1, emb_s2 | 1,048,576 |
-| fusion projection (weight and bias) | 524,800 |
-| calendar tables (60, 24, 7, 32, 13 rows) | 69,632 |
-| transformer blocks, 8 | 20,996,096 |
-| final norm | 512 |
-| dependency layer (4 projections with bias, norm) | 1,051,136 |
-| heads proj_s1, proj_s2 (weights and biases) | 1,050,624 |
-| **total** | **24,741,376** |
+| part | counted as | weights |
+|---|---|---:|
+| token tables emb_s1, emb_s2 | 2x1024x512 | 1,048,576 |
+| fusion projection (weight and bias) | 512x1024 + 512 | 524,800 |
+| calendar tables (60, 24, 7, 32, 13 rows) | 136x512 | 69,632 |
+| transformer blocks, 8 | 8 x (4 (512x512 + 512) + 2x512 + 3x512x1024) | 20,996,096 |
+| final norm | 512 | 512 |
+| dependency layer (4 projections with bias, norm) | 4 (512x512 + 512) + 512 | 1,051,136 |
+| heads proj_s1, proj_s2 (weights and biases) | 2 (1024x512 + 1024) | 1,050,624 |
+| **total** |  | **24,741,376** |
 
-Kronos tokenizer (base).
+Kronos tokenizer (base): width 256, feed-forward width 512, 6 features per bar, 20 = 2 x 10 bits, 3 encoder and 3 decoder blocks of the same form as the decoder's (four projections 256x256 with biases, two norm gains, three SwiGLU matrices 256x512). 'embed' maps 6 features to 256 and 'head' maps 256 back to 6, both with biases; 'quant_embed' maps 256 to the 20 bits; 'post_quant_embed' maps the 20 bits to 256, and 'post_quant_embed_pre' maps the 10 coarse bits to 256 (both with biases). 
 
-| part | weights |
-|---|---:|
-| embed and head | 3,334 |
-| quant_embed | 5,140 |
-| post_quant_embed_pre and post_quant_embed | 8,192 |
-| encoder blocks, 3 | 1,970,688 |
-| decoder blocks, 3 | 1,970,688 |
-| **total** | **3,958,042** |
+| part | counted as | weights |
+|---|---|---:|
+| embed and head | 256x6 + 256 + 6x256 + 6 | 3,334 |
+| quant_embed | 20x256 + 20 | 5,140 |
+| post_quant_embed_pre and post_quant_embed | 256x10 + 256 + 256x20 + 256 | 8,192 |
+| encoder blocks, 3 | 3 x (4 (256x256 + 256) + 2x256 + 3x256x512) | 1,970,688 |
+| decoder blocks, 3 | 3 x (4 (256x256 + 256) + 2x256 + 3x256x512) | 1,970,688 |
+| **total** |  | **3,958,042** |
 <!-- /worked -->
 
 TimesFM-3's weight is attention, $262{,}256{,}000$ of its $330{,}710{,}976$ weights in the two attention sublayers, and Chronos-2's is split between its feed-forward networks and its two attentions. FinCast has $991{,}436{,}960$ weights and $656{,}384{,}000$ of them are experts, of which a token uses half: $328{,}192{,}000$ weights are active per token in the experts, and $663{,}244{,}960$ in the whole network. Kronos is small, $24{,}741{,}376$ weights in the decoder and $3{,}958{,}042$ in the tokenizer, because its vocabularies are two tables of $1{,}024$ rows and not one of a million.
@@ -532,7 +532,15 @@ TimesFM-3's weight is attention, $262{,}256{,}000$ of its $330{,}710{,}976$ weig
 A count of weights is not a cost, and the cost of a forecast is a count too. A dense matrix product uses each of its weights twice per token (a multiply and an add), so the matrix FLOPs of a forward pass over $n$ tokens are about twice the weights used times $n$, plus the two products of attention that grow with the pairs of positions scored.
 
 <!-- worked: foundation_forecasters.forecast_work -->
-Floating-point operations (a multiply and an add count as 2) of one forecast of 64 bars from a context of 448 bars of one series, counting only matrix products and the two products of attention (scores and weighted sum, 4 d per scored pair of positions), and no norms, activations, softmaxes, table lookups or sampling. 'tokens' is the length of the longest sequence the backbone reads (for Kronos the context tokens of the prefill); 'pairs' is the number of (query, key) pairs scored, causal pairs counted once, bidirectional ones in both directions. Chronos-2 runs the group sublayer of a series alone as its value and output projections only; FinCast pads its context to 512 bars; for Kronos the rows include the tokenizer (encode the context, decode the 512-bar window of context and forecast), the prefill, and 64 steps each of one token step and one dependency step.
+Floating-point operations (a multiply and an add count as 2) of one forecast of 64 bars from a context of 448 bars of one series, counting only matrix products and the two products of attention (scores and weighted sum, 4 d per scored pair of positions), and no norms, activations, softmaxes, table lookups or sampling. A linear of a rows and b columns used on t tokens costs 2 t a b; the widths are those of the layer lists of the previous example. 'tokens' is the length of the longest sequence the backbone reads (for Kronos the context tokens of the prefill); 'pairs' is the number of (query, key) pairs scored, causal pairs counted once, bidirectional ones in both directions. The rules, row by row:
+
+- Chronos-2: n = 28 context patches + 1 [REG] token + 4 horizon patches = 33 tokens. The residual-block embedding is applied to the 32 patch tokens and not to [REG]: 2 x 32 x (48x3072 + 3072x768 + 48x768). Each of the 12 layers costs 2 n (4x768x768 for the time attention, 2x768x768 for the value and output projections of the group sublayer, 2x768x3072 for the feed-forward network). The head is applied to the 4 horizon tokens only: 2 x 4 x (768x3072 + 3072x336 + 768x336). Attention scores all n^2 = 1089 pairs, bidirectionally, in the time attention only, at 4 x 768 per pair per layer.
+
+- TimesFM-3: n = 448 / 32 = 14 context patches + max(ceil((64 - min(2 x 32, 64) + 32) / 32), 1) = 1 forecast patch + 2 - 1 further patches = 16 tokens, all through the embedding (input 192, three linears), the head (1280x576) and every layer: 2 n (8x1280^2 for the 4 projections of both attentions + 2x1280x1280 for the feed-forward network). Scored pairs: the sequence attention is causal, n (n + 1) / 2 = 136, and the variate attention scores 1 pair per token for one variate, n = 16; each pair costs 4 x 1280 per layer.
+
+- FinCast: the context is padded to 512 bars, n = 512 / 32 = 16 tokens through the embedding (input 64), the head (1280x1280, 1280x1280, 1280x1280) and every layer: 2 n (1280x3840 fused projection + 1280x1280 output + 1280x4 router) + 2 n x 2 active experts x 2 x 1280^2 (the two linears of an expert; all 4 experts in the all-experts row). Causal pairs n (n + 1) / 2 = 136, 4 x 1280 per pair per layer.
+
+- Kronos: the tokenizer encoder reads the 448 context bars (448 tokens: 2 x 448 x 6x256 embed, 3 blocks of 2 (4x256^2 + 3x256x512) per token, 2 x 448 x 256x20 quant_embed) and its decoder the window of 512 = min(448 + 64, 512) bars (2 x 512 x 20x256 post_quant_embed, 3 blocks, 2 x 512 x 256x6 head), post_quant_embed_pre being unused on this path. The decoder prefill reads the 448 context tokens, each costing the fusion 2 x 1024x512, 8 blocks of 2 (4x512^2 + 3x512x1024), proj_s1 2x512x1024 and the key and value projections of the dependency layer 2 x 2x512^2. Each of the 64 steps costs the same per-token amount (the new bar's embedding through the 8 blocks, proj_s1 and the dependency key and value) plus the dependency query and output projections 2 x 2x512^2 and proj_s2 2x512x1024. Scored pairs: tokenizer encoder causal 100576, tokenizer decoder causal 131328, decoder prefill causal 100576, the 64 token steps (step i reads 448 + i + 1 keys) 30752 and the 64 dependency steps (step i reads 448 + i keys) 30688; each pair costs 4 x 256 in a tokenizer layer, 4 x 512 in a decoder layer and in the dependency layer.
 
 | forecaster | tokens | pairs scored | matrix FLOPs | attention FLOPs | total FLOPs | per forecast bar |
 |---|---:|---:|---:|---:|---:|---:|
@@ -638,7 +646,7 @@ Using such a model is not trusting it. The port was proved against a reference b
 2. **[Calculate]** A group of the values $2, 4$ and a group of the values $3, 5, 7$ are merged. Give $(n, \mu, \sigma)$ of each group, merge them with the formula of the chapter, and check the result against the mean and population deviation of the five values.
 3. **[Calculate]** With $B = 32$ bins on $[-4, 4]$ and the scale $s = 20$, give the token of $x = 31$ and the value it is read back as, and the largest round-trip error for an unclipped value.
 4. **[Calculate]** For $\mathbf{z} = (0.4, -1.2, 0.7, -0.1, 2.0, -0.3)$ and $k_1 = 3$ give the bits, the tokens $s_1$ and $s_2$, the code $\mathbf{c}$ and the cosine between $\mathbf{z}$ and $\mathbf{c}$, with the coarse bits only and with both.
-5. **[Calculate]** A forecaster has outputs of $E = 12$ bars at input patches of $P = 4$ bars. For a horizon of $30$ give the overlap, the number of forecast patches and the length of the stitched output, and list the weights of the earlier patch over the overlap.
+5. **[Calculate]** A forecaster has outputs of $E = 7$ bars at input patches of $P = 4$ bars. For a horizon of $30$ give the overlap, the number of forecast patches and the length of the stitched output, and list the weights of the earlier patch over the overlap.
 6. **[Calculate]** A process $x_t = 0.95\,x_{t-1} + e_t$ with unit innovations is forecast in blocks of $16$ bars with the mean fed back. Give the true standard deviation at step $17$ and the one after feeding the mean back.
 7. **[Calculate]** Count the weights of one block of TimesFM-3 (two attentions and a feed-forward network, with the norms) at $d = 1280$, hidden width $1280$ and head width $80$, and check twenty times it against the sum of the three rows of the table that are made of layers.
 8. **[Implement]** Reproduce `foundation_forecasters.scalers`: the four scalers, the invariance column, the earlier-values-changed column and the running-statistics check, on the series of Chapter 1.
@@ -667,7 +675,7 @@ Using such a model is not trusting it. The port was proved against a reference b
 
 **Check your understanding.**
 
-1. It says that zero-shot is a claim about the distribution of the pretraining corpus: the map has no way to extrapolate to a season it never saw, and more series of the old family only fit it more tightly to the old season (the table: $0.792$ to $0.858$ on period $8$ as the period-$12$ corpus grows). A corpus of $10{,}000$ series of season twelve would not help; a corpus that contains season ten, or a model that can represent seasons in general, would.
+1. It says that zero-shot is a claim about the distribution of the pretraining corpus: the map has no way to extrapolate to a season it never saw, and more series of the old family only fit it more tightly to the old season (the table: $0.792$, $0.782$, $0.801$, $0.858$ on period $8$ as the period-$12$ corpus grows from $5$ to $400$ series, no better at $100$ series than at $5$ and worse at $400$). A corpus of $10{,}000$ series of season twelve would not help; a corpus that contains season ten, or a model that can represent seasons in general, would.
 2. It could no longer see the level of a patch relative to earlier patches (a rising trend is invisible if each patch is standardised alone) and the size of its variation relative to earlier patches (a sudden calm or burst). The running scaler keeps both, because the statistics of patches $0$ through $p$ carry the history, and it still never looks ahead.
 3. The forecast is a set of quantile rows, each mapped through $\sinh$ and the affine inverse. An increasing map takes the $\tau$-quantile of a variable to the $\tau$-quantile of its image, so the rows are quantiles of the forecast in the units of the series; they are not means, because $\sinh$ is not linear and the mean of $\sinh$ of a variable is not $\sinh$ of its mean.
 4. $448/32 = 14$ context patches and $2$ patches of horizon, so $16$ tokens and $16^2 = 256$ pairs. Read as bars the context alone would be $448$ tokens and $448^2 = 200{,}704$ pairs, larger by a factor of $784 = 28^2$.
@@ -682,7 +690,7 @@ Using such a model is not trusting it. The port was proved against a reference b
 2. The groups are $(2, 3, 1)$ and $(3, 5, \sqrt{8/3} = 1.633)$. Then $n = 5$, $\mu = (6 + 15)/5 = 4.2$ and $5\sigma^2 = 2 \cdot 1 + 3 \cdot (8/3) + 2\,(3 - 4.2)^2 + 3\,(5 - 4.2)^2 = 2 + 8 + 2.88 + 1.92 = 14.8$, so $\sigma^2 = 2.96$. Directly, the values $2, 4, 3, 5, 7$ have mean $4.2$ and squared deviations $4.84, 0.04, 1.44, 0.64, 7.84$, which sum to $14.8$.
 3. $x/s = 1.55$ and $w = 0.25$, so the token is $\lfloor (1.55 + 4)/0.25 \rfloor = 22$ and it is read back as $(-4 + 22.5 \times 0.25) \times 20 = 32.5$, which is off by $1.5$. The largest unclipped round-trip error is $ws/2 = 2.5$.
 4. The bits are $(1, 0, 1, 0, 1, 0)$, so $s_1 = 1 + 4 = 5$ from the first three and $s_2 = 0 + 2 + 0 = 2$ from the last three (bit $4$ is the second of its group). The code is $(1, -1, 1, -1, 1, -1)/\sqrt{6}$. With both tokens the cosine is $\lVert\mathbf{z}\rVert_1 / (\sqrt{6}\,\lVert\mathbf{z}\rVert_2) = 4.7 / (2.4495 \times 2.4880) = 0.7712$; with the coarse bits only (zeros in the last three places) it is $2.3 / (2.4880 \sqrt{3}) = 0.5337$.
-5. The overlap is $12 - 4 = 8$, the number of forecast patches is $\max(\lceil (30 - 8)/4 \rceil, 1) = 6$ and the stitched output has $6 \times 4 + 8 = 32$ bars, of which $30$ are kept. The weights of the earlier patch are $1 - k/7$ for $k = 0, \dots, 7$.
+5. The overlap is $7 - 4 = 3$, which is at most $P$, so the rule applies. The number of forecast patches is $\max(\lceil (30 - 3)/4 \rceil, 1) = 7$ and the stitched output has $7 \times 4 + 3 = 31$ bars, of which $30$ are kept. The weights of the earlier patch are $1 - k/2$ for $k = 0, 1, 2$, that is $1$, $0.5$ and $0$.
 6. At step $17$ the true standard deviation is $\sqrt{(1 - 0.95^{34})/(1 - 0.95^2)} = \sqrt{0.8252/0.0975} = 2.909$; after the mean is fed back the first bar of the second block has the one-step spread, $1$.
 7. Each attention sublayer has $4 \times 1{,}280^2 + 2 \times 1{,}280 + 3 \times 80 = 6{,}556{,}400$ weights, two of them $13{,}112{,}800$; the feed-forward network has $2 \times 1{,}280^2 + 2 \times 1{,}280 = 3{,}279{,}360$; a block has $16{,}392{,}160$ and twenty have $327{,}843{,}200$, which is the sum of the three rows of the table, $131{,}128{,}000 + 131{,}128{,}000 + 65{,}587{,}200$. The rest of the total is in the embedding and the head.
 8. to 11. The checks are the tables of the blocks, to the printed digits: the invariance and changed-value counts of the four scalers, the three scaled errors of every row of the zero-shot table when the generator, the seeds, the draw order and the fit of the block are used (a reader's elimination may differ from the book's in the last digits of the weights but not in the three digits of the table), the weights and the two columns of the stitching table, and the totals $330{,}710{,}976$, $119{,}477{,}664$ and $991{,}436{,}960$.

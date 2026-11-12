@@ -146,6 +146,7 @@ def patch_counts():
 SCALE_CTX, SCALE_P = 64, 8
 EPS_KRONOS, CLIP_KRONOS = 1e-5, 5.0
 TOL_REVIN = 1e-6
+TOL_MERGE = 1e-14                        # the merged statistics agree with the prefix statistics to rounding, far below this
 
 
 def _pop_stats(x):
@@ -237,8 +238,10 @@ def scalers():
             f"deviation, floored at 1e-6; the running scheme merges the statistics of patch p into those of patches 0 .. p - 1 by "
             f"n = n1 + n2, mu = (n1 mu1 + n2 mu2) / n and n sigma^2 = n1 sigma1^2 + n2 sigma2^2 + n1 (mu1 - mu)^2 + n2 (mu2 - mu)^2, "
             f"and a standard deviation below 1e-6 is replaced by 1.\n\n")
+    assert worst < TOL_MERGE, worst
     tail = (f"\n\nThe merged running mean and standard deviation after each patch differ from the mean and standard deviation of "
-            f"the whole prefix by at most {_sci(worst, 1)}, which is rounding.")
+            f"the whole prefix (each computed in one pass, the sum of the values taken in increasing order, then the sum of the squared deviations "
+            f"from their mean, in double precision) by less than {TOL_MERGE:g}, which is rounding.")
     return head + _table(["scaler", "invariance", "earlier values changed"], rows) + tail
 
 
@@ -323,21 +326,33 @@ def decoder_toy():
     o1, _ = tb.block_forward(block, toks, "pre", DEC_HEADS)
     o2, _ = tb.block_forward(block, toks2, "pre", DEC_HEADS)
     change = [max(abs(a - b) for a, b in zip(r1, r2)) for r1, r2 in zip(o1, o2)]
-    n_par = (DEC_HIDDEN * 2 * DEC_P + DEC_D * 2 * DEC_P + DEC_D * DEC_HIDDEN + 4 * DEC_D * DEC_D + 3 * DEC_D * DEC_FF + 2 * DEC_D
-             + DEC_P * len(DEC_LEVELS) * DEC_D)
+    n_emb = DEC_HIDDEN * 2 * DEC_P + DEC_D * 2 * DEC_P + DEC_D * DEC_HIDDEN
+    n_mats = 4 * DEC_D * DEC_D + 3 * DEC_D * DEC_FF
+    n_head = DEC_P * len(DEC_LEVELS) * DEC_D
+    n_par = n_emb + n_mats + 2 * DEC_D + n_head
+    hw = DEC_D // DEC_HEADS
     head = (f"The eight bars {', '.join(str(v) for v in DEC_BARS)}, standardised with their own mean {m:.4f} and population standard deviation {s:.4f}, "
-            f"cut into 4 patches of {DEC_P}. Each patch is embedded as in the previous example (the vector [2 values, 2 mask bits], all mask bits 1) by a "
-            f"residual block, then one pre-norm block of Volume V (RMS norm, causal attention with {DEC_HEADS} heads of width {DEC_D // DEC_HEADS}, SwiGLU "
-            f"of hidden width {DEC_FF}, no position information), then a linear head of {DEC_P * k} outputs per position, laid out step by step "
-            f"(for each of the {DEC_P} output bars the levels {', '.join(str(v) for v in DEC_LEVELS)}). {_draws(DEC_NAME)} Draws in this order: "
-            f"W_hidden (4 by 4), W_res (4 by 4) and W_out (4 by 4) of the embedding, each entry 0.5 normal(), each matrix row by row; the block "
-            f"by `init_block` of Volume V (W_Q, W_K, W_V, W_O, W_gate, W_up, W_down, each normal() / sqrt(fan_in), gains 1); the head "
-            f"({DEC_P * k} by {DEC_D}), each entry normal() / sqrt({DEC_D}). The {n_par} weights are random, so the pinball losses below "
-            f"are those of an untrained net and say nothing about skill. Position p predicts the standardised bars of patch p + 1.\n\n")
+            f"cut into 4 patches of {DEC_P}. Each patch is embedded as in the previous example (the vector [2 values, 2 mask bits], all mask bits 1, "
+            f"a column x; out = W_out relu(W_hidden x) + W_res x) by a residual block, giving a row of {DEC_D} numbers per patch. "
+            f"Then one pre-norm block of Volume V on these rows, with the row-vector convention of that volume, y = x W with W of shape (fan_in, fan_out): "
+            f"n = RMS norm of x (gain 1, epsilon 1e-6), causal attention of n with {DEC_HEADS} heads of width {hw}, "
+            f"scores q . k / sqrt({hw}) (the 1 / sqrt(head width) factor is present), a softmax over the allowed keys, no position information, "
+            f"x1 = x + (the concatenated head outputs) W_O, "
+            f"then x1 + SwiGLU(RMS norm of x1) with hidden width {DEC_FF}, SwiGLU(n) = (silu(n W_gate) * (n W_up)) W_down. "
+            f"There is no final norm: the linear head, which maps the row of {DEC_D} numbers to {DEC_P * k} outputs per position as the column product "
+            f"W_head h, reads the block's output directly, and is laid out step by step (for each of the {DEC_P} output bars the levels "
+            f"{', '.join(str(v) for v in DEC_LEVELS)}). {_draws(DEC_NAME)} Draws in this order: "
+            f"W_hidden ({DEC_HIDDEN} by {2 * DEC_P}), W_res ({DEC_D} by {2 * DEC_P}) and W_out ({DEC_D} by {DEC_HIDDEN}) of the embedding, each entry 0.5 normal(), "
+            f"each matrix row by row; then the block: W_Q, W_K, W_V, W_O (each {DEC_D} by {DEC_D}), W_gate, W_up ({DEC_D} by {DEC_FF}) and W_down ({DEC_FF} by {DEC_D}), "
+            f"each entry normal() / sqrt(fan_in) with fan_in the number of rows of that matrix, drawn row by row; the two RMS gains are 1 and are not drawn; "
+            f"then the head ({DEC_P * k} by {DEC_D}), each entry normal() / sqrt({DEC_D}), row by row. The {n_par} weights "
+            f"({n_emb} of the embedding, {n_mats} in the seven matrices of the block, {2 * DEC_D} in its two gains, {n_head} in the head) "
+            f"are random, so the pinball losses below are those of an untrained net and say nothing about skill. "
+            f"Position p predicts the standardised bars of patch p + 1; its pinball loss is the mean over the {DEC_P * k} outputs of the pinball loss of Chapter 2.\n\n")
     tail = (f"\n\nOne pass gives {len(heads) - 1} supervised positions from {len(DEC_BARS)} bars; the fourth position predicts the two bars after the "
             f"context, for which training has no target in this window. Adding 1 to every entry of the last token and running the block again "
-            f"changes the outputs of positions 0, 1 and 2 by {', '.join(_fx(c, 1) for c in change[:3])} (largest absolute change) and the output "
-            f"of position 3 by {_fx(change[3], 3)}.")
+            f"changes the block's output (the residual stream after the block, before the head) at positions 0, 1 and 2 by {', '.join(_fx(c, 1) for c in change[:3])} "
+            f"(largest absolute change over the {DEC_D} entries of the row) and at position 3 by {_fx(change[3], 3)}.")
     return head + t1 + tail
 
 
@@ -524,6 +539,7 @@ def group_attention():
                 + [(f"{GROUP_NAMES[i]}, divided by sqrt(4)", *(_fx(w, 3) for w in rows_s[i])) for i in range(3)])
     diff = math.sqrt(sum((a - b) ** 2 for a, b in zip(upd[0], alone)))
     norm = math.sqrt(sum(a * a for a in upd[0]))
+    norm_alone = math.sqrt(sum(a * a for a in alone))
     t2 = _table(["update of the target token", "c0", "c1", "c2", "c3"],
                 [("with the two covariates in the group", *(_fx(v, 3) for v in upd[0])), ("alone in its group (weight 1 on itself)", *(_fx(v, 3) for v in alone))])
     g = bookrng.generator(SHARP_NAME)
@@ -542,11 +558,13 @@ def group_attention():
             + "; ".join(f"{n} {tuple(h)}" for n, h in zip(GROUP_NAMES, GROUP_STATES))
             + f". Each is RMS-normalised (gain 1, epsilon 1e-6), projected by W_Q, W_K and W_V, the three rows of scores q_i . k_j go through a softmax "
               f"with no position information, the mixed values go through W_O. {_draws(GROUP_NAME)} Draws: W_Q, W_K, W_V, W_O in this order, each 4 by 4, "
-              f"each entry {GROUP_SCALE} normal(), row by row. The attention weights, once with the scores as they are and once divided by sqrt(4):\n\n")
+              f"each entry {GROUP_SCALE} normal(), row by row. A matrix W acts on a column, the projection of a state x being the product W x with output r the dot product of row r of W with x; "
+              f"q_i = W_Q x_i, and likewise k_i and v_i from the same normalised x_i. The attention weights, once with the scores as they are and once divided by sqrt(4):\n\n")
     mid = (f"\n\nThe update the target token receives from the group sublayer is W_O (sum_j a_0j v_j); the euclidean distance between it and the update "
-           f"of a target alone in its group, W_O v_0, is {diff:.3f} against a length of {norm:.3f}.\n\n")
+           f"of a target alone in its group, W_O v_0, is {diff:.3f}; the update with the covariates has length {norm:.3f} and the shortcut's has length {norm_alone:.3f}.\n\n")
     end = (f"\n\nWhy the scale of a score matters: for q and three keys with independent standard Gaussian entries of width d_k, the largest of the "
-           f"three weights averaged over {SHARP_DRAWS} draws. {_draws(SHARP_NAME)} Per draw: q (d_k calls of normal()), then the three keys in order.\n\n")
+           f"three weights averaged over {SHARP_DRAWS} draws. {_draws(SHARP_NAME)} Per draw: q (d_k calls of normal()), then the three keys in order, each d_k calls. One generator runs through the three rows in the order printed "
+           f"(d_k = 4, then 16, then 64), never restarted between rows; the scaled column uses the same draws as the unscaled one.\n\n")
     return head + t1 + mid + t2 + end + t3
 
 
@@ -620,6 +638,7 @@ def _stitch(preds, P, extract):
     and the overlap tail of the last patch."""
     F = len(preds)
     overlap = extract - P
+    assert 1 <= P <= extract <= 2 * P, "an overlap of at most one input patch"
     if F == 1:
         return list(preds[0])
     w = _stitch_weights(overlap)
@@ -736,83 +755,136 @@ def long_horizon():
 
 # ------------------------------------------------------------------ parameter and work counts of the four forecasters
 
+# The published configurations, one place for the inventories and for the work counts, so that the layer lists printed in the
+# chapter are the lists every count is derived from.
+TF3 = dict(d=1280, hidden=1280, hd=80, layers=20, p_in=32, p_out=64, q=9)
+C2 = dict(d=768, f=3072, inner=768, layers=12, vocab=2, patch=16, q=21)
+FC = dict(d=1280, f=1280, hd=80, heads=16, layers=50, experts=4, top=2, patch=32, horizon=128, q=9, freqs=3)
+KD = dict(d=512, ff=1024, layers=8, bits=10, calendar=(60, 24, 7, 32, 13))
+KT = dict(d=256, ff=512, d_in=6, bits=10, blocks=3)
+
+
 def _res_block(i, h, o, bias=True):
     """Weights of out = W_out act(W_hidden x) + W_res x with hidden width h; with biases each of the three linears has one."""
     n = h * i + o * h + o * i
     return n + (h + 2 * o if bias else 0)
 
 
-def _timesfm3_inventory(d=1280, hidden=1280, hd=80, layers=20, p_in=32, p_out=64, q=9):
+def _res_how(i, h, o, bias):
+    """How a residual block of input width i, hidden width h and output width o is counted, as a sum."""
+    t = f"{h}x{i} + {o}x{h} + {o}x{i}"
+    return t + (f" + {h} + 2x{o} biases" if bias else ", no biases")
+
+
+def _timesfm3_inventory(c=TF3):
+    d, hidden, hd, layers, p_in, p_out, q = (c[k] for k in ("d", "hidden", "hd", "layers", "p_in", "p_out", "q"))
     width = 2 * (p_in + p_out)
     attn = 4 * d * d + 2 * d + 3 * hd                  # pre norm, q k v o, query norm, key norm, per-dim scale, post norm
     ff = 2 * d * hidden + 2 * d                        # pre norm, ff0, ff1, post norm
     layer = 2 * attn + ff
-    items = [("patch embedding (3 linears, no bias)", _res_block(width, d, d, bias=False)),
-             (f"sequence attention, {layers} layers", layers * attn), (f"variate attention, {layers} layers", layers * attn),
-             (f"feed-forward, {layers} layers", layers * ff), ("output head (weight and bias)", p_out * q * d + p_out * q)]
-    return items, layers * layer
+    attn_how = f"{layers} x (4x{d}x{d} + 2x{d} + 3x{hd})"
+    items = [(f"patch embedding, input {width}", _res_how(width, d, d, False), _res_block(width, d, d, bias=False)),
+             (f"sequence attention, {layers} layers", attn_how, layers * attn), (f"variate attention, {layers} layers", attn_how, layers * attn),
+             (f"feed-forward, {layers} layers", f"{layers} x (2x{d}x{hidden} + 2x{d})", layers * ff),
+             ("output head (weight and bias)", f"{p_out * q}x{d} + {p_out * q}", p_out * q * d + p_out * q)]
+    desc = (f"TimesFM-3: model width {d}, {layers} blocks, head width {hd}, input vector {width} = 2 ({p_in} + {p_out}) numbers per patch, output {p_out} x {q} = {p_out * q} "
+            f"numbers per position. The embedding is a residual block with hidden width {d} and no biases. A block has a sequence attention, a variate attention and a "
+            f"feed-forward network; each sublayer has a norm gain vector of {d} before and another after it; an attention has four projections {d}x{d} without bias and "
+            f"three vectors of the head width {hd} (query norm, key norm, per-dimension scale); the feed-forward network has two matrices {d}x{hidden} and no bias. "
+            f"The head is one linear with a bias.")
+    return items, layers * layer, desc
 
 
-def _chronos2_inventory(d=768, f=3072, layers=12, vocab=2, patch=16, q=21, inner=768):
+def _chronos2_inventory(c=C2):
+    d, f, inner, layers, vocab, patch, q = (c[k] for k in ("d", "f", "inner", "layers", "vocab", "patch", "q"))
     attn = 4 * d * inner + d
     mlp = 2 * d * f + d
-    items = [("special-token table [PAD], [REG]", vocab * d), ("patch embedding (residual block)", _res_block(3 * patch, f, d)),
-             (f"time attention, {layers} layers", layers * attn), (f"group attention, {layers} layers", layers * attn),
-             (f"feed-forward, {layers} layers", layers * mlp), ("final norm", d), ("quantile head (residual block)", _res_block(d, f, q * patch))]
-    return items
+    items = [("special-token table [PAD], [REG]", f"{vocab}x{d}", vocab * d),
+             (f"patch embedding, input {3 * patch}", _res_how(3 * patch, f, d, True), _res_block(3 * patch, f, d)),
+             (f"time attention, {layers} layers", f"{layers} x (4x{d}x{inner} + {d})", layers * attn),
+             (f"group attention, {layers} layers", f"{layers} x (4x{d}x{inner} + {d})", layers * attn),
+             (f"feed-forward, {layers} layers", f"{layers} x (2x{d}x{f} + {d})", layers * mlp), ("final norm", f"{d}", d),
+             (f"quantile head, output {q * patch}", _res_how(d, f, q * patch, True), _res_block(d, f, q * patch))]
+    desc = (f"Chronos-2: model width {d}, {layers} blocks, feed-forward width {f}, attention inner width {inner}, patches of {patch} bars, input {3 * patch} = 3 x {patch} numbers per patch, "
+            f"output {q} x {patch} = {q * patch} numbers per horizon patch. The embedding and the head are residual blocks with hidden width {f} and biases. A block has a "
+            f"time attention, a group attention and a feed-forward network; each sublayer has one norm gain vector of {d} (before it) and no other bias or norm; an attention has "
+            f"four projections {d}x{inner} without bias; the feed-forward network has two matrices {d}x{f} without bias. One final norm gain, and a table of {vocab} special tokens.")
+    return items, desc
 
 
-def _fincast_inventory(d=1280, f=1280, hd=80, heads=16, layers=50, experts=4, patch=32, horizon=128, q=9):
+def _fincast_inventory(c=FC):
+    d, f, hd, heads, layers, experts, patch, horizon, q, freqs = (c[k] for k in ("d", "f", "hd", "heads", "layers", "experts", "patch", "horizon", "q", "freqs"))
     inner = heads * hd
-    qkv = (heads + 2 * heads) * hd
+    qkv = 3 * heads * hd
     attn = d + hd + qkv * d + qkv + d * inner + d      # input norm, per-dim scale, qkv, o
     expert = 2 * (d * d + d) + 2 * d                   # gate_proj, down_proj with biases, layer norm weight and bias
     moe = d + experts * d + experts * expert           # prenorm gamma, gate matrix, experts
-    items = [("patch embedding (residual block)", _res_block(2 * patch, f, d)), ("frequency embedding", 3 * d),
-             (f"attention, {layers} layers", layers * attn), (f"experts, {layers} layers of {experts}", layers * experts * expert),
-             (f"gates and norms of the mixture, {layers} layers", layers * (moe - experts * expert)),
-             ("horizon head (residual block)", _res_block(d, f, horizon * (1 + q)))]
-    return items
+    out = horizon * (1 + q)
+    items = [(f"patch embedding, input {2 * patch}", _res_how(2 * patch, f, d, True), _res_block(2 * patch, f, d)),
+             ("frequency embedding", f"{freqs}x{d}", freqs * d),
+             (f"attention, {layers} layers", f"{layers} x ({d} + {hd} + {qkv}x{d} + {qkv} + {d}x{inner} + {d})", layers * attn),
+             (f"experts, {layers} layers of {experts}", f"{layers} x {experts} x (2 ({d}x{d} + {d}) + 2x{d})", layers * experts * expert),
+             (f"gates and norms of the mixture, {layers} layers", f"{layers} x ({d} + {experts}x{d})", layers * (moe - experts * expert)),
+             (f"horizon head, output {out}", _res_how(d, f, out, True), _res_block(d, f, out))]
+    desc = (f"FinCast: model width {d}, {layers} blocks, {heads} heads of width {hd} (attention inner width {inner}, queries, keys and values all with {heads} heads), "
+            f"patches of {patch} bars, input {2 * patch} = 2 x {patch} numbers per patch, output {horizon} x (1 + {q}) = {out} numbers per position (a mean and {q} quantiles per bar). "
+            f"The embedding and the head are residual blocks with hidden width {f} and biases; the frequency embedding is a table of {freqs} rows. A block has an input norm gain of {d}, "
+            f"a causal attention (one fused {qkv}x{d} projection with a bias, a per-dimension query scale of {hd}, an output projection {d}x{inner} with a bias) and a mixture "
+            f"of {experts} experts: a norm gain of {d}, a router matrix {experts}x{d} without bias, and {experts} experts of two linears {d}x{d} with biases and a layer norm "
+            f"(weight and bias, 2x{d}).")
+    return items, desc
 
 
 def _kronos_block(d, ff):
     return 4 * (d * d + d) + 2 * d + 3 * d * ff
 
 
-def _kronos_inventory(d=512, layers=8, ff=1024, bits=10):
+def _kronos_inventory(c=KD):
+    d, layers, ff, bits, cal = c["d"], c["layers"], c["ff"], c["bits"], c["calendar"]
     v = 1 << bits
-    items = [("token tables emb_s1, emb_s2", 2 * v * d), ("fusion projection (weight and bias)", d * 2 * d + d),
-             ("calendar tables (60, 24, 7, 32, 13 rows)", (60 + 24 + 7 + 32 + 13) * d), (f"transformer blocks, {layers}", layers * _kronos_block(d, ff)),
-             ("final norm", d), ("dependency layer (4 projections with bias, norm)", 4 * (d * d + d) + d),
-             ("heads proj_s1, proj_s2 (weights and biases)", 2 * (v * d + v))]
-    return items
+    items = [("token tables emb_s1, emb_s2", f"2x{v}x{d}", 2 * v * d), ("fusion projection (weight and bias)", f"{d}x{2 * d} + {d}", d * 2 * d + d),
+             (f"calendar tables ({', '.join(str(r) for r in cal)} rows)", f"{sum(cal)}x{d}", sum(cal) * d),
+             (f"transformer blocks, {layers}", f"{layers} x (4 ({d}x{d} + {d}) + 2x{d} + 3x{d}x{ff})", layers * _kronos_block(d, ff)),
+             ("final norm", f"{d}", d), ("dependency layer (4 projections with bias, norm)", f"4 ({d}x{d} + {d}) + {d}", 4 * (d * d + d) + d),
+             ("heads proj_s1, proj_s2 (weights and biases)", f"2 ({v}x{d} + {v})", 2 * (v * d + v))]
+    desc = (f"Kronos decoder (small): model width {d}, {layers} blocks, feed-forward width {ff}, two token vocabularies of {v} = 2^{bits}. A block has four attention projections {d}x{d} "
+            f"with biases, two norm gains of {d} and a SwiGLU network of three matrices {d}x{ff} without biases. The fusion linear maps the two token embeddings ({2 * d} numbers) "
+            f"to {d}, with a bias; the dependency layer is a cross-attention of four projections {d}x{d} with biases and one norm gain; the two heads map {d} to {v} with biases.")
+    return items, desc
 
 
-def _kronos_tokenizer_inventory(d=256, ff=512, d_in=6, bits=10, blocks=3):
+def _kronos_tokenizer_inventory(c=KT):
+    d, ff, d_in, bits, blocks = c["d"], c["ff"], c["d_in"], c["bits"], c["blocks"]
     k = 2 * bits
-    items = [("embed and head", d_in * d + d + d * d_in + d_in), ("quant_embed", k * d + k), ("post_quant_embed_pre and post_quant_embed", d * bits + d + d * k + d),
-             (f"encoder blocks, {blocks}", blocks * _kronos_block(d, ff)), (f"decoder blocks, {blocks}", blocks * _kronos_block(d, ff))]
-    return items
+    items = [("embed and head", f"{d}x{d_in} + {d} + {d_in}x{d} + {d_in}", d_in * d + d + d * d_in + d_in), ("quant_embed", f"{k}x{d} + {k}", k * d + k),
+             ("post_quant_embed_pre and post_quant_embed", f"{d}x{bits} + {d} + {d}x{k} + {d}", d * bits + d + d * k + d),
+             (f"encoder blocks, {blocks}", f"{blocks} x (4 ({d}x{d} + {d}) + 2x{d} + 3x{d}x{ff})", blocks * _kronos_block(d, ff)),
+             (f"decoder blocks, {blocks}", f"{blocks} x (4 ({d}x{d} + {d}) + 2x{d} + 3x{d}x{ff})", blocks * _kronos_block(d, ff))]
+    desc = (f"Kronos tokenizer (base): width {d}, feed-forward width {ff}, {d_in} features per bar, {k} = 2 x {bits} bits, {blocks} encoder and {blocks} decoder blocks of the "
+            f"same form as the decoder's (four projections {d}x{d} with biases, two norm gains, three SwiGLU matrices {d}x{ff}). 'embed' maps {d_in} features to {d} and 'head' "
+            f"maps {d} back to {d_in}, both with biases; 'quant_embed' maps {d} to the {k} bits; 'post_quant_embed' maps the {k} bits to {d}, and "
+            f"'post_quant_embed_pre' maps the {bits} coarse bits to {d} (both with biases).")
+    return items, desc
 
 
 def parameter_counts():
-    tf, tf_total = _timesfm3_inventory()
+    tf, tf_total, tf_desc = _timesfm3_inventory()
     tf_items = tf
-    c2 = _chronos2_inventory()
-    fc = _fincast_inventory()
-    kd = _kronos_inventory()
-    kt = _kronos_tokenizer_inventory()
-    sections = [("TimesFM-3", tf_items, 330710976), ("Chronos-2", c2, 119477664), ("FinCast", fc, 991436960),
-                ("Kronos decoder (small)", kd, None), ("Kronos tokenizer (base)", kt, None)]
+    c2, c2_desc = _chronos2_inventory()
+    fc, fc_desc = _fincast_inventory()
+    kd, kd_desc = _kronos_inventory()
+    kt, kt_desc = _kronos_tokenizer_inventory()
+    sections = [("TimesFM-3", tf_items, tf_desc, 330710976), ("Chronos-2", c2, c2_desc, 119477664), ("FinCast", fc, fc_desc, 991436960),
+                ("Kronos decoder (small)", kd, kd_desc, None), ("Kronos tokenizer (base)", kt, kt_desc, None)]
     out = []
-    for name, items, published in sections:
-        total = sum(n for _, n in items)
-        rows = [(label, _int(n)) for label, n in items] + [("**total**", f"**{_int(total)}**")]
-        note = "" if published is None else f" The count of the crate's own test is {_int(published)}: {'equal' if published == total else 'DIFFERENT'}."
-        out.append(f"{name}.{note}\n\n" + _table(["part", "weights"], rows))
-    return ("The weights of each forecaster by part, from the shapes of its published configuration (every linear counts its weight matrix, and "
-            "its bias where the model has one; every norm its gain vector and, for a layer norm, its bias). Hidden widths and block counts are those "
-            "of the layer lists in the text.\n\n" + "\n\n".join(out))
+    for name, items, desc, published in sections:
+        total = sum(n for _, _, n in items)
+        rows = [(label, how, _int(n)) for label, how, n in items] + [("**total**", "", f"**{_int(total)}**")]
+        note = "" if published is None else f"The count of the crate's own test is {_int(published)}: {'equal' if published == total else 'DIFFERENT'}."
+        out.append(f"{desc} {note}\n\n" + _table(["part", "counted as", "weights"], rows, "llr"))
+    return ("The weights of each forecaster by part, from the shapes of its published configuration, which are printed with each table: every linear counts its weight matrix "
+            "(output width x input width) and its bias where the model has one; every norm its gain vector and, for a layer norm, its bias. "
+            "'counted as' is the sum, in numbers of weights, that gives the row; a product axb is a matrix of a rows and b columns.\n\n" + "\n\n".join(out))
 
 
 WORK_CONTEXT, WORK_HORIZON = 448, 64
@@ -822,7 +894,8 @@ def _causal_pairs(n):
     return n * (n + 1) // 2
 
 
-def _work_timesfm3(c=WORK_CONTEXT, h=WORK_HORIZON, d=1280, hidden=1280, layers=20, p=32, p_out=64, q=9):
+def _work_timesfm3(c=WORK_CONTEXT, h=WORK_HORIZON, cfg=TF3):
+    d, hidden, layers, p, p_out, q = (cfg[k] for k in ("d", "hidden", "layers", "p_in", "p_out", "q"))
     forecast_patches = max(-(-(h - min(2 * p, p_out) + p) // p), 1)
     n = c // p + forecast_patches + p_out // p - 1
     width = 2 * (p + p_out)
@@ -831,7 +904,8 @@ def _work_timesfm3(c=WORK_CONTEXT, h=WORK_HORIZON, d=1280, hidden=1280, layers=2
     return n, matrix, attention, _causal_pairs(n) + n
 
 
-def _work_chronos2(c=WORK_CONTEXT, h=WORK_HORIZON, d=768, f=3072, inner=768, layers=12, patch=16, q=21):
+def _work_chronos2(c=WORK_CONTEXT, h=WORK_HORIZON, cfg=C2):
+    d, f, inner, layers, patch, q = (cfg[k] for k in ("d", "f", "inner", "layers", "patch", "q"))
     n_ctx, n_out = -(-c // patch), -(-h // patch)
     n = n_ctx + 1 + n_out
     embed = 2 * (n_ctx + n_out) * (3 * patch * f + f * d + 3 * patch * d)
@@ -841,7 +915,8 @@ def _work_chronos2(c=WORK_CONTEXT, h=WORK_HORIZON, d=768, f=3072, inner=768, lay
     return n, embed + layers * per_layer + head, attention, n * n
 
 
-def _work_fincast(c=WORK_CONTEXT, d=1280, f=1280, hd=80, heads=16, layers=50, patch=32, horizon=128, q=9, experts=4, top=2, routed=True):
+def _work_fincast(c=WORK_CONTEXT, cfg=FC, routed=True):
+    d, f, hd, heads, layers, patch, horizon, q, experts, top = (cfg[k] for k in ("d", "f", "hd", "heads", "layers", "patch", "horizon", "q", "experts", "top"))
     n = 512 // patch
     inner = heads * hd
     qkv = 3 * heads * hd
@@ -852,7 +927,10 @@ def _work_fincast(c=WORK_CONTEXT, d=1280, f=1280, hd=80, heads=16, layers=50, pa
     return n, embed + layers * per_layer + head, attention, _causal_pairs(n)
 
 
-def _work_kronos(c=WORK_CONTEXT, h=WORK_HORIZON, d=512, ff=1024, layers=8, vocab=1024, dt=256, fft=512, blocks=3, k=20, d_in=6, max_ctx=512):
+def _work_kronos(c=WORK_CONTEXT, h=WORK_HORIZON, dec=KD, tok=KT, max_ctx=512):
+    d, ff, layers, bits = dec["d"], dec["ff"], dec["layers"], dec["bits"]
+    vocab, k = 1 << bits, 2 * bits
+    dt, fft, blocks, d_in = tok["d"], tok["ff"], tok["blocks"], tok["d_in"]
     block_dense = lambda dd, f_: 2 * (4 * dd * dd + 3 * dd * f_)
     # tokenizer: encode the context, decode the window of context and generated bars
     n_w = min(c + h, max_ctx)
@@ -873,6 +951,41 @@ def _work_kronos(c=WORK_CONTEXT, h=WORK_HORIZON, d=512, ff=1024, layers=8, vocab
     return c, matrix, attention, tok_pairs + prefill_pairs + step_pairs + dep_pairs
 
 
+def _work_recipes():
+    """The counting rules of the five rows of forecast_work, written with the constants of the configurations above."""
+    c, h = WORK_CONTEXT, WORK_HORIZON
+    tf, c2, fc, kd, kt = TF3, C2, FC, KD, KT
+    n_tf = _work_timesfm3()[0]
+    n_c2 = _work_chronos2()[0]
+    n_ctx2, n_out2 = -(-c // c2["patch"]), -(-h // c2["patch"])
+    n_w = min(c + h, 512)
+    n_fc = 512 // fc["patch"]
+    return [
+        f"Chronos-2: n = {n_ctx2} context patches + 1 [REG] token + {n_out2} horizon patches = {n_c2} tokens. The residual-block embedding is applied to the {n_ctx2 + n_out2} patch tokens "
+        f"and not to [REG]: 2 x {n_ctx2 + n_out2} x ({3 * c2['patch']}x{c2['f']} + {c2['f']}x{c2['d']} + {3 * c2['patch']}x{c2['d']}). Each of the {c2['layers']} layers costs "
+        f"2 n ({4}x{c2['d']}x{c2['inner']} for the time attention, 2x{c2['d']}x{c2['inner']} for the value and output projections of the group sublayer, "
+        f"2x{c2['d']}x{c2['f']} for the feed-forward network). The head is applied to the {n_out2} horizon tokens only: 2 x {n_out2} x ({c2['d']}x{c2['f']} + {c2['f']}x{c2['q'] * c2['patch']} + {c2['d']}x{c2['q'] * c2['patch']}). "
+        f"Attention scores all n^2 = {n_c2 ** 2} pairs, bidirectionally, in the time attention only, at 4 x {c2['inner']} per pair per layer.",
+        f"TimesFM-3: n = {c} / {tf['p_in']} = {c // tf['p_in']} context patches + max(ceil(({h} - min(2 x {tf['p_in']}, {tf['p_out']}) + {tf['p_in']}) / {tf['p_in']}), 1) = "
+        f"{max(-(-(h - min(2 * tf['p_in'], tf['p_out']) + tf['p_in']) // tf['p_in']), 1)} forecast patch + {tf['p_out'] // tf['p_in']} - 1 further patches = {n_tf} tokens, all through the embedding "
+        f"(input {2 * (tf['p_in'] + tf['p_out'])}, three linears), the head ({tf['d']}x{tf['p_out'] * tf['q']}) and every layer: 2 n (8x{tf['d']}^2 for the 4 projections of both attentions + "
+        f"2x{tf['d']}x{tf['hidden']} for the feed-forward network). Scored pairs: the sequence attention is causal, n (n + 1) / 2 = {_causal_pairs(n_tf)}, and the variate attention "
+        f"scores 1 pair per token for one variate, n = {n_tf}; each pair costs 4 x {tf['d']} per layer.",
+        f"FinCast: the context is padded to 512 bars, n = 512 / {fc['patch']} = {n_fc} tokens through the embedding (input {2 * fc['patch']}), the head ({fc['d']}x{fc['f']}, "
+        f"{fc['f']}x{fc['horizon'] * (1 + fc['q'])}, {fc['d']}x{fc['horizon'] * (1 + fc['q'])}) and every layer: 2 n ({fc['d']}x{3 * fc['heads'] * fc['hd']} fused projection + "
+        f"{fc['heads'] * fc['hd']}x{fc['d']} output + {fc['d']}x{fc['experts']} router) + 2 n x {fc['top']} active experts x 2 x {fc['d']}^2 (the two linears of an expert; "
+        f"all {fc['experts']} experts in the all-experts row). Causal pairs n (n + 1) / 2 = {_causal_pairs(n_fc)}, 4 x {fc['heads'] * fc['hd']} per pair per layer.",
+        f"Kronos: the tokenizer encoder reads the {c} context bars ({c} tokens: 2 x {c} x {kt['d_in']}x{kt['d']} embed, {kt['blocks']} blocks of 2 (4x{kt['d']}^2 + 3x{kt['d']}x{kt['ff']}) per token, "
+        f"2 x {c} x {kt['d']}x{2 * kt['bits']} quant_embed) and its decoder the window of {n_w} = min({c} + {h}, 512) bars (2 x {n_w} x {2 * kt['bits']}x{kt['d']} post_quant_embed, {kt['blocks']} blocks, "
+        f"2 x {n_w} x {kt['d']}x{kt['d_in']} head), post_quant_embed_pre being unused on this path. The decoder prefill reads the {c} context tokens, each costing the fusion 2 x {2 * kd['d']}x{kd['d']}, "
+        f"{kd['layers']} blocks of 2 (4x{kd['d']}^2 + 3x{kd['d']}x{kd['ff']}), proj_s1 2x{kd['d']}x{1 << kd['bits']} and the key and value projections of the dependency layer 2 x 2x{kd['d']}^2. "
+        f"Each of the {h} steps costs the same per-token amount (the new bar's embedding through the {kd['layers']} blocks, proj_s1 and the dependency key and value) plus the dependency "
+        f"query and output projections 2 x 2x{kd['d']}^2 and proj_s2 2x{kd['d']}x{1 << kd['bits']}. Scored pairs: tokenizer encoder causal {_causal_pairs(c)}, tokenizer decoder causal {_causal_pairs(n_w)}, "
+        f"decoder prefill causal {_causal_pairs(c)}, the {h} token steps (step i reads {c} + i + 1 keys) {sum(c + i + 1 for i in range(h))} and the {h} dependency steps "
+        f"(step i reads {c} + i keys) {sum(c + i for i in range(h))}; each pair costs 4 x {kt['d']} in a tokenizer layer, 4 x {kd['d']} in a decoder layer and in the dependency layer.",
+    ]
+
+
 def forecast_work():
     rows = []
     items = (("Chronos-2", _work_chronos2()), ("TimesFM-3", _work_timesfm3()), ("FinCast", _work_fincast()),
@@ -882,11 +995,10 @@ def forecast_work():
         rows.append((name, n, _int(pairs), _flops(matrix), _flops(attention), _flops(total), _flops(total / WORK_HORIZON)))
     head = (f"Floating-point operations (a multiply and an add count as 2) of one forecast of {WORK_HORIZON} bars from a context of {WORK_CONTEXT} bars of one series, "
             f"counting only matrix products and the two products of attention (scores and weighted sum, 4 d per scored pair of positions), and no norms, "
-            f"activations, softmaxes, table lookups or sampling. 'tokens' is the length of the longest sequence the backbone reads (for Kronos the context "
+            f"activations, softmaxes, table lookups or sampling. A linear of a rows and b columns used on t tokens costs 2 t a b; the widths are those of the layer lists of the previous "
+            f"example. 'tokens' is the length of the longest sequence the backbone reads (for Kronos the context "
             f"tokens of the prefill); 'pairs' is the number of (query, key) pairs scored, causal pairs counted once, bidirectional ones in both directions. "
-            f"Chronos-2 runs the group sublayer of a series alone as its value and output projections only; FinCast pads its context to 512 bars; "
-            f"for Kronos the rows include the tokenizer (encode the context, decode the 512-bar window of context and forecast), the prefill, and "
-            f"{WORK_HORIZON} steps each of one token step and one dependency step.\n\n")
+            f"The rules, row by row:\n\n" + "\n\n".join(f"- {r}" for r in _work_recipes()) + "\n\n")
     return head + _table(["forecaster", "tokens", "pairs scored", "matrix FLOPs", "attention FLOPs", "total FLOPs", "per forecast bar"], rows)
 
 

@@ -473,9 +473,9 @@ def head_scores():
     head = (f"The heads of the previous table, scored on the {na} test rows t = {TEST_A_ROWS[0]} .. {TEST_A_ROWS[1]} (the same recipe as the training rows; the "
             f"Student-t head is the grid value nu = {nu} with the smallest validation NLL). 'NLL' is the mean negative log-density; 'CRPS' is "
             f"the mean over the rows of sigma times the standardised CRPS (closed form for the Gaussian; for the Student-t, 2 times the mean pinball loss "
-            f"over the {CRPS_LEVELS} levels (j + 0.5) / {CRPS_LEVELS} of its quantile function, found by bisection on the finite-sum distribution function). "
+            f"over the {CRPS_LEVELS} levels (j + 0.5) / {CRPS_LEVELS} of its quantile function, found by bisection on the finite-sum distribution function t_cdf of pseudocode.md, 200 halvings of [-1e6, 1e6]). "
             f"'80 percent' and '95 percent' are the shares of rows whose target lies inside the central interval mu +- sigma q, with q the standard "
-            f"quantile at 0.9 and 0.975 of the head's own distribution.\n\n")
+            f"quantile at 0.9 and 0.975 of the head's own distribution (Phi_inv for the Gaussian, t_quantile for the Student-t, both of pseudocode.md).\n\n")
     return head + _table(["head", "NLL", "CRPS", "inside the 80 percent interval", "inside the 95 percent interval"], rows)
 
 
@@ -492,7 +492,7 @@ def pit_table():
         rows.append((f"{j / PIT_BINS:.1f} .. {(j + 1) / PIT_BINS:.1f}", *(a[4][j] for _, _, _, a, _ in sc)))
     n = TEST_A_ROWS[1] - TEST_A_ROWS[0] + 1
     head = (f"For each test row t = {TEST_A_ROWS[0]} .. {TEST_A_ROWS[1]} the value u = F(y), F the head's predictive distribution function at the target "
-            f"(library error function for the Gaussian, the finite sum for the Student-t head with nu = {nu}); the table counts the u in ten equal bins "
+            f"(library error function for the Gaussian, the finite sum t_cdf of pseudocode.md, with the standardised residual (y - mu) / sigma as its argument, for the Student-t head with nu = {nu}); the table counts the u in ten equal bins "
             f"(u = 1 goes into the last). A calibrated head puts {n // PIT_BINS} of {n} rows in each bin on average, with a standard deviation of "
             f"{math.sqrt(n * 0.1 * 0.9):.1f}.\n\n")
     return head + _table(["bin of u", *(label for label, *_ in sc)], rows)
@@ -757,7 +757,8 @@ def conformal_finite():
                     hit += 1
             rows.append((n, label, k, f"{k / (n + 1):.4f}", f"{hit / trials:.4f}"))
     head = (f"Calibration scores s_1 .. s_n and one new score are drawn independently as |normal()| from one generator ({_seed_text(CONFORMAL_NAME)}); "
-            f"in each of {trials} trials the draws are the n calibration scores in order and then the new one, and the new score is 'covered' when it is at "
+            f"the generator is created once and runs through the four rows below in the order printed, never restarted between rows or trials (a held value of "
+            f"normal() is carried across the boundaries); in each of {trials} trials the draws are the n calibration scores in order and then the new one, and the new score is 'covered' when it is at "
             f"most the k-th smallest calibration score (k counted from 1). Nominal level 1 - alpha = 0.9. Exact coverage is k / (n + 1) "
             f"whatever the distribution (continuous, so no ties).\n\n")
     return head + _table(["n", "rule for k", "k", "exact k / (n + 1)", f"covered in {trials} trials"], rows)

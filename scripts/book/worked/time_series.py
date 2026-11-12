@@ -210,7 +210,8 @@ def sample_series():
             f"one per t in increasing order. First 14 values:\n\n")
     tail = (f"\n\nThe mean of all {N} values is {_mean(y):.3f}, their standard deviation (divisor n) {_pop_sd(y):.3f}, the smallest "
             f"{min(y):.3f} (t = {y.index(min(y))}) and the largest {max(y):.3f} (t = {y.index(max(y))}); the last value is "
-            f"y_{N - 1} = {y[-1]:.3f}. The remainder u_t has the stationary standard deviation {SHOCK_SD / math.sqrt(1 - PHI_NOISE ** 2):.3f}.")
+            f"y_{N - 1} = {y[-1]:.3f}. Once it has settled (the memory of the start fades), the remainder u_t has the long-run standard deviation "
+            f"{SHOCK_SD:g} / sqrt(1 - {PHI_NOISE:g}^2) = {SHOCK_SD / math.sqrt(1 - PHI_NOISE ** 2):.3f}, derived in the text below.")
     return head + _table(["t", "trend", "season", "remainder u_t", "y_t"], rows) + tail
 
 
@@ -225,7 +226,7 @@ def acf_table():
     head = (f"The series of the first table. r_k = c_k / c_0, where c_k = (1/n) sum over t = 0 .. n-1-k of (x_t - xbar)(x_(t+k) - xbar), "
             f"xbar is the mean of all n values of the list and the divisor is n for every lag. 'first difference' is x_t = y_t - y_(t-1) "
             f"for t = 1 .. {N - 1} (n = {N - 1}); 'seasonal difference' is x_t = y_t - y_(t-{SEASON}) for t = {SEASON} .. {N - 1} "
-            f"(n = {N - SEASON}). For white noise r_k has standard deviation about 1/sqrt(n), so the 95 percent band is {BAND}/sqrt(n): "
+            f"(n = {N - SEASON}). For white noise (independent values of mean zero and one common variance) r_k has standard deviation about 1/sqrt(n), so the 95 percent band is {BAND}/sqrt(n): "
             f"{BAND / math.sqrt(N):.3f} for n = {N}, {BAND / math.sqrt(N - 1):.3f} for n = {N - 1} and {BAND / math.sqrt(N - SEASON):.3f} "
             f"for n = {N - SEASON}.\n\n")
     rows = [(j, *(f"{a[j]:+.2f}" for a in acfs)) for j in range(1, k + 1)]
@@ -281,7 +282,7 @@ def stationarity():
         a, b = x[:h], x[h:]
         rows.append((label, len(x), f"{_mean(a):.3f}", f"{_mean(b):.3f}", f"{_pop_sd(a) ** 2:.3f}", f"{_pop_sd(b) ** 2:.3f}",
                      f"{_acf(x, 1)[1]:+.2f}"))
-    head = ("The series of the first table and three differences of it. Each list is cut after its first floor(n/2) values; the mean "
+    head = ("The series of the first table and three differences of it. Each list of n values is cut after its first floor(n/2) values (the first part; the second part is the remaining n - floor(n/2) values); the mean "
             "and the variance (divisor: the number of values of the part, around the part's own mean) of each part are printed, and the "
             "autocorrelation at lag 1 of the whole list as in the autocorrelation table.\n\n")
     return head + _table(["series", "n", "mean, first part", "mean, second part", "variance, first part", "variance, second part",
@@ -513,7 +514,7 @@ def window_policies():
     head = (f"A series of n = {n} bars, windows of c = {c} bars of context and h = {h} bars of forecast. The origin o of a window is the "
             f"index of its first forecast bar: its context is bars o - {c} .. o - 1 and its forecast bars o .. o + {h - 1}, so the origins "
             f"are {c} .. {n - h} ({len(_origins())} windows). The train fraction is {TRAIN_FRAC} and the cut is floor({n} * {TRAIN_FRAC}) "
-            f"= {train_end}; the purge-and-embargo rows follow the rule of the pseudocode below with no validation set. The random row "
+            f"= {train_end}; the purge-and-embargo rows follow the rule of the pseudocode above (temporal_split) with no validation set. The random row "
             f"shuffles the {len(_origins())} origins (in increasing order before the shuffle; SplitMix64 {_seed_text(POLICY_NAME)}) "
             f"and takes the first {len(_policies()[2][1])} as training windows and the next {len(_policies()[2][2])} as holdout windows. "
             f"'holdout label bars' counts the distinct bars among the forecast bars of the holdout windows; the last two columns count "
