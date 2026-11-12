@@ -18,4 +18,5 @@ mod bench_conv_gemm;
 mod kernel_timing;
 mod native_f16;
 mod read_staging_reuse;
+mod serialized_batch_count;
 mod upload_flush;

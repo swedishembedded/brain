@@ -39,8 +39,7 @@ fn backend() -> Option<WgpuBackend> {
     common::backend(&[("axpy", kernels::AXPY)])
 }
 
-/// Queue submissions so far. `Backend::queue_submits` is not implemented by
-/// this backend (it keeps the default 0), so read the counter that is.
+/// Flushed batches so far (`stats().submits`; `queue_submits` is the physical count).
 fn submits(b: &WgpuBackend) -> u64 {
     b.stats().expect("wgpu backend reports stats").submits
 }

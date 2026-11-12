@@ -1096,7 +1096,13 @@ pub struct WgpuBackend {
     profile: bool,
     stats_uniform: std::sync::atomic::AtomicU64,
     stats_bg: std::sync::atomic::AtomicU64,
+    /// Flushed batches: one per `flush_inner` that reached the queue, however many physical queue submissions the
+    /// batch was split into (see `stats_serialized_extra`). This is what `Backend::stats` reports as `submits`, the
+    /// property callers budget ("a layer costs a constant number of submits"), independent of the adapter.
     stats_submit: std::sync::atomic::AtomicU64,
+    /// Queue submissions beyond the first that `flush_serialized` issued: it submits each step of a batch on its
+    /// own, so a batch of `n` steps costs `n - 1` more than `stats_submit` counts. `queue_submits` adds it back.
+    stats_serialized_extra: std::sync::atomic::AtomicU64,
     stats_dispatch: std::sync::atomic::AtomicU64,
     stats_read: std::sync::atomic::AtomicU64,
     stats_write: std::sync::atomic::AtomicU64,
@@ -2000,6 +2006,7 @@ impl WgpuBackend {
             stats_uniform: AtomicU64::new(0),
             stats_bg: AtomicU64::new(0),
             stats_submit: AtomicU64::new(0),
+            stats_serialized_extra: AtomicU64::new(0),
             stats_dispatch: AtomicU64::new(0),
             stats_read: AtomicU64::new(0),
             stats_write: AtomicU64::new(0),
@@ -2069,6 +2076,10 @@ impl WgpuBackend {
     /// next to the steady-state dispatch count.
     #[cfg(not(target_arch = "wasm32"))]
     fn flush_serialized(&self, steps: &[WgpuStep]) {
+        // One batch, however many queue submissions it is split into: `stats().submits` is the caller's budget and
+        // must not depend on whether this adapter needs the workaround. The physical count is `queue_submits`.
+        self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.stats_serialized_extra.fetch_add(steps.len().saturating_sub(1) as u64, std::sync::atomic::Ordering::Relaxed);
         for (kind, bg, gx, gy, _sliced) in steps {
             let mut enc = self
                 .device()
@@ -2083,7 +2094,6 @@ impl WgpuBackend {
                 pass.dispatch_workgroups(*gx, *gy, 1);
             }
             self.queue().submit(Some(enc.finish()));
-            self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.poll_wait_bounded("flush_serialized (Intel ANV sliced-binding workaround)");
         }
     }
@@ -3042,6 +3052,11 @@ impl Backend for WgpuBackend {
             p.acc.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().for_each(|e| *e = (0.0, 0));
             p.unavailable_ticks.store(0, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    fn queue_submits(&self) -> u64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.stats_submit.load(Relaxed) + self.stats_serialized_extra.load(Relaxed)
     }
 
     fn stats(&self) -> Option<backend_api::DeviceStats> {

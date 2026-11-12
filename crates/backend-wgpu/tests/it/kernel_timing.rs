@@ -41,8 +41,37 @@ use crate::common;
 /// `crates/gpu-core/tests/it/device_sharing.rs` exists to prevent. Same fix here.
 static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+const AXPY: usize = 0;
+const MATMUL: usize = 1;
+
 fn backend() -> Option<WgpuBackend> {
-    common::backend(&[("axpy", kernels::AXPY)])
+    common::backend(&[("axpy", kernels::AXPY), ("matmul", kernels::MATMUL)])
+}
+
+/// Queue one dispatch that keeps the device busy for far longer than the host takes to record it, and return the
+/// buffers it uses (alive until the caller is done with the work).
+///
+/// It is ONE naive `matmul` rather than many bandwidth-bound `axpy` dispatches because `submit` force-flushes and
+/// waits for the device once a batch's workgroup count reaches `backend_api::hardware::max_unsynced_workgroups()`
+/// (the preemption safety valve). A batch of 256 `axpy` over 4M words is 4M workgroups, so `submit` itself
+/// drained the device and nothing was outstanding when these tests looked: the "device is still busy" premise
+/// held only when the valve happened to be raised. A matmul's cost is in its inner loop, not in its workgroup
+/// count, so it stays under the valve and still runs for tens of milliseconds.
+fn submit_long_device_work(be: &WgpuBackend) -> [backend_api::DeviceBuffer; 3] {
+    const M: u32 = 512;
+    const N: u32 = 496;
+    const K: u32 = 4_096;
+    let workgroups = u64::from(M * N).div_ceil(64);
+    assert!(
+        workgroups < backend_api::hardware::max_unsynced_workgroups(),
+        "{workgroups} workgroups would trip the unsynchronised-batch valve, which waits for the device inside `submit`"
+    );
+    let x = Backend::storage_init(be, "x", &vec![1.0f32; (M * K) as usize]);
+    let w = Backend::storage_init(be, "w", &vec![1.0f32; (N * K) as usize]);
+    let out = Backend::storage(be, u64::from(M * N));
+    let step = Backend::step(be, MATMUL, &[&x, &w, &out], &[M, K, N], M * N);
+    Backend::submit(be, &[], &[step]);
+    [x, w, out]
 }
 
 /// Turn timing on, or say why the rest of the test cannot run. A device whose
@@ -84,7 +113,7 @@ fn deferring_the_timestamp_readback_loses_no_dispatch() {
     let out = Backend::storage(&be, 1024);
     let inp = Backend::storage_init(&be, "inp", &vec![1.0f32; 1024]);
     for _ in 0..FLUSHES {
-        let steps: Vec<_> = (0..PER_FLUSH).map(|_| Backend::step(&be, 0, &[&out, &inp], &[1024, backend_api::f(1.0)], 1024)).collect();
+        let steps: Vec<_> = (0..PER_FLUSH).map(|_| Backend::step(&be, AXPY, &[&out, &inp], &[1024, backend_api::f(1.0)], 1024)).collect();
         Backend::submit(&be, &[], &steps);
         // Queue it and move on, exactly as a pipelined caller does. Nothing is
         // read back here.
@@ -129,12 +158,7 @@ fn a_timed_flush_returns_before_the_device_has_finished() {
     if !timed(&be) {
         return;
     }
-    const N: u64 = 4 << 20;
-    const DISPATCHES: usize = 256;
-    let out = Backend::storage(&be, N);
-    let inp = Backend::storage_init(&be, "inp", &vec![1.0f32; N as usize]);
-    let steps: Vec<_> = (0..DISPATCHES).map(|_| Backend::step(&be, 0, &[&out, &inp], &[N as u32, backend_api::f(1.0)], N as u32)).collect();
-    Backend::submit(&be, &[], &steps);
+    let _buffers = submit_long_device_work(&be);
 
     let t_flush = std::time::Instant::now();
     Backend::flush(&be);
@@ -143,7 +167,7 @@ fn a_timed_flush_returns_before_the_device_has_finished() {
     Backend::poll_wait(&be);
     let wait_ms = t_wait.elapsed().as_secs_f64() * 1e3;
 
-    println!("timed flush: {flush_ms:.2} ms to queue {DISPATCHES} dispatches, {wait_ms:.2} ms waiting for them");
+    println!("timed flush: {flush_ms:.2} ms to queue the dispatch, {wait_ms:.2} ms waiting for it");
     assert!(
         flush_ms * 4.0 < wait_ms,
         "the timed flush spent {flush_ms:.2} ms against {wait_ms:.2} ms of device work: it is draining the queue itself, so a caller that overlaps host work with device work cannot be measured by this profiler"
@@ -172,13 +196,8 @@ fn dropping_a_shared_handle_does_not_wait_for_the_device() {
     if !timed(&be) {
         return;
     }
-    const N: u64 = 4 << 20;
-    const DISPATCHES: usize = 256;
     let share = be.share_device();
-    let out = Backend::storage(&share, N);
-    let inp = Backend::storage_init(&share, "inp", &vec![1.0f32; N as usize]);
-    let steps: Vec<_> = (0..DISPATCHES).map(|_| Backend::step(&share, 0, &[&out, &inp], &[N as u32, backend_api::f(1.0)], N as u32)).collect();
-    Backend::submit(&share, &[], &steps);
+    let _buffers = submit_long_device_work(&share);
     Backend::flush(&share);
 
     let t_drop = std::time::Instant::now();
@@ -241,7 +260,7 @@ fn a_corrupted_timestamp_readback_is_discarded_not_reported() {
     let out = Backend::storage(&be, 1024);
     let inp = Backend::storage_init(&be, "inp", &vec![1.0f32; 1024]);
     for _ in 0..FLUSHES {
-        let steps: Vec<_> = (0..PER_FLUSH).map(|_| Backend::step(&be, 0, &[&out, &inp], &[1024, backend_api::f(1.0)], 1024)).collect();
+        let steps: Vec<_> = (0..PER_FLUSH).map(|_| Backend::step(&be, AXPY, &[&out, &inp], &[1024, backend_api::f(1.0)], 1024)).collect();
         Backend::submit(&be, &[], &steps);
         Backend::flush(&be);
     }
