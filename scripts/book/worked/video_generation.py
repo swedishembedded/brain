@@ -189,7 +189,7 @@ def attention_split():
         rows.append([name, _int(t), f"{lin / 1e12:.2f}", f"{sa / 1e12:.2f}", f"{(text + ca) / 1e12:.3f}", f"{sa / (lin + text + sa + ca):.2f}",
                      f"{total / 1e12:.1f}", _int(round(crossover_tokens(m)))])
     return ("FLOPs of one block (a multiply-add counted as two) in units of 10^12, from the four d x d matrices of self-attention, the q and o matrices of "
-            "text cross-attention on the T tokens, a feed-forward of two matrices of width d by f (f = 4d for LTX, 8960 and 13824 for the two Wan sizes), "
+            "text cross-attention on the T tokens, a feed-forward of two matrices of width d by f (LTX: d = 4096, f = 4d; Wan 1.3B: d = 1536, f = 8960; Wan 14B: d = 5120, f = 13824), "
             "and the scores plus weighted sum of self-attention (4 T^2 d); the text side (k and v matrices on N = 1024 or 512 context rows, 4 N d^2, and "
             "the cross-attention scores 4 T N d) is shown separately. Left out: norms, rotation, gates, the embedding and output matrices, and the conditioning "
             "networks (each a small fraction of the block matrices). 'Attention share' is the self-attention scores over the whole block. 'Forward' multiplies the block by "
@@ -679,7 +679,13 @@ def av_cross_cost():
     return (f"The 121-frame, 768 x 512 clip at 24 frames per second has T = {_int(t)} video tokens and ta = {ta} audio tokens (width 2048, 32 heads of 64). "
             f"The video stream's self-attention scores {_int(self_pairs)} pairs per head; each cross-attention direction scores T * ta = {_int(cross_pairs)}, "
             f"{cross_pairs / self_pairs:.3f} of that. FLOPs of one block (query, key, value and output matrices, scores and weighted sum; norms, gates and the "
-            f"adaLN tables left out):\n\n"
+            f"adaLN tables left out). The shapes are these. Video stream: the block of the attention-split table (width {dv}, feed-forward width 4 * {dv}, {LTX['ctx']} context rows of width {dv}). "
+            f"Audio stream, width {da}: self-attention with four {da} x {da} matrices over the {ta} audio tokens and the scores 4 ta^2 {da}; text cross-attention whose q and o "
+            f"matrices act on the {ta} audio tokens and whose k and v matrices act on the {LTX['ctx']} context rows, taken at width {da} like the video's (4 * {LTX['ctx']} * {da}^2), with scores 4 ta {LTX['ctx']} {da}; "
+            f"a feed-forward of two {da} x 4 * {da} = {da} x {4 * da} matrices. Cross-attention in each direction works at width {da}, the audio width: with the query stream on the left, "
+            f"its q matrix maps the query stream's width to {da}, its k and v matrices map the other stream's width to {da}, its o matrix maps {da} back to the query stream's width, and the scores and "
+            f"weighted sum cost 4 T ta {da}. The columns below therefore count 2 T {dv} {da} (video q) + 2 (2 ta {da}^2) (audio k, v) + 2 T {da} {dv} (video o) + 4 T ta {da} for audio to video, and "
+            f"2 ta {da}^2 (audio q) + 2 (2 T {dv} {da}) (video k, v) + 2 ta {da}^2 (audio o) + 4 T ta {da} for video to audio:\n\n"
             + _table(["part of the block", "FLOPs"], rows, "lr")
             + f"\n\nThe audio stream and both cross-attentions add {extra / video:.3f} of the video stream's FLOPs.")
 
@@ -784,7 +790,34 @@ def counts_table():
     return (f"Parameters counted from the tensor shapes of each model's checkpoint manifest (weights, biases, norm gains and tables; the {_int(ltx['tensors'])} tensors "
             f"of the LTX-2.5 transformer are 59 outside the blocks, 84 in each of 48 blocks, and 129 in each of two connectors). Per LTX block: video stream "
             f"{_int(ltx['per_block'][0])}, audio stream {_int(ltx['per_block'][1])}, cross-attention {_int(ltx['per_block'][2])}. Per Wan block: {_int(b13)} (1.3B) and {_int(b14)} (14B).\n\n"
-            + _table(["part", "parameters", "share of the LTX transformer"], rows, "lrr"))
+            + _table(["part", "parameters", "share of the LTX transformer"], rows, "lrr")
+            + "\n\n" + counts_inventory())
+
+
+
+def counts_inventory():
+    """The shape rules that reproduce every row of counts_table; kept next to the functions that apply them."""
+    dv, da, layers = LTX["d"], LTX_A["d"], LTX["layers"]
+    w = WAN13
+    return (
+        "The rows follow from these shapes. A *linear* layer of a inputs and b outputs has a b weights and b biases unless it is called bias-free. "
+        f"An LTX attention with query width q, key-value width kv and inner width i (i = q for self-attention and text cross-attention; i = {da} for the audio-video attentions) has the gain vectors of its query and "
+        f"key norms (2 i), a gate with {LTX['heads']} logits computed from the query stream (q {LTX['heads']} weights and {LTX['heads']} biases), and four linear layers with biases: q (q to i), k and v (kv to i) and the output (i to q). "
+        f"A video block ({_int(ltx_params()['per_block'][0])}) holds two such attentions at width {dv} (self-attention, and cross-attention to the {LTX['ctx']} text rows of width {dv}), a bias-free feed-forward of two "
+        f"{dv} x {4 * dv} matrices, a 9 x {dv} table and a 2 x {dv} table of modulation values. An audio block holds the same at width {da} with a feed-forward of two {da} x {4 * da} matrices that has biases "
+        f"(one of {4 * da} and one of {da}), a 9 x {da} table and a 2 x {da} table. The audio-video cross-attention of a block is one attention with q = {dv}, kv = {da}, i = {da} and one with q = {da}, kv = {dv}, i = {da}, "
+        f"plus 5 x {dv} and 5 x {da} modulation values. Outside the blocks: the input projections 128 to {dv} and 128 to {da} and the output projections {dv} to 128 and {da} to 128 (each with a bias), "
+        f"the output tables of 2 x {dv}, 2 x {da} and one more row of {dv}, and eight adaLN networks (a timestep embedding 256 to d to d, each linear with a bias, then d to r d with a bias, "
+        f"where d is the stream's width and r = 9, 2, 4 and 1 rows for the four networks of each stream). Each of the two connectors has 128 registers of its width and eight blocks, "
+        "each an attention at that width (i = q = kv) and a feed-forward with biases of two matrices of width 4 times the width. "
+        f"A Wan block (d = {w['d']} and f = {w['ffn']} for 1.3B; d = {WAN14['d']} and f = {WAN14['ffn']} for 14B) holds a 6 x d modulation table, the gain and bias of one more norm (2 d), two attentions "
+        "(self and text cross-attention) of four d x d linear layers with biases and the gains of two norms (2 d), and a feed-forward d to f to d with biases; outside the blocks are a patch embedding (16 channels "
+        "x 4 pixels of d weights and d biases), a text embedding (4096 to d to d, with biases), a timestep embedding (256 to d to d), a time projection (d to 6 d), and a head (d to 4 x 16 values) with a "
+        "2 x d table. An image-to-video checkpoint widens the patch embedding to 36 channels, adds k and v layers with biases and one norm gain for the image tokens in every block, and an image projection "
+        "(a norm of width 1280 with gain and bias, 1280 to 1280 and 1280 to d with biases, and a final norm of width d with gain and bias). Gemma-4's text tower has 262,144 embedding rows of width 3840 and a final norm of 3840; each of its 48 layers has four norms of 3840, one scalar, "
+        "bias-free q, k, v, o matrices (16 query heads; 8 key-value heads of width 256 in a sliding layer, and in a full layer, every sixth, 1 of width 512 with no v matrix), two norms of the head width (q and k) and a "
+        "bias-free gated feed-forward of three 3840 x 15360 matrices; the two aggregate heads each have a bias. The tensor counts (4,349 for LTX, 825 for Wan 1.3B) are read from the manifests and are data, "
+        "not derived here.")
 
 
 def tower_work():
@@ -797,7 +830,8 @@ def tower_work():
         rows.append([n, f"{tower / 1e12:.2f}", f"{proj_v / 1e12:.3f}", f"{proj_a / 1e12:.3f}"])
     fwd = forward_flops(LTX, LTX_TOKENS)[0]
     return ("FLOPs of encoding a prompt of n tokens (in units of 10^12): the 48 layers' matrices at 2 FLOPs per weight per token (embedding lookups are free; the attention "
-            "among the prompt's own tokens is left out), then the aggregate projections 188160 -> 4096 (video) and 188160 -> 2048 (audio) at 2 * 188160 * width per token.\n\n"
+            "among the prompt's own tokens is left out; the tower has 262,144 embedding rows of width 3840, and the layers' own weights are the tower's parameters minus 262,144 * 3840, "
+            "so the column is 2 * (those weights) * n; layer shapes in the table of counts), then the aggregate projections 188160 -> 4096 (video) and 188160 -> 2048 (audio) at 2 * 188160 * width per token.\n\n"
             + _table(["prompt tokens n", "text tower", "video head", "audio head"], rows, "rrrr")
             + f"\n\nOne video-stream forward of the 121-frame clip is {fwd / 1e12:.1f} x 10^12 FLOPs, and the prompt is encoded once and reused by all of a clip's forwards.")
 

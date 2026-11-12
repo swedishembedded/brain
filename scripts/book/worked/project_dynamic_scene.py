@@ -772,10 +772,20 @@ def sparse_structure():
         f"{sum(two['mask'])} inliers of 43, the tracks outside the model are {[j for j in range(NTRACK) if not two['mask'][j]]} (tracks 40, 41, 42 are the "
         f"balls), the pose has the rotation angle {_rot_deg(two['R']):.3f} degrees (true {_rot_deg(cameras()[BASE_PAIR[1]][0]):.3f}) and the "
         f"translation direction {sfm.dir_error(two['t'], cameras()[BASE_PAIR[1]][1]):.3f} degrees from the true one. The inlier tracks are triangulated (`structure_from_motion."
-        "triangulate`, linear) from the pair and kept if in front of both cameras.", "",
+        "triangulate`, linear) from the pair and kept if in front of both cameras. The sampling is exactly this. A sample is 8 distinct track indices: "
+        "`integer(43)` draws are taken from the generator one after another and a draw equal to an index already in the sample is discarded and drawn again, until 8 are held, "
+        "in draw order. The eight-point algorithm (without refinement) gives a matrix from the sample; every one of the 43 correspondences is scored by its Sampson distance in "
+        f"pixels d, and the hypothesis scores the sum of min(d^2, {PAIR_THRESH_PX:g}^2) (lower is better); a hypothesis replaces the best only when its score is strictly lower, and "
+        "each time it does the cap is lowered to min(cap, the adaptive bound of the inlier fraction of the new best, 8-point samples), with the loop ending when the number of hypotheses "
+        "tried reaches the cap. The inliers of the best (Sampson distance below the threshold) are fitted again by the eight-point algorithm; the pose of that essential matrix is the one of "
+        "the four that puts the most inlier points in front of both cameras; and two rounds of Levenberg-Marquardt on the inliers' Sampson distances refine it, the inliers being recomputed "
+        "from the refined pose after each round (the second round's inliers are the mask above).", "",
         "The other ten frames are registered one at a time by `structure_from_motion.ransac_pnp` on those points (6-point DLT, threshold "
         f"{PNP_THRESH_PX:g} pixels, cap 2000, generator `{RANSAC_NAME}.pnp.<v>` for frame v), each refined by 30 Levenberg-Marquardt iterations on "
-        "its inliers with the points held:", "",
+        "its inliers with the points held. Frames are registered in increasing order, 1, 2, 3, 5, ..., 11 (frames 0 and 4 are the pair), each from a fresh generator of its own name; "
+        "a sample is 6 distinct indices of the pair's points drawn as above with `integer(n)`, n the number of triangulated points; the 6-point DLT gives a pose; "
+        f"the score is the sum of min(d^2, {PNP_THRESH_PX:g}^2) of the reprojection distances d in pixels, replaced only by a strictly lower one, with the cap lowered as above "
+        "(sample size 6); the best pose's inliers (reprojection below the threshold) are the points of the refinement:", "",
         _table(["frame", "iterations", "inliers"], reg, "rrl"), "",
         f"The adjustment (`structure_from_motion.Problem`: frame {BASE_PAIR[0]} held, frame {BASE_PAIR[1]} the scale camera, the other ten free, "
         f"Huber threshold 2 pixels, lambda starting at 1e-3). Each inlier track is triangulated linearly from the observations of the frames whose "
@@ -963,7 +973,7 @@ def planted():
         ["1", "half a pixel", "shift of every projection in the 32 by 24 image (pixels)", f"{shift[0]:.3f} and {shift[1]:.3f}"],
         ["1", "", "the same shift at 640 by 480 (pixels); at depth 5.2 m (metres)", f"{20 * shift[0]:.1f}; {abs(shift[0]) * 5.2 / FS:.4f}"],
         ["1", "", "squared error between the two renders of the true scene, frames 11 and 17", f"{hm[0]:.3e}; {hm[1]:.3e}"],
-        ["2", "transposed rotation", "camera-centre error at frames 1, 4, 11 (metres)", ", ".join(f"{cent[v]:.3f}" for v in (1, 4, 11))],
+        ["2", "transposed rotation", "camera-centre error at frames 1, 4, 11 (metres): the cameras recovered in milestone 2, scaled, with R transposed, against the true centres", ", ".join(f"{cent[v]:.3f}" for v in (1, 4, 11))],
         ["2", "", "RMS reprojection error of the 40 points, 12 frames (pixels at 640 by 480); share in front", f"{rms:.1f}; {front:.3f}"],
         ["3", "no clamp", "ball C's predicted x past the clamp box at frames 12 .. 17 (metres)", ", ".join(f"{max(0.0, o):.3f}" for o in over)],
     ]
@@ -1009,6 +1019,7 @@ def opening():
 SAMPSON_FLOPS = 45          # a hand count of `structure_from_motion.sampson_px`: two matrix-vector products (15 each), 7 for the denominator, 5 for the numerator, 3
 REPROJ_FLOPS = 40           # a hand count of `structure_from_motion.reproj_px`: a rotation and a translation (18), the division and focal length (6), the hypot (4), the rest
 BYTES = 4                   # 32-bit values
+RIDGE_FIT_OPS = 260         # a hand allowance per ridge fit: the sums of the normal equations are 10 transitions x 12 products and sums x 2 = 240, and 20 more cover the ridge and the 3 by 3 elimination
 
 
 def bill_rows():
@@ -1032,12 +1043,12 @@ def bill_rows():
          rec["two"]["iters"] * NTRACK * SAMPSON_FLOPS, "-", NTRACK * 4 * BYTES],
         ["registration: RANSAC scoring", f"{reg_iters} hypotheses (10 frames) x {len(rec['ids'])} points x {REPROJ_FLOPS}",
          reg_iters * len(rec["ids"]) * REPROJ_FLOPS, "-", len(rec["ids"]) * 5 * BYTES],
-        ["adjustment", f"{tries} damped steps x 2 x {reduced:,.0f} multiply-adds (Schur, {nc} camera unknowns, {npt} points, {k:.0f} views each)",
+        ["adjustment", f"{tries} damped steps x 2 x {reduced:,.2f} multiply-adds (Schur, {nc} camera unknowns, {npt} points, {k:.0f} views each)",
          int(2 * reduced * tries), "-", int(mem_r / 8 * BYTES)],
         ["fit: forward", f"{updates} loss evaluations x 12 frames x ({nG} Gaussians x {gs.PROJECT_FLOPS} + {pairs_frame:,} pairs x {gs.PAIR_FLOPS})",
          updates * OBSERVED * per_frame_fwd, "-", OBSERVED * 2 * H * W * 3 * BYTES],
         ["fit: backward", f"{updates - 1} updates x 12 frames x {pairs_frame:,} pairs replayed (not counted in operations)", "-", "-", OBSERVED * nG * 14 * BYTES],
-        ["dynamics", "6 ridge fits (10 transitions, 3 features) and 2 rollouts of 6 frames", 6 * 260 + 2 * 6 * 3 * 2 * 4, "-", 0],
+        ["dynamics", "6 ridge fits (10 transitions, 3 features) and 2 rollouts of 6 frames", 6 * RIDGE_FIT_OPS + 2 * 6 * 3 * 2 * 4, "-", 0],
         ["held-out frames", f"4 predictions x {HELD} frames x ({nG} x {gs.PROJECT_FLOPS} + {pairs_frame:,} x {gs.PAIR_FLOPS})", 4 * HELD * per_frame_fwd, "-", 4 * HELD * H * W * 3 * BYTES],
     ]
     return rows, dict(pairs_frame=pairs_frame, per_frame_fwd=per_frame_fwd, nG=nG, updates=updates, tries=tries, reduced=reduced, mem_r=mem_r,
@@ -1059,7 +1070,12 @@ def bill():
     upd_flops = OBSERVED * c["per_frame_fwd"]
     return "\n".join([
         "Operations (a multiply or an add is one; the counts of `gaussian_splatting`: 260 per Gaussian for the projection, 21 per pair) and bytes "
-        "(32-bit values) of every stage, counted from the loops. 'Bytes' is what one pass of the stage moves: the observations, the matrix that is factored, the images read and written, the gradients written.", "",
+        "(32-bit values) of every stage, counted from the loops. 'Bytes' is what one pass of the stage moves: the observations, the matrix that is factored, the images read and written, the gradients written. "
+        f"Counting rules. Adjustment: one damped step costs P (54 k + 108 k^2) + nc^3 / 6 multiply-adds, with P = {c['npt']} points, k = {c['k']:.0f} views each and nc = {c['nc']} camera unknowns "
+        f"(6 per camera but two, plus 5), which is {c['reduced']:,.4f} per step, and the table's count is 2 x that x {c['tries']} steps = {2 * c['reduced'] * c['tries']:,.2f}, cut to an integer; its bytes are "
+        f"4 (nc^2 + 9 P) = {int(c['mem_r'] / 8 * BYTES):,} (the reduced matrix and the 3 by 3 block of each point). Dynamics: each of the 6 ridge fits (3 balls x 2 coordinates) is "
+        f"{RIDGE_FIT_OPS} (a hand allowance: the sums are 10 x 12 x 2 = 240 and 20 cover the ridge and the elimination), and each of the 2 rollouts (clamped and unclamped) is 6 frames x 3 balls x 2 coordinates x 4 "
+        "(p' = c + a p + b q is two multiplies and two adds) = 144, so 6 x 260 + 2 x 144 = 1,848. The tracks row is 12 x 43 x 2 values of 4 bytes.", "",
         _table(["stage", "count", "operations", "share", "bytes"], out_rows, "llrrr"), "",
         f"The total is {total:,} operations, of which the forward passes of the fit are {100.0 * rows[4][2] / total:.1f}%. A render visits every record at every "
         f"pixel, {c['pairs_frame']:,} pairs a frame for the starting scene (and {pairs_end} for the 12 frames of the fitted scenes: no Gaussian is "
@@ -1104,7 +1120,7 @@ def acceptance_tests():
         (6, "held-out mean squared error: clamped, unclamped, held, true balls, copied", ", ".join(cell("clean", mean_mse(n), e2) for n in ("model", "free", "persist", "truth", "copy")), "the digits shown"),
         (7, "half pixel: shift (pixels); squared error of the two renders, frames 11 and 17", f"{shift[0]:.3f}; {hm[0]:.2e}, {hm[1]:.2e}", "1e-3; 1e-2 relative"),
         (7, "half pixel: held-out error; training loss", f"{cell('half', mean_mse('model'), e2)}; {cell('half', lambda r: r['curve'][FIT_STEPS], e2)}", "the digits shown"),
-        (7, "transposed: centre error at frame 11 (metres); RMS reprojection (pixels)", f"{cent[11]:.3f}; {rms:.1f}", "1e-3; 0.1"),
+        (7, "transposed (milestone-2 cameras, not the true ones): centre error at frame 11 (metres); RMS reprojection (pixels)", f"{cent[11]:.3f}; {rms:.1f}", "1e-3; 0.1"),
         (7, "transposed: held-out error; training loss", f"{cell('transposed', mean_mse('model'), e2)}; {cell('transposed', lambda r: r['curve'][FIT_STEPS], e2)}", "the digits shown"),
         (8, "operations of the whole loop; forward passes of the fit; pairs per frame", f"{total:,}; {bill_r[4][2]:,}; {bc['pairs_frame']:,}", "exact"),
     ]

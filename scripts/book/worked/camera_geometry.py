@@ -265,7 +265,12 @@ def rotvec_of(R):
     c = (R[0][0] + R[1][1] + R[2][2] - 1.0) / 2.0
     th = math.atan2(s, c)
     if s < 1e-9:
-        return [x / 2.0 for x in w] if c > 0 else [th * x for x in _axis_from_diagonal(R)]
+        if c > 0:
+            return [x / 2.0 for x in w]
+        ax = _axis_from_diagonal(R)
+        if sum(x * y for x, y in zip(ax, w)) < 0:       # the skew part, however small, still says which way the axis points
+            ax = [-x for x in ax]
+        return [th * x for x in ax]
     return [x * th / (2.0 * s) for x in w]
 
 
@@ -392,8 +397,10 @@ def half_turn_loss():
         rows.append([f"{delta:.1e}", sci(e1), sci(e2)])
     return ("Rotations of angle pi - delta about the axis (1, 2, 2) / 3, built by Rodrigues' formula and read back. The error is the "
             "length of the difference between the recovered and the original rotation vector. 'acos' takes the angle as "
-            "acos((tr R - 1) / 2) and, within 1e-6 of pi, the axis from the diagonal; 'atan2' takes it as atan2(|w| / 2, "
-            "(tr R - 1) / 2) with w the skew part of R.\n\n"
+            "acos((tr R - 1) / 2) and, within 1e-6 of pi, the axis from the diagonal; otherwise it multiplies the skew part w of R "
+            "(w = [R21 - R12, R02 - R20, R10 - R01]) by th / (2 sin th), with th the angle just taken and sin th the sine of that angle "
+            "(not |w| / 2, which gives different digits near pi). 'atan2' takes the angle as atan2(|w| / 2, "
+            "(tr R - 1) / 2) and multiplies w by th / (2 sin th) with sin th = |w| / 2; when |w| / 2 < 1e-9 it takes the axis from the diagonal, signed by w.\n\n"
             + _table(["delta", "error with acos", "error with atan2"], rows))
 
 
@@ -432,7 +439,9 @@ def gimbal_lock():
            _table(["pitch", "(yaw, roll)", "yaw - roll", "R[0][1]", "R[1][1]", "R[2][2]"], rows, "lrrrrr"), "",
            f"At pitch 90 degrees, (yaw, roll) = (30, 10) and (40, 20) give matrices that differ by {sci(_maxdiff(R1, R2))}. "
            f"Reading the angles back from that matrix gives (yaw, pitch, roll) = ({math.degrees(yw):.4f}, "
-           f"{math.degrees(pt):.4f}, {math.degrees(rl):.4f}) degrees, with the yaw set to 0 by the rule of the chapter."]
+           f"{math.degrees(pt):.4f}, {math.degrees(rl):.4f}) degrees. The extraction rule: pitch = asin(-R[2][0]); when |R[2][0]| is within 1e-12 of 1, "
+           "yaw is set to 0 and roll = atan2(-R[2][0] * R[0][1], R[1][1]); otherwise yaw = atan2(R[1][0], R[0][0]) and "
+           "roll = atan2(R[2][1], R[2][2])."]
     return "\n".join(out)
 
 
@@ -903,8 +912,10 @@ def calibration_noisy():
             "coordinate, one `normal()` call each (70 a view, 350 in all). "
             "Values are printed to two decimals; the runs of the closed form are stable to that.\n\n"
             + _table(["parameter", "true", "closed form"], rows, "lrr") + "\n\n"
-            f"Reprojection RMS over the {sum(len(v) for v in views)} corners: {rms_fit:.4f} pixels for the recovered parameters "
-            f"and {rms_true:.4f} pixels for the true parameters on the same noisy corners (the noise floor: "
+            f"Reprojection RMS over the {sum(len(v) for v in views)} corners: {rms_fit:.4f} pixels for the recovered parameters, with the "
+            "poses the closed form gives from the noisy homographies (lambda' = 2 / (|K^-1 h1| + |K^-1 h2|), the mean of the two column lengths, "
+            "for each view), "
+            f"and {rms_true:.4f} pixels for the true K with the true poses of the table of views, on the same noisy corners (the noise floor: "
             f"{SIGMA_PX} sqrt(2) = {SIGMA_PX * math.sqrt(2):.4f} for the expectation).")
 
 

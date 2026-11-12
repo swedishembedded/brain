@@ -357,7 +357,7 @@ def toy_costs():
     for t, cur in enumerate(fr):
         intra = entropy_bits([p - 128 for p in _flat(cur)])
         if t == 0:
-            rows.append((t, intra, intra, intra, None, None))
+            rows.append((t, intra, intra, intra, sum(1 for p in _flat(cur) if p != 128), None))
             continue
         prev = fr[t - 1]
         zero = entropy_bits(_flat(_residual(cur, prev, [(0, 0)] * 16)))
@@ -373,7 +373,7 @@ def toy_table():
     out_rows = []
     for t, intra, zero, mv, nz, vecs in rows:
         if vecs is None:
-            out_rows.append([t, f"{intra:.1f}", f"{intra:.1f}", f"{intra:.1f}", "256", "-"])
+            out_rows.append([t, f"{intra:.1f}", f"{intra:.1f}", f"{intra:.1f}", nz, "-"])
         else:
             uniq = sorted(set(vecs))
             vs = "all " + str(uniq[0]) if len(uniq) == 1 else "mixed: " + ", ".join(f"{u} x {vecs.count(u)}" for u in uniq)
@@ -564,7 +564,7 @@ def frame_pick():
     out = ("A clip of 30 frames at 30 frames per second in a Matroska file, whose stored times, in thousandths of a second, are floor(i * 10^9 / 30 / 10^6) "
            f"({', '.join(str(mkv_ms(i, 30, 1)) for i in range(8))}, ...). Asked for 12 frames per second, output j is the instant "
            "(stored time of frame 0) + j / 12 and takes the source frame whose time is nearest, a tie to the earlier frame, where 'tie' "
-           "means within a thousandth of a second of the midpoint of two stored times.\n\n"
+           "means at most a thousandth of a second above the midpoint of two stored times (an instant below the midpoint is the earlier frame's anyway).\n\n"
            + _table(["j", "instant (thousandths)", "position in frames", "frame, with the tie rule", "frame, strict midpoint"], rows, "lrrrr"))
     n48 = 48
     t48 = [mkv_ms(i, 24, 1) / 1000 for i in range(n48)]
@@ -699,7 +699,7 @@ def saving_table():
         pos = lf * (h // 32) * (w // 32)
         rows.append([name, f"{pix:,}", f"{planar:,}", f"{lat:,}", f"{pos:,}", f"{pos * pos:,}", f"{pix / lat:.1f}", f"{planar / lat:.1f}"])
     return ("Values of the pixels (3 per pixel), of the 4:2:0 planes (1.5 per pixel) and of the latent (128 per position), and the number of latent "
-            "positions (frames * height / 32 * width / 32), and the square of that number, the pairs of positions an attention layer would score.\n\n"
+            "positions (latent frames * height / 32 * width / 32, where latent frames = 1 + (F - 1) / 8 for F video frames), and the square of that number, the pairs of positions an attention layer would score.\n\n"
             + _table(["clip", "RGB values", "4:2:0 values", "latent values", "latent positions", "pairs of positions", "RGB / latent", "4:2:0 / latent"], rows, "lrrrrrrr"))
 
 

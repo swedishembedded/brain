@@ -388,7 +388,7 @@ def sparse_network():
             f"$E_{{\\mathrm{{exc}}}} = {p['e_exc']}$, $E_{{\\mathrm{{inh}}}} = {p['e_inh']}$, 1 refractory tick, excitatory keep factor "
             f"{1 - p['a_syn']:.1f}, inhibitory keep factor {1 - p['a_inh']:.1f}, adaptation decay {p['adapt_decay']} and increment "
             f"{p['adapt_inc']}, pool release {p['std_release']} and refill {p['std_recover']:.6f} per tick. {ticks} ticks, "
-            f"all state at rest at the start. The floor of 5 synapses removes the edge 1 to 2 (4 synapses) and nothing else. "
+            f"all state at rest at the start (every synaptic pool starts full, at 1.0; the tick numbers below count from 1, so the first tick is 1, unlike the block of the crate's own test earlier in the chapter, which counts from 0). The floor of 5 synapses removes the edge 1 to 2 (4 synapses) and nothing else. "
             f"Smallest distance of any threshold decision from the threshold, over both runs: "
             f"{min(margins):.1e}.\n\n{t}")
 

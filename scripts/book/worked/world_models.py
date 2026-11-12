@@ -256,7 +256,7 @@ def track_fit():
     ks = [1, 2, 4, 8, 16, 32]
     roll = [(k, f"{err[k]:.3f}", f"{100 * outside[k]:.1f}%") for k in ks]
     return "\n".join([
-        f"The real cart: v' = 0.9 v + 0.5 a, x' = x + v' on a track [0, 10], and a wall stops it (x' is clamped and v' = 0). "
+        f"The real cart: v' = 0.9 v + 0.5 a, x' = x + v' on a track [0, 10], and a wall stops it (when x' < 0 the cart is put at x' = 0, and when x' > 10 at 10, with v' = 0 in both cases). "
         f"Data: {N_FIT} transitions from the stream `{FIT_NAME}` (seed {_seed(FIT_NAME)}); for each, in order, x = 10 u, "
         f"v = -2 + 4 u (two `uniform()` draws) and a = `integer(3)` - 1; {hits} of the {N_FIT} end on a wall. The model is the "
         "least-squares solution of the normal equations (Gauss-Jordan, partial pivoting) for x' and for v' on the features "
@@ -268,7 +268,7 @@ def track_fit():
         "",
         f"Free-running error: {ROLL_N} rollouts of {ROLL_K} steps from the stream `{ROLL_NAME}` (seed {_seed(ROLL_NAME)}); "
         "for each rollout, in order, x = 10 u (v starts at 0), then for each step a = `integer(3)` - 1. The real cart and the model "
-        "take the same actions; the model is fed its own output. The error is |x_model - x_real|, averaged over the rollouts. "
+        "take the same actions; the model is fed its own output and is never clamped (it knows no walls), and 'off the track' counts the model rollouts whose position is below 0 or above 10 at step k. The error is |x_model - x_real|, averaged over the rollouts. "
         f"Fed the true state at every step instead, the model's mean one-step position error over all {ROLL_N * ROLL_K} steps is "
         f"{teacher:.3f}.",
         "",
@@ -369,10 +369,12 @@ def latent_action_toy():
         f"the order of the first block), drawn as `integer(5)` from the stream `{LAT_NAME}.actions` (seed "
         f"{_seed(LAT_NAME + '.actions')}), starting at (0, 0). A localiser reports each of the {LAT_N + 1} positions plus normal noise "
         f"of the stated spread on both coordinates, two `normal()` draws per position (x then y) from `{LAT_NAME}.noise` (seed "
-        f"{_seed(LAT_NAME + '.noise')}). The displacement of a step is the difference of two reports with each coordinate wrapped into "
+        f"{_seed(LAT_NAME + '.noise')}). All {LAT_N} actions are drawn first, then the noise. An action moves the square by (dx, dy) = noop (0, 0), up (0, -1), left (-1, 0), down (0, +1), right (+1, 0), "
+        "with the coordinates taken mod 8 (y grows downward). The displacement of a step is the difference of two reports with each coordinate wrapped into "
         "[-4, 4) by d - 8 floor(d / 8 + 1/2). The displacements are clustered by k-means with a farthest-point start (the first point "
-        "and then, k - 1 times, the point farthest from its nearest chosen centre, the first on a tie) and Lloyd rounds until the "
-        "assignment is unchanged; purity is the fraction of steps whose cluster's most common true action is their own.",
+        "and then, k - 1 times, the point farthest from its nearest chosen centre, the first on a tie) and Lloyd rounds (assign each point to "
+        "the nearest centre, the lowest-numbered on a tie; a centre becomes the mean of its points, an empty cluster keeps its centre) until the "
+        "assignment is unchanged (at most 100 rounds); codes are numbered in the order the centres were chosen; purity is the fraction of steps whose cluster's most common true action is their own.",
         "",
         _table(["localiser error", "codes k", "codes used", "purity"], rows, "rrrr"),
         "",
@@ -524,10 +526,12 @@ def _mode_stats(n, p, std):
         return _euler_sample(x0, sg, bias)
 
     lo, hi = -12.0 * std, 12.0 * std
+    # P(f(x0) > 0.9) and P(f(x0) < -0.9) for the increasing map f; when f is already beyond the level at the left end of the search
+    # interval (12 standard deviations) every start is on that side, and when it never reaches the level at the right end none is.
     t_hi = _threshold(f, 0.9, lo, hi)
     t_lo = _threshold(f, -0.9, lo, hi)
-    plus = 0.0 if t_hi is None else 1.0 - _phi(t_hi / std)
-    minus = 0.0 if t_lo is None else _phi(t_lo / std)
+    plus = (1.0 if f(lo) > 0.9 else 0.0) if t_hi is None else 1.0 - _phi(t_hi / std)
+    minus = (1.0 if f(hi) < -0.9 else 0.0) if t_lo is None else _phi(t_lo / std)
     return plus, minus, 1.0 - plus - minus
 
 
@@ -649,13 +653,23 @@ def diamond_counts():
     per_step = [(n, f"{n * tf / 1e9:.3f}", f"{15 * n * tf / 1e12:.4f}") for n in (1, 2, 3)]
     weight_bytes = 4 * tp
     return "\n".join([
-        "The UNet of the Atari model, built from its config: 64 by 64 frames of 3 channels, 4 context frames stacked on the channels "
-        "(15 input channels, plus the 3 of the noisy frame in the same convolution), 4 levels of 64 channels with 2 residual blocks "
+        "The UNet of the Atari model, built from its config: 64 by 64 frames of 3 channels, the 4 context frames and the noisy frame "
+        "stacked on the channels (5 frames of 3 channels: 15 input channels in all), 4 levels of 64 channels with 2 residual blocks "
         "a level on the way down and 3 on the way up, the sampling convolutions between levels (stride 2 down, nearest-neighbour "
         "doubling and a 3 by 3 convolution up), two residual blocks with self-attention at 8 by 8 in the middle (64 positions, "
         "head width 8), conditioning width 256, 4 actions. A convolution costs 2 c_in c_out k^2 per output pixel; attention costs "
         "2 n c (3 c) for the projections, 2 n^2 c for the scores, 2 n^2 c for the weighted sum and 2 n c^2 for the output "
-        "projection, for n = 64 positions.",
+        "projection, for n = 64 positions. Inventory of the parameters: a residual block from c_in to c_out channels has two conditioned "
+        "norms, the first over c_in channels and the second over c_out, each a linear layer from the 256-vector to a scale and a shift "
+        "per channel (2 c_in * 256 + 2 c_in, and 2 c_out * 256 + 2 c_out); a 3 by 3 convolution c_in to c_out and one c_out to c_out, both "
+        "with biases; and, only when c_in differs from c_out (the blocks of the way up, whose input is the 64 channels of the path "
+        "joined to the 64 of the skip connection, 128 to 64), a 1 by 1 shortcut convolution with a bias. The middle's two blocks each "
+        "add a norm (gain and bias), a 1 by 1 query-key-value convolution 64 to 192 with a bias and a 1 by 1 output convolution with a "
+        "bias. 'Conditioning' is 384 + 2 * (256 * 256 + 256) = 131,968 parameters: 128 for the noise-level embedding (2 * 64), 256 "
+        "for the action table (4 actions of 64 values, so that the 4 context frames' actions fill the 256-vector) and two 256 by 256 "
+        "linear layers with biases. The sampling convolutions are 3 by 3, 64 to 64 with a bias, three down and three up. The FLOP "
+        "table counts the up blocks' 128 to 64 shortcuts, and each block's first convolution, at the resolution of the block's "
+        "output; a sampling convolution on the way up runs after the doubling, so at the larger resolution.",
         "",
         _table(["parameters", "count", "share"], rows, "lrr"),
         "",
@@ -682,6 +696,27 @@ def _attn_params(d, inner, hd):
 
 def _ff_params(d, inner):
     return 2 * d + 2 * inner * d + d * inner
+
+
+def genie_inventory():
+    """The shape rules behind genie_counts, with the numbers computed from the same functions."""
+    d, inner, hd, ffi = 512, 512, 64, 1365
+    peg = 27 * d + d
+    att = _attn_params(d, inner, hd)
+    ff = _ff_params(d, ffi)
+    half = _stblock_params(d, inner, hd, ffi) // 2
+    return (
+        f"A block is two halves (spatial, then temporal) of the same shape. A half holds a depthwise 3 by 3 by 3 convolution over the channels (PEG: 27 weights "
+        f"and a bias per channel, {_int(peg)} at width {d}); an attention ({_int(att)}: two vectors of {hd} per-head-dimension scales for the queries and keys (2 * {hd}), "
+        f"a norm gain and its unused bias buffer and the unused context-norm gain and bias buffer (4 * {d}), a query matrix {d} to {inner}, a fused key-value "
+        f"matrix {d} to 2 * {inner}, and an output matrix {inner} to {d}, none with a bias); and a gated feed-forward ({_int(ff)}: a norm gain and bias buffer (2 * {d}), an input matrix {d} to "
+        f"2 * {ffi} whose two halves are the value and the gate of a GEGLU, and an output matrix {ffi} to {d}, without biases). That is {_int(half)} for a half, {_int(2 * half)} "
+        f"for a block, and 15 tensors a half (2 for the PEG, 9 for the attention, 4 for the feed-forward). The output gain of a stack is a gain and a bias buffer (2 * width). "
+        f"A position-bias MLP maps a 2-vector to the width h, then h to h, then h to 8 heads, each linear with a bias. A patch embedding is a norm over the 48 values of a 4 by 4 patch of 3 channels "
+        f"(gain and bias), a linear layer 48 to {d} with a bias and a norm over {d} (gain and bias); a pixel head is a linear layer {d} to 48 with a bias. "
+        f"The quantizer is a linear layer {d} to 32 with a bias, a codebook of 1024 vectors of 32, a linear layer 32 to {d} with a bias, and the buffers the importer "
+        "reads: one initialised flag, 1024 cluster counts and 1024 vectors of 32 for the moving average. The dynamics works at width 519 (512 plus 7 action channels) with feed-forward width 1384; "
+        "its token embedding has 1025 rows of 512 (1024 codes and a mask), its position embedding 4000 rows of 512, and its logits are a linear layer 519 to 1024 with a bias. ")
 
 
 def _stblock_params(d, inner_attn, hd, ffi):
@@ -725,8 +760,8 @@ def genie_counts():
         "Parameters of the two networks of the GenieRedux checkpoints brain imports, counted from their shapes: width 512 (519 in the "
         "dynamics: 512 plus 7 action channels), 8 heads of width 64, feed-forward inner width 1365 (1384), a 3 by 3 by 3 depthwise "
         "convolution (PEG) and an attention and a feed-forward in each of the spatial and temporal halves of a block. The attention has "
-        "no biases; the tensors the importer reads and discards (the unused context norm and the quantizer's moving-average "
-        "buffers) are counted because they are in the file.",
+        "no biases; the tensors the importer reads and discards (the unused context norm and the quantizer's exponential-moving-average (EMA) "
+        "buffers) are counted because they are in the file. " + genie_inventory(),
         "",
         _table(["part", "parameters"], rows, "lr"),
         "",
@@ -771,6 +806,9 @@ def genie_context():
         "",
         _table(["frames t", "tokens n", "pairs, space then time", "pairs, one causal sequence", "ratio"], rows, "rrrrr"),
         "",
+        "Per token and per block the linear parts are, in multiply-adds and for each of the two halves, a query matrix 519 to 512, a key-value matrix 519 to 1024, an output "
+        "matrix 512 to 519, a feed-forward input 519 to 2 * 1384, an output 1384 to 519 (three feed-forward matrices of that size in all, counting the gate) and the PEG's 27 per channel "
+        "(27 * 519). Pairs scored for the new frame alone are 256^2 within the frame plus 256 t to the t frames of the clip. "
         "TFLOPs of one forward pass of the 12-block dynamics over t frames of context (the linear layers and the PEG at 2 FLOPs per "
         "multiply-add, and attention at 4 * 512 FLOPs per pair scored: scores and weighted sum; the logits and the elementwise work are "
         "left out), the way brain runs it, with every frame recomputed; and the work that would remain if the keys, values and PEG "
@@ -851,7 +889,7 @@ def pacing_arithmetic():
         "",
         "The quality controller: a tick is an overrun when its work exceeds the budget (equal is not an overrun); after 5 overruns "
         "in a row the quality code goes down one level (code 0 = 3 evaluations, 1 = 2, 2 or more = 1), after 30 ticks in a row "
-        "within budget it goes up one; an overrun resets the count of good ticks and a good tick the count of overruns. A "
+        "within budget it goes up one; a tick lasts from its start until the later of the end of its work and its deadline (so max(work, budget) when the loop has no slack in hand), and the next deadline is the later of that instant and the old deadline, plus the budget; an overrun resets the count of good ticks and a good tick the count of overruns. A "
         "hypothetical machine that takes w milliseconds for each evaluation, a target of 15 frames a second (budget 66 milliseconds), 400 ticks, "
         "counted over the last 175 (the first run listed is the tail of a longer one):",
         "",

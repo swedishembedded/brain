@@ -209,7 +209,7 @@ The scene is a texture of 16 rows and 24 columns of integers 0 .. 255, drawn by 
 
 | frame | alone (bits) | difference (bits) | motion (bits) | non-zero residuals | vectors (dx, dy) |
 |---|---:|---:|---:|---:|---|
-| 0 | 1838.8 | 1838.8 | 1838.8 | 256 | - |
+| 0 | 1838.8 | 1838.8 | 1838.8 | 255 | - |
 | 1 | 1847.9 | 1894.5 | 224.6 | 16 | all (1, 0) |
 | 2 | 1856.9 | 1902.0 | 222.6 | 16 | all (1, 0) |
 | 3 | 1853.2 | 1894.5 | 224.6 | 16 | all (1, 0) |
@@ -306,10 +306,10 @@ The unit test of these files, `crates/videocodec/tests/roundtrip.rs`, writes a 3
 
 A model does not read 1440 frames; it reads a few dozen, chosen from the clip. How they are chosen is a use of the timestamps, and it is where the one-millisecond clock of the Matroska file shows. `crates/imaging/src/video.rs` selects frames from the stream's own timestamps. For a requested rate $r$ the output instants are $s_j = t_{\mathrm{first}} + j/r$, and the output at $s_j$ takes the source frame whose time is nearest to it. Between two frames the boundary is the midpoint of their times, and an instant at the midpoint belongs to the earlier frame; to the precision of the container's clock, in fact, an instant within a millisecond above the midpoint belongs to the earlier frame, because the stored times are the true times rounded down by up to a millisecond. After the last frame an instant is still covered if it falls within one more frame interval of that frame's time.
 
-A clip of 30 frames per second asked for 12 frames per second shows the need. Every frame of the clip is 2.5 source frames from the next output, so every second output instant falls exactly on a midpoint.
+A clip of 30 frames per second asked for 12 frames per second shows the need. Every output is 2.5 source frames from the next, so every second output instant falls exactly on a midpoint.
 
 <!-- worked: video.frame_pick -->
-A clip of 30 frames at 30 frames per second in a Matroska file, whose stored times, in thousandths of a second, are floor(i * 10^9 / 30 / 10^6) (0, 33, 66, 100, 133, 166, 200, 233, ...). Asked for 12 frames per second, output j is the instant (stored time of frame 0) + j / 12 and takes the source frame whose time is nearest, a tie to the earlier frame, where 'tie' means within a thousandth of a second of the midpoint of two stored times.
+A clip of 30 frames at 30 frames per second in a Matroska file, whose stored times, in thousandths of a second, are floor(i * 10^9 / 30 / 10^6) (0, 33, 66, 100, 133, 166, 200, 233, ...). Asked for 12 frames per second, output j is the instant (stored time of frame 0) + j / 12 and takes the source frame whose time is nearest, a tie to the earlier frame, where 'tie' means at most a thousandth of a second above the midpoint of two stored times (an instant below the midpoint is the earlier frame's anyway).
 
 | j | instant (thousandths) | position in frames | frame, with the tie rule | frame, strict midpoint |
 |---|---:|---:|---:|---:|
@@ -438,7 +438,7 @@ The first latent frame covers one pixel frame, the rest eight, and together they
 The point of the construction is to give an attention layer, in the next chapter, fewer positions to attend over. The table counts what a clip is as pixel values, as planar values and as latent values, and how many positions the latent has.
 
 <!-- worked: video.saving_table -->
-Values of the pixels (3 per pixel), of the 4:2:0 planes (1.5 per pixel) and of the latent (128 per position), and the number of latent positions (frames * height / 32 * width / 32), and the square of that number, the pairs of positions an attention layer would score.
+Values of the pixels (3 per pixel), of the 4:2:0 planes (1.5 per pixel) and of the latent (128 per position), and the number of latent positions (latent frames * height / 32 * width / 32, where latent frames = 1 + (F - 1) / 8 for F video frames), and the square of that number, the pairs of positions an attention layer would score.
 
 | clip | RGB values | 4:2:0 values | latent values | latent positions | pairs of positions | RGB / latent | 4:2:0 / latent |
 |---|---:|---:|---:|---:|---:|---:|---:|
