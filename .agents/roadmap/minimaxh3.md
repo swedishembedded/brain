@@ -1350,3 +1350,15 @@ step is 1.45x its neighbours (a 0.88 change against a median of 1.10), and
 no frame repeats. H3 needs no windowing for its whole duration range, so
 this is its long-clip case.
 
+**Repeatability, and the case H3 does not hold.** Same 768x448 x 124
+setup at seed 12: stills from one shot pass again (worst step 1.16x, every
+still at exactly its frame). With the frame-62 still from another
+composition, seed 12 CUTS from that composition back to the ends' at frame
+81 (15.5x) while still reaching all three stills at their frames - where
+seed 11 dissolved. Holding the interior keyframe weaker does not remove it:
+its rows noised to and announced at t = 0.8 and 0.5 cut at the same frame
+(14.7x, 13.6x) and only reach the mid still less closely (4.00 -> 5.82 ->
+8.59), so that change was not kept. Stills no continuous motion connects
+are cut between at some seeds; LTX-2.5 at keyframe strength 0.8 dissolves
+between them at every seed measured.
+

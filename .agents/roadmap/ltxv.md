@@ -9364,6 +9364,16 @@ gradually (3.7, 3.2, 2.8, 2.3, 1.8), worst step 1.76x - a 0.44 change in a
 stretch around frames 30-50 where the motion eases down and back up - and
 frame 0 the file's only key frame.
 
+Repeatability on the final defaults, 97 frames at 768x448, criterion fixed
+beforehand (every still closest at exactly its frame, no step above 2x its
+neighbours): prompt 1 at seeds 12 and 13 with five same-shot anchors (worst
+1.35x, 1.33x) and with the other-composition mid still (1.35x, 1.12x); a
+second prompt (a woman walking through a night market, its own stills from
+an unconditioned seed-21 run, whose own worst step is 1.12x) at seeds 23 and
+24 same-shot (1.48x, 1.33x) and with a seed-22 composition's mid still
+(1.26x, 1.17x). All 26 stills closest at exactly their frames; all eight
+runs pass.
+
 Gates: `pipeline::conditioned_latent_tests` (every still a block at its own
 instant; a keyframe moves a start still onto a guide; several keyframes;
 ordering refusals; `parse_keyframe`), `window_gen_opts_tests::several_
