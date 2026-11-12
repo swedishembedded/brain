@@ -1,67 +1,51 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! **A mid-frame anchor must be REALISED at its instant across long-form
-//! windows - the clip has to pass through the mid image, visibly and for
-//! its full pinned span - not merely bend toward it.** `anchor_with_mid_
-//! real.rs` gates the single-generation case. Long-form is different in the
-//! one way that matters here: the clip is refined across several
-//! full-resolution windows, and an interior anchor's instant belongs to
-//! exactly one of them. If the routing loses the mid still - drops it, or
-//! conditions it at the wrong local instant - the trajectory interpolates
-//! start to end and glides past the middle without ever showing it, which
-//! is what real usage reports.
+//! **A keyframe must be REALISED at its instant across long-form windows,
+//! and the clip must move through it smoothly.** The clip is refined across
+//! several full-resolution windows and an interior keyframe's instant
+//! belongs to exactly one of them. If the routing loses the still - drops
+//! it, or conditions it at the wrong local instant - the trajectory glides
+//! from start to end without ever showing it. If the mechanism holds the
+//! still instead of guiding toward it, the clip freezes on it and jumps into
+//! and out of the freeze. Both are gated.
 //!
 //! All stills come from an unconditioned reference run at the same shape
 //! (in distribution, at the exact target resolution, the same reasoning
-//! `anchor_with_mid_real.rs` uses). Three claims, each calibrated by three
-//! measured real-22B runs (guide / pin / pin+guide - the two pin variants
-//! measured identically at the instant, so the plain pin ships):
+//! `anchor_with_mid_real.rs` uses). Four claims:
 //!
-//! 1. **Position**: the generated frame closest to the mid still is the
-//!    frame at the mid instant (within the VAE's own frame-grouping slack).
-//!    Guide run: frame 20 at 11.62 - already positional, and NOT enough.
-//! 2. **Depth**: the delta AT the mid instant is pin-class, not
-//!    guide-class. An appended guiding block only bends the trajectory -
-//!    its best measured delta is 11.62, a one-frame dip between 16.33 and
-//!    17.71 neighbours, which reads on screen as "the motion changes
-//!    direction but nothing resembles the mid frame". The pin measured
-//!    9.25 (both variants; the start pin covers every pixel and measures
-//!    ~4, but an interior still competes with the prompt-driven motion the
-//!    clip keeps rendering AROUND it inside the pinned span, so its floor
-//!    is structurally higher and the guide's 11.62 is the number that has
-//!    to be beaten). Measured floor evidence: the unconditioned reference
-//!    clip's own frames sit 14.75-20.13 from the mid still across the same
-//!    span - the pinned clip is closer to the mid still than the moving
-//!    scene itself ever was. Gate: `<= 10.0`, between the measured pin
-//!    floor and the measured guide best.
-//! 3. **Hold**: the mid content HOLDS across the pinned slot's whole pixel
-//!    span - the latent slot owning the instant covers 8 pixel frames at
-//!    this geometry (frames 17..=24), and the causal decoder renders the
-//!    still across all of them. That is what separates the mechanisms on
-//!    screen: the guide's delta climbs straight back up outside its
-//!    one-frame dip (spread 6.09), the pin's plateau spreads only 1.18.
-//!    Gate: every span frame within 2.0 of the instant's delta.
+//! 1. **Position**: the generated frame closest to the keyframe is the
+//!    frame at its instant (within the VAE's own frame-grouping slack).
+//! 2. **Depth**: the mean |delta| AT the instant is close to the still -
+//!    closer than the unconditioned reference's own neighbouring frames sit
+//!    from it, so the clip reaches the still rather than passing near it.
+//! 3. **The end still too**: the last frame reaches it. A refinement window
+//!    handed the end as a guide past its own span pulled its own last frames
+//!    onto it instead, so the clip reached the end early and jumped away.
+//! 4. **Smoothness**: no frame-to-frame step anywhere in the clip stands out
+//!    from the steps beside it - no freeze, no jump. A still pinned into its
+//!    latent slot measured a 3.0x step into an eight-frame freeze at
+//!    768x448; the unconditioned clip's worst is ~1.1x.
 //!
 //! Swedish Embedded AB implements long-form video diffusion pipelines and
 //! their measurement gates for its clients. If your team needs expertise in
 //! video generation then you can procure our services by sending an email to
 //! info@swedishembedded.com.
 //!
-//! `#[ignore]`d: three full real 22B generations. Run explicitly:
+//! `#[ignore]`d: two full real 22B generations. Run explicitly:
 //!
 //! ```text
-//! cargo test -p brain-ltxv --test longform_mid_real -- --ignored --nocapture
+//! cargo test -p brain-ltxv --test it longform_mid_real -- --ignored --nocapture
 //! ```
 
-use ltxv::pipeline::{generate, generate_long, latent_frame_containing, GenOpts, LongOpts, Paths};
+use ltxv::pipeline::{generate, generate_long, GenOpts, LongOpts, Paths};
 
-const FRAMES: usize = 41;
-const MID: usize = 20;
-const WIDTH: usize = 512;
-const HEIGHT: usize = 256;
-const SEED: u64 = 42; // seed: the mid-anchor realisation margin was measured on the real 22B checkpoint at this seed (ignored, needs weights; not run)
-const FPS: usize = 8;
+const FRAMES: usize = 121;
+const MID: usize = 60;
+const WIDTH: usize = 384;
+const HEIGHT: usize = 192;
+const SEED: u64 = 42; // seed: the keyframe realisation margins were measured on the real 22B checkpoint at this seed (ignored, needs weights)
+const FPS: usize = 24;
 
 const PROMPT: &str = "a belgian malinois dog running at full speed along a mountain road, a small winged P40 graphics card flying beside it, camera tracking";
 
@@ -84,30 +68,26 @@ fn write_still(dir: &std::path::Path, name: &str, frame: &[u8]) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// The shape has to be a genuine stage-major one: the stage-2 ceiling forced
-/// low enough that the full-resolution plan splits (41 px frames = 6 latent,
-/// 128 tokens/latent frame at 512x256, ceiling 640 = 5 latent/window: a head
-/// window emitting px [0, 33) and a continuation emitting [33, 41)), while
-/// both the window-major dispatch plan (512 tokens = 4 latent/window at full
-/// res) and the half-resolution stage-1 plan (32 tokens/latent frame) stay
-/// coarse - stage 1 remains one global window that sees all three anchors
-/// and decides the motion, the detail is refined across windows, which is
-/// the shape real 720p runs take.
+/// Three windows of the default loop at the reference's own 8-latent-frame
+/// context: 16 latent frames at 72 tokens each under a 1008-token ceiling
+/// (14 latent frames) split evenly into 8 new, then 8 carried + 4 new twice
+/// - emitted pixel frames [0, 57), [57, 89) and [89, 121). The keyframe's
+/// instant is the second window's, the end still the third's.
 fn long_opts(base: GenOpts) -> LongOpts {
-    LongOpts { context_latent_frames: 2, max_window_tokens: 512, max_refine_tokens: 640, stage_major: true, base }
+    LongOpts { max_window_tokens: 14 * (HEIGHT / 32) * (WIDTH / 32), base, ..LongOpts::default() }
 }
 
 #[test]
-#[ignore = "three full real 22B generations"]
-fn the_mid_anchor_is_realised_at_its_instant_in_a_stage_major_run() {
+#[ignore = "two full real 22B generations"]
+fn a_keyframe_is_reached_at_its_instant_and_passed_through_smoothly_across_windows() {
     let Some(paths) = real_paths() else {
         return brain_testutil::skip("put the real LTX-2.5 checkpoints in the model store");
     };
     let cancel = capability::CancelToken::default();
 
-    // The reference run is the source of all three stills, so an ignored mid
-    // cannot be excused as an out-of-distribution anchor.
-    let (reference, _) = generate(&paths, PROMPT, &GenOpts { frames: FRAMES, width: WIDTH, height: HEIGHT, seed: SEED, fps: FPS, eta: 1.0, guidance: ltxv::guidance::Guidance::cfg(1.0), dit_config: "ltx25_22b".into(), device: Some("gpu".into()), ..GenOpts::default() }, &cancel, |_, _, _| {}).expect("reference run"); // seed: the mid-anchor realisation margin was measured on the real 22B checkpoint at this seed (ignored, needs weights; not run)
+    // The reference run is the source of all three stills, so an ignored
+    // keyframe cannot be excused as an out-of-distribution anchor.
+    let (reference, _) = generate(&paths, PROMPT, &GenOpts { frames: FRAMES, width: WIDTH, height: HEIGHT, seed: SEED, fps: FPS, eta: 1.0, guidance: ltxv::guidance::Guidance::cfg(1.0), dit_config: "ltx25_22b".into(), device: Some("gpu".into()), ..GenOpts::default() }, &cancel, |_, _, _| {}).expect("reference run"); // seed: the keyframe realisation margins were measured on the real 22B checkpoint at this seed (ignored, needs weights)
     let dir = std::env::temp_dir().join(format!("ltxv-longform-mid-{}", std::process::id()));
     let start_path = write_still(&dir, "start.png", &reference.frames[0]);
     let mid_path = write_still(&dir, "mid.png", &reference.frames[MID]);
@@ -117,18 +97,20 @@ fn the_mid_anchor_is_realised_at_its_instant_in_a_stage_major_run() {
         frames: FRAMES,
         width: WIDTH,
         height: HEIGHT,
-        seed: SEED, // seed: the mid-anchor realisation margin was measured on the real 22B checkpoint at this seed (ignored, needs weights; not run)
+        // Another draw than the reference's: on the same noise the clip would
+        // reach the stills by reproducing the reference, not by being guided.
+        seed: SEED + 1, // seed: the keyframe realisation margins were measured on the real 22B checkpoint at this seed (ignored, needs weights)
         fps: FPS,
         eta: 1.0,
         guidance: ltxv::guidance::Guidance::cfg(1.0),
         dit_config: "ltx25_22b".into(),
         device: Some("gpu".into()),
         start_frame: Some(start_path),
-        mid_frame: Some(mid_path),
+        keyframes: vec![(MID, mid_path)],
         end_frame: Some(end_path),
         ..GenOpts::default()
     };
-    let (video, _) = generate_long(&paths, PROMPT, &long_opts(base), &cancel, |_, _, _| {}).expect("stage-major run with all three anchors");
+    let (video, _) = generate_long(&paths, PROMPT, &long_opts(base), &cancel, |_, _, _| {}).expect("a three-window run with all three anchors");
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(video.frames.len(), FRAMES);
@@ -139,37 +121,46 @@ fn the_mid_anchor_is_realised_at_its_instant_in_a_stage_major_run() {
     let d_start = mean_abs_delta(&video.frames[0], &reference.frames[0]);
     let d_mid = to_mid[MID];
     let d_end = mean_abs_delta(&video.frames[FRAMES - 1], &reference.frames[FRAMES - 1]);
-    // The pinned slot's own pixel span: the latent slot containing the mid
-    // instant covers `VAE_TEMPORAL_SCALE` pixel frames, and the causal
-    // decoder renders the still across all of them. For MID 20 at fps 8 that
-    // is latent frame 3, pixel frames 17..=24.
-    let slot_px = (1 + (latent_frame_containing(MID) - 1) * ltxv::pipeline::VAE_TEMPORAL_SCALE)..1 + latent_frame_containing(MID) * ltxv::pipeline::VAE_TEMPORAL_SCALE;
-    let span = &to_mid[slot_px.clone()];
-    let span_max = span.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    // The reference clip's own motion over the same span - how far a
-    // freely-moving scene at those frames sits from the mid still. Printed as
-    // context for future recalibration: it bounds what "close to the mid
-    // still" can even mean while the scene moves.
-    let ref_motion: Vec<f64> = (slot_px.clone()).map(|i| mean_abs_delta(&reference.frames[i], &reference.frames[MID])).collect();
+    // How far the moving scene's own frames around the instant sit from the
+    // still: the floor "reaching the still" has to beat.
+    let ref_nearest = (MID - 4..=MID + 4).filter(|&i| i != MID).map(|i| mean_abs_delta(&reference.frames[i], &reference.frames[MID])).fold(f64::INFINITY, f64::min);
+    let ref_nearest_end = mean_abs_delta(&reference.frames[FRAMES - 2], &reference.frames[FRAMES - 1]);
+    // The worst frame-to-frame step anywhere in the clip over the median of
+    // the steps beside it - the keyframe's own instant and every window seam.
+    let steps: Vec<f64> = video.frames.windows(2).map(|w| mean_abs_delta(&w[0], &w[1])).collect();
+    let worst = jump_ratio(&steps, 0..steps.len());
+    let ref_steps: Vec<f64> = reference.frames.windows(2).map(|w| mean_abs_delta(&w[0], &w[1])).collect();
+    let ref_worst = jump_ratio(&ref_steps, 0..ref_steps.len());
 
-    println!("anchor deltas: start {d_start:.2}, mid(instant) {d_mid:.2}, end {d_end:.2}");
-    println!("closest approach to the mid still: frame {best_i} at {best_d:.2} (mid instant is frame {MID})");
-    println!("pinned span {slot_px:?}: video-vs-mid {span:?}");
-    println!("reference's own motion over the span: {ref_motion:?}");
+    println!("anchor deltas: start {d_start:.2}, keyframe(instant) {d_mid:.2}, end {d_end:.2}");
+    println!("closest approach to the keyframe: frame {best_i} at {best_d:.2} (instant is frame {MID}); the reference's own nearest neighbour sits {ref_nearest:.2} from it");
+    println!("the end still: {d_end:.2} at the last frame; the reference's own previous frame sits {ref_nearest_end:.2} from it");
+    println!("worst step in the clip: {worst:.2}x its neighbours (reference {ref_worst:.2}x)");
     for (i, d) in to_mid.iter().enumerate().step_by(2) {
-        println!("  frame {i:3}: {d:.2}");
+        println!("  frame {i:3}: {d:.2} from the keyframe, {:.2} from the end still", mean_abs_delta(&video.frames[i], &reference.frames[FRAMES - 1]));
     }
 
     assert!(
-        (18..=22).contains(&best_i),
-        "the clip's closest approach to the mid still is frame {best_i}, not the mid instant {MID}: the mid anchor is not being realised where it is conditioned (start {d_start:.2}, mid {d_mid:.2}, end {d_end:.2})"
+        (MID - 2..=MID + 2).contains(&best_i),
+        "the clip's closest approach to the keyframe is frame {best_i}, not its instant {MID}: the keyframe is not realised where it is conditioned (start {d_start:.2}, keyframe {d_mid:.2}, end {d_end:.2})"
     );
-    assert!(
-        d_mid <= 10.0,
-        "the mid anchor is only approached (delta {d_mid:.2} at its instant), not realised: pin-class is <= 10.0 (the pin mechanism measured 9.25, the start pin's whole-frame pin ~4); guide-class bending with the mid as an appended block measured 11.62 at best (start {d_start:.2}, end {d_end:.2})"
-    );
-    assert!(
-        span_max <= d_mid + 2.0,
-        "the mid content does not HOLD across its pinned span {slot_px:?}: worst frame sits at {span_max:.2} against {d_mid:.2} at the instant (spread > 2.0) - the guide mechanism's signature, a one-frame dip between 16.33 and 17.71, not the pin's plateau (measured spread 1.18)"
-    );
+    assert!(d_mid < ref_nearest, "the keyframe is only approached (delta {d_mid:.2} at its instant), not reached: the reference's own neighbouring frames sit {ref_nearest:.2} from it");
+    assert!(d_end < ref_nearest_end, "the end still is not reached at the last frame (delta {d_end:.2}; the reference's own previous frame sits {ref_nearest_end:.2} from it): a window reached it early, or not at all");
+    assert!(worst <= MAX_JUMP, "a step in the clip is {worst:.2}x its neighbours (reference {ref_worst:.2}x): the clip freezes on, jumps to or jumps away from an anchor instead of moving through it");
+}
+
+/// Above this, one frame-to-frame step reads as a jump against the steps
+/// around it.
+const MAX_JUMP: f64 = 1.6;
+
+/// The largest step in `range` over the median of the six steps on either
+/// side of it.
+fn jump_ratio(steps: &[f64], range: std::ops::Range<usize>) -> f64 {
+    range
+        .map(|i| {
+            let mut ctx: Vec<f64> = steps[i.saturating_sub(6)..i].iter().chain(&steps[i + 1..(i + 7).min(steps.len())]).copied().collect();
+            ctx.sort_by(f64::total_cmp);
+            steps[i] / ctx[ctx.len() / 2].max(0.25)
+        })
+        .fold(0.0, f64::max)
 }

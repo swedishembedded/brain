@@ -49,9 +49,10 @@ pub fn manifest() -> Manifest {
     .params(guidance_params())
     .param(ParamSpec::new("start_frame", ParamType::Str, "optional path to a PNG/JPEG still: encoded through the real video VAE and used as frame-0 conditioning while the rest of the clip denoises around it (VideoConditionByLatentIndex on its own, VideoConditionByKeyframeIndex when end_frame is also given - see crate::pipeline::conditioned_latent). Needs dit_config=ltx25_22b (the real VAE). Runs under either sampler: eta>0 follows the reference's ancestral loop (LTX-2.5 distilled's own stage-1 sampler), eta=0 the deterministic one.").host_resolved())
     .param(ParamSpec::new("end_frame", ParamType::Str, "optional path to a PNG/JPEG still: a clean image-guidance latent appended at the clip's LAST pixel frame's timestamp, not a replacement of it - the generated token there still denoises freely, only strongly guided toward the still via attention (start_frame given alone is the one case that IS a literal replacement; combined with end_frame/mid_frame it switches to this same appended-guide mechanism too). Same image as start_frame for a clip that loops seamlessly (the generated content in between connects the still to itself); a different image for a clip that morphs from one still to another. Same eta/dit_config requirements as start_frame.").host_resolved())
-    .param(ParamSpec::new("mid_frame", ParamType::Str, "optional path to a PNG/JPEG still: the same appended image-guidance latent end_frame uses, anchored at ONE INTERIOR instant of the clip, so a single generation can be guided at its start, its middle and its end at once. Same eta/dit_config requirements as start_frame.").host_resolved())
+    .param(ParamSpec::new("mid_frame", ParamType::Str, "optional path to a PNG/JPEG still anchoring ONE INTERIOR instant of the clip (mid_frame_at): a clean image-guidance latent appended at that instant, exactly as end_frame is at the last - one more of keyframes. Same eta/dit_config requirements as start_frame.").host_resolved())
     .param(ParamSpec::new("mid_frame_at", ParamType::Int, "which pixel frame mid_frame anchors, strictly between 0 and frames-1. Unset takes the reference's own position for a single interior keyframe (evenly_spaced_keyframe_positions), (frames-1)/2. Only read when mid_frame is set.").min(0.0).max(capability::bounds::VIDEO_FRAMES))
-    .param(ParamSpec::new("conditioning_strength", ParamType::Float, "ImageConditioningInput.strength for every given still: 1.0 pins the conditioned tokens to the encoded image exactly, lower values (the reference's own CLI example is 0.8) leave the model room to move. Only read when one of start_frame/mid_frame/end_frame is set.").min(0.0).max(capability::bounds::UNIT).default(json!(d.conditioning_strength)))
+    .param(ParamSpec::new("keyframes", ParamType::Str, "interior keyframes, comma-separated FRAME:PATH pairs (e.g. 40:a.png,80:b.png): each server-side PNG/JPEG still anchors the pixel frame it names, strictly between 0 and frames-1, as a clean image-guidance latent appended at that instant; the clip moves through every one of them in a single generation. Same eta/dit_config requirements as start_frame.").host_resolved())
+    .param(ParamSpec::new("conditioning_strength", ParamType::Float, "ImageConditioningInput.strength for every given still: 1.0 pins the conditioned tokens to the encoded image exactly, lower values (the reference's own CLI example is 0.8) leave the model room to move. Only read when one of start_frame/mid_frame/keyframes/end_frame is set.").min(0.0).max(capability::bounds::UNIT).default(json!(d.conditioning_strength)))
     .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame). Unset, the duration head predicts the length from the prompt (1-20 s) when the real checkpoint, text encoder and duration head are configured; otherwise 121 with the real checkpoint, 9 for the tiny smoke test").min(0.0).max(capability::bounds::VIDEO_FRAMES))
     .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 32); unset, 768 with the real checkpoint, 64 for the smoke test").min(0.0).max(capability::bounds::SIDE_PX))
     .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 32); unset, 512 with the real checkpoint, 64 for the smoke test").min(0.0).max(capability::bounds::SIDE_PX))
@@ -235,7 +236,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     dit_config_from_name(&dit_config)?; // validated here so a bad name is rejected before any weight load
     let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
     let (sampler, eta) = sampler_from(inv)?;
-    let opts = GenOpts {
+    let mut opts = GenOpts {
         frames: inv.get_i64("frames").unwrap_or(d.frames as i64).max(1) as usize,
         width: inv.get_i64("width").unwrap_or(d.width as i64).max(32) as usize,
         height: inv.get_i64("height").unwrap_or(d.height as i64).max(32) as usize,
@@ -258,8 +259,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         device: None,
         start_frame: inv.get_str("start_frame"),
         end_frame: inv.get_str("end_frame"),
-        mid_frame: inv.get_str("mid_frame"),
-        mid_frame_at: inv.get_i64("mid_frame_at").filter(|&n| n >= 0).map(|n| n as usize),
+        keyframes: Vec::new(),
         conditioning_strength: inv.get_f64("conditioning_strength").unwrap_or(d.conditioning_strength as f64).clamp(0.0, 1.0) as f32,
         // Not an invocation parameter: placement is the SERVER's decision,
         // not the caller's. A resident instance overrides it (see
@@ -281,10 +281,22 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     if !opts.width.is_multiple_of(32) || !opts.height.is_multiple_of(32) {
         return Err(format!("{}x{} is not a multiple of 32 (the VAE's spatial stride)", opts.width, opts.height));
     }
-    if opts.mid_frame.is_some() {
-        crate::pipeline::mid_anchor_frame(opts.frames, opts.mid_frame_at)?;
-    }
+    opts.keyframes = keyframes_from(inv, opts.frames)?;
     Ok(GenParams { opts, named: named_in(inv) })
+}
+
+/// `t2v`'s interior keyframes: the `keyframes` list and the `mid_frame`
+/// still at its resolved instant, in timeline order and checked against the
+/// clip ([`crate::pipeline::check_keyframes`]).
+fn keyframes_from(inv: &Invocation, frames: usize) -> Result<Vec<(usize, String)>, String> {
+    let mut keyframes = crate::pipeline::parse_keyframes(&inv.get_str("keyframes").unwrap_or_default())?;
+    if let Some(path) = inv.get_str("mid_frame").filter(|p| !p.is_empty()) {
+        let at = inv.get_i64("mid_frame_at").filter(|&n| n >= 0).map(|n| n as usize);
+        keyframes.push((crate::pipeline::mid_anchor_frame(frames, at)?, path));
+    }
+    keyframes.sort_by_key(|(at, _)| *at);
+    crate::pipeline::check_keyframes(frames, &keyframes)?;
+    Ok(keyframes)
 }
 
 /// Run one generation and wrap the result as a video-output [`Outcome`].

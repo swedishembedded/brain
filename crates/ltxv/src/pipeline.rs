@@ -467,22 +467,13 @@ pub struct GenOpts {
     /// compression). For a clip that has to move, anchor two DIFFERENT
     /// instants, or use `start_frame` alone.
     pub end_frame: Option<String>,
-    /// Image conditioning at one INTERIOR instant of the clip, so a single
-    /// generation can be pinned at its start, its middle and its end at once.
-    ///
-    /// Mechanically this is a PIN, not the appended guiding block `end_frame`
-    /// uses: [`conditioned_latent`] overwrites the latent slot containing
-    /// this instant with the encoded still and freezes it there (the
-    /// deviation from the reference is documented on that function - an
-    /// appended guide measurably bends the trajectory toward the instant
-    /// without ever realising the still's content). The end still stays an
-    /// appended guide; see [`mid_anchor_frame`] for where the default
-    /// position comes from.
-    pub mid_frame: Option<String>,
-    /// Which pixel frame [`Self::mid_frame`] anchors. `None` takes the
-    /// reference's own single-interior-keyframe position - see
-    /// [`mid_anchor_frame`].
-    pub mid_frame_at: Option<usize>,
+    /// Image conditioning at INTERIOR instants of the clip, as `(pixel
+    /// frame, image path)` pairs in timeline order, each strictly between
+    /// frame 0 and the last frame ([`check_keyframes`]): a single generation
+    /// is anchored at its start, at every keyframe and at its end at once.
+    /// Each is an appended guiding block at its own instant
+    /// ([`conditioned_latent`]).
+    pub keyframes: Vec<(usize, String)>,
     /// Extra appended guiding blocks for LONG-FORM windows, as `(local pixel
     /// frame, image path)` pairs in the WINDOW's own coordinate frame: an
     /// anchor whose instant lies beyond this window's own decoded span,
@@ -611,8 +602,7 @@ impl Default for GenOpts {
             device: None,
             start_frame: None,
             end_frame: None,
-            mid_frame: None,
-            mid_frame_at: None,
+            keyframes: Vec::new(),
             future_anchors: Vec::new(),
             conditioning_strength: 1.0,
             devices: crate::devplan::DevicePlan::default(),
@@ -1205,7 +1195,8 @@ mod keyframe_conditioning_positions_tests {
     }
 }
 
-/// Which pixel frame [`GenOpts::mid_frame`] anchors in a `frames`-long clip.
+/// Which pixel frame `--mid-frame` (a single interior keyframe) anchors in a
+/// `frames`-long clip.
 ///
 /// `at` is the caller's own index when they gave one. With none, the position
 /// is the reference's own answer for a single INTERIOR keyframe:
@@ -1245,18 +1236,48 @@ pub fn mid_anchor_frame(frames: usize, at: Option<usize>) -> Result<usize, Strin
     Ok(at)
 }
 
+/// One keyframe spelled `FRAME:PATH` - the pixel frame it anchors and the
+/// still's path.
+pub fn parse_keyframe(spec: &str) -> Result<(usize, String), String> {
+    let (at, path) = spec.split_once(':').ok_or_else(|| format!("keyframe '{spec}' is not <frame>:<image>"))?;
+    let at = at.trim().parse::<usize>().map_err(|e| format!("keyframe frame '{at}': {e}"))?;
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(format!("keyframe '{spec}' names no image"));
+    }
+    Ok((at, path.to_string()))
+}
+
+/// A comma-separated list of [`parse_keyframe`] specs, in the order given.
+pub fn parse_keyframes(list: &str) -> Result<Vec<(usize, String)>, String> {
+    list.split(',').map(str::trim).filter(|s| !s.is_empty()).map(parse_keyframe).collect()
+}
+
+/// Interior keyframes a `frames`-long clip can honour: each strictly between
+/// frame 0 (`start_frame`'s) and the last frame (`end_frame`'s), in timeline
+/// order with no frame named twice.
+pub fn check_keyframes(frames: usize, keyframes: &[(usize, String)]) -> Result<(), String> {
+    for &(at, _) in keyframes {
+        if at == 0 || at + 1 >= frames {
+            return Err(format!("a keyframe at pixel frame {at} is not INSIDE a {frames}-frame clip: frame 0 is --start-frame's and the last frame is --end-frame's, so a keyframe has to sit strictly between them"));
+        }
+    }
+    for pair in keyframes.windows(2) {
+        let ((a, _), (b, _)) = (&pair[0], &pair[1]);
+        if a >= b {
+            return Err(format!("keyframes must be in timeline order with no frame named twice, got frame {b} after frame {a}"));
+        }
+    }
+    Ok(())
+}
+
 /// Which latent frame's own pixel span contains `pixel_frame` - the inverse of
 /// [`real_pixel_positions`]' causal fix, where latent frame 0 covers exactly
 /// one pixel frame and every later one covers [`VAE_TEMPORAL_SCALE`].
 ///
 /// It names the instant of the clip a caller is pointing at - the log line
-/// and the window plan both read it - and, since the mid anchor moved from
-/// an appended guide to a pin, it is also the slot [`conditioned_latent`]
-/// overwrites with the mid still (see that function's deviation note). The
-/// pixel frame itself is still not snapped to an x8 border (see
-/// [`mid_anchor_frame`]): the pin lands on the slot CONTAINING the named
-/// instant, so the still's content renders across the slot's whole pixel
-/// span.
+/// and the window plan both read it. A keyframe's pixel frame itself is not
+/// snapped to an x8 border (see [`mid_anchor_frame`]).
 pub fn latent_frame_containing(pixel_frame: usize) -> usize {
     if pixel_frame == 0 {
         0
@@ -1627,6 +1648,41 @@ struct ConditionedLatent {
     t: usize,
 }
 
+/// The encoded stills one pass is conditioned on, each an `[lh*lw,
+/// channels]` latent token block: [`conditioned_latent`]'s input.
+#[derive(Clone, Copy)]
+struct Stills<'a> {
+    start: Option<&'a [f32]>,
+    /// Interior keyframes, `(pixel frame, tokens)` in timeline order.
+    interior: &'a [(usize, &'a [f32])],
+    end: Option<&'a [f32]>,
+    /// A long-form window's anchors beyond its own span, `(local pixel
+    /// frame, tokens)` ([`GenOpts::future_anchors`]).
+    future: &'a [(usize, &'a [f32])],
+    /// `ImageConditioningInput.strength` ([`GenOpts::conditioning_strength`]).
+    strength: f32,
+}
+
+impl Stills<'_> {
+    fn appended_blocks(&self) -> usize {
+        appended_blocks(self.start.is_some(), self.interior.len(), self.end.is_some(), self.future.len())
+    }
+}
+
+/// How many `lh*lw`-token blocks [`conditioned_latent`] APPENDS - `0` for
+/// image-to-video (a lone start still overwrites latent frame 0 in place),
+/// otherwise one per still, start included: any interior keyframe, end still
+/// or future anchor beside a start still makes the request interpolation,
+/// not the overwrite. A stage needs the count before the stills are encoded,
+/// to draw the initial noise at the full post-conditioning length in one go.
+fn appended_blocks(start: bool, interior: usize, end: bool, future: usize) -> usize {
+    if start && interior == 0 && !end && future == 0 {
+        0
+    } else {
+        usize::from(start) + interior + usize::from(end) + future
+    }
+}
+
 /// Build [`ConditionedLatent`] from the base noise latent plus whichever
 /// stills were given, **choosing the reference mechanism the requested
 /// combination actually calls for**. There are two of them and they are not
@@ -1652,42 +1708,21 @@ struct ConditionedLatent {
 ///   tokens denoising freely. `frame_idx` is a raw pixel-frame offset onto
 ///   the RoPE time coordinate, so a block may point at any instant of the
 ///   clip, and the reference caps neither the count nor the positions.
-///   **The one deliberate deviation from the reference is the interior
-///   anchor's mechanism.** The reference would append the mid still as a
-///   third guide like any other; measured on the real 22B checkpoint
-///   (`crates/ltxv/tests/it/longform_mid_real.rs`), a guide BENDS the
-///   trajectory toward its instant (delta 11.62 at the mid still, against
-///   25-29 everywhere else) but never REALISES its content - attention-only
-///   pull lets the model compromise, which reads on screen as "the motion
-///   changes direction but nothing resembles the mid frame". So this port
-///   PINS the mid still into the base grid's own latent slot - the slot
-///   [`latent_frame_containing`] names - with the same in-place
-///   overwrite-and-freeze the image-to-video builder applies at frame 0
-///   (`VideoConditionByLatentIndex`'s `clean_latent[:, start:stop] = tokens`,
-///   `denoise_mask[:, start:stop] = 1 - strength`; the same freezing a masked
-///   video-to-video pass trains on). The pinned slot keeps the base grid's
-///   own positions and keyframes mask - it is a structural frame of the
-///   clip, not an appended token block - and the causal VAE renders its
-///   content across the slot's whole pixel span, so the trajectory must pass
-///   through the mid image rather than merely bend toward it. Two further
-///   variants were MEASURED and rejected against the plain pin
-///   (`crates/ltxv/tests/it/longform_mid_real.rs`, real 22B checkpoint, mid
-///   delta at its instant): the still also appended as a guide at the
-///   owner's instant changed nothing (9.25 either way - the pinned latent's
-///   decode dominates its pixel span, so the guide's attention-only pull has
-///   nothing left to move), and encoding the still through the video path
-///   with its span repeated (the interior slot's native 8-frame aggregation)
-///   produced a bit-identical trajectory - a constant signal's temporal
-///   aggregation IS its one-frame latent, so the cheap image-path encode is
-///   already the right pin content. The measured delta floor at the instant
-///   (~9) is the prompt-driven motion the clip keeps rendering AROUND the
-///   still's content inside the pinned span - a pinned interior still
-///   competes with the scene's own movement, where the start pin covers
-///   every pixel - and it holds across the slot's whole pixel span plus one
-///   frame of causal bleed backward, which is what "the clip passes through
-///   the mid image" looks like on screen. The end stills stay pure appended
-///   guides: those measurably work, and a pinned last latent frame would
-///   hold the clip's final second motionless.
+///   An interior keyframe is one more such block at its own instant -
+///   which is also what keeps a clip smooth through it. Pinning the still
+///   into the latent slot that contains its instant instead (overwritten and
+///   frozen, the image-to-video mechanism moved inside the clip) was measured
+///   on the real 22B checkpoint at 768x448 x 97 frames, start/mid/end stills
+///   taken from an unconditioned run of the same prompt: the slot's eight
+///   pixel frames freeze (frame-to-frame difference 0.4-0.8 against the
+///   clip's own ~2.2) and the clip jumps into and out of the freeze (3.0x and
+///   2.0x the surrounding motion), while the guide keeps the motion as even
+///   as the unconditioned run's (worst step 1.09x its neighbours, against
+///   1.11x unconditioned) AND reaches the still more closely, at exactly its
+///   frame (mean |delta| 2.28 at frame 48, against the pin's 4.95 with its
+///   closest frame 8 early). Releasing the pin part way through the schedule
+///   (re-noising the slot at sigma 0.909 or 0.725) sat between the two:
+///   still a slowdown or a freeze around the slot and a farther still.
 ///
 /// **What the difference buys, and what it does NOT.** Overwriting latent
 /// frame 0 freezes a whole latent frame of the GENERATED sequence: the
@@ -1708,22 +1743,20 @@ struct ConditionedLatent {
 ///
 /// **Which of the two runs is decided by how many stills were given, not by
 /// which ones.** One still at frame 0 and nothing else is image-to-video and
-/// takes the overwrite; every other request - including any [`GenOpts::
-/// mid_frame`] anchor - is keyframe interpolation. There the end stills are
-/// appended guides, `frame_idx == 0` included, because that is what
-/// `image_conditionings_by_adding_guiding_latent` does - and the mid anchor
-/// is pinned into its slot instead (see the deviation above). Nothing about
-/// the existing one- and two-still requests changes.
+/// takes the overwrite; every other request - including any interior
+/// keyframe ([`GenOpts::keyframes`]) - is keyframe interpolation, and every
+/// still is an appended guide, `frame_idx == 0` included, because that is
+/// what `image_conditionings_by_adding_guiding_latent` does.
 ///
-/// `start`/`mid`/`end` are already-encoded `[lh*lw, channels]` latent token
+/// The [`Stills`] are already-encoded `[lh*lw, channels]` latent token
 /// blocks (one real VAE encode each; the SAME image passed at both ends is
 /// encoded once and reused). `frames` is the clip's pixel-frame count - the
-/// end still conditions pixel-frame `frames - 1`, and `mid` carries the pixel
-/// frame it conditions ([`mid_anchor_frame`]). At least one still must be
+/// end still conditions pixel-frame `frames - 1`, and each interior keyframe
+/// carries the pixel frame it conditions. At least one still must be
 /// present.
 ///
 /// `noise` is the whole sequence's initial Gaussian draw, `[(base_t +
-/// blocks*lh*lw), channels]` ([`conditioning_block_count`] gives `blocks`) -
+/// blocks*lh*lw), channels]` ([`Stills::appended_blocks`] gives `blocks`) -
 /// the reference draws ONE noise tensor over the full post-conditioning
 /// sequence (`GaussianNoiser._sample_noise` runs after every conditioning
 /// item has been applied), so the appended range gets real noise, not zeros.
@@ -1762,12 +1795,13 @@ struct ConditionedLatent {
 /// start still alongside any future anchor takes the interpolation path, not
 /// the overwrite: more than one anchor means the base video's own tokens all
 /// stay free, exactly as a mid or end anchor already forces.
-#[allow(clippy::too_many_arguments)]
-fn conditioned_latent(noise: Vec<f32>, base_positions: &[f32], base_keyframes_mask: &[f32], base_t: usize, lh: usize, lw: usize, channels: usize, frames: usize, fps: f64, start: Option<&[f32]>, mid: Option<(usize, &[f32])>, end: Option<&[f32]>, future: &[(usize, &[f32])], strength: f32) -> ConditionedLatent {
-    assert!(start.is_some() || mid.is_some() || end.is_some() || !future.is_empty(), "conditioned_latent: at least one still must be given");
+fn conditioned_latent(noise: Vec<f32>, base: BaseSequence<'_>, frames: usize, stills: Stills<'_>) -> ConditionedLatent {
+    let BaseSequence { base_t, base_positions, base_keyframes_mask, lh, lw, channels, fps } = base;
+    let Stills { start, interior, end, future, strength } = stills;
+    assert!(start.is_some() || !interior.is_empty() || end.is_some() || !future.is_empty(), "conditioned_latent: at least one still must be given");
     assert!((0.0..=1.0).contains(&strength), "conditioned_latent: strength {strength} is outside [0, 1]");
     let block_t = lh * lw;
-    let blocks = conditioning_block_count(start.is_some(), mid.is_some(), end.is_some(), future.len());
+    let blocks = stills.appended_blocks();
     let total_t = base_t + blocks * block_t;
     assert_eq!(noise.len(), total_t * channels, "conditioned_latent: noise has {} values, expected {}", noise.len(), total_t * channels);
     let m = 1.0 - strength;
@@ -1779,54 +1813,28 @@ fn conditioned_latent(noise: Vec<f32>, base_positions: &[f32], base_keyframes_ma
             latent[off + i] = (1.0 - m) * c + m * latent[off + i];
         }
     };
-    // The mid anchor's slot on the BASE grid: the latent frame whose pixel
-    // span contains the instant it names. It must name a real interior frame
-    // - pixel frame 0 is the start still's own slot - and fit the grid the
-    // caller built; both violations are mis-routed requests, not user error.
-    let mid_slot = mid.map(|(px, _)| {
-        assert!(px >= 1, "conditioned_latent: mid anchor names pixel frame 0, which is the start still's own slot");
-        let slot = latent_frame_containing(px);
-        assert!((slot + 1) * block_t <= base_t, "conditioned_latent: mid anchor at pixel frame {px} lands in latent frame {slot}, beyond this pass's {0}-latent-frame grid", base_t / block_t);
-        slot
-    });
 
     // Image-to-video: one still at frame 0 and nothing else overwrites the
     // base video's own first latent frame.
-    if let (Some(s), None, None) = (start, mid, end) {
-        if future.is_empty() {
-            let mut latent = noise;
-            mix(&mut latent, s, 0);
-            let mut denoise_mask = vec![1.0f32; base_t];
-            denoise_mask[..block_t].fill(m);
-            let mut clean = vec![0f32; base_t * channels];
-            clean[..block_t * channels].copy_from_slice(s);
-            return ConditionedLatent { latent, positions: base_positions.to_vec(), keyframes_mask: base_keyframes_mask.to_vec(), denoise_mask, clean, t: base_t };
-        }
+    if let (Some(s), 0) = (start, blocks) {
+        let mut latent = noise;
+        mix(&mut latent, s, 0);
+        let mut denoise_mask = vec![1.0f32; base_t];
+        denoise_mask[..block_t].fill(m);
+        let mut clean = vec![0f32; base_t * channels];
+        clean[..block_t * channels].copy_from_slice(s);
+        return ConditionedLatent { latent, positions: base_positions.to_vec(), keyframes_mask: base_keyframes_mask.to_vec(), denoise_mask, clean, t: base_t };
     }
 
-    // Keyframe interpolation: the end stills appended as their own guiding
-    // blocks in timeline order, the base video otherwise untouched (see this
-    // function's doc). The future anchors come last: their named instants lie
-    // beyond this window's own span, and every in-window anchor sits inside
-    // it. The mid anchor is NOT among them - it takes the pin below.
-    let anchors: Vec<(usize, &[f32])> = [start.map(|s| (0usize, s)), end.map(|e| (frames - 1, e))].into_iter().flatten().chain(future.iter().copied()).collect();
-    let mut ic = append_image_conditioning(base_t, base_positions, base_keyframes_mask, lh, lw, channels, fps, m, &anchors);
+    // Keyframe interpolation: every still appended as its own guiding block
+    // in timeline order, the base video untouched (see this function's doc).
+    // The future anchors come last: their named instants lie beyond this
+    // window's own span, and every in-window anchor sits inside it.
+    let anchors: Vec<(usize, &[f32])> = start.map(|s| (0usize, s)).into_iter().chain(interior.iter().copied()).chain(end.map(|e| (frames - 1, e))).chain(future.iter().copied()).collect();
+    let ic = append_image_conditioning(base_t, base_positions, base_keyframes_mask, lh, lw, channels, fps, m, &anchors);
     let mut latent = noise;
     for (bi, (_, tokens)) in anchors.iter().enumerate() {
         mix(&mut latent, tokens, base_t + bi * block_t);
-    }
-    // The mid pin: overwrite the slot on the base grid whose pixel span
-    // contains the named instant, freeze it there (the same `1 - strength`
-    // algebra every conditioning item applies). The slot keeps the base
-    // grid's own positions and keyframes mask - it is a structural frame of
-    // the clip the trajectory must pass through, not an appended guide the
-    // model may compromise with. `mid.is_some()` and `mid_slot.is_none()`
-    // cannot disagree: both derive from the same `mid`.
-    if let (Some((_, tokens)), Some(slot)) = (mid, mid_slot) {
-        mix(&mut latent, tokens, slot * block_t);
-        let (s0, s1) = (slot * block_t, (slot + 1) * block_t);
-        ic.denoise_mask[s0..s1].fill(m);
-        ic.clean[s0 * channels..s1 * channels].copy_from_slice(tokens);
     }
     ConditionedLatent { latent, positions: ic.positions, keyframes_mask: ic.keyframes_mask, denoise_mask: ic.denoise_mask, clean: ic.clean, t: total_t }
 }
@@ -1869,25 +1877,6 @@ fn masked_with_guides(noise: Vec<f32>, base_positions: &[f32], base_keyframes_ma
     ConditionedLatent { latent, positions: ic.positions, keyframes_mask: ic.keyframes_mask, denoise_mask, clean, t: total_t }
 }
 
-/// How many `lh*lw`-token conditioning blocks [`conditioned_latent`] will
-/// APPEND for a given request - `0` for image-to-video (a lone start still
-/// overwrites latent frame 0 in place), otherwise one per still given,
-/// start included. The future anchors count as stills: a start still beside
-/// any one of them is interpolation, not the overwrite. The mid anchor
-/// contributes NO block of its own - it pins into the base grid's latent
-/// slot - but its PRESENCE still flips a start still onto the interpolation
-/// mechanism, so it takes part in the decision without adding to the count.
-/// [`generate`] needs this before the stills are encoded, to draw the
-/// initial noise at the full post-conditioning length in one go (see
-/// [`conditioned_latent`]'s `noise`).
-fn conditioning_block_count(start: bool, mid: bool, end: bool, future: usize) -> usize {
-    if start && !mid && !end && future == 0 {
-        0
-    } else {
-        usize::from(start) + usize::from(end) + future
-    }
-}
-
 #[cfg(test)]
 mod conditioned_latent_tests {
     use super::*;
@@ -1914,6 +1903,13 @@ mod conditioned_latent_tests {
         (noise, positions, km, base_t)
     }
 
+    /// [`conditioned_latent`] over [`base`]'s geometry.
+    #[allow(clippy::too_many_arguments)]
+    fn cond(noise: Vec<f32>, positions: &[f32], km: &[f32], base_t: usize, start: Option<&[f32]>, interior: &[(usize, &[f32])], end: Option<&[f32]>, future: &[(usize, &[f32])], strength: f32) -> ConditionedLatent {
+        let base = BaseSequence { base_t, base_positions: positions, base_keyframes_mask: km, lh: LH, lw: LW, channels: CH, fps: FPS };
+        conditioned_latent(noise, base, FRAMES, Stills { start, interior, end, future, strength })
+    }
+
     fn tokens(bias: f32) -> Vec<f32> {
         (0..LH * LW * CH).map(|i| bias + i as f32).collect()
     }
@@ -1929,7 +1925,7 @@ mod conditioned_latent_tests {
         let (latent, positions, km, base_t) = base(2);
         let (s, e) = (tokens(0.0), tokens(100.0));
 
-        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, Some(&s), None, Some(&e), &[], 1.0);
+        let c = cond(latent.clone(), &positions, &km, base_t, Some(&s), &[], Some(&e), &[], 1.0);
 
         let block_t = LH * LW;
         assert_eq!(c.t, base_t + 2 * block_t, "one appended guiding block per still");
@@ -1974,7 +1970,7 @@ mod conditioned_latent_tests {
         assert_eq!(&c.latent[base_t * CH..(base_t + block_t) * CH], &g4[..]);
         assert_eq!(&c.latent[(base_t + block_t) * CH..], &g8[..]);
         assert_eq!(&c.clean[base_t * CH..(base_t + block_t) * CH], &g4[..]);
-        let keyframed = conditioned_latent(noise, &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, None, None, None, &[(4, &g4), (8, &g8)], 1.0);
+        let keyframed = cond(noise, &positions, &km, base_t, None, &[], None, &[(4, &g4), (8, &g8)], 1.0);
         assert_eq!(c.positions, keyframed.positions, "each guide sits where the keyframe path puts the same instant");
         assert_eq!(c.keyframes_mask, keyframed.keyframes_mask);
     }
@@ -1988,7 +1984,7 @@ mod conditioned_latent_tests {
         let (latent, positions, km, base_t) = base(0);
         let s = tokens(0.0);
 
-        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, Some(&s), None, None, &[], 1.0);
+        let c = cond(latent.clone(), &positions, &km, base_t, Some(&s), &[], None, &[], 1.0);
 
         let block_t = LH * LW;
         assert_eq!(c.t, base_t, "nothing is appended");
@@ -2006,7 +2002,7 @@ mod conditioned_latent_tests {
         let (latent, positions, km, base_t) = base(1);
         let e = tokens(100.0);
 
-        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, None, None, Some(&e), &[], 1.0);
+        let c = cond(latent.clone(), &positions, &km, base_t, None, &[], Some(&e), &[], 1.0);
 
         let block_t = LH * LW;
         assert_eq!(c.t, base_t + block_t);
@@ -2031,7 +2027,7 @@ mod conditioned_latent_tests {
         let strength = 0.8f32;
         let m = 1.0 - strength;
 
-        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, Some(&s), None, Some(&e), &[], strength);
+        let c = cond(latent.clone(), &positions, &km, base_t, Some(&s), &[], Some(&e), &[], strength);
 
         let block_t = LH * LW;
         assert_eq!(&c.denoise_mask[base_t..], &vec![m; 2 * block_t][..], "denoise_mask over a conditioned token is 1 - strength");
@@ -2044,136 +2040,115 @@ mod conditioned_latent_tests {
         }
     }
 
-    /// The block count `generate` needs BEFORE the stills are encoded, to
-    /// draw one noise vector at the full post-conditioning length. The mid
-    /// anchor never appends - it pins into its owning latent slot - but its
-    /// presence still moves a start still onto the interpolation mechanism.
+    /// The block count a stage needs BEFORE the stills are encoded, to draw
+    /// one noise vector at the full post-conditioning length. Every still
+    /// appends one, except a start still given alone, which overwrites.
     #[test]
     fn appended_block_count_matches_the_mechanism_each_request_uses() {
-        assert_eq!(conditioning_block_count(false, false, false, 0), 0, "unconditioned");
-        assert_eq!(conditioning_block_count(true, false, false, 0), 0, "image-to-video overwrites in place");
-        assert_eq!(conditioning_block_count(false, false, true, 0), 1);
-        assert_eq!(conditioning_block_count(true, false, true, 0), 2, "keyframe interpolation appends BOTH end stills");
-        assert_eq!(conditioning_block_count(false, true, false, 0), 0, "a lone mid anchor pins and appends nothing");
-        assert_eq!(conditioning_block_count(true, true, false, 0), 1, "the mid pin moves the start still onto an appended guide: one block, the start's");
-        assert_eq!(conditioning_block_count(true, true, true, 0), 2, "the two end stills append; the mid pins");
-        assert_eq!(conditioning_block_count(true, false, false, 1), 2, "a future anchor turns the start still into an appended guide: it appends, and so does the start");
-        assert_eq!(conditioning_block_count(false, false, false, 2), 2, "future anchors alone are their own appended blocks");
+        assert_eq!(appended_blocks(false, 0, false, 0), 0, "unconditioned");
+        assert_eq!(appended_blocks(true, 0, false, 0), 0, "image-to-video overwrites in place");
+        assert_eq!(appended_blocks(false, 0, true, 0), 1);
+        assert_eq!(appended_blocks(true, 0, true, 0), 2, "keyframe interpolation appends BOTH end stills");
+        assert_eq!(appended_blocks(false, 1, false, 0), 1, "a lone keyframe is its own block");
+        assert_eq!(appended_blocks(true, 1, false, 0), 2, "a keyframe moves the start still onto an appended guide");
+        assert_eq!(appended_blocks(true, 3, true, 0), 5, "every keyframe appends beside both ends");
+        assert_eq!(appended_blocks(true, 0, false, 1), 2, "a future anchor turns the start still into an appended guide: it appends, and so does the start");
+        assert_eq!(appended_blocks(false, 0, false, 2), 2, "future anchors alone are their own appended blocks");
     }
 
-    /// **The mid anchor is both pinned and appended; start and end are pure
-    /// guides.** The two end stills each get their own appended guiding
-    /// block (the reference's `image_conditionings_by_adding_guiding_latent`
-    /// semantics); the interior anchor is written INTO the latent slot
-    /// containing its pixel instant, frozen there - structural, not advisory,
-    /// and appended nowhere.
+    /// **Start, keyframe and end are each an appended guide at its own
+    /// instant**, the reference's `image_conditionings_by_adding_guiding_
+    /// latent` for every still: no token of the generated video is
+    /// overwritten or frozen, so the clip moves through the keyframe rather
+    /// than holding it.
     #[test]
-    fn three_anchors_pin_the_mid_and_append_the_two_ends() {
-        let (latent, positions, km, base_t) = base(2);
+    fn three_anchors_append_three_guiding_blocks_at_their_own_instants() {
+        let (latent, positions, km, base_t) = base(3);
         let (s, m, e) = (tokens(0.0), tokens(50.0), tokens(100.0));
         let mid_at = mid_anchor_frame(FRAMES, None).expect("a 9-frame clip has an interior");
         assert_eq!(mid_at, 4);
 
-        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, Some(&s), Some((mid_at, &m)), Some(&e), &[], 1.0);
+        let c = cond(latent.clone(), &positions, &km, base_t, Some(&s), &[(mid_at, &m)], Some(&e), &[], 1.0);
 
         let block_t = LH * LW;
-        assert_eq!(c.t, base_t + 2 * block_t, "only the two end stills are appended; the mid pin costs no tokens");
-        assert_eq!(&c.denoise_mask[base_t..], &vec![0.0f32; 2 * block_t][..], "both appended guiding blocks are frozen");
-        // Pixel frame 4 of a 9-frame clip sits in latent frame 1 (px [1, 9)):
-        // the pin occupies exactly that slot of the base grid.
-        let slot = latent_frame_containing(mid_at) * block_t;
-        assert_eq!(slot, block_t);
-        assert_eq!(&c.latent[slot * CH..(slot + block_t) * CH], &m[..], "the pinned slot carries the mid still, replacing its noise");
-        assert_eq!(&c.denoise_mask[slot..slot + block_t], &vec![0.0f32; block_t][..], "the pinned slot is frozen at strength 1.0");
-        assert_eq!(&c.clean[slot * CH..(slot + block_t) * CH], &m[..], "the pinned slot's clean target is the still");
-        assert_eq!(&c.denoise_mask[..slot], &vec![1.0f32; slot][..], "every other generated token still denoises freely");
-        assert_eq!(&c.denoise_mask[slot + block_t..base_t], &vec![1.0f32; base_t - slot - block_t][..]);
-        assert_eq!(&c.latent[..slot * CH], &latent[..slot * CH], "tokens outside the pin keep their own noise");
-        assert_eq!(&c.latent[(slot + block_t) * CH..base_t * CH], &latent[(slot + block_t) * CH..base_t * CH]);
-        // The pinned slot keeps the video's OWN grid positions - it is a
-        // structural frame of the clip, not an appended guide with its own
-        // one-frame-wide RoPE span.
-        for axis in 0..3 {
-            let src = &positions[axis * base_t * 2..(axis + 1) * base_t * 2];
-            let dst = &c.positions[axis * c.t * 2..(axis + 1) * c.t * 2];
-            assert_eq!(&dst[slot * 2..(slot + block_t) * 2], &src[slot * 2..(slot + block_t) * 2], "axis {axis}: the pinned slot uses the base grid's own positions");
-        }
-        // The end stills land at their own instants as appended guides.
-        assert_eq!(&c.positions[base_t * 2..base_t * 2 + 2], &[0.0, 0.125]);
-        let second = base_t + block_t;
-        assert_eq!(&c.positions[second * 2..second * 2 + 2], &[1.0, 1.125]);
-    }
-
-    /// A middle anchor with no still at either end is a pin into its slot and
-    /// nothing else - the mechanism does not need company, and no block is
-    /// appended for it.
-    #[test]
-    fn a_lone_mid_anchor_pins_into_its_slot() {
-        let (latent, positions, km, base_t) = base(0);
-        let m = tokens(50.0);
-
-        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, None, Some((4, &m)), None, &[], 1.0);
-
-        let block_t = LH * LW;
-        assert_eq!(c.t, base_t, "nothing is appended");
-        let slot = latent_frame_containing(4) * block_t;
-        assert_eq!(&c.latent[slot * CH..(slot + block_t) * CH], &m[..]);
-        assert_eq!(&c.denoise_mask[slot..slot + block_t], &vec![0.0f32; block_t][..]);
-        assert_eq!(&c.clean[slot * CH..(slot + block_t) * CH], &m[..]);
-        assert_eq!(&c.denoise_mask[..slot], &vec![1.0f32; slot][..]);
-        assert_eq!(c.positions, positions, "the base grid's positions are untouched - the pin reuses its own slot");
-    }
-
-    /// A pinned mid at strength < 1.0 blends both the mask and the initial
-    /// latent exactly like every other conditioning item - the pin is the
-    /// same `1 - strength` algebra, applied to a slot of the base grid.
-    #[test]
-    fn a_pinned_mid_blends_at_strength_below_one() {
-        let (latent, positions, km, base_t) = base(0);
-        let m_img = tokens(50.0);
-        let strength = 0.8f32;
-        let m = 1.0 - strength;
-
-        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, None, Some((4, &m_img)), None, &[], strength);
-
-        let block_t = LH * LW;
-        let slot = latent_frame_containing(4) * block_t;
-        assert_eq!(&c.denoise_mask[slot..slot + block_t], &vec![m; block_t][..]);
-        for (i, &v) in c.latent[slot * CH..(slot + block_t) * CH].iter().enumerate() {
-            let want = (1.0 - m) * m_img[i] + m * latent[slot * CH + i];
-            assert!((v - want).abs() < 1e-5, "token {i}: the pinned slot's initial latent is lerp(clean, noise, 1-strength): got {v}, want {want}");
+        assert_eq!(c.t, base_t + 3 * block_t, "one appended block per still");
+        assert_eq!(&c.denoise_mask[..base_t], &vec![1.0f32; base_t][..], "every generated token denoises freely");
+        assert_eq!(&c.latent[..base_t * CH], &latent[..base_t * CH], "the base video keeps its own noise");
+        assert_eq!(&c.denoise_mask[base_t..], &vec![0.0f32; 3 * block_t][..], "each guide is frozen at strength 1.0");
+        assert_eq!(c.positions.len(), 3 * c.t * 2);
+        for (k, (still, instant)) in [(&s, [0.0, 0.125]), (&m, [0.5, 0.625]), (&e, [1.0, 1.125])].into_iter().enumerate() {
+            let at = base_t + k * block_t;
+            assert_eq!(&c.clean[at * CH..(at + block_t) * CH], &still[..], "block {k} carries its own still, in timeline order");
+            assert_eq!(&c.positions[at * 2..at * 2 + 2], &instant, "block {k} sits at its own instant (pixel frames 0, 4, 8 at 8 fps)");
         }
     }
 
-    /// Pixel frame 0 is the start still's own slot: a mid anchor naming it is
-    /// a mis-routed request, refused loudly rather than silently pinning the
-    /// clip's first latent frame twice.
+    /// A keyframe needs no company: alone it is one guide at its instant.
     #[test]
-    #[should_panic(expected = "mid anchor names pixel frame 0")]
-    fn a_pinned_mid_refuses_pixel_frame_zero() {
-        let (latent, positions, km, base_t) = base(0);
-        let m = tokens(50.0);
-        let _ = conditioned_latent(latent, &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, None, Some((0, &m)), None, &[], 1.0);
-    }
-
-    /// Adding a middle anchor to a `--start-frame` run moves the start still
-    /// off the in-place overwrite and onto an appended guide, while the mid
-    /// takes the pin - the two stills condition different mechanisms, and the
-    /// generated video's own latent frame 0 must be released for the start
-    /// guide, or the clip would be pinned twice at the same instant.
-    #[test]
-    fn a_mid_anchor_moves_the_start_still_from_an_overwrite_to_a_guide() {
+    fn a_lone_keyframe_appends_one_guiding_block_at_its_own_instant() {
         let (latent, positions, km, base_t) = base(1);
+        let m = tokens(50.0);
+
+        let c = cond(latent.clone(), &positions, &km, base_t, None, &[(4, &m)], None, &[], 1.0);
+
+        let block_t = LH * LW;
+        assert_eq!(c.t, base_t + block_t);
+        assert_eq!(&c.denoise_mask[..base_t], &vec![1.0f32; base_t][..]);
+        assert_eq!(&c.clean[base_t * CH..], &m[..]);
+        assert_eq!(&c.positions[base_t * 2..base_t * 2 + 2], &[0.5, 0.625]);
+    }
+
+    /// Adding a keyframe to a `--start-frame` run moves the start still off
+    /// the in-place overwrite and onto an appended guide - the
+    /// interpolation pipeline's rule - releasing the generated video's own
+    /// latent frame 0.
+    #[test]
+    fn a_keyframe_moves_the_start_still_from_an_overwrite_to_a_guide() {
+        let (latent, positions, km, base_t) = base(2);
         let (s, m) = (tokens(0.0), tokens(50.0));
 
-        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, Some(&s), Some((4, &m)), None, &[], 1.0);
+        let c = cond(latent.clone(), &positions, &km, base_t, Some(&s), &[(4, &m)], None, &[], 1.0);
 
         let block_t = LH * LW;
-        assert_eq!(c.t, base_t + block_t, "only the start still is appended");
-        assert_eq!(&c.denoise_mask[..base_t - block_t], &vec![1.0f32; base_t - block_t][..], "latent frame 0 is no longer overwritten");
-        let slot = latent_frame_containing(4) * block_t;
-        assert_eq!(&c.clean[base_t * CH..(base_t + block_t) * CH], &s[..], "the start still is the appended guide");
-        assert_eq!(&c.clean[slot * CH..(slot + block_t) * CH], &m[..], "the mid still is the pin");
+        assert_eq!(c.t, base_t + 2 * block_t);
+        assert_eq!(&c.denoise_mask[..base_t], &vec![1.0f32; base_t][..], "latent frame 0 is no longer overwritten");
+        assert_eq!(&c.clean[base_t * CH..(base_t + block_t) * CH], &s[..], "the start still is the first appended guide");
+        assert_eq!(&c.clean[(base_t + block_t) * CH..], &m[..], "the keyframe the second");
+    }
+
+    /// Several keyframes, each its own guide at its own instant, between the
+    /// start's and the end's.
+    #[test]
+    fn several_keyframes_each_guide_their_own_instant() {
+        let (latent, positions, km, base_t) = base(4);
+        let (s, a, b, e) = (tokens(0.0), tokens(10.0), tokens(20.0), tokens(100.0));
+
+        let c = cond(latent, &positions, &km, base_t, Some(&s), &[(2, &a), (6, &b)], Some(&e), &[], 1.0);
+
+        let block_t = LH * LW;
+        assert_eq!(c.t, base_t + 4 * block_t);
+        let second = base_t + block_t;
+        let third = base_t + 2 * block_t;
+        assert_eq!(&c.clean[second * CH..(second + block_t) * CH], &a[..]);
+        assert_eq!(&c.clean[third * CH..(third + block_t) * CH], &b[..]);
+        assert_eq!(&c.positions[second * 2..second * 2 + 2], &[0.25, 0.375]);
+        assert_eq!(&c.positions[third * 2..third * 2 + 2], &[0.75, 0.875]);
+    }
+
+    /// Only an ordered list of interior instants is a request a clip can
+    /// honour.
+    #[test]
+    fn keyframes_must_be_interior_and_in_timeline_order() {
+        let k = |frames: &[usize]| frames.iter().map(|&at| (at, format!("{at}.png"))).collect::<Vec<_>>();
+        check_keyframes(17, &k(&[3, 4, 15])).expect("interior, ordered");
+        check_keyframes(17, &[]).expect("none");
+        for (frames, why) in [(vec![0], "frame 0 is the start still's"), (vec![16], "the last frame is the end still's"), (vec![20], "past the clip"), (vec![8, 4], "out of order"), (vec![5, 5], "named twice")] {
+            assert!(check_keyframes(17, &k(&frames)).is_err(), "{why}: {frames:?} must be refused");
+        }
+        assert_eq!(parse_keyframes(" 4:a.png, 12:b.png ").unwrap(), k(&[4, 12]).into_iter().map(|(at, _)| (at, if at == 4 { "a.png".to_string() } else { "b.png".to_string() })).collect::<Vec<_>>());
+        for bad in ["a.png", "x:a.png", "4:"] {
+            assert!(parse_keyframe(bad).is_err(), "{bad} must be refused");
+        }
     }
 
     /// A future anchor rides along as its own appended block at the RAW pixel
@@ -2187,7 +2162,7 @@ mod conditioned_latent_tests {
         let (latent, positions, km, base_t) = base(1);
         let f = tokens(7.0);
 
-        let c = conditioned_latent(latent, &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, None, None, None, &[(40, &f)], 1.0);
+        let c = cond(latent, &positions, &km, base_t, None, &[], None, &[(40, &f)], 1.0);
 
         let block_t = LH * LW;
         assert_eq!(c.t, base_t + block_t);
@@ -2213,7 +2188,7 @@ mod conditioned_latent_tests {
         let (latent, positions, km, base_t) = base(2);
         let (s, f) = (tokens(3.0), tokens(7.0));
 
-        let c = conditioned_latent(latent.clone(), &positions, &km, base_t, LH, LW, CH, FRAMES, FPS, Some(&s), None, None, &[(40, &f)], 1.0);
+        let c = cond(latent.clone(), &positions, &km, base_t, Some(&s), &[], None, &[(40, &f)], 1.0);
 
         let block_t = LH * LW;
         assert_eq!(c.t, base_t + 2 * block_t);
@@ -3340,13 +3315,6 @@ fn vae_input(v: u8) -> f32 {
 /// `ltx_pipelines.distilled.DistilledPipeline.__call__` does (it calls
 /// `combined_image_conditionings` separately for stage 1 and stage 2, with
 /// `stage_1_h/stage_1_w` and then `height/width`).
-///
-/// This is also the right content for the mid anchor's PIN, which sits in an
-/// interior latent slot whose decoder normally aggregates 8 pixel frames:
-/// fed the same still repeated across its span instead, the encoder produced
-/// a bit-identical trajectory end to end (a constant signal's temporal
-/// aggregation IS its one-frame latent), so the pin keeps the cheap
-/// image-path encode.
 fn encode_still(vcfg: &LtxVaeConfig, vweights: &vae::blocks::Tensors, path: &str, width: usize, height: usize, channels: usize, device: Option<&str>) -> Result<Vec<f32>, String> {
     let (lh, lw) = (height / 32, width / 32);
     let img_t = Instant::now();
@@ -3585,8 +3553,10 @@ struct KeyframeSlots<'a> {
     initial_chw: Option<&'a [f32]>,
 }
 
-/// The base state [`append_keyframe_slots`] extends.
-struct KeyframeSlotsInput<'a> {
+/// The base state a conditioning item extends ([`conditioned_latent`],
+/// [`append_keyframe_slots`]).
+#[derive(Clone, Copy)]
+struct BaseSequence<'a> {
     base_t: usize,
     base_positions: &'a [f32],
     base_keyframes_mask: &'a [f32],
@@ -3611,7 +3581,7 @@ struct AppendedSlots {
 /// [`keyframe_conditioning_positions`] (`_slot_positions`: the spatial grid,
 /// time `[p, p + 1) / fps`), keyframes mask `1` (marked), start latent the
 /// initial content lerped toward noise by `sigma0`.
-fn append_keyframe_slots(b: KeyframeSlotsInput<'_>, slots: &KeyframeSlots<'_>, sigma0: f32, seed: u64) -> Result<AppendedSlots, String> {
+fn append_keyframe_slots(b: BaseSequence<'_>, slots: &KeyframeSlots<'_>, sigma0: f32, seed: u64) -> Result<AppendedSlots, String> {
     let k = slots.pixel_frames.len();
     if k == 0 || slots.pixel_frames.windows(2).any(|w| w[1] <= w[0]) {
         return Err(format!("keyframe slots need strictly increasing pixel frames, got {:?}", slots.pixel_frames));
@@ -3710,9 +3680,8 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
 
     // One draw over the WHOLE post-conditioning sequence, matching
     // `GaussianNoiser._sample_noise`, which runs after every conditioning
-    // item has appended its tokens. The mid anchor adds no block: it pins
-    // into the base grid instead of appending (see [`conditioned_latent`]).
-    let blocks = conditioning_block_count(o.start_frame.is_some(), o.mid_frame.is_some(), o.end_frame.is_some(), o.future_anchors.len());
+    // item has appended its tokens.
+    let blocks = appended_blocks(o.start_frame.is_some(), o.keyframes.len(), o.end_frame.is_some(), o.future_anchors.len());
     let mut latent0 = seeded_noise((t + blocks * lh * lw) * c, o.seed ^ st.seed_salt);
     if let Some(seed_chw) = st.seed_chw {
         // `GaussianNoiser.__call__`'s partial re-noise, `lerp(latent, noise,
@@ -3741,8 +3710,8 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
         // block at a fixed instant the pass did not ask for), which masked
         // conditioning already writes; keyframe guides append blocks of their
         // own and compose ([`masked_with_guides`]).
-        if o.start_frame.is_some() || o.mid_frame.is_some() || o.end_frame.is_some() || st.context.is_some() {
-            return Err("a masked video-to-video pass was given a start, mid or end still or a carried latent context as well: masked conditioning already writes every token's clean latent and denoise mask, so the two cannot both apply; a keyframe guide (--keyframe) composes with it".into());
+        if o.start_frame.is_some() || !o.keyframes.is_empty() || o.end_frame.is_some() || st.context.is_some() {
+            return Err("a masked video-to-video pass was given a start, interior or end still or a carried latent context as well: masked conditioning already writes every token's clean latent and denoise mask, so the two cannot both apply; a keyframe guide (--keyframe) composes with it".into());
         }
         assert_eq!(ms.mask.len(), t, "masked stage: mask has {} tokens, expected {t}", ms.mask.len());
         let cond_tc = chw_to_tc(ms.chw, c, sc.lat_t, lh, lw);
@@ -3776,10 +3745,10 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
         // One refusal: context + lone --start-frame is a genuine
         // collision - start-frame's overwrite of latent frame 0 sits
         // inside the carried prefix.
-        if st.context.is_some() && o.start_frame.is_some() && o.mid_frame.is_none() && o.end_frame.is_none() {
+        if st.context.is_some() && o.start_frame.is_some() && o.keyframes.is_empty() && o.end_frame.is_none() {
             return Err("a carried latent context and a lone --start-frame cannot compose: start-frame's overwrite of latent frame 0 sits inside the carried prefix".into());
         }
-        let has_image = o.start_frame.is_some() || o.mid_frame.is_some() || o.end_frame.is_some() || !o.future_anchors.is_empty();
+        let has_image = o.start_frame.is_some() || !o.keyframes.is_empty() || o.end_frame.is_some() || !o.future_anchors.is_empty();
         let (mut latent, positions_d, keyframes_mask_d, denoise_t_count, mut frozen) = if has_image {
             // WHICH mechanism runs is [`conditioned_latent`]'s decision - the
             // reference has two conditioning builders for these two cases
@@ -3798,28 +3767,13 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
                 (Some(e), _) => Some(enc(e.as_str())?),
                 (None, _) => None,
             };
-            // Resolved from the clip's frame count, which is the same in both
-            // stages of a two-stage run, so the anchor names the same instant at
-            // half resolution and at full.
-            let mid_at = o.mid_frame.as_deref().map(|_| mid_anchor_frame(o.frames, o.mid_frame_at)).transpose()?;
-            let mid_tokens = o.mid_frame.as_deref().map(enc).transpose()?;
-            let mid = mid_at.zip(mid_tokens.as_deref());
-            if let Some((at, _)) = mid {
-                tracing::info!(stage = st.label, mid_frame = at, latent_frame = latent_frame_containing(at), of_frames = o.frames, "mid-frame anchor pinned into its latent slot");
-            }
-            // The mid pin writes INSIDE the base range, at the pinned slot's
-            // token range, while a carried context overwrites [0, ctx_tokens)
-            // of that same range - so the pin must sit beyond the carried
-            // prefix. Window routing only ever hands this pass a mid owned by
-            // its EMITTED span, which starts a whole latent frame past the
-            // context; the refusal keeps that invariant loud instead of
-            // silently letting the context overwrite the pin.
-            if let (Some(ctx), Some((at, _))) = (&st.context, mid) {
-                let slot = latent_frame_containing(at);
-                let ctx_tokens = ctx.frames * lh * lw;
-                if slot * lh * lw < ctx_tokens {
-                    return Err(format!("the mid anchor pinned at window pixel frame {at} lands in latent frame {slot}, inside the carried context's {} latent frames: window routing must own the mid instant in this window's emitted span", ctx.frames));
-                }
+            // Pixel frames of the clip, which is the same in both stages of a
+            // two-stage run, so a keyframe names the same instant at half
+            // resolution and at full.
+            let keyframe_tokens = o.keyframes.iter().map(|(_, path)| enc(path)).collect::<Result<Vec<_>, _>>()?;
+            let interior: Vec<(usize, &[f32])> = o.keyframes.iter().zip(&keyframe_tokens).map(|((at, _), tokens)| (*at, tokens.as_slice())).collect();
+            if !interior.is_empty() {
+                tracing::info!(stage = st.label, keyframes = ?o.keyframes.iter().map(|(at, _)| *at).collect::<Vec<_>>(), of_frames = o.frames, "interior keyframes appended as guiding blocks");
             }
             // The long-form windows' future anchors: appended guides at the raw
             // local pixel positions they name, which may lie beyond this
@@ -3832,7 +3786,9 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
             if !future.is_empty() {
                 tracing::info!(stage = st.label, future_anchors = ?future.iter().map(|(at, _)| *at).collect::<Vec<_>>(), of_frames = o.frames, "future anchors appended as guiding blocks");
             }
-            let cl = conditioned_latent(latent0, &positions, &keyframes_mask, t, lh, lw, c, o.frames, o.fps as f64, start_tokens.as_deref(), mid, end_tokens.as_deref(), &future, o.conditioning_strength);
+            let base = BaseSequence { base_t: t, base_positions: &positions, base_keyframes_mask: &keyframes_mask, lh, lw, channels: c, fps: o.fps as f64 };
+            let stills = Stills { start: start_tokens.as_deref(), interior: &interior, end: end_tokens.as_deref(), future: &future, strength: o.conditioning_strength };
+            let cl = conditioned_latent(latent0, base, o.frames, stills);
             tracing::info!(stage = st.label, strength = o.conditioning_strength, tokens = cl.t, base_tokens = t, appended_blocks = blocks, "image conditioning applied");
             (cl.latent, cl.positions, cl.keyframes_mask, cl.t, Some((cl.denoise_mask, cl.clean)))
         } else {
@@ -3895,7 +3851,7 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
                 return Err("a masked video-to-video pass cannot also generate keyframe slots".into());
             }
             let sigma0 = if st.seed_chw.is_some() { st.sigmas[0] as f32 } else { 1.0 };
-            let base = KeyframeSlotsInput { base_t: denoise_t_count, base_positions: &positions_d, base_keyframes_mask: &keyframes_mask_d, lh, lw, channels: c, fps: o.fps as f64 };
+            let base = BaseSequence { base_t: denoise_t_count, base_positions: &positions_d, base_keyframes_mask: &keyframes_mask_d, lh, lw, channels: c, fps: o.fps as f64 };
             let ks = append_keyframe_slots(base, slots, sigma0, o.seed ^ st.seed_salt ^ SLOT_SEED_SALT)?;
             let mut latent = latent0;
             latent.extend_from_slice(&ks.latent);
@@ -3993,24 +3949,8 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
     if let Some(a) = &audio_state {
         tracing::info!(stage = st.label, audio_tokens = a.ta, carried_tokens = a.frozen.as_ref().map_or(0, |(m, _)| m.iter().filter(|&&m| m == 0.0).count()), "audio stream denoising jointly with the video stream");
     }
-    let final_latent = denoise(
-        sc.dit,
-        st.sigmas,
-        latent0,
-        &positions_d,
-        &keyframes_mask_d,
-        sc.ctx_cond,
-        sc.ctx_uncond,
-        sc.context_len,
-        denoise_t_count,
-        &o.guidance,
-        Sampling { sampler: o.sampler, eta: st.eta, s_noise: o.s_noise, seed: o.seed ^ 0x4e_4f_49_53_45 ^ st.seed_salt },
-        total,
-        frozen_ref.as_ref(),
-        sc.cancel,
-        audio_state.as_mut(),
-        &mut |done, tot, phase| progress(done_before + done, tot, phase),
-    )?;
+    let sampling = Sampling { sampler: o.sampler, eta: st.eta, s_noise: o.s_noise, seed: o.seed ^ 0x4e_4f_49_53_45 ^ st.seed_salt };
+    let final_latent = denoise(sc.dit, st.sigmas, latent0, &positions_d, &keyframes_mask_d, sc.ctx_cond, sc.ctx_uncond, sc.context_len, denoise_t_count, &o.guidance, sampling, total, frozen_ref.as_ref(), sc.cancel, audio_state.as_mut(), &mut |done, tot, phase| progress(done_before + done, tot, phase))?;
     let slots_chw = st.slots.as_ref().map(|s| tc_to_chw(&final_latent[slot_start * c..slot_end * c], c, s.pixel_frames.len(), lh, lw));
     Ok(StageOut { video_chw: tc_to_chw(&final_latent[..t * c], c, sc.lat_t, lh, lw), slots_chw, audio: audio_state.map(|a| a.latent) })
 }
@@ -4503,9 +4443,7 @@ pub fn generate(paths: &Paths, prompt: &str, o: &GenOpts, cancel: &capability::C
     }
     // Before any weight is read: an anchor pointed outside the clip is a
     // typo, and a typo should cost milliseconds rather than a model build.
-    if o.mid_frame.is_some() {
-        mid_anchor_frame(o.frames, o.mid_frame_at)?;
-    }
+    check_keyframes(o.frames, &o.keyframes)?;
     check_audio_request(paths, o)?;
     let (lh, lw) = (o.height / 32, o.width / 32);
     let (lat_t, lh, lw) = (lat_t as usize, lh, lw);
@@ -5315,7 +5253,7 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
         // a `GenOpts` that disagreed with the stage it accompanies would be a
         // trap for the next reader. Image conditioning is cleared: this entry
         // point's content comes from the clip, not from a still.
-        let pass_opts = GenOpts { frames: len, width: out_w, height: out_h, start_frame: None, mid_frame: None, end_frame: None, ..o.base.clone() };
+        let pass_opts = GenOpts { frames: len, width: out_w, height: out_h, start_frame: None, keyframes: Vec::new(), end_frame: None, ..o.base.clone() };
         let sc = StageCtx {
             // A refinement pass never denoises an audio stream (its content
             // comes from a rendered file), so these are never read - empty
@@ -5569,7 +5507,7 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
     // The clip's content comes from the source: a start, mid or end still
     // would overwrite tokens the mask writes. Keyframe guides append their
     // own blocks and compose with it, at instants inside the clip, in order.
-    if o.base.start_frame.is_some() || o.base.mid_frame.is_some() || o.base.end_frame.is_some() {
+    if o.base.start_frame.is_some() || !o.base.keyframes.is_empty() || o.base.end_frame.is_some() {
         return Err("a masked pass takes its content from the source clip: a start, mid or end still would overwrite what the mask holds; give the edited frames as keyframe guides (--keyframe <frame>:<image>) instead".into());
     }
     if let Some(&(at, _)) = o.base.future_anchors.iter().find(|(at, _)| *at >= frames) {
@@ -5894,7 +5832,12 @@ pub struct LongOpts {
     pub max_refine_tokens: usize,
     /// Run a video-only clip stage-major (stage 1 across the whole clip at
     /// half resolution, then stage 2 refining slices of it) when its stage-2
-    /// plan splits; `false` keeps the window-major loop. On by default.
+    /// plan splits; `false`, the default, keeps the window-major loop. Off
+    /// because its refinement windows do not stitch: each re-noises its slice
+    /// to sigma 0.909 and regenerates it seeing only its own part of the
+    /// clip, so on the real checkpoint a 313-frame 768x448 clip cut to
+    /// another scene at a refinement seam and missed an interior keyframe,
+    /// where the window-major loop held all four anchors with no jump.
     pub stage_major: bool,
     /// `frames` is the WHOLE clip's length, not one window's.
     pub base: GenOpts,
@@ -5906,7 +5849,7 @@ impl Default for LongOpts {
             context_latent_frames: crate::longform::CONTEXT_LATENT_FRAMES,
             max_window_tokens: crate::longform::LONGFORM_MAX_TOKENS,
             max_refine_tokens: REFINE_MAX_TOKENS,
-            stage_major: true,
+            stage_major: false,
             base: GenOpts::default(),
         }
     }
@@ -5961,68 +5904,60 @@ pub fn two_stage_long_plan(
 }
 
 /// Build per-window generation options from a clip-global base, routing
-/// `start_frame`, `end_frame`, and `mid_frame` to the window that owns each,
-/// and handing every window the anchors still ahead of it as future guides.
+/// `start_frame`, `end_frame` and every interior keyframe to the window that
+/// owns it, and handing every window the anchors still ahead of it as future
+/// guides.
 ///
 /// - `start_frame`: window 0 only (pixel frame 0 only exists there).
 /// - `end_frame`: last window only (its `frames = w.decoded_frames()` already
 ///   re-expresses the anchor with no arithmetic).
-/// - `mid_frame` / `mid_frame_at`: routed via [`crate::longform::route_mid_anchor`]
-///   to the window whose decoded range contains the pixel frame, and re-expressed
-///   as the local pixel frame within that window.
-/// - Everything still AHEAD of a window - a mid anchor a later window owns,
-///   the end anchor on any window but the last - becomes that window's
+/// - `keyframes`: each routed via [`crate::longform::route_anchor`] to the
+///   window whose decoded range contains its pixel frame, and re-expressed as
+///   the local pixel frame within that window.
+/// - Everything still AHEAD of a window - a keyframe a later window owns, the
+///   end anchor on any window but the last - becomes that window's
 ///   [`GenOpts::future_anchors`] entry: an appended guide at its local pixel
 ///   position, so the window bends toward an anchor it cannot reach inside its
 ///   own span. An anchor a window has already emitted is its past; the carried
 ///   context carries its effect and nothing re-conditions it.
 ///
-/// Returns `Err` when the base options carry a mid anchor that doesn't land
-/// inside the clip (out-of-bounds `mid_frame_at`), since no window could
-/// honour it as either owner or future.
+/// Returns `Err` when the base options carry a keyframe that doesn't land
+/// inside the clip, since no window could honour it as either owner or
+/// future.
 pub fn window_gen_opts(
     base: &GenOpts,
     plan: &[crate::longform::Window],
     wi: usize,
 ) -> Result<GenOpts, String> {
+    check_keyframes(base.frames, &base.keyframes)?;
     let w = &plan[wi];
     let start_frame = if wi == 0 { base.start_frame.clone() } else { None };
     let end_frame = if wi == plan.len() - 1 { base.end_frame.clone() } else { None };
-    // The mid anchor's clip-global instant, resolved and validated against the
-    // FULL clip: an explicit `mid_frame_at` outside it has no owning window and
-    // no future for any window to guide toward.
-    let mid_global = base.mid_frame.as_ref().map(|_| mid_anchor_frame(base.frames, base.mid_frame_at)).transpose()?;
-    // Which window owns the instant - always some window, because the decoded
-    // ranges tile the clip (see `crate::longform`'s `route_mid_anchor`).
-    let owner = mid_global.and_then(|m| crate::longform::route_mid_anchor(plan, m).map(|(owning_wi, _)| (m, owning_wi)));
-    let (mid_frame, mid_frame_at) = match owner {
-        Some((m, owning_wi)) if owning_wi == wi => {
-            // The global pixel frame falls inside this window's decoded range
-            // and this window emits it: re-express as the local pixel frame.
-            (base.mid_frame.clone(), Some(m - w.source_first_frame()))
-        }
-        _ => (None, None),
-    };
-    let decoded_end = w.source_first_frame() + w.decoded_frames();
+    let first = w.source_first_frame();
+    let decoded_end = first + w.decoded_frames();
+    let mut keyframes = Vec::new();
     let mut future_anchors = Vec::new();
-    if let (Some(ref path), Some((m, _))) = (&base.mid_frame, owner) {
-        // The owner is the only window whose emitted span contains the
-        // instant; every window whose span ends before it sees it in future.
-        if m >= decoded_end {
-            future_anchors.push((m - w.source_first_frame(), path.clone()));
+    for (at, path) in &base.keyframes {
+        // Which window owns the instant - always some window, because the
+        // decoded ranges tile the clip (see `crate::longform::route_anchor`).
+        match crate::longform::route_anchor(plan, *at) {
+            Some((owner, _)) if owner == wi => keyframes.push((at - first, path.clone())),
+            // Only the owner's emitted span contains the instant; every
+            // window whose span ends before it sees it in its future.
+            Some(_) if *at >= decoded_end => future_anchors.push((at - first, path.clone())),
+            _ => {}
         }
     }
     if let Some(ref path) = base.end_frame {
         if wi != plan.len() - 1 && base.frames > decoded_end {
-            future_anchors.push((base.frames - 1 - w.source_first_frame(), path.clone()));
+            future_anchors.push((base.frames - 1 - first, path.clone()));
         }
     }
     Ok(GenOpts {
         frames: w.decoded_frames(),
         start_frame,
         end_frame,
-        mid_frame,
-        mid_frame_at,
+        keyframes,
         future_anchors,
         ..base.clone()
     })
@@ -6042,12 +5977,11 @@ mod window_gen_opts_tests {
         ]
     }
 
-    fn base_with_anchors(at: Option<usize>) -> GenOpts {
+    fn base_with_anchors(keyframes: &[usize]) -> GenOpts {
         GenOpts {
             frames: 41,
             start_frame: Some("start.png".into()),
-            mid_frame: Some("mid.png".into()),
-            mid_frame_at: at,
+            keyframes: keyframes.iter().map(|&at| (at, format!("k{at}.png"))).collect(),
             end_frame: Some("end.png".into()),
             ..GenOpts::default()
         }
@@ -6061,22 +5995,21 @@ mod window_gen_opts_tests {
     #[test]
     fn an_anchor_beyond_a_windows_span_rides_along_as_a_future_guide() {
         let plan = two_window_plan();
-        let b = base_with_anchors(Some(36)); // the mid anchor's instant is window 1's to own
+        let b = base_with_anchors(&[36]); // the keyframe's instant is window 1's to own
 
-        let w0 = window_gen_opts(&b, &plan, 0).expect("a clip-global mid anchor inside the clip routes");
+        let w0 = window_gen_opts(&b, &plan, 0).expect("a keyframe inside the clip routes");
         assert_eq!(w0.start_frame.as_deref(), Some("start.png"));
-        assert_eq!(w0.mid_frame, None, "the mid anchor is not window 0's to own in-window");
+        assert!(w0.keyframes.is_empty(), "the keyframe is not window 0's to own in-window");
         assert_eq!(w0.end_frame, None, "the end anchor belongs to the last window in-window");
         assert_eq!(
             w0.future_anchors,
-            vec![(36, "mid.png".to_string()), (40, "end.png".to_string())],
+            vec![(36, "k36.png".to_string()), (40, "end.png".to_string())],
             "both later anchors, in timeline order, at local pixel positions beyond window 0's 33-frame span"
         );
 
-        let w1 = window_gen_opts(&b, &plan, 1).expect("a clip-global mid anchor inside the clip routes");
+        let w1 = window_gen_opts(&b, &plan, 1).expect("a keyframe inside the clip routes");
         assert_eq!(w1.start_frame, None, "the start still conditioned window 0 and is window 1's past");
-        assert_eq!(w1.mid_frame.as_deref(), Some("mid.png"), "the mid anchor's instant is inside window 1's emitted span");
-        assert_eq!(w1.mid_frame_at, Some(12), "pixel 36 minus window 1's source_first_frame 24");
+        assert_eq!(w1.keyframes, vec![(12, "k36.png".to_string())], "pixel 36 minus window 1's source_first_frame 24, inside its emitted span");
         assert_eq!(w1.end_frame.as_deref(), Some("end.png"), "the last window owns the end anchor in-window");
         assert!(w1.future_anchors.is_empty(), "nothing lies beyond the last window");
     }
@@ -6088,40 +6021,41 @@ mod window_gen_opts_tests {
     #[test]
     fn an_anchor_a_window_has_already_emitted_is_not_re_conditioned() {
         let plan = two_window_plan();
-        let b = base_with_anchors(Some(20)); // owned by window 0
+        let b = base_with_anchors(&[20]); // owned by window 0
 
         let w0 = window_gen_opts(&b, &plan, 0).expect("routes");
-        assert_eq!(w0.mid_frame.as_deref(), Some("mid.png"));
-        assert_eq!(w0.mid_frame_at, Some(20));
+        assert_eq!(w0.keyframes, vec![(20, "k20.png".to_string())]);
         assert_eq!(w0.future_anchors, vec![(40, "end.png".to_string())], "only the end anchor is still ahead of window 0");
 
         let w1 = window_gen_opts(&b, &plan, 1).expect("routes");
-        assert_eq!(w1.mid_frame, None, "the mid anchor's instant is in window 1's past");
+        assert!(w1.keyframes.is_empty(), "the keyframe's instant is in window 1's past");
         assert!(w1.future_anchors.is_empty());
     }
 
-    /// Without an explicit position the mid anchor belongs at the middle of
-    /// the FULL clip - routed to the window that owns that instant, and seen
-    /// by no other window as anything but past or future.
+    /// Several keyframes split between windows by ownership: each window
+    /// owns the ones its emitted span contains, sees the later ones as
+    /// future guides, and never sees the earlier ones again.
     #[test]
-    fn the_default_mid_anchor_is_clip_global_and_reaches_no_window_but_its_owner_in_window() {
+    fn several_keyframes_route_to_their_own_windows() {
         let plan = two_window_plan();
-        let b = base_with_anchors(None); // the default (41-1)/2 = 20 is window 0's to own
+        let b = base_with_anchors(&[10, 20, 36]);
 
         let w0 = window_gen_opts(&b, &plan, 0).expect("routes");
-        assert_eq!(w0.mid_frame.as_deref(), Some("mid.png"));
-        assert_eq!(w0.mid_frame_at, Some(20), "the clip's own middle, not this window's");
-        assert_eq!(w0.future_anchors, vec![(40, "end.png".to_string())]);
+        assert_eq!(w0.keyframes, vec![(10, "k10.png".to_string()), (20, "k20.png".to_string())]);
+        assert_eq!(w0.future_anchors, vec![(36, "k36.png".to_string()), (40, "end.png".to_string())]);
+
+        let w1 = window_gen_opts(&b, &plan, 1).expect("routes");
+        assert_eq!(w1.keyframes, vec![(12, "k36.png".to_string())]);
+        assert!(w1.future_anchors.is_empty());
     }
 
-    /// A mid anchor outside the clip is refused where it is routed - no
+    /// A keyframe outside the clip is refused where it is routed - no
     /// window's decoded range contains it and no future guide can name an
     /// instant the clip never reaches.
     #[test]
-    fn a_mid_anchor_outside_the_clip_is_refused_where_it_is_routed() {
+    fn a_keyframe_outside_the_clip_is_refused_where_it_is_routed() {
         let plan = two_window_plan();
-        let b = base_with_anchors(Some(50));
-        let err = window_gen_opts(&b, &plan, 0).expect_err("beyond the clip");
+        let err = window_gen_opts(&base_with_anchors(&[50]), &plan, 0).expect_err("beyond the clip");
         assert!(err.contains("not INSIDE"), "the refusal names the shape problem: {err}");
     }
 }
@@ -6172,7 +6106,7 @@ mod window_gen_opts_tests {
 /// dispatch below), and anything with [`LongOpts::stage_major`]
 /// off. Clip-global anchors route through [`window_gen_opts`] exactly as
 /// they do on the stage-major path: `--start-frame` conditions window 0, the
-/// end and mid stills condition the windows that own their instants, and every
+/// end still and the keyframes condition the windows that own their instants, and every
 /// window also receives the anchors still ahead of it as future guides.
 ///
 /// # Stage-major path (two-stage, video-only, default)
@@ -6194,10 +6128,10 @@ mod window_gen_opts_tests {
 ///    the full-res window plan.  The motion is already fixed by stage 1, so
 ///    stage 2 can fragment freely with no quality cost.
 ///
-/// Clip-global anchors (`--start-frame`, `--end-frame`, `--mid-frame`) are
-/// routed to their owning window via [`window_gen_opts`], and every window
-/// receives the anchors still ahead of it as future guides; a mid anchor
-/// outside the clip is refused rather than silently dropped.  Audio-visual
+/// Clip-global anchors (`--start-frame`, `--end-frame` and every interior
+/// keyframe) are routed to their owning window via [`window_gen_opts`], and
+/// every window receives the anchors still ahead of it as future guides; a
+/// keyframe outside the clip is refused rather than silently dropped.  Audio-visual
 /// clips keep the window-major path (Phase F defers that design).
 ///
 /// Long-form generation is otherwise the ordinary generation path - same
@@ -6666,17 +6600,13 @@ fn run_stage_major(
     if tsp.stage2.len() < 2 {
         return Err("stage-major path requires >= 2 stage-2 windows (otherwise generate_long's fast path handles it)".into());
     }
-    // A mid anchor that routes into no window would be honoured by none of
+    // A keyframe that routes into no window would be honoured by none of
     // them - silently dropped, the defect the window-major path refuses
     // rather than commits. Every pixel frame inside the clip lands in exactly
     // one window's decoded range (the ranges tile the clip), so only an
-    // out-of-clip anchor can fail to route: refuse it here, before any weight
-    // is read.
-    if let (Some(_), Some(global_at)) = (&o.base.mid_frame, o.base.mid_frame_at) {
-        if crate::longform::route_mid_anchor(&tsp.stage1, global_at).is_none() {
-            return Err(format!("--mid-frame-at {global_at} lands outside this {}-frame clip: no window's decoded range contains it, so no window could honour it", o.base.frames));
-        }
-    }
+    // out-of-clip keyframe can fail to route: refuse it here, before any
+    // weight is read.
+    check_keyframes(o.base.frames, &o.base.keyframes)?;
 
     check_audio_request(paths, &o.base)?;
     if o.base.steps == 0 {
@@ -6897,17 +6827,17 @@ fn run_stage_major(
 
 /// One scene's own [`LongOpts`] within a [`generate_scenes`] run - `frames`
 /// and `seed` become the scene's own, `start_frame` conditions scene 0's
-/// opening only, and everything else (including `end_frame`/`mid_frame`)
+/// opening only, and everything else (including `end_frame`/`keyframes`)
 /// passes through from the caller's request untouched.
 ///
-/// **Do not add an unconditional `end_frame: None` (or `mid_frame: None`)
+/// **Do not add an unconditional `end_frame: None` (or empty `keyframes`)
 /// here.** `generate_scenes` calls this for the `scenes.len() == 1` case
 /// too - the ordinary, no-`--scene` `t2v` request - and an earlier version
 /// of this function zeroed `end_frame` for every scene regardless of `si`,
 /// which silently discarded `--end-frame` on every single-scene call ever
 /// made. The multi-scene
 /// refusal in `generate_scenes`, run before this is ever called more than
-/// once, is what keeps `end_frame`/`mid_frame` at `None` once more than one
+/// once, is what keeps `end_frame`/`keyframes` empty once more than one
 /// scene is in play; this function has no case of its own left to enforce.
 fn scene_gen_opts(o: &LongOpts, s: &Scene, si: usize) -> LongOpts {
     LongOpts {
@@ -6933,15 +6863,14 @@ mod scene_gen_opts_tests {
 
     /// The exact defect this function was extracted to stop from coming
     /// back: a single-scene request (`si == 0`, the ordinary `t2v` path)
-    /// must keep the caller's own `end_frame`/`mid_frame`, not silently
+    /// must keep the caller's own `end_frame` and keyframes, not silently
     /// drop them.
     #[test]
-    fn a_single_scene_keeps_the_callers_end_and_mid_frame() {
-        let o = LongOpts { base: GenOpts { end_frame: Some("end.png".into()), mid_frame: Some("mid.png".into()), mid_frame_at: Some(4), ..GenOpts::default() }, ..LongOpts::default() };
+    fn a_single_scene_keeps_the_callers_end_frame_and_keyframes() {
+        let o = LongOpts { base: GenOpts { end_frame: Some("end.png".into()), keyframes: vec![(4, "mid.png".into())], ..GenOpts::default() }, ..LongOpts::default() };
         let got = scene_gen_opts(&o, &scene(9, "a shot"), 0);
         assert_eq!(got.base.end_frame.as_deref(), Some("end.png"), "single-scene end_frame must survive unchanged");
-        assert_eq!(got.base.mid_frame.as_deref(), Some("mid.png"), "single-scene mid_frame must survive unchanged");
-        assert_eq!(got.base.mid_frame_at, Some(4));
+        assert_eq!(got.base.keyframes, vec![(4, "mid.png".to_string())], "single-scene keyframes must survive unchanged");
     }
 
     /// `start_frame` conditions scene 0's opening only - unchanged behaviour,
@@ -6996,14 +6925,14 @@ const SCENE_PROGRESS_UNITS: u32 = 100;
 ///
 /// **A single-scene call is handed straight to [`generate_long`]**, so a
 /// request that names one scene is bit-for-bit the run it already was -
-/// including `end_frame`/`mid_frame`, which [`scene_gen_opts`] must not
-/// touch: the multi-scene refusal below is what keeps them `None` by the
+/// including `end_frame`/`keyframes`, which [`scene_gen_opts`] must not
+/// touch: the multi-scene refusal below is what keeps them empty by the
 /// time more than one scene is in play, so this function has no case of its
 /// own left to enforce.
 ///
 /// [`LongOpts::base`]'s own `frames` is NOT read - each [`Scene`] brings its
 /// own length, and the clip's length is their sum. `start_frame` conditions
-/// the first scene's opening and nowhere else; `end_frame` and `mid_frame` are
+/// the first scene's opening and nowhere else; `end_frame` and `keyframes` are
 /// refused for the same reasons [`generate_long`] refuses them.
 #[tracing::instrument(level = "info", name = "generate_scenes", skip_all, fields(scenes = scenes.len(), width = o.base.width, height = o.base.height, seed = o.base.seed))]
 pub fn generate_scenes(paths: &Paths, scenes: &[Scene], o: &LongOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<(Video, Timings), String> {
@@ -7020,8 +6949,8 @@ pub fn generate_scenes(paths: &Paths, scenes: &[Scene], o: &LongOpts, cancel: &c
     if o.base.end_frame.is_some() {
         return Err("--end-frame is not supported for a multi-scene clip: it pins the last frame of ONE window, and the last window of a multi-scene plan is the last scene's, which is not what a caller asking for a final still means".into());
     }
-    if o.base.mid_frame.is_some() {
-        return Err("--mid-frame is not supported for a multi-scene clip: \"the middle of the clip\" is a position in a timeline that is now a sequence of scenes, and which scene should own it has not been designed - anchor the scene you mean by generating it on its own".into());
+    if !o.base.keyframes.is_empty() {
+        return Err("interior keyframes are not supported for a multi-scene clip: a scene boundary is a cut that carries nothing across, so a keyframe's frame names an instant of one scene's own timeline - anchor the scene you mean by generating it on its own, or give a continuous shot as one scene with its keyframes".into());
     }
     // A window seam inside a scene carries both streams; a SCENE boundary
     // deliberately carries neither, which is what makes the next scene free to
@@ -7339,22 +7268,21 @@ pub fn generate_dfr(paths: &Paths, prompt: &str, o: &DfrOpts, cancel: &capabilit
 /// already the previous tile's content), in window-local frames. The start
 /// still keeps its pin at frame 0; the end still guides at the REQUESTED last
 /// frame rather than the padded canvas's, so it joins the future anchors;
-/// the mid still keeps its pin.
+/// the interior keyframes keep their mechanism.
 fn dfr_window_stills(base: &GenOpts, requested: usize, scale: usize, pixel_start: usize, pixel_end: usize, first_free: usize) -> GenOpts {
     let local = |frame: usize| {
         let at = frame * scale;
         (pixel_start..=pixel_end).contains(&at).then_some(at).filter(|&at| at >= first_free).map(|at| at - pixel_start)
     };
     let start_frame = base.start_frame.clone().filter(|_| local(0) == Some(0));
-    let mid_at = base.mid_frame.as_ref().map(|_| base.mid_frame_at.unwrap_or((requested - 1) / 2)).and_then(local);
+    let keyframes = base.keyframes.iter().filter_map(|(at, path)| local(*at).map(|l| (l, path.clone()))).collect();
     let mut future_anchors: Vec<(usize, String)> = base.future_anchors.iter().filter_map(|(at, path)| local(*at).map(|l| (l, path.clone()))).collect();
     if let Some((at, path)) = base.end_frame.as_ref().and_then(|p| local(requested - 1).map(|l| (l, p.clone()))) {
         future_anchors.push((at, path));
     }
     GenOpts {
         start_frame,
-        mid_frame: base.mid_frame.clone().filter(|_| mid_at.is_some()),
-        mid_frame_at: mid_at,
+        keyframes,
         end_frame: None,
         future_anchors,
         ..base.clone()
@@ -8282,7 +8210,7 @@ mod tests {
     /// [`generate_long`] means by carrying latent context rather than a
     /// re-encoded picture.
     ///
-    /// The APPENDED case is `--end-frame`'s and `--mid-frame`'s guiding
+    /// The APPENDED case is `--end-frame`'s and every keyframe's guiding
     /// blocks, and the INTERIOR case is the one nothing else covers: every
     /// frozen range this crate had before sat at one of the two ends of the
     /// sequence, so a step that walked a range from the wrong end, or that
@@ -8668,7 +8596,7 @@ mod tests {
             let video_in = if seeded { chw_to_tc(&get("stage2.video_in"), c, lat_t, lh, lw) } else { vec![0f32; t * c] };
             let keyframes = seeded.then(|| get("stage2.keyframes_in"));
             let slots = KeyframeSlots { pixel_frames: &slot_frames, initial_chw: keyframes.as_deref() };
-            let base = KeyframeSlotsInput { base_t: t, base_positions: &positions, base_keyframes_mask: &keyframes_mask, lh, lw, channels: c, fps };
+            let base = BaseSequence { base_t: t, base_positions: &positions, base_keyframes_mask: &keyframes_mask, lh, lw, channels: c, fps };
             let ks = append_keyframe_slots(base, &slots, 0.0, 1).unwrap();
             let mut latent = video_in;
             latent.extend_from_slice(&ks.latent);
@@ -8778,7 +8706,7 @@ mod tests {
         }
         let initial = tc_to_chw(&initial_tc, c, slot_local.len(), lh, lw);
         let slots = KeyframeSlots { pixel_frames: &slot_local, initial_chw: Some(&initial) };
-        let base = KeyframeSlotsInput { base_t: ic.keyframes_mask.len(), base_positions: &ic.positions, base_keyframes_mask: &ic.keyframes_mask, lh, lw, channels: c, fps };
+        let base = BaseSequence { base_t: ic.keyframes_mask.len(), base_positions: &ic.positions, base_keyframes_mask: &ic.keyframes_mask, lh, lw, channels: c, fps };
         let ks = append_keyframe_slots(base, &slots, 0.0, 1).unwrap();
         latent.extend_from_slice(&ks.latent);
         denoise_mask.resize(ks.total_t, 1.0);

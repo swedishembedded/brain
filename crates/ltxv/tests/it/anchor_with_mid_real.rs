@@ -100,7 +100,7 @@ fn a_start_frame_anchor_survives_a_mid_frame_anchor_alongside_it() {
     let mid_path = write_still(&dir, "mid.png", &mid_anchor);
     let end_path = write_still(&dir, "end.png", &end_anchor);
 
-    let o = GenOpts { start_frame: Some(start_path), mid_frame: Some(mid_path), end_frame: Some(end_path), ..base_opts() };
+    let o = GenOpts { start_frame: Some(start_path), keyframes: vec![(FRAMES / 2, mid_path)], end_frame: Some(end_path), ..base_opts() };
     let (video, timings) = generate(&paths, PROMPT, &o, &cancel, |_, _, _| {}).expect("keyframe-interpolation run with start+mid+end");
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(video.frames.len(), FRAMES);

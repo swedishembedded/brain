@@ -205,16 +205,17 @@ fn a_multi_window_clip_carries_exactly_the_tokens_a_single_window_one_would() {
 }
 
 /// The refusal. A plan whose seams do not land on the audio token grid is
-/// rejected with a specific message, not carried with a rounded context - and
-/// the UNALIGNED planner produces exactly such a plan at a 24-frame-a-second
-/// clip, which is why
-/// the aligned one exists.
+/// rejected with a specific message, not carried with a rounded context -
+/// which is why the aligned planner exists.
 #[test]
 fn a_plan_whose_seams_miss_the_token_grid_is_refused_rather_than_rounded() {
     let (frames, fps) = (241usize, 24usize);
     assert_eq!(audio::window_latent_frame_quantum(fps), 3, "at 24 frames a second a video latent frame is 25/3 audio tokens, so three of them are the smallest whole number");
-    let naive = window_plan(frames, LH, LW, CONTEXT_LATENT_FRAMES, LONGFORM_MAX_TOKENS).expect("the silent plan is legal");
-    let e = audio::audio_plan(&naive, CONTEXT_LATENT_FRAMES, frames, fps).expect_err("a plan that advances by 6 then 5 latent frames cannot carry whole audio tokens at 24 frames a second");
+    // 31 latent frames as a head of 13 and a continuation of 8 carried plus
+    // 18 new: the first seam advances the clip by 5 latent frames.
+    let head = Window { context: 0, new: 13, first_frame: 0 };
+    let naive = vec![head.clone(), Window { context: CONTEXT_LATENT_FRAMES, new: 18, first_frame: head.emitted_frames() }];
+    let e = audio::audio_plan(&naive, CONTEXT_LATENT_FRAMES, frames, fps).expect_err("a plan that advances by 5 latent frames cannot carry whole audio tokens at 24 frames a second");
     assert!(e.contains("whole number"), "the refusal has to say what is wrong: {e}");
     assert!(e.contains("multiples of 3"), "the refusal has to say what would work: {e}");
 

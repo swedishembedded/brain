@@ -33,7 +33,7 @@ per component and the open gaps.
 | Masked video to video | [x] `brain ltxv v2v --mask <maskseq>`: regenerate a tracked region, hold the rest token-exactly; `--keyframe F:<image>` guides it with edited stills (see "Replacing a person") |
 | Character replacement | [x] `brain ltxv replace`: a clip, a character sheet and a click on a person in; the clip with the person replaced out (see "Replacing a person") |
 | Extension | [x] `brain ltxv extend` / the `extend` action: continue a clip from its last 57 frames, with its soundtrack |
-| Image / keyframe conditioning | [x] `--start-frame`, `--mid-frame`, `--end-frame` (see "Anchoring a clip on real images") |
+| Image / keyframe conditioning | [x] `--start-frame`, `--keyframe` (any number), `--mid-frame`, `--end-frame` (see "Anchoring a clip on real images") |
 | Clip length from the prompt | [x] the duration head, when it is in the model store (see "Clip length") |
 | Guidance | [x] the reference's multimodal guider: CFG, STG, rescale and isolated-modality guidance per stream, `--guidance-preset reference` (see "Guidance and samplers") |
 | Samplers | [x] ancestral Euler (the distilled pipeline's) and res_2s (the reference's high-quality pipeline's), `--sampler` |
@@ -155,46 +155,63 @@ pipeline predicts it, and `t2a` from the audio stream's alone.
 
 ### Anchoring a clip on real images
 
-A generation can be pinned to stills you supply, at up to three instants at
-once: `--start-frame`, `--mid-frame` and `--end-frame`. Each is VAE-encoded and
-held at sigma 0 (`denoise_mask = 0`, per-token timestep 0, re-pinned every step)
-while the rest of the clip denoises around it.
+A generation can be anchored to stills you supply at its first frame, at any
+number of interior frames and at its last: `--start-frame`, `--keyframe
+<frame>:<image>` (repeatable; `--mid-frame` is one keyframe at the clip's
+midpoint, or at `--mid-frame-at`) and `--end-frame`. Each still is VAE-encoded
+and appended to the sequence as a clean guiding block at its own instant -
+held at sigma 0 (`denoise_mask = 0`, per-token timestep 0) - while every
+token of the generated clip denoises freely around it. The clip moves
+through each still and reaches it at its frame, rather than freezing on it or
+cutting to it.
 
 ```bash
 brain -v --device gpu0 ltxv t2v \
   --prompt "a fishing boat crosses the harbour mouth, camera tracking left" \
   --frames 121 --width 768 --height 448 --fps 24 --output-path boat.mp4 \
-  --start-frame dawn.png --mid-frame midway.png --end-frame open-sea.png
+  --start-frame dawn.png --keyframe 40:turning.png --keyframe 80:midway.png \
+  --end-frame open-sea.png
 ```
 
-* **`--mid-frame-at <N>`** picks the pixel frame the middle still anchors,
-  strictly between `0` and `--frames - 1`. Left off, it is the clip's own
-  midpoint, `(frames - 1) / 2` - the reference's own position for a single
-  interior keyframe (`ltx_pipelines.utils.helpers.
-  evenly_spaced_keyframe_positions(1, 121) == [60]`). The resolved frame is
-  printed in the run's first line.
-* **Any frame is a legal position; nothing is snapped to the `1 + 8k` grid.**
-  A middle still is an *appended guiding block* carrying its own RoPE position
+* **Any interior frame is a legal position; nothing is snapped to the `1 +
+  8k` grid.** A guide carries its own RoPE position
   (`VideoConditionByKeyframeIndex.apply_to` adds `frame_idx` straight onto the
   time coordinate and divides by fps), not a slot on the generated video's
-  latent grid, so there is no grid for it to land on. The `1 + 8k` rule
-  constrains the clip's *length*, not where a guide may point inside it.
+  latent grid. The `1 + 8k` rule constrains the clip's *length*. Keyframes
+  must be in timeline order, strictly between the first and last frames; the
+  resolved frames are printed in the run's first line.
+* **`--mid-frame` without `--mid-frame-at`** lands on `(frames - 1) / 2`, the
+  reference's own position for a single interior keyframe
+  (`ltx_pipelines.utils.helpers.evenly_spaced_keyframe_positions(1, 121) ==
+  [60]`).
 * **One still at frame 0 and nothing else is still image-to-video**, which
-  overwrites latent frame 0 in place. The moment a second still is given -
-  middle, end, or both - every still becomes an appended guide instead,
-  including the one at frame 0, and no token of the generated video is frozen.
-  That is the reference's own split between `combined_image_conditionings` and
-  `image_conditionings_by_adding_guiding_latent`.
+  overwrites latent frame 0 in place. The moment a second still is given,
+  every still becomes an appended guide instead, including the one at frame
+  0. That is the reference's own split between `combined_image_conditionings`
+  and `image_conditionings_by_adding_guiding_latent`.
+* **Why a guide and not a pin.** Overwriting the latent slot that contains a
+  keyframe's instant with the still, and freezing it there, freezes that
+  slot's eight pixel frames and makes the clip jump into and out of the
+  freeze. Measured on the real checkpoint at 768x448 x 97 frames with stills
+  from an unconditioned run of the same prompt, the worst frame-to-frame step
+  was 3.0x its neighbours with the pin, and 1.09x with the guide (1.11x for
+  the unconditioned run itself). The guide also reached the still more
+  closely (mean |delta| 2.28 at its frame, against 4.95 for the pin).
 * **`--conditioning-strength`** (default `1.0`) applies to every still given.
 * **Two identical anchors make a static clip.** Passing the same image to
   `--start-frame` and `--end-frame` asks for "start here, end here", which has
   a correct trivial answer; see `crates/ltxv/tests/it/motion_real.rs` for the
-  measured table. A middle anchor is subject to the same logic - anchor
-  *different* instants.
-* **Not supported for a multi-window or multi-scene clip.** `--mid-frame` names
-  a pixel frame of the whole clip, and routing it means finding the window
-  whose emitted range covers it and re-expressing it in that window's own
-  frame numbering. That is refused rather than silently dropped.
+  measured table. Keyframes follow the same logic: anchor *different*
+  instants with stills a plausible motion apart.
+* **Long clips route every anchor to the window that owns it.** A clip
+  generated as several windows (see below) conditions each keyframe in the
+  window whose emitted frames contain it, and every earlier window carries the
+  anchors still ahead of it as guides, so each window bends toward the next
+  keyframe. The `t2v` capability action takes the same stills as
+  `start_frame`, `keyframes` (`frame:path` pairs, comma-separated),
+  `mid_frame`/`mid_frame_at` and `end_frame`.
+* **Not supported for a multi-scene clip**: a scene boundary is a cut that
+  carries nothing across, so a continuous shot with keyframes is one scene.
 
 ### Clips longer than one denoising window
 
@@ -236,18 +253,23 @@ brain -v --device gpu0 ltxv t2v \
   overridable with `--max-window-tokens`.
 * **A request that fits one window is unchanged.** It is handed straight to the
   single-window path, bit for bit, and none of this runs.
-* **The stage-major loop is the default for video-only clips** (stage 1 at
-  half resolution across the whole clip, then stage 2 refines it at full
-  resolution); `--window-major` goes back to the older window-major loop, e.g.
-  to bisect a regression against it. Audio-visual clips always use the
-  window-major loop.
+* **The window-major loop is the default.** `--stage-major` runs a video-only
+  clip's stage 1 at half resolution across the whole clip and then refines it
+  at full resolution window by window; its refinement windows each regenerate
+  their own slice and do not stitch (measured on the real checkpoint: a cut to
+  another scene at a refinement seam), so it is opt-in. Audio-visual clips
+  always use the window-major loop.
+* **The windows share the clip's new frames evenly.** The fewest windows the
+  token ceiling allows, each generating the same number of new latent frames
+  (the first never fewer than the carried context). A continuation of only
+  one or two new latent frames after its context only holds its history - the
+  clip froze for its last third of a second before the split was evened.
 * **`--audio` crosses the same seams**, on its own time grid and with its own
   constraint on where a seam may fall - see "Generating sound" below.
-* **`--end-frame` and `--mid-frame` are refused for a multi-window clip** - the
-  first pins the last frame of one window, and pinning the end of a rolling
-  plan has not been designed; the second names a pixel frame of the whole clip,
-  which would have to be routed to whichever window covers it.
-  `--start-frame` conditions the first window as usual.
+* **Anchors are routed per window**: `--start-frame` conditions the first
+  window, each keyframe the window that owns its frame, `--end-frame` the
+  last, and every window also carries the anchors still ahead of it as
+  guides.
 
 The same routing applies to the `t2v` capability action (`brain do brain/ltxv
 t2v`), with the default context and no new action parameter.
@@ -293,8 +315,9 @@ One command, one file, 299 frames.
   say where the clip starts. Every seed is derived per scene, so two scenes
   never draw the same initial noise.
 * **`--start-frame` conditions the first scene's opening only**, and
-  `--end-frame`/`--mid-frame` are refused for a multi-scene clip for the same
-  reasons they are refused for a multi-window one.
+  `--end-frame`/`--keyframe`/`--mid-frame` are refused for a multi-scene clip:
+  a scene boundary carries nothing across, so a keyframe belongs to a
+  continuous shot.
 * **Not exposed on the `t2v` capability action** - `--scene` is a CLI flag; the
   action still takes one prompt.
 

@@ -368,14 +368,13 @@ mod real_weights {
         let cancel = capability::CancelToken::default();
 
         let opts = GenOpts {
-            mid_frame: Some("mid.png".into()),
-            mid_frame_at: Some(frames + 8),
+            keyframes: vec![(frames + 8, "mid.png".into())],
             ..o.base.clone()
         };
         let Err(e) = generate_long(&paths, "a moving bar", &LongOpts { base: opts, ..o.clone() }, &cancel, |_, _, _| {}) else {
-            panic!("an out-of-clip mid anchor generated a clip instead of refusing --mid-frame-at");
+            panic!("an out-of-clip keyframe generated a clip instead of being refused");
         };
-        assert!(e.contains("--mid-frame-at"), "the refusal does not name --mid-frame-at: {e}");
+        assert!(e.contains("keyframe at pixel frame"), "the refusal does not name the keyframe: {e}");
     }
 
     /// **Stage-major long-form with all three keyframes composes end to
@@ -426,7 +425,7 @@ mod real_weights {
             fps: 8,
             device: Some("cpu".into()),
             start_frame: Some(still("start.png", [220, 30, 30])),
-            mid_frame: Some(still("mid.png", [30, 220, 30])),
+            keyframes: vec![(20, still("mid.png", [30, 220, 30]))],
             end_frame: Some(still("end.png", [230, 230, 30])),
             ..GenOpts::default()
         };
@@ -448,7 +447,7 @@ mod real_weights {
 
     /// **The window-major path honours all three keyframes too.** This loop
     /// built each window's options INLINE: `end_frame` was `None` for every
-    /// window - the end still silently dropped - and `mid_frame`/`mid_frame_at`
+    /// window - the end still silently dropped - and the mid keyframe's position
     /// passed through from the clip-global base verbatim, so the clip-global
     /// position was reinterpreted as each window's LOCAL frame. A bandage
     /// refused keyframes on this path outright; the fix routes them through
@@ -487,9 +486,8 @@ mod real_weights {
             fps: 8,
             device: Some("cpu".into()),
             start_frame: Some(still("start.png", [220, 30, 30])),
-            mid_frame: Some(still("mid.png", [30, 220, 30])),
+            keyframes: vec![(36, still("mid.png", [30, 220, 30]))],
             end_frame: Some(still("end.png", [230, 230, 30])),
-            mid_frame_at: Some(36),
             ..GenOpts::default()
         };
         // Only the window ceiling is forced: with `max_refine_tokens` left at

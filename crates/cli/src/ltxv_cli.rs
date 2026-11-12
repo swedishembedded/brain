@@ -148,10 +148,10 @@ reference pipelines' defaults; without it, a tiny random-weight smoke test):
   --start-frame <path>         PNG/JPEG still, encoded through the real VAE.
                              Given ALONE, it overwrites the clip's own
                              frame 0 outright (the generated video IS the
-                             still there). Given alongside --mid-frame/
-                             --end-frame, all of them switch to the OTHER
-                             mechanism below - an appended guide, not a
-                             replacement.
+                             still there). Given alongside --keyframe/
+                             --mid-frame/--end-frame, all of them switch to
+                             the OTHER mechanism below - an appended guide,
+                             not a replacement.
   --end-frame <path>           a clean image-guidance latent, appended to
                              the sequence at the clip's LAST pixel frame's
                              timestamp - not a replacement of that frame:
@@ -163,27 +163,24 @@ reference pipelines' defaults; without it, a tiny random-weight smoke test):
                              between connects the still to itself); a
                              different path for a clip that morphs between
                              two stills. Either flag works alone.
-  --mid-frame <path>           same appended-guide mechanism, anchored at
-                             ONE INTERIOR instant, so a single pass can be
-                             anchored at its start, its middle and its end
-                             at once - the way to keep a long or moving-
-                             camera clip on course rather than only
-                             pinning where it begins and ends. Works alone
-                             or with either of the two above. Because this
-                             is guidance rather than replacement, how
-                             closely the clip actually reaches the mid
-                             still's content depends on how much the scene
-                             has to change to get there and how many
-                             denoising steps it has to do it in - see
-                             --conditioning-strength.
-  --mid-frame-at <N>           which pixel frame --mid-frame anchors,
-                             strictly between 0 and --frames minus one.
-                             The default is the clip's own midpoint,
-                             (frames - 1) / 2. Any frame is legal: the
-                             still is an appended guide carrying its own
-                             position, not a slot on the latent grid, so
-                             it does not have to sit on the 1 + 8k
-                             boundary the clip's LENGTH does.
+  --keyframe <F>:<path>        an interior keyframe, repeatable: the same
+                             appended-guide mechanism anchored at pixel
+                             frame F, strictly between 0 and --frames minus
+                             one, so one pass is anchored at its start, at
+                             every keyframe and at its end. Every token of
+                             the clip still denoises freely, so the clip
+                             moves THROUGH each still - reaching it at its
+                             frame - rather than freezing on it or cutting
+                             to it. F need not sit on the 1 + 8k boundary
+                             the clip's LENGTH does: a guide carries its own
+                             position, not a slot on the latent grid. Give
+                             stills a plausible distance apart: the model
+                             blends between them, so two very different
+                             stills a few frames apart can only be a cut.
+  --mid-frame <path>           one --keyframe at --mid-frame-at.
+  --mid-frame-at <N>           which pixel frame --mid-frame anchors (the
+                             default is the clip's own midpoint,
+                             (frames - 1) / 2).
   --context-frames <N>         how much of the previous window a long-form
                              continuation carries, in pixel frames, must be
                              1 + 8k (default 57 = 8 latent frames, the
@@ -300,23 +297,21 @@ Long-form clips:
   generated exactly as it always was, and none of this runs.
   --max-window-tokens <N> sets the per-window token ceiling (default 13200,
   the largest single-window generation this crate has a recorded real run
-  at); --window-major keeps a video-only clip on the window-by-window loop
-  instead of building its motion stage-major. --start-frame conditions the first window as
+  at); --stage-major builds a video-only clip's motion stage-major instead
+  of window by window (see below). --start-frame conditions the first window as
   usual; --end-frame conditions the windows that own their instants, and
   every window also receives the anchors still ahead of it as appended
   guides, so each window bends its motion toward the next keyframe instead
-  of running on alone. --mid-frame is pinned INTO its owning window's
-  latent slot - frozen there like a start frame, so the clip passes through
-  the mid image instead of merely bending toward it; windows before it see
-  it as an appended guide.
+  of running on alone. Every --keyframe (and --mid-frame) guides the window
+  that owns its instant, at that instant, the same way.
 
-  Stage-major (two-stage, video-only, default): When two-stage generation
-  is enabled, the clip is generated via two independent window plans:
-  stage 1 at half resolution (where motion is decided) and stage 2 at full
-  resolution (where refinement detail is carried).  Clip-global anchors
-  (--end-frame, --mid-frame) are routed to their owning window via
-  window_gen_opts.  Audio-visual clips keep the window-major path.
-  --window-major disables the stage-major path.
+  Stage-major (--stage-major, two-stage, video-only): the clip is generated
+  via two independent window plans: stage 1 at half resolution across the
+  whole clip (where motion is decided) and stage 2 refining it window by
+  window at full resolution. Off by default: each refinement window
+  regenerates its slice seeing only its own part of the clip, and the
+  slices do not stitch - measured, a refinement seam can cut to another
+  scene. Audio-visual clips always use the window-major loop.
 
 Scenes:
   One --frames/--prompt run is one continuous SHOT: every window shares the
@@ -339,9 +334,9 @@ Scenes:
   a scene deliberately rather than letting one long shot run until it
   degrades. Each scene's frame count is its own 1 + 8k; the clip is their
   sum. --start-frame conditions the FIRST scene's opening only, and
-  --end-frame/--mid-frame are refused (there is no design for pinning the
-  last frame, or an interior frame, of a clip whose timeline is a sequence
-  of scenes).
+  --end-frame/--keyframe/--mid-frame are refused: a scene boundary is a cut
+  that carries nothing across, so give a continuous shot with keyframes as
+  one scene.
 
 Adapters:
   --adapter <path>           a LoRA to apply, repeatable: the official LTX
@@ -796,9 +791,10 @@ fn t2v(args: &[String]) -> Result<(), String> {
     // `--frames` has a default, so "was it given" cannot be read back off the
     // value - and refusing `--scene` alongside it depends on knowing.
     let mut frames_given = false;
+    let (mut mid_frame, mut mid_frame_at) = (None, None);
     // The long-form plan's own settings ([`LongOpts`]).
     let mut max_window_tokens = ltxv::longform::LONGFORM_MAX_TOKENS;
-    let mut stage_major = true;
+    let mut stage_major = false;
     // Which settings the command line names; the rest come from what is
     // configured (`ltxv::pipeline::resolve_defaults`).
     let mut named = Named::default();
@@ -843,8 +839,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
             }
             f if runtime_flag(f) => set_runtime(&mut o.runtime, f, need(i)?)?,
             "--max-window-tokens" => max_window_tokens = num(i, "--max-window-tokens")?.max(1),
-            "--window-major" => {
-                stage_major = false;
+            "--stage-major" => {
+                stage_major = true;
                 i += 1;
                 continue;
             }
@@ -880,9 +876,10 @@ fn t2v(args: &[String]) -> Result<(), String> {
                 o.end_frame = Some(need(i)?.clone());
             }
             "--mid-frame" => {
-                o.mid_frame = Some(need(i)?.clone());
+                mid_frame = Some(need(i)?.clone());
             }
-            "--mid-frame-at" => o.mid_frame_at = Some(num(i, "--mid-frame-at")?),
+            "--mid-frame-at" => mid_frame_at = Some(num(i, "--mid-frame-at")?),
+            "--keyframe" => o.keyframes.push(ltxv::pipeline::parse_keyframe(need(i)?).map_err(|e| format!("--keyframe: {e}"))?),
             // `--no-stretch` is a bare flag (no value), unlike every other
             // option above - handled separately so the `i += 2` stride
             // below stays uniform for everything else.
@@ -939,6 +936,14 @@ fn t2v(args: &[String]) -> Result<(), String> {
         scene_specs.iter().map(|s| ltxv::longform::Scene::parse(s)).collect::<Result<_, _>>()?
     };
     o.frames = scenes.iter().map(|s| s.frames).sum();
+    // `--mid-frame` is one more interior keyframe, at the instant
+    // `--mid-frame-at` names or the clip's own midpoint - resolved now that
+    // the clip's length is known.
+    if let Some(path) = mid_frame {
+        o.keyframes.push((ltxv::pipeline::mid_anchor_frame(o.frames, mid_frame_at)?, path));
+    }
+    o.keyframes.sort_by_key(|(at, _)| *at);
+    ltxv::pipeline::check_keyframes(o.frames, &o.keyframes)?;
 
     let (lh, lw) = (o.height / 32, o.width / 32);
     let context_latents = {
@@ -1020,12 +1025,13 @@ fn t2v(args: &[String]) -> Result<(), String> {
         (None, Some(e)) => format!(", end-frame ({e})"),
         (None, None) => String::new(),
     };
-    // The resolved pixel frame, not the flag: an unset --mid-frame-at is the
-    // clip's own midpoint, and a caller should be told which frame that is
-    // before the run rather than have to derive it.
-    let mid_desc = match o.mid_frame.as_deref() {
-        Some(m) => format!(", mid-frame ({m}) at frame {}", ltxv::pipeline::mid_anchor_frame(o.frames, o.mid_frame_at)?),
-        None => String::new(),
+    // The resolved pixel frames, not the flags: an unset --mid-frame-at is
+    // the clip's own midpoint, and a caller should be told which frame that
+    // is before the run rather than have to derive it.
+    let mid_desc = if o.keyframes.is_empty() {
+        String::new()
+    } else {
+        format!(", keyframes at frames {:?}", o.keyframes.iter().map(|(at, _)| *at).collect::<Vec<_>>())
     };
     eprintln!(
         "ltxv ({dit_desc}, real VAE, {ctx_desc}): {} frames at {}x{}, {steps_desc} steps x {forwards} forward(s) of {tokens} tokens, eta {}, guidance {:?}, seed {}{img_desc}{mid_desc}{stage_desc}{window_desc}{audio_desc}",
@@ -1474,12 +1480,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
             }
             "--output-path" | "--out" => out = Some(crate::args::strip_out_name_prefix(need(i)?, "video").to_string()),
             "--strength" => o.strength = flt(i, "--strength")?,
-            "--keyframe" => {
-                let v = need(i)?;
-                let (at, path) = v.split_once(':').ok_or_else(|| format!("--keyframe: '{v}' is not <frame>:<image>"))?;
-                let at = at.trim().parse::<usize>().map_err(|e| format!("--keyframe: frame '{at}': {e}"))?;
-                o.base.future_anchors.push((at, path.to_string()));
-            }
+            "--keyframe" => o.base.future_anchors.push(ltxv::pipeline::parse_keyframe(need(i)?).map_err(|e| format!("--keyframe: {e}"))?),
             "--keyframe-strength" => o.base.conditioning_strength = flt(i, "--keyframe-strength")?,
             "--steps" => o.base.steps = num(i, "--steps")?,
             f if guidance_flag(f) => set_guidance(&mut o.base.guidance, f, need(i)?)?,
@@ -1778,6 +1779,7 @@ mod tests {
             "--end-frame",
             "--mid-frame",
             "--mid-frame-at",
+            "--keyframe",
             "--conditioning-strength",
             "--context-frames",
             "--reference-video",
@@ -1915,7 +1917,7 @@ mod tests {
                 assert!(help.contains(flag), "{flag} is parsed but not in {name} --help");
             }
         }
-        assert!(super::HELP.contains("--max-window-tokens") && super::HELP.contains("--window-major"));
+        assert!(super::HELP.contains("--max-window-tokens") && super::HELP.contains("--stage-major"));
     }
 
     /// The same self-check for `t2a`.

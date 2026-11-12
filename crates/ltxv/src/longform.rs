@@ -18,23 +18,26 @@
 //! reads from, and [`fitted_context`], which says what a four-times-denser
 //! grid can afford to carry.
 //!
-//! # Stage-major long-form generation
+//! # Stage-major long-form generation (opt-in)
 //!
-//! For two-stage clips, [`crate::pipeline::run_stage_major`] builds TWO
-//! independent window plans via [`crate::pipeline::two_stage_long_plan`]:
+//! With `LongOpts::stage_major`, [`crate::pipeline::run_stage_major`] builds
+//! TWO independent window plans via [`crate::pipeline::two_stage_long_plan`]:
 //! one at half resolution (stage 1, where motion is decided) and one at full
 //! resolution (stage 2, where refinement detail is carried).  Stage 1's plan
 //! is sized by the half-resolution token count, so clips whose entire
 //! stage-1 trajectory fits in one window get a single global pass.  Stage 2
-//! fragments as much as memory demands, with no quality cost because the
-//! motion is already fixed by stage 1.
+//! fragments as much as memory demands - and that is where it fails: each
+//! refinement window re-noises its slice to sigma 0.909 and regenerates it
+//! seeing only its own part of the clip, so its windows do not stitch. On the
+//! real checkpoint a refinement seam cut to another scene; the window-major
+//! loop is the default for that reason.
 //!
 //! Stage 1's output is a global half-resolution latent buffer
 //! [`crate::pipeline::run_stage_major`] builds by writing each window's NEW
 //! frames into their positions via [`write_latent_window`].  Stage 2 reads
 //! slices of this buffer via [`latent_window`] for each window.
 //!
-//! Clip-global anchors (`--start-frame`, `--end-frame`, `--mid-frame`) are
+//! Clip-global anchors (`--start-frame`, `--end-frame`, every `--keyframe`) are
 //! routed to their owning window via [`crate::pipeline::window_gen_opts`].
 //! Each anchor is re-expressed in the window's own local frame numbering.
 //!
@@ -299,7 +302,7 @@ pub fn write_latent_window(dest: &mut [f32], channels: usize, lat_t: usize, lh: 
 /// Returns `(window_index, local_latent_frame)` when the pixel frame falls
 /// inside a window's decoded range.  `None` when the pixel frame does not
 /// land inside any window (out of bounds).
-pub fn route_mid_anchor(plan: &[Window], global_pixel_frame: usize) -> Option<(usize, usize)> {
+pub fn route_anchor(plan: &[Window], global_pixel_frame: usize) -> Option<(usize, usize)> {
     for (i, w) in plan.iter().enumerate() {
         if let Some(local) = w.local_frame(global_pixel_frame) {
             return Some((i, local));
@@ -361,16 +364,17 @@ pub fn fitted_context(lh: usize, lw: usize, want: usize, max_tokens: usize) -> R
 /// segments cannot do, since `n` of them sum to `n + 8 * sum(k_i)` and that is
 /// a legal clip length only for `n == 1`.
 ///
-/// **Window 0 takes the whole budget; the continuation windows are equal to
-/// each other.** Two reasons, and neither is aesthetic. It is the only window
-/// that builds structure from noise with no history at all, so it is the one
-/// that benefits most from length; and it is the only window whose budget is
-/// not already spent on a context, so making it the largest is what
-/// guarantees it can hand its successor a FULL `context` frames - an even
-/// split across all windows cannot (at a 15-latent-frame budget and an
-/// 8-frame context, an even three-way split gives window 0 six latent frames
-/// and window 1 would carry a silently truncated context). Splitting the
-/// remainder equally then keeps the clip from ending on a stub window.
+/// **The windows split the clip's new latent frames evenly, with window 0
+/// never below `context`.** The fewest windows the budget allows, then the
+/// same number of new frames in each: a greedy window 0 that takes its
+/// whole budget leaves the last window a stub, and a continuation of one or
+/// two new latent frames after its carried context only holds its history -
+/// on the real checkpoint the clip freezes for its last third of a second.
+/// Window 0 is still the only window whose budget is not spent on a context,
+/// so it is never cut below `context` new frames: it has to hand its
+/// successor a FULL context (at a 15-latent-frame budget and an 8-frame
+/// context, an even three-way split would give window 0 six latent frames
+/// and window 1 a silently truncated context; it gets eight).
 pub fn window_plan(frames: usize, lh: usize, lw: usize, context: usize, max_tokens: usize) -> Result<Vec<Window>, String> {
     window_plan_aligned(frames, lh, lw, context, max_tokens, 1)
 }
@@ -422,23 +426,36 @@ pub fn window_plan_aligned(frames: usize, lh: usize, lw: usize, context: usize, 
             lh * lw
         ));
     }
-    // Window 0 takes the whole budget, less whatever the quantum cannot use:
-    // its own advance across the first seam is `new - context`, so that is
-    // what has to be a multiple of `align`, not `new` itself.
-    let head_new = max_lat - (max_lat - context) % align;
+    // Window 0's cap is the whole budget, less whatever the quantum cannot
+    // use: its own advance across the first seam is `new - context`, so that
+    // is what has to be a multiple of `align`, not `new` itself.
+    let head_cap = max_lat - (max_lat - context) % align;
     // Every window after the first spends `context` of its budget before it
     // generates anything, so that - not `max_lat` - is what sets their count.
     let cap_new = max_lat - context;
     // A constrained window's own cap: the largest multiple of the quantum
     // that still fits. The LAST window is unconstrained and keeps `cap_new`.
     let cap_aligned = align * (cap_new / align);
-    let remaining = k_total - (head_new - 1);
-    // The fewest continuation windows that can hold `remaining`: all but the
-    // last are capped at `cap_aligned`, the last at `cap_new`.
+    let fits = |n_cont: usize, remaining: usize| (n_cont - 1) * cap_aligned + cap_new >= remaining;
+    // The fewest continuation windows, then window 0's share of an even split
+    // over all of them - never below `context`, so it can hand its successor
+    // a full context, and never above its cap. Taking the whole budget here
+    // instead leaves the last window a stub of one or two new latent frames,
+    // and a continuation that short has nothing to do but hold its history:
+    // measured on the real checkpoint, it renders as a freeze.
     let mut n_cont = 1usize;
-    while (n_cont - 1) * cap_aligned + cap_new < remaining {
+    while !fits(n_cont, k_total - (head_cap - 1)) {
         n_cont += 1;
     }
+    let head_new = loop {
+        let even = (k_total + 1).div_ceil(n_cont + 1).max(context);
+        let head = (context + align * (even - context).div_ceil(align)).min(head_cap);
+        if fits(n_cont, k_total - (head - 1)) {
+            break head;
+        }
+        n_cont += 1;
+    };
+    let remaining = k_total - (head_new - 1);
     // How much of `remaining` the CONSTRAINED windows take. Bounded below by
     // what will not fit in the free last window (and by one quantum each),
     // above by their own caps and by leaving the last window something to do,

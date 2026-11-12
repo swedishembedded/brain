@@ -82,46 +82,19 @@ mod real_weights {
         let other_mid = still(&dir, "other-mid.png", [30, 30, 220]);
         let end = still(&dir, "end.png", [230, 230, 30]);
 
-        let three = GenOpts { start_frame: Some(start.clone()), mid_frame: Some(mid.clone()), end_frame: Some(end.clone()), ..base_opts() };
+        let three = GenOpts { start_frame: Some(start.clone()), keyframes: vec![(8, mid.clone())], end_frame: Some(end.clone()), ..base_opts() };
         let a = run(&paths, &three);
         // A different picture at the same instant.
-        let b = run(&paths, &GenOpts { mid_frame: Some(other_mid), ..three.clone() });
+        let b = run(&paths, &GenOpts { keyframes: vec![(8, other_mid)], ..three.clone() });
         // The same picture at a different instant.
-        let c = run(&paths, &GenOpts { mid_frame_at: Some(12), ..three.clone() });
+        let c = run(&paths, &GenOpts { keyframes: vec![(12, mid.clone())], ..three.clone() });
         // The two-anchor request this feature generalises.
-        let d = run(&paths, &GenOpts { mid_frame: None, ..three.clone() });
+        let d = run(&paths, &GenOpts { keyframes: Vec::new(), ..three.clone() });
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_ne!(a, b, "changing the middle still's pixels changed nothing: the mid anchor's content never reached the denoiser");
         assert_ne!(a, c, "moving the middle still from frame 8 to frame 12 changed nothing: the mid anchor's POSITION never reached the denoiser");
         assert_ne!(a, d, "dropping the middle still changed nothing: the third anchor is not in the sequence at all");
         assert!(a.iter().any(|f| f.iter().any(|&v| v != f[0])), "every frame is a flat colour - nothing was decoded");
-    }
-
-    /// The documented default position, end to end: leaving `--mid-frame-at`
-    /// off must be the same run as naming the reference's own single-interior
-    /// keyframe position, bit for bit.
-    ///
-    /// That the position is read at all is
-    /// [`three_simultaneous_anchors_each_reach_the_denoiser`](self)'s job, so
-    /// this one buys only the two runs it needs.
-    #[test]
-    fn the_default_mid_position_is_the_one_the_reference_would_pick() {
-        let Some(vae) = weights_path("vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
-            return brain_testutil::skip("put the real VAE in the model store");
-        };
-        let paths = Paths::new(vae.clone());
-        let dir = std::env::temp_dir().join(format!("ltxv-anchors-default-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let mid = still(&dir, "mid.png", [30, 220, 30]);
-
-        // `evenly_spaced_keyframe_positions(1, 17) == [8]`.
-        assert_eq!(ltxv::pipeline::mid_anchor_frame(FRAMES, None), Ok(8));
-        let o = GenOpts { mid_frame: Some(mid), ..base_opts() };
-        let implicit = run(&paths, &o);
-        let explicit = run(&paths, &GenOpts { mid_frame_at: Some(8), ..o.clone() });
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert_eq!(implicit, explicit, "the default mid position is not (frames - 1) / 2");
     }
 }

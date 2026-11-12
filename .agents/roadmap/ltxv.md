@@ -9291,3 +9291,91 @@ attention mask (`--conditioning-attention-mask`/`conditioning_attention_strength
 < 1) needs a per-key attention weight in the flash kernels; multi-window
 routing of a reference; a reference on the capability actions (an input blob,
 the same undesigned shape `upscale` waits on).
+
+### Phase 43 - a clip moves through its keyframes instead of stopping on them
+
+An interior keyframe (`--mid-frame`) was PINNED: its still overwrote the
+latent slot containing its instant and was frozen there (Phase 26's guide,
+replaced in August by `b97da9249` after a guide measured weak). On screen
+that is the defect this phase removes: the slot's eight pixel frames hold
+the still, and the clip jumps into and out of the hold.
+
+Measured on the real 22B checkpoint, 768x448 x 97 frames at 24 fps, single
+stage, stills taken from an unconditioned run of the same prompt (seed 7) at
+frames 0/48/96, conditioned runs at seed 11. "Worst step" is the largest
+frame-to-frame mean |delta| over the median of the six steps either side of
+it; "delta" is the mean |delta| of the clip's frame 48 against the still:
+
+| interior keyframe as | worst step | frames 40-47 step | delta at 48 | closest frame |
+|---|---:|---:|---:|---:|
+| unconditioned run (no keyframes) | 1.11x | ~2.6 | - | - |
+| pin, whole schedule (shipped) | 3.04x | 0.4-0.8 (frozen) | 4.95 | 40 |
+| pin, re-noised and released at sigma 0.725 | 3.16x | 0.1-0.5 (frozen) | 2.00 | 47 |
+| pin, re-noised and released at sigma 0.909 | 1.45x | 1.3-1.8 (slowed) | 2.48 | 48 |
+| appended guide (the reference's mechanism) | 1.09x | ~2.7 | 2.28 | 48 |
+
+The guide is both the smoothest and among the closest, at exactly its frame;
+the August measurement predates the corrections since (appended stills
+noised as the reference does, the prompt AdaLN, the negative prompt), and
+does not reproduce. So every interior keyframe is now an appended guiding
+block at its own instant, `VideoConditionByKeyframeIndex` exactly as the
+reference applies it, and the pin is gone with its token-slot plumbing.
+
+Interior keyframes are also no longer limited to one: `GenOpts::keyframes`
+is a list of `(pixel frame, still)` in timeline order, `--keyframe F:<image>`
+repeats on `t2v` (the spelling `v2v` already had), `keyframes` takes
+`F:path,F:path` on the capability action, and `--mid-frame`/`mid_frame` are
+one more keyframe at `--mid-frame-at` or the midpoint. Long-form routes each
+keyframe to the window that emits its frame and hands it to every earlier
+window as a future guide (`window_gen_opts`); DFR keeps them on the windows
+that contain them. Five anchors in one 97-frame pass (0/24/48/72/96) all land
+on their frames (delta 1.85-2.25) at a worst step of 1.15x.
+
+**Long clips.** A 313-frame 768x448 clip with a start still, keyframes at
+104 and 208 and an end still - four anchors, two windows - showed the
+long-form paths were the bigger source of jumps:
+
+| path | anchors reached at their frames | worst step | what went wrong |
+|---|---|---:|---|
+| stage-major (was the default) | 3 of 4 (end: frame 280, 32 early) | 5.5x | refinement window 2 cut to another scene (aerial, daylight) and snapped to the end still on the last frame |
+| stage-major, windows evened | 2 of 4 | 14.7x | cuts at 200 and 296 |
+| window-major, greedy plan | 4 of 4 | 2.2x | the last window was 8 carried + 1 new latent frame and froze for 7 frames on the end still |
+| window-major, windows evened | 4 of 4 (1.82/2.13/1.93/1.84) | 1.95x | none; the end is approached gradually |
+| one window (512x288, fits) | 4 of 4 | 3.05x at 239 (encoder) | none |
+
+Stage-major's refinement windows each re-noise their slice to sigma 0.909
+and regenerate it seeing only their own part of the clip; they do not
+stitch even with no carried context at all (a 40.3 step at the seam), and
+neither dropping the end still from window 0's future guides nor anchoring
+each window to a stage-1 keyframe slot at its seam changed that - both were
+tried and reverted. Window-major is now the default (`--stage-major` opts
+in), and the planner evens the new frames over the fewest windows instead
+of letting window 0 take its whole budget (a continuation of one or two new
+latent frames only holds its history). The step at 239->240 in every
+313-frame run is rav1e's keyframe at frame 240 (`key_frame_interval` 120),
+not generation.
+
+Gates: `pipeline::conditioned_latent_tests` (every still a block at its own
+instant; a keyframe moves a start still onto a guide; several keyframes;
+ordering refusals; `parse_keyframe`), `window_gen_opts_tests::several_
+keyframes_route_to_their_own_windows`, and `tests/it/longform_mid_real.rs`
+rewritten from "the still holds across its slot" (which is the freeze) to
+position, depth, the end still reached and a worst-step bound over the whole
+clip, on three windows of the default loop at the reference's 8-frame
+context (121 frames at 384x192): keyframe reached at frame 61 (9.16 against
+the reference's own neighbour 12.95), end 5.77 (against 15.12), worst step
+1.12x (the unconditioned reference: 1.12x).
+
+**Open - stills that are not one continuous shot.** With the mid still taken
+from a different composition of the same prompt (seed 8: another camera
+position and another car body), the clip honours all three stills (deltas
+2.05/3.02/2.03) by cutting between the compositions in two frames (33-35,
+6.3x). That is the model's answer to stills no continuous motion connects;
+the guide does not create it (the same stills from one shot never cut).
+Two levers measured on that request: a continuity clause in the prompt
+("one continuous unbroken shot, ... no cuts") spreads the cut over five
+frames (3.1x); `--conditioning-strength 0.8` (the reference's own CLI
+example) turns it into a cross-dissolve - worst step 1.31x, the mid still
+still reached at frame 48 (delta 3.76) - with both cars double-exposed
+around frames 40 and 80. The default stays 1.0: it is what reaches stills
+from one shot closest, and a dissolve is a choice for the caller.
