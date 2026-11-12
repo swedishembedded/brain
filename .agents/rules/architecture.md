@@ -55,8 +55,8 @@ layer 2 - accelerator seam: backends and the gpu-core facade
 layer 3 - training substrate and shared contracts
     atif, audio, audit, camera, capability, checkpoint, data, diffusion, dit, events, forecast,
     gguf, model, modelref, modelstore, neuro, onnx, optim, paramstore, promote, residency, rlcd,
-    search, shutdown, solve, stats, survival, testutil, timeseries, trace, vae, videocodec,
-    vision, weightset
+    search, shutdown, solve, stats, survival, testutil, trace, vae, videocodec, vision,
+    weightset
 layer 4 - models
     arcface, bisenet, campplus, captioner, chronos2, clip, codeformer, connectome, controlnet,
     cosyvoice, decide, decisions, deepseek2, deepseek2ocr, deepseekocr2, deepseekvl, dflash2,
@@ -268,7 +268,7 @@ layer 6 - serving, front ends, SDK, samples
                            reported where it is drawn.
 
  ─── 4. models ─────────────────────────────────────────────────────────────
-   decoder LMs    gpt2  qwen3  qwen35moe  toymoe  glmdsa  toypid  toyseq2seq  toyautoencoder  timeseries
+   decoder LMs    gpt2  qwen3  qwen35moe  toymoe  glmdsa  toypid  toyseq2seq  toyautoencoder
    vision / 3D    yolov8 ─┐         zipdepth ─┐     worldmirror2   splat
                         └─ vision ───┘  (shared conv blocks, fold_bn)
    diffusion      diffusion + dit + vae ──> s3dit  (+ qwen3 text encoder)

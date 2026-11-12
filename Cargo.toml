@@ -97,7 +97,6 @@ default-members = [
     "crates/kronos",
     "crates/fincast",
     "crates/timesfm3",
-    "crates/timeseries",
     "crates/mimi",
     "crates/ecapatdnn",
     "crates/qwen3tts",

@@ -3095,10 +3095,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-timeseries"
-version = "5.1.0"
-
-[[package]]
 name = "brain-timesfm3"
 version = "5.1.0"
 dependencies = [
