@@ -852,7 +852,7 @@ volumes:
         question: "What makes data ordered in time different, and how do we avoid cheating with the future?"
         introduces: [time-series, stationarity, autocorrelation, seasonality, autoregressive-model, leakage-safe-window]
         requires: [data-leakage, covariance, least-squares, baseline, discrete-fourier-transform]
-        brain: [timeseries]
+        brain: [forecast]
       - id: probabilistic-forecasting
         title: "Probabilistic Forecasts"
         question: "How should a forecast express what it does not know?"
