@@ -12,6 +12,9 @@
 //! transformers to new inference stacks, you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
 /// `MINIMAX_H3_MODALITY_NUM` - every row of the packed sequence (including
 /// TEXT rows) carries one of these three tags and gets its own AdaLN
 /// modulation parameters per timestep (`transformer_minimax_h3.py`'s own
@@ -29,7 +32,11 @@ pub const TAG_AUDIO: u32 = 2;
 /// exactly (`diffusers/models/transformers/transformer_minimax_h3.py`), so a
 /// diff against the reference constructor call is a diff against this
 /// struct's [`Default`] impl.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Its JSON form ([`Self::to_json`], [`Self::from_json_checked`]) is strict in
+/// both directions: every field must be present and no other key is accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct H3TransformerConfig {
     pub num_attention_heads: u32,
     /// Per-head channel width. `num_attention_heads * attention_head_dim`
@@ -137,6 +144,17 @@ impl H3TransformerConfig {
         }
     }
 
+    /// This config as a JSON object keyed by the field names.
+    pub fn to_json(&self) -> Value {
+        serde_json::to_value(self).expect("H3TransformerConfig is plain numbers")
+    }
+
+    /// The inverse of [`Self::to_json`]. `Err` names the missing key or the
+    /// unknown one; nothing is defaulted.
+    pub fn from_json_checked(c: &Value) -> Result<H3TransformerConfig, String> {
+        H3TransformerConfig::deserialize(c).map_err(|e| format!("minimaxh3 config: {e}"))
+    }
+
     /// The attention QKV width - `num_attention_heads * attention_head_dim`,
     /// larger than [`Self::hidden_size`] at the real config (see that
     /// field's own doc).
@@ -188,6 +206,20 @@ mod tests {
         assert_eq!(cfg.rotary_dim(), 96, "2*3*16 - matches the roadmap's confirmed 96/128 split");
         assert_eq!(cfg.adaln_out_features(), 96768, "6*5376*3, matches adaln_proj.linear.weight [96768,2688]");
         assert_eq!(cfg.final_adaln_out_features(), 10752, "2*5376, matches final_adaln_out_features");
+    }
+
+    #[test]
+    fn json_round_trips_and_refuses_a_missing_or_unknown_key() {
+        let cfg = H3TransformerConfig::real();
+        assert_eq!(H3TransformerConfig::from_json_checked(&cfg.to_json()), Ok(cfg));
+
+        let mut missing = cfg.to_json();
+        missing.as_object_mut().unwrap().remove("ffn_dim");
+        assert!(H3TransformerConfig::from_json_checked(&missing).unwrap_err().contains("ffn_dim"));
+
+        let mut unknown = cfg.to_json();
+        unknown["n_layers"] = 50.into();
+        assert!(H3TransformerConfig::from_json_checked(&unknown).unwrap_err().contains("n_layers"));
     }
 
     #[test]

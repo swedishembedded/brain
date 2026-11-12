@@ -21,6 +21,9 @@
 //! interesting logic (RoPE construction, the sliding/full alternation,
 //! k_eq_v, the aggregate projection).
 
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
 /// Whether a decoder layer is a windowed (`sliding_attention`) or a
 /// wide/global (`full_attention`) attention layer - `Gemma4TextConfig.
 /// layer_types[i]`, real values `"sliding_attention"`/`"full_attention"`.
@@ -38,7 +41,13 @@ pub enum LayerType {
 const SLIDING_WINDOW_PATTERN: u32 = 6;
 
 /// The Gemma-4 text tower's shape + op-sequence configuration.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Its JSON form ([`Self::to_json`], [`Self::from_json_checked`]) is strict in
+/// both directions: every field must be present and no other key is accepted,
+/// so a config keyed for a different model, or missing a shape, is refused
+/// instead of being priced as an unrelated default.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Gemma4Config {
     pub vocab_size: u32,
     pub hidden_size: u32,
@@ -77,6 +86,17 @@ pub struct Gemma4Config {
 }
 
 impl Gemma4Config {
+    /// This config as a JSON object keyed by the field names.
+    pub fn to_json(&self) -> Value {
+        serde_json::to_value(self).expect("Gemma4Config is plain numbers and a bool")
+    }
+
+    /// The inverse of [`Self::to_json`]. `Err` names the missing key or the
+    /// unknown one; nothing is defaulted.
+    pub fn from_json_checked(c: &Value) -> Result<Gemma4Config, String> {
+        Gemma4Config::deserialize(c).map_err(|e| format!("gemma4 config: {e}"))
+    }
+
     /// `configuration_gemma4.py`'s auto-derived `layer_types` - see this
     /// module's doc.
     pub fn layer_type(&self, layer_idx: u32) -> LayerType {
@@ -182,6 +202,22 @@ mod tests {
         let c = Gemma4Config::tiny();
         let types: Vec<LayerType> = (0..c.num_hidden_layers).map(|i| c.layer_type(i)).collect();
         assert_eq!(types, [LayerType::Sliding; 5].into_iter().chain([LayerType::Full]).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn json_round_trips_and_refuses_a_missing_or_unknown_key() {
+        let cfg = Gemma4Config::gemma4_12b();
+        assert_eq!(Gemma4Config::from_json_checked(&cfg.to_json()), Ok(cfg));
+
+        let mut missing = cfg.to_json();
+        missing.as_object_mut().unwrap().remove("global_head_dim");
+        let err = Gemma4Config::from_json_checked(&missing).unwrap_err();
+        assert!(err.contains("global_head_dim"), "{err}");
+
+        let mut unknown = cfg.to_json();
+        unknown["n_layers"] = 48.into();
+        let err = Gemma4Config::from_json_checked(&unknown).unwrap_err();
+        assert!(err.contains("n_layers"), "{err}");
     }
 
     #[test]

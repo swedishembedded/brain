@@ -22,3 +22,8 @@ brain-gpt2.workspace = true
 brain-lfm2.workspace = true
 brain-qwen35.workspace = true
 brain-qwen35moe.workspace = true
+brain-gemma4.workspace = true
+brain-minimaxh3.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

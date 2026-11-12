@@ -15,7 +15,7 @@
 
 use std::time::Instant;
 
-use gpu_core::cost::CostReport;
+use gpu_core::cost::{CostReport, Recording};
 use model::{Shard, Shardable};
 use serde_json::Value;
 
@@ -23,6 +23,23 @@ use crate::{CostSummary, Measurement};
 
 fn synthetic_tokens(n: usize, vocab: u32) -> Vec<u32> {
     (0..n).map(|i| i as u32 % vocab.max(1)).collect()
+}
+
+/// Device bytes live on `gpu` right now; `None` where the backend does not
+/// account for its allocations (never a fabricated zero).
+///
+/// Every model builds its own `Gpu` (no constructor takes a device), so that
+/// device's tally holds this model and nothing else: reading it right after
+/// the build IS "bytes held by the model", with no other allocation to
+/// subtract.
+fn live_bytes(gpu: &gpu_core::Gpu) -> Option<u64> {
+    gpu.memory_usage().map(|u| u.live)
+}
+
+/// The peak of live device bytes since `gpu.reset_memory_peak()`; `None` as
+/// [`live_bytes`].
+fn peak_bytes(gpu: &gpu_core::Gpu) -> Option<u64> {
+    gpu.memory_usage().map(|u| u.peak_live)
 }
 
 /// Cost of exactly ONE repeated unit (a transformer layer) in a HOMOGENEOUS
@@ -74,6 +91,8 @@ pub(crate) fn measure_qwen3(config: &Value, reps: usize) -> Result<Measurement, 
     let x = synthetic_tokens(cfg.block_size as usize, cfg.vocab);
     m.set_batch(&x, &x);
     let load_seconds = load_start.elapsed().as_secs_f64();
+    let held_bytes = live_bytes(m.gpu());
+    m.gpu().reset_memory_peak();
 
     let t0 = Instant::now();
     let _ = m.run_forward_stage();
@@ -89,7 +108,7 @@ pub(crate) fn measure_qwen3(config: &Value, reps: usize) -> Result<Measurement, 
     }
 
     let total = CostSummary::from(&m.cost_fwd());
-    Ok(Measurement { load_seconds, cold_seconds, hot_seconds, total, per_layer: CostSummary::from(&per_layer) })
+    Ok(Measurement { load_seconds, cold_seconds, hot_seconds, total, per_layer: CostSummary::from(&per_layer), held_bytes, peak_bytes: peak_bytes(m.gpu()) })
 }
 
 pub(crate) fn price_gpt2(config: &Value) -> Result<CostReport, String> {
@@ -118,6 +137,8 @@ pub(crate) fn measure_gpt2(config: &Value, reps: usize) -> Result<Measurement, S
     let x = synthetic_tokens(cfg.block_size as usize, cfg.vocab);
     m.set_batch(&x, &x);
     let load_seconds = load_start.elapsed().as_secs_f64();
+    let held_bytes = live_bytes(&m.gpu);
+    m.gpu.reset_memory_peak();
 
     let t0 = Instant::now();
     let _ = m.run_forward_stage();
@@ -133,7 +154,7 @@ pub(crate) fn measure_gpt2(config: &Value, reps: usize) -> Result<Measurement, S
     }
 
     let total = CostSummary::from(&m.cost_fwd());
-    Ok(Measurement { load_seconds, cold_seconds, hot_seconds, total, per_layer: CostSummary::from(&per_layer) })
+    Ok(Measurement { load_seconds, cold_seconds, hot_seconds, total, per_layer: CostSummary::from(&per_layer), held_bytes, peak_bytes: peak_bytes(&m.gpu) })
 }
 
 pub(crate) fn price_lfm2(config: &Value) -> Result<CostReport, String> {
@@ -159,6 +180,8 @@ pub(crate) fn measure_lfm2(config: &Value, reps: usize) -> Result<Measurement, S
     let x = synthetic_tokens(t as usize, cfg.vocab);
     m.set_batch(&x, &x);
     let load_seconds = load_start.elapsed().as_secs_f64();
+    let held_bytes = live_bytes(&m.gpu);
+    m.gpu.reset_memory_peak();
 
     let t0 = Instant::now();
     m.forward();
@@ -191,15 +214,89 @@ pub(crate) fn measure_lfm2(config: &Value, reps: usize) -> Result<Measurement, S
         bytes: total.bytes / n_layers as u64,
         coverage: total.coverage,
     };
-    Ok(Measurement { load_seconds, cold_seconds, hot_seconds, total, per_layer })
+    Ok(Measurement { load_seconds, cold_seconds, hot_seconds, total, per_layer, held_bytes, peak_bytes: peak_bytes(&m.gpu) })
+}
+
+/// `qwen35` is hybrid (gated delta-net and full-attention layers), so like
+/// lfm2 it has no single per-layer cost to derive; it is priced whole.
+///
+/// Its forward pass has no recorded step list to walk (`cost_fwd` is a
+/// property of the qwen3-style graph builders), so the pass is run under a dry
+/// `Recording`: every dispatch is tallied and none reaches the device.
+pub(crate) fn price_qwen35(config: &Value) -> Result<CostReport, String> {
+    let cfg = qwen35::config::Qwen35Config::from_json_checked(config)?;
+    let init = qwen35::init::init_weights(&cfg, 0);
+    let t = cfg.block_size;
+    let m = qwen35::Qwen35::new_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg.clone(), 1, t, &init);
+    let x = synthetic_tokens(t as usize, cfg.vocab);
+    m.set_batch(&x, &x);
+    let rec = Recording::dry();
+    let _ = m.forward();
+    Ok(rec.take())
 }
 
 pub(crate) fn manifest_qwen35(config: &Value) -> Result<Vec<(String, usize)>, String> {
     Ok(qwen35::config::Qwen35Config::from_json_checked(config)?.param_list())
 }
 
+/// [`price_qwen35`] for the mixture-of-experts sibling. Which experts a token
+/// visits is data a dry pass does not have; the dispatch count and shapes are
+/// fixed by the config regardless. `gpu_core::cost` has no formula yet for the
+/// grouped-expert matmul and routing kernels, so they show as uncovered in the
+/// report and the total understates the expert work (coverage says by how much).
+pub(crate) fn price_qwen35moe(config: &Value) -> Result<CostReport, String> {
+    let cfg = qwen35moe::config::Qwen35Config::from_json_checked(config)?;
+    let init = qwen35moe::init::init_weights(&cfg, 0);
+    let t = cfg.block_size;
+    let m = qwen35moe::Qwen35::new(cfg.clone(), 1, t, &init);
+    let x = synthetic_tokens(t as usize, cfg.vocab);
+    m.set_batch(&x, &x);
+    let rec = Recording::dry();
+    let _ = m.forward();
+    Ok(rec.take())
+}
+
 pub(crate) fn manifest_qwen35moe(config: &Value) -> Result<Vec<(String, usize)>, String> {
     Ok(qwen35moe::config::Qwen35Config::from_json_checked(config)?.param_list())
+}
+
+/// Tokens in the one forward pass [`price_gemma4`] prices. A Gemma-4 config
+/// carries no context length (the text tower runs at whatever length the
+/// encoder is handed), so the pass is a fixed 16 tokens: comparable between
+/// configs, to be scaled by the real prompt length for a particular request.
+pub(crate) const GEMMA4_PRICED_TOKENS: usize = 16;
+
+pub(crate) fn price_gemma4(config: &Value) -> Result<CostReport, String> {
+    let cfg = gemma4::Gemma4Config::from_json_checked(config)?;
+    // The text tower reads only the embedding, the final norm and the layers;
+    // the aggregate-embed projections are LTX's own host-side head.
+    let weights: gemma4::block::Tensors = gemma4::gemma4_tensor_manifest(&cfg)
+        .into_iter()
+        .filter(|(name, _)| !name.starts_with("text_embedding_projection."))
+        .map(|(name, shape)| {
+            let n = shape.iter().product();
+            (name, (shape, vec![0.0f32; n]))
+        })
+        .collect();
+    let m = gemma4::Gemma4Model::new(cfg, weights, Some("cpu"));
+    let tokens = synthetic_tokens(GEMMA4_PRICED_TOKENS, cfg.vocab_size);
+    let rec = Recording::dry();
+    let _ = m.forward(&tokens);
+    Ok(rec.take())
+}
+
+pub(crate) fn manifest_gemma4(config: &Value) -> Result<Vec<(String, usize)>, String> {
+    let cfg = gemma4::Gemma4Config::from_json_checked(config)?;
+    Ok(gemma4::gemma4_tensor_manifest(&cfg).into_iter().map(|(name, shape)| (name, shape.iter().product())).collect())
+}
+
+pub(crate) fn price_minimaxh3(config: &Value) -> Result<CostReport, String> {
+    minimaxh3::cost::forward_cost(&minimaxh3::config::H3TransformerConfig::from_json_checked(config)?)
+}
+
+pub(crate) fn manifest_minimaxh3(config: &Value) -> Result<Vec<(String, usize)>, String> {
+    let cfg = minimaxh3::config::H3TransformerConfig::from_json_checked(config)?;
+    Ok(minimaxh3::model::dit_tensor_manifest(&cfg).into_iter().map(|(name, shape)| (name, shape.iter().product())).collect())
 }
 
 #[cfg(test)]

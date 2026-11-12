@@ -16,11 +16,14 @@
 //!
 //! **Exact** ([`CostEntry::price`]): builds a real (zero-init, no weights
 //! needed - cost is a function of shape, never buffer contents) model at the
-//! architecture's OWN config and reports its forward-pass [`CostReport`] via
-//! `Model::cost_fwd`. Needs that architecture to have wired a `Recording`
-//! through its forward pass; today that is qwen3/gpt2/lfm2, the three
-//! `brain perf flops` already covered without a generation-shape parameter
-//! (width/height/steps) a bare model config cannot supply.
+//! architecture's OWN config and reports its forward-pass [`CostReport`]:
+//! qwen3, gpt2 and lfm2 through `Model::cost_fwd` (a recorded step list);
+//! qwen35, qwen35moe, gemma4 and minimaxh3 by running one forward under
+//! `gpu_core::cost::Recording::dry()`, which tallies every dispatch without
+//! executing it. A config with no context length of its own (gemma4's text
+//! tower, the minimaxh3 DiT) is priced over a fixed small pass its pricer
+//! names. Needs a generation-shape-free forward pass: a diffusion model whose
+//! cost depends on width/height/steps stays with `brain perf flops`.
 //!
 //! **Bandwidth** ([`CostEntry::tensor_manifest`]): sums tensor byte sizes from
 //! an architecture's own shape manifest - no device, no model build,
@@ -126,6 +129,15 @@ pub struct Measurement {
     /// instead - a real number, just a coarser one, and never presented as
     /// the derived kind.
     pub per_layer: CostSummary,
+    /// Device bytes the model holds once built (weights plus the buffers its
+    /// forward pass lives in), by the backend's own allocation accounting.
+    /// `None` on a backend that does not account (the CPU one) - unmeasured
+    /// is `None`, never a zero that reads as "holds nothing".
+    pub held_bytes: Option<u64>,
+    /// The most device bytes live at any moment of the timed forward passes,
+    /// counted from the held figure (so never below it). `None` as
+    /// [`Self::held_bytes`].
+    pub peak_bytes: Option<u64>,
 }
 
 mod pricers;
@@ -137,11 +149,16 @@ pub fn registry() -> &'static [CostEntry] {
         CostEntry { arch: "qwen3", price: Some(pricers::price_qwen3), tensor_manifest: Some(pricers::manifest_qwen3), measure: Some(pricers::measure_qwen3) },
         CostEntry { arch: "gpt2", price: Some(pricers::price_gpt2), tensor_manifest: Some(pricers::manifest_gpt2), measure: Some(pricers::measure_gpt2) },
         CostEntry { arch: "lfm2", price: Some(pricers::price_lfm2), tensor_manifest: Some(pricers::manifest_lfm2), measure: Some(pricers::measure_lfm2) },
-        // qwen35/qwen35moe have no wired `Recording` through their forward
-        // pass yet (no `cost_fwd`, unlike qwen3/gpt2/lfm2) - bandwidth tier
-        // only until one of them gains it.
-        CostEntry { arch: "qwen35", price: None, tensor_manifest: Some(pricers::manifest_qwen35), measure: None },
-        CostEntry { arch: "qwen35moe", price: None, tensor_manifest: Some(pricers::manifest_qwen35moe), measure: None },
+        // Hybrid and mixture-of-experts stacks have no derivable per-layer
+        // cost, and their forward passes are not step-list graphs, so they
+        // are priced from a dry recorded pass and registered without `measure`.
+        CostEntry { arch: "qwen35", price: Some(pricers::price_qwen35), tensor_manifest: Some(pricers::manifest_qwen35), measure: None },
+        CostEntry { arch: "qwen35moe", price: Some(pricers::price_qwen35moe), tensor_manifest: Some(pricers::manifest_qwen35moe), measure: None },
+        // Text tower and diffusion transformer: no context length in the
+        // config, so the priced pass is a fixed small one (see each pricer).
+        // Both build per forward or stream, so there is nothing resident to time.
+        CostEntry { arch: "gemma4", price: Some(pricers::price_gemma4), tensor_manifest: Some(pricers::manifest_gemma4), measure: None },
+        CostEntry { arch: "minimaxh3", price: Some(pricers::price_minimaxh3), tensor_manifest: Some(pricers::manifest_minimaxh3), measure: None },
     ]
 }
 
@@ -387,6 +404,8 @@ mod tests {
             ("lfm2", lfm2::config::LfmConfig::tiny().to_json()),
             ("qwen35", qwen35::config::Qwen35Config::tiny().to_json()),
             ("qwen35moe", qwen35moe::config::Qwen35Config::tiny().to_json()),
+            ("gemma4", gemma4::Gemma4Config::tiny().to_json()),
+            ("minimaxh3", minimaxh3::config::H3TransformerConfig::tiny().to_json()),
         ];
         for (arch, cfg) in cases {
             let entry = by_arch(arch).unwrap_or_else(|| panic!("{arch} is not registered"));
@@ -431,10 +450,11 @@ mod tests {
 
     #[test]
     fn measure_errors_for_an_architecture_with_no_measure_fn_registered() {
-        // qwen35 has a bandwidth-tier manifest but no `cost_fwd`/measure path.
-        let cfg = qwen35::config::Qwen35Config::tiny().to_json();
-        let err = measure("qwen35", &cfg, 1).expect_err("qwen35 has no measure fn registered");
-        assert!(err.contains("qwen35"));
+        // gemma4 is priced exactly but builds its device per forward pass and
+        // streams layers, so there is no resident model to time.
+        let cfg = gemma4::Gemma4Config::tiny().to_json();
+        let err = measure("gemma4", &cfg, 1).expect_err("gemma4 has no measure fn registered");
+        assert!(err.contains("gemma4"));
     }
 
     #[test]
@@ -452,7 +472,7 @@ mod tests {
         let expect_bytes: u64 = tensors.iter().map(|(_, n)| *n as u64 * 4).sum();
 
         let _scratch = Scratch::new("bandwidth-byte-total");
-        let priced = price_and_cache("qwen35", "test/qwen35-tiny", &cfg).expect("qwen35 has a bandwidth pricer");
+        let priced = price_and_cache_bandwidth_only("qwen35", "test/qwen35-tiny", &cfg).expect("qwen35 has a bandwidth pricer");
         assert_eq!(priced.tier, Tier::Bandwidth);
         assert_eq!(priced.summary.bytes, expect_bytes);
         assert_eq!(priced.summary.flops, 0, "the bandwidth tier must never report a fabricated FLOP count");
@@ -557,6 +577,173 @@ mod tests {
         assert_eq!(priced.tier, Tier::Bandwidth);
         assert_eq!(priced.summary.flops, 0);
         assert!(priced.summary.bytes > 0);
+    }
+
+    // ------------------------------------------------ exact-tier coverage --
+
+    /// One exact-registered architecture on its own tiny config, with what an
+    /// INDEPENDENT lower bound needs: how many rows one forward pass pushes
+    /// through the weights, which manifest tensors a row multiplies, and the
+    /// fraction of expert weights a row actually visits.
+    struct ExactCase {
+        arch: &'static str,
+        config: Value,
+        rows: u64,
+        multiplies: fn(&str) -> bool,
+        /// `(top_k, n_experts)` for a mixture-of-experts: a row multiplies only
+        /// the experts the router picks, so `.experts.` tensors count at this share.
+        expert_share: (u64, u64),
+    }
+
+    /// A weight a row multiplies: a `.weight` that is not a norm, an embedding
+    /// table (a gather, no multiply), a depthwise conv (counted by its own
+    /// kernel, not as a dense matmul) or the cached AdaLN/time projections
+    /// (host math, never dispatched). A tied head is not listed in any
+    /// manifest, so it is not counted: that only loosens the bound.
+    fn dense_row_weight(name: &str) -> bool {
+        const NOT_A_ROW_MATMUL: &[&str] = &["norm", ".ln", "ln.", "tok.weight", "pos.weight", "embed_tokens", "conv.conv", "conv1d", "text_embedding_projection", "adaln_proj", "time_embedder", "layer_scalar"];
+        name.ends_with(".weight") && !NOT_A_ROW_MATMUL.iter().any(|s| name.contains(s))
+    }
+
+    /// The H3 DiT block stack: every packed row crosses every block, so only
+    /// `transformer_blocks.*` projections and FFN weights are a safe floor
+    /// (the refiner sees text rows only, the embed/head projections one modality each).
+    fn h3_block_weight(name: &str) -> bool {
+        name.starts_with("transformer_blocks.") && dense_row_weight(name)
+    }
+
+    fn exact_cases() -> Vec<ExactCase> {
+        let moe = qwen35moe::config::Qwen35Config::tiny();
+        vec![
+            ExactCase { arch: "qwen3", config: qwen3::QwenConfig::tiny().to_json(), rows: qwen3::QwenConfig::tiny().block_size as u64, multiplies: dense_row_weight, expert_share: (1, 1) },
+            ExactCase { arch: "gpt2", config: gpt2::GptConfig::tiny().to_json(), rows: gpt2::GptConfig::tiny().block_size as u64, multiplies: dense_row_weight, expert_share: (1, 1) },
+            ExactCase { arch: "lfm2", config: lfm2::config::LfmConfig::tiny().to_json(), rows: lfm2::config::LfmConfig::tiny().block_size as u64, multiplies: dense_row_weight, expert_share: (1, 1) },
+            ExactCase { arch: "qwen35", config: qwen35::config::Qwen35Config::tiny().to_json(), rows: qwen35::config::Qwen35Config::tiny().block_size as u64, multiplies: dense_row_weight, expert_share: (1, 1) },
+            ExactCase { arch: "qwen35moe", config: moe.to_json(), rows: moe.block_size as u64, multiplies: dense_row_weight, expert_share: (moe.top_k as u64, moe.n_experts as u64) },
+            ExactCase { arch: "gemma4", config: gemma4::Gemma4Config::tiny().to_json(), rows: pricers::GEMMA4_PRICED_TOKENS as u64, multiplies: dense_row_weight, expert_share: (1, 1) },
+            ExactCase { arch: "minimaxh3", config: minimaxh3::config::H3TransformerConfig::tiny().to_json(), rows: minimaxh3::cost::PRICED_ROWS as u64, multiplies: h3_block_weight, expert_share: (1, 1) },
+        ]
+    }
+
+    /// An upper bound on `exact flops / (2 * rows * multiplied weights)`.
+    ///
+    /// What sits above the matmul floor is real work the floor leaves out on
+    /// purpose: attention scores and context (`4 * heads * head_dim * rows^2 /
+    /// 2` per layer, ~8% of the floor for the 9-row H3 and ~20% for the
+    /// 16..64-row decoders), the lm head, norms, RoPE, activations and the
+    /// recurrent/conv mixers. Measured on the tiny configs the ratio is
+    /// 1.13..1.39. The bound is 2.0: a pricer that double counts a pass (the
+    /// floor itself doubled, plus the same extras, is >= 2.2) or prices a
+    /// training step fails it, while the attention kernels `gpu_core::cost`
+    /// does not price yet (see the coverage assertion) would add at most that
+    /// ~20% and stay inside it.
+    const MAX_OVER_FLOOR: f64 = 2.0;
+
+    /// Below this share of dispatches priced, a total no longer describes the pass.
+    const MIN_COVERAGE: f64 = 0.8;
+
+    #[test]
+    fn every_exact_pricer_reports_covered_nonzero_flops_within_a_floor_and_a_stated_multiple() {
+        for case in exact_cases() {
+            let entry = by_arch(case.arch).unwrap_or_else(|| panic!("{} is not registered", case.arch));
+            let price = entry.price.unwrap_or_else(|| panic!("{} must have an exact pricer", case.arch));
+            let manifest = (entry.tensor_manifest.unwrap_or_else(|| panic!("{} must keep its manifest", case.arch)))(&case.config).unwrap();
+
+            let report = price(&case.config).unwrap_or_else(|e| panic!("{}: {e}", case.arch));
+            let summary = CostSummary::from(&report);
+            assert!(summary.flops > 0, "{}: an exact forward pass must cost FLOPs", case.arch);
+            // Coverage is reported, not assumed complete: a dispatch with no cost
+            // formula is listed in `uncovered` and excluded from the totals, so
+            // the floor below still binds while the share of unpriced steps stays
+            // small. Today `gpu_core::cost` has no formula for qwen35's
+            // `region_copy`, the MoE grouped-expert kernels, gemma4's
+            // `gqa_scores_win` or H3's `attn_scores_qk`/`attn_apply_full`/
+            // `gate_rows`/`modulate_rows`, which puts the lowest coverage at 0.85.
+            assert!(summary.coverage > MIN_COVERAGE, "{}: coverage {} leaves too much of the pass unpriced: {:?}", case.arch, summary.coverage, report.uncovered);
+
+            let (num, den) = case.expert_share;
+            let multiplied: u64 = manifest.iter().filter(|(n, _)| (case.multiplies)(n)).map(|(n, numel)| if n.contains(".experts.") { *numel as u64 * num / den } else { *numel as u64 }).sum();
+            let floor = 2 * case.rows * multiplied;
+            assert!(floor > 0, "{}: the independent floor must not be empty", case.arch);
+            assert!(summary.flops >= floor, "{}: exact {} FLOPs is below the 2*rows*weights floor {floor}", case.arch, summary.flops);
+            let ratio = summary.flops as f64 / floor as f64;
+            assert!(ratio <= MAX_OVER_FLOOR, "{}: exact/floor = {ratio:.2} exceeds the stated multiple {MAX_OVER_FLOOR}", case.arch);
+        }
+    }
+
+    // --------------------------------------- real configs, manifests only --
+
+    fn registry_manifest(arch: &str, config: &Value) -> Vec<(String, usize)> {
+        (by_arch(arch).unwrap().tensor_manifest.unwrap())(config).unwrap()
+    }
+
+    /// The published Gemma-4-12B text tower, priced through the registry
+    /// without building a ~54 GB model. Every number is recomputed here from
+    /// the config's fields, not copied from the manifest.
+    #[test]
+    fn registry_gemma4_manifest_at_the_real_12b_config_has_the_published_counts() {
+        let cfg = gemma4::Gemma4Config::gemma4_12b();
+        let m = registry_manifest("gemma4", &cfg.to_json());
+        assert_eq!(m.len(), 670);
+        assert_eq!(m.iter().filter(|(n, _)| n.starts_with("layers.0.")).count(), 14, "a sliding layer carries v_proj");
+        assert_eq!(m.iter().filter(|(n, _)| n.starts_with("layers.5.")).count(), 13, "a full layer shares k as v");
+
+        let (v, h, i) = (cfg.vocab_size as u64, cfg.hidden_size as u64, cfg.intermediate_size as u64);
+        let (heads, kv_s, kv_f) = (cfg.num_attention_heads as u64, cfg.num_key_value_heads as u64, cfg.num_global_key_value_heads as u64);
+        let (hd_s, hd_f) = (cfg.head_dim as u64, cfg.global_head_dim as u64);
+        let mlp = 3 * h * i;
+        let sliding = 4 * h + 1 + (heads * hd_s * h) + 2 * (kv_s * hd_s * h) + (h * heads * hd_s) + 2 * hd_s + mlp;
+        let full = 4 * h + 1 + (heads * hd_f * h) + (kv_f * hd_f * h) + (h * heads * hd_f) + 2 * hd_f + mlp;
+        let n_full = (cfg.num_hidden_layers / 6) as u64;
+        let n_sliding = cfg.num_hidden_layers as u64 - n_full;
+        let states = cfg.num_hidden_layers as u64 + 1;
+        let aggregate = (4096 * h * states + 4096) + (2048 * h * states + 2048);
+        let expected = v * h + h + n_sliding * sliding + n_full * full + aggregate;
+        assert_eq!(m.iter().map(|(_, n)| *n as u64).sum::<u64>(), expected);
+    }
+
+    /// The published MiniMax-H3 DiT: QKV is wider than the residual stream and
+    /// the per-block AdaLN projection emits 18 hidden-widths (6 vectors x 3
+    /// modalities). The total is recomputed from the config fields.
+    #[test]
+    fn registry_minimaxh3_manifest_at_the_real_config_has_the_published_widths() {
+        let cfg = minimaxh3::config::H3TransformerConfig::real();
+        let m = registry_manifest("minimaxh3", &cfg.to_json());
+        let numel = |name: &str| m.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("missing {name}")).1 as u64;
+        let (h, te) = (cfg.hidden_size as u64, cfg.time_embed_dim as u64);
+        assert_eq!(cfg.num_attention_heads as u64 * cfg.attention_head_dim as u64, 7_168);
+        assert_eq!(numel("transformer_blocks.0.attn.to_q.weight"), 7_168 * h, "QKV width 56*128 over the residual width");
+        assert_eq!(numel("transformer_blocks.0.adaln_proj.linear.bias"), 96_768, "18 * 5376");
+        assert_eq!(numel("transformer_blocks.0.adaln_proj.linear.weight"), 96_768 * te);
+
+        let (inner, hd, ffn) = (cfg.num_attention_heads as u64 * cfg.attention_head_dim as u64, cfg.attention_head_dim as u64, cfg.ffn_dim as u64);
+        let attn = 3 * inner * h + 2 * hd + h * inner;
+        let ff = 2 * ffn * h + h * ffn;
+        let refiner = cfg.num_refiner_layers as u64 * (attn + ff + 2 * h) + h;
+        let block = attn + ff + 2 * h + 18 * h * te + 18 * h;
+        let (patch, audio, text) = (cfg.video_patch_dim() as u64, cfg.audio_in_channels as u64, cfg.text_dim as u64);
+        let (freq, teh) = (cfg.freq_dim as u64, cfg.time_embed_hidden_dim as u64);
+        let edges = (h * patch + h) + (h * audio + h) + (h * text + h) + (teh * freq + teh) + (te * teh + te) + (h + 2 * h * te + 2 * h) + (patch * h + patch) + (audio * h + audio);
+        let expected = refiner + cfg.num_layers as u64 * block + edges;
+        assert_eq!(m.iter().map(|(_, n)| *n as u64).sum::<u64>(), expected);
+    }
+
+    // ------------------------------------------------ allocation measurement --
+
+    #[test]
+    fn measure_qwen3_reports_the_device_bytes_the_model_holds_and_its_forward_peak() {
+        let cfg = qwen3::QwenConfig::tiny();
+        let m = measure("qwen3", &cfg.to_json(), 1).expect("qwen3 has a registered measure fn");
+        // Each model builds its own `Gpu` (no constructor takes a device), so the
+        // tally read is that device's own and holds nothing but this model.
+        let (Some(held), Some(peak)) = (m.held_bytes, m.peak_bytes) else {
+            assert_eq!((m.held_bytes, m.peak_bytes), (None, None), "a backend that does not account must report neither, never a fabricated zero");
+            brain_testutil::skip_unavailable("this backend does not account for device allocations");
+            return;
+        };
+        let weights: u64 = qwen3::QwenConfig::tiny().param_list().iter().map(|(_, n)| *n as u64 * 4).sum();
+        assert!(held >= weights, "held {held} B must cover the {weights} B of fp32 weights");
+        assert!(peak >= held, "the forward peak {peak} B cannot be below what was already held {held} B");
     }
 
     #[test]

@@ -56,6 +56,7 @@ pub mod audio_encoder;
 pub mod block;
 pub mod caps;
 pub mod config;
+pub mod cost;
 pub mod dit_shard;
 pub mod grad;
 pub mod import;

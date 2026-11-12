@@ -33,7 +33,9 @@ brain-paramstore.workspace = true
 # no subscriber installed each macro is a predictable-branch no-op, so
 # instrumenting a 48-layer loop costs nothing on an untraced run.
 tracing.workspace = true
+# `Gemma4Config`'s strict JSON form (`to_json` / `from_json_checked`).
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
-serde_json.workspace = true

@@ -367,68 +367,76 @@ pub fn resident_cost(cfg: &H3TransformerConfig, tier: Dtype, gated: bool) -> Lay
     LayerBytes { per_layer: vec![block_bytes(cfg, tier) + gate; cfg.num_layers as usize], embed, head }
 }
 
-/// Seeded random weights under every name and shape [`H3Transformer::load`]
-/// reads for `cfg`: a synthetic checkpoint for tests and measurements that
-/// need the model's structure, not its trained values.
-pub fn random_checkpoint(cfg: &H3TransformerConfig, seed: u64) -> Tensors {
-    let mut rng = data::rng::Lcg::new(seed);
-    let mut t: Tensors = std::collections::HashMap::new();
-    let mut put = |name: &str, shape: Vec<usize>| {
-        let n: usize = shape.iter().product();
-        t.insert(name.to_string(), (shape, rng.vec_scaled(n, 0.2)));
-    };
+/// Every tensor [`H3Transformer::load`] reads for `cfg`, with its shape, in
+/// the order [`random_checkpoint`] draws them. The one list of the DiT's
+/// weight names: a synthetic checkpoint, a zero-weight pricing build and the
+/// model registry's parameter count are all read off it.
+pub fn dit_tensor_manifest(cfg: &H3TransformerConfig) -> Vec<(String, Vec<usize>)> {
     let (hidden, inner, hd, ffn, te) = (cfg.hidden_size as usize, cfg.inner_dim() as usize, cfg.attention_head_dim as usize, cfg.ffn_dim as usize, cfg.time_embed_dim as usize);
+    let mut m: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut put = |name: String, shape: Vec<usize>| m.push((name, shape));
 
-    let put_attn = |name: &mut dyn FnMut(&str, Vec<usize>), prefix: &str| {
-        name(&format!("{prefix}.to_q.weight"), vec![inner, hidden]);
-        name(&format!("{prefix}.to_k.weight"), vec![inner, hidden]);
-        name(&format!("{prefix}.to_v.weight"), vec![inner, hidden]);
-        name(&format!("{prefix}.norm_q.weight"), vec![hd]);
-        name(&format!("{prefix}.norm_k.weight"), vec![hd]);
-        name(&format!("{prefix}.to_out.0.weight"), vec![hidden, inner]);
-    };
-    let put_ff = |name: &mut dyn FnMut(&str, Vec<usize>), prefix: &str| {
-        name(&format!("{prefix}.ff.net.0.proj.weight"), vec![2 * ffn, hidden]);
-        name(&format!("{prefix}.ff.net.2.weight"), vec![hidden, ffn]);
+    let attn_and_ff = |put: &mut dyn FnMut(String, Vec<usize>), p: &str| {
+        put(format!("{p}.attn.to_q.weight"), vec![inner, hidden]);
+        put(format!("{p}.attn.to_k.weight"), vec![inner, hidden]);
+        put(format!("{p}.attn.to_v.weight"), vec![inner, hidden]);
+        put(format!("{p}.attn.norm_q.weight"), vec![hd]);
+        put(format!("{p}.attn.norm_k.weight"), vec![hd]);
+        put(format!("{p}.attn.to_out.0.weight"), vec![hidden, inner]);
+        put(format!("{p}.ff.net.0.proj.weight"), vec![2 * ffn, hidden]);
+        put(format!("{p}.ff.net.2.weight"), vec![hidden, ffn]);
     };
 
     for i in 0..cfg.num_refiner_layers {
         let p = format!("token_refiner.refiner_blocks.{i}");
-        put_attn(&mut put, &format!("{p}.attn"));
-        put_ff(&mut put, &p);
-        put(&format!("{p}.norm1.weight"), vec![hidden]);
-        put(&format!("{p}.norm2.weight"), vec![hidden]);
+        attn_and_ff(&mut put, &p);
+        put(format!("{p}.norm1.weight"), vec![hidden]);
+        put(format!("{p}.norm2.weight"), vec![hidden]);
     }
-    put("token_refiner.final_norm.weight", vec![hidden]);
+    put("token_refiner.final_norm.weight".into(), vec![hidden]);
 
     for i in 0..cfg.num_layers {
         let p = format!("transformer_blocks.{i}");
-        put_attn(&mut put, &format!("{p}.attn"));
-        put_ff(&mut put, &p);
-        put(&format!("{p}.norm1.weight"), vec![hidden]);
-        put(&format!("{p}.norm2.weight"), vec![hidden]);
-        put(&format!("{p}.adaln_proj.linear.weight"), vec![18 * hidden, te]);
-        put(&format!("{p}.adaln_proj.linear.bias"), vec![18 * hidden]);
+        attn_and_ff(&mut put, &p);
+        put(format!("{p}.norm1.weight"), vec![hidden]);
+        put(format!("{p}.norm2.weight"), vec![hidden]);
+        put(format!("{p}.adaln_proj.linear.weight"), vec![cfg.adaln_out_features() as usize, te]);
+        put(format!("{p}.adaln_proj.linear.bias"), vec![cfg.adaln_out_features() as usize]);
     }
 
-    put("proj_in.weight", vec![hidden, cfg.video_patch_dim() as usize]);
-    put("proj_in.bias", vec![hidden]);
-    put("audio_proj_in.weight", vec![hidden, cfg.audio_in_channels as usize]);
-    put("audio_proj_in.bias", vec![hidden]);
-    put("context_embedder.weight", vec![hidden, cfg.text_dim as usize]);
-    put("context_embedder.bias", vec![hidden]);
-    put("time_embedder.linear_1.weight", vec![cfg.time_embed_hidden_dim as usize, cfg.freq_dim as usize]);
-    put("time_embedder.linear_1.bias", vec![cfg.time_embed_hidden_dim as usize]);
-    put("time_embedder.linear_2.weight", vec![te, cfg.time_embed_hidden_dim as usize]);
-    put("time_embedder.linear_2.bias", vec![te]);
-    put("norm_out.norm.weight", vec![hidden]);
-    put("norm_out.linear.weight", vec![2 * hidden, te]);
-    put("norm_out.linear.bias", vec![2 * hidden]);
-    put("proj_out.weight", vec![cfg.video_patch_dim() as usize, hidden]);
-    put("proj_out.bias", vec![cfg.video_patch_dim() as usize]);
-    put("audio_proj_out.weight", vec![cfg.audio_in_channels as usize, hidden]);
-    put("audio_proj_out.bias", vec![cfg.audio_in_channels as usize]);
-    t
+    let (patch, audio, text, teh) = (cfg.video_patch_dim() as usize, cfg.audio_in_channels as usize, cfg.text_dim as usize, cfg.time_embed_hidden_dim as usize);
+    put("proj_in.weight".into(), vec![hidden, patch]);
+    put("proj_in.bias".into(), vec![hidden]);
+    put("audio_proj_in.weight".into(), vec![hidden, audio]);
+    put("audio_proj_in.bias".into(), vec![hidden]);
+    put("context_embedder.weight".into(), vec![hidden, text]);
+    put("context_embedder.bias".into(), vec![hidden]);
+    put("time_embedder.linear_1.weight".into(), vec![teh, cfg.freq_dim as usize]);
+    put("time_embedder.linear_1.bias".into(), vec![teh]);
+    put("time_embedder.linear_2.weight".into(), vec![te, teh]);
+    put("time_embedder.linear_2.bias".into(), vec![te]);
+    put("norm_out.norm.weight".into(), vec![hidden]);
+    put("norm_out.linear.weight".into(), vec![cfg.final_adaln_out_features() as usize, te]);
+    put("norm_out.linear.bias".into(), vec![cfg.final_adaln_out_features() as usize]);
+    put("proj_out.weight".into(), vec![patch, hidden]);
+    put("proj_out.bias".into(), vec![patch]);
+    put("audio_proj_out.weight".into(), vec![audio, hidden]);
+    put("audio_proj_out.bias".into(), vec![audio]);
+    m
+}
+
+/// Seeded random weights under every name and shape [`H3Transformer::load`]
+/// reads for `cfg` ([`dit_tensor_manifest`]): a synthetic checkpoint for tests
+/// and measurements that need the model's structure, not its trained values.
+pub fn random_checkpoint(cfg: &H3TransformerConfig, seed: u64) -> Tensors {
+    let mut rng = data::rng::Lcg::new(seed);
+    dit_tensor_manifest(cfg)
+        .into_iter()
+        .map(|(name, shape)| {
+            let n: usize = shape.iter().product();
+            (name, (shape, rng.vec_scaled(n, 0.2)))
+        })
+        .collect()
 }
 
 /// The checkpoint as the int8 tier stores it: every block and refiner

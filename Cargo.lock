@@ -1675,6 +1675,7 @@ dependencies = [
  "brain-model",
  "brain-paramstore",
  "brain-testutil",
+ "serde",
  "serde_json",
  "tracing",
 ]
@@ -2162,6 +2163,7 @@ dependencies = [
  "brain-qwen3vl",
  "brain-testutil",
  "brain-vae",
+ "serde",
  "serde_json",
  "tracing",
 ]
@@ -2239,13 +2241,16 @@ dependencies = [
 name = "brain-modelcost"
 version = "5.1.0"
 dependencies = [
+ "brain-gemma4",
  "brain-gpt2",
  "brain-gpu-core",
  "brain-lfm2",
+ "brain-minimaxh3",
  "brain-model",
  "brain-qwen3",
  "brain-qwen35",
  "brain-qwen35moe",
+ "brain-testutil",
  "serde",
  "serde_json",
 ]

@@ -52,6 +52,7 @@ brain-data.workspace = true
 # `caps::load_keyframe_pixels`: `fl2va`'s still images, decoded and resampled
 # by the one image crate rather than a private codec.
 brain-imaging.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 # The `tracing` FACADE only, never a subscriber - `--trace-minimaxh3 <0-5>`
 # turns per-block/per-step events on; with no subscriber installed every
