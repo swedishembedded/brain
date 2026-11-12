@@ -18,13 +18,22 @@
 //! `compare` action of the per-model forecasting samples (`samples/models/<model>`).
 //!
 //! ## Headline score
-//! A 0..1 **skill score** = `clamp(1 − MAE_best / MAE_naive, 0, 1)`: how much the
-//! best *structured* forecast beats the dumb last-value (naive) forecast, averaged
-//! over the windows. The structured candidates are the closed-form oracle (when
-//! the scenario has one), a seasonal-naive repeat, and a linear-drift line — no
-//! model fitting, so the score is a clean "how much exploitable structure is
-//! here?" probe. On the **random-walk** negative control nothing beats last-value,
-//! so skill stays ≈ 0 (the property the harness's dedicated gate enforces hard).
+//! A 0..1 **skill score** = `clamp(1 − MAE_chosen / MAE_naive, 0, 1)`: how much
+//! the forecast of the *chosen* candidate beats the dumb last-value (naive)
+//! forecast, with the two MAEs averaged over the windows. The candidates are
+//! naive, the closed-form oracle (when the scenario has one), a seasonal-naive
+//! repeat, and a linear-drift line, with no model fitting, so the score is a clean
+//! "how much exploitable structure is here?" probe.
+//!
+//! The candidate is chosen from the context window alone: each is forecast
+//! from the context without its last `horizon` steps and scored against those
+//! held-back steps, and the winner forecasts the real future. Choosing with the
+//! future in hand would bias the score above zero even where there is no
+//! structure (the best of several noisy candidates beats naive by luck). On the
+//! **random-walk** negative control nothing beats last-value, so the unclamped
+//! skill (`skill_raw`) is centred on zero, slightly below it because picking a
+//! candidate on noise costs; the harness's dedicated gate enforces the hard
+//! version of the property.
 
 use std::path::Path;
 
@@ -63,31 +72,55 @@ impl ForecastBench {
         vec![context.last().copied().unwrap_or(0.0); self.scenario.horizon()]
     }
 
-    /// Structured candidate forecasts to beat the naive one: the closed-form
-    /// oracle (if the scenario exposes one), a seasonal-naive repeat, and a
-    /// linear-drift extrapolation. The best (lowest MAE) is what scores.
-    fn structured_forecasts(&self, context: &[f32]) -> Vec<Vec<f32>> {
+    /// Candidate forecasts of `horizon` steps from `context`, each named so the
+    /// same candidate can be found again from a shorter context: naive, the
+    /// closed-form oracle (if the scenario exposes one), a seasonal-naive
+    /// repeat, and a linear-drift extrapolation. A candidate the context is
+    /// too short for is absent.
+    fn candidates(&self, context: &[f32]) -> Vec<(&'static str, Vec<f32>)> {
         let h = self.scenario.horizon();
         let n = context.len();
         let last = context.last().copied().unwrap_or(0.0);
-        let mut out: Vec<Vec<f32>> = Vec::new();
+        let mut out: Vec<(&'static str, Vec<f32>)> = vec![("naive", self.naive_forecast(context))];
 
         if let Some(oracle) = self.scenario.oracle(context) {
             if oracle.len() == h {
-                out.push(oracle);
+                out.push(("oracle", oracle));
             }
         }
         // seasonal-naive: repeat the last full season.
         let season = self.scenario.season();
         if season > 1 && n >= season {
-            out.push((0..h).map(|i| context[n - season + (i % season)]).collect());
+            out.push(("seasonal_naive", (0..h).map(|i| context[n - season + (i % season)]).collect()));
         }
         // linear drift: last value + in-sample average slope.
         if n >= 2 {
             let slope = (last - context[0]) / (n as f32 - 1.0);
-            out.push((1..=h).map(|k| last + slope * k as f32).collect());
+            out.push(("drift", (1..=h).map(|k| last + slope * k as f32).collect()));
         }
         out
+    }
+
+    /// The forecast of the candidate that did best on the last `horizon` steps
+    /// of `context` when forecast from what came before them. Uses no value
+    /// beyond `context`. Falls back to naive when the context is too short to
+    /// hold anything back.
+    fn chosen_forecast(&self, context: &[f32]) -> Vec<f32> {
+        let h = self.scenario.horizon();
+        let mut candidates = self.candidates(context);
+        let Some(split) = context.len().checked_sub(h).filter(|&s| s >= 2) else {
+            return candidates.swap_remove(0).1;
+        };
+        let (prefix, held_back) = context.split_at(split);
+        let mut best = ("naive", f32::INFINITY);
+        for (name, forecast) in self.candidates(prefix) {
+            let e = mae(&forecast, held_back);
+            if e < best.1 {
+                best = (name, e);
+            }
+        }
+        let at = candidates.iter().position(|(name, _)| *name == best.0).unwrap_or(0);
+        candidates.swap_remove(at).1
     }
 }
 
@@ -115,7 +148,7 @@ impl Benchmark for ForecastBench {
     }
 
     /// Non-LM objective: the decoder `lm` is ignored (documented above). Score the
-    /// best structured forecast's skill vs naive, averaged over the windows.
+    /// chosen candidate's skill vs naive, averaged over the windows.
     fn evaluate_with(&self, _lm: &dyn DecoderLm, dir: &Path, _seed: u64) -> std::io::Result<Metrics> {
         let ctx = self.scenario.context_len();
         let h = self.scenario.horizon();
@@ -131,27 +164,25 @@ impl Benchmark for ForecastBench {
         for rec in vals.chunks_exact(stride) {
             let (context, future) = rec.split_at(ctx);
             let en = mae(&self.naive_forecast(context), future);
-            let eb = self
-                .structured_forecasts(context)
-                .iter()
-                .map(|p| mae(p, future))
-                .fold(en, f32::min); // never worse than naive itself
+            let eb = mae(&self.chosen_forecast(context), future);
             if en.is_finite() && eb.is_finite() {
                 naive_sum += en;
                 best_sum += eb;
                 count += 1;
             }
         }
-        let (mae_naive, mae_best) = if count > 0 {
+        let (mae_naive, mae_chosen) = if count > 0 {
             (naive_sum / count as f32, best_sum / count as f32)
         } else {
             (f32::NAN, f32::NAN)
         };
-        // Fraction of naive error removed by the best structured forecast.
-        let skill = if mae_naive > 1e-9 { (1.0 - mae_best / mae_naive).clamp(0.0, 1.0) } else { 0.0 };
+        // Fraction of naive error removed by the chosen candidate.
+        let skill_raw = if mae_naive > 1e-9 { 1.0 - mae_chosen / mae_naive } else { 0.0 };
+        let skill = skill_raw.clamp(0.0, 1.0);
         Ok(Metrics::new(skill)
+            .with("skill_raw", skill_raw)
             .with("mae_naive", mae_naive)
-            .with("mae_best", mae_best)
+            .with("mae_chosen", mae_chosen)
             .with("windows", count as f32))
     }
 
@@ -167,7 +198,7 @@ impl Benchmark for ForecastBench {
     }
 
     fn report_fields(&self) -> Vec<&str> {
-        vec!["mae_naive", "mae_best", "windows"]
+        vec!["mae_naive", "mae_chosen", "skill_raw", "windows"]
     }
 
     fn informational(&self) -> bool {
@@ -251,6 +282,19 @@ mod tests {
         assert!(rw.score < 0.1, "random walk must show ~no skill (negative control): {rw:?}");
         // And skill(trend) must dominate skill(random walk) by a clear margin.
         assert!(trend.score > rw.score + 0.1, "structured must beat control: {trend:?} vs {rw:?}");
+    }
+
+    /// With the candidate chosen from the context alone there is no hindsight
+    /// to inflate the score: on a driftless random walk the unclamped skill
+    /// is centred on zero (slightly negative, as picking a candidate on noise
+    /// costs), where choosing with the future in hand gives a positive
+    /// expectation by construction.
+    #[test]
+    fn skill_on_the_random_walk_control_is_not_inflated_by_hindsight() {
+        let b = build("forecast_random_walk", 400).expect("scenario present");
+        let m = score_of(b.as_ref(), 42);
+        let raw = m.get("skill_raw").expect("unclamped skill reported");
+        assert!(raw < 0.02 && raw > -0.10, "random-walk skill_raw {raw}: {m:?}");
     }
 
     #[test]
