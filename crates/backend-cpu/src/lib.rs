@@ -107,6 +107,9 @@ impl CpuBuffer {
 /// another `Arc` onto this.
 struct CpuShared {
     jit: Jit,
+    /// Whether the JIT's kernels range-check every storage access ([`CpuBackend::with_checks`]); a fault panics with the
+    /// kernel and binding it names.
+    checked: bool,
     threads: usize,
     /// Kernel names in index order (mirrors the registry passed to `new`), used
     /// for the optional `--kernel-profile` per-kernel timing breakdown.
@@ -262,8 +265,17 @@ impl CpuBackend {
         self.shared.wgsizes.get(kind).copied().unwrap_or(backend_api::DEFAULT_WORKGROUP_SIZE)
     }
 
+    /// A CPU backend over `kernels`, range-checked when asked for ([`backend_api::set_checked_kernels`]) and in debug
+    /// builds: `BRAIN_GPU_CHECKED`'s contract on the CPU, where the unchecked kernels trust every access.
     pub fn new(kernels: &[(&str, &str)]) -> CpuBackend {
-        let jit = Jit::new_profiled(kernels, backend_api::profile_enabled()).expect("WGSL->CPU JIT compilation failed");
+        Self::with_checks(kernels, backend_api::checked_kernels() || cfg!(debug_assertions))
+    }
+
+    /// [`Self::new`] with the checks chosen by the caller. A checked backend compiles a range test into every storage
+    /// load and store of the JIT; an access outside its binding reads zero or is dropped, and the dispatch panics with
+    /// a message naming the kernel and the binding (`wgsl_cpu::AccessFault`). The native fast paths are not checked.
+    pub fn with_checks(kernels: &[(&str, &str)], checked: bool) -> CpuBackend {
+        let jit = Jit::new_with(kernels, backend_api::profile_enabled(), checked).expect("WGSL->CPU JIT compilation failed");
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         // A process can build several engine instances (e.g. the TTS pipeline
         // makes one per component); log the adapter line only once.
@@ -348,6 +360,7 @@ impl CpuBackend {
         CpuBackend {
             shared: std::sync::Arc::new(CpuShared {
                 jit,
+                checked,
                 threads,
                 names,
                 profile,
@@ -526,15 +539,21 @@ impl CpuBackend {
             let total = (*gx as u64) * (*gy as u64) * self.wgsize(*kind) as u64;
             let uniform = bg.uniform.base_ptr() as *const u32;
             let bufs: Vec<*mut u8> = bg.bufs.iter().map(|(b, off)| unsafe { b.base_ptr().add(off * 4) }).collect();
+            // Byte length of each binding from its (sub-range) base, for a checked JIT's range tests.
+            let lens: Vec<u64> = if self.shared.checked {
+                bg.bufs.iter().map(|(b, off)| (b.words_mut().len().saturating_sub(*off) * 4) as u64).collect()
+            } else {
+                Vec::new()
+            };
             if let Some(prof) = &self.shared.profile {
                 let t = std::time::Instant::now();
-                self.dispatch(*kind, total, *gx, *gy, uniform, &bufs);
+                self.dispatch(*kind, total, *gx, *gy, uniform, &bufs, &lens);
                 let dt = t.elapsed();
                 let mut g = prof.lock().unwrap_or_else(|e| e.into_inner());
                 g[*kind].0 += dt;
                 g[*kind].1 += 1;
             } else {
-                self.dispatch(*kind, total, *gx, *gy, uniform, &bufs);
+                self.dispatch(*kind, total, *gx, *gy, uniform, &bufs, &lens);
             }
         }
     }
@@ -560,6 +579,24 @@ impl CpuBackend {
         }
     }
 
+    /// Run invocations `[start, end)` of JIT kernel `kind`. A checked backend routes through the JIT's range-checked
+    /// entry and turns the fault into a panic that names the kernel and the binding.
+    ///
+    /// # Safety
+    /// As `wgsl_cpu::Jit::run`; `lens` holds one byte length per binding of `bufs` when the backend is checked.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn run_jit(&self, kind: usize, start: u64, end: u64, gx: u32, gy: u32, uniform: *const u32, bufs: *const *mut u8, lens: &[u64]) {
+        let jit = &self.shared.jit;
+        if self.shared.checked {
+            if let Err(fault) = jit.run_checked(kind, start, end, gx, gy, uniform, bufs, lens.as_ptr()) {
+                panic!("{fault}");
+            }
+        } else {
+            jit.run(kind, start, end, gx, gy, uniform, bufs);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn dispatch(
         &self,
         kind: usize,
@@ -568,6 +605,7 @@ impl CpuBackend {
         gy: u32,
         uniform: *const u32,
         bufs: &[*mut u8],
+        lens: &[u64],
     ) {
         // Provider-registered native step (`kernel-performance.md` M8.10) -
         // checked BEFORE `total == 0`: a native function decides its own work
@@ -1222,13 +1260,12 @@ impl CpuBackend {
         if chunk >= total {
             // One chunk: run it on the calling thread, without the pool.
             // SAFETY: as below, with the whole range on one thread.
-            unsafe { self.shared.jit.run(kind, 0, total, gx, gy, uniform, bufs.as_ptr()) };
+            unsafe { self.run_jit(kind, 0, total, gx, gy, uniform, bufs.as_ptr(), lens) };
             return;
         }
         let starts: Vec<u64> = (0..total).step_by(chunk as usize).collect();
         let uni = SendConst(uniform);
         let bufs_ptr = SendMut(bufs.as_ptr());
-        let jit = &self.shared.jit;
         starts.par_iter().for_each(|&s| {
             // Rebind whole wrappers so the closure captures the `Send` newtypes,
             // not their raw-pointer fields (Rust 2021 disjoint capture).
@@ -1249,7 +1286,7 @@ impl CpuBackend {
             let e = (s + chunk).min(total);
             // SAFETY: each invocation writes a disjoint output element, so the
             // sub-ranges never alias; `bufs` outlives this scoped parallel loop.
-            unsafe { jit.run(kind, s, e, gx, gy, uni.0, bufs_ptr.0) };
+            unsafe { self.run_jit(kind, s, e, gx, gy, uni.0, bufs_ptr.0, lens) };
         });
     }
 }

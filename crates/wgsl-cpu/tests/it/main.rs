@@ -8,6 +8,7 @@
 //! others run beside it.
 
 mod aggregates;
+mod checked_bindings;
 mod compile_all;
 mod math_builtins;
 mod rope_theta;

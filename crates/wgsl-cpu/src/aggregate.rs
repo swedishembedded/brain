@@ -73,16 +73,24 @@ impl<'a, 'b> Tr<'a, 'b> {
         let m = self.module_ref;
         Ok(match p {
             Place::Local(var, ty) => Eval::Scalar(self.b.use_var(var), ty),
-            Place::Mem { addr, elem, readonly } => {
+            Place::Mem { addr, elem, readonly, guard } => {
+                let addr = self.guarded_addr(guard, addr, cl_ty(elem).bytes(), false);
                 Eval::Scalar(self.b.ins().load(cl_ty(elem), mem_flags(readonly), addr, 0), elem)
             }
-            Place::Ptr { addr, off, shape, readonly } => {
+            Place::Ptr { addr, off, shape, readonly, guard } => {
                 let mut offs = Vec::new();
                 mem_offsets(m, shape, off, &mut offs)?;
-                let vals = offs
-                    .into_iter()
-                    .map(|(o, t)| (self.b.ins().load(cl_ty(t), mem_flags(readonly), addr, o as i32), t))
-                    .collect();
+                let mut vals = Vec::with_capacity(offs.len());
+                for (o, t) in offs {
+                    // A guarded access folds its offset into the address it tests; an unguarded one keeps the immediate.
+                    let (at, imm) = if guard.is_some() {
+                        let a = self.offset_addr(addr, o);
+                        (self.guarded_addr(guard, a, cl_ty(t).bytes(), false), 0)
+                    } else {
+                        (addr, o as i32)
+                    };
+                    vals.push((self.b.ins().load(cl_ty(t), mem_flags(readonly), at, imm), t));
+                }
                 self.make(vals, shape)
             }
             Place::Vars { group, start, shape } => {
@@ -119,17 +127,24 @@ impl<'a, 'b> Tr<'a, 'b> {
                 let v = self.coerce(one(vals)?, ty)?;
                 self.b.def_var(var, v);
             }
-            Place::Mem { addr, elem, .. } => {
+            Place::Mem { addr, elem, guard, .. } => {
                 let v = self.coerce(one(vals)?, elem)?;
+                let addr = self.guarded_addr(guard, addr, cl_ty(elem).bytes(), true);
                 self.b.ins().store(MemFlags::trusted(), v, addr, 0);
             }
-            Place::Ptr { addr, off, shape, .. } => {
+            Place::Ptr { addr, off, shape, guard, .. } => {
                 let mut offs = Vec::new();
                 mem_offsets(m, shape, off, &mut offs)?;
                 check_len(offs.len(), vals.len())?;
                 for ((o, t), v) in offs.into_iter().zip(vals) {
                     let v = self.coerce(*v, t)?;
-                    self.b.ins().store(MemFlags::trusted(), v, addr, o as i32);
+                    if guard.is_some() {
+                        let a = self.offset_addr(addr, o);
+                        let at = self.guarded_addr(guard, a, cl_ty(t).bytes(), true);
+                        self.b.ins().store(MemFlags::trusted(), v, at, 0);
+                    } else {
+                        self.b.ins().store(MemFlags::trusted(), v, addr, o as i32);
+                    }
                 }
             }
             Place::Vars { group, start, shape } => {
@@ -180,10 +195,10 @@ impl<'a, 'b> Tr<'a, 'b> {
     }
 
     /// A place in memory holding `shape`: scalars become [`Place::Mem`].
-    fn mem_place(&mut self, addr: Value, off: u32, shape: Shape, readonly: bool) -> Place {
+    fn mem_place(&mut self, addr: Value, off: u32, shape: Shape, readonly: bool, guard: Option<u32>) -> Place {
         match shape {
-            Shape::Scalar(elem) => Place::Mem { addr: self.offset_addr(addr, off), elem, readonly },
-            _ => Place::Ptr { addr, off, shape, readonly },
+            Shape::Scalar(elem) => Place::Mem { addr: self.offset_addr(addr, off), elem, readonly, guard },
+            _ => Place::Ptr { addr, off, shape, readonly, guard },
         }
     }
 
@@ -192,18 +207,19 @@ impl<'a, 'b> Tr<'a, 'b> {
         let m = self.module_ref;
         let gv = &m.global_variables[g];
         let shape = shape_of(m, gv.ty)?;
-        let (addr, readonly) = match gv.space {
+        let (addr, readonly, guard) = match gv.space {
             AddressSpace::WorkGroup => {
-                (*self.env.wg_mem.get(&g).ok_or("workgroup global without scratch base")?, false)
+                (*self.env.wg_mem.get(&g).ok_or("workgroup global without scratch base")?, false, None)
             }
             AddressSpace::Storage { .. } => {
                 let b = gv.binding.as_ref().map(|b| b.binding).ok_or("storage global without binding")?;
-                (*self.env.buf_base.get(&b).ok_or("missing storage base pointer")?, false)
+                let base = *self.env.buf_base.get(&b).ok_or("missing storage base pointer")?;
+                (base, false, self.env.checks.map(|_| b))
             }
-            AddressSpace::Uniform => (self.env.uniform_ptr, true),
+            AddressSpace::Uniform => (self.env.uniform_ptr, true, None),
             other => return Err(format!("global in unsupported space {other:?}")),
         };
-        Ok(self.mem_place(addr, 0, shape, readonly))
+        Ok(self.mem_place(addr, 0, shape, readonly, guard))
     }
 
     /// `base.index` (`AccessIndex`) on a place or a value.
@@ -212,9 +228,9 @@ impl<'a, 'b> Tr<'a, 'b> {
         match self.eval(base)? {
             Eval::Place(p) => {
                 let place = match p {
-                    Place::Ptr { addr, off, shape, readonly } => {
+                    Place::Ptr { addr, off, shape, readonly, guard } => {
                         let mb = member(m, shape, index)?;
-                        self.mem_place(addr, off + mb.offset, mb.shape, readonly)
+                        self.mem_place(addr, off + mb.offset, mb.shape, readonly, guard)
                     }
                     Place::Vars { group, start, shape } => {
                         let mb = member(m, shape, index)?;
@@ -248,12 +264,12 @@ impl<'a, 'b> Tr<'a, 'b> {
         match b {
             Eval::Place(p) => {
                 let place = match p {
-                    Place::Ptr { addr, off, shape, readonly } => {
+                    Place::Ptr { addr, off, shape, readonly, guard } => {
                         let el = element(m, shape)?;
                         let idx64 = self.emit_i64(idx);
                         let scaled = self.b.ins().imul_imm(idx64, el.mem_stride as i64);
                         let a = self.b.ins().iadd(addr, scaled);
-                        self.mem_place(a, off, el.shape, readonly)
+                        self.mem_place(a, off, el.shape, readonly, guard)
                     }
                     Place::Vars { group, start, shape } => {
                         let el = element(m, shape)?;

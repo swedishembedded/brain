@@ -7,6 +7,7 @@
 //! process-wide state (the current directory, environment variables): the
 //! others run beside it.
 
+mod checked_dispatch;
 mod conv_batch;
 mod global_pool;
 mod host_gemm;

@@ -169,7 +169,7 @@ impl<'a, 'b> Tr<'a, 'b> {
         match self.frame.locals[&h] {
             LocalSlot::Scalar(var, ty) => Place::Local(var, ty),
             LocalSlot::Vars { group, shape } => Place::Vars { group, start: 0, shape },
-            LocalSlot::Stack { base, shape } => Place::Ptr { addr: base, off: 0, shape, readonly: false },
+            LocalSlot::Stack { base, shape } => Place::Ptr { addr: base, off: 0, shape, readonly: false, guard: None },
         }
     }
 

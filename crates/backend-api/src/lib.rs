@@ -1960,6 +1960,24 @@ pub fn set_profile(on: bool) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+static CHECKED_KERNELS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ask the backends that can for range-checked kernels: every storage load and store compared with the length of its
+/// binding, a fault reported as an error that names the kernel and the binding instead of an out-of-bounds access. A
+/// backend takes it when it is built, so the application sets it first. The CPU backend also turns it on by itself in
+/// debug builds; `BRAIN_GPU_CHECKED` remains the switch of the wgpu and Vulkan backends. Never read from the environment.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_checked_kernels(on: bool) {
+    CHECKED_KERNELS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether range-checked kernels were asked for ([`set_checked_kernels`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn checked_kernels() -> bool {
+    CHECKED_KERNELS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 static CACHE_DIR: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
 
 /// Name the directory derived data persists in (`None` restores the platform's cache location); the CLI's `--cache-dir`.

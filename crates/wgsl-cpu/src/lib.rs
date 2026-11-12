@@ -18,8 +18,15 @@
 //! just a function that loops over a contiguous range of invocation ids:
 //!
 //! ```text
-//! extern "C" fn(start, end, grid_x, grid_y, uniform: *const u32, bufs: *const *mut u8)
+//! extern "C" fn(start, end, grid_x, grid_y, uniform: *const u32, bufs: *const *mut u8,
+//!               lens: *const u64, fault: *mut u64)
 //! ```
+//!
+//! `lens` (byte length of each storage binding) and `fault` are read only by a *checked* kernel
+//! ([`Jit::new_checked`]): every storage access then compares its byte range with the binding's length, a failing load
+//! reads zero and a failing store is dropped (the contract of wgpu's runtime checks, `BRAIN_GPU_CHECKED`), and the
+//! first failure is recorded in `fault` so [`Jit::run_checked`] returns an [`AccessFault`] naming the kernel and the
+//! binding instead of reading or writing past the buffer. An unchecked kernel keeps the trusted loads and stores.
 //!
 //! The CPU backend (in `gpu-core`) hands each rayon worker a disjoint
 //! `[start, end)` sub-range of the `grid_x*grid_y*64` invocations; because each
@@ -60,7 +67,40 @@ use shape::Shape;
 
 /// The ABI of every compiled kernel.
 pub type KernelFn =
-    unsafe extern "C" fn(u64, u64, u32, u32, *const u32, *const *mut u8);
+    unsafe extern "C" fn(u64, u64, u32, u32, *const u32, *const *mut u8, *const u64, *mut u64);
+
+/// A storage access of a *checked* kernel that fell outside its binding: the typed error [`Jit::run_checked`] returns
+/// where an unchecked kernel would read or write past the buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessFault {
+    /// The kernel, by the name it was registered under.
+    pub kernel: String,
+    /// The `@binding` number of the storage buffer.
+    pub binding: u32,
+    /// The WGSL variable name of that binding.
+    pub name: String,
+    /// Byte offset of the first access that fell outside the buffer, from the binding's base.
+    pub byte_offset: u64,
+    /// The byte length the caller bound.
+    pub byte_len: u64,
+}
+
+impl std::fmt::Display for AccessFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "wgsl-cpu: kernel `{}` accessed binding {} (`{}`) at byte offset {}, outside the {} bytes bound to it",
+            self.kernel, self.binding, self.name, self.byte_offset, self.byte_len
+        )
+    }
+}
+
+impl std::error::Error for AccessFault {}
+
+/// A fault word is `binding << FAULT_BINDING_SHIFT | byte offset`, written by one 64-bit store so that two workers
+/// faulting at once leave a consistent record. Bindings start at 1, so a recorded fault is never zero.
+const FAULT_BINDING_SHIFT: u32 = 40;
+const FAULT_OFFSET_MASK: i64 = (1 << FAULT_BINDING_SHIFT) - 1;
 
 /// A set of compiled kernels, indexed in the order they were passed to [`Jit::new`].
 ///
@@ -81,6 +121,17 @@ pub struct Jit {
     /// `workgroupBarrier()` (compiled with the work-group execution model). The
     /// CPU dispatcher must hand the latter ranges aligned to `wgsize`.
     wg_size: Vec<Option<u32>>,
+    /// Whether the kernels carry per-access range checks ([`Jit::new_checked`]).
+    checked: bool,
+    /// Per kernel, its storage bindings as `(binding number, WGSL variable name)`.
+    bindings: Vec<Vec<(u32, String)>>,
+}
+
+/// What compiling one kernel yields besides its code.
+struct Compiled {
+    /// The workgroup size of a workgroup kernel, `None` for a one-output-per-invocation kernel.
+    wg: Option<u32>,
+    bindings: Vec<(u32, String)>,
 }
 
 /// Why one kernel failed to compile.
@@ -136,11 +187,23 @@ impl Jit {
     /// with for the same 20+ seconds. See `deepseek-ocr`'s model-construction investigation for why this needed a real
     /// number instead of a guess.
     pub fn new_profiled(kernels: &[(&str, &str)], profile: bool) -> Result<Jit, String> {
+        Self::new_with(kernels, profile, false)
+    }
+
+    /// [`Self::new`] with per-access range checks on every storage load and store: drive it with [`Self::run_checked`].
+    /// Costs a compare and two selects per access, so it is for debugging and tests (the CPU backend turns it on in
+    /// debug builds), the analogue of `BRAIN_GPU_CHECKED` on the GPU backends.
+    pub fn new_checked(kernels: &[(&str, &str)]) -> Result<Jit, String> {
+        Self::new_with(kernels, false, true)
+    }
+
+    /// The one constructor behind [`Self::new_profiled`] and [`Self::new_checked`].
+    pub fn new_with(kernels: &[(&str, &str)], profile: bool, checked: bool) -> Result<Jit, String> {
         let t0 = std::time::Instant::now();
         let mut flags = settings::builder();
         flags.set("opt_level", "speed").unwrap();
-        // We synthesise our own bounds via the kernels' early-return mask, so the
-        // generated loads/stores are trusted; no need for spectre mitigations.
+        // Unchecked kernels bound themselves with their early-return mask and the model sizes their buffers, so the
+        // generated loads/stores are trusted; `new_checked` kernels range-check every storage access instead.
         flags.set("enable_verifier", "true").unwrap();
         let isa = cranelift_native::builder()
             .map_err(|e| format!("host ISA unavailable: {e}"))?
@@ -161,12 +224,14 @@ impl Jit {
         let mut fctx = FunctionBuilderContext::new();
         let mut ids = Vec::with_capacity(kernels.len());
         let mut wg_size = Vec::with_capacity(kernels.len());
+        let mut bindings = Vec::with_capacity(kernels.len());
 
         for (name, src) in kernels {
             ctx.func.signature = kernel_signature(module.target_config().pointer_type());
-            match compile_one(src, &mut module, &math, &mut ctx, &mut fctx) {
-                Ok(wg) => {
-                    wg_size.push(wg);
+            match compile_one(src, checked, &mut module, &math, &mut ctx, &mut fctx) {
+                Ok(c) => {
+                    wg_size.push(c.wg);
+                    bindings.push(c.bindings);
                     let id = module
                         .declare_function(name, Linkage::Export, &ctx.func.signature)
                         .map_err(|e| format!("declare {name:?}: {e}"))?;
@@ -187,6 +252,7 @@ impl Jit {
                 Err(CompileError::UnsupportedWorkgroupStructure(e)) => {
                     eprintln!("wgsl-cpu: kernel {name:?} not JIT-compiled ({e}); must use a native fast path or the GPU");
                     wg_size.push(None);
+                    bindings.push(Vec::new());
                     ids.push(None);
                     module.clear_context(&mut ctx);
                 }
@@ -207,6 +273,8 @@ impl Jit {
             funcs,
             names: kernels.iter().map(|(n, _)| n.to_string()).collect(),
             wg_size,
+            checked,
+            bindings,
         })
     }
 
@@ -248,6 +316,50 @@ impl Jit {
         uniform: *const u32,
         bufs: *const *mut u8,
     ) {
+        assert!(!self.checked, "wgsl-cpu: a checked Jit needs the binding lengths: call run_checked");
+        let f = self.kernel_fn(kind);
+        f(start, end, grid_x, grid_y, uniform, bufs, std::ptr::null(), std::ptr::null_mut());
+    }
+
+    /// [`Self::run`] for a Jit built with [`Self::new_checked`] (an unchecked one ignores `lens` and never faults).
+    /// `lens` holds the byte length of each storage binding, in binding order, one per entry of `bufs`.
+    ///
+    /// A load outside its binding reads zero and a store outside it is dropped, so no memory outside the buffers is
+    /// touched; if any access fell outside, one of them comes back as an [`AccessFault`] naming the kernel
+    /// and the binding.
+    ///
+    /// # Safety
+    /// As [`Self::run`], and `lens` must point to one valid `u64` per storage binding of the kernel.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn run_checked(
+        &self,
+        kind: usize,
+        start: u64,
+        end: u64,
+        grid_x: u32,
+        grid_y: u32,
+        uniform: *const u32,
+        bufs: *const *mut u8,
+        lens: *const u64,
+    ) -> Result<(), AccessFault> {
+        let f = self.kernel_fn(kind);
+        let mut fault = 0u64;
+        f(start, end, grid_x, grid_y, uniform, bufs, lens, &mut fault);
+        if fault == 0 {
+            return Ok(());
+        }
+        let binding = (fault >> FAULT_BINDING_SHIFT) as u32;
+        let name = self.bindings[kind].iter().find(|(b, _)| *b == binding).map(|(_, n)| n.clone()).unwrap_or_default();
+        Err(AccessFault {
+            kernel: self.names[kind].clone(),
+            binding,
+            name,
+            byte_offset: fault & FAULT_OFFSET_MASK as u64,
+            byte_len: *lens.add(binding as usize - 1),
+        })
+    }
+
+    fn kernel_fn(&self, kind: usize) -> KernelFn {
         let ptr = self.funcs[kind].unwrap_or_else(|| {
             panic!(
                 "wgsl-cpu: kernel {:?} was not JIT-compiled (unsupported work-group structure); \
@@ -255,12 +367,12 @@ impl Jit {
                 self.names.get(kind).map(String::as_str).unwrap_or("?")
             )
         });
-        let f: KernelFn = std::mem::transmute(ptr);
-        f(start, end, grid_x, grid_y, uniform, bufs);
+        // SAFETY: `ptr` is the finalized code of a function with exactly the `kernel_signature` ABI.
+        unsafe { std::mem::transmute(ptr) }
     }
 }
 
-/// `(start, end, grid_x, grid_y, uniform_ptr, bufs_ptr)`.
+/// `(start, end, grid_x, grid_y, uniform_ptr, bufs_ptr, lens_ptr, fault_ptr)`.
 fn kernel_signature(ptr: types::Type) -> Signature {
     let mut sig = Signature::new(cranelift_codegen::isa::CallConv::SystemV);
     sig.params.push(AbiParam::new(types::I64)); // start
@@ -269,6 +381,8 @@ fn kernel_signature(ptr: types::Type) -> Signature {
     sig.params.push(AbiParam::new(types::I32)); // grid_y
     sig.params.push(AbiParam::new(ptr)); // uniform
     sig.params.push(AbiParam::new(ptr)); // bufs
+    sig.params.push(AbiParam::new(ptr)); // lens: byte length per storage binding (checked kernels)
+    sig.params.push(AbiParam::new(ptr)); // fault: first out-of-range access (checked kernels)
     sig
 }
 
@@ -412,10 +526,11 @@ enum Eval {
 enum Place {
     /// A mutable scalar function-local (`var`) backed by a Cranelift SSA variable.
     Local(Variable, Ty),
-    /// A scalar in memory at `addr`; `readonly` for the uniform buffer.
-    Mem { addr: Value, elem: Ty, readonly: bool },
+    /// A scalar in memory at `addr`; `readonly` for the uniform buffer. `guard` is the storage binding whose range a
+    /// checked kernel tests the access against (`None`: not a storage place, or an unchecked kernel).
+    Mem { addr: Value, elem: Ty, readonly: bool, guard: Option<u32> },
     /// An aggregate in memory at `addr + off`, in WGSL's host-shareable layout.
-    Ptr { addr: Value, off: u32, shape: Shape, readonly: bool },
+    Ptr { addr: Value, off: u32, shape: Shape, readonly: bool, guard: Option<u32> },
     /// Scalars `[start, start + flat_len(shape))` of variable group `group`
     /// (a register-backed aggregate local).
     Vars { group: u32, start: u32, shape: Shape },
@@ -469,13 +584,53 @@ fn workgroup_array_info(m: &naga::Module, ty: Handle<naga::Type>) -> Result<(Ty,
 // Per-kernel translation.
 // ---------------------------------------------------------------------------
 
+/// The `(binding, variable name)` of every storage buffer a kernel declares.
+fn storage_bindings(nmod: &naga::Module) -> Vec<(u32, String)> {
+    nmod.global_variables
+        .iter()
+        .filter_map(|(_, gv)| match (&gv.space, &gv.binding) {
+            (AddressSpace::Storage { .. }, Some(b)) => Some((b.binding, gv.name.clone().unwrap_or_default())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The entry-block setup of a checked kernel: each storage binding's length from the `lens` argument and the two
+/// scratch slots a failing access is redirected to. Must run in the entry block, which dominates every use.
+fn emit_checks(
+    builder: &mut FunctionBuilder,
+    nmod: &naga::Module,
+    ptr_ty: types::Type,
+    lens_ptr: Value,
+    fault_ptr: Value,
+) -> Checks {
+    use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
+    let mut buf_len = HashMap::new();
+    for (binding, _) in storage_bindings(nmod) {
+        let addr = builder.ins().iadd_imm(lens_ptr, (binding as i64 - 1) * 8);
+        buf_len.insert(binding, builder.ins().load(types::I64, MemFlags::trusted(), addr, 0));
+    }
+    let scratch = |builder: &mut FunctionBuilder| {
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3));
+        let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+        let zero = builder.ins().iconst(types::I64, 0);
+        builder.ins().store(MemFlags::trusted(), zero, addr, 0);
+        builder.ins().store(MemFlags::trusted(), zero, addr, 8);
+        addr
+    };
+    let zero = scratch(builder);
+    let sink = scratch(builder);
+    Checks { buf_len, zero, sink, fault: fault_ptr }
+}
+
 fn compile_one(
     src: &str,
+    checked: bool,
     module: &mut JITModule,
     math: &MathRefs,
     ctx: &mut cranelift_codegen::Context,
     fctx: &mut FunctionBuilderContext,
-) -> Result<Option<u32>, CompileError> {
+) -> Result<Compiled, CompileError> {
     let nmod = naga::front::wgsl::parse_str(src).map_err(|e| format!("WGSL parse: {e:?}"))?;
     let entry = nmod
         .entry_points
@@ -483,13 +638,14 @@ fn compile_one(
         .find(|e| e.name == "main")
         .ok_or("no `main` entry point")?;
     let func = &entry.function;
+    let bindings = storage_bindings(&nmod);
 
     // Work-group kernels (workgroup memory / `workgroupBarrier()`) use a separate
     // execution model; everything else is the one-output-per-invocation path.
     if is_workgroup_kernel(&nmod, func) {
         let wgsize = entry.workgroup_size[0];
-        compile_one_wg(&nmod, entry, module, math, ctx, fctx)?;
-        return Ok(Some(wgsize));
+        compile_one_wg(&nmod, entry, checked, module, math, ctx, fctx)?;
+        return Ok(Compiled { wg: Some(wgsize), bindings });
     }
 
     let ptr_ty = module.target_config().pointer_type();
@@ -502,6 +658,7 @@ fn compile_one(
     let p = builder.block_params(entry_block).to_vec();
     let (start, end, gx, gy, uniform_ptr, bufs_ptr) =
         (p[0], p[1], p[2], p[3], p[4], p[5]);
+    let checks = checked.then(|| emit_checks(&mut builder, &nmod, ptr_ty, p[6], p[7]));
 
     // Resolve which function argument carries which builtin vec3.
     let ba = builtin_args(func);
@@ -570,6 +727,7 @@ fn compile_one(
     let env = Env {
         ptr_ty,
         buf_base: &buf_base,
+        checks: checks.as_ref(),
         wg_mem: &empty_wg,
         uniform_ptr,
         gid,
@@ -598,7 +756,7 @@ fn compile_one(
 
     builder.seal_all_blocks();
     builder.finalize();
-    Ok(None)
+    Ok(Compiled { wg: None, bindings })
 }
 
 /// A kernel is a "work-group kernel" if it declares any `var<workgroup>` global
@@ -714,6 +872,7 @@ fn root_local(func: &naga::Function, mut pointer: Handle<Expression>) -> Option<
 fn compile_one_wg(
     nmod: &naga::Module,
     entry: &naga::EntryPoint,
+    checked: bool,
     module: &mut JITModule,
     math: &MathRefs,
     ctx: &mut cranelift_codegen::Context,
@@ -767,6 +926,7 @@ fn compile_one_wg(
     builder.switch_to_block(entry_block);
     let p = builder.block_params(entry_block).to_vec();
     let (start, end, gx, gy, uniform_ptr, bufs_ptr) = (p[0], p[1], p[2], p[3], p[4], p[5]);
+    let checks = checked.then(|| emit_checks(&mut builder, nmod, ptr_ty, p[6], p[7]));
 
     let ba = builtin_args(func);
 
@@ -881,7 +1041,7 @@ fn compile_one_wg(
     let bx = WgBuiltins { wg, gx, gy, wgsize: wgsize as i32 };
     for (seg, c, first) in [(&seg_before, &no_carried, true), (&seg_after, &carried, false)] {
         emit_invocation_loop(
-            &mut builder, nmod, func, seg, c, &ba, &wg_mem, &buf_base, uniform_ptr, &fns, ptr_ty,
+            &mut builder, nmod, func, seg, c, &ba, &wg_mem, &buf_base, checks.as_ref(), uniform_ptr, &fns, ptr_ty,
             &bx, active_base, first,
         )?;
     }
@@ -946,6 +1106,7 @@ fn emit_invocation_loop(
     ba: &BuiltinArgs,
     wg_mem: &HashMap<Handle<naga::GlobalVariable>, Value>,
     buf_base: &HashMap<u32, Value>,
+    checks: Option<&Checks>,
     uniform_ptr: Value,
     fns: &FnRefs,
     ptr_ty: types::Type,
@@ -1012,6 +1173,7 @@ fn emit_invocation_loop(
         let env = Env {
             ptr_ty,
             buf_base,
+            checks,
             wg_mem,
             uniform_ptr,
             gid,
@@ -1078,12 +1240,27 @@ fn cl_ty(ty: Ty) -> types::Type {
     }
 }
 
+/// What a *checked* kernel needs besides the buffer bases: each binding's byte length, the scratch an out-of-range
+/// access is redirected to, and the cell the first fault is recorded in.
+struct Checks {
+    /// Byte length (i64) of each storage binding, loaded from the `lens` argument.
+    buf_len: HashMap<u32, Value>,
+    /// 16 zero bytes a failing load reads from; never written.
+    zero: Value,
+    /// 16 bytes a failing store (and a fault record from a passing access) lands in.
+    sink: Value,
+    /// The caller's fault cell.
+    fault: Value,
+}
+
 /// What a translated function body needs from the kernel around it: buffer
 /// base pointers, the builtin input values, the intrinsic references, and
 /// where an entry-point `return` goes.
 struct Env<'a> {
     ptr_ty: types::Type,
     buf_base: &'a HashMap<u32, Value>,
+    /// Present for a checked kernel only.
+    checks: Option<&'a Checks>,
     /// Base address of each `var<workgroup>` global (per-workgroup scratch),
     /// keyed by global handle. Empty for one-output-per-invocation kernels.
     wg_mem: &'a HashMap<Handle<naga::GlobalVariable>, Value>,
@@ -1235,6 +1412,22 @@ impl<'a, 'b> Tr<'a, 'b> {
         Ok(true)
     }
 
+    /// The address to access `size` bytes at `addr` in storage binding `guard`: `addr` itself when the access is inside the
+    /// binding (or the kernel is unchecked), else scratch (`zero` for a load, `sink` for a store) with the fault recorded.
+    pub(crate) fn guarded_addr(&mut self, guard: Option<u32>, addr: Value, size: u32, store: bool) -> Value {
+        let (Some(binding), Some(ck)) = (guard, self.env.checks) else { return addr };
+        let (base, len) = (self.env.buf_base[&binding], ck.buf_len[&binding]);
+        let off = self.b.ins().isub(addr, base);
+        let end = self.b.ins().iadd_imm(off, size as i64);
+        // Unsigned, so an address below the base (a wrapped negative offset) fails the same test.
+        let inside = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, end, len);
+        let masked = self.b.ins().band_imm(off, FAULT_OFFSET_MASK);
+        let code = self.b.ins().bor_imm(masked, (binding as i64) << FAULT_BINDING_SHIFT);
+        let record_at = self.b.ins().select(inside, ck.sink, ck.fault);
+        self.b.ins().store(MemFlags::trusted(), code, record_at, 0);
+        self.b.ins().select(inside, addr, if store { ck.sink } else { ck.zero })
+    }
+
     /// `*place = value`.
     fn store(&mut self, place: Place, value: Handle<Expression>) -> Result<(), String> {
         match place {
@@ -1243,9 +1436,10 @@ impl<'a, 'b> Tr<'a, 'b> {
                 let v = self.coerce(v, ty)?;
                 self.b.def_var(var, v);
             }
-            Place::Mem { addr, elem, .. } => {
+            Place::Mem { addr, elem, guard, .. } => {
                 let v = self.scalar(value)?;
                 let v = self.coerce(v, elem)?;
+                let addr = self.guarded_addr(guard, addr, cl_ty(elem).bytes(), true);
                 self.b.ins().store(MemFlags::trusted(), v, addr, 0);
             }
             _ => {
