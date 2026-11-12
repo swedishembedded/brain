@@ -910,6 +910,25 @@ impl Engine {
         }
     }
 
+    /// One batched decode step returning each row's whole `[vocab]` logits: the step of
+    /// [`Engine::forward_batched_topk`] with the row read back instead of its best `k`. It builds the step
+    /// each time rather than replaying a recorded one, since the recorded tapes end in a greedy or top-k head.
+    pub fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        assert_eq!(tables.len(), inputs.len(), "forward_batched_logit_rows: tables/inputs length mismatch");
+        if tables.is_empty() {
+            return Vec::new();
+        }
+        let rows = inputs.len() as u32;
+        let coords = self.advance_tables(tables);
+        let seqs = self.seqs_for(&coords);
+        let caches = self.batch_caches(&seqs);
+        let _scope = self.model.gpu.scratch_scope();
+        let hidden = self.model.run_decode_batch(inputs, &caches);
+        let logits = self.model.head_logits_rows_of(&hidden, rows);
+        let vocab = self.model.cfg.vocab as usize;
+        self.model.gpu.read(&logits, rows as usize * vocab).chunks(vocab).map(<[f32]>::to_vec).collect()
+    }
+
     /// [`Engine::forward_batched_greedy`], repeated `k` times per sequence,
     /// feeding each step's own greedy output back as the next input - there is no
     /// real on-device window (see [`Engine::decode_window_capacity`]'s doc), so
@@ -1001,6 +1020,12 @@ impl PagedDecoder for Engine {
     }
     fn topk_capacity(&self) -> usize {
         Engine::topk_capacity(self)
+    }
+    fn full_row_readback(&self) -> bool {
+        true
+    }
+    fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        Engine::forward_batched_logit_rows(self, tables, inputs)
     }
 }
 

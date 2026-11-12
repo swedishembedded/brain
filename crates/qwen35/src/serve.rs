@@ -865,6 +865,13 @@ impl PagedDecoder for Engine {
     fn topk_capacity(&self) -> usize {
         Engine::topk_capacity(self)
     }
+    fn full_row_readback(&self) -> bool {
+        true
+    }
+    fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        let vocab = self.model.cfg.vocab as usize;
+        Engine::forward_batched_logits(self, tables, inputs).chunks(vocab).map(<[f32]>::to_vec).collect()
+    }
     fn adapter_availability(&mut self, adapter: AdapterId) -> AdapterAvailability {
         adapters::availability(std::iter::once(&self.model), adapter).0
     }

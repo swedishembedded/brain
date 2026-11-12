@@ -3303,6 +3303,20 @@ impl Engine {
         self.topk_from_hidden(meta.bsz, k)
     }
 
+    /// Advance every sequence by one token, returning each row's whole `[vocab]` logits: the step of
+    /// [`Self::forward_batched_topk`] with the row read back instead of its best `k`. The sampler uses it for a
+    /// request its candidate list cannot answer exactly (`model::serve::SampleParams::needs_full_row`).
+    pub(crate) fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        let meta = self.append_meta(tables);
+        self.run_batched_submit(&meta, Input::Tokens(inputs), false);
+        let bsz = meta.bsz;
+        let mut steps: Vec<Step> = Vec::new();
+        self.head_steps(&mut steps, bsz);
+        self.gpu.submit(&[], &steps);
+        let vocab = self.cfg.vocab as usize;
+        self.gpu.read(&self.logits_dev, bsz as usize * vocab).chunks(vocab).map(<[f32]>::to_vec).collect()
+    }
+
     /// Advance every sequence by `k` tokens with ONE host round-trip (A4).
     ///
     /// The host allocates the window's K/V slots up front and uploads them as
@@ -4227,6 +4241,12 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY as usize
+    }
+    fn full_row_readback(&self) -> bool {
+        true
+    }
+    fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        Engine::forward_batched_logit_rows(self, tables, inputs)
     }
     fn spec_max_draft(&self) -> usize {
         // A verify forwards 1 + proposals rows of one sequence in one batch.

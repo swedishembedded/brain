@@ -4009,6 +4009,11 @@ impl Qwen35 {
     /// Device-side head epilogue over a `[rows, d_model]` block of final-normed
     /// hidden states: `logits[rows, vocab]` in one GEMM against the resident
     /// head weight.
+    pub(crate) fn head_logits_rows_of(&self, hidden: &Hidden, rows: u32) -> DeviceBuffer {
+        self.head_logits_rows_hidden(hidden, rows)
+    }
+
+    /// [`Self::head_logits_rows_of`] over a plain `[rows, d_model]` buffer.
     pub(crate) fn head_logits_rows_dev(&self, hidden: &DeviceBuffer, rows: u32) -> DeviceBuffer {
         self.head_logits_rows_hidden(&Hidden::plain(hidden.clone()), rows)
     }

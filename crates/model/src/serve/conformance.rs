@@ -45,6 +45,10 @@
 //!   decode produces, with both accepted and rejected proposals exercised. A
 //!   decoder that does not speculate passes it trivially (nothing to verify);
 //!   once it does, the property applies with no change to its factory.
+//! * [`full_rows_rank_what_the_candidate_list_ranks`]: a decoder that reads its
+//!   logits rows back ([`PagedDecoder::full_row_readback`]) returns, for the
+//!   same step, rows whose best entries are the candidate list's and which
+//!   hold nothing above its last entry.
 //!
 //!   Bit identity: the property compares token streams exactly, so a verify
 //!   kernel whose floating-point order differs from plain decode may flip an
@@ -137,6 +141,7 @@ pub fn run_all<D: PagedDecoder>(c: &Conformance<D>) {
     }
     speculation_equals_plain_greedy(c);
     scoring_is_declared_exactly_when_it_works(c);
+    full_rows_rank_what_the_candidate_list_ranks(c);
 }
 
 /// A decoder that declares [`PagedDecoder::scores_continuations`] returns one finite, non-positive log-probability for
@@ -332,6 +337,34 @@ pub fn speculation_equals_plain_greedy<D: PagedDecoder>(c: &Conformance<D>) {
     if seqs > 1 {
         assert!(stats.accepted < stats.proposed, "no proposal was ever rejected, so rollback was not exercised: {stats:?}");
     }
+}
+
+/// One decode step read back as a whole logits row and as a candidate list, on two identical decoders (a step
+/// advances a sequence, so it cannot be run twice on one): every candidate's logit is the row's at its token, and no
+/// token outside the list outranks the list's last entry. A decoder without row readback passes trivially.
+pub fn full_rows_rank_what_the_candidate_list_ranks<D: PagedDecoder>(c: &Conformance<D>) {
+    let (mut by_list, mut by_row) = ((c.make)(), (c.make)());
+    if !by_row.full_row_readback() {
+        return;
+    }
+    let vocab = by_row.vocab();
+    let prompt = tokens(vocab, 3, 9);
+    let next = tokens(vocab, 4, 1)[0];
+    let (mut list_table, mut row_table) = (crate::paged::BlockTable::new(), crate::paged::BlockTable::new());
+    by_list.prefill(&mut list_table, &prompt);
+    by_row.prefill(&mut row_table, &prompt);
+    let k = by_list.topk_capacity().clamp(1, 8);
+    let candidates = by_list.forward_batched_topk(&mut [&mut list_table], &[next], k).remove(0);
+    let row = by_row.forward_batched_logit_rows(&mut [&mut row_table], &[next]).remove(0);
+    assert_eq!(row.len(), vocab, "a logits row must hold one logit per vocabulary token");
+    let close = |a: f32, b: f32| (a - b).abs() <= 1e-3 * (1.0 + a.abs().max(b.abs()));
+    for &(token, logit) in &candidates {
+        assert!(close(row[token as usize], logit), "candidate {token} has logit {logit} but the row holds {}", row[token as usize]);
+    }
+    let floor = candidates.last().expect("a step offers at least one candidate").1;
+    let listed: Vec<u32> = candidates.iter().map(|c| c.0).collect();
+    let best_outside = row.iter().enumerate().filter(|(t, _)| !listed.contains(&(*t as u32))).map(|(_, &l)| l).fold(f32::NEG_INFINITY, f32::max);
+    assert!(best_outside <= floor + 1e-3 * (1.0 + floor.abs()), "a token outside the candidate list holds logit {best_outside}, above the list's last {floor}");
 }
 
 /// Greedy output of one request alone with speculation off.

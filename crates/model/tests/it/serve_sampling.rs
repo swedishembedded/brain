@@ -22,6 +22,9 @@ const CANDIDATES: [(u32, f32); 3] = [(5, 3.0), (6, 2.9), (7, 1.0)];
 
 struct Fixed {
     alloc: BlockAllocator,
+    /// A decoder that can read its whole logits row back answers every step with this row; `None` is a
+    /// decoder that only offers the `CANDIDATES` list.
+    row: Option<Vec<f32>>,
 }
 
 impl PagedDecoder for Fixed {
@@ -38,7 +41,7 @@ impl PagedDecoder for Fixed {
         1024
     }
     fn vocab(&self) -> usize {
-        VOCAB
+        self.row.as_ref().map_or(VOCAB, Vec::len)
     }
     fn blocks_for(&self, tokens: u32) -> u32 {
         tokens.div_ceil(8)
@@ -54,6 +57,9 @@ impl PagedDecoder for Fixed {
         vec![0.0]
     }
     fn logits(&self, _hidden: &[f32]) -> Vec<f32> {
+        if let Some(row) = &self.row {
+            return row.clone();
+        }
         let mut l = vec![-10.0; VOCAB];
         for (t, v) in CANDIDATES {
             l[t as usize] = v;
@@ -93,12 +99,50 @@ impl PagedDecoder for Fixed {
     fn topk_capacity(&self) -> usize {
         8
     }
+    fn full_row_readback(&self) -> bool {
+        self.row.is_some()
+    }
+    fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        for t in tables.iter_mut() {
+            t.append(&mut self.alloc).unwrap();
+        }
+        let row = self.row.clone().expect("the scheduler asks for rows only of a decoder that offers them");
+        inputs.iter().map(|_| row.clone()).collect()
+    }
 }
 
 fn generate(params: SampleParams, prompt: Vec<u32>, max_new: usize) -> Vec<u32> {
-    let mut sched = Scheduler::new(Fixed { alloc: BlockAllocator::new(256, 8) }, 4);
+    generate_with(None, params, prompt, max_new)
+}
+
+fn generate_with(row: Option<Vec<f32>>, params: SampleParams, prompt: Vec<u32>, max_new: usize) -> Vec<u32> {
+    let mut sched = Scheduler::new(Fixed { alloc: BlockAllocator::new(256, 8), row }, 4);
     let id = sched.submit_sampled(Request { prompt, max_new, stop: Vec::new() }, params, 1);
     sched.run().remove(&id).expect("the request completes")
+}
+
+/// A decoder that reads its whole row back is sampled over that row, not over its 8-token candidate list: a
+/// flat 300-token row with `top_p` 0.9 has a 270-token nucleus, so over 200 draws tokens past the list width
+/// appear, and none past the nucleus.
+#[test]
+fn a_decoder_with_row_readback_is_sampled_over_the_whole_row() {
+    let params = SampleParams { temp: 1.0, top_p: 0.9, ..SampleParams::greedy() };
+    let drawn = generate_with(Some(vec![1.0; 300]), params, vec![1, 2, 3], 200);
+    assert!(drawn.iter().any(|&t| t >= 8), "every draw stayed inside the 8-token candidate list");
+    assert!(drawn.iter().all(|&t| t < 270), "a draw left the 270-token nucleus: {drawn:?}");
+}
+
+/// A penalty is ranked against the whole row too: tokens 0..8 lead the row, a repetition penalty of 100 over a
+/// context holding all of them sinks them below token 9, which the 8-token list never held.
+#[test]
+fn penalties_rank_the_tokens_the_candidate_list_never_held() {
+    let mut row = vec![0.0f32; 20];
+    for (i, l) in row.iter_mut().enumerate().take(8) {
+        *l = 10.0 + i as f32 * 0.01;
+    }
+    row[9] = 9.0;
+    let params = SampleParams { repetition_penalty: 100.0, ..SampleParams::greedy() };
+    assert_eq!(generate_with(Some(row), params, (0..8).collect(), 1), vec![9]);
 }
 
 /// A request that asks for no processor decodes exactly as before: the argmax, token 5, every step.

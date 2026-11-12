@@ -8,18 +8,22 @@
 
 //! The logit processors of the shared sampler: the penalties of the OpenAI and
 //! vLLM request fields (presence, frequency, repetition) and the DRY ("don't
-//! repeat yourself") repetition penalty with llama.cpp's semantics. They run on
-//! a decoder's candidate list (the top logits of the step) before temperature,
-//! top-k, top-p and min-p, for every model the scheduler serves.
+//! repeat yourself") repetition penalty with llama.cpp's semantics. They run
+//! before temperature, top-k, top-p and min-p, for every model the scheduler
+//! serves.
 //!
-//! Working on the candidate list (the decoder's `topk_capacity` best tokens) is
-//! an approximation once a processor is on. It is exact while the best
-//! processed candidate is still at or above the lowest unprocessed candidate
-//! logit, because every token outside the list started at or below that. It is
-//! not exact when the processors push all candidates below a token outside the
-//! list (a heavily repeated context), nor when a request asks for a negative
-//! presence or frequency penalty or a repetition penalty below 1, which raise
-//! logits: a raised token outside the list is never seen.
+//! A processor changes the logit of the tokens the request's context touches
+//! (seen, counted, penalised by DRY, banned) and no other, and the result must
+//! be ranked against every token of the vocabulary, not just the decoder's
+//! best few: a heavily repeated context can push every top candidate below a
+//! token the list never held, and a negative penalty (or a repetition penalty
+//! below 1) raises a token from anywhere in the row. So the form the scheduler
+//! uses is [`apply_processors_to_row`], over the full `[vocab]` logits row of a
+//! decoder that can read it back ([`super::PagedDecoder::full_row_readback`]),
+//! which visits only the touched tokens and is exact. [`apply_processors_with`]
+//! is the same arithmetic over a candidate list, for the callers that only
+//! ever hold one (speculative verification, rollouts): it is exact for the
+//! candidates it is given, and a token outside the list is never seen.
 //!
 //! All processors are off by default ([`SampleParams::has_processors`]); a request
 //! that asks for none is sampled exactly as before.
@@ -454,6 +458,64 @@ impl DryState {
     }
 }
 
+/// What the processors do to a token's logit at one step, resolved from the
+/// request's parameters and the sequence's [`ProcessorState`]. One definition
+/// of the arithmetic, used by the candidate-list form and the full-row form
+/// alike, so the two cannot drift apart.
+struct Adjustments<'a> {
+    params: &'a SampleParams,
+    /// The tokens the no-repeat filter bans at this step.
+    banned: Vec<u32>,
+    /// The tokens of the whole context, when the repetition penalty is on.
+    seen: Option<&'a std::collections::HashSet<u32>>,
+    /// Occurrences in the generated part, when the presence or frequency penalty is on.
+    counts: Option<&'a HashMap<u32, u32>>,
+    /// DRY's penalty per token, empty when DRY is off.
+    dry: HashMap<u32, f32>,
+}
+
+impl<'a> Adjustments<'a> {
+    fn new(params: &'a SampleParams, ctx: &SampleContext<'_>, state: &'a mut ProcessorState) -> Adjustments<'a> {
+        state.sync(params, ctx);
+        let state: &'a ProcessorState = state;
+        Adjustments {
+            params,
+            banned: if params.no_repeat.active() { params.no_repeat.banned(ctx.generated()) } else { Vec::new() },
+            seen: state.shape.seen.then_some(&state.seen),
+            counts: state.shape.counts.then_some(&state.counts),
+            dry: if state.shape.dry.is_some() { state.dry.penalties(ctx.context, &params.dry) } else { HashMap::new() },
+        }
+    }
+
+    /// `logit` of `token` after the processors, applied in a fixed order: ban, repetition, presence and frequency, DRY.
+    fn apply(&self, token: u32, mut logit: f32) -> f32 {
+        if self.banned.contains(&token) {
+            logit = f32::NEG_INFINITY;
+        }
+        if self.seen.is_some_and(|seen| seen.contains(&token)) {
+            logit = if logit > 0.0 { logit / self.params.repetition_penalty } else { logit * self.params.repetition_penalty };
+        }
+        if let Some(&n) = self.counts.and_then(|counts| counts.get(&token)) {
+            logit -= self.params.frequency_penalty * n as f32 + self.params.presence_penalty;
+        }
+        if let Some(p) = self.dry.get(&token) {
+            logit -= p;
+        }
+        logit
+    }
+
+    /// Every token a processor can move, once each. A token outside this set keeps its logit.
+    fn touched(&self) -> Vec<u32> {
+        let mut out: Vec<u32> = self.banned.clone();
+        out.extend(self.seen.into_iter().flatten());
+        out.extend(self.counts.into_iter().flat_map(HashMap::keys));
+        out.extend(self.dry.keys());
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
 /// Apply the request's processors to `candidates` (token, logit), then restore
 /// the descending order the rest of the sampler relies on.
 ///
@@ -472,39 +534,30 @@ pub fn apply_processors_with(candidates: &mut [(u32, f32)], params: &SampleParam
     if !params.has_processors() || ctx.context.is_empty() {
         return;
     }
-    state.sync(params, ctx);
-    if params.no_repeat.active() {
-        let banned = params.no_repeat.banned(ctx.generated());
-        for (t, l) in candidates.iter_mut() {
-            if banned.contains(t) {
-                *l = f32::NEG_INFINITY;
-            }
-        }
-    }
-    if state.shape.seen {
-        for (t, l) in candidates.iter_mut() {
-            if state.seen.contains(t) {
-                *l = if *l > 0.0 { *l / params.repetition_penalty } else { *l * params.repetition_penalty };
-            }
-        }
-    }
-    if state.shape.counts {
-        for (t, l) in candidates.iter_mut() {
-            if let Some(&n) = state.counts.get(t) {
-                *l -= params.frequency_penalty * n as f32 + params.presence_penalty;
-            }
-        }
-    }
-    if state.shape.dry.is_some() {
-        let penalties = state.dry.penalties(ctx.context, &params.dry);
-        for (t, l) in candidates.iter_mut() {
-            if let Some(p) = penalties.get(t) {
-                *l -= p;
-            }
-        }
+    let adjust = Adjustments::new(params, ctx, state);
+    for (t, l) in candidates.iter_mut() {
+        *l = adjust.apply(*t, *l);
     }
     // Stable, so equal logits keep the decoder's order; NaN sorts last.
     candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or_else(|| a.1.is_nan().cmp(&b.1.is_nan())));
+}
+
+/// The same processors over a decoder's whole `[vocab]` logits `row`, in place:
+/// only the tokens the context touches are visited (O(touched), not O(vocab)),
+/// and every other logit is left as the decoder produced it. This is the exact
+/// form: the result ranks every token of the vocabulary, wherever it started.
+/// A context token past the end of `row` (a prompt token outside the logits
+/// the decoder returns) has nothing to adjust and is skipped.
+pub fn apply_processors_to_row(row: &mut [f32], params: &SampleParams, ctx: &SampleContext<'_>, state: &mut ProcessorState) {
+    if !params.has_processors() || ctx.context.is_empty() {
+        return;
+    }
+    let adjust = Adjustments::new(params, ctx, state);
+    for t in adjust.touched() {
+        if let Some(l) = row.get_mut(t as usize) {
+            *l = adjust.apply(t, *l);
+        }
+    }
 }
 
 #[cfg(test)]

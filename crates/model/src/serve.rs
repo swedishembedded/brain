@@ -24,6 +24,7 @@ use crate::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
 
 mod budget;
 mod embeds;
+mod fullrow;
 mod sampler;
 mod speculate;
 pub mod taps;
@@ -31,7 +32,8 @@ pub mod rows;
 pub mod conformance;
 pub use budget::{MixedLimits, StepCost};
 pub use embeds::{ContentKey, PromptEmbeds};
-pub use sampler::{apply_processors, apply_processors_with, ngram_followers, DryParams, NoRepeatNgram, ProcessorState, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_NGRAM_ALLOW, MAX_THINK_CLOSE, MAX_THINK_LEAD};
+pub use fullrow::sample_logits_row;
+pub use sampler::{apply_processors, apply_processors_to_row, apply_processors_with, ngram_followers, DryParams, NoRepeatNgram, ProcessorState, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_NGRAM_ALLOW, MAX_THINK_CLOSE, MAX_THINK_LEAD};
 pub use taps::TapPool;
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
 
@@ -250,6 +252,23 @@ pub trait PagedDecoder {
     /// The largest `k` [`forward_batched_topk`](Self::forward_batched_topk) will
     /// honor — the decoder's on-device top-K extraction scratch capacity.
     fn topk_capacity(&self) -> usize;
+
+    /// Whether this decoder can read a decode step's whole `[vocab]` logits row back
+    /// ([`forward_batched_logit_rows`](Self::forward_batched_logit_rows)). The scheduler samples a request the
+    /// candidate list cannot answer exactly ([`SampleParams::needs_full_row`]) from the full row when this is
+    /// true; a decoder that says false keeps the candidate list, which is exact only within its
+    /// [`topk_capacity`](Self::topk_capacity). The default is false.
+    fn full_row_readback(&self) -> bool {
+        false
+    }
+
+    /// One batched decode step returning each row's full `[vocab]` logits, in the order
+    /// [`forward_batched_topk`](Self::forward_batched_topk) ranks them from: the same step with the whole row
+    /// read back instead of its best `k`. Called only when [`full_row_readback`](Self::full_row_readback) is true.
+    fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        let _ = (tables, inputs);
+        unimplemented!("this decoder does not read its logits rows back (full_row_readback is false)")
+    }
 
     // ---- prefill interleaved with decode (optional) ----
     //
@@ -812,6 +831,14 @@ impl SampleParams {
     pub fn needs_candidates(&self) -> bool {
         !self.is_greedy() || self.has_penalties()
     }
+    /// Whether a candidate list of `capacity` tokens cannot answer this request exactly, so a decoder that can
+    /// read its whole logits row back should be sampled from that row: a processor moves tokens from
+    /// anywhere in the row, and a draw without a `top_k` that fits the list (`top_k == 0`, or wider than
+    /// `capacity`) is over a distribution the list truncates, which `top_p` and `min_p` make visible and a plain
+    /// temperature draw makes slightly wrong too. A greedy request without a penalty is the list's first entry.
+    pub fn needs_full_row(&self, capacity: usize) -> bool {
+        self.has_penalties() || (!self.is_greedy() && !(self.top_k > 0 && self.top_k <= capacity))
+    }
 }
 
 /// Sample one token from a row's sorted-descending top-K `(token id, logit)`
@@ -823,8 +850,10 @@ impl SampleParams {
 /// candidate list is what makes this cheap enough to run per decode step
 /// without shipping `[bsz, vocab]` back to the host. Candidates beyond
 /// `candidates.len()` cannot be represented (the decoder's `topk_capacity`
-/// bounds how wide the nucleus can ever be); this is a documented ceiling on
-/// `top_p`'s width, not a bug.
+/// bounds how wide the nucleus can ever be). The list is therefore exact only for a
+/// `top_k` within it; a request without one is sampled from the decoder's whole
+/// row instead ([`sample_logits_row`]) when the decoder offers it
+/// ([`PagedDecoder::full_row_readback`]).
 pub fn sample_from_topk(candidates: &[(u32, f32)], params: SampleParams, rng: &mut data::rng::Rng) -> u32 {
     sample_from_topk_impl(candidates, params, rng).0
 }
@@ -867,7 +896,14 @@ fn sample_from_topk_impl(candidates: &[(u32, f32)], params: SampleParams, rng: &
     if params.is_greedy() {
         return (candidates[0].0, 0.0);
     }
-    let (probs, kept_sum) = truncated_weights(candidates, params);
+    draw_truncated(candidates, params, None, rng)
+}
+
+/// The inverse-CDF draw over [`truncated_weights_of`]'s surviving prefix of `candidates`, with the sampled token's
+/// log-probability under that distribution. `full_mass` is the softmax normaliser of a list that is only a prefix
+/// of a larger row (see [`truncated_weights_of`]).
+fn draw_truncated(candidates: &[(u32, f32)], params: SampleParams, full_mass: Option<f32>, rng: &mut data::rng::Rng) -> (u32, f32) {
+    let (probs, kept_sum) = truncated_weights_of(candidates, params, full_mass);
     let r = rng.next_f32() * kept_sum;
     let mut acc = 0.0f32;
     for (i, &p) in probs.iter().enumerate() {
@@ -898,6 +934,14 @@ pub fn candidate_logprob(candidates: &[(u32, f32)], params: SampleParams, token:
 /// distribution" shared by plain sampling and speculative verification, so
 /// the two can never disagree about it.
 fn truncated_weights(candidates: &[(u32, f32)], params: SampleParams) -> (Vec<f32>, f32) {
+    truncated_weights_of(candidates, params, None)
+}
+
+/// [`truncated_weights`] for a `candidates` list that is the best-first prefix of a row whose softmax normaliser
+/// (the sum of `exp(logit / temp - best / temp)` over the whole row) is `full_mass`: the nucleus is the shortest
+/// prefix whose mass reaches `top_p` of that normaliser, not of the list's own sum. `None` is a list that is the
+/// whole distribution (a `top_k` list, or a decoder's candidates).
+fn truncated_weights_of(candidates: &[(u32, f32)], params: SampleParams, full_mass: Option<f32>) -> (Vec<f32>, f32) {
     let temp = params.temp.max(1e-6);
     let n = if params.top_k > 0 { params.top_k.min(candidates.len()) } else { candidates.len() };
     let mut probs: Vec<f32> = candidates[..n].iter().map(|&(_, v)| v / temp).collect();
@@ -910,11 +954,12 @@ fn truncated_weights(candidates: &[(u32, f32)], params: SampleParams) -> (Vec<f3
     // Nucleus (top-p): candidates already arrive sorted descending, so the
     // cumulative-mass prefix IS the nucleus — no re-sort needed.
     let mut cut = n;
-    if params.top_p > 0.0 && params.top_p < 1.0 && sum > 0.0 {
+    let whole = full_mass.unwrap_or(sum);
+    if params.top_p > 0.0 && params.top_p < 1.0 && whole > 0.0 {
         let mut kept = 0.0f32;
         for (rank, p) in probs.iter().enumerate() {
             kept += p;
-            if kept / sum >= params.top_p {
+            if kept / whole >= params.top_p {
                 cut = rank + 1;
                 break;
             }
@@ -1325,6 +1370,20 @@ fn sample_rows(running: &mut [Running], active: &[usize], candidates: &[Vec<(u32
             let r = &mut running[si];
             let ctx = SampleContext { context: &r.context, prompt_len: r.context.len() - r.generated.len() };
             vec![sample_in_context_with(&candidates[bi], r.sample, &ctx, &mut r.procs, &mut r.rng)]
+        })
+        .collect()
+}
+
+/// [`sample_rows`] over whole logits rows (`rows[bi]` for `active[bi]`): each sequence draws from the exact
+/// distribution of its own row ([`sample_logits_row`]).
+fn sample_full_rows(running: &mut [Running], active: &[usize], rows: Vec<Vec<f32>>) -> Vec<Vec<(u32, f32)>> {
+    active
+        .iter()
+        .zip(rows)
+        .map(|(&si, mut row)| {
+            let r = &mut running[si];
+            let ctx = SampleContext { context: &r.context, prompt_len: r.context.len() - r.generated.len() };
+            vec![sample_logits_row(&mut row, r.sample, &ctx, &mut r.procs, &mut r.rng)]
         })
         .collect()
 }
@@ -2240,6 +2299,9 @@ impl<D: PagedDecoder> Scheduler<D> {
             (forced, 0.0)
         } else if !sample.needs_candidates() {
             (first_candidates.first().map_or_else(|| self.dec.admit_greedy(&hidden), |&(token, _)| token), 0.0)
+        } else if self.dec.full_row_readback() && sample.needs_full_row(self.dec.topk_capacity()) {
+            let mut row = self.dec.logits(&hidden);
+            sample_logits_row(&mut row, sample, &SampleContext { context: &prompt, prompt_len: prompt.len() }, &mut ProcessorState::default(), &mut rng)
         } else {
             // The iteration's head pass gave the full candidate list when it was asked for candidates (see
             // `mixed_iteration`); a shorter list is the greedy pick and the head runs again.
@@ -2659,13 +2721,24 @@ impl<D: PagedDecoder> Scheduler<D> {
                 };
                 greedy.into_iter().map(|row| row.into_iter().map(|t| (t, 0.0)).collect()).collect()
             } else {
-                let wanted = self.candidates_wanted(&active, banned_max);
-                let candidates = {
-                    let mut refs = active_tables(&mut self.running, &in_batch);
-                    self.dec.forward_batched_topk(&mut refs, &inputs, wanted)
-                };
-                let _sample = gpu_core::markers::range(c"serve.sample");
-                sample_rows(&mut self.running, &active, &candidates)
+                if self.wants_full_rows(&active) {
+                    // A request the candidate list cannot answer exactly, on a decoder that reads its rows back:
+                    // the step returns whole `[vocab]` rows and every sequence samples from its own.
+                    let rows = {
+                        let mut refs = active_tables(&mut self.running, &in_batch);
+                        self.dec.forward_batched_logit_rows(&mut refs, &inputs)
+                    };
+                    let _sample = gpu_core::markers::range(c"serve.sample");
+                    sample_full_rows(&mut self.running, &active, rows)
+                } else {
+                    let wanted = self.candidates_wanted(&active, banned_max);
+                    let candidates = {
+                        let mut refs = active_tables(&mut self.running, &in_batch);
+                        self.dec.forward_batched_topk(&mut refs, &inputs, wanted)
+                    };
+                    let _sample = gpu_core::markers::range(c"serve.sample");
+                    sample_rows(&mut self.running, &active, &candidates)
+                }
             }});
             let window = match decoded {
                 Ok(window) => window,
@@ -2714,6 +2787,13 @@ impl<D: PagedDecoder> Scheduler<D> {
         let banned_max = active.iter().map(|&i| self.running[i].sample.no_repeat.banned(&self.running[i].generated).len()).max().unwrap_or(0);
         let all_greedy = banned_max == 0 && active.iter().all(|&i| !self.running[i].sample.needs_candidates());
         (all_greedy, banned_max)
+    }
+
+    /// Whether this decode step reads whole logits rows back instead of candidate lists: the decoder can, and some
+    /// sequence of `active` samples a distribution its list cannot answer exactly ([`SampleParams::needs_full_row`]).
+    fn wants_full_rows(&self, active: &[usize]) -> bool {
+        let capacity = self.dec.topk_capacity();
+        self.dec.full_row_readback() && active.iter().any(|&i| self.running[i].sample.needs_full_row(capacity))
     }
 
     /// Candidates per row a non-greedy step asks for. Real sampling and the penalties read the whole candidate
