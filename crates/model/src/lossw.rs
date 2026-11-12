@@ -68,7 +68,10 @@ impl WeightedCe {
     /// [`Self::hook`] for one chunk: `d_logits` holds the gradient of rows
     /// `r0..r0+rows`, which are scaled by those rows' weights. `r0` must be
     /// a legal binding offset into the `[n]` weight row (a multiple of 64
-    /// rows is, on every adapter).
+    /// rows is, on every adapter). Every caller passes a chunk start of
+    /// `HeadCe::chunks`, which is a multiple of 64 or 0 by construction; any
+    /// other `r0` is refused by `step_sliced` on every backend, naming the
+    /// `scale_row` kernel.
     pub fn hook_rows<'a>(&'a self, gpu: &Gpu, steps: &mut Vec<Step>, scale_row: usize, d_logits: &DeviceBuffer, r0: u32, rows: u32) -> &'a DeviceBuffer {
         assert!(rows as u64 <= self.rows && (r0 + rows) as u64 <= self.n, "WeightedCe::hook_rows: rows {r0}..{} past the chunk {} / batch {}", r0 + rows, self.rows, self.n);
         let total = rows * self.v as u32;

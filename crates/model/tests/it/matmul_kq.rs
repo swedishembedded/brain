@@ -228,6 +228,29 @@ fn host_oracle_affine(codes_x: &[i8], sx: &[f32], codes_w: &[i32], ds: &[f32], d
     out
 }
 
+/// `S[m,n] = sum_g |sx[m,g]| * ( |ds[n,g]| * |A[m,n,g]| + |dm[n,g]| * |S[m,g]| )`: the absolute sum of the terms the
+/// kernel accumulates, the `S` of `testutil::rounding`'s `gamma_k * S` bound. Computed in f64 from the same integer codes.
+#[allow(clippy::too_many_arguments)]
+fn host_abs_sum_affine(codes_x: &[i8], sx: &[f32], codes_w: &[i32], ds: &[f32], dm: &[f32], m: usize, k: usize, n: usize, group: usize) -> Vec<f64> {
+    let ng = k / group;
+    let mut out = vec![0f64; m * n];
+    for r in 0..m {
+        for c in 0..n {
+            for g in 0..ng {
+                let (mut a, mut s) = (0i64, 0i64);
+                for j in 0..group {
+                    let kk = g * group + j;
+                    let xv = i64::from(codes_x[r * k + kk]);
+                    a += i64::from(codes_w[c * k + kk]) * xv;
+                    s += xv;
+                }
+                out[r * n + c] += f64::from(sx[r * ng + g]).abs() * (a.abs() as f64 * f64::from(ds[c * ng + g]).abs() + s.abs() as f64 * f64::from(dm[c * ng + g]).abs());
+            }
+        }
+    }
+    out
+}
+
 fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
     let (mut num, mut den) = (0f64, 0f64);
     for (&g, &w) in got.iter().zip(want) {
@@ -248,35 +271,40 @@ fn cosine(got: &[f32], want: &[f32]) -> f64 {
     d / (na.sqrt() * nb.sqrt())
 }
 
-fn max_rel(got: &[f32], want: &[f32]) -> f64 {
-    got.iter().zip(want).map(|(&g, &w)| (f64::from(g) - f64::from(w)).abs() / f64::from(w).abs().max(1.0)).fold(0.0, f64::max)
+/// Rounding tolerance for one output element of the affine kernels, derived rather than measured.
+///
+/// Each group contributes `sx * (ds*A - dm*S)` with `A`, `S` exact integers (`dot4I8Packed` and the activation group
+/// sum are integer arithmetic below `2^24` here), so the f32 rounding happens in: decoding `ds`/`dm` (1 multiply),
+/// `ds*A` and `dm*S` (1), their difference (1), the scaling by `sx` (1), and then the running total, which adds the
+/// `k / group` group terms (`ng` additions on the longest chain). That is `ng + 4` roundings on terms whose absolute
+/// sum is `abs_sum`, so the kernel is within `gamma_{ng+4} * abs_sum` of the exact value
+/// ([`brain_testutil::rounding`]); the f64 oracle contributes none. A comparison between two f32 evaluations (dyn
+/// against gemv) is within twice that. The kernel's association order inside the total is irrelevant to the bound.
+fn rounding_tolerance(ng: usize, abs_sum: f64, agreement_of_two_f32_runs: bool) -> f64 {
+    if agreement_of_two_f32_runs {
+        brain_testutil::rounding::agreement_bound(ng + 4, abs_sum)
+    } else {
+        brain_testutil::rounding::accumulation_bound(ng + 4, abs_sum)
+    }
 }
 
-fn assert_matches_oracle(what: &str, got: &[f32], want: &[f32]) {
+/// `got` against `want`, element by element, within `tol[i]` (see [`rounding_tolerance`]), plus the two structural
+/// gates that catch a wrong group or index as a gross error rather than rounding: `rel_l2` and cosine.
+fn assert_matches_oracle(what: &str, got: &[f32], want: &[f32], tol: &[f64]) {
+    assert_eq!(got.len(), want.len(), "{what}: length mismatch");
+    assert_eq!(tol.len(), want.len(), "{what}: tolerance length mismatch");
+    // Gross-error gates. A genuine wrong-group/index bug showed `rel_l2 ~ 1.2` and `cosine ~ -0.26` (case4's history);
+    // rounding alone stays several orders below these.
     let l2 = rel_l2(got, want);
     let cos = cosine(got, want);
-    let mr = max_rel(got, want);
     assert!(l2 <= 1e-6, "{what}: rel_l2 {l2:e} > 1e-6");
     assert!(cos >= 1.0 - 1e-9, "{what}: cosine {cos:.12} < 1 - 1e-9");
-    // The affine correction's fold does a SECOND f32 reduction alongside the
-    // usual `ds*dot4I8Packed` term (`- dm[n,g]*S[m,g]`, see this kernel's own
-    // header), so its worst-case single-element error against the f64 host
-    // oracle runs somewhat higher than a pure symmetric-family kernel's -
-    // measured on a real device (Intel Arc iGPU, Vulkan) across every case in
-    // this file, `rel_l2` stayed in `8e-8..1.8e-7` and `cosine` at `1.0` to 12
-    // decimals (both UNCHANGED from this bound, and both still the primary,
-    // tight gates) while `max_rel` (a single worst-element metric) ranged up
-    // to `2.9e-4`. `1e-5` (calibrated against the symmetric family's single-
-    // reduction fold) is too tight for this two-reduction fold; `5e-4` keeps
-    // real margin above the measured worst case while staying far below a
-    // magnitude that would indicate an actual wrong group/index (case4's own
-    // history is the proof of that distinction: a genuine bug there showed
-    // `rel_l2 ~ 1.2` and `cosine ~ -0.26`, orders of magnitude past either
-    // bound - see `rand_unsigned_codes`'s own doc comment for what that bug
-    // actually was, an out-of-range test fixture, not a kernel defect).
-    assert!(mr <= 5e-4, "{what}: max relative error {mr:e} > 5e-4");
-    for (i, &v) in got.iter().enumerate() {
-        assert!(v.is_finite(), "{what}: got[{i}] = {v} is not finite");
+    for (i, ((&g, &w), &t)) in got.iter().zip(want).zip(tol).enumerate() {
+        assert!(g.is_finite(), "{what}: got[{i}] = {g} is not finite");
+        // `w` is the f64 oracle rounded to f32 (half an ulp of `w`), which the bound does not cover.
+        let slack = f64::from(w).abs() * brain_testutil::rounding::U;
+        let err = (f64::from(g) - f64::from(w)).abs();
+        assert!(err <= t + slack, "{what}: element {i} error {err:e} exceeds the rounding bound {t:e} (got {g}, want {w})");
     }
 }
 
@@ -336,6 +364,15 @@ impl Scenario {
         host_oracle_affine(&self.codes_x, &self.sx_h, &self.codes_w, &ds, &dm, self.m, self.k, self.n, self.group)
     }
 
+    /// Per-element rounding tolerance against [`Self::oracle`] (see [`rounding_tolerance`]).
+    fn tolerance(&self, agreement_of_two_f32_runs: bool) -> Vec<f64> {
+        let (ds, dm) = self.ds_dm();
+        host_abs_sum_affine(&self.codes_x, &self.sx_h, &self.codes_w, &ds, &dm, self.m, self.k, self.n, self.group)
+            .into_iter()
+            .map(|s| rounding_tolerance(self.ng(), s, agreement_of_two_f32_runs))
+            .collect()
+    }
+
     /// Upload every buffer this scenario needs, in the kernels' own binding
     /// order: xq, wq, sx, wsm, wd, xgs.
     fn upload(&self, g: &Gpu) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
@@ -387,20 +424,13 @@ fn rand_kq_scale(seed: u64, n: usize, ng: usize, dmin_nonzero: bool) -> (Vec<u8>
         vec![0u8; n * ng]
     };
     // Ranges chosen so the EFFECTIVE product `ds = d_super*sc`/`dm =
-    // dmin_super*mn` reproduces this file's pre-M14 direct-`ds`/`dm` ranges
-    // (`[0.01, 0.5]`/`[0.05, 1.5]`, what the 5e-4 `max_rel` ceiling below was
-    // originally measured against) rather than a wider envelope the
-    // decomposed `(sc, d_super)` representation could otherwise reach: `sc`/
-    // `mn` top out at 62 (see above), so `d_super in [0.0003, 0.008]` caps
-    // `ds` at `~0.5`, and `dmin_super in [0.001, 0.024]` caps `dm` at `~1.5`.
-    // A wider `d_super`/`dmin_super` span was measured to push a genuine
-    // sub-rectangle/ragged-tile case's `max_rel` past the calibrated ceiling
-    // (`~1e-3` vs `5e-4`) purely through larger-magnitude fp32 accumulation
-    // noise on an output element with a small true value, not a kernel
-    // defect (`f16_to_f32`'s magic-multiply/FTZ decode was checked bit-exact
-    // against `half::f16` for all 65536 patterns before this range was
-    // narrowed) - restoring the pre-M14 magnitude envelope keeps the same
-    // numerical risk profile the ceiling was calibrated against.
+    // dmin_super*mn` stays in `[0.01, 0.5]`/`[0.05, 1.5]`: `sc`/`mn` top out
+    // at 62, so `d_super in [0.0003, 0.008]` caps `ds` at `~0.5` and
+    // `dmin_super in [0.001, 0.024]` caps `dm` at `~1.5`. The magnitude
+    // envelope only sets the scale of `Scenario::tolerance` (which grows with
+    // the absolute sum of the accumulated terms), not whether the check is
+    // sound; `f16_to_f32`'s magic-multiply/FTZ decode was checked bit-exact
+    // against `half::f16` for all 65536 patterns.
     let d_super = rand_pos_f32(seed ^ 0x56, n * spb, 0.0003, 0.008);
     let dmin_super = if dmin_nonzero { rand_pos_f32(seed ^ 0x57, n * spb, 0.001, 0.024) } else { vec![0f32; n * spb] };
     (sc, mn, d_super, dmin_super)
@@ -434,7 +464,7 @@ fn dyn_matches_host_oracle_both_code_bits() {
         let sc = Scenario::random(0xB0_0000 | bits as u64, 192, 256, 176, bits, 32, true);
         let bufs = sc.upload(&g);
         let got = run_dyn(&g, dn, &sc, &bufs);
-        assert_matches_oracle(&format!("matmul_kq_dyn CODE_BITS={bits}"), &got, &sc.oracle());
+        assert_matches_oracle(&format!("matmul_kq_dyn CODE_BITS={bits}"), &got, &sc.oracle(), &sc.tolerance(false));
     }
 }
 
@@ -449,7 +479,7 @@ fn gemv_matches_host_oracle_both_code_bits() {
         let sc = Scenario::random(0xB1_0000 | bits as u64, 24, 256, 48, bits, 32, true);
         let bufs = sc.upload(&g);
         let got = run_gemv(&g, gn, &sc, &bufs);
-        assert_matches_oracle(&format!("matmul_kq_gemv CODE_BITS={bits}"), &got, &sc.oracle());
+        assert_matches_oracle(&format!("matmul_kq_gemv CODE_BITS={bits}"), &got, &sc.oracle(), &sc.tolerance(false));
     }
 }
 
@@ -523,8 +553,8 @@ fn case1_dmin_zero_vs_nonzero_are_genuinely_different() {
     let got_zero = run_dyn(&g, dn, &sc_zero, &sc_zero.upload(&g));
     let got_nonzero = run_dyn(&g, dn, &sc_nonzero, &sc_nonzero.upload(&g));
 
-    assert_matches_oracle("case1 dm==0", &got_zero, &sc_zero.oracle());
-    assert_matches_oracle("case1 dm!=0", &got_nonzero, &sc_nonzero.oracle());
+    assert_matches_oracle("case1 dm==0", &got_zero, &sc_zero.oracle(), &sc_zero.tolerance(false));
+    assert_matches_oracle("case1 dm!=0", &got_nonzero, &sc_nonzero.oracle(), &sc_nonzero.tolerance(false));
 
     let diff = rel_l2(&got_nonzero, &got_zero);
     assert!(diff > 0.01, "case1: dm==0 and dm!=0 outputs must differ meaningfully (rel_l2 between them was {diff:e}) or the correction term could be silently dropped without any test noticing");
@@ -569,7 +599,7 @@ fn case2_sub_block_scale_variation_across_groups() {
     let g = Gpu::new(&kernels_list);
     let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
-    assert_matches_oracle("case2 sub-block scale variation", &got, &sc.oracle());
+    assert_matches_oracle("case2 sub-block scale variation", &got, &sc.oracle(), &sc.tolerance(false));
 }
 
 /// Case 3: mixed positive/negative ACTIVATION values, combined with weight
@@ -609,7 +639,7 @@ fn case3_mixed_sign_activation_full_range_codes() {
     let g = Gpu::new(&kernels_list);
     let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
-    assert_matches_oracle("case3 mixed-sign activation, full-range codes", &got, &sc.oracle());
+    assert_matches_oracle("case3 mixed-sign activation, full-range codes", &got, &sc.oracle(), &sc.tolerance(false));
 }
 
 /// Case 4: a sub-block whose weight codes AND scale/min are all exactly
@@ -643,7 +673,7 @@ fn case4_all_zero_subblock_no_nan() {
     let g = Gpu::new(&kernels_list);
     let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
-    assert_matches_oracle("case4 all-zero sub-block", &got, &sc.oracle());
+    assert_matches_oracle("case4 all-zero sub-block", &got, &sc.oracle(), &sc.tolerance(false));
 }
 
 /// Case 5: a genuine sub-rectangle of the output tile grid (`row0 != 0`
@@ -673,20 +703,23 @@ fn case5_subrectangle_nonzero_origin_two_superblocks() {
     let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
     let want = sc.oracle();
-    assert_matches_oracle("case5 full grid", &got, &want);
+    let tol = sc.tolerance(false);
+    assert_matches_oracle("case5 full grid", &got, &want, &tol);
 
     // Target the (row0=128, col0=128) tile specifically - the second tile in
     // both dimensions, i.e. the genuine sub-rectangle.
     let (r0, c0, rn, cn) = (128usize, 128usize, 64usize, 64usize);
     let mut got_sub = Vec::with_capacity(rn * cn);
     let mut want_sub = Vec::with_capacity(rn * cn);
+    let mut tol_sub = Vec::with_capacity(rn * cn);
     for r in r0..r0 + rn {
         for c in c0..c0 + cn {
             got_sub.push(got[r * n + c]);
             want_sub.push(want[r * n + c]);
+            tol_sub.push(tol[r * n + c]);
         }
     }
-    assert_matches_oracle("case5 sub-rectangle (row0=128, col0=128)", &got_sub, &want_sub);
+    assert_matches_oracle("case5 sub-rectangle (row0=128, col0=128)", &got_sub, &want_sub, &tol_sub);
 }
 
 /// Case 6: ragged tiles - `M`/`N` not multiples of 128 for `matmul_kq_dyn`,
@@ -701,7 +734,7 @@ fn case6_ragged_tiles_dyn() {
         let g = Gpu::new(&kernels_list);
         let sc = Scenario::random(0xC6_0000 | bits as u64, m, k, n, bits, group, true);
         let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
-        assert_matches_oracle(&format!("case6 ragged dyn CODE_BITS={bits}"), &got, &sc.oracle());
+        assert_matches_oracle(&format!("case6 ragged dyn CODE_BITS={bits}"), &got, &sc.oracle(), &sc.tolerance(false));
     }
 }
 
@@ -716,7 +749,7 @@ fn case6_ragged_gemv() {
             let g = Gpu::new(&kernels_list);
             let sc = Scenario::random(0xC6_1000 | (bits as u64) << 8 | m as u64, m, k, n, bits, group, true);
             let got = run_gemv(&g, gn, &sc, &sc.upload(&g));
-            assert_matches_oracle(&format!("case6 ragged gemv CODE_BITS={bits} m={m}"), &got, &sc.oracle());
+            assert_matches_oracle(&format!("case6 ragged gemv CODE_BITS={bits} m={m}"), &got, &sc.oracle(), &sc.tolerance(false));
         }
     }
 }
@@ -742,7 +775,7 @@ fn case7_x_and_w_word_densities_genuinely_differ() {
     let g = Gpu::new(&kernels_list);
     let sc = Scenario::random(0xC7_0000, m, k, n, bits, group, true);
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
-    assert_matches_oracle("case7 differing word densities", &got, &sc.oracle());
+    assert_matches_oracle("case7 differing word densities", &got, &sc.oracle(), &sc.tolerance(false));
 }
 
 // =======================================================================
@@ -763,8 +796,8 @@ fn cross_kernel_dyn_and_gemv_agree() {
         let bufs = sc.upload(&g);
         let got_dyn = run_dyn(&g, dn, &sc, &bufs);
         let got_gemv = run_gemv(&g, gn, &sc, &bufs);
-        assert_matches_oracle(&format!("cross-kernel dyn vs oracle CODE_BITS={bits}"), &got_dyn, &sc.oracle());
-        assert_matches_oracle(&format!("cross-kernel gemv vs oracle CODE_BITS={bits}"), &got_gemv, &sc.oracle());
-        assert_matches_oracle(&format!("cross-kernel dyn vs gemv CODE_BITS={bits}"), &got_dyn, &got_gemv);
+        assert_matches_oracle(&format!("cross-kernel dyn vs oracle CODE_BITS={bits}"), &got_dyn, &sc.oracle(), &sc.tolerance(false));
+        assert_matches_oracle(&format!("cross-kernel gemv vs oracle CODE_BITS={bits}"), &got_gemv, &sc.oracle(), &sc.tolerance(false));
+        assert_matches_oracle(&format!("cross-kernel dyn vs gemv CODE_BITS={bits}"), &got_dyn, &got_gemv, &sc.tolerance(true));
     }
 }

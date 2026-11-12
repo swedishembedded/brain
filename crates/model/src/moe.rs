@@ -485,6 +485,8 @@ pub fn experts_fwd_train(g: &Gpu, ids: &MoeIds, shape: &MoeShape, x: &DeviceBuff
     let most = routed.regions.iter().map(|r| r.1).max().unwrap_or(0).max(1) as u64;
     let (x_c, gate_c) = (g.storage(most * d as u64), g.storage(most * ne as u64));
     let full = (0u64, 0u64);
+    // Every `start` below (and in `CompactBwd`) is a region start from `route_rows`, which pads each to a multiple of
+    // 64 words (256 bytes): the index-list bindings are aligned for any expert counts.
     for (e, (w, &(start, count))) in weights.iter().zip(&routed.regions).enumerate() {
         if count == 0 {
             continue;
@@ -784,7 +786,8 @@ impl CompactBwd<'_> {
         self.routed.regions.iter().map(|r| r.1).max().unwrap_or(0).max(1) as u64
     }
 
-    /// `src`'s rows routed to the expert at `rows` (`(start, count)` in the index list), into `dst`.
+    /// `src`'s rows routed to the expert at `rows` (`(start, count)` in the index list), into `dst`. `start` is a
+    /// `route_rows` region start, a multiple of 64 words, so the index-list binding is aligned.
     fn gather(&self, rows: (u32, u32), src: &DeviceBuffer, dst: &DeviceBuffer, width: u32) -> Step {
         let (start, count) = rows;
         let full = (0u64, 0u64);
@@ -1734,6 +1737,7 @@ pub fn expert_fwd_compact_layer(
              size CompactExpertScratch::new with shape.rows to make this impossible",
             scratch.capacity
         );
+        // `start` is a `route_rows` region start (a multiple of 64 words), so this binding is aligned.
         let idx_slice = (start as u64, count as u64);
         let (gate_w, up_w, down_w) = &expert_weights[ei];
         steps.push(g.step_sliced(ids.gather, &[&scratch.idx, x, &scratch.x_compact], &[idx_slice, full, full], &[d, count], count * d));

@@ -1631,7 +1631,7 @@ pub(crate) fn key_minor_step(
 ///
 /// **Alignment:** a span or chunk starts at a sliced binding of `qkv` (`row * stride`) and `ctx` (`row * d_out`), so
 /// `stride` and `d_out` must be multiples of 64 words (256 B, `backend_api::STORAGE_BINDING_OFFSET_ALIGN_BYTES`),
-/// which every ViT width is. The backend refuses a misaligned slice, naming the kernel.
+/// which every ViT width is. A call whose windows do not start on the grain panics at the call, naming the width ([`assert_row_windows_bindable`]).
 ///
 /// `km` swaps the score dispatch for the coalesced [`KeyMinor`] pair. This loop
 /// is the best case for it: the transpose is hoisted to once per SPAN while the
@@ -1658,6 +1658,7 @@ pub fn chunked_bidir_fwd(
     rel: Option<&crate::vit::RelPos>,
     steps: &mut Vec<Step>,
 ) {
+    assert_row_windows_bindable("chunked_bidir_fwd", spans, chunk, &[("stride", stride), ("d_out", d_out)]);
     for &(row0, len) in spans {
         if let Some(r) = rel {
             r.check_span(len);
@@ -1790,6 +1791,7 @@ pub fn chunked_bidir_fwd_win(
     chunk: u32,
     steps: &mut Vec<Step>,
 ) {
+    assert_row_windows_bindable("chunked_bidir_fwd_win", spans, chunk, &[("stride", stride), ("d_out", d_out)]);
     for &(row0, len) in spans {
         let kv_row_off = row0 as u64 * stride as u64;
         if let Some(km) = km {
@@ -1882,6 +1884,7 @@ pub fn chunked_bidir_bwd_win(
     chunk: u32,
     steps: &mut Vec<Step>,
 ) {
+    assert_row_windows_bindable("chunked_bidir_bwd_win", spans, chunk, &[("stride", stride), ("d_out", d_out)]);
     for &(row0, len) in spans {
         let kv_row_off = row0 as u64 * stride as u64;
         if let Some(km) = km {
@@ -2040,6 +2043,7 @@ pub fn chunked_bidir_fwd_band(
     chunk: u32,
     steps: &mut Vec<Step>,
 ) {
+    assert_row_windows_bindable("chunked_bidir_fwd_band", spans, chunk, &[("stride", stride), ("d_out", d_out)]);
     for &(row0, len) in spans {
         let kv_row_off = row0 as u64 * stride as u64;
         let mut q0 = 0u32;
@@ -2095,6 +2099,7 @@ pub fn chunked_bidir_bwd_band(
     chunk: u32,
     steps: &mut Vec<Step>,
 ) {
+    assert_row_windows_bindable("chunked_bidir_bwd_band", spans, chunk, &[("stride", stride), ("d_out", d_out)]);
     for &(row0, len) in spans {
         let kv_row_off = row0 as u64 * stride as u64;
         let mut q0 = 0u32;
@@ -2733,6 +2738,34 @@ pub fn flash_cross_relpos_step(
     )
 }
 
+/// Panic unless every row window the chunked attention entry points are about to bind starts on the storage-binding
+/// alignment grain ([`gpu_core::STORAGE_BINDING_OFFSET_ALIGN_BYTES`], 64 words).
+///
+/// They bind a window of a `[rows, width]` buffer at `row * width` words, for the span start `row0` and every query
+/// chunk start `row0 + q0` of `spans` split into `chunk` rows. For arbitrary rows that is aligned exactly when `width`
+/// is a multiple of 64 words, which is the documented precondition; a toy-sized model whose windows happen to start on
+/// aligned rows (one span from row 0 that fits one chunk, or spans of 16 rows at a width of 48) is legal and stays so.
+/// Checking the offsets themselves, once per call, names the width and the row instead of surfacing as the backend's
+/// `step_sliced` refusal at whichever recorded step first binds the offset.
+pub(crate) fn assert_row_windows_bindable(entry: &str, spans: &[(u32, u32)], chunk: u32, widths: &[(&str, u32)]) {
+    let grain_words = u64::from(gpu_core::STORAGE_BINDING_OFFSET_ALIGN_BYTES / 4);
+    for &(row0, len) in spans {
+        let chunk_starts = (0..len.max(1)).step_by(chunk.max(1) as usize).map(|q0| row0 + q0);
+        for row in std::iter::once(row0).chain(chunk_starts) {
+            for &(name, width) in widths {
+                let offset = u64::from(row) * u64::from(width);
+                assert!(
+                    offset % grain_words == 0,
+                    "{entry}: the window starting at row {row} binds {name} at word {row} * {width} = {offset}, which is not a multiple of \
+                     {grain_words} words ({} bytes, the storage-binding offset alignment); {name} must be a multiple of {grain_words} words \
+                     (or every window must start on a row where row * {name} is)",
+                    gpu_core::STORAGE_BINDING_OFFSET_ALIGN_BYTES
+                );
+            }
+        }
+    }
+}
+
 /// Round up to a 64-word (256B) boundary - `step_sliced`'s storage-buffer
 /// `BufferBinding` offsets must satisfy `min_storage_buffer_offset_alignment`
 /// (256B on the near-universal case), so every per-head/per-segment stride
@@ -3004,6 +3037,9 @@ pub fn dscores_variant(g: &Gpu, k: &CrossBwdIds, rows: u32, cols: u32) -> (usize
 ///  * that pass ACCUMULATES `dq` onto what `bwd.dq` already assigned, and
 ///    accumulates the dense-table adjoint across spans - every window of a
 ///    windowed block shares one table.
+///
+/// **Alignment:** as [`chunked_bidir_fwd`]: `d_ctx`, `d_qkv` and `qkv` windows start at `row * d_out` and
+/// `row * stride`, so `stride` and `d_out` must be multiples of 64 words; a call that breaks it panics, naming the width.
 pub fn chunked_bidir_bwd(
     g: &Gpu,
     fwd: &CrossIds,
@@ -3027,6 +3063,7 @@ pub fn chunked_bidir_bwd(
     rel: Option<&crate::vit::RelPos>,
     steps: &mut Vec<Step>,
 ) {
+    assert_row_windows_bindable("chunked_bidir_bwd", spans, chunk, &[("stride", stride), ("d_out", d_out)]);
     for (si, &(row0, len)) in spans.iter().enumerate() {
         if let Some(r) = rel {
             r.check_span(len);

@@ -2261,6 +2261,9 @@ impl Ops {
                 // follow (see `crate::int8::quant_rows_steps`'s own doc
                 // comment on `xgs`'s offset units).
                 let go = crate::int8::act_scale_range(act.xr0, m, k);
+                // Binding alignment of `xo`, `so`, `go`: a packed activation exists only if `Ops::act*` built it, and
+                // `quant_rows_steps` refuses an `xr0` that is not a multiple of 64 rows, which makes `xr0 * k/4`,
+                // `xr0 * k/GROUP` (k a multiple of GROUP) multiples of 64 words.
                 let quant = self.packed(s, act).expect(
                     "Ops::matmul: this activation was built with Ops::act_f32, which promises no \
                      quantized weight reads it - build it with Ops::act or Ops::act_kq instead",
@@ -2400,6 +2403,8 @@ impl Ops {
                 if tiles.len() > 1 {
                     let kind = self.idx[Self::bind_embed_tile(dt)];
                     let rw = row_words as u64;
+                    // Tile starts are multiples of `tile_row_align(row_words)` rows (see `tiles_with_budget`), so
+                    // `v0 * rw` is a multiple of 64 words whatever the row width.
                     for (v0, count) in tiles {
                         s.push(self.gpu.step_sliced(kind, &[tokens, w, out], &[WHOLE, (v0 as u64 * rw, count as u64 * rw), WHOLE], &[d_model, seq_len, v0, count], seq_len * d_model));
                     }
@@ -2970,6 +2975,7 @@ impl Ops {
                 let xo = (act.xr0 as u64 * k as u64, m as u64 * k as u64);
                 let so = crate::int8::act_scale_range(act.xr0, m, k);
                 let qo = (act.xr0 as u64 * kg, m as u64 * kg);
+                // `act.xr0` is a multiple of 64 rows (`quant_rows_steps`, as in `matmul`), so `xo`, `so`, `qo` are aligned.
                 s.push(self.gpu.step_sliced(kernel(QUANT_RESIDUAL_PACK), &[&act.x, &quant.sx, fine.xq_for(k), &fine.sx], &[xo, so, qo, so], &[m, k], m * k / crate::int8::GROUP as u32));
                 Arc::new(fine)
             })
@@ -2981,6 +2987,9 @@ impl Ops {
             let rows = (m - r0).min(TWO_LEVEL_PASS_ROWS);
             self.packed_product(s, w, &fine, act.xr0 + r0, rows, &product, 0);
             let len = rows as u64 * n as u64;
+            // `r0` is a multiple of `TWO_LEVEL_PASS_ROWS` (1024, a multiple of 64), so `r0 * n` is a multiple of 64
+            // words; `yoff` is the offset the same `matmul` call binds `y` at (`packed_product`'s `oo`), the caller's
+            // alignment contract that this product shares.
             s.push(self.gpu.step_sliced(add, &[&product, y], &[(0, len), (yoff + r0 as u64 * n as u64, len)], &[rows * n], rows * n));
         }
     }

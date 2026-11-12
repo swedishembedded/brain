@@ -451,6 +451,9 @@ impl HeadCe {
     }
 
     fn ce_value_step(&self, gpu: &Gpu, labels: &DeviceBuffer, nll: &DeviceBuffer, r0: u32, rows: u32) -> Step {
+        // Binding alignment: `r0` is a chunk start from `Self::chunks`, which is 0 or a multiple of `self.rows`, and
+        // `chunks` refuses a `self.rows` that is not a multiple of 64 once there is more than one chunk. So `r0` words
+        // (labels, nll, argmax ids, loss weights) are a multiple of 256 bytes, and so is `r0 * d` (hidden rows).
         let at = (r0 as u64, rows as u64);
         let v = self.vocab;
         match (self.coop, self.k.ce_value_stats_rows) {
@@ -471,6 +474,7 @@ impl HeadCe {
             if !held {
                 self.logits_steps(ops, s, b.hidden, r0, rows, b.logit_scale);
             }
+            // Same chunk-start alignment argument as `ce_value_step`: `r0` is a multiple of 64 rows.
             let at = (r0 as u64, rows as u64);
             // Two-pass CE gradient: the per-row softmax statistics once, then
             // one elementwise pass reading them (O(rows * V), not O(rows * V^2)).

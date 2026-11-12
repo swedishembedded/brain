@@ -386,3 +386,33 @@ fn compact_layer_undersized_scratch_panics_loudly() {
     let weights = expert_weights(&s);
     let _ = expert_fwd_compact_layer(&s.g, &s.compact_ids, &s.shape, &s.host_gate, &s.x, &s.gate, &weights, &scratch, &acc);
 }
+
+/// Every expert's region of the shared index list starts on a 64-word (256-byte) boundary, whatever the counts, because
+/// each is bound as a sliced sub-range (`step_sliced` refuses any other offset on every backend). Counts of 1, 3, 0 and
+/// 66 rows put the unpadded starts at 1, 4, 4: none aligned.
+#[test]
+fn route_rows_regions_start_on_the_binding_grain() {
+    let shape = MoeShape { rows: 70, d_model: 4, moe_ff: 4, n_experts: 4, top_k: 1 };
+    // Expert 0 gets row 0, expert 1 rows 1..4, expert 3 rows 4..70, expert 2 none.
+    let owner = |r: u32| match r {
+        0 => 0,
+        1..=3 => 1,
+        _ => 3,
+    };
+    let mut gate = vec![0.0f32; (shape.rows * shape.n_experts) as usize];
+    for r in 0..shape.rows {
+        gate[(r * shape.n_experts + owner(r)) as usize] = 1.0;
+    }
+    let (combined, regions) = model::moe::route_rows(&shape, &gate);
+    let counts: Vec<u32> = regions.iter().map(|r| r.1).collect();
+    assert_eq!(counts, [1, 3, 0, 66]);
+    for (e, &(start, count)) in regions.iter().enumerate() {
+        assert_eq!(u64::from(start) * 4 % backend_api_grain_bytes(), 0, "expert {e} region starts at word {start}");
+        let rows = &combined[start as usize..(start + count) as usize];
+        assert!(rows.iter().all(|&r| owner(r) == e as u32), "expert {e} region holds rows of another expert: {rows:?}");
+    }
+}
+
+fn backend_api_grain_bytes() -> u64 {
+    gpu_core::STORAGE_BINDING_OFFSET_ALIGN_BYTES
+}

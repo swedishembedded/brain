@@ -24,7 +24,7 @@
 
 pub use backend_api::{
     f, AllocPolicy, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceOutOfMemory, DeviceStats, MemAdvice, MemoryLimits, MemoryUsage,
-    NumericSupport, PlacementFacts, PrefetchTarget, Step, StepMeta,
+    NumericSupport, PlacementFacts, PrefetchTarget, Step, StepMeta, STORAGE_BINDING_OFFSET_ALIGN_BYTES,
 };
 pub use backend_api::hardware;
 pub use backend_api::runtime;
