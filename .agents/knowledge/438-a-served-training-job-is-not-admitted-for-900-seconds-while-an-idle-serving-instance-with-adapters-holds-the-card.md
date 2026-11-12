@@ -17,10 +17,22 @@ running on the card. A server that had not yet answered any request admitted the
 - Run 2 (reproduction, same server, A2 adapter served and 160 requests answered earlier, no request in
   flight): a 2-step job of the same dataset waited 900.09 s and was refused; 86 GB resident, 0% utilisation.
 
-## What this establishes, and what it does not
+## Root cause (validated) and fix
 
-Reproduced twice: a loaded, idle, adapter-serving instance blocks admission for the full deadline. Not
-isolated: whether the adapter bank, the watched directory, the resident KV pool, or the instance being
-loaded at all is what refuses eviction (the one success had none of them). A test needs a fake instance
-that is loaded, idle and holds an adapter, and asserts that `check_job` evicts it. Workaround: restart the
-server before a training job, or train on a card that serves no adapters.
+The served model (a Qwen3.8 base with an adapter bank) is a **multi-device** resident (`activate_multi`); the
+train job is a single-device workload. `ResidencyManager::claim` already frees a card for a single-device job by
+dropping an unpinned multi-device resident (`evict_multi_to_fit`), but the dispatcher only calls `claim` for a
+group that `ResidencyManager::placeable` accepts, and `placeable` planned eviction over single-device residents
+only. With the served model resident and idle, `placeable` said "no" on every round, the job stayed queued
+(depth 1) and was never claimed, so it waited out its admission deadline. A server that had answered no request
+had not built the model yet, so the card was free and the job fit at once. The adapter bank, the watched
+directory and the KV pool are not involved: nothing was pinned; the idle resident was simply invisible to the
+placement filter.
+
+Validated with a regression test (`a_single_device_job_is_placeable_when_an_idle_multi_device_resident_can_give_way`
+in `residency::manager`): red before the fix at the "idle: ... can give way" assertion (the pinned assertion
+passed), green after. The fix extracts the read-only victim planning of `evict_multi_to_fit` into
+`plan_multi_victims`, and `placeable` consults it, so the filter and the claim cannot disagree. Generic: no model
+named. A pinned resident (a lane running on it) still blocks the job, and a busy card is not offered.
+
+Workaround before the fix: restart the server before a training job, or train on a card that serves no adapters.

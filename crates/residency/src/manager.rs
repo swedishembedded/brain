@@ -691,7 +691,9 @@ impl ResidencyManager {
         // reaches `claim()`, which turns the same unplaceable cost into a real,
         // per-job `ClaimError::TooLarge` -- a clean failure instead of a silent
         // hang. Mirrors `placeable_multi`'s identical fix (see its own doc).
-        !fits_when_empty(&cost, &self.budgets)
+        // `claim` falls back to idle multi-device residents (invisible to the planner above) when no
+        // single-device plan exists; agree with it, or the job waits in the queue and is never claimed.
+        self.plan_multi_victims(&cost, exclude).is_some() || !fits_when_empty(&cost, &self.budgets)
     }
 
     /// [`Self::placeable`]'s multi-device sibling - the executor's scheduling
@@ -1384,6 +1386,18 @@ impl ResidencyManager {
     /// multi-residents into `Residents` so the real policy applies to them is
     /// the proper fix and is deliberately not attempted here.
     fn evict_multi_to_fit(&mut self, cost: &MemCost, exclude: &HashSet<Device>) -> Option<Device> {
+        let (d, victims) = self.plan_multi_victims(cost, exclude)?;
+        for k in victims {
+            self.evict_multi(&k);
+        }
+        self.budgets.fits_on(d, cost.vram).then_some(d)
+    }
+
+    /// Read-only half of [`Self::evict_multi_to_fit`]: the card a single-device `cost` could be given by dropping
+    /// unpinned multi-device residents, and which ones, or `None` when no card can be freed enough. Shared with
+    /// [`Self::placeable`], which must agree with what `claim` will do: a job `placeable` rejects is never claimed,
+    /// so it would wait out its admission deadline although `claim` would have made room.
+    fn plan_multi_victims(&self, cost: &MemCost, exclude: &HashSet<Device>) -> Option<(Device, Vec<InstanceKey>)> {
         if cost.vram == 0 {
             return None;
         }
@@ -1401,7 +1415,7 @@ impl ResidencyManager {
                 .map(|(k, e)| (k.clone(), e.cost.on(d)))
                 .collect();
             victims.sort_by_key(|(k, bytes)| (*bytes, format!("{k}")));
-            // Dry run: how far down the list do we have to go, and is it enough?
+            // How far down the list do we have to go, and is it enough?
             let mut freed = 0u64;
             let mut take = 0usize;
             let deficit = cost.vram.saturating_sub(self.budgets.free_on(d));
@@ -1415,12 +1429,7 @@ impl ResidencyManager {
             if freed < deficit {
                 continue; // this card cannot be freed enough; destroy nothing
             }
-            for (k, _) in victims.into_iter().take(take) {
-                self.evict_multi(&k);
-            }
-            if self.budgets.fits_on(d, cost.vram) {
-                return Some(d);
-            }
+            return Some((d, victims.into_iter().take(take).map(|(k, _)| k).collect()));
         }
         None
     }
@@ -2223,6 +2232,26 @@ mod tests {
         assert_eq!(mgr.resident_multi_count(), 0, "the multi-device resident was the only thing in the way");
         let where_ = mgr.residents.get(&InstanceKey::new("later", "default")).map(|e| e.device);
         assert!(matches!(where_, Some(Device::Gpu(_))), "the claim must get a CARD, not the host tier: {where_:?}");
+    }
+
+    /// **The dispatcher must see an idle multi-device resident as room for a single-device job.** `assign` asks
+    /// `placeable` before it claims, and a job that is not placeable is never claimed, so it waits in the queue
+    /// until its admission deadline although `claim` itself would have evicted the idle resident (a served model
+    /// that spans cards, a fine-tune that needs one of them). A pinned resident still blocks it.
+    #[test]
+    fn a_single_device_job_is_placeable_when_an_idle_multi_device_resident_can_give_way() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register_multi(Arc::new(MultiFake { name: "spanner".into(), per_gpu: 20 * GB, live: live.clone() }));
+        mgr.register(Arc::new(Fake { name: "later".into(), vram: 16 * GB, live: live.clone() }));
+        let (_, mkey) = claim_multi_built(&mut mgr, "spanner").expect("multi resident");
+        let later = InstanceKey::new("later", "default");
+        assert!(!mgr.placeable(&later, "later", &HashSet::new()), "pinned: nothing can give way");
+        mgr.release_multi(&mkey);
+        assert!(mgr.placeable(&later, "later", &HashSet::new()), "idle: the multi-device resident can give way");
+        assert!(!mgr.placeable(&later, "later", &HashSet::from([Device::Gpu(0), Device::Gpu(1)])), "a busy card is not offered");
     }
 
     /// A multi-device claim that does not fit beside an idle multi-device
