@@ -82,10 +82,11 @@ fn metric_table(cmp: &Comparison, metric: &str) -> String {
             match cmp.get(s, m, metric) {
                 Some(v) => {
                     let is_best = best[si].map(|b| (b - v).abs() < 1e-6).unwrap_or(false);
+                    let text = cmp.display(s, m, metric, fmt).unwrap_or_default();
                     if is_best {
-                        out.push_str(&format!(" **{}** |", fmt(v)));
+                        out.push_str(&format!(" **{text}** |"));
                     } else {
-                        out.push_str(&format!(" {} |", fmt(v)));
+                        out.push_str(&format!(" {text} |"));
                     }
                 }
                 None => out.push_str(" — |"),
@@ -200,8 +201,8 @@ pub fn html(cmp: &Comparison) -> String {
         for m in models_of(cmp) {
             body.push_str(&format!("<tr><td>{m}</td>"));
             for s in &scenarios {
-                match cmp.get(s, &m, metric) {
-                    Some(v) => body.push_str(&format!("<td>{}</td>", fmt(v))),
+                match cmp.display(s, &m, metric, fmt) {
+                    Some(text) => body.push_str(&format!("<td>{text}</td>")),
                     None => body.push_str("<td>—</td>"),
                 }
             }
@@ -209,16 +210,15 @@ pub fn html(cmp: &Comparison) -> String {
         }
         body.push_str("</table>");
     }
-    let control_ok =
-        cmp.negative_control_violations("random_walk", 0.10).is_empty();
-    body.push_str(&format!(
-        "<h3>negative control</h3><p>{}</p>",
-        if control_ok {
-            "PASS — no model beats naive on the random-walk control."
-        } else {
-            "FAIL — a model falsely beats naive on a random walk."
-        }
-    ));
+    let has_control = cmp.cells.iter().any(|c| c.scenario == "random_walk");
+    let verdict = if !has_control {
+        "no control scenario present."
+    } else if cmp.negative_control_violations("random_walk", 0.10).is_empty() {
+        "PASS - no model beats naive on the random-walk control."
+    } else {
+        "FAIL - a model falsely beats naive on a random walk."
+    };
+    body.push_str(&format!("<h3>negative control</h3><p>{verdict}</p>"));
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><style>\
          body{{font-family:system-ui,sans-serif;margin:2rem;}}\
@@ -265,6 +265,47 @@ mod tests {
         assert!(h.starts_with("<!doctype html>"));
         assert!(h.contains("<table>"));
         assert!(!h.contains("http://"), "must not reference external hosts");
+    }
+
+    /// With no control scenario there is nothing to pass; the HTML must say
+    /// so, as the markdown does, not print PASS.
+    #[test]
+    fn html_does_not_pass_a_control_it_never_ran() {
+        let models: Vec<Box<dyn ForecastModel>> = vec![Box::new(RandomWalk), Box::new(Drift)];
+        let scenarios: Vec<Box<dyn Scenario>> = vec![Box::new(SeasonalTrend { slope: 0.3, noise: 0.02, ..Default::default() })];
+        let h = html(&harness::run(&models, &scenarios, 12, 3));
+        assert!(!h.contains("PASS"), "no control ran, yet the report passes it");
+        assert!(h.contains("no control scenario present"));
+    }
+
+    /// A model that errors on some windows is averaged over the rest; the
+    /// report must show how many it was scored on, not the run's count.
+    #[test]
+    fn a_model_that_fails_some_windows_shows_how_many_were_scored() {
+        struct Flaky(std::cell::Cell<usize>);
+        impl ForecastModel for Flaky {
+            fn capabilities(&self) -> forecast::Capabilities {
+                let mut c = RandomWalk.capabilities();
+                c.name = "flaky".into();
+                c
+            }
+            fn forecast(&self, panel: &forecast::Panel, spec: &forecast::ForecastSpec) -> Result<forecast::Forecast, forecast::ForecastError> {
+                let k = self.0.get();
+                self.0.set(k + 1);
+                if k % 2 == 0 {
+                    return Err(forecast::ForecastError::internal("every other window fails"));
+                }
+                RandomWalk.forecast(panel, spec)
+            }
+        }
+        let models: Vec<Box<dyn ForecastModel>> = vec![Box::new(RandomWalk), Box::new(Flaky(std::cell::Cell::new(0)))];
+        let scenarios: Vec<Box<dyn Scenario>> = vec![Box::new(RandomWalkScenario::default())];
+        let cmp = harness::run(&models, &scenarios, 4, 3);
+        assert_eq!(cmp.scored("random_walk", "flaky", "mase"), Some(2));
+        assert_eq!(cmp.scored("random_walk", "naive", "mase"), Some(4));
+        let md = markdown(&cmp);
+        assert!(md.contains("(2/4)"), "the partial cell must say so:\n{md}");
+        assert!(html(&cmp).contains("(2/4)"));
     }
 
     #[test]

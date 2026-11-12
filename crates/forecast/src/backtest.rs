@@ -22,9 +22,13 @@ pub struct BacktestSpec {
     pub origins: usize,
     /// Step between successive origins.
     pub stride: usize,
-    /// Metric names to compute (`"mase"`, `"crps"`, `"coverage_90"`, …).
+    /// Metric names to compute: `"mase"`, `"wql"`, `"coverage"` (of the
+    /// outermost levels' interval), `"directional"`, `"crps"`. A name the scorer
+    /// does not know produces no row.
     pub metrics: Vec<String>,
-    /// Quantile levels used when a metric needs them.
+    /// Quantile levels requested of the model. `fcbench`'s scorer does not read
+    /// this: it always asks for and scores `fcbench::score::LEVELS`
+    /// (0.1, 0.5, 0.9), so its wQL is the sum over those three.
     pub quantile_levels: Vec<f32>,
     /// Seed for any stochastic model. [`Default`] draws a random one.
     pub seed: u64,

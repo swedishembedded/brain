@@ -20,6 +20,9 @@ pub struct Cell {
     pub model: String,
     pub metric: String,
     pub value: f32,
+    /// Windows the mean is over: fewer than [`Comparison::windows`] when the
+    /// model errored on a window or its metric was not finite there.
+    pub scored: usize,
 }
 
 /// The full comparison grid plus the metric names computed.
@@ -37,6 +40,22 @@ impl Comparison {
             .iter()
             .find(|c| c.scenario == scenario && c.model == model && c.metric == metric)
             .map(|c| c.value)
+    }
+
+    /// How many windows a cell's mean is over (see [`Cell::scored`]).
+    pub fn scored(&self, scenario: &str, model: &str, metric: &str) -> Option<usize> {
+        self.cells
+            .iter()
+            .find(|c| c.scenario == scenario && c.model == model && c.metric == metric)
+            .map(|c| c.scored)
+    }
+
+    /// A cell's value for a report, with its window count when the mean is
+    /// over fewer windows than the run had.
+    pub fn display(&self, scenario: &str, model: &str, metric: &str, fmt: impl Fn(f32) -> String) -> Option<String> {
+        let v = self.get(scenario, model, metric)?;
+        let n = self.scored(scenario, model, metric).unwrap_or(self.windows);
+        Some(if n < self.windows { format!("{} ({n}/{})", fmt(v), self.windows) } else { fmt(v) })
     }
 
     /// Names of models that materially beat the `naive` baseline on a
@@ -120,6 +139,7 @@ pub fn run(
                         model: name.clone(),
                         metric,
                         value: sum / n as f32,
+                        scored: n,
                     });
                 }
             }
