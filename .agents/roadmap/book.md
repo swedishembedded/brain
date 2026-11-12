@@ -96,7 +96,13 @@ reproduced its worked examples from the text alone in another language.
       that lived only in the worked modules, unprinted layer inventories,
       a pseudocode order that disagreed with its module, three real slips).
       All were fixed in the following commits; a recheck has not been run.
-- [ ] Volume XI, Forecasting, Decisions and Uncertainty: all 7 chapters written; reader pass pending.
+- [x] Volume XI, Forecasting, Decisions and Uncertainty: all 7 chapters written.
+      Independent readers reproduced 764 items in C from the page alone:
+      700 passed, 50 after a guess and 14 failed (unprinted layer
+      inventories in Chapter 3, unstated generator order and matrix
+      orientation, a stitch rule unsound for long overlaps, two wrong bytes
+      cells in the project's bill, unlabelled raw-head order rows).
+      All were fixed in the following commits; a recheck has not been run.
 
 ## Open
 

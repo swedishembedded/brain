@@ -729,11 +729,12 @@ def concordance_replicates():
                          _fx(mean([r[2] for r in res]), 4), _fx(mean(diff), 4), _fx(sd(diff) / math.sqrt(len(diff)), 4)))
     head = (_gen_line(REPLICATES_NAME, f"{REPLICATES} replicates in order; each replicate draws {REPLICATES_N} subjects in order, every subject "
                       "three normal() values x1, x2, x3, then u = uniform() for T = -ln(1 - u) / (0.08 exp(0.7 x1 - 0.5 x2)) and v = uniform() "
-                      "for the censoring time of the scenario (the generator is never reset, a held normal() value is carried on). ")
+                      "for the censoring time of the scenario (the generator is never reset, a held normal() value is carried on); both scenarios of a replicate use "
+                      "the same 200 lifetimes and the same v, so C = 3 + 12 v and C = 2 + 6 v censor the same subjects with different times. ")
             + "The risk score is the true linear predictor 0.7 x1 - 0.5 x2. For each replicate: Harrell's and Uno's concordance on the "
               "censored data and the oracle concordance on the true lifetimes (cases with T below t*). Columns: the mean and the "
               "standard deviation over the replicates of the estimate, the mean of the oracle value, and the mean of the difference to "
-              "the oracle with its standard error (standard deviation over the square root of 200).\n\n")
+              "the oracle with its standard error (standard deviation, divisor n - 1, over the square root of 200).\n\n")
     return head + _table(["scenario", "estimator", "mean", "sd over replicates", "mean of oracle", "mean difference to oracle", "SE of that mean"], rows, "llrrrrr")
 
 
@@ -816,8 +817,12 @@ def brier_under_censoring():
             "horizon t is the mean over all 300 subjects of the squared distance between the predicted probability of failing by t and what "
             "happened. With G the Kaplan-Meier estimate of the censoring distribution: a subject that failed by t contributes "
             "S_i(t)^2 / G(T_i), a subject whose observed time exceeds t contributes (1 - S_i(t))^2 / G(t), and a subject censored by t "
-            "contributes 0. The integrated score is the trapezoid rule over t = 1, 2, ..., 12 divided by 11.\n\n")
-    return head + t1 + "\n\n" + t2
+            "contributes 0. The integrated score is the trapezoid rule over t = 1, 2, ..., 12 divided by 11. Below the tables, the skill "
+            "1 - (score) / (Kaplan-Meier score) at t = 12 is computed from the unrounded scores.\n\n")
+    at12 = {kind: _brier_ipcw(_surv_matrix(kind), times, events, g, 12.0) for kind in ("true", "x1", "km")}
+    skill = ("\n\nSkill at t = 12 against the Kaplan-Meier model, from the unrounded scores: both risk factors "
+             f"{1.0 - at12['true'] / at12['km']:.3f}, x1 only {1.0 - at12['x1'] / at12['km']:.3f}.")
+    return head + t1 + "\n\n" + t2 + skill
 
 
 # ------------------------------------------------------------------ closed-form curves of a hazard table

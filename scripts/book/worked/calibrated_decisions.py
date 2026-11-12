@@ -132,10 +132,10 @@ def _decompose(p, y, n_bins=N_BINS):
 
 # ---------------------------------------------------------- isotonic regression
 
-def _pav(scores, y):
+def _pav_blocks(scores, y):
     """Pool adjacent violators on the examples sorted by ascending score (equal scores keep input order).
 
-    Returns (sorted_scores, fitted) where fitted[i] is the value of the block that holds sorted position i."""
+    Returns (sorted_scores, blocks), each block [sum of labels, count]; adjacent blocks may have equal means."""
     order = sorted(range(len(y)), key=lambda i: scores[i])
     xs = [scores[i] for i in order]
     blocks = []                                   # each block: [sum of labels, count]
@@ -145,6 +145,12 @@ def _pav(scores, y):
             s, c = blocks.pop()
             blocks[-1][0] += s
             blocks[-1][1] += c
+    return xs, blocks
+
+
+def _pav(scores, y):
+    """(sorted_scores, fitted) where fitted[i] is the value of the block that holds sorted position i."""
+    xs, blocks = _pav_blocks(scores, y)
     fitted = []
     for s, c in blocks:
         fitted.extend([s / c] * c)
@@ -301,7 +307,10 @@ def decomposition():
             "k/10 <= q < (k+1)/10, and q = 1 goes to bin 9. REL = sum over nonempty bins of (n_k/n)(mean q - mean y)^2, "
             "RES = sum of (n_k/n)(mean y in the bin - mean y)^2, UNC = ybar (1 - ybar); 'remainder' is BS - (REL - RES + UNC). "
             "'Scale and shift' is sigmoid(a z + b) with (a, b) fitted on the fit set by Newton's method on the "
-            "cross-entropy (`metrics._fit_shift_scale`). The base rate is the share of labels 1 in the fit set. "
+            "cross-entropy: start at (a, b) = (1, 0); each iteration forms the mean gradient and mean Hessian of the cross-entropy "
+            "over the fit set, computes the Newton step, halves it until the cross-entropy at the stepped point is no larger than at the "
+            "current one (or the step factor reaches 1e-6), and moves; at most 100 iterations, stopping when the move has "
+            "|da| + |db| < 1e-12. Undamped Newton from (1, 0) diverges on this data (a = -1.2554 after one step, 26.9 after two), so the halving is part of the recipe. The base rate is the share of labels 1 in the fit set. "
             "ECE is the 10-bin expected calibration error of the probability of the event; log loss is the mean "
             "-ln of the probability given to the label.\n\n"
             + _table(["forecaster", "BS", "REL", "RES", "UNC", "remainder", "ECE", "log loss"], rows))
@@ -329,6 +338,8 @@ def recalibration():
     methods.append(("scale and shift, fitted on the fit set", pa, "fit"))
     ia, ka = _isotonic(fz, fy)
     _, fitted = _pav(fz, fy)
+    n_blocks_fit = len(_pav_blocks(fz, fy)[1])
+    n_blocks_test = len(_pav_blocks(tz, ty)[1])
     methods.append(("isotonic, fitted on the fit set", ia, "fit"))
     pt, at, bt = _platt(tz, ty)
     methods.append(("scale and shift, fitted on the test set", pt, "test"))
@@ -343,8 +354,10 @@ def recalibration():
     iso_fresh = [ia(v) for v in rz]
     sure = [(q, t) for q, t in zip(iso_fresh, ry) if q in (0.0, 1.0)]
     wrong = sum(1 for q, t in sure if q != t)
-    return ("Data as in `calibrated_decisions.decomposition`. The scale-and-shift fit on the fit set is a = "
-            f"{a:.4f}, b = {b:.4f}; the isotonic fit on the fit set has {ka} distinct values, on the test set {kt}. "
+    return ("Data as in `calibrated_decisions.decomposition`; every scale-and-shift fit here (fit set or test set) uses the damped "
+            "Newton recipe given there, started at (a, b) = (1, 0). The scale-and-shift fit on the fit set is a = "
+            f"{a:.4f}, b = {b:.4f}; the isotonic fit on the fit set has {n_blocks_fit} blocks holding {ka} distinct values, on the test set {n_blocks_test} blocks "
+            f"holding {kt} (adjacent blocks of equal mean are not merged, so blocks can outnumber values). "
             "Isotonic regression pools adjacent violators of the labels sorted by ascending model logit z; the "
             "fitted function at a logit z is the value of the block that holds the largest training logit not above "
             f"z, and the first block's value below all of them; the fit-set values run from {min(fitted):.4f} to {max(fitted):.4f}. The model logits of the fit and test sets are all "
@@ -705,7 +718,8 @@ def soft_scores():
             f"Cells are the mean over the three of sum_i q_i (-ln p_i) (soft cross-entropy), sum_i q_i ln(q_i / p_i) (KL) and "
             f"sum_i (p_i - q_i)^2, four decimals; the mean entropy of the oracle is {ent:.4f}. 'Likelier label' is the mean "
             f"-ln of the probability the report gives to the likelier outcome of the oracle (healthy, faulty, healthy), "
-            f"the score of a collapsed target.\n\n"
+            f"the score of a collapsed target. The reports given, one per oracle distribution in the order above: the oracle itself; hedged "
+            f"toward the middle (0.7, 0.3), (0.5, 0.5), (0.8, 0.2); collapsed to the likelier label (0.98, 0.02), (0.02, 0.98), (0.98, 0.02).\n\n"
             + _table(["report", "likelier label", "soft cross-entropy", "KL", "squared distance"], rows))
 
 

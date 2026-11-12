@@ -439,9 +439,12 @@ def run(nudge):
 
     # orders: the quantile 0.9 of the third forecast bar
     def orders(rows, fitted):
-        o = {"sn": order_costs(rows, "sn", fitted, fitted.raw), "ar": order_costs(rows, "ar", fitted, fitted.raw),
-             "map raw": order_costs(rows, "map", fitted, fitted.raw), "map recal": order_costs(rows, "map", fitted, fitted.recal["map"]),
-             "map median": order_costs(rows, "map", fitted, fitted.raw, 2)}
+        o = {}
+        for kind in ("sn", "ar", "map"):
+            o[f"{kind} raw"] = order_costs(rows, kind, fitted, fitted.raw)
+            o[f"{kind} recal"] = order_costs(rows, kind, fitted, fitted.recal[kind])
+        o["map raw median"] = order_costs(rows, "map", fitted, fitted.raw, 2)
+        o["map recal median"] = order_costs(rows, "map", fitted, fitted.recal["map"], 2)
         out = {k: sum(v) / len(v) for k, v in o.items()}
         out["oracle"] = 0.0
         return out
@@ -575,8 +578,8 @@ def panel_setup():
     ev_total = sum(sum(sr["ev"]) for sr in panel)
     bars = lambda lo, hi: sum(sum(sr["ev"][lo:hi]) for sr in panel)
     head = (f"The panel has {S} series of {N} bars. Generator `{PANEL_NAME}` (SplitMix64, seed {_seed(PANEL_NAME)}), series after series; for series i the draws, in this order, are "
-            f"seven values and then {N} calls of normal(): u1 for level = 20 * 5^u1; u2 for slope = 0.0005 + 0.0025 u2; u3 for amp = 0.05 + 0.20 u3; u4 for phase = 2 pi u4; "
-            f"u5 for shock = 0.01 + 0.03 u5; integer(200) for change = 100 + that integer; u7 for jump = -0.25 + 0.50 u7. Then v_t = 0.7 v_(t-1) + shock normal() with "
+            f"seven values (six calls of uniform() and one of integer(200)) and then {N} calls of normal(): u1 for level = 20 * 5^u1; u2 for slope = 0.0005 + 0.0025 u2; u3 for amp = 0.05 + 0.20 u3; u4 for phase = 2 pi u4; "
+            f"u5 for shock = 0.01 + 0.03 u5; integer(200) for change = 100 + that integer; u6 for jump = -0.25 + 0.50 u6. Then v_t = 0.7 v_(t-1) + shock normal() with "
             f"v_(-1) = 0, and y_t = level (1 + slope t + amp sin(2 pi t / 12 + phase) + v_t) (1 + jump [t >= change]) for t = 0 .. {N - 1} (the library sine; the {N} "
             f"calls of normal() are an even number, so no Gaussian value is held from one series to the next). Events: generator `{EVENT_NAME}` (seed {_seed(EVENT_NAME)}), "
             f"series after series, one uniform b for the intercept b = {EVENT_B0} + {EVENT_BW} u and then one uniform per bar t = 0 .. {N - 1}; with z_t = (y_(t-1) - mean) / "
@@ -688,8 +691,8 @@ def control():
 def recalibration():
     qrows = []
     for i, tau in enumerate(LEVELS):
-        qrows.append((tau, fx(Z(tau), 4), *(_cs(lambda r, k=k, i=i: r["mult"][k][i], 4) for k in ("sn", "ar", "map"))))
-    t1 = _table(["level tau", "raw multiplier z_tau", "seasonal naive", "seasonal AR(1)", "learned map"], qrows)
+        qrows.append((tau, fx(Z(tau), 4), *(_cs(lambda r, k=k, i=i: r["mult"][k][i], 4) for k in ("naive", "sn", "ar", "map"))))
+    t1 = _table(["level tau", "raw multiplier z_tau", "naive", "seasonal naive", "seasonal AR(1)", "learned map"], qrows)
     rrows = []
     for i, tau in enumerate(LEVELS):
         rrows.append((tau, *(_cp(lambda r, v=v, b=b, i=i: r[b][v][2][i] if b == "cover_cal" else r["cover"]["map"][v][2][i], 1) for b in ("cover_cal", "cover") for v in ("raw", "recal"))))
@@ -727,14 +730,16 @@ def decisions():
     alerts = [("number of alerts, raw p", *(cell(lambda r, b=b: float(r["event"][b]["alerts"]["raw"]), lambda x: f"{x:.0f}") for b in ("cal", "test", "deploy"))),
               ("number of alerts, recalibrated p", *(cell(lambda r, b=b: float(r["event"][b]["alerts"]["recal"]), lambda x: f"{x:.0f}") for b in ("cal", "test", "deploy")))]
     ords = []
-    for label, key in (("seasonal naive, quantile 0.9", "sn"), ("seasonal AR(1), quantile 0.9", "ar"), ("learned map, raw quantile 0.9", "map raw"),
-                       ("learned map, recalibrated quantile 0.9", "map recal"), ("learned map, median", "map median")):
+    for label, key in (("seasonal naive, raw head, quantile 0.9", "sn raw"), ("seasonal AR(1), raw head, quantile 0.9", "ar raw"),
+                       ("learned map, raw head, quantile 0.9", "map raw"), ("learned map, raw head, median", "map raw median"),
+                       ("seasonal naive, recalibrated head, quantile 0.9", "sn recal"), ("seasonal AR(1), recalibrated head, quantile 0.9", "ar recal"),
+                       ("learned map, recalibrated head, quantile 0.9", "map recal"), ("learned map, recalibrated head, median", "map recal median")):
         ords.append((label, *(_c(lambda r, b=b, k=key: r["orders"][b][k], 4) for b in ("test", "deploy"))))
     ords.append(("perfect foresight", "0", "0"))
     head = (f"Alerts. The probabilities and the repair are those of milestone 6. An alert costs {COST_FALSE_ALARM:g} when no stock-out follows and nothing when one does; no alert "
             f"costs {COST_MISS:g} when one follows and nothing otherwise; the threshold is 1 / (1 + {COST_MISS:g}) = {t_star:.4f}, and a window is alerted when p >= the threshold. "
             f"First table: mean cost per window (series and origin) in the three blocks, then the counts of alerts.\n\n")
-    head2 = (f"\n\nOrders. For each row the order is the quantile 0.9 (or the median) of the third forecast bar (h = {LEAD}), and its cost is {COST_OVER:g} per unit of d_loss ordered "
+    head2 = (f"\n\nOrders. For each row the order is the quantile 0.9 (or the median) of the third forecast bar (h = {LEAD}) of the head named in the row, raw (point + d sigma_h z_tau) or recalibrated (the multipliers of milestone 6 of that forecaster), and its cost is {COST_OVER:g} per unit of d_loss ordered "
              f"above the outcome and {COST_UNDER:g} per unit of d_loss below it (the pinball loss at 0.9 times ten). Second table: the mean cost per row.\n\n")
     return head + _table(["policy", "calibration block", "test block", "deployment block"], rows + alerts) + head2 + _table(["order", "test block", "deployment block"], ords)
 
@@ -793,17 +798,18 @@ def ledger():
     stages = [
         ("scale a fit window and its targets", f"{n_fit} x (6c + 4 + 2H)", n_fit * (scale + 2 * H), n_fit * (C + H) * 8),
         ("accumulate the Gram matrix and the right-hand sides", f"{n_fit} x 2 (p(p+1)/2 + pH)", n_fit * gram, (p * p + p * H) * 8),
-        ("eliminate: H solves of order p", f"{H} x elimination(p = {p})", H * _elim_flops(p), (p * (p + 1) + p * H) * 8),
+        ("eliminate: H solves of order p", f"{H} x elimination(p = {p})", H * _elim_flops(p), (p * p + p * H) * 8),
         ("forward pass of the map, all four blocks", f"{n_fit + n_cal + n_test + n_dep} x (2pH + 2H)", (n_fit + n_cal + n_test + n_dep) * fwd, (n_fit + n_cal + n_test + n_dep) * C * 8),
         ("score a head on a block: 8 variants on test, 4 on deployment", f"{8 * n_test + 4 * n_dep} x H (1 + 7 L)", (8 * n_test + 4 * n_dep) * score, 0),
         ("four block bootstraps of the skill", f"4 x {RESAMPLES} x (2 K + 2)", 4 * RESAMPLES * boot_row, 4 * 2 * len(split_forward()[2]) * 8),
-        ("Newton fit of the event model", f"{NEWTON_STEPS} x {n_fit} x 40", NEWTON_STEPS * n_fit * newton, n_fit * 3 * 8),
+        ("Newton fit of the event model", f"{NEWTON_STEPS} x {n_fit} x 40", NEWTON_STEPS * n_fit * newton, n_fit * (3 + 1) * 8),
     ]
     return stages, {"n": (n_fit, n_cal, n_test, n_dep), "scale": scale, "gram": gram, "fwd": fwd, "score": score, "boot_row": boot_row, "elim": _elim_flops(p)}
 
 
 def bill():
     stages, info = ledger()
+    p = C + 1
     total = sum(s[2] for s in stages)
     rows = [(a, b, f"{c:,}", f"{d:,}" if d else "-", f"{100.0 * c / total:.1f}") for a, b, c, d in stages]
     rows.append(("total", "", f"{total:,}", "", "100.0"))
@@ -813,11 +819,15 @@ def bill():
             f"logarithm, the Gaussian distribution and its inverse, the sigmoid, the draws of the generator) are not counted. With p = c + 1 = {C + 1} inputs of the map, "
             f"H = {H} outputs, L = {len(LEVELS)} levels and K = {len(split_forward()[2])} test origins: scaling a window is 6c + 4 FLOPs (mean c + 1, variance 3c + 1, the square "
             f"root, the added 1e-5, and 2c for the scaled bars) and its targets 2H; one Gram update is 2 (p (p + 1) / 2 + p H) = {info['gram']}; one elimination of order p is "
-            f"{info['elim']} (per pivot column c and row below it one division and 2 FLOPs for each of the p - c + 1 entries to its right, then 2 (p - 1 - i) + 2 for row i of the "
+            f"{info['elim']} (per pivot column c = 0 .. p - 1 and row below it one division and 2 FLOPs for each of the p - c + 1 entries from the pivot column itself through the right-hand side, which is updated like the rest, then 2 (p - 1 - i) + 2 for row i of the "
             f"back substitution); the map's output for a row is 2 p H + 2 H = {info['fwd']}; scoring one head on one row is H (1 + 7 L) = {info['score']} (one product d sigma_h per "
             f"horizon, then per level 2 for the quantile, 4 for the loss and 1 to add it up); one bootstrap resample is 2K + 2 = {info['boot_row']} (two sums of K losses, a "
             f"division and a subtraction); one Newton step of the event model is 40 FLOPs a row (the logit, the gradient and the 3 x 3 Hessian). Bytes are 8-byte doubles "
-            f"read once per stage. Rows of the four blocks: {', '.join(str(x) for x in info['n'])}.\n\n")
+            f"of the arrays a stage reads, each counted once however often the stage passes over it, and arrays that the stage before just wrote and that are still resident are not counted again: "
+            f"scaling reads the c + H = {C + H} raw bars of each fit window; the Gram stage reads its accumulator, the p x p matrix and the p x H right-hand sides ({p * p + p * H} doubles); "
+            f"elimination reads that same matrix and right-hand sides once for all H solves ({p * p + p * H} doubles); the forward pass reads the c = {C} scaled context bars of each row "
+            f"of the four blocks (the constant input and the {p * H} weights are resident); scoring reads nothing new (the rows just passed forward); a bootstrap reads two "
+            f"vectors of K origin losses, the baseline's and the model's; the Newton fit reads the 3 features and the label of each fit row. Rows of the four blocks: {', '.join(str(x) for x in info['n'])}.\n\n")
     tail = (f"\n\nOne fit window is read once, {(C + H) * 8} bytes for {info['gram'] + info['scale'] + 2 * H:,} FLOPs, {(info['gram'] + info['scale'] + 2 * H) / ((C + H) * 8):.2f} FLOPs "
             f"per byte; the whole panel is {S * N * 8:,} bytes.")
     return head + _table(["stage", "count", "FLOPs", "bytes read", "share of FLOPs (%)"], rows) + tail
@@ -854,7 +864,8 @@ def acceptance_tests():
     add(7, "event model weights", ", ".join(_cs(lambda r, j=j: r["theta"][j], 4) for j in range(3)), "4 decimals")
     add(7, "ECE on the test block, raw and repaired", f"{_c(lambda r: r['event']['test']['ece']['raw'])}, {_c(lambda r: r['event']['test']['ece']['recal'])}", "4 decimals")
     add(7, "alert cost on the test block: never, always, raw, repaired", ", ".join(_c(lambda r, k=k: r["event"]["test"]["cost"][k]) for k in ("never", "always", "raw", "recal")), "4 decimals")
-    add(7, "order cost on the test block: seasonal naive, learned raw, learned recalibrated", ", ".join(_c(lambda r, k=k: r["orders"]["test"][k]) for k in ("sn", "map raw", "map recal")), "4 decimals")
+    add(7, "order cost on the test block, quantile 0.9, raw head: seasonal naive, learned map", ", ".join(_c(lambda r, k=k: r["orders"]["test"][k]) for k in ("sn raw", "map raw")), "4 decimals")
+    add(7, "order cost on the test block, quantile 0.9, recalibrated head: seasonal naive, AR(1), learned map", ", ".join(_c(lambda r, k=k: r["orders"]["test"][k]) for k in ("sn recal", "ar recal", "map recal")), "4 decimals")
     add(8, "future scaler: skill on the test block and in deployment", f"{_cs(lambda r: r['future']['test']['skill']['recal'], 3)}, {_cs(lambda r: r['future']['deploy']['skill']['recal'], 3)}", "3 decimals")
     add(8, "future scaler: share inside the central 80 percent in deployment (recalibrated)", _cp(lambda r: r["future"]["deploy"]["cover"]["recal"]), "1 decimal, percent")
     add(8, "random split: raw event ECE on its test block and in deployment", f"{_c(lambda r: r['random']['event_test']['ece']['raw'])}, {_c(lambda r: r['random']['event_deploy']['ece']['raw'])}", "4 decimals")

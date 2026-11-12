@@ -96,8 +96,11 @@ def _series_spec():
 def _forecaster_spec():
     return ("The forecasters are those of Chapter 1, each refitted at every origin o from the bars y_0 .. y_(o-1) alone (an expanding "
             "past) and asked for the 12 bars o .. o + 11: SN repeats the last season, y_(o-12+(k mod 12)) for k = 0 .. 11; SND adds to "
-            "that the drift delta * 12 * (floor(k / 12) + 1) with delta = (y_(o-1) - y_0) / (o - 1); AR fits an AR(1) to the seasonal "
-            "differences by least squares and adds the forecast differences back to the season before; naive repeats y_(o-1).")
+            "that the drift delta * 12 * (floor(k / 12) + 1) with delta = (y_(o-1) - y_0) / (o - 1); AR forms the seasonal "
+            "differences z_t = y_t - y_(t-12) for t = 12 .. o - 1, fits z_t = a + b z_(t-1) with an intercept by ordinary least squares over "
+            "t = 13 .. o - 1, forecasts z_(o+k) = a + b z_(o+k-1) recursively from the last difference z_(o-1) (each forecast difference "
+            "fed back in), and adds each to the bar of the season before, y_(o+k-12) (for k = 0 .. 11 no forecast bar is needed); "
+            "naive repeats y_(o-1).")
 
 
 @lru_cache(maxsize=None)
@@ -258,7 +261,7 @@ def wql_counts():
     t1 = _table(["levels used", "number of levels Q", "wQL (sum over levels)", "wQL divided by Q"], rows)
     head = ("Actuals y = (10, 12, 9, 14), four bars. The forecast of bar t is the Gaussian with mean mu = (10.5, 11, 10, 13) and standard "
             "deviation 2, so its quantile at level tau is mu_t + 2 z_tau with z_tau the library inverse of the standard Gaussian distribution "
-            "function (z_0.5 = 0, z_0.1 = -1.281552, z_0.9 = +1.281552), and the last row of the second table adds 100 to every actual and every mean. The pinball loss of a quantile q against y at level tau is "
+            "function (z_0.5 = 0, z_0.1 = -1.281552, z_0.9 = +1.281552; any inverse-distribution routine accurate to 1e-6 reproduces the table), and the last row of the second table adds 100 to every actual and every mean. The pinball loss of a quantile q against y at level tau is "
             "max(tau (y - q), (tau - 1)(y - q)). wQL is 2 times the sum of the pinball losses over all bars and all levels, divided by the "
             "sum of |y_t| = 45.\n\n")
     return head + t0 + "\n\n" + t1
@@ -441,7 +444,8 @@ def dm_size():
     head = (f"Differentials with no true difference: d_t = (1 / sqrt(12)) (xi_t + xi_(t+1) + ... + xi_(t+11)) for t = 0 .. K - 1 with xi the "
             f"standard Gaussian calls of one generator per row of the table ({_seed_text(DM_NAME)}, a fresh generator for each K), the K + 11 calls "
             f"of normal() of a replicate in order, {DM_REPS} replicates in turn; d has mean 0, variance 1 and autocovariance "
-            f"(12 - k) / 12 at lag k < 12. Each statistic is that of the previous example with horizon 12; the Gaussian columns reject when its "
+            f"(12 - k) / 12 at lag k < 12. Each statistic is that of the previous example with horizon 12 (the 'rectangular with factor' column is the rectangular statistic multiplied by "
+            f"the Harvey-Leybourne-Newbold factor sqrt((K + 1 - 2h + h (h - 1) / K) / K) with h = 12); the Gaussian columns reject when its "
             f"absolute value exceeds {_fx(Z975, 6)}, the small-sample column when it exceeds the Student t multiplier of K - 1 degrees of freedom shown. "
             f"A replicate whose rectangular long-run variance is not positive has no rectangular statistic and is counted as not rejecting.\n\n")
     return head + _table(["K origins", "t multiplier", "independent origins", "rectangular", "rectangular with factor", "Bartlett",
@@ -539,8 +543,8 @@ def how_many_series():
             f"'Needed' is the number of series ceil(((1.959964 + 0.841621) * s / m)^2) for a two-sided test at the 5 percent level to find a mean "
             f"difference m with probability 0.8 when the differences have standard deviation s (divisor {PANEL_SERIES - 1}). The last columns are the "
             f"share of {POWER_REPS} draws of N series with replacement from the {PANEL_SERIES} differences for which mean / (sd / sqrt(N)) exceeds 1.959964 "
-            f"(sd with divisor N - 1); one generator ({_seed_text(POWER_NAME)}) draws the rows in order, row after row, N after N, each draw being N calls "
-            f"of rng.integer({PANEL_SERIES}).\n\n")
+            f"(sd with divisor N - 1); a fresh generator ({_seed_text(POWER_NAME)}) for each row, drawing the columns in order, N after N, each draw being N calls "
+            f"of rng.integer({PANEL_SERIES}) (rows do not share a stream).\n\n")
     return head + _table(["origins per series", "mean difference m", "s", "series needed"] + [f"share significant, N = {n}" for n in POWER_SIZES], rows)
 
 
@@ -579,6 +583,7 @@ def _random_walk(rng, n):
 def cherry_horizons():
     rng = bookrng.generator(CHERRY_NAME)
     skills, zs = [], []
+    pooled_drift = pooled_naive = 0.0
     for _ in range(CHERRY_SERIES):
         y = _random_walk(rng, CHERRY_BARS)
         srow, zrow = [], []
@@ -592,6 +597,8 @@ def cherry_horizons():
             d = [b - a for a, b in zip(drift_err, naive_err)]
             k = len(d)
             v = _long_run(d, h - 1, "rect")
+            pooled_drift += sum(drift_err)
+            pooled_naive += sum(naive_err)
             srow.append(1.0 - sum(drift_err) / sum(naive_err))
             zrow.append(_mean(d) / math.sqrt(v / k) if v > 0 else 0.0)
         skills.append(srow)
@@ -606,6 +613,7 @@ def cherry_horizons():
         holm += z > 0
     unadj = sum(1 for r in zs for z in r if z > Z975)
     rows = [("every one of the 480 cells (the honest average)", _fs(_mean(cells))),
+            ("all errors of all cells pooled into one ratio", _fs(1.0 - pooled_drift / pooled_naive)),
             ("each series at its best horizon, averaged over the 40 series", _fs(_mean([max(r) for r in skills]))),
             ("the single best cell of the 480", _fs(max(cells)))]
     t1 = _table(["what is reported", "skill of drift against naive"], rows)
@@ -620,7 +628,9 @@ def cherry_horizons():
             f"Skill is 1 - (sum of drift errors) / (sum of naive errors) over the origins; the statistic of a cell is the rectangular statistic of "
             f"d_o = (naive error) - (drift error) with lag h - 1 (lag 0 for h = 1) and no small-sample factor, so a positive statistic favours drift. "
             f"The 480 cells are ranked by two-sided Gaussian p-value, and Holm's rule multiplies the r-th smallest (r = 1, 2, ...) by 480 - r + 1 "
-            f"and stops at the first product above 0.05.\n\n")
+            f"and stops at the first product above 0.05. The skill of a cell is the pooled ratio of that one series and horizon; "
+            f"'the honest average' is the plain mean of the 480 cell skills, not a pooled ratio over all cells. A cell whose rectangular "
+            f"variance is not positive gets statistic 0 (counted in neither tail); with lag 0 the variance is the sample variance and is positive.\n\n")
     return head + t1 + "\n\n" + t2
 
 
