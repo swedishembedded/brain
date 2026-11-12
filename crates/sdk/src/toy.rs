@@ -10,7 +10,7 @@
 //!
 //! [`write_toy_chat_checkpoint`] writes a randomly initialised `qwen3` checkpoint (2 layers, 32 wide, a 264-token
 //! vocabulary) with a byte-level tokenizer and a bare chat template: a user turn is its text followed by `=`, an
-//! assistant turn its text followed by `<|im_end|>`, a system turn is dropped. A prompt `abc=` is answered by whatever the
+//! assistant turn its text followed by `<|im_end|>`, a system turn is dropped, and generation stops at `<|im_end|>`. A prompt `abc=` is answered by whatever the
 //! weights make of the tokens after it, so a task whose answer is a function of the prompt (a cipher, say) is learnt by a
 //! LoRA adapter of rank 16 in a few hundred steps, and a held-out prompt shows whether it generalised or memorised.
 //!
@@ -27,7 +27,7 @@ pub const WEIGHT_SCALE: f32 = 6.0;
 
 /// The vocabulary the checkpoint declares: 256 bytes and three specials, rounded up.
 const VOCAB: u32 = 264;
-const CONTEXT: u32 = 64;
+const CONTEXT: u32 = 256;
 
 const TEMPLATE: &str = "{% for m in messages %}{% if m.role == 'user' %}{{ m.content }}={% elif m.role == 'assistant' %}{{ m.content }}<|im_end|>{% endif %}{% endfor %}";
 
@@ -74,5 +74,5 @@ pub fn write_toy_chat_checkpoint(dir: &Path, seed: u64) -> Result<()> {
     ]);
     let tokenizer = serde_json::json!({"model": {"vocab": vocab, "merges": []}, "added_tokens": specials});
     std::fs::write(dir.join("tokenizer.json"), tokenizer.to_string()).map_err(io)?;
-    std::fs::write(dir.join("tokenizer_config.json"), serde_json::json!({"chat_template": TEMPLATE}).to_string()).map_err(io)
+    std::fs::write(dir.join("tokenizer_config.json"), serde_json::json!({"chat_template": TEMPLATE, "eos_token": "<|im_end|>"}).to_string()).map_err(io)
 }
