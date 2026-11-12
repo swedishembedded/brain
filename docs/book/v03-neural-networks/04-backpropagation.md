@@ -962,8 +962,10 @@ reverse list once, in reverse order, with a comment above each group naming the
 chain-rule step ("out = g @ Wo^T + bo -> d_g, dWo, dbo", "g = GELU(dec_pre) ->
 d_dec_pre"). `backward` just submits the cached list. Each layer's pre-activation
 and activation are kept in buffers of their own, one per stage, because the
-backward reads them. Its first layer even computes $d\mathbf{X}$ and labels it
-"unused", a matrix product the chapter's pseudocode skips. The
+backward reads them. Its first layer computes the weight and bias gradients and
+stops there, with no product for $d\mathbf{X}$: the input is data, and the
+backward list, like the chapter's pseudocode, spends nothing on a gradient
+nobody reads. The
 decoder-only language model `crates/gpt2/src/model.rs` has the same shape, with
 attention and normalisation kernels in between.
 

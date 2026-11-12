@@ -12,9 +12,9 @@ chapter's passage is rewritten in the same series of commits.
 ## Open: fixable in this tree
 
 Numerics and data:
-- [ ] data rng: `gen_range_inclusive` modulo bias (use rejection), Box-Muller clamp at 1e-12 (redraw a zero `u1`), offset
+- [x] data rng: `gen_range_inclusive` modulo bias (use rejection), Box-Muller clamp at 1e-12 (redraw a zero `u1`), offset
       comment (v01 ch17).
-- [ ] eval: real tests for `gpt_val_perplexity`, `gpt_exact_match`, `greedy_until_newline`, `argmax`; drop the
+- [x] eval: real tests for `gpt_val_perplexity`, `gpt_exact_match`, `greedy_until_newline`, `argmax`; drop the
       tautological one (v02 ch06).
 
 Training kernels and graphs:
@@ -23,18 +23,18 @@ Training kernels and graphs:
 - [ ] rmsnorm/layernorm: shared builder registers the `_rows` twins by default; correct the "per-row loop is fine"
       comments (v03 ch10, v04 ch04).
 - [ ] model: rename `LayerTape`/`TapeEdge` to names that say what they are (v03 ch04).
-- [ ] toyautoencoder: delete the unused first-layer dX and its buffer (v03 ch04).
+- [x] toyautoencoder: delete the unused first-layer dX and its buffer (v03 ch04).
 - [ ] wgsl-cpu: bounds-checked dispatch that returns an error naming kernel and binding (v03 ch10).
-- [ ] wgsl-cpu: typed compile error instead of matching the word "barrier" (v04 ch09).
+- [x] wgsl-cpu: typed compile error instead of matching the word "barrier" (v04 ch09).
 - [ ] backend-cuda / gpt2: derive golden tolerances from the round-off bound (v04 ch09).
 - [ ] gpt2: tie lm_head to the token embedding, with gradcheck (v05 ch03, ch10, ch15).
 - [ ] gpt2: derive the forward bound and assert the greedy top-2 gap instead of choosing a seed (v05 ch15).
-- [ ] rope.wgsl: theta as a parameter (v05 ch08).
+- [x] rope.wgsl: theta as a parameter (v05 ch08).
 - [ ] modernbert: banded local attention over a [rows, 2w+1] slab (v05 ch14).
-- [ ] checkpoint: `read_model_dir` errors on an index key no shard returned (v06 ch02).
+- [x] checkpoint: `read_model_dir` errors on an index key no shard returned (v06 ch02).
 - [ ] gradcheck: `check_moe` differentiates a loss that includes the aux and z terms (v06 ch04).
 - [ ] modelcost: register gemma4 and minimaxh3, wire Recording in qwen35/qwen35moe, real-config pins (v06 ch10).
-- [ ] serve sampler: exact top-p/min-p over the full row, exact penalties, one top-k tie rule (v05 ch11).
+- [ ] serve sampler: exact top-p/min-p over the full row, exact penalties (v05 ch11); the one top-k tie rule is done (qwen3vl keeps exactly k, lowest id first).
 
 Vision and generation:
 - [ ] imaging letterbox: pixels and boxes share one pad; half-pixel nearest resize and pad value on device; retire the
@@ -42,7 +42,7 @@ Vision and generation:
 - [ ] imaging: migrate the call sites the crate header lists as owed (v07 ch01).
 - [ ] clip: DeepSeek-OCR vision tower activation agrees with upstream (v07 ch08).
 - [ ] zipdepth: scale-and-shift-invariant loss with gradient term and a real loader (v07 ch05).
-- [ ] instantid: per-site k and v computed once in `set_id` (v08 ch11).
+- [x] instantid: per-site k and v computed once in `set_id` (v08 ch11).
 - [ ] rrdbnet: exact tiling or an asserted seam bound (v08 ch12).
 - [ ] vqgan / mimi: perceptual (lpips) and adversarial terms wired into training (v08 ch03, ch04, v09 ch03).
 
@@ -84,4 +84,4 @@ Forecasting and decisions:
 
 ## Book text only
 
-- [ ] The 16 passages that describe defects already fixed (stale text), and the v11 ch06 sentence on an old commit message.
+- [ ] The 16 passages that describe defects already fixed (stale text; v05 ch11 and v08 ch11 done), and the v11 ch06 sentence on an old commit message.

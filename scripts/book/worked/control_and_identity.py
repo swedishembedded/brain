@@ -1134,7 +1134,7 @@ def instantid_counts():
         tot_kv += len(grp) * kvf
         tot_att += len(grp) * att
     rp, rf, rt = resampler_counts()
-    ratio = (tot_kv + tot_att) / 1e9 / SDXL_PASS_GFLOP * 100
+    ratio = tot_att / 1e9 / SDXL_PASS_GFLOP * 100
     return (
         "InstantID's identity branch derived from the SDXL U-Net's 70 cross-attention sites (counted from the configuration of "
         "`denoiser_architectures`, at a 128 by 128 latent) and the released resampler's shapes (width 1280, 4 layers, 20 heads of "
@@ -1149,9 +1149,9 @@ def instantid_counts():
         + _table(["site width", "sites", "tokens T", "numbers per site", "numbers, all sites", "keys and values, MFLOP", "scores and sums, MFLOP"],
                  rows, "rrrrrrr")
         + f"\n\nThe 70 sites hold {_int(tot_p)} numbers and the resampler {_int(rp)} in {rt} tensors, {_int(tot_p + rp)} in all "
-        f"({(tot_p + rp) * 4 / 1e9:.2f} GB in 32-bit floats). The resampler costs {_gf(rf / 1e9, 2)} once per identity. In every "
-        f"evaluation of the denoiser the added attention costs {_gf((tot_kv + tot_att) / 1e9)} ({_gf(tot_kv / 1e9)} for the keys and "
-        f"values, which depend only on the identity, and {_gf(tot_att / 1e9)} for the scores and sums), {ratio:.2f} percent of the "
+        f"({(tot_p + rp) * 4 / 1e9:.2f} GB in 32-bit floats). The resampler costs {_gf(rf / 1e9, 2)} once per identity, and so do the keys and "
+        f"values of the 16 tokens ({_gf(tot_kv / 1e9)}), which depend only on the identity. In every evaluation of the denoiser the "
+        f"added attention costs {_gf(tot_att / 1e9)} for the scores and sums, {ratio:.2f} percent of the "
         f"{_gf(SDXL_PASS_GFLOP)} of the U-Net pass."
     )
 
