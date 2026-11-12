@@ -384,7 +384,7 @@ volumes:
         question: "How does a whole network become one compiled program for a fixed-function accelerator?"
         introduces: [graph-export, onnx-graph, post-training-quantization, calibration-set, graph-compiler]
         requires: [affine-quantization, computational-graph, backend-abstraction]
-        brain: [onnx, npu, rknpu]
+        brain: [onnx, npu, rknpu, openvino-rt]
 
       - id: project-tensor-engine
         title: "Project: A Device-Independent Tensor Engine"

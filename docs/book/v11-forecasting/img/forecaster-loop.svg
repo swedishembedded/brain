@@ -1,0 +1,44 @@
+<!-- source-sha256: 600d13363838a09cb2272a996b26a877c8d335e7ab78db664ce6fa3899ed96cc -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 777 346" width="777" height="346"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="777" height="346" fill="#ffffff"/>
+<rect x="24" y="24" width="160" height="86" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="104" y="55.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">40 series of 300 bars:</text>
+<text x="104" y="71.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">season, regime change,</text>
+<text x="104" y="87.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">stock-outs</text>
+<rect x="224" y="24" width="163" height="86" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="305.5" y="55.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">blocks: fit, calibration,</text>
+<text x="305.5" y="71.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">test, then deployment;</text>
+<text x="305.5" y="87.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">purge and embargo</text>
+<rect x="427" y="24" width="152" height="86" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="503" y="47.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">naive, seasonal naive,</text>
+<text x="503" y="63.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">seasonal AR(1) and a</text>
+<text x="503" y="79.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pooled ridge map, each</text>
+<text x="503" y="95.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">with a Gaussian head</text>
+<rect x="619" y="24" width="134" height="86" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="686" y="47.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">scaled quantile loss,</text>
+<text x="686" y="63.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">skill and block</text>
+<text x="686" y="79.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bootstrap, coverage,</text>
+<text x="686" y="95.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">random-walk control</text>
+<rect x="24" y="206" width="160" height="86" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="104" y="229.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">quantile levels repaired</text>
+<text x="104" y="245.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">by the probability integral</text>
+<text x="104" y="261.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">transform; isotonic fit of</text>
+<text x="104" y="277.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the event probability</text>
+<rect x="224" y="206" width="163" height="86" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="305.5" y="237.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">orders at the 0.9 quantile,</text>
+<text x="305.5" y="253.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">alerts at the cost</text>
+<text x="305.5" y="269.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">threshold 1 / (1 + 5)</text>
+<rect x="427" y="206" width="152" height="86" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="503" y="237.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cost actually incurred</text>
+<text x="503" y="253.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">in the test block and</text>
+<text x="503" y="269.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">in the deployment block</text>
+<line x1="187" y1="67" x2="221" y2="67" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="187" y1="249" x2="221" y2="249" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="390" y1="67" x2="424" y2="67" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="390" y1="249" x2="424" y2="249" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="582" y1="67" x2="616" y2="67" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M686,110 L686,148 Q686,158 676,158 L114,158 Q104,158 104,168 L104,203" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="395" y="150.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the forecasts of the test block</text>
+<text x="305.5" y="130.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">mistake 1: a random split</text>
+<text x="503" y="130.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">mistake 2: a scaler that sees the future</text>
+<text x="104" y="312.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">mistake 3: fitted on the test block</text>
+</svg>

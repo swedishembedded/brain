@@ -1,0 +1,38 @@
+<!-- source-sha256: 53327097aa7d4e9379ac400775b616132b0c871cc562112ad178051e80284ea1 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 340" width="560" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="340" fill="#ffffff"/>
+<line x1="118.5" y1="294" x2="118.5" y2="30" stroke="#edf2f7"/>
+<text x="118.5" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="239.5" y1="294" x2="239.5" y2="30" stroke="#edf2f7"/>
+<text x="239.5" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="360.5" y1="294" x2="360.5" y2="30" stroke="#edf2f7"/>
+<text x="360.5" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">3</text>
+<line x1="481.5" y1="294" x2="481.5" y2="30" stroke="#edf2f7"/>
+<text x="481.5" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="58" y1="285.2" x2="542" y2="285.2" stroke="#edf2f7"/>
+<text x="52" y="289.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-0.75</text>
+<line x1="58" y1="241.2" x2="542" y2="241.2" stroke="#edf2f7"/>
+<text x="52" y="245.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-0.5</text>
+<line x1="58" y1="197.2" x2="542" y2="197.2" stroke="#edf2f7"/>
+<text x="52" y="201.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-0.25</text>
+<line x1="58" y1="153.2" x2="542" y2="153.2" stroke="#edf2f7"/>
+<text x="52" y="157.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="109.2" x2="542" y2="109.2" stroke="#edf2f7"/>
+<text x="52" y="113.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.25</text>
+<line x1="58" y1="65.2" x2="542" y2="65.2" stroke="#edf2f7"/>
+<text x="52" y="69.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<rect x="58" y="30" width="484" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="264"/></clipPath>
+<g clip-path="url(#plot)"><line x1="58" y1="153.2" x2="542" y2="153.2" stroke="#a0aec0" stroke-dasharray="4 4"/><circle cx="118.5" cy="109.59" r="5" fill="#2b6cb0"/><circle cx="239.5" cy="51.37" r="5" fill="#2b6cb0"/><circle cx="360.5" cy="110.31" r="5" fill="#2b6cb0"/><circle cx="481.5" cy="109.69" r="5" fill="#2b6cb0"/><circle cx="118.5" cy="110.97" r="5" fill="#c05621"/><circle cx="239.5" cy="281.19" r="5" fill="#c05621"/><circle cx="360.5" cy="110.25" r="5" fill="#c05621"/><circle cx="481.5" cy="110.74" r="5" fill="#c05621"/><circle cx="118.5" cy="153.23" r="5" fill="#2f855a"/><circle cx="239.5" cy="60.15" r="5" fill="#2f855a"/><circle cx="360.5" cy="153.77" r="5" fill="#2f855a"/><circle cx="481.5" cy="153.24" r="5" fill="#2f855a"/></g>
+<text x="300" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">1 as specified   2 future scaler   3 random split   4 test-block recalibration</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">skill against the baseline</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Skill reported, deployed and on random walks</text>
+<rect x="376.88" y="225" width="157.12" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<circle cx="394.88" cy="240" r="3.5" fill="#2b6cb0"/>
+<text x="410.88" y="244" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">test block</text>
+<circle cx="394.88" cy="257" r="3.5" fill="#c05621"/>
+<text x="410.88" y="261" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">deployment block</text>
+<circle cx="394.88" cy="274" r="3.5" fill="#2f855a"/>
+<text x="410.88" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">random-walk control</text>
+</svg>
