@@ -804,7 +804,7 @@ volumes:
         question: "How does a 3D point become a pixel, and how do we undo that?"
         introduces: [pinhole-camera, camera-intrinsics, camera-extrinsics, homogeneous-coordinates, lens-distortion]
         requires: [matrix, rotation-matrix, vector, singular-value-decomposition, jacobian, monocular-depth]
-        brain: [camera]
+        brain: [camera, headpose]
       - id: structure-from-motion
         title: "Structure from Motion and Multi-View Stereo"
         question: "How can we recover a 3D scene and the camera positions from ordinary photographs?"

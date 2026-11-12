@@ -185,4 +185,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 2. [Probabilistic Forecasts](v11-forecasting/02-probabilistic-forecasting.md): How should a forecast express what it does not know?
 3. [Foundation Models for Time Series](v11-forecasting/03-foundation-forecasters.md): Can one pretrained model forecast any series it has never seen?
 4. [Evaluating Forecasters Honestly](v11-forecasting/04-evaluating-forecasts.md): How do we tell a forecaster with real skill from one that got lucky?
+5. [Survival Analysis and Competing Risks](v11-forecasting/05-survival-analysis.md): How do we predict when something will happen when many examples have not happened yet?
 <!-- /contents -->

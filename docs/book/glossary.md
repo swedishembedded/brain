@@ -170,6 +170,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **causal mask**: the matrix of zeros and minus infinities added to the scores before the softmax so that position $i$ gives no weight to positions after it, which makes the output at each position a function of its prefix alone and lets all positions of a sequence be trained in one pass. *([Self-Attention](v05-sequences/07-self-attention.md))*
 
+**censoring**: the loss of the end of a unit's story, so that only a lower bound on its lifetime is known (it lasted at least as long as it was watched); a censored row is information about survival to a time, not a missing value. *([Survival Analysis and Competing Risks](v11-forecasting/05-survival-analysis.md))*
+
 **central difference**: the finite difference $(f(x+h) - f(x-h))/(2h)$, whose error is proportional to $h^2$ because the first error term cancels by symmetry. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
 **central limit theorem**: the statement that the average of many independent draws with finite variance, shifted by the mean and divided by $\sigma/\sqrt{n}$, has a distribution that approaches the standard Gaussian whatever the distribution of the draws. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
@@ -201,6 +203,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **command recording**: appending many dispatches to one list and handing the list to the device as a single submission, so that the host pays the submission cost once instead of once per dispatch; a read-back or any other observation of the device ends the list. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
 
 **compensated summation**: a way of adding many numbers in which a second variable carries the rounding error of each addition into the next, so that the error of the total stays near $2u$ times the sum of absolute values however many terms there are (Kahan's algorithm). *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
+
+**competing risks**: a setting in which a unit can end in one of several ways and the first ends the follow-up for all, so that the probability of a cause (its cumulative incidence) depends on the hazards of the others and one minus the Kaplan-Meier estimate of a cause is not that probability. *([Survival Analysis and Competing Risks](v11-forecasting/05-survival-analysis.md))*
 
 **complex number**: a point of the plane written $a + bi$, added like a vector and multiplied by the rule $(ac - bd) + (ad + bc)i$, which turns by the angle of one factor and stretches by its length; $i = (0, 1)$ is a quarter turn and $i^2 = -1$. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
@@ -516,6 +520,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **hashing**: computing from a value, by a fixed rule, a fixed-size number used as the address of the value in a table (giving expected constant-time lookup when the rule spreads the keys) or as a fingerprint that changes if any byte of the value changes. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
+**hazard function**: the rate at which units still at risk at time $t$ fail, the limit of the probability of failing in a short stretch given survival to $t$ divided by the length of the stretch, equal to the density over the survival function; its integral is the cumulative hazard and the survival function is the exponential of minus that. *([Survival Analysis and Competing Risks](v11-forecasting/05-survival-analysis.md))*
+
 **he-initialization**: drawing the weights of a ReLU layer with variance $2/n_{\mathrm{in}}$, the factor 2 compensating for the ReLU zeroing half of the second moment. *([Initialization: Where Training Starts](v03-neural-networks/09-initialization.md))*
 
 **Hessian**: the symmetric matrix of second partial derivatives of a scalar function; $\mathbf{u}^\top\mathbf{H}\mathbf{u}$ is the curvature along the unit direction $\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
@@ -593,6 +599,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **k-nearest neighbours**: a classifier that stores the training rows and predicts the most common label among the $k$ rows nearest to a new one; $k$ trades bias against variance. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
 **k-quantization**: a family of block formats in which a super-block of weights is divided into sub-blocks whose scales and mins are themselves stored as small integers times one or two shared factors (two levels of scale), as in Q4_K: 256 weights, eight sub-blocks, 144 bytes. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
+
+**Kaplan-Meier estimator**: the estimate of a survival curve that multiplies, over the distinct observed times, the fraction of the units at risk that did not fail at that time; censored units count in the units at risk until their time. *([Survival Analysis and Competing Risks](v11-forecasting/05-survival-analysis.md))*
 
 **kernel dispatch**: the host-side act of running a kernel: binding buffers to its slots, writing its uniform parameters and enqueueing it over a grid of workgroups, after which the host may continue while the device runs it. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
@@ -1175,6 +1183,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **time series**: a list of values taken at equally spaced moments in which the order is part of the data, so that its values depend on each other and cannot be shuffled. *([Time Series Fundamentals](v11-forecasting/01-time-series.md))*
 
 **time-delay network**: a network of one-dimensional convolutions along time, whose weights are shared across time and whose units read a layer at several delayed moments, so that a deeper unit sees a longer stretch of the signal. *([Who Is Speaking](v09-audio/05-speaker-embeddings.md))*
+
+**time-to-event model**: a model that maps the features of a unit to its hazard, and so to its survival curve at any horizon, trained by a likelihood in which a failure contributes its hazard and every unit its accumulated hazard over the time it was observed. *([Survival Analysis and Competing Risks](v11-forecasting/05-survival-analysis.md))*
 
 **timestep embedding**: the vector made from the scalar noise level by a sinusoidal encoding (cosines of the scaled level at a ladder of rates, then the sines) and a small network, so that a model built from vectors can read how noisy its input is. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
 
