@@ -1331,6 +1331,14 @@ the ends, so this is measured rather than assumed - real weights, 768x448,
 |---|---:|---:|
 | first + last | 1.19x | 2.83 / - / 2.47 |
 | first + frame 62 + last | 1.33x (at rav1e's keyframe, frame 120) | 2.69 / 2.61 / 2.46 |
+| first + frame 62 from ANOTHER composition + last | 1.68x | 2.78 / 4.26 / 2.66 |
 
 Each still is reached at exactly its frame and approached and left evenly
 (5.8, 5.2, 4.4, 3.5, **2.6**, 3.4, 4.6, 5.3, 6.0 around frame 62).
+
+The last row's mid still is another seed's shot of the same prompt (another
+camera position and car body). H3 needs no strength change for it: it
+dissolves into that composition over a few frames around frame 40 and pulls
+back to the end still gradually, with no cut - where LTX-2.5 at full
+keyframe strength cut between the same stills in two frames (6.3x).
+
