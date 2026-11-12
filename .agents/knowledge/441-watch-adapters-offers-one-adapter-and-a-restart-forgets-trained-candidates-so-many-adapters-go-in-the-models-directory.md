@@ -1,0 +1,8 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
+
+# 441. `--watch-adapters` offers one adapter, a restart forgets the candidates a training server made, so many adapters go in the models directory
+
+Thirty-five LoRA adapters of one Qwen3.8-27B-FP8 base had to be compared on one card. Three ways of putting them in front of the base were tried on a `brain serve --training` instance: (1) the adapters a served training job delivers are offered as `<base>:candidate:<attempt-dir-name>` only by the instance that trained them; after a restart the list held the base alone (the artifact store kept the 153 blobs, but nothing registered them). (2) `--watch-adapters DIR` with 35 files `adapter-000001..000036.safetensors` offered exactly one model, the last by version (`p8204-selective`): the directory is a promotion sequence, "the highest-versioned file", not a bank. (3) A models directory with `<repo>/adapters/<owner>/<name>/<tag>/adapter.brain.safetensors` (hard links to the blobs) and `--adapter-slots 4 --adapter-rank-cap 32 --adapter-targets all` offered all 35 plus the base, each under the id its card records (`...:candidate:p8100-all`), swapping the least recently used idle adapter out; 1,300 trials ran across them without a missing model.
+
+Rule: to compare many adapters, give the server a private models directory laid out as the store lays adapters out (a symlink farm of the base files plus the adapters), restart it, and read the ids from `/v1/models`. An adapter blob is found by its modification time against the job that wrote it when the digest was not recorded (35 of 35 within 3 s, the ids confirming the pairing). Evidence: a 27B comparison run on 2026-11-12 on gpu2.
