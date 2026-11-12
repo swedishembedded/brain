@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 <!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
 
-# 436. A non-empty enumeration is not a physical card: WSL2's Mesa ICDs answer Vulkan with llvmpipe only, so the CUDA fallback never fired
+# 452. A non-empty enumeration is not a physical card: WSL2's Mesa ICDs answer Vulkan with llvmpipe only, so the CUDA fallback never fired
 
 **Lesson:** A registry fallback keyed on "the higher-precedence source returned nothing" strands a
 real card behind a software rasteriser whenever the high-precedence source answers with junk. A
