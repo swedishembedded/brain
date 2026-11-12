@@ -94,7 +94,12 @@ def structure(book, errors):
                 errors.append(f"{where}: '{c}' already introduced by {introduced[c]}")
             introduced[c] = ch.id
 
-    crates = {p.name for p in (ROOT / "crates").iterdir() if (p / "Cargo.toml").is_file()}
+    # The crates git knows about: the book describes committed code, and a
+    # crate another session is still building in the working tree is not yet
+    # part of brain.
+    tracked = subprocess.run(["git", "ls-files", "--", "crates/*/Cargo.toml"], cwd=ROOT,
+                             capture_output=True, text=True, check=True).stdout.split()
+    crates = {Path(t).parent.name for t in tracked}
     explained = {c for ch in book.chapters() for c in ch.brain}
     for c in sorted(explained - crates):
         errors.append(f"book.yaml: names crate '{c}', which does not exist under crates/")
