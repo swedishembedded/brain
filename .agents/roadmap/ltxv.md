@@ -9353,8 +9353,9 @@ tried and reverted. The stage-major loop is removed (its plan type,
 planner evens the new frames over the fewest windows instead
 of letting window 0 take its whole budget (a continuation of one or two new
 latent frames only holds its history). The step at 239->240 in every
-313-frame run is rav1e's keyframe at frame 240 (`key_frame_interval` 120),
-not generation.
+313-frame run was the encoder's, not generation's: rav1e's forced keyframe
+at frame 240 (`key_frame_interval` 120, a keyframe coded finer than the
+frames around it). `videocodec` no longer forces any after the first frame.
 
 Gates: `pipeline::conditioned_latent_tests` (every still a block at its own
 instant; a keyframe moves a start still onto a guide; several keyframes;

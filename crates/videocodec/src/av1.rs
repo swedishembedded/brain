@@ -22,8 +22,18 @@ pub struct EncodeSettings {
     pub quantizer: u8,
     /// rav1e's speed preset, 0 (slowest, smallest) ..= 10 (fastest).
     pub speed: u8,
-    /// Frames between forced key frames: where a reader can start decoding.
-    pub key_frame_interval: u64,
+    /// Frames between forced key frames, where a reader can start decoding;
+    /// `None` forces none after the first frame. rav1e still starts one at
+    /// every scene cut it detects either way.
+    ///
+    /// `None` by default because a forced key frame in the middle of a shot
+    /// is visible: rav1e's fixed quantizer codes a key frame about a quarter
+    /// finer than the frames between, which settle a few dB lower within a
+    /// few dozen frames, so every forced key frame reads as the picture
+    /// sharpening all at once (+3.9 dB at each of frames 120 and 240 of a
+    /// real 313-frame clip at the old interval of 120, against at most
+    /// 0.84 dB between any two frames without them, in 3% fewer bytes).
+    pub key_frame_interval: Option<u64>,
     /// Tiles per frame (0: one tile per 64K pixels, at least one): the unit
     /// both coders spread over threads, at a small cost in compression.
     pub tiles: usize,
@@ -36,9 +46,14 @@ impl Default for EncodeSettings {
     /// rate; eight tiles (one per 64K pixels) halve the time again for 7%
     /// more bytes, to about 185 ms a frame - 35 s for an 8 s clip at 24 fps.
     fn default() -> EncodeSettings {
-        EncodeSettings { quantizer: 80, speed: 10, key_frame_interval: 120, tiles: 0 }
+        EncodeSettings { quantizer: 80, speed: 10, key_frame_interval: None, tiles: 0 }
     }
 }
+
+/// rav1e's longest key-frame interval (its own `MAX_MAX_KEY_FRAME_INTERVAL`,
+/// which it does not export): past any clip this crate writes, so only the
+/// first frame and the scene cuts rav1e detects are key frames.
+const NO_FORCED_KEY_FRAMES: u64 = i32::MAX as u64 / 3;
 
 /// The frame sides rav1e codes.
 const MIN_SIDE: usize = 16;
@@ -79,7 +94,7 @@ impl Encoder {
             }),
             quantizer: settings.quantizer as usize,
             min_key_frame_interval: 1,
-            max_key_frame_interval: settings.key_frame_interval.max(1),
+            max_key_frame_interval: settings.key_frame_interval.map_or(NO_FORCED_KEY_FRAMES, |n| n.max(1)),
             tiles: if settings.tiles == 0 { (w * h).div_ceil(1 << 16) } else { settings.tiles },
             ..EncoderConfig::with_speed_preset(settings.speed.min(10))
         };

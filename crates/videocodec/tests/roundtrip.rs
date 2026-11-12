@@ -17,7 +17,7 @@ const FPS: f64 = 24.0;
 const FRAMES: usize = 30;
 /// Close coding, so a decode that converts colour or places planes wrongly
 /// (which costs 10 dB and more) cannot hide under the coding loss.
-const SETTINGS: EncodeSettings = EncodeSettings { quantizer: 30, speed: 9, key_frame_interval: 12, tiles: 0 };
+const SETTINGS: EncodeSettings = EncodeSettings { quantizer: 30, speed: 9, key_frame_interval: Some(12), tiles: 0 };
 /// Against what a lossless codec would return: the frame through 4:2:0 and
 /// back (the pattern's saturated hard edges cost 4:2:0 itself 31-36 dB, so
 /// the frame as written would measure the colour format, not the codec).
@@ -159,3 +159,33 @@ fn ffprobe_agrees(path: &Path, with_sound: bool) {
     assert_eq!(streams.contains("opus,audio"), with_sound, "{}: {streams}", path.display());
 }
 
+/// **Quality does not pulse.** Under rav1e's fixed quantizer a key frame is
+/// coded about a quarter finer than the frames between, and those settle a
+/// few dB lower within a few dozen frames, so a key frame forced into the
+/// middle of a shot reads as the picture sharpening all at once - measured
+/// on a real 313-frame generated clip, +3.9 dB at each of frames 120 and 240
+/// against at most 0.84 dB between any two frames without them. The default
+/// settings force none after the first frame: a shot longer than the old
+/// 120-frame interval, with no cut in it, is one key frame.
+#[test]
+fn default_settings_force_no_key_frame_into_a_shot() {
+    let (w, h, n) = (96usize, 64usize, 200usize);
+    let mut enc = videocodec::av1::Encoder::new(w, h, (24, 1), EncodeSettings::default()).expect("an encoder");
+    let mut packets = Vec::new();
+    for i in 0..n {
+        packets.extend(enc.push(&frame(i, w, h)).expect("a frame"));
+    }
+    packets.extend(enc.finish().expect("the last units"));
+    assert_eq!(packets.len(), n);
+    let keys: Vec<u64> = packets.iter().filter(|p| p.key).map(|p| p.frame).collect();
+    assert_eq!(keys, vec![0], "key frames inside one shot");
+
+    // A caller who asks for an interval gets it.
+    let mut enc = videocodec::av1::Encoder::new(w, h, (24, 1), EncodeSettings { key_frame_interval: Some(60), ..EncodeSettings::default() }).expect("an encoder");
+    let mut packets = Vec::new();
+    for i in 0..n {
+        packets.extend(enc.push(&frame(i, w, h)).expect("a frame"));
+    }
+    packets.extend(enc.finish().expect("the last units"));
+    assert!(packets.iter().filter(|p| p.key).count() >= n / 60, "an asked-for interval is honoured");
+}
