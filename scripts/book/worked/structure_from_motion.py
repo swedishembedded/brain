@@ -125,7 +125,7 @@ def scene_setup():
            f"are the projections plus noise from `bookrng.generator(\"{NOISE_NAME}\")` (seed {seed_n}), standard deviation "
            f"{SIGMA:g} pixel per coordinate: for view 0 to 3 in turn and point 0 to {NPOINTS - 1} in turn, `normal()` for u "
            "and then `normal()` for v.", "",
-           _table(["camera", "eye C (metres)", "looks at", "u of the 60 points", "v of the 60 points"], rows, "lllll"), "",
+           _table(["camera", "eye C (metres)", "looks at", "range of u over the 60 projections (without noise)", "range of v (without noise)"], rows, "lllll"), "",
            "First three points (X, Y, Z) and their noisy pixels in views 0 and 3:", ""]
     r2 = []
     for j in range(3):
@@ -553,7 +553,8 @@ def refine_point(Ps, pix, X, iters=3):
 
 
 def triangulation_data():
-    """Per baseline: (B, angle in degrees, RMS depth error of the linear method, after Gauss-Newton, first-order prediction)."""
+    """Per baseline: (B, angle in degrees between the two rays to the point, atan(B / Z), RMS depth error of the linear method,
+    after Gauss-Newton, first-order prediction)."""
     def make():
         trials, Z0 = 200, 5.0
         g = bookrng.generator(TRI_NAME)
@@ -569,7 +570,7 @@ def triangulation_data():
                 e_dlt.append(X[2] - Z0)
                 e_gn.append(refine_point(Ps, pix, X)[2] - Z0)
             rms = lambda e: math.sqrt(sum(x * x for x in e) / len(e))
-            out.append((B, math.degrees(2 * math.atan(B / (2 * Z0))), rms(e_dlt), rms(e_gn), math.sqrt(2) * SIGMA * Z0 * Z0 / (F * B)))
+            out.append((B, math.degrees(math.atan(B / Z0)), rms(e_dlt), rms(e_gn), math.sqrt(2) * SIGMA * Z0 * Z0 / (F * B)))
         return out
     return _once("triangulation_data", make)
 
@@ -583,7 +584,8 @@ def triangulation_error():
                       f"coordinates in the order u and v of camera 0, u and v of camera 1 (`bookrng.generator(\"{TRI_NAME}\")`, seed "
                       f"{seed}, one stream through all five baselines in the order printed, B = 0.05 first). Root mean square error of "
                       "the estimated depth, in metres, for the linear method, for the linear method followed by three Gauss-Newton "
-                      "steps on the reprojection error, and the first-order prediction sqrt(2) sigma Z^2 / (f B):", "",
+                      "steps on the reprojection error, and the first-order prediction sqrt(2) sigma Z^2 / (f B). The angle is atan(B / Z) "
+                      "(the ray of camera 0 is the z axis, the ray of the other camera leaves (B, 0, 0)):", "",
                       _table(["baseline B (m)", "angle between the rays (deg)", "linear", "linear + 3 Gauss-Newton steps",
                               "prediction"], rows, "rrrrr")])
 
@@ -818,7 +820,10 @@ def pose_ambiguity():
                      "chosen" if i == tv["best"] else ""])
     return "\n".join([f"The {len(tv['inl_best'])} RANSAC inliers triangulated under each of the four decompositions of their "
                       "eight-point essential matrix: how many land in front of both cameras, and how far each candidate is from the "
-                      "true rotation and translation direction (degrees).", "",
+                      "true rotation and translation direction (degrees). The sign of u3 (and the sign pairing of the columns of U and "
+                      "V) is a convention of the singular value decomposition routine, so the row labels follow the routine's sign "
+                      "gauge; a reader's routine may swap the two +u3 and -u3 labels, and the rows are then identified by their "
+                      "errors, not their names.", "",
                       _table(["candidate (R, t)", "rotation error", "direction error", "in front of both", "behind one or both",
                               ""], rows, "lrrrrl")])
 
@@ -844,7 +849,8 @@ def minimal_samples():
             ["nearest rank-two matrix", "%.1f" % med(rk2), max(rk2)]]
     return "\n".join([f"The {len(good)} correct matches of the pair (0, 1) with their noisy pixels, and 100 samples of 8 of them from "
                       f"`bookrng.generator(\"{MINIMAL_NAME}\")` (seed {bookrng.seed_of(MINIMAL_NAME)}; the same `integer` draws "
-                      "with repeats discarded). Each sample gives two hypotheses by the eight-point algorithm; the table counts, for "
+                      "with repeats discarded). Each sample gives two hypotheses by the eight-point algorithm (the essential matrix is cut to "
+                      "singular values 1, 1, 0 after the similarities are undone, the rank-two matrix before); the table counts, for "
                       f"each kind, the matches within {THRESH_PX:g} pixel of Sampson distance of it (all {len(good)} are correct, so "
                       "a perfect hypothesis scores 54).", "",
                       _table(["hypothesis", "median inliers", "largest"], rows, "lrr")])
@@ -983,15 +989,25 @@ def absolute_pose():
         Rt, tt = true_pair(0, v)
         rows.append([v, n, ok, ransac_iterations(ok / n, 6, 10 ** 6), r["iters"], inl, inl_ok,
                      "%.2f" % rot_error(r["R"], Rt), "%.2f" % dir_error(r["t"], tt)])
-    seed = bookrng.seed_of(PNP_NAME + ".2")
+    seed = {v: bookrng.seed_of(PNP_NAME + "." + str(v)) for v in (2, 3)}
     out = ["For camera v = 2 and 3, each of the inlier matches of the pair (0, 1) gives a 3D point (triangulated with the refined "
            "pose, baseline 1) and a 2D keypoint: the nearest neighbour, among the keypoints of view v, of the match's view-0 "
            "descriptor. The RANSAC sample is 6 distinct correspondences from `integer(n)` draws on `bookrng.generator(\"" + PNP_NAME +
-           ".v\")` (v = 2: seed " + str(seed) + "), a hypothesis is the DLT pose of the sample, and the threshold is "
-           f"{PNP_THRESH_PX:g} pixels of reprojection error with the same truncated score and adaptive bound as before (cap 2000).",
+           ".v\")` (v = 2: seed " + str(seed[2]) + ", v = 3: seed " + str(seed[3]) + "), a hypothesis is the DLT pose of the "
+           "sample, and the threshold is "
+           f"{PNP_THRESH_PX:g} pixels of reprojection error with the same truncated score and adaptive bound as before (cap 2000). "
+           "The DLT of a sample moves its 3D points so that their centroid is the origin and their mean distance from it is "
+           "sqrt(3), uses the normalized image points (x, y, 1) = K^-1 (u, v, 1) without a similarity of their own, takes the null "
+           "vector of the 2n by 12 system, undoes the point similarity, flips the sign if the determinant of the left 3 by 3 block "
+           "is negative, takes R as the nearest rotation to that block and divides the translation column by the mean of the block's "
+           "three singular values (their trace over 3). A candidate that puts a point behind the camera has an infinite error for it. "
+           "The pose of the best sample is the one reported in the table; its inliers are the correspondences within the threshold.",
            "", _table(["camera", "correspondences", "correct", "bound at the true fraction", "iterations run", "inliers",
                        "correct inliers", "rotation error (degrees)", "direction error (degrees)"], rows, "rrrrrrrrr"), "",
-           "Smallest singular values of the 16 by 12 matrix of the linear absolute-pose system, 8 points, last three:", "",
+           "Smallest singular values of the 16 by 12 matrix of the linear absolute-pose system for the first 8 scene points (points 0 to 7) "
+           "projected without noise by the true camera 2 (3D points normalized as above, sigma_12 the smallest); in the second row the 8 "
+           "points are replaced by the intersections of the rays of their noisy view-0 pixels with the plane Z = 5.5, projected by "
+           "the true camera 2:", "",
            _table(["the 8 points are", "sigma_12", "sigma_11", "sigma_10"], planar_degeneracy(), "lrrr")]
     return "\n".join(out)
 
@@ -1408,12 +1424,34 @@ def bundle_adjustment():
                                                                 [x for r in Q.poses[i][0] for x in r] + Q.poses[i][1]))
     n = len(P.obs)
     npar = P.nc + 3 * len(P.points)
+    per_cam = [sum(1 for o in P.obs if o[0] == i) for i in range(4)]
+    dropped = [i for i in tv["inl"] if i not in kept]
+    wrong_obs = sorted({(o[0], kept[o[1]]) for o, ok in zip(P.obs, truth) if not ok})
+    wrong_pair = [i for i in tv["inl"] if not tv["truth"][i]]
+    build = (f"The input is built as the pipeline leaves it. Number the 100 matches of the two-view block by the position of "
+             f"their view-0 keypoint in the shuffled keypoint list of view 0. Camera 0 has the identity pose; camera 1 the refined "
+             f"pose of the pair with its translation scaled to length 1; cameras 2 and 3 the poses of the RANSAC runs of the "
+             f"absolute-pose block (seeds `{PNP_NAME}.2` and `{PNP_NAME}.3` there), each refined by the Levenberg-Marquardt loop of this "
+             f"section on its own six pose columns alone (the points of its inliers held fixed, Huber delta 2, lambda 1e-3, at most "
+             f"30 iterations). Each of the {len(tv['inl'])} inlier matches of the pair is a track holding its two keypoints (views 0 "
+             f"and 1); the keypoint that camera 2 or 3 matched to it is added when it was an inlier of that camera's RANSAC "
+             f"({sum(register_camera(2)['mask'])} and {sum(register_camera(3)['mask'])} of them). Each track is then triangulated by "
+             f"the linear method from all its observations at once, an observation whose point lands behind its camera is dropped, "
+             f"and a track left with fewer than two observations is dropped, which removes the matches "
+             f"{' and '.join(str(i) for i in dropped)} and leaves {len(P.points)} points. The wrong associations are the observations of "
+             f"{'the wrong match' if len(wrong_obs) == 2 else 'wrong matches'} "
+             f"{', '.join(sorted({str(i) for _, i in wrong_obs}))} (its keypoints in views "
+             f"{' and '.join(str(v) for v, _ in wrong_obs)} belong to different scene points; the pair kept "
+             f"{len([i for i in wrong_pair if i in kept])} of its {len(wrong_pair)} wrong matches). Cameras 0 to 3 hold "
+             f"{', '.join(str(c) for c in per_cam[:-1])} and {per_cam[-1]} observations.")
     floor = SIGMA * math.sqrt(2.0) * math.sqrt(max(0.0, (2 * n - npar) / (2 * n)))
     out = [f"The problem after registration: {len(P.points)} points and {n} observations in 4 cameras, of which {n - sum(truth)} are "
            f"wrong associations; camera 0 is the anchor (held), camera 1 the scale camera (5 columns, baseline 1), cameras 2 and 3 "
            f"free (6 columns each), so the camera system has {P.nc} unknowns and the points {3 * len(P.points)}. Huber threshold "
            "delta = 2 pixels, lambda starts at 1e-3; an iteration tries the step, accepts it when the robust cost falls "
-           "(lambda divided by 3) and otherwise multiplies lambda by 5.", "",
+           "(lambda divided by 3) and otherwise multiplies lambda by 5 (at most 8 tries per iteration, at most 60 iterations; the scale "
+           "camera's two translation columns are along the unit vectors e1 = unit(b x a) and e2 = b x e1 across the baseline b, with "
+           "a = (1, 0, 0), or (0, 1, 0) if |b_x| >= 0.9).", "", build, "",
            f"Before the adjustment the root mean square reprojection error is {rms0:.4f} px and the robust cost {cost0:.4f}. The first "
            f"damped step computed from the dense system of {P.nc + 3 * len(P.points)} unknowns and from the Schur complement of the "
            f"{P.nc} camera unknowns differ by at most {gap:.1e} in any entry (the largest camera step is {scale_step:.3f}).", "",
@@ -1505,7 +1543,10 @@ def ba_structure():
            f"{nnz} nonzero entries of {rows_n * cols_n}, {100.0 * nnz / (rows_n * cols_n):.1f}%. The numbers of observations of "
            f"cameras 0 to 3 are {', '.join(str(c) for c in per_cam)}.", "",
            "Singular values of the residual Jacobian at the true parameters, noise-free observations of the first 10 points in all "
-           "4 cameras (80 residuals): the eight smallest, and the rank (singular values above 1e-9 times the largest):", "",
+           "4 cameras (80 residuals): the eight smallest, and the rank (singular values above 1e-9 times the largest). The poses and "
+           "points are the true ones in the scene's own units (metres, so that the baseline of cameras 0 and 1 is 0.607 and not 1), the "
+           "observations are the noise-free pixels, the rows of the Jacobian are the unweighted pixel residuals (no Huber weight), "
+           "and the singular values are those of the dense 80 by n matrix, so they depend on the unit of length:", "",
            _table(["parametrization", "columns", "rank", "missing", "eight smallest singular values"], rows, "lrrrl"), "",
            "Work of one step, in multiply-adds (dense: Cholesky of all n unknowns, n^3 / 6; Schur: 54 k + 108 k^2 per point with k "
            "observations, here k = 3, plus the Cholesky of the nc camera unknowns), and the bytes of the matrix that is factored "
@@ -1567,7 +1608,8 @@ class _focal:
 
 def _pair_with_focal(fg):
     """Pair (0, 1) reconstructed through the focal length fg from the correct inlier matches, then cameras 2 and 3 registered against
-    those points: returns (pair RMS of the Sampson distances, rotation error, direction error, RMS reprojection of camera 2, of 3)."""
+    those points: returns (pair RMS of the Sampson distances, rotation error, direction error, RMS reprojection of camera 2, of 3,
+    the numbers of correspondences used for cameras 2 and 3)."""
     tv, kp = two_view(), features()
     good = [i for i in tv["inl"] if tv["truth"][i]]
     R0, t0 = true_pair(0, 1)
@@ -1578,7 +1620,7 @@ def _pair_with_focal(fg):
         cands, counts, k = pose_from_essential(eight_point(a, b), a, b, idx)
         R, t, c0, c1 = refine_essential(cands[k][0], cands[k][1], a, b)
         X = {i: triangulate([(IDENT, [0.0, 0.0, 0.0]), (R, t)], [a[n], b[n]]) for n, i in enumerate(good)}
-        rms = []
+        rms, counts = [], []
         for v in (2, 3):
             cs = [c for c in register_camera(v)["corr"] if c["ok"] and c["match"] in X]
             Xs = [X[c["match"]] for c in cs]
@@ -1587,13 +1629,16 @@ def _pair_with_focal(fg):
                         delta=None, f=fg)
             P.solve(40)
             rms.append(P.rms())
-    return math.sqrt(c1 / len(good)), rot_error(R, R0), dir_error(t, t0), rms[0], rms[1]
+            counts.append(len(cs))
+    return math.sqrt(c1 / len(good)), rot_error(R, R0), dir_error(t, t0), rms[0], rms[1], counts
 
 
 def focal_length_effect():
     rows = []
+    first = None
     for fg in (400.0, 450.0, 500.0, 550.0, 600.0):
         r = _pair_with_focal(fg)
+        first = first or r
         rows.append([f"{fg:g}", "%.3f" % r[0], "%.2f" % r[1], "%.2f" % r[2], "%.2f" % r[3], "%.2f" % r[4]])
     rows2, prof = [], []
     for f0 in (450.0, 550.0):
@@ -1608,7 +1653,14 @@ def focal_length_effect():
     return "\n".join([
         "The inlier matches that are correct (51 of the pair's 54) are turned into rays through a focal length f_given, the pair is "
         "estimated and triangulated as before, and cameras 2 and 3 are registered against the resulting points (DLT, then "
-        "Levenberg-Marquardt on the pose alone, projecting through f_given). RMS columns are in pixels.", "",
+        "Levenberg-Marquardt on the pose alone, projecting through f_given). RMS columns are in pixels. A camera's "
+        "correspondences are those of the absolute-pose block (the nearest keypoint of the view to the match's view-0 descriptor) "
+        "that are correct and whose match is among the 51: " + " and ".join(str(n) for n in first[5]) + " of them for cameras 2 and 3, "
+        "all used, with no RANSAC; the DLT of all of them starts a loop of at most 40 iterations on the six pose columns with "
+        "the plain squared pixel error (no Huber loss), and the RMS is that of the result. The two tables after it use the problem "
+        "of the bundle-adjustment block (its poses, points and observations are those of the f = 500 pipeline; only the focal "
+        "length used in the projection is replaced by the given value, as the starting value of the shared column in the first "
+        "and as the fixed value in the second, with every pose and point free).", "",
         _table(["f_given", "pair: RMS Sampson distance", "rotation error (deg)", "direction error (deg)",
                 "camera 2: RMS reprojection", "camera 3: RMS reprojection"], rows, "rrrrrr"), "",
         "The adjustment of the previous sections with the focal length as one more unknown (a column shared by every observation), "
@@ -1666,6 +1718,7 @@ def chunk_registration():
         R, t = poses_[i]
         return (R, centre(R, t))
     A = [cam(P.poses, i) for i in (1, 2)]               # the shared cameras 1 and 2 in the world of chunk A
+    span0 = norm(sub(A[0][1], A[1][1]))
     rows = []
     for label, shift in (("chunk B as solved", 0.0), ("camera 2 of chunk B displaced by 15% of the span", 0.15),
                          ("camera 2 of chunk B displaced by 40% of the span", 0.40)):
@@ -1684,7 +1737,14 @@ def chunk_registration():
         "(scale 2.5, rotation vector (0.3, -0.5, 0.2), translation (1, -2, 3)). They share cameras 1 and 2. The similarity from B "
         "to A is the rotation from the cameras' axes, the scale from the median ratio of their centre distances and the translation "
         "from the centroids; the residual is the largest distance between a shared centre in A and the registered one from B, "
-        "relative to the distance between the shared centres (the span); the gate is 0.1.", "",
+        "relative to the distance between the shared centres (the span, "
+        f"{span0:.4f} in A's units, A being the adjusted reconstruction in which the baseline between cameras 0 and 1 is 1); the "
+        "gate is 0.1. The rotation is the nearest rotation (singular value decomposition, U V^T) to the sum over the shared cameras "
+        "and their three axes of a_k b_k^T, where a_k and b_k are the k-th rows of the camera's rotation in A and in B. In the "
+        "displaced rows the shared camera 2 of B has its centre in B's world moved by shift * span * 2.5 along "
+        "unit(cross(C_2 - C_1, (0, 1, 0))), perpendicular to the line between the two shared centres of B, while its rotation "
+        "stays; the residual is then the largest distance, over the two shared cameras, between the centre in A and the registered "
+        "centre from B.", "",
         _table(["chunk B", "scale found (true: 0.4)", "largest centre residual (A's units)", "relative to the span",
                 "accepted (gate 0.1)"], rows, "lrrrl")])
 
@@ -1898,7 +1958,17 @@ def plane_sweep():
         f"The cost of a hypothesis for the reference pixel is the mean over the two sources of 1 - NCC, the bilaterally weighted "
         f"normalized cross-correlation of the {len(range(-WIN_RADIUS, WIN_RADIUS + 1, WIN_STEP))} by "
         f"{len(range(-WIN_RADIUS, WIN_RADIUS + 1, WIN_STEP))} samples of an 11 by 11 window (spacing {WIN_STEP}), color sigma "
-        f"{SIGMA_COLOR:g}, spatial sigma {SIGMA_SPATIAL:g}. A plane sweep tries 64 ranges, uniform in inverse range from 2.5 to 8:", "",
+        f"{SIGMA_COLOR:g}, spatial sigma {SIGMA_SPATIAL:g}. The ray of pixel (x, y) leaves the camera through the pixel's centre "
+        f"(x + 0.5, y + 0.5), and the window samples are the reference pixels (x + dx, y + dy) for dx, dy in -5, -3, ..., 5, read "
+        "without interpolation; a sample outside the reference image is skipped (a window at the border has fewer than 36), and so is "
+        "a sample whose ray meets the plane at n.d > -1e-4. The sample's point on the plane is imaged by the source camera, and the "
+        "source gray value is the bilinear interpolation of the four pixels around the position (pixel i is centred on i + 0.5), "
+        "the position clamped to the image, so that a projection outside the source image reads the border. With sample weights "
+        "w (bilateral, from the reference), the weighted means and variances are m = sum(w g) / sum(w) and v = sum(w g^2) / "
+        f"sum(w) - m^2 for each image, the correlation is (sum(w g s) / sum(w) - m_g m_s) / sqrt(v_g v_s), and the cost is clamped "
+        f"to [0, {BAD:g}]. A hypothesis costs {BAD:g} when the window centre's point is not imaged inside the source image (or is "
+        f"behind it), when no sample is left, or when v is below {MIN_VAR:g} in the reference or the source. A plane sweep tries 64 "
+        "ranges, uniform in inverse range from 2.5 to 8:", "",
         _table(["pixel", "true range", "cost at the true plane", "cost at the true range, fronto-parallel normal",
                 "best range of the fronto-parallel sweep", "its cost", "best range with the true normal", "its cost"], rows, "lrrrrrrr")])
 
@@ -2029,7 +2099,9 @@ def patchmatch_table():
            "is scaled by 0.5 * 0.5^t (floors 0.002 and 0.02). Every number below is printed with only the digits that are the same in this "
            "run and in four copies of it whose texture value under the middle pixel is changed by +1e-12, -1e-12, +3e-12 and -3e-12 "
            "(the stable-digits rule of the book): a decision of the search that depended on rounding would show as a digit that "
-           "differs.", "",
+           "differs. A neighbour's plane is skipped when its normal gives n.d > -1e-4 for this pixel's ray or the range it gives is "
+           "not between 0 and 32; the perturbed and fresh hypotheses are drawn after the neighbours were scored, whether or not a "
+           "neighbour improved the hypothesis.", "",
            _table(["after", "cost evaluations so far", "median relative range error", "within 1% of the true range",
                    "median normal error (deg)"], shown, "lrrrr"), "",
            f"A cost evaluation is one hypothesis scored against both sources, {nsamp} window samples each. The run used {per_iter} of "

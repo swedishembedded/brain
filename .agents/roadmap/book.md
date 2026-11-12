@@ -90,7 +90,12 @@ reproduced its worked examples from the text alone in another language.
       with the module, conventions stated only in words, and three real
       table slips). All were fixed in the following commits; a recheck
       has not been run.
-- [ ] Volume X, Video, Space and World Models: all 9 chapters written; reader pass pending.
+- [x] Volume X, Video, Space and World Models: all 9 chapters written.
+      Independent readers reproduced 834 items in C from the page alone:
+      613 passed, 95 after a guess, 114 failed and 12 were blocked (inputs
+      that lived only in the worked modules, unprinted layer inventories,
+      a pseudocode order that disagreed with its module, three real slips).
+      All were fixed in the following commits; a recheck has not been run.
 
 ## Open
 

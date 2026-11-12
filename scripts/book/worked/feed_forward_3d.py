@@ -212,6 +212,25 @@ def hard_pixels(depth):
     return out
 
 
+def standin_rule():
+    """The complete recipe of the room's stand-in as page text, from the constants the code uses."""
+    nhard = sum(sum(hard_pixels(c["z"])) for c in room())
+    return (f"The stand-in (`bookrng.generator(\"{STAND_NAME}\")`, seed {bookrng.seed_of(STAND_NAME)}) is built as follows. Let z be the "
+            f"true camera depth of a pixel, (x, y) = ((i + 0.5 - c_x) / f, (j + 0.5 - c_y) / f) its normalized coordinates, "
+            f"s = {SCALE_UNKNOWN} the scale of its world, and a pixel *hard* when its true depth differs from that of a 4-neighbour "
+            f"by more than {HARD_JUMP:g} of the smaller of the two (the silhouettes: {nhard} of the {3 * W * H} pixels). For camera v "
+            f"= 0, 1, 2 in turn, six `normal()` draws are scaled by the standard deviations ({', '.join(f'{x:g}' for x in SIG_BIAS)}) to "
+            "give the biases (b0, bx, by) of the depth head, and the next six likewise the biases (b0', bx', by') of the pointmap head. "
+            "Then for every pixel in row-major order (row j from 0, column i from 0), five `normal()` draws in this order: e for the depth "
+            "head and e' for the pointmap head, each scaled by "
+            f"sigma = {SIG_PIX:g} ({SIG_HARD:g} on a hard pixel), and three lateral errors scaled by {SIG_LAT:g} z, one for each world axis. "
+            "The depth head's output is s z (1 + b0 + bx x + by y + e). The pointmap head's is s (C + z (1 + b0' + bx' x + by' y + e') r + "
+            "lateral), where C is the camera centre and r = R_c (x, y, 1) with R_c the camera-to-world rotation, so that C + z r is the exact "
+            "world point; the lateral errors are added in world axes before the scale s. Both heads give the confidence 1 + exp(raw) with "
+            f"raw = -2 ln(sigma / {SIG_PIX:g}), which is 2 on an easy pixel and 1 + 1/9 on a hard one. "
+            "The sizes are chosen, not measured.")
+
+
 def standin():
     """Per camera: the depth head's prediction `d` (camera depth, in the stand-in's units), its confidence `cd`, the pointmap head's
     prediction `P` (a world point in the stand-in's units, frame of camera 0) and its confidence `cp`. For camera v = 0, 1, 2 in
@@ -322,7 +341,7 @@ def camera_from_pointmap():
         "the scale held at 1; the pointmap of the stand-in is in the stand-in's units, so its centre error is divided by the scale "
         f"{SCALE_UNKNOWN} to read in metres). Columns: the rotation error in degrees and the centre error in metres of the pose "
         "from exact maps, and of the pose from the stand-in's depth head and pointmap head (`feed_forward_3d.standin`, seed "
-        f"{bookrng.seed_of(STAND_NAME)}).", "",
+        f"{bookrng.seed_of(STAND_NAME)}).", "", standin_rule(), "",
         _table(["camera", "rotation error, exact (deg)", "centre error, exact (m)", "rotation error, stand-in (deg)",
                 "centre error, stand-in (m)"], rows, "rrrrr"), "",
         f"The intrinsics read back from the exact camera-frame points of camera 1 by the line u = c_x + f (X / Z) are f_x = {fx:.6f}, "
@@ -520,9 +539,11 @@ def camera_tokens():
         f"A rotation of -150 degrees about y has the scalar-last quaternion {_v(qa, 4)} by the branch rule of the pose token, and the "
         f"rotation of +150 degrees {_v(qb, 4)}: the second has w = {qb[3]:.4f}, the first {qa[3]:.4f}, a sign that "
         "follows from the branch and not from the rotation.", "",
-        f"A ray map for a barrel lens (k1 = -0.15, {W} by {H} pixels, f = {FOC:g}) is {W * H} unit directions. The pinhole line u = c + f' (x / z) "
-        f"fitted to it by least squares has f' = {a:.4f}, c = {c0:.4f}, and misses the pixel it was made from by {rms:.3f} px RMS and "
-        f"{max(res):.3f} px at the worst; the ray map itself has no such error, since it lists the ray of every pixel."])
+        f"A ray map for a barrel lens (k1 = -0.15, {W} by {H} pixels, f = {FOC:g}, the radial model of Chapter 3 inverted by 12 Newton "
+        f"steps) is {W * H} unit directions. The pinhole line u = c + f' (x / z) is fitted to the {W * H} pairs of the pixel-centre "
+        f"column u = i + 0.5 and x / z of its ray by least squares, in u alone (v is not used), and has f' = {a:.4f}, c = {c0:.4f}; it "
+        f"misses the pixel column it was made from by {rms:.3f} px RMS and "
+        f"{max(res):.3f} px at the worst, in u; the ray map itself has no such error, since it lists the ray of every pixel."])
 
 
 # ------------------------------------------------------------------------------------------------ brain's model, counted
@@ -562,32 +583,128 @@ def _dpt_shapes(out_ch, merger):
     return sh
 
 
-def param_groups():
-    """name -> list of tensor shapes, from the description of the model: the checkpoint's 1545 tensors in nine groups."""
+def group_parts():
+    """name -> list of (component, list of tensor shapes): the checkpoint's 1545 tensors in ten groups, each as the named
+    components that the page's inventory table lists. The groups are the concatenation of their components in order."""
     pe = (D, 3, PATCH, PATCH)
-    g = {}
-    g["trunk tokens and prior encoders"] = [(1, 2, 1, D), (1, 2, REG, D)] + _lin(7, D) + _lin(D, D) + _lin(4, D) + _lin(D, D) \
-        + _lin(PATCH * PATCH, MLP * D) + _lin(MLP * D, D)
-    g["DINOv2 patch encoder"] = [(1, 1, D), (1, REG, D), (1, D), (1, 1 + (IMG // PATCH) ** 2, D), pe, (D,)] \
-        + sum((_block_shapes(D, False) for _ in range(DEPTH)), []) + [(D,), (D,)]
-    g["24 frame blocks"] = sum((_block_shapes(D, True) for _ in range(DEPTH)), []) + [(D // HEADS // 4,)]    # and the one rope table
-    g["24 global blocks"] = sum((_block_shapes(D, True) for _ in range(DEPTH)), [])
     c2 = 2 * D
-    cam = [(1, 1, 9)] + _lin(9, c2) + [(c2,)] * 4 + _lin(c2, 3 * c2)
-    for _ in range(CAM_BLOCKS):
-        cam += _block_shapes(c2, False)
-    g["camera head"] = cam + _lin(c2, D) + _lin(D, 9)
-    g["depth head (DPT)"] = _dpt_shapes(3, False)
-    g["pointmap head (DPT)"] = _dpt_shapes(4, False)
-    g["normal head (DPT)"] = _dpt_shapes(4, False)
-    g["gaussian depth head (DPT) and input merger"] = _dpt_shapes(3, True)
-    g["gaussian parameter convolutions"] = [(DPT_FEAT, DPT_FEAT // 2, 3, 3), (12, DPT_FEAT, 1, 1), (12,)]
+    blocks = lambda d, qk, label: [(f"{label}, block {b}", _block_shapes(d, qk)) for b in range(DEPTH)]
+    g = {}
+    g["trunk tokens and prior encoders"] = [
+        ("camera token, one copy for frame 0 and one for the others", [(1, 2, 1, D)]),
+        ("register tokens, same two copies of 4", [(1, 2, REG, D)]),
+        ("pose embedder: linear 7 to d, GELU, linear d to d", _lin(7, D) + _lin(D, D)),
+        ("intrinsics embedder: linear 4 to d, GELU, linear d to d", _lin(4, D) + _lin(D, D)),
+        ("depth embedder: the 14 by 14 values of a depth patch (196) through linear 196 to 4 d, GELU, linear 4 d to d",
+         _lin(PATCH * PATCH, MLP * D) + _lin(MLP * D, D))]
+    g["DINOv2 patch encoder"] = [
+        ("class token", [(1, 1, D)]), ("register tokens", [(1, REG, D)]),
+        ("mask token (unused at inference)", [(1, D)]),
+        ("position embedding, 1 + 37 * 37 = 1370 positions", [(1, 1 + (IMG // PATCH) ** 2, D)]),
+        ("patch projection, a 14 by 14 convolution of 3 channels to d, with bias", [pe, (D,)]),
+        ("24 blocks of width d (block table below, 14 tensors each)", sum((_block_shapes(D, False) for _ in range(DEPTH)), [])),
+        ("final layer norm", [(D,), (D,)])]
+    g["24 frame blocks"] = [
+        ("24 blocks of width d with query-key norms (block table below, 18 tensors each)", sum((_block_shapes(D, True) for _ in range(DEPTH)), [])),
+        ("the one stored table of rotary periods, head width / 4 = 16 values, shared by all 48 trunk blocks", [(D // HEADS // 4,)])]
+    g["24 global blocks"] = [("24 blocks of width d with query-key norms (block table below, 18 tensors each)", sum((_block_shapes(D, True) for _ in range(DEPTH)), []))]
+    g["camera head"] = [
+        ("initial camera 9-vector", [(1, 1, 9)]), ("parameter embedding: linear 9 to 2 d", _lin(9, c2)),
+        ("token norm and output norm over 2 d", [(c2,)] * 4),
+        ("modulation generator: linear 2 d to 6 d (read at each of the 4 refinement iterations)", _lin(c2, 3 * c2)),
+        ("4 refinement blocks at width 2 d (block table below, 14 tensors each)", sum((_block_shapes(c2, False) for _ in range(CAM_BLOCKS)), [])),
+        ("predictor: linear 2 d to d, then linear d to 9", _lin(c2, D) + _lin(D, 9))]
+    for name, out_ch, merger in (("depth head (DPT)", 3, False), ("pointmap head (DPT)", 4, False),
+                                 ("normal head (DPT)", 4, False), ("gaussian depth head (DPT) and input merger", 3, True)):
+        g[name] = [(f"DPT head with {out_ch} output channels" + (" and the 7 by 7 input merger" if merger else "") +
+                    " (head table below)", _dpt_shapes(out_ch, merger))]
+    g["gaussian parameter convolutions"] = [("3 by 3 convolution 128 to 256 without bias, 1 by 1 convolution 256 to 12 with bias",
+                                             [(DPT_FEAT, DPT_FEAT // 2, 3, 3), (12, DPT_FEAT, 1, 1), (12,)])]
     return g
+
+
+def param_groups():
+    """name -> list of tensor shapes (the components of group_parts concatenated)."""
+    return {k: sum((sh for _, sh in parts), []) for k, parts in group_parts().items()}
 
 
 def count_params():
     g = param_groups()
     return {k: (len(v), sum(math.prod(s) for s in v)) for k, v in g.items()}
+
+
+def _vals(shapes):
+    return sum(math.prod(sh) for sh in shapes)
+
+
+def _block_table():
+    """The tensors of one block in checkpoint order as (name, shape expression, values at d = 1024); the four query-key vectors
+    are one row."""
+    d = D
+    rows = [("norm 1 weight, bias", "2 x d", 2 * d), ("fused query-key-value weight", "3d x d", 3 * d * d),
+            ("fused query-key-value bias", "3d", 3 * d),
+            ("(trunk blocks only) query norm weight and bias, key norm weight and bias", "4 x d/16", 4 * (d // HEADS)),
+            ("output weight", "d x d", d * d), ("output bias", "d", d), ("layer scale 1", "d", d),
+            ("norm 2 weight, bias", "2 x d", 2 * d), ("feed-forward weight 1", "4d x d", 4 * d * d), ("feed-forward bias 1", "4d", 4 * d),
+            ("feed-forward weight 2", "d x 4d", 4 * d * d), ("feed-forward bias 2", "d", d), ("layer scale 2", "d", d)]
+    return rows
+
+
+def _dpt_table():
+    """The tensors of a DPT head in checkpoint order as (what, shapes)."""
+    f, tap = DPT_FEAT, 2 * D
+    rows = [("token norm over the 2 d = 2048 channels of a tap (weight, bias)", [(tap,), (tap,)]),
+            ("projections, 1 by 1 convolutions from 2048 to 256, 512, 1024, 1024 channels, with bias",
+             sum(([(c, tap, 1, 1), (c,)] for c in DPT_PROJ), [])),
+            ("resize 0: transposed convolution 256 to 256, kernel 4, stride 4, with bias", [(256, 256, 4, 4), (256,)]),
+            ("resize 1: transposed convolution 512 to 512, kernel 2, stride 2, with bias", [(512, 512, 2, 2), (512,)]),
+            ("resize 2: none (the patch grid itself)", []),
+            ("resize 3: convolution 1024 to 1024, kernel 3, stride 2, with bias", [(1024, 1024, 3, 3), (1024,)]),
+            ("fusion inputs, 3 by 3 convolutions from 256, 512, 1024, 1024 to 256 channels, no bias",
+             [(f, c, 3, 3) for c in DPT_PROJ])]
+    for r in (1, 2, 3, 4):
+        units = 1 if r == 4 else 2
+        rows.append((f"refinement block {r}: {units} residual unit{'s' if units > 1 else ''} of two 3 by 3 convolutions 256 to 256 "
+                     "with bias, then a 1 by 1 convolution 256 to 256 with bias", [(f, f, 3, 3), (f,)] * (2 * units) + [(f, f, 1, 1), (f,)]))
+    rows += [("output convolution 1: 3 by 3, 256 to 128, with bias", [(f // 2, f, 3, 3), (f // 2,)]),
+             ("output convolution 2: 3 by 3, 128 to 32, with bias", [(f // 8, f // 2, 3, 3), (f // 8,)]),
+             ("output convolution 3: 1 by 1, 32 to the output channels (3, 4, 4 or 3), with bias", [("out", f // 8, 1, 1), ("out",)]),
+             ("input merger (gaussian head only): 7 by 7 convolution from the 3 colour channels to 128, with bias", [(f // 2, 3, 7, 7), (f // 2,)])]
+    return rows
+
+
+def inventory():
+    """The block table and the DPT head table that make every row of model_counts derivable."""
+    d = D
+    base, withqk = _vals(_block_shapes(d, False)), _vals(_block_shapes(d, True))
+    blk = [[nm, sh, f"{v:,}"] for nm, sh, v in _block_table()]
+    out = ["", "", "A block of width d, tensors in checkpoint order (the encoder's and the camera head's blocks have no query-key vectors; "
+           "the trunk's have them, 4 tensors of d/16 = 64 values):", "",
+           _table(["tensor", "shape", "values at d = 1024"], blk, "llr"), "",
+           f"A block without the query-key vectors has 14 tensors and {base:,} values at d = 1024, and one with them 18 tensors and "
+           f"{withqk:,}. At d = 2048, the camera head's width, a block has {_vals(_block_shapes(2 * d, False)):,} values.", "",
+           "A DPT head has one body for all four dense heads, which differ only in the output channels of the last convolution (depth "
+           "3: log depth, confidence and validity logit; pointmap 4: x, y, z and confidence; normals 4: a vector and its confidence; "
+           "Gaussian depth 3, with the input merger). Its tensors, in checkpoint order, for the 3-channel head:", ""]
+    rows = []
+    for what, shp in _dpt_table():
+        rows.append([what, len(shp), f"{_vals([tuple(3 if x == 'out' else x for x in sh) for sh in shp]):,}"])
+    out.append(_table(["part of a DPT head", "tensors", "values"], rows, "lrr"))
+    out += ["", "The 4-channel heads add 33 values (32 weights and 1 bias for the extra channel), and the input merger is the last row, "
+            "which only the Gaussian depth head has, so that the 3-channel head without it has 62 tensors and the Gaussian depth head 64."]
+    return "\n".join(out)
+
+
+def _components():
+    """What each group is made of, component by component, so that the totals of the table above are derivable."""
+    rows = []
+    for grp, parts in group_parts().items():
+        for label, shapes in parts:
+            rows.append([grp, label, len(shapes), f"{_vals([tuple(3 if x == 'out' else x for x in sh) for sh in shapes]):,}"])
+    return ("\n\nThe groups, component by component (the encoder and trunk blocks are 24 of the block below; the 16-value table "
+            "of rotary periods is stored once, in the first frame block, and is the reason the frame blocks have one tensor and 16 "
+            "values more than the global blocks, which are otherwise identical: 24 x 18 = 432 tensors):\n\n" +
+            _table(["group", "component", "tensors", "values"], rows, "llrr"))
 
 
 def model_counts():
@@ -621,7 +738,7 @@ def model_counts():
         f"width 2 d = {2 * D}. Each block has two layer norms, a fused query-key-value matrix, an output matrix, a feed-forward pair and "
         "two layer-scale vectors; a trunk block adds layer norms over the head width for queries and keys. Values are 4-byte floats; "
         "MiB is 2^20 bytes.", "",
-        _table(["group", "tensors", "values", "MiB"], rows, "lrrr")]) + check
+        _table(["group", "tensors", "values", "MiB"], rows, "lrrr")]) + check + _components() + inventory()
 
 
 # ------------------------------------------------------------------------------------------------ arithmetic of a pass
@@ -722,7 +839,9 @@ def counts_per_pass():
         f"FLOPs of one forward pass (TFLOP, 2 per multiply-add) at {IMG} by {IMG} pixels, by stage: the {DEPTH}-block encoder, the matrix "
         "products of the 48 trunk blocks, the attention of the frame blocks and of the global blocks, the camera head (4 iterations of "
         "4 blocks over the S camera tokens) and the four dense heads, each run on every frame. Normalizations, activations, "
-        "softmax and the resampling are not counted.", "",
+        "softmax and the resampling are not counted. The encoder works on 1 + 4 + 1369 = 1374 tokens a frame (class token, four registers "
+        "and the patches), the trunk on 7 + 1369 = 1376 (the seven special tokens and the patches), and the attention of each is "
+        "counted at its own token count.", "",
         _table(["frames", "encoder", "trunk matrix products", "frame attention", "global attention", "camera head", "dense heads", "total"],
                rows, "rrrrrrrr"), "",
         "One dense head on one frame costs, in multiply-adds: " + ", ".join(f"{k} {v / 1e9:.1f} G" for k, v in heads.items()) +
@@ -776,8 +895,12 @@ def frame_budget_table():
         "The grid and the frame budget for sources of several sizes under a longest-edge cap of 518 (the model's native size) and of "
         f"952. A frame has (grid width / {PATCH}) (grid height / {PATCH}) patches; the budget is {MAX_PASS_PATCHES} divided by that, "
         f"rounded down, then raised to {MIN_PASS_FRAMES} if lower and cut to {MAX_PASS_FRAMES} if higher (there is no device limit "
-        "here). 'Pairs' is the number of (query, key) pairs a global block scores per head at the budget, in millions; the last "
-        "column is the largest single buffer in GiB.", "",
+        "here). The grid is made as follows: the longest side becomes min(longest side, cap) rounded down to a multiple of 14 (at "
+        "least 28), and the other side is multiplied by the same ratio (new longest / old longest) and rounded half up to a multiple "
+        "of 14. 'Patches in the pass' is frames times the patches of a frame and does not count the seven special tokens a frame "
+        "adds; 'pairs' is the number of (query, key) pairs a global block scores per head at the budget, in millions, and does count "
+        "them: (frames x (patches a frame + 7))^2. The last column is the largest single buffer in GiB: the larger of 2^30 bytes, "
+        "one frame's scores in all 16 heads, the fused query-key-value buffer and the feed-forward hidden buffer, in 4-byte floats.", "",
         _table(["source", "cap", "grid", "patches a frame", "frames", "patches in the pass", "pairs, global block (M)",
                 "largest buffer (GiB)"], rows, "lrrrrrrr")])
 
@@ -1021,6 +1144,12 @@ def seed_or_replace():
     return "\n".join([
         f"The sparse scene of Chapter 4 (seed {bookrng.seed_of(sfm.SCENE_NAME)} for the points, {bookrng.seed_of(sfm.NOISE_NAME)} for the pixel "
         f"noise) with the stand-in's pointmaps at the 60 keypoints (`feed_forward_3d.sparse`, seed {bookrng.seed_of(SPARSE_NAME)}). "
+        "The sparse stand-in follows the rule of the room's (the first worked block of the section on cameras), with the 60 projections of "
+        "the noise-free pixels in place of a pixel grid: for view v = 0 to 3 in turn, six `normal()` draws for the biases of the depth head "
+        "and the pointmap head (standard deviations 0.02, 0.01, 0.01), then for each point j = 0 to 59 five `normal()` draws "
+        "(e, e' with sigma 0.01, three lateral errors with 0.004 z), where (x, y) are the normalized coordinates of the exact projection "
+        "of the point in the view, z its true camera depth and no point is hard. Its outputs are in the same units, 0.37 of a metre. "
+        "Observed pixels are the noisy ones of Chapter 4. "
         "Tracks: a keypoint of view 0 is matched to the keypoint of view v whose pointmap entry is nearest in space, if the two are mutual "
         f"nearest neighbours; {sum(len(t) for t in tracks)} of the {npt * nv} possible entries land in tracks, {wrong} matches are wrong. "
         "Cameras: for each view v > 0, the rigid fit of its camera-frame points d (x, y, 1) (the depth head and the observed pixel) to its pointmap "
@@ -1049,5 +1178,5 @@ def work_comparison():
         "adjustment of 4 cameras and 60 points seen 4 times each (the normal-equation matrix, 8 bytes a value) and from the counts "
         "of this chapter for the model (its 4-byte weights, each read at least once).", "",
         _table(["computation", "FLOPs", "bytes"], rows, "lrr"), "",
-        f"The pass needs {tot / (2 * reduced):.1e} times the arithmetic of the step, and performs {tot / wbytes:,.0f} FLOPs for every byte "
-        "of weights it reads."])
+        f"The pass needs {tot / (2 * reduced):.1e} times the arithmetic of the Schur-complement step ({tot / (2 * dense):.1e} times that of "
+        f"the dense step), and performs {tot / wbytes:,.0f} FLOPs for every byte of weights it reads."])

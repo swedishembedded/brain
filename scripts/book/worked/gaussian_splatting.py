@@ -102,8 +102,9 @@ def covariance_from_scale_rotation():
     m2 = S[0][0] * S[1][1] - S[0][1] ** 2
     rows = [[f"{_g(R[i][0], 6)}", f"{_g(R[i][1], 6)}", f"{_g(R[i][2], 6)}", f"{_g(S[i][0], 6)}", f"{_g(S[i][1], 6)}", f"{_g(S[i][2], 6)}"]
             for i in range(3)]
-    return ("A Gaussian with quaternion (w, x, y, z) = (1/3, 2/3, 0, 2/3) and scales s = (0.30, 0.10, 0.05). The matrix is the "
-            "rotation of Chapter 3 (`camera_geometry.matrix_of_quat`) and each entry of Sigma is the sum over k = 0, 1, 2 of "
+    return ("A Gaussian with quaternion (w, x, y, z) = (1/3, 2/3, 0, 2/3) and scales s = (0.30, 0.10, 0.05). The matrix is that of the "
+            "unit quaternion of Chapter 3, R = [[1 - 2(y^2 + z^2), 2(xy - wz), 2(xz + wy)], [2(xy + wz), 1 - 2(x^2 + z^2), "
+            "2(yz - wx)], [2(xz - wy), 2(yz + wx), 1 - 2(x^2 + y^2)]] after dividing the quaternion by its length, and each entry of Sigma is the sum over k = 0, 1, 2 of "
             "s_k^2 R[i][k] R[j][k], added in that order.\n\n"
             + _table(["row", "R column 0", "R column 1", "R column 2", "Sigma column 0", "Sigma column 1", "Sigma column 2"],
                      [[str(i)] + rows[i] for i in range(3)], "lrrrrrr")
@@ -301,7 +302,7 @@ def compositing_pixel():
             + _table(["i", "sigma", "opacity * exp(-sigma)", "alpha", "T before", "w = alpha T", "accumulated colour / note"], rows, "rrrrrrl")
             + f"\n\nThe walk stops at Gaussian {stopped}. The pixel is the accumulated colour plus T * background = {_v(final, 6)} with "
             f"T = {_g(T, 6)}. The weights of the {len(used)} Gaussians used sum to {_g(wsum, 8)} = 1 - T = {_g(1.0 - T, 8)}. Composited "
-            f"in the reverse order, the same Gaussians give {_v(swapped, 6)}: compositing is not commutative, which is why the "
+            f"in the reverse order (the same {len(used)} Gaussians, last used first, each with its own alpha, no stop), the same Gaussians give {_v(swapped, 6)}: compositing is not commutative, which is why the "
             "order is sorted by depth.")
 
 
@@ -364,6 +365,9 @@ def spherical_harmonics():
             "against one another over the sphere by the midpoint rule with 90 equal steps in the polar angle theta and 180 in the "
             "azimuth phi (weight sin(theta) d theta d phi). The largest entry of |Gram - I| is "
             f"{'below 1e-3' if err < 1e-3 else 'ABOVE 1e-3'} (criterion 1e-3; the rule is second-order accurate).\n\n"
+            f"The eight functions, for the unit direction d = (d_x, d_y, d_z) and C1 = {C1!r}, C2 = ({C2[0]!r}, {C2[1]!r}, {C2[2]!r}) = "
+            "(sqrt(15 / (4 pi)), sqrt(5 / (16 pi)), sqrt(15 / (16 pi))), in the order of the coefficients: degree 1: -C1 d_y, C1 d_z, "
+            "-C1 d_x; degree 2: C2[0] d_x d_y, -C2[0] d_y d_z, C2[1] (2 d_z^2 - d_x^2 - d_y^2), -C2[0] d_x d_z, C2[2] (d_x^2 - d_y^2).\n\n"
             "A Gaussian at the mean (0, 0, 4) with base coefficients dc = (0.8, -0.6, -1.4), so that the flat colour "
             f"C0 dc + 0.5 is {_v(flat, 5)}, and harmonic coefficients: red 0.30 on the first degree-1 function, green 0.25 on the "
             "third degree-2 function, blue -0.5 on the first degree-1 function, all others 0. Colour = max(0, flat + sum Y_t(d) coefficient_t), "
@@ -372,7 +376,8 @@ def spherical_harmonics():
             + "\n\nThe first degree-1 function is -C1 d_y, so red and blue change only with the height of the eye: "
               "looking from the origin (d_y = 0) leaves the flat colour; from above (the eye at y = -3, the y axis points down) d_y is "
               "positive and red falls while blue rises, clipped at zero where the sum goes negative.\n\n"
-            "Degree for a capture of V views, the largest d with 8 (d + 1)^2 <= V:\n\n"
+            "Degree for a capture of V views: the largest d from 0 to 3 with 8 (d + 1)^2 <= V (the degree is capped at 3, which the "
+            "rule alone would exceed from V = 200):\n\n"
             + _table(["views V", "degree"], [[str(v), str(sh_degree_for_views(v))] for v in views], "rr"))
 
 
@@ -517,7 +522,13 @@ def tile_binning():
     ulp = struct.unpack("<f", struct.pack("<I", f32_bits(d0) + 1))[0] - d0
     near = [d0, d0 + ulp, d0 + 8 * ulp, d0 + 16 * ulp]
     same = [f32_bits(v) >> (32 - P["depth_bits"]) for v in near]
-    return (f"The scene of `gaussian_splatting.TILE_SCENE`: six Gaussians (listed in the figure) seen by the camera at the origin with "
+    scene_rows = [[str(i), _v(g[0:3], 6), _v([math.exp(x) for x in g[3:6]], 6), _v(g[6:10], 10), _g(sigmoid(g[10]), 6), _v(g[11:14], 6)]
+                  for i, g in enumerate(TILE_SCENE)]
+    return (f"The scene `gaussian_splatting.TILE_SCENE`: six Gaussians, the whole of its input, given by the mean, the three scales, the "
+            "quaternion (w, x, y, z; it is normalized on use), the opacity and the colour (the background is black, the Gaussians are "
+            "projected by the formulas of this section, with the 0.3 dilation):\n\n"
+            + _table(["i", "mean (x, y, z)", "scales", "quaternion", "opacity", "colour"], scene_rows, "rlllrl")
+            + f"\n\nThey are seen by the camera at the origin (R = I) with "
             f"f = 40 and principal point (24, 16) in a 48 by 32 image. A tile is 16 by 16 pixels, so the grid is {P['tx']} by {P['ty']} = "
             f"{P['tx'] * P['ty']} tiles, tile numbers need ceil(log2 {P['tx'] * P['ty']}) = {P['tile_bits']} bits and the depth keeps the top "
             f"{P['depth_bits']} bits of its binary32 pattern. Each Gaussian covers the tiles its box u +- rx, v +- ry touches (clamped to the "
@@ -755,9 +766,13 @@ def gradient_check():
             rows.append([f"{gi}", name, ", ".join(_g(grads[gi][k], 6) for k in range(a, b)),
                          "below 1e-6" if max(errs[gi][k] for k in range(a, b)) < 1e-6 else "FAILS"])
     qdot = max(abs(dot(scene[gi][6:10], grads[gi][6:10])) for gi in range(3))
-    return (f"A frame of 8 by 8 pixels from the camera at (0.3, -0.2, -1) looking at (0, 0, 3) with f = 9 (`make_camera`, the `look_at` of "
-            f"Chapter 3), background {_v(GC_BG, 3)}, three Gaussians (scene `_gc_scene`: means, scales, quaternions and colours as in the "
-            f"source; opacities 0.7, 0.6, 0.5). The loss is L = sum over pixels and channels of W C, with 192 weights W drawn in "
+    scene_rows = [[str(i), _v(g[0:3], 4), _v([math.exp(x) for x in g[3:6]], 4), _v(g[6:10], 4), _g(sigmoid(g[10]), 4), _v(g[11:14], 4)]
+                  for i, g in enumerate(scene)]
+    return (f"A frame of 8 by 8 pixels from the camera at (0.3, -0.2, -1) looking at (0, 0, 3) with up = (0, -1, 0) and f = 9 "
+            f"(`make_camera`, the `look_at` of Chapter 3; principal point (4, 4)), background {_v(GC_BG, 3)}, and three Gaussians, the "
+            "whole scene (quaternions are normalized on use):\n\n"
+            + _table(["i", "mean", "scales", "quaternion (w, x, y, z)", "opacity", "colour"], scene_rows, "rlllrl")
+            + f"\n\nThe loss is L = sum over pixels and channels of W C, with 192 weights W drawn in "
             f"order (pixel row, pixel column, channel) from `normal()` of the generator `{GC_NAME}`, seed {bookrng.seed_of(GC_NAME)}, so "
             f"dL/dC = W exactly. L = {_g(loss, 8)}. The analytic gradient is compared with the central difference "
             "(L(theta + h) - L(theta - h)) / 2h, h = 1e-6, for each of the 42 numbers; an entry passes when "
@@ -803,8 +818,11 @@ def cutoff_jump():
         fd = (red(x0 + h) - red(x0 - h)) / (2 * h)
         e = abs(fd - an) / abs(an)
         rows.append([f"{h:.0e}", _g(fd, 4) if e >= 1e-6 else _g(an, 4), f"{e:.3g}" if e >= 1e-6 else "below 1e-6"])
-    return (f"One pixel (a 1 by 1 image, f = 10, camera at the origin looking along +z), one Gaussian of opacity 0.5, isotropic scale 0.4, at "
-            f"depth 4, colour (1, 0.5, 0.25), background black. Its mean x is moved until the alpha at the pixel is 1.001 times 1/255 "
+    return (f"One pixel (a 1 by 1 image, f = 10, camera at the origin looking along +z, so R = I, with the principal point at the "
+            "pixel's own centre (0.5, 0.5) and the pixel sampled at that centre), one Gaussian of opacity 0.5, isotropic scale 0.4 "
+            "(quaternion (1, 0, 0, 0)), at (x, 0, 4), colour (1, 0.5, 0.25), background black. Its screen covariance is the full "
+            "J Sigma J^T of the projection section, with the z column of J (the mean moves in x, so J changes with it), plus the 0.3 "
+            "dilation, and the alpha is opacity times exp(-kappa) at the pixel centre. Its mean x is moved until the alpha at the pixel is 1.001 times 1/255 "
             f"(bisection of 200 halvings on [0, 6]; x = {_g(x0, 8)}). The derivative of the red channel with respect to the mean x is "
             f"{_g(an, 5)} analytically, and the table shows the central difference of the render for five steps h.\n\n"
             + _table(["step h", "central difference", "relative error"], rows)
@@ -939,9 +957,14 @@ def fit_toy():
     opac = [_fit_text(lambda r, i=i: sigmoid(r[1][i][10]), lambda x: f"{x:.4f}") for i in range(3)]
     train, held = fit_cameras()
     s0 = fit_start()
-    return (f"The target is `FIT_TARGET`, three Gaussians (listed in the source) with opacities 0.9, 0.8, 0.85. It is rendered at {FIT_W} by "
-            f"{FIT_H} pixels, f = {FIT_F:g}, background {_v(FIT_BG, 3)}, by four training cameras on a circle of radius 4 (azimuth 0, 90, "
-            "180, 270 degrees, heights -1.2, -1.5, -1.0, -1.7) and one held-out camera at (2.8, -2.6, -2.6), all looking at the origin. "
+    tgt_rows = [[str(i), _v(g[0:3], 4), _v([math.exp(x) for x in g[3:6]], 4), _v(g[6:10], 4), _g(sigmoid(g[10]), 4), _v(g[11:14], 4)]
+                for i, g in enumerate(FIT_TARGET)]
+    return ("The target is three Gaussians, the whole of it (quaternions normalized on use):\n\n"
+            + _table(["i", "mean", "scales", "quaternion (w, x, y, z)", "opacity", "colour"], tgt_rows, "rlllrl")
+            + f"\n\nIt is rendered at {FIT_W} by "
+            f"{FIT_H} pixels, f = {FIT_F:g}, background {_v(FIT_BG, 3)}, by four training cameras at (4 sin a, h, -4 cos a) for the azimuths a = 0, 90, "
+            "180, 270 degrees with the heights h = -1.2, -1.5, -1.0, -1.7, and one held-out camera at (2.8, -2.6, -2.6), all looking at "
+            "the origin with up = (0, -1, 0) (`make_camera`, principal point at the middle of the image). "
             f"The start disturbs the target: for each Gaussian in turn, 3 mean numbers by 0.15 z, 3 log scales by 0.2 z and 4 quaternion "
             f"numbers by 0.15 z, with z the next `normal()` of the generator `{FIT_NAME}` (seed {bookrng.seed_of(FIT_NAME)}), in that order, "
             "then every opacity is set to 0.5 and every colour to (0.5, 0.5, 0.5). Full-batch Adam (beta_1 = 0.9, beta_2 = 0.999, epsilon = "
@@ -1171,10 +1194,14 @@ def ewa_vs_ray():
             "(0.25, 0.1, 1) times z, seen by a pinhole camera with f = 100; z is the distance along the axis. The ray column evaluates the "
             "exact maximum response along each pixel's ray (`ray_response`, with the ray (u/f, v/f, 1) for the pixel centre at "
             "offset (u, v) from the principal point); the linearised column is exp(-q/2) of the Gaussian whose covariance is J Sigma J^T "
-            "with J taken at the mean. The pixel centres tried are those within 3.5 projected standard deviations of the projected mean, at most "
-            "150 pixels, in whole pixel steps. The error is the largest absolute difference over those pixels, with the pixel where it "
-            "occurs given relative to the pixel containing the projected mean. The last column is the trace of the covariance of six "
-            "sigma points m +- sqrt(3) sigma e_k projected through the same lens, divided by the trace of J Sigma J^T.\n\n"
+            "with J taken at the mean (the full 2 by 3 Jacobian including its z column). The principal point is the origin of the pixel "
+            "offsets (u, v), so a pixel centre is a half-integer offset: with (c_u, c_v) = (f x / z, f y / z) the projected mean, the "
+            "centres tried are (floor(c_u) + d_u + 1/2, floor(c_v) + d_v + 1/2) for the integers d_u, d_v in [-h, h], a square, "
+            "with h = the integer part of min(3.5 projected sigma, 150). The error is the largest absolute difference over those pixels, "
+            "with the pixel where it occurs given as (d_u, d_v) relative to the pixel containing the projected mean. The last column "
+            "is the trace of the covariance of six sigma points m +- sqrt(3) sigma e_k projected through the same pinhole map, each "
+            "squared offset taken about the projection of m itself (not about the mean of the projected points) and divided by 6, "
+            "over the trace of J Sigma J^T.\n\n"
             + _table(["z", "sigma / z", "projected sigma (pixels)", "largest difference", "at pixel", "sigma-point trace / linearised trace"],
                      rows, "rrrrrr"))
 

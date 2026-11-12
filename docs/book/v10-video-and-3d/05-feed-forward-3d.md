@@ -85,10 +85,12 @@ function align_similarity(A: array<real>[n, 3], B: array<real>[n, 3], with_scale
     return (a, R, t)
 ```
 
-The camera-to-world pose of frame $i$ is then $(\mathbf{R}, \mathbf{t})$ from `align_similarity(A, B, false)`, with the camera-frame points as $\mathbf{A}$ and the pointmap as $\mathbf{B}$, and its centre is $\mathbf{t}$. The example below does it for the room, first from exact maps and then from the outputs of a **stand-in** for a network. A model of a billion parameters cannot be trained inside a textbook, and what these examples need is the shape of its outputs and the way they go wrong, so a seeded generator makes outputs with the errors such a model makes: a scale the world has no unit for (the stand-in's world is 0.37 of the room's metres), for each view a smooth bias along the ray in the depth head and in the pointmap head separately, noise of 1 percent per pixel (3 percent on the silhouette of the sphere), and a scatter of 0.4 percent of the depth in each coordinate of the pointmap. The sizes are mine, chosen near the one to two percent that real depth maps are reported to disagree by (the commit `1fe049d1d`, below, measures about 1 percent on a real capture). The stand-in is a way to measure the machinery around the model; it is not a measurement of brain's model, and nothing below should be read as one.
+The camera-to-world pose of frame $i$ is then $(\mathbf{R}, \mathbf{t})$ from `align_similarity(A, B, false)`, with the camera-frame points as $\mathbf{A}$ and the pointmap as $\mathbf{B}$, and its centre is $\mathbf{t}$. The example below does it for the room, first from exact maps and then from the outputs of a **stand-in** for a network. A model of a billion parameters cannot be trained inside a textbook, and what these examples need is the shape of its outputs and the way they go wrong, so a seeded generator makes outputs with the errors such a model makes: a scale the world has no unit for (the stand-in's world is 0.37 of the room's metres), for each view a smooth bias along the ray in the depth head and in the pointmap head separately, noise of 1 percent per pixel (3 percent on a silhouette, a pixel whose depth differs from a neighbour's by more than half of the smaller), and a scatter of 0.4 percent of the depth in each coordinate of the pointmap. The first worked block below prints the complete recipe: the distributions, the bias function, the draw order and the confidence. The sizes are mine, chosen near the one to two percent that real depth maps are reported to disagree by (the commit `1fe049d1d`, below, measures about 1 percent on a real capture). The stand-in is a way to measure the machinery around the model; it is not a measurement of brain's model, and nothing below should be read as one.
 
 <!-- worked: feed_forward_3d.camera_from_pointmap -->
 Camera v = 1 and 2 of the room. A camera-frame point is z (x, y, 1) with (x, y) = ((i + 0.5 - c_x) / f, (j + 0.5 - c_y) / f); the pose (R, C) is the rigid map from these points to the pointmap entries over all 1728 pixels (the Umeyama fit with the scale held at 1; the pointmap of the stand-in is in the stand-in's units, so its centre error is divided by the scale 0.37 to read in metres). Columns: the rotation error in degrees and the centre error in metres of the pose from exact maps, and of the pose from the stand-in's depth head and pointmap head (`feed_forward_3d.standin`, seed 9090303255190359577).
+
+The stand-in (`bookrng.generator("feed_forward_3d.standin")`, seed 9090303255190359577) is built as follows. Let z be the true camera depth of a pixel, (x, y) = ((i + 0.5 - c_x) / f, (j + 0.5 - c_y) / f) its normalized coordinates, s = 0.37 the scale of its world, and a pixel *hard* when its true depth differs from that of a 4-neighbour by more than 0.5 of the smaller of the two (the silhouettes: 176 of the 5184 pixels). For camera v = 0, 1, 2 in turn, six `normal()` draws are scaled by the standard deviations (0.02, 0.01, 0.01) to give the biases (b0, bx, by) of the depth head, and the next six likewise the biases (b0', bx', by') of the pointmap head. Then for every pixel in row-major order (row j from 0, column i from 0), five `normal()` draws in this order: e for the depth head and e' for the pointmap head, each scaled by sigma = 0.01 (0.03 on a hard pixel), and three lateral errors scaled by 0.004 z, one for each world axis. The depth head's output is s z (1 + b0 + bx x + by y + e). The pointmap head's is s (C + z (1 + b0' + bx' x + by' y + e') r + lateral), where C is the camera centre and r = R_c (x, y, 1) with R_c the camera-to-world rotation, so that C + z r is the exact world point; the lateral errors are added in world axes before the scale s. Both heads give the confidence 1 + exp(raw) with raw = -2 ln(sigma / 0.01), which is 2 on an easy pixel and 1 + 1/9 on a hard one. The sizes are chosen, not measured.
 
 | camera | rotation error, exact (deg) | centre error, exact (m) | rotation error, stand-in (deg) | centre error, stand-in (m) |
 |---:|---:|---:|---:|---:|
@@ -140,7 +142,7 @@ The second table is that case. The stand-in's points are carried by a rotation a
 
 A transformer has no notion of "this image" or "the first image": it sees tokens. For frames to be recognised as views of one scene, and for one of them to define the world, something in the input has to say so. brain's model does this with seven special tokens in front of the patches of every frame (`PATCH_START` in `crates/worldmirror2/src/model.rs`): one camera token, four register tokens, a pose token and an intrinsics token. The camera token is the slot in which the model will gather what it knows about this frame's camera, and the registers are spare slots that attention can use as scratch space (Darcet et al., 2024, found that vision transformers learn to hide global information in a few low-content patches unless such slots are given). The camera and register tokens are learned vectors, and frame 0 has its own copy of them (`cam_token` and `reg_token` have shape $[1, 2, \cdot, d]$, entry 0 for the first frame and entry 1 for every later one): the model is told which frame is the reference by what it is wearing.
 
-The pose and intrinsics tokens are the model's way of taking cameras as input. A capture rig often knows its poses or its lens. If the model can be told, it should be, and brain's model accepts it (`crates/worldmirror2/src/priors.rs`): the pose token is a small network applied to the 7-vector of a camera, the quaternion of its camera-to-world rotation (scalar last) followed by its centre, and the intrinsics token to the 4-vector $(f_x/w, f_y/h, c_x/w, c_y/h)$. Both small networks are a linear map, a GELU and a linear map to width $d$, run on the host, since a sequence of cameras is a few million multiply-adds. Their design has two consequences worth checking.
+The pose and intrinsics tokens are the model's way of taking cameras as input. A capture rig often knows its poses or its lens. If the model can be told, it should be, and brain's model accepts it (`crates/worldmirror2/src/priors.rs`): the pose token is a small network applied to the 7-vector of a camera, the quaternion of its camera-to-world rotation (scalar last, $(x, y, z, w)$, where Chapter 3 and Chapter 6 write $(w, x, y, z)$) followed by its centre, and the intrinsics token to the 4-vector $(f_x/w, f_y/h, c_x/w, c_y/h)$. Both small networks are a linear map, a GELU and a linear map to width $d$, run on the host, since a sequence of cameras is a few million multiply-adds. Their design has two consequences worth checking.
 
 First, the pose vector cannot hold absolute positions. A reconstruction is defined only up to scale, so a prior in metres would carry a unit the model has no way to honour. The centres are therefore normalized across the sequence: subtract their centroid, divide by the largest distance of a centre from it. The same rig in millimetres, anywhere in the world, gives the same tokens, and the furthest camera sits at distance 1. It also means that the priors of a sequence must be encoded together, since a frame's token depends on where the others are. Second, the intrinsics are divided by the image size, so the token says how wide the lens is and not how many pixels the sensor has: the same camera at half the resolution has the same token.
 
@@ -166,7 +168,7 @@ Intrinsics tokens (f_x / w, f_y / h, c_x / w, c_y / h) and what the field-of-vie
 
 A rotation of -150 degrees about y has the scalar-last quaternion (0, 0.9659, 0, -0.2588) by the branch rule of the pose token, and the rotation of +150 degrees (0, 0.9659, 0, 0.2588): the second has w = 0.2588, the first -0.2588, a sign that follows from the branch and not from the rotation.
 
-A ray map for a barrel lens (k1 = -0.15, 48 by 36 pixels, f = 36) is 1728 unit directions. The pinhole line u = c + f' (x / z) fitted to it by least squares has f' = 33.7472, c = 24.0000, and misses the pixel it was made from by 0.403 px RMS and 1.875 px at the worst; the ray map itself has no such error, since it lists the ray of every pixel.
+A ray map for a barrel lens (k1 = -0.15, 48 by 36 pixels, f = 36, the radial model of Chapter 3 inverted by 12 Newton steps) is 1728 unit directions. The pinhole line u = c + f' (x / z) is fitted to the 1728 pairs of the pixel-centre column u = i + 0.5 and x / z of its ray by least squares, in u alone (v is not used), and has f' = 33.7472, c = 24.0000; it misses the pixel column it was made from by 0.403 px RMS and 1.875 px at the worst, in u; the ray map itself has no such error, since it lists the ray of every pixel.
 <!-- /worked -->
 
 Absent priors leave the pose and intrinsics rows zero. That is not a fallback: the crate's own comment records that during training each prior is dropped independently with probability 0.5 by zeroing exactly these rows, so the all-zero row is a case the model has seen as often as any other, and the unconditioned path is just a different corner of the same input space. (This is the crate's statement about the reference model's training. brain has no training code for the model, and the claim is not one that this book re-derives.) Commit `0fd41ffe3` (September 2026) is the history of it: the checkpoint had carried the embedders `pose_embed` and `ray_embed` since the port was written, and nothing had ever called them. The commit also records why the capability matters beyond accuracy: handing the model the cameras is the only way to ask whether a failed reconstruction failed in camera prediction or in depth. A companion, `0e23faf95`, found a caution: back-projecting the depths through the supplied cameras instead of the predicted ones, on a turntable clip with approximate synthesized poses, made the result worse, because the supplied poses were less accurate than the predicted ones, and a geometry built on a camera inherits every error of it. A prior that is worse than the model's own estimate is not help.
@@ -239,12 +241,85 @@ The model of the chapter, from its configuration: width d = 1024, 16 heads of 64
 | total | 1,545 | 1,263,337,084 | 4,819.2 |
 
 The tensor shapes of the released checkpoint's header (the committed fixture `crates/worldmirror2/tests/golden/header.json`) number 1,545 and hold 1,263,337,084 values; grouped by the prefix of their names into the seven groups `visual_geometry_transformer`, `cam_head`, `depth_head`, `pts_head`, `norm_head`, `gs_head`, `gs_renderer`, every group's count equals the count above (all seven agree).
+
+The groups, component by component (the encoder and trunk blocks are 24 of the block below; the 16-value table of rotary periods is stored once, in the first frame block, and is the reason the frame blocks have one tensor and 16 values more than the global blocks, which are otherwise identical: 24 x 18 = 432 tensors):
+
+| group | component | tensors | values |
+|---|---|---:|---:|
+| trunk tokens and prior encoders | camera token, one copy for frame 0 and one for the others | 1 | 2,048 |
+| trunk tokens and prior encoders | register tokens, same two copies of 4 | 1 | 8,192 |
+| trunk tokens and prior encoders | pose embedder: linear 7 to d, GELU, linear d to d | 4 | 1,057,792 |
+| trunk tokens and prior encoders | intrinsics embedder: linear 4 to d, GELU, linear d to d | 4 | 1,054,720 |
+| trunk tokens and prior encoders | depth embedder: the 14 by 14 values of a depth patch (196) through linear 196 to 4 d, GELU, linear 4 d to d | 4 | 5,002,240 |
+| DINOv2 patch encoder | class token | 1 | 1,024 |
+| DINOv2 patch encoder | register tokens | 1 | 4,096 |
+| DINOv2 patch encoder | mask token (unused at inference) | 1 | 1,024 |
+| DINOv2 patch encoder | position embedding, 1 + 37 * 37 = 1370 positions | 1 | 1,402,880 |
+| DINOv2 patch encoder | patch projection, a 14 by 14 convolution of 3 channels to d, with bias | 2 | 603,136 |
+| DINOv2 patch encoder | 24 blocks of width d (block table below, 14 tensors each) | 336 | 302,358,528 |
+| DINOv2 patch encoder | final layer norm | 2 | 2,048 |
+| 24 frame blocks | 24 blocks of width d with query-key norms (block table below, 18 tensors each) | 432 | 302,364,672 |
+| 24 frame blocks | the one stored table of rotary periods, head width / 4 = 16 values, shared by all 48 trunk blocks | 1 | 16 |
+| 24 global blocks | 24 blocks of width d with query-key norms (block table below, 18 tensors each) | 432 | 302,364,672 |
+| camera head | initial camera 9-vector | 1 | 9 |
+| camera head | parameter embedding: linear 9 to 2 d | 2 | 20,480 |
+| camera head | token norm and output norm over 2 d | 4 | 8,192 |
+| camera head | modulation generator: linear 2 d to 6 d (read at each of the 4 refinement iterations) | 2 | 12,589,056 |
+| camera head | 4 refinement blocks at width 2 d (block table below, 14 tensors each) | 56 | 201,449,472 |
+| camera head | predictor: linear 2 d to d, then linear d to 9 | 4 | 2,107,401 |
+| depth head (DPT) | DPT head with 3 output channels (head table below) | 62 | 32,654,595 |
+| pointmap head (DPT) | DPT head with 4 output channels (head table below) | 62 | 32,654,628 |
+| normal head (DPT) | DPT head with 4 output channels (head table below) | 62 | 32,654,628 |
+| gaussian depth head (DPT) and input merger | DPT head with 3 output channels and the 7 by 7 input merger (head table below) | 64 | 32,673,539 |
+| gaussian parameter convolutions | 3 by 3 convolution 128 to 256 without bias, 1 by 1 convolution 256 to 12 with bias | 3 | 297,996 |
+
+A block of width d, tensors in checkpoint order (the encoder's and the camera head's blocks have no query-key vectors; the trunk's have them, 4 tensors of d/16 = 64 values):
+
+| tensor | shape | values at d = 1024 |
+|---|---|---:|
+| norm 1 weight, bias | 2 x d | 2,048 |
+| fused query-key-value weight | 3d x d | 3,145,728 |
+| fused query-key-value bias | 3d | 3,072 |
+| (trunk blocks only) query norm weight and bias, key norm weight and bias | 4 x d/16 | 256 |
+| output weight | d x d | 1,048,576 |
+| output bias | d | 1,024 |
+| layer scale 1 | d | 1,024 |
+| norm 2 weight, bias | 2 x d | 2,048 |
+| feed-forward weight 1 | 4d x d | 4,194,304 |
+| feed-forward bias 1 | 4d | 4,096 |
+| feed-forward weight 2 | d x 4d | 4,194,304 |
+| feed-forward bias 2 | d | 1,024 |
+| layer scale 2 | d | 1,024 |
+
+A block without the query-key vectors has 14 tensors and 12,598,272 values at d = 1024, and one with them 18 tensors and 12,598,528. At d = 2048, the camera head's width, a block has 50,362,368 values.
+
+A DPT head has one body for all four dense heads, which differ only in the output channels of the last convolution (depth 3: log depth, confidence and validity logit; pointmap 4: x, y, z and confidence; normals 4: a vector and its confidence; Gaussian depth 3, with the input merger). Its tensors, in checkpoint order, for the 3-channel head:
+
+| part of a DPT head | tensors | values |
+|---|---:|---:|
+| token norm over the 2 d = 2048 channels of a tap (weight, bias) | 2 | 4,096 |
+| projections, 1 by 1 convolutions from 2048 to 256, 512, 1024, 1024 channels, with bias | 8 | 5,769,984 |
+| resize 0: transposed convolution 256 to 256, kernel 4, stride 4, with bias | 2 | 1,048,832 |
+| resize 1: transposed convolution 512 to 512, kernel 2, stride 2, with bias | 2 | 1,049,088 |
+| resize 2: none (the patch grid itself) | 0 | 0 |
+| resize 3: convolution 1024 to 1024, kernel 3, stride 2, with bias | 2 | 9,438,208 |
+| fusion inputs, 3 by 3 convolutions from 256, 512, 1024, 1024 to 256 channels, no bias | 4 | 6,488,064 |
+| refinement block 1: 2 residual units of two 3 by 3 convolutions 256 to 256 with bias, then a 1 by 1 convolution 256 to 256 with bias | 10 | 2,426,112 |
+| refinement block 2: 2 residual units of two 3 by 3 convolutions 256 to 256 with bias, then a 1 by 1 convolution 256 to 256 with bias | 10 | 2,426,112 |
+| refinement block 3: 2 residual units of two 3 by 3 convolutions 256 to 256 with bias, then a 1 by 1 convolution 256 to 256 with bias | 10 | 2,426,112 |
+| refinement block 4: 1 residual unit of two 3 by 3 convolutions 256 to 256 with bias, then a 1 by 1 convolution 256 to 256 with bias | 6 | 1,245,952 |
+| output convolution 1: 3 by 3, 256 to 128, with bias | 2 | 295,040 |
+| output convolution 2: 3 by 3, 128 to 32, with bias | 2 | 36,896 |
+| output convolution 3: 1 by 1, 32 to the output channels (3, 4, 4 or 3), with bias | 2 | 99 |
+| input merger (gaussian head only): 7 by 7 convolution from the 3 colour channels to 128, with bias | 2 | 18,944 |
+
+The 4-channel heads add 33 values (32 weights and 1 bias for the extra channel), and the input merger is the last row, which only the Gaussian depth head has, so that the 3-channel head without it has 62 tensors and the Gaussian depth head 64.
 <!-- /worked -->
 
 The count equals the checkpoint's: 1,545 tensors and 1,263,337,084 values, which is the "1.26 billion", and in four-byte floats 4,819 MiB, a little under 5 GiB that has to be resident before the first photograph. The three counts the table makes visible are worth reading. The encoder and the two halves of the trunk have almost the same size (302 to 304 million values each), since each is 24 blocks of width 1024 and a block has $12 d^2 \approx 12.6$ million. The camera head, which predicts nine numbers per frame, has 216 million values: its four blocks run at width 2048, where a block has four times as many weights as at 1024, and a 2048-to-6144 modulation layer is read at every one of its four iterations. And each dense head is 32.7 million, small beside the trunk but not beside its job, because the arithmetic of a head is spent at image resolution.
 
 <!-- worked: feed_forward_3d.counts_per_pass -->
-FLOPs of one forward pass (TFLOP, 2 per multiply-add) at 518 by 518 pixels, by stage: the 24-block encoder, the matrix products of the 48 trunk blocks, the attention of the frame blocks and of the global blocks, the camera head (4 iterations of 4 blocks over the S camera tokens) and the four dense heads, each run on every frame. Normalizations, activations, softmax and the resampling are not counted.
+FLOPs of one forward pass (TFLOP, 2 per multiply-add) at 518 by 518 pixels, by stage: the 24-block encoder, the matrix products of the 48 trunk blocks, the attention of the frame blocks and of the global blocks, the camera head (4 iterations of 4 blocks over the S camera tokens) and the four dense heads, each run on every frame. Normalizations, activations, softmax and the resampling are not counted. The encoder works on 1 + 4 + 1369 = 1374 tokens a frame (class token, four registers and the patches), the trunk on 7 + 1369 = 1376 (the seven special tokens and the patches), and the attention of each is counted at its own token count.
 
 | frames | encoder | trunk matrix products | frame attention | global attention | camera head | dense heads | total |
 |---:|---:|---:|---:|---:|---:|---:|---:|
@@ -380,7 +455,7 @@ A pass costs $S$ frames of the encoder and heads and an $S^2$ of global attentio
 The grid follows the reference's preprocessing: the longest side becomes the smaller of its length and a cap, floored to a multiple of 14, and the other side is scaled by the same factor and rounded to a multiple of 14, so that the grid is a whole number of patches. The normalized rotary positions are why the cap need not be the 518 of the checkpoint; brain's command-line default is 952, which gives a square frame 3.4 times the samples. The frame budget then follows from the cost of attention. One pass may hold 14,336 patch tokens in all, the frame count falls out as that number divided by a frame's patches, and it is held between 6 and 24: below 6 the plan is mostly overlap between chunks, and above 24 "the pass stops being the thing that fails first and the host-side assembly does", in the words of the source.
 
 <!-- worked: feed_forward_3d.frame_budget_table -->
-The grid and the frame budget for sources of several sizes under a longest-edge cap of 518 (the model's native size) and of 952. A frame has (grid width / 14) (grid height / 14) patches; the budget is 14336 divided by that, rounded down, then raised to 6 if lower and cut to 24 if higher (there is no device limit here). 'Pairs' is the number of (query, key) pairs a global block scores per head at the budget, in millions; the last column is the largest single buffer in GiB.
+The grid and the frame budget for sources of several sizes under a longest-edge cap of 518 (the model's native size) and of 952. A frame has (grid width / 14) (grid height / 14) patches; the budget is 14336 divided by that, rounded down, then raised to 6 if lower and cut to 24 if higher (there is no device limit here). The grid is made as follows: the longest side becomes min(longest side, cap) rounded down to a multiple of 14 (at least 28), and the other side is multiplied by the same ratio (new longest / old longest) and rounded half up to a multiple of 14. 'Patches in the pass' is frames times the patches of a frame and does not count the seven special tokens a frame adds; 'pairs' is the number of (query, key) pairs a global block scores per head at the budget, in millions, and does count them: (frames x (patches a frame + 7))^2. The last column is the largest single buffer in GiB: the larger of 2^30 bytes, one frame's scores in all 16 heads, the fused query-key-value buffer and the feed-forward hidden buffer, in 4-byte floats.
 
 | source | cap | grid | patches a frame | frames | patches in the pass | pairs, global block (M) | largest buffer (GiB) |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -403,7 +478,7 @@ Commit `84521a0f2` (September 2026) is the loop that uses this. `crates/recon` k
 Now the comparison the chapter has been building to. The toy is the scene of Chapter 4: 60 points in a box, four cameras, half a pixel of noise, the classical chain run on it with its numbers (52 points and 172 observations after matching, rotation errors of 0.52, 0.60 and 0.78 degrees and centre errors of 0.025, 0.047 and 0.083 metres after the adjustment). The stand-in is applied to the same scene, at the 60 keypoints. Everything the network is allowed to supply, it supplies. Matches come from the pointmaps: a keypoint of view 0 is matched to the keypoint of view $v$ whose entry is nearest in space, if the two are mutual nearest neighbours. Cameras come from the fit of the previous sections, one per view. Points are the mean of a track's entries. Then the adjustment of Chapter 4, unchanged, takes it from there.
 
 <!-- worked: feed_forward_3d.seed_or_replace -->
-The sparse scene of Chapter 4 (seed 18033376832500173267 for the points, 8282942143422244089 for the pixel noise) with the stand-in's pointmaps at the 60 keypoints (`feed_forward_3d.sparse`, seed 4353048558362900194). Tracks: a keypoint of view 0 is matched to the keypoint of view v whose pointmap entry is nearest in space, if the two are mutual nearest neighbours; 223 of the 240 possible entries land in tracks, 5 matches are wrong. Cameras: for each view v > 0, the rigid fit of its camera-frame points d (x, y, 1) (the depth head and the observed pixel) to its pointmap entries; camera 0 is the identity. Points: the mean of the track's pointmap entries. Both are divided by the distance of camera 1 from camera 0, so the baseline is 1 as in Chapter 4's gauge. Errors are those of Chapter 4's table (rotation in degrees, centre in metres after the true baseline is restored) for cameras 1, 2 and 3.
+The sparse scene of Chapter 4 (seed 18033376832500173267 for the points, 8282942143422244089 for the pixel noise) with the stand-in's pointmaps at the 60 keypoints (`feed_forward_3d.sparse`, seed 4353048558362900194). The sparse stand-in follows the rule of the room's (the first worked block of the section on cameras), with the 60 projections of the noise-free pixels in place of a pixel grid: for view v = 0 to 3 in turn, six `normal()` draws for the biases of the depth head and the pointmap head (standard deviations 0.02, 0.01, 0.01), then for each point j = 0 to 59 five `normal()` draws (e, e' with sigma 0.01, three lateral errors with 0.004 z), where (x, y) are the normalized coordinates of the exact projection of the point in the view, z its true camera depth and no point is hard. Its outputs are in the same units, 0.37 of a metre. Observed pixels are the noisy ones of Chapter 4. Tracks: a keypoint of view 0 is matched to the keypoint of view v whose pointmap entry is nearest in space, if the two are mutual nearest neighbours; 223 of the 240 possible entries land in tracks, 5 matches are wrong. Cameras: for each view v > 0, the rigid fit of its camera-frame points d (x, y, 1) (the depth head and the observed pixel) to its pointmap entries; camera 0 is the identity. Points: the mean of the track's pointmap entries. Both are divided by the distance of camera 1 from camera 0, so the baseline is 1 as in Chapter 4's gauge. Errors are those of Chapter 4's table (rotation in degrees, centre in metres after the true baseline is restored) for cameras 1, 2 and 3.
 
 | path | points / observations | rotation error (deg) | centre error (m) | RMS reprojection (px) |
 |---|---:|---:|---:|---:|
@@ -432,10 +507,10 @@ Work in FLOPs (2 per multiply-add) and the bytes of the large operand, from the 
 | the same step by the Schur complement | 2.35e+05 | 6.63e+03 |
 | one forward pass of the model, 4 frames of 518 by 518 | 1.99e+13 | 5.05e+09 |
 
-The pass needs 8.5e+07 times the arithmetic of the step, and performs 3,939 FLOPs for every byte of weights it reads.
+The pass needs 8.5e+07 times the arithmetic of the Schur-complement step (7.8e+06 times that of the dense step), and performs 3,939 FLOPs for every byte of weights it reads.
 <!-- /worked -->
 
-A single pass of the model is nearly eight orders of magnitude more arithmetic than a Levenberg-Marquardt step of the toy (a factor of $8.5 \times 10^7$), and reads five gigabytes of weights to do it. The comparison is not fair, since the classical chain runs the step dozens of times and thousands of RANSAC iterations around it, and it is not meant to be: it says that the trade the network offers is arithmetic, regular and parallel, for logic, branching and thresholds. A pass is dense matrix products at nearly four thousand FLOPs for every byte of weights it reads, the shape of work that a GPU is built for (Volume IV), where a bundle adjustment is a sparse, irregular, sequential solve. For a hundred frames of a room it is the matrix products that win. For a calibrated rig, for a capture with a known scale, or for anything the network was not trained on, they need not.
+A single pass of the model is nearly eight orders of magnitude more arithmetic than a Levenberg-Marquardt step of the toy solved by the Schur complement (a factor of $8.5 \times 10^7$; against the dense step of the same toy, $7.8 \times 10^6$), and reads five gigabytes of weights to do it. The comparison is not fair, since the classical chain runs the step dozens of times and thousands of RANSAC iterations around it, and it is not meant to be: it says that the trade the network offers is arithmetic, regular and parallel, for logic, branching and thresholds. A pass is dense matrix products at nearly four thousand FLOPs for every byte of weights it reads, the shape of work that a GPU is built for (Volume IV), where a bundle adjustment is a sparse, irregular, sequential solve. For a hundred frames of a room it is the matrix products that win. For a calibrated rig, for a capture with a known scale, or for anything the network was not trained on, they need not.
 
 The traffic runs both ways, and the history shows where each direction was built. Known cameras can be given to the model (commits `0fd41ffe3` and `0e23faf95` above), and the model's output can be given to the fit. Commit `558d44164` (September 2026) is the second: `ChunkScene` and `Reconstruction` in `crates/recon` now carry a per-frame `DepthPrior`, the depth the model predicted for every pixel with a confidence, so that the optimisation of the next chapter, whose image loss is blind to distance, has something to be pulled toward. What the model puts there is the fused depth of equation (4) and the agreement count as the confidence (`depth_prior` in `recon_impl.rs`), not any single view's depth, for the reason of the last section. The commit's message reports a measurement on analytic ground truth, a scene slid 5.7 percent along every ray that an image-only fit left at 6.21 percent and the supervised fit brought back to 0.08 percent; the claim is the commit's, and the structural reason, that a splat's image-plane gradient is orthogonal to its own ray, is the one the code states in three places.
 
