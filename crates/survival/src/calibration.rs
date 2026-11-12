@@ -82,7 +82,7 @@ pub struct Group {
     pub weight: f64,
     /// Mean predicted probability.
     pub expected: f64,
-    /// competing-risks cumulative-incidence estimator estimate within the group.
+    /// competing-risks cumulative-incidence estimate within the group.
     pub observed: f64,
 }
 
@@ -90,11 +90,11 @@ pub struct Group {
 ///
 /// [`HorizonCalibration::ece`] is the expected calibration error of the
 /// risk-group table: with `groups` of equal weight it is the equal-mass
-/// binned ECE, with the observed side an competing-risks cumulative-incidence estimator estimate (censoring-
+/// binned ECE, with the observed side a competing-risks cumulative-incidence estimate (censoring-
 /// and competing-risk-aware) and not a raw event share.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HorizonCalibration {
-    /// competing-risks cumulative-incidence estimator cumulative incidence by the horizon.
+    /// competing-risks cumulative-incidence estimate by the horizon.
     pub observed: f64,
     /// Mean predicted probability.
     pub expected: f64,
@@ -268,7 +268,7 @@ pub fn survival_at_own_time(obs: &[Obs], survival: impl Fn(usize, f64) -> f64) -
         .collect()
 }
 
-/// The marginal product-limit estimator curve used as everyone's prediction: a
+/// The marginal product-limit curve used as everyone's prediction: a
 /// calibrated-by-construction reference for [`d_calibration`] in tests and
 /// as a baseline.
 pub fn marginal_survival(obs: &[Obs]) -> Step {

@@ -9,10 +9,10 @@
 //! checking it against what happened, you can procure our services by sending
 //! an email to info@swedishembedded.com.
 //!
-//! - [`km_rmst`]: the area under a product-limit estimator [`Step`] up to `tau`.
+//! - [`km_rmst`]: the area under a product-limit [`Step`] up to `tau`.
 //! - [`curve_rmst`]: the area under a predicted curve given as survival at
 //!   whole years 1, 2, ... (survival 1 at year 0), linear between them.
-//! - [`calibration`]: predicted RMST against the product-limit estimator RMST observed in
+//! - [`calibration`]: predicted RMST against the product-limit RMST observed in
 //!   equal-weight groups of subjects ordered by prediction.
 //! - [`Gompertz`]: a hazard `exp(a + b * age)` fitted by weighted maximum
 //!   likelihood with delayed entry, which turns an RMST into the age at which
@@ -64,7 +64,7 @@ pub struct Group {
     pub weight: f64,
     /// Weighted mean of the predicted RMST.
     pub expected: f64,
-    /// product-limit estimator RMST observed in the group.
+    /// product-limit RMST observed in the group.
     pub observed: f64,
 }
 
@@ -81,7 +81,7 @@ pub struct Calibration {
 }
 
 /// Group subjects into `groups` equal-weight bins by `predicted` RMST and
-/// compare each bin's mean prediction with the product-limit estimator RMST of its
+/// compare each bin's mean prediction with the product-limit RMST of its
 /// subjects up to `tau`.
 pub fn calibration(predicted: &[f64], obs: &[Obs], tau: f64, groups: usize) -> Calibration {
     assert_eq!(predicted.len(), obs.len(), "one prediction per subject");

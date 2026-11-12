@@ -15,7 +15,7 @@
 //! model.
 //!
 //! - [`estimate`]: weighted product-limit estimator, the censoring distribution, and
-//!   competing-risks cumulative-incidence estimator cumulative incidence for one cause among several.
+//!   competing-risks cumulative-incidence estimate for one cause among several.
 //! - [`concordance`]: concordance and Uno's truncated, IPCW-weighted C, with
 //!   competing causes, in `O(n log n)`.
 //! - [`auc`]: the time-dependent AUROC at a horizon (cumulative cases

@@ -22,7 +22,7 @@
 //! - the squared-error probability score integrated over `(0, horizon]` on an even grid;
 //! - the recalibration slope and intercept, the intercept with the slope fixed
 //!   at one (calibration in the large), observed over expected and the
-//!   expected calibration error, the observed side an competing-risks cumulative-incidence estimator estimate;
+//!   expected calibration error, the observed side a competing-risks cumulative-incidence estimate;
 //! - when subjects carry a `group_id`, percentile intervals of the
 //!   concordance, AUC and squared-error probability score from a bootstrap that resamples whole
 //!   groups ([`survival::compare::cluster_bootstrap_by`]), so members of a
