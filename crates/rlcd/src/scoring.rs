@@ -23,7 +23,7 @@
 //! the training set, then goes overconfident on held-out data through the
 //! generalization gap. Focal loss is improper but empirically ends up better
 //! calibrated at test time, because it under-confidences the training set by
-//! exactly the amount the gap re-inflates. squared-error probability score is a proper scoring rule that
+//! exactly the amount the gap re-inflates. The squared-error probability score is a proper scoring rule that
 //! penalizes the whole distribution rather than only the correct option's
 //! mass. Which combination wins is measured, not assumed.
 //!

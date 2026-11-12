@@ -563,23 +563,19 @@ mod tests {
 
     #[test]
     fn classwise_ece_catches_a_class_top1_ece_is_blind_to() {
-        // 3 classes. The top label is always right (top-1 ECE = 0 at
-        // confidence 1), but among the two REJECTED classes, the model always
-        // reports class 1 as impossible and class 2 as a coin flip when it is
-        // never actually chosen - a per-class miscalibration invisible to any
-        // metric that only looks at the argmax slot.
-        let probs = vec![vec![1.0, 0.0, 0.0]; 20];
-        let labels = vec![0usize; 20];
-        let top1 = ece(&[1.0f32; 20], &[true; 20], 10);
-        assert!(top1 <= 1e-6, "top-1 ECE should look perfect");
+        // 3 classes, every prediction (0.7, 0.3, 0.0). The top label, class 0,
+        // is right 7 times in 10, so top-1 ECE is exactly calibrated. But the
+        // mass sits on the wrong rejected class: class 1 is given 0.3 and
+        // never occurs, class 2 is given 0 and occurs 3 times in 10 - a
+        // per-class miscalibration invisible to any metric that only looks at
+        // the argmax slot.
+        let probs = vec![vec![0.7f32, 0.3, 0.0]; 10];
+        let labels: Vec<usize> = (0..10).map(|i| if i < 7 { 0 } else { 2 }).collect();
+        let correct: Vec<bool> = labels.iter().map(|&l| l == 0).collect();
+        let top1 = ece(&[0.7f32; 10], &correct, 10);
+        assert!(top1 <= 1e-6, "top-1 ECE {top1} should look perfect");
         let cw = classwise_ece(&probs, &labels, 10);
-        // Classes 1 and 2 are reported as confidence-0 and are indeed never
-        // the label, so THEY are calibrated too here - classwise_ece must
-        // therefore also read ~0 on this particular (degenerate but
-        // internally consistent) input. The real check is that it is a
-        // DIFFERENT, independently computed number from top-1 ECE, not that
-        // it disagrees on every input.
-        assert!(cw <= 1e-6, "classwise ECE {cw} on a genuinely 0/1 model");
+        assert!(cw > 0.1, "classwise ECE {cw} must see the misplaced 0.3");
     }
 
     #[test]

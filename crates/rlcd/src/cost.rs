@@ -227,7 +227,7 @@ mod tests {
     const P_NONE: [f32; 2] = [0.8, 0.2];
     const P_POSITIVE: [f32; 2] = [1.0 / 3.0, 2.0 / 3.0];
     const P_NEGATIVE: [f32; 2] = [18.0 / 19.0, 1.0 / 19.0];
-    const P_POSITIVE_RESULT: f32 = 0.24; // P(+) = 0.24*P(F|+) ... = 0.2*0.8 + 0.8*0.1
+    const P_POSITIVE_RESULT: f32 = 0.24; // P(+) = P(F)P(+|F) + P(not F)P(+|not F) = 0.2*0.8 + 0.8*0.1
     const P_NEGATIVE_RESULT: f32 = 0.76;
 
     #[test]

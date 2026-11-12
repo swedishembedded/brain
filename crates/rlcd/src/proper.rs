@@ -24,8 +24,11 @@
 //! a `dR/dq` here would invite a caller to minimize `-R` directly, which is a
 //! different algorithm that would fit different weights.
 //!
-//! All three terms are strictly proper, so the only way to maximize `R` is to
-//! report honest probabilities - a model cannot win by being confident. The
+//! All three terms are strictly proper above the log floor, so there the only
+//! way to maximize `R` is to report honest probabilities - a model cannot win by
+//! being confident. Below it the floor (below) is a deliberate trade: for a
+//! true probability under about `2.7e-4` the floored log term pays more for
+//! reporting 0 than for the truth. The
 //! ranked probability term is ORDINAL: it punishes mass placed far from the
 //! target level more than mass placed next to it, which is meaningful for a
 //! `score` question (level 0 ... level k-1 are ordered) and meaningless for a
