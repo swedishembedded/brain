@@ -301,17 +301,23 @@ impl SiteAttn {
         }
     }
 
-    /// Upload the ID tokens, once per identity. The `k`/`v` projection of
-    /// them depends on nothing else, but it is still recomputed on every
-    /// pass (`run` and `SiteAttnSet::inject`); caching it is a small saving
-    /// left on the table.
+    /// Upload the ID tokens and project them to `k | v`, once per identity.
+    /// The projection depends on the tokens and the site's weights alone, so
+    /// [`SiteAttn::run`] only attends over it.
     pub fn set_id(&self, id: &[f32]) {
         assert_eq!(id.len(), self.num_queries * self.cfg.token_dim, "instantid: id token slab");
         self.gpu.write_f32(&self.id, id);
+        let e = RowEmit::new(&self.gpu, self.k, EPS);
+        let mut s = Vec::new();
+        // One linear over the FUSED weight produces `[nq, 2*hidden]` laid out as
+        // k | v per row, the layout the cross-attention kernels expect.
+        e.linear(&mut s, &self.id, 0, &self.kv_w, None, &self.kv, 0, self.num_queries, self.cfg.token_dim, 2 * self.cfg.hidden);
+        self.gpu.submit(&[], &s);
     }
 
     /// `ip_out[n_img, hidden]` for the given image queries — the term the caller
-    /// scales and adds to the text cross-attention's output.
+    /// scales and adds to the text cross-attention's output. [`SiteAttn::set_id`]
+    /// must have run.
     pub fn run(&self, q: &[f32], n_img: usize) -> Vec<f32> {
         let hidden = self.cfg.hidden;
         assert!(n_img <= self.max_img, "instantid: {n_img} image rows > max_img {}", self.max_img);
@@ -319,15 +325,12 @@ impl SiteAttn {
         self.gpu.write_f32(&self.q, q);
         let e = RowEmit::new(&self.gpu, self.k, EPS);
         let mut s = Vec::new();
-        // One linear over the FUSED weight produces `[nq, 2*hidden]` laid out as
-        // k | v per row — the layout the cross-attention kernels expect.
-        e.linear(&mut s, &self.id, 0, &self.kv_w, None, &self.kv, 0, self.num_queries, self.cfg.token_dim, 2 * hidden);
         e.cross_attn(&mut s, &self.q, 0, &self.kv, &self.scores, &self.probs, &self.ctx, &self.xkt, hidden / 64, 64, n_img, self.num_queries);
         self.gpu.submit(&[], &s);
         self.gpu.read(&self.ctx, n_img * hidden)
     }
 
-    /// The projected `k` and `v` for the uploaded ID tokens, de-interleaved —
+    /// The projected `k` and `v` of the ID tokens given to `set_id`, de-interleaved,
     /// the parity ladder's view into the fused buffer.
     pub fn read_kv(&self) -> (Vec<f32>, Vec<f32>) {
         let hidden = self.cfg.hidden;
@@ -378,6 +381,8 @@ pub struct SiteAttnSet {
     /// Per-site scratch: the projected kv, the score/prob slabs and the context.
     scratch: Vec<SiteScratch>,
     num_queries: usize,
+    /// Whether `set_id` has run, so `set_scale` knows there is a projection to redo.
+    id_set: std::sync::atomic::AtomicBool,
     /// Atomic because the trait is `Send + Sync` (a backbone may be shared) and
     /// `set_scale` takes `&self` — it writes device buffers, which is already a
     /// shared-reference operation.
@@ -436,19 +441,44 @@ impl SiteAttnSet {
             kv_w,
             scratch,
             num_queries,
+            id_set: std::sync::atomic::AtomicBool::new(false),
             scale: std::sync::atomic::AtomicU32::new(1.0f32.to_bits()),
         }
     }
 
-    /// Upload the ID tokens produced by [`Resampler`]. Once per identity.
+    /// Upload the ID tokens produced by [`Resampler`] and project them to every
+    /// site's `k | v`. Once per identity: the sampling graph only attends over
+    /// the result, so its steps hold no projection.
     pub fn set_id(&self, id: &[f32]) {
         assert_eq!(id.len(), self.num_queries * self.sites[0].token_dim, "instantid: id token slab");
         self.gpu.write_f32(&self.id, id);
+        self.id_set.store(true, std::sync::atomic::Ordering::Release);
+        self.project_kv();
+    }
+
+    /// `k | v = id @ w^T` for every site, from the current ID tokens and the
+    /// (scaled) fused weights. One linear over the FUSED weight yields
+    /// `[nq, 2*hidden]` = k | v per row, which is the layout the cross-attention
+    /// kernels read.
+    fn project_kv(&self) {
+        let e = RowEmit::new(&self.gpu, self.k, EPS);
+        let mut steps = Vec::with_capacity(self.sites.len());
+        for (k, site) in self.sites.iter().enumerate() {
+            e.linear(&mut steps, &self.id, 0, &self.kv_w[k], None, &self.scratch[k].kv, 0, self.num_queries, site.token_dim, 2 * site.hidden);
+        }
+        self.gpu.submit(&[], &steps);
+        // Handles onto one device have their own command streams, and the backbone consumes
+        // `kv` from its own, so the projection must have finished before this returns: a
+        // one-word read of the last site's `kv` is the fence.
+        if let Some(last) = self.scratch.last() {
+            self.gpu.read(&last.kv, 1);
+        }
     }
 
     /// Set the ID strength. Folded into each site's `v` rows — exact, see the
     /// type docs. Re-applied from the unscaled weights, so calling it twice does
-    /// not compound.
+    /// not compound. Projects again when an identity is already set, since `v`
+    /// carries the scale.
     pub fn set_scale(&self, s: f32) {
         for (i, site) in self.sites.iter().enumerate() {
             let half = site.hidden * site.token_dim;
@@ -459,6 +489,9 @@ impl SiteAttnSet {
             self.gpu.write_f32(&self.kv_w[i], &w);
         }
         self.scale.store(s.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        if self.id_set.load(std::sync::atomic::Ordering::Acquire) {
+            self.project_kv();
+        }
     }
 
     pub fn scale(&self) -> f32 {
@@ -489,12 +522,123 @@ impl model::attninject::CrossAttnInject for SiteAttnSet {
         let sc = &self.scratch[k];
         let e = RowEmit::new(gpu, self.k, EPS);
         let (nq, hidden) = (self.num_queries, site.hidden);
-        // One linear over the FUSED weight yields `[nq, 2*hidden]` = k | v per
-        // row, which is the layout the cross-attention kernels read.
-        e.linear(steps, &self.id, 0, &self.kv_w[k], None, &sc.kv, 0, nq, site.token_dim, 2 * hidden);
+        // `sc.kv` was projected by `set_id` / `set_scale`; the graph only attends over it.
         e.cross_attn(steps, q, 0, &sc.kv, &sc.scores, &sc.probs, &sc.ctx, &sc.xkt, hidden / 64, 64, t as usize, nq);
         // ctx += ip_ctx. The scale is already inside `v`, so this is a plain add
         // (`axpy` with s = 1) rather than a second scaling.
         steps.push(gpu.step(self.k_axpy, &[ctx, &sc.ctx], &[t * c, 1.0f32.to_bits()], t * c));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SiteConfig;
+    use crate::import::SiteWeights;
+
+    const HIDDEN: usize = 64; // one head of head_dim 64
+    const TOKEN_DIM: usize = 8;
+    const NQ: usize = 4;
+    const T: usize = 3;
+
+    /// Fixed, well-spread operands in `[-1, 1)`; the tests check arithmetic, not a distribution.
+    fn operands(n: usize, salt: usize) -> Vec<f32> {
+        (0..n).map(|i| ((i * 7919 + salt * 104_729) % 997) as f32 / 498.5 - 1.0).collect()
+    }
+
+    /// `softmax(q kT / sqrt(64)) v` with `k | v = id @ w^T`, in f64: the decoupled ID branch.
+    fn reference(w: &[f32], id: &[f32], q: &[f32], scale: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let proj = |row0: usize, tok: usize, ch: usize| -> f64 {
+            (0..TOKEN_DIM).map(|d| id[tok * TOKEN_DIM + d] as f64 * w[(row0 + ch) * TOKEN_DIM + d] as f64).sum()
+        };
+        let k: Vec<f64> = (0..NQ * HIDDEN).map(|i| proj(0, i / HIDDEN, i % HIDDEN)).collect();
+        let v: Vec<f64> = (0..NQ * HIDDEN).map(|i| scale as f64 * proj(HIDDEN, i / HIDDEN, i % HIDDEN)).collect();
+        let mut ctx = vec![0f32; T * HIDDEN];
+        for t in 0..T {
+            let s: Vec<f64> = (0..NQ)
+                .map(|j| (0..HIDDEN).map(|c| q[t * HIDDEN + c] as f64 * k[j * HIDDEN + c]).sum::<f64>() / 8.0)
+                .collect();
+            let m = s.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let e: Vec<f64> = s.iter().map(|x| (x - m).exp()).collect();
+            let z: f64 = e.iter().sum();
+            for c in 0..HIDDEN {
+                ctx[t * HIDDEN + c] = (0..NQ).map(|j| e[j] / z * v[j * HIDDEN + c]).sum::<f64>() as f32;
+            }
+        }
+        (k.iter().map(|&x| x as f32).collect(), v.iter().map(|&x| x as f32).collect(), ctx)
+    }
+
+    fn assert_close(got: &[f32], want: &[f32], what: &str) {
+        let err = got.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(err < 1e-4, "{what}: max |got - want| = {err}");
+    }
+
+    fn site_cfg() -> SiteConfig {
+        SiteConfig { index: 1, hidden: HIDDEN, token_dim: TOKEN_DIM }
+    }
+
+    /// `set_id` projects the ID tokens to k and v once; `run` only attends, so
+    /// any number of passes over different queries reads the same projection.
+    #[test]
+    fn site_attn_projects_the_id_tokens_in_set_id_and_attends_in_run() {
+        let w = operands(2 * HIDDEN * TOKEN_DIM, 1);
+        let id = operands(NQ * TOKEN_DIM, 2);
+        let site = SiteAttn::new_on(Gpu::new(KERNELS), KERNELS, site_cfg(), NQ, T, &w);
+        site.set_id(&id);
+
+        let (k, v, _) = reference(&w, &id, &operands(T * HIDDEN, 3), 1.0);
+        let (got_k, got_v) = site.read_kv();
+        assert_close(&got_k, &k, "k straight after set_id");
+        assert_close(&got_v, &v, "v straight after set_id");
+
+        for salt in [3, 4] {
+            let q = operands(T * HIDDEN, salt);
+            assert_close(&site.run(&q, T), &reference(&w, &id, &q, 1.0).2, "ip context");
+        }
+    }
+
+    /// The adapter records no projection into the sampling graph: its steps are
+    /// the attention plus the add, and the result is `ctx + scale * ip_ctx`
+    /// whether the scale is set before or after the identity.
+    #[test]
+    fn inject_records_no_linear_and_set_id_and_set_scale_agree_in_either_order() {
+        use model::attninject::CrossAttnInject;
+        let w = operands(2 * HIDDEN * TOKEN_DIM, 5);
+        let id = operands(NQ * TOKEN_DIM, 6);
+        let weights = SiteWeights { cfg: vec![site_cfg()], kv: HashMap::from([(1, w.clone())]) };
+        let q = operands(T * HIDDEN, 7);
+        let ctx0 = operands(T * HIDDEN, 8);
+        let scale = 0.5f32;
+        let want: Vec<f32> = reference(&w, &id, &q, scale).2.iter().zip(&ctx0).map(|(a, b)| a + b).collect();
+
+        for id_first in [true, false] {
+            // The adapter holds its own handle onto the device, as it does beside a backbone's: the
+            // projection done in set_id must be visible to a graph recorded and run on `gpu`.
+            let gpu = Gpu::new(KERNELS);
+            let set = SiteAttnSet::new_on(gpu.share(), KERNELS, &weights, NQ, T);
+            if id_first {
+                set.set_id(&id);
+                set.set_scale(scale);
+            } else {
+                set.set_scale(scale);
+                set.set_id(&id);
+            }
+            let qb = gpu.storage_init("q", &q);
+            let ctx = gpu.storage_init("ctx", &ctx0);
+            let mut steps = Vec::new();
+            set.inject(&mut steps, &gpu, 0, &qb, &ctx, T as u32, HIDDEN as u32);
+
+            let mut attend_only = Vec::new();
+            let sc = &set.scratch[0];
+            RowEmit::new(&gpu, set.k, EPS).cross_attn(&mut attend_only, &qb, 0, &sc.kv, &sc.scores, &sc.probs, &sc.ctx, &sc.xkt, 1, 64, T, NQ);
+            assert_eq!(steps.len(), attend_only.len() + 1, "inject is the attention plus one add, no projection");
+
+            gpu.submit(&[], &steps);
+            assert_close(&gpu.read(&ctx, T * HIDDEN), &want, &format!("ctx + scale * ip (id first: {id_first})"));
+            // Replaying the graph adds the same context again: nothing in it depends on a pass counter.
+            gpu.submit(&[], &steps);
+            let twice: Vec<f32> = want.iter().zip(&ctx0).map(|(w2, c)| w2 + (w2 - c)).collect();
+            assert_close(&gpu.read(&ctx, T * HIDDEN), &twice, "second pass");
+        }
     }
 }
