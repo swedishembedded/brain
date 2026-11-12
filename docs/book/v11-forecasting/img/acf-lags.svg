@@ -1,0 +1,38 @@
+<!-- source-sha256: 6f1f8313ad13402b426bb404d36d0bf8cb20f3eefe262f9298b227805fc5cbb7 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 320" width="560" height="320">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="320" fill="#ffffff"/>
+<line x1="58" y1="274" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="138.67" y1="274" x2="138.67" y2="30" stroke="#edf2f7"/>
+<text x="138.67" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2.5</text>
+<line x1="219.33" y1="274" x2="219.33" y2="30" stroke="#edf2f7"/>
+<text x="219.33" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="300" y1="274" x2="300" y2="30" stroke="#edf2f7"/>
+<text x="300" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">7.5</text>
+<line x1="380.67" y1="274" x2="380.67" y2="30" stroke="#edf2f7"/>
+<text x="380.67" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="461.33" y1="274" x2="461.33" y2="30" stroke="#edf2f7"/>
+<text x="461.33" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">12.5</text>
+<line x1="542" y1="274" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="542" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">15</text>
+<line x1="58" y1="258.75" x2="542" y2="258.75" stroke="#edf2f7"/>
+<text x="52" y="262.75" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">-0.5</text>
+<line x1="58" y1="182.5" x2="542" y2="182.5" stroke="#edf2f7"/>
+<text x="52" y="186.5" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="106.25" x2="542" y2="106.25" stroke="#edf2f7"/>
+<text x="52" y="110.25" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="30" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="484" height="244" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="244"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="90.27,46.13 122.53,78.86 154.8,120.8 187.07,163.01 219.33,193.99 251.6,206.41 283.87,198.29 316.13,173.65 348.4,139.39 380.67,105.15 412.93,80.52 445.2,72.78 477.47,82.79 509.73,107.68"/><circle cx="90.27" cy="46.13" r="3" fill="#2b6cb0"/><circle cx="122.53" cy="78.86" r="3" fill="#2b6cb0"/><circle cx="154.8" cy="120.8" r="3" fill="#2b6cb0"/><circle cx="187.07" cy="163.01" r="3" fill="#2b6cb0"/><circle cx="219.33" cy="193.99" r="3" fill="#2b6cb0"/><circle cx="251.6" cy="206.41" r="3" fill="#2b6cb0"/><circle cx="283.87" cy="198.29" r="3" fill="#2b6cb0"/><circle cx="316.13" cy="173.65" r="3" fill="#2b6cb0"/><circle cx="348.4" cy="139.39" r="3" fill="#2b6cb0"/><circle cx="380.67" cy="105.15" r="3" fill="#2b6cb0"/><circle cx="412.93" cy="80.52" r="3" fill="#2b6cb0"/><circle cx="445.2" cy="72.78" r="3" fill="#2b6cb0"/><circle cx="477.47" cy="82.79" r="3" fill="#2b6cb0"/><circle cx="509.73" cy="107.68" r="3" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="90.27,77.04 122.53,109.11 154.8,135.11 187.07,162.68 219.33,192.61 251.6,199.69 283.87,204.23 316.13,213.67 348.4,222.09 380.67,223.03 412.93,217.73 445.2,244.43 477.47,232.12 509.73,213.6"/><circle cx="90.27" cy="77.04" r="3" fill="#c05621"/><circle cx="122.53" cy="109.11" r="3" fill="#c05621"/><circle cx="154.8" cy="135.11" r="3" fill="#c05621"/><circle cx="187.07" cy="162.68" r="3" fill="#c05621"/><circle cx="219.33" cy="192.61" r="3" fill="#c05621"/><circle cx="251.6" cy="199.69" r="3" fill="#c05621"/><circle cx="283.87" cy="204.23" r="3" fill="#c05621"/><circle cx="316.13" cy="213.67" r="3" fill="#c05621"/><circle cx="348.4" cy="222.09" r="3" fill="#c05621"/><circle cx="380.67" cy="223.03" r="3" fill="#c05621"/><circle cx="412.93" cy="217.73" r="3" fill="#c05621"/><circle cx="445.2" cy="244.43" r="3" fill="#c05621"/><circle cx="477.47" cy="232.12" r="3" fill="#c05621"/><circle cx="509.73" cy="213.6" r="3" fill="#c05621"/><line x1="58" y1="155.21" x2="542" y2="155.21" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="58" y1="209.79" x2="542" y2="209.79" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="58" y1="182.5" x2="542" y2="182.5" stroke="#4a5568"/></g>
+<text x="300" y="310" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">lag k (bars)</text>
+<text x="14" y="152" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 152)">autocorrelation r_k</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Autocorrelation before and after a seasonal difference</text>
+<rect x="66" y="222" width="150.74" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="237" x2="94" y2="237" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="241" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">the series</text>
+<line x1="74" y1="254" x2="94" y2="254" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="258" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">seasonal difference</text>
+</svg>

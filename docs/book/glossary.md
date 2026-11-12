@@ -70,9 +70,13 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **audio token**: one integer of a codec's output, an index into one stage's table for one column, which a language model treats as a symbol. *([Neural Audio Codecs](v09-audio/03-audio-codecs.md))*
 
+**autocorrelation**: the correlation of a series with itself shifted by a number of bars, a measure of its memory at that lag. *([Time Series Fundamentals](v11-forecasting/01-time-series.md))*
+
 **autoencoder**: a network trained to output its own input after passing it through a bottleneck layer much narrower than the input, so that it must learn a short code from which the input can be rebuilt. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 **autoregressive factorization**: writing the probability of a sequence as the product, over its positions, of the probability of each token given all the tokens before it, an identity that holds for every distribution over sequences. *([Language Modeling](v05-sequences/04-language-modeling.md))*
+
+**autoregressive model**: a model that forecasts a value as a constant plus a weighted sum of the values just before it, fitted by least squares. *([Time Series Fundamentals](v11-forecasting/01-time-series.md))*
 
 ## B
 
@@ -622,6 +626,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **layer-normalization**: normalizing each example's features with the mean and variance taken over the features of that one example, then applying a learned gain and shift; it does not depend on the batch or the mode. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
+**leakage-safe window**: a (context, target) window assigned to training or evaluation by its origin, with a purge and an embargo so that no bar a model is judged on was used in fitting it. *([Time Series Fundamentals](v11-forecasting/01-time-series.md))*
+
 **leaky integrate-and-fire**: a spiking neuron whose membrane potential integrates its input, leaks back toward rest with a time constant, and fires and resets at a threshold. *([Simulating Brains and Bodies](v10-video-and-3d/08-neural-simulation.md))*
 
 **learned index selection**: choosing the keys a query reads by ranking all keys with a second, cheaper scorer (the indexer) and attending exactly to the top few; the scorer is trained to imitate the dense attention because the ranking itself has no gradient. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
@@ -1014,6 +1020,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **score function**: the slope of the logarithm of a density, $\partial \ln p_t(x)/\partial x$, which points toward higher probability; for noised data it equals minus the conditional mean of the noise divided by $b_t$. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
 
+**seasonality**: a pattern that repeats after a fixed number of bars, shown by a return of large autocorrelation at that lag and by a peak in the spectrum. *([Time Series Fundamentals](v11-forecasting/01-time-series.md))*
+
 **seed**: the number from which a generator's starting state is computed; the same seed gives the same stream, and a seed used by a run must be recorded for the run to be repeated. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
 **selection cache**: the stored map from a key of device identity, driver version, source digest and shape bucket to the candidate chosen, kept between runs so that a measurement is paid once and discarded when any part of the key changes. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
@@ -1086,6 +1094,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **state-space model**: a layer whose state evolves under a linear system in continuous time, $\mathbf{h}' = \mathbf{A}\mathbf{h} + \mathbf{B}x$, discretized into a recurrence $\mathbf{h}_t = \bar{\mathbf{A}}\mathbf{h}_{t-1} + \bar{\mathbf{B}}x_t$ with a step size that may depend on the input. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
+**stationarity**: the property that a series has the same mean and variance at every bar and a covariance between two bars that depends only on how far apart they are. *([Time Series Fundamentals](v11-forecasting/01-time-series.md))*
+
 **stochastic gradient descent**: gradient descent that steps along the gradient of a small random batch of examples instead of the whole training set, $\theta \leftarrow \theta - \eta\,\mathbf{g}_t$, an unbiased but noisy estimate of the full step. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **storage buffer**: a large array in device memory that a kernel reads or reads and writes, whose element type the kernel declares and whose length the host chooses when it binds the buffer. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
@@ -1143,6 +1153,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **tiled matmul**: the matrix product computed one tile of the output at a time, with the matching tiles of the two inputs staged in a fast memory so that each number loaded is used once per row or column of the tile, cutting the loads from $2n^3$ to $2n^3/T$ for a tile of side $T$. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 
 **tiled rasterization**: drawing the Gaussians of a frame by giving each square tile of the image the list of the Gaussians that touch it, built by counting, a scan and one radix sort of keys that hold the tile number and the depth, so that every pixel walks a depth-sorted list shared with its tile. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
+
+**time series**: a list of values taken at equally spaced moments in which the order is part of the data, so that its values depend on each other and cannot be shuffled. *([Time Series Fundamentals](v11-forecasting/01-time-series.md))*
 
 **time-delay network**: a network of one-dimensional convolutions along time, whose weights are shared across time and whose units read a layer at several delayed moments, so that a deeper unit sees a longer stretch of the signal. *([Who Is Speaking](v09-audio/05-speaker-embeddings.md))*
 

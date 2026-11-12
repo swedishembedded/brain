@@ -851,7 +851,7 @@ volumes:
         title: "Time Series Fundamentals"
         question: "What makes data ordered in time different, and how do we avoid cheating with the future?"
         introduces: [time-series, stationarity, autocorrelation, seasonality, autoregressive-model, leakage-safe-window]
-        requires: [data-leakage, covariance, least-squares]
+        requires: [data-leakage, covariance, least-squares, baseline, discrete-fourier-transform]
         brain: [timeseries]
       - id: probabilistic-forecasting
         title: "Probabilistic Forecasts"

@@ -1,0 +1,41 @@
+<!-- source-sha256: c2eef3182e24c7d58e2c90dc14f459cba4b3d275f5cdf75e1e1fd36eef358034 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 382" width="600" height="382">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="382" fill="#ffffff"/>
+<line x1="58" y1="294" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">60</text>
+<line x1="146.81" y1="294" x2="146.81" y2="30" stroke="#edf2f7"/>
+<text x="146.81" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">70</text>
+<line x1="235.63" y1="294" x2="235.63" y2="30" stroke="#edf2f7"/>
+<text x="235.63" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">80</text>
+<line x1="324.44" y1="294" x2="324.44" y2="30" stroke="#edf2f7"/>
+<text x="324.44" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">90</text>
+<line x1="413.25" y1="294" x2="413.25" y2="30" stroke="#edf2f7"/>
+<text x="413.25" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="502.07" y1="294" x2="502.07" y2="30" stroke="#edf2f7"/>
+<text x="502.07" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">110</text>
+<line x1="58" y1="278.47" x2="582" y2="278.47" stroke="#edf2f7"/>
+<text x="52" y="282.47" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<line x1="58" y1="200.82" x2="582" y2="200.82" stroke="#edf2f7"/>
+<text x="52" y="204.82" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="123.18" x2="582" y2="123.18" stroke="#edf2f7"/>
+<text x="52" y="127.18" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">15</text>
+<line x1="58" y1="45.53" x2="582" y2="45.53" stroke="#edf2f7"/>
+<text x="52" y="49.53" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<rect x="58" y="30" width="524" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#4a5568" stroke-width="2.6" points="58,160.41 66.88,148.98 75.76,142.84 84.64,127.72 93.53,134.1 102.41,132.23 111.29,161.1 120.17,182.83 129.05,195.14 137.93,208.96 146.81,195.29 155.69,171.82 164.58,160.73 173.46,127.3 182.34,102.64 191.22,100.19 200.1,104.31 208.98,123.72 217.86,146.72 226.75,151.7 235.63,169.97 244.51,181.48 253.39,178.85 262.27,163.92 271.15,149.51 280.03,118.49 288.92,113.04 297.8,101.47 306.68,100.58 315.56,115.61 324.44,116.41 333.32,140.24 342.2,146.88 351.08,164.46 359.97,160.14 368.85,145.29 377.73,124.99 386.61,90.19 395.49,71.21 404.37,71.27 413.25,79.28 422.14,89.27 431.02,112.92 439.9,140.62 448.78,162.56 457.66,182.96 466.54,180.99 475.42,159.13 484.31,139.91 493.19,106.47 502.07,85.01 510.95,66.7 519.83,77.74 528.71,103.79 537.59,118.11 546.47,144.97 555.36,147.19 564.24,146.83 573.12,134.52 582,108.39"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" stroke-dasharray="6 4" points="377.73,145.29 386.61,145.29 395.49,145.29 404.37,145.29 413.25,145.29 422.14,145.29 431.02,145.29 439.9,145.29 448.78,145.29 457.66,145.29 466.54,145.29 475.42,145.29 484.31,145.29 493.19,145.29 502.07,145.29 510.95,145.29 519.83,145.29 528.71,145.29 537.59,145.29 546.47,145.29 555.36,145.29 564.24,145.29 573.12,145.29 582,145.29"/><polyline fill="none" stroke="#6b46c1" stroke-width="2.0" stroke-dasharray="6 4" points="377.73,131.01 386.61,131.01 395.49,131.01 404.37,131.01 413.25,131.01 422.14,131.01 431.02,131.01 439.9,131.01 448.78,131.01 457.66,131.01 466.54,131.01 475.42,131.01 484.31,131.01 493.19,131.01 502.07,131.01 510.95,131.01 519.83,131.01 528.71,131.01 537.59,131.01 546.47,131.01 555.36,131.01 564.24,131.01 573.12,131.01 582,131.01"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="377.73,143.21 386.61,112.19 395.49,106.74 404.37,95.17 413.25,94.28 422.14,109.31 431.02,110.11 439.9,133.94 448.78,140.58 457.66,158.16 466.54,153.84 475.42,138.99 484.31,136.91 493.19,105.89 502.07,100.44 510.95,88.87 519.83,87.98 528.71,103.01 537.59,103.81 546.47,127.64 555.36,134.28 564.24,151.86 573.12,147.54 582,132.69"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="377.73,133.49 386.61,104.13 395.49,99.74 404.37,88.84 413.25,88.37 422.14,103.67 431.02,104.64 439.9,128.57 448.78,135.29 457.66,152.91 466.54,148.62 475.42,133.78 484.31,122 493.19,92.65 502.07,88.26 510.95,77.36 519.83,76.89 528.71,92.19 537.59,93.17 546.47,117.1 555.36,123.82 564.24,141.44 573.12,137.15 582,122.31"/><line x1="373.29" y1="294" x2="373.29" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><text x="368.85" y="42.42" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">past</text><text x="377.73" y="42.42" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">holdout</text></g>
+<text x="320" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">bar t</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">value</text>
+<text x="320" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Four forecasts of the last 24 bars, from the first 96</text>
+<line x1="60.37" y1="353" x2="80.37" y2="353" stroke="#4a5568" stroke-width="2"/>
+<text x="86.37" y="357" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">the series</text>
+<line x1="163.39" y1="353" x2="183.39" y2="353" stroke="#9b2c2c" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="189.39" y="357" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">naive</text>
+<line x1="241.33" y1="353" x2="261.33" y2="353" stroke="#6b46c1" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="267.33" y="357" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">moving average</text>
+<line x1="375.04" y1="353" x2="395.04" y2="353" stroke="#2b6cb0" stroke-width="2"/>
+<text x="401.04" y="357" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">seasonal naive with drift</text>
+<line x1="205.66" y1="370" x2="225.66" y2="370" stroke="#c05621" stroke-width="2"/>
+<text x="231.66" y="374" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">AR(1) on seasonal differences</text>
+</svg>

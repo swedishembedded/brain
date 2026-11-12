@@ -178,4 +178,8 @@ historical sections draw on in the [Chronology](history/chronology.md).
 7. [World Models](v10-video-and-3d/07-world-models.md): Can a network learn to simulate an environment well enough to be played?
 8. [Simulating Brains and Bodies](v10-video-and-3d/08-neural-simulation.md): What can we learn by running a real animal's wiring diagram inside a simulated body?
 9. [Project: Reconstructing and Predicting a Scene](v10-video-and-3d/09-project-dynamic-scene.md): Can you reconstruct a scene from images and predict how it changes?
+
+### [Volume XI: Forecasting, Decisions and Uncertainty](v11-forecasting/index.md)
+
+1. [Time Series Fundamentals](v11-forecasting/01-time-series.md): What makes data ordered in time different, and how do we avoid cheating with the future?
 <!-- /contents -->

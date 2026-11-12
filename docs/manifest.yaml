@@ -534,6 +534,10 @@ navigation:
           - docs/book/v10-video-and-3d/07-world-models.md
           - docs/book/v10-video-and-3d/08-neural-simulation.md
           - docs/book/v10-video-and-3d/09-project-dynamic-scene.md
+      - title: "Volume XI: Forecasting, Decisions and Uncertainty"
+        pages:
+          - docs/book/v11-forecasting/index.md
+          - docs/book/v11-forecasting/01-time-series.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md
