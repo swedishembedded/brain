@@ -17,7 +17,7 @@ use model::block::{self, Gqa, KernelIds};
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
 use model::ops::{Act, Ops, Weight};
 use model::saved::{Residuals, SavedFormat};
-use model::tape::LayerTape;
+use model::segmented::SegmentedPass;
 use model::Shard;
 use paramstore::ParamStore;
 
@@ -466,8 +466,8 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
         ce_grad_uniform,
         inv_count,
         head_ce,
-        fwd: LayerTape::default(),
-        bwd: LayerTape::default(),
+        fwd: SegmentedPass::default(),
+        bwd: SegmentedPass::default(),
         resident: resident.map(std::cell::RefCell::new),
         resident_norm: Cell::new(None),
         backward_pending: Cell::new(false),
@@ -486,7 +486,7 @@ impl Ripple {
     /// whenever one of them is replaced (the boundary store narrowing).
     pub(super) fn record(&mut self) {
         self.fwd = self.forward_tape();
-        self.bwd = if self.train { self.backward_tape() } else { LayerTape::default() };
+        self.bwd = if self.train { self.backward_tape() } else { SegmentedPass::default() };
     }
 
     fn boundary(&self, i: usize) -> &DeviceBuffer {
@@ -694,11 +694,11 @@ impl Ripple {
     }
 
     /// The recorded forward in segments: the embedding, one per layer, then the head and the loss.
-    fn forward_tape(&self) -> LayerTape {
+    fn forward_tape(&self) -> SegmentedPass {
         let c = &self.cfg.model;
         let (n, d, v) = (self.rows(), c.hidden_size as u32, c.vocab_size as u32);
         let layers = c.num_hidden_layers;
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         let mut s = Vec::new();
         // The embedding feeds the stream on the first stage and every layer's value residual on any stage.
         if self.shard.embed || c.use_valres {
@@ -710,18 +710,18 @@ impl Ripple {
                 s.push(self.gpu.step(self.k.grad_scale, &[&self.x0], &[n * d, f(scale)], n * d));
             }
         }
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in self.shard.start..self.shard.end {
             self.layer_fwd(&mut s, l, self.boundary(l), &self.res[l + 1], false);
             self.res.round_trip(&self.gpu, &mut s, l + 1);
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
-        let Some(head) = &self.head else { return tape };
+        let Some(head) = &self.head else { return pass };
         s.push(self.rmsnorm_fwd(&self.res[layers], "model.norm.weight", &self.hs, d, n));
         if let Some(chunked) = &self.head_ce {
             chunked.forward_steps(&self.ops, &mut s, &self.hs, n, &self.targets, &self.ce_rows, self.logit_scale);
-            tape.segment(&mut s, None);
-            return tape;
+            pass.segment(&mut s, None);
+            return pass;
         }
         let act = self.act(&mut s, &self.hs, d, &[&head.w]);
         self.ops.matmul(&mut s, &head.w, &act, &self.logits, 0);
@@ -729,8 +729,8 @@ impl Ripple {
             s.push(self.gpu.step(self.k.grad_scale, &[&self.logits], &[n * v, f(self.logit_scale)], n * v));
         }
         s.push(self.gpu.step(self.k.ce_value, &[&self.logits, &self.targets, &self.ce_rows], &[n, v, IGNORE], n));
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     /// The table `name` of a resident build as the `Weight` its products read, `None` when the store holds it.
@@ -753,13 +753,13 @@ impl Ripple {
 
     /// The recorded backward in segments: the head and final norm, one per layer from the last down (each rebuilds its
     /// layer from the saved boundary before differentiating it), then the embedding.
-    fn backward_tape(&self) -> LayerTape {
+    fn backward_tape(&self) -> SegmentedPass {
         let c = &self.cfg.model;
         let g = self.grad.as_ref().expect("a backward needs the training build");
         let (n, d, v) = (self.rows(), c.hidden_size as u32, c.vocab_size as u32);
         let layers = c.num_hidden_layers;
-        let mut tape = LayerTape::default();
-        tape.clear_on_submit(&g.dx0);
+        let mut pass = SegmentedPass::default();
+        pass.clear_on_submit(&g.dx0);
         let mut s = Vec::new();
         // The head stage starts the chain from the loss; any other receives the gradient of its output boundary.
         if let (Some(head), Some(chunked)) = (&self.head, &self.head_ce) {
@@ -789,7 +789,7 @@ impl Ripple {
             self.rmsnorm_bwd(&mut s, &self.res[layers], "model.norm.weight", &g.d_hs, &g.dres[layers % 2], d, n);
         }
         // The head and final norm are complete; the layers follow, the last first.
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in (self.shard.start..self.shard.end).rev() {
             if l >= 1 {
                 self.res.restore(&self.gpu, &mut s, l);
@@ -797,7 +797,7 @@ impl Ripple {
             let h_in = self.boundary(l);
             self.layer_fwd(&mut s, l, h_in, &self.res[l + 1], true);
             self.layer_bwd(&mut s, l, h_in, &g.dres[(l + 1) % 2], &g.dres[l % 2]);
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
         // x0 is both layer 0's input and every layer's value source: its gradient is the stream's plus the sum of
         // the value paths', scaled back through the embedding's multiplier. A later stage holds its own copy of the
@@ -822,8 +822,8 @@ impl Ripple {
                 }
             }
         }
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     /// Run the recorded forward on the batch already set. A layer-streamed build loads each layer's weights into its
@@ -834,7 +834,7 @@ impl Ripple {
             return;
         }
         self.fwd.submit_hooked(&self.gpu, &mut |edge| {
-            if let model::tape::TapeEdge::Before { layer: Some(layer), .. } = edge {
+            if let model::segmented::SegmentEdge::Before { layer: Some(layer), .. } = edge {
                 self.stream_load(layer);
             }
         });

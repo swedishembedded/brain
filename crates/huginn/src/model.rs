@@ -47,8 +47,8 @@ use std::cell::Cell;
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
 use model::saved::{Residuals, SavedPolicy};
-use model::streamed::{RevisitingTape, StreamedStore};
-use model::tape::LayerTape;
+use model::streamed::{RevisitingPass, StreamedStore};
+use model::segmented::SegmentedPass;
 use paramstore::ParamStore;
 
 use crate::config::HuginnConfig;
@@ -363,9 +363,9 @@ pub struct Huginn {
     tape: Option<Tape>,
     back: Option<Back>,
     /// Training forward: embed → prelude → recurrence → coda → head → CE.
-    fwd_steps: LayerTape,
+    fwd_steps: SegmentedPass,
     /// Training backward: head → coda → recurrence → prelude → embedding.
-    bwd_steps: LayerTape,
+    bwd_steps: SegmentedPass,
     /// The block tensors held in a device window of layers, when the run streams them
     /// ([`model::Model::set_resident`]); `None` keeps every block in the store. Every core block runs once in each
     /// recurrent step, so its gradient is carried between its visits and it is updated once the backward is complete.
@@ -535,8 +535,8 @@ impl Huginn {
             scratch,
             tape,
             back,
-            fwd_steps: LayerTape::default(),
-            bwd_steps: LayerTape::default(),
+            fwd_steps: SegmentedPass::default(),
+            bwd_steps: SegmentedPass::default(),
             streamed,
             backward_pending: Cell::new(false),
             opt,
@@ -709,13 +709,13 @@ impl Huginn {
     /// graph ends in the tied head and the masked cross-entropy rows.
     /// One segment per block application (the layer indices are [`block_layer`]'s): a core block appears once
     /// in every recurrent step, the prelude and coda blocks once.
-    fn training_forward_steps(&self) -> LayerTape {
+    fn training_forward_steps(&self) -> SegmentedPass {
         let cfg = &self.cfg;
         let k = kernel_ids();
         let n = self.rows();
         let d = cfg.d_model;
         let tape = self.tape.as_ref().expect("training graph on an inference build");
-        let mut passes = LayerTape::default();
+        let mut passes = SegmentedPass::default();
         let mut g: Vec<Step> = Vec::new();
 
         g.push(self.gpu.step(EMBED, &[&self.tokens, self.ps.w("tok.weight"), &tape.embeds[0]], &[d, n], n * d));
@@ -771,7 +771,7 @@ impl Huginn {
     /// finally the embedding scatter. A shared parameter's gradient buffer is
     /// never assigned - `matmul_dw`, `rmsnorm_dw`, `bias_grad` and `emb_bwd`
     /// all accumulate - so the gradient is the sum over every application.
-    fn training_backward_steps(&self) -> LayerTape {
+    fn training_backward_steps(&self) -> SegmentedPass {
         let cfg = &self.cfg;
         let k = kernel_ids();
         let n = self.rows();
@@ -780,7 +780,7 @@ impl Huginn {
         let g = self.back.as_ref().expect("training graph on an inference build");
         let n_coda = cfg.n_coda as usize;
         let per_step = cfg.n_recurrent as usize + 1;
-        let mut passes = LayerTape::default();
+        let mut passes = SegmentedPass::default();
         // `d_inject` is the one boundary gradient with several producers (every recurrent step's adapter); everything
         // else is written by one. Each submission of the pass, however many an update makes, starts it from zero.
         passes.clear_on_submit(&g.d_inject);
@@ -874,10 +874,10 @@ impl Huginn {
     }
 
     /// Submit a training forward; a layer-streamed build loads each block into its window slot at every application.
-    fn submit_forward(&self, tape: &LayerTape) {
+    fn submit_forward(&self, pass: &SegmentedPass) {
         match &self.streamed {
-            Some(stream) => stream.forward(&self.gpu, tape).unwrap_or_else(|e| panic!("huginn layer-streamed forward: {e}")),
-            None => tape.submit(&self.gpu),
+            Some(stream) => stream.forward(&self.gpu, pass).unwrap_or_else(|e| panic!("huginn layer-streamed forward: {e}")),
+            None => pass.submit(&self.gpu),
         }
     }
 
@@ -1111,7 +1111,7 @@ impl model::Model for Huginn {
                     assert!(self.backward_pending.replace(false), "huginn layer-streamed full fine-tune: adamw_step without a backward");
                 }
                 let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
-                stream.adamw_step(&self.gpu, &self.ps, opt, &RevisitingTape(&self.bwd_steps), &args).unwrap_or_else(|e| panic!("huginn layer-streamed update: {e}"));
+                stream.adamw_step(&self.gpu, &self.ps, opt, &RevisitingPass(&self.bwd_steps), &args).unwrap_or_else(|e| panic!("huginn layer-streamed update: {e}"));
             }
             None => opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
         }

@@ -105,11 +105,11 @@ pub mod hostopt;
 pub mod resident_ft;
 pub mod rollout;
 pub mod saved;
+pub mod segmented;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shard;
 pub mod streamed;
 pub mod stepgate;
-pub mod tape;
 pub mod train;
 pub mod trainprec;
 pub mod training;

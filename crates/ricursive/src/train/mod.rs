@@ -56,7 +56,7 @@ use model::adapter::device::LoraCfg;
 use model::adapter::exec::AdapterRuntime;
 use model::ops::{Ops, TierPolicy, Weight};
 use model::saved::{Residuals, SavedFormat, SavedPolicy};
-use model::tape::LayerTape;
+use model::segmented::SegmentedPass;
 use model::Shard;
 use paramstore::{ParamStore, Role};
 
@@ -198,8 +198,8 @@ pub struct Ripple {
     /// The training head: the loss and its gradient a chunk of rows at a time; `None` on an inference build.
     head_ce: Option<model::head_ce::HeadCe>,
     /// The recorded passes, in segments that name the layer each runs: a layer-streamed build acts between the layers.
-    fwd: LayerTape,
-    bwd: LayerTape,
+    fwd: SegmentedPass,
+    bwd: SegmentedPass,
     /// The linears and the two tables of a resident full fine-tune, their master copies and optimizer state.
     resident: Option<std::cell::RefCell<model::resident_ft::ResidentFullFt>>,
     /// The global gradient norm of the latest clipped resident step.

@@ -13,12 +13,12 @@
 //!
 //! What a model adds to the generic state is small: which tensors are resident ([`resident_specs`]), what the rest
 //! of the step needs the device optimizer for ([`ResidentBackward`]), the layer boundaries of its recorded passes
-//! (the segments of [`model::tape::LayerTape`]) and the commit and restore of the off-device state
+//! (the segments of [`model::segmented::SegmentedPass`]) and the commit and restore of the off-device state
 //! ([`OffDeviceState`]).
 
 use model::memplan::{Capacity, Category, Demand};
 use model::resident_ft::{LayerEvent, ResidentBackward, ResidentFtConfig, ResidentPlan, ResidentSpec, StepArgs};
-use model::tape::TapeEdge;
+use model::segmented::SegmentEdge;
 use model::Shard;
 
 use super::{Ripple, TrainConfig};
@@ -120,9 +120,9 @@ impl ResidentBackward for Ripple {
         let mut failed: Option<std::io::Error> = None;
         self.bwd.submit_hooked(&self.gpu, &mut |edge| {
             let event = match edge {
-                TapeEdge::Before { layer: Some(l), .. } => LayerEvent::BeforeBackward(l),
-                TapeEdge::After { layer: Some(l), .. } => LayerEvent::AfterBackward(l),
-                TapeEdge::After { index: 0, layer: None } => LayerEvent::AfterHead,
+                SegmentEdge::Before { layer: Some(l), .. } => LayerEvent::BeforeBackward(l),
+                SegmentEdge::After { layer: Some(l), .. } => LayerEvent::AfterBackward(l),
+                SegmentEdge::After { index: 0, layer: None } => LayerEvent::AfterHead,
                 _ => return,
             };
             if failed.is_none() {

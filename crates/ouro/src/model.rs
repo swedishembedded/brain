@@ -30,8 +30,8 @@ use std::cell::{Cell, RefCell};
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
 use model::saved::{Residuals, SavedFormat, SavedPolicy};
-use model::streamed::{RevisitingTape, StreamedStore};
-use model::tape::LayerTape;
+use model::streamed::{RevisitingPass, StreamedStore};
+use model::segmented::SegmentedPass;
 use paramstore::ParamStore;
 
 use crate::config::OuroConfig;
@@ -280,13 +280,13 @@ pub struct Ouro {
     scratch: Scratch,
     grad: Option<Grad>,
     /// Trunk: embed once, then every pass of the shared stack plus its gate.
-    trunk: LayerTape,
+    trunk: SegmentedPass,
     /// One LM-head matmul per pass.
     heads: Vec<Vec<Step>>,
     /// Training forward: trunk + every pass's head + its CE rows.
-    fwd_steps: LayerTape,
+    fwd_steps: SegmentedPass,
     /// Training backward: weighted head gradients, then the stack in reverse.
-    bwd_steps: LayerTape,
+    bwd_steps: SegmentedPass,
     /// The per-layer tensors held in a device window of layers, when the run streams them
     /// ([`model::Model::set_resident`]); `None` keeps every layer in the store. Each layer runs once in every pass, so
     /// its gradient is carried between its visits and it is updated once the backward is complete.
@@ -445,10 +445,10 @@ impl Ouro {
             ce_rows,
             scratch,
             grad,
-            trunk: LayerTape::default(),
+            trunk: SegmentedPass::default(),
             heads: Vec::new(),
-            fwd_steps: LayerTape::default(),
-            bwd_steps: LayerTape::default(),
+            fwd_steps: SegmentedPass::default(),
+            bwd_steps: SegmentedPass::default(),
             streamed,
             backward_pending: Cell::new(false),
             ce_grad_uniform,
@@ -541,18 +541,18 @@ impl Ouro {
     /// The trunk: embed once, then `T` passes of the shared stack, each ending
     /// in the final norm and the exit gate. The embedding is applied exactly
     /// once - pass `p` consumes the previous pass's state, never `embed(x)`.
-    fn trunk_steps(&self) -> LayerTape {
+    fn trunk_steps(&self) -> SegmentedPass {
         let cfg = &self.cfg;
         let ids = self.k();
         let n = self.rows();
         let d = cfg.d_model;
         let t = cfg.total_ut_steps;
 
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         let mut steps = vec![self.gpu.step(EMBED, &[&self.tokens, self.ps.w("tok.weight"), &self.res[0]], &[d, n], n * d)];
         self.res.round_trip(&self.gpu, &mut steps, 0);
         for p in 0..t as usize {
-            tape.segment(&mut steps, None);
+            pass.segment(&mut steps, None);
             for l in 0..cfg.n_layers as usize {
                 let i = p * cfg.n_layers as usize + l;
                 // The reference reassigns `hidden_states = norm(hidden_states)`
@@ -561,7 +561,7 @@ impl Ouro {
                 let h_in: &DeviceBuffer = if l == 0 && p > 0 { &self.hs[p - 1] } else { &self.res[i] };
                 self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1], None);
                 self.res.round_trip(&self.gpu, &mut steps, i + 1);
-                tape.segment(&mut steps, Some(l));
+                pass.segment(&mut steps, Some(l));
             }
             let last = &self.res[(p + 1) * cfg.n_layers as usize];
             steps.push(block::rmsnorm_fwd(&self.gpu, &ids, last, self.ps.w("norm.weight"), &self.hs[p], d, n, cfg.norm_eps));
@@ -569,8 +569,8 @@ impl Ouro {
             steps.push(self.gpu.step(MATMUL, &[&self.hs[p], self.ps.w("gate.weight"), &self.gates[p]], &[n, d, 1], n));
             steps.push(self.gpu.step(BIAS_ADD, &[&self.gates[p], self.ps.w("gate.bias")], &[n, 1], n));
         }
-        tape.segment(&mut steps, None);
-        tape
+        pass.segment(&mut steps, None);
+        pass
     }
 
     fn head_steps(&self, pass: usize) -> Vec<Step> {
@@ -580,17 +580,17 @@ impl Ouro {
         vec![self.gpu.step(MATMUL, &[&self.hs[pass], self.ps.w("lm_head.weight"), out], &[n, d, v], n * v)]
     }
 
-    fn training_forward_steps(&self) -> LayerTape {
+    fn training_forward_steps(&self) -> SegmentedPass {
         let n = self.rows();
         let v = self.cfg.vocab;
-        let mut tape = self.trunk_steps();
+        let mut pass = self.trunk_steps();
         let mut steps = Vec::new();
         for p in 0..self.cfg.total_ut_steps as usize {
             steps.extend(self.heads[p].iter().cloned());
             steps.push(self.gpu.step(CE_VALUE, &[&self.logits[p], &self.targets, &self.ce_rows[p]], &[n, v, IGNORE], n));
         }
-        tape.segment(&mut steps, None);
-        tape
+        pass.segment(&mut steps, None);
+        pass
     }
 
     /// The backward graph. Pass 1 of every layer's gradient is the update of
@@ -598,7 +598,7 @@ impl Ouro {
     /// uses" accumulation, and the kernels that write a parameter gradient
     /// (`matmul_dw`, `rmsnorm_dw`, `emb_bwd`, `matmul_dx` with `acc=1`) add
     /// into the buffer the trainer zeroed once per step.
-    fn training_backward_steps(&self) -> LayerTape {
+    fn training_backward_steps(&self) -> SegmentedPass {
         let cfg = &self.cfg;
         let ids = self.k();
         let n = self.rows();
@@ -607,7 +607,7 @@ impl Ouro {
         let t = cfg.total_ut_steps as usize;
         let l_count = cfg.n_layers as usize;
         let g = self.grad.as_ref().expect("training graph on an inference build");
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         let mut steps = Vec::new();
 
         // Head phase, every pass. The CE gradient is divided by the supervised
@@ -645,16 +645,16 @@ impl Ouro {
                     self.res.restore(&self.gpu, &mut steps, i);
                 }
                 // Rebuild the layer's internals from its boundary residual.
-                tape.segment(&mut steps, None);
+                pass.segment(&mut steps, None);
                 self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1], None);
                 self.layer_bwd_into(&mut steps, l, h_in, &g.dres[i + 1], if l == 0 && p > 0 { &g.dhs[p - 1] } else { &g.dres[i] }, l == 0 && p > 0);
-                tape.segment(&mut steps, Some(l));
+                pass.segment(&mut steps, Some(l));
             }
         }
 
         steps.push(self.gpu.step(EMB_BWD, &[&self.tokens, &g.dres[0], self.ps.g("tok.weight")], &[n, d, v], v * d));
-        tape.segment(&mut steps, None);
-        tape
+        pass.segment(&mut steps, None);
+        pass
     }
 
     /// One layer's backward. `d_h_out` is the gradient of the layer's output;
@@ -711,11 +711,11 @@ impl Ouro {
         self.submit_forward(&self.trunk);
     }
 
-    /// Submit a forward tape; a layer-streamed build loads each layer into its window slot at every visit.
-    fn submit_forward(&self, tape: &LayerTape) {
+    /// Submit a forward pass; a layer-streamed build loads each layer into its window slot at every visit.
+    fn submit_forward(&self, pass: &SegmentedPass) {
         match &self.streamed {
-            Some(stream) => stream.forward(&self.gpu, tape).unwrap_or_else(|e| panic!("ouro layer-streamed forward: {e}")),
-            None => tape.submit(&self.gpu),
+            Some(stream) => stream.forward(&self.gpu, pass).unwrap_or_else(|e| panic!("ouro layer-streamed forward: {e}")),
+            None => pass.submit(&self.gpu),
         }
     }
 
@@ -1006,7 +1006,7 @@ impl model::Model for Ouro {
                     assert!(self.backward_pending.replace(false), "ouro layer-streamed full fine-tune: adamw_step without a backward");
                 }
                 let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
-                stream.adamw_step(&self.gpu, &self.ps, opt, &RevisitingTape(&self.bwd_steps), &args).unwrap_or_else(|e| panic!("ouro layer-streamed update: {e}"));
+                stream.adamw_step(&self.gpu, &self.ps, opt, &RevisitingPass(&self.bwd_steps), &args).unwrap_or_else(|e| panic!("ouro layer-streamed update: {e}"));
             }
             None => opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
         }

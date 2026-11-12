@@ -31,7 +31,7 @@ use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, FlashGqaIds, Gqa, KernelIds};
 use model::saved::{Residuals, SavedFormat, SavedPolicy};
 use model::streamed::StreamedStore;
-use model::tape::LayerTape;
+use model::segmented::SegmentedPass;
 use paramstore::ParamStore;
 
 use crate::config::SpectralConfig;
@@ -105,11 +105,11 @@ pub struct SpectralLm {
     scratch: Scratch,
     grad: Option<Grad>,
     /// Embedding, the layers (one segment each) and the final norm.
-    trunk: LayerTape,
+    trunk: SegmentedPass,
     head: Vec<Step>,
     loss_steps: Vec<Step>,
     /// The head, the layers from the last down (one segment each), the embedding.
-    bwd_steps: LayerTape,
+    bwd_steps: SegmentedPass,
     /// The per-layer tensors held in a device window of layers, when the run streams them
     /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
     streamed: Option<StreamedStore>,
@@ -242,10 +242,10 @@ impl SpectralLm {
             t,
             train,
             count: Cell::new(1.0),
-            trunk: LayerTape::default(),
+            trunk: SegmentedPass::default(),
             head: Vec::new(),
             loss_steps: Vec::new(),
-            bwd_steps: LayerTape::default(),
+            bwd_steps: SegmentedPass::default(),
             streamed,
             backward_pending: Cell::new(false),
             dec: RefCell::new(None),
@@ -368,21 +368,21 @@ impl SpectralLm {
         s.push(self.gpu.step(ADD2, &[&g.d_xmid, &g.d_tmp, d_in], &[n * d], n * d));
     }
 
-    fn trunk_steps(&self) -> LayerTape {
+    fn trunk_steps(&self) -> SegmentedPass {
         let (n, d) = (self.rows(), self.cfg.d_model);
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         let mut s = vec![self.gpu.step(EMBED, &[&self.tokens, self.ps.w("tok.weight"), &self.res[0]], &[d, n], n * d)];
         self.res.round_trip(&self.gpu, &mut s, 0);
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in 0..self.cfg.n_layers as usize {
             self.layer_fwd(&mut s, l, &self.res[l], &self.res[l + 1]);
             self.res.round_trip(&self.gpu, &mut s, l + 1);
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
         let last = &self.res[self.cfg.n_layers as usize];
         s.push(block::rmsnorm_fwd(&self.gpu, &self.ids, last, self.ps.w("norm.weight"), &self.xf, d, n, self.cfg.rms_eps));
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     /// Per-position cross-entropy and the per-row softmax statistics the
@@ -409,27 +409,27 @@ impl SpectralLm {
 
     /// The whole backward: the head, then every layer rebuilt and
     /// differentiated in reverse, then the embedding.
-    fn backward_steps(&self) -> LayerTape {
+    fn backward_steps(&self) -> SegmentedPass {
         let (n, d, v) = (self.rows(), self.cfg.d_model, self.cfg.vocab);
         let g = self.grad.as_ref().expect("backward on an inference build");
         let layers = self.cfg.n_layers as usize;
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         // The loss steps wrote the per-row softmax statistics this reads.
         let mut s = vec![self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uniform, &[&self.logits, &self.targets, &self.ce_stats, &g.dlogits], n * v)];
         self.linear_dw(&mut s, &g.dlogits, &self.xf, self.head_grad(), n, d, v);
         self.linear_dx(&mut s, &g.dlogits, self.head_weight(), &g.d_xf, n, d, v, false);
         self.res.restore(&self.gpu, &mut s, layers);
         s.extend(block::rmsnorm_bwd(&self.gpu, &self.ids, &self.res[layers], self.ps.w("norm.weight"), &g.d_xf, &g.dres[layers], &g.rms_inv, Some(self.ps.g("norm.weight")), d, n, self.cfg.rms_eps));
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in (0..layers).rev() {
             self.res.restore(&self.gpu, &mut s, l);
             self.layer_fwd(&mut s, l, &self.res[l], &self.res[l + 1]);
             self.layer_bwd(&mut s, l, &self.res[l], &g.dres[l + 1], &g.dres[l]);
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
         s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &g.dres[0], self.ps.g("tok.weight")], &[n, d, v], v * d));
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     /// Submit the trunk; a layer-streamed build loads each layer into its window slot as it is reached.

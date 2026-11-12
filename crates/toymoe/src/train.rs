@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::saved::{Residuals, SavedPolicy};
 use model::streamed::StreamedStore;
-use model::tape::LayerTape;
+use model::segmented::SegmentedPass;
 use model::IGNORE;
 use optim::Optim;
 use paramstore::ParamStore;
@@ -250,8 +250,8 @@ pub struct Trainer {
     // keep their referenced buffers alive; only the *contents* of
     // `tokens`/`targets` (set_batch) change in place via `write_buffer`. The
     // AdamW graph is cached inside the shared `Optim`.
-    fwd_steps: LayerTape,
-    bwd_steps: LayerTape,
+    fwd_steps: SegmentedPass,
+    bwd_steps: SegmentedPass,
     /// The per-layer tensors (every expert included) held in a device window of layers, when the run streams them
     /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
     streamed: Option<StreamedStore>,
@@ -369,8 +369,8 @@ impl Trainer {
             d_expert_out: st(n * d),
             inv: st(n),
             gpu,
-            fwd_steps: LayerTape::default(),
-            bwd_steps: LayerTape::default(),
+            fwd_steps: SegmentedPass::default(),
+            bwd_steps: SegmentedPass::default(),
             streamed,
             backward_pending: Cell::new(false),
         };
@@ -417,30 +417,30 @@ impl Trainer {
     /// Build the forward dispatch graph; caches all activations. Buffers and
     /// uniform contents are identical every step, so this is built once.
     /// The forward, one segment per layer (a layer-streamed build loads each layer before its segment).
-    fn build_forward(&self) -> LayerTape {
+    fn build_forward(&self) -> SegmentedPass {
         let c = &self.cfg;
         let n = self.b * self.t;
         let d = c.d_model;
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         let mut s: Vec<Step> = Vec::new();
 
         // embedding -> res[0]
         s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("token_emb.weight"), &self.res[0]], &[d, n], n * d));
 
         self.res.round_trip(&self.gpu, &mut s, 0);
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in 0..c.n_layers as usize {
             self.layer_forward(l, &mut s);
             self.res.round_trip(&self.gpu, &mut s, l + 1);
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
 
         // final norm + tied lm_head
         s.push(self.gpu.step(RMSNORM, &[&self.res[c.n_layers as usize], self.w("norm.weight"), &self.xn_final], &[d, n, f(crate::RMS_EPS)], n));
         s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("token_emb.weight"), &self.logits], &[n, d, c.vocab], n * c.vocab));
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, c.vocab, IGNORE], n));
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     /// Layer `l`'s forward, from `res[l]` into `res[l + 1]`.
@@ -502,16 +502,16 @@ impl Trainer {
     }
 
     /// Submit a recorded forward; a layer-streamed build loads each layer into its window slot as it is reached.
-    fn submit_forward(&self, tape: &LayerTape) {
+    fn submit_forward(&self, pass: &SegmentedPass) {
         match &self.streamed {
-            Some(stream) => stream.forward(&self.gpu, tape).unwrap_or_else(|e| panic!("toymoe layer-streamed forward: {e}")),
-            None => tape.submit(&self.gpu),
+            Some(stream) => stream.forward(&self.gpu, pass).unwrap_or_else(|e| panic!("toymoe layer-streamed forward: {e}")),
+            None => pass.submit(&self.gpu),
         }
     }
 
     /// Build the backward dispatch graph (constant across steps): the head, one segment per layer from the last down,
     /// then the embedding.
-    fn build_backward(&self) -> LayerTape {
+    fn build_backward(&self) -> SegmentedPass {
         let c = &self.cfg;
         let n = self.b * self.t;
         let d = c.d_model;
@@ -520,7 +520,7 @@ impl Trainer {
         let hd = c.head_dim();
         let half = hd / 2;
         let n_layers = c.n_layers as usize;
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         // ---- output: cross-entropy grad, lm_head, final norm ----
         let mut s: Vec<Step> = Vec::new();
         self.res.restore(&self.gpu, &mut s, n_layers);
@@ -536,7 +536,7 @@ impl Trainer {
             self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[n_layers], &self.inv, self.g("norm.weight")], &[d, n], d),
             self.gpu.step(RMSNORM_DX, &[&self.res[n_layers], self.w("norm.weight"), &self.d_xn, &self.dres[n_layers]], &[d, n, f(crate::RMS_EPS)], n),
         ]);
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
 
         for l in (0..n_layers).rev() {
             if self.saved.recomputes() {
@@ -594,13 +594,13 @@ impl Trainer {
             s.push(self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[l], &self.inv, self.g(&pn("norm1.weight"))], &[d, n], d));
             s.push(self.gpu.step(RMSNORM_DX, &[&self.res[l], self.w(&pn("norm1.weight")), &self.d_xn, &self.d_tmp], &[d, n, f(crate::RMS_EPS)], n));
             s.push(self.gpu.step(ADD2, &[&lb.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
 
         // embedding backward (accumulates onto grad_emb which holds lm_head grad)
         s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("token_emb.weight")], &[n, d, c.vocab], c.vocab * d));
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     /// One AdamW step matching the unified [`model::Model`] signature (optional

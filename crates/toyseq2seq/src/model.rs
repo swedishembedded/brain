@@ -43,7 +43,7 @@ use serde_json::Value;
 use gpu_core::{f, Gpu, Step};
 use model::saved::{Residuals, SavedPolicy};
 use model::streamed::StreamedStore;
-use model::tape::LayerTape;
+use model::segmented::SegmentedPass;
 use optim::Optim;
 use paramstore::ParamStore;
 
@@ -432,8 +432,8 @@ pub struct Seq2Seq {
     enc_ln_mean: gpu_core::DeviceBuffer,
     enc_ln_inv: gpu_core::DeviceBuffer,
 
-    fwd_steps: LayerTape,
-    bwd_steps: LayerTape,
+    fwd_steps: SegmentedPass,
+    bwd_steps: SegmentedPass,
     /// The encoder's and the decoder's per-layer tensors held in a device window of layers, when the run streams them
     /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
     streamed: Option<StreamedStore>,
@@ -609,8 +609,8 @@ impl Seq2Seq {
             ln_inv: st(nd),
             enc_ln_mean: st(ne),
             enc_ln_inv: st(ne),
-            fwd_steps: LayerTape::default(),
-            bwd_steps: LayerTape::default(),
+            fwd_steps: SegmentedPass::default(),
+            bwd_steps: SegmentedPass::default(),
             streamed,
             backward_pending: Cell::new(false),
             ce_grad_uni,
@@ -739,7 +739,7 @@ impl Seq2Seq {
 
     /// The forward, one segment per layer of the encoder and then of the decoder (the decoder's layer indices follow
     /// the encoder's), so a layer-streamed build loads each layer before its segment.
-    fn forward_steps(&self) -> LayerTape {
+    fn forward_steps(&self) -> SegmentedPass {
         let c = &self.cfg;
         let d = c.d_model;
         let v = c.vocab;
@@ -748,37 +748,37 @@ impl Seq2Seq {
         let td = self.t_dec;
         let ne = b * te;
         let nd = b * td;
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         let mut s: Vec<Step> = Vec::new();
 
         // ---- ENCODER ----
         s.push(self.gpu.step(EMBED, &[&self.src, self.w("tok.weight"), &self.enc_res[0]], &[d, ne], ne * d));
         s.push(self.gpu.step(POS_ADD, &[&self.enc_res[0], self.w("enc_pos.weight")], &[ne * d, d, te], ne * d));
         self.enc_res.round_trip(&self.gpu, &mut s, 0);
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in 0..c.n_enc as usize {
             self.enc_layer_forward(l, &mut s);
             self.enc_res.round_trip(&self.gpu, &mut s, l + 1);
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
 
         // ---- DECODER ----
         s.push(self.gpu.step(EMBED, &[&self.tgt, self.w("tok.weight"), &self.dec_res[0]], &[d, nd], nd * d));
         s.push(self.gpu.step(POS_ADD, &[&self.dec_res[0], self.w("dec_pos.weight")], &[nd * d, d, td], nd * d));
         self.dec_res.round_trip(&self.gpu, &mut s, 0);
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in 0..c.n_dec as usize {
             self.dec_layer_forward(l, &mut s);
             self.dec_res.round_trip(&self.gpu, &mut s, l + 1);
-            tape.segment(&mut s, Some(c.n_enc as usize + l));
+            pass.segment(&mut s, Some(c.n_enc as usize + l));
         }
 
         let last = c.n_dec as usize;
         s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.dec_res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final, d, nd, 1e-5));
         s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("lm_head.weight"), &self.logits], &[nd, d, v], nd * v));
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.labels, &self.ce_buf], &[nd, v, IGNORE], nd));
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     pub fn forward_submit(&self) {
@@ -815,7 +815,7 @@ impl Seq2Seq {
     }
 
     /// The backward: the head, the decoder's layers from the last down, the encoder's likewise, then the embeddings.
-    fn build_backward_steps(&self) -> LayerTape {
+    fn build_backward_steps(&self) -> SegmentedPass {
         let c = &self.cfg;
         let d = c.d_model;
         let ff = c.d_ff;
@@ -828,8 +828,8 @@ impl Seq2Seq {
         let ne = b * te;
         let nd = b * td;
         let g = |name: &str| self.ps.g(name);
-        let mut tape = LayerTape::default();
-        tape.clear_on_submit(&self.d_enc_mem0);
+        let mut pass = SegmentedPass::default();
+        pass.clear_on_submit(&self.d_enc_mem0);
         let mut s: Vec<Step> = Vec::new();
         let enc_mem = &self.enc_res[c.n_enc as usize];
         // Ping-pong accumulator parity for the encoder-memory grad: starts at the
@@ -853,7 +853,7 @@ impl Seq2Seq {
         // ---- DECODER blocks (reverse) ----
         // d_enc_mem accumulates cross-attn K/V grads from every decoder layer; it
         // is cleared once per backward submit (see `backward`).
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in (0..c.n_dec as usize).rev() {
             if self.saved.recomputes() {
                 // The layers of the stack share one set of activation buffers: rebuild this layer's from `dec_res[l]`.
@@ -924,7 +924,7 @@ impl Seq2Seq {
             s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.dec_res[l], self.w(&p("ln1.weight")), &self.d_branch, &self.d_tmp, d, nd, 1e-5));
             // grad into dec_res[l] = d_acc2 + d_tmp
             s.push(self.gpu.step(ADD2, &[&self.d_acc2, &self.d_tmp, &self.dec_dres[l]], &[nd * d], nd * d));
-            tape.segment(&mut s, Some(c.n_enc as usize + l));
+            pass.segment(&mut s, Some(c.n_enc as usize + l));
         }
 
         // ---- ENCODER blocks (reverse) ----
@@ -976,7 +976,7 @@ impl Seq2Seq {
             s.push(self.gpu.step(LN_DBETA, &[&self.enc_d_branch, g(&p("ln1.bias"))], &[d, ne], d));
             s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.enc_res[l], self.w(&p("ln1.weight")), &self.enc_d_branch, &self.enc_d_tmp, d, ne, 1e-5));
             s.push(self.gpu.step(ADD2, &[&self.enc_d_acc, &self.enc_d_tmp, &self.enc_dres[l]], &[ne * d], ne * d));
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
 
         // ---- embeddings backward ----
@@ -986,8 +986,8 @@ impl Seq2Seq {
         // Encoder embeddings (tok.weight is SHARED: accumulate into the same grad).
         s.push(self.gpu.step(POS_BWD, &[&self.enc_dres[0], g("enc_pos.weight")], &[b, te, d], te * d));
         s.push(self.gpu.step(EMB_BWD, &[&self.src, &self.enc_dres[0], g("tok.weight")], &[ne, d, v], v * d));
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     pub fn zero_grads(&self) {

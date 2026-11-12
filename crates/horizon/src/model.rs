@@ -27,7 +27,7 @@ use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, LayerNormIds};
 use model::saved::{Residuals, SavedPolicy};
 use model::streamed::StreamedStore;
-use model::tape::LayerTape;
+use model::segmented::SegmentedPass;
 use optim::Optim;
 use paramstore::ParamStore;
 use serde_json::Value;
@@ -371,8 +371,8 @@ pub struct Horizon {
     fc: Option<forecast::ForecastBufs>,
     /// The state across visits, when the configuration asks for one.
     bb: Option<backbone::BackboneBufs>,
-    fwd: LayerTape,
-    bwd: LayerTape,
+    fwd: SegmentedPass,
+    bwd: SegmentedPass,
     /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
     /// every layer sharing one set of activation buffers its replay before its backward refills
     /// ([`model::Model::set_saved_policy`]).
@@ -560,8 +560,8 @@ impl Horizon {
             }),
             fc: forecast::ForecastBufs::new(&gpu, &cfg, b),
             bb: backbone::BackboneBufs::new(&gpu, &cfg, b),
-            fwd: LayerTape::default(),
-            bwd: LayerTape::default(),
+            fwd: SegmentedPass::default(),
+            bwd: SegmentedPass::default(),
             saved: SavedPolicy::Keep,
             streamed,
             backward_pending: Cell::new(false),
@@ -1026,11 +1026,11 @@ impl Horizon {
 
     /// The batched forward, one segment per set-encoder layer (a layer-streamed build loads each layer before its
     /// segment).
-    fn forward_steps(&self) -> LayerTape {
-        let mut tape = LayerTape::default();
+    fn forward_steps(&self) -> SegmentedPass {
+        let mut pass = SegmentedPass::default();
         if self.cfg.additive {
-            tape.segment(&mut self.additive_forward_steps(), None);
-            return tape;
+            pass.segment(&mut self.additive_forward_steps(), None);
+            return pass;
         }
         let c = &self.cfg;
         let g = &self.gpu;
@@ -1040,11 +1040,11 @@ impl Horizon {
         let (bn, bp, b) = (self.sets * n, self.b * p, self.b);
         let mut s = self.embedding_steps();
         self.res.round_trip(g, &mut s, 0);
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in 0..self.layers.len() {
             self.layer_forward(l, &mut s);
             self.res.round_trip(g, &mut s, l + 1);
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
         let last = &self.res[c.n_layers as usize];
         s.extend([
@@ -1134,20 +1134,20 @@ impl Horizon {
             ),
         ]);
         s.extend(self.forecast_forward_steps());
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     /// The batched backward: the heads, one segment per set-encoder layer from the last down, then the embeddings.
-    fn backward_steps(&self) -> LayerTape {
-        let mut tape = LayerTape::default();
+    fn backward_steps(&self) -> SegmentedPass {
+        let mut pass = SegmentedPass::default();
         // The accumulators the heads add into start from zero on every run of the pass.
         for buf in [&self.d_az, &self.d_lz, &self.d_z].into_iter().chain(self.bb.iter().flat_map(|bb| bb.cleared())) {
-            tape.clear_on_submit(buf);
+            pass.clear_on_submit(buf);
         }
         if self.cfg.additive {
-            tape.segment(&mut self.additive_backward_steps(), None);
-            return tape;
+            pass.segment(&mut self.additive_backward_steps(), None);
+            return pass;
         }
         let c = &self.cfg;
         let g = &self.gpu;
@@ -1263,7 +1263,7 @@ impl Horizon {
             &self.dres[last],
             bn,
         ));
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         let a = self.bidir();
         for l in (0..c.n_layers as usize).rev() {
             if self.saved.recomputes() {
@@ -1335,11 +1335,11 @@ impl Horizon {
                 &[bn * d],
                 bn * d,
             ));
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
         s.extend(self.embedding_backward_steps());
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     /// Backward of [`Self::embedding_steps`] from the gradient in `dres[0]`.

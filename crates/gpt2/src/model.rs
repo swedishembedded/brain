@@ -26,7 +26,7 @@ use serde_json::Value;
 use gpu_core::{f, Gpu, Step};
 use model::saved::{Residuals, SavedPolicy};
 use model::streamed::StreamedStore;
-use model::tape::LayerTape;
+use model::segmented::SegmentedPass;
 use optim::Optim;
 use paramstore::ParamStore;
 pub use model::Shard;
@@ -428,8 +428,8 @@ pub struct Gpt {
     ln_mean: gpu_core::DeviceBuffer,
     ln_inv: gpu_core::DeviceBuffer,
 
-    fwd_steps: LayerTape,
-    bwd_steps: LayerTape,
+    fwd_steps: SegmentedPass,
+    bwd_steps: SegmentedPass,
     /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
     /// every layer sharing one set of activation buffers its replay before its backward refills
     /// ([`model::Model::set_saved_policy`]).
@@ -644,8 +644,8 @@ impl Gpt {
             d_fc: st(n * ff),
             ln_mean: st(n),
             ln_inv: st(n),
-            fwd_steps: LayerTape::default(),
-            bwd_steps: LayerTape::default(),
+            fwd_steps: SegmentedPass::default(),
+            bwd_steps: SegmentedPass::default(),
             saved: SavedPolicy::Keep,
             streamed,
             backward_pending: Cell::new(false),
@@ -712,12 +712,12 @@ impl Gpt {
     }
 
     /// The batched forward, one segment per layer (a layer-streamed build loads each layer before its segment).
-    fn forward_steps(&self, b_use: u32, t_use: u32) -> LayerTape {
+    fn forward_steps(&self, b_use: u32, t_use: u32) -> SegmentedPass {
         let c = &self.cfg;
         let n = b_use * t_use;
         let d = c.d_model;
         let v = c.vocab;
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         let mut s: Vec<Step> = Vec::new();
 
         // Token+positional embedding: only the embed stage; other stages receive
@@ -728,16 +728,16 @@ impl Gpt {
         }
 
         self.res.round_trip(&self.gpu, &mut s, self.shard.start);
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in self.shard.start..self.shard.end {
             self.layer_forward(l, b_use, t_use, &mut s);
             self.res.round_trip(&self.gpu, &mut s, l + 1);
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
 
         // Head epilogue (final norm + lm_head + CE): only the head stage.
         if !self.shard.head {
-            return tape;
+            return pass;
         }
         let last = c.n_layers as usize;
         s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final, d, n, 1e-5));
@@ -747,8 +747,8 @@ impl Gpt {
             scale.hook(&self.gpu, &mut s, GRAD_SCALE_BUF, &self.logits, n * v);
         }
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     /// Layer `l`'s forward over `b_use` sequences of `t_use` tokens, from `res[l]` into `res[l + 1]`.
@@ -789,10 +789,10 @@ impl Gpt {
     }
 
     /// Submit a recorded forward; a layer-streamed build loads each layer into its window slot as it is reached.
-    fn submit_forward(&self, tape: &LayerTape) {
+    fn submit_forward(&self, pass: &SegmentedPass) {
         match &self.streamed {
-            Some(stream) => stream.forward(&self.gpu, tape).unwrap_or_else(|e| panic!("gpt2 layer-streamed forward: {e}")),
-            None => tape.submit(&self.gpu),
+            Some(stream) => stream.forward(&self.gpu, pass).unwrap_or_else(|e| panic!("gpt2 layer-streamed forward: {e}")),
+            None => pass.submit(&self.gpu),
         }
     }
 
@@ -861,7 +861,7 @@ impl Gpt {
     }
 
     /// The batched backward: the head, one segment per layer from the last down, then the embeddings.
-    fn build_backward_steps(&self) -> LayerTape {
+    fn build_backward_steps(&self) -> SegmentedPass {
         let c = &self.cfg;
         let n = self.b * self.t;
         let d = c.d_model;
@@ -870,7 +870,7 @@ impl Gpt {
         let hd = c.head_dim();
         let g = |name: &str| self.ps.g(name);
         let p = |l: usize, name: &str| format!("blocks.{l}.{name}");
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         let mut s: Vec<Step> = Vec::new();
 
         // head (no bias) + final layernorm — head stage only; other stages receive
@@ -900,7 +900,7 @@ impl Gpt {
             s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last], d, n, 1e-5));
         }
 
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in (self.shard.start..self.shard.end).rev() {
             if self.saved.recomputes() {
                 // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
@@ -947,7 +947,7 @@ impl Gpt {
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln1.bias"))], &[d, n], d));
             s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[l], self.w(&p(l, "ln1.weight")), &self.d_branch, &self.d_tmp, d, n, 1e-5));
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
 
         // embeddings backward — only the embed stage (owns tok/pos and dres[0]).
@@ -955,8 +955,8 @@ impl Gpt {
             s.push(self.gpu.step(POS_BWD, &[&self.dres[0], g("pos.weight")], &[self.b, self.t, d], self.t * d));
             s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], g("tok.weight")], &[n, d, c.vocab], c.vocab * d));
         }
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     pub fn zero_grads(&self) {

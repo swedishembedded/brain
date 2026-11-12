@@ -22,7 +22,7 @@ use serde_json::Value;
 use gpu_core::{f, Gpu, Step};
 use model::saved::{Residuals, SavedPolicy};
 use model::streamed::StreamedStore;
-use model::tape::LayerTape;
+use model::segmented::SegmentedPass;
 use optim::Optim;
 use paramstore::ParamStore;
 
@@ -277,8 +277,8 @@ pub struct Pid {
     // step (the old behaviour) allocates a fresh uniform + bind group per
     // dispatch, exhausting the GPU memory aperture after a few thousand steps
     // and triggering a device reset (surfaced as `Buffer 'params' is invalid`).
-    fwd_steps: LayerTape,
-    bwd_steps: LayerTape,
+    fwd_steps: SegmentedPass,
+    bwd_steps: SegmentedPass,
     /// The per-layer tensors held in a device window of layers, when the run streams them
     /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
     streamed: Option<StreamedStore>,
@@ -397,8 +397,8 @@ impl Pid {
             d_val: st(n * ff),
             ln_mean: st(n),
             ln_inv: st(n),
-            fwd_steps: LayerTape::default(),
-            bwd_steps: LayerTape::default(),
+            fwd_steps: SegmentedPass::default(),
+            bwd_steps: SegmentedPass::default(),
             streamed,
             backward_pending: Cell::new(false),
             ce_grad_uni,
@@ -461,12 +461,12 @@ impl Pid {
 
     /// Forward over the first `b_use * t_use` rows, one segment per layer (a layer-streamed build loads each layer
     /// before its segment).
-    fn forward_steps(&self, b_use: u32, t_use: u32) -> LayerTape {
+    fn forward_steps(&self, b_use: u32, t_use: u32) -> SegmentedPass {
         let c = &self.cfg;
         let n = b_use * t_use;
         let d = c.d_model;
         let u = c.u_bins;
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         let mut s: Vec<Step> = Vec::new();
 
         // embeddings
@@ -474,11 +474,11 @@ impl Pid {
         s.push(self.gpu.step(POS_ADD, &[&self.res[0], self.w("pos.weight")], &[n * d, d, t_use], n * d));
 
         self.res.round_trip(&self.gpu, &mut s, 0);
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in 0..c.n_layers as usize {
             self.layer_forward(l, b_use, t_use, &mut s);
             self.res.round_trip(&self.gpu, &mut s, l + 1);
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
 
         // final norm + head + loss
@@ -487,8 +487,8 @@ impl Pid {
         s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("u_head.weight"), &self.logits], &[n, d, u], n * u));
         s.push(self.gpu.step(BIAS_ADD, &[&self.logits, self.w("u_head.bias")], &[n, u], n * u));
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, u, IGNORE], n));
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     /// Submit the forward pass to the GPU. No host readback -- the loss scalar,
@@ -499,10 +499,10 @@ impl Pid {
     }
 
     /// Submit a recorded forward; a layer-streamed build loads each layer into its window slot as it is reached.
-    fn submit_forward(&self, tape: &LayerTape) {
+    fn submit_forward(&self, pass: &SegmentedPass) {
         match &self.streamed {
-            Some(stream) => stream.forward(&self.gpu, tape).unwrap_or_else(|e| panic!("toypid layer-streamed forward: {e}")),
-            None => tape.submit(&self.gpu),
+            Some(stream) => stream.forward(&self.gpu, pass).unwrap_or_else(|e| panic!("toypid layer-streamed forward: {e}")),
+            None => pass.submit(&self.gpu),
         }
     }
 
@@ -543,7 +543,7 @@ impl Pid {
 
     /// Build the backward dispatch graph (constant across steps apart from the
     /// CE-grad count, which lives in `ce_grad_uni`).
-    fn build_backward_steps(&self) -> LayerTape {
+    fn build_backward_steps(&self) -> SegmentedPass {
         let c = &self.cfg;
         let n = self.b * self.t;
         let d = c.d_model;
@@ -553,7 +553,7 @@ impl Pid {
         let g = |name: &str| self.ps.g(name);
         let p = |l: usize, name: &str| format!("blocks.{l}.{name}");
         let last = c.n_layers as usize;
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
 
         // ---- head + final layernorm ----
         let mut s: Vec<Step> = Vec::new();
@@ -568,7 +568,7 @@ impl Pid {
             self.gpu.step(LN_DBETA, &[&self.d_xn, g("ln.bias")], &[d, n], d),
             model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last], d, n, 1e-5),
         ]);
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
 
         for l in (0..c.n_layers as usize).rev() {
             if self.saved.recomputes() {
@@ -611,14 +611,14 @@ impl Pid {
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln1.bias"))], &[d, n], d));
             s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[l], self.w(&p(l, "ln1.weight")), &self.d_branch, &self.d_tmp, d, n, 1e-5));
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
 
         // ---- embeddings backward ----
         s.push(self.gpu.step(POS_BWD, &[&self.dres[0], g("pos.weight")], &[self.b, self.t, d], self.t * d));
         s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], g("tok.weight")], &[n, d, c.vocab], c.vocab * d));
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     pub fn zero_grads(&self) {

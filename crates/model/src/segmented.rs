@@ -5,18 +5,22 @@
 // your team needs expertise in streaming a model's layers through a fixed device window, you can procure our services
 // by sending an email to info@swedishembedded.com.
 
-//! A recorded pass in segments, each knowing the layer it runs ([`LayerTape`]).
+//! A recorded pass in segments, each knowing the layer it runs ([`SegmentedPass`]).
 //!
 //! A trainer records its forward or backward once; a layer-streamed build ([`crate::streamed`]) must act between
-//! the layers of that pass (load a layer's weights before it runs, finish its update after its backward). The tape
-//! keeps the one recorded list and the boundaries, and [`LayerTape::submit_hooked`] reports every boundary as it
+//! the layers of that pass (load a layer's weights before it runs, finish its update after its backward). The pass
+//! keeps the one recorded list and the boundaries, and [`SegmentedPass::submit_hooked`] reports every boundary as it
 //! submits.
+//!
+//! This is not an automatic-differentiation tape: nothing here is differentiated or replayed backward. Every
+//! step was built, in the order it runs, by the model's own forward or backward builder; the segments only mark
+//! where a layer begins and ends.
 
 use gpu_core::{Gpu, Step};
 
 /// A recorded pass and the segments it is submitted in.
 #[derive(Default)]
-pub struct LayerTape {
+pub struct SegmentedPass {
     /// Buffers zeroed each time the pass is submitted, before its first step: the accumulators it adds into, which
     /// must start from zero on every run of the pass (a layer-streamed update runs its backward more than once).
     clears: Vec<gpu_core::DeviceBuffer>,
@@ -26,16 +30,16 @@ pub struct LayerTape {
     segs: Vec<(usize, Option<usize>)>,
 }
 
-/// A boundary of a [`LayerTape`] segment.
+/// A boundary of a [`SegmentedPass`] segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TapeEdge {
+pub enum SegmentEdge {
     /// Segment `index` (running `layer`, if any) is about to be submitted.
     Before { index: usize, layer: Option<usize> },
     /// Segment `index` has been submitted.
     After { index: usize, layer: Option<usize> },
 }
 
-impl LayerTape {
+impl SegmentedPass {
     /// Zero `buf` each time the pass is submitted, before its first step.
     pub fn clear_on_submit(&mut self, buf: &gpu_core::DeviceBuffer) {
         self.clears.push(buf.clone());
@@ -80,18 +84,18 @@ impl LayerTape {
         self.submit_hooked(gpu, &mut |_| {});
     }
 
-    /// Submit every segment in order, reporting [`TapeEdge::Before`] ahead of each and [`TapeEdge::After`] once it
+    /// Submit every segment in order, reporting [`SegmentEdge::Before`] ahead of each and [`SegmentEdge::After`] once it
     /// is submitted (an empty segment included). The pass's clears go first.
-    pub fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge)) {
+    pub fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(SegmentEdge)) {
         if !self.clears.is_empty() {
             gpu.submit(&self.clears.iter().collect::<Vec<_>>(), &[]);
         }
         for (index, layer, steps) in self.segments() {
-            edge(TapeEdge::Before { index, layer });
+            edge(SegmentEdge::Before { index, layer });
             if !steps.is_empty() {
                 gpu.submit(&[], steps);
             }
-            edge(TapeEdge::After { index, layer });
+            edge(SegmentEdge::After { index, layer });
         }
     }
 }
@@ -107,7 +111,7 @@ mod tests {
         let gpu = gpu_core::testgpu::dev(&[("add2", kernels::ADD2)]);
         let (a, out) = (gpu.storage(4), gpu.storage(4));
         let step = || gpu.step(0, &[&a, &a, &out], &[4], 4);
-        let mut t = LayerTape::default();
+        let mut t = SegmentedPass::default();
         t.steps_mut().push(step());
         t.close(None);
         t.steps_mut().extend([step(), step()]);
@@ -119,8 +123,8 @@ mod tests {
         let mut edges = Vec::new();
         t.submit_hooked(&gpu, &mut |e| edges.push(e));
         assert_eq!(edges.len(), 8);
-        assert_eq!(edges[2], TapeEdge::Before { index: 1, layer: Some(1) });
-        assert_eq!(edges[5], TapeEdge::After { index: 2, layer: Some(0) });
+        assert_eq!(edges[2], SegmentEdge::Before { index: 1, layer: Some(1) });
+        assert_eq!(edges[5], SegmentEdge::After { index: 2, layer: Some(0) });
     }
 
     /// Spec: a pass's clears zero their buffers on every submission, not only the first.
@@ -128,7 +132,7 @@ mod tests {
     fn clears_run_on_every_submission() {
         let gpu = gpu_core::testgpu::dev(&[("add2", kernels::ADD2)]);
         let acc = gpu.storage(4);
-        let mut t = LayerTape::default();
+        let mut t = SegmentedPass::default();
         t.clear_on_submit(&acc);
         for _ in 0..2 {
             gpu.write_f32(&acc, &[5.0; 4]);

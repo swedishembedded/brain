@@ -126,7 +126,7 @@ use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels}
 use model::ops::{Act, Ops, TierPolicy, Weight};
 use model::saved::{Residuals, SavedPolicy};
 use model::streamed::{LayeredPass, StreamedStore};
-use model::tape::TapeEdge;
+use model::segmented::SegmentEdge;
 use model::Shard;
 use model::adapter::exec::AdapterRuntime;
 use paramstore::{ParamStore, Role};
@@ -2871,7 +2871,7 @@ impl Qwen35 {
     }
 
     /// [`Self::run_forward`], reporting the edges of each layer's part.
-    fn run_forward_hooked(&self, edge: &mut dyn FnMut(TapeEdge)) {
+    fn run_forward_hooked(&self, edge: &mut dyn FnMut(SegmentEdge)) {
         let g = &self.gpu;
         let n = self.b * self.t;
         let d = self.cfg.d_model;
@@ -2893,10 +2893,10 @@ impl Qwen35 {
         self.round_trip_boundary(self.shard.start);
         // `l` is the ABSOLUTE layer index (into the layer types, `self.res` and the `blocks.{l}.*` weight names).
         for l in self.shard.start..self.shard.end {
-            edge(TapeEdge::Before { index: l, layer: Some(l) });
+            edge(SegmentEdge::Before { index: l, layer: Some(l) });
             let acts = self.layer_forward(l, n, &self.res[l], &self.res[l + 1]);
             self.round_trip_boundary(l + 1);
-            edge(TapeEdge::After { index: l, layer: Some(l) });
+            edge(SegmentEdge::After { index: l, layer: Some(l) });
             // A recomputing build drops each layer's activations here and rebuilds them in the backward.
             if self.is_train && !self.saved.recomputes() {
                 layer_acts.push(acts.expect("qwen35: is_train but layer_forward returned no acts"));
@@ -3178,7 +3178,7 @@ impl Qwen35 {
 
     /// The backward over the forward's activations `ta`, reporting the edges of each layer's part. It reads `ta` and
     /// never consumes it, so a layer-streamed update that measures the clip first can run it twice.
-    fn backward_hooked(&self, ta: &TrainActs, edge: &mut dyn FnMut(TapeEdge)) {
+    fn backward_hooked(&self, ta: &TrainActs, edge: &mut dyn FnMut(SegmentEdge)) {
         let g = &self.gpu;
         let n = self.b * self.t;
         let d = self.cfg.d_model;
@@ -3231,7 +3231,7 @@ impl Qwen35 {
         // Where a recomputed layer writes its (unused) output residual.
         let recompute_out = self.saved.recomputes().then(|| g.storage((n * d) as u64));
         for l in (self.shard.start..self.shard.end).rev() {
-            edge(TapeEdge::Before { index: l, layer: Some(l) });
+            edge(SegmentEdge::Before { index: l, layer: Some(l) });
             // This layer's input boundary (decoded into its working buffer when held narrow), then, when recomputing,
             // the layer's activations rebuilt from it.
             self.restore_boundary(l);
@@ -3289,7 +3289,7 @@ impl Qwen35 {
                 drop(rebuilt);
                 g.poll_wait();
             }
-            edge(TapeEdge::After { index: l, layer: Some(l) });
+            edge(SegmentEdge::After { index: l, layer: Some(l) });
         }
 
         // This stage's INPUT-boundary gradient (`dres[shard.start]`), for the
@@ -4317,7 +4317,7 @@ enum EagerPass {
 }
 
 impl LayeredPass for Eager<'_> {
-    fn submit_hooked(&self, _gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge)) {
+    fn submit_hooked(&self, _gpu: &Gpu, edge: &mut dyn FnMut(SegmentEdge)) {
         match self.pass {
             EagerPass::Forward => self.model.run_forward_hooked(edge),
             EagerPass::Backward => {

@@ -277,7 +277,7 @@ converts a built model (`model::streamed::StreamedStore::convert`): every traine
 `blocks.{l}.*` tensor moves into the state, the store's weight and gradient
 entries become handles to the window's slots and lanes, and the model records
 its passes again, so its kernels run unchanged. The model marks where its layers
-begin and end in its passes (`model::tape::LayerTape`), loads each layer before
+begin and end in its passes (`model::segmented::SegmentedPass`), loads each layer before
 its forward segment (`StreamedStore::forward`) and hands its backward to the
 shared update (`StreamedStore::backward_events`, `resident_ft::adamw_step`). The
 embeddings, the head and the final norm stay in the store under the model's
@@ -300,12 +300,12 @@ tape, and an eager model (qwen35moe) reports them as its forward and backward
 run each layer. Whatever a model holds of the store's buffers outside its passes
 (qwen35moe's `Ops` weights of the mixer linears) must be pointed at the window's
 slots when it converts, and the accumulators a backward adds into are cleared by
-the pass itself (`LayerTape::clear_on_submit`), since the update's measuring
+the pass itself (`SegmentedPass::clear_on_submit`), since the update's measuring
 pass runs it twice. A model that runs each layer in every step of its recurrence
 (ouro, huginn's recurrent core) has a layer's gradient complete only after the
 last visit: its backward
 pass declares that it revisits layers (`streamed::LayeredPass::revisits`,
-`RevisitingTape`), each visit's gradient is carried on the host
+`RevisitingPass`), each visit's gradient is carried on the host
 (`ResidentFullFt::carry_layer`) and the layers are finished once the backward is
 complete (`finish_carried`), through the same device norm and update as a
 single visit. A chat full fine-tune (`finetune::fit_full`) takes `weights=f32`

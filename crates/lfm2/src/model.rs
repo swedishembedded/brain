@@ -36,7 +36,7 @@ use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, CrossIds};
 use model::saved::{Residuals, SavedPolicy};
 use model::streamed::StreamedStore;
-use model::tape::LayerTape;
+use model::segmented::SegmentedPass;
 use paramstore::ParamStore;
 
 use crate::config::{LayerType, LfmConfig};
@@ -389,11 +389,11 @@ pub struct Lfm {
     /// binding budget). None = full [n, vocab] head.
     head: Option<HeadGather>,
     ce_grad_uni: DeviceBuffer,
-    bwd_steps: LayerTape,
+    bwd_steps: SegmentedPass,
     /// The seeded-backward twin of `bwd_steps` - see [`Lfm::seed_buf`]/
     /// [`Lfm::backward_seeded`]. Built alongside `bwd_steps` whenever `train`
     /// is set; empty on an inference build.
-    seeded_bwd_steps: LayerTape,
+    seeded_bwd_steps: SegmentedPass,
     /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
     /// each layer kind sharing one set of activation buffers its replay before its backward refills
     /// ([`model::Model::set_saved_policy`]).
@@ -416,10 +416,10 @@ pub struct Lfm {
     logits: DeviceBuffer,
     ce_buf: DeviceBuffer,
 
-    fwd_steps: LayerTape,
+    fwd_steps: SegmentedPass,
     /// Chunked-inference regime: one forward per group size 1..=b (index
     /// `b_use-1`), so partial scheduler groups run at their true size.
-    fwd_variants: Vec<LayerTape>,
+    fwd_variants: Vec<SegmentedPass>,
     /// YaRN long-context RoPE table (`head_dim/2` per-channel inverse
     /// frequencies) plus the attention-magnitude correction - `None` when
     /// `cfg.rope_scaling` is unset, the plain analytic-theta RoPE path every
@@ -791,8 +791,8 @@ impl Lfm {
             train_chunk: None,
             head: None,
             ce_grad_uni: gpu.uniform_dynamic(4),
-            bwd_steps: LayerTape::default(),
-            seeded_bwd_steps: LayerTape::default(),
+            bwd_steps: SegmentedPass::default(),
+            seeded_bwd_steps: SegmentedPass::default(),
             saved: SavedPolicy::Keep,
             streamed,
             backward_pending: Cell::new(false),
@@ -804,7 +804,7 @@ impl Lfm {
             xn_final: st(n * d),
             logits,
             ce_buf,
-            fwd_steps: LayerTape::default(),
+            fwd_steps: SegmentedPass::default(),
             fwd_variants: Vec::new(),
             yarn,
             gpu,
@@ -1074,7 +1074,7 @@ impl Lfm {
         }
     }
 
-    fn forward_steps(&self) -> LayerTape {
+    fn forward_steps(&self) -> SegmentedPass {
         self.forward_steps_for(self.b)
     }
 
@@ -1083,7 +1083,7 @@ impl Lfm {
     /// chunked-inference regime prebuilds one list per group size so the
     /// scheduler never pays repeat-padding for a partial group.
     /// One segment per layer (a layer-streamed build loads each layer before its segment).
-    fn forward_steps_for(&self, b_use: u32) -> LayerTape {
+    fn forward_steps_for(&self, b_use: u32) -> SegmentedPass {
         let c = &self.cfg;
         assert!(b_use >= 1 && b_use <= self.b);
         assert!(b_use == self.b || matches!(self.regime, Regime::Chunked { .. }), "partial batches: chunked regime only");
@@ -1093,7 +1093,7 @@ impl Lfm {
         let eps = c.norm_eps;
         let dw = d as u64;
         let tiles = block::vocab_tiles_on(&self.gpu, v as u64, dw);
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         let mut s: Vec<Step> = Vec::new();
 
         // Token embedding, vocab-tiled (65536×1024 fp32 = 256 MB per binding
@@ -1109,11 +1109,11 @@ impl Lfm {
         }
 
         self.round_trip_boundary(&mut s, 0);
-        tape.segment(&mut s, None);
+        pass.segment(&mut s, None);
         for l in 0..c.layer_types.len() {
             self.layer_forward(l, b_use, &mut s);
             self.round_trip_boundary(&mut s, l + 1);
-            tape.segment(&mut s, Some(l));
+            pass.segment(&mut s, Some(l));
         }
 
         // Final norm.
@@ -1137,8 +1137,8 @@ impl Lfm {
                 ));
             }
             s.push(self.gpu.step(CE_VALUE, &[&hg.logits_g, &hg.sup_targets, &hg.ce_g], &[cap, v, IGNORE], cap));
-            tape.segment(&mut s, None);
-            return tape;
+            pass.segment(&mut s, None);
+            return pass;
         }
         match &self.regime {
             Regime::Materialized { .. } => {
@@ -1178,8 +1178,8 @@ impl Lfm {
                 }
             }
         }
-        tape.segment(&mut s, None);
-        tape
+        pass.segment(&mut s, None);
+        pass
     }
 
     /// Layer `l`'s forward over `b_use` sequences, from its residual-in into the next residual, with the buffers the
@@ -1321,14 +1321,14 @@ impl Lfm {
     }
 
     /// The batched backward: the head, one segment per layer from the last down, then the embedding.
-    fn backward_steps(&self) -> LayerTape {
+    fn backward_steps(&self) -> SegmentedPass {
         let c = &self.cfg;
         let bw = self.bwd.as_ref().expect("train mode");
         let n = self.b * self.t;
         let d = c.d_model;
         let v = c.vocab;
         let head = c.head_weight();
-        let mut tape = LayerTape::default();
+        let mut pass = SegmentedPass::default();
         let mut s: Vec<Step> = Vec::new();
 
         // ---- head + final norm ----
@@ -1338,7 +1338,7 @@ impl Lfm {
             // the supervised rows of d_xn (zeroed by the pass's clears, each
             // time it runs - rows with no supervision contribute nothing).
             let cap = hg.cap;
-            tape.clear_on_submit(&bw.d_xn);
+            pass.clear_on_submit(&bw.d_xn);
             s.push(self.gpu.step(CE_STATS, &[&hg.logits_g, &hg.sup_targets, &hg.ce_stats_g], &[cap, v, IGNORE], cap));
             s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&hg.logits_g, &hg.sup_targets, &hg.ce_stats_g, &hg.d_logits_g], cap * v));
             let (bk, bt) = dw_kernel(v, d);
@@ -1356,8 +1356,8 @@ impl Lfm {
             let (bk, bt) = dx_kernel(n, d);
             s.push(self.gpu.dispatch(bk, &[&bw.d_logits, self.w(head), &bw.d_xn], &[n, d, v, 0], bt));
         }
-        self.trunk_backward_steps(&mut tape, &mut s);
-        tape
+        self.trunk_backward_steps(&mut pass, &mut s);
+        pass
     }
 
     /// The seeded-backward step list: whatever gradient the caller has
@@ -1368,10 +1368,10 @@ impl Lfm {
     /// CE - an external objective (contrastive, or anything else) owns the
     /// loss and its own gradient on the pooled/unpooled hidden states; this
     /// is where that gradient re-enters the encoder.
-    fn seeded_backward_steps(&self) -> LayerTape {
-        let mut tape = LayerTape::default();
-        self.trunk_backward_steps(&mut tape, &mut Vec::new());
-        tape
+    fn seeded_backward_steps(&self) -> SegmentedPass {
+        let mut pass = SegmentedPass::default();
+        self.trunk_backward_steps(&mut pass, &mut Vec::new());
+        pass
     }
 
     /// Final RMSNorm backward, every layer's FFN + mixer backward, and the
@@ -1384,9 +1384,9 @@ impl Lfm {
     /// doc; only the pure-inference chunked builder is not, and never builds
     /// `self.bwd` at all).
     ///
-    /// Records into `tape`: the steps already in `s` (the head) close as the first segment, each layer is a segment of
+    /// Records into `pass`: the steps already in `s` (the head) close as the first segment, each layer is a segment of
     /// its own, and the embedding backward is left in `s` for the caller to close.
-    fn trunk_backward_steps(&self, tape: &mut LayerTape, s: &mut Vec<Step>) {
+    fn trunk_backward_steps(&self, pass: &mut SegmentedPass, s: &mut Vec<Step>) {
         let c = &self.cfg;
         let bw = self.bwd.as_ref().expect("train mode");
         let Regime::Materialized { layers, res, .. } = &self.regime else {
@@ -1405,7 +1405,7 @@ impl Lfm {
         let last = c.n_layers() as usize;
         res.restore(&self.gpu, s, last);
         self.norm_bwd(s, &res[last], "norm.weight", &bw.d_xn, &bw.dres[last], &bw.inv, d, n);
-        tape.segment(s, None);
+        pass.segment(s, None);
 
         for (l, lb) in layers.iter().enumerate().rev() {
             if self.saved.recomputes() {
@@ -1488,12 +1488,12 @@ impl Lfm {
             }
             self.norm_bwd(s, &res[l], &p("ln1.weight"), &bw.d_xn, &bw.d_tmp, &bw.inv, d, n);
             s.push(self.gpu.step(ADD2, &[&bw.dxmid, &bw.d_tmp, &bw.dres[l]], &[n * d], n * d));
-            tape.segment(s, Some(l));
+            pass.segment(s, Some(l));
         }
 
         // Embedding backward (tied: accumulates onto the head grad in tok.weight).
         s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &bw.dres[0], self.ps.g("tok.weight")], &[n, d, v], v * d));
-        tape.segment(s, None);
+        pass.segment(s, None);
     }
 
     pub fn backward(&self) {
@@ -1649,10 +1649,10 @@ impl Lfm {
     }
 
     /// Submit a recorded forward; a layer-streamed build loads each layer into its window slot as it is reached.
-    fn submit_forward(&self, tape: &LayerTape) {
+    fn submit_forward(&self, pass: &SegmentedPass) {
         match &self.streamed {
-            Some(stream) => stream.forward(&self.gpu, tape).unwrap_or_else(|e| panic!("lfm2 layer-streamed forward: {e}")),
-            None => tape.submit(&self.gpu),
+            Some(stream) => stream.forward(&self.gpu, pass).unwrap_or_else(|e| panic!("lfm2 layer-streamed forward: {e}")),
+            None => pass.submit(&self.gpu),
         }
     }
     /// Writes a `ModelCard` (`family: "lfm"`) alongside the weights -

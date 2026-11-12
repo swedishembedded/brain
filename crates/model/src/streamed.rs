@@ -11,7 +11,7 @@
 //! names: each streamed entry of [`ParamStore::weight`] and [`ParamStore::grad`] becomes a handle to the window slot
 //! and gradient lane the tensor's layer uses, so the model's recorded passes run unchanged.
 //!
-//! What a model adds is where its layers begin and end in those passes ([`LayerTape`]): the forward loads a layer's
+//! What a model adds is where its layers begin and end in those passes ([`SegmentedPass`]): the forward loads a layer's
 //! weights into its slot before the layer runs ([`StreamedStore::forward`]), and the backward is driven by the shared
 //! update ([`crate::resident_ft::adamw_step`]), which loads each layer again, takes its gradient and updates it before
 //! the next layer reuses the slot ([`StreamedStore::backward_events`]). Everything else in the store (embeddings, the
@@ -32,14 +32,14 @@ use paramstore::ParamStore;
 use crate::memplan::{Authorized, Capacity};
 use crate::ops::{StoreDevice, Weight};
 use crate::resident_ft::{self, LayerEvent, ResidentBackward, ResidentBudget, ResidentFtConfig, ResidentFullFt, ResidentSpec, ResidentValue, StepArgs};
-use crate::tape::{LayerTape, TapeEdge};
+use crate::segmented::{SegmentedPass, SegmentEdge};
 
-/// A recorded pass a layer-streamed build acts between the layers of: a [`LayerTape`], or a model's own segmented
+/// A recorded pass a layer-streamed build acts between the layers of: a [`SegmentedPass`], or a model's own segmented
 /// pass (one that interleaves host work, such as routed experts built per pass).
 pub trait LayeredPass {
-    /// Submit the pass in order, reporting [`TapeEdge::Before`] and [`TapeEdge::After`] around each layer's part
+    /// Submit the pass in order, reporting [`SegmentEdge::Before`] and [`SegmentEdge::After`] around each layer's part
     /// (edges with no layer may be reported too and are ignored).
-    fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge));
+    fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(SegmentEdge));
 
     /// Whether the backward visits a layer more than once (a recurrent-depth model runs one layer in every step of
     /// its recurrence): its gradients are then carried between visits and the layers finished once the backward is
@@ -49,18 +49,18 @@ pub trait LayeredPass {
     }
 }
 
-impl LayeredPass for LayerTape {
-    fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge)) {
-        LayerTape::submit_hooked(self, gpu, edge);
+impl LayeredPass for SegmentedPass {
+    fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(SegmentEdge)) {
+        SegmentedPass::submit_hooked(self, gpu, edge);
     }
 }
 
-/// A [`LayerTape`] whose backward visits a layer more than once ([`LayeredPass::revisits`]): a recurrent-depth model
+/// A [`SegmentedPass`] whose backward visits a layer more than once ([`LayeredPass::revisits`]): a recurrent-depth model
 /// running one layer in every step of its recurrence.
-pub struct RevisitingTape<'a>(pub &'a LayerTape);
+pub struct RevisitingPass<'a>(pub &'a SegmentedPass);
 
-impl LayeredPass for RevisitingTape<'_> {
-    fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge)) {
+impl LayeredPass for RevisitingPass<'_> {
+    fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(SegmentEdge)) {
         self.0.submit_hooked(gpu, edge);
     }
 
@@ -188,7 +188,7 @@ impl StreamedStore {
         let dev = device(gpu)?;
         let mut failed = None;
         pass.submit_hooked(gpu, &mut |edge| {
-            if let (TapeEdge::Before { layer: Some(layer), .. }, None) = (edge, &failed) {
+            if let (SegmentEdge::Before { layer: Some(layer), .. }, None) = (edge, &failed) {
                 failed = self.ft.borrow_mut().load_layer(&dev, layer).err();
             }
         });
@@ -208,14 +208,14 @@ impl StreamedStore {
             }
         };
         pass.submit_hooked(gpu, &mut |edge| match edge {
-            TapeEdge::Before { layer: Some(layer), .. } => {
+            SegmentEdge::Before { layer: Some(layer), .. } => {
                 if !std::mem::replace(&mut head_done, true) {
                     report(LayerEvent::AfterHead, &mut failed);
                 }
                 report(LayerEvent::BeforeBackward(layer), &mut failed);
             }
-            TapeEdge::After { layer: Some(layer), .. } if revisits => report(LayerEvent::AfterVisit(layer), &mut failed),
-            TapeEdge::After { layer: Some(layer), .. } => report(LayerEvent::AfterBackward(layer), &mut failed),
+            SegmentEdge::After { layer: Some(layer), .. } if revisits => report(LayerEvent::AfterVisit(layer), &mut failed),
+            SegmentEdge::After { layer: Some(layer), .. } => report(LayerEvent::AfterBackward(layer), &mut failed),
             _ => {}
         });
         if !head_done {

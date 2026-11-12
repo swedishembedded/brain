@@ -74,7 +74,7 @@ use std::cell::{Cell, RefCell};
 
 use model::saved::{Residuals, SavedPolicy};
 use model::streamed::{LayeredPass, StreamedStore};
-use model::tape::TapeEdge;
+use model::segmented::SegmentEdge;
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
@@ -2373,14 +2373,14 @@ struct Pass<'a> {
 }
 
 impl LayeredPass for Pass<'_> {
-    fn submit_hooked(&self, gpu: &gpu_core::Gpu, edge: &mut dyn FnMut(TapeEdge)) {
+    fn submit_hooked(&self, gpu: &gpu_core::Gpu, edge: &mut dyn FnMut(SegmentEdge)) {
         for (index, seg) in self.segs.iter().enumerate() {
             match seg {
                 PassSeg::Steps(steps) => gpu.submit(&[], steps),
                 PassSeg::Experts { layer, rows, stage: ExpertStage::Forward { keep } } => self.model.moe_fwd(*layer, *rows, *keep),
                 PassSeg::Experts { layer, rows, stage: ExpertStage::Backward } => self.model.moe_bwd(*layer, *rows),
-                PassSeg::LayerBegin(layer) => edge(TapeEdge::Before { index, layer: Some(*layer) }),
-                PassSeg::LayerEnd(layer) => edge(TapeEdge::After { index, layer: Some(*layer) }),
+                PassSeg::LayerBegin(layer) => edge(SegmentEdge::Before { index, layer: Some(*layer) }),
+                PassSeg::LayerEnd(layer) => edge(SegmentEdge::After { index, layer: Some(*layer) }),
             }
         }
     }

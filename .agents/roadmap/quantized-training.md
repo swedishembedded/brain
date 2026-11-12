@@ -136,7 +136,7 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   with every token routed to every expert (fp8 flips a fixed fraction of top-2 choices against f32). Open: the
   vision trainers.
 - D Layer streaming for any `ParamStore` model (`weights=f32,window=N`): `ResidentValue::F32` (the value its own
-  master), `ops::DeviceIo`/`StoreDevice` (the state on the model's own handle), `model::tape::LayerTape` (per-layer
+  master), `ops::DeviceIo`/`StoreDevice` (the state on the model's own handle), `model::segmented::SegmentedPass` (per-layer
   segments), `model::streamed::StreamedStore` (converts a built store, aliases its entries to the window, drives
   the shared `resident_ft::adamw_step`), `Model::set_resident` from `apply_train_precision`. Specs:
   `streamed::check_layer_streaming`, `trainprec::check_exact_resume`. gpt2, spectrallm, deepseek2 and glmdsa (their
