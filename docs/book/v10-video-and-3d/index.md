@@ -27,4 +27,4 @@ You can say how many bytes a minute of video is as pixels, as planes and as a co
 6. [3D Gaussian Splatting](06-gaussian-splatting.md): how do millions of small, differentiable blobs render a photorealistic scene?
 7. [World Models](07-world-models.md): can a network learn to simulate an environment well enough to be played?
 8. [Simulating Brains and Bodies](08-neural-simulation.md): what can we learn by running a real animal's wiring diagram inside a simulated body?
-9. Project: Reconstructing and Predicting a Scene: can you reconstruct a scene from images and predict how it changes?
+9. [Project: Reconstructing and Predicting a Scene](09-project-dynamic-scene.md): can you reconstruct a scene from images and predict how it changes?

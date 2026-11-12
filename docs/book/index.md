@@ -177,4 +177,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 6. [3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md): How do millions of small, differentiable blobs render a photorealistic scene?
 7. [World Models](v10-video-and-3d/07-world-models.md): Can a network learn to simulate an environment well enough to be played?
 8. [Simulating Brains and Bodies](v10-video-and-3d/08-neural-simulation.md): What can we learn by running a real animal's wiring diagram inside a simulated body?
+9. [Project: Reconstructing and Predicting a Scene](v10-video-and-3d/09-project-dynamic-scene.md): Can you reconstruct a scene from images and predict how it changes?
 <!-- /contents -->

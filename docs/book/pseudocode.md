@@ -537,6 +537,8 @@ The splatting chapter (Chapter 6) writes out `project_gaussian`, `build_tile_lis
 
 The simulation chapter (Chapter 8) writes out `gather_tick`, `neural_tick` and `control_tick` where they are first used. A state that holds several arrays of the same length is written as a `map<text, array<real>[n]>` whose arrays are read and written by name (`S["v"][i]`); a count of ticks left is stored in a `real` array and compared with 0. `inout` marks the arrays a routine updates in place.
 
+The dynamic-scene project (Chapter 9) writes out `floor_plane`, `ray_on_plane`, `fit_scene`, `fit_ar2` and `rollout` where they are first used. `for p in points` visits the elements of a list in order, `append k to on` adds at the end, and `len` is the length of a list; `-matmul(transpose(R), t)` is the negated matrix-vector product, a scalar times a vector acts on every element, and `Ga[j][2:5]` is the slice of three entries from index 2. `solve(A, y, true)` is the elimination of Volume I, Chapter 4 as above. In `fit_scene` the routines `view_gradient` and `mse_upstream` are those of Chapter 6, a camera is the record of Chapter 6's renderer, and "adam update" is the step of Volume III, Chapter 7 with the rates the chapter states; "zeros of the shapes of" is an array or list of zeros with those shapes.
+
 ## Routines of the transformer chapters (Volume V)
 
 Chapters 9 to 12 use four routines of the normalization and attention chapters without writing them out again. Each is defined here by what it returns.

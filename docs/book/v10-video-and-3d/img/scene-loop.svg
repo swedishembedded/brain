@@ -1,0 +1,38 @@
+<!-- source-sha256: fe9031b816f0bb02f45ebe193348dde2f38dd2693575241b45a9d59796972e1e -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 761 322" width="761" height="322"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="761" height="322" fill="#ffffff"/>
+<rect x="24" y="24" width="144" height="74" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="96" y="57.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12 observed frames,</text>
+<text x="96" y="73.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">43 feature tracks</text>
+<rect x="208" y="24" width="156" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="286" y="49.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">structure from motion:</text>
+<text x="286" y="65.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cameras, 40 points,</text>
+<text x="286" y="81.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">floor, ball detections</text>
+<rect x="404" y="24" width="154" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="481" y="57.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">export the cameras</text>
+<text x="481" y="73.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">to the renderer</text>
+<rect x="598" y="24" width="139" height="74" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="667.5" y="57.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fit 10 + 3 Gaussians</text>
+<text x="667.5" y="73.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">to the 12 frames</text>
+<rect x="24" y="194" width="144" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="96" y="227.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">dynamics of each ball:</text>
+<text x="96" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">p&#x27; = c + a p + b q</text>
+<rect x="208" y="194" width="156" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="286" y="227.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">free run for 6 frames,</text>
+<text x="286" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">clipped to the clamp box</text>
+<rect x="404" y="194" width="154" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="481" y="227.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">render the Gaussians at</text>
+<text x="481" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">each held-out camera</text>
+<rect x="598" y="194" width="139" height="74" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="667.5" y="227.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">squared error against</text>
+<text x="667.5" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the held-out frame</text>
+<line x1="171" y1="61" x2="205" y2="61" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="171" y1="231" x2="205" y2="231" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="367" y1="61" x2="401" y2="61" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="367" y1="231" x2="401" y2="231" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="561" y1="61" x2="595" y2="61" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="561" y1="231" x2="595" y2="231" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M667.5,98 L667.5,136 Q667.5,146 657.5,146 L106,146 Q96,146 96,156 L96,191" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="381.75" y="138.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the ball positions of the 12 frames</text>
+<text x="481" y="118.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">mistakes 1 and 2</text>
+<text x="286" y="288.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">mistake 3</text>
+</svg>

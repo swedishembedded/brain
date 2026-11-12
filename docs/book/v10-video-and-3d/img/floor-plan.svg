@@ -1,0 +1,41 @@
+<!-- source-sha256: 2518036b6ae03ddc6ffbb403275a6848cd91292c9206a13c5d943d65e03f21cc -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 462" width="560" height="462">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="462" fill="#ffffff"/>
+<line x1="116.67" y1="374" x2="116.67" y2="30" stroke="#edf2f7"/>
+<text x="116.67" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-1</text>
+<line x1="263.33" y1="374" x2="263.33" y2="30" stroke="#edf2f7"/>
+<text x="263.33" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="410" y1="374" x2="410" y2="30" stroke="#edf2f7"/>
+<text x="410" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="58" y1="349.43" x2="542" y2="349.43" stroke="#edf2f7"/>
+<text x="52" y="353.43" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="288" x2="542" y2="288" stroke="#edf2f7"/>
+<text x="52" y="292" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4.5</text>
+<line x1="58" y1="226.57" x2="542" y2="226.57" stroke="#edf2f7"/>
+<text x="52" y="230.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<line x1="58" y1="165.14" x2="542" y2="165.14" stroke="#edf2f7"/>
+<text x="52" y="169.14" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5.5</text>
+<line x1="58" y1="103.71" x2="542" y2="103.71" stroke="#edf2f7"/>
+<text x="52" y="107.71" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<line x1="58" y1="42.29" x2="542" y2="42.29" stroke="#edf2f7"/>
+<text x="52" y="46.29" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6.5</text>
+<rect x="58" y="30" width="484" height="344" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="344"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#4a5568" stroke-width="1.4" points="89.61,355.57 437.52,355.57 437.52,66.39 89.61,66.39 89.61,355.57"/><polyline fill="none" stroke="#4a5568" stroke-width="1.2" stroke-dasharray="6 4" points="133.61,318.71 393.52,318.71 393.52,103.25 133.61,103.25 133.61,318.71"/><circle cx="162.3" cy="284.76" r="3.0" fill="#2b6cb0"/><circle cx="191.74" cy="273.27" r="3.0" fill="#2b6cb0"/><circle cx="229.69" cy="257.66" r="3.0" fill="#2b6cb0"/><circle cx="271.57" cy="238.49" r="3.0" fill="#2b6cb0"/><circle cx="311.81" cy="215.45" r="3.0" fill="#2b6cb0"/><circle cx="346.31" cy="196.86" r="3.0" fill="#2b6cb0"/><circle cx="370.65" cy="175.42" r="3.0" fill="#2b6cb0"/><circle cx="382.61" cy="155.24" r="3.0" fill="#2b6cb0"/><circle cx="380.2" cy="144.17" r="3.0" fill="#2b6cb0"/><circle cx="363.36" cy="140.37" r="3.0" fill="#2b6cb0"/><circle cx="335.04" cy="138.23" r="3.0" fill="#2b6cb0"/><circle cx="299.3" cy="141.9" r="3.0" fill="#2b6cb0"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.6" points="298.53,129.57 257.27,140.78 216.94,156.8 182.34,176.34 157.6,197.82 145.6,219.53 147.71,239.74"/><circle cx="133.24" cy="296.82" r="3.0" fill="#c05621"/><circle cx="147.12" cy="285.53" r="3.0" fill="#c05621"/><circle cx="159.24" cy="277.47" r="3.0" fill="#c05621"/><circle cx="169.22" cy="263.98" r="3.0" fill="#c05621"/><circle cx="178.61" cy="258.29" r="3.0" fill="#c05621"/><circle cx="187.47" cy="248.71" r="3.0" fill="#c05621"/><circle cx="195.41" cy="242.56" r="3.0" fill="#c05621"/><circle cx="202.27" cy="236.37" r="3.0" fill="#c05621"/><circle cx="207.98" cy="230.49" r="3.0" fill="#c05621"/><circle cx="214.19" cy="224.46" r="3.0" fill="#c05621"/><circle cx="219.94" cy="221.87" r="3.0" fill="#c05621"/><circle cx="224.51" cy="217.08" r="3.0" fill="#c05621"/><polyline fill="none" stroke="#c05621" stroke-width="1.6" points="221.91,204.54 226.05,200.72 229.78,197.29 233.14,194.2 236.16,191.41 238.87,188.91 241.32,186.66"/><circle cx="134.26" cy="121.26" r="3.0" fill="#2f855a"/><circle cx="155.54" cy="115.39" r="3.0" fill="#2f855a"/><circle cx="176.89" cy="114.55" r="3.0" fill="#2f855a"/><circle cx="197.92" cy="114.87" r="3.0" fill="#2f855a"/><circle cx="220.16" cy="117.45" r="3.0" fill="#2f855a"/><circle cx="241.47" cy="116.66" r="3.0" fill="#2f855a"/><circle cx="264.31" cy="120.17" r="3.0" fill="#2f855a"/><circle cx="285.05" cy="117.36" r="3.0" fill="#2f855a"/><circle cx="306.33" cy="114.03" r="3.0" fill="#2f855a"/><circle cx="328.98" cy="119.07" r="3.0" fill="#2f855a"/><circle cx="350.53" cy="118.33" r="3.0" fill="#2f855a"/><circle cx="372.04" cy="119.24" r="3.0" fill="#2f855a"/><polyline fill="none" stroke="#2f855a" stroke-width="1.6" points="373.33,103.71 395.33,103.71 395.33,103.71 395.33,103.71 395.33,103.71 395.33,103.71 395.33,103.71"/><text x="104.93" y="337.14" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">solid lines: true paths from frame 11 to frame 17</text><polyline fill="none" stroke="#6b46c1" stroke-width="1.6" stroke-dasharray="6 4" points="372.04,119.24 394.07,117.26 415.89,116.72 437.88,117.12 459.84,117.31 481.87,117.25 503.93,117.19"/></g>
+<text x="300" y="410" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">x (metres, right)</text>
+<text x="14" y="202" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 202)">z (metres, away from the camera)</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">The table from above</text>
+<line x1="36.55" y1="433" x2="56.55" y2="433" stroke="#4a5568" stroke-width="2"/>
+<text x="62.55" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">table</text>
+<line x1="111.63" y1="433" x2="131.62" y2="433" stroke="#4a5568" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="137.62" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">clamp box</text>
+<circle cx="224.54" cy="433" r="3.5" fill="#2b6cb0"/>
+<text x="240.54" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">A, detected</text>
+<circle cx="332.18" cy="433" r="3.5" fill="#c05621"/>
+<text x="348.18" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">B, detected</text>
+<circle cx="439.81" cy="433" r="3.5" fill="#2f855a"/>
+<text x="455.81" y="437" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">C, detected</text>
+<line x1="227.07" y1="450" x2="247.07" y2="450" stroke="#6b46c1" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="253.07" y="454" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">C, unclamped</text>
+</svg>
