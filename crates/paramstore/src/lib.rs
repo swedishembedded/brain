@@ -181,6 +181,23 @@ impl ParamStore {
         Self::new_with_roles_src(gpu, roles, source)
     }
 
+    /// An all-`Frozen` (inference) store from imported tensors, name ->
+    /// `(shape, data)`, checking every tensor's element count against its
+    /// shape. `what` names the model in the panic. Names are sorted, so the
+    /// store's layout does not depend on the map's iteration order.
+    pub fn frozen(gpu: &Gpu, tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>, what: &str) -> ParamStore {
+        let mut init = HashMap::with_capacity(tensors.len());
+        let mut roles = Vec::with_capacity(tensors.len());
+        for (name, (shape, data)) in tensors {
+            let n: usize = shape.iter().product();
+            assert_eq!(data.len(), n, "{what}: tensor {name}: {} values for shape {shape:?}", data.len());
+            roles.push((name.clone(), n, Role::Frozen));
+            init.insert(name.clone(), data.clone());
+        }
+        roles.sort_by(|a, b| a.0.cmp(&b.0));
+        Self::new_with_roles(gpu, roles, &init)
+    }
+
     /// Role-aware store: `Frozen` parameters allocate weights only. Used for
     /// inference (all frozen) and LoRA (frozen base + trainable adapters).
     pub fn new_with_roles(

@@ -16,7 +16,7 @@
 //! `import.rs`/`config.rs`'s docs.
 
 use gpu_core::{f, DeviceBuffer, Gpu};
-use paramstore::{ParamStore, Role};
+use paramstore::ParamStore;
 use vision::{Act, Conv, ConvKernelIds, ConvNames, ConvSpec, Ctx, MaxPool, Norm, PoolSpec, Shape};
 
 use crate::config::{BiSeNetConfig, ARM16, ARM32, FFM, OUTPUT_MID, RESNET18_STAGES};
@@ -76,19 +76,6 @@ pub fn ids() -> &'static ConvKernelIds {
 /// `arcface::model::kernel`'s identical helper.
 pub fn kernel(name: &str) -> usize {
     PIPELINES.iter().position(|(n, _)| *n == name).unwrap_or_else(|| panic!("kernel `{name}` is not in bisenet::PIPELINES"))
-}
-
-fn frozen_store(gpu: &Gpu, t: &Tensors) -> ParamStore {
-    let mut init = std::collections::HashMap::with_capacity(t.len());
-    let mut roles = Vec::with_capacity(t.len());
-    for (name, (shape, data)) in t {
-        let n: usize = shape.iter().product();
-        assert_eq!(data.len(), n, "bisenet: tensor {name}: {} values for shape {shape:?}", data.len());
-        roles.push((name.clone(), n, Role::Frozen));
-        init.insert(name.clone(), data.clone());
-    }
-    roles.sort_by(|a, b| a.0.cmp(&b.0));
-    ParamStore::new_with_roles(gpu, roles, &init)
 }
 
 /// `ConvNames` for an explicit `(conv weight name, BN module prefix)` pair -
@@ -532,7 +519,7 @@ impl BiSeNet {
             }
         }
 
-        let ps = frozen_store(&gpu, weights);
+        let ps = ParamStore::frozen(&gpu, weights, "bisenet");
         BiSeNet { gpu, cfg, ps, in_shape, cp, ffm, conv_out, conv_out_final }
     }
 

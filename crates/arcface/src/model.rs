@@ -24,7 +24,7 @@
 use std::sync::OnceLock;
 
 use gpu_core::{DeviceBuffer, Gpu};
-use paramstore::{ParamStore, Role};
+use paramstore::ParamStore;
 use vision::{
     Act, BatchNorm, BnNames, Conv, ConvKernelIds, ConvNames, ConvSpec, Ctx, Norm, PReLU, Shape,
 };
@@ -110,21 +110,6 @@ pub fn kernel(name: &str) -> usize {
         .iter()
         .position(|(n, _)| *n == name)
         .unwrap_or_else(|| panic!("kernel `{name}` is not in arcface::PIPELINES"))
-}
-
-/// Build a frozen (inference) ParamStore from an imported tensor map, checking
-/// every tensor's element count against the manifest that produced it.
-fn frozen_store(gpu: &Gpu, t: &Tensors) -> ParamStore {
-    let mut init = std::collections::HashMap::with_capacity(t.len());
-    let mut roles = Vec::with_capacity(t.len());
-    for (name, (shape, data)) in t {
-        let n: usize = shape.iter().product();
-        assert_eq!(data.len(), n, "tensor {name}: {} values for shape {shape:?}", data.len());
-        roles.push((name.clone(), n, Role::Frozen));
-        init.insert(name.clone(), data.clone());
-    }
-    roles.sort_by(|a, b| a.0.cmp(&b.0));
-    ParamStore::new_with_roles(gpu, roles, &init)
 }
 
 /// A norm-free conv spec with a learned bias - the shape EVERY conv in the
@@ -353,7 +338,7 @@ impl ArcFace {
             }
         }
 
-        let ps = frozen_store(&gpu, weights);
+        let ps = ParamStore::frozen(&gpu, weights, "arcface");
         let input = gpu.storage(in_shape.numel() as u64);
         ArcFace { gpu, cfg, ps, input, stem_conv, stem_prelu, blocks, stage_last, bn2, fc_out, features }
     }
