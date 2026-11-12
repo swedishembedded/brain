@@ -2398,6 +2398,7 @@ dependencies = [
  "brain-model",
  "brain-nemotronasr",
  "brain-onnx",
+ "brain-openvino-rt",
  "brain-paramstore",
  "brain-qwen3",
  "brain-qwen35moe",
@@ -2450,6 +2451,15 @@ dependencies = [
  "brain-paramstore",
  "brain-testutil",
  "brain-vision",
+]
+
+[[package]]
+name = "brain-openvino-rt"
+version = "5.1.0"
+dependencies = [
+ "brain-backend-api",
+ "brain-stats",
+ "openvino",
 ]
 
 [[package]]

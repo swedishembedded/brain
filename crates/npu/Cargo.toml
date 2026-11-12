@@ -16,6 +16,8 @@ path = "src/lib.rs"
 # same kind of cross-thread AND cross-process device-init lock the GPU
 # backends do - on its own key, since the NPU is physically separate silicon.
 brain-backend-api.workspace = true
+# The OpenVINO runtime seam (re-exported as `npu::openvino`).
+brain-openvino-rt.workspace = true
 # `capability::scratch`: where an exported graph is staged, private to this user.
 brain-capability.workspace = true
 brain-model.workspace = true

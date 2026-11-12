@@ -548,9 +548,9 @@ crates/npu/src/kronos_export.rs	KRONOS_ONNX_OUT
 crates/npu/src/kronos_export.rs	KRONOS_ONNX_T
 crates/npu/src/kronos_export.rs	KRONOS_PARITY_DIR
 crates/npu/src/kronos_export.rs	MOE_SKIP_GPU_TESTS
-crates/npu/src/openvino/real.rs	<k>
-crates/npu/src/openvino/real.rs	LD_LIBRARY_PATH
-crates/npu/src/openvino/real.rs	VIRTUAL_ENV
+crates/openvino-rt/src/real.rs	<k>
+crates/openvino-rt/src/real.rs	LD_LIBRARY_PATH
+crates/openvino-rt/src/real.rs	VIRTUAL_ENV
 crates/npu/tests/it/depth_npu_render.rs	DEPTH_RENDER_IMG
 crates/npu/tests/it/depth_npu_render.rs	DEPTH_RENDER_OUT
 crates/npu/tests/it/depth_npu_render.rs	ZIPDEPTH_NPU_PTH

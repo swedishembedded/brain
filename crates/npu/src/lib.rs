@@ -68,7 +68,9 @@ pub mod deepseekocr2_export;
 pub mod deepseekocr2_topology;
 
 // OpenVINO runtime seam (real on x86_64 linux/windows, stub elsewhere).
-pub mod openvino;
+/// The OpenVINO runtime, its own crate below every model; re-exported under
+/// its historical path so `npu::openvino::*` callers are unchanged.
+pub use openvino_rt as openvino;
 // Measured (never assumed) NPU roofline: fp16/int8 throughput via a synthetic
 // MatMul + the free device_info() capability report. Builds on `openvino`
 // alone, so it compiles against both the real and stub backends unchanged.

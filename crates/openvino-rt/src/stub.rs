@@ -11,6 +11,11 @@ use std::path::Path;
 /// One named output tensor: `(name, shape, row-major f32 data)`; the shape the real backend exports.
 pub type NamedTensor = (String, Vec<usize>, Vec<f32>);
 
+/// No runtime on this target; see the real implementation.
+pub fn use_library_dir(_dir: std::path::PathBuf) -> bool {
+    false
+}
+
 fn unsupported<T>() -> Result<T, NpuError> {
     Err(NpuError::Unsupported(std::env::consts::ARCH.to_string()))
 }

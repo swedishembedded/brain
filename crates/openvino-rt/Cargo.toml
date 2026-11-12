@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+[package]
+name = "brain-openvino-rt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The OpenVINO runtime seam: compile an ONNX graph for the Intel NPU, GPU or CPU and run it, with the OpenVINO library loaded at run time."
+
+[lib]
+name = "openvino_rt"
+path = "src/lib.rs"
+
+[dependencies]
+# `backend_api::hardware` - the cross-thread and cross-process device-init
+# lock, on the NPU's own key.
+brain-backend-api.workspace = true
+# `brain_stats::latency::Dist` - the shared latency statistics for `bench`.
+brain-stats.workspace = true
+
+# OpenVINO itself, on the platforms the NPU path targets; `runtime-linking`
+# loads the shared library when a session opens, so builds need no OpenVINO.
+[target.'cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))'.dependencies]
+openvino.workspace = true

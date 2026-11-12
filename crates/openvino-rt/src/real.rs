@@ -44,6 +44,10 @@ fn matches_base(id: &str, base: &str) -> bool {
 /// `--device npu` inside a venv with `make environment/requirements` installed.
 fn ensure_openvino_on_path() {
     use std::path::{Path, PathBuf};
+    if let Some(dir) = LIBRARY_DIR.get() {
+        put_on_path(dir.clone());
+        return;
+    }
     // Respect an explicit OpenVINO install env (e.g. a real setupvars.sh).
     if ["OPENVINO_INSTALL_DIR", "INTEL_OPENVINO_DIR", "OPENVINO_BUILD_DIR"]
         .iter()
@@ -93,20 +97,40 @@ fn ensure_openvino_on_path() {
         }
     }
     if let Some(dir) = found {
-        // The openvino-sys loader dlopens the UNVERSIONED `libopenvino_c.so`, but the
-        // pip wheel ships only versioned files (e.g. `libopenvino_c.so.2620` for
-        // 2026.2). Create the missing unversioned symlinks so the runtime resolves —
-        // best-effort (a read-only libs dir just falls through to `RuntimeNotFound`,
-        // whose message tells the user to set LD_LIBRARY_PATH / symlink manually).
-        #[cfg(unix)]
-        ensure_unversioned_solinks(&dir);
-        let mut paths = vec![dir];
-        if let Some(p) = std::env::var_os("LD_LIBRARY_PATH") {
-            paths.extend(std::env::split_paths(&p));
-        }
-        if let Ok(joined) = std::env::join_paths(paths) {
-            std::env::set_var("LD_LIBRARY_PATH", joined);
-        }
+        put_on_path(dir);
+    }
+}
+
+/// A library directory a caller has named (see [`use_library_dir`]).
+static LIBRARY_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Use the OpenVINO libraries in `dir` (a pip wheel's `openvino/libs`, or
+/// any directory holding `libopenvino_c.so*` and the device plugins) before
+/// any other place the runtime could be found. Call it before the first
+/// session opens. `false`, with no effect, when `dir` holds no OpenVINO C
+/// library or a directory was already chosen.
+pub fn use_library_dir(dir: std::path::PathBuf) -> bool {
+    let has_c = std::fs::read_dir(&dir)
+        .map(|rd| rd.flatten().any(|e| e.file_name().to_string_lossy().starts_with("libopenvino_c.so")))
+        .unwrap_or(false);
+    has_c && LIBRARY_DIR.set(dir).is_ok()
+}
+
+/// Make the OpenVINO C library in `dir` loadable.
+fn put_on_path(dir: std::path::PathBuf) {
+    // The openvino-sys loader dlopens the UNVERSIONED `libopenvino_c.so`, but the
+    // pip wheel ships only versioned files (e.g. `libopenvino_c.so.2620` for
+    // 2026.2). Create the missing unversioned symlinks so the runtime resolves —
+    // best-effort (a read-only libs dir just falls through to `RuntimeNotFound`,
+    // whose message tells the user to set LD_LIBRARY_PATH / symlink manually).
+    #[cfg(unix)]
+    ensure_unversioned_solinks(&dir);
+    let mut paths = vec![dir];
+    if let Some(p) = std::env::var_os("LD_LIBRARY_PATH") {
+        paths.extend(std::env::split_paths(&p));
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        std::env::set_var("LD_LIBRARY_PATH", joined);
     }
 }
 
@@ -467,7 +491,7 @@ impl Feed<'_> {
 /// by default; INT8/INT4 orthogonal) compiles here once and runs via [`run`], feeding
 /// f32/i64 inputs by name and reading f32 outputs by name. This generalises the
 /// per-model bespoke sessions so a residency `NpuInstance` is model-agnostic: a model
-/// only supplies its `crate::NpuModel` (graph bytes); `NpuGraph` does compile / cache
+/// only supplies its `npu::NpuModel` (graph bytes); `NpuGraph` does compile / cache
 /// / infer / evict.
 ///
 /// [`run`]: NpuGraph::run
@@ -679,7 +703,7 @@ pub struct Chronos2Session {
 }
 
 impl Chronos2Session {
-    /// Compile the core ONNX (e.g. from [`crate::chronos2_export::export_onnx`]).
+    /// Compile the core ONNX (e.g. from `npu::chronos2_export::export_onnx`).
     pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
         let (mut core, device) = open_device(cfg)?;
         let model = core
@@ -829,7 +853,7 @@ pub struct FincastSession {
 }
 
 impl FincastSession {
-    /// Compile the core ONNX (from [`crate::fincast_export::export_onnx`]).
+    /// Compile the core ONNX (from `npu::fincast_export::export_onnx`).
     pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
         let (mut core, device) = open_device(cfg)?;
         let model = core
@@ -1112,7 +1136,7 @@ impl CodecSession {
 }
 
 /// A compiled **KV-cache decode-step** Talker graph (see
-/// [`crate::qwen_topology::build_talker_decode_graph`]): one token + per-layer
+/// `npu::qwen_topology::build_talker_decode_graph`): one token + per-layer
 /// past K/V in, hidden + per-layer new K/V out. Dimensions are supplied by the
 /// caller (known from the Talker config) rather than introspected.
 pub struct KvSession {
@@ -1322,7 +1346,7 @@ impl PrefillSession {
     }
 }
 
-/// A compiled **fused MTP** graph (see [`crate::qwen_topology::build_mtp_fused_graph`]):
+/// A compiled **fused MTP** graph (see `npu::qwen_topology::build_mtp_fused_graph`):
 /// `talker_hidden:[1,1,emb]` + `cb0_embed:[1,1,emb]` -> `codes:[1,1,nres]` (f32,
 /// argmax ids cast to float) + `res_sum:[1,1,emb]`. One inference does all 15
 /// residual substeps on-device (no per-substep host round-trip).
@@ -1380,7 +1404,7 @@ impl FusedMtpSession {
 }
 
 /// A compiled **streaming-back** codec graph (see
-/// [`crate::codec_topology::build_codec_back_stream_graph`]): `latent` chunk +
+/// `npu::codec_topology::build_codec_back_stream_graph`): `latent` chunk +
 /// per-conv `bufin.{prefix}` in, `waveform` chunk + per-conv `bufout.{prefix}`
 /// out. The host carries the buffers across chunks so each chunk decodes only its
 /// new frames. Buffer specs `(prefix, channels, width)` are supplied by the

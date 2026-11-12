@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! OpenVINO NPU runtime seam.
+//! The OpenVINO runtime seam: compile an ONNX graph for an Intel NPU, GPU or
+//! CPU and run it.
+//!
+//! Its own crate, below every model, because what it needs is only the
+//! runtime: `crates/npu` builds graphs from brain's models (and re-exports
+//! this crate as `npu::openvino`), and a model crate that exports itself can
+//! run on the NPU without linking every other model's exporter.
 //!
 //! OpenVINO is a DEFAULT dependency (not behind a cargo feature): on x86_64
 //! linux/windows the real implementation is always compiled in, so `--device

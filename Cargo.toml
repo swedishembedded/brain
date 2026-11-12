@@ -164,6 +164,7 @@ default-members = [
     "crates/sfm",
     "crates/headpose",
     "crates/openseeface",
+    "crates/openvino-rt",
     "crates/mvs",
     "crates/recon",
     "crates/worldmirror2",
@@ -364,6 +365,7 @@ brain-splat = { path = "crates/splat" }
 brain-sfm = { path = "crates/sfm" }
 brain-headpose = { path = "crates/headpose" }
 brain-openseeface = { path = "crates/openseeface" }
+brain-openvino-rt = { path = "crates/openvino-rt" }
 brain-mvs = { path = "crates/mvs" }
 brain-camera = { path = "crates/camera" }
 brain-recon = { path = "crates/recon" }

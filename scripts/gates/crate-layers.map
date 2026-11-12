@@ -63,6 +63,7 @@ brain-modelref	3
 brain-modelstore	3
 brain-neuro	3
 brain-onnx	3
+brain-openvino-rt	3
 brain-optim	3
 brain-paramstore	3
 brain-promote	3
