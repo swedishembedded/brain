@@ -93,3 +93,18 @@ fn a_measured_distance_rescales_the_face_until_depth_is_right() {
     assert!(close(refit, 0.6, 1e-6));
     assert!(c.set_distance(0.6, 0.06).is_err(), "an IPD no adult has is refused");
 }
+
+#[test]
+fn a_camera_mode_with_another_aspect_keeps_square_pixels_or_is_refused() {
+    let fov: Profile = serde_json::from_str(r#"{"display_width_m":0.344,"display_height_m":0.194,"camera_gap_m":0.008,
+        "camera":{"kind":"fov","width":640,"height":480,"hfov_deg":60.0},"ipd_m":0.063}"#).unwrap();
+    // the driver delivered 16:9 instead of the 4:3 the profile describes
+    let c = fov.calibration_for(1280, 720).unwrap();
+    assert!(close(c.camera.fx, c.camera.fy, 1e-12), "pixels stay square: fx {} fy {}", c.camera.fx, c.camera.fy);
+    assert!(close(c.camera.fx, 640.0 / 30f64.to_radians().tan(), 1e-9), "the field of view is kept across the width");
+    let k = camera::Intrinsics::pinhole(500.0, 640, 480);
+    let cal: Profile = serde_json::from_value(serde_json::json!({"display_width_m":0.344,"display_height_m":0.194,"camera_gap_m":0.008,
+        "camera":{"kind":"intrinsics","intrinsics":k.to_json()},"ipd_m":0.063})).unwrap();
+    assert!(close(cal.calibration_for(1280, 960).unwrap().camera.fx, 1000.0, 1e-9), "same aspect: scaled");
+    assert!(cal.calibration_for(1280, 720).is_err(), "another aspect: refused");
+}

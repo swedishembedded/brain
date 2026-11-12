@@ -201,6 +201,33 @@ impl Profile {
         Ok(Calibration { camera, mount, display, ipd_m: self.ipd_m })
     }
 
+    /// The calibration for a camera delivering `width` x `height` frames,
+    /// which need not be the size the profile describes (a driver may give a
+    /// different mode than asked for). A field-of-view lens is rebuilt at the
+    /// delivered size with square pixels; a calibrated lens is rescaled only
+    /// when the aspect ratio is unchanged, because a crop or a different
+    /// sensor mode is a different lens, not a scaled one.
+    pub fn calibration_for(&self, width: u32, height: u32) -> Result<Calibration, GeometryError> {
+        let mut c = self.calibration()?;
+        c.camera = match &self.camera {
+            CameraProfile::Fov { hfov_deg, .. } => {
+                let f = width as f64 / 2.0 / (hfov_deg.to_radians() / 2.0).tan();
+                Intrinsics::pinhole(f, width, height)
+            }
+            CameraProfile::Intrinsics { .. } => {
+                let (a, b) = (c.camera.width as f64 / c.camera.height as f64, width as f64 / height as f64);
+                if (a / b - 1.0).abs() > 0.01 {
+                    return Err(GeometryError::OutOfRange(format!(
+                        "the calibrated lens is {}x{} but the camera delivers {width}x{height}: a different aspect is a different lens, recalibrate it",
+                        c.camera.width, c.camera.height
+                    )));
+                }
+                c.camera.resized(width, height)
+            }
+        };
+        Ok(c)
+    }
+
     /// The profile of a calibration built from a flat display, after
     /// [`Calibration::recentre`] / [`Calibration::set_distance`] moved it.
     /// Pitch and the lens record are carried from `self`.

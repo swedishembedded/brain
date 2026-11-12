@@ -41,11 +41,12 @@ const RIGID_MM: &[(usize, V3)] = &[
     (39, [-16.0, 0.0, 5.0]),
     (42, [16.0, 0.0, 5.0]),
     (45, [45.0, -2.0, 10.0]),
-    // nasal bridge, nasion to tip
-    (27, [0.0, -6.0, 2.0]),
-    (28, [0.0, 10.0, -6.0]),
-    (29, [0.0, 27.0, -13.0]),
-    (30, [0.0, 44.0, -22.0]),
+    // nasal bridge, nasion to tip, evenly spaced as the 68-point annotation
+    // places them
+    (27, [0.0, -2.0, 2.0]),
+    (28, [0.0, 14.0, -6.0]),
+    (29, [0.0, 30.0, -13.0]),
+    (30, [0.0, 46.0, -22.0]),
     // the lower edge of the nose, subject's right ala to left
     (31, [-13.0, 49.0, -6.0]),
     (32, [-7.0, 51.0, -10.0]),
