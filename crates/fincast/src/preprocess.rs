@@ -94,13 +94,19 @@ pub fn preprocess(cfg: &FincastConfig, context: &[f32]) -> Patched {
             let padded = pad[p * patch + i];
             all_pad = all_pad.min(padded);
             // standardize, zero padded positions
-            let sv = if padded > 0.5 { 0.0 } else { (vals[p * patch + i] - ls.mu) / ls.sigma };
+            let sv = if padded > 0.5 { 0.0 } else { normalize(vals[p * patch + i], ls) };
             features[p * 2 * patch + i] = sv;
             features[p * 2 * patch + patch + i] = padded;
         }
         patch_padding[p] = all_pad;
     }
     Patched { features, patch_padding, n_patches: n, loc_scale: ls }
+}
+
+/// Standardize a raw value by `ls`; the inverse of [`denorm`].
+#[inline]
+pub fn normalize(v: f32, ls: LocScale) -> f32 {
+    (v - ls.mu) / ls.sigma
 }
 
 /// Reverse the standardization on a head output value.
@@ -112,6 +118,13 @@ pub fn denorm(v: f32, ls: LocScale) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_is_the_inverse_of_denorm() {
+        let ls = LocScale { mu: 3.0, sigma: 2.0 };
+        assert_eq!(normalize(7.0, ls), 2.0);
+        assert_eq!(denorm(normalize(-1.25, ls), ls), -1.25);
+    }
 
     #[test]
     fn clean_context_standardizes_by_first_patch() {

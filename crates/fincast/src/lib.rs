@@ -10,12 +10,15 @@
 //! - [`model`] — the device forward (patched decoder + top-2 MoE + PQ head).
 //! - [`forecaster`] — the [`forecast::ForecastModel`] adapter (CLI/server/bench).
 //! - [`train`] — host-differentiable forward+backward, gradcheck-gated.
+//! - [`finetune`] - the gated fine-tune over a universe of series, on the shared
+//!   [`forecast::host_train`] loop.
 //!
 //! Licence note: the reference is Apache-2.0 but the authors state the model is
 //! "for research and educational purposes only" and "does not constitute
 //! financial advice". Flagged, not blocked.
 
 pub mod config;
+pub mod finetune;
 pub mod forecaster;
 pub mod import;
 pub mod model;

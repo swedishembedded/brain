@@ -29,7 +29,7 @@ pub struct FincastForecaster {
 
 /// Map a pandas-style frequency string to FinCast's bucket (0 high / 1 med /
 /// 2 low), per the reference `ffm_base.freq_map`.
-fn freq_bucket(freq: &str) -> usize {
+pub(crate) fn freq_bucket(freq: &str) -> usize {
     let f = freq.to_uppercase();
     let f = f.trim_start_matches(|c: char| c.is_ascii_digit());
     if f.starts_with("MS") {

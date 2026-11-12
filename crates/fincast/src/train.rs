@@ -9,9 +9,10 @@
 //! differences on a tiny config — the same discipline as the Chronos-2/Kronos
 //! decoders. Training is CPU-bound but correct.
 //!
-//! The trained graph is the transformer core (`num_layers` decoder blocks) + the
-//! horizon head, over the assembled patch embeddings `emb[s,d]` (the
-//! preprocessing/patch-embed is data-derived and kept out of the trained graph).
+//! The trained graph is the input embedding ([`FincastTrain::embed_forward`]:
+//! the `input_ff_layer` block and the frequency row), the transformer core
+//! (`num_layers` decoder blocks) and the horizon head. The standardization of
+//! the context is data-derived and stays outside the graph.
 //! Loss on the last patch: `mean_pinball(9 quantiles) + MSE(mean)` — a
 //! probabilistic-quantile (PQ) loss. **Deterministic top-2 MoE routing**: the
 //! gradcheck uses configs where the selected experts are stable under the FD
@@ -22,6 +23,32 @@ use crate::config::{FincastConfig, QUANTILES};
 use model::hostmath;
 use model::saved::{BlockStack, SavedPolicy};
 use std::collections::HashMap;
+
+/// Deterministic small-magnitude draw in `[-0.2, 0.2)` for test and gate weights.
+fn rng(seed: &mut u64) -> f32 {
+    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+    ((*seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.4
+}
+
+/// Weights drawn from `seed` (advanced as they are drawn), in the reference's
+/// own tensor names: norm gains near 1, the attention scaling near 0.5,
+/// everything else small.
+fn fill_weights(cfg: &FincastConfig, seed: &mut u64) -> HashMap<String, Vec<f32>> {
+    let mut w = HashMap::new();
+    for (name, shape) in cfg.param_list() {
+        let n: usize = shape.iter().product();
+        let is_gain = name.ends_with("layer_norm.weight") || name.ends_with("input_layernorm.weight") || name.ends_with("moe_prenorm.gamma");
+        let is_scaling = name.ends_with("self_attn.scaling");
+        let base = if is_gain { 1.0 } else if is_scaling { 0.5 } else { 0.0 };
+        w.insert(name, (0..n).map(|_| base + rng(seed)).collect());
+    }
+    w
+}
+
+/// Reproducible weights for tests and gates (see [`fill_weights`]).
+pub fn init_weights(cfg: &FincastConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+    fill_weights(cfg, &mut (seed ^ 0x46_696e_4361_7374))
+}
 
 // ---- host math primitives (fwd + bwd), weights stored `[out, in]` -------------
 
@@ -305,6 +332,14 @@ pub struct FincastTrain {
     saved: SavedPolicy,
 }
 
+/// What [`FincastTrain::embed_backward`] needs from [`FincastTrain::embed_forward`].
+pub struct EmbedCache {
+    x: Vec<f32>,
+    hid_pre: Vec<f32>,
+    hid: Vec<f32>,
+    freq: usize,
+}
+
 impl FincastTrain {
     /// A trainer over `w` that keeps every block's cache.
     pub fn new(cfg: FincastConfig, w: HashMap<String, Vec<f32>>) -> FincastTrain {
@@ -318,6 +353,62 @@ impl FincastTrain {
         BlockStack::<(), ()>::new("fincast", policy)?;
         self.saved = policy;
         Ok(())
+    }
+
+    /// The input embedding: patch features `[s, 2 * patch]` (values and padding
+    /// flags, [`crate::preprocess::preprocess`]) through the `input_ff_layer`
+    /// residual block, plus the learned embedding of the frequency bucket
+    /// `freq` (0 high / 1 med / 2 low) on every token. Mirrors
+    /// `Fincast::assemble`.
+    pub fn embed_forward(&self, features: &[f32], freq: usize) -> (Vec<f32>, EmbedCache) {
+        let cfg = &self.cfg;
+        let (d, f, feat) = (cfg.hidden_size, cfg.intermediate_size, cfg.patch_feat_dim());
+        let s = features.len() / feat;
+        let ww = |n: &str| &self.w[n];
+        let mut hid_pre = matmul(features, ww("input_ff_layer.hidden_layer.0.weight"), s, feat, f);
+        bias_add(&mut hid_pre, ww("input_ff_layer.hidden_layer.0.bias"), s, f);
+        let hid: Vec<f32> = hid_pre.iter().map(|&v| v * sigmoid(v)).collect();
+        let mut emb = matmul(&hid, ww("input_ff_layer.output_layer.weight"), s, f, d);
+        bias_add(&mut emb, ww("input_ff_layer.output_layer.bias"), s, d);
+        let mut res = matmul(features, ww("input_ff_layer.residual_layer.weight"), s, feat, d);
+        bias_add(&mut res, ww("input_ff_layer.residual_layer.bias"), s, d);
+        let freq = freq.min(2);
+        let femb = &ww("freq_emb.weight")[freq * d..(freq + 1) * d];
+        for t in 0..s {
+            for c in 0..d {
+                emb[t * d + c] += res[t * d + c] + femb[c];
+            }
+        }
+        (emb, EmbedCache { x: features.to_vec(), hid_pre, hid, freq })
+    }
+
+    /// Backward of [`FincastTrain::embed_forward`]: `d_emb_in` (what
+    /// [`FincastTrain::full_backward`] returns) into the embedding block's grads
+    /// and the frequency row. The features are data, so nothing is returned.
+    pub fn embed_backward(&self, c: &EmbedCache, d_emb_in: &[f32], g: &mut HashMap<String, Vec<f32>>) {
+        let cfg = &self.cfg;
+        let (d, f, feat) = (cfg.hidden_size, cfg.intermediate_size, cfg.patch_feat_dim());
+        let s = d_emb_in.len() / d;
+        let ww = |n: &str| &self.w[n];
+        let femb = g.get_mut("freq_emb.weight").unwrap();
+        for t in 0..s {
+            for k in 0..d {
+                femb[c.freq * d + k] += d_emb_in[t * d + k];
+            }
+        }
+        bias_bwd(d_emb_in, s, d, g.get_mut("input_ff_layer.residual_layer.bias").unwrap());
+        matmul_bwd(&c.x, ww("input_ff_layer.residual_layer.weight"), d_emb_in, s, feat, d, g.get_mut("input_ff_layer.residual_layer.weight").unwrap());
+        bias_bwd(d_emb_in, s, d, g.get_mut("input_ff_layer.output_layer.bias").unwrap());
+        let d_hid = matmul_bwd(&c.hid, ww("input_ff_layer.output_layer.weight"), d_emb_in, s, f, d, g.get_mut("input_ff_layer.output_layer.weight").unwrap());
+        let d_hidpre: Vec<f32> = (0..s * f)
+            .map(|i| {
+                let x = c.hid_pre[i];
+                let sg = sigmoid(x);
+                d_hid[i] * (sg + x * sg * (1.0 - sg))
+            })
+            .collect();
+        bias_bwd(&d_hidpre, s, f, g.get_mut("input_ff_layer.hidden_layer.0.bias").unwrap());
+        matmul_bwd(&c.x, ww("input_ff_layer.hidden_layer.0.weight"), &d_hidpre, s, feat, f, g.get_mut("input_ff_layer.hidden_layer.0.weight").unwrap());
     }
 
     pub fn zero_grads(&self) -> HashMap<String, Vec<f32>> {
@@ -640,27 +731,54 @@ fn add_into(dst: &mut [f32], src: &[f32]) {
 mod tests {
     use super::*;
 
-    fn rng(seed: &mut u64) -> f32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-        ((*seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.4
+    fn params(cfg: &FincastConfig, seed: &mut u64) -> HashMap<String, Vec<f32>> {
+        fill_weights(cfg, seed)
     }
 
-    fn params(cfg: &FincastConfig, seed: &mut u64) -> HashMap<String, Vec<f32>> {
-        let mut w = HashMap::new();
-        for (name, shape) in cfg.param_list() {
-            let n: usize = shape.iter().product();
-            // gains (layernorm/rmsnorm .weight/.gamma) near 1, others small.
-            let is_gain = name.ends_with("layer_norm.weight")
-                || name.ends_with("input_layernorm.weight")
-                || name.ends_with("moe_prenorm.gamma");
-            let is_scaling = name.ends_with("self_attn.scaling");
-            let data: Vec<f32> = (0..n).map(|_| {
-                let base = if is_gain { 1.0 } else if is_scaling { 0.5 } else { 0.0 };
-                base + rng(seed)
-            }).collect();
-            w.insert(name, data);
+    /// The input embedding is in the trained graph: its gradient and the
+    /// frequency row's match finite differences of the loss through the stack.
+    #[test]
+    fn the_input_embedding_and_frequency_row_gradcheck() {
+        let cfg = FincastConfig::tiny();
+        let w = init_weights(&cfg, 3);
+        let ctx: Vec<f32> = (0..cfg.context_len).map(|i| 5.0 + (i as f32 * 0.4).sin()).collect();
+        let pp = crate::preprocess::preprocess(&cfg, &ctx);
+        let target: Vec<f32> = (0..cfg.horizon_len).map(|i| (i as f32 * 0.5).cos()).collect();
+        let freq = 1usize;
+
+        let loss = |w: &HashMap<String, Vec<f32>>| {
+            let m = FincastTrain::new(cfg.clone(), w.clone());
+            let (emb, _) = m.embed_forward(&pp.features, freq);
+            m.full_forward(&emb, &target).0
+        };
+        let m = FincastTrain::new(cfg.clone(), w.clone());
+        let (emb, ec) = m.embed_forward(&pp.features, freq);
+        let (_, cache) = m.full_forward(&emb, &target);
+        let mut g = m.zero_grads();
+        let d_emb = m.full_backward(&cache, &target, &mut g);
+        m.embed_backward(&ec, &d_emb, &mut g);
+
+        let d = cfg.hidden_size;
+        let probes = [
+            ("input_ff_layer.hidden_layer.0.weight", 5usize),
+            ("input_ff_layer.hidden_layer.0.bias", 2),
+            ("input_ff_layer.output_layer.weight", 9),
+            ("input_ff_layer.residual_layer.weight", 11),
+            ("input_ff_layer.residual_layer.bias", 1),
+            ("freq_emb.weight", d + 3), // the bucket in use
+            ("freq_emb.weight", 3),     // a bucket that is not
+        ];
+        let eps = 5e-3f32;
+        for (name, idx) in probes {
+            let mut wp = w.clone();
+            wp.get_mut(name).unwrap()[idx] += eps;
+            let mut wm = w.clone();
+            wm.get_mut(name).unwrap()[idx] -= eps;
+            let numeric = (loss(&wp) - loss(&wm)) / (2.0 * eps);
+            let a = g[name][idx];
+            assert!((a - numeric).abs() <= 4e-3 + 8e-2 * a.abs().max(numeric.abs()), "grad {name}[{idx}]: {a} vs {numeric}");
         }
-        w
+        assert_eq!(g["freq_emb.weight"][3], 0.0, "an unused frequency bucket gets no gradient");
     }
 
     #[test]
