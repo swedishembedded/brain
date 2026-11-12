@@ -26,9 +26,10 @@ pub struct BacktestSpec {
     /// outermost levels' interval), `"directional"`, `"crps"`. A name the scorer
     /// does not know produces no row.
     pub metrics: Vec<String>,
-    /// Quantile levels requested of the model. `fcbench`'s scorer does not read
-    /// this: it always asks for and scores `fcbench::score::LEVELS`
-    /// (0.1, 0.5, 0.9), so its wQL is the sum over those three.
+    /// Quantile levels requested of the model and scored: wQL is the mean over
+    /// them and `"coverage"` is the interval between the lowest and highest.
+    /// Strictly increasing, inside (0, 1); an empty list scores nothing
+    /// probabilistic.
     pub quantile_levels: Vec<f32>,
     /// Seed for any stochastic model. [`Default`] draws a random one.
     pub seed: u64,
@@ -60,6 +61,36 @@ pub struct BacktestRow {
     pub value: f32,
     /// Number of origins that contributed.
     pub n_origins: usize,
+    /// Standard error of [`BacktestRow::value`]. Origins closer together than
+    /// the horizon share future steps, so their errors are correlated; the
+    /// backtester uses the Newey-West (Bartlett kernel) estimate with the
+    /// overlap as its lag. `0` for a single origin.
+    pub std_err: f32,
+    /// This model minus the `naive` model over the origins both scored, with
+    /// its own standard error. `None` for `naive` itself or when no `naive`
+    /// row exists for the metric.
+    pub vs_naive: Option<PairedDiff>,
+}
+
+/// A paired difference of two models' per-origin scores, with the standard
+/// error of its mean. Pairing cancels the part of the error that both models
+/// share (a hard origin is hard for both), so it is far tighter than the two
+/// rows' own standard errors combined.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PairedDiff {
+    /// Mean of `model - naive` over the paired origins (negative: model better,
+    /// for the lower-is-better metrics).
+    pub mean: f32,
+    /// Standard error of `mean` (Newey-West at the same lag as the rows).
+    pub std_err: f32,
+}
+
+impl PairedDiff {
+    /// True when the model beats the baseline with `z` standard errors of
+    /// confidence: the whole interval `mean +- z * std_err` lies below zero.
+    pub fn is_significantly_better(&self, z: f32) -> bool {
+        self.mean + z * self.std_err < 0.0
+    }
 }
 
 /// The aggregated result of a backtest — a long-format table of
@@ -94,8 +125,8 @@ mod tests {
     fn report_lookup_and_beats() {
         let r = BacktestReport {
             rows: vec![
-                BacktestRow { model: "chronos2".into(), metric: "mase".into(), value: 0.9, n_origins: 30 },
-                BacktestRow { model: "naive".into(), metric: "mase".into(), value: 1.0, n_origins: 30 },
+                BacktestRow { model: "chronos2".into(), metric: "mase".into(), value: 0.9, n_origins: 30, std_err: 0.0, vs_naive: None },
+                BacktestRow { model: "naive".into(), metric: "mase".into(), value: 1.0, n_origins: 30, std_err: 0.0, vs_naive: None },
             ],
         };
         assert_eq!(r.get("chronos2", "mase"), Some(0.9));
@@ -103,5 +134,13 @@ mod tests {
         assert!(!r.beats("naive", "chronos2", "mase"));
         // missing metric -> not a win
         assert!(!r.beats("chronos2", "naive", "crps"));
+    }
+
+    #[test]
+    fn a_paired_difference_must_clear_its_interval_to_count_as_better() {
+        let d = PairedDiff { mean: -0.1, std_err: 0.04 };
+        assert!(d.is_significantly_better(1.96)); // -0.1 + 0.078 < 0
+        assert!(!PairedDiff { mean: -0.1, std_err: 0.06 }.is_significantly_better(1.96));
+        assert!(!PairedDiff { mean: 0.05, std_err: 0.0 }.is_significantly_better(1.96));
     }
 }

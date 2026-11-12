@@ -13,6 +13,10 @@
 //! - `distribution` → quantiles, mean (closed form) — exact.
 //! - `quantiles`    → mean (interpolate the median / average — approximate), and
 //!   samples (inverse-CDF interpolation — **lossy**).
+//! - derived sample paths (from quantiles or a Gaussian) are comonotone: one
+//!   uniform per path read at every bar, so each bar keeps its marginal and a
+//!   path keeps one rank across the horizon. The cross-bar dependence is a
+//!   choice, not information in the native output.
 //! - `point`        → nothing. A point forecast asked for quantiles is an error,
 //!   not a zero-width interval.
 //! - `classes`      → nothing numeric; class probabilities are their own thing.
@@ -163,8 +167,14 @@ fn quantiles_to_mean(tf: &TargetForecast) -> Result<Block, ForecastError> {
 }
 
 /// Samples from quantiles via inverse-CDF (piecewise-linear) interpolation.
-/// **Lossy** — the tails beyond the outermost quantiles are flat. Deterministic
-/// given `seed`.
+/// **Lossy**: the tails beyond the outermost quantiles are flat. Each sample
+/// path draws ONE uniform and reads every bar at it (comonotone paths), so each
+/// bar's marginal is the native one and a path that is high at one bar is high
+/// at all of them. Quantile grids carry no cross-bar dependence, and
+/// comonotone is the choice that keeps the paths coherent (a path-level
+/// functional such as a sum over the horizon is then the widest the marginals
+/// allow, not the artificially narrow one independent bars would give).
+/// Deterministic given `seed`.
 fn quantiles_to_samples(
     tf: &TargetForecast,
     n: usize,
@@ -180,8 +190,8 @@ fn quantiles_to_samples(
     let mut rng = SplitMix64::new(seed);
     let mut out = vec![0.0f32; n * h];
     for i in 0..n {
+        let u = rng.next_f32();
         for t in 0..h {
-            let u = rng.next_f32();
             let row = &q.data[t * ql..t * ql + ql];
             out[i * h + t] = inverse_cdf(&tf.levels, row, u);
         }
@@ -245,7 +255,8 @@ fn gaussian_to_mean(tf: &TargetForecast) -> Result<Block, ForecastError> {
 }
 
 /// Draw `n` trajectories from a per-step Gaussian `[mu, sigma]`. Deterministic
-/// given `seed`. Uses the standard-normal inverse CDF on uniform draws.
+/// given `seed`. Uses the standard-normal inverse CDF on one uniform per path,
+/// shared across bars (comonotone, as in [`quantiles_to_samples`]).
 fn gaussian_to_samples(
     tf: &TargetForecast,
     n: usize,
@@ -255,9 +266,10 @@ fn gaussian_to_samples(
     let mut rng = SplitMix64::new(seed);
     let mut out = vec![0.0f32; n * h];
     for i in 0..n {
+        let u = rng.next_f32();
         for t in 0..h {
             let (mu, sigma) = (d.data[t * 2], d.data[t * 2 + 1]);
-            out[i * h + t] = mu + sigma * norm_ppf(rng.next_f32());
+            out[i * h + t] = mu + sigma * norm_ppf(u);
         }
     }
     Ok(Block::derived(vec![n, h], out, "gaussian_sampling"))
@@ -463,6 +475,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tf.samples, tf2.samples);
+    }
+
+    /// Every derived path is comonotone: its bars share one uniform, so each
+    /// bar's marginal is the native one and a path that is high at one bar is
+    /// high at all of them.
+    #[test]
+    fn derived_sample_paths_share_one_rank_across_bars() {
+        let mut tf = TargetForecast::new("X", "close");
+        // two bars, levels [0.1, 0.5, 0.9]; bar 1 is wider and shifted.
+        tf.quantiles = Some(Block::native(vec![2, 3], vec![0.0, 10.0, 20.0, 100.0, 130.0, 200.0]));
+        tf.levels = vec![0.1, 0.5, 0.9];
+        let n = 2000;
+        ensure_representations(&mut tf, Representation::Quantiles, &[Representation::Samples], &[0.1, 0.5, 0.9], n, 9)
+            .unwrap();
+        let s = tf.samples.as_ref().unwrap();
+        assert_eq!(s.shape, vec![n, 2]);
+        // coherent rank: ordering of any two paths is the same at both bars
+        for i in 0..n - 1 {
+            let (a, b) = (s.data[i * 2] - s.data[(i + 1) * 2], s.data[i * 2 + 1] - s.data[(i + 1) * 2 + 1]);
+            assert!(a * b >= 0.0, "paths {i},{} order differently across bars", i + 1);
+        }
+        // each bar keeps its own marginal: the empirical median sits on the native median
+        for (t, native_median) in [(0usize, 10.0f32), (1, 130.0)] {
+            let mut col: Vec<f32> = (0..n).map(|i| s.data[i * 2 + t]).collect();
+            col.sort_by(f32::total_cmp);
+            assert!((col[n / 2] - native_median).abs() < 0.05 * native_median, "bar {t} median {}", col[n / 2]);
+            assert!(col[(n as f32 * 0.1) as usize] < native_median && col[(n as f32 * 0.9) as usize] > native_median);
+        }
+    }
+
+    #[test]
+    fn gaussian_sample_paths_share_one_rank_across_bars() {
+        let mut tf = TargetForecast::new("X", "close");
+        tf.dist_family = "gaussian".into();
+        tf.distribution = Some(Block::native(vec![2, 2], vec![0.0, 1.0, 50.0, 4.0]));
+        let n = 500;
+        ensure_representations(&mut tf, Representation::Distribution, &[Representation::Samples], &[0.5], n, 3).unwrap();
+        let s = tf.samples.as_ref().unwrap();
+        for i in 0..n - 1 {
+            let (a, b) = (s.data[i * 2] - s.data[(i + 1) * 2], s.data[i * 2 + 1] - s.data[(i + 1) * 2 + 1]);
+            assert!(a * b >= 0.0, "paths {i},{} order differently across bars", i + 1);
+        }
     }
 
     #[test]

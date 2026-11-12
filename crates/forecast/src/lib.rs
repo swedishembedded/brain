@@ -31,11 +31,12 @@ pub mod convert;
 pub mod csv;
 pub mod finetune;
 pub mod forecast;
+pub mod host_train;
 pub mod metrics;
 pub mod panel;
 pub mod train_data;
 
-pub use backtest::{BacktestReport, BacktestRow, BacktestSpec};
+pub use backtest::{BacktestReport, BacktestRow, BacktestSpec, PairedDiff};
 pub use csv::{parse_ohlcv, Bar, OhlcvSeries, Split, Stamp};
 pub use finetune::{promoted, FinetuneOpts, FinetuneOutcome, FinetuneReport};
 pub use forecast::{Block, Forecast, TargetForecast};

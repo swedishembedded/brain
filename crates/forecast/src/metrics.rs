@@ -105,9 +105,10 @@ pub fn crps_quantile_grid(quantiles: &[f32], levels: &[f32], actual: &[f32]) -> 
     2.0 * mean_pinball(quantiles, levels, actual)
 }
 
-/// Weighted quantile loss: `2 * sum(pinball)` over the `[H, Q]` grid normalised
-/// by `sum|actual|` (gluonts / GIFT-Eval convention). Returns 0 when the actuals
-/// are all zero.
+/// Weighted quantile loss, the mean over the Q levels of
+/// `2 * sum_t pinball_tau / sum_t |actual|` (gluonts / GIFT-Eval convention), so
+/// the value does not grow with the size of the level grid and is comparable
+/// across grids. Returns 0 when the actuals are all zero.
 pub fn weighted_quantile_loss(quantiles: &[f32], levels: &[f32], actual: &[f32]) -> f32 {
     let (h, qn) = (actual.len(), levels.len());
     if h == 0 || qn == 0 {
@@ -124,7 +125,7 @@ pub fn weighted_quantile_loss(quantiles: &[f32], levels: &[f32], actual: &[f32])
     if denom <= 0.0 {
         return 0.0;
     }
-    2.0 * total / denom
+    2.0 * total / (denom * qn as f32)
 }
 
 /// CRPS of observation `x` under a Gaussian forecast `N(mu, sig^2)`, closed
@@ -140,21 +141,28 @@ pub fn crps_gaussian(x: f32, mu: f32, sig: f32) -> f32 {
     sig * (sx * (2.0 * cdf - 1.0) + 2.0 * pdf - pi_inv)
 }
 
-/// Sample-based CRPS via `CRPS = E|X - x| - 0.5*E|X - X'|` over all pairs of the
-/// `samples` ensemble. O(n^2).
+/// Sample-based CRPS via `CRPS = E|X - x| - 0.5*E|X - X'|`, with `E|X - X'|`
+/// estimated over the distinct ordered pairs of the `samples` ensemble (pair sum
+/// divided by `n(n-1)`, the fair estimator: unbiased for the CRPS of the
+/// distribution the samples were drawn from, where dividing by `n^2` biases it
+/// up by about `E|X - X'|/(2n)`). A single sample has no pairs, so `n = 1`
+/// falls back to its absolute error. O(n^2).
 pub fn crps_ensemble(samples: &[f32], x: f32) -> f32 {
     let n = samples.len();
     if n == 0 {
         return 0.0;
     }
     let e_abs: f32 = samples.iter().map(|&s| (s - x).abs()).sum::<f32>() / n as f32;
+    if n == 1 {
+        return e_abs;
+    }
     let mut e_diff = 0.0f32;
     for &a in samples {
         for &b in samples {
             e_diff += (a - b).abs();
         }
     }
-    e_diff /= (n * n) as f32;
+    e_diff /= (n * (n - 1)) as f32;
     e_abs - 0.5 * e_diff
 }
 
@@ -414,6 +422,19 @@ mod tests {
     }
 
     #[test]
+    fn weighted_quantile_loss_is_the_mean_over_levels() {
+        // One step, y = 4, forecasts 1 at tau 0.25 and 6 at tau 0.75.
+        // pinball: 0.25*3 = 0.75 and 0.25*2 = 0.5; per-level wQL = 2*p/4 =
+        // 0.375 and 0.25. Their mean is 0.3125 (the sum would be 0.625).
+        let got = weighted_quantile_loss(&[1.0, 6.0], &[0.25, 0.75], &[4.0]);
+        assert!((got - 0.3125).abs() < 1e-6, "got {got}");
+        // a grid repeated at three levels scores the same as at one
+        let one = weighted_quantile_loss(&[1.0], &[0.25], &[4.0]);
+        let three = weighted_quantile_loss(&[1.0, 1.0, 1.0], &[0.25, 0.25, 0.25], &[4.0]);
+        assert!((one - three).abs() < 1e-6);
+    }
+
+    #[test]
     fn crps_gaussian_matches_the_closed_form() {
         assert!((crps_gaussian(0.0, 0.0, 1.0) - 0.233_694_98).abs() < 1e-5);
         assert!((crps_gaussian(0.0, 0.0, 3.0) - 3.0 * 0.233_694_98).abs() < 1e-4);
@@ -422,9 +443,19 @@ mod tests {
 
     #[test]
     fn crps_ensemble_matches_the_energy_form() {
-        assert!((crps_ensemble(&[0.0, 2.0], 1.0) - 0.5).abs() < 1e-6);
+        // fair estimator: E|X-x| = 1, pair sum 2+2 over n(n-1)=2 is 2, so 1 - 0.5*2 = 0
+        assert!(crps_ensemble(&[0.0, 2.0], 1.0).abs() < 1e-6);
+        // n = 1: only the absolute error term
         assert!((crps_ensemble(&[4.0], 1.0) - 3.0).abs() < 1e-6);
         assert!(crps_ensemble(&[2.0, 2.0], 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn crps_ensemble_is_fair_by_hand() {
+        // samples {0, 1, 5}, x = 2: E|X-x| = (2+1+3)/3 = 2.
+        // pairs |0-1|=1, |0-5|=5, |1-5|=4 -> ordered-pair sum 20, / n(n-1)=6 -> 10/3.
+        // CRPS = 2 - 0.5 * 10/3 = 1/3.
+        assert!((crps_ensemble(&[0.0, 1.0, 5.0], 2.0) - 1.0 / 3.0).abs() < 1e-6);
     }
 
     #[test]

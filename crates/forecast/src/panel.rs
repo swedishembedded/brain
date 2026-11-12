@@ -186,6 +186,38 @@ impl Panel {
         self.items.iter().map(|it| it.context_len()).max().unwrap_or(0)
     }
 
+    /// The seasonal period, in steps, implied by [`Panel::freq`]: how many
+    /// steps make up the usual cycle of that sampling interval (seconds and
+    /// minutes per hour, hours per day, days per week, weeks per year, months
+    /// per year, quarters per year). `1` when the frequency is not recognised,
+    /// the step does not divide its cycle, or the cycle is the year itself.
+    /// Used where a scale needs the seasonal lag, such as MASE.
+    pub fn seasonal_period(&self) -> usize {
+        let f = self.freq.trim().to_ascii_lowercase();
+        // ISO-8601 duration: "pt15m" is 15 minutes, "p1d" a day, "p1m" a month.
+        let (body, iso_time) = match f.strip_prefix("pt") {
+            Some(rest) => (rest, true),
+            None => (f.strip_prefix('p').unwrap_or(&f), false),
+        };
+        let digits = body.chars().take_while(|c| c.is_ascii_digit()).count();
+        let step: usize = if digits == 0 { 1 } else { body[..digits].parse().unwrap_or(0) };
+        let cycle = match (&body[digits..], iso_time) {
+            ("s" | "sec" | "second" | "seconds", _) => 60,
+            ("m", true) | ("min" | "t" | "minute" | "minutes", _) => 60,
+            ("h" | "hour" | "hours", _) => 24,
+            ("d" | "day" | "days", _) => 7,
+            ("w" | "week" | "weeks", _) => 52,
+            ("m" | "mo" | "month" | "months", false) => 12,
+            ("q" | "quarter" | "quarters", _) => 4,
+            _ => return 1,
+        };
+        if step == 0 || cycle % step != 0 {
+            1
+        } else {
+            cycle / step
+        }
+    }
+
     /// True if any item carries a covariate variate (non-target).
     pub fn has_covariates(&self) -> bool {
         self.items
@@ -197,6 +229,26 @@ impl Panel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seasonal_period_follows_the_sampling_frequency() {
+        let period = |f: &str| Panel::single(f, "x", vec![]).seasonal_period();
+        assert_eq!(period("1d"), 7);
+        assert_eq!(period("1D"), 7);
+        assert_eq!(period("1h"), 24);
+        assert_eq!(period("PT1H"), 24);
+        assert_eq!(period("30min"), 2);
+        assert_eq!(period("PT15M"), 4);
+        assert_eq!(period("1w"), 52);
+        assert_eq!(period("1M"), 12);
+        assert_eq!(period("P1D"), 7);
+        assert_eq!(period("1q"), 4);
+        assert_eq!(period("1y"), 1);
+        // a step that does not divide its cycle, or an unknown unit, has no period
+        assert_eq!(period("5h"), 1);
+        assert_eq!(period("fortnightly"), 1);
+        assert_eq!(period(""), 1);
+    }
 
     #[test]
     fn role_and_kind_wire_tags_roundtrip() {
