@@ -157,8 +157,8 @@ pub fn registry() -> &'static [CostEntry] {
         // Text tower and diffusion transformer: no context length in the
         // config, so the priced pass is a fixed small one (see each pricer).
         // Both build per forward or stream, so there is nothing resident to time.
-        CostEntry { arch: "gemma4", price: Some(pricers::price_gemma4), tensor_manifest: Some(pricers::manifest_gemma4), measure: None },
-        CostEntry { arch: "minimaxh3", price: Some(pricers::price_minimaxh3), tensor_manifest: Some(pricers::manifest_minimaxh3), measure: None },
+        CostEntry { arch: "gemma4", price: Some(pricers::price_gemma4), tensor_manifest: Some(pricers::manifest_gemma4), measure: Some(pricers::measure_gemma4) },
+        CostEntry { arch: "minimaxh3", price: Some(pricers::price_minimaxh3), tensor_manifest: Some(pricers::manifest_minimaxh3), measure: Some(pricers::measure_minimaxh3) },
     ]
 }
 
@@ -450,11 +450,10 @@ mod tests {
 
     #[test]
     fn measure_errors_for_an_architecture_with_no_measure_fn_registered() {
-        // gemma4 is priced exactly but builds its device per forward pass and
-        // streams layers, so there is no resident model to time.
-        let cfg = gemma4::Gemma4Config::tiny().to_json();
-        let err = measure("gemma4", &cfg, 1).expect_err("gemma4 has no measure fn registered");
-        assert!(err.contains("gemma4"));
+        // qwen35 is priced exactly but its hybrid stack has no measure fn yet.
+        let cfg = qwen35::config::Qwen35Config::tiny().to_json();
+        let err = measure("qwen35", &cfg, 1).expect_err("qwen35 has no measure fn registered");
+        assert!(err.contains("qwen35"));
     }
 
     #[test]
@@ -736,6 +735,60 @@ mod tests {
         let weights: u64 = qwen3::QwenConfig::tiny().param_list().iter().map(|(_, n)| *n as u64 * 4).sum();
         assert!(held >= weights, "held {held} B must cover the {weights} B of fp32 weights");
         assert!(peak >= held, "the forward peak {peak} B cannot be below what was already held {held} B");
+    }
+
+    /// Serialises the tests that read a device's allocation tally: each model opens its own device, and two opening at
+    /// once on one card is the hazard `gpu_core::testgpu` exists to prevent. (`testgpu::private` is this plus a device
+    /// the test would hold; these tests use the model's own, so they take the lock alone.)
+    fn alone_on_the_device() -> impl Sized {
+        gpu_core::testgpu::exclusive()
+    }
+
+    #[test]
+    fn measure_gemma4_reports_the_peak_of_one_forward_under_the_layer_stream() {
+        let _exclusive = alone_on_the_device();
+        let cfg = gemma4::Gemma4Config::tiny();
+        let m = measure("gemma4", &cfg.to_json(), 1).expect("gemma4 has a registered measure fn");
+        assert!(m.cold_seconds > 0.0 && m.hot_seconds > 0.0);
+        assert!(m.total.flops > 0);
+        assert_eq!(m.per_layer.flops, m.total.flops / u64::from(cfg.num_hidden_layers), "a hybrid stack reports the average, total / layers");
+        let (Some(held), Some(peak)) = (m.held_bytes, m.peak_bytes) else {
+            assert_eq!((m.held_bytes, m.peak_bytes), (None, None), "a backend that does not account must report neither, never a fabricated zero");
+            brain_testutil::skip_unavailable("this backend does not account for device allocations");
+            return;
+        };
+        // The stream holds one layer at a time: the peak covers the largest layer's fp32 weights, and what survives the
+        // pass (the RoPE tables) is below it, because every layer's weights were reclaimed.
+        let largest_layer: u64 = (0..cfg.num_hidden_layers)
+            .map(|l| gemma4::model::layer_tensor_names(&cfg, l).iter().map(|(_, shape)| shape.iter().product::<usize>() as u64 * 4).sum::<u64>())
+            .max()
+            .expect("the tiny config has layers");
+        assert!(peak >= largest_layer, "peak {peak} B must cover the largest layer's {largest_layer} B of fp32 weights");
+        assert!(held < peak, "after the stream held {held} B must be below the pass's peak {peak} B");
+    }
+
+    #[test]
+    fn measure_minimaxh3_reports_held_and_peak_bytes_and_a_derived_per_block_cost() {
+        let _exclusive = alone_on_the_device();
+        let cfg = minimaxh3::config::H3TransformerConfig::tiny();
+        let m = measure("minimaxh3", &cfg.to_json(), 1).expect("minimaxh3 has a registered measure fn");
+        assert!(m.cold_seconds > 0.0 && m.hot_seconds > 0.0);
+        assert!(m.per_layer.flops > 0);
+        assert!(m.per_layer.flops * u64::from(cfg.num_layers) <= m.total.flops, "blocks cannot cost more than the whole pass");
+        let (Some(held), Some(peak)) = (m.held_bytes, m.peak_bytes) else {
+            assert_eq!((m.held_bytes, m.peak_bytes), (None, None), "a backend that does not account must report neither, never a fabricated zero");
+            brain_testutil::skip_unavailable("this backend does not account for device allocations");
+            return;
+        };
+        let weights: u64 = registry_manifest("minimaxh3", &cfg.to_json()).iter().map(|(_, n)| *n as u64 * 4).sum();
+        assert!(held > 0 && held <= weights, "held {held} B is the resident model: some device bytes, no more than the {weights} B of fp32 weights (the AdaLN projection is never held)");
+        assert!(peak >= held, "the forward peak {peak} B cannot be below what was already held {held} B");
+    }
+
+    #[test]
+    fn measuring_a_config_too_large_to_materialise_is_refused_by_name() {
+        let err = measure("minimaxh3", &minimaxh3::config::H3TransformerConfig::real().to_json(), 1).expect_err("the real 33B config must not be built over host zeros");
+        assert!(err.contains("minimaxh3") && err.contains("zero-filled"), "{err}");
     }
 
     #[test]

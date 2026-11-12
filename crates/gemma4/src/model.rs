@@ -112,6 +112,15 @@ impl Gemma4Model {
     /// with, in fp32. [`forward_streamed`] is the same forward over a
     /// checkpoint read one layer at a time.
     pub fn forward(&self, input_ids: &[u32]) -> Gemma4Output {
+        self.forward_measured(input_ids).0
+    }
+
+    /// [`Self::forward`], plus the device's allocation tally read as the pass ends, just before the device is dropped:
+    /// `live` is what the stream leaves resident (the two RoPE tables; every layer's weights are already reclaimed) and
+    /// `peak_live` the most device bytes held at once during the pass. This model owns no resident device, it opens one
+    /// per forward and uploads each layer in turn, so the peak of one forward under that stream is the only figure
+    /// there is. `None` where the backend does not account for its allocations.
+    pub fn forward_measured(&self, input_ids: &[u32]) -> (Gemma4Output, Option<gpu_core::MemoryUsage>) {
         let cfg = &self.cfg;
         let hidden = cfg.hidden_size as usize;
         let embed_table = &self.w.get("embed_tokens.weight").unwrap_or_else(|| panic!("gemma4: missing embed_tokens.weight")).1;
@@ -139,7 +148,7 @@ fn forward_core(
     embed_out: Vec<f32>,
     norm_w: &[f32],
     mut build_layer: impl for<'g> FnMut(&'g Gpu, u32) -> gpu_core::Transient<'g, Gemma4Layer>,
-) -> Gemma4Output {
+) -> (Gemma4Output, Option<gpu_core::MemoryUsage>) {
     let hidden = cfg.hidden_size as usize;
     let n = cfg.num_hidden_layers;
 
@@ -185,6 +194,8 @@ fn forward_core(
         raw_outputs.push(x.clone());
     }
 
+    let device_memory = gpu.memory_usage();
+
     // `hidden_states` per this module's doc: embed, then layers
     // 0..N-2's raw outputs, then the FINAL layer's raw output run
     // through the model's own `norm` - not raw.
@@ -197,7 +208,7 @@ fn forward_core(
     }
     hidden_states.push(last_hidden_state.clone());
 
-    Gemma4Output {
+    let out = Gemma4Output {
         hidden_states,
         last_hidden_state,
         layer0_self_attn_out,
@@ -206,7 +217,8 @@ fn forward_core(
         rope_sliding_sin: sliding_tbl.sin,
         rope_full_cos: full_tbl.cos,
         rope_full_sin: full_tbl.sin,
-    }
+    };
+    (out, device_memory)
 }
 
 /// Every tensor name layer `l` owns, from the manifest itself rather than a
@@ -275,7 +287,8 @@ pub fn forward_streamed(
             }
         };
         Gemma4Layer::on(gpu, cfg, src, l, precision)
-    });
+    })
+    .0;
     Ok(out)
 }
 

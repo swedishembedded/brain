@@ -65,6 +65,28 @@ fn per_unit_cost(mut probe: impl FnMut(usize) -> CostReport) -> Result<CostRepor
     Ok(delta)
 }
 
+/// The most fp32 weight bytes [`measure_gemma4`] and [`measure_minimaxh3`] materialise on the host. Both build a model
+/// from a zero-filled tensor map (cost never depends on the values), so a measurement of the real 12B/33B configs would
+/// ask the host for tens of gigabytes; they are refused by name instead, and priced from their manifests.
+const MEASURE_MAX_WEIGHT_BYTES: u64 = 4 << 30;
+
+fn refuse_if_too_large_to_materialise(arch: &str, manifest: &[(String, usize)]) -> Result<(), String> {
+    let bytes: u64 = manifest.iter().map(|(_, n)| *n as u64 * 4).sum();
+    if bytes > MEASURE_MAX_WEIGHT_BYTES {
+        return Err(format!(
+            "{arch}: measuring builds the model over {bytes} bytes of zero-filled fp32 weights on the host, past the {MEASURE_MAX_WEIGHT_BYTES} byte limit; \
+             its cost is available from the exact and bandwidth tiers instead"
+        ));
+    }
+    Ok(())
+}
+
+/// `total / n` per unit, for a stack whose units are not interchangeable: a real number, named as an average.
+fn average_per_unit(total: &CostSummary, n: u64) -> CostSummary {
+    let n = n.max(1);
+    CostSummary { flops: total.flops / n, int_ops: total.int_ops / n, bytes: total.bytes / n, coverage: total.coverage }
+}
+
 pub(crate) fn price_qwen3(config: &Value) -> Result<CostReport, String> {
     let cfg = qwen3::QwenConfig::from_json_checked(config)?;
     let init = qwen3::init_weights(&cfg, 0);
@@ -268,16 +290,7 @@ pub(crate) const GEMMA4_PRICED_TOKENS: usize = 16;
 
 pub(crate) fn price_gemma4(config: &Value) -> Result<CostReport, String> {
     let cfg = gemma4::Gemma4Config::from_json_checked(config)?;
-    // The text tower reads only the embedding, the final norm and the layers;
-    // the aggregate-embed projections are LTX's own host-side head.
-    let weights: gemma4::block::Tensors = gemma4::gemma4_tensor_manifest(&cfg)
-        .into_iter()
-        .filter(|(name, _)| !name.starts_with("text_embedding_projection."))
-        .map(|(name, shape)| {
-            let n = shape.iter().product();
-            (name, (shape, vec![0.0f32; n]))
-        })
-        .collect();
+    let weights = gemma4_zero_weights(&cfg);
     let m = gemma4::Gemma4Model::new(cfg, weights, Some("cpu"));
     let tokens = synthetic_tokens(GEMMA4_PRICED_TOKENS, cfg.vocab_size);
     let rec = Recording::dry();
@@ -290,6 +303,57 @@ pub(crate) fn manifest_gemma4(config: &Value) -> Result<Vec<(String, usize)>, St
     Ok(gemma4::gemma4_tensor_manifest(&cfg).into_iter().map(|(name, shape)| (name, shape.iter().product())).collect())
 }
 
+/// Gemma-4 owns no resident device: every forward opens one and uploads each layer in turn, then reclaims it before the
+/// next (`Gemma4Model::forward_measured`). So the timings are of that whole stream (the load of a layer is part of a
+/// pass, as it is for a user), `peak_bytes` is the peak of one forward under the stream, and `held_bytes` is what the
+/// stream leaves resident at the end of it (the RoPE tables), not a weight footprint.
+/// `load_seconds` is the host-side materialisation of the zero-filled weights, which stands in for reading a
+/// checkpoint.
+///
+/// Sliding and full-attention layers differ in width, so `per_layer` is the average, not a derived single-layer cost.
+pub(crate) fn measure_gemma4(config: &Value, reps: usize) -> Result<Measurement, String> {
+    let cfg = gemma4::Gemma4Config::from_json_checked(config)?;
+    let manifest = manifest_gemma4(config)?;
+    refuse_if_too_large_to_materialise("gemma4", &manifest)?;
+
+    let load_start = Instant::now();
+    let weights = gemma4_zero_weights(&cfg);
+    let m = gemma4::Gemma4Model::new(cfg, weights, None);
+    let tokens = synthetic_tokens(GEMMA4_PRICED_TOKENS, cfg.vocab_size);
+    let load_seconds = load_start.elapsed().as_secs_f64();
+
+    let t0 = Instant::now();
+    let (_, first) = m.forward_measured(&tokens);
+    let cold_seconds = t0.elapsed().as_secs_f64();
+    let mut peak = first.map(|u| u.peak_live);
+    let held = first.map(|u| u.live);
+
+    let mut hot_seconds = f64::INFINITY;
+    for _ in 0..reps.max(1) {
+        let t = Instant::now();
+        let (_, usage) = m.forward_measured(&tokens);
+        hot_seconds = hot_seconds.min(t.elapsed().as_secs_f64());
+        peak = peak.max(usage.map(|u| u.peak_live));
+    }
+
+    let total = CostSummary::from(&price_gemma4(config)?);
+    let per_layer = average_per_unit(&total, u64::from(cfg.num_hidden_layers));
+    Ok(Measurement { load_seconds, cold_seconds, hot_seconds, total, per_layer, held_bytes: held, peak_bytes: peak })
+}
+
+/// The text tower's tensors at zero, which is all a cost depends on; shared by [`price_gemma4`] and [`measure_gemma4`].
+/// The aggregate-embed projections are LTX's own host-side head, which the text tower never reads.
+fn gemma4_zero_weights(cfg: &gemma4::Gemma4Config) -> gemma4::block::Tensors {
+    gemma4::gemma4_tensor_manifest(cfg)
+        .into_iter()
+        .filter(|(name, _)| !name.starts_with("text_embedding_projection."))
+        .map(|(name, shape)| {
+            let n = shape.iter().product();
+            (name, (shape, vec![0.0f32; n]))
+        })
+        .collect()
+}
+
 pub(crate) fn price_minimaxh3(config: &Value) -> Result<CostReport, String> {
     minimaxh3::cost::forward_cost(&minimaxh3::config::H3TransformerConfig::from_json_checked(config)?)
 }
@@ -297,6 +361,40 @@ pub(crate) fn price_minimaxh3(config: &Value) -> Result<CostReport, String> {
 pub(crate) fn manifest_minimaxh3(config: &Value) -> Result<Vec<(String, usize)>, String> {
     let cfg = minimaxh3::config::H3TransformerConfig::from_json_checked(config)?;
     Ok(minimaxh3::model::dit_tensor_manifest(&cfg).into_iter().map(|(name, shape)| (name, shape.iter().product())).collect())
+}
+
+/// The DiT held resident on the default device (one stage, fp32), timed over the [`minimaxh3::cost::PRICED_ROWS`]-row
+/// request `price_minimaxh3` prices. Every block is the same shape, so `per_layer` is DERIVED like qwen3's: dry
+/// probes at 0/1/2 blocks, verified affine at the point outside that basis. The token-refiner layers are part of the
+/// 0-block base.
+pub(crate) fn measure_minimaxh3(config: &Value, reps: usize) -> Result<Measurement, String> {
+    let cfg = minimaxh3::config::H3TransformerConfig::from_json_checked(config)?;
+    refuse_if_too_large_to_materialise("minimaxh3", &manifest_minimaxh3(config)?)?;
+
+    let mut probe_error = None;
+    let per_layer = per_unit_cost(|n| {
+        let probe = minimaxh3::config::H3TransformerConfig { num_layers: n as u32, ..cfg };
+        minimaxh3::cost::forward_cost(&probe).unwrap_or_else(|e| {
+            probe_error.get_or_insert(e);
+            CostReport::default()
+        })
+    });
+    if let Some(e) = probe_error {
+        return Err(format!("minimaxh3: pricing a {}-block probe failed: {e}", cfg.num_layers));
+    }
+    let per_layer = per_layer?;
+
+    let timing = minimaxh3::cost::measure_forward(&cfg, reps)?;
+    let total = CostSummary::from(&price_minimaxh3(config)?);
+    Ok(Measurement {
+        load_seconds: timing.load_seconds,
+        cold_seconds: timing.cold_seconds,
+        hot_seconds: timing.hot_seconds,
+        total,
+        per_layer: CostSummary::from(&per_layer),
+        held_bytes: timing.held_bytes,
+        peak_bytes: timing.peak_bytes,
+    })
 }
 
 #[cfg(test)]

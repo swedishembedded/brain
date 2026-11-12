@@ -604,6 +604,12 @@ impl H3Transformer {
         &self.cfg
     }
 
+    /// The device stage `s` of the placement runs on (`None` past the last stage): what a caller reads that device's
+    /// allocation tally from.
+    pub fn stage_gpu(&self, s: usize) -> Option<&gpu_core::Gpu> {
+        self.stages.get(s).map(|cx| &cx.gpu)
+    }
+
     /// Whether every block holds its trained VSA gate.
     pub fn has_gates(&self) -> bool {
         self.blocks.iter().all(|b| b.gate.is_some())
