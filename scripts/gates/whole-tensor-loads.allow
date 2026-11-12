@@ -75,7 +75,6 @@ crates/sdk/src/reader.rs	1	class T: one whole tensor as fp32 on the host, then W
 crates/sdk/src/text.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/sdxlunet/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/t5encoder/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
-crates/timesfm3/src/finetune.rs	2	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
 crates/timesfm3/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/toyautoencoder/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/toymoe/src/train.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)

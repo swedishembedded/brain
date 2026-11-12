@@ -366,23 +366,11 @@ pub fn load_base(path: &str) -> Result<(Timesfm3Config, HashMap<String, Vec<f32>
         let weights = crate::import::load_hf(&cfg, path)?;
         return Ok((cfg, weights));
     }
-    // `checkpoint::load` PANICS on an unreadable file, and a mistyped path is
-    // an ordinary user error that deserves an exit code and a sentence.
-    if !std::path::Path::new(path).is_file() {
-        return Err(format!("{path}: not a readable checkpoint file or reference directory"));
-    }
-    let c = checkpoint::load(path);
-    let cfg = Timesfm3Config::from_json(&c.header["config"])?;
-    let weights = c.by_role("");
-    for (name, shape) in cfg.param_list() {
-        let want: usize = shape.iter().product();
-        match weights.get(&name) {
-            None => return Err(format!("{path}: missing tensor {name}")),
-            Some(v) if v.len() != want => return Err(format!("{path}: {name} has {} elements, expected {want}", v.len())),
-            Some(_) => {}
-        }
-    }
-    Ok((cfg, weights))
+    checkpoint::load_host_weights(path, |c| {
+        let cfg = Timesfm3Config::from_json(c)?;
+        let expected = cfg.param_list().into_iter().map(|(name, shape)| (name, shape.iter().product())).collect();
+        Ok((cfg, expected))
+    })
 }
 
 /// Write a fine-tuned checkpoint: the reference's own tensor names and

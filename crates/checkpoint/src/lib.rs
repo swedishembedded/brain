@@ -449,6 +449,37 @@ pub fn load_reader(r: &weightio::WeightReader) -> Result<Container, String> {
     Ok(Container { header: serde_json::json!({ "config": r.config() }), tensors })
 }
 
+/// Every tensor of a host-trained model's container, checked against what its
+/// config expects: the one way a fine-tune reads its base or its own output.
+///
+/// `parse_config` turns the container's `config` into the caller's config and
+/// the `(name, element count)` list it implies. A path that is not a file, a
+/// config `parse_config` rejects, a missing tensor and a tensor of the wrong
+/// size are all errors with a sentence naming the path, because a mistyped
+/// path or a checkpoint of another model is an ordinary user mistake, not a
+/// panic. Whole-tensor fp32 by design: such a model trains on the host, so its
+/// weights are already a `name -> Vec<f32>` map in memory.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_host_weights<C>(
+    path: &str,
+    parse_config: impl FnOnce(&Value) -> Result<(C, Vec<(String, usize)>), String>,
+) -> Result<(C, HashMap<String, Vec<f32>>), String> {
+    if !std::path::Path::new(path).is_file() {
+        return Err(format!("{path}: not a readable checkpoint file"));
+    }
+    let c = st::load_safetensors(path).map(container).map_err(|e| format!("{path}: {e}"))?;
+    let (cfg, expected) = parse_config(&c.header["config"]).map_err(|e| format!("{path}: {e}"))?;
+    let weights = c.into_by_role("");
+    for (name, want) in expected {
+        match weights.get(&name) {
+            None => return Err(format!("{path}: missing tensor {name}")),
+            Some(v) if v.len() != want => return Err(format!("{path}: {name} has {} elements, expected {want}", v.len())),
+            Some(_) => {}
+        }
+    }
+    Ok((cfg, weights))
+}
+
 /// The model config of the checkpoint at `path`, for the cost of a header
 /// parse - no tensor data is read.
 ///
@@ -508,6 +539,35 @@ mod tests {
             (0..ntensors).map(|i| (format!("t{i}"), vec![n as u64], vec![i as f32; n])).collect();
         save(&p, cfg.clone(), &tensors);
         (p, cfg, n * ntensors * 4)
+    }
+
+    /// `load_host_weights` refuses, with a sentence instead of a panic, a path
+    /// that is not a file, a config the caller rejects, a missing tensor and a
+    /// tensor of the wrong size, and otherwise hands back config and weights.
+    #[test]
+    fn load_host_weights_checks_the_tensors_its_config_expects() {
+        let p = std::env::temp_dir().join(format!("brain-ckpt-host-{}.safetensors", std::process::id()));
+        let p = p.to_str().unwrap().to_string();
+        save(&p, serde_json::json!({"n": 3}), &[("w".into(), vec![3], vec![1.0, 2.0, 3.0])]);
+        let expect = |n: usize, name: &'static str| {
+            move |cfg: &Value| -> Result<(usize, Vec<(String, usize)>), String> {
+                let got = cfg["n"].as_u64().ok_or("no n")? as usize;
+                Ok((got, vec![(name.to_string(), n)]))
+            }
+        };
+
+        let (n, w) = load_host_weights(&p, expect(3, "w")).unwrap();
+        assert_eq!((n, w["w"].clone()), (3, vec![1.0, 2.0, 3.0]));
+
+        let missing = load_host_weights(&p, expect(3, "v")).err().unwrap();
+        assert!(missing.contains("missing tensor v"), "{missing}");
+        let wrong = load_host_weights(&p, expect(4, "w")).err().unwrap();
+        assert!(wrong.contains("w has 3 elements, expected 4"), "{wrong}");
+        let rejected = load_host_weights(&p, |_: &Value| -> Result<((), Vec<(String, usize)>), String> { Err("bad config".into()) });
+        assert_eq!(rejected.err().unwrap(), format!("{p}: bad config"));
+        let absent = load_host_weights("/nonexistent/brain.safetensors", expect(3, "w")).err().unwrap();
+        assert!(absent.contains("not a readable checkpoint file"), "{absent}");
+        std::fs::remove_file(&p).ok();
     }
 
     /// `load` must not hold the raw file bytes AND the decoded tensors at the
