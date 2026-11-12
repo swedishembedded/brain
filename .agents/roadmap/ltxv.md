@@ -9357,6 +9357,13 @@ latent frames only holds its history). The step at 239->240 in every
 at frame 240 (`key_frame_interval` 120, a keyframe coded finer than the
 frames around it). `videocodec` no longer forces any after the first frame.
 
+The same 313-frame request on the final defaults (keyframe strength 0.8,
+the encoder forcing no key frame mid-shot): all four stills closest at
+exactly their frames (1.82 / 2.46 / 2.09 / 1.82), the end approached
+gradually (3.7, 3.2, 2.8, 2.3, 1.8), worst step 1.76x - a 0.44 change in a
+stretch around frames 30-50 where the motion eases down and back up - and
+frame 0 the file's only key frame.
+
 Gates: `pipeline::conditioned_latent_tests` (every still a block at its own
 instant; a keyframe moves a start still onto a guide; several keyframes;
 ordering refusals; `parse_keyframe`), `window_gen_opts_tests::several_

@@ -1342,3 +1342,11 @@ dissolves into that composition over a few frames around frame 40 and pulls
 back to the end still gradually, with no cut - where LTX-2.5 at full
 keyframe strength cut between the same stills in two frames (6.3x).
 
+A long clip in one pass: 345 frames (14.4 s, the 15 s bound's largest
+aligned length) at 512x288, anchored at frames 0, 115, 230 and 344 with
+stills from one LTX-2.5 shot (stretched from 768x448): each still is
+closest at exactly its frame (3.40 / 5.26 / 4.02 / 3.41), the worst frame
+step is 1.45x its neighbours (a 0.88 change against a median of 1.10), and
+no frame repeats. H3 needs no windowing for its whole duration range, so
+this is its long-clip case.
+
