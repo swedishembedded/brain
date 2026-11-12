@@ -31,7 +31,10 @@ impl Rng {
     /// Seed the generator. Any seed (including 0) is valid.
     pub fn new(seed: u64) -> Self {
         Rng {
-            // Offset so seed 0 still produces a well-mixed stream.
+            // One step ahead of the textbook SplitMix64 seed: `new(s)` skips the first
+            // output of the plain generator. SplitMix64 mixes every state, including
+            // seed 0, so the offset is not needed for quality; it stays because every
+            // on-disk dataset was generated from this stream.
             state: seed.wrapping_add(0x9E37_79B9_7F4A_7C15),
         }
     }
@@ -80,10 +83,18 @@ impl Rng {
     }
 
     /// Uniform integer in `[lo, hi]` **inclusive** (matches Python `randint`).
+    /// Raw values that would make some results more likely than others are
+    /// redrawn (probability under `span / 2^64`), so the stream is that of
+    /// plain `% span` except at those draws.
     pub fn gen_range_inclusive(&mut self, lo: i64, hi: i64) -> i64 {
         debug_assert!(lo <= hi);
-        let span = (hi - lo + 1) as u64;
-        lo + (self.next_u64() % span) as i64
+        // Wrapping: the span of the whole i64 range is 2^64, which reads as 0 and
+        // means "every raw value is in range".
+        let span = (hi.wrapping_sub(lo) as u64).wrapping_add(1);
+        if span == 0 {
+            return lo.wrapping_add(self.next_u64() as i64);
+        }
+        lo + bounded(span, || self.next_u64()) as i64
     }
 
     /// Uniform `f64` in `[lo, hi)` (matches Python `uniform`).
@@ -96,13 +107,49 @@ impl Rng {
         &items[self.gen_range_inclusive(0, items.len() as i64 - 1) as usize]
     }
 
-    /// Standard-normal `f64` via paired uniform-to-normal transform (used by the time-series generator).
+    /// Standard-normal `f64`: the cosine half of Box-Muller, with the sine
+    /// partner discarded so each call consumes two uniforms (used by the
+    /// time-series generator). Unbounded: a zero first uniform is redrawn.
     pub fn next_gaussian(&mut self) -> f64 {
-        // Avoid log(0).
-        let u1 = (self.next_f64()).max(1e-12);
-        let u2 = self.next_f64();
-        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        gaussian_from(|| self.next_f64())
     }
+}
+
+/// The largest raw value accepted when drawing below `span` from a source whose
+/// values are uniform on `[0, max]`. The values above it are the partial last
+/// block of residues, which `% span` would hit once more often than the rest.
+fn accept_limit(span: u64, max: u64) -> u64 {
+    // `max + 1` values do not divide evenly by `span`; the remainder is the
+    // size of the partial block.
+    let partial = (max % span + 1) % span;
+    max - partial
+}
+
+/// Uniform in `[0, span)` from a source of raw 64-bit values, `span >= 1`.
+/// A raw value in the partial last block is redrawn, so every residue is
+/// equally likely; any other value gives the same residue plain `%` would.
+fn bounded(span: u64, mut next: impl FnMut() -> u64) -> u64 {
+    let limit = accept_limit(span, u64::MAX);
+    loop {
+        let x = next();
+        if x <= limit {
+            return x % span;
+        }
+    }
+}
+
+/// The cosine half of Box-Muller from a source of uniforms on `[0, 1)`. A zero
+/// first uniform has no logarithm and is redrawn rather than capped, so the
+/// output is not bounded by a clamp.
+fn gaussian_from(mut uniform: impl FnMut() -> f64) -> f64 {
+    let u1 = loop {
+        let u = uniform();
+        if u > 0.0 {
+            break u;
+        }
+    };
+    let u2 = uniform();
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
 /// The deterministic LCG that fixtures, parity probes and kernel tests use to
@@ -282,5 +329,72 @@ mod tests {
             let f = r.next_f64();
             assert!((0.0..1.0).contains(&f));
         }
+    }
+
+    /// Every residue of a span that does not divide 2^64 must be equally
+    /// likely: for span 3 the raw value `u64::MAX` (residue 0 of the partial
+    /// last block) is rejected and the next draw is used.
+    #[test]
+    fn bounded_rejects_the_partial_block_at_the_top() {
+        // 2^64 = 3 * 6148914691236517205 + 1, so only `u64::MAX` is in the partial block.
+        let mut draws = vec![u64::MAX, 7].into_iter();
+        let v = bounded(3, || draws.next().expect("one redraw"));
+        assert_eq!(v, 7 % 3);
+        // Every value below the block is accepted on the first draw.
+        assert_eq!(bounded(3, || u64::MAX - 1), (u64::MAX - 1) % 3);
+    }
+
+    /// Exhaustive check on a scaled-down generator: with a 8-bit source and a span of 100,
+    /// the accepted draws hit every residue exactly equally often.
+    #[test]
+    fn bounded_accepts_each_residue_equally_often() {
+        let span = 100u64;
+        let mut hits = [0u32; 100];
+        for raw in 0..=u8::MAX as u64 {
+            let limit = accept_limit(span, u8::MAX as u64);
+            if raw <= limit {
+                hits[(raw % span) as usize] += 1;
+            }
+        }
+        assert!(hits.iter().all(|&h| h == hits[0]), "{hits:?}");
+        assert_eq!(hits[0], 2);
+    }
+
+    /// A zero first uniform has no logarithm: it is redrawn, not capped, so
+    /// no output is bounded by a clamp.
+    #[test]
+    fn gaussian_redraws_a_zero_uniform() {
+        let mut draws = vec![0.0, 0.0, 0.25, 0.0].into_iter();
+        let z = gaussian_from(|| draws.next().expect("three draws"));
+        let want = (-2.0 * 0.25f64.ln()).sqrt();
+        assert!((z - want).abs() < 1e-12, "{z} vs {want}");
+    }
+
+    /// A tiny positive uniform is used as drawn (the old clamp raised it to 1e-12).
+    #[test]
+    fn gaussian_does_not_clamp_a_small_uniform() {
+        let u1 = 1e-15;
+        let mut draws = vec![u1, 0.0].into_iter();
+        let z = gaussian_from(|| draws.next().unwrap());
+        assert!((z - (-2.0 * u1.ln()).sqrt()).abs() < 1e-9);
+        assert!(z > 8.0, "tail beyond 7.43 sigma must be reachable: {z}");
+    }
+
+    /// The pinned stream of accepted draws is unchanged by the rejection.
+    #[test]
+    fn range_matches_plain_modulo_when_nothing_is_rejected() {
+        let mut a = Rng::new(42);
+        let mut b = Rng::new(42);
+        for _ in 0..1000 {
+            let want = 5 + (b.next_u64() % 17) as i64;
+            assert_eq!(a.gen_range_inclusive(5, 21), want);
+        }
+    }
+
+    #[test]
+    fn full_i64_range_does_not_overflow() {
+        let mut r = Rng::new(1);
+        let _ = r.gen_range_inclusive(i64::MIN, i64::MAX);
+        assert_eq!(r.gen_range_inclusive(7, 7), 7);
     }
 }
