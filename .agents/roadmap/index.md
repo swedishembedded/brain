@@ -41,6 +41,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`edgerock`](edgerock.md) | edgerock | EdgeRock-4B windowed hybrid decoder with a bounded anchor memory (`crates/qwen35` config variant, `model::anchor_memory`). |
 | [`embeddings`](embeddings.md) | embeddings | Text embedding, retrieval, RAG and contrastive fine-tuning through the SDK. |
 | [`fincast`](fincast.md) | fincast | FinCast forecaster (`crates/fincast`). |
+| [`fishtank`](fishtank.md) | fishtank - head-coupled perspective | Webcam head tracking to a calibrated eye position and the off-axis view through the display (`crates/headpose`, `crates/openseeface`, `samples/vision/fishtank`). |
 | [`florence2`](florence2.md) | florence2 | Florence-2 vision-language model (`crates/florence2`). |
 | [`flux1`](flux1.md) | flux1 | FLUX.1 / Kontext text-to-image (`crates/flux1`). |
 | [`flux2`](flux2.md) | flux2 | FLUX.2 Klein text-to-image and editing (`crates/flux2`). |

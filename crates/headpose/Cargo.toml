@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+[package]
+name = "brain-headpose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Head-coupled perspective geometry: a viewer's eye position in physical screen coordinates from 2D face landmarks (calibrated rigid face fit on the workspace camera model), a confidence-aware One Euro estimator that predicts to presentation time and never snaps, and the generalized off-axis projection through a measured display."
+
+[lib]
+name = "headpose"
+path = "src/lib.rs"
+
+[dependencies]
+# `camera::Intrinsics` - the workspace's one lens model: landmark pixels become
+# bearings through it, and the fit's reprojection error is measured through it.
+brain-camera.workspace = true
+# `sfm::pnp::refine` and `sfm::linalg` - the workspace's one absolute-pose
+# solver and its small-matrix algebra. A head is a rigid object seen by a
+# calibrated camera, which is exactly the problem that solver already owns.
+brain-sfm.workspace = true
+# The calibration profile is a typed, strictly validated serde record.
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# `data::rng::Lcg` - the workspace's one deterministic test PRNG.
+brain-data.workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

@@ -162,6 +162,7 @@ default-members = [
     "crates/zipdepth",
     "crates/splat",
     "crates/sfm",
+    "crates/headpose",
     "crates/mvs",
     "crates/recon",
     "crates/worldmirror2",
@@ -360,6 +361,7 @@ brain-minimaxh3 = { path = "crates/minimaxh3" }
 brain-zipdepth = { path = "crates/zipdepth" }
 brain-splat = { path = "crates/splat" }
 brain-sfm = { path = "crates/sfm" }
+brain-headpose = { path = "crates/headpose" }
 brain-mvs = { path = "crates/mvs" }
 brain-camera = { path = "crates/camera" }
 brain-recon = { path = "crates/recon" }

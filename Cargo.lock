@@ -1767,6 +1767,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-headpose"
+version = "5.1.0"
+dependencies = [
+ "brain-camera",
+ "brain-data",
+ "brain-sfm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-hfsm"
 version = "5.1.0"
 
