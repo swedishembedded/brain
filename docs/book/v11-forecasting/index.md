@@ -26,5 +26,5 @@ You can say what separates a time series from a table of rows, read its memory a
 3. [Foundation Models for Time Series](03-foundation-forecasters.md): can one pretrained model forecast any series it has never seen?
 4. [Evaluating Forecasters Honestly](04-evaluating-forecasts.md): how do we tell a forecaster with real skill from one that got lucky?
 5. [Survival Analysis and Competing Risks](05-survival-analysis.md): how do we predict when something will happen when many examples have not happened yet?
-6. Scoring Rules and Calibrated Decisions: how do we reward a model for honest probabilities rather than confident guesses?
+6. [Scoring Rules and Calibrated Decisions](06-calibrated-decisions.md): how do we reward a model for honest probabilities rather than confident guesses?
 7. Project: A Calibrated Forecasting System: can you build a forecaster whose uncertainty estimates are calibrated and honestly evaluated?

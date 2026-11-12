@@ -545,6 +545,7 @@ navigation:
           - docs/book/v11-forecasting/03-foundation-forecasters.md
           - docs/book/v11-forecasting/04-evaluating-forecasts.md
           - docs/book/v11-forecasting/05-survival-analysis.md
+          - docs/book/v11-forecasting/06-calibrated-decisions.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

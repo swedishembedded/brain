@@ -1,0 +1,40 @@
+<!-- source-sha256: 29fe33b0b1365f80408ccb19c0dbcdfdedeff0e376e7f4a182f07e041ed9f3ee -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 330" width="560" height="330">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="330" fill="#ffffff"/>
+<line x1="58" y1="284" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="300" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="138.67" y1="284" x2="138.67" y2="30" stroke="#edf2f7"/>
+<text x="138.67" y="300" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.1</text>
+<line x1="219.33" y1="284" x2="219.33" y2="30" stroke="#edf2f7"/>
+<text x="219.33" y="300" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.2</text>
+<line x1="300" y1="284" x2="300" y2="30" stroke="#edf2f7"/>
+<text x="300" y="300" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.3</text>
+<line x1="380.67" y1="284" x2="380.67" y2="30" stroke="#edf2f7"/>
+<text x="380.67" y="300" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.4</text>
+<line x1="461.33" y1="284" x2="461.33" y2="30" stroke="#edf2f7"/>
+<text x="461.33" y="300" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.5</text>
+<line x1="542" y1="284" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="542" y="300" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.6</text>
+<line x1="58" y1="272.45" x2="542" y2="272.45" stroke="#edf2f7"/>
+<text x="52" y="276.45" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="214.73" x2="542" y2="214.73" stroke="#edf2f7"/>
+<text x="52" y="218.73" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="157" x2="542" y2="157" stroke="#edf2f7"/>
+<text x="52" y="161" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.5</text>
+<line x1="58" y1="99.27" x2="542" y2="99.27" stroke="#edf2f7"/>
+<text x="52" y="103.27" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="41.55" x2="542" y2="41.55" stroke="#edf2f7"/>
+<text x="52" y="45.55" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2.5</text>
+<rect x="58" y="30" width="484" height="254" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="254"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="66.07,261.19 74.13,257.84 82.2,254.09 90.27,251.15 98.33,249.1 106.4,246.91 114.47,244.34 122.53,242.79 130.6,241.17 138.67,238.83 146.73,237.43 154.8,235.45 162.87,234.18 170.93,232.1 179,230.22 187.07,227.94 195.13,225.76 203.2,224.3 211.27,222.35 219.33,220.74 227.4,218.62 235.47,217.28 243.53,215.85 251.6,214.63 259.67,213.01 267.73,211.55 275.8,210.06 283.87,208.41 291.93,206.3 300,204.88 308.07,203.68 316.13,202.39 324.2,200.73 332.27,198.34 340.33,196.62 348.4,195.15 356.47,193.7 364.53,192.05 372.6,190.06 380.67,188.32 388.73,187.2 396.8,185.62 404.87,184.3 412.93,182.57 421,181.33 429.07,179.79 437.13,178.2 445.2,176.05 453.27,174.34 461.33,172.25 469.4,170.95 477.47,168.67 485.53,166.69 493.6,164.91 501.67,163.25 509.73,161.14 517.8,159.12 525.87,155.65 533.93,153.89 542,151.11"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="66.07,258.54 74.13,260.36 82.2,261.45 90.27,262.03 98.33,262.38 106.4,262.7 114.47,263.48 122.53,263.66 130.6,263.82 138.67,263.91 146.73,263.36 154.8,263.45 162.87,263.2 170.93,262.77 179,262.01 187.07,261.25 195.13,260.96 203.2,259.67 211.27,259.02 219.33,257.64 227.4,255.26 235.47,253.64 243.53,251.7 251.6,250.78 259.67,248.73 267.73,246.66 275.8,244.14 283.87,242.21 291.93,240.17 300,237.47 308.07,234.6 316.13,231.09 324.2,226.91 332.27,223.59 340.33,218.84 348.4,215.34 356.47,211.73 364.53,206.93 372.6,202.84 380.67,197.25 388.73,192.55 396.8,187.2 404.87,182.16 412.93,176.82 421,171.17 429.07,164.45 437.13,157.21 445.2,149.38 453.27,141.16 461.33,134.05 469.4,126.09 477.47,118.74 485.53,111.04 493.6,103.86 501.67,97.63 509.73,90.9 517.8,83.62 525.87,76.94 533.93,69.35 542,63.21"/><line x1="131.33" y1="284" x2="131.33" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/></g>
+<text x="300" y="320" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">threshold t (block when the probability is at least t)</text>
+<text x="14" y="157" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 157)">mean cost per example</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">The cheapest threshold sits near 1/11 only for calibrated probabilities</text>
+<rect x="420.66" y="38" width="113.34" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="428.66" y1="53" x2="448.66" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="454.66" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">raw model</text>
+<line x1="428.66" y1="70" x2="448.66" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="454.66" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">recalibrated</text>
+</svg>

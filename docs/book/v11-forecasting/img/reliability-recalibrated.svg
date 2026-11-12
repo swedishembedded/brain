@@ -1,0 +1,42 @@
+<!-- source-sha256: 65e3cf0b06683cfdaa5fc9214a992977525d99e1f61ef081cef49c9ae44073b5 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 420" width="520" height="420">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="520" height="420" fill="#ffffff"/>
+<line x1="58" y1="374" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="146.8" y1="374" x2="146.8" y2="30" stroke="#edf2f7"/>
+<text x="146.8" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.2</text>
+<line x1="235.6" y1="374" x2="235.6" y2="30" stroke="#edf2f7"/>
+<text x="235.6" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.4</text>
+<line x1="324.4" y1="374" x2="324.4" y2="30" stroke="#edf2f7"/>
+<text x="324.4" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.6</text>
+<line x1="413.2" y1="374" x2="413.2" y2="30" stroke="#edf2f7"/>
+<text x="413.2" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.8</text>
+<line x1="502" y1="374" x2="502" y2="30" stroke="#edf2f7"/>
+<text x="502" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="58" y1="374" x2="502" y2="374" stroke="#edf2f7"/>
+<text x="52" y="378" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="305.2" x2="502" y2="305.2" stroke="#edf2f7"/>
+<text x="52" y="309.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="236.4" x2="502" y2="236.4" stroke="#edf2f7"/>
+<text x="52" y="240.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="167.6" x2="502" y2="167.6" stroke="#edf2f7"/>
+<text x="52" y="171.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="98.8" x2="502" y2="98.8" stroke="#edf2f7"/>
+<text x="52" y="102.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="30" x2="502" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="444" height="344" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="444" height="344"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#a0aec0" stroke-width="2.0" stroke-dasharray="6 4" points="58,374 502,30"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="66.17,331.35 122.82,274.69 167.66,260.76 213.61,242.4 257.85,242.27 302.65,214.34 346.59,199.2 391.23,184.82 436.22,164.22 489.46,102.72"/><circle cx="66.17" cy="331.35" r="3.5" fill="#2b6cb0"/><circle cx="122.82" cy="274.69" r="3.5" fill="#2b6cb0"/><circle cx="167.66" cy="260.76" r="3.5" fill="#2b6cb0"/><circle cx="213.61" cy="242.4" r="3.5" fill="#2b6cb0"/><circle cx="257.85" cy="242.27" r="3.5" fill="#2b6cb0"/><circle cx="302.65" cy="214.34" r="3.5" fill="#2b6cb0"/><circle cx="346.59" cy="199.2" r="3.5" fill="#2b6cb0"/><circle cx="391.23" cy="184.82" r="3.5" fill="#2b6cb0"/><circle cx="436.22" cy="164.22" r="3.5" fill="#2b6cb0"/><circle cx="489.46" cy="102.72" r="3.5" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="78.85,355.35 124.76,330.23 168.63,302.27 213.3,263.06 258.11,224.66 300.79,176.96 344.85,135.37 389.26,102.5 432.9,83.99 476.15,47.55"/><circle cx="78.85" cy="355.35" r="3.5" fill="#c05621"/><circle cx="124.76" cy="330.23" r="3.5" fill="#c05621"/><circle cx="168.63" cy="302.27" r="3.5" fill="#c05621"/><circle cx="213.3" cy="263.06" r="3.5" fill="#c05621"/><circle cx="258.11" cy="224.66" r="3.5" fill="#c05621"/><circle cx="300.79" cy="176.96" r="3.5" fill="#c05621"/><circle cx="344.85" cy="135.37" r="3.5" fill="#c05621"/><circle cx="389.26" cy="102.5" r="3.5" fill="#c05621"/><circle cx="432.9" cy="83.99" r="3.5" fill="#c05621"/><circle cx="476.15" cy="47.55" r="3.5" fill="#c05621"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="76.57,359.32 126.31,329.85 164.82,285.3 230.85,244.63 264.07,216.45 302.95,194.6 342.95,153.5 432.93,92.72 488.87,46.47"/><circle cx="76.57" cy="359.32" r="3.5" fill="#2f855a"/><circle cx="126.31" cy="329.85" r="3.5" fill="#2f855a"/><circle cx="164.82" cy="285.3" r="3.5" fill="#2f855a"/><circle cx="230.85" cy="244.63" r="3.5" fill="#2f855a"/><circle cx="264.07" cy="216.45" r="3.5" fill="#2f855a"/><circle cx="302.95" cy="194.6" r="3.5" fill="#2f855a"/><circle cx="342.95" cy="153.5" r="3.5" fill="#2f855a"/><circle cx="432.93" cy="92.72" r="3.5" fill="#2f855a"/><circle cx="488.87" cy="46.47" r="3.5" fill="#2f855a"/></g>
+<text x="280" y="410" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">mean forecast in the bin</text>
+<text x="14" y="202" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 202)">share of labels 1 in the bin</text>
+<text x="280" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Reliability on 20000 fresh examples</text>
+<rect x="335.34" y="305" width="158.66" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="343.34" y1="320" x2="363.34" y2="320" stroke="#2b6cb0" stroke-width="2"/>
+<text x="369.34" y="324" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">raw model</text>
+<line x1="343.34" y1="337" x2="363.34" y2="337" stroke="#c05621" stroke-width="2"/>
+<text x="369.34" y="341" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">scale and shift, fit set</text>
+<line x1="343.34" y1="354" x2="363.34" y2="354" stroke="#2f855a" stroke-width="2"/>
+<text x="369.34" y="358" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">isotonic, fit set</text>
+</svg>

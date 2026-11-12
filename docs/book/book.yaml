@@ -630,7 +630,7 @@ volumes:
         question: "How does a model find faces and recognize the same person across photos?"
         introduces: [face-detection, angular-margin-loss, identity-embedding, face-parsing]
         requires: [anchor-free-detection, cosine-similarity, softmax-cross-entropy, semantic-segmentation]
-        brain: [scrfd, arcface]
+        brain: [scrfd, arcface, openseeface]
 
       - id: project-vision-pipeline
         title: "Project: A Vision Pipeline"

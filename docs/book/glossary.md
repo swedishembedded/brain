@@ -132,6 +132,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **box regression loss**: a loss on the difference between a predicted box and the true one; the IoU family (1 minus the IoU, GIoU, DIoU or CIoU) measures it by overlap, and adds terms so that boxes that do not overlap still receive a gradient. *([Object Detection](v07-vision/04-detection.md))*
 
+**Brier score**: the mean squared difference between a forecast probability and the outcome coded as $0$ or $1$; strictly proper, with honest value $p(1 - p)$, and a sum of reliability, minus resolution, plus uncertainty. *([Scoring Rules and Calibrated Decisions](v11-forecasting/06-calibrated-decisions.md))*
+
 **broadcasting**: the rule that aligns two shapes from the right and treats an axis of size 1 as stretched to match the other, by giving it stride 0, so that arrays of different shapes combine without copying. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **buffer alignment**: the rule that a value starts at an address that is a multiple of its alignment, which fixes where the fields of a parameter block and the slices of a buffer may begin and leaves padding between them. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
@@ -293,6 +295,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **dead-units**: ReLU units whose pre-activation is not positive on any input, so that their output and slope are zero, their incoming gradient is exactly zero and no gradient step can revive them. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
 **decision boundary**: the set of inputs where the model switches its decision, for a linear logit the line, plane or flat sheet $\mathbf{w}\cdot\mathbf{x} = 0$ (at threshold $1/2$), which separates the two predicted classes. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
+
+**decision threshold**: the probability above which one action has a lower expected cost than another, the point where the two expected costs cross; for a false alarm costing $c_{\mathrm{FP}}$ and a miss $c_{\mathrm{FN}}$ it is $c_{\mathrm{FP}}/(c_{\mathrm{FP}} + c_{\mathrm{FN}})$ and it belongs to the costs, not to the model. *([Scoring Rules and Calibrated Decisions](v11-forecasting/06-calibrated-decisions.md))*
 
 **decision tree**: a model that asks a sequence of yes-or-no questions, each a threshold on one feature chosen to make the answers as informative about the class as possible, and predicts the class held at the leaf reached. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
 
@@ -672,6 +676,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **load balancing**: any way of making the experts receive about equal numbers of tokens, by an added loss on the router's probabilities or by a selection bias moved with the observed load. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
 
+**log score**: the negative logarithm of the probability the forecast gave to what happened, the cross-entropy loss; strictly proper, with honest value the entropy of the truth, and unbounded for a forecast that called the outcome impossible. *([Scoring Rules and Calibrated Decisions](v11-forecasting/06-calibrated-decisions.md))*
+
 **log-mel spectrogram**: the array of mel energies of every frame after a logarithm with a guard or a floor, the input of most speech models. *([Spectrograms and the Mel Scale](v09-audio/02-spectrograms.md))*
 
 **log-probabilities**: the logarithms of probabilities, at most 0, which a decoder reports and adds instead of multiplying probabilities, each stated for the distribution it belongs to: the model's or the sampler's. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
@@ -927,6 +933,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **prompt ensembling**: averaging, for each class, the text vectors of several sentence templates that name it (for example "a photo of a square" and "a drawing of a square") and renormalizing, so that no single template's wording decides the class vector. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*
 
 **promptable segmentation**: the task of returning the mask of an object in an image from a prompt, a point, a box or a rough mask, with the same model for every object and no fixed list of classes; a prompt that leaves the extent open is answered with several masks. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
+
+**proper scoring rule**: a loss for probability reports under which the expected loss is smallest when the report equals the true probability, so that a forecaster minimising it has no reason to state anything but their belief; it is strictly proper when the truth is the only best report. *([Scoring Rules and Calibrated Decisions](v11-forecasting/06-calibrated-decisions.md))*
 
 **pseudo-random generator**: a deterministic state machine (a state, a rule that advances it, and a rule that turns it into a number) whose outputs are judged by how closely they resemble draws from a uniform distribution, not by being unpredictable to someone who knows the rule. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
