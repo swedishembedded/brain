@@ -1,0 +1,8 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
+
+# 439. The served fine-tune of a Qwen3.8 (qwen35) model reports a held-out token accuracy of null because the in-process scorer never computes one
+
+Served fine-tune jobs on `Qwen/Qwen3.8-27B-FP8` (an orchestrator's training job, 150 steps, 52 held-out records, 294 supervised positions) returned `base` and `tuned` held-out scores with `loss` set and `token_accuracy: null`, in every one of 12 jobs. The null is not a lost field: the chat fine-tune of the qwen35 family scores in the trainer's own process (`crates/qwen35/src/finetune.rs:541`, `model::score_base` / `model::score_tuned`), `ScoredSet` carries losses only (`crates/model/src/score.rs`), and the SDK builds the reported score with `token_accuracy: None` by construction (`crates/sdk/src/finetune.rs:1269`, `as_score`). The qwen3 path (`qwen3::eval::score_chat_rendered`) does compute it (`crates/qwen3/src/eval.rs`, argmax against the next token), which is why the field exists and is filled elsewhere.
+
+What is missing is wiring, not a bug in an arithmetic: qwen35 has the per-position argmax readout (`Qwen35::batch_token_argmax`, `crates/qwen35/src/objectives.rs`) but `score_dataset` / `eval_every_example` forward batches and read only the loss. Until that is wired, a caller that needs a correctness measure of a served qwen35 fine-tune must generate answers from the tuned adapter and check them (the orchestrator does, through a benchmark harness), not read `token_accuracy`. Evidence: the result files of a 27B comparison run on 2026-11-12 (12 jobs, `token_accuracy` null in each).
