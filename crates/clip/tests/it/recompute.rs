@@ -9,8 +9,9 @@
 //! states: a tower whose blocks share one set of intermediates and rebuild a block's from its input before its
 //! backward gives the output and every gradient (the parameters' and the injected patch tokens') of the tower that
 //! keeps every block, bit for bit, holding fewer device bytes, for both stems and both patch sources. Narrow formats
-//! and going back to keeping are refused by name. One test in its own binary, so nothing else allocates while the
-//! device bytes are compared.
+//! and going back to keeping are refused by name.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use clip::config::{ClipVisionConfig, TextAct, VisionStem};
 use clip::model::{ClipVision, PatchSource, CLIP_VISION_PIPELINES};
@@ -41,7 +42,7 @@ fn config(stem: VisionStem) -> ClipVisionConfig {
 type Measured = (Vec<u32>, Vec<(String, Vec<u32>)>, Vec<u32>, u64);
 
 fn step(cfg: &ClipVisionConfig, src: PatchSource, init: &std::collections::HashMap<String, Vec<f32>>, seed: u64, policy: SavedPolicy) -> Measured {
-    let gpu = gpu_core::testgpu::dev(CLIP_VISION_PIPELINES);
+    let gpu = gpu_core::testgpu::private(CLIP_VISION_PIPELINES);
     let before = gpu.memory_usage().expect("the test device reports its memory").live;
     let mut m = ClipVision::new_train_on(gpu.share(), cfg.clone(), 1, src, init);
     m.set_saved_policy(policy).unwrap();

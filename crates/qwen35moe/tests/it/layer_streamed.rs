@@ -11,8 +11,9 @@
 //! what the plain f32 build trains on the device (`model::streamed::check_layer_streaming`), and a streamed run
 //! stopped and resumed through the fit loop ends exactly where the uninterrupted one does
 //! (`model::trainprec::check_exact_resume`). The model is eager: its forward and backward report each layer's edges
-//! as they run it. One test in its own binary, the contracts in turn, so nothing else allocates while the device bytes
-//! are compared.
+//! as they run it.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use model::Model;
 use qwen35moe::config::Qwen35Config;
@@ -25,7 +26,9 @@ fn qwen35moe_streams_its_layers_through_a_one_layer_window_and_resumes_exactly()
     let t = 16;
     let x: Vec<u32> = (0..t).map(|i| (i * 3 + 1) % cfg.vocab).collect();
     let y: Vec<u32> = (0..t).map(|i| (i * 3 + 2) % cfg.vocab).collect();
-    let build = || Qwen35::new_train_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), 1, t, &init);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(pipelines());
+    let build = || Qwen35::new_train_on(own.new_like(pipelines()), cfg.clone(), 1, t, &init);
     let step = |m: &Qwen35, step: u32, clip: Option<f32>| {
         m.zero_grads();
         m.set_batch(&x, &y);

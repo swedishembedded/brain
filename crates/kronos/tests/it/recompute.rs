@@ -8,8 +8,9 @@
 //! Activation recompute for the Kronos decoder trainer, held to the contract `model::saved::check_recompute` states:
 //! a trainer whose layers share one set of intermediates and rebuild a layer's from its input before its backward
 //! gives the loss and every gradient of the trainer that keeps them, bit for bit, holding fewer device bytes, for a
-//! full fine-tune and for LoRA. Narrow formats and going back to keeping are refused by name. One test in its own
-//! binary, so nothing else allocates while the device bytes are compared.
+//! full fine-tune and for LoRA. Narrow formats and going back to keeping are refused by name.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use std::collections::HashMap;
 
@@ -70,7 +71,7 @@ fn batch(cfg: &KronosConfig, seed: u64) -> Batch {
 }
 
 fn step(init: &HashMap<String, Vec<f32>>, b: &Batch, lora: Option<LoraCfg>, policy: SavedPolicy) -> Measured {
-    let gpu = gpu_core::testgpu::dev(PIPELINES);
+    let gpu = gpu_core::testgpu::private(PIPELINES);
     let before = gpu.memory_usage().expect("the test device reports its memory").live;
     let mut m = KronosTrain::with_lora_batch_on(gpu.share(), config(), T, B, init, lora);
     m.set_saved_policy(policy).unwrap();

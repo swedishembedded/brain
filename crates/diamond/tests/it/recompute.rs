@@ -8,8 +8,9 @@
 //! Activation recompute for the DIAMOND UNet trainer, held to the contract `model::saved::check_recompute` states: a
 //! trainer whose residual blocks share their internal activations and rebuild a block's from its inputs before its
 //! backward gives the loss and every gradient of the trainer that keeps them, bit for bit, holding fewer device
-//! bytes. A narrow saved format is refused by name. One test in its own binary, so nothing else allocates while the
-//! device bytes are compared.
+//! bytes. A narrow saved format is refused by name.
+//! The device-byte comparison runs on a device the test owns (the
+//! model constructor builds it; `gpu_core::testgpu::exclusive` is held while it lives).
 
 use std::collections::HashMap;
 
@@ -74,6 +75,8 @@ fn step(cfg: &DiamondConfig, tensors: &Tensors, seed: u64, policy: SavedPolicy) 
 
 #[test]
 fn the_unet_recomputes_its_residual_blocks_exactly() {
+    // The constructor builds its own device, with its own allocation tally; only one such device may be alive at a time.
+    let _exclusive = gpu_core::testgpu::exclusive();
     let cfg = config();
     let seed = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
     let tensors = random_tensors(&cfg, &mut NormalRng::new(seed));

@@ -9,8 +9,9 @@
 //! each layer (its routed experts included) before its backward computes the loss and gradients of the build that
 //! keeps every layer, bit for bit, on fewer device bytes (`model::saved::check_recompute`), and holding those
 //! residuals in bf16 or FP8 trains to the format's precision on fewer still
-//! (`model::saved::check_quantized_boundaries`). One test in its own binary, the contracts in turn, so nothing else
-//! allocates while the device bytes are compared.
+//! (`model::saved::check_quantized_boundaries`).
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use deepseek2::config::DeepseekV2Config;
 use deepseek2::model::DeepseekV2;
@@ -26,7 +27,9 @@ fn deepseek2_recomputes_every_layer_and_narrows_its_boundaries() {
     let v = cfg.vocab();
     let x: Vec<u32> = (0..48).map(|i| (i * 5 + 1) % v).collect();
     let y: Vec<u32> = (0..48).map(|i| (i * 5 + 2) % v).collect();
-    let build = || DeepseekV2::new_on(gpu_core::testgpu::dev(deepseek2::model::PIPELINES), cfg.clone(), 4, 12, &init, true);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(deepseek2::model::PIPELINES);
+    let build = || DeepseekV2::new_on(own.new_like(deepseek2::model::PIPELINES), cfg.clone(), 4, 12, &init, true);
     let step = |m: &DeepseekV2| {
         m.zero_grads();
         m.set_batch(&x, &y);

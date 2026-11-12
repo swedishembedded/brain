@@ -7,8 +7,9 @@
 
 //! What the SDXL UNet's training graph keeps of its activations. A graph that recomputes its resnets and
 //! transformers (`vae::blocks::Activations::Recompute`) gives the gradients of the one that keeps them, bit for bit,
-//! holding fewer device bytes. One test in its own binary, so nothing else allocates while the device bytes are
-//! compared.
+//! holding fewer device bytes.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use sdxlunet::config::{UNetConfig, N_TIME_IDS};
 use sdxlunet::train::{UnetTrainer, TRAIN_PIPELINES};
@@ -26,7 +27,7 @@ fn values(n: usize, salt: usize) -> Vec<f32> {
 fn step(activations: Activations) -> (Vec<(String, Vec<u32>)>, u64) {
     let cfg = UNetConfig::tiny();
     let tensors = sdxlunet::init::init_weights(&cfg, 7);
-    let gpu = gpu_core::testgpu::dev(TRAIN_PIPELINES);
+    let gpu = gpu_core::testgpu::private(TRAIN_PIPELINES);
     let before = gpu.memory_usage().expect("the test device reports its memory").live;
     let m = UnetTrainer::new(gpu.share(), cfg.clone(), &tensors, H, W, T_ENC, activations);
     let held = gpu.memory_usage().unwrap().live - before;

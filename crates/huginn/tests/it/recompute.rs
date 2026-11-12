@@ -9,8 +9,9 @@
 //! keeps only the residual between block applications and rebuilds each one before its backward, so `recompute` is
 //! accepted as what it already does and keeping every application is refused by name
 //! (`model::saved::check_always_recomputes`), and holding the recurrence's residuals in bf16 or FP8 trains to the
-//! format's precision on fewer device bytes (`model::saved::check_quantized_boundaries`). One test in its own binary,
-//! the contracts in turn, so nothing else allocates while the device bytes are compared.
+//! format's precision on fewer device bytes (`model::saved::check_quantized_boundaries`).
+//! The device-byte comparison runs on a device the test owns (the
+//! model constructor builds it; `gpu_core::testgpu::exclusive` is held while it lives).
 
 use huginn::model::Huginn;
 use huginn::HuginnConfig;
@@ -18,6 +19,8 @@ use model::{Batch, Model};
 
 #[test]
 fn huginn_recomputes_and_narrows_its_boundaries() {
+    // The constructor builds its own device, with its own allocation tally; only one such device may be alive at a time.
+    let _exclusive = gpu_core::testgpu::exclusive();
     let cfg = HuginnConfig::tiny();
     let init = huginn::init::init_weights(&cfg, 3);
     let v = cfg.vocab;

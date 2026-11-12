@@ -6,7 +6,7 @@
 // services by sending an email to info@swedishembedded.com.
 
 //! Construction-time layer streaming through the shared contract (`model::streamed::check_streamed_construction`).
-//! One test in its own binary, so nothing else allocates while the device bytes are compared.
+//! The device-byte comparison runs on a device the test owns (`gpu_core::testgpu::private`).
 
 use gpt2::{Gpt, GptConfig};
 use model::Model;
@@ -20,8 +20,10 @@ fn gpt2_builds_its_layers_straight_into_the_window() {
     let x: Vec<u32> = (0..16).map(|i| (i * 5 + 1) % cfg.vocab).collect();
     let y: Vec<u32> = (0..16).map(|i| (i * 5 + 2) % cfg.vocab).collect();
     let resident = model::TrainPrecision::parse("weights=f32,window=1").unwrap().resident_config(Some(7)).unwrap().expect("resident");
-    let build = || Gpt::new_on(gpu_core::testgpu::dev(gpt2::model::PIPELINES), cfg.clone(), 2, 8, &init);
-    let build_streamed = || Gpt::new_resident_on(gpu_core::testgpu::dev(gpt2::model::PIPELINES), cfg.clone(), 2, 8, &init, &resident);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(gpt2::model::PIPELINES);
+    let build = || Gpt::new_on(own.new_like(gpt2::model::PIPELINES), cfg.clone(), 2, 8, &init);
+    let build_streamed = || Gpt::new_resident_on(own.new_like(gpt2::model::PIPELINES), cfg.clone(), 2, 8, &init, &resident);
     let step = |m: &Gpt, t: u32, clip: Option<f32>| {
         m.zero_grads();
         Gpt::set_batch(m, &x, &y);

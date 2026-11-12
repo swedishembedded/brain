@@ -6,8 +6,9 @@
 // info@swedishembedded.com.
 
 //! A VQGAN trainer that recomputes its encoder's and generator's blocks (`vae::blocks::Activations::Recompute`) gives
-//! the gradients of the one that keeps them, bit for bit, holding fewer device bytes. One test in its own binary, so
-//! nothing else allocates while the device bytes are compared.
+//! the gradients of the one that keeps them, bit for bit, holding fewer device bytes.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use vae::blocks::{Activations, Tensors};
 use vqgan::train::VqganTrainer;
@@ -61,7 +62,7 @@ type Measured = (Vec<(String, Vec<u32>)>, u64);
 
 fn step(activations: Activations) -> Measured {
     let cfg = config();
-    let gpu = gpu_core::testgpu::dev(vqgan::train::TRAIN_PIPELINES);
+    let gpu = gpu_core::testgpu::private(vqgan::train::TRAIN_PIPELINES);
     let before = gpu.memory_usage().expect("the test device reports its memory").live;
     let s = cfg.img_size;
     let m = VqganTrainer::new(cfg.clone(), &weights(&cfg), s, s, gpu.share(), activations);

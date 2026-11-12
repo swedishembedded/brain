@@ -11,8 +11,9 @@
 //! on the device. Horizon trains on subject timelines, not a token corpus, so the exact-resume contract of
 //! `model::trainprec::check_exact_resume` (a causal-LM corpus) is run here on its own objective: a streamed run
 //! stopped after three of six steps and resumed through the fit loop ends with the loss and every weight of the
-//! uninterrupted run, bit for bit. One test in its own binary, the contracts in turn, so nothing else allocates while
-//! the device bytes are compared.
+//! uninterrupted run, bit for bit.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use data::rng::Rng;
 use horizon::batch::assemble;
@@ -43,7 +44,9 @@ fn horizon_streams_its_layers_through_a_one_layer_window_and_resumes_exactly() {
     cfg.n_layers = 3;
     let encoded: Vec<Encoded> = subjects.iter().take(60).map(|s| encode(s, &vocab, &cfg)).collect();
     let init = horizon::init_weights(&cfg, 3);
-    let build = || Horizon::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), BATCH, &init);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(pipelines());
+    let build = || Horizon::new_on(own.new_like(pipelines()), cfg.clone(), BATCH, &init);
 
     let refs: Vec<&Encoded> = encoded.iter().take(BATCH as usize).collect();
     let batch = assemble(&cfg, &refs, BATCH as usize, 0.4, &mut Rng::new(data::rng::random_seed()));

@@ -6,7 +6,7 @@
 // services by sending an email to info@swedishembedded.com.
 
 //! Construction-time layer streaming through the shared contract (`model::streamed::check_streamed_construction`).
-//! One test in its own binary, so nothing else allocates while the device bytes are compared.
+//! The device-byte comparison runs on a device the test owns (`gpu_core::testgpu::private`).
 
 use data::rng::Rng;
 use horizon::batch::assemble;
@@ -41,8 +41,10 @@ fn horizon_builds_its_layers_straight_into_the_window() {
     let refs: Vec<&Encoded> = encoded.iter().take(BATCH as usize).collect();
     let batch = assemble(&cfg, &refs, BATCH as usize, 0.4, &mut Rng::new(data::rng::random_seed()));
     let resident = model::TrainPrecision::parse("weights=f32,window=1").unwrap().resident_config(Some(7)).unwrap().expect("resident");
-    let build = || Horizon::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), BATCH, &init);
-    let build_streamed = || Horizon::new_resident_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), BATCH, &init, &resident);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(pipelines());
+    let build = || Horizon::new_on(own.new_like(pipelines()), cfg.clone(), BATCH, &init);
+    let build_streamed = || Horizon::new_resident_on(own.new_like(pipelines()), cfg.clone(), BATCH, &init, &resident);
     let step = |m: &Horizon, t: u32, clip: Option<f32>| {
         m.zero_grads();
         m.set_batch(&batch);

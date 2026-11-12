@@ -438,6 +438,9 @@ pub fn check_quantized_boundaries<M: crate::Model>(name: &str, build: impl Fn() 
 /// * where the backend accounts for its allocations, the recomputing step peaks at fewer live device bytes: a
 ///   recorded-pass model released the activation buffers of every layer but one per kind when the policy was set,
 ///   an eager one frees each layer's activations as the forward moves on.
+///
+/// Run it on a device the test owns (`gpu_core::testgpu::private`, every build a `new_like` handle on it): the byte
+/// comparison reads that device's allocation tally, which a device shared with concurrent tests would pollute.
 pub fn check_recompute<M: crate::Model>(name: &str, build: impl Fn() -> M, step: impl Fn(&M) -> f32) -> Result<(), String> {
     /// A step's loss, every parameter's gradient bits and the live device bytes it peaked at.
     type Measured = (f32, Vec<(String, Vec<u32>)>, Option<u64>);

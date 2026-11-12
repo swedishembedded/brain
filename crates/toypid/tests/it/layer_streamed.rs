@@ -9,8 +9,9 @@
 //! one-layer device window with their f32 values and optimizer state on the host, and train exactly what the build
 //! holding every layer in that state trains, which is what the plain f32 build trains on the device
 //! (`model::streamed::check_layer_streaming`); a streamed run stopped and resumed through the fit loop ends exactly
-//! where the uninterrupted one does (`model::trainprec::check_exact_resume`). One test in its own binary, the
-//! contracts in turn, so nothing else allocates while the device bytes are compared.
+//! where the uninterrupted one does (`model::trainprec::check_exact_resume`).
+//! The device-byte comparison runs on a device the test owns (the
+//! model constructor builds it; `gpu_core::testgpu::exclusive` is held while it lives).
 
 use model::Model;
 use toypid::data::init_weights;
@@ -18,6 +19,8 @@ use toypid::{Pid, PidConfig};
 
 #[test]
 fn toypid_streams_its_layers_through_a_one_layer_window_and_resumes_exactly() {
+    // The constructor builds its own device, with its own allocation tally; only one such device may be alive at a time.
+    let _exclusive = gpu_core::testgpu::exclusive();
     let cfg = PidConfig { block_size: 16, n_layers: 3, d_model: 32, n_heads: 4, d_ff: 64, ..PidConfig::default_small() };
     let init = init_weights(&cfg, 3);
     let (b, t) = (2u32, 8u32);

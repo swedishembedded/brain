@@ -8,8 +8,9 @@
 //! Activation recompute through the shared contract (`model::saved::check_recompute`): a detector that keeps only each
 //! conv unit's output and rebuilds the unit's post-conv and post-BatchNorm intermediates from its input before its
 //! backward (the normalisation replayed with the batch statistics the forward kept) computes the loss and gradients
-//! of the build that keeps every intermediate, bit for bit, at a lower step peak. One test in its own binary, so
-//! nothing else allocates while the device bytes are compared.
+//! of the build that keeps every intermediate, bit for bit, at a lower step peak.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use yolov8::{GtBox, LossMode, Yolo, YoloConfig};
 
@@ -29,7 +30,9 @@ fn yolov8_recomputes_its_units_exactly() {
         GtBox { img: 0, cls: 0, cx: 0.30, cy: 0.35, w: 0.25, h: 0.30 },
         GtBox { img: 1, cls: 2, cx: 0.70, cy: 0.65, w: 0.30, h: 0.25 },
     ];
-    let build = || Yolo::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), 2, cfg.input, &init);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(pipelines());
+    let build = || Yolo::new_on(own.new_like(pipelines()), cfg.clone(), 2, cfg.input, &init);
     let step = |m: &Yolo| {
         m.set_mode(LossMode::Detection);
         m.zero_grads();

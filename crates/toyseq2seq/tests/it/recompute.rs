@@ -9,8 +9,9 @@
 //! encoder and of the decoder and replays each layer (the decoder's cross-attention to the encoder memory included)
 //! before its backward computes the loss and gradients of the build that keeps every layer, bit for bit, on fewer
 //! device bytes (`model::saved::check_recompute`), and holding those residuals in bf16 or FP8 trains to the format's
-//! precision on fewer still (`model::saved::check_quantized_boundaries`). One test in its own binary, the contracts
-//! in turn, so nothing else allocates while the device bytes are compared.
+//! precision on fewer still (`model::saved::check_quantized_boundaries`).
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use toyseq2seq::{Seq2Seq, Seq2SeqConfig};
 
@@ -28,7 +29,9 @@ fn toyseq2seq_recomputes_every_layer_and_narrows_its_boundaries() {
     let src: Vec<u32> = (0..b * s).map(|i| (i * 5 + 1) % cfg.vocab).collect();
     let tgt: Vec<u32> = (0..b * t).map(|i| (i * 7 + 2) % cfg.vocab).collect();
     let labels: Vec<u32> = (0..b * t).map(|i| (i * 7 + 3) % cfg.vocab).collect();
-    let build = || Seq2Seq::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), b, t, &init);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(pipelines());
+    let build = || Seq2Seq::new_on(own.new_like(pipelines()), cfg.clone(), b, t, &init);
     let step = |m: &Seq2Seq| {
         m.zero_grads();
         m.set_batch(&src, &tgt, &labels);

@@ -10,7 +10,7 @@
 //! its input before its backward gives the loss, the input-image gradient and the gradient of every tower's
 //! parameters of the composite that keeps them, bit for bit, holding fewer device bytes. A narrow format narrows the
 //! decoder's residual stream while the vision towers recompute from f32 inputs. Going back to keeping is refused by
-//! name. One test in its own binary, so nothing else allocates while the device bytes are compared. The weights are
+//! name. The device-byte comparison runs on a device the test owns (`gpu_core::testgpu::private`). The weights are
 //! drawn at random from the config's own manifests, so the test needs no fixture.
 
 use std::collections::HashMap;
@@ -50,7 +50,10 @@ fn live(m: &DeepseekOcr) -> u64 {
 type Measured = (u32, Vec<u32>, Vec<(String, Vec<u32>)>, u64);
 
 fn step(cfg: &DeepseekOcrConfig, weights: &HashMap<String, Vec<f32>>, seed: u64, policy: SavedPolicy) -> Measured {
-    let dev = |p| gpu_core::testgpu::dev(p);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns; the towers'
+    // kernel sets are handles on it.
+    let own = gpu_core::testgpu::private(&[]);
+    let dev = |p| own.new_like(p);
     let seq = 12u32;
     let mut m = DeepseekOcr::new(&dev, cfg.clone(), weights, seed, seq, 2, true);
     m.set_saved_policy(policy).unwrap();

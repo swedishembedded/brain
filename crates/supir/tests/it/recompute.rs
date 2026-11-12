@@ -8,8 +8,9 @@
 //! What SUPIR's graphs keep of their activations. Its trunk, backbone and adaptor blocks free their intermediates
 //! after their last read, so the inference graph reuses them and computes the training graph's output; and a training
 //! graph that recomputes those blocks (`vae::blocks::Activations::Recompute`) gives the gradients of the one that
-//! keeps them, bit for bit, holding fewer device bytes. One test in its own binary, so nothing else allocates while
-//! the device bytes are compared.
+//! keeps them, bit for bit, holding fewer device bytes.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use sdxlunet::config::N_TIME_IDS;
 use supir::config::SupirConfig;
@@ -57,7 +58,7 @@ type Measured = (Vec<(String, Vec<u32>)>, Vec<f32>, u64);
 
 fn step(activations: Activations) -> Measured {
     let cfg = SupirConfig::tiny();
-    let gpu = gpu_core::testgpu::dev(TRAIN_PIPELINES);
+    let gpu = gpu_core::testgpu::private(TRAIN_PIPELINES);
     let before = gpu.memory_usage().expect("the test device reports its memory").live;
     let m = SupirTrainer::new(gpu.share(), cfg.clone(), &weights(&cfg), SHAPE, activations);
     let held = gpu.memory_usage().unwrap().live - before;

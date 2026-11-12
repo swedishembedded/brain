@@ -597,6 +597,32 @@ pub mod testgpu {
         })
     }
 
+    /// A device of its own, for a test that compares the device's live or peak
+    /// bytes. [`dev`] hands every test of the binary one shared device, whose
+    /// allocation tally then counts every concurrent test's buffers too; a
+    /// device built here has its own tally. It holds [`exclusive`] for its
+    /// whole life, so it is the one test-owned device alive, and it derefs to
+    /// the [`Gpu`]; [`Gpu::new_like`] gives further handles on it.
+    pub struct PrivateGpu {
+        // Declared first so it drops first: the device is torn down while the
+        // lock is still held.
+        gpu: Gpu,
+        _exclusive: DeviceGuard,
+    }
+
+    impl std::ops::Deref for PrivateGpu {
+        type Target = Gpu;
+        fn deref(&self) -> &Gpu {
+            &self.gpu
+        }
+    }
+
+    /// [`PrivateGpu`] for `kernels`.
+    pub fn private(kernels: &'static [(&'static str, &'static str)]) -> PrivateGpu {
+        let guard = exclusive();
+        PrivateGpu { gpu: Gpu::new(kernels), _exclusive: guard }
+    }
+
     /// Keyed by the kernel slice's address: kernel sets are `'static` consts,
     /// so the pointer is a stable identity.
     static POOL: OnceLock<Mutex<HashMap<usize, WeakGpu>>> = OnceLock::new();

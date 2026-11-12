@@ -7,8 +7,9 @@
 
 //! What ControlNet's training graph keeps of its activations. A graph that recomputes the trainable copy's blocks and
 //! the frozen backbone's (`vae::blocks::Activations::Recompute`) gives the gradients of the one that keeps them, bit
-//! for bit, holding fewer device bytes. One test in its own binary, so nothing else allocates while the device bytes
-//! are compared.
+//! for bit, holding fewer device bytes.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use controlnet::config::ControlNetConfig;
 use controlnet::train::{tensors_for, ControlNetTrainer, TRAIN_PIPELINES};
@@ -27,7 +28,7 @@ fn values(n: usize, salt: usize) -> Vec<f32> {
 fn step(activations: Activations) -> (Vec<(String, Vec<u32>)>, u64) {
     let cfg = ControlNetConfig::tiny();
     let tensors = tensors_for(&cfg, 7);
-    let gpu = gpu_core::testgpu::dev(TRAIN_PIPELINES);
+    let gpu = gpu_core::testgpu::private(TRAIN_PIPELINES);
     let before = gpu.memory_usage().expect("the test device reports its memory").live;
     let m = ControlNetTrainer::new(gpu.share(), cfg.clone(), &tensors, H, W, T_ENC, activations);
     let held = gpu.memory_usage().unwrap().live - before;

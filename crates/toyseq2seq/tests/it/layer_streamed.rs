@@ -11,8 +11,8 @@
 //! in that state trains, which is what the plain f32 build trains on the device. The model trains on source/target
 //! pairs, not a token corpus, so the exact-resume contract of `model::trainprec::check_exact_resume` is run here on
 //! its own objective: a streamed run stopped after three of six steps and resumed through the fit loop ends with the
-//! loss and every weight of the uninterrupted run, bit for bit. One test in its own binary, the contracts in turn,
-//! so nothing else allocates while the device bytes are compared.
+//! loss and every weight of the uninterrupted run, bit for bit. The device-byte comparison runs on a device
+//! the test owns (`gpu_core::testgpu::private`).
 
 use data::rng::Rng;
 use model::{Model, Objective};
@@ -72,7 +72,9 @@ fn toyseq2seq_streams_its_layers_through_a_one_layer_window_and_resumes_exactly(
     let src: Vec<u32> = (0..BATCH * s).map(|i| (i * 5 + 1) % cfg.vocab).collect();
     let tgt: Vec<u32> = (0..BATCH * t).map(|i| (i * 7 + 2) % cfg.vocab).collect();
     let labels: Vec<u32> = (0..BATCH * t).map(|i| (i * 7 + 3) % cfg.vocab).collect();
-    let build = || Seq2Seq::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), BATCH, t, &init);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(pipelines());
+    let build = || Seq2Seq::new_on(own.new_like(pipelines()), cfg.clone(), BATCH, t, &init);
     let step = |m: &Seq2Seq, step: u32, clip: Option<f32>| {
         m.zero_grads();
         m.set_batch(&src, &tgt, &labels);

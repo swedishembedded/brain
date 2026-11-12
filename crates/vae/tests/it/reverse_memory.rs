@@ -8,8 +8,9 @@
 //! What the reverse of the shared conv-block tape (`vae::blocks::grad::Trace::backward`) allocates. An activation's
 //! gradient is complete once the walk has passed every consumer of the activation, and dead once it has passed the
 //! op that produced it, so the reverse holds gradients for the live frontier of the walk: a deeper stack of blocks
-//! adds no activation-gradient memory. One test in its own binary, so nothing else allocates while the device bytes
-//! are compared.
+//! adds no activation-gradient memory.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use vae::blocks::grad::BwdIds;
 use vae::blocks::{BlockNames, Builder, Tensors};
@@ -52,7 +53,8 @@ fn tensors(depth: usize) -> Tensors {
 /// Device bytes the reverse of a `depth`-block stack allocates while it is recorded, and the input gradient it
 /// computes.
 fn reverse_bytes(depth: usize) -> (u64, Vec<f32>) {
-    let gpu = gpu_core::testgpu::dev(&KERNELS);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let gpu = gpu_core::testgpu::private(&KERNELS);
     let t = tensors(depth);
     let mut b = Builder::new(&gpu, &t, 1e-5, 4, BlockNames::diffusers(), false);
     b.set_train(true);

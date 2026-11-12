@@ -8,8 +8,9 @@
 //! Activation recompute through the shared contracts: a build that keeps only the residual between encoder layers and
 //! replays each layer before its backward computes the loss and gradients of the build that keeps every layer, bit
 //! for bit, on fewer device bytes (`model::saved::check_recompute`), and holding those residuals in bf16 or FP8 trains
-//! to the format's precision on fewer still (`model::saved::check_quantized_boundaries`). One test in its own binary,
-//! the contracts in turn, so nothing else allocates while the device bytes are compared.
+//! to the format's precision on fewer still (`model::saved::check_quantized_boundaries`).
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use data::rng::Rng;
 use horizon::batch::assemble;
@@ -36,7 +37,9 @@ fn horizon_recomputes_every_layer_and_narrows_its_boundaries() {
     let refs: Vec<&Encoded> = encoded.iter().collect();
     let batch = assemble(&cfg, &refs, 32, 0.4, &mut Rng::new(data::rng::random_seed()));
     let init = horizon::init_weights(&cfg, 3);
-    let build = || Horizon::new_on(gpu_core::testgpu::dev(horizon::PIPELINES), cfg.clone(), 32, &init);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(horizon::PIPELINES);
+    let build = || Horizon::new_on(own.new_like(horizon::PIPELINES), cfg.clone(), 32, &init);
     let step = |m: &Horizon| {
         m.zero_grads();
         m.set_batch(&batch);

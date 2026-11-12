@@ -8,14 +8,17 @@
 //! Activation recompute through the shared contracts: a build that keeps only the residual between layers and replays
 //! each layer before its backward computes the loss and gradients of the build that keeps every layer, bit for bit,
 //! on fewer device bytes (`model::saved::check_recompute`), and holding those residuals in bf16 or FP8 trains to the
-//! format's precision on fewer still (`model::saved::check_quantized_boundaries`). One test in its own binary, the
-//! contracts in turn, so nothing else allocates while the device bytes are compared.
+//! format's precision on fewer still (`model::saved::check_quantized_boundaries`).
+//! The device-byte comparison runs on a device the test owns (the
+//! model constructor builds it; `gpu_core::testgpu::exclusive` is held while it lives).
 
 use toypid::data::init_weights;
 use toypid::{Pid, PidConfig};
 
 #[test]
 fn toypid_recomputes_every_layer_and_narrows_its_boundaries() {
+    // The constructor builds its own device, with its own allocation tally; only one such device may be alive at a time.
+    let _exclusive = gpu_core::testgpu::exclusive();
     // Six layers: more boundaries than the narrow store's two f32 working buffers.
     let cfg = PidConfig { block_size: 32, n_layers: 6, d_model: 32, n_heads: 4, d_ff: 64, ..PidConfig::default_small() };
     let init = init_weights(&cfg, 3);

@@ -9,8 +9,9 @@
 //! trainer that keeps only each residual block's output and rebuilds the block's `bn1 -> conv1 -> prelu` branch from
 //! the block's input before its backward computes the loss and every gradient of the trainer that keeps them, bit for
 //! bit, at a lower step peak. `ArcFaceTrainer` has no `model::Model` impl for that function to take (there is no
-//! image/label batch variant), so this test runs the same clauses on the trainer itself. One test in its own binary,
-//! so nothing else allocates while the device bytes are compared.
+//! image/label batch variant), so this test runs the same clauses on the trainer itself.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use arcface::{ArcFaceTrainConfig, ArcFaceTrainer};
 use model::saved::{SavedFormat, SavedPolicy};
@@ -26,14 +27,15 @@ fn init(name: &str, n: usize) -> Vec<f32> {
     }
 }
 
-fn trainer() -> ArcFaceTrainer {
-    let gpu = gpu_core::testgpu::dev(arcface::model::PIPELINES);
+fn trainer(gpu: gpu_core::Gpu) -> ArcFaceTrainer {
     ArcFaceTrainer::new_on(gpu, ArcFaceTrainConfig::tiny(), &init)
 }
 
 /// One training step under `policy`.
 fn measured(policy: SavedPolicy) -> Measured {
-    let mut t = trainer();
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(arcface::model::PIPELINES);
+    let mut t = trainer(own.share());
     t.set_saved_policy(policy).unwrap();
     let cfg = t.config().clone();
     let n = (cfg.batch * 3 * cfg.arc.image_size * cfg.arc.image_size) as usize;
@@ -67,7 +69,7 @@ fn arcface_recomputes_its_block_branches_exactly() {
     }
 
     // Narrow saved formats do not apply, and a recomputing trainer does not go back to keeping.
-    let mut t = trainer();
+    let mut t = trainer(gpu_core::testgpu::dev(arcface::model::PIPELINES));
     assert!(t.set_saved_policy(SavedPolicy::Quantized(SavedFormat::Bf16)).unwrap_err().contains("arcface"));
     t.set_saved_policy(SavedPolicy::Recompute).unwrap();
     assert!(t.set_saved_policy(SavedPolicy::Keep).unwrap_err().contains("arcface"));

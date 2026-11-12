@@ -10,8 +10,9 @@
 //! objective and every gradient of the tower that keeps everything, bit for bit, on fewer live device bytes.
 //! `SamEncoder` has no `model::Model` impl for that function to take, so this test runs the same clauses on the
 //! tower itself. The fixture is the HD-branch tower grown to five blocks, so windowed and global blocks both recur
-//! and the tapped block's adjoint joins a downstream block's. One test in its own binary, so nothing else allocates
-//! while the device bytes are compared.
+//! and the tapped block's adjoint joins a downstream block's.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use model::saved::{SavedFormat, SavedPolicy};
 use sam1::{SamEncoder, SamViTConfig};
@@ -29,13 +30,15 @@ fn config() -> SamViTConfig {
     SamViTConfig { n_layers: 5, ..SamViTConfig::tiny_hd() }
 }
 
-fn tower() -> SamEncoder {
-    SamEncoder::with_dense_init(gpu_core::testgpu::dev(sam1::PIPELINES), config(), 11)
+fn tower(gpu: gpu_core::Gpu) -> SamEncoder {
+    SamEncoder::with_dense_init(gpu, config(), 11)
 }
 
 /// One training step under `policy`.
 fn measured(policy: SavedPolicy) -> Measured {
-    let mut t = tower();
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(sam1::PIPELINES);
+    let mut t = tower(own.share());
     t.set_saved_policy(policy).unwrap();
     let live = t.gpu.memory_usage().map(|u| u.live);
     t.gpu.reset_memory_peak();
@@ -67,7 +70,7 @@ fn sam1_recomputes_its_blocks_exactly() {
     }
 
     // Narrow saved formats do not apply, and a recomputing tower does not go back to keeping.
-    let mut t = tower();
+    let mut t = tower(gpu_core::testgpu::dev(sam1::PIPELINES));
     assert!(t.set_saved_policy(SavedPolicy::Quantized(SavedFormat::Bf16)).unwrap_err().contains("sam1"));
     t.set_saved_policy(SavedPolicy::Recompute).unwrap();
     assert!(t.set_saved_policy(SavedPolicy::Keep).unwrap_err().contains("sam1"));

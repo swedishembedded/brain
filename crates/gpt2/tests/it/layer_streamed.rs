@@ -9,8 +9,8 @@
 //! per-layer tensors stream through a one-layer device window with their f32 values and optimizer state on the host,
 //! and train exactly what the build holding every layer in that state trains, which is what the plain f32 build
 //! trains on the device; a streamed run stopped and resumed through the fit loop ends exactly where the
-//! uninterrupted one does (`model::trainprec::check_exact_resume`). One test in its own binary, the contracts in turn,
-//! so nothing else allocates while the device bytes are compared.
+//! uninterrupted one does (`model::trainprec::check_exact_resume`). The device-byte comparison runs on a device
+//! the test owns (`gpu_core::testgpu::private`).
 
 use gpt2::{Gpt, GptConfig};
 use model::Model;
@@ -21,7 +21,9 @@ fn gpt2_streams_its_layers_through_a_one_layer_window_and_resumes_exactly() {
     let init = gpt2::init_weights(&cfg, 11);
     let x: Vec<u32> = (0..16).map(|i| (i * 5 + 1) % cfg.vocab).collect();
     let y: Vec<u32> = (0..16).map(|i| (i * 5 + 2) % cfg.vocab).collect();
-    let build = || Gpt::new_on(gpu_core::testgpu::dev(gpt2::model::PIPELINES), cfg.clone(), 2, 8, &init);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(gpt2::model::PIPELINES);
+    let build = || Gpt::new_on(own.new_like(gpt2::model::PIPELINES), cfg.clone(), 2, 8, &init);
     let step = |m: &Gpt, t: u32, clip: Option<f32>| {
         m.zero_grads();
         Gpt::set_batch(m, &x, &y);

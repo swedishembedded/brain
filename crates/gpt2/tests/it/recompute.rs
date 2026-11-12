@@ -8,8 +8,9 @@
 //! Activation recompute through the shared contracts: a build that keeps only the residual between layers and replays
 //! each layer before its backward computes the loss and gradients of the build that keeps every layer, bit for bit,
 //! on fewer device bytes (`model::saved::check_recompute`), and holding those residuals in bf16 or FP8 trains to the
-//! format's precision on fewer still (`model::saved::check_quantized_boundaries`). One test in its own binary, the
-//! contracts in turn, so nothing else allocates while the device bytes are compared.
+//! format's precision on fewer still (`model::saved::check_quantized_boundaries`).
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use gpt2::{Gpt, GptConfig};
 
@@ -20,7 +21,9 @@ fn gpt2_recomputes_every_layer_and_narrows_its_boundaries() {
     let init = gpt2::init_weights(&cfg, 11);
     let x: Vec<u32> = (0..16).map(|i| (i * 5 + 1) % cfg.vocab).collect();
     let y: Vec<u32> = (0..16).map(|i| (i * 5 + 2) % cfg.vocab).collect();
-    let build = || Gpt::new_on(gpu_core::testgpu::dev(gpt2::model::PIPELINES), cfg.clone(), 2, 8, &init);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(gpt2::model::PIPELINES);
+    let build = || Gpt::new_on(own.new_like(gpt2::model::PIPELINES), cfg.clone(), 2, 8, &init);
     let step = |m: &Gpt| {
         m.zero_grads();
         m.set_batch(&x, &y);

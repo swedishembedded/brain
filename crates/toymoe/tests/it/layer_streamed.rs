@@ -9,14 +9,17 @@
 //! included, stream through a one-layer device window with their f32 values and optimizer state on the host, and train
 //! exactly what the build holding every layer in that state trains, which is what the plain f32 build trains on the
 //! device (`model::streamed::check_layer_streaming`); a streamed run stopped and resumed through the fit loop ends
-//! exactly where the uninterrupted one does (`model::trainprec::check_exact_resume`). One test in its own binary, the
-//! contracts in turn, so nothing else allocates while the device bytes are compared.
+//! exactly where the uninterrupted one does (`model::trainprec::check_exact_resume`).
+//! The device-byte comparison runs on a device the test owns (the
+//! model constructor builds it; `gpu_core::testgpu::exclusive` is held while it lives).
 
 use model::Model as _;
 use toymoe::train::{Config, Trainer, MOE_ADAM};
 
 #[test]
 fn toymoe_streams_its_layers_through_a_one_layer_window_and_resumes_exactly() {
+    // The constructor builds its own device, with its own allocation tally; only one such device may be alive at a time.
+    let _exclusive = gpu_core::testgpu::exclusive();
     let cfg = Config { vocab: 64, block_size: 16, n_layers: 3, d_model: 32, n_heads: 4, n_experts: 3, top_k: 2, d_ff: 64, aux_coef: 0.01, z_coef: 1e-4 };
     let init = Trainer::init_weights(&cfg, 5);
     let x: Vec<u32> = (0..16).map(|i| (i * 7 % 64) as u32).collect();

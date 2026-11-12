@@ -8,8 +8,9 @@
 //! Activation recompute through the shared contracts: a build that keeps only the residual between layers and replays
 //! each layer (every expert included) before its backward computes the loss and gradients of the build that keeps
 //! every layer, bit for bit, on fewer device bytes (`model::saved::check_recompute`), and holding those residuals in
-//! bf16 or FP8 trains to the format's precision on fewer still (`model::saved::check_quantized_boundaries`). One test
-//! in its own binary, the contracts in turn, so nothing else allocates while the device bytes are compared.
+//! bf16 or FP8 trains to the format's precision on fewer still (`model::saved::check_quantized_boundaries`).
+//! The device-byte comparison runs on a device the test owns (the
+//! model constructor builds it; `gpu_core::testgpu::exclusive` is held while it lives).
 
 use model::Model as _;
 use toymoe::train::{Config, Trainer};
@@ -21,6 +22,8 @@ fn config(top_k: u32) -> Config {
 
 #[test]
 fn toymoe_recomputes_every_layer_and_narrows_its_boundaries() {
+    // The constructor builds its own device, with its own allocation tally; only one such device may be alive at a time.
+    let _exclusive = gpu_core::testgpu::exclusive();
     let (b, t) = (2u32, 64u32);
     let x: Vec<u32> = (0..b * t).map(|i| i * 7 % 64).collect();
     let y: Vec<u32> = (0..b * t).map(|i| (i * 7 + 1) % 64).collect();

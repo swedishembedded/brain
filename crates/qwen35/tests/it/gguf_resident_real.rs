@@ -1175,6 +1175,8 @@ fn the_planned_workspace_covers_what_a_real_step_allocates() {
         brain_testutil::skip_unavailable("no GPU with queryable VRAM");
         return;
     }
+    // The probe and the loaded model are devices of this test's own, whose tallies are compared; one such device at a time.
+    let _exclusive = gpu_core::testgpu::exclusive();
     let probe = gpu_core::Gpu::new(&[]);
     if probe.memory_usage().is_none() {
         brain_testutil::skip_unavailable("this backend does not account for its allocations");

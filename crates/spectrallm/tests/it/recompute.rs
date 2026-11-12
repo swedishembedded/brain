@@ -9,8 +9,9 @@
 //! SpectralLM keeps only the residual between layers and rebuilds each one before its backward, so `recompute` is
 //! accepted as what it already does and keeping every layer is refused by name
 //! (`model::saved::check_always_recomputes`), and holding those residuals in bf16 or FP8 trains to the format's
-//! precision on fewer device bytes (`model::saved::check_quantized_boundaries`). One test in its own binary, the
-//! contracts in turn, so nothing else allocates while the device bytes are compared.
+//! precision on fewer device bytes (`model::saved::check_quantized_boundaries`).
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use model::{Batch, Model};
 use spectrallm::{SpectralConfig, SpectralLm};
@@ -28,7 +29,9 @@ fn spectrallm_recomputes_and_narrows_its_boundaries() {
     let init = spectrallm::init_weights(&cfg, 12);
     let x: Vec<u32> = (0..48u32).map(|i| (i * 13 + i / 8) % cfg.vocab).collect();
     let y: Vec<u32> = (0..48u32).map(|i| (i * 11 + 5) % cfg.vocab).collect();
-    let build = || SpectralLm::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), 4, 12, &init, true);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(pipelines());
+    let build = || SpectralLm::new_on(own.new_like(pipelines()), cfg.clone(), 4, 12, &init, true);
     model::saved::check_always_recomputes("spectrallm", &mut build()).unwrap();
     let step = |m: &SpectralLm| {
         m.zero_grads();

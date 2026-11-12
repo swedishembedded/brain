@@ -8,8 +8,9 @@
 //! What RRDBNet's graphs keep of their activations. Every dense block frees its intermediates after their last read,
 //! so the inference graph reuses them and computes exactly the training graph's output; and a training graph that
 //! recomputes the dense blocks (`vae::blocks::Activations::Recompute`) gives the gradients of the one that keeps them,
-//! bit for bit, holding fewer device bytes. One test in its own binary, so nothing else allocates while the device
-//! bytes are compared.
+//! bit for bit, holding fewer device bytes.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use rrdbnet::train::{RrdbTrainer, TRAIN_PIPELINES};
 use rrdbnet::{Rrdb, RrdbConfig};
@@ -46,7 +47,7 @@ type Measured = (Vec<(String, Vec<u32>)>, Vec<f32>, u64);
 
 fn step(activations: Activations) -> Measured {
     let cfg = config();
-    let gpu = gpu_core::testgpu::dev(TRAIN_PIPELINES);
+    let gpu = gpu_core::testgpu::private(TRAIN_PIPELINES);
     let before = gpu.memory_usage().expect("the test device reports its memory").live;
     let m = RrdbTrainer::new(gpu.share(), cfg.clone(), &weights(&cfg), H, W, activations);
     let held = gpu.memory_usage().unwrap().live - before;

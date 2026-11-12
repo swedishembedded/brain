@@ -9,10 +9,10 @@
 //! `model::saved::check_recompute` states: a network that keeps only each unit's output and rebuilds its post-conv and
 //! post-BatchNorm intermediates from the unit's input before its backward computes the loss and every gradient of the
 //! network that keeps them, bit for bit, at a lower step peak. ZipDepth is a net run by a free training loop with no
-//! `model::Model` impl for that function to take, so this test runs the same two clauses on the net itself. One test
-//! in its own binary, so nothing else allocates while the device bytes are compared.
+//! `model::Model` impl for that function to take, so this test runs the same two clauses on the net itself.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
-use gpu_core::Gpu;
 use model::saved::SavedPolicy;
 use paramstore::ParamStore;
 use vision::Ctx;
@@ -30,7 +30,8 @@ fn config() -> ZipConfig {
 /// One training step of the net under `policy`.
 fn measured(policy: SavedPolicy) -> Measured {
     let cfg = config();
-    let gpu: Gpu = gpu_core::testgpu::dev(zipdepth::net::PIPELINES);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let gpu = gpu_core::testgpu::private(zipdepth::net::PIPELINES);
     let ctx = Ctx::new(&gpu, zipdepth::net::ids());
     let m = ZipDepth::build(&ctx, cfg.clone(), BATCH, true);
     m.set_saved_policy(policy).unwrap();

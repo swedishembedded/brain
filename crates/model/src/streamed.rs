@@ -331,6 +331,9 @@ pub fn blocks_layer(name: &str) -> Option<u32> {
 ///   step in whichever direction its noise points, in either build;
 /// * where the backend accounts for its allocations, the streamed build holds fewer live device bytes than the plain
 ///   one.
+///
+/// Run it on a device the test owns (`gpu_core::testgpu::private`, every build a `new_like` handle on it): the byte
+/// comparison reads that device's allocation tally, which a device shared with concurrent tests would pollute.
 pub fn check_layer_streaming<M: crate::Model>(name: &str, build: impl Fn() -> M, step: impl Fn(&M, u32, Option<f32>) -> f32) -> Result<(), String> {
     let live = |m: &M| m.optimizer_parts().and_then(|p| p.gpu.memory_usage()).map(|u| u.live);
     let values = |m: &M| -> Vec<(String, Vec<f32>)> {
@@ -387,7 +390,8 @@ pub fn check_layer_streaming<M: crate::Model>(name: &str, build: impl Fn() -> M,
 /// * it trains exactly what the plain model streamed after construction ([`crate::Model::set_resident`]) trains: the
 ///   loss of every step and every final value, bit for bit, with the clip off and active.
 ///
-/// Run it with no other model alive on the device, so the streamed build's peak is its own.
+/// Run it on a device the test owns (`gpu_core::testgpu::private`, every build a `new_like` handle on it), so the
+/// streamed build's peak is its own: a device shared with concurrent tests counts their buffers too.
 pub fn check_streamed_construction<M: crate::Model>(name: &str, build: impl Fn() -> M, build_streamed: impl Fn() -> Result<M, String>, step: impl Fn(&M, u32, Option<f32>) -> f32) -> Result<(), String> {
     let usage = |m: &M| m.optimizer_parts().and_then(|p| p.gpu.memory_usage());
     let values = |m: &M| -> Vec<(String, Vec<u32>)> {

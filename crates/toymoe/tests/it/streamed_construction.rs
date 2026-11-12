@@ -6,7 +6,7 @@
 // services by sending an email to info@swedishembedded.com.
 
 //! Construction-time layer streaming through the shared contract (`model::streamed::check_streamed_construction`).
-//! One test in its own binary, so nothing else allocates while the device bytes are compared.
+//! The device-byte comparison runs on a device the test owns (`gpu_core::testgpu::private`).
 
 use model::Model as _;
 use toymoe::train::{Config, Trainer, MOE_ADAM};
@@ -15,6 +15,8 @@ use toymoe::train::{Config, Trainer, MOE_ADAM};
 /// trains what the build streamed after construction does (`model::streamed::check_streamed_construction`).
 #[test]
 fn toymoe_builds_its_layers_straight_into_the_window() {
+    // The constructor builds its own device, with its own allocation tally; only one such device may be alive at a time.
+    let _exclusive = gpu_core::testgpu::exclusive();
     let cfg = Config { vocab: 64, block_size: 16, n_layers: 3, d_model: 32, n_heads: 4, n_experts: 3, top_k: 2, d_ff: 64, aux_coef: 0.01, z_coef: 1e-4 };
     let init = Trainer::init_weights(&cfg, 5);
     let x: Vec<u32> = (0..16).map(|i| i * 7 % 64).collect();

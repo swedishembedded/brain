@@ -9,8 +9,9 @@
 //! state and routed experts included) before its backward computes the loss and gradients of the build that keeps
 //! every layer, bit for bit, while holding no layer's activations across the forward and peaking lower in device
 //! memory (`model::saved::check_recompute`); holding those residuals in bf16 or FP8 trains to the format's precision on
-//! fewer bytes still (`model::saved::check_quantized_boundaries`). One test in its own binary, so nothing else
-//! allocates while the device bytes are compared.
+//! fewer bytes still (`model::saved::check_quantized_boundaries`).
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use model::saved::SavedPolicy;
 use qwen35moe::config::Qwen35Config;
@@ -25,7 +26,9 @@ fn qwen35moe_recomputes_every_layer_and_narrows_its_boundaries() {
     let init = qwen35moe::init::init_weights(&cfg, 7);
     let x: Vec<u32> = (0..t).map(|i| (i * 3 + 1) % cfg.vocab).collect();
     let y: Vec<u32> = (0..t).map(|i| (i * 3 + 2) % cfg.vocab).collect();
-    let build = || Qwen35::new_train_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), 1, t, &init);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(pipelines());
+    let build = || Qwen35::new_train_on(own.new_like(pipelines()), cfg.clone(), 1, t, &init);
     let step = |m: &Qwen35| {
         m.zero_grads();
         m.set_batch(&x, &y);
@@ -56,6 +59,6 @@ fn qwen35moe_recomputes_every_layer_and_narrows_its_boundaries() {
     let mut dense = cfg.clone();
     dense.top_k = dense.n_experts;
     let init = qwen35moe::init::init_weights(&dense, 9);
-    let build = || Qwen35::new_train_on(gpu_core::testgpu::dev(pipelines()), dense.clone(), 1, t, &init);
+    let build = || Qwen35::new_train_on(own.new_like(pipelines()), dense.clone(), 1, t, &init);
     model::saved::check_quantized_boundaries("qwen35moe", build, step).unwrap();
 }

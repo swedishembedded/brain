@@ -10,8 +10,9 @@
 //! gradient carried on the host between those visits and the block updated once the backward is complete. That trains
 //! exactly what the build holding every layer in that state trains and what the plain f32 build trains on the device
 //! (`model::streamed::check_layer_streaming`); a streamed run stopped and resumed through the fit loop ends exactly
-//! where the uninterrupted one does (`model::trainprec::check_exact_resume`). One test in its own binary, the
-//! contracts in turn, so nothing else allocates while the device bytes are compared.
+//! where the uninterrupted one does (`model::trainprec::check_exact_resume`).
+//! The device-byte comparison runs on a device the test owns (the
+//! model constructor builds it; `gpu_core::testgpu::exclusive` is held while it lives).
 
 use huginn::model::Huginn;
 use huginn::HuginnConfig;
@@ -19,6 +20,8 @@ use model::{Batch, Model};
 
 #[test]
 fn huginn_streams_its_blocks_through_a_one_layer_window_and_resumes_exactly() {
+    // The constructor builds its own device, with its own allocation tally; only one such device may be alive at a time.
+    let _exclusive = gpu_core::testgpu::exclusive();
     let cfg = HuginnConfig::tiny();
     let init = huginn::init::init_weights(&cfg, 3);
     let v = cfg.vocab;

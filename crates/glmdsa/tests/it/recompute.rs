@@ -9,8 +9,9 @@
 //! each layer (its routed experts included) before its backward computes the loss and gradients of the build that
 //! keeps every layer, bit for bit, on fewer device bytes (`model::saved::check_recompute`), and holding those
 //! residuals in bf16 or FP8 trains to the format's precision on fewer still
-//! (`model::saved::check_quantized_boundaries`). One test in its own binary, the contracts in turn, so nothing else
-//! allocates while the device bytes are compared.
+//! (`model::saved::check_quantized_boundaries`).
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use glmdsa::{Glm, GlmConfig};
 
@@ -23,7 +24,9 @@ fn glm_recomputes_every_layer_and_narrows_its_boundaries() {
     let init = glmdsa::init_weights(&cfg, 11);
     let x: Vec<u32> = (0..128).map(|i| (i * 7 % 23) as u32).collect();
     let y: Vec<u32> = (0..128).map(|i| ((i * 7 + 1) % 23) as u32).collect();
-    let build = || Glm::new_on(gpu_core::testgpu::dev(glmdsa::model::PIPELINES), cfg.clone(), 8, 16, &init);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(glmdsa::model::PIPELINES);
+    let build = || Glm::new_on(own.new_like(glmdsa::model::PIPELINES), cfg.clone(), 8, 16, &init);
     let step = |m: &Glm| {
         m.zero_grads();
         m.set_batch(&x, &y);

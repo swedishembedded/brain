@@ -10,8 +10,9 @@
 //! (the multi-token-prediction head stays in the store), train exactly what the build holding every layer in that
 //! state trains, which is what the plain f32 build trains on the device (`model::streamed::check_layer_streaming`),
 //! and a streamed run stopped and resumed through the fit loop ends exactly where the uninterrupted one does
-//! (`model::trainprec::check_exact_resume`). One test in its own binary, the contracts in turn, so nothing else
-//! allocates while the device bytes are compared.
+//! (`model::trainprec::check_exact_resume`).
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use glmdsa::{Glm, GlmConfig};
 use model::Model;
@@ -23,7 +24,9 @@ fn glm_streams_its_layers_through_a_one_layer_window_and_resumes_exactly() {
     let init = glmdsa::init_weights(&cfg, 11);
     let x: Vec<u32> = (0..16).map(|i| (i * 7 % 23) as u32).collect();
     let y: Vec<u32> = (0..16).map(|i| ((i * 7 + 1) % 23) as u32).collect();
-    let build = || Glm::new_on(gpu_core::testgpu::dev(glmdsa::model::PIPELINES), cfg.clone(), 2, 8, &init);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(glmdsa::model::PIPELINES);
+    let build = || Glm::new_on(own.new_like(glmdsa::model::PIPELINES), cfg.clone(), 2, 8, &init);
     let step = |m: &Glm, t: u32, clip: Option<f32>| {
         m.zero_grads();
         m.set_batch(&x, &y);

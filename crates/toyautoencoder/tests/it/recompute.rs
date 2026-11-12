@@ -22,6 +22,8 @@ fn build() -> Autoencoder {
 
 #[test]
 fn toyautoencoder_recomputes_and_refuses_what_it_cannot_do() {
+    // The constructor builds its own device, with its own allocation tally; only one such device may be alive at a time.
+    let _exclusive = gpu_core::testgpu::exclusive();
     let x: Vec<f32> = (0..8 * 32).map(|i| ((i * 5 % 13) as f32 - 6.0) * 0.1).collect();
     let step = |m: &Autoencoder| {
         m.zero_grads();

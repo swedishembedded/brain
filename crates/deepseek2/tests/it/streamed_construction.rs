@@ -6,7 +6,7 @@
 // services by sending an email to info@swedishembedded.com.
 
 //! Construction-time layer streaming through the shared contract (`model::streamed::check_streamed_construction`).
-//! One test in its own binary, so nothing else allocates while the device bytes are compared.
+//! The device-byte comparison runs on a device the test owns (`gpu_core::testgpu::private`).
 
 use deepseek2::config::DeepseekV2Config;
 use deepseek2::model::DeepseekV2;
@@ -24,8 +24,10 @@ fn deepseek2_builds_its_layers_straight_into_the_window() {
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % v).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % v).collect();
     let resident = model::TrainPrecision::parse("weights=f32,window=1").unwrap().resident_config(Some(7)).unwrap().expect("resident");
-    let build = || DeepseekV2::new_on(gpu_core::testgpu::dev(deepseek2::model::PIPELINES), cfg.clone(), 2, 6, &init, true);
-    let build_streamed = || DeepseekV2::new_resident_on(gpu_core::testgpu::dev(deepseek2::model::PIPELINES), cfg.clone(), 2, 6, &init, &resident);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(deepseek2::model::PIPELINES);
+    let build = || DeepseekV2::new_on(own.new_like(deepseek2::model::PIPELINES), cfg.clone(), 2, 6, &init, true);
+    let build_streamed = || DeepseekV2::new_resident_on(own.new_like(deepseek2::model::PIPELINES), cfg.clone(), 2, 6, &init, &resident);
     let step = |m: &DeepseekV2, t: u32, clip: Option<f32>| {
         m.zero_grads();
         m.set_batch(&x, &y);

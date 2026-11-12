@@ -8,8 +8,9 @@
 //! Activation recompute for the TimesFM-3 trainer, held to the contract `model::saved::check_recompute` states: a
 //! trainer whose layers share one set of intermediates and rebuild a layer's from its input before its backward
 //! gives every gradient of the trainer that keeps them, bit for bit, holding fewer device bytes, for a full
-//! fine-tune and for LoRA. Narrow formats and going back to keeping are refused by name. One test in its own binary,
-//! so nothing else allocates while the device bytes are compared.
+//! fine-tune and for LoRA. Narrow formats and going back to keeping are refused by name.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use std::collections::HashMap;
 
@@ -57,7 +58,7 @@ fn trainer(gpu: gpu_core::Gpu, f: &Fixture, lora: Option<LoraCfg>) -> Timesfm3Tr
 }
 
 fn step(f: &Fixture, lora: Option<LoraCfg>, policy: SavedPolicy) -> Measured {
-    let gpu = gpu_core::testgpu::dev(TRAIN_PIPELINES);
+    let gpu = gpu_core::testgpu::private(TRAIN_PIPELINES);
     let before = gpu.memory_usage().expect("the test device reports its memory").live;
     let mut t = trainer(gpu.share(), f, lora);
     t.set_saved_policy(policy).unwrap();

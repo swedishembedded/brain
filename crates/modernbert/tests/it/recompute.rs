@@ -9,7 +9,9 @@
 //! `model::saved::check_recompute` states: a trainer whose layers share one set of intermediates and rebuild a
 //! layer's from its input boundary before its backward gives the objective's gradients of the trainer that keeps
 //! every layer, bit for bit, holding fewer device bytes. Narrow formats and going back to keeping are refused by
-//! name. One test in its own binary, so nothing else allocates while the device bytes are compared.
+//! name.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use modernbert::config::ModernBertConfig;
 use modernbert::kern::PIPELINES;
@@ -45,7 +47,7 @@ fn max_span() -> u32 {
 
 fn trunk_step(init: &std::collections::HashMap<String, Vec<f32>>, policy: SavedPolicy) -> Measured {
     let cfg = trunk_config();
-    let gpu = gpu_core::testgpu::dev(PIPELINES);
+    let gpu = gpu_core::testgpu::private(PIPELINES);
     let before = gpu.memory_usage().expect("the test device reports its memory").live;
     let mut m = ModernBert::new_train_on(gpu.share(), cfg.clone(), rows(), max_span(), init);
     m.set_saved_policy(policy).unwrap();
@@ -68,7 +70,7 @@ fn trunk_step(init: &std::collections::HashMap<String, Vec<f32>>, policy: SavedP
 fn head_step(trunk_init: &std::collections::HashMap<String, Vec<f32>>, head_init: &std::collections::HashMap<String, Vec<f32>>, policy: SavedPolicy) -> Measured {
     let cfg = trunk_config();
     let laya = LayaConfig::new(cfg.d_model);
-    let gpu = gpu_core::testgpu::dev(PIPELINES);
+    let gpu = gpu_core::testgpu::private(PIPELINES);
     let mut enc = ModernBert::new_train_on(gpu.share(), cfg.clone(), rows(), max_span(), trunk_init);
     let before = gpu.memory_usage().unwrap().live;
     let mut head = LayaHead::new_train_on(gpu.share(), laya.clone(), rows(), max_span(), MARKER_ROWS.len() as u32, SPANS.len() as u32, head_init);

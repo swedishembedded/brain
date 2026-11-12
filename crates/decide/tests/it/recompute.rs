@@ -8,8 +8,9 @@
 //! Activation recompute for the decision encoder, held to the contract `model::saved::check_recompute` states: an
 //! encoder whose layers share one set of intermediates and rebuild a layer's from its input before its backward gives
 //! every gradient of the encoder that keeps them, bit for bit, holding fewer device bytes. Narrow formats and going
-//! back to keeping are refused by name. One test in its own binary, so nothing else allocates while the device bytes
-//! are compared.
+//! back to keeping are refused by name.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use decide::config::EncoderConfig;
 use decide::kern::PIPELINES;
@@ -37,7 +38,7 @@ fn max_span() -> u32 {
 
 fn step(init: &decide::Tensors, policy: SavedPolicy) -> Measured {
     let cfg = config();
-    let gpu = gpu_core::testgpu::dev(PIPELINES);
+    let gpu = gpu_core::testgpu::private(PIPELINES);
     let before = gpu.memory_usage().expect("the test device reports its memory").live;
     let mut enc = Encoder::new_train_on(gpu.share(), cfg.clone(), rows(), max_span(), init);
     enc.set_saved_policy(policy).unwrap();

@@ -8,8 +8,9 @@
 //! Activation recompute for Florence-2's BART trainer, held to the contract `model::saved::check_recompute` states:
 //! a trainer whose layers share one set of intermediates per tower and rebuild a layer's from its input before its
 //! backward gives the loss and every gradient of the trainer that keeps them, bit for bit, holding fewer device bytes,
-//! for a full fine-tune and for LoRA. Narrow formats and going back to keeping are refused by name. One test in its own
-//! binary, so nothing else allocates while the device bytes are compared.
+//! for a full fine-tune and for LoRA. Narrow formats and going back to keeping are refused by name.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use std::collections::HashMap;
 
@@ -34,7 +35,7 @@ fn build(gpu: &gpu_core::Gpu, lora: Option<LoraCfg>) -> Florence2Trainer {
 type Measured = (u32, Vec<(String, Vec<u32>)>, u64);
 
 fn step(lora: Option<LoraCfg>, policy: SavedPolicy) -> Measured {
-    let gpu = gpu_core::testgpu::dev(train::PIPELINES);
+    let gpu = gpu_core::testgpu::private(train::PIPELINES);
     let before = gpu.memory_usage().expect("the test device reports its memory").live;
     let mut m = build(&gpu, lora);
     m.set_saved_policy(policy).unwrap();

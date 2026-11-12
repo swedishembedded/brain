@@ -6,7 +6,7 @@
 // services by sending an email to info@swedishembedded.com.
 
 //! Construction-time layer streaming through the shared contract (`model::streamed::check_streamed_construction`).
-//! One test in its own binary, so nothing else allocates while the device bytes are compared.
+//! The device-byte comparison runs on a device the test owns (`gpu_core::testgpu::private`).
 
 use model::Model;
 use toyseq2seq::{Seq2Seq, Seq2SeqConfig};
@@ -27,8 +27,10 @@ fn toyseq2seq_builds_its_layers_straight_into_the_window() {
     let tgt: Vec<u32> = (0..b * t).map(|i| (i * 7 + 2) % cfg.vocab).collect();
     let labels: Vec<u32> = (0..b * t).map(|i| (i * 7 + 3) % cfg.vocab).collect();
     let resident = model::TrainPrecision::parse("weights=f32,window=1").unwrap().resident_config(Some(7)).unwrap().expect("resident");
-    let build = || Seq2Seq::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), b, t, &init);
-    let build_streamed = || Seq2Seq::new_resident_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), b, t, &init, &resident);
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(pipelines());
+    let build = || Seq2Seq::new_on(own.new_like(pipelines()), cfg.clone(), b, t, &init);
+    let build_streamed = || Seq2Seq::new_resident_on(own.new_like(pipelines()), cfg.clone(), b, t, &init, &resident);
     let step = |m: &Seq2Seq, step: u32, clip: Option<f32>| {
         m.zero_grads();
         m.set_batch(&src, &tgt, &labels);

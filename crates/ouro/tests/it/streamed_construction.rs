@@ -6,7 +6,7 @@
 // services by sending an email to info@swedishembedded.com.
 
 //! Construction-time layer streaming through the shared contract (`model::streamed::check_streamed_construction`).
-//! One test in its own binary, so nothing else allocates while the device bytes are compared.
+//! The device-byte comparison runs on a device the test owns (`gpu_core::testgpu::private`).
 
 use model::{Batch, Model};
 use ouro::model::Ouro;
@@ -16,6 +16,8 @@ use ouro::OuroConfig;
 /// streamed after construction does (`model::streamed::check_streamed_construction`).
 #[test]
 fn ouro_builds_its_layers_straight_into_the_window() {
+    // The constructor builds its own device, with its own allocation tally; only one such device may be alive at a time.
+    let _exclusive = gpu_core::testgpu::exclusive();
     let cfg = OuroConfig::tiny();
     let init = ouro::init::init_weights(&cfg, 3);
     let v = cfg.vocab;

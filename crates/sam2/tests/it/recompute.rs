@@ -9,8 +9,9 @@
 //! states: a trainer that keeps only each two-way layer's output tokens and keys and rebuilds the layer from them
 //! before its backward computes the loss and every gradient of the trainer that keeps everything, bit for bit, on
 //! fewer live device bytes. `MaskDecoderTrainer` has no `model::Model` impl for that function to take, so this test
-//! runs the same clauses on the trainer itself. One test in its own binary, so nothing else allocates while the
-//! device bytes are compared.
+//! runs the same clauses on the trainer itself.
+//! The device-byte comparison runs on a device the test owns
+//! (`gpu_core::testgpu::private`).
 
 use std::collections::HashMap;
 
@@ -79,8 +80,7 @@ fn weights(cfg: &Sam2Config) -> Tensors {
     t
 }
 
-fn trainer() -> MaskDecoderTrainer {
-    let gpu: Gpu = gpu_core::testgpu::dev(sam2::PIPELINES);
+fn trainer(gpu: Gpu) -> MaskDecoderTrainer {
     let cfg = config();
     let weights = weights(&cfg);
     let d = cfg.d_model as usize;
@@ -121,7 +121,9 @@ fn trainer() -> MaskDecoderTrainer {
 
 /// One training step under `policy`.
 fn measured(policy: SavedPolicy) -> Measured {
-    let mut t = trainer();
+    // The byte comparison reads the device's own allocation tally, so it runs on a device this test owns.
+    let own = gpu_core::testgpu::private(sam2::PIPELINES);
+    let mut t = trainer(own.share());
     t.set_saved_policy(policy).unwrap();
     let gpu = &t.sam.gpu;
     let live = gpu.memory_usage().map(|u| u.live);
@@ -155,7 +157,7 @@ fn sam2_recomputes_its_two_way_layers_exactly() {
     }
 
     // Narrow saved formats do not apply, and a recomputing trainer does not go back to keeping.
-    let mut t = trainer();
+    let mut t = trainer(gpu_core::testgpu::dev(sam2::PIPELINES));
     assert!(t.set_saved_policy(SavedPolicy::Quantized(SavedFormat::Bf16)).unwrap_err().contains("sam2"));
     t.set_saved_policy(SavedPolicy::Recompute).unwrap();
     assert!(t.set_saved_policy(SavedPolicy::Keep).unwrap_err().contains("sam2"));
