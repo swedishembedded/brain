@@ -52,6 +52,7 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("mid_frame", ParamType::Str, "optional path to a PNG/JPEG still anchoring ONE INTERIOR instant of the clip (mid_frame_at): a clean image-guidance latent appended at that instant, exactly as end_frame is at the last - one more of keyframes. Same eta/dit_config requirements as start_frame.").host_resolved())
     .param(ParamSpec::new("mid_frame_at", ParamType::Int, "which pixel frame mid_frame anchors, strictly between 0 and frames-1. Unset takes the reference's own position for a single interior keyframe (evenly_spaced_keyframe_positions), (frames-1)/2. Only read when mid_frame is set.").min(0.0).max(capability::bounds::VIDEO_FRAMES))
     .param(ParamSpec::new("keyframes", ParamType::Str, "interior keyframes, comma-separated FRAME:PATH pairs (e.g. 40:a.png,80:b.png): each server-side PNG/JPEG still anchors the pixel frame it names, strictly between 0 and frames-1, as a clean image-guidance latent appended at that instant; the clip moves through every one of them in a single generation. Same eta/dit_config requirements as start_frame.").host_resolved())
+    .param(ParamSpec::new("keyframe_strength", ParamType::Float, "ImageConditioningInput.strength for the interior keyframes (mid_frame, keyframes) alone; start_frame and end_frame keep conditioning_strength").min(0.0).max(capability::bounds::UNIT).default(json!(d.keyframe_strength)))
     .param(ParamSpec::new("conditioning_strength", ParamType::Float, "ImageConditioningInput.strength for every given still: 1.0 pins the conditioned tokens to the encoded image exactly, lower values (the reference's own CLI example is 0.8) leave the model room to move. Only read when one of start_frame/mid_frame/keyframes/end_frame is set.").min(0.0).max(capability::bounds::UNIT).default(json!(d.conditioning_strength)))
     .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame). Unset, the duration head predicts the length from the prompt (1-20 s) when the real checkpoint, text encoder and duration head are configured; otherwise 121 with the real checkpoint, 9 for the tiny smoke test").min(0.0).max(capability::bounds::VIDEO_FRAMES))
     .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 32); unset, 768 with the real checkpoint, 64 for the smoke test").min(0.0).max(capability::bounds::SIDE_PX))
@@ -260,6 +261,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         start_frame: inv.get_str("start_frame"),
         end_frame: inv.get_str("end_frame"),
         keyframes: Vec::new(),
+        keyframe_strength: inv.get_f64("keyframe_strength").unwrap_or(d.keyframe_strength as f64).clamp(0.0, 1.0) as f32,
         conditioning_strength: inv.get_f64("conditioning_strength").unwrap_or(d.conditioning_strength as f64).clamp(0.0, 1.0) as f32,
         // Not an invocation parameter: placement is the SERVER's decision,
         // not the caller's. A resident instance overrides it (see

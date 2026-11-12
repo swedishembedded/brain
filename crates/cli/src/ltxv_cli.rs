@@ -177,6 +177,12 @@ reference pipelines' defaults; without it, a tiny random-weight smoke test):
                              stills a plausible distance apart: the model
                              blends between them, so two very different
                              stills a few frames apart can only be a cut.
+  --keyframe-strength <S>      how hard each --keyframe/--mid-frame holds its
+                             still, 0..1 (default 0.8; the start and end
+                             stills keep --conditioning-strength). At 0.8 a
+                             keyframe that no continuous motion reaches is
+                             blended into rather than cut to; one from the
+                             same shot is reached as closely as at 1.0.
   --mid-frame <path>           one --keyframe at --mid-frame-at.
   --mid-frame-at <N>           which pixel frame --mid-frame anchors (the
                              default is the clip's own midpoint,
@@ -297,21 +303,12 @@ Long-form clips:
   generated exactly as it always was, and none of this runs.
   --max-window-tokens <N> sets the per-window token ceiling (default 13200,
   the largest single-window generation this crate has a recorded real run
-  at); --stage-major builds a video-only clip's motion stage-major instead
-  of window by window (see below). --start-frame conditions the first window as
+  at). --start-frame conditions the first window as
   usual; --end-frame conditions the windows that own their instants, and
   every window also receives the anchors still ahead of it as appended
   guides, so each window bends its motion toward the next keyframe instead
   of running on alone. Every --keyframe (and --mid-frame) guides the window
   that owns its instant, at that instant, the same way.
-
-  Stage-major (--stage-major, two-stage, video-only): the clip is generated
-  via two independent window plans: stage 1 at half resolution across the
-  whole clip (where motion is decided) and stage 2 refining it window by
-  window at full resolution. Off by default: each refinement window
-  regenerates its slice seeing only its own part of the clip, and the
-  slices do not stitch - measured, a refinement seam can cut to another
-  scene. Audio-visual clips always use the window-major loop.
 
 Scenes:
   One --frames/--prompt run is one continuous SHOT: every window shares the
@@ -794,7 +791,6 @@ fn t2v(args: &[String]) -> Result<(), String> {
     let (mut mid_frame, mut mid_frame_at) = (None, None);
     // The long-form plan's own settings ([`LongOpts`]).
     let mut max_window_tokens = ltxv::longform::LONGFORM_MAX_TOKENS;
-    let mut stage_major = false;
     // Which settings the command line names; the rest come from what is
     // configured (`ltxv::pipeline::resolve_defaults`).
     let mut named = Named::default();
@@ -839,11 +835,6 @@ fn t2v(args: &[String]) -> Result<(), String> {
             }
             f if runtime_flag(f) => set_runtime(&mut o.runtime, f, need(i)?)?,
             "--max-window-tokens" => max_window_tokens = num(i, "--max-window-tokens")?.max(1),
-            "--stage-major" => {
-                stage_major = true;
-                i += 1;
-                continue;
-            }
             "--base-shift" => o.base_shift = dbl(i, "--base-shift")?,
             "--max-shift" => o.max_shift = dbl(i, "--max-shift")?,
             "--terminal" => o.terminal = dbl(i, "--terminal")?,
@@ -879,6 +870,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
                 mid_frame = Some(need(i)?.clone());
             }
             "--mid-frame-at" => mid_frame_at = Some(num(i, "--mid-frame-at")?),
+            "--keyframe-strength" => o.keyframe_strength = flt(i, "--keyframe-strength")?,
             "--keyframe" => o.keyframes.push(ltxv::pipeline::parse_keyframe(need(i)?).map_err(|e| format!("--keyframe: {e}"))?),
             // `--no-stretch` is a bare flag (no value), unlike every other
             // option above - handled separately so the `i += 2` stride
@@ -950,7 +942,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
         let vcfg = ltxv::LtxVaeConfig::conv25();
         vcfg.latent_frames(context_frames as u32).ok_or_else(|| format!("--context-frames {context_frames} is not of the form 1 + 8k"))? as usize
     };
-    let long = LongOpts { context_latent_frames: context_latents, max_window_tokens, max_refine_tokens: ltxv::pipeline::REFINE_MAX_TOKENS, stage_major, base: o.clone() };
+    let long = LongOpts { context_latent_frames: context_latents, max_window_tokens, base: o.clone() };
     // The plan decides what this run actually is, so it is resolved before
     // the preview line rather than after: a multi-window clip's per-forward
     // token count is one WINDOW's, and reporting the whole clip's would name
@@ -1780,6 +1772,7 @@ mod tests {
             "--mid-frame",
             "--mid-frame-at",
             "--keyframe",
+            "--keyframe-strength",
             "--conditioning-strength",
             "--context-frames",
             "--reference-video",
@@ -1917,7 +1910,7 @@ mod tests {
                 assert!(help.contains(flag), "{flag} is parsed but not in {name} --help");
             }
         }
-        assert!(super::HELP.contains("--max-window-tokens") && super::HELP.contains("--stage-major"));
+        assert!(super::HELP.contains("--max-window-tokens"));
     }
 
     /// The same self-check for `t2a`.

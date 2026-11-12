@@ -235,7 +235,7 @@ mod real_weights {
     use std::path::Path;
 
     use ltxv::longform::{scene_plan, window_plan, Scene, CONTEXT_LATENT_FRAMES, SCENE_SEED_SALT};
-    use ltxv::pipeline::{generate_long, generate_scenes, GenOpts, LongOpts, Paths, REFINE_MAX_TOKENS};
+    use ltxv::pipeline::{generate_long, generate_scenes, GenOpts, LongOpts, Paths};
 
     /// The named environment variable, else the repo-relative
     /// `resources/ltxv/weights/` the real files ship under - never a literal
@@ -272,8 +272,6 @@ mod real_weights {
         let o = LongOpts {
             context_latent_frames: context,
             max_window_tokens: max_tokens,
-            max_refine_tokens: REFINE_MAX_TOKENS,
-            stage_major: true,
             base: GenOpts { frames, width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), ..GenOpts::default() },
         };
         let plan = window_plan(frames, 2, 2, context, max_tokens).expect("the plan is legal");
@@ -316,7 +314,7 @@ mod real_weights {
         let scenes = [Scene { frames: 41, prompt: "a moving bar".into() }, Scene { frames: 25, prompt: "a spinning square".into() }];
         let total: usize = scenes.iter().map(|s| s.frames).sum();
         let base = GenOpts { width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), ..GenOpts::default() };
-        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, max_refine_tokens: REFINE_MAX_TOKENS, stage_major: true, base: base.clone() };
+        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, base: base.clone() };
 
         let plan = scene_plan(&scenes, 2, 2, context, max_tokens).expect("the plan is legal");
         assert_eq!(plan[0].len(), 2, "scene 1 has to span several windows for this test to say anything about the intra-scene context: {:?}", plan[0]);
@@ -342,9 +340,9 @@ mod real_weights {
         assert_eq!(timings.steps, t0.steps + t1.steps, "the aggregated timings lost a scene's work");
     }
 
-    /// **An anchor the plan cannot honour is refused, not dropped.** Since the
-    /// stage-major path routes clip-global anchors into the window whose
-    /// decoded range covers each anchor's instant, `--end-frame` and
+    /// **An anchor the plan cannot honour is refused, not dropped.** Since
+    /// long-form routes clip-global anchors into the window whose decoded
+    /// range covers each anchor's instant, `--end-frame` and
     /// `--mid-frame` on a multi-window plan are HONOURED, not refused - the
     /// one anchor that can still fail to route is a `--mid-frame-at` outside
     /// the clip it names: no window's decoded range contains it, every window
@@ -360,10 +358,7 @@ mod real_weights {
         let paths = Paths::new(vae.clone());
         let (frames, context, max_tokens) = (41usize, 2usize, 20usize);
         let base = GenOpts { frames, width: 64, height: 64, steps: 2, fps: 8, device: Some("cpu".into()), ..GenOpts::default() };
-        // `max_refine_tokens` forced down with the window ceiling so the
-        // stage-2 plan splits and the stage-major path - the one that routes
-        // anchors - actually serves this shape instead of refusing it.
-        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, max_refine_tokens: max_tokens, stage_major: true, base };
+        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, base };
         assert!(window_plan(frames, 2, 2, context, max_tokens).expect("legal").len() > 1, "this shape has to need several windows");
         let cancel = capability::CancelToken::default();
 
@@ -377,75 +372,7 @@ mod real_weights {
         assert!(e.contains("keyframe at pixel frame"), "the refusal does not name the keyframe: {e}");
     }
 
-    /// **Stage-major long-form with all three keyframes composes end to
-    /// end.** The stage-major loop refines the half-res motion with a SECOND
-    /// independent window plan at full resolution, and that loop has a
-    /// history of geometry bugs no smaller test could see: a continuation
-    /// window whose refine input was read from the wrong half-res span
-    /// (content shifted 64 px frames), one whose context was the LAST
-    /// stage-1 window's tail - the clip's own end - instead of its own
-    /// predecessor, and one whose sequence length disagreed with the plan it
-    /// came from. Every one of those either panics, refuses, or stitches a
-    /// clip whose seams are hard content jumps; all of them survive any test
-    /// that never runs the loop.
-    ///
-    /// So this runs the loop. Real conv VAE, real spatial upsampler, tiny
-    /// random-weight DiT, CPU; 41 frames at 64x64 with both ceilings forced
-    /// to 20 tokens so the full-res grid (2x2) splits into two stage-2
-    /// windows under the default 2-latent-frame context. The claim is
-    /// WIRING: with `--start-frame` + `--mid-frame` + `--end-frame` all
-    /// supplied - start conditioning window 0, the mid routed to the window
-    /// whose decoded range covers frame 20, the end appended to the last
-    /// window's final frame - the run completes and reassembles exactly the
-    /// requested clip, which is precisely what each of those geometry bugs
-    /// broke.
-    #[test]
-    fn a_stage_major_run_with_three_keyframes_comes_back_as_one_clip() {
-        let Some(vae) = weights_path("vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
-            return brain_testutil::skip("put the real VAE in the model store");
-        };
-        let Some(upsampler) = weights_path("latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors") else {
-            return brain_testutil::skip("no spatial x2 latent upscaler in the model store");
-        };
-        let paths = Paths { spatial_upsampler: Some(upsampler.clone()), ..Paths::new(vae.clone()) };
-        let dir = std::env::temp_dir().join(format!("ltxv-stage-major-anchors-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let still = |name: &str, rgb: [u8; 3]| {
-            let path = dir.join(name);
-            let px: Vec<u8> = std::iter::repeat_n(rgb, 64 * 64).flatten().collect();
-            image::RgbImage::from_raw(64, 64, px).expect("a flat RGB image").save(&path).expect("write the conditioning still");
-            path.to_string_lossy().into_owned()
-        };
-        let (frames, context, max_tokens) = (41usize, 2usize, 20usize);
-        let base = GenOpts {
-            frames,
-            width: 64,
-            height: 64,
-            steps: 2,
-            fps: 8,
-            device: Some("cpu".into()),
-            start_frame: Some(still("start.png", [220, 30, 30])),
-            keyframes: vec![(20, still("mid.png", [30, 220, 30]))],
-            end_frame: Some(still("end.png", [230, 230, 30])),
-            ..GenOpts::default()
-        };
-        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, max_refine_tokens: max_tokens, stage_major: true, base };
-        // The shape has to split at BOTH stages for this test to mean
-        // anything: one stage-1 window builds the motion, two stage-2 windows
-        // refine it across one full-res seam.
-        assert!(window_plan(frames, 2, 2, context, max_tokens).expect("legal").len() > 1, "the full-res grid has to need several windows");
-        let cancel = capability::CancelToken::default();
-
-        let (video, _) = generate_long(&paths, "a single continuous shot", &o, &cancel, |_, _, _| {}).expect("stage-major long-form with keyframes");
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert_eq!(video.frames.len(), frames, "the clip is not the requested length");
-        assert_eq!((video.width, video.height), (64, 64));
-        assert!(video.frames.iter().all(|f: &Vec<u8>| f.len() == 64 * 64 * 3), "a frame is the wrong size");
-        assert!(video.frames.iter().any(|f: &Vec<u8>| f.iter().any(|&v| v != f[0])), "every frame is a flat colour - nothing was decoded");
-    }
-
-    /// **The window-major path honours all three keyframes too.** This loop
+    /// **A multi-window run honours all three keyframes.** This loop
     /// built each window's options INLINE: `end_frame` was `None` for every
     /// window - the end still silently dropped - and the mid keyframe's position
     /// passed through from the clip-global base verbatim, so the clip-global
@@ -453,15 +380,12 @@ mod real_weights {
     /// refused keyframes on this path outright; the fix routes them through
     /// [`ltxv::pipeline::window_gen_opts`] like every other path.
     ///
-    /// The shape targets the window-major path specifically: the window
-    /// ceiling is forced low enough to split the main plan while
-    /// `max_refine_tokens` stays at its default, so the stage-2 plan fits one
-    /// window and dispatch falls back here. `--mid-frame-at 36` names an
-    /// instant inside the SECOND window's emitted span - the exact request the
-    /// inline options refused, because window 0's own 33-frame span cannot
-    /// hold pixel 36.
+    /// The window ceiling is forced low enough to split the plan, and the
+    /// keyframe at pixel 36 names an instant inside the SECOND window's
+    /// emitted span - the exact request the inline options refused, because
+    /// window 0's own span cannot hold it.
     #[test]
-    fn a_window_major_run_with_three_keyframes_honours_all_three() {
+    fn a_multi_window_run_with_three_keyframes_honours_all_three() {
         let Some(vae) = weights_path("vae/ltx-2.5-video-vae-conv-bf16.safetensors") else {
             return brain_testutil::skip("put the real VAE in the model store");
         };
@@ -490,11 +414,7 @@ mod real_weights {
             end_frame: Some(still("end.png", [230, 230, 30])),
             ..GenOpts::default()
         };
-        // Only the window ceiling is forced: with `max_refine_tokens` left at
-        // its default the stage-2 plan fits one window, so the stage-major
-        // dispatch does not take this shape and the window-major loop serves
-        // it - the path this test pins.
-        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, max_refine_tokens: ltxv::pipeline::REFINE_MAX_TOKENS, stage_major: true, base };
+        let o = LongOpts { context_latent_frames: context, max_window_tokens: max_tokens, base };
         assert!(window_plan(frames, 2, 2, context, max_tokens).expect("legal").len() > 1, "the full-res grid has to need several windows");
         let cancel = capability::CancelToken::default();
 
@@ -555,7 +475,7 @@ mod real_weights {
 mod seam_real {
     use ltxv::clipmetric::frame_to_frame_diffs;
     use ltxv::longform::{window_plan, CONTEXT_LATENT_FRAMES};
-    use ltxv::pipeline::{generate, generate_long, GenOpts, LongOpts, Paths, Video, REFINE_MAX_TOKENS};
+    use ltxv::pipeline::{generate, generate_long, GenOpts, LongOpts, Paths, Video};
 
     /// 384x192 is 72 tokens per latent frame, the shape `motion_real.rs` and
     /// `anchor_real.rs` both calibrate at. The window ceiling is forced to 14
@@ -625,7 +545,7 @@ mod seam_real {
         let cancel = capability::CancelToken::default();
 
         // Arm A: the rolling latent context.
-        let o = LongOpts { context_latent_frames: CONTEXT_LATENT_FRAMES, max_window_tokens: MAX_WINDOW_TOKENS, max_refine_tokens: REFINE_MAX_TOKENS, stage_major: true, base: base_opts(FRAMES) };
+        let o = LongOpts { context_latent_frames: CONTEXT_LATENT_FRAMES, max_window_tokens: MAX_WINDOW_TOKENS, base: base_opts(FRAMES) };
         let (rolling, _) = generate_long(&paths, PROMPT, &o, &cancel, |_, _, _| {}).unwrap_or_else(|e| panic!("generate_long failed: {e}"));
         assert_eq!(rolling.frames.len(), FRAMES);
 

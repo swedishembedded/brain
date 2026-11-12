@@ -454,8 +454,7 @@ instruments as options: `--lf-subst dst=src` (overwrite latent frame `dst` with
 **LTX-2.5 knobs** are request options, not variables: `GenOpts::runtime`
 (`--resident-blocks`, `--two-stage`, `--vae-tiling`, `--text-precision`,
 `--no-text-cache`, `--text-cache-max-bytes`, `--latent-dump`,
-`--av-fp32-reference`) and `LongOpts` (`--max-window-tokens`,
-`--stage-major`). `--device gpu0` keeps a run's CFG pair on one card.
+`--av-fp32-reference`) and `LongOpts` (`--max-window-tokens`). `--device gpu0` keeps a run's CFG pair on one card.
 
 **CUDA memory and profiling knobs:** `brain --block-cache-mb <MiB>` (size of the
 held-freed-block cache; `0` turns it off, unset sizes it from device memory

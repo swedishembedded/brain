@@ -18,25 +18,6 @@
 //! reads from, and [`fitted_context`], which says what a four-times-denser
 //! grid can afford to carry.
 //!
-//! # Stage-major long-form generation (opt-in)
-//!
-//! With `LongOpts::stage_major`, [`crate::pipeline::run_stage_major`] builds
-//! TWO independent window plans via [`crate::pipeline::two_stage_long_plan`]:
-//! one at half resolution (stage 1, where motion is decided) and one at full
-//! resolution (stage 2, where refinement detail is carried).  Stage 1's plan
-//! is sized by the half-resolution token count, so clips whose entire
-//! stage-1 trajectory fits in one window get a single global pass.  Stage 2
-//! fragments as much as memory demands - and that is where it fails: each
-//! refinement window re-noises its slice to sigma 0.909 and regenerates it
-//! seeing only its own part of the clip, so its windows do not stitch. On the
-//! real checkpoint a refinement seam cut to another scene; the window-major
-//! loop is the default for that reason.
-//!
-//! Stage 1's output is a global half-resolution latent buffer
-//! [`crate::pipeline::run_stage_major`] builds by writing each window's NEW
-//! frames into their positions via [`write_latent_window`].  Stage 2 reads
-//! slices of this buffer via [`latent_window`] for each window.
-//!
 //! Clip-global anchors (`--start-frame`, `--end-frame`, every `--keyframe`) are
 //! routed to their owning window via [`crate::pipeline::window_gen_opts`].
 //! Each anchor is re-expressed in the window's own local frame numbering.
@@ -231,19 +212,6 @@ impl Window {
         self.first_frame - self.dropped_frames()
     }
 
-    /// The latent frame index where this window's first NEW latent frame sits
-    /// in a global latent buffer (a `[C, total_lat_t, lh, lw]` that holds
-    /// every window's generated latent frames concatenated).
-    ///
-    /// Window 0 starts at latent frame 0 (it has no carried prefix).  A
-    /// continuation window's first new frame is at `sum of new over all
-    /// preceding windows`, because the carried context occupies latent frames
-    /// `[0, context)` of THIS window's sequence but is NOT part of the
-    /// generated latent (it is a copy of the predecessor's tail).
-    pub fn first_latent_frame(&self, preceding_new: usize) -> usize {
-        preceding_new
-    }
-
     /// Convert a global pixel frame to a local latent frame within this
     /// window's own sequence, or `None` if the pixel frame does not fall
     /// inside this window's decoded range.
@@ -260,39 +228,6 @@ impl Window {
             return None;
         }
         Some((global_pixel_frame - src_first) / 8)
-    }
-}
-
-/// Slice out latent frames `[start..start+count)` from a `[C, lat_t, lh, lw]`
-/// channel-major buffer, returning a `[C, count, lh, lw]` copy.
-///
-/// Returns an empty `Vec` when `count == 0` (a degenerate window).  Panics
-/// when the range extends past `lat_t`.
-pub fn latent_window(latent_chw: &[f32], channels: usize, lat_t: usize, lh: usize, lw: usize, start: usize, count: usize) -> Vec<f32> {
-    let plane = lh * lw;
-    assert!(start + count <= lat_t, "latent_window: [{start}..{}) past lat_t {lat_t}", start + count);
-    assert_eq!(latent_chw.len(), channels * lat_t * plane, "latent_window: {} values, expected {}", latent_chw.len(), channels * lat_t * plane);
-    let mut out = vec![0f32; channels * count * plane];
-    for c in 0..channels {
-        let src = (c * lat_t + start) * plane;
-        out[c * count * plane..(c + 1) * count * plane].copy_from_slice(&latent_chw[src..src + count * plane]);
-    }
-    out
-}
-
-/// Write latent frames from a `[C, count, lh, lw]` source into a
-/// `[C, lat_t, lh, lw]` destination at position `start` in the time axis.
-///
-/// Panics when the range extends past `lat_t` or when `src`'s shape does not
-/// match `(channels, count, lh, lw)`.
-pub fn write_latent_window(dest: &mut [f32], channels: usize, lat_t: usize, lh: usize, lw: usize, start: usize, src: &[f32]) {
-    let plane = lh * lw;
-    let count = src.len() / (channels * plane);
-    assert!(start + count <= lat_t, "write_latent_window: [{start}..{}) past lat_t {lat_t}", start + count);
-    assert_eq!(src.len(), channels * count * plane, "write_latent_window: {} values, expected {}", src.len(), channels * count * plane);
-    for c in 0..channels {
-        let dst = (c * lat_t + start) * plane;
-        dest[dst..dst + count * plane].copy_from_slice(&src[c * count * plane..(c + 1) * count * plane]);
     }
 }
 

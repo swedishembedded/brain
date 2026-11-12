@@ -70,8 +70,8 @@ fn write_still(dir: &std::path::Path, name: &str, frame: &[u8]) -> String {
 
 /// Three windows of the default loop at the reference's own 8-latent-frame
 /// context: 16 latent frames at 72 tokens each under a 1008-token ceiling
-/// (14 latent frames) split evenly into 8 new, then 8 carried + 4 new twice
-/// - emitted pixel frames [0, 57), [57, 89) and [89, 121). The keyframe's
+/// (14 latent frames) split evenly into 8 new, then 8 carried + 4 new twice,
+/// emitting pixel frames [0, 57), [57, 89) and [89, 121). The keyframe's
 /// instant is the second window's, the end still the third's.
 fn long_opts(base: GenOpts) -> LongOpts {
     LongOpts { max_window_tokens: 14 * (HEIGHT / 32) * (WIDTH / 32), base, ..LongOpts::default() }

@@ -474,6 +474,15 @@ pub struct GenOpts {
     /// Each is an appended guiding block at its own instant
     /// ([`conditioned_latent`]).
     pub keyframes: Vec<(usize, String)>,
+    /// `ImageConditioningInput.strength` for the interior [`Self::keyframes`]
+    /// alone; the start and end stills keep [`Self::conditioning_strength`].
+    ///
+    /// `0.8` (the reference CLI's own example value) by default, measured on
+    /// the real checkpoint: a keyframe from another composition than the
+    /// stills around it is cut to at `1.0` (a 6.3x frame step) and blended
+    /// into at `0.8` (worst step 1.16x), while a keyframe from the same shot
+    /// is reached as closely at either (mean |delta| 2.35 against 2.28).
+    pub keyframe_strength: f32,
     /// Extra appended guiding blocks for LONG-FORM windows, as `(local pixel
     /// frame, image path)` pairs in the WINDOW's own coordinate frame: an
     /// anchor whose instant lies beyond this window's own decoded span,
@@ -603,6 +612,7 @@ impl Default for GenOpts {
             start_frame: None,
             end_frame: None,
             keyframes: Vec::new(),
+            keyframe_strength: DEFAULT_KEYFRAME_STRENGTH,
             future_anchors: Vec::new(),
             conditioning_strength: 1.0,
             devices: crate::devplan::DevicePlan::default(),
@@ -1236,6 +1246,9 @@ pub fn mid_anchor_frame(frames: usize, at: Option<usize>) -> Result<usize, Strin
     Ok(at)
 }
 
+/// [`GenOpts::keyframe_strength`]'s default.
+pub const DEFAULT_KEYFRAME_STRENGTH: f32 = 0.8;
+
 /// One keyframe spelled `FRAME:PATH` - the pixel frame it anchors and the
 /// still's path.
 pub fn parse_keyframe(spec: &str) -> Result<(usize, String), String> {
@@ -1661,6 +1674,8 @@ struct Stills<'a> {
     future: &'a [(usize, &'a [f32])],
     /// `ImageConditioningInput.strength` ([`GenOpts::conditioning_strength`]).
     strength: f32,
+    /// The same for the interior keyframes ([`GenOpts::keyframe_strength`]).
+    interior_strength: f32,
 }
 
 impl Stills<'_> {
@@ -1797,7 +1812,8 @@ fn appended_blocks(start: bool, interior: usize, end: bool, future: usize) -> us
 /// stay free, exactly as a mid or end anchor already forces.
 fn conditioned_latent(noise: Vec<f32>, base: BaseSequence<'_>, frames: usize, stills: Stills<'_>) -> ConditionedLatent {
     let BaseSequence { base_t, base_positions, base_keyframes_mask, lh, lw, channels, fps } = base;
-    let Stills { start, interior, end, future, strength } = stills;
+    let Stills { start, interior, end, future, strength, interior_strength } = stills;
+    assert!((0.0..=1.0).contains(&interior_strength), "conditioned_latent: keyframe strength {interior_strength} is outside [0, 1]");
     assert!(start.is_some() || !interior.is_empty() || end.is_some() || !future.is_empty(), "conditioned_latent: at least one still must be given");
     assert!((0.0..=1.0).contains(&strength), "conditioned_latent: strength {strength} is outside [0, 1]");
     let block_t = lh * lw;
@@ -1831,10 +1847,19 @@ fn conditioned_latent(noise: Vec<f32>, base: BaseSequence<'_>, frames: usize, st
     // The future anchors come last: their named instants lie beyond this
     // window's own span, and every in-window anchor sits inside it.
     let anchors: Vec<(usize, &[f32])> = start.map(|s| (0usize, s)).into_iter().chain(interior.iter().copied()).chain(end.map(|e| (frames - 1, e))).chain(future.iter().copied()).collect();
-    let ic = append_image_conditioning(base_t, base_positions, base_keyframes_mask, lh, lw, channels, fps, m, &anchors);
+    let mut ic = append_image_conditioning(base_t, base_positions, base_keyframes_mask, lh, lw, channels, fps, m, &anchors);
+    // The interior keyframes' blocks follow the start still's, at their own
+    // strength: `1 - strength` is both their denoise mask and their lerp.
+    let interior_blocks = usize::from(start.is_some())..usize::from(start.is_some()) + interior.len();
     let mut latent = noise;
     for (bi, (_, tokens)) in anchors.iter().enumerate() {
-        mix(&mut latent, tokens, base_t + bi * block_t);
+        let off = base_t + bi * block_t;
+        let mb = if interior_blocks.contains(&bi) { 1.0 - interior_strength } else { m };
+        ic.denoise_mask[off..off + block_t].fill(mb);
+        for (i, &c) in tokens.iter().enumerate() {
+            let v = &mut latent[off * channels + i];
+            *v = (1.0 - mb) * c + mb * *v;
+        }
     }
     ConditionedLatent { latent, positions: ic.positions, keyframes_mask: ic.keyframes_mask, denoise_mask: ic.denoise_mask, clean: ic.clean, t: total_t }
 }
@@ -1907,7 +1932,7 @@ mod conditioned_latent_tests {
     #[allow(clippy::too_many_arguments)]
     fn cond(noise: Vec<f32>, positions: &[f32], km: &[f32], base_t: usize, start: Option<&[f32]>, interior: &[(usize, &[f32])], end: Option<&[f32]>, future: &[(usize, &[f32])], strength: f32) -> ConditionedLatent {
         let base = BaseSequence { base_t, base_positions: positions, base_keyframes_mask: km, lh: LH, lw: LW, channels: CH, fps: FPS };
-        conditioned_latent(noise, base, FRAMES, Stills { start, interior, end, future, strength })
+        conditioned_latent(noise, base, FRAMES, Stills { start, interior, end, future, strength, interior_strength: strength })
     }
 
     fn tokens(bias: f32) -> Vec<f32> {
@@ -2133,6 +2158,29 @@ mod conditioned_latent_tests {
         assert_eq!(&c.clean[third * CH..(third + block_t) * CH], &b[..]);
         assert_eq!(&c.positions[second * 2..second * 2 + 2], &[0.25, 0.375]);
         assert_eq!(&c.positions[third * 2..third * 2 + 2], &[0.75, 0.875]);
+    }
+
+    /// The interior keyframes take their own strength in both places it
+    /// lands - the denoise mask and the initial latent's lerp - while the
+    /// start and end stills keep theirs.
+    #[test]
+    fn a_keyframe_takes_its_own_strength_and_the_ends_keep_theirs() {
+        let (latent, positions, km, base_t) = base(3);
+        let (s, m, e) = (tokens(0.0), tokens(50.0), tokens(100.0));
+        let base = BaseSequence { base_t, base_positions: &positions, base_keyframes_mask: &km, lh: LH, lw: LW, channels: CH, fps: FPS };
+
+        let c = conditioned_latent(latent.clone(), base, FRAMES, Stills { start: Some(&s), interior: &[(4, &m)], end: Some(&e), future: &[], strength: 1.0, interior_strength: 0.8 });
+
+        let block_t = LH * LW;
+        let mid = base_t + block_t;
+        assert_eq!(&c.denoise_mask[base_t..mid], &vec![0.0f32; block_t][..], "the start still keeps strength 1.0");
+        assert!(c.denoise_mask[mid..mid + block_t].iter().all(|&v| (v - 0.2).abs() < 1e-6), "the keyframe's mask is 1 - 0.8");
+        assert_eq!(&c.denoise_mask[mid + block_t..], &vec![0.0f32; block_t][..], "the end still keeps strength 1.0");
+        for i in 0..block_t * CH {
+            let want = 0.8 * m[i] + 0.2 * latent[mid * CH + i];
+            assert!((c.latent[mid * CH + i] - want).abs() < 1e-4, "value {i}: the keyframe starts at lerp(clean, noise, 0.2)");
+        }
+        assert_eq!(&c.latent[base_t * CH..mid * CH], &s[..]);
     }
 
     /// Only an ordered list of interior instants is a request a clip can
@@ -3787,7 +3835,7 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
                 tracing::info!(stage = st.label, future_anchors = ?future.iter().map(|(at, _)| *at).collect::<Vec<_>>(), of_frames = o.frames, "future anchors appended as guiding blocks");
             }
             let base = BaseSequence { base_t: t, base_positions: &positions, base_keyframes_mask: &keyframes_mask, lh, lw, channels: c, fps: o.fps as f64 };
-            let stills = Stills { start: start_tokens.as_deref(), interior: &interior, end: end_tokens.as_deref(), future: &future, strength: o.conditioning_strength };
+            let stills = Stills { start: start_tokens.as_deref(), interior: &interior, end: end_tokens.as_deref(), future: &future, strength: o.conditioning_strength, interior_strength: o.keyframe_strength };
             let cl = conditioned_latent(latent0, base, o.frames, stills);
             tracing::info!(stage = st.label, strength = o.conditioning_strength, tokens = cl.t, base_tokens = t, appended_blocks = blocks, "image conditioning applied");
             (cl.latent, cl.positions, cl.keyframes_mask, cl.t, Some((cl.denoise_mask, cl.clean)))
@@ -5824,21 +5872,8 @@ pub struct LongOpts {
     /// cannot set it.
     pub context_latent_frames: usize,
     /// Per-window video-token ceiling, [`crate::longform::LONGFORM_MAX_TOKENS`]
-    /// by default.  Governs stage 1's half-resolution plan.
+    /// by default.
     pub max_window_tokens: usize,
-    /// Per-pass video-token ceiling for stage 2's refinement, mirroring
-    /// [`crate::pipeline::REFINE_MAX_TOKENS`].  Defaults to
-    /// [`crate::pipeline::REFINE_MAX_TOKENS`].
-    pub max_refine_tokens: usize,
-    /// Run a video-only clip stage-major (stage 1 across the whole clip at
-    /// half resolution, then stage 2 refining slices of it) when its stage-2
-    /// plan splits; `false`, the default, keeps the window-major loop. Off
-    /// because its refinement windows do not stitch: each re-noises its slice
-    /// to sigma 0.909 and regenerates it seeing only its own part of the
-    /// clip, so on the real checkpoint a 313-frame 768x448 clip cut to
-    /// another scene at a refinement seam and missed an interior keyframe,
-    /// where the window-major loop held all four anchors with no jump.
-    pub stage_major: bool,
     /// `frames` is the WHOLE clip's length, not one window's.
     pub base: GenOpts,
 }
@@ -5848,59 +5883,9 @@ impl Default for LongOpts {
         LongOpts {
             context_latent_frames: crate::longform::CONTEXT_LATENT_FRAMES,
             max_window_tokens: crate::longform::LONGFORM_MAX_TOKENS,
-            max_refine_tokens: REFINE_MAX_TOKENS,
-            stage_major: false,
             base: GenOpts::default(),
         }
     }
-}
-
-/// Two independent window plans for a stage-major long-form generation:
-/// stage 1 at half resolution (where motion is decided) and stage 2 at full
-/// resolution (where refinement detail is carried).
-///
-/// Stage 1's plan determines the clip's motion structure; stage 2's plan
-/// fragments only as much as memory demands, with no quality cost because the
-/// motion is already fixed by stage 1.
-#[derive(Clone, Debug)]
-pub struct TwoStageLongPlan {
-    /// Half-resolution window plan (where motion is decided).
-    pub stage1: Vec<crate::longform::Window>,
-    /// Full-resolution window plan (refinement detail).
-    pub stage2: Vec<crate::longform::Window>,
-    /// Latent frames in the global half-resolution latent buffer (sum of
-    /// stage1 windows' `new` fields).
-    pub lat_t: usize,
-    /// Stage 2's context: the number of full-res latent frames carried across
-    /// each stage-2 seam (may differ from stage 1's context if the grids
-    /// differ).
-    pub stage2_context: usize,
-}
-
-/// Build two independent window plans for a stage-major long-form generation.
-///
-/// Calls [`crate::longform::window_plan_aligned`] twice, once at the
-/// half-resolution grid (stage 1) and once at the full-resolution grid
-/// (stage 2).  Stage 2's context is capped to what fits under
-/// `max_stage2_tokens` on the denser grid.
-///
-/// Returns `Err` when either grid cannot express the clip.
-pub fn two_stage_long_plan(
-    frames: usize,
-    lh1: usize,
-    lw1: usize,
-    lh: usize,
-    lw: usize,
-    context: usize,
-    max_stage1_tokens: usize,
-    max_stage2_tokens: usize,
-    align: usize,
-) -> Result<TwoStageLongPlan, String> {
-    let stage1 = crate::longform::window_plan_aligned(frames, lh1, lw1, context, max_stage1_tokens, align)?;
-    let stage2_ctx = crate::longform::fitted_context(lh, lw, context, max_stage2_tokens)?;
-    let stage2 = crate::longform::window_plan_aligned(frames, lh, lw, stage2_ctx, max_stage2_tokens, align)?;
-    let lat_t = stage1.iter().map(|w| w.new).sum();
-    Ok(TwoStageLongPlan { stage1, stage2, lat_t, stage2_context: stage2_ctx })
 }
 
 /// Build per-window generation options from a clip-global base, routing
@@ -6101,38 +6086,18 @@ mod window_gen_opts_tests {
 /// plan and refuses rather than rounding. `crate::audio`'s module doc carries
 /// the rule and why a rounded seam is the failure mode that matters.
 ///
-/// **Scope (window-major).** This path is what serves audio-visual clips,
-/// clips whose stage-2 refinement plan fits one window (see the stage-major
-/// dispatch below), and anything with [`LongOpts::stage_major`]
-/// off. Clip-global anchors route through [`window_gen_opts`] exactly as
-/// they do on the stage-major path: `--start-frame` conditions window 0, the
-/// end still and the keyframes condition the windows that own their instants, and every
-/// window also receives the anchors still ahead of it as future guides.
-///
-/// # Stage-major path (two-stage, video-only, default)
-///
-/// A video-only multi-window request goes to [`run_stage_major`] when its
-/// STAGE-2 refinement plan - the full-res grid under `max_refine_tokens`,
-/// not the dispatch plan under `max_window_tokens` - splits into at least two
-/// windows. Anything else falls through to the window-major loop above, which
-/// has always served exactly those shapes. There the generation is
-/// restructured to run stage 1 at half resolution for the whole clip, then
-/// stage 2 at full resolution:
-///
-/// 1. **Stage 1** builds a global half-resolution latent using
-///    [`two_stage_long_plan`]'s independent half-res window plan.  This lets
-///    stage 1 decide the clip's motion in as few, as global a pass as
-///    possible, with fragments only when memory demands it.
-///
-/// 2. **Stage 2** refines each window from a slice of stage 1's output, using
-///    the full-res window plan.  The motion is already fixed by stage 1, so
-///    stage 2 can fragment freely with no quality cost.
-///
 /// Clip-global anchors (`--start-frame`, `--end-frame` and every interior
-/// keyframe) are routed to their owning window via [`window_gen_opts`], and
-/// every window receives the anchors still ahead of it as future guides; a
-/// keyframe outside the clip is refused rather than silently dropped.  Audio-visual
-/// clips keep the window-major path (Phase F defers that design).
+/// keyframe) are routed to their owning window via [`window_gen_opts`]:
+/// `--start-frame` conditions window 0, the end still and the keyframes the
+/// windows that own their instants, and every window also receives the
+/// anchors still ahead of it as future guides; a keyframe outside the clip
+/// is refused rather than silently dropped. Each window is a whole
+/// generation, two-stage when its own size calls for it. Refining one
+/// half-resolution pass over the whole clip in full-resolution windows
+/// instead was measured and removed: each refinement window re-noises its
+/// slice to sigma 0.909 and regenerates it seeing only its own part of the
+/// clip, so the windows do not stitch - a 313-frame clip cut to another
+/// scene at a refinement seam.
 ///
 /// Long-form generation is otherwise the ordinary generation path - same
 /// schedule, same CFG fold, same two-stage decision per window, same VAE.
@@ -6161,26 +6126,6 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     }
     if o.base.reference.is_some() {
         return Err("--reference-video is applied by a single-window generation; a clip this long is generated as several windows, which do not route a reference yet".into());
-    }
-    // Stage-major long-form: when the kill switch is enabled (default) and the
-    // clip is video-only, route to the stage-major loop which runs stage 1 at
-    // half resolution for the whole clip, then stage 2 at full resolution.
-    // Audio-visual clips keep today's window-major loop (Phase F defers that).
-    let stage_major_enabled = o.stage_major && !o.base.audio;
-    // The stage-major loop needs its OWN stage-2 plan to split: it refines the
-    // half-res motion across >= 2 full-resolution windows, and a clip whose
-    // stage-2 plan fits one window is exactly what the window-major loop below
-    // has always served. The dispatch plan above is cut at `max_window_tokens`
-    // on the full-res grid, while stage 2 plans at `max_refine_tokens` - close
-    // but not the same ceiling, so "the dispatch plan splits" does not imply
-    // "the stage-2 plan splits" - and dispatching on the wrong one made every
-    // such request die in run_stage_major's own refusal instead of generating.
-    if stage_major_enabled
-        && two_stage_long_plan(o.base.frames, lh / 2, lw / 2, lh, lw, o.context_latent_frames, o.max_window_tokens, o.max_refine_tokens, align)
-            .map(|t| t.stage2.len() >= 2)
-            .unwrap_or(false)
-    {
-        return run_stage_major(paths, prompt, o, cancel, progress);
     }
     check_audio_request(paths, &o.base)?;
     if o.base.steps == 0 {
@@ -6561,269 +6506,6 @@ pub fn generate_long(paths: &Paths, prompt: &str, o: &LongOpts, cancel: &capabil
     Ok((Video { width: o.base.width as u32, height: o.base.height as u32, fps: o.base.fps, frames: out_frames, audio }, timings))
 }
 
-/// Stage-major long-form generation: stage 1 builds the clip's motion
-/// structure at half resolution in as few, as global a pass as possible;
-/// stage 2 refines at full resolution, reading slices of stage 1's output.
-///
-/// This is the path [`LongOpts::stage_major`] selects (on by default for
-/// video-only clips).  Audio-visual clips keep the window-major
-/// loop in [`generate_long`].
-///
-/// Stage 1's plan is sized by the half-resolution token count, so clips whose
-/// entire stage-1 trajectory fits in one window get a single global pass.
-/// Stage 2 fragments as much as memory demands, with no quality cost because
-/// the motion is already fixed by stage 1.
-fn run_stage_major(
-    paths: &Paths,
-    prompt: &str,
-    o: &LongOpts,
-    cancel: &capability::CancelToken,
-    mut progress: impl FnMut(u32, u32, &str),
-) -> Result<(Video, Timings), String> {
-    let vcfg = LtxVaeConfig::conv25();
-    if vcfg.latent_frames(o.base.frames as u32).is_none() {
-        return Err(format!("{} frames is not of the form 1 + 8k (the causal VAE gives the first frame its own latent frame)", o.base.frames));
-    }
-    if !o.base.width.is_multiple_of(32) || !o.base.height.is_multiple_of(32) {
-        return Err(format!("{}x{} is not a multiple of 32 (the VAE's spatial stride)", o.base.width, o.base.height));
-    }
-    let (lh, lw) = (o.base.height / 32, o.base.width / 32);
-    let (w1, h1) = (o.base.width / 2, o.base.height / 2);
-    let (lh1, lw1) = (h1 / 32, w1 / 32);
-    let align = 1u32; // video-only; audio clips never reach here
-
-    let tsp = two_stage_long_plan(
-        o.base.frames, lh1, lw1, lh, lw,
-        o.context_latent_frames, o.max_window_tokens, o.max_refine_tokens,
-        align as usize,
-    )?;
-    if tsp.stage2.len() < 2 {
-        return Err("stage-major path requires >= 2 stage-2 windows (otherwise generate_long's fast path handles it)".into());
-    }
-    // A keyframe that routes into no window would be honoured by none of
-    // them - silently dropped, the defect the window-major path refuses
-    // rather than commits. Every pixel frame inside the clip lands in exactly
-    // one window's decoded range (the ranges tile the clip), so only an
-    // out-of-clip keyframe can fail to route: refuse it here, before any
-    // weight is read.
-    check_keyframes(o.base.frames, &o.base.keyframes)?;
-
-    check_audio_request(paths, &o.base)?;
-    if o.base.steps == 0 {
-        return Err("--steps must be at least 1".into());
-    }
-
-    let dit_cfg = dit_config_from_name(&o.base.dit_config)?;
-    if dit_cfg.in_channels != vcfg.latent_channels {
-        return Err(format!("ltxv dit-config {:?} has in_channels {} but the VAE latent width is {}", o.base.dit_config, dit_cfg.in_channels, vcfg.latent_channels));
-    }
-    let in_channels = dit_cfg.in_channels as usize;
-    let is_real_distilled = o.base.dit_config == "ltx25_22b";
-    let context = o.context_latent_frames;
-
-    let sigmas: Vec<f64> = if is_real_distilled {
-        LTX2_DISTILLED_SIGMAS.iter().map(|&s| s as f64).collect()
-    } else {
-        ltx2_sigmas(tsp.stage1[0].tokens(lh1, lw1), o.base.steps, o.base.base_shift, o.base.max_shift, o.base.stretch, o.base.terminal)
-    };
-    let steps = sigmas.len() - 1;
-    let refine_sigmas = stage2_sigmas(LTX2_STAGE2_STEPS)?;
-
-    // Phases: build, stage-1 windows, stage-2 windows, one decode.
-    let per_s1 = steps as u32;
-    let per_s2 = LTX2_STAGE2_STEPS as u32 + 1;
-    let total = 1 + tsp.stage1.len() as u32 * per_s1 + tsp.stage2.len() as u32 * per_s2 + 1;
-    tracing::info!(
-        stage1_windows = tsp.stage1.len(),
-        stage2_windows = tsp.stage2.len(),
-        stage1_max_tokens = o.max_window_tokens,
-        stage2_max_tokens = o.max_refine_tokens,
-        stage2_context = tsp.stage2_context,
-        frames = o.base.frames,
-        "stage-major long-form generation planned"
-    );
-
-    let mut timings = Timings::default();
-    let place = o.base.devices.resolve(o.base.device.as_deref());
-    progress(0, total, "build transformer");
-    let build_t = Instant::now();
-    let dit = build_denoiser(paths, dit_cfg, &o.base, &o.base.adapters, place)?;
-    if o.base.audio && !dit.has_audio() {
-        return Err("ltxv: audio was requested but the built denoiser carries no audio stream".into());
-    }
-    timings.build_dit = build_t.elapsed().as_secs_f32();
-    let TextContext { cond: ctx_cond, uncond: ctx_uncond, valid: context_valid, uncond_valid, len: context_len, .. } =
-        build_context(paths, prompt, dit_cfg, &o.base, place, &mut timings.text_encode)?;
-    let crate::import::VideoVae { arch: varch, weights: vweights } = crate::import::import_vae(read_any(&paths.vae)?, &vcfg)?;
-    let upsampler = SpatialUpsampler::default();
-
-    let mut out_frames: Vec<Vec<u8>> = Vec::with_capacity(o.base.frames);
-    let mut vae_secs = 0.0f32;
-    let work_t = Instant::now();
-    let mut done_before = 1u32;
-
-    // ---- Stage 1: build the global half-res latent -------------------------
-    let mut global_half = vec![0f32; in_channels * tsp.lat_t * lh1 * lw1];
-    let mut s1_carried: Option<(Vec<f32>, usize)> = None;
-    for (wi, w) in tsp.stage1.iter().enumerate() {
-        if cancel.is_cancelled() { return Err("cancelled".into()); }
-        let lat_t = w.latent_frames();
-        let win_opts = window_gen_opts(&o.base, &tsp.stage1, wi)?;
-        let sc = StageCtx {
-            a_ctx_cond: &[],
-            a_ctx_uncond: &[],
-            dit: dit.as_ref(),
-            vcfg: &vcfg,
-            vweights: &vweights,
-            o: &win_opts,
-            lat_t,
-            in_channels,
-            ctx_cond: Caption::of(&ctx_cond, &context_valid),
-            ctx_uncond: Caption::of(&ctx_uncond, &uncond_valid),
-            context_len,
-            cancel,
-            reference: None,
-        };
-        let seed_salt = 0x57_49_4e_44_00_00_00_00u64 ^ wi as u64;
-        tracing::info!(window = wi, of = tsp.stage1.len(), latent_frames = lat_t, carried = w.context, new = w.new, tokens = w.tokens(lh1, lw1), "stage1 window starting");
-
-        let stage_out = denoise_stage(
-            &sc,
-            Stage {
-                mask: None,
-                width: w1,
-                height: h1,
-                sigmas: &sigmas,
-                eta: o.base.eta,
-                seed_chw: None,
-                context: s1_carried.as_ref().map(|(chw, n)| LatentContext { chw, frames: *n }),
-                seed_salt,
-                done_before,
-                label: "s1",
-                audio: None,
-                slots: None,
-                anchors: None,
-            },
-            total,
-            &mut progress,
-        )?;
-        let stage1_chw = stage_out.video_chw;
-        s1_carried = Some((crate::longform::carry_tail(&stage1_chw, in_channels, lat_t, lh1, lw1, context.min(lat_t)), context.min(lat_t)));
-        // Write this window's NEW frames into the global half-res buffer.
-        let first_lat = w.first_latent_frame(if wi == 0 { 0 } else { tsp.stage1[..wi].iter().map(|w| w.new).sum() });
-        crate::longform::write_latent_window(&mut global_half, in_channels, tsp.lat_t, lh1, lw1, first_lat, &stage1_chw[(w.context * lh1 * lw1 * in_channels)..]);
-        done_before += per_s1;
-    }
-
-    // ---- Stage 2: refine each stage-2 window from the global half-res ------
-    let mut carried_full: Option<(Vec<f32>, usize)> = None;
-    for (wi, w) in tsp.stage2.iter().enumerate() {
-        if cancel.is_cancelled() { return Err("cancelled".into()); }
-        // Stage 2 reads its NEW frames from the global half-res latent. The
-        // window's shape comes from the PLAN (`w.context + w.new`): the refine
-        // input must be exactly this window's own `latent_frames()` so every
-        // decoded frame count the plan promised holds, and the context slots
-        // hold the half-res frames immediately before this window's own -
-        // never some other window's tail.
-        let new_count = w.new;
-        let first_lat = w.first_latent_frame(if wi == 0 { 0 } else { tsp.stage2[..wi].iter().map(|w| w.new).sum() });
-        let s1_new = crate::longform::latent_window(&global_half, in_channels, tsp.lat_t, lh1, lw1, first_lat, new_count);
-        // `ctx_count` is THIS window's own plan context: 0 for the first
-        // stage-2 window, `tsp.stage2_context` for the rest.  The context
-        // slots are filled from the global half-res buffer (the frames just
-        // before this window's own), giving the upscaler real content to
-        // chew on; for every window with context > 0 the `carried_full`
-        // overlay inside `denoise_stage` then overwrites them with the
-        // previous stage-2 window's own refined output.
-        let ctx_count = w.context;
-        let lat_t = ctx_count + new_count;
-        let mut s1_slice = vec![0f32; in_channels * lat_t * lh1 * lw1];
-        if ctx_count > 0 {
-            let ctx_first = first_lat.saturating_sub(ctx_count);
-            let ctx_data = crate::longform::latent_window(&global_half, in_channels, tsp.lat_t, lh1, lw1, ctx_first, ctx_count);
-            s1_slice[..ctx_count * lh1 * lw1 * in_channels].copy_from_slice(&ctx_data);
-        }
-        s1_slice[ctx_count * lh1 * lw1 * in_channels..].copy_from_slice(&s1_new);
-        // Stage-2 keyframes route per-window, exactly like stage 1: an anchor
-        // belongs at the position where its instant lives in THIS window's own
-        // sequence. Blasting every keyframe into every window instead pins the
-        // start still onto position 0 of windows whose position 0 is a frozen
-        // mid-video context frame - conditioning that contradicts the carried
-        // context and re-anchors each segment, which is one way a long-form
-        // clip fractures into per-window trajectories.
-        let win_opts = window_gen_opts(&o.base, &tsp.stage2, wi)?;
-        let sc = StageCtx {
-            a_ctx_cond: &[],
-            a_ctx_uncond: &[],
-            dit: dit.as_ref(),
-            vcfg: &vcfg,
-            vweights: &vweights,
-            o: &win_opts,
-            lat_t,
-            in_channels,
-            ctx_cond: Caption::of(&ctx_cond, &context_valid),
-            ctx_uncond: Caption::of(&ctx_uncond, &uncond_valid),
-            context_len,
-            cancel,
-            reference: None,
-        };
-        let seed_salt = 0x57_49_4e_44_00_00_00_00u64 ^ (tsp.stage1.len() + wi) as u64;
-        tracing::info!(window = wi, of = tsp.stage2.len(), latent_frames = lat_t, carried = w.context, new = w.new, tokens = w.tokens(lh, lw), "stage2 window starting");
-
-        dit.release_devices();
-        let stage_out = upscale_and_refine(
-            &sc,
-            Refine {
-                upsampler: &upsampler,
-                upsampler_path: paths.spatial_upsampler.as_deref().expect("checked before the first forward"),
-                slots: None,
-                latent_chw: &s1_slice,
-                lat_t,
-                lh1,
-                lw1,
-                width: o.base.width,
-                height: o.base.height,
-                sigmas: &refine_sigmas,
-                eta: refine_eta(&o.base),
-                context: carried_full.as_ref().map(|(chw, n)| LatentContext { chw, frames: *n }),
-                seed_salt,
-                done_before,
-                label: "s2",
-                audio: None,
-            },
-            total,
-            &mut progress,
-        )?;
-        let final_chw = stage_out.video_chw;
-        carried_full = Some((crate::longform::carry_tail(&final_chw, in_channels, lat_t, lh, lw, tsp.stage2_context.min(lat_t)), tsp.stage2_context.min(lat_t)));
-        done_before += per_s2;
-
-        dit.release_devices();
-        progress(done_before, total, "vae decode");
-        let dec_t = Instant::now();
-        let (pixels, got) = decode_video(&vcfg, varch, &vweights, lat_t as u32, lh as u32, lw as u32, &final_chw, &o.base)?;
-        vae_secs += dec_t.elapsed().as_secs_f32();
-        if got != w.decoded_frames() || pixels.len() != 3 * got * o.base.height * o.base.width {
-            return Err(format!("window {wi} decoded to {got} frames / {} values, expected {} / {}", pixels.len(), w.decoded_frames(), 3 * w.decoded_frames() * o.base.height * o.base.width));
-        }
-        let rgb = chw_to_rgb8(&pixels, got, o.base.height, o.base.width);
-        out_frames.extend(rgb.into_iter().skip(w.dropped_frames()));
-        done_before += 1;
-    }
-    drop(dit);
-
-    if out_frames.len() != o.base.frames {
-        return Err(format!("reassembled {} frames from {} stage-2 windows, expected {}", out_frames.len(), tsp.stage2.len(), o.base.frames));
-    }
-    timings.decode = vae_secs;
-    timings.denoise = (work_t.elapsed().as_secs_f32() - vae_secs).max(0.0);
-    timings.steps = tsp.stage1.len() * steps + tsp.stage2.len() * LTX2_STAGE2_STEPS;
-    timings.tokens = tsp.stage2.iter().map(|w| w.tokens(lh, lw)).max().unwrap_or(0);
-    timings.forwards_per_step = o.base.guidance.forwards_per_step(o.base.audio);
-    progress(total, total, "done");
-    tracing::info!(frames = out_frames.len(), stage1_windows = tsp.stage1.len(), stage2_windows = tsp.stage2.len(), total_secs = timings.total(), "stage-major long-form generation done");
-    Ok((Video { width: o.base.width as u32, height: o.base.height as u32, fps: o.base.fps, frames: out_frames, audio: None }, timings))
-}
 
 /// One scene's own [`LongOpts`] within a [`generate_scenes`] run - `frames`
 /// and `seed` become the scene's own, `start_frame` conditions scene 0's

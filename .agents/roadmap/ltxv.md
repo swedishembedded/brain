@@ -9348,8 +9348,9 @@ and regenerate it seeing only their own part of the clip; they do not
 stitch even with no carried context at all (a 40.3 step at the seam), and
 neither dropping the end still from window 0's future guides nor anchoring
 each window to a stage-1 keyframe slot at its seam changed that - both were
-tried and reverted. Window-major is now the default (`--stage-major` opts
-in), and the planner evens the new frames over the fewest windows instead
+tried and reverted. The stage-major loop is removed (its plan type,
+`--stage-major`/`--window-major`, `LongOpts::max_refine_tokens`), and the
+planner evens the new frames over the fewest windows instead
 of letting window 0 take its whole budget (a continuation of one or two new
 latent frames only holds its history). The step at 239->240 in every
 313-frame run is rav1e's keyframe at frame 240 (`key_frame_interval` 120),
@@ -9377,5 +9378,11 @@ Two levers measured on that request: a continuity clause in the prompt
 frames (3.1x); `--conditioning-strength 0.8` (the reference's own CLI
 example) turns it into a cross-dissolve - worst step 1.31x, the mid still
 still reached at frame 48 (delta 3.76) - with both cars double-exposed
-around frames 40 and 80. The default stays 1.0: it is what reaches stills
-from one shot closest, and a dissolve is a choice for the caller.
+around frames 40 and 80. Lowering only the KEYFRAME's strength
+(`--keyframe-strength`, the ends kept at 1.0) does the same for the cut -
+worst step 1.16x, the mid still reached at frame 48 (4.10) - and costs a
+same-shot keyframe nothing (2.35 against 2.28, worst step 1.10x). At 0.9
+both still hold (mixed 1.15x / 3.94, same 1.10x / 2.29): the cut sits
+between 0.9 and 1.0 for this pair, so 0.8 - the reference CLI's own example
+value, with margin for stills further apart - is the keyframes' default: a still no continuous motion reaches is blended into
+rather than cut to.

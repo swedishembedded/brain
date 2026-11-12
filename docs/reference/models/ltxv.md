@@ -197,7 +197,14 @@ brain -v --device gpu0 ltxv t2v \
   was 3.0x its neighbours with the pin, and 1.09x with the guide (1.11x for
   the unconditioned run itself). The guide also reached the still more
   closely (mean |delta| 2.28 at its frame, against 4.95 for the pin).
-* **`--conditioning-strength`** (default `1.0`) applies to every still given.
+* **Keyframes hold at `--keyframe-strength` (default `0.8`), the ends at
+  `--conditioning-strength` (default `1.0`).** A keyframe whose still no
+  continuous motion reaches from its neighbours - another camera position,
+  another subject - is blended into at `0.8` where `1.0` cuts to it: measured
+  with a mid still from a different composition of the same prompt, the
+  worst frame step was 6.3x at `1.0` and 1.16x at `0.8`, the still still
+  reached at its frame. A keyframe from the same shot is reached as closely
+  either way (mean |delta| 2.35 at `0.8`, 2.28 at `1.0`).
 * **Two identical anchors make a static clip.** Passing the same image to
   `--start-frame` and `--end-frame` asks for "start here, end here", which has
   a correct trivial answer; see `crates/ltxv/tests/it/motion_real.rs` for the
@@ -253,12 +260,11 @@ brain -v --device gpu0 ltxv t2v \
   overridable with `--max-window-tokens`.
 * **A request that fits one window is unchanged.** It is handed straight to the
   single-window path, bit for bit, and none of this runs.
-* **The window-major loop is the default.** `--stage-major` runs a video-only
-  clip's stage 1 at half resolution across the whole clip and then refines it
-  at full resolution window by window; its refinement windows each regenerate
-  their own slice and do not stitch (measured on the real checkpoint: a cut to
-  another scene at a refinement seam), so it is opt-in. Audio-visual clips
-  always use the window-major loop.
+* **Each window is a whole generation**, two-stage when its own size calls
+  for it. Refining one half-resolution pass over the whole clip in
+  full-resolution windows was measured and removed: the refinement windows
+  each regenerate their own slice and do not stitch (on the real checkpoint,
+  a cut to another scene at a refinement seam).
 * **The windows share the clip's new frames evenly.** The fewest windows the
   token ceiling allows, each generating the same number of new latent frames
   (the first never fewer than the carried context). A continuation of only
