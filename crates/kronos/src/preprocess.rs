@@ -7,7 +7,7 @@
 //! the integer token streams the AR decoder consumes).
 //!
 //! - [`normalize`] / [`denormalize`] — per-feature z-score over the context time
-//!   axis with a `1e-5` floor, then clip to ±`clip` (Kronos `KronosPredictor`).
+//!   axis, dividing by `std + 1e-5`, then clip to ±`clip` (Kronos `KronosPredictor`).
 //! - [`quantized_to_indices`] — a `[T, k]` bipolar BSQ code → two integer token
 //!   streams `(s1, s2)`, LSB-first (`bits_to_indices`).
 //! - [`indices_to_bipolar`] — the inverse: `(s1, s2)` tokens → `[T, k]` bipolar
@@ -20,7 +20,7 @@ pub struct Norm {
     pub std: Vec<f32>,
 }
 
-/// Z-score each feature column over the `T` bars, floor std at `1e-5`, then clip
+/// Z-score each feature column over the `T` bars, dividing by `std + 1e-5`, then clip
 /// to `±clip`. `bars` is `[T, feat]` row-major (each row one OHLCV(+amount) bar).
 pub fn normalize(bars: &[f32], t: usize, feat: usize, clip: f32) -> (Norm, Vec<f32>) {
     assert_eq!(bars.len(), t * feat, "bars must be [T, feat]");

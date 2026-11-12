@@ -240,7 +240,8 @@ impl ForecastModel for Arima {
             let z = util::diff_n(c, d);
             let last = c.last().copied().unwrap_or(0.0);
             let coef = Self::fit_ar(&z, p);
-            // one-step residual scale on the differenced series
+            // scale of the differenced series (not of the AR residuals), floored
+            // by the first-difference scale: a conservative one-step width
             let s1 = util::std(&z).max(util::diff_std(c));
             let (mus, sigmas) = match coef {
                 Some(coef) => {
@@ -257,7 +258,7 @@ impl ForecastModel for Arima {
                         zf.push(yhat);
                         hist.push(yhat);
                     }
-                    // re-integrate d times (only d in {0,1} exercised; d=1 is a cumsum)
+                    // re-integrate all d orders of differencing
                     let mus = integrate(&zf, c, d, last);
                     let sigmas = (0..h).map(|k| s1 * ((k + 1) as f32).sqrt()).collect();
                     (mus, sigmas)
@@ -274,24 +275,19 @@ impl ForecastModel for Arima {
     }
 }
 
-/// Re-integrate a `d`-differenced forecast back to the original level. Only
-/// `d <= 1` is fully supported (d=1 is a cumulative sum anchored at `last`); for
-/// `d = 0` the forecast is the level itself.
-fn integrate(zf: &[f32], _ctx: &[f32], d: usize, last: f32) -> Vec<f32> {
-    match d {
-        0 => zf.to_vec(),
-        _ => {
-            // d>=1: undo one difference by cumulative sum from `last`; higher d
-            // is approximated by repeated cumsum (adequate for a baseline).
-            let mut level = last;
-            let mut out = Vec::with_capacity(zf.len());
-            for &dz in zf {
-                level += dz;
-                out.push(level);
-            }
-            out
+/// Re-integrate a `d`-differenced forecast back to the original level: one
+/// cumulative sum per order, from order `d - 1` down to the level, each
+/// anchored at the last value of that order of `ctx`.
+fn integrate(zf: &[f32], ctx: &[f32], d: usize, last: f32) -> Vec<f32> {
+    let mut out = zf.to_vec();
+    for k in (0..d).rev() {
+        let mut level = if k == 0 { last } else { util::diff_n(ctx, k).last().copied().unwrap_or(0.0) };
+        for v in out.iter_mut() {
+            level += *v;
+            *v = level;
         }
     }
+    out
 }
 
 // ---- GARCH(1,1) volatility -------------------------------------------------
@@ -400,6 +396,18 @@ pub fn default_set() -> Vec<Box<dyn ForecastModel>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A second difference is undone by two cumulative sums, each anchored at
+    /// the last value of its own order: t^2 has a constant second difference
+    /// of 2, and continuing it must give the next squares.
+    #[test]
+    fn integrate_undoes_every_order_of_differencing() {
+        let c: Vec<f32> = (0..10).map(|t| (t * t) as f32).collect();
+        let out = integrate(&[2.0, 2.0, 2.0], &c, 2, *c.last().unwrap());
+        assert_eq!(out, vec![100.0, 121.0, 144.0]);
+        let lin: Vec<f32> = (0..5).map(|t| 3.0 * t as f32).collect();
+        assert_eq!(integrate(&[3.0, 3.0], &lin, 1, 12.0), vec![15.0, 18.0]);
+    }
     use forecast::{Item, Variate};
 
     fn panel_of(series: Vec<f32>) -> Panel {
