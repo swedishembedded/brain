@@ -92,6 +92,28 @@ fn rnd(seed: &mut u32) -> f32 {
     ((*seed >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
 }
 
+/// Tolerance for the per-workgroup partials of `gradnorm_part` on `grad`, derived from the round-off bound
+/// ([`brain_testutil::rounding`]) instead of fixed.
+///
+/// A partial is a sum of squares of the elements a workgroup owns, formed by a longest chain of one rounded product,
+/// `ceil(numel / (n_wg * 64))` strided adds in a lane, and the 64 serial adds that fold the lanes: `k = 1 + lane + 64`
+/// rounded operations. `S` is the largest partial's sum of absolute terms (the terms are squares, so it is the sum
+/// itself). Both backends fold in this same order but through different compilers, so the bound that applies to each
+/// from the exact value applies to their difference twice over.
+fn gradnorm_part_tolerance(grad: &[f32], n_wg: u32) -> f32 {
+    let (numel, stride) = (grad.len(), n_wg as usize * 64);
+    let lane = numel.div_ceil(stride);
+    let worst_s = (0..n_wg as usize)
+        .map(|w| {
+            (0..64usize)
+                .flat_map(|t| (w * 64 + t..numel).step_by(stride))
+                .map(|i| f64::from(grad[i]) * f64::from(grad[i]))
+                .sum::<f64>()
+        })
+        .fold(0.0, f64::max);
+    brain_testutil::rounding::agreement_bound(1 + lane + 64, worst_s) as f32
+}
+
 /// Run one case through `wgsl-cpu`'s JIT, returning the output buffers.
 fn run_cpu(case: &Case) -> Vec<Buf> {
     let jit = wgsl_cpu::Jit::new(&[(case.name, case.wgsl)])
@@ -243,6 +265,17 @@ fn elementwise_case(name: &'static str, wgsl: &'static str, n: usize, inputs: us
     }
 }
 
+/// Tolerance for `gelu.wgsl` on the inputs in `x`: `0.5 v (1 + tanh(k (v + 0.044715 v^3)))`, whose terms are `0.5 v`
+/// and `0.5 v tanh(.)`, so `S_i = 0.5 |v| (1 + |tanh|) <= |v|` (taken at the largest `|v|`). The longest chain from
+/// `v` to the result is nine rounded operations (cube: 2, scale: 1, add: 1, `k *`: 1, `1 +`: 1, `0.5 *`: 1, final
+/// product: 1, plus the add of the two terms) and the two `tanh` implementations are each allowed 2 ulp, an ulp being
+/// `2u`, so 4 `u` per side: `k = 9 + 2 * 4` rounded operations, applied twice for the two backends.
+fn gelu_tolerance(x: &Buf) -> f32 {
+    let Buf::F32(x) = x else { panic!("gelu input is f32") };
+    let s = x.iter().fold(0.0f64, |m, v| m.max(f64::from(v.abs())));
+    brain_testutil::rounding::agreement_bound(9 + 2 * 4, s) as f32
+}
+
 /// The covered catalogue subset, at two shapes each: one that fills whole
 /// workgroups and one with a partial tail, because the tail is exactly where a
 /// mishandled early-return mask shows up.
@@ -254,9 +287,9 @@ fn generated_cuda_agrees_with_the_cpu_reference_per_kernel_and_shape() {
         agree(&ctx, &elementwise_case("add2", kernels::ADD2, n, 2));
         agree(&ctx, &elementwise_case("mul", kernels::MUL, n, 2));
         // `tanh` is a libm call on one side and a device intrinsic on the
-        // other, so this one is held to the fp32 noise floor, not bit-equality.
+        // other, so this one is held to a derived round-off bound, not bit-equality.
         let mut g = elementwise_case("gelu", kernels::GELU, n, 1);
-        g.outputs = vec![(1, 1e-6)];
+        g.outputs = vec![(1, gelu_tolerance(&g.bufs[0]))];
         agree(&ctx, &g);
     }
 
@@ -292,6 +325,7 @@ fn generated_cuda_agrees_with_the_cpu_reference_per_kernel_and_shape() {
         // seed: fixed input stream so a kernel/CPU disagreement is reproduced on the same operands
         let mut seed = 0xfeed_beefu32;
         let grad: Vec<f32> = (0..numel).map(|_| rnd(&mut seed)).collect();
+        let tol = gradnorm_part_tolerance(&grad, n_wg);
         agree(
             &ctx,
             &Case {
@@ -302,9 +336,9 @@ fn generated_cuda_agrees_with_the_cpu_reference_per_kernel_and_shape() {
                 grid_x: n_wg,
                 grid_y: 1,
                 // A tree of 64 partials summed in the same order on both
-                // sides, but the loads are fp32 adds either way: the noise
-                // floor, not bit-equality.
-                outputs: vec![(1, 1e-6)],
+                // sides through different compilers: the round-off bound of
+                // that chain, not bit-equality.
+                outputs: vec![(1, tol)],
                 alias: vec![],
             },
         );
@@ -359,8 +393,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         bufs: vec![Buf::F32(y), Buf::F32(x), Buf::F32(vec![0.0; n])],
         grid_x: n.div_ceil(64) as u32,
         grid_y: 1,
-        // CUDA's atan2f is within 2 ulp of the correctly rounded value.
-        outputs: vec![(2, 1e-6)],
+        // CUDA's atan2f is within 2 ulp of the correctly rounded value and the CPU side's libm within 1, an ulp being
+        // `2u` of relative error on a result no larger than pi in magnitude: `k = 2 * 2 + 2 * 1` combined roundings.
+        outputs: vec![(2, brain_testutil::rounding::accumulation_bound(2 * 2 + 2, std::f64::consts::PI) as f32)],
         alias: vec![],
     };
     agree(&ctx, &case);
@@ -383,7 +418,7 @@ fn an_early_return_before_a_barrier_does_not_strand_the_barrier() {
         bufs: vec![Buf::F32(grad.clone()), Buf::F32(vec![-1.0; dispatched as usize])],
         grid_x: dispatched,
         grid_y: 1,
-        outputs: vec![(1, 1e-6)],
+        outputs: vec![(1, gradnorm_part_tolerance(&grad, n_wg))],
         alias: vec![],
     };
     agree(&ctx, &case);
@@ -734,7 +769,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         bufs: vec![Buf::F32(x.clone()), Buf::F32(vec![0.0; n_wg as usize])],
         grid_x: n_wg,
         grid_y: 1,
-        outputs: vec![(1, 1e-6)],
+        outputs: vec![(1, wg_zero_tolerance(&x, live))],
         alias: vec![],
     };
     agree(&ctx, &case);
@@ -743,9 +778,22 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     let got = run_cuda(&ctx, &case);
     let Buf::F32(o) = &got[1] else { panic!("o is f32") };
     for w in 0..n_wg as usize {
-        let want: f32 = (0..live as usize).map(|t| x[w * 64 + t]).sum();
-        assert!((o[w] - want).abs() < 1e-6, "workgroup {w}: {} != {want}", o[w]);
+        let want: f64 = (0..live as usize).map(|t| f64::from(x[w * 64 + t])).sum();
+        let tol = brain_testutil::rounding::accumulation_bound(live as usize, wg_abs_sum(&x, w, live));
+        assert!((f64::from(o[w]) - want).abs() <= tol, "workgroup {w}: {} != {want} (bound {tol})", o[w]);
     }
+}
+
+/// `sum |x|` over the `live` lanes of workgroup `w`: the `S` of the round-off bound for that workgroup's sum.
+fn wg_abs_sum(x: &[f32], w: usize, live: u32) -> f64 {
+    (0..live as usize).map(|t| f64::from(x[w * 64 + t]).abs()).sum()
+}
+
+/// Tolerance for two backends summing the `live` lanes of each 64-lane workgroup of `x`: a sum of `live` terms, so
+/// `k = live`, at the largest workgroup `S`.
+fn wg_zero_tolerance(x: &[f32], live: u32) -> f32 {
+    let worst_s = (0..x.len() / 64).map(|w| wg_abs_sum(x, w, live)).fold(0.0, f64::max);
+    brain_testutil::rounding::agreement_bound(live as usize, worst_s) as f32
 }
 
 /// The kernels this milestone claims. Named in one place so the hazard checks

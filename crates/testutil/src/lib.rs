@@ -28,6 +28,7 @@ pub mod fd;
 pub mod golden;
 pub mod hfquant;
 pub mod parity;
+pub mod rounding;
 
 /// Name what a test is skipping, and let a caller demand it not be skipped.
 ///

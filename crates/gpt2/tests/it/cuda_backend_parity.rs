@@ -47,21 +47,45 @@
 use gpt2::model::{Gpt, GptConfig, PIPELINES};
 use gpu_core::Gpu;
 
-/// The bound every pair of backends must agree inside.
+/// Per-logit bound inside which every pair of backends must agree, derived from the binary32 round-off bound
+/// `k u S / (1 - k u)` ([`brain_testutil::rounding`]) for this model's own shapes and weights.
 ///
-/// The same floor `deepseek2/tests/backend_parity.rs` holds the CPU-vs-wgpu
-/// comparison to, for the same reason: a GEMM that folds its `k` loop in a
-/// different order costs a few fp32 ulps at these magnitudes and nothing more,
-/// while a real miscompile - a barrier some threads never reach, a uniform
-/// member read at the wrong offset, a shift the PTX ISA clamps - is orders of
-/// magnitude larger.
+/// A logit is `sum_j W[v, j] h_j` over the final-norm output `h`. A normalised row has unit mean square, so
+/// `|x_hat_j| <= sqrt(d)` and `|h_j| <= H = sqrt(d) max|g| + max|b|` for the norm's gain `g` and shift `b`; the terms
+/// of logit `v` therefore sum in absolute value to `S_v <= H sum_j |W[v, j]|`. `k` is the number of rounded operations
+/// on the longest chain from a token to a logit: every reduction of every stage in turn (norm statistics, projection
+/// widths, attention over `t` keys, the 4d feed-forward contraction) plus the head's own `d` adds, and a few for each
+/// elementwise step. The bound takes each stage to carry relative error through with gain at most one, which the norms
+/// and the residual stream are there to make true; the full forward bound is the ledger item "derive the forward
+/// bound". Two backends each within the bound of the exact logit are within twice the bound of each other.
+///
+/// A real miscompile (a barrier some threads never reach, a uniform member read at the wrong offset, a shift the PTX ISA
+/// clamps) moves a logit by orders of magnitude more than this.
 ///
 /// perf-number: a numerical-tolerance ratio, not a throughput claim.
-const BOUND: f32 = 1e-6;
+fn logit_bounds(cfg: &GptConfig, init: &std::collections::HashMap<String, Vec<f32>>) -> Vec<f32> {
+    let (d, ff, t) = (cfg.d_model as usize, cfg.d_ff as usize, T as usize);
+    let hd = d / cfg.n_heads as usize;
+    let norm = 2 * d + 4; // mean, variance, then the rsqrt and scale
+    let layer = norm + d + (hd + t + 4 + t) + d + 1 + norm + d + 10 + ff + 1;
+    let k = cfg.n_layers as usize * layer + norm + d;
 
-fn maxabs(a: &[f32], b: &[f32]) -> f32 {
+    let max_abs = |name: &str| init[name].iter().fold(0.0f64, |m, v| m.max(f64::from(v.abs())));
+    let h = (d as f64).sqrt() * max_abs("ln.weight") + max_abs("ln.bias");
+    init["lm_head.weight"]
+        .chunks(d)
+        .map(|row| brain_testutil::rounding::agreement_bound(k, h * row.iter().map(|w| f64::from(w.abs())).sum::<f64>()) as f32)
+        .collect()
+}
+
+/// Worst excess of `|a - b|` over its per-vocab bound `bounds[i % vocab]`, as `(excess, index)`; `excess <= 0` is agreement.
+fn worst_excess(a: &[f32], b: &[f32], bounds: &[f32]) -> (f32, usize) {
     assert_eq!(a.len(), b.len(), "compared tensors differ in length");
-    a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    a.iter()
+        .zip(b)
+        .enumerate()
+        .map(|(i, (x, y))| ((x - y).abs() - bounds[i % bounds.len()], i))
+        .fold((f32::NEG_INFINITY, 0), |m, e| if e.0 > m.0 { e } else { m })
 }
 
 /// `b * t` stays under `select::GEMM_TILE_MIN_ROWS` so every linear picks the
@@ -127,9 +151,10 @@ fn the_cuda_forward_agrees_with_every_other_backend_on_this_box() {
     let got = logits_on(cuda, &cfg, &init);
 
     assert!(got.iter().all(|v| v.is_finite()), "the CUDA forward produced non-finite logits");
-    let err = maxabs(&got, &want);
-    println!("gpt2 tiny forward, cpu vs cuda: maxabs {err:e} over {} logits", got.len());
-    assert!(err < BOUND, "the CUDA forward diverges from the CPU reference: maxabs {err:e}");
+    let bounds = logit_bounds(&cfg, &init);
+    let (excess, at) = worst_excess(&got, &want, &bounds);
+    println!("gpt2 tiny forward, cpu vs cuda: worst excess over the derived bound {excess:e} (logit {at} of {})", got.len());
+    assert!(excess <= 0.0, "the CUDA forward diverges from the CPU reference at logit {at}: {} vs {}, bound {}", got[at], want[at], bounds[at % bounds.len()]);
     assert_eq!(
         argmax_ids(&got, vocab),
         argmax_ids(&want, vocab),
@@ -143,9 +168,9 @@ fn the_cuda_forward_agrees_with_every_other_backend_on_this_box() {
     match Gpu::try_new_vulkan(PIPELINES) {
         Ok(vk) => {
             let vk_logits = logits_on(vk, &cfg, &init);
-            let err = maxabs(&got, &vk_logits);
-            println!("gpt2 tiny forward, vulkan vs cuda: maxabs {err:e}");
-            assert!(err < BOUND, "the CUDA forward diverges from Vulkan: maxabs {err:e}");
+            let (excess, at) = worst_excess(&got, &vk_logits, &bounds);
+            println!("gpt2 tiny forward, vulkan vs cuda: worst excess over the derived bound {excess:e} (logit {at})");
+            assert!(excess <= 0.0, "the CUDA forward diverges from Vulkan at logit {at}: {} vs {}", got[at], vk_logits[at]);
             assert_eq!(
                 argmax_ids(&got, vocab),
                 argmax_ids(&vk_logits, vocab),
@@ -154,4 +179,19 @@ fn the_cuda_forward_agrees_with_every_other_backend_on_this_box() {
         }
         Err(e) => brain_testutil::skip_unavailable(&format!("no Vulkan device to cross-check against: {e}")),
     }
+}
+
+/// The derived bound must contain the difference of two backends that ARE on every box: the CPU JIT and the default GPU
+/// device. Without it the CUDA comparison above, which skips without a card, would be the only evidence that `k` and
+/// `S` are not too small.
+#[test]
+fn the_derived_bound_contains_the_cpu_vs_default_device_difference() {
+    let cfg = config();
+    let init = gpt2::init_weights(&cfg, 7);
+    let want = logits_on(Gpu::new_cpu(PIPELINES), &cfg, &init);
+    let got = logits_on(Gpu::new(PIPELINES), &cfg, &init);
+    let bounds = logit_bounds(&cfg, &init);
+    let (excess, at) = worst_excess(&got, &want, &bounds);
+    println!("gpt2 tiny forward, cpu vs default device: worst excess {excess:e} at logit {at}, bound there {}", bounds[at % bounds.len()]);
+    assert!(excess <= 0.0, "two backends differ beyond the round-off bound at logit {at}: {} vs {}", got[at], want[at]);
 }
