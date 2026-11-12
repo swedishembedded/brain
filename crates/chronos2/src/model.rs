@@ -4,12 +4,14 @@
 //! Chronos-2 forward (inference) — composes the preprocessing and the WGSL
 //! kernels into the univariate forecast path.
 //!
-//! Univariate Phase 1: a single series, so `group_ids = arange(B)` with `B=1`.
-//! Group (cross-variate) attention then operates on a length-1 sequence, so
+//! For a single series (`forecast_quantiles`, `B=1`), `group_ids = arange(B)` and
+//! the group (cross-variate) attention operates on a length-1 sequence, so
 //! softmax is trivially 1 and its output collapses to `o_proj(v_proj(RMSNorm(x)))`
 //! per token — no attention kernel needed for the group sublayer (the spec
 //! explicitly endorses this degeneration). The time (temporal) attention is the
-//! real bidirectional MHA over the token axis.
+//! real bidirectional MHA over the token axis. Several related series, and
+//! known-future covariates, take the real group attention
+//! (`forecast_quantiles_mv`, `forecast_quantiles_mv_kf`).
 //!
 //! Op sequence per token sequence `S = n_ctx + 1(REG) + n_out`:
 //! ```text

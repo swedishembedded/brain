@@ -121,7 +121,7 @@ impl KronosForecaster {
     }
 
     /// Assemble a `[T, feat]` row-major bar matrix from the item's OHLCV
-    /// variates, synthesising `amount = volume × close` if the model wants 6
+    /// variates, synthesising `amount = volume × mean(open, high, low, close)` if the model wants 6
     /// features. Errors if a required column is missing or ragged.
     fn build_bars(&self, item: &forecast::Item) -> Result<(Vec<f32>, usize), ForecastError> {
         let feat = self.model.feat();

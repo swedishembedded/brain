@@ -6,7 +6,7 @@
 //!
 //! Two pieces, both parity-critical (the spec flags them as the traps):
 //! - [`instance_norm`] / [`instance_norm_inverse`] — Chronos-2's `InstanceNorm`:
-//!   per-row **standardization** (NaN-aware mean/std, scale floored to 1e-5)
+//!   per-row **standardization** (NaN-aware mean/std; a scale of exactly 0 becomes 1e-5)
 //!   followed by **arcsinh** squashing. The inverse applies `sinh` then the
 //!   affine. This is standardization, *not* median/MAD, despite loose
 //!   descriptions of it as "robust scaling".

@@ -5,7 +5,7 @@
 //! `PatchedTimeSeriesDecoder_MOE._preprocess_input` / `_forward_transform`.
 //!
 //! The context is padded/truncated to `context_len`, split into `patch_len`
-//! windows, standardized by the **first patch with >3 valid values** (not the
+//! windows, standardized by the **first patch with at least 3 valid values** (not the
 //! whole series), padded positions zeroed, and the per-patch padding flag
 //! computed. Returns the `[n_patches, 2*patch_len]` `[values, mask]` features,
 //! the per-patch padding mask, and the `(mu, sigma)` used to reverse it.
@@ -46,7 +46,7 @@ fn pad_to_context(context: &[f32], context_len: usize) -> (Vec<f32>, Vec<f32>) {
     (vals, pad)
 }
 
-/// `_masked_mean_std`: statistics of the first patch with >3 valid (unpadded)
+/// `_masked_mean_std`: statistics of the first patch with at least 3 valid (unpadded)
 /// values; falls back to the last patch when none qualify.
 fn masked_mean_std(patch_vals: &[f32], patch_pad: &[f32], n: usize, patch_len: usize, tol: f32) -> LocScale {
     // pick the patch index
