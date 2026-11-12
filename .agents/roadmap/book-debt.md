@@ -18,15 +18,18 @@ Numerics and data:
       tautological one (v02 ch06).
 
 Training kernels and graphs:
-- [ ] optim: `Optim::new` resolves the cooperative grad-norm pair itself; migrate deepseekocr2, minicpmv, qwen35moe,
-      florence2, solve, timesfm3, ricursive; retire the serial kernel to a test reference (v03 ch08).
-- [ ] rmsnorm/layernorm: shared builder registers the `_rows` twins by default; correct the "per-row loop is fine"
-      comments (v03 ch10, v04 ch04).
+- [x] optim: `Optim` resolves the cooperative grad-norm pair itself (the `Gpu` appends it beside `gradnorm_sq`, `gpu_core::upgrade::TWINS`),
+      so deepseekocr2, minicpmv, qwen35moe, florence2, solve, timesfm3, ricursive and every other model get it with no edit; the serial
+      kernel stays for a device with no workgroup reduction (the CPU JIT) and as the bench reference (v03 ch08).
+- [x] rmsnorm/layernorm: shared builder resolves the `_rows` twins by default (`Gpu::twin_of`); the "per-row loop is fine"
+      comments are corrected (v03 ch10, v04 ch04).
 - [ ] model: rename `LayerTape`/`TapeEdge` to names that say what they are (v03 ch04).
 - [x] toyautoencoder: delete the unused first-layer dX and its buffer (v03 ch04).
-- [ ] wgsl-cpu: bounds-checked dispatch that returns an error naming kernel and binding (v03 ch10).
+- [x] wgsl-cpu: bounds-checked dispatch that returns an error naming kernel and binding (v03 ch10); on in debug builds of the CPU backend
+      and via `backend_api::set_checked_kernels`; the native fast paths of `backend-cpu` are not covered.
 - [x] wgsl-cpu: typed compile error instead of matching the word "barrier" (v04 ch09).
-- [ ] backend-cuda / gpt2: derive golden tolerances from the round-off bound (v04 ch09).
+- [x] backend-cuda / gpt2: derive golden tolerances from the round-off bound (v04 ch09); the CUDA comparisons skip without a card, the
+      derived gpt2 bound is checked against CPU vs the default device.
 - [ ] gpt2: tie lm_head to the token embedding, with gradcheck (v05 ch03, ch10, ch15).
 - [ ] gpt2: derive the forward bound and assert the greedy top-2 gap instead of choosing a seed (v05 ch15).
 - [x] rope.wgsl: theta as a parameter (v05 ch08).

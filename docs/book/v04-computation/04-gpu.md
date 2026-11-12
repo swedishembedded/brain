@@ -579,7 +579,7 @@ aborted the whole process with a memory error and no kernel name, because the gu
 ### Coalescing in a real kernel: `layernorm.wgsl` and `layernorm_rows.wgsl`
 
 The two layer-normalization kernels are the chapter's two
-access patterns in code. In `crates/kernels/wgsl/layernorm.wgsl` invocation $t$ owns row $t$ and walks it with three serial loops, so
+access patterns in code, and the device picks between them: the handle appends the second beside every `layernorm.wgsl` a model registers, and the shared builder dispatches it on any device that can run a workgroup reduction, so the first remains as the reference and as the kernel of a device that cannot. In `crates/kernels/wgsl/layernorm.wgsl` invocation $t$ owns row $t$ and walks it with three serial loops, so
 the 32 lanes of a subgroup read addresses $d$ numbers apart. In `crates/kernels/wgsl/layernorm_rows.wgsl` one workgroup of 64 invocations
 walks one row with stride 64, two subgroups reading 32 consecutive numbers each, and the partial sums go through a 64-entry shared
 array and one barrier. The table counts the transactions of both for 32 rows:
