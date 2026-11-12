@@ -7748,8 +7748,13 @@ dependencies = [
 name = "sample-vision-fishtank"
 version = "5.1.0"
 dependencies = [
+ "brain-capture",
+ "brain-gpu-core",
  "brain-headpose",
  "brain-imaging",
+ "brain-modelref",
+ "brain-modelstore",
+ "brain-openseeface",
  "bytemuck",
  "pollster",
  "serde_json",
