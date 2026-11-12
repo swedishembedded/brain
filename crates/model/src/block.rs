@@ -1629,6 +1629,10 @@ pub(crate) fn key_minor_step(
 /// leaves the dispatch sequence byte-for-byte what it was; there is deliberately
 /// no second copy of this loop for the biased case.
 ///
+/// **Alignment:** a span or chunk starts at a sliced binding of `qkv` (`row * stride`) and `ctx` (`row * d_out`), so
+/// `stride` and `d_out` must be multiples of 64 words (256 B, `backend_api::STORAGE_BINDING_OFFSET_ALIGN_BYTES`),
+/// which every ViT width is. The backend refuses a misaligned slice, naming the kernel.
+///
 /// `km` swaps the score dispatch for the coalesced [`KeyMinor`] pair. This loop
 /// is the best case for it: the transpose is hoisted to once per SPAN while the
 /// score sweep runs once per query CHUNK, so a span of `len` rows at chunk size

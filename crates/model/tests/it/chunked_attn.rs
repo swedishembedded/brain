@@ -44,23 +44,25 @@ fn ids() -> VitKernelIds {
         matmul_rows: 11,
     }
 }
+// dim is a multiple of 64 words: every span's row offset (`row0 * 3 * dim`, `row0 * dim`) is then a legal
+// 256-byte storage-binding offset, as it is for every real ViT width.
 fn run(seed: u64, chunk: u32, spans: &[(u32, u32)], rows: u32) -> Vec<f32> {
-    let sh = VitShape { dim: 32, heads: 2, mlp: 64, eps: 1e-5 };
+    let sh = VitShape { dim: 64, heads: 2, mlp: 128, eps: 1e-5 };
     let g = Gpu::new_cpu(PIPES);
     let k = ids();
     let mut r = Lcg::new(seed);
-    let qkv_host: Vec<f32> = (0..rows as usize * 96).map(|_| r.scaled(0.5)).collect();
+    let qkv_host: Vec<f32> = (0..rows as usize * 192).map(|_| r.scaled(0.5)).collect();
     let qkv = g.storage_init("qkv", &qkv_host);
-    let ctx = g.storage(rows as u64 * 32);
+    let ctx = g.storage(rows as u64 * 64);
     // slab big enough for the largest chunk
     let slab = 2 * rows as u64 * rows as u64;
     let scores = g.storage(slab);
     let probs = g.storage(slab);
-    let kt = g.storage(32 * rows as u64);
+    let kt = g.storage(64 * rows as u64);
     let mut steps = Vec::new();
     chunked_attn_fwd(&g, &k, &sh, &qkv, &ctx, &scores, &probs, &kt, spans, chunk, &mut steps);
     g.submit(&[&ctx], &steps);
-    g.read(&ctx, rows as usize * 32)
+    g.read(&ctx, rows as usize * 64)
 }
 
 #[test]
@@ -94,8 +96,8 @@ fn frame_spans_match_reference() {
     for f in 0..3u32 {
         // frame f alone: same qkv content (same seed), span at 0
         let solo = run(seed, td, &[(f * td, td)], rows);
-        let a = &multi[(f * td * 32) as usize..((f + 1) * td * 32) as usize];
-        let b = &solo[(f * td * 32) as usize..((f + 1) * td * 32) as usize];
+        let a = &multi[(f * td * 64) as usize..((f + 1) * td * 64) as usize];
+        let b = &solo[(f * td * 64) as usize..((f + 1) * td * 64) as usize];
         let max = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
         assert!(max < 1e-6, "frame {f}: max diff {max}");
     }
