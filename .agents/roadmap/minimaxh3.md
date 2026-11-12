@@ -1315,3 +1315,22 @@ transplant onto ref2va uses 0.75.
   gated by its own crate test. `ref2va`'s and the scheduler's own dumpers
   (if any is still needed beyond `crate::schedule`'s existing closed-form
   tests) do not exist yet.
+
+## Interior keyframes
+
+`fl2va` anchors any pixel frame, not only the two ends: `pipeline::Anchor::
+At(p)` puts a keyframe's conditioning rows at rotary time `text + 5/3 * p`,
+the clock `"first"` (`p = 0`) and `"last"` (`p = aligned - 1`, which the
+pairwise-summed span equals) already sit on; `check_anchors` refuses frame 0,
+the last frame, frames past the clip and anything out of timeline order. The
+`keyframes` param takes `FRAME:PATH` pairs. The released pipeline names only
+the ends, so this is measured rather than assumed - real weights, 768x448,
+124 frames, 20 steps, stills from one LTX-2.5 shot of the same prompt:
+
+| anchors | worst frame step | delta first / interior / last |
+|---|---:|---:|
+| first + last | 1.19x | 2.83 / - / 2.47 |
+| first + frame 62 + last | 1.33x (at rav1e's keyframe, frame 120) | 2.69 / 2.61 / 2.46 |
+
+Each still is reached at exactly its frame and approached and left evenly
+(5.8, 5.2, 4.4, 3.5, **2.6**, 3.4, 4.6, 5.3, 6.0 around frame 62).

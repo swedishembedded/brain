@@ -189,15 +189,16 @@ pub fn manifest() -> Manifest {
 
     let fl2va = common(ActionSpec::new(
         TASKS[1],
-        "t2va, plus one and/or the other end of the clip anchored to a still image: the given still(s) are VAE-encoded, lightly noised, and prepended to the packed sequence as extra conditioning rows the denoise loop never resamples - the generated clip is guided to start and/or end at them",
+        "t2va, plus the clip anchored to still images at its first frame, its last frame and/or interior frames: the given stills are VAE-encoded, lightly noised, and prepended to the packed sequence as extra conditioning rows, each at its own frame's rotary time, that the denoise loop never resamples - the generated clip is guided through every one of them",
     ))
     // `host_resolved`: these name still files on the machine that holds the
     // weights - `ltxv::caps`' `start_frame`/`end_frame`/`mid_frame` pattern.
     // A caller standing on the host (`brain do`) sets them; every off-machine
     // surface refuses them and would take the still's content as a blob
     // instead.
-    .param(ParamSpec::new("first_frame", ParamType::Str, "server-side path to a PNG/JPEG still the clip's FIRST frame is anchored to. At least one of first_frame/last_frame is required.").host_resolved())
-    .param(ParamSpec::new("last_frame", ParamType::Str, "server-side path to a PNG/JPEG still the clip's LAST frame is anchored to. At least one of first_frame/last_frame is required.").host_resolved())
+    .param(ParamSpec::new("first_frame", ParamType::Str, "server-side path to a PNG/JPEG still the clip's FIRST frame is anchored to. At least one of first_frame/last_frame/keyframes is required.").host_resolved())
+    .param(ParamSpec::new("last_frame", ParamType::Str, "server-side path to a PNG/JPEG still the clip's LAST frame is anchored to. At least one of first_frame/last_frame/keyframes is required.").host_resolved())
+    .param(ParamSpec::new("keyframes", ParamType::Str, "interior keyframes, comma-separated FRAME:PATH pairs in timeline order (e.g. 40:a.png,80:b.png): each server-side PNG/JPEG still anchors the pixel frame it names, strictly between the clip's first and last").host_resolved())
     .video(contract.clone().frame_images(Some("first_frame"), Some("last_frame")));
 
     let ref2va = common(ActionSpec::new(
@@ -218,7 +219,7 @@ pub fn manifest() -> Manifest {
 
     Manifest::new(
         MODEL,
-        "MiniMax-H3 (MiniMax) - a 33B joint video+audio rectified-flow diffusion transformer: one packed self-attention stack denoises video, audio and text-conditioned rows together (not a two-stream architecture like ltxv), under two independent shifted-sigma Euler schedules in one forward, no CFG (guidance-distilled). Qwen3-VL text conditioning truncated to an intermediate hidden layer; causal 3D video VAE + DAC-lineage/BigVGAN audio VAE. t2va: text only. fl2va: text plus a first/last-frame image anchor. ref2va: text plus up to 12 image/video/audio references.",
+        "MiniMax-H3 (MiniMax) - a 33B joint video+audio rectified-flow diffusion transformer: one packed self-attention stack denoises video, audio and text-conditioned rows together (not a two-stream architecture like ltxv), under two independent shifted-sigma Euler schedules in one forward, no CFG (guidance-distilled). Qwen3-VL text conditioning truncated to an intermediate hidden layer; causal 3D video VAE + DAC-lineage/BigVGAN audio VAE. t2va: text only. fl2va: text plus still images anchoring its first, last and/or interior frames. ref2va: text plus up to 12 image/video/audio references.",
         vec![t2va, fl2va, ref2va],
     )
 }
@@ -380,7 +381,7 @@ fn decode_gen_params(inv: &capability::Invocation) -> Result<GenParams, String> 
     Ok(GenParams { opts, adapter, adapter_scale, vsa_gate, preset, sparsity_asked })
 }
 
-/// One `fl2va` keyframe request: which end of the clip it anchors, and the
+/// One `fl2va` keyframe request: which instant of the clip it anchors, and the
 /// server-side path to the still image ([`encode_keyframes`] loads and
 /// encodes it; `crate::pipeline::Anchor`/`KeyframeCondition`'s own doc for
 /// what happens to it after that).
@@ -390,24 +391,31 @@ pub struct FlKeyframeSpec {
     pub path: String,
 }
 
-/// Decode `fl2va`'s own `first_frame`/`last_frame` params. At least one is
-/// required - checked here so a request naming neither is rejected before
-/// any weight is read, matching [`gen_params_from`]'s own discipline.
+/// Decode `fl2va`'s own `first_frame`/`keyframes`/`last_frame` params, in
+/// timeline order. At least one still is required - checked here so a
+/// request naming none is rejected before any weight is read, matching
+/// [`gen_params_from`]'s own discipline. Whether the interior frames fit the
+/// clip is [`pipeline::check_anchors`]' question once the clip is aligned.
 pub fn fl2va_keyframes_from(inv: &capability::Invocation) -> Result<Vec<FlKeyframeSpec>, String> {
     let mut out = Vec::new();
     if let Some(path) = inv.get_str("first_frame").filter(|s| !s.is_empty()) {
         out.push(FlKeyframeSpec { anchor: pipeline::Anchor::First, path });
     }
+    for pair in inv.get_str("keyframes").unwrap_or_default().split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (at, path) = pair.split_once(':').ok_or_else(|| format!("fl2va: keyframe '{pair}' is not FRAME:PATH"))?;
+        let at = at.trim().parse::<u32>().map_err(|e| format!("fl2va: keyframe frame '{at}': {e}"))?;
+        out.push(FlKeyframeSpec { anchor: pipeline::Anchor::At(at), path: path.trim().to_string() });
+    }
     if let Some(path) = inv.get_str("last_frame").filter(|s| !s.is_empty()) {
         out.push(FlKeyframeSpec { anchor: pipeline::Anchor::Last, path });
     }
     if out.is_empty() {
-        return Err("fl2va: at least one of first_frame/last_frame is required".to_string());
+        return Err("fl2va: at least one of first_frame/last_frame/keyframes is required".to_string());
     }
     Ok(out)
 }
 
-/// `fl2va`'s stills on the canvas, each with the end of the clip it anchors.
+/// `fl2va`'s stills on the canvas, each with the instant of the clip it anchors.
 pub type Keyframes = Vec<(pipeline::Anchor, imaging::Rgb8)>;
 
 /// What a request conditions on besides its prompt, decoded from disk and
@@ -466,7 +474,7 @@ pub fn request_from(action: &str, inv: &capability::Invocation, paths: &Paths) -
 /// scaled (rounding half to even) to cover it, then centred.
 pub fn load_keyframes(specs: &[FlKeyframeSpec], canvas: Option<(u32, u32)>) -> Result<((u32, u32), Keyframes), String> {
     let stills = specs.iter().map(|s| imaging::load(&s.path).map(|img| (s.anchor, img)).map_err(|e| format!("fl2va: loading {}: {e}", s.path))).collect::<Result<Vec<_>, _>>()?;
-    let first = &stills.first().ok_or("fl2va: at least one of first_frame/last_frame is required")?.1;
+    let first = &stills.first().ok_or("fl2va: at least one of first_frame/last_frame/keyframes is required")?.1;
     let (h, w) = match canvas {
         Some(c) => c,
         None => pipeline::resolve_canvas_size(first.w as f64, first.h as f64, canvas_multiple(), pipeline::CANVAS_SHORT_EDGE, pipeline::CANVAS_MAX_PIXELS)?,
@@ -1396,6 +1404,16 @@ mod tests {
         // `filter(|s| !s.is_empty())` optional-string param in this workspace.
         let e = fl2va_keyframes_from(&Invocation::new().set("first_frame", json!(""))).unwrap_err();
         assert!(e.contains("at least one"), "{e}");
+
+        // Interior keyframes sit between the two ends, in the order given.
+        let all = fl2va_keyframes_from(&Invocation::new().set("first_frame", json!("a.png")).set("keyframes", json!("40:b.png, 80:c.png")).set("last_frame", json!("d.png"))).unwrap();
+        let anchors: Vec<_> = all.iter().map(|k| (k.anchor, k.path.as_str())).collect();
+        assert_eq!(anchors, vec![(pipeline::Anchor::First, "a.png"), (pipeline::Anchor::At(40), "b.png"), (pipeline::Anchor::At(80), "c.png"), (pipeline::Anchor::Last, "d.png")]);
+        let alone = fl2va_keyframes_from(&Invocation::new().set("keyframes", json!("60:b.png"))).unwrap();
+        assert_eq!(alone, vec![FlKeyframeSpec { anchor: pipeline::Anchor::At(60), path: "b.png".to_string() }]);
+        for bad in ["b.png", "x:b.png", "-3:b.png"] {
+            assert!(fl2va_keyframes_from(&Invocation::new().set("keyframes", json!(bad))).is_err(), "{bad} must be refused");
+        }
     }
 
     /// The real Qwen3-VL conditioner, loaded from the model store's real

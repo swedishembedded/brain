@@ -45,6 +45,18 @@ brain minimaxh3 fl2va --allow-community \
   --steps 20 --out video=kayak.mp4
 ```
 
+`fl2va` also takes interior keyframes: `--keyframes 40:a.png,80:b.png`
+anchors each still at the pixel frame it names, strictly between the clip's
+first and last frames and in timeline order, beside or without
+`--first_frame`/`--last_frame`. The released pipeline anchors only the two
+ends; an interior keyframe is the same conditioning block at its own frame's
+rotary time (5/3 per pixel frame, the clock `"first"` and `"last"` already
+sit on). Measured at 768x448 x 124 frames, stills from one shot: the clip
+reaches a frame-62 still exactly at frame 62 (mean |delta| 2.61, against
+2.69/2.46 at the two ends) and moves through it as evenly as a first/last
+clip does (worst frame step 1.33x its neighbours, at rav1e's own keyframe;
+1.19x with the ends alone).
+
 `t2va` takes the same flags without `--first_frame`/`--last_frame`. The clip
 carries the sound the same forward generated as its own track; `--out
 audio=…` also writes it as a WAV.

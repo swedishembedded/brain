@@ -252,12 +252,51 @@ fn pairwise_sum(a: &[f64]) -> f64 {
 // `MiniMaxH3PrepareLayoutStep.build_packed_sequence`)
 // ============================================================================
 
-/// Which end of the video a keyframe conditioning block anchors to
+/// Which instant of the video a keyframe conditioning block anchors to
 /// (`keyframe_anchors`' entries).
+///
+/// The released pipeline names the two ends. [`Anchor::At`] names any pixel
+/// frame between them: the rotary clock runs at [`ROPE_FRAME_RESCALE`] per
+/// pixel frame (the latent spans `(1, 4, 4, 4, 4)` sum to the aligned frame
+/// count), so `"first"` is pixel frame 0 on it, `"last"` the aligned clip's
+/// last pixel frame, and an interior keyframe takes the time of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Anchor {
     First,
+    /// An interior pixel frame of the aligned clip, strictly between its
+    /// first and last ([`check_anchors`]).
+    At(u32),
     Last,
+}
+
+impl Anchor {
+    /// The pixel frame this anchor names in a clip of `aligned_frames`.
+    pub fn pixel_frame(self, aligned_frames: u32) -> u32 {
+        match self {
+            Anchor::First => 0,
+            Anchor::At(p) => p,
+            Anchor::Last => aligned_frames.saturating_sub(1),
+        }
+    }
+}
+
+/// A keyframe list a clip of `aligned_frames` can honour: every interior
+/// anchor strictly inside the clip, and the anchors in timeline order with
+/// no instant named twice - the packed order is the presentation order the
+/// prompt numbers them by.
+pub fn check_anchors(anchors: &[Anchor], aligned_frames: u32) -> Result<(), String> {
+    for a in anchors {
+        if let Anchor::At(p) = *a {
+            if p == 0 || p + 1 >= aligned_frames {
+                return Err(format!("a keyframe at frame {p} is not inside the {aligned_frames}-frame clip: the first and last frames are first_frame/last_frame"));
+            }
+        }
+    }
+    let frames: Vec<u32> = anchors.iter().map(|a| a.pixel_frame(aligned_frames)).collect();
+    if frames.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(format!("keyframes must be in timeline order with no frame named twice, got frames {frames:?}"));
+    }
+    Ok(())
 }
 
 /// One contiguous run of packed rows, as the layout builds it: what a
@@ -342,6 +381,7 @@ pub fn build_packed_sequence(text_token_tags: &[u32], num_latent_frames: u32, la
     for (index, anchor) in keyframe_anchors.iter().enumerate() {
         let anchor_time = match anchor {
             Anchor::First => num_text_tokens as f64,
+            Anchor::At(p) => num_text_tokens as f64 + ROPE_FRAME_RESCALE * *p as f64,
             Anchor::Last => {
                 let spans: Vec<f64> = (0..num_latent_frames).map(|i| ROPE_FRAME_RESCALE * ROPE_FRAMES_PER_LATENT[(i as usize) % ROPE_FRAMES_PER_LATENT.len()]).collect();
                 num_text_tokens as f64 + pairwise_sum(&spans) - ROPE_FRAME_RESCALE
@@ -900,9 +940,10 @@ pub fn t2va(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts, cancel
     generate(ckpt, text, Conditioning::Keyframes(&[]), opts, cancel, progress)
 }
 
-/// `fl2va`: text plus up to 2 keyframe conditioning rows, one `"first"`-
-/// and/or one `"last"`-anchored ([`Anchor`]), built via
-/// [`encode_keyframe_condition`] in packed order.
+/// `fl2va`: text plus keyframe conditioning rows built via
+/// [`encode_keyframe_condition`] in packed order - the released pipeline's
+/// `"first"` and/or `"last"` anchors, and any interior ones between them
+/// ([`Anchor`], ordered as [`check_anchors`] requires).
 pub fn fl2va(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
     if keyframes.is_empty() {
         return Err("fl2va: at least one keyframe is required - use t2va for a text-only request".to_string());
@@ -1021,6 +1062,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
     let (packed, condition_video, condition_audio): (PackedSequence, Vec<&[f32]>, Vec<&[f32]>) = match conditioning {
         Conditioning::Keyframes(keyframes) => {
             let anchors: Vec<Anchor> = keyframes.iter().map(|k| k.anchor).collect();
+            check_anchors(&anchors, aligned_num_frames)?;
             let packed = build_packed_sequence(&text.token_tags, num_latent_frames, latent_height, latent_width, num_audio_latents, dit_cfg.patch_size, AUDIO_CHANNELS, &anchors);
             (packed, keyframes.iter().map(|k| k.rows.as_slice()).collect(), Vec::new())
         }
@@ -1338,6 +1380,46 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(total(&ref2va), ref2va.token_tags.len());
+    }
+
+    /// An interior keyframe sits on the same rotary clock as the two ends:
+    /// a keyframe named at the clip's last frame lands where `"last"` does,
+    /// and one at frame `p` at `p` frames' worth of time past `"first"`.
+    #[test]
+    fn an_interior_keyframe_takes_its_own_frames_rotary_time() {
+        // 7 latent frames = spans 1+4+4+4+4+1+4: a 22-frame aligned clip.
+        let (latents, aligned) = (7, 22);
+        let text = [TAG_TEXT; 3];
+        let time_of = |anchor: Anchor| {
+            let packed = build_packed_sequence(&text, latents, 2, 2, 3, [1, 2, 2], 2, &[anchor]);
+            packed.position_ids[text.len() * 3]
+        };
+        let first = time_of(Anchor::First);
+        assert!((time_of(Anchor::At(aligned - 1)) - time_of(Anchor::Last)).abs() < 1e-4, "frame {} is the last frame", aligned - 1);
+        assert!((time_of(Anchor::At(9)) - first - (ROPE_FRAME_RESCALE * 9.0) as f32).abs() < 1e-4);
+        // The generated latent frame starting at pixel frame 5 (latent 2,
+        // after spans 1 and 4) shares the time of a keyframe named there.
+        let packed = build_packed_sequence(&text, latents, 2, 2, 3, [1, 2, 2], 2, &[Anchor::At(5)]);
+        // One row per latent frame on a 2x2 latent grid patched 2x2.
+        let latent2_row = packed.video_indices[packed.num_condition_video_rows + 2] as usize;
+        assert_eq!(packed.position_ids[latent2_row * 3], time_of(Anchor::At(5)));
+    }
+
+    #[test]
+    fn keyframes_must_lie_inside_the_clip_in_timeline_order() {
+        let ok = [Anchor::First, Anchor::At(5), Anchor::At(9), Anchor::Last];
+        check_anchors(&ok, 22).unwrap();
+        check_anchors(&[Anchor::At(5)], 22).unwrap();
+        for (anchors, why) in [
+            (vec![Anchor::At(0)], "frame 0 is first_frame's"),
+            (vec![Anchor::At(21)], "the last frame is last_frame's"),
+            (vec![Anchor::At(30)], "past the clip"),
+            (vec![Anchor::At(9), Anchor::At(5)], "out of order"),
+            (vec![Anchor::At(5), Anchor::At(5)], "named twice"),
+            (vec![Anchor::Last, Anchor::First], "ends reversed"),
+        ] {
+            assert!(check_anchors(&anchors, 22).is_err(), "{why}: {anchors:?} must be refused");
+        }
     }
 
     #[test]
