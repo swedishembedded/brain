@@ -72,6 +72,22 @@ Forecasting and decisions:
 - [x] chronos2 / fincast: fine-tuning entry points on the shared contract; roadmaps corrected (v11 ch03).
 - [x] rlcd: one documented probability floor (v11 ch06).
 
+## Open: found while fixing the items above
+
+- [ ] model `it` on the Intel Arc device: `interleaved_rope_theta` (error 2.96e-5 against 1e-5),
+      `matmul_kq::dyn_matches_host_oracle_both_code_bits` (5.2e-4 against 5e-4) and
+      `moe_compact_parity::compact_layer_submit_count_*` (25 submits against at most 3) fail; root-cause each
+      (derive tolerances with `testutil::rounding` where the bound is round-off, fix the submit count if real).
+- [ ] Flaky: moondream3 `geglu_shift_grads_match_finite_differences`, backend-wgpu
+      `kernel_timing::dropping_a_shared_handle_does_not_wait_for_the_device`.
+- [ ] Binding-offset alignment: audit the `step_sliced` sites not exercised by a test (`head_ce.rs` row chunks,
+      `lossw.rs`, `moe.rs` index-list regions near 493 and 791, `ops.rs` near 2217/2341/2921, `block.rs` sliced
+      dq/dk, `chunked_bidir_bwd`); make `chunked_bidir_fwd/bwd` assert their 64-word precondition; check CUDA's
+      `step_native_sliced` and library-GEMM paths.
+- [ ] gemma4 and minimaxh3 have no `measure` (held/peak bytes); `brain models profile --measure` does not print the
+      new byte fields (CLI).
+- [ ] Commit d9da9049b (gradcheck tied GPT-2 check) landed before 961487746 (the gpt2 tie) and does not build alone.
+
 ## Open: needs hardware, weights or a reference the box does not have
 
 - [ ] cli: `brain forecast finetune --chronos2/--fincast` over the new host fine-tunes (needs a brain-cli build, which
