@@ -3,10 +3,10 @@
 
 //! The WorldMirror-2 model on the brain engine.
 //!
-//! P1 scope: per-frame DINOv2 ViT-L/14-reg encoding (frames → 1369 normed
-//! patch tokens each), built on `model::vit`. The trunk (P2) and heads (P3)
-//! extend this file's `Mirror` with further recorded stages on the same
-//! `ParamStore`/scratch.
+//! The whole forward as recorded stages on one `ParamStore`/scratch: the
+//! per-frame DINOv2 ViT-L/14-reg encoding (frames → 1369 normed patch tokens
+//! each, built on `model::vit`), the alternating frame/global trunk, and the
+//! heads.
 //!
 //! Follows the depth `Predictor` pattern for the shape-adaptive rebuild:
 //! OWNS its `Gpu` (matching `supir::model`/`controlnet::model`/`vqgan::model`,

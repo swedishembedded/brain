@@ -9,7 +9,8 @@
 //! plus an iterative camera head. Weights import 1:1 from the reference
 //! `model.safetensors`; outputs feed the `splat` rasterizer.
 //!
-//! Populated phase by phase (P0: config/param_list/import).
+//! Config, parameter list, import, the forward and its heads, the Gaussian
+//! assembly and cross-view fusion are all here.
 
 pub mod cam;
 pub mod caps;

@@ -5,8 +5,8 @@
 //! `rotation.py` parity) and per-pixel Gaussian construction
 //! (`rasterization.py::prepare_splats` + `act_gs.py` parity).
 //!
-//! Per source pixel: means = gs_depth back-projected through the predicted
-//! camera (pixel-index grid, no +0.5 — reference convention); quat wxyz
+//! Per source pixel: means = gs_depth back-projected through the camera
+//! (predicted or supplied) at the pixel centre (+0.5, see `69a4363c6`); quat wxyz
 //! normalized; scales exp-clamped at 0.3; opacity sigmoid; color =
 //! SH-decode(residual + RGB2SH(rgb)) = residual·C0 + rgb.
 
