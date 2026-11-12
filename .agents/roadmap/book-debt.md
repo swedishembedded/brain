@@ -74,18 +74,24 @@ Forecasting and decisions:
 
 ## Open: found while fixing the items above
 
-- [ ] model `it` on the Intel Arc device: `interleaved_rope_theta` (error 2.96e-5 against 1e-5),
-      `matmul_kq::dyn_matches_host_oracle_both_code_bits` (5.2e-4 against 5e-4) and
-      `moe_compact_parity::compact_layer_submit_count_*` (25 submits against at most 3) fail; root-cause each
-      (derive tolerances with `testutil::rounding` where the bound is round-off, fix the submit count if real).
-- [ ] Flaky: moondream3 `geglu_shift_grads_match_finite_differences`, backend-wgpu
-      `kernel_timing::dropping_a_shared_handle_does_not_wait_for_the_device`.
-- [ ] Binding-offset alignment: audit the `step_sliced` sites not exercised by a test (`head_ce.rs` row chunks,
-      `lossw.rs`, `moe.rs` index-list regions near 493 and 791, `ops.rs` near 2217/2341/2921, `block.rs` sliced
-      dq/dk, `chunked_bidir_bwd`); make `chunked_bidir_fwd/bwd` assert their 64-word precondition; check CUDA's
-      `step_native_sliced` and library-GEMM paths.
-- [ ] gemma4 and minimaxh3 have no `measure` (held/peak bytes); `brain models profile --measure` does not print the
-      new byte fields (CLI).
+- [x] model `it` on the Intel Arc device: `interleaved_rope_theta` (tolerance derived from the WGSL `sin`/`cos`/`pow`
+      accuracy table, angles kept inside `[-pi, pi]`), `matmul_kq::dyn_matches_host_oracle_both_code_bits` (per-element
+      `gamma_{ng+4} * S` bound from `testutil::rounding`) and `moe_compact_parity::compact_layer_submit_count_*`
+      (`stats().submits` counted the Intel sliced-binding workaround's one-queue-submit-per-step; now one per batch,
+      `queue_submits` is the physical count). Knowledge #437.
+- [x] Flaky: moondream3 `geglu_shift_grads_match_finite_differences` (tolerance scaled by a cancelling derivative; now
+      derived from the absolute sum of the terms), backend-wgpu `kernel_timing::dropping_a_shared_handle_does_not_wait_for_the_device`
+      (`submit` drained the device through the unsynchronised-workgroup valve before the test looked; now one naive matmul).
+      Latent, same shape, not changed: the `rel < 1e-2` against `max(|d|, 1e-3)` checks of the other tests in
+      `crates/moondream3/src/kernels_check.rs`.
+- [x] Binding-offset alignment: every listed `step_sliced` site proved aligned in a comment (`head_ce.rs`/`lossw.rs` chunk
+      starts, `moe.rs` `route_rows` regions, `ops.rs` quant rows/embed tiles/two-level passes); the six `chunked_bidir_*`
+      entry points refuse a window off the grain at the call (`block::assert_row_windows_bindable`).
+      Open: CUDA's `step_native_sliced` and `step_library_gemm` (`crates/backend-cuda/src/backend.rs`) do not call
+      `check_binding_offsets`, so a misaligned native slice is accepted there and refused everywhere else; adding it
+      needs a CUDA device to confirm no provider passes an unaligned offset.
+- [ ] gemma4 and minimaxh3 `measure` landed (`modelcost`: held/peak bytes; gemma4 is the peak of one forward under its
+      layer stream); `brain models profile --measure` still does not print the new byte fields (CLI; needs a brain-cli build).
 - [ ] Commit d9da9049b (gradcheck tied GPT-2 check) landed before 961487746 (the gpt2 tie) and does not build alone.
 
 ## Open: needs hardware, weights or a reference the box does not have
