@@ -25,11 +25,10 @@
 //! get_batch_weighted`]'s own default), so a dataset directory produced for
 //! ordinary [`model::train::fit`] also works here unchanged.
 //!
-//! ## What is NOT here yet
-//!
-//! Turning real ATIF trajectories (`atif::Trajectory`) into a weighted
-//! dataset directory in exactly that format is self-improve roadmap **P5**
-//! - see the [`atif`] module.
+//! [`atif::ingest_dir`] produces such a directory from real ATIF
+//! trajectories: each rewarded trajectory becomes a chat sample, every token
+//! of which carries the trajectory's verified reward as its weight (the loss
+//! mask still selects which of those tokens are trained on).
 
 pub mod atif;
 pub mod conformance;
