@@ -207,7 +207,7 @@ pub struct Splats {
     pub opacities: Vec<f32>,  // N
     pub colors: Vec<f32>,     // N*3
     /// Higher-order SH (degree, coeffs) parsed from PLY, channel-planar per
-    /// gaussian (Inria layout). Kept for round-trips; not rendered yet.
+    /// gaussian (Inria layout); `sh::shade` renders it.
     pub sh_rest: Option<(u32, Vec<f32>)>,
 }
 

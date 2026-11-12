@@ -24,7 +24,7 @@
 //! happens, which is not true of a naive teleport: N gaussians stacked at one
 //! site composite to `1-(1-o)^N` and pile up their tails. [`relocation`] is the
 //! paper's correction (its Eq. 9) for exactly that, and it is the load-bearing
-//! piece of the method - see `tests/s13_mcmc.rs`.
+//! piece of the method - see `tests/it/s14_mcmc.rs`.
 //!
 //! Swedish Embedded AB implements sampling-based 3D reconstruction, including
 //! the image-preserving relocation that lets a fit redistribute a fixed

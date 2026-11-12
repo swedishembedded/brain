@@ -179,9 +179,9 @@ impl Viewport {
 
     /// Record every presented frame into an MP4 at `path`.
     ///
-    /// Encoded as it goes, through an `ffmpeg` pipe - see [`record`]. An
-    /// absent ffmpeg is an error the caller can report and carry on from
-    /// rather than a reason to stop.
+    /// Encoded as it goes, in process (AV1 through `videocodec`, no external
+    /// tool) - see [`record`]. A failure to start is an error the caller can
+    /// report and carry on from rather than a reason to stop.
     pub fn record(&mut self, path: impl AsRef<std::path::Path>, fps: u32) -> Result<(), String> {
         self.recorder = Some(Recorder::start(
             path,
