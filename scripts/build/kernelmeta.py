@@ -121,7 +121,7 @@ def cpu(name, st, native):
     code: more than ONE top-level barrier - the JIT splits a body at one and
     no more; with two or more it does not fail cleanly, it corrupts memory
     (#26). It is the only compile error `wgsl_cpu::Jit` skips rather than
-    fails on (`is_unsupported_workgroup_structure` in
+    fails on (`CompileError::UnsupportedWorkgroupStructure` in
     `crates/wgsl-cpu/src/lib.rs`), so this cell and the JIT cannot disagree.
 
     A function-scope array in a work-group kernel used to be a second reason;

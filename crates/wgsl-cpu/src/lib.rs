@@ -83,18 +83,41 @@ pub struct Jit {
     wg_size: Vec<Option<u32>>,
 }
 
-/// The compile error that means "this backend's work-group execution model
-/// cannot express this kernel", as opposed to "this kernel or this compiler is
-/// broken": more than one top-level barrier (`compile_one_wg`'s
-/// split-at-barrier model). Only it is skippable; everything else is a hard
-/// error, so a genuine port bug can never masquerade as a skipped kernel.
+/// Why one kernel failed to compile.
 ///
-/// It is a structural fact a kernel DECLARES in its header (`@cpu no` /
-/// `native-only`) and that `scripts/build/kernelmeta.py::cpu` derives from the
-/// same code the compiler reads, so the two can never disagree silently. No
-/// other error message may therefore contain the word "barrier".
-fn is_unsupported_workgroup_structure(e: &str) -> bool {
-    e.to_lowercase().contains("barrier")
+/// The kinds are told apart by variant, never by what the message says, so a
+/// genuine port bug can never masquerade as a skipped kernel (or the reverse)
+/// because of how an error happens to be worded.
+#[derive(Debug)]
+enum CompileError {
+    /// This backend's work-group execution model cannot express the kernel
+    /// (`compile_one_wg`'s split-at-barrier model: not exactly one top-level
+    /// barrier). A structural fact a kernel DECLARES in its header (`@cpu no` /
+    /// `native-only`), derived by `scripts/build/kernelmeta.py::cpu` from the
+    /// same rule the compiler applies. Only this kind is skippable.
+    UnsupportedWorkgroupStructure(String),
+    /// The kernel or the compiler is broken; the build fails.
+    Failed(String),
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompileError::UnsupportedWorkgroupStructure(m) | CompileError::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+impl From<String> for CompileError {
+    fn from(m: String) -> Self {
+        CompileError::Failed(m)
+    }
+}
+
+impl From<&str> for CompileError {
+    fn from(m: &str) -> Self {
+        CompileError::Failed(m.to_string())
+    }
 }
 
 // The JIT-compiled code is immutable after `new` returns; only `&Jit` is shared.
@@ -161,13 +184,13 @@ impl Jit {
                 // derives that cell from the same structural fact). Genuine
                 // compile errors still fail hard, so a real port bug cannot
                 // hide as a skip.
-                Err(e) if is_unsupported_workgroup_structure(&e) => {
+                Err(CompileError::UnsupportedWorkgroupStructure(e)) => {
                     eprintln!("wgsl-cpu: kernel {name:?} not JIT-compiled ({e}); must use a native fast path or the GPU");
                     wg_size.push(None);
                     ids.push(None);
                     module.clear_context(&mut ctx);
                 }
-                Err(e) => return Err(format!("kernel {name:?}: {e}")),
+                Err(e @ CompileError::Failed(_)) => return Err(format!("kernel {name:?}: {e}")),
             }
         }
 
@@ -452,7 +475,7 @@ fn compile_one(
     math: &MathRefs,
     ctx: &mut cranelift_codegen::Context,
     fctx: &mut FunctionBuilderContext,
-) -> Result<Option<u32>, String> {
+) -> Result<Option<u32>, CompileError> {
     let nmod = naga::front::wgsl::parse_str(src).map_err(|e| format!("WGSL parse: {e:?}"))?;
     let entry = nmod
         .entry_points
@@ -503,7 +526,7 @@ fn compile_one(
                 let base = builder.ins().load(ptr_ty, MemFlags::trusted(), addr, 0);
                 buf_base.insert(binding, base);
             }
-            other => return Err(format!("unsupported address space {other:?}")),
+            other => return Err(format!("unsupported address space {other:?}").into()),
         }
     }
 
@@ -605,18 +628,22 @@ fn block_has_barrier(block: &Block) -> bool {
 /// Split a work-group kernel body at its single top-level `workgroupBarrier()`
 /// into the cooperative segment before it and the segment after. Restricted to
 /// exactly one top-level barrier (no nesting) — sufficient for the tiled kernels.
-fn split_at_barrier(body: &Block) -> Result<(Block, Block), String> {
+fn split_at_barrier(body: &Block) -> Result<(Block, Block), CompileError> {
     let stmts: Vec<&Statement> = body.iter().collect();
     let bpos = stmts
         .iter()
         .position(|s| matches!(s, Statement::ControlBarrier(_)))
-        .ok_or("work-group kernel without a top-level barrier (unsupported structure)")?;
+        .ok_or_else(|| {
+            CompileError::UnsupportedWorkgroupStructure("work-group kernel without a top-level barrier".into())
+        })?;
     let before: Vec<Statement> = stmts[..bpos].iter().map(|s| (*s).clone()).collect();
     let after: Vec<Statement> = stmts[bpos + 1..].iter().map(|s| (*s).clone()).collect();
     if before.iter().any(|s| block_has_barrier(&Block::from_vec(vec![s.clone()])))
         || after.iter().any(|s| block_has_barrier(&Block::from_vec(vec![s.clone()])))
     {
-        return Err("only a single top-level workgroupBarrier() is supported".into());
+        return Err(CompileError::UnsupportedWorkgroupStructure(
+            "only a single top-level workgroupBarrier() is supported".into(),
+        ));
     }
     Ok((Block::from_vec(before), Block::from_vec(after)))
 }
@@ -691,7 +718,7 @@ fn compile_one_wg(
     math: &MathRefs,
     ctx: &mut cranelift_codegen::Context,
     fctx: &mut FunctionBuilderContext,
-) -> Result<(), String> {
+) -> Result<(), CompileError> {
     let func = &entry.function;
     let ptr_ty = module.target_config().pointer_type();
     let wgsize = entry.workgroup_size[0] as i64;
@@ -721,20 +748,14 @@ fn compile_one_wg(
         locals_touched(&seg_after, func, &mut after_locals);
         if let Some(h) = before_locals.intersection(&after_locals).next() {
             let name = func.local_variables[*h].name.clone().unwrap_or_default();
-            // Deliberately worded without the substring "barrier": `Jit::new`
-            // treats any error containing it as an expected barrier-STRUCTURAL
-            // limitation (a shape the JIT's one-barrier model can't express at
-            // all, e.g. a tiled GEMM with a barrier inside the K-loop) and
-            // falls back to a native/GPU path rather than failing the build.
-            // This is a different, worse kind of error — the barrier structure
-            // is fine, but a value would silently read as stale/zero across
-            // the workgroup synchronisation point - so it must hard-fail, not
-            // be swallowed into that fallback.
-            return Err(format!(
+            // The barrier structure is fine; what is wrong is that a value would silently
+            // read back zero across the synchronisation point. That is a defect, not an
+            // unsupported shape, so it is `Failed` and never falls back to a native/GPU path.
+            return Err(CompileError::Failed(format!(
                 "local `{name}` is live across the workgroup synchronisation point; the JIT \
                  re-initialises per-invocation locals for each segment, so a value stored before \
                  it and read after would silently read back zero"
-            ));
+            )));
         }
     }
 
@@ -782,7 +803,7 @@ fn compile_one_wg(
                 wg_mem.insert(h, base);
                 wg_fill.push((base, elem, count as i64));
             }
-            other => return Err(format!("unsupported address space {other:?}")),
+            other => return Err(format!("unsupported address space {other:?}").into()),
         }
     }
 
@@ -1706,6 +1727,63 @@ mod tests {
 
     fn ptrs(bufs: &mut [&mut [f32]]) -> Vec<*mut u8> {
         bufs.iter_mut().map(|b| b.as_mut_ptr() as *mut u8).collect()
+    }
+
+    /// A one-barrier work-group kernel whose per-invocation local `{name}` is
+    /// written before the barrier and read after it.
+    fn local_live_across_barrier(name: &str) -> String {
+        format!(
+            "struct Params {{ total: u32, }}
+             @group(0) @binding(0) var<uniform> p: Params;
+             @group(0) @binding(1) var<storage, read_write> out: array<f32>;
+             var<workgroup> tile: array<f32, 8>;
+             @compute @workgroup_size(8)
+             fn main(@builtin(local_invocation_id) lid: vec3<u32>) {{
+                 var {name}: f32 = 0.0;
+                 {name} = f32(lid.x);
+                 tile[lid.x] = {name};
+                 workgroupBarrier();
+                 out[lid.x] = {name} + tile[0];
+             }}"
+        )
+    }
+
+    const TWO_BARRIERS: &str = "struct Params { total: u32, };
+        @group(0) @binding(0) var<uniform> p: Params;
+        @group(0) @binding(1) var<storage, read_write> out: array<f32>;
+        var<workgroup> tile: array<f32, 8>;
+        @compute @workgroup_size(8)
+        fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
+            tile[lid.x] = f32(lid.x);
+            workgroupBarrier();
+            out[lid.x] = tile[0];
+            workgroupBarrier();
+            out[lid.x] = out[lid.x] + tile[1];
+        }";
+
+    /// A kernel the work-group model cannot express (two barriers) is skipped,
+    /// not failed: it runs on a native path or the GPU.
+    #[test]
+    fn a_kernel_with_two_barriers_is_skipped_not_failed() {
+        let jit = Jit::new(&[("two", TWO_BARRIERS)]).expect("an unsupported structure is not an error");
+        assert!(!jit.is_compiled(0));
+    }
+
+    /// Whether a compile failure is skippable is decided by its kind, not by
+    /// what its message says: a real defect whose message happens to mention a
+    /// barrier (here a local named after one) still fails the build.
+    #[test]
+    fn a_defect_naming_a_barrier_in_its_message_is_still_a_hard_error() {
+        let err = Jit::new(&[("live", &local_live_across_barrier("barrier_total"))])
+            .err()
+            .expect("a local live across the synchronisation point must fail");
+        assert!(err.contains("barrier_total") && err.contains("\"live\""), "{err}");
+    }
+
+    #[test]
+    fn a_local_live_across_the_barrier_is_a_hard_error() {
+        let err = Jit::new(&[("live", &local_live_across_barrier("total"))]).err().expect("must fail");
+        assert!(err.contains("live across"), "{err}");
     }
 
     #[test]
