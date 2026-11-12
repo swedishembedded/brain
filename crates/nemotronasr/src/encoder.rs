@@ -6,6 +6,7 @@
 //!   1. depthwise-separable causal subsampling (×8) + linear
 //!   2. macaron Conformer blocks (rel-pos MHA + conv module)
 //!   3. prompt + encoder projectors
+//!
 //! This file runs them over a whole clip; `stream.rs` runs the same stages a
 //! chunk at a time, sharing this code.
 //!
