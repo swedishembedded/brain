@@ -6,9 +6,9 @@
 //! multi-patch quantile head. Apache-2.0 reference (`amazon/chronos-2`, 120M,
 //! native fp32), imported exactly and parity-gated per stage.
 //!
-//! Build order (brain's model-add recipe):
+//! Build order (brain's model-add recipe), all steps done:
 //! 1. [`config`] — dims + `param_list()` in the reference's own key names, and
-//!    the device-free T0 layout gate. **(this milestone)**
+//!    the device-free T0 layout gate.
 //! 2. WGSL kernels — reuse rmsnorm/matmul/softmax; add unscaled attention, RoPE
 //!    (half-split), the arcsinh scaler, and the quantile-head rearrange.
 //! 3. `model.rs` — SSA `build_forward`: patch-embed → REG → future tokens →

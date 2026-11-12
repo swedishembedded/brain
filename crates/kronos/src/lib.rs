@@ -13,8 +13,9 @@
 //! reference (T0 layout → T1 encode → T2 decode → T3 block → T4 dual head → T5
 //! generate).
 //!
-//! This milestone: the two configs + their `param_list()`s in the reference's
-//! own `state_dict` names, ready for the T0 layout gate.
+//! Configs and `param_list()`s in the reference's own `state_dict` names (gated
+//! by the T0 layout test), the decoder, tokenizer, generator, import, training
+//! and the `ForecastModel` adapter are all here.
 
 pub mod config;
 pub mod decoder;
