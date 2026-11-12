@@ -176,4 +176,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 5. [Learning 3D Directly](v10-video-and-3d/05-feed-forward-3d.md): Can one network look at a few images and output the scene's geometry in a single pass?
 6. [3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md): How do millions of small, differentiable blobs render a photorealistic scene?
 7. [World Models](v10-video-and-3d/07-world-models.md): Can a network learn to simulate an environment well enough to be played?
+8. [Simulating Brains and Bodies](v10-video-and-3d/08-neural-simulation.md): What can we learn by running a real animal's wiring diagram inside a simulated body?
 <!-- /contents -->

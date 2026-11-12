@@ -184,6 +184,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **classifier-free guidance**: sampling with the prediction $u_{\mathrm{un}} + g(u_c - u_{\mathrm{un}})$, the prediction made with the prompt pushed away from the prediction made without it by a scale $g$; $g = 1$ is the plain conditional model, and a larger $g$ follows the prompt harder at the cost of variety and of a second network pass per step. *([Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md))*
 
+**closed-loop control**: an arrangement in which a controller's command acts on a body and the body's resulting state is sensed and fed back to the controller, so that the controller's behaviour is judged by what the loop does. *([Simulating Brains and Bodies](v10-video-and-3d/08-neural-simulation.md))*
+
 **codebook**: a table of $K$ vectors of $d$ numbers each, the only values a quantized vector may take; a position of a tokenizer stores the index of a row. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
 
 **codebook prior**: a learned codebook of clean-picture parts used as the space of allowed restorations, so that every restored feature is one of the codes the decoder was trained on and the codes are chosen from the whole degraded picture. *([Restoration and Super-Resolution](v08-image-generation/12-restoration.md))*
@@ -217,6 +219,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **conformer**: an encoder block in which attention and a convolution module sit between two half-step feed-forwards, so that it relates both distant rows and close ones. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
 
 **connectionist temporal classification**: a loss and a decoding rule for a model that writes a distribution over a vocabulary and a blank at every row, scoring a transcript by the total probability of all the paths that collapse to it. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
+
+**connectome model**: a measured wiring diagram made executable: its synapse counts become weights with a sign for each sending neuron, a scale and a floor, and every neuron and synapse gets the physiology that the wiring does not contain. *([Simulating Brains and Bodies](v10-video-and-3d/08-neural-simulation.md))*
 
 **context extension**: making a model trained on texts of one length usable at a longer one, by choosing a scaling table for the new length and, usually, continuing to train it on texts of that length. *([Long Context](v06-language-models/08-long-context.md))*
 
@@ -618,6 +622,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **layer-normalization**: normalizing each example's features with the mean and variance taken over the features of that one example, then applying a learned gain and shift; it does not depend on the batch or the mode. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
+**leaky integrate-and-fire**: a spiking neuron whose membrane potential integrates its input, leaks back toward rest with a time constant, and fires and resets at a threshold. *([Simulating Brains and Bodies](v10-video-and-3d/08-neural-simulation.md))*
+
 **learned index selection**: choosing the keys a query reads by ranking all keys with a second, cheaper scorer (the indexer) and attending exactly to the top few; the scorer is trained to imitate the dense attention because the ranking itself has no gradient. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
 
 **learned-controller**: a network trained to produce a control command from the state of a system, here by imitating the commands of a classical controller, and judged by the behaviour of the system when it is in charge. *([First Complete Models](v03-neural-networks/13-first-models.md))*
@@ -844,6 +850,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **perplexity**: the exponential of the cross-entropy, $\exp H(p, q)$ with natural logarithms, the number of equally likely choices that would give the same average surprise. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
+**physics simulation**: the advance of the state of a set of bodies by integrating their equations of motion in small steps, with contacts as forces, so that its accuracy and stability depend on the step. *([Simulating Brains and Bodies](v10-video-and-3d/08-neural-simulation.md))*
+
 **piecewise function**: a function defined by different rules on different parts of its domain, such as the absolute value, ReLU and a schedule with a warmup. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 **pinhole camera**: the camera that sends each point of the world along a straight ray through one point, the pinhole, to the image, so that the image position is the ratio of the lateral offset to the depth and the depth itself is lost. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
@@ -1067,6 +1075,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **speech encoder**: the stack that turns the frames of a log-mel spectrogram into fewer rows of one width, each informed by its neighbours, ready for an alignment loss or a decoder. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
 
 **speech tokenizer**: a network trained, with a supervised target such as the transcript and not by reconstruction, to turn speech into discrete tokens that carry what is said and little of who says it or how. *([Speech Synthesis](v09-audio/06-speech-synthesis.md))*
+
+**spiking neuron**: a model neuron whose output is a discrete event, a spike, emitted when its internal state crosses a threshold, after which the state is reset. *([Simulating Brains and Bodies](v10-video-and-3d/08-neural-simulation.md))*
 
 **splat projection**: the map of a three-dimensional Gaussian to a two-dimensional one on the image, with the pixel of its centre and the covariance $\mathbf{J}\mathbf{R}\boldsymbol\Sigma\mathbf{R}^\top\mathbf{J}^\top$ of the camera's Jacobian, plus a small dilation; its inverse, the conic, gives the exponent at any pixel. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
 

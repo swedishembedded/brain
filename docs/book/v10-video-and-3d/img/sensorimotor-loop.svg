@@ -1,0 +1,28 @@
+<!-- source-sha256: 835b895e4f4253545add31ef33092731575acc44f71d711d349b786dc249d9d8 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 649 260" width="649" height="260"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="649" height="260" fill="#ffffff"/>
+<rect x="24" y="32" width="136" height="74" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="92" y="57.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">command</text>
+<text x="92" y="73.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">constant current</text>
+<text x="92" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">into descending cells</text>
+<rect x="200" y="32" width="105" height="74" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="252.5" y="57.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">spiking network</text>
+<text x="252.5" y="73.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">one neural tick</text>
+<text x="252.5" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per control tick</text>
+<rect x="345" y="32" width="128" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="409" y="57.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">muscle activation</text>
+<text x="409" y="73.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">times 0.8, plus 0.05</text>
+<text x="409" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per motor spike</text>
+<rect x="513" y="32" width="112" height="74" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="569" y="57.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">body</text>
+<text x="569" y="73.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">20 physics steps</text>
+<text x="569" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per control tick</text>
+<rect x="356.25" y="162" width="109" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="410.75" y="187.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">proprioceptor</text>
+<text x="410.75" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">current = gain</text>
+<text x="410.75" y="219.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">times joint angle</text>
+<line x1="163" y1="69" x2="197" y2="69" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="308" y1="69" x2="342" y2="69" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="476" y1="69" x2="510" y2="69" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M569,106 L569,189 Q569,199 559,199 L468.25,199" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M356.25,199 L262.5,199 Q252.5,199 252.5,189 L252.5,109" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>
