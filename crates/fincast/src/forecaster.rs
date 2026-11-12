@@ -135,6 +135,7 @@ impl ForecastModel for FincastForecaster {
                 if native.len() != QUANTILES.len() * spec.horizon {
                     return Err(ForecastError::internal("fincast: unexpected forecast shape"));
                 }
+                forecast::check_quantile_levels("fincast", &levels, &QUANTILES)?;
                 let q = FincastForecaster::interp_levels(&native, spec.horizon, &levels);
 
                 let mut tf = TargetForecast::new(&item.item_id, &tgt.name);

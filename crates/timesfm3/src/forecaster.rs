@@ -246,6 +246,7 @@ impl ForecastModel for Timesfm3Forecaster {
                             *x = x.max(0.0);
                         }
                     }
+                    forecast::check_quantile_levels("timesfm3", &levels, &cfg.quantile_levels)?;
                     let mut q = Self::interp_levels(&native, &cfg.quantile_levels, spec.horizon, &levels);
                     if nonneg {
                         for x in &mut q {

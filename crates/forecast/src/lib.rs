@@ -191,6 +191,22 @@ pub struct ForecastError {
     pub detail: serde_json::Value,
 }
 
+/// Refuse requested quantile `levels` outside the range of the `native` levels
+/// a model's head emits. Interpolation inside the grid is honest; beyond it
+/// the only answer is the outermost native quantile under the wrong label (a
+/// 0.95 level read as 0.9 makes a 90% interval an 80% one). The endpoints
+/// themselves are accepted to f32 rounding.
+pub fn check_quantile_levels(model: &str, levels: &[f32], native: &[f32]) -> Result<(), ForecastError> {
+    let (lo, hi) = native.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let tol = 1e-6;
+    match levels.iter().find(|&&l| l < lo - tol || l > hi + tol) {
+        Some(l) => Err(ForecastError::unsupported(format!(
+            "{model}: quantile level {l} is outside the {lo}..{hi} its head emits; it would only be clamped"
+        ))),
+        None => Ok(()),
+    }
+}
+
 impl ForecastError {
     fn of(code: &str, message: impl Into<String>, retryable: bool) -> ForecastError {
         ForecastError {
@@ -313,6 +329,18 @@ pub trait ForecastModel: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A level outside the levels a head emits cannot be interpolated, only
+    /// clamped to the outermost one, which would return the 80% band under a
+    /// 90% label; it is refused instead, and the endpoints themselves pass.
+    #[test]
+    fn quantile_levels_outside_the_native_grid_are_refused() {
+        let native = [0.1f32, 0.5, 0.9];
+        assert!(check_quantile_levels("m", &[0.1, 0.5, 0.9], &native).is_ok());
+        let err = check_quantile_levels("m", &[0.05, 0.5, 0.95], &native).unwrap_err();
+        assert_eq!(err.code, "unsupported_capability");
+        assert!(err.message.contains("0.05"), "{}", err.message);
+    }
 
     #[test]
     fn representation_wire_tags_roundtrip() {

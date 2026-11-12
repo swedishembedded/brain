@@ -160,6 +160,7 @@ impl ForecastModel for Chronos2Forecaster {
                 if native.len() != QUANTILES.len() * spec.horizon {
                     return Err(ForecastError::internal("chronos2: unexpected forecast shape"));
                 }
+                forecast::check_quantile_levels("chronos2", &levels, &QUANTILES)?;
                 let q = Chronos2Forecaster::interp_levels(&native, spec.horizon, &levels);
 
                 let mut tf = TargetForecast::new(&item.item_id, &tgt.name);
