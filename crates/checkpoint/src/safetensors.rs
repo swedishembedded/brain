@@ -527,6 +527,24 @@ pub fn read_model_dir(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
             let p = dir.join(shard);
             out.extend(read(p.to_str().ok_or("safetensors: non-utf8 shard path")?)?);
         }
+        // The index is a promise that every key is in the shard it names. A truncated or
+        // swapped shard breaks it, and a model built from what is left would be missing
+        // weights without saying so.
+        let returned: std::collections::HashSet<&str> = out.iter().map(|t| t.name.as_str()).collect();
+        let mut missing: Vec<(&str, &str)> = map
+            .iter()
+            .filter(|(key, _)| !returned.contains(key.as_str()))
+            .map(|(key, shard)| (key.as_str(), shard.as_str().unwrap_or_default()))
+            .collect();
+        missing.sort();
+        if let Some(&(key, shard)) = missing.first() {
+            return Err(format!(
+                "safetensors index: tensor \"{key}\" is listed in shard {shard} but no shard in {} holds it \
+                 ({} indexed tensor(s) missing)",
+                dir.display(),
+                missing.len()
+            ));
+        }
         return Ok(out);
     }
     // Same two-name split as `index_filename`'s sharded case: HF-transformers
@@ -653,6 +671,53 @@ mod tests {
         let w = ts.iter().find(|t| t.name == "w").unwrap();
         assert_eq!(w.data, vec![3.25, -0.5]);
         std::fs::remove_file(&file).ok();
+    }
+
+    /// Bytes of a safetensors file holding the named one-element f32 tensors.
+    fn shard_file(tensors: &[(&str, f32)]) -> Vec<u8> {
+        let mut header = serde_json::Map::new();
+        for (i, (name, _)) in tensors.iter().enumerate() {
+            header.insert(
+                name.to_string(),
+                serde_json::json!({"dtype": "F32", "shape": [1], "data_offsets": [i * 4, i * 4 + 4]}),
+            );
+        }
+        let hbytes = serde_json::to_vec(&header).unwrap();
+        let mut buf = (hbytes.len() as u64).to_le_bytes().to_vec();
+        buf.extend_from_slice(&hbytes);
+        for (_, v) in tensors {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        buf
+    }
+
+    /// An index promises every key in its `weight_map`; a shard that lacks one
+    /// (truncated or replaced download) is an error naming the key and the
+    /// shard, not a model quietly missing a weight.
+    #[test]
+    fn a_shard_that_lacks_an_indexed_key_is_an_error_naming_both() {
+        let dir = std::env::temp_dir().join(format!("brain-st-index-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = serde_json::json!({"weight_map": {
+            "a": "model-00001-of-00002.safetensors",
+            "b": "model-00001-of-00002.safetensors",
+            "c": "model-00002-of-00002.safetensors",
+        }});
+        std::fs::write(dir.join("model.safetensors.index.json"), index.to_string()).unwrap();
+        std::fs::write(dir.join("model-00002-of-00002.safetensors"), shard_file(&[("c", 3.0)])).unwrap();
+
+        // The first shard holds only "a": the index also promised "b".
+        std::fs::write(dir.join("model-00001-of-00002.safetensors"), shard_file(&[("a", 1.0)])).unwrap();
+        let err = read_model_dir(&dir).err().expect("the missing key must be an error");
+        assert!(err.contains("\"b\"") && err.contains("model-00001-of-00002.safetensors"), "{err}");
+
+        // Complete shards read every tensor.
+        std::fs::write(dir.join("model-00001-of-00002.safetensors"), shard_file(&[("a", 1.0), ("b", 2.0)])).unwrap();
+        let mut names: Vec<String> = read_model_dir(&dir).unwrap().into_iter().map(|t| t.name).collect();
+        names.sort();
+        assert_eq!(names, ["a", "b", "c"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
