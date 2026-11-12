@@ -632,15 +632,11 @@ mod tests {
     /// 2` per layer, ~8% of the floor for the 9-row H3 and ~20% for the
     /// 16..64-row decoders), the lm head, norms, RoPE, activations and the
     /// recurrent/conv mixers. Measured on the tiny configs the ratio is
-    /// 1.13..1.39. The bound is 2.0: a pricer that double counts a pass (the
+    /// 1.16..1.47. The bound is 2.0: a pricer that double counts a pass (the
     /// floor itself doubled, plus the same extras, is >= 2.2) or prices a
-    /// training step fails it, while the attention kernels `gpu_core::cost`
-    /// does not price yet (see the coverage assertion) would add at most that
-    /// ~20% and stay inside it.
+    /// training step fails it, while the attention scores, now priced like
+    /// every other kernel, add at most that ~20% and stay inside it.
     const MAX_OVER_FLOOR: f64 = 2.0;
-
-    /// Below this share of dispatches priced, a total no longer describes the pass.
-    const MIN_COVERAGE: f64 = 0.8;
 
     #[test]
     fn every_exact_pricer_reports_covered_nonzero_flops_within_a_floor_and_a_stated_multiple() {
@@ -652,14 +648,10 @@ mod tests {
             let report = price(&case.config).unwrap_or_else(|e| panic!("{}: {e}", case.arch));
             let summary = CostSummary::from(&report);
             assert!(summary.flops > 0, "{}: an exact forward pass must cost FLOPs", case.arch);
-            // Coverage is reported, not assumed complete: a dispatch with no cost
-            // formula is listed in `uncovered` and excluded from the totals, so
-            // the floor below still binds while the share of unpriced steps stays
-            // small. Today `gpu_core::cost` has no formula for qwen35's
-            // `region_copy`, the MoE grouped-expert kernels, gemma4's
-            // `gqa_scores_win` or H3's `attn_scores_qk`/`attn_apply_full`/
-            // `gate_rows`/`modulate_rows`, which puts the lowest coverage at 0.85.
-            assert!(summary.coverage > MIN_COVERAGE, "{}: coverage {} leaves too much of the pass unpriced: {:?}", case.arch, summary.coverage, report.uncovered);
+            // Every dispatch of every registered architecture has a formula in
+            // `gpu_core::cost`: a kernel without one is listed in `uncovered`,
+            // and the totals would silently describe less than the pass.
+            assert_eq!(summary.coverage, 1.0, "{}: dispatches without a cost formula: {:?}", case.arch, report.uncovered);
 
             let (num, den) = case.expert_share;
             let multiplied: u64 = manifest.iter().filter(|(n, _)| (case.multiplies)(n)).map(|(n, numel)| if n.contains(".experts.") { *numel as u64 * num / den } else { *numel as u64 }).sum();

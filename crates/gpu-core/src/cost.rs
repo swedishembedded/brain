@@ -833,6 +833,59 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, e, k) = (p(0)?, p(1)?, p(2)?);
             c(0, rows * e, 4 * (rows * e + rows * k))
         }
+        // params [seq_len, n_experts, top_k, norm, scale]: one thread per token
+        // (E experts, k = min(top_k, E, 32) picks). Float work per token: row max
+        // E; exp numerator and sum 3E (subtract, exp, add); the greedy selection
+        // scans E-kk candidates at pick kk, each a divide and a compare, plus one
+        // add per pick: 2kE - k(k-1) + k; finalisation 2 for the renormaliser and
+        // 3 per selected expert (divide, two multiplies). The index compares of
+        // the already-picked scans are data dependent (they stop at a match) and
+        // are reported at their dense bound, k(k-1)/2 per expert in the selection
+        // and k per expert in the finalisation, like `moe_linear_gated`'s rows.
+        // Bytes: logits read and the gate written once.
+        "router_gate" => {
+            let (rows, e, top_k) = (p(0)?, p(1)?, p(2)?);
+            let k = top_k.min(e).min(32);
+            let flops = 4 * e + 2 * k * e - k * k.saturating_sub(1) + 4 * k + 2;
+            c(rows * flops, rows * e * (k * k.saturating_sub(1) / 2 + k), 8 * rows * e)
+        }
+        // Grouped MoE stage 1, params [rows, n_experts, bm]: one thread per expert
+        // counts the rows whose gate is positive (a compare and an increment per
+        // row, integer work like `router_topk_compact`) and derives its tile count
+        // with a 3-op ceil-division; it writes three u32 tables.
+        "moe_group_counts" => {
+            let (rows, e) = (p(0)?, p(1)?);
+            c(0, e * (rows + 3), 4 * (rows * e + 3 * e))
+        }
+        // Stage 2, params [rows, n_experts, top_k]: one thread per expert scans
+        // every row's gate (rows*E compares) and, for each routed (row, expert)
+        // pair, scans up to top_k ids and bumps the position. The routed pairs are
+        // rows*top_k at the dense bound. Bytes: gate and top_ids read, row_start
+        // read, perm and pos_for_slot written.
+        "moe_group_perm_emit" => {
+            let (rows, e, k) = (p(0)?, p(1)?, p(2)?);
+            c(0, rows * e + rows * k * (k + 1), 4 * (rows * e + 3 * rows * k + e))
+        }
+        // Stage 4, params [rows, d, n_experts, top_k]: each of rows*d outputs
+        // multiplies and adds top_k gathered contributions; per row the gate
+        // entries, ids and positions are read once each, every selected expert
+        // row of width d is gathered, and the output is written.
+        "moe_group_combine" => {
+            let (rows, d, k) = (p(0)?, p(1)?, p(3)?);
+            f(2 * rows * d * k, 4 * (rows * k * d + rows * d + 3 * rows * k))
+        }
+        // The grouped expert GEMM, params [k, n, n_experts, rows]: `rows` is the
+        // compacted row total across experts (the host-known rows*top_k), which
+        // the shader never reads because it takes each expert's range from the
+        // scanned tables, but the cost registry cannot see those tables. The
+        // contraction is the `matmul` family's 2*m*k*n over those rows; the
+        // padding the 128x128 tiles and the worst-case grid add is not model work.
+        // Bytes: the compacted x, every expert's [n, k] weights, the compacted
+        // output and the three per-expert u32 tables.
+        "matmul_reg3_grouped" => {
+            let (k, n, e, rows) = (p(0)?, p(1)?, p(2)?, p(3)?);
+            f(2 * rows * k * n, 4 * (rows * k + e * n * k + rows * n + 3 * e))
+        }
         // params [width, row]: one cache-row write.
         "kv_append" => f(0, 8 * p(0)?),
         // params [rows, heads_out, group, hd, ...]: replicate kv heads (copy);
@@ -1000,6 +1053,26 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
                 4 * (b * h * t * t + b * t * hd * (h + kvh)) + if kmask { 4 * t } else { 0 },
             )
         }
+        // `gqa_scores` under a sliding window, params [b, h, hkv, t, hd, group,
+        // window]: query i keeps the keys j with i-window < j <= i, that is
+        // min(i+1, window) of them, so the live pairs per head are
+        // tri(w) + (t-w)*w for w = min(window, t). A window of at least t is the
+        // plain causal mask; masked entries are written but cost no arithmetic.
+        "gqa_scores_win" => {
+            let (b, h, kvh, t, hd, window) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(6)?);
+            let w = window.min(t);
+            let pairs = tri(w) + (t - w) * w;
+            f(b * h * pairs * (2 * hd + 1), 4 * (b * h * t * t + b * t * hd * (h + kvh)))
+        }
+        // Scores from separate q and k buffers, params [b, h, t, hd, qk_stride,
+        // causal, scale]: `attn_scores`' arithmetic with the mask a parameter
+        // (causal != 0 keeps tri(t) pairs, else all t*t). Only the h*hd channels
+        // of each stride-wide token row are read.
+        "attn_scores_qk" => {
+            let (b, h, t, hd, causal) = (p(0)?, p(1)?, p(2)?, p(3)?, p(5)?);
+            let pairs = if causal != 0 { tri(t) } else { t * t };
+            f(b * h * pairs * (2 * hd + 1), 4 * (b * h * t * t + 2 * b * t * h * hd))
+        }
         // params [b, h, t]: per row i — max, exp-sum, and the exp·inv writes.
         "attn_softmax" => {
             let (b, h, t) = (p(0)?, p(1)?, p(2)?);
@@ -1053,7 +1126,9 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (b, h, t) = (p(0)?, p(1)?, p(2)?);
             f(b * h * t * (6 * t + 1), 8 * b * h * t * t)
         }
-        "attn_apply_bidir" | "attn_bwd_dv_bidir" => {
+        // `attn_apply_full` reads v from its own buffer; params [b, h, t, hd, ..]
+        // lead as in the bidirectional form, and the MAC count is the same.
+        "attn_apply_bidir" | "attn_bwd_dv_bidir" | "attn_apply_full" => {
             let (b, h, t, hd) = (p(0)?, p(1)?, p(2)?, p(3)?);
             f(2 * b * h * hd * t * t, 4 * (b * h * t * t + 2 * b * t * h * hd))
         }
@@ -1359,6 +1434,21 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, v) = (p(0)?, p(1)?);
             f(4 * rows * v, 4 * (rows * v + 3 * rows))
         }
+        // params [R, D]: y = x + g[idx[r]]*h, a multiply and an add per element.
+        // x, the gathered gate, h and y move once each (the gather counted at
+        // what the dispatch issues, as `gate_row` documents), plus the R indices.
+        "gate_rows" => {
+            let (rows, dim) = (p(0)?, p(1)?);
+            f(2 * rows * dim, 4 * (4 * rows * dim + rows))
+        }
+        // params [R, D]: y = x*(1+scale[idx[r]])+shift[idx[r]], an add, a multiply
+        // and an add per element; x, both gathered tables and y move once each.
+        "modulate_rows" => {
+            let (rows, dim) = (p(0)?, p(1)?);
+            f(3 * rows * dim, 4 * (4 * rows * dim + rows))
+        }
+        // params [rows, width, row_stride, off]: pure movement of rows*width elements.
+        "region_copy" => f(0, 8 * p(0)? * p(1)?),
         // A strided column-block copy; params [rows, cnt, src_stride,
         // src_off, dst_stride, dst_off]: pure data movement.
         "copy_cols" => {
@@ -2217,6 +2307,86 @@ mod tests {
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }
+    }
+
+    /// The kernels qwen35, qwen35moe, gemma4 and minimaxh3 dispatch that had no
+    /// formula, so a pass through any of them reported coverage below 1.0.
+    /// Every figure is the hand count of the kernel's loop structure.
+    #[test]
+    fn windowed_and_separate_qk_attention_are_priced_by_their_pair_counts() {
+        // gqa_scores_win [b=1, h=2, hkv=1, t=4, hd=8, group=2, window=2]: query i
+        // sees min(i+1, window) keys = 1, 2, 2, 2 = 7 pairs per head, each
+        // 2*8 MACs-as-flops plus the scale: 2 heads * 7 * 17.
+        assert_eq!(cost("gqa_scores_win", &[1, 2, 1, 4, 8, 2, 2], 32).flops, 2 * 7 * 17);
+        // A window as long as the sequence is the plain causal mask exactly.
+        assert_eq!(cost("gqa_scores_win", &[1, 2, 1, 4, 8, 2, 4], 32), cost("gqa_scores", &[1, 2, 1, 4, 8, 2], 32));
+        assert_eq!(cost("gqa_scores_win", &[1, 2, 1, 4, 8, 2, 99], 32), cost("gqa_scores", &[1, 2, 1, 4, 8, 2], 32));
+        // A window of zero admits no key at all.
+        assert_eq!(cost("gqa_scores_win", &[1, 2, 1, 4, 8, 2, 0], 32).flops, 0);
+
+        // attn_scores_qk [b=1, h=2, t=4, hd=8, qk_stride=16, causal, scale]:
+        // causal keeps 10 of 16 pairs per head; q and k are each b*t*h*hd read,
+        // the scores b*h*t*t written.
+        assert_eq!(cost("attn_scores_qk", &[1, 2, 4, 8, 16, 1, 0], 32).flops, 2 * 10 * 17);
+        assert_eq!(cost("attn_scores_qk", &[1, 2, 4, 8, 16, 0, 0], 32).flops, 2 * 16 * 17);
+        assert_eq!(cost("attn_scores_qk", &[1, 2, 4, 8, 16, 0, 0], 32).bytes, 4 * (2 * 16 + 2 * 4 * 2 * 8));
+
+        // attn_apply_full [b=1, h=2, t=4, hd=8, v_stride=16, d_model=16]: every
+        // one of t*t probabilities multiplies a hd-wide v row: 2*b*h*hd*t*t.
+        assert_eq!(cost("attn_apply_full", &[1, 2, 4, 8, 16, 16], 64).flops, 2 * 2 * 8 * 16);
+        assert_eq!(cost("attn_apply_full", &[1, 2, 4, 8, 16, 16], 64).bytes, 4 * (2 * 16 + 2 * 4 * 2 * 8));
+    }
+
+    #[test]
+    fn adaln_row_tables_and_region_copy_are_priced_per_element() {
+        // gate_rows [R=3, D=4]: y = x + g*h is a multiply and an add per
+        // element; x, gathered g, h and y move once each, plus the R-entry index.
+        assert_eq!(cost("gate_rows", &[3, 4], 12).flops, 2 * 12);
+        assert_eq!(cost("gate_rows", &[3, 4], 12).bytes, 4 * (4 * 12 + 3));
+        // modulate_rows: x*(1+scale)+shift is an add, a multiply and an add.
+        assert_eq!(cost("modulate_rows", &[3, 4], 12).flops, 3 * 12);
+        assert_eq!(cost("modulate_rows", &[3, 4], 12).bytes, 4 * (4 * 12 + 3));
+        // region_copy [rows=3, width=4, row_stride=10, off=2]: 12 elements
+        // read and written, no arithmetic.
+        let copy = cost("region_copy", &[3, 4, 10, 2], 12);
+        assert_eq!((copy.flops, copy.int_ops, copy.bytes), (0, 0, 8 * 12));
+    }
+
+    #[test]
+    fn grouped_moe_kernels_are_priced_by_their_loop_structure() {
+        // router_gate [seq=2, E=8, top_k=2, norm=1, scale]. Per token: row max
+        // 8, exp numerator 3*8 (subtract, exp, add), greedy selection (8
+        // candidates then 7, each a divide and a compare, plus one add per
+        // pick) 17 + 15, finalisation 2 + 3 per selected expert = 8: 72 flops.
+        // The already-picked scans are 0 + 1 compares per candidate in the
+        // selection and up to top_k per expert in the finalisation: 8 * (1 + 2).
+        let gate = cost("router_gate", &[2, 8, 2, 1, 0], 2);
+        assert_eq!(gate.flops, 2 * 72);
+        assert_eq!(gate.int_ops, 2 * 24);
+        assert_eq!(gate.bytes, 4 * 2 * 2 * 8);
+
+        // moe_group_counts [rows=4, E=3, bm=128]: each expert scans 4 gate
+        // entries and does the 3-op ceil-division; it writes three u32s.
+        let counts = cost("moe_group_counts", &[4, 3, 128], 3);
+        assert_eq!((counts.flops, counts.int_ops, counts.bytes), (0, 3 * (4 + 3), 4 * (4 * 3 + 3 * 3)));
+
+        // moe_group_perm_emit [rows=4, E=3, top_k=2]: 12 gate compares, and for
+        // each of the rows*top_k routed pairs up to top_k id compares and one
+        // position increment: 12 + 8 * 3.
+        let perm = cost("moe_group_perm_emit", &[4, 3, 2], 3);
+        assert_eq!((perm.flops, perm.int_ops, perm.bytes), (0, 12 + 8 * 3, 4 * (4 * 3 + 3 * 8 + 3)));
+
+        // moe_group_combine [rows=4, d=5, E=3, top_k=2]: every output element
+        // multiplies and adds top_k gathered contributions.
+        let combine = cost("moe_group_combine", &[4, 5, 3, 2], 20);
+        assert_eq!(combine.flops, 2 * 4 * 5 * 2);
+        assert_eq!(combine.bytes, 4 * (4 * 2 * 5 + 4 * 5 + 3 * 4 * 2));
+
+        // matmul_reg3_grouped [k=4, n=6, E=3, rows=8]: 8 compacted rows, each a
+        // 4-long dot product for 6 outputs; the three u32 tables are read once.
+        let grouped = cost("matmul_reg3_grouped", &[4, 6, 3, 8], 3 * 256);
+        assert_eq!(grouped.flops, 2 * 8 * 4 * 6);
+        assert_eq!(grouped.bytes, 4 * (8 * 4 + 3 * 6 * 4 + 8 * 6 + 3 * 3));
     }
 
     /// The DAC-vocoder trio: `convtr1d`, `snake1d`, `add_chan_inplace`.

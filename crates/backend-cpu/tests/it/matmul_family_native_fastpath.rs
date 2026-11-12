@@ -370,7 +370,7 @@ fn grouped_matmul_native_fastpath_matches_per_expert_reference() {
         let steps = vec![gpu.dispatch(
             kind,
             &[&xb, &wb, &ob, &rs, &rc, &ts],
-            &[k as u32, n as u32, e as u32],
+            &[k as u32, n as u32, e as u32, rows as u32],
             gpu_core::Dispatch::Workgroups(tiles),
         )];
         gpu.submit(&[], &steps);

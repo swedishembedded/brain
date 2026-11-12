@@ -1961,7 +1961,7 @@ pub fn expert_fwd_grouped(
         steps.push(g.dispatch(
             ids.gemm_grouped,
             &[x_in, w, out_buf, &scratch.row_start, &scratch.row_count, &scratch.tile_start],
-            &[k, n, e],
+            &[k, n, e, compacted],
             gpu_core::Dispatch::Workgroups(tiles),
         ));
     };

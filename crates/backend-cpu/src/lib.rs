@@ -666,9 +666,9 @@ impl CpuBackend {
         // exists only to map a fixed GPU tile grid onto variable row counts,
         // so it is read for nothing here - the row tables say everything.
         //
-        // The compacted row count is not in the params (it is device-computed),
-        // so the buffer bounds come from the tables: the highest row any expert
-        // claims. Rows past that are the host's worst-case slack and are left
+        // The params carry the host-known compacted row total only for the cost
+        // registry; the buffer bounds here come from the tables: the highest row
+        // any expert claims. Rows past that are the host's worst-case slack and are left
         // untouched, exactly as the GPU kernel's own bound checks leave them.
         //
         // The expert blocks run in PARALLEL, which is the whole reason this

@@ -66,7 +66,11 @@
 // there). Gated by `backend-cpu/tests/matmul_family_native_fastpath.rs::
 // grouped_matmul_native_fastpath_matches_per_expert_reference`.
 
-struct Params { k: u32, n: u32, n_experts: u32 };
+// `rows` is the compacted row total across experts (the host-known rows*top_k).
+// The shader takes each expert's range from the group tables and never reads
+// it; it is in the uniform so the cost registry (`gpu_core::cost`) can price
+// the dispatch exactly, since it sees params and thread count but no buffer.
+struct Params { k: u32, n: u32, n_experts: u32, rows: u32 };
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       x:                array<f32>; // [compacted_rows, k]
