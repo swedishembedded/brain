@@ -122,10 +122,159 @@ fn argmax(v: &[f32]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Eight characters, so a model that knows nothing has perplexity 8.
+    const ITOS: [char; 8] = ['a', 'b', 'c', 'd', 'e', 'f', '=', '\n'];
+    const BLOCK: u32 = 8;
+    /// Logit margin the favoured token gets over every other one.
+    const MARGIN: f32 = 10.0;
+
+    fn config() -> crate::GptConfig {
+        crate::GptConfig { vocab: 8, block_size: BLOCK, n_layers: 1, d_model: 8, n_heads: 2, d_ff: 16 }
+    }
+
+    /// A model whose output ignores its input. Every weight is zero, so the
+    /// residual stream stays zero, the final layer norm returns its bias, and
+    /// the logits are `lm_head * bias`. With `lm_head` the identity and a bias
+    /// of `MARGIN` on token `favoured`, that token wins by exactly `MARGIN`
+    /// everywhere; with no favoured token all logits are zero (uniform).
+    fn constant_model(dir: &Path, favoured: Option<usize>) -> String {
+        let cfg = config();
+        let d = cfg.d_model as usize;
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(name, n)| {
+                let mut v = vec![0.0f32; n];
+                match name.as_str() {
+                    "ln.weight" => v.fill(1.0),
+                    "ln.bias" => {
+                        if let Some(j) = favoured {
+                            v[j] = MARGIN;
+                        }
+                    }
+                    "lm_head.weight" => (0..d).for_each(|i| v[i * d + i] = 1.0),
+                    _ => {}
+                }
+                (name, vec![n as u64], v)
+            })
+            .collect();
+        let path = dir.join("model.safetensors");
+        checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
+        path.to_str().unwrap().to_string()
+    }
+
+    /// A dataset directory: `meta.json`, a `val` split and `input.txt`.
+    fn dataset(dir: &Path, val: &[u32], text: &str) {
+        let meta = Meta { vocab_size: ITOS.len(), itos: ITOS.to_vec() };
+        std::fs::write(dir.join("meta.json"), meta.to_json()).unwrap();
+        data::binio::write_u32_bin(&dir.join("val.u32.bin"), val).unwrap();
+        std::fs::write(dir.join("input.txt"), text).unwrap();
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("brain-eval-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Ten tail lines (the last tenth of a hundred) with the given text each.
+    fn input_with_tail(tail_line: &str) -> String {
+        let mut text = String::new();
+        for _ in 0..90 {
+            text.push_str("ab=c\n");
+        }
+        for _ in 0..10 {
+            text.push_str(tail_line);
+            text.push('\n');
+        }
+        text
+    }
+
     #[test]
-    fn perplexity_definition_sanity() {
-        // exp(ln V) = V: the perplexity definition used above.
-        let v = 65f32;
-        assert!(((v.ln()).exp() - v).abs() < 1e-2);
+    fn argmax_takes_the_first_of_equal_maxima() {
+        assert_eq!(argmax(&[0.0, 2.0, 1.0]), 1);
+        assert_eq!(argmax(&[3.0, 3.0, 1.0]), 0);
+        assert_eq!(argmax(&[f32::NEG_INFINITY, -5.0]), 1);
+    }
+
+    /// Perplexity is `exp(mean cross-entropy)`: a model that knows nothing
+    /// scores the vocabulary size, one that is sure and right scores near 1,
+    /// one that is sure and wrong scores `exp(MARGIN)` plus the other tokens.
+    #[test]
+    fn perplexity_is_the_exponential_of_the_cross_entropy() {
+        let dir = scratch("ppl");
+        let val_all_a = vec![0u32; 200];
+        dataset(&dir, &val_all_a, "");
+
+        let uniform = constant_model(&dir, None);
+        let ppl = val_perplexity(&uniform, &dir, 2, 7).unwrap();
+        assert!((ppl - 8.0).abs() < 1e-3, "uniform model over 8 tokens: {ppl}");
+
+        let right = constant_model(&dir, Some(0));
+        let ppl = val_perplexity(&right, &dir, 2, 7).unwrap();
+        let p = MARGIN.exp() / (MARGIN.exp() + 7.0);
+        assert!((ppl - 1.0 / p).abs() < 1e-3, "sure and right: {ppl} vs {}", 1.0 / p);
+
+        let wrong = constant_model(&dir, Some(1));
+        let ppl = val_perplexity(&wrong, &dir, 2, 7).unwrap();
+        let want = MARGIN.exp() + 7.0;
+        assert!((ppl / want - 1.0).abs() < 1e-3, "sure and wrong: {ppl} vs {want}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Greedy decoding stops at the newline token and at `max_new`.
+    #[test]
+    fn greedy_decoding_stops_at_a_newline_or_the_length_limit() {
+        let dir = scratch("greedy");
+        let tok = CharTokenizer::from_itos(ITOS.to_vec());
+        let prompt = tok.encode("ab=");
+
+        let emits_c = Gpt::load(&constant_model(&dir, Some(2)), 1, BLOCK);
+        assert_eq!(greedy_until_newline(&emits_c, &prompt, 4, &tok), "cccc");
+        assert_eq!(greedy_until_newline(&emits_c, &prompt, 0, &tok), "");
+
+        let emits_newline = Gpt::load(&constant_model(&dir, Some(7)), 1, BLOCK);
+        assert_eq!(greedy_until_newline(&emits_newline, &prompt, 4, &tok), "");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A model that always answers with the end of line is right on exactly the
+    /// lines whose right-hand side is empty.
+    #[test]
+    fn exact_match_counts_the_lines_decoded_to_the_right_hand_side() {
+        let dir = scratch("exact");
+        let model = constant_model(&dir, Some(7));
+
+        dataset(&dir, &[0; 20], &input_with_tail("ab="));
+        assert_eq!(exact_match(&model, &dir, 5, 3).unwrap(), (1.0, 5));
+
+        dataset(&dir, &[0; 20], &input_with_tail("ab=c"));
+        assert_eq!(exact_match(&model, &dir, 5, 3).unwrap(), (0.0, 5));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// With no `LHS=RHS` line in the held-out tail there is nothing to score.
+    #[test]
+    fn exact_match_without_a_candidate_line_is_zero_of_zero() {
+        let dir = scratch("nocand");
+        let model = constant_model(&dir, Some(7));
+        dataset(&dir, &[0; 20], &input_with_tail("abc"));
+        assert_eq!(exact_match(&model, &dir, 5, 3).unwrap(), (0.0, 0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A prompt that does not fit the block leaves no room to decode and is
+    /// skipped, not counted as wrong.
+    #[test]
+    fn exact_match_skips_a_prompt_that_fills_the_block() {
+        let dir = scratch("overlong");
+        let model = constant_model(&dir, Some(7));
+        // The prompt `abcdefa=` is exactly the block (8 tokens): nothing is left to decode into.
+        dataset(&dir, &[0; 20], &input_with_tail("abcdefa="));
+        assert_eq!(exact_match(&model, &dir, 5, 3).unwrap(), (0.0, 0));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
