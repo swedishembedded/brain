@@ -1720,9 +1720,16 @@ $(SAMPLE_CATEGORY_TARGETS):
 $(SAMPLE_NAME_TARGETS):
 	$(LIST_CHILDREN)
 
-## samples/<category>/<name>/build - build one sample (shares brain's ./target cache)
+# A sample whose `[package.metadata.brain]` says `fetch-on-build = true` also
+# runs its own `fetch-data.sh` when it is built, so that after `build` the
+# `run` target has everything it needs. Opt-in, because some samples' fetch
+# scripts take arguments or build third-party engines; a script that opts in
+# must be idempotent and pin and checksum what it downloads.
+sample_fetches_on_build = $(shell grep -qE '^fetch-on-build *= *true' samples/$(1)/Cargo.toml 2>/dev/null && echo yes)
+## samples/<category>/<name>/build - build one sample (shares brain's ./target cache), and fetch its data if it opts in
 $(SAMPLE_BUILD_TARGETS): samples/%/build:
 	cargo build $(SAMPLE_CARGO_FLAGS) -p $(call sample_pkg,$*)
+	$(if $(call sample_fetches_on_build,$*),samples/$*/fetch-data.sh)
 
 ## samples/<category>/<name>/run - run a built sample, printing when it was built (ARGS=...)
 $(SAMPLE_RUN_TARGETS): samples/%/run:
