@@ -176,7 +176,7 @@ fn read_neurons(r: impl Read, cov: &mut Coverage) -> Result<(BTreeMap<u64, u32>,
             soma_side: get(c_side),
             cell_type: get(c_type),
             region: get(c_region),
-            // Missing or unparseable becomes 0.0, which `Connectome::size_scale`
+            // Missing or unparseable becomes 0.0, which `Connectome::excitability`
             // reads as "unknown" and replaces with the population median rather
             // than with an infinitely excitable neuron.
             surface_area_nm2: c_area.and_then(|i| fields[i].trim().parse::<f64>().ok()).unwrap_or(0.0),

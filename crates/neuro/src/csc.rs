@@ -131,7 +131,8 @@ impl Csc {
     /// what it is, which is the thing being tested.
     pub fn shuffled_sources(&self, seed: u64) -> Csc {
         let mut out = self.clone();
-        // unbiased in-place over the `pre` array, with this workspace's
+        // Fisher-Yates in place over the `pre` array (the `% (i + 1)` of a
+        // 31-bit draw carries a relative bias of about `len / 2^31`), with this workspace's
         // deterministic test PRNG shape so a shuffled run is reproducible.
         let mut state = seed | 1;
         let mut next = || {

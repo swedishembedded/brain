@@ -194,12 +194,15 @@ impl Model {
     /// failing. It can be DERIVED instead, for the one model shape where the
     /// derivation is unambiguous.
     ///
-    /// A free joint occupies seven coordinates and six velocities; every other
-    /// joint type occupies the same number of each. So `nq - nv` counts the
-    /// free joints, and when it is exactly one - a single floating body with
-    /// everything else hinged or sliding off it, which is what a legged or
-    /// winged animal model is - joint 0 is that free joint and joint `k` for
-    /// `k >= 1` sits at `7 + k - 1`.
+    /// A free joint occupies seven coordinates and six velocities, a ball
+    /// joint four and three, a hinge or slide one and one. So `nq - nv` is the
+    /// number of free and ball joints, and when it is exactly one and that
+    /// joint is a free joint 0 - a single floating body with everything else
+    /// hinged or sliding off it, which is what a legged or winged animal model
+    /// is - joint `k` for `k >= 1` sits at `7 + k - 1`. A model whose one such
+    /// joint is a ball joint (no free joint) also passes the `nq - nv` test
+    /// and would be mis-addressed: the model sizes this binding reads do not
+    /// tell the two apart, so the caller owns that shape.
     ///
     /// Returns `None` when the model is not that shape, rather than a number
     /// that would be right for a different model.
@@ -215,13 +218,13 @@ impl Model {
         (at < self.nq).then_some(at)
     }
 
-    /// Every actuator name, in index order. `None` where an actuator is
-    /// unnamed, which MJCF permits.
     /// The raw `mjModel*`, for the sibling modules that hand it back to MuJoCo.
     pub(crate) fn ptr(&self) -> *mut c_void {
         self.ptr
     }
 
+    /// Every actuator name, in index order. `None` where an actuator is
+    /// unnamed, which MJCF permits.
     pub fn actuator_names(&self) -> Vec<Option<String>> {
         (0..self.nu).map(|i| self.name_of(ObjType::Actuator, i)).collect()
     }

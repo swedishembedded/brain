@@ -24,9 +24,10 @@ const K_LEARN: usize = 5;
 /// a pair the kernel cannot honour.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LifParams {
-    /// `dt / tau_m`. Must be in `(0, 1]`: at `a > 1` the Euler update
-    /// overshoots the resting potential and the membrane oscillates, which is
-    /// a numerical artefact rather than a neuron.
+    /// `dt / tau_m`. Must be in `(0, 1]`. The kernel's exact exponential step
+    /// is stable at any `a`; the bound keeps a tick no longer than the
+    /// membrane time constant, below which the threshold crossing is
+    /// resolved to the tick.
     pub dt_over_tau: f32,
     pub v_rest: f32,
     pub v_reset: f32,
@@ -184,8 +185,8 @@ impl LifParams {
     /// The exact discrete membrane trajectory for a CONSTANT input current,
     /// starting from `v0`, ignoring threshold.
     ///
-    /// The Euler update `v <- v + a(v_rest - v + r*I)` is a geometric
-    /// recurrence, so it has a closed form rather than merely an
+    /// The exact exponential update `v <- v_inf + (v - v_inf) e^(-a)` is a
+    /// geometric recurrence, so it has a closed form rather than merely an
     /// approximation:
     ///
     /// ```text

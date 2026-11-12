@@ -83,7 +83,7 @@ fn a_neuron_fires_at_threshold_and_then_stays_silent_while_refractory() {
             fired.push(tick);
         }
     }
-    // a = 1 drives straight to v_inf = 1.0 > 0.5 every tick it is allowed to
+    // a = 1 moves 1 - e^-1 = 0.632 of the way to v_inf = 1.0, past 0.5, every tick it is allowed to
     // integrate, so the cell fires, sits out three ticks, and fires again:
     // period 4. A refractory period that only gated the SPIKE rather than
     // clamping the membrane would produce period 1 here.

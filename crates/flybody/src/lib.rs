@@ -121,7 +121,7 @@ pub struct MuscleAction {
     /// **Settled, by construction:** a flexor and its extensor land on the
     /// same DoF with opposite polarity, so an antagonist pair is always a pair.
     ///
-    /// **Settled, by measurement** (`tests/actuator_convention.rs`): flybody
+    /// **Settled, by measurement** (`tests/it/actuator_convention.rs`): flybody
     /// mirrors its own joint axes, so positive control moves the left and
     // perf-number: model-parity tolerance, checked by actuator_convention test
     /// right legs the same anatomical way, to better than 0.01% on 21 of 24
@@ -437,17 +437,17 @@ pub fn parse_sub_class(sub: &str) -> Option<(Segment, String)> {
     Some((seg, muscle.to_string()))
 }
 
+/// The adhesion actuator for one leg, by flybody's own naming.
+pub fn claw_actuator(seg: Segment, side: Side) -> String {
+    format!("adhere_claw_{}_{}", seg.suffix(), side.suffix())
+}
+
 /// Build the map for every leg motor neuron in `c`, against a model's
 /// actuator names.
 ///
 /// `actuators` is taken as a plain name list rather than a loaded model so the
 /// map is testable with no MuJoCo present, and so the same function serves a
 /// model loaded from any source.
-/// The adhesion actuator for one leg, by flybody's own naming.
-pub fn claw_actuator(seg: Segment, side: Side) -> String {
-    format!("adhere_claw_{}_{}", seg.suffix(), side.suffix())
-}
-
 pub fn build(c: &Connectome, actuators: &[String]) -> MotorMap {
     let mut map = MotorMap::default();
     for (i, n) in c.neurons.iter().enumerate() {

@@ -759,6 +759,12 @@ impl Fly {
         out
     }
 
+    /// How many actuators the body has, so a caller can lesion all of them
+    /// without knowing the model.
+    pub fn actuator_count(&self) -> usize {
+        self.muscle.len()
+    }
+
     /// Weaken or restore one muscle, `1.0` being intact and `0.0` severed.
     ///
     /// This is the BODY perturbation the control matrix asks for, and it is
@@ -769,12 +775,6 @@ impl Fly {
     /// or a motor-map polarity instead would perturb the CONTROLLER and then
     /// call the recovery re-adaptation, which would be a different claim
     /// wearing this one's name.
-    /// How many actuators the body has, so a caller can lesion all of them
-    /// without knowing the model.
-    pub fn actuator_count(&self) -> usize {
-        self.muscle.len()
-    }
-
     pub fn set_muscle_strength(&mut self, actuator: usize, strength: f32) -> Result<(), String> {
         let n = self.muscle.len();
         if actuator >= n {
@@ -927,18 +927,6 @@ impl Fly {
         (self.model.nq(), self.model.nv())
     }
 
-    /// Start a new episode: clear the dynamical state and put the body back,
-    /// KEEPING whatever the weights have learned.
-    ///
-    /// Not `DynamicalSystem::reset`, which also restores the connectome's
-    /// original weights. An episode loop built on that unlearns between every
-    /// episode and reports a perfectly reproducible failure to learn.
-    /// Put the body back where it started and silence the cord, leaving
-    /// anything learned - and any muscle lesion - in place.
-    ///
-    /// Muscle strength deliberately survives a reset. A body perturbation that
-    /// undid itself at every episode boundary could never be re-adapted to,
-    /// and the control that asks for re-adaptation would be measuring nothing.
     /// Put the animal back where it started.
     ///
     /// EVERY piece of dynamical state, and the list is exhaustive on purpose.
@@ -999,7 +987,6 @@ impl Fly {
         self.net.modulate(delta);
     }
 
-    /// Enable three-factor plasticity on the cord.
     /// Turn on the fly's OWN learning rule: plasticity confined to the
     /// Kenyon-cell output synapses, gated per compartment by the dopaminergic
     /// cells that innervate it.
@@ -1062,6 +1049,8 @@ impl Fly {
         (self.last_mb_spikes.0, self.last_mb_spikes.1, self.mb.kc.len())
     }
 
+    /// Enable three-factor plasticity on the whole cord: every synapse
+    /// eligible, the third factor from [`Fly::reward`].
     pub fn enable_plasticity(&mut self, p: neuro::PlasticityParams) -> Result<(), String> {
         self.net.enable_plasticity(p)
     }
@@ -1163,12 +1152,6 @@ impl Fly {
         self.food.map(|f| sense::yaw_and_range(&self.qpos(), f).1)
     }
 
-    /// The whole cord's spikes from the last neural tick, as the device last
-    /// reported them.
-    ///
-    /// Already in hand - `step` reads this vector back every tick to find the
-    /// motor neurons - so an experiment measuring some other population costs
-    /// a slice rather than a second readback.
     /// Membrane potential of every neuron, for tracing a cord that is not
     /// firing when it should be.
     ///
@@ -1179,6 +1162,12 @@ impl Fly {
         self.net.read(Port::Membrane, out)
     }
 
+    /// The whole cord's spikes from the last neural tick, as the device last
+    /// reported them.
+    ///
+    /// Already in hand - `step` reads this vector back every tick to find the
+    /// motor neurons - so an experiment measuring some other population costs
+    /// a slice rather than a second readback.
     pub fn spikes(&self) -> &[f32] {
         &self.spike
     }

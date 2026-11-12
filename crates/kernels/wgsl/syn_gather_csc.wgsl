@@ -80,8 +80,11 @@
 
 struct Params {
     n: u32,
-    // Fraction of last tick's current that survives into this one,
-    // `exp(-dt / tau_syn)`, SEPARATELY for excitatory and inhibitory input.
+    // Fraction of last tick's current that survives into this one, SEPARATELY
+    // for excitatory and inhibitory input. The caller passes `1 - dt/tau_syn`
+    // (`SpikingNet::step`), the forward-Euler factor, not `exp(-dt/tau_syn)`:
+    // a nominal 5 ms and 20 ms synapse at the cord's tick act as 3.92 ms and
+    // 18.98 ms.
     //
     // A spike is an impulse and a synapse is not: the postsynaptic current
     // from one release rises and decays over milliseconds. With no decay at

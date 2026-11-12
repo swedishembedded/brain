@@ -88,20 +88,17 @@ chosen by measuring MANC rather than by copying a number:
 
 ## Decisions taken
 
-1. **Physics is MuJoCo, runtime-linked.** `mujoco-rs` (MIT OR Apache-2.0,
-   tracking MuJoCo 3.12) rather than a custom articulated-body solver.
-   flybody's walking depends on MuJoCo's adhesion model and its flight on
-   MuJoCo's fluid-force model; reimplementing both and revalidating them is a
-   project of its own, and doing so would also forfeit direct comparability
-   against DeepMind's published policies. The crate goes behind a **non-default
-   cargo feature and outside `default-members`**, exactly as `crates/vulkan`
-   (coopmat) already is, so `make build` and `make test` stay green on a box
-   with no MuJoCo installed.
-   *Open:* `mujoco-rs` binds a **shared** C library. Whether a `cargo build`
-   succeeds with no `libmujoco.so` present (dlopen) or fails at link time
-   (`-lmujoco`) decides whether the feature gate alone is sufficient or whether
-   the body crate needs its own `runtime-linking` shim like `crates/npu` has
-   for OpenVINO. Resolve this in M3 by building it, not by reading about it.
+1. **Physics is MuJoCo, runtime-linked.** MuJoCo rather than a custom
+   articulated-body solver: flybody's walking depends on MuJoCo's adhesion
+   model and its flight on MuJoCo's fluid-force model; reimplementing both and
+   revalidating them is a project of its own, and doing so would also forfeit
+   direct comparability against DeepMind's published policies. *Resolved in
+   M3:* `mujoco-rs` turned out unusable (see below), so `crates/mujoco` is a
+   hand-written binding that `dlopen`s the shared library at run time and
+   validates its own layout against `mj_stateSize` (commit `d4d4b1206`). With
+   no link-time dependency it is an ordinary default member: `make build` and
+   `make test` stay green on a box with no MuJoCo installed, and the body
+   tests skip there.
 
 2. **Local plasticity is the deliverable; gradients are an instrument.**
    The point is a digital animal, not a connectome-shaped RNN, so
@@ -253,7 +250,7 @@ follows.
 |---|---|
 | `neuro` | the sparse stateful runtime: CSC gather, LIF, eligibility traces, neuromodulator fields, replay/consolidation. Knows nothing about flies |
 | `connectome` | structure: CSV/feather -> CSR/CSC, NT prior, neuron metadata, named populations. Knows nothing about dynamics |
-| `flybody` | the body seam: MuJoCo behind a feature gate, the MN -> muscle -> actuator map, proprioceptive readout |
+| `flybody` | the body seam: MuJoCo through the runtime-linked binding, the MN -> muscle -> actuator map, proprioceptive readout |
 | `fly` | the model: composes the three, owns `caps.rs`, the CLI verbs, the curriculum |
 
 Seams:
