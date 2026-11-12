@@ -74,9 +74,9 @@ fn the_tracker_detects_once_then_follows_the_face_from_its_landmarks() {
     let gpu = gpu_core::testgpu::dev(PIPELINES);
     let (rgb, w, h) = frame(&g);
     let mut t = Tracker::load(&gpu, &dir, LANDMARKS_FAST, TrackerConfig::default()).unwrap();
-    let first = t.track(&rgb, w, h).expect("the portrait has a face");
+    let first = t.track(&rgb, w, h).unwrap().expect("the portrait has a face");
     assert!(first.detected);
-    let second = t.track(&rgb, w, h).expect("still there");
+    let second = t.track(&rgb, w, h).unwrap().expect("still there");
     assert!(!second.detected, "a tracked face is followed from its landmarks, not re-detected");
     // the same face: eye corners within a few pixels between the two crops
     for i in [36, 39, 42, 45] {
@@ -85,6 +85,6 @@ fn the_tracker_detects_once_then_follows_the_face_from_its_landmarks() {
     }
     // a blank frame loses it, and the next real frame re-detects
     let blank = vec![0u8; rgb.len()];
-    assert!(t.track(&blank, w, h).is_none());
-    assert!(t.track(&rgb, w, h).expect("found again").detected);
+    assert!(t.track(&blank, w, h).unwrap().is_none());
+    assert!(t.track(&rgb, w, h).unwrap().expect("found again").detected);
 }

@@ -24,6 +24,8 @@ brain-vision.workspace = true
 brain-onnx.workspace = true
 # Host-side crop resize (`resize_bilinear_hwc`, the reference's cv2 bilinear).
 brain-imaging.workspace = true
+# The OpenVINO runtime: the exported graph compiled for an Intel NPU or GPU.
+brain-openvino-rt.workspace = true
 
 [dev-dependencies]
 brain-checkpoint.workspace = true

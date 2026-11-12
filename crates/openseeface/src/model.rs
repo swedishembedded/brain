@@ -9,6 +9,13 @@
 //! corner-aligned `resize_bilinear`.
 //!
 //! SSA: every stage writes a fresh buffer; nothing is computed in place.
+//!
+//! The forward is RECORDED once and replayed: a frame differs from the last
+//! only in the input buffer's contents, and the blocks submit each stage
+//! eagerly, so building and submitting a couple of hundred small dispatches
+//! per frame would cost more than running them. The first
+//! [`Net::forward`] records the whole pass on a `gpu_core` tape; every
+//! later one rewrites the input and replays the tape as one submission.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -123,6 +130,8 @@ pub struct Net {
     ups: Vec<UpNet>,
     head: (Conv, Conv),
     pool: Option<MaxPool>,
+    /// The recorded forward, after the first call.
+    tape: std::sync::Mutex<Option<gpu_core::tape::Tape>>,
 }
 
 impl Net {
@@ -199,7 +208,7 @@ impl Net {
         let out = Conv::with_spec(&ctx, "head.out", mid.out_shape, spec(h.out, 1, 1, h.out_groups, h.out_act), false);
         let pool = cfg.peak_pool.then(|| MaxPool::new(&ctx, out.out_shape, PoolSpec::new(3, 1, 1)));
         drop(ctx);
-        Net { cfg, gpu, ps, input, stem, stages, ups, head: (mid, out), pool }
+        Net { cfg, gpu, ps, input, stem, stages, ups, head: (mid, out), pool, tape: std::sync::Mutex::new(None) }
     }
 
     pub fn gpu(&self) -> &Gpu {
@@ -217,6 +226,18 @@ impl Net {
         let n = self.cfg.input as usize;
         assert_eq!(x.len(), 3 * n * n, "openseeface: input must be 3x{n}x{n}");
         self.gpu.write_f32(&self.input, x);
+        let mut tape = self.tape.lock().unwrap_or_else(|e| e.into_inner());
+        if tape.is_none() {
+            self.gpu.begin_tape();
+            self.record();
+            *tape = Some(self.gpu.end_tape());
+        }
+        self.gpu.replay_tape(tape.as_ref().expect("recorded above"));
+    }
+
+    /// Every dispatch of one forward pass, in order. Reads only the input
+    /// buffer, so a recording of it is valid for any input.
+    fn record(&self) {
         let ctx = Ctx::new(&self.gpu, ids());
         let ps = &self.ps;
         self.stem.forward(&ctx, ps, &self.input);

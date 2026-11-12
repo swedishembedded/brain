@@ -17,6 +17,7 @@ released graphs.
 | Inference             | [x] |
 | Training from scratch | [ ] |
 | Library (`crates/openseeface`) | [x] |
+| Intel NPU / GPU (OpenVINO) | [x] |
 | CLI                    | [ ] |
 | HTTP API               | [ ] |
 | D-Bus                  | [ ] |
@@ -47,3 +48,23 @@ if let Some(found) = t.track(&rgb, width, height) {
 
 The tracker runs the detector only when no face is tracked; otherwise each
 frame's crop comes from the previous frame's landmarks. It follows one face.
+
+## On the Intel NPU or GPU
+
+`openseeface::export` writes the network as a static-shape ONNX graph from
+brain's imported weights (batch 1, every resize size constant - the released
+graphs' run-time shape arithmetic is what the NPU compiler refuses), and
+`openseeface::openvino::OvNet` compiles it with OpenVINO for `npu`, `gpu` or
+`cpu`. Both executors implement `openseeface::Infer`, which is what the
+tracker runs through:
+
+```rust
+use openseeface::{config, openvino::OvNet, Tracker};
+let det = OvNet::load(dir, config::DETECTOR, openvino_rt::NpuDevice::Npu)?;
+let lm = OvNet::load(dir, config::LANDMARKS_FAST, openvino_rt::NpuDevice::Npu)?;
+let mut t = Tracker::new(Box::new(det), Box::new(lm), Default::default());
+```
+
+The compiled graph is checked against the same reference outputs as brain's
+own forward; on the GPU and NPU it computes in half precision, which moves a
+decoded landmark by under 0.4 px.

@@ -26,17 +26,24 @@
 //!
 //! [`config`] holds each released graph's geometry, [`import`] reads the
 //! ONNX file and checks it against that geometry, [`model`] is the forward
-//! pass, [`decode`] turns the outputs into boxes and points, and [`track`]
-//! is the detect-track-recover loop.
+//! pass on brain's kernels, [`export`] writes the same network as a
+//! static-shape ONNX graph that [`openvino`] compiles for an Intel NPU or
+//! GPU, [`infer`] is the seam the tracker runs either through, [`decode`]
+//! turns the outputs into boxes and points, and [`track`] is the
+//! detect-track-recover loop.
 //!
 //! Inference only: the release is a forward artifact.
 
 pub mod config;
 pub mod decode;
+pub mod export;
 pub mod import;
+pub mod infer;
 pub mod model;
+pub mod openvino;
 pub mod track;
 
 pub use decode::{FaceBox, Landmarks};
+pub use infer::{Infer, Output};
 pub use model::Net;
 pub use track::{Tracked, Tracker, TrackerConfig};

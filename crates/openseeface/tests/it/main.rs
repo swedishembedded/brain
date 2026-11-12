@@ -13,6 +13,7 @@
 //! make test/one P=brain-openseeface T=it ARGS=--nocapture
 //! ```
 
+mod export;
 mod import;
 mod parity;
 mod pipeline;

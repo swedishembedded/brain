@@ -20,6 +20,7 @@ use gpu_core::Gpu;
 
 use crate::config::{NetConfig, DETECTOR};
 use crate::decode::{self, FaceBox, Landmarks};
+use crate::infer::Infer;
 use crate::model::Net;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,8 +49,8 @@ pub struct Tracked {
 }
 
 pub struct Tracker {
-    detector: Net,
-    landmarks: Net,
+    detector: Box<dyn Infer>,
+    landmarks: Box<dyn Infer>,
     config: TrackerConfig,
     tracked: Option<FaceBox>,
 }
@@ -59,7 +60,19 @@ impl Tracker {
     /// [`crate::config::LANDMARKS_FAST`], [`crate::config::LANDMARKS_BEST`])
     /// from the directory holding the released `.onnx` files, on `device`.
     pub fn load(device: &Gpu, dir: &Path, landmarks: NetConfig, config: TrackerConfig) -> Result<Tracker, String> {
-        Ok(Tracker { detector: Net::load(device, dir, DETECTOR)?, landmarks: Net::load(device, dir, landmarks)?, config, tracked: None })
+        Ok(Tracker::new(Box::new(Net::load(device, dir, DETECTOR)?), Box::new(Net::load(device, dir, landmarks)?), config))
+    }
+
+    /// Track with any two executors - brain's kernels, OpenVINO, or one of
+    /// each. `detector` must run [`DETECTOR`].
+    pub fn new(detector: Box<dyn Infer>, landmarks: Box<dyn Infer>, config: TrackerConfig) -> Tracker {
+        assert!(detector.config().peak_pool, "Tracker::new: the first network must be the detector");
+        Tracker { detector, landmarks, config, tracked: None }
+    }
+
+    /// Where the two networks run.
+    pub fn devices(&self) -> (String, String) {
+        (self.detector.device(), self.landmarks.device())
     }
 
     /// Forget the tracked face; the next frame detects.
@@ -68,34 +81,34 @@ impl Tracker {
     }
 
     /// The most confident face in an RGB frame, if any.
-    pub fn detect(&self, rgb: &[u8], w: u32, h: u32) -> Option<FaceBox> {
-        self.detector.forward(&decode::detector_input(rgb, w, h));
-        let out = self.detector.read_output();
-        let pooled = self.detector.read_pooled().expect("the detector has a peak pool");
-        decode::strongest_face(&out, &pooled, w, h, self.config.detection_threshold)
+    pub fn detect(&mut self, rgb: &[u8], w: u32, h: u32) -> Result<Option<FaceBox>, String> {
+        let o = self.detector.infer(&decode::detector_input(rgb, w, h))?;
+        let pooled = o.pooled.ok_or("the detector returned no peak pool")?;
+        Ok(decode::strongest_face(&o.map, &pooled, w, h, self.config.detection_threshold))
     }
 
     /// The landmarks inside `b`'s crop, if they are a confident face.
-    pub fn landmarks_in(&self, rgb: &[u8], w: u32, h: u32, b: &FaceBox) -> Option<(Landmarks, [i32; 4])> {
-        let crop = decode::crop_for(b, w, h)?;
-        self.landmarks.forward(&decode::crop_input(rgb, w, crop));
-        let lm = decode::landmarks(&self.landmarks.read_output(), crop);
-        (lm.score() >= self.config.landmark_threshold).then_some((lm, crop))
+    pub fn landmarks_in(&mut self, rgb: &[u8], w: u32, h: u32, b: &FaceBox) -> Result<Option<(Landmarks, [i32; 4])>, String> {
+        let Some(crop) = decode::crop_for(b, w, h) else { return Ok(None) };
+        let o = self.landmarks.infer(&decode::crop_input(rgb, w, crop))?;
+        let lm = decode::landmarks(&o.map, crop);
+        Ok((lm.score() >= self.config.landmark_threshold).then_some((lm, crop)))
     }
 
-    /// Track through one RGB frame (`w * h * 3` bytes, row-major).
-    pub fn track(&mut self, rgb: &[u8], w: u32, h: u32) -> Option<Tracked> {
+    /// Track through one RGB frame (`w * h * 3` bytes, row-major). `Ok(None)`
+    /// is "no face"; an error is an executor failure.
+    pub fn track(&mut self, rgb: &[u8], w: u32, h: u32) -> Result<Option<Tracked>, String> {
         assert_eq!(rgb.len(), (w * h * 3) as usize, "track: a {w}x{h} RGB frame is {} bytes", w * h * 3);
         if let Some(b) = self.tracked {
-            if let Some((landmarks, crop)) = self.landmarks_in(rgb, w, h, &b) {
+            if let Some((landmarks, crop)) = self.landmarks_in(rgb, w, h, &b)? {
                 self.tracked = Some(landmarks.extent());
-                return Some(Tracked { landmarks, crop, detected: false });
+                return Ok(Some(Tracked { landmarks, crop, detected: false }));
             }
         }
         self.tracked = None;
-        let b = self.detect(rgb, w, h)?;
-        let (landmarks, crop) = self.landmarks_in(rgb, w, h, &b)?;
+        let Some(b) = self.detect(rgb, w, h)? else { return Ok(None) };
+        let Some((landmarks, crop)) = self.landmarks_in(rgb, w, h, &b)? else { return Ok(None) };
         self.tracked = Some(landmarks.extent());
-        Some(Tracked { landmarks, crop, detected: true })
+        Ok(Some(Tracked { landmarks, crop, detected: true }))
     }
 }
