@@ -1,0 +1,32 @@
+<!-- source-sha256: 74e5a58af3a65b6d8ec59d0b9a2cd3d603be93246628598baf9673747d23e307 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 320" width="560" height="320">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="320" fill="#ffffff"/>
+<line x1="198.52" y1="274" x2="198.52" y2="30" stroke="#edf2f7"/>
+<text x="198.52" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="354.65" y1="274" x2="354.65" y2="30" stroke="#edf2f7"/>
+<text x="354.65" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="510.77" y1="274" x2="510.77" y2="30" stroke="#edf2f7"/>
+<text x="510.77" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">30</text>
+<line x1="58" y1="274" x2="542" y2="274" stroke="#edf2f7"/>
+<text x="52" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="227.08" x2="542" y2="227.08" stroke="#edf2f7"/>
+<text x="52" y="231.08" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="180.15" x2="542" y2="180.15" stroke="#edf2f7"/>
+<text x="52" y="184.15" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="133.23" x2="542" y2="133.23" stroke="#edf2f7"/>
+<text x="52" y="137.23" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.5</text>
+<line x1="58" y1="86.31" x2="542" y2="86.31" stroke="#edf2f7"/>
+<text x="52" y="90.31" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="39.38" x2="542" y2="39.38" stroke="#edf2f7"/>
+<text x="52" y="43.38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2.5</text>
+<rect x="58" y="30" width="484" height="244" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="244"/></clipPath>
+<g clip-path="url(#plot)"><line x1="58" y1="262.7" x2="542" y2="262.7" stroke="#a0aec0" stroke-dasharray="4 4"/><text x="542" y="255.19" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="end">one step, true state fed back</text><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,265.89 73.61,245.72 89.23,218.01 104.84,189.02 120.45,162.14 136.06,140.34 151.68,122.1 167.29,105.26 182.9,90.55 198.52,78.54 214.13,72.69 229.74,69.72 245.35,66.89 260.97,65.06 276.58,63.64 292.19,60.43 307.81,61.9 323.42,62.86 339.03,66.52 354.65,70.37 370.26,72.37 385.87,72.86 401.48,76.17 417.1,82.85 432.71,92.83 448.32,99.73 463.94,98.31 479.55,94.9 495.16,89.31 510.77,82.78 526.39,79.9 542,74.9"/></g>
+<text x="300" y="310" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">free-running steps k</text>
+<text x="14" y="152" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 152)">mean |position error|</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Error of the learned cart model</text>
+<rect x="360.38" y="38" width="173.62" height="27" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="368.38" y1="53" x2="388.38" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="394.38" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">model fed its own output</text>
+</svg>

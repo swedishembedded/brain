@@ -1,0 +1,32 @@
+<!-- source-sha256: f16797599c8fa7a426f8a1fd9bcb132e5b8de3b0e12a377b494bac0073191d03 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 320" width="560" height="320">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="320" fill="#ffffff"/>
+<line x1="159.89" y1="274" x2="159.89" y2="30" stroke="#edf2f7"/>
+<text x="159.89" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="287.26" y1="274" x2="287.26" y2="30" stroke="#edf2f7"/>
+<text x="287.26" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="414.63" y1="274" x2="414.63" y2="30" stroke="#edf2f7"/>
+<text x="414.63" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">15</text>
+<line x1="542" y1="274" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="542" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="58" y1="274" x2="542" y2="274" stroke="#edf2f7"/>
+<text x="52" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.7</text>
+<line x1="58" y1="197.75" x2="542" y2="197.75" stroke="#edf2f7"/>
+<text x="52" y="201.75" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="121.5" x2="542" y2="121.5" stroke="#edf2f7"/>
+<text x="52" y="125.5" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.9</text>
+<line x1="58" y1="45.25" x2="542" y2="45.25" stroke="#edf2f7"/>
+<text x="52" y="49.25" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="484" height="244" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="244"/></clipPath>
+<g clip-path="url(#plot)"><line x1="58" y1="197.75" x2="542" y2="197.75" stroke="#a0aec0" stroke-dasharray="4 4"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="83.47,45.48 108.95,99.89 134.42,166.37 159.89,176.25 185.37,188.51 210.84,195.1 236.32,199.54 261.79,202.81 287.26,205.24 312.74,207.14 338.21,208.66 363.68,209.9 389.16,210.94 414.63,211.82 440.11,212.57 465.58,213.21 491.05,213.78 516.53,214.28 542,214.73"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="108.95,45.25 134.42,45.25 159.89,45.25 185.37,45.25 210.84,45.26 236.32,45.26 261.79,45.27 287.26,45.27 312.74,45.27 338.21,45.28 363.68,45.28 389.16,45.29 414.63,45.29 440.11,45.29 465.58,45.29 491.05,45.3 516.53,45.3 542,45.3"/><text x="65.64" y="209.19" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">true share 0.8</text></g>
+<text x="300" y="310" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">denoiser evaluations n</text>
+<text x="14" y="152" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 152)">share of samples at +1</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Two futures, probabilities 0.8 and 0.2</text>
+<rect x="418.46" y="222" width="115.54" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="426.46" y1="237" x2="446.46" y2="237" stroke="#2b6cb0" stroke-width="2"/>
+<text x="452.46" y="241" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">start N(0, 25)</text>
+<line x1="426.46" y1="254" x2="446.46" y2="254" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="452.46" y="258" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">start N(0, 1)</text>
+</svg>

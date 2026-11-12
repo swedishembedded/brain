@@ -175,4 +175,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 4. [Structure from Motion and Multi-View Stereo](v10-video-and-3d/04-structure-from-motion.md): How can we recover a 3D scene and the camera positions from ordinary photographs?
 5. [Learning 3D Directly](v10-video-and-3d/05-feed-forward-3d.md): Can one network look at a few images and output the scene's geometry in a single pass?
 6. [3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md): How do millions of small, differentiable blobs render a photorealistic scene?
+7. [World Models](v10-video-and-3d/07-world-models.md): Can a network learn to simulate an environment well enough to be played?
 <!-- /contents -->

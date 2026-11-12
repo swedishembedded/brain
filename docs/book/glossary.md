@@ -312,6 +312,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **diffusion transformer**: a denoiser made of transformer blocks over the patch tokens of a latent, with the noise level entering through adaptive layer normalization, and a last layer that maps the tokens back to patches. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
 
+**diffusion world model**: a world model that produces the next frame by denoising noise, given the last frames and the action. *([World Models](v10-video-and-3d/07-world-models.md))*
+
 **directional derivative**: the rate of change of a function per unit distance in a chosen unit direction $\mathbf{u}$, equal to $\nabla L\cdot\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **discrete Fourier transform**: the list $X[k] = \sum_{n=0}^{N-1} x[n]e^{-2\pi i kn/N}$ of correlations of $N$ samples with turning pointers, one per frequency $k$; its modulus gives the amplitude and its angle the phase of the component at that frequency, and the original samples are recovered by the inverse transform. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
@@ -548,6 +550,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **integral**: the limit of the Riemann sums $\sum f(t_i)\,\Delta t$ as the width goes to zero, written $\int_a^b f(t)\,dt$; the signed area between the graph of $f$ and the axis. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
+**interactive generation**: generation in which each output is produced within a frame budget from the user's latest input and the model's own previous output. *([World Models](v10-video-and-3d/07-world-models.md))*
+
 **intersection over union**: the area two boxes share divided by the area they cover together, a number from 0 to 1 that is unchanged by scaling or shifting both boxes and is 0 for boxes that do not meet. *([Object Detection](v07-vision/04-detection.md))*
 
 **inverse function**: the function $f^{-1}$ that undoes $f$, so $f^{-1}(f(x)) = x$; it exists when $f$ is one-to-one. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
@@ -597,6 +601,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **label**: the answer attached to an example, the quantity a supervised model is asked to predict. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
 **label-smoothing**: replacing the one-hot target by a mixture of it with the uniform distribution, so that the loss is smallest at a finite gap between the scores instead of only in the limit of infinite confidence. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
+
+**latent action**: a discrete code, learned from pairs of consecutive frames with no action labels, that stands for what changed between them and can be chosen to steer a model. *([World Models](v10-video-and-3d/07-world-models.md))*
 
 **latent diffusion**: running the iterated denoiser in the compressed latent space of an autoencoder that was trained earlier and is frozen at generation time, so that the full-resolution decoder runs once at the end and not at every step. *([Latent Diffusion Systems End to End](v08-image-generation/10-latent-diffusion-systems.md))*
 
@@ -669,6 +675,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **mask decoder**: the small network that turns the prompt tokens and the stored image embedding into mask logits, by letting tokens and image cells attend to each other and then taking, for each output token, a dot product with the upscaled cells. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
 
 **masked language modeling**: the training task of an encoder in which a random subset of positions is selected, the input there is replaced (by a mask token, a random token or nothing, in the proportions 80, 10 and 10 percent), and the model is trained to recover the original tokens at the selected positions only, from both sides. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
+
+**masked-token prediction**: predicting a grid of codes by hiding all of them, predicting all in parallel, keeping the most confident and predicting the rest again with the kept ones visible. *([World Models](v10-video-and-3d/07-world-models.md))*
 
 **matrix**: a table of numbers with $m$ rows and $n$ columns, which is also a linear map from $n$ numbers to $m$ numbers. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
@@ -1257,6 +1265,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **WordPiece**: a tokenizer that cuts a word by greedy longest match from the left, marks every piece after the first with `##`, and turns a word it cannot cover into `[UNK]`; its vocabulary is chosen to raise the likelihood of the training text. *([Tokenization](v05-sequences/02-tokenization.md))*
 
 **workgroup**: a set of invocations of one dispatch that run together on one compute unit, share an on-chip memory and can wait for each other at a barrier, while different workgroups are independent. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
+
+**world model**: a function that holds some context, takes an action and returns the next observation, so that repeated calls simulate a world that can be played. *([World Models](v10-video-and-3d/07-world-models.md))*
 
 ## X
 

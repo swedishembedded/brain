@@ -25,6 +25,6 @@ You can say how many bytes a minute of video is as pixels, as planes and as a co
 4. [Structure from Motion and Multi-View Stereo](04-structure-from-motion.md): how can we recover a 3D scene and the camera positions from ordinary photographs?
 5. [Learning 3D Directly](05-feed-forward-3d.md): can one network look at a few images and output the scene's geometry in a single pass?
 6. [3D Gaussian Splatting](06-gaussian-splatting.md): how do millions of small, differentiable blobs render a photorealistic scene?
-7. World Models: can a network learn to simulate an environment well enough to be played?
+7. [World Models](07-world-models.md): can a network learn to simulate an environment well enough to be played?
 8. Simulating Brains and Bodies: what can we learn by running a real animal's wiring diagram inside a simulated body?
 9. Project: Reconstructing and Predicting a Scene: can you reconstruct a scene from images and predict how it changes?

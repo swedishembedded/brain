@@ -1,0 +1,38 @@
+<!-- source-sha256: b3d78ad74fb2eb1f35c86ac62e0c9052c3d97412940c19100a817b2ac63a3229 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 990 192" width="990" height="192"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="990" height="192" fill="#ffffff"/>
+<rect x="24" y="94" width="111" height="74" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="79.5" y="127.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">past frames</text>
+<text x="79.5" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">64 x 64 x 3 each</text>
+<rect x="165" y="94" width="117" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="223.5" y="119.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokenizer</text>
+<text x="223.5" y="135.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">encoder, 8 blocks</text>
+<text x="223.5" y="151.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cosine VQ</text>
+<rect x="312" y="94" width="123" height="74" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="373.5" y="119.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">past tokens</text>
+<text x="373.5" y="135.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 codes a frame</text>
+<text x="373.5" y="151.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">of 1024</text>
+<rect x="465" y="94" width="133" height="74" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="531.5" y="119.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">dynamics</text>
+<text x="531.5" y="135.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12 blocks, width 519</text>
+<text x="531.5" y="151.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">causal in time</text>
+<rect x="628" y="94" width="82" height="74" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="669" y="127.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">next tokens</text>
+<text x="669" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 codes</text>
+<rect x="740" y="94" width="117" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="798.5" y="127.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokenizer</text>
+<text x="798.5" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decoder, 8 blocks</text>
+<rect x="887" y="94" width="79" height="74" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="926.5" y="127.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">next frame</text>
+<text x="926.5" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">64 x 64 x 3</text>
+<line x1="138" y1="131" x2="162" y2="131" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="285" y1="131" x2="309" y2="131" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="438" y1="131" x2="462" y2="131" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="601" y1="131" x2="625" y2="131" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="713" y1="131" x2="737" y2="131" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="860" y1="131" x2="884" y2="131" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="479.5" y="24" width="104" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="531.5" y="42.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">action one-hot</text>
+<text x="531.5" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(7 for CoinRun)</text>
+<line x1="531.5" y1="71" x2="531.5" y2="91" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="540.5" y="85.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">appended to every token</text>
+</svg>
