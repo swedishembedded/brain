@@ -195,6 +195,11 @@ const FP32_BY_DESIGN: &[&str] = &["matmul_gemv_reg", "matmul_reg3", "library_gem
 #[test]
 fn the_fast_tier_runs_its_products_on_tensor_cores() {
     let Some(mut engine) = engine_of(shaped(1, 128), Precision::Fast) else { return };
+    // The tier's products are the vendor library's bf16 GEMM and the int8 MMA kernels: CUDA at the MMA compute capability.
+    let gpu = engine.gpu();
+    if !(gpu.kind() == "cuda" && gpu_core::native_kernels_enabled() && gpu_core::provider::cuda::tensor_core_kernels_enabled(gpu)) {
+        return brain_testutil::skip_unavailable(&format!("this device has no tensor cores (the {} backend)", gpu.kind()));
+    }
     if !engine.gpu().set_kernel_timing(true) {
         return brain_testutil::skip_unavailable("this backend cannot time kernels");
     }

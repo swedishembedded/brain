@@ -55,6 +55,21 @@ fn engine_with_cap(kv_block_rows: u32, kv_tier: KvTier, kv_pool_rows: u32, cap: 
     engine_on(kv_block_rows, kv_tier, kv_pool_rows, cap, false)
 }
 
+/// Whether the cards this run uses can back parts of a reserved address range with memory on demand: only the CUDA backend
+/// can (wgpu has no sparse buffers), and the unified pool is built on it. A test of the pool skips where this is false.
+fn sparse_memory_available() -> bool {
+    gpu_core::defaults::Hardware::detected().sparse_memory_on(&gpu_core::devices::ambient_compute_set().gpus)
+}
+
+/// Skips the calling test, naming the missing capability, when [`sparse_memory_available`] is false.
+fn skip_without_sparse_memory() -> bool {
+    let missing = !sparse_memory_available();
+    if missing {
+        brain_testutil::skip_unavailable(&format!("the unified state-and-KV pool needs sparse buffers, which the {} backend does not provide", gpu_core::backend_name()));
+    }
+    missing
+}
+
 /// An engine whose recurrent-state rows and KV blocks share one pool of `pool_blocks` blocks (a block is a granule of a plane,
 /// thousands of rows of this tiny model), holding sequences of `cap` tokens.
 fn unified_engine(pool_blocks: u32, cap: u32) -> Qwen35GgufEngine {
@@ -89,6 +104,9 @@ fn the_released_gguf_engine_conforms() {
 /// The same suite with the recurrent state and the KV blocks drawn from one pool. A block is a granule of a plane (thousands of
 /// rows of this tiny model), so a prefix is reused in whole blocks and none of the suite's prompts fills one.
 fn the_released_gguf_engine_conforms_with_one_pool_for_state_and_kv() {
+    if skip_without_sparse_memory() {
+        return;
+    }
     conformance::run_all(&Conformance { make: || unified_engine(16, 192), prefix_reuse: true, prefix_prompt_tokens: PREFIX_PROMPT_TOKENS, load_adapter: Some(load_adapter) });
 }
 
@@ -202,6 +220,9 @@ fn a_small_pool_serves_what_fits_and_preempts_what_does_not() {
 /// the batch is smaller and this model's arithmetic (a lone row meets a different kernel) moves a late token, so a pool that
 /// preempts is held to finishing every request and giving back every block and state row.
 fn a_unified_small_pool_serves_what_fits_and_preempts_what_does_not() {
+    if skip_without_sparse_memory() {
+        return;
+    }
     let prompts: Vec<Vec<u32>> = (0..4u32).map(|k| (1..=20u32).map(|i| 3 + (i * (k + 2) + k) % 26).collect()).collect();
     let run = |mut sched: Scheduler<Qwen35GgufEngine>| {
         let ids: Vec<u64> = prompts.iter().map(|p| sched.submit(Request { prompt: p.clone(), max_new: 12, stop: Vec::new() })).collect();
