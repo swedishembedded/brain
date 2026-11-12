@@ -186,7 +186,6 @@ pub struct Autoencoder {
     d_z: gpu_core::DeviceBuffer,   // grad wrt z      [B, z_dim]
     d_h: gpu_core::DeviceBuffer,   // grad wrt h      [B, hidden]
     d_enc_pre: gpu_core::DeviceBuffer, // grad wrt enc_pre [B, hidden]
-    d_x: gpu_core::DeviceBuffer,   // grad wrt x (unused downstream) [B, in_dim]
 
     /// What the backward keeps of the forward ([`model::Model::set_saved_policy`]).
     saved: SavedPolicy,
@@ -245,7 +244,6 @@ impl Autoencoder {
             d_z: st(bz),
             d_h: st(bh),
             d_enc_pre: st(bh),
-            d_x: st(bi),
             saved: SavedPolicy::Keep,
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
@@ -358,10 +356,9 @@ impl Autoencoder {
             s.push(self.gpu.step(BIAS_ADD, &[&self.enc_pre, self.w("enc.bias")], &[b, h], bh));
         }
         s.push(self.gpu.step(GELU_BWD, &[&self.enc_pre, &self.d_h, &self.d_enc_pre], &[bh], bh));
-        // enc_pre = x @ We^T + be  ->  d_x (unused), dWe, dbe
+        // enc_pre = x @ We^T + be  ->  dWe, dbe (the input is data: no gradient flows to it)
         s.push(self.gpu.step(BIAS_GRAD, &[&self.d_enc_pre, g("enc.bias")], &[b, h], h));
         s.push(self.gpu.step(MATMUL_DW, &[&self.d_enc_pre, &self.x, g("enc.weight")], &[b, i, h], h * i));
-        s.push(self.gpu.step(MATMUL_DX, &[&self.d_enc_pre, self.w("enc.weight"), &self.d_x], &[b, i, h, 0], bi));
         s
     }
 
