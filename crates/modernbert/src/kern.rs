@@ -81,6 +81,14 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // must use this rung unconditionally until the fused flash kernel grows
     // its own window support - see `model.rs`'s module doc.
     ("attn_scores_cross_win", kernels::ATTN_SCORES_CROSS_WIN),
+    // The BANDED form of the same window: a [rows, 2*window+1] slab, used by
+    // every local layer whose span is longer than the band - see `model.rs`.
+    ("attn_scores_band", kernels::ATTN_SCORES_BAND),
+    ("attn_apply_band", kernels::ATTN_APPLY_BAND),
+    ("attn_bwd_dscores_band", kernels::ATTN_BWD_DSCORES_BAND),
+    ("attn_bwd_dq_band", kernels::ATTN_BWD_DQ_BAND),
+    ("attn_bwd_dk_band_acc", kernels::ATTN_BWD_DK_BAND_ACC),
+    ("attn_bwd_dv_band_acc", kernels::ATTN_BWD_DV_BAND_ACC),
     ("matmul_dx", kernels::MATMUL_DX),
     ("matmul_dw", kernels::MATMUL_DW),
     ("bias_grad", kernels::BIAS_GRAD),
@@ -168,6 +176,12 @@ ids! {
     dk_cross_acc => "attn_bwd_dk_cross_acc",
     dv_cross_acc => "attn_bwd_dv_cross_acc",
     scores_cross_win => "attn_scores_cross_win",
+    scores_band => "attn_scores_band",
+    apply_band => "attn_apply_band",
+    dscores_band => "attn_bwd_dscores_band",
+    dq_band => "attn_bwd_dq_band",
+    dk_band_acc => "attn_bwd_dk_band_acc",
+    dv_band_acc => "attn_bwd_dv_band_acc",
     matmul_dx => "matmul_dx",
     matmul_dw => "matmul_dw",
     bias_grad => "bias_grad",

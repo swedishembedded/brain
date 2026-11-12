@@ -1948,6 +1948,198 @@ pub fn chunked_bidir_bwd_win(
     }
 }
 
+/// Kernel-pipeline indices for banded bidirectional sliding-window attention:
+/// the score and apply kernels that address a `[rows, 2*window + 1]` slab, and
+/// the row softmax, which is `attn_softmax_cross` itself run with the band width
+/// as the row length (a slot outside the span holds `-3.4e38`, which
+/// exponentiates to 0, and the centre slot is always live).
+#[derive(Clone, Copy)]
+pub struct BandIds {
+    /// `attn_scores_band` pipeline index.
+    pub scores: usize,
+    /// `attn_softmax_cross` pipeline index.
+    pub softmax: usize,
+    /// `attn_apply_band` pipeline index.
+    pub apply: usize,
+}
+
+/// The four gradient kernels of [`chunked_bidir_bwd_band`]: the dense backward's
+/// `dscores`/`dq`/`dk`/`dv` re-addressed to the band slab.
+#[derive(Clone, Copy)]
+pub struct BandBwdIds {
+    /// `attn_bwd_dscores_band` pipeline index.
+    pub dscores: usize,
+    /// `attn_bwd_dq_band` pipeline index.
+    pub dq: usize,
+    /// `attn_bwd_dk_band_acc` pipeline index.
+    pub dk: usize,
+    /// `attn_bwd_dv_band_acc` pipeline index.
+    pub dv: usize,
+}
+
+/// Score and softmax of one query chunk over its band slab, shared by the
+/// forward and by the backward's per-chunk recompute.
+#[allow(clippy::too_many_arguments)]
+fn band_scores_softmax(
+    g: &Gpu,
+    k: &BandIds,
+    window: u32,
+    heads: u32,
+    head_dim: u32,
+    (stride, q_off, k_off): (u32, u32, u32),
+    (q0, qn, len): (u32, u32, u32),
+    qkv: &DeviceBuffer,
+    (q_row_off, kv_row_off): (u64, u64),
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    steps: &mut Vec<Step>,
+) {
+    let band = 2 * window + 1;
+    steps.push(g.step_sliced(
+        k.scores,
+        &[qkv, qkv, scores],
+        &[(q_row_off, 0), (kv_row_off, 0), (0, 0)],
+        &[1, heads, qn, len, head_dim, stride, stride, q_off, k_off, q0, window],
+        heads * qn * band,
+    ));
+    steps.push(g.step(k.softmax, &[scores, probs], &[1, heads, qn, band], heads * qn));
+}
+
+/// Banded twin of [`chunked_bidir_fwd_win`]: the same bidirectional local
+/// window (`|i - j| <= window`), computed over a `[heads, chunk, 2*window + 1]`
+/// slab instead of `[heads, chunk, span]`, so a local layer costs
+/// O(span * window) in memory and in score, softmax and apply work rather than
+/// O(span^2). Every row's live keys and their softmax are exactly the dense
+/// windowed result; only the dead slots are not stored.
+///
+/// `scores` and `probs` need `heads * chunk * (2*window + 1)` floats. A span no
+/// longer than the band is still computed correctly (its out-of-span slots are
+/// masked) but a caller that sized the slab for the span should use the dense
+/// [`chunked_bidir_fwd_win`] for it, which is then the narrower slab.
+#[allow(clippy::too_many_arguments)]
+pub fn chunked_bidir_fwd_band(
+    g: &Gpu,
+    k: &BandIds,
+    window: u32,
+    heads: u32,
+    head_dim: u32,
+    d_out: u32,
+    qkv: &DeviceBuffer,
+    stride: u32,
+    q_off: u32,
+    k_off: u32,
+    v_off: u32,
+    ctx: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    spans: &[(u32, u32)],
+    chunk: u32,
+    steps: &mut Vec<Step>,
+) {
+    for &(row0, len) in spans {
+        let kv_row_off = row0 as u64 * stride as u64;
+        let mut q0 = 0u32;
+        while q0 < len {
+            let qn = chunk.min(len - q0);
+            let q_row_off = (row0 + q0) as u64 * stride as u64;
+            let ctx_off = (row0 + q0) as u64 * d_out as u64;
+            band_scores_softmax(g, k, window, heads, head_dim, (stride, q_off, k_off), (q0, qn, len), qkv, (q_row_off, kv_row_off), scores, probs, steps);
+            steps.push(g.step_sliced(
+                k.apply,
+                &[probs, qkv, ctx],
+                &[(0, 0), (kv_row_off, 0), (ctx_off, 0)],
+                &[1, heads, qn, len, head_dim, stride, v_off, d_out, q0, window],
+                heads * qn * head_dim,
+            ));
+            q0 += qn;
+        }
+    }
+}
+
+/// Backward of [`chunked_bidir_fwd_band`]. Per query chunk it recomputes the
+/// band scores and probabilities, then runs the four band gradient kernels.
+/// `d_q` is assigned per row. `d_k` and `d_v` are summed over the chunks that
+/// reach a key, and a chunk only dispatches the keys it can reach
+/// (`[q0 - window, q0 + qn - 1 + window]`), so the key-side work is
+/// O(span * window) as well. The first chunk to reach a key assigns it, so
+/// `d_qkv` needs no clear: every key row of the span is reached by at least
+/// the chunk holding its own query row.
+///
+/// `d_scores` takes the same `heads * chunk * (2*window + 1)` floats as the
+/// forward slab, and may not alias `probs` (the dv kernel reads `probs` after
+/// the score gradient is written).
+#[allow(clippy::too_many_arguments)]
+pub fn chunked_bidir_bwd_band(
+    g: &Gpu,
+    fwd: &BandIds,
+    bwd: &BandBwdIds,
+    window: u32,
+    heads: u32,
+    head_dim: u32,
+    d_out: u32,
+    qkv: &DeviceBuffer,
+    stride: u32,
+    q_off: u32,
+    k_off: u32,
+    v_off: u32,
+    d_ctx: &DeviceBuffer,
+    d_qkv: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    d_scores: &DeviceBuffer,
+    spans: &[(u32, u32)],
+    chunk: u32,
+    steps: &mut Vec<Step>,
+) {
+    for &(row0, len) in spans {
+        let kv_row_off = row0 as u64 * stride as u64;
+        let mut q0 = 0u32;
+        while q0 < len {
+            let qn = chunk.min(len - q0);
+            let q_row_off = (row0 + q0) as u64 * stride as u64;
+            let dc_off = (row0 + q0) as u64 * d_out as u64;
+            band_scores_softmax(g, fwd, window, heads, head_dim, (stride, q_off, k_off), (q0, qn, len), qkv, (q_row_off, kv_row_off), scores, probs, steps);
+
+            // The keys this chunk reaches, and the first one no earlier chunk did
+            // (chunks are contiguous, so the previous one ended at q0 - 1 + window).
+            let j0 = q0.saturating_sub(window);
+            let j_last = (q0 + qn - 1 + window).min(len - 1);
+            let n_keys = j_last - j0 + 1;
+            let fresh_from = if q0 == 0 { 0 } else { (q0 + window).min(len) };
+
+            steps.push(g.step_sliced(
+                bwd.dscores,
+                &[d_ctx, qkv, probs, d_scores],
+                &[(dc_off, 0), (kv_row_off, 0), (0, 0), (0, 0)],
+                &[1, heads, qn, len, head_dim, stride, v_off, d_out, q0, window],
+                heads * qn,
+            ));
+            steps.push(g.step_sliced(
+                bwd.dq,
+                &[d_scores, qkv, d_qkv],
+                &[(0, 0), (kv_row_off, 0), (q_row_off, 0)],
+                &[1, heads, qn, len, head_dim, stride, stride, q_off, k_off, q0, window],
+                heads * qn * head_dim,
+            ));
+            steps.push(g.step_sliced(
+                bwd.dk,
+                &[d_scores, qkv, d_qkv],
+                &[(0, 0), (q_row_off, 0), (kv_row_off, 0)],
+                &[1, heads, qn, len, head_dim, stride, stride, q_off, k_off, q0, window, j0, n_keys, fresh_from],
+                heads * n_keys * head_dim,
+            ));
+            steps.push(g.step_sliced(
+                bwd.dv,
+                &[probs, d_ctx, d_qkv],
+                &[(0, 0), (dc_off, 0), (kv_row_off, 0)],
+                &[1, heads, qn, len, head_dim, stride, v_off, d_out, q0, window, j0, n_keys, fresh_from],
+                heads * n_keys * head_dim,
+            ));
+            q0 += qn;
+        }
+    }
+}
+
 /// The workspace-wide OUTER gate for asking any flash-attention family for a
 /// dispatch at all - the check every caller must make BEFORE it may even call
 /// [`flash_bidir_variant`] or [`flash_cross_supported`], both of which pick a

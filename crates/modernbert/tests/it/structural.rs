@@ -71,3 +71,34 @@ fn a_second_batch_at_the_same_shape_runs_cleanly() {
     assert!(second.iter().all(|v| v.is_finite()));
     assert_ne!(first, second, "different token ids must produce a different forward");
 }
+
+/// A packed batch whose spans straddle the local band (`tiny()`: window 3, so
+/// the band is 7 wide): the 12-row span takes the banded rung and the 5-row
+/// span the dense windowed one. Each span's hidden states must equal the same
+/// span run alone, so neither rung leaks into the other's rows and the split
+/// covers every span exactly once.
+#[test]
+fn spans_longer_and_shorter_than_the_local_band_do_not_disturb_each_other() {
+    let cfg = ModernBertConfig::tiny();
+    assert_eq!(cfg.window, 3, "the spans below are chosen against a band of 2*3+1");
+    let init = modernbert::init::init_weights(&cfg, 13);
+    let gpu = gpu_core::testgpu::dev(PIPELINES);
+    let ids: Vec<u32> = (0..17u32).map(|i| (i * 5 + 1) % cfg.vocab).collect();
+
+    let mixed: &[(u32, u32)] = &[(0, 12), (12, 5)];
+    let mut both = ModernBert::new_on(gpu.share(), cfg.clone(), 17, 12, &init);
+    both.set_batch(&ids, mixed);
+    both.forward();
+    let together = both.hidden();
+
+    let d = cfg.d_model as usize;
+    for &(row0, len) in mixed {
+        let (row0, len) = (row0 as usize, len as usize);
+        let mut alone = ModernBert::new_on(gpu.share(), cfg.clone(), len as u32, len as u32, &init);
+        alone.set_batch(&ids[row0..row0 + len], &[(0, len as u32)]);
+        alone.forward();
+        let solo = alone.hidden();
+        let worst = solo.iter().zip(&together[row0 * d..(row0 + len) * d]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-4, "span of {len} rows differs by {worst:e} between a packed batch and a run on its own");
+    }
+}

@@ -25,6 +25,14 @@ point the same `--encoder` flag at a Laya checkpoint instead.
       middle `FlashIds` rung is not reproduced, since Laya does not need
       it). The fused `flash_attn_bidir_spans` kernel's own windowing was
       deliberately deferred - see "not yet done" below.
+- [x] **Banded local attention** (book-debt, v05 ch14). Local layers run
+      `block::{chunked_bidir_fwd_band, chunked_bidir_bwd_band}` over a
+      `[heads, chunk, 2*window + 1]` slab (`attn_scores_band`,
+      `attn_apply_band`, `attn_bwd_{dscores,dq}_band`, `attn_bwd_{dk,dv}_band_acc`;
+      the row softmax is `attn_softmax_cross`), so a local layer is
+      O(span * window), not O(span^2). A span no longer than the band takes the
+      dense windowed form above, which stays the oracle
+      (`crates/model/tests/it/chunked_bidir_band.rs`).
 - [x] **`crates/modernbert`'s backbone forward** (`5fd8f72bb`, `19ebcdff9`):
       `ModernBertConfig` (both the nested and flat legacy `config.json`
       schemas), per-span RoPE with per-layer-type theta (160000 full /

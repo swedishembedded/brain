@@ -116,6 +116,8 @@ pub const ARGMAX_ROW: &str = include_str!("../wgsl/argmax_row.wgsl");
 pub const ATTENTION: &str = include_str!("../wgsl/attention.wgsl");
 /// `wgsl/attn_apply.wgsl`
 pub const ATTN_APPLY: &str = include_str!("../wgsl/attn_apply.wgsl");
+/// `wgsl/attn_apply_band.wgsl`
+pub const ATTN_APPLY_BAND: &str = include_str!("../wgsl/attn_apply_band.wgsl");
 /// `wgsl/attn_apply_bidir.wgsl`
 pub const ATTN_APPLY_BIDIR: &str = include_str!("../wgsl/attn_apply_bidir.wgsl");
 /// `wgsl/attn_apply_cross.wgsl`
@@ -128,6 +130,8 @@ pub const ATTN_BIAS_GROUPS: &str = include_str!("../wgsl/attn_bias_groups.wgsl")
 pub const ATTN_BWD_DBIAS: &str = include_str!("../wgsl/attn_bwd_dbias.wgsl");
 /// `wgsl/attn_bwd_dk.wgsl`
 pub const ATTN_BWD_DK: &str = include_str!("../wgsl/attn_bwd_dk.wgsl");
+/// `wgsl/attn_bwd_dk_band_acc.wgsl`
+pub const ATTN_BWD_DK_BAND_ACC: &str = include_str!("../wgsl/attn_bwd_dk_band_acc.wgsl");
 /// `wgsl/attn_bwd_dk_bias.wgsl`
 pub const ATTN_BWD_DK_BIAS: &str = include_str!("../wgsl/attn_bwd_dk_bias.wgsl");
 /// `wgsl/attn_bwd_dk_bidir.wgsl`
@@ -140,6 +144,8 @@ pub const ATTN_BWD_DK_CROSS_ACC: &str = include_str!("../wgsl/attn_bwd_dk_cross_
 pub const ATTN_BWD_DK_SPANS: &str = include_str!("../wgsl/attn_bwd_dk_spans.wgsl");
 /// `wgsl/attn_bwd_dq.wgsl`
 pub const ATTN_BWD_DQ: &str = include_str!("../wgsl/attn_bwd_dq.wgsl");
+/// `wgsl/attn_bwd_dq_band.wgsl`
+pub const ATTN_BWD_DQ_BAND: &str = include_str!("../wgsl/attn_bwd_dq_band.wgsl");
 /// `wgsl/attn_bwd_dq_bias.wgsl`
 pub const ATTN_BWD_DQ_BIAS: &str = include_str!("../wgsl/attn_bwd_dq_bias.wgsl");
 /// `wgsl/attn_bwd_dq_bidir.wgsl`
@@ -150,6 +156,8 @@ pub const ATTN_BWD_DQ_CROSS: &str = include_str!("../wgsl/attn_bwd_dq_cross.wgsl
 pub const ATTN_BWD_DQ_SPANS: &str = include_str!("../wgsl/attn_bwd_dq_spans.wgsl");
 /// `wgsl/attn_bwd_dscores.wgsl`
 pub const ATTN_BWD_DSCORES: &str = include_str!("../wgsl/attn_bwd_dscores.wgsl");
+/// `wgsl/attn_bwd_dscores_band.wgsl`
+pub const ATTN_BWD_DSCORES_BAND: &str = include_str!("../wgsl/attn_bwd_dscores_band.wgsl");
 /// `wgsl/attn_bwd_dscores_bidir.wgsl`
 pub const ATTN_BWD_DSCORES_BIDIR: &str = include_str!("../wgsl/attn_bwd_dscores_bidir.wgsl");
 /// `wgsl/attn_bwd_dscores_bidir_rows.wgsl`
@@ -164,6 +172,8 @@ pub const ATTN_BWD_DSCORES_ROWS: &str = include_str!("../wgsl/attn_bwd_dscores_r
 pub const ATTN_BWD_DSCORES_SPANS: &str = include_str!("../wgsl/attn_bwd_dscores_spans.wgsl");
 /// `wgsl/attn_bwd_dv.wgsl`
 pub const ATTN_BWD_DV: &str = include_str!("../wgsl/attn_bwd_dv.wgsl");
+/// `wgsl/attn_bwd_dv_band_acc.wgsl`
+pub const ATTN_BWD_DV_BAND_ACC: &str = include_str!("../wgsl/attn_bwd_dv_band_acc.wgsl");
 /// `wgsl/attn_bwd_dv_bidir.wgsl`
 pub const ATTN_BWD_DV_BIDIR: &str = include_str!("../wgsl/attn_bwd_dv_bidir.wgsl");
 /// `wgsl/attn_bwd_dv_cross.wgsl`
@@ -196,6 +206,8 @@ pub const ATTN_RELPOS_DRW: &str = include_str!("../wgsl/attn_relpos_drw.wgsl");
 pub const ATTN_RELPOS_QR: &str = include_str!("../wgsl/attn_relpos_qr.wgsl");
 /// `wgsl/attn_scores.wgsl`
 pub const ATTN_SCORES: &str = include_str!("../wgsl/attn_scores.wgsl");
+/// `wgsl/attn_scores_band.wgsl`
+pub const ATTN_SCORES_BAND: &str = include_str!("../wgsl/attn_scores_band.wgsl");
 /// `wgsl/attn_scores_bidir.wgsl`
 pub const ATTN_SCORES_BIDIR: &str = include_str!("../wgsl/attn_scores_bidir.wgsl");
 /// `wgsl/attn_scores_bidir_bias.wgsl`
@@ -1722,23 +1734,27 @@ pub const ALL: &[(&str, &str)] = &[
     ("argmax_row", ARGMAX_ROW),
     ("attention", ATTENTION),
     ("attn_apply", ATTN_APPLY),
+    ("attn_apply_band", ATTN_APPLY_BAND),
     ("attn_apply_bidir", ATTN_APPLY_BIDIR),
     ("attn_apply_cross", ATTN_APPLY_CROSS),
     ("attn_apply_full", ATTN_APPLY_FULL),
     ("attn_bias_groups", ATTN_BIAS_GROUPS),
     ("attn_bwd_dbias", ATTN_BWD_DBIAS),
     ("attn_bwd_dk", ATTN_BWD_DK),
+    ("attn_bwd_dk_band_acc", ATTN_BWD_DK_BAND_ACC),
     ("attn_bwd_dk_bias", ATTN_BWD_DK_BIAS),
     ("attn_bwd_dk_bidir", ATTN_BWD_DK_BIDIR),
     ("attn_bwd_dk_cross", ATTN_BWD_DK_CROSS),
     ("attn_bwd_dk_cross_acc", ATTN_BWD_DK_CROSS_ACC),
     ("attn_bwd_dk_spans", ATTN_BWD_DK_SPANS),
     ("attn_bwd_dq", ATTN_BWD_DQ),
+    ("attn_bwd_dq_band", ATTN_BWD_DQ_BAND),
     ("attn_bwd_dq_bias", ATTN_BWD_DQ_BIAS),
     ("attn_bwd_dq_bidir", ATTN_BWD_DQ_BIDIR),
     ("attn_bwd_dq_cross", ATTN_BWD_DQ_CROSS),
     ("attn_bwd_dq_spans", ATTN_BWD_DQ_SPANS),
     ("attn_bwd_dscores", ATTN_BWD_DSCORES),
+    ("attn_bwd_dscores_band", ATTN_BWD_DSCORES_BAND),
     ("attn_bwd_dscores_bidir", ATTN_BWD_DSCORES_BIDIR),
     ("attn_bwd_dscores_bidir_rows", ATTN_BWD_DSCORES_BIDIR_ROWS),
     ("attn_bwd_dscores_cross", ATTN_BWD_DSCORES_CROSS),
@@ -1746,6 +1762,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_bwd_dscores_rows", ATTN_BWD_DSCORES_ROWS),
     ("attn_bwd_dscores_spans", ATTN_BWD_DSCORES_SPANS),
     ("attn_bwd_dv", ATTN_BWD_DV),
+    ("attn_bwd_dv_band_acc", ATTN_BWD_DV_BAND_ACC),
     ("attn_bwd_dv_bidir", ATTN_BWD_DV_BIDIR),
     ("attn_bwd_dv_cross", ATTN_BWD_DV_CROSS),
     ("attn_bwd_dv_cross_acc", ATTN_BWD_DV_CROSS_ACC),
@@ -1762,6 +1779,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_relpos_drw", ATTN_RELPOS_DRW),
     ("attn_relpos_qr", ATTN_RELPOS_QR),
     ("attn_scores", ATTN_SCORES),
+    ("attn_scores_band", ATTN_SCORES_BAND),
     ("attn_scores_bidir", ATTN_SCORES_BIDIR),
     ("attn_scores_bidir_bias", ATTN_SCORES_BIDIR_BIAS),
     ("attn_scores_causal_bias", ATTN_SCORES_CAUSAL_BIAS),

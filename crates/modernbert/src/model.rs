@@ -13,7 +13,9 @@
 //!     layer_types[l] (Full -> rope_theta_full, Local -> rope_theta_local)
 //!   ctx  = bidirectional self-attention, per span:
 //!            Full  -> block::chunked_bidir_fwd (unwindowed)
-//!            Local -> block::chunked_bidir_fwd_win(window: cfg.window)
+//!            Local -> block::chunked_bidir_fwd_band(window: cfg.window) over a
+//!                     [heads, chunk, 2*window + 1] slab (a span no longer than
+//!                     the band takes the dense block::chunked_bidir_fwd_win)
 //!   attn_out = ctx @ Wo^T                                 [rows, H], no bias
 //!   res1 = x[l] + attn_out                                PRE-LN residual
 //!   xn2  = LN_nobias(res1, "blocks.l.mlp_norm.weight")
@@ -56,14 +58,19 @@
 //! word offsets).
 //!
 //! **Attention rung choice, deliberately simple for this milestone.** Full
-//! layers use the plain materialized `block::chunked_bidir_fwd`; local layers
-//! MUST use `block::chunked_bidir_fwd_win` - the fused `flash_attn_bidir_spans`
-//! kernel has no window support yet (a separate follow-up to Laya M1), so
-//! selecting it for a local layer would silently attend the whole span. Both
-//! rungs run with no key-minor transpose optimisation (`km: None`) - a
-//! deliberate simplicity choice for a first correct forward, not a fused-path
-//! selection ladder like `crates/decide`'s; see `crates/decide/src/model.rs`
-//! for that shape if a later milestone wants the throughput.
+//! layers use the plain materialized `block::chunked_bidir_fwd`. Local layers
+//! cannot use the fused `flash_attn_bidir_spans` kernel (it has no window
+//! support, so selecting it would silently attend the whole span); they use
+//! the banded form `block::chunked_bidir_fwd_band`, which stores only the
+//! `2*window + 1` keys a row can see, so a local layer costs O(span * window)
+//! in score memory and in softmax and apply work, not O(span^2). A span no
+//! longer than the band has no saving to make and takes the dense windowed
+//! rung `block::chunked_bidir_fwd_win`, whose slab is then the narrower one
+//! (see [`ModernBert::local_span_split`]). Both rungs run with no key-minor
+//! transpose optimisation (`km: None`) - a deliberate simplicity choice for a
+//! first correct forward, not a fused-path selection ladder like
+//! `crates/decide`'s; see `crates/decide/src/model.rs` for that shape if a
+//! later milestone wants the throughput.
 //!
 //! # Backward (Laya M5)
 //!
@@ -98,14 +105,15 @@
 //! len` convention) but against `k.rope_base_bwd` instead of `k.rope_base` -
 //! see [`ModernBert::rope_span_bwd`].
 //!
-//! **Windowed attention's backward needs ONE new Rust function
-//! (`block::chunked_bidir_bwd_win`) and ZERO new kernels** - confirmed by a
-//! dedicated finite-difference test
-//! (`crates/model/tests/it/chunked_bidir_bwd_win.rs`), not just the plan's own
-//! reasoning: it recomputes scores/probs through the WINDOWED forward kernel
-//! and feeds them into the SAME unwindowed `CrossBwdIds` gradient kernels
-//! `chunked_bidir_bwd` uses, which is sound because softmax's adjoint is
-//! already exactly zero wherever the probability is zero.
+//! **Local attention's backward** is `block::chunked_bidir_bwd_band`: per
+//! query chunk it recomputes the band scores and probabilities from the cached
+//! (post-RoPE) `qkv`, then runs the four band gradient kernels, the last two of
+//! which touch only the keys that chunk can reach. A span shorter than the band
+//! uses `block::chunked_bidir_bwd_win`, which feeds the same unwindowed
+//! gradient kernels (sound because softmax's adjoint is already exactly zero
+//! wherever the probability is zero). Both are checked against each other in
+//! `crates/model/tests/it/chunked_bidir_band.rs` and against finite
+//! differences in `chunked_bidir_bwd_win.rs`.
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block;
@@ -560,6 +568,23 @@ impl ModernBert {
         self.gpu.poll_wait();
     }
 
+    /// The banded local-attention kernels; the row softmax is the dense `attn_softmax_cross`.
+    fn band_ids(&self) -> block::BandIds {
+        block::BandIds { scores: self.k.scores_band, softmax: self.k.softmax_cross, apply: self.k.apply_band }
+    }
+
+    /// Splits the packed spans into those a local layer attends through the
+    /// `[rows, 2*window + 1]` band slab and those it attends densely. A span no
+    /// longer than the band gains nothing from the band (its dense slab is no
+    /// wider) and may be narrower than the slab the band kernels address, so
+    /// only spans strictly longer than the band take it. The two groups
+    /// together cover every span, and the band slab always fits the scratch,
+    /// which is sized for the longest span.
+    fn local_span_split(&self) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
+        let band = 2 * self.cfg.window + 1;
+        self.spans.iter().copied().partition(|&(_, len)| len > band)
+    }
+
     /// One span's RoPE dispatch on the q or k region of `qkv`, hand-built with
     /// `Gpu::step_sliced` rather than `block::rope_fwd` - see the module doc's
     /// "RoPE must be dispatched per span" note for why the convenience wrapper
@@ -661,6 +686,7 @@ impl ModernBert {
         let hd = c.head_dim();
         let cross = block::CrossIds { scores: self.k.scores_cross, softmax: self.k.softmax_cross, apply: self.k.apply_cross };
         let cross_win = block::CrossWinIds { scores: self.k.scores_cross_win };
+        let band = self.band_ids();
         let lb = &self.layers[l];
         let p = format!("blocks.{l}");
 
@@ -687,11 +713,17 @@ impl ModernBert {
             LayerAttn::Full => block::chunked_bidir_fwd(
                 g, &cross, None, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &lb.ctx, &self.scores, &self.probs, &self.spans, self.chunk, None, s,
             ),
-            // Local layers MUST take the materialized windowed rung - see
-            // the module doc's "attention rung choice" note.
-            LayerAttn::Local => block::chunked_bidir_fwd_win(
-                g, &cross_win, self.k.softmax_cross, self.k.apply_cross, None, c.window, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &lb.ctx, &self.scores, &self.probs, &self.spans, self.chunk, s,
-            ),
+            // Local layers take the banded rung, or the dense windowed one for a
+            // span no longer than the band - see the module doc's "attention rung choice".
+            LayerAttn::Local => {
+                let (banded, dense) = self.local_span_split();
+                block::chunked_bidir_fwd_band(
+                    g, &band, c.window, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &lb.ctx, &self.scores, &self.probs, &banded, self.chunk, s,
+                );
+                block::chunked_bidir_fwd_win(
+                    g, &cross_win, self.k.softmax_cross, self.k.apply_cross, None, c.window, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &lb.ctx, &self.scores, &self.probs, &dense, self.chunk, s,
+                );
+            }
         }
 
         s.push(g.step(self.k.matmul, &[&lb.ctx, self.w(&format!("{p}.proj.weight")), &lb.attn_out], &[n, h, h], n * h));
@@ -751,6 +783,8 @@ impl ModernBert {
         };
         let cross = block::CrossIds { scores: self.k.scores_cross, softmax: self.k.softmax_cross, apply: self.k.apply_cross };
         let cross_win = block::CrossWinIds { scores: self.k.scores_cross_win };
+        let band = self.band_ids();
+        let band_bwd = block::BandBwdIds { dscores: self.k.dscores_band, dq: self.k.dq_band, dk: self.k.dk_band_acc, dv: self.k.dv_band_acc };
         let cross_bwd = block::CrossBwdIds::resolve(g, self.k.dscores_cross, self.k.dq_cross, self.k.dk_cross_acc, self.k.dv_cross_acc);
         let gr = |name: &str| self.ps.g(name);
         let mut s: Vec<Step> = Vec::new();
@@ -813,9 +847,15 @@ impl ModernBert {
                 LayerAttn::Full => block::chunked_bidir_bwd(
                     g, &cross, None, &cross_bwd, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &bw.d_ctx, &bw.d_qkv, &self.scores, &self.probs, &bw.d_scores, &self.spans, self.chunk, None, &mut s,
                 ),
-                LayerAttn::Local => block::chunked_bidir_bwd_win(
-                    g, &cross_win, self.k.softmax_cross, None, &cross_bwd, c.window, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &bw.d_ctx, &bw.d_qkv, &self.scores, &self.probs, &bw.d_scores, &self.spans, self.chunk, &mut s,
-                ),
+                LayerAttn::Local => {
+                    let (banded, dense) = self.local_span_split();
+                    block::chunked_bidir_bwd_band(
+                        g, &band, &band_bwd, c.window, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &bw.d_ctx, &bw.d_qkv, &self.scores, &self.probs, &bw.d_scores, &banded, self.chunk, &mut s,
+                    );
+                    block::chunked_bidir_bwd_win(
+                        g, &cross_win, self.k.softmax_cross, None, &cross_bwd, c.window, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &bw.d_ctx, &bw.d_qkv, &self.scores, &self.probs, &bw.d_scores, &dense, self.chunk, &mut s,
+                    );
+                }
             }
 
             // Undo RoPE on the q/k regions of `d_qkv`, per span - the exact

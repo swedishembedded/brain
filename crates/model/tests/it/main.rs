@@ -26,6 +26,7 @@ mod bf16_roundtrip;
 mod bmm_tiled;
 mod causal_conv1d_step;
 mod chunked_attn;
+mod chunked_bidir_band;
 mod chunked_bidir_bwd_win;
 mod chunked_bidir_fwd_win;
 mod collective_errors;
