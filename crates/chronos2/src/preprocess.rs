@@ -17,6 +17,8 @@
 //!
 //! `arcsinh(x) = ln(x + sqrt(x^2 + 1))`, `sinh(x) = (e^x - e^-x)/2`.
 
+use crate::config::Chronos2Config;
+
 /// Per-row standardization statistics, carried for future covariates and for
 /// denormalizing the forecast.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -205,9 +207,81 @@ pub fn future_features_with_values(
     Patched { features, attn_mask: vec![1.0; n_patches], n_patches, feat_dim }
 }
 
+/// One univariate input laid out for the embedding: the per-patch features of
+/// the context patches followed by those of the future patches, and the additive
+/// attention mask over the full token sequence (context patches, `[REG]`,
+/// future patches).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Layout {
+    /// `[n_ctx + n_out, 3 * patch]`: context rows then future rows.
+    pub features: Vec<f32>,
+    /// `[n_ctx + 1 + n_out]`, `0` to attend and `-3.4e38` for a context patch
+    /// with no observed value.
+    pub mask: Vec<f32>,
+    pub n_ctx: usize,
+    pub n_out: usize,
+    /// The standardization the forecast is mapped back through.
+    pub ls: LocScale,
+}
+
+/// Standardize `context`, patch it, and append the future patches for
+/// `horizon` steps (steps 1-3 of a forecast, shared by inference and training).
+pub fn layout(cfg: &Chronos2Config, context: &[f32], horizon: usize) -> Layout {
+    let patch = cfg.input_patch_size;
+    let (ls, scaled) = instance_norm(context, cfg.use_arcsinh);
+    let ctx = context_features(&scaled, patch, cfg.time_encoding_scale);
+    let fut = future_features(horizon, patch, cfg.time_encoding_scale);
+    let (n_ctx, n_out) = (ctx.n_patches, fut.n_patches);
+
+    let mut features = ctx.features;
+    features.extend_from_slice(&fut.features);
+    // context patches per observed-mask, REG + future attendable.
+    let mut mask = vec![0.0f32; n_ctx + 1 + n_out];
+    for (m, &attend) in mask.iter_mut().zip(&ctx.attn_mask) {
+        if attend == 0.0 {
+            *m = -3.4e38;
+        }
+    }
+    Layout { features, mask, n_ctx, n_out, ls }
+}
+
+/// Splice the embedded patches `[n_ctx + n_out, d]` and the `[REG]` row into
+/// the token sequence `[n_ctx + 1 + n_out, d]`: context tokens, REG, future tokens.
+pub fn assemble_tokens(patch_emb: &[f32], reg: &[f32], n_ctx: usize, d: usize) -> Vec<f32> {
+    let mut emb = Vec::with_capacity(patch_emb.len() + d);
+    emb.extend_from_slice(&patch_emb[..n_ctx * d]);
+    emb.extend_from_slice(reg);
+    emb.extend_from_slice(&patch_emb[n_ctx * d..]);
+    emb
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_places_context_then_future_and_masks_only_unobserved_patches() {
+        let cfg = Chronos2Config::tiny(); // patch 4
+        // 6 observed values: left-padded to 8 = 2 patches, the first half observed.
+        let ctx: Vec<f32> = (0..6).map(|i| 10.0 + i as f32).collect();
+        let l = layout(&cfg, &ctx, 5); // 5 steps -> 2 future patches
+        assert_eq!((l.n_ctx, l.n_out), (2, 2));
+        assert_eq!(l.features.len(), 4 * cfg.patch_feat_dim());
+        assert_eq!(l.mask.len(), 2 + 1 + 2);
+        assert!(l.mask.iter().all(|&m| m == 0.0), "every patch has an observed value");
+        // an all-NaN leading patch is masked out
+        let mut gap = vec![f32::NAN; 4];
+        gap.extend((0..4).map(|i| i as f32));
+        let l = layout(&cfg, &gap, 4);
+        assert_eq!(l.mask[0], -3.4e38);
+        assert_eq!(l.mask[1], 0.0);
+    }
+
+    #[test]
+    fn tokens_are_context_then_reg_then_future() {
+        let patch_emb = [1.0, 1.0, 2.0, 2.0, 3.0, 3.0]; // d = 2: two context rows, one future row
+        assert_eq!(assemble_tokens(&patch_emb, &[9.0, 9.0], 2, 2), vec![1.0, 1.0, 2.0, 2.0, 9.0, 9.0, 3.0, 3.0]);
+    }
 
     #[test]
     fn standardize_matches_the_closed_form_without_arcsinh() {

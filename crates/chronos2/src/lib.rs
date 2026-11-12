@@ -23,6 +23,7 @@
 //! covariates and long-horizon pipeline unrolling come after parity.
 
 pub mod config;
+pub mod finetune;
 pub mod forecaster;
 pub mod import;
 pub mod model;

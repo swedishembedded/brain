@@ -21,9 +21,14 @@
 //! - **The encoder blocks** (time attention + group degeneration + FFN).
 //! - **The full backbone**, chaining every block into the head path.
 //!
-//! A real fine-tune entry (AdamW + LoRA + promotion gate) is not yet
-//! implemented - [`Chronos2Train::sgd_step`] is a plain-SGD step used only by
-//! the from-scratch learning test.
+//! - **The input embedding** ([`Chronos2Train::embed_forward`]): the patch
+//!   features through the `input_patch_embedding` block plus the `[REG]` row,
+//!   so a fine-tune ([`crate::finetune`]) trains every weight of the model.
+//!   The scaler stays outside the graph: it is data-derived, not learned.
+//!
+//! [`Chronos2Train::sgd_step`] is a plain-SGD step used by the from-scratch
+//! learning test; the AdamW loop and the promotion gate are in
+//! [`crate::finetune`].
 
 use crate::config::Chronos2Config;
 // Single implementation of the elementwise/normalisation math.
@@ -344,6 +349,25 @@ impl FullCache {
     }
 }
 
+/// Reproducible weights for tests and gates, in the reference's own tensor
+/// names: norm gains near 1 (their default), everything else small, so no
+/// attention row saturates and the pinball loss has a gradient everywhere.
+pub fn init_weights(cfg: &Chronos2Config, seed: u64) -> HashMap<String, Vec<f32>> {
+    let mut state = seed ^ 0x6368_726f_6e6f_7332;
+    let mut next = move || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((state >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.4
+    };
+    cfg.param_list()
+        .into_iter()
+        .map(|(name, shape)| {
+            let base = if name.ends_with("layer_norm.weight") { 1.0 } else { 0.0 };
+            let n: usize = shape.iter().product();
+            (name, (0..n).map(|_| base + next()).collect())
+        })
+        .collect()
+}
+
 // ---- the differentiable head path ----------------------------------------------
 
 /// The trainable Chronos-2 (host). Holds a config and a name→weights map; the
@@ -355,6 +379,13 @@ pub struct Chronos2Train {
     pub w: HashMap<String, Vec<f32>>,
     /// What the full core's backward keeps of its forward ([`Chronos2Train::set_saved_policy`]).
     saved: SavedPolicy,
+}
+
+/// What [`Chronos2Train::embed_backward`] needs from [`Chronos2Train::embed_forward`].
+pub struct EmbedCache {
+    rb: ResidualCache,
+    n_ctx: usize,
+    n_out: usize,
 }
 
 /// Everything the head backward needs from the forward.
@@ -380,6 +411,37 @@ impl Chronos2Train {
         BlockStack::<(), ()>::new("chronos2", policy)?;
         self.saved = policy;
         Ok(())
+    }
+
+    /// The input embedding: the token sequence `[n_ctx + 1 + n_out, d]` the core
+    /// consumes, from the patch features `[n_ctx + n_out, 3 * patch]` of
+    /// [`crate::preprocess::layout`]. Patches go through the
+    /// `input_patch_embedding` residual block; the `[REG]` row is read from
+    /// `shared.weight`. Mirrors `Chronos2::assemble_input`.
+    pub fn embed_forward(&self, features: &[f32], n_ctx: usize, n_out: usize) -> (Vec<f32>, EmbedCache) {
+        let cfg = &self.cfg;
+        let d = cfg.d_model;
+        let (patch_emb, rb) = residual_block(&self.w, "input_patch_embedding", features, n_ctx + n_out, cfg.patch_feat_dim(), cfg.d_ff, d);
+        let reg = &self.w["shared.weight"][cfg.reg_token_id * d..(cfg.reg_token_id + 1) * d];
+        (crate::preprocess::assemble_tokens(&patch_emb, reg, n_ctx, d), EmbedCache { rb, n_ctx, n_out })
+    }
+
+    /// Backward of [`Chronos2Train::embed_forward`]: `d_emb_in` `[n_ctx + 1 + n_out, d]`
+    /// (what [`Chronos2Train::full_backward`] returns) into the embedding block's
+    /// grads and the `[REG]` row of `shared.weight`. The features are data, so
+    /// nothing is returned.
+    pub fn embed_backward(&self, cache: &EmbedCache, d_emb_in: &[f32], g: &mut HashMap<String, Vec<f32>>) {
+        let cfg = &self.cfg;
+        let d = cfg.d_model;
+        let (n_ctx, n_out) = (cache.n_ctx, cache.n_out);
+        let mut d_patch = Vec::with_capacity((n_ctx + n_out) * d);
+        d_patch.extend_from_slice(&d_emb_in[..n_ctx * d]);
+        d_patch.extend_from_slice(&d_emb_in[(n_ctx + 1) * d..]);
+        let reg = g.get_mut("shared.weight").unwrap();
+        for (r, dv) in reg[cfg.reg_token_id * d..(cfg.reg_token_id + 1) * d].iter_mut().zip(&d_emb_in[n_ctx * d..(n_ctx + 1) * d]) {
+            *r += dv;
+        }
+        residual_block_bwd(&self.w, g, "input_patch_embedding", &cache.rb, &d_patch, n_ctx + n_out, cfg.patch_feat_dim(), cfg.d_ff, d);
     }
 
     /// Zeroed grad accumulator with an entry per weight.
@@ -565,8 +627,8 @@ impl Chronos2Train {
     }
 
     /// One plain-SGD step on a single example (accumulate grads, then `w -= lr*g`).
-    /// Returns the pre-step loss. Used by the from-scratch learning test; a real
-    /// fine-tune entry (AdamW + LoRA + promotion gate) is not yet implemented.
+    /// Returns the pre-step loss. Used by the from-scratch learning test; the
+    /// fine-tune loop is [`crate::finetune`].
     pub fn sgd_step(&mut self, emb_in: &[f32], mask: &[f32], n_out: usize, target: &[f32], levels: &[f32], lr: f32) -> f32 {
         let (loss, cache) = self.full_forward(emb_in, mask, n_out, target, levels);
         let mut g = self.zero_grads();
@@ -700,6 +762,52 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 60, "expected a broad end-to-end gradcheck, only {checked}");
+    }
+
+    /// The input embedding is in the trained graph: its gradient, and the
+    /// `[REG]` token row's, match finite differences of the loss through the
+    /// whole stack, from the patch features to the pinball loss.
+    #[test]
+    fn the_input_embedding_and_reg_token_gradcheck() {
+        let cfg = Chronos2Config::tiny();
+        let w = init_weights(&cfg, 5);
+        let ctx: Vec<f32> = (0..9).map(|i| 3.0 + (i as f32 * 0.7).sin()).collect();
+        let lay = crate::preprocess::layout(&cfg, &ctx, 4);
+        let target: Vec<f32> = (0..lay.n_out * cfg.output_patch_size).map(|i| (i as f32 * 0.3).cos()).collect();
+        let levels = crate::QUANTILES;
+
+        let loss = |w: &HashMap<String, Vec<f32>>| {
+            let m = Chronos2Train::new(cfg.clone(), w.clone());
+            let (emb, _) = m.embed_forward(&lay.features, lay.n_ctx, lay.n_out);
+            m.full_forward(&emb, &lay.mask, lay.n_out, &target, &levels).0
+        };
+        let m = Chronos2Train::new(cfg.clone(), w.clone());
+        let (emb, ecache) = m.embed_forward(&lay.features, lay.n_ctx, lay.n_out);
+        let (_, cache) = m.full_forward(&emb, &lay.mask, lay.n_out, &target, &levels);
+        let mut g = m.zero_grads();
+        let d_emb = m.full_backward(&cache, &target, &levels, &mut g);
+        m.embed_backward(&ecache, &d_emb, &mut g);
+
+        let reg = cfg.reg_token_id * cfg.d_model;
+        let probes = [
+            ("input_patch_embedding.hidden_layer.weight", 3usize),
+            ("input_patch_embedding.output_layer.bias", 2),
+            ("input_patch_embedding.residual_layer.weight", 7),
+            ("shared.weight", reg + 1),
+            ("shared.weight", 1), // the PAD row never reaches the loss
+        ];
+        let eps = 4e-3f32;
+        for (name, idx) in probes {
+            let mut wp = w.clone();
+            wp.get_mut(name).unwrap()[idx] += eps;
+            let mut wm = w.clone();
+            wm.get_mut(name).unwrap()[idx] -= eps;
+            let numeric = (loss(&wp) - loss(&wm)) / (2.0 * eps);
+            let a = g[name][idx];
+            assert!((a - numeric).abs() <= 4e-3 + 8e-2 * a.abs().max(numeric.abs()), "grad {name}[{idx}]: {a} vs {numeric}");
+        }
+        assert_eq!(g["shared.weight"][1], 0.0, "no gradient reaches the PAD row");
+        assert!(g["shared.weight"][reg + 1].abs() > 0.0, "the REG row is trained");
     }
 
     /// Spec: recomputing the core's blocks gives the loss and gradients of keeping them, bit for bit, holding none

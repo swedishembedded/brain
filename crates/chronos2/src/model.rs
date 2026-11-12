@@ -321,32 +321,14 @@ impl Chronos2 {
         let d = cfg.d_model;
         let patch = cfg.input_patch_size;
 
-        let (ls, scaled) = preprocess::instance_norm(context, cfg.use_arcsinh);
-        let ctx = preprocess::context_features(&scaled, patch, cfg.time_encoding_scale);
-        let fut = preprocess::future_features(horizon, patch, cfg.time_encoding_scale);
-        let n_ctx = ctx.n_patches;
-        let n_out = fut.n_patches;
+        let lay = preprocess::layout(cfg, context, horizon);
+        let feat_buf = self.gpu.storage_init("feats", &lay.features);
+        let patch_emb = self.residual_block("input_patch_embedding", &feat_buf, lay.n_ctx + lay.n_out, 3 * patch, cfg.d_ff, d);
+        let patch_emb_host = self.gpu.read(&patch_emb, (lay.n_ctx + lay.n_out) * d);
 
-        let mut feats = ctx.features.clone();
-        feats.extend_from_slice(&fut.features);
-        let feat_buf = self.gpu.storage_init("feats", &feats);
-        let patch_emb = self.residual_block("input_patch_embedding", &feat_buf, n_ctx + n_out, 3 * patch, cfg.d_ff, d);
-        let patch_emb_host = self.gpu.read(&patch_emb, (n_ctx + n_out) * d);
-
-        // assemble ctx tokens · REG · future tokens
-        let reg = &self.w_host_row("shared.weight", cfg.reg_token_id, d);
-        let mut emb = Vec::with_capacity((n_ctx + 1 + n_out) * d);
-        emb.extend_from_slice(&patch_emb_host[..n_ctx * d]);
-        emb.extend_from_slice(reg);
-        emb.extend_from_slice(&patch_emb_host[n_ctx * d..]);
-
-        // additive mask: ctx patches per observed-mask, REG + future attendable.
-        let mut mask = vec![0.0f32; n_ctx + 1 + n_out];
-        for (p, m) in mask.iter_mut().enumerate().take(n_ctx) {
-            if ctx.attn_mask[p] == 0.0 {
-                *m = -3.4e38;
-            }
-        }
+        let reg = self.w_host_row("shared.weight", cfg.reg_token_id, d);
+        let emb = preprocess::assemble_tokens(&patch_emb_host, &reg, lay.n_ctx, d);
+        let (mask, n_out, ls) = (lay.mask, lay.n_out, lay.ls);
         (emb, mask, n_out, ls)
     }
 
