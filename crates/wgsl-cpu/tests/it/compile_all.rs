@@ -73,7 +73,7 @@ fn dtype_tiers_compile_or_fail_only_for_the_documented_barrier_reason() {
         for dt in tiers {
             exercised += 1;
             let (mut vname, mut vsrc): (&str, &'static str) = (*name, *src);
-            for binding in bindings.iter().copied() {
+            for binding in bindings.iter().map(String::as_str) {
                 let variant = kernels::template::dtype_variant(vname, vsrc, binding, dt)
                     .unwrap_or_else(|e| {
                         panic!("{name}: dtype_variant({dt:?}, {binding:?}) build failed: {e}")
@@ -163,17 +163,30 @@ fn declared_dtype_tiers(src: &str) -> Vec<DType> {
         .collect()
 }
 
-/// The binding names a kernel's `// @tpl <binding>[, <binding>] -> ... storage
-/// variant` header line names - the field B4 added and explicitly deferred
-/// parsing of to "B6" in its own comment (see `matmul.wgsl`'s header: "header
-/// field, parsing deferred to B6"); this is that parse. The list is the text
-/// before `->`, split on commas with the optional space after each trimmed;
-/// empty when the kernel has no `@tpl` line.
-fn tpl_bindings(src: &str) -> Vec<&str> {
-    let Some(line) = src.lines().find(|l| l.trim_start().starts_with("// @tpl")) else {
+/// The binding names a kernel's `// @tpl` header block names as storage
+/// variants - the field B4 added and deferred parsing of to "B6" (see
+/// `matmul.wgsl`'s header); this is that parse.
+///
+/// The block is the tag line plus the comment lines indented under it, a
+/// `;`-separated list of `<names> -> <meaning>` clauses, names split on commas.
+/// A kernel may list interned constants (`GROUP -> query heads per KV head`)
+/// beside its storage bindings (`pool_k,pool_v -> bf16 storage variant`), so
+/// only the clauses whose meaning names a storage variant count. Empty when
+/// the kernel has no `@tpl` block.
+fn tpl_bindings(src: &str) -> Vec<String> {
+    let mut lines = src.lines().skip_while(|l| !l.trim_start().starts_with("// @tpl"));
+    let Some(tag) = lines.next() else {
         return Vec::new();
     };
-    let names = line.trim_start().trim_start_matches("// @tpl");
-    let names = names.split("->").next().unwrap_or(names);
-    names.split(',').map(str::trim).filter(|b| !b.is_empty()).collect()
+    let continuation = |l: &&str| l.starts_with("//  ") && !l.trim_start_matches('/').trim().is_empty();
+    let mut text = tag.trim_start().trim_start_matches("// @tpl").to_string();
+    for l in lines.take_while(continuation) {
+        text.push(' ');
+        text.push_str(l.trim_start_matches('/'));
+    }
+    text.split(';')
+        .filter_map(|clause| clause.split_once("->"))
+        .filter(|(_, meaning)| meaning.contains("storage variant"))
+        .flat_map(|(names, _)| names.split(',').map(str::trim).filter(|b| !b.is_empty()).map(String::from).collect::<Vec<_>>())
+        .collect()
 }
