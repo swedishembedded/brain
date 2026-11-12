@@ -47,6 +47,11 @@ while the viewer moves - motion parallax, not stereo.
       pyramid, ACES), the glass taken from the window's place on the
       monitor, HUD, `P` screenshots, `--headless --output` PNGs.
 
+- [x] MobileNetV3's pieces in the shared vision layer: `hardswish`,
+      `hardsigmoid`, `relu6` kernel pairs (`Act::HardSwish`,
+      `Act::HardSigmoid`, `Act::Relu6`; FD-checked in `crates/gradcheck`)
+      and `vision::SqueezeExcite` with a selectable gate.
+
 ## Not yet done
 
 - [ ] Sample: the window's glass assumes a top-left client origin and a
@@ -64,6 +69,10 @@ while the viewer moves - motion parallax, not stereo.
 - [ ] SDK `FaceLandmarkPipeline` (detect + streaming track), its e2e test.
 - [ ] Sample webcam mode: capture thread, tracking thread, persisted profile,
       calibration keys; a recorded-webcam replay for regression.
+- [ ] `crates/fastvlm` and `crates/ecapatdnn` each keep a private
+      squeeze-excite; move them onto `vision::SqueezeExcite` (needs their
+      parity goldens to re-prove). The shared block has no backward yet, and
+      the new activations take the unfused path (no `fused_code`).
 - [ ] Measure on real hardware: inference and render rate, capture-to-photon
       latency, static jitter; compare One Euro against a constant-velocity
       Kalman filter on recorded data.

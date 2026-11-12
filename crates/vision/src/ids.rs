@@ -92,6 +92,14 @@ pub struct ConvKernelIds {
     /// DIFFERENT function from `gelu`, not a faster spelling of it.
     pub gelu_erf: usize,
     pub gelu_erf_bwd: usize,
+    /// MobileNetV3's activations: hard swish (`Act::HardSwish`), hard sigmoid
+    /// (`Act::HardSigmoid`, the squeeze-excite gate) and ReLU6 (`Act::Relu6`).
+    pub hardswish: usize,
+    pub hardswish_bwd: usize,
+    pub hardsigmoid: usize,
+    pub hardsigmoid_bwd: usize,
+    pub relu6: usize,
+    pub relu6_bwd: usize,
     /// PReLU with a LEARNED per-channel slope (ArcFace's IResNet). NOT
     /// `leaky_relu`, whose slope is a dispatch-time constant with no gradient
     /// and no storage binding — see [`crate::blocks::PReLU`].
@@ -220,6 +228,12 @@ impl ConvKernelIds {
             gelu_bwd: k("gelu_bwd"),
             gelu_erf: k("gelu_erf"),
             gelu_erf_bwd: k("gelu_erf_bwd"),
+            hardswish: k("hardswish"),
+            hardswish_bwd: k("hardswish_bwd"),
+            hardsigmoid: k("hardsigmoid"),
+            hardsigmoid_bwd: k("hardsigmoid_bwd"),
+            relu6: k("relu6"),
+            relu6_bwd: k("relu6_bwd"),
             prelu: k("prelu"),
             prelu_bwd: k("prelu_bwd"),
             prelu_bwd_wg: k("prelu_bwd_wg"),

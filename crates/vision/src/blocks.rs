@@ -111,6 +111,14 @@ pub enum Act {
     /// `nn.GELU()`, and therefore what ConvNeXt / SAM 2 / VQGAN checkpoints were
     /// trained with. The default for [`CXBlock`].
     GeluErf,
+    /// Hard swish, `x * relu6(x + 3) / 6` - MobileNetV3's activation
+    /// (torch's `nn.Hardswish`).
+    HardSwish,
+    /// Hard sigmoid, `relu6(x + 3) / 6` - MobileNetV3's squeeze-excite gate
+    /// (torch's `nn.Hardsigmoid`, not Keras' `0.2x + 0.5`).
+    HardSigmoid,
+    /// ReLU capped at 6 - MobileNetV2-style heads (torch's `nn.ReLU6`).
+    Relu6,
 }
 
 impl Act {
@@ -128,7 +136,7 @@ impl Act {
             Act::Relu => Some(1),
             Act::Silu => Some(2),
             Act::Sigmoid => Some(3),
-            Act::Gelu | Act::GeluErf => None,
+            Act::Gelu | Act::GeluErf | Act::HardSwish | Act::HardSigmoid | Act::Relu6 => None,
         }
     }
 }
@@ -155,6 +163,13 @@ fn act_pair(ctx: &Ctx, act: Act) -> Option<(usize, usize)> {
         Act::GeluErf => {
             Some((ctx.ids.need(ctx.ids.gelu_erf, "gelu_erf"), ctx.ids.need(ctx.ids.gelu_erf_bwd, "gelu_erf_bwd")))
         }
+        Act::HardSwish => {
+            Some((ctx.ids.need(ctx.ids.hardswish, "hardswish"), ctx.ids.need(ctx.ids.hardswish_bwd, "hardswish_bwd")))
+        }
+        Act::HardSigmoid => {
+            Some((ctx.ids.need(ctx.ids.hardsigmoid, "hardsigmoid"), ctx.ids.need(ctx.ids.hardsigmoid_bwd, "hardsigmoid_bwd")))
+        }
+        Act::Relu6 => Some((ctx.ids.need(ctx.ids.relu6, "relu6"), ctx.ids.need(ctx.ids.relu6_bwd, "relu6_bwd"))),
     }
 }
 

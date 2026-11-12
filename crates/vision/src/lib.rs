@@ -56,6 +56,7 @@ pub mod fold;
 pub mod ids;
 pub mod net;
 pub mod plumbing;
+pub mod se;
 
 pub use blocks::{
     Act, Bottleneck, Conv, ConvNames, ConvSpec, ConvTrSpec, ConvTranspose, CxSpec, CXBlock,
@@ -67,3 +68,4 @@ pub use fold::{fold_bn, BN_EPS};
 pub use ids::{ConvKernelIds, NONE};
 pub use net::{ActTap, Ctx, Shape};
 pub use plumbing::{Acc, Cat, Up};
+pub use se::{SeSpec, SqueezeExcite};

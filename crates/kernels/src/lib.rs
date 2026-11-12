@@ -648,6 +648,14 @@ pub const GRID_SAMPLE: &str = include_str!("../wgsl/grid_sample.wgsl");
 pub const GRID_SAMPLE_DGRID: &str = include_str!("../wgsl/grid_sample_dgrid.wgsl");
 /// `wgsl/grid_sample_dx.wgsl`
 pub const GRID_SAMPLE_DX: &str = include_str!("../wgsl/grid_sample_dx.wgsl");
+/// `wgsl/hardsigmoid.wgsl`
+pub const HARDSIGMOID: &str = include_str!("../wgsl/hardsigmoid.wgsl");
+/// `wgsl/hardsigmoid_bwd.wgsl`
+pub const HARDSIGMOID_BWD: &str = include_str!("../wgsl/hardsigmoid_bwd.wgsl");
+/// `wgsl/hardswish.wgsl`
+pub const HARDSWISH: &str = include_str!("../wgsl/hardswish.wgsl");
+/// `wgsl/hardswish_bwd.wgsl`
+pub const HARDSWISH_BWD: &str = include_str!("../wgsl/hardswish_bwd.wgsl");
 /// `wgsl/hconv_glu.wgsl`
 pub const HCONV_GLU: &str = include_str!("../wgsl/hconv_glu.wgsl");
 /// `wgsl/head_pack.wgsl`
@@ -1329,6 +1337,10 @@ pub const REGION_COPY: &str = include_str!("../wgsl/region_copy.wgsl");
 pub const REL_SHIFT: &str = include_str!("../wgsl/rel_shift.wgsl");
 /// `wgsl/rel_shift_bwd.wgsl`
 pub const REL_SHIFT_BWD: &str = include_str!("../wgsl/rel_shift_bwd.wgsl");
+/// `wgsl/relu6.wgsl`
+pub const RELU6: &str = include_str!("../wgsl/relu6.wgsl");
+/// `wgsl/relu6_bwd.wgsl`
+pub const RELU6_BWD: &str = include_str!("../wgsl/relu6_bwd.wgsl");
 /// `wgsl/relu_inplace.wgsl`
 pub const RELU_INPLACE: &str = include_str!("../wgsl/relu_inplace.wgsl");
 /// `wgsl/resize_bicubic.wgsl`
@@ -1973,6 +1985,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("grid_sample", GRID_SAMPLE),
     ("grid_sample_dgrid", GRID_SAMPLE_DGRID),
     ("grid_sample_dx", GRID_SAMPLE_DX),
+    ("hardsigmoid", HARDSIGMOID),
+    ("hardsigmoid_bwd", HARDSIGMOID_BWD),
+    ("hardswish", HARDSWISH),
+    ("hardswish_bwd", HARDSWISH_BWD),
     ("hconv_glu", HCONV_GLU),
     ("head_pack", HEAD_PACK),
     ("head_pack_t", HEAD_PACK_T),
@@ -2299,6 +2315,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("region_copy", REGION_COPY),
     ("rel_shift", REL_SHIFT),
     ("rel_shift_bwd", REL_SHIFT_BWD),
+    ("relu6", RELU6),
+    ("relu6_bwd", RELU6_BWD),
     ("relu_inplace", RELU_INPLACE),
     ("resize_bicubic", RESIZE_BICUBIC),
     ("resize_bicubic_dx", RESIZE_BICUBIC_DX),

@@ -356,6 +356,10 @@ load of it must already be bare-identifier-indexed.
 | [`grid_sample`](../../../crates/kernels/wgsl/grid_sample.wgsl) | Bilinear grid sample forward - `torch.nn.functional.grid_sample(mode='bilinear', padding_mode='zeros')` | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`grid_sample_dgrid`](../../../crates/kernels/wgsl/grid_sample_dgrid.wgsl) | Bilinear grid sample GRID gradient - the other half of grid_sample.wgsl's backward, w.r.t | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`grid_sample_dx`](../../../crates/kernels/wgsl/grid_sample_dx.wgsl) | Bilinear grid sample INPUT gradient - the adjoint of grid_sample.wgsl w.r.t | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
+| [`hardsigmoid`](../../../crates/kernels/wgsl/hardsigmoid.wgsl) | Hard sigmoid, MobileNetV3's gate: relu6(x + 3) / 6 | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`hardsigmoid_bwd`](../../../crates/kernels/wgsl/hardsigmoid_bwd.wgsl) | Hard sigmoid backward: gradient w.r.t. the pre-activation | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`hardswish`](../../../crates/kernels/wgsl/hardswish.wgsl) | Hard swish, MobileNetV3's activation: x * relu6(x + 3) / 6 | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`hardswish_bwd`](../../../crates/kernels/wgsl/hardswish_bwd.wgsl) | Hard swish backward: gradient w.r.t. the pre-activation | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`hconv_glu`](../../../crates/kernels/wgsl/hconv_glu.wgsl) | Gated product of the HConvGLU mixer: gelu_tanh(gate + bias) * value, the two branches read from one fused projection | one thread per output element | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`head_pack`](../../../crates/kernels/wgsl/head_pack.wgsl) | Pack one attention operand head-major-contiguous for GEMM attention | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`head_pack_t`](../../../crates/kernels/wgsl/head_pack_t.wgsl) | As head_pack but TRANSPOSED per head | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
@@ -682,6 +686,8 @@ load of it must already be bare-identifier-indexed.
 | [`region_copy`](../../../crates/kernels/wgsl/region_copy.wgsl) | Strided-region copy between same-layout buffers | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`rel_shift`](../../../crates/kernels/wgsl/rel_shift.wgsl) | Transformer-XL relative-position shift (NeMo / Conformer rel-pos attention) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`rel_shift_bwd`](../../../crates/kernels/wgsl/rel_shift_bwd.wgsl) | Backward (transpose) of rel_shift.wgsl | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`relu6`](../../../crates/kernels/wgsl/relu6.wgsl) | ReLU6: min(max(x, 0), 6) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`relu6_bwd`](../../../crates/kernels/wgsl/relu6_bwd.wgsl) | ReLU6 backward: gradient w.r.t. the pre-activation | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`relu_inplace`](../../../crates/kernels/wgsl/relu_inplace.wgsl) | In-place ReLU (single read_write binding - wgpu usage-scope safe) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`resize_bicubic`](../../../crates/kernels/wgsl/resize_bicubic.wgsl) | Bicubic resize forward (Catmull-Rom / cubic convolution, a = -0.75), NCHW | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`resize_bicubic_dx`](../../../crates/kernels/wgsl/resize_bicubic_dx.wgsl) | Bicubic resize INPUT gradient, NCHW | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |

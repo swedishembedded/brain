@@ -26,7 +26,7 @@ use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::{
     Act, ConvKernelIds, ConvTrSpec, ConvTranspose, Ctx, CxSpec, CXBlock, LayerNorm2d, Ln2dNames,
-    MaxPool, PoolSpec, Shape,
+    MaxPool, PoolSpec, SeSpec, Shape, SqueezeExcite,
 };
 
 /// Only the kernels these blocks dispatch. Deliberately not `kernels::ALL`: the
@@ -49,6 +49,7 @@ const PIPELINES: &[(&str, &str)] = &[
     // pooling
     ("maxpool2d", kernels::MAXPOOL2D),
     ("maxpool2d_dx", kernels::MAXPOOL2D_DX),
+    ("avgpool2d", kernels::AVGPOOL2D),
     // LayerNorm2d: the permutations + BOTH LayerNorm variants, so the
     // `model::block` seam can pick the coalesced `*_rows` twins where the
     // device supports a workgroup reduction.
@@ -69,6 +70,12 @@ const PIPELINES: &[(&str, &str)] = &[
     ("gelu_bwd", kernels::GELU_BWD),
     ("gelu_erf", kernels::GELU_ERF),
     ("gelu_erf_bwd", kernels::GELU_ERF_BWD),
+    ("leaky_relu", kernels::LEAKY_RELU),
+    ("leaky_relu_bwd", kernels::LEAKY_RELU_BWD),
+    ("sigmoid", kernels::SIGMOID),
+    ("sigmoid_bwd", kernels::SIGMOID_BWD),
+    ("hardsigmoid", kernels::HARDSIGMOID),
+    ("hardsigmoid_bwd", kernels::HARDSIGMOID_BWD),
     // elementwise / layer scale
     ("scale_chan", kernels::SCALE_CHAN),
     ("scale_chan_dg", kernels::SCALE_CHAN_DG),
@@ -838,5 +845,52 @@ fn layernorm2d_composition_cost() {
             "permute measured at {perm_gbs:.0} GB/s — above any plausible roof, so the timing is not \
              measuring the device (is every timed region bracketed by poll_wait?)"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SqueezeExcite
+// ---------------------------------------------------------------------------
+
+/// The gate from its definition, on the host: global mean per (n, c), the two
+/// biased 1x1 convs as matrix-vector products, ReLU, the chosen gate, scale.
+fn se_ref(x: &[f32], s: Shape, w1: &[f32], b1: &[f32], w2: &[f32], b2: &[f32], r: usize, gate: Act) -> Vec<f32> {
+    let (n, c, hw) = (s.n as usize, s.c as usize, (s.h * s.w) as usize);
+    let mut out = vec![0.0f32; x.len()];
+    for b in 0..n {
+        let mean: Vec<f32> = (0..c).map(|ch| x[(b * c + ch) * hw..(b * c + ch + 1) * hw].iter().sum::<f32>() / hw as f32).collect();
+        let hid: Vec<f32> = (0..r).map(|j| (b1[j] + (0..c).map(|ch| w1[j * c + ch] * mean[ch]).sum::<f32>()).max(0.0)).collect();
+        for ch in 0..c {
+            let z = b2[ch] + (0..r).map(|j| w2[ch * r + j] * hid[j]).sum::<f32>();
+            let g = match gate {
+                Act::HardSigmoid => (z + 3.0).clamp(0.0, 6.0) / 6.0,
+                Act::Sigmoid => 1.0 / (1.0 + (-z).exp()),
+                other => panic!("no reference for {other:?}"),
+            };
+            for i in 0..hw {
+                out[(b * c + ch) * hw + i] = x[(b * c + ch) * hw + i] * g;
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn squeeze_excite_matches_its_definition_for_both_gates_and_every_sample() {
+    let gpu = dev();
+    let ctx = Ctx::new(&gpu, ids());
+    // two samples, so a gate indexed by channel alone would be caught
+    let s = Shape::new(2, 12, 5, 5);
+    let x = Lcg::new(random_seed()).vec(s.numel() as usize).iter().map(|v| 4.0 * v).collect::<Vec<f32>>();
+    for gate in [Act::HardSigmoid, Act::Sigmoid] {
+        let spec = SeSpec { reduced: 4, inner: Act::Relu, gate };
+        let se = SqueezeExcite::new(&ctx, "se", s, spec);
+        let ps = store(&gpu, se.param_list(), 31);
+        let xb = gpu.storage_init("x", &x);
+        se.forward(&ctx, &ps, &xb);
+        let got = gpu.read(se.out(), x.len());
+        let w = |n: &str| ps.read_weight(&gpu, n);
+        let want = se_ref(&x, s, &w("se.reduce.conv.weight"), &w("se.reduce.conv.bias"), &w("se.expand.conv.weight"), &w("se.expand.conv.bias"), 4, gate);
+        close(&got, &want, 2e-5, &format!("squeeze-excite with {gate:?}"));
     }
 }

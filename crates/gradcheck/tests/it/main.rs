@@ -20,6 +20,7 @@ mod decoder_variants_fd;
 mod depth_kernels;
 mod florence2_fd;
 mod gelu_erf_fd;
+mod mobilenet_act_fd;
 mod glue;
 mod grid_sample_kernels;
 mod horizon_fd;
