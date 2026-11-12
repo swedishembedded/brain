@@ -80,3 +80,19 @@ its definition, the on-policy first step and the supervised parity of a record w
 - [ ] Per-sequence normalisation (`LossAgg::SeqMean`, the default) needs a batch of one sequence; long agent calls
       weigh less per token than short ones under it (`TokenSum` is the alternative, see knowledge 290).
 
+
+## External policy gradient on a toy: what the measurements say (2026-11-12)
+
+On a toy `qwen3` LoRA model (`brain::toy`, a three-letter cipher, held-out exact match) the objective behaves as
+specified: the first step's importance ratio is exactly 1 under the start-of-run behaviour, and the finite-difference
+gradchecks hold. What decided whether the two-sided (default, standardised) advantage improved the held-out score
+was the data, not the loss:
+
+- negative advantages alone destroy the held-out score (loss 2.93 to 5.9) and positive ones alone improve it, so a
+  run that revisits a fixed set of prompts lets the negatives memorise those prompts and the score falls after four
+  rounds; a fresh slice of prompts each round improves it every round with the same objective and settings (0.39 to
+  0.53 over six rounds);
+- larger groups on the same prompts help little; a higher learning rate or a wider clip band makes it worse.
+
+Open here: whether the same holds on a real model (it was not run), and an optional negative-advantage weight if a
+reused-prompt regime must be supported.
