@@ -1,0 +1,16 @@
+<!-- source-sha256: 3eb5dc97aae41d2849324bae8032e9896d642d32c33d9c4969d5b5c560e50773 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 521 262" width="521" height="262"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="521" height="262" fill="#ffffff"/>
+<rect x="24" y="86" width="140" height="90" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="94" y="119.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">agent</text>
+<text x="94" y="135.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">policy pi:</text>
+<text x="94" y="151.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">state s_t -&gt; action a_t</text>
+<rect x="314" y="86" width="183" height="90" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="405.5" y="111.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">environment</text>
+<text x="405.5" y="127.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">draws the demand D;</text>
+<text x="405.5" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">next state from P(. | s_t, a_t);</text>
+<text x="405.5" y="159.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reward r_t from the day</text>
+<path d="M94,86 L94,62 Q94,52 104,52 L395.5,52 Q405.5,52 405.5,62 L405.5,83" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="249.75" y="42.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">action a_t: how many units to order</text>
+<path d="M405.5,176 L405.5,200 Q405.5,210 395.5,210 L104,210 Q94,210 94,200 L94,179" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="249.75" y="230.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">state s_(t+1) and reward r_t</text>
+</svg>

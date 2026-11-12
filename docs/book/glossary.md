@@ -108,6 +108,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **beam search**: keeping the $B$ partial texts of highest total log-probability at every step instead of one, to find a more probable whole text than greedy decoding does, at $B$ times the work. *([Decoding: Turning Probabilities into Text](v05-sequences/11-decoding.md))*
 
+**Bellman equation**: the equation that says the value of a state is the reward of the day plus the discounted, averaged value of the next state, linear for a policy and with a maximum over actions for the optimal values. *([Markov Decision Processes](v12-reinforcement-learning/01-mdps.md))*
+
 **Bernoulli distribution**: the distribution of a single yes/no outcome coded as $1$ or $0$, equal to $1$ with probability $p$; its mean is $p$ and its variance is $p(1-p)$. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **bf16 format**: the 16-bit floating-point layout of 1 sign bit, 8 exponent bits (the exponent field of fp32) and 7 fraction bits: fp32's range with 2.4 digits, obtained from an fp32 by dropping the low 16 bits (with rounding). *([Bits and Number Formats](v04-computation/01-number-formats.md))*
@@ -335,6 +337,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **diffusion world model**: a world model that produces the next frame by denoising noise, given the last frames and the action. *([World Models](v10-video-and-3d/07-world-models.md))*
 
 **directional derivative**: the rate of change of a function per unit distance in a chosen unit direction $\mathbf{u}$, equal to $\nabla L\cdot\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
+
+**discount factor**: the number $\gamma$ in $[0, 1)$ by which a reward one day later is multiplied, which keeps the return finite and sets an effective horizon of $1/(1 - \gamma)$ days. *([Markov Decision Processes](v12-reinforcement-learning/01-mdps.md))*
 
 **discrete Fourier transform**: the list $X[k] = \sum_{n=0}^{N-1} x[n]e^{-2\pi i kn/N}$ of correlations of $N$ samples with turning pointers, one per frequency $k$; its modulus gives the amplitude and its angle the phase of the component at that frequency, and the original samples are recovered by the inverse transform. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
@@ -706,6 +710,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **machine epsilon**: the gap between $1$ and the next larger floating-point number, $2^{1-p}$ ($1.19 \times 10^{-7}$ in 32 bits, $2.22 \times 10^{-16}$ in 64 bits); twice the unit round-off $u = 2^{-p}$, which is the bound on the relative error of one rounding. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
+**Markov decision process**: a set of states, the actions available in each, the probabilities of the next state given a state and an action, the mean reward of each pair and a discount factor, with the property that the next state depends on the past only through the present state and action. *([Markov Decision Processes](v12-reinforcement-learning/01-mdps.md))*
+
 **mask decoder**: the small network that turns the prompt tokens and the stored image embedding into mask logits, by letting tokens and image cells attend to each other and then taking, for each output token, a dot product with the upscaled cells. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
 
 **masked language modeling**: the training task of an encoder in which a random subset of positions is selected, the input there is replaced (by a mask token, a random token or nothing, in the proportions 80, 10 and 10 percent), and the model is trained to recover the original tokens at the selected positions only, from both sides. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
@@ -894,6 +900,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **pointmap**: an array with one world point per pixel of an image, the point the pixel sees, written in the coordinates of one shared frame (the first camera's), so that a depth map and the camera that took it are one object and two pixels of two images that see the same surface hold the same point. *([Learning 3D Directly](v10-video-and-3d/05-feed-forward-3d.md))*
 
+**policy**: a rule that chooses an action in each state; in this chapter a list of one action per state. *([Markov Decision Processes](v12-reinforcement-learning/01-mdps.md))*
+
 **polynomial**: a sum of constant multiples of powers of $x$; one of degree $n$ has $n + 1$ parameters and is fixed by $n + 1$ points. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 **pooled text embedding**: a single vector for the whole prompt, usually the row of an encoder at its end token after the final normalization (and, for SDXL, a projection), with no positions, so that it is added to the timestep embedding and reaches every block with the clock and not through attention. *([Conditioning on Text](v08-image-generation/09-text-conditioning.md))*
@@ -1007,6 +1015,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **residual-connection**: a layer that returns its input plus a correction, $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, so that its Jacobian is $\mathbf{I} + \mathbf{J}_f$ and the gradient has a path through it that passes no weights. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
 **retrieval**: finding the stored texts that answer a query by embedding the query, comparing its vector with the stored vectors and ranking the collection by cosine, judged by the share of the relevant texts found among the top $k$ (recall at $k$). *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
+
+**return**: the discounted sum of the rewards that follow a day, $G_t = r_t + \gamma r_{t+1} + \gamma^2 r_{t+2} + \dots$, which obeys $G_t = r_t + \gamma G_{t+1}$. *([Markov Decision Processes](v12-reinforcement-learning/01-mdps.md))*
 
 **reverse-mode differentiation**: computing derivatives by carrying a row vector from the single output back through the chain of Jacobians, so one sweep gives the gradient with respect to every input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
@@ -1259,6 +1269,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **v-prediction**: asking the network for the velocity $v = a_t\varepsilon - b_t x_0$, a rotation of the clean value and the noise that keeps the error of the implied clean value bounded at every noise level. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
 
 **validation set**: rows kept apart from fitting and used to choose between models (degree, penalty, learning rate, when to stop); the score of the chosen model on it is optimistic, because it was chosen for its score. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
+
+**value function**: the expected return of starting in each state and following a policy, written $V^\pi$ (and $V^\ast$ for the best policy). *([Markov Decision Processes](v12-reinforcement-learning/01-mdps.md))*
+
+**value iteration**: repeated sweeps of the optimal Bellman equation from a starting vector, each sweep replacing every value by the best one-step lookahead of the old values, until the change is below a tolerance. *([Markov Decision Processes](v12-reinforcement-learning/01-mdps.md))*
 
 **vanishing-gradient**: the gradient reaching the early layers of a deep network is a tiny fraction of the one at the top, because it is a product of layer Jacobians whose factors are below one; those layers do not learn. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 

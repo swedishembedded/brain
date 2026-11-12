@@ -188,4 +188,8 @@ historical sections draw on in the [Chronology](history/chronology.md).
 5. [Survival Analysis and Competing Risks](v11-forecasting/05-survival-analysis.md): How do we predict when something will happen when many examples have not happened yet?
 6. [Scoring Rules and Calibrated Decisions](v11-forecasting/06-calibrated-decisions.md): How do we reward a model for honest probabilities rather than confident guesses?
 7. [Project: A Calibrated Forecasting System](v11-forecasting/07-project-forecaster.md): Can you build a forecaster whose uncertainty estimates are calibrated and honestly evaluated?
+
+### [Volume XII: Reinforcement Learning and Continuous Improvement](v12-reinforcement-learning/index.md)
+
+1. [Markov Decision Processes](v12-reinforcement-learning/01-mdps.md): How do we describe an agent that acts, sees consequences and wants long-term reward?
 <!-- /contents -->

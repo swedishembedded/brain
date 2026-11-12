@@ -1,0 +1,77 @@
+<!-- source-sha256: 6c7a6c22167311c9ae0264f90158a7e8fedad121cd10a36006a57913b9fb70d5 -->
+<svg width="434pt" height="187pt"
+viewBox="0.00 0.00 434.00 187.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(10.8 175.84)">
+<polygon fill="white" stroke="none" points="-10.8,10.8 -10.8,-175.84 423,-175.84 423,10.8 -10.8,10.8"/>
+<g id="node1" class="node">
+<ellipse fill="#ebf4ff" stroke="#718096" cx="264" cy="-58.39" rx="32.4" ry="32.4"/>
+<text xml:space="preserve" text-anchor="middle" x="264" y="-59.19" font-family="Helvetica,sans-Serif" font-size="11.00">stock 0</text>
+<text xml:space="preserve" text-anchor="middle" x="264" y="-47.94" font-family="Helvetica,sans-Serif" font-size="11.00">order 1</text>
+</g>
+<g id="edge1" class="edge">
+<path fill="none" stroke="#718096" d="M253.15,-89.4C253.03,-100.13 256.65,-108.79 264,-108.79 268.48,-108.79 271.57,-105.57 273.28,-100.63"/>
+<polygon fill="#718096" stroke="#718096" points="276.72,-101.28 274.64,-90.9 269.79,-100.31 276.72,-101.28"/>
+<text xml:space="preserve" text-anchor="middle" x="264" y="-109.59" font-family="Helvetica,sans-Serif" font-size="11.00">0.7</text>
+</g>
+<g id="node2" class="node">
+<ellipse fill="#ebf4ff" stroke="#718096" cx="379.8" cy="-60.39" rx="32.4" ry="32.4"/>
+<text xml:space="preserve" text-anchor="middle" x="379.8" y="-61.19" font-family="Helvetica,sans-Serif" font-size="11.00">stock 1</text>
+<text xml:space="preserve" text-anchor="middle" x="379.8" y="-49.94" font-family="Helvetica,sans-Serif" font-size="11.00">order 0</text>
+</g>
+<g id="edge2" class="edge">
+<path fill="none" stroke="#718096" d="M296.7,-58.95C308.91,-59.16 323.05,-59.41 336.13,-59.64"/>
+<polygon fill="#718096" stroke="#718096" points="335.7,-63.13 345.76,-59.81 335.82,-56.13 335.7,-63.13"/>
+<text xml:space="preserve" text-anchor="middle" x="321.9" y="-60.31" font-family="Helvetica,sans-Serif" font-size="11.00">0.3</text>
+</g>
+<g id="edge3" class="edge">
+<path fill="none" stroke="#718096" d="M349.14,-48.95C342.72,-46.95 335.91,-45.18 329.4,-44.14 321.73,-42.91 313.6,-43.33 305.79,-44.62"/>
+<polygon fill="#718096" stroke="#718096" points="305.19,-41.17 296.16,-46.71 306.67,-48.01 305.19,-41.17"/>
+<text xml:space="preserve" text-anchor="middle" x="321.9" y="-44.94" font-family="Helvetica,sans-Serif" font-size="11.00">0.7</text>
+</g>
+<g id="edge4" class="edge">
+<path fill="none" stroke="#718096" d="M368.95,-91.4C368.83,-102.13 372.45,-110.79 379.8,-110.79 384.28,-110.79 387.37,-107.57 389.08,-102.63"/>
+<polygon fill="#718096" stroke="#718096" points="392.52,-103.28 390.44,-92.9 385.59,-102.31 392.52,-103.28"/>
+<text xml:space="preserve" text-anchor="middle" x="379.8" y="-111.59" font-family="Helvetica,sans-Serif" font-size="11.00">0.3</text>
+</g>
+<g id="node3" class="node">
+<ellipse fill="#ebf4ff" stroke="#718096" cx="148.2" cy="-58.39" rx="32.4" ry="32.4"/>
+<text xml:space="preserve" text-anchor="middle" x="148.2" y="-59.19" font-family="Helvetica,sans-Serif" font-size="11.00">stock 2</text>
+<text xml:space="preserve" text-anchor="middle" x="148.2" y="-47.94" font-family="Helvetica,sans-Serif" font-size="11.00">order 0</text>
+</g>
+<g id="edge5" class="edge">
+<path fill="none" stroke="#718096" d="M180.9,-58.39C193.11,-58.39 207.25,-58.39 220.33,-58.39"/>
+<polygon fill="#718096" stroke="#718096" points="219.96,-61.89 229.96,-58.39 219.96,-54.89 219.96,-61.89"/>
+<text xml:space="preserve" text-anchor="middle" x="206.1" y="-59.19" font-family="Helvetica,sans-Serif" font-size="11.00">0.3</text>
+</g>
+<g id="edge6" class="edge">
+<path fill="none" stroke="#718096" d="M173.36,-37.88C188.89,-26.07 210.13,-12.37 231.6,-6.14 259.26,1.89 268.81,2.13 296.4,-6.14 314.17,-11.46 331.64,-21.99 345.9,-32.36"/>
+<polygon fill="#718096" stroke="#718096" points="343.49,-34.93 353.57,-38.19 347.72,-29.35 343.49,-34.93"/>
+<text xml:space="preserve" text-anchor="middle" x="264" y="-6.94" font-family="Helvetica,sans-Serif" font-size="11.00">0.4</text>
+</g>
+<g id="edge7" class="edge">
+<path fill="none" stroke="#718096" d="M137.35,-89.4C137.23,-100.13 140.85,-108.79 148.2,-108.79 152.68,-108.79 155.77,-105.57 157.48,-100.63"/>
+<polygon fill="#718096" stroke="#718096" points="160.92,-101.28 158.84,-90.9 153.99,-100.31 160.92,-101.28"/>
+<text xml:space="preserve" text-anchor="middle" x="148.2" y="-109.59" font-family="Helvetica,sans-Serif" font-size="11.00">0.3</text>
+</g>
+<g id="node4" class="node">
+<ellipse fill="#ebf4ff" stroke="#718096" cx="32.4" cy="-103.39" rx="32.4" ry="32.4"/>
+<text xml:space="preserve" text-anchor="middle" x="32.4" y="-104.19" font-family="Helvetica,sans-Serif" font-size="11.00">stock 3</text>
+<text xml:space="preserve" text-anchor="middle" x="32.4" y="-92.94" font-family="Helvetica,sans-Serif" font-size="11.00">order 0</text>
+</g>
+<g id="edge8" class="edge">
+<path fill="none" stroke="#718096" d="M63.24,-114.56C113.15,-131.46 215.98,-158.62 296.4,-129.39 316.78,-121.99 335.63,-107.09 350.15,-93.02"/>
+<polygon fill="#718096" stroke="#718096" points="352.57,-95.55 357.11,-85.98 347.59,-90.63 352.57,-95.55"/>
+<text xml:space="preserve" text-anchor="middle" x="206.1" y="-143.1" font-family="Helvetica,sans-Serif" font-size="11.00">0.3</text>
+</g>
+<g id="edge9" class="edge">
+<path fill="none" stroke="#718096" d="M63,-91.68C76.57,-86.32 92.85,-79.88 107.46,-74.1"/>
+<polygon fill="#718096" stroke="#718096" points="108.33,-77.53 116.34,-70.59 105.75,-71.02 108.33,-77.53"/>
+<text xml:space="preserve" text-anchor="middle" x="90.3" y="-84.38" font-family="Helvetica,sans-Serif" font-size="11.00">0.4</text>
+</g>
+<g id="edge10" class="edge">
+<path fill="none" stroke="#718096" d="M21.55,-134.4C21.43,-145.13 25.05,-153.79 32.4,-153.79 36.88,-153.79 39.97,-150.57 41.68,-145.63"/>
+<polygon fill="#718096" stroke="#718096" points="45.12,-146.28 43.04,-135.9 38.19,-145.31 45.12,-146.28"/>
+<text xml:space="preserve" text-anchor="middle" x="32.4" y="-154.59" font-family="Helvetica,sans-Serif" font-size="11.00">0.3</text>
+</g>
+</g>
+</svg>

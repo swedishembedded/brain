@@ -103,6 +103,7 @@ reproduced its worked examples from the text alone in another language.
       orientation, a stitch rule unsound for long overlaps, two wrong bytes
       cells in the project's bill, unlabelled raw-head order rows).
       All were fixed in the following commits; a recheck has not been run.
+- [ ] Volume XII, Reinforcement Learning and Continuous Improvement: chapter 1 written.
 
 ## Open
 
