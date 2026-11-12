@@ -1,0 +1,88 @@
+<!-- source-sha256: 11082af58b9fe9daf44c7bc82f3e6a8658fe82512fa555c37ee90490b393d119 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 380" width="920" height="380"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="920" height="380" fill="#ffffff"/>
+<text x="167.44" y="26.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">scale</text>
+<text x="324.12" y="26.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">tokens</text>
+<text x="497.05" y="26.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">backbone</text>
+<text x="669.98" y="26.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">head</text>
+<text x="834.6" y="26.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">output</text>
+<text x="53.86" y="89.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Chronos-2</text>
+<rect x="105.71" y="60" width="123.45" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="167.44" y="81.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">standardise the</text>
+<text x="167.44" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">context, arcsinh</text>
+<rect x="255.17" y="60" width="137.91" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="324.12" y="81.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">patches of 16 bars,</text>
+<text x="324.12" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">one register token</text>
+<line x1="232.17" y1="85" x2="252.17" y2="85" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="419.07" y="60" width="155.95" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="497.05" y="81.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">12 blocks: time and</text>
+<text x="497.05" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">group attention</text>
+<line x1="396.07" y1="85" x2="416.07" y2="85" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="601.02" y="60" width="137.91" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="669.98" y="81.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">21 quantiles</text>
+<text x="669.98" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">for each bar</text>
+<line x1="578.02" y1="85" x2="598.02" y2="85" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="764.93" y="60" width="139.34" height="50" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="834.6" y="81.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sinh, then</text>
+<text x="834.6" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">loc + scale x</text>
+<line x1="741.93" y1="85" x2="761.93" y2="85" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="53.86" y="171.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">TimesFM-3</text>
+<rect x="105.71" y="142" width="123.45" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="167.44" y="163.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">running mean and</text>
+<text x="167.44" y="179.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">deviation per patch</text>
+<rect x="255.17" y="142" width="137.91" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="324.12" y="163.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">patches of 32 bars,</text>
+<text x="324.12" y="179.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a slot for the future</text>
+<line x1="232.17" y1="167" x2="252.17" y2="167" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="419.07" y="142" width="155.95" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="497.05" y="163.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">20 blocks: causal, variate</text>
+<text x="497.05" y="179.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">attention, feed-forward</text>
+<line x1="396.07" y1="167" x2="416.07" y2="167" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="601.02" y="142" width="137.91" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="669.98" y="163.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">9 quantiles, 64 bars</text>
+<text x="669.98" y="179.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">for each patch</text>
+<line x1="578.02" y1="167" x2="598.02" y2="167" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="764.93" y="142" width="139.34" height="50" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="834.6" y="163.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">undo the scaling,</text>
+<text x="834.6" y="179.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cross-fade patches</text>
+<line x1="741.93" y1="167" x2="761.93" y2="167" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="53.86" y="253.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">FinCast</text>
+<rect x="105.71" y="224" width="123.45" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="167.44" y="245.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mean and deviation</text>
+<text x="167.44" y="261.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">of the first patch</text>
+<rect x="255.17" y="224" width="137.91" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="324.12" y="245.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">patches of 32 bars,</text>
+<text x="324.12" y="261.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">padded to 512</text>
+<line x1="232.17" y1="249" x2="252.17" y2="249" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="419.07" y="224" width="155.95" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="497.05" y="245.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">50 blocks: attention and</text>
+<text x="497.05" y="261.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">top 2 of 4 experts</text>
+<line x1="396.07" y1="249" x2="416.07" y2="249" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="601.02" y="224" width="137.91" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="669.98" y="245.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mean and 9 quantiles,</text>
+<text x="669.98" y="261.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">128 bars at once</text>
+<line x1="578.02" y1="249" x2="598.02" y2="249" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="764.93" y="224" width="139.34" height="50" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="834.6" y="245.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">undo the scaling,</text>
+<text x="834.6" y="261.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">feed the mean back</text>
+<line x1="741.93" y1="249" x2="761.93" y2="249" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="53.86" y="335.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Kronos</text>
+<rect x="105.71" y="306" width="123.45" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="167.44" y="327.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">z-score of the bars,</text>
+<text x="167.44" y="343.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">clipped to +-5</text>
+<rect x="255.17" y="306" width="137.91" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="324.12" y="327.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sign code of each bar:</text>
+<text x="324.12" y="343.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokens s1 and s2</text>
+<line x1="232.17" y1="331" x2="252.17" y2="331" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="419.07" y="306" width="155.95" height="50" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="497.05" y="327.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 blocks and a</text>
+<text x="497.05" y="343.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">dependency layer</text>
+<line x1="396.07" y1="331" x2="416.07" y2="331" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="601.02" y="306" width="137.91" height="50" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="669.98" y="327.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">logits of s1, then</text>
+<text x="669.98" y="343.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">of s2 given s1</text>
+<line x1="578.02" y1="331" x2="598.02" y2="331" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="764.93" y="306" width="139.34" height="50" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="834.6" y="327.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sample, decode the</text>
+<text x="834.6" y="343.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bars, undo the z-score</text>
+<line x1="741.93" y1="331" x2="761.93" y2="331" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

@@ -260,6 +260,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **covariance**: the expected product of the deviations of two variables from their means, $\mathbb{E}[XY] - \mathbb{E}[X]\mathbb{E}[Y]$, positive when they tend to move together; it is the cross term in the variance of a sum and the entry of the covariance matrix. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
+**covariate conditioning**: letting the forecast of one series depend on other series observed alongside it, past or known in the future, by attention between the series at each patch position or by laying their values into the input of the patches. *([Foundation Models for Time Series](v11-forecasting/03-foundation-forecasters.md))*
+
 **CPU core**: one unit of a processor that fetches, decodes and executes instructions in a pipeline, with its own registers and first-level caches, sharing the rest of the memory system with the other cores of the chip. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 
 **critical point**: a point where the derivative is zero, so the tangent is horizontal; it may be a minimum, a maximum or neither. *([Derivatives: The Mathematics of Change](v01-mathematics/07-derivatives.md))*
@@ -846,6 +848,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **patch embedding**: the layer that turns a picture into a sequence of tokens by cutting it into non-overlapping square patches, flattening each and applying one shared linear map; identical to a convolution whose kernel size equals its stride. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
+**patch tokenization of a series**: cutting a scaled series into consecutive, non-overlapping stretches of a fixed number of bars, padded on the left with missing bars, each stretch becoming one token by an embedding of its values and the mask of which of them were observed. *([Foundation Models for Time Series](v11-forecasting/03-foundation-forecasters.md))*
+
 **patch-match stereo**: dense depth estimation in which every pixel holds a plane hypothesis (range and normal), scored by correlation of its patch across views, and a randomized search propagates good hypotheses between neighbouring pixels and refines them, so that a small fraction of the hypothesis space is tried. *([Structure from Motion and Multi-View Stereo](v10-video-and-3d/04-structure-from-motion.md))*
 
 **PCM audio**: pulse-code modulation, a recording stored as integer codes, each the nearest multiple of a fixed step to the waveform at one of equally spaced moments. *([Sound and Sampling](v09-audio/01-sound.md))*
@@ -1039,6 +1043,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **sentence embedding**: one vector that represents a whole text, obtained by pooling the per-token vectors of an encoder (the mean over the real tokens, or the row of a designated first token) so that two texts can be compared by the cosine of their vectors. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
 
 **sequence packing**: laying the tokens of many documents end to end in one stream and cutting it into rows of a fixed length, with the targets one place later and a padded, masked last row, so that almost every position of every row does useful work. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
+
+**series tokenizer**: a map from bars or stretches of a series to symbols of a finite vocabulary and back, by uniform bins after a scale or by a learned code, so that the machinery of a language model applies to a forecast, at the price of a floor on the resolution of the values. *([Foundation Models for Time Series](v11-forecasting/03-foundation-forecasters.md))*
 
 **set**: a collection of distinct elements, written with braces and combined by union, intersection and difference. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
@@ -1313,3 +1319,5 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **zero convolution**: a $1 \times 1$ convolution whose weights and bias start at exactly zero, so that a branch ending in it adds nothing at the first step, yet its own weights already have a gradient, and the layers behind it receive one from the second step on. *([Control, Identity and Adapters](v08-image-generation/11-control-and-identity.md))*
 
 **zero-shot classification**: assigning an input to the class whose caption vector is nearest, with the class vectors computed at the time of the question from sentences naming the classes (averaged over several templates), so that classes need no labelled examples and no trained weight of their own. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*
+
+**zero-shot forecasting**: forecasting a series by applying a model that was fitted to other series, with no fitting on the series itself; its reach is that of the collection the model was fitted to. *([Foundation Models for Time Series](v11-forecasting/03-foundation-forecasters.md))*

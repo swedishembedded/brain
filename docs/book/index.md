@@ -183,4 +183,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 
 1. [Time Series Fundamentals](v11-forecasting/01-time-series.md): What makes data ordered in time different, and how do we avoid cheating with the future?
 2. [Probabilistic Forecasts](v11-forecasting/02-probabilistic-forecasting.md): How should a forecast express what it does not know?
+3. [Foundation Models for Time Series](v11-forecasting/03-foundation-forecasters.md): Can one pretrained model forecast any series it has never seen?
 <!-- /contents -->

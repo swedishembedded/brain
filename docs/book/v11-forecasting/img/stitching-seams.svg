@@ -1,0 +1,38 @@
+<!-- source-sha256: 1ae99ddede0b8c1fe3f01c6fb7107b3eff9ad9e2d1406ad6e71254b8e1866a68 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 340" width="560" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="340" fill="#ffffff"/>
+<line x1="58" y1="294" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="185.37" y1="294" x2="185.37" y2="30" stroke="#edf2f7"/>
+<text x="185.37" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="312.74" y1="294" x2="312.74" y2="30" stroke="#edf2f7"/>
+<text x="312.74" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="440.11" y1="294" x2="440.11" y2="30" stroke="#edf2f7"/>
+<text x="440.11" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">15</text>
+<line x1="58" y1="270" x2="542" y2="270" stroke="#edf2f7"/>
+<text x="52" y="274" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="222" x2="542" y2="222" stroke="#edf2f7"/>
+<text x="52" y="226" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">12</text>
+<line x1="58" y1="174" x2="542" y2="174" stroke="#edf2f7"/>
+<text x="52" y="178" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">14</text>
+<line x1="58" y1="126" x2="542" y2="126" stroke="#edf2f7"/>
+<text x="52" y="130" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">16</text>
+<line x1="58" y1="78" x2="542" y2="78" stroke="#edf2f7"/>
+<text x="52" y="82" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">18</text>
+<line x1="58" y1="30" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<rect x="58" y="30" width="484" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#c05621" stroke-width="2.6" points="58,270 83.47,238.8 108.95,214.03 134.42,200.4 159.89,199.63 185.37,210 210.84,226.8 236.32,243.6 261.79,253.97 287.26,253.2 312.74,239.57 338.21,214.8 363.68,183.6 389.16,152.4 414.63,127.63 440.11,114 465.58,113.23 491.05,123.6 516.53,140.4 542,157.2"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="58,274.35 83.47,243.42 108.95,218.92 134.42,205.55 159.89,191.71 185.37,200.36 210.84,215.45 236.32,230.53 261.79,247.08 287.26,245.87 312.74,231.79 338.21,206.58 363.68,181.21 389.16,149.99 414.63,125.2 440.11,111.55 465.58,110.76 491.05,121.11 516.53,137.89 542,154.67"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,274.35 83.47,243.42 108.95,218.92 134.42,205.55 159.89,205.05 185.37,210.58 210.84,221.21 236.32,230.53 261.79,239.19 287.26,239.76 312.74,228.31 338.21,206.58 363.68,174.93 389.16,145.52 414.63,122.82 440.11,111.55 465.58,110.76 491.05,121.11 516.53,137.89 542,154.67"/></g>
+<text x="300" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">forecast bar</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">value</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Four output patches, stitched two ways</text>
+<rect x="66" y="38" width="110.37" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">truth</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#9b2c2c" stroke-width="2"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">hard switch</text>
+<line x1="74" y1="87" x2="94" y2="87" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">cross-fade</text>
+</svg>
