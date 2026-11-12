@@ -42,6 +42,10 @@ int main(void){
     offsetof(struct v4l2_buffer,m.offset),offsetof(struct v4l2_buffer,length),
     offsetof(struct v4l2_buffer,bytesused));
   printf("OFF_PIX %zu\n", offsetof(struct v4l2_format,fmt.pix));
+  printf("OFF_FLAGS %zu\nOFF_TIMESTAMP %zu\nSZ_TV_SEC %zu\n", offsetof(struct v4l2_buffer,flags),
+    offsetof(struct v4l2_buffer,timestamp), sizeof(((struct v4l2_buffer*)0)->timestamp.tv_sec));
+  printf("TS_MASK %u\nTS_MONO %u\nSRC_MASK %u\nSRC_SOE %u\n", V4L2_BUF_FLAG_TIMESTAMP_MASK,
+    V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC, V4L2_BUF_FLAG_TSTAMP_SRC_MASK, V4L2_BUF_FLAG_TSTAMP_SRC_SOE);
   printf("OFF_DEVCAPS %zu\n", offsetof(struct v4l2_capability,device_caps));
   return 0;
 }
@@ -71,4 +75,11 @@ int main(void){
     eq("SZFMT", SZ_FORMAT as u64);
     eq("SZREQ", SZ_REQUESTBUFFERS as u64);
     eq("SZBUF", SZ_BUFFER as u64);
+    eq("OFF_FLAGS", OFF_BUF_FLAGS as u64);
+    eq("OFF_TIMESTAMP", OFF_BUF_TIMESTAMP as u64);
+    eq("SZ_TV_SEC", 8);
+    eq("TS_MASK", V4L2_BUF_FLAG_TIMESTAMP_MASK as u64);
+    eq("TS_MONO", V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC as u64);
+    eq("SRC_MASK", V4L2_BUF_FLAG_TSTAMP_SRC_MASK as u64);
+    eq("SRC_SOE", V4L2_BUF_FLAG_TSTAMP_SRC_SOE as u64);
 }

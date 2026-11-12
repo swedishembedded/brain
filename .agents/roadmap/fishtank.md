@@ -38,11 +38,12 @@ while the viewer moves - motion parallax, not stereo.
       noise-free, no false translation under +-40 degrees of yaw), and the One
       Euro estimator with speed-gated, lag-compensated prediction,
       confirmation of discontinuities and crossfaded reacquisition.
+- [x] `capture::Frame` carries a `Stamp`: the driver's V4L2 timestamp when
+      it declares `CLOCK_MONOTONIC` and is plausible, else the dequeue time,
+      marked as such; `capture::clock::monotonic_ns` reads the same clock.
 
 ## Not yet done
 
-- [ ] `capture::Frame` carries no timestamp: add the V4L2 buffer timestamp
-      (`CLOCK_MONOTONIC`), so prediction measures capture-to-photon age.
 - [ ] `samples/vision/fishtank`: wgpu renderer (grid, crystal, pillars and
       rings at several depths, starfield, fog, bloom), manual eye mode
       (mouse/arrows), headless `--output` screenshot, HUD.

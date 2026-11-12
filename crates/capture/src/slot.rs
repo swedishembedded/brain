@@ -25,6 +25,29 @@ pub struct SlotStats {
     pub taken: u64,
 }
 
+/// Which event a frame's [`Stamp`] marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StampSource {
+    /// The driver's timestamp of the start of exposure.
+    Exposure,
+    /// The driver's timestamp of the end of the frame (the last line read
+    /// out) - the V4L2 default.
+    FrameEnd,
+    /// The driver gave no usable monotonic timestamp; this is when the
+    /// buffer was dequeued, which is later than either event by the
+    /// driver's and scheduler's delay.
+    Dequeue,
+}
+
+/// When a frame was captured, in nanoseconds of [`crate::clock::monotonic_ns`]
+/// (`CLOCK_MONOTONIC` on Linux), so a consumer can measure a frame's age
+/// against its own clock reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    pub ns: u64,
+    pub source: StampSource,
+}
+
 /// One RGB frame plus its dimensions.
 #[derive(Clone, Debug)]
 pub struct Frame {
@@ -33,6 +56,8 @@ pub struct Frame {
     pub h: u32,
     /// Monotonic frame index from the producer, for the HUD / drop accounting.
     pub seq: u64,
+    /// When the frame was captured.
+    pub stamp: Stamp,
 }
 
 struct Inner {

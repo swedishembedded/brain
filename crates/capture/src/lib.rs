@@ -26,12 +26,13 @@
 //! (producer wins), so the render loop takes the latest frame and never rebuilds a
 //! backlog — the same latest-state discipline the SDL keystroke path uses.
 
+pub mod clock;
 pub mod slot;
 
 #[cfg(target_os = "linux")]
 pub mod v4l2;
 
-pub use slot::{Frame, FrameSlot, SlotStats};
+pub use slot::{Frame, FrameSlot, SlotStats, Stamp, StampSource};
 
 #[cfg(target_os = "linux")]
 pub use v4l2::Device;

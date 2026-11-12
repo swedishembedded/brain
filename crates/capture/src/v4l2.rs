@@ -24,6 +24,8 @@
 
 use std::os::raw::{c_int, c_ulong, c_void};
 
+use crate::slot::{Stamp, StampSource};
+
 // ---- ioctl request numbers (from tests/abi.rs / videodev2.h) ----
 pub const VIDIOC_QUERYCAP: c_ulong = 0x8068_5600;
 pub const VIDIOC_S_FMT: c_ulong = 0xc0d0_5605;
@@ -40,6 +42,10 @@ pub const V4L2_MEMORY_MMAP: u32 = 1;
 pub const V4L2_FIELD_NONE: u32 = 1;
 pub const V4L2_CAP_VIDEO_CAPTURE: u32 = 0x0000_0001;
 pub const V4L2_CAP_STREAMING: u32 = 0x0400_0000;
+pub const V4L2_BUF_FLAG_TIMESTAMP_MASK: u32 = 0x0000_e000;
+pub const V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC: u32 = 0x0000_2000;
+pub const V4L2_BUF_FLAG_TSTAMP_SRC_MASK: u32 = 0x0007_0000;
+pub const V4L2_BUF_FLAG_TSTAMP_SRC_SOE: u32 = 0x0001_0000;
 
 // ---- struct sizes ----
 pub const SZ_CAPABILITY: usize = 104;
@@ -63,6 +69,10 @@ const OFF_REQ_MEMORY: usize = 8;
 const OFF_BUF_INDEX: usize = 0;
 const OFF_BUF_TYPE: usize = 4;
 const OFF_BUF_BYTESUSED: usize = 8;
+pub const OFF_BUF_FLAGS: usize = 12;
+/// `struct timeval timestamp`: `tv_sec` then `tv_usec`, each a 64-bit
+/// `long` on the 64-bit ABIs these offsets describe.
+pub const OFF_BUF_TIMESTAMP: usize = 24;
 const OFF_BUF_MEMORY: usize = 60;
 const OFF_BUF_M_OFFSET: usize = 64;
 const OFF_BUF_LENGTH: usize = 72;
@@ -95,6 +105,33 @@ fn wr_u32(buf: &mut [u8], off: usize, v: u32) {
 }
 fn rd_u32(buf: &[u8], off: usize) -> u32 {
     u32::from_ne_bytes(buf[off..off + 4].try_into().unwrap())
+}
+fn rd_i64(buf: &[u8], off: usize) -> i64 {
+    i64::from_ne_bytes(buf[off..off + 8].try_into().unwrap())
+}
+
+/// How old a driver timestamp may be at dequeue before it is distrusted.
+/// A frame is dequeued within a few frame intervals of its capture; anything
+/// older is a driver reporting a different clock under the monotonic flag.
+const MAX_DRIVER_STAMP_AGE_NS: u64 = 2_000_000_000;
+
+/// The stamp for a dequeued buffer, from its `flags` and `timestamp` and the
+/// monotonic clock read just after `DQBUF` returned (`now_ns`).
+///
+/// The driver's own timestamp is used only when it declares the monotonic
+/// clock and lies in `(now - MAX_DRIVER_STAMP_AGE_NS, now]`; otherwise the
+/// dequeue time is the honest answer, marked as such.
+pub fn stamp(flags: u32, tv_sec: i64, tv_usec: i64, now_ns: u64) -> Stamp {
+    let dequeue = Stamp { ns: now_ns, source: StampSource::Dequeue };
+    if flags & V4L2_BUF_FLAG_TIMESTAMP_MASK != V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC || tv_sec < 0 || !(0..1_000_000).contains(&tv_usec) {
+        return dequeue;
+    }
+    let ns = tv_sec as u64 * 1_000_000_000 + tv_usec as u64 * 1_000;
+    if ns == 0 || ns > now_ns || now_ns - ns > MAX_DRIVER_STAMP_AGE_NS {
+        return dequeue;
+    }
+    let source = if flags & V4L2_BUF_FLAG_TSTAMP_SRC_MASK == V4L2_BUF_FLAG_TSTAMP_SRC_SOE { StampSource::Exposure } else { StampSource::FrameEnd };
+    Stamp { ns, source }
 }
 
 /// One mmap'd capture buffer.
@@ -220,14 +257,17 @@ impl Device {
     }
 
     /// Block until the next frame, run `f` over its YUYV bytes, then requeue the
-    /// buffer. `f`'s result is returned. Copies nothing itself — the closure decides
-    /// (the demo converts straight into an RGB frame).
-    pub fn next_frame<T>(&mut self, f: impl FnOnce(&[u8], u32, u32) -> T) -> Result<T, String> {
+    /// buffer. `f`'s result is returned with the frame's capture [`Stamp`].
+    /// Copies nothing itself; the closure decides (the demo converts straight
+    /// into an RGB frame).
+    pub fn next_frame<T>(&mut self, f: impl FnOnce(&[u8], u32, u32) -> T) -> Result<(T, Stamp), String> {
         self.buf = [0u8; SZ_BUFFER];
         wr_u32(&mut self.buf, OFF_BUF_TYPE, V4L2_BUF_TYPE_VIDEO_CAPTURE);
         wr_u32(&mut self.buf, OFF_BUF_MEMORY, V4L2_MEMORY_MMAP);
         let buf_ptr = self.buf.as_mut_ptr() as *mut c_void;
         self.xioctl(VIDIOC_DQBUF, buf_ptr)?;
+        let now = crate::clock::monotonic_ns();
+        let stamp = stamp(rd_u32(&self.buf, OFF_BUF_FLAGS), rd_i64(&self.buf, OFF_BUF_TIMESTAMP), rd_i64(&self.buf, OFF_BUF_TIMESTAMP + 8), now);
         let index = rd_u32(&self.buf, OFF_BUF_INDEX);
         let bytesused = rd_u32(&self.buf, OFF_BUF_BYTESUSED) as usize;
         let mb = &self.bufs[index as usize];
@@ -235,7 +275,7 @@ impl Device {
         let slice = unsafe { std::slice::from_raw_parts(mb.ptr as *const u8, n) };
         let out = f(slice, self.width, self.height);
         self.queue(index)?;
-        Ok(out)
+        Ok((out, stamp))
     }
 }
 

@@ -9,3 +9,4 @@
 
 mod abi;
 mod slot;
+mod stamp;

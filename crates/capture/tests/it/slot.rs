@@ -6,10 +6,10 @@
 //! The YUYV conversion tests moved with the function to
 //! `crates/imaging/tests/it/color.rs`.
 use capture::slot::Frame;
-use capture::FrameSlot;
+use capture::{FrameSlot, Stamp, StampSource};
 
 fn frame(seq: u64) -> Frame {
-    Frame { rgb: vec![seq as u8; 12], w: 2, h: 2, seq }
+    Frame { rgb: vec![seq as u8; 12], w: 2, h: 2, seq, stamp: Stamp { ns: 1_000 + seq, source: StampSource::FrameEnd } }
 }
 
 /// The slot keeps only the LATEST frame and counts overwrites as drops — the whole
@@ -54,4 +54,15 @@ fn slot_is_shareable_across_threads() {
     t.join().unwrap();
     assert!(s.take().is_some());
     assert_eq!(s.stats().pushed, 10);
+}
+
+/// The frame a consumer takes carries the capture time of THAT frame, not of
+/// one it replaced: age accounting reads the stamp of what it is processing.
+#[test]
+fn the_taken_frame_carries_its_own_capture_stamp() {
+    let s = FrameSlot::new();
+    s.push(frame(4));
+    s.push(frame(5));
+    let got = s.take().unwrap();
+    assert_eq!((got.seq, got.stamp.ns), (5, 1_005));
 }
