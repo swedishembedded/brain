@@ -189,6 +189,13 @@ struct LayerBufs {
     dxmid: DeviceBuffer,
 }
 
+/// One layer's router in the last forward: the logits `[rows, n_experts]` and whether each (row, expert) pair was
+/// selected by the top-k.
+pub struct RouterState {
+    pub logits: Vec<f32>,
+    pub selected: Vec<bool>,
+}
+
 pub struct Trainer {
     gpu: Gpu,
     cfg: Config,
@@ -640,6 +647,21 @@ impl Trainer {
             Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("toymoe: writing {name}: {e}")),
             _ => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
         }
+    }
+
+    /// What each layer's router saw in the last [`Self::forward`], for a host that evaluates the router's
+    /// auxiliary losses itself (the finite-difference oracle of `brain-gradcheck`). Only a build that keeps every
+    /// layer's activations has them: under a recompute policy the layers share one set of buffers.
+    pub fn read_router_state(&self) -> Vec<RouterState> {
+        assert!(self.saved == SavedPolicy::Keep, "toymoe: router state of every layer needs the Keep policy, this build holds {:?}", self.saved);
+        let (n, e) = ((self.b * self.t) as usize, self.cfg.n_experts as usize);
+        self.layers
+            .iter()
+            .map(|lb| RouterState {
+                logits: self.gpu.read(&lb.router_logits, n * e),
+                selected: self.gpu.read(&lb.gate, n * e).into_iter().map(|g| g > 0.0).collect(),
+            })
+            .collect()
     }
 
     /// Names of all trainable parameters.

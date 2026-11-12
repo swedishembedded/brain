@@ -419,6 +419,38 @@ pub fn check_gpt(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// GPT-2's tied head: `tok.weight` is both the embedding table and the output
+/// projection, so its gradient is the head's `dlogitsᵀ · xn` plus the
+/// embedding scatter. A directional check can miss a missing share of that sum
+/// (see [`directional_check`]), so every row of the table is differenced entry
+/// by entry, and the rows no input token selects must carry the head's share
+/// alone: nonzero analytically, matching finite differences numerically.
+pub fn check_gpt_tied(seed: u64) -> Report {
+    use gpt2::{Gpt, GptConfig};
+    let cfg = GptConfig { vocab: 23, block_size: 12, n_layers: 2, d_model: 16, n_heads: 2, d_ff: 32 };
+    let (vocab, d) = (cfg.vocab as usize, cfg.d_model as usize);
+    let init = gpt2::init_weights(&cfg, seed);
+    let model = Gpt::new(cfg, 2, 6, &init);
+    assert!(
+        !CheckModel::param_names(&model).iter().any(|n| n == "lm_head.weight"),
+        "a tied head has no table of its own"
+    );
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    // One entry per vocabulary row, at a column that moves with the row.
+    let indices: Vec<usize> = (0..vocab).map(|v| v * d + (v * 7) % d).collect();
+    let report = elementwise_check_at(&model, "tok.weight", 5e-3, &indices);
+    let grad = CheckModel::read_grad(&model, "tok.weight");
+    let head_only = (0..vocab as u32).filter(|v| !x.contains(v)).collect::<Vec<_>>();
+    assert!(!head_only.is_empty(), "the batch must leave some rows unselected as inputs");
+    for v in head_only {
+        let row = &grad[v as usize * d..(v as usize + 1) * d];
+        assert!(row.iter().any(|g| *g != 0.0), "row {v} is no input token, so only the head can have written its gradient");
+    }
+    report
+}
+
 /// Build a tiny Qwen3 decoder, set a fixed batch, and gradient-check it. This is
 /// the correctness gate for the GQA attention (fwd + the dq/dk/dv backward with
 /// kv-head accumulation), the per-head QK-RMSNorm, the half-split RoPE-base, the
@@ -710,42 +742,150 @@ pub fn check_qwen35_splices(seed: u64) -> Report {
     Report { checks: vec![check] }
 }
 
-/// Build a tiny sparse-MoE Trainer, set a fixed batch, and gradient-check it
-/// (validates RMSNorm/RoPE/router/SwiGLU/aux+z-loss backprop). Now that MoE
-/// implements `model::Model`, the blanket `CheckModel` impl makes it checkable -
-/// closing the TESTING.md gap where only GPT was gradient-checked. Returns the
-/// report.
-pub fn check_moe(seed: u64) -> Report {
-    use toymoe::train::{Config, Trainer};
-    // aux_coef/z_coef = 0: the FD check differentiates the model's scalar
-    // `forward()`, which is the cross-entropy only (the load-balancing aux loss
-    // and router z-loss are folded into the router gradient, not the returned
-    // scalar). Zeroing them makes the analytic router grad consistent with the
-    // CE-only FD.
-    let cfg = Config {
-        vocab: 23,
-        block_size: 12,
-        n_layers: 2,
-        d_model: 16,
-        n_heads: 2,
-        n_experts: 3,
-        // top_k == n_experts: every expert is always selected, so the renormalised
-        // gate is a smooth softmax over all experts with no hard top-k selection
-        // boundary. That removes the discontinuity FD cannot see (perturbing the
-        // router weight could otherwise flip *which* experts are in the top-k,
-        // making the central difference ill-conditioned) while still exercising
-        // the full router matmul + softmax + gate backprop.
-        top_k: 3,
-        d_ff: 32,
-        aux_coef: 0.0,
-        z_coef: 0.0,
-    };
-    let init = <Trainer as model::Model>::init_weights(&cfg, seed);
+/// The scalar the toy MoE trainer's backward differentiates, evaluated on the host: the cross-entropy `forward()`
+/// returns, plus the router's two auxiliary losses, which the trainer folds into the router gradient and never
+/// returns. Per layer, with `p` the full softmax of the router logits and `lse` their log-sum-exp over a row,
+///
+/// ```text
+/// aux = aux_coef * E * sum_e f_e * mean_rows p[row, e]        f_e = rows routed to e / (rows * top_k)
+/// z   = z_coef * mean_rows lse(row)^2
+/// ```
+///
+/// `f_e` is a count and is held fixed under differentiation (the router backward adds `aux_coef * E * f_e / rows` to
+/// each probability's gradient and nothing for `f_e` itself), so it is read once per evaluation and, as long as the
+/// top-k does not change, is a constant of the finite difference too. A perturbation that moved the top-k would make
+/// the cross-entropy discontinuous and the difference meaningless, so the first evaluation records the selection and
+/// any later one that differs stops the check by name instead of reporting a failed gradient.
+struct MoeRouterLossModel<'a> {
+    model: &'a toymoe::train::Trainer,
+    cfg: toymoe::train::Config,
+    /// Include the load-balancing term in the oracle (a test turns it off to show the check can fail).
+    with_aux: bool,
+    selection: std::cell::RefCell<Option<Vec<Vec<bool>>>>,
+}
+
+impl MoeRouterLossModel<'_> {
+    fn router_losses(&self) -> f32 {
+        let (e, k) = (self.cfg.n_experts as usize, self.cfg.top_k as usize);
+        let states = self.model.read_router_state();
+        let selection: Vec<Vec<bool>> = states.iter().map(|s| s.selected.clone()).collect();
+        match &*self.selection.borrow() {
+            None => {}
+            Some(first) => assert!(*first == selection, "a perturbation moved the router's top-k selection: the finite difference straddles a discontinuity (use a smaller step or wider router margins)"),
+        }
+        self.selection.borrow_mut().get_or_insert(selection);
+        let mut total = 0.0f64;
+        for state in &states {
+            let rows = state.logits.len() / e;
+            let mut p_mean = vec![0.0f64; e];
+            let mut routed = vec![0.0f64; e];
+            let mut lse_sq = 0.0f64;
+            for (row, sel) in state.logits.chunks(e).zip(state.selected.chunks(e)) {
+                let mx = row.iter().fold(f32::NEG_INFINITY, |m, v| m.max(*v)) as f64;
+                let sum: f64 = row.iter().map(|v| (*v as f64 - mx).exp()).sum();
+                let lse = mx + sum.ln();
+                lse_sq += lse * lse;
+                for j in 0..e {
+                    p_mean[j] += (row[j] as f64 - lse).exp() / rows as f64;
+                    routed[j] += f64::from(u8::from(sel[j]));
+                }
+            }
+            let balance: f64 = (0..e).map(|j| routed[j] / (rows * k) as f64 * p_mean[j]).sum();
+            if self.with_aux {
+                total += self.cfg.aux_coef as f64 * e as f64 * balance;
+            }
+            total += self.cfg.z_coef as f64 * lse_sq / rows as f64;
+        }
+        total as f32
+    }
+
+    /// The fraction `f_e` of routed slots each expert takes in layer `layer` of the last evaluation.
+    fn expert_fractions(&self, layer: usize) -> Vec<f32> {
+        let (e, k) = (self.cfg.n_experts as usize, self.cfg.top_k as usize);
+        let sel = self.model.read_router_state().swap_remove(layer).selected;
+        let rows = sel.len() / e;
+        (0..e).map(|j| sel.chunks(e).filter(|r| r[j]).count() as f32 / (rows * k) as f32).collect()
+    }
+}
+
+impl CheckModel for MoeRouterLossModel<'_> {
+    fn param_names(&self) -> Vec<String> {
+        CheckModel::param_names(self.model)
+    }
+    fn read_weight(&self, name: &str) -> Vec<f32> {
+        CheckModel::read_weight(self.model, name)
+    }
+    fn write_weight(&self, name: &str, data: &[f32]) {
+        CheckModel::write_weight(self.model, name, data);
+    }
+    fn read_grad(&self, name: &str) -> Vec<f32> {
+        CheckModel::read_grad(self.model, name)
+    }
+    fn loss(&self) -> f32 {
+        CheckModel::loss(self.model) + self.router_losses()
+    }
+    fn zero_grads(&self) {
+        CheckModel::zero_grads(self.model);
+    }
+    fn backward(&self) {
+        CheckModel::backward(self.model);
+    }
+}
+
+/// A tiny toy-MoE trainer with the router's balancing and z-loss coefficients nonzero, on a fixed batch.
+fn moe_router_loss_harness(cfg: toymoe::train::Config, seed: u64, router_scale: f32) -> toymoe::train::Trainer {
+    use toymoe::train::Trainer;
+    let mut init = <Trainer as model::Model>::init_weights(&cfg, seed);
+    for l in 0..cfg.n_layers {
+        // Wider router logits keep the top-k margins far from the finite-difference step.
+        init.get_mut(&format!("blocks.{l}.moe.router.weight")).expect("a router per layer").iter_mut().for_each(|w| *w *= router_scale);
+    }
     let model = Trainer::new(cfg, 2, 6, &init);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
     model.set_batch(&x, &y);
-    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+    model
+}
+
+fn moe_config(top_k: u32, n_experts: u32, aux_coef: f32, z_coef: f32) -> toymoe::train::Config {
+    toymoe::train::Config { vocab: 23, block_size: 12, n_layers: 2, d_model: 16, n_heads: 2, n_experts, top_k, d_ff: 32, aux_coef, z_coef }
+}
+
+/// Gradient-check the sparse-MoE trainer (RMSNorm/RoPE/router/SwiGLU, the load-balancing aux loss and the router
+/// z-loss) against finite differences of the loss its backward differentiates: the cross-entropy plus both
+/// router terms with nonzero coefficients, evaluated on the host ([`MoeRouterLossModel`]).
+///
+/// `top_k == n_experts`: every expert is always selected, so the renormalised gate is a smooth softmax over all
+/// experts with no top-k boundary for a finite step to cross. That makes the z-loss live and the balancing term
+/// inert (every expert takes `1/E` of the slots, so `sum_e f_e p_e` is the constant `1/E`); the balancing term is
+/// exercised by [`check_moe_balance`].
+pub fn check_moe(seed: u64) -> Report {
+    let cfg = moe_config(3, 3, 0.05, 0.05);
+    let model = moe_router_loss_harness(cfg.clone(), seed, 1.0);
+    let oracle = MoeRouterLossModel { cfg, model: &model, with_aux: true, selection: Default::default() };
+    directional_check(&oracle, 5e-3, 4, seed ^ 0x1234)
+}
+
+/// The load-balancing term of the router gradient, entry by entry. Four experts, top two of them, so the slots the
+/// experts take are uneven and `f_e` is not constant; the balancing coefficient is large and the router weights are
+/// scaled up so the top-k margins stay clear of the step. Every entry of every layer's router weight is differenced
+/// (a directional check could hide a missing share of a gradient that the layers above feed back into), against the
+/// host loss that includes the term. `with_aux = false` drops the term from the oracle: the report must then fail,
+/// which is how a test shows the check is able to see it.
+pub fn check_moe_balance(seed: u64, with_aux: bool) -> Report {
+    let cfg = moe_config(2, 4, 0.5, 0.05);
+    let model = moe_router_loss_harness(cfg.clone(), seed, 8.0);
+    let oracle = MoeRouterLossModel { cfg: cfg.clone(), model: &model, with_aux, selection: Default::default() };
+    let mut checks = Vec::new();
+    for l in 0..cfg.n_layers {
+        let name = format!("blocks.{l}.moe.router.weight");
+        let n = CheckModel::read_weight(&oracle, &name).len();
+        checks.extend(elementwise_check_at(&oracle, &name, 5e-3, &(0..n).collect::<Vec<_>>()).checks);
+        let f = oracle.expert_fractions(l as usize);
+        let spread = f.iter().fold(0.0f32, |m, v| m.max((v - 1.0 / cfg.n_experts as f32).abs()));
+        assert!(spread > 0.02, "layer {l}: the experts share the slots evenly ({f:?}), so the balancing term would not be tested");
+    }
+    Report { checks }
 }
 
 /// Build a tiny GLM-5.2 (`glm_moe_dsa`) decoder, set a fixed batch, and
@@ -2253,6 +2393,16 @@ mod tests {
     }
 
     #[test]
+    fn gpt2_tied_head_grads_match_finite_differences_per_entry() {
+        if brain_testutil::gpu_tests_skipped() {
+            return;
+        }
+        let report = check_gpt_tied(7);
+        report.print();
+        assert_grad_gate(&report, "model");
+    }
+
+    #[test]
     fn gpt2_weighted_analytic_grads_match_finite_differences() {
         if brain_testutil::gpu_tests_skipped() {
             return;
@@ -2336,6 +2486,26 @@ mod tests {
         let report = check_moe(7);
         report.print();
         assert_grad_gate(&report, "model");
+    }
+
+    #[test]
+    fn moe_balancing_term_matches_finite_differences_per_router_entry() {
+        if brain_testutil::gpu_tests_skipped() {
+            return;
+        }
+        let report = check_moe_balance(7, true);
+        assert_grad_gate(&report, "model");
+    }
+
+    /// The check is only evidence if it can fail: with the balancing term left out of the host loss, the router
+    /// gradient that includes it must disagree.
+    #[test]
+    fn moe_balancing_check_fails_when_the_oracle_omits_the_term() {
+        if brain_testutil::gpu_tests_skipped() {
+            return;
+        }
+        let report = check_moe_balance(7, false);
+        assert!(!report.failures(4e-3, 8e-2).is_empty(), "an oracle without the balancing term agreed with a gradient that has it");
     }
 
     #[test]
