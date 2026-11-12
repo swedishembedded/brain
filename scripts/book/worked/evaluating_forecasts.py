@@ -258,12 +258,12 @@ def wql_counts():
     shifted, q3 = _wql(WQL_GRIDS[1][1], tuple(v + 100.0 for v in WQL_ACTUAL), tuple(v + 100.0 for v in WQL_MU))
     rows.append(("0.1, 0.5, 0.9, every y_t and mu_t raised by 100", q3, _fx(shifted, 4), _fx(shifted / q3, 4)))
     t0 = _table(["bar t", "actual y_t", "mu_t", "pinball at 0.1", "pinball at 0.5", "pinball at 0.9"], cells)
-    t1 = _table(["levels used", "number of levels Q", "wQL (sum over levels)", "wQL divided by Q"], rows)
+    t1 = _table(["levels used", "number of levels Q", "sum over levels", "wQL (sum divided by Q)"], rows)
     head = ("Actuals y = (10, 12, 9, 14), four bars. The forecast of bar t is the Gaussian with mean mu = (10.5, 11, 10, 13) and standard "
             "deviation 2, so its quantile at level tau is mu_t + 2 z_tau with z_tau the library inverse of the standard Gaussian distribution "
             "function (z_0.5 = 0, z_0.1 = -1.281552, z_0.9 = +1.281552; any inverse-distribution routine accurate to 1e-6 reproduces the table), and the last row of the second table adds 100 to every actual and every mean. The pinball loss of a quantile q against y at level tau is "
-            "max(tau (y - q), (tau - 1)(y - q)). wQL is 2 times the sum of the pinball losses over all bars and all levels, divided by the "
-            "sum of |y_t| = 45.\n\n")
+            "max(tau (y - q), (tau - 1)(y - q)). The sum over levels is 2 times the sum of the pinball losses over all bars and all levels, divided by the "
+            "sum of |y_t| = 45; the wQL is that sum divided by the number of levels Q.\n\n")
     return head + t0 + "\n\n" + t1
 
 
