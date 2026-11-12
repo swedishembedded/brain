@@ -1,0 +1,39 @@
+<!-- source-sha256: 2e9cc6ca1552316eef3a08268f19f3b05f66b6310caf612e306b6728376ea1ce -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 345" width="560" height="345">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="345" fill="#ffffff"/>
+<line x1="58" y1="274" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="168" y1="274" x2="168" y2="30" stroke="#edf2f7"/>
+<text x="168" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="278" y1="274" x2="278" y2="30" stroke="#edf2f7"/>
+<text x="278" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="388" y1="274" x2="388" y2="30" stroke="#edf2f7"/>
+<text x="388" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">15</text>
+<line x1="498" y1="274" x2="498" y2="30" stroke="#edf2f7"/>
+<text x="498" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="58" y1="274" x2="542" y2="274" stroke="#edf2f7"/>
+<text x="52" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="225.2" x2="542" y2="225.2" stroke="#edf2f7"/>
+<text x="52" y="229.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="176.4" x2="542" y2="176.4" stroke="#edf2f7"/>
+<text x="52" y="180.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="127.6" x2="542" y2="127.6" stroke="#edf2f7"/>
+<text x="52" y="131.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<line x1="58" y1="78.8" x2="542" y2="78.8" stroke="#edf2f7"/>
+<text x="52" y="82.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">8</text>
+<line x1="58" y1="30" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<rect x="58" y="30" width="484" height="244" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="244"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,251.5 63.5,252.11 69,252.72 74.5,253.33 80,253.94 85.5,254.55 91,255.16 96.5,255.77 102,256.38 107.5,256.31 113,256.24 118.5,256.17 124,256.11 129.5,255.36 135,254.62 140.5,253.87 146,253.12 151.5,252.38 157,251.63 162.5,250.89 168,250.14 173.5,248.72 179,247.3 184.5,245.87 190,244.45 195.5,243.03 201,241.6 206.5,240.18 212,238.76 217.5,236.65 223,234.55 228.5,232.45 234,230.35 239.5,227.57 245,224.79 250.5,222.01 256,219.24 261.5,216.46 267,213.68 272.5,210.9 278,208.12 283.5,205.34 289,202.56 294.5,199.78 300,197 305.5,193.55 311,190.09 316.5,186.63 322,183.18 327.5,179.04 333,174.91 338.5,170.77 344,166.64 349.5,162.51 355,158.37 360.5,154.24 366,150.1 371.5,145.97 377,141.83 382.5,137.7 388,133.56 393.5,128.75 399,123.94 404.5,119.13 410,114.32 415.5,109.5 421,104.69 426.5,99.88 432,95.07 437.5,90.25 443,85.44 448.5,80.63 454,75.82 459.5,71.01 465,66.19 470.5,61.38 476,56.57 481.5,51.76 487,46.94 492.5,42.13 498,37.32 503.5,31.83 509,26.34 514.5,20.85 520,15.36 525.5,9.87 531,4.38 536.5,-1.11 542,-6.6"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,161.49 63.5,164.54 69,167.59 74.5,170.64 80,173.69 85.5,176.74 91,179.79 96.5,182.84 102,185.89 107.5,188.26 113,190.63 118.5,193.01 124,195.38 129.5,197.07 135,198.77 140.5,200.46 146,202.16 151.5,203.85 157,205.54 162.5,207.24 168,208.93 173.5,209.95 179,210.97 184.5,211.98 190,213 195.5,214.02 201,215.03 206.5,216.05 212,217.07 217.5,217.41 223,217.74 228.5,218.08 234,218.42 239.5,218.08 245,217.74 250.5,217.41 256,217.07 261.5,216.73 267,216.39 272.5,216.05 278,215.71 283.5,215.37 289,215.03 294.5,214.69 300,214.36 305.5,213.34 311,212.32 316.5,211.31 322,210.29 327.5,208.59 333,206.9 338.5,205.21 344,203.51 349.5,201.82 355,200.12 360.5,198.43 366,196.73 371.5,195.04 377,193.34 382.5,191.65 388,189.96 393.5,187.58 399,185.21 404.5,182.84 410,180.47 415.5,178.09 421,175.72 426.5,173.35 432,170.98 437.5,168.61 443,166.23 448.5,163.86 454,161.49 459.5,159.12 465,156.74 470.5,154.37 476,152 481.5,149.63 487,147.26 492.5,144.88 498,142.51 503.5,139.46 509,136.41 514.5,133.36 520,130.31 525.5,127.26 531,124.21 536.5,121.16 542,118.11"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,71.48 63.5,76.97 69,82.46 74.5,87.95 80,93.44 85.5,98.93 91,104.42 96.5,109.91 102,115.4 107.5,120.21 113,125.02 118.5,129.84 124,134.65 129.5,138.78 135,142.92 140.5,147.05 146,151.19 151.5,155.32 157,159.46 162.5,163.59 168,167.72 173.5,171.18 179,174.64 184.5,178.09 190,181.55 195.5,185.01 201,188.46 206.5,191.92 212,195.38 217.5,198.16 223,200.94 228.5,203.71 234,206.49 239.5,208.59 245,210.7 250.5,212.8 256,214.9 261.5,217 267,219.1 272.5,221.2 278,223.3 283.5,225.4 289,227.5 294.5,229.61 300,231.71 305.5,233.13 311,234.55 316.5,235.98 322,237.4 327.5,238.15 333,238.89 338.5,239.64 344,240.38 349.5,241.13 355,241.87 360.5,242.62 366,243.36 371.5,244.11 377,244.86 382.5,245.6 388,246.35 393.5,246.41 399,246.48 404.5,246.55 410,246.62 415.5,246.69 421,246.75 426.5,246.82 432,246.89 437.5,246.96 443,247.02 448.5,247.09 454,247.16 459.5,247.23 465,247.3 470.5,247.36 476,247.43 481.5,247.5 487,247.57 492.5,247.63 498,247.7 503.5,247.09 509,246.48 514.5,245.87 520,245.26 525.5,244.65 531,244.04 536.5,243.43 542,242.82"/><circle cx="102" cy="256.38" r="5" fill="#2b6cb0"/><circle cx="234" cy="218.42" r="5" fill="#c05621"/><circle cx="498" cy="247.7" r="5" fill="#2f855a"/></g>
+<text x="300" y="310" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">forecast q</text>
+<text x="14" y="152" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 152)">mean pinball loss</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Mean pinball loss of the nine values against q</text>
+<line x1="147.43" y1="333" x2="167.43" y2="333" stroke="#2b6cb0" stroke-width="2"/>
+<text x="173.43" y="337" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">tau = 0.1</text>
+<line x1="238.57" y1="333" x2="258.57" y2="333" stroke="#c05621" stroke-width="2"/>
+<text x="264.57" y="337" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">tau = 0.5</text>
+<line x1="332.57" y1="333" x2="352.57" y2="333" stroke="#2f855a" stroke-width="2"/>
+<text x="358.57" y="337" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">tau = 0.9</text>
+</svg>

@@ -22,7 +22,7 @@ You can say what separates a time series from a table of rows, read its memory a
 ## Chapters
 
 1. [Time Series Fundamentals](01-time-series.md): what makes data ordered in time different, and how do we avoid cheating with the future?
-2. Probabilistic Forecasts: how should a forecast express what it does not know?
+2. [Probabilistic Forecasts](02-probabilistic-forecasting.md): how should a forecast express what it does not know?
 3. Foundation Models for Time Series: can one pretrained model forecast any series it has never seen?
 4. Evaluating Forecasters Honestly: how do we tell a forecaster with real skill from one that got lucky?
 5. Survival Analysis and Competing Risks: how do we predict when something will happen when many examples have not happened yet?

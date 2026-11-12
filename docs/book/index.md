@@ -182,4 +182,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume XI: Forecasting, Decisions and Uncertainty](v11-forecasting/index.md)
 
 1. [Time Series Fundamentals](v11-forecasting/01-time-series.md): What makes data ordered in time different, and how do we avoid cheating with the future?
+2. [Probabilistic Forecasts](v11-forecasting/02-probabilistic-forecasting.md): How should a forecast express what it does not know?
 <!-- /contents -->

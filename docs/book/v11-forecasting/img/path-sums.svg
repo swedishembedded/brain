@@ -1,0 +1,34 @@
+<!-- source-sha256: 686717e3c054315f3d3e86f36115da3d9aaeb322569f87ce961498cc3dbfa424 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 320" width="560" height="320">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="320" fill="#ffffff"/>
+<line x1="118.5" y1="274" x2="118.5" y2="30" stroke="#edf2f7"/>
+<text x="118.5" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-10</text>
+<line x1="239.5" y1="274" x2="239.5" y2="30" stroke="#edf2f7"/>
+<text x="239.5" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="360.5" y1="274" x2="360.5" y2="30" stroke="#edf2f7"/>
+<text x="360.5" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="481.5" y1="274" x2="481.5" y2="30" stroke="#edf2f7"/>
+<text x="481.5" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="58" y1="274" x2="542" y2="274" stroke="#edf2f7"/>
+<text x="52" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="197.75" x2="542" y2="197.75" stroke="#edf2f7"/>
+<text x="52" y="201.75" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.05</text>
+<line x1="58" y1="121.5" x2="542" y2="121.5" stroke="#edf2f7"/>
+<text x="52" y="125.5" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.1</text>
+<line x1="58" y1="45.25" x2="542" y2="45.25" stroke="#edf2f7"/>
+<text x="52" y="49.25" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.15</text>
+<rect x="58" y="30" width="484" height="244" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="244"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#4a5568" stroke-width="2.6" points="73.12,272.74 103.38,269.85 133.62,262.65 163.88,248.25 194.12,225.55 224.38,198.4 254.62,176.14 284.88,168.92 315.12,180.41 345.38,204.86 375.62,231.63 405.88,252.46 436.12,264.92 466.38,270.82 496.62,273.08 526.88,273.78"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="73.12,273.08 103.38,270.8 133.62,262.71 163.88,247.62 194.12,223.22 224.38,199.73 254.62,173.5 284.88,173.35 315.12,177.77 345.38,202.78 375.62,235.72 405.88,252.34 436.12,263.78 466.38,270.95 496.62,273.08 526.88,273.69"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="73.12,274 103.38,274 133.62,274 163.88,273.24 194.12,263.63 224.38,219.71 254.62,116.31 284.88,61.72 315.12,147.58 345.38,231.76 375.62,268.66 405.88,273.39 436.12,274 466.38,274 496.62,274 526.88,274"/></g>
+<text x="300" y="310" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">sum of the 12 forecast bars</text>
+<text x="14" y="152" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 152)">density</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">The sum over 12 bars: paths against independent bars</text>
+<rect x="396.02" y="38" width="137.98" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="404.02" y1="53" x2="424.02" y2="53" stroke="#4a5568" stroke-width="2"/>
+<text x="430.02" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">exact Gaussian</text>
+<line x1="404.02" y1="70" x2="424.02" y2="70" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="430.02" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">sample paths</text>
+<line x1="404.02" y1="87" x2="424.02" y2="87" stroke="#9b2c2c" stroke-width="2"/>
+<text x="430.02" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">independent bars</text>
+</svg>

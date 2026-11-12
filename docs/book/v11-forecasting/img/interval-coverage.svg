@@ -1,0 +1,37 @@
+<!-- source-sha256: 7ed368947b1e9e27160a969bc19f6a821fde133f1cc578df15bd6482e87e3317 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 345" width="560" height="345">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="560" height="345" fill="#ffffff"/>
+<line x1="142.17" y1="274" x2="142.17" y2="30" stroke="#edf2f7"/>
+<text x="142.17" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="247.39" y1="274" x2="247.39" y2="30" stroke="#edf2f7"/>
+<text x="247.39" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="352.61" y1="274" x2="352.61" y2="30" stroke="#edf2f7"/>
+<text x="352.61" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">15</text>
+<line x1="457.83" y1="274" x2="457.83" y2="30" stroke="#edf2f7"/>
+<text x="457.83" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="58" y1="274" x2="542" y2="274" stroke="#edf2f7"/>
+<text x="52" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.5</text>
+<line x1="58" y1="225.2" x2="542" y2="225.2" stroke="#edf2f7"/>
+<text x="52" y="229.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="176.4" x2="542" y2="176.4" stroke="#edf2f7"/>
+<text x="52" y="180.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.7</text>
+<line x1="58" y1="127.6" x2="542" y2="127.6" stroke="#edf2f7"/>
+<text x="52" y="131.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="78.8" x2="542" y2="78.8" stroke="#edf2f7"/>
+<text x="52" y="82.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.9</text>
+<line x1="58" y1="30" x2="542" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="484" height="244" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="484" height="244"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,136.38 79.04,180.3 100.09,195.43 121.13,204.22 142.17,213.49 163.22,206.17 184.26,221.3 205.3,213.49 226.35,208.12 247.39,224.22 268.43,211.05 289.48,210.07 310.52,216.9 331.57,234.96 352.61,216.42 373.65,223.74 394.7,223.25 415.74,223.25 436.78,221.3 457.83,214.46 478.87,222.76 499.91,218.37 520.96,230.08 542,226.18"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,136.38 79.04,136.38 100.09,133.94 121.13,138.82 142.17,138.34 163.22,132.48 184.26,140.78 205.3,144.68 226.35,133.94 247.39,146.63 268.43,144.19 289.48,138.34 310.52,99.78 331.57,86.12 352.61,82.7 373.65,77.82 394.7,72.46 415.74,73.92 436.78,74.41 457.83,83.19 478.87,79.78 499.91,77.82 520.96,83.68 542,79.78"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,131.99 79.04,118.82 100.09,120.28 121.13,119.79 142.17,124.67 163.22,117.35 184.26,127.11 205.3,108.57 226.35,108.08 247.39,125.65 268.43,129.06 289.48,131.02 310.52,133.46 331.57,131.02 352.61,132.48 373.65,123.21 394.7,113.45 415.74,115.89 436.78,115.89 457.83,127.11 478.87,123.21 499.91,124.67 520.96,126.62 542,131.02"/><line x1="58" y1="127.6" x2="542" y2="127.6" stroke="#a0aec0" stroke-dasharray="4 4"/></g>
+<text x="300" y="310" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">horizon h (bars after the origin)</text>
+<text x="14" y="152" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 152)">share of series inside</text>
+<text x="300" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Coverage of nominal 80 percent intervals by horizon</text>
+<line x1="142.04" y1="333" x2="162.04" y2="333" stroke="#2b6cb0" stroke-width="2"/>
+<text x="168.04" y="337" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">constant</text>
+<line x1="235.6" y1="333" x2="255.6" y2="333" stroke="#c05621" stroke-width="2"/>
+<text x="261.6" y="337" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">growing</text>
+<line x1="329.05" y1="333" x2="349.05" y2="333" stroke="#2f855a" stroke-width="2"/>
+<text x="355.05" y="337" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">conformal</text>
+</svg>

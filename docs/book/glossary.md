@@ -230,6 +230,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **context vector**: the vector that carries what an encoder has read to the decoder; in the first design a single vector, the encoder's last state, and in attention a vector of its own at every output step, a weighted average of the encoder states. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
 
+**continuous ranked probability score**: the integral of the squared gap between a forecast's distribution function and the step at the outcome, in the units of the outcome, which equals the absolute error for a point forecast and twice the pinball loss averaged over all levels. *([Probabilistic Forecasts](v11-forecasting/02-probabilistic-forecasting.md))*
+
 **contrastive loss**: a loss that trains vectors by comparison: for each anchor it is the softmax cross-entropy, at a temperature, over the cosines of the anchor to its partner and to the partners of the other pairs of the batch (the in-batch negatives), which raises the cosine of the pair and lowers the others. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
 
 **contrastive pretraining**: training two networks, here one for pictures and one for captions, so that the vectors they write into a shared space are close for the two members of a pair and far for the members of different pairs, with the other pairs of the batch as the negatives. *([Contrastive Vision-Language Learning](v07-vision/08-clip.md))*
@@ -429,6 +431,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **FLOPs per token**: the arithmetic of a forward pass for one token, two FLOPs for every active parameter plus four per layer, query-head width and key seen for the attention products, $2N_{\mathrm{act}} + 4LHd_hT$; a property of the shapes and not of the hardware. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
 
 **flow matching**: training a network to give the velocity field by regressing, with squared error, on the velocity of a sampled pair at its own point of the path; the constant that separates this loss from the loss on the field itself does not depend on the network. *([Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md))*
+
+**forecast calibration**: the property that the probability integral transform of the outcomes under the forecast distributions is uniform, so that each quantile is exceeded and each interval covers as often as it claims. *([Probabilistic Forecasts](v11-forecasting/02-probabilistic-forecasting.md))*
 
 **forward noising process**: the chain that turns a data value into noise by adding a little Gaussian noise at each step, $x_t = \sqrt{1 - \beta_t}\,x_{t-1} + \sqrt{\beta_t}\,\varepsilon_t$, which by the addition of Gaussians gives any step directly from the clean value, $x_t = \sqrt{\bar\alpha_t}\,x_0 + \sqrt{1 - \bar\alpha_t}\,\varepsilon$. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
 
@@ -860,6 +864,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **piecewise function**: a function defined by different rules on different parts of its domain, such as the absolute value, ReLU and a schedule with a warmup. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
+**pinball loss**: the asymmetric loss $\max(\tau(y - q), (\tau - 1)(y - q))$ of a forecast $q$ at level $\tau$, which charges $\tau$ per unit of shortfall and $1 - \tau$ per unit of excess and whose expected value is smallest at the quantile of level $\tau$. *([Probabilistic Forecasts](v11-forecasting/02-probabilistic-forecasting.md))*
+
 **pinhole camera**: the camera that sends each point of the world along a straight ray through one point, the pinhole, to the image, so that the image position is the ratio of the lateral offset to the depth and the depth itself is lost. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
 
 **pixel**: one sample of an image, a point measurement of light (three numbers for a colour image, usually 8-bit codes), taken at the centre of its cell in a grid of width times height. *([Images as Data](v07-vision/01-images.md))*
@@ -911,6 +917,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 ## Q
 
 **QK-normalization**: the RMS normalization of every query and every key over its own head width, with a learned gain per channel and applied before the rotary rotation, which bounds attention logits by $\sqrt{d_h}$ times the gains. *([Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md))*
+
+**quantile forecast**: a forecast stated as the values at which the outcome is claimed to fall at or below with a list of stated probabilities, one column per level and one row per bar. *([Probabilistic Forecasts](v11-forecasting/02-probabilistic-forecasting.md))*
 
 **quantization error**: the difference $e = w' - w$ between a decoded weight and the original, bounded by half a step, and summarized by its mean squared error or the signal-to-quantization-noise ratio $10\log_{10}(\mathrm{mean}(w^2)/\mathrm{MSE})$ in decibels. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
