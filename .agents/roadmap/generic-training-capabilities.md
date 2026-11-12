@@ -19,6 +19,12 @@ declares its base formats (`ChatTrainer::LORA_BASES`). Status re-read against th
 The tier, adapter and trainer work is part of the larger plan in
 `quantized-training.md`, which this file feeds.
 
+`brain::toy::write_toy_chat_checkpoint` writes a 2-layer, 32-wide `qwen3` checkpoint with a byte-level tokenizer and a bare
+chat template (stops at `<|im_end|>`, 256-token context) that a LoRA run trains and samples on the CPU in seconds;
+`sdk/tests/it/toy_training.rs` holds a held-out cipher task on it (a random model answers none, the adapter answers unseen prompts).
+An orchestrator's learning-method smokes build on it. Not supported on it: `merge_adapter` (it needs a
+Hugging Face directory), so on-policy methods continue an adapter instead of folding it.
+
 ## Not yet done
 
 - [ ] Conformance tiers: register the tiers still missing as they land (an
