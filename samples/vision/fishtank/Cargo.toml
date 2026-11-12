@@ -30,11 +30,17 @@ brain-imaging.workspace = true
 # model store the weights are found in.
 brain-capture.workspace = true
 brain-openseeface.workspace = true
+# The OpenVINO runtime the tracker compiles for the NPU or GPU (its library
+# directory is named explicitly; see `--openvino-libs`).
+brain-openvino-rt.workspace = true
 brain-gpu-core.workspace = true
 brain-modelstore.workspace = true
 brain-modelref.workspace = true
 
 [package.metadata.brain]
+# `make samples/vision/fishtank/build` also runs fetch-data.sh (the pinned
+# face tracker and OpenVINO runtime), so `.../run` works right after it.
+fetch-on-build = true
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # 28 -> 34: webcam tracking (capture, openseeface, its vision blocks, the model store).
 max-brain-crates = 34

@@ -20,9 +20,11 @@ while the viewer moves - motion parallax, not stereo.
   `porting.md`; the id is the directory). `crates/headpose` is model-agnostic
   geometry: landmarks in pixels in, eyes in metres and matrices out. The
   landmark tracker owns its ROI state, never calibration.
-- **Rendering lives in the sample**, as a real wgpu raster pipeline
-  presented to a surface: `gpu-core` is a compute seam and has no surface,
-  raster or depth attachments. Readback only for headless screenshots.
+- **Rendering lives in the sample**, as a full-screen ray-traced pass on
+  wgpu presented to a surface: `gpu-core` is a compute seam and has no
+  surface or raster pipeline. Readback only for headless screenshots. Ray
+  tracing rather than raster because the scene is analytic and the off-axis
+  ray from the eye through each pixel is the projection itself.
   Extract a shared GPU surface into `crates/viewport` once a second sample
   needs one.
 - **The canonical face is anthropometric, not transcribed**: rigid points
@@ -41,11 +43,19 @@ while the viewer moves - motion parallax, not stereo.
 - [x] `capture::Frame` carries a `Stamp`: the driver's V4L2 timestamp when
       it declares `CLOCK_MONOTONIC` and is plausible, else the dequeue time,
       marked as such; `capture::clock::monotonic_ns` reads the same clock.
-- [x] `samples/vision/fishtank` with a fixed, mouse or scripted eye: a wgpu
-      raster pipeline presented to a winit surface (sky at infinity, neon
-      tank grid, instanced crystal / pillars / rings / orbs, fog, bloom
-      pyramid, ACES), the glass taken from the window's place on the
-      monitor, HUD, `P` screenshots, `--headless --output` PNGs.
+- [x] `samples/vision/fishtank` with a fixed, mouse or scripted eye: one
+      ray-traced wgpu pass (analytic rusty pipe, ball, buoy and crate in a
+      riveted steel recess; a lake, ridges and sky beyond; a room behind
+      the viewer for reflections; GGX, exact sun shadows, form-factor sky
+      light, occlusion, one mirror bounce, ACES), its material texture
+      generated per mip level on the GPU, the scene's resolution following
+      GPU timestamps to fit the refresh, the glass taken from the window's
+      place on the monitor, HUD, `P` screenshots, `--headless --output`
+      PNGs. Measured 2026-11-12 on the Arc iGPU (Meteor Lake, power limit
+      raised to 45 W): GPU frame 9.0 ms at 1920x1200, 13.5 ms at 2880x1800
+      headless; in a fullscreen window on the same machine under other
+      load (GPU at 100-350 MHz) it held 60 fps by rendering the scene at
+      43% resolution.
 
 - [x] MobileNetV3's pieces in the shared vision layer: `hardswish`,
       `hardsigmoid`, `relu6` kernel pairs (`Act::HardSwish`,
@@ -73,17 +83,39 @@ while the viewer moves - motion parallax, not stereo.
       is Hugging Face; until a pinned GitHub source exists the weights come
       from a sha256-checked fetch script into a local directory.
 - [ ] SDK `FaceLandmarkPipeline` (detect + streaming track), its e2e test.
-- [ ] Run against a live webcam: this development container may not open
-      `/dev/video0` (EPERM), so live tracking, jitter and latency are
-      unmeasured on a real camera.
-- [ ] GPU inference cost: every `vision` block submits eagerly, so a face
-      network is a few hundred small submissions; on the iGPU beside the
-      renderer that measured 80-116 ms per forward (2026-11-12, loaded box)
-      against 23-42 ms on the CPU backend. Record a forward as one
-      submission (or a captured program) before making `gpu` the default.
-- [ ] Intel NPU: `crates/npu` exports whole brain graphs to OpenVINO; the
-      openseeface networks have no exporter there yet, and this box's
-      container exposes no `/dev/accel` device to test one.
+- [ ] Run against a live webcam: the maintainers' devcontainer profiles
+      allow device majors 189/195/226/234/237/261 but not V4L2 (81), so
+      `/dev/video0` is EPERM inside them; live tracking, jitter and latency
+      are unmeasured on a real camera.
+- [x] Intel NPU and GPU: `openseeface::export` (static-shape ONNX from
+      brain's weights) compiled by OpenVINO (`crates/openvino-rt`, split
+      out of `crates/npu` so a model can run on the NPU without linking
+      every exporter); parity on CPU, iGPU and Meteor Lake NPU; the sample
+      tracks at camera rate on the NPU (11 ms/frame) and iGPU (21 ms).
+- [ ] brain's own kernels on the iGPU. Measured 2026-11-12 with the GPU's
+      actual clock (`gt0/rps_act_freq_mhz`) and throttle reasons sampled
+      beside every run: this box sat at its PL1 package power limit for
+      100% of every run (other workloads drawing CPU power), holding the
+      iGPU at 100-500 MHz of its 2250 MHz, so every absolute number here is
+      several times too slow. At equal clock, brain's forward spends 2.5x
+      (detector), 3.5x (lm0) and 7.7x (lm3) the GPU cycles of OpenVINO's,
+      60-77% of it in `conv_bias_reg` (lm3's 960x160 pointwise conv at 7x7
+      fills about 25 workgroups). im2col + `matmul_reg3_64` for biased 1x1
+      convs computes the identical output in 25-35% fewer cycles - real,
+      but not the gap, and landing it as one more hard-wired rule in
+      `vision` would bypass per-device selection (the CPU backend has a
+      native direct-conv path). Next: register 1x1/depthwise/GAP small-shape
+      candidates through the `gpu_core::provider` seam and select by
+      measurement (kernels.md section F), then fuse bias + activation into
+      the GEMM epilogue. Measure only with the clock and PL1 logged, on an
+      otherwise idle machine. `intel_gpu_top` needs CAP_PERFMON, absent in
+      the devcontainer.
+- [ ] Dependency isolation: the openseeface test binary links rav1e/rav1d,
+      opus, image, imageproc, nalgebra, rustls and regex, almost all through
+      `crates/imaging`, for one host resize; and `crates/perf`'s sysfs
+      telemetry lives in a layer-6 crate. Move pure host pixel ops and the
+      device telemetry into small leaf crates that the heavy ones re-export,
+      so a consumer links what it calls.
 - [ ] Recorded-webcam replay (a frame sequence with timestamps) for
       regression; `--camera-image` replays a still photo only.
 - [ ] `crates/fastvlm` and `crates/ecapatdnn` each keep a private

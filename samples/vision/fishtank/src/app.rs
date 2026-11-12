@@ -72,7 +72,8 @@ pub fn run(args: Args) -> Result<(), String> {
                 camera: args.camera.clone(),
                 size: args.camera_size,
                 landmarks: args.landmarks,
-                device: args.tracker_device.clone(),
+                executor: args.tracker_device,
+                openvino_libs: args.openvino_libs.clone(),
                 profile: args.profile.clone(),
                 save_to: args.profile_path.clone(),
             })
@@ -92,7 +93,7 @@ pub fn run(args: Args) -> Result<(), String> {
         manual_z: eye::REST[2],
         nudge: [0.0; 2],
         frozen: None,
-        grid: true,
+        grid: false,
         diagnostics: true,
         shots: 0,
         frame_times: Vec::new(),
@@ -123,17 +124,22 @@ impl App {
             compatible_surface: Some(&surface),
         }))
         .map_err(|e| format!("no GPU adapter can present to this window: {e}"))?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("fishtank"), ..Default::default() })).map_err(|e| format!("opening the GPU: {e}"))?;
+        // timestamps, where the GPU takes them, let the scene's resolution follow its cost
+        let timestamps = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("fishtank"), required_features: timestamps, ..Default::default() }))
+            .map_err(|e| format!("opening the GPU: {e}"))?;
         let size = window.inner_size();
         let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).ok_or("the GPU cannot present to this window")?;
         let caps = surface.get_capabilities(&adapter);
         if let Some(f) = caps.formats.iter().find(|f| f.is_srgb()) {
             config.format = *f;
         }
-        config.present_mode = wgpu::PresentMode::AutoVsync;
+        config.present_mode = if self.args.vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
         surface.configure(&device, &config);
         let tank = scene::Tank::for_display(self.args.display_w_m, self.args.display_h_m);
-        let renderer = Renderer::new(device, queue, config.format, config.width, config.height, tank);
+        let mut renderer = Renderer::new(device, queue, config.format, config.width, config.height, tank);
+        let refresh_hz = window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).map_or(60.0, |mhz| f64::from(mhz) / 1e3);
+        renderer.adapt_to(1.0 / refresh_hz);
         let info = adapter.get_info();
         eprintln!("fishtank: {} ({:?}), {}x{} {:?}", info.name, info.backend, config.width, config.height, config.format);
         Ok(Gfx { window, surface, config, renderer, adapter_name: info.name })
@@ -174,12 +180,17 @@ impl App {
             format!("eye   x {:+6.1}  y {:+6.1}  z {:6.1} cm", eye[0] * 100.0, eye[1] * 100.0, eye[2] * 100.0),
             format!("glass {:.1} x {:.1} cm   render {:5.1} fps", glass.width() * 100.0, glass.height() * 100.0, fps),
             format!("gpu   {}", g.adapter_name),
+            match g.renderer.gpu_ms() {
+                Some([scene, frame]) => format!("      scene {scene:4.1} ms  frame {frame:4.1} ms  at {:.0}% resolution", g.renderer.scale() * 100.0),
+                None => "      (this GPU takes no timestamps: resolution fixed)".to_string(),
+            },
         ];
         if let Some(tr) = &self.tracking {
             let v = tr.viewer(now_s() + PRESENT_LEAD_S);
             let s = tr.stats.lock().unwrap().clone();
             lines.push(format!("track {:?}  conf {:.2}  fit {:.1} px  age {:3.0} ms  lead {:2.0} ms", v.status, s.confidence, s.fit_rmse_px, v.sample_age_s.min(9.999) * 1e3, v.lead_s * 1e3));
-            lines.push(format!("cam   {}  infer {:4.1} ms  frames {}  dropped {}  detects {}", s.camera, s.inference_ms, s.frames, s.dropped, s.detections));
+            lines.push(format!("cam   {}  frames {}  dropped {}  detects {}", s.camera, s.frames, s.dropped, s.detections));
+            lines.push(format!("face  {}  {:4.1} ms/frame", s.devices, s.inference_ms));
             if !s.last_problem.is_empty() {
                 lines.push(format!("      {}", s.last_problem.chars().take(70).collect::<String>()));
             }
@@ -355,8 +366,8 @@ impl ApplicationHandler for App {
                         let s = tr.stats.lock().unwrap().clone();
                         let e = v.cyclopean();
                         eprintln!(
-                            "fishtank: tracking {:?}, eye ({:.1}, {:.1}, {:.1}) cm, conf {:.2}, fit {:.1} px, {} frames ({} dropped, {} detections), inference {:.1} ms{}",
-                            v.status, e[0] * 100.0, e[1] * 100.0, e[2] * 100.0, s.confidence, s.fit_rmse_px, s.frames, s.dropped, s.detections, s.inference_ms,
+                            "fishtank: tracking {:?} on {}, eye ({:.1}, {:.1}, {:.1}) cm, conf {:.2}, fit {:.1} px, {} frames ({} dropped, {} detections), {:.1} ms per frame{}",
+                            v.status, s.devices, e[0] * 100.0, e[1] * 100.0, e[2] * 100.0, s.confidence, s.fit_rmse_px, s.frames, s.dropped, s.detections, s.inference_ms,
                             if s.last_problem.is_empty() { String::new() } else { format!(", last problem: {}", s.last_problem) }
                         );
                     }

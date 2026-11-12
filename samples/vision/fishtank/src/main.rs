@@ -3,9 +3,10 @@
 
 //! sample: vision/fishtank - head-coupled perspective ("fish tank VR").
 //!
-//! The laptop screen becomes a window onto a small scene that stays fixed in
-//! the room: a neon tank behind the glass, floating crystal, pillars and
-//! rings at several depths, orbs in front of the glass and stars beyond.
+//! The laptop screen becomes a window onto a scene that stays fixed in the
+//! room: a rusty pipe reaching out of the glass, a steel ball floating in
+//! front of it, a riveted steel recess behind it, and a lake and mountains
+//! kilometres beyond.
 //! Each frame is rendered through the off-axis projection from the eye
 //! (`headpose::off_axis`), so moving your head shows the parallax a real
 //! window would.
@@ -43,6 +44,7 @@ EYE:
 
 DISPLAY (what the glass physically is):
     --display-cm W,H       visible screen area in centimetres (default 34.4,19.4: a 15.6\" 16:9 panel)
+    --no-vsync             present without waiting for the display's refresh (for measuring)
     --profile PATH         a calibration profile (JSON, headpose::calibration::Profile); wins over the
                            display and camera flags, and is where C and Z save to
                            (default ~/.config/brain/fishtank-profile.json, loaded when it exists)
@@ -56,8 +58,10 @@ CAMERA (webcam):
     --camera-gap-cm CM     lens centre above the top edge of the visible screen (default 0.8)
     --ipd-mm MM            your interpupillary distance (default 63)
     --landmarks fast|best  OpenSeeFace landmark network (default fast)
-    --tracker-device DEV   where the face networks run: cpu (default; leaves the GPU to the
-                           renderer), gpu, gpu<i>
+    --tracker-device DEV   where the face networks run: auto (default: the NPU, else the GPU,
+                           through OpenVINO, else brain's CPU backend), npu, gpu, cpu (OpenVINO),
+                           brain-cpu, brain-gpu (brain's own kernels)
+    --openvino-libs DIR    the OpenVINO libraries (default: where fetch-data.sh puts them)
     --calibration-distance-cm CM  the true eye-to-screen distance the Z key calibrates to (default 50)
 
 HEADLESS:
@@ -68,13 +72,14 @@ HEADLESS:
     --hud                  draw the diagnostics overlay into the PNG too
 
 BOTH:
-    --frames N             stop after N frames (headless: render N frames 1/60 s apart, keep the last;
+    --frames N             stop after N frames (headless: render N frames 1/60 s apart, keep the last
+                           and report their median GPU time;
                            window: with --output PATH, save the last frame, HUD included)
 
 KEYS (window):
     Esc quit   G grid   D diagnostics   Space freeze the eye   P screenshot   F fullscreen
     arrows nudge the eye   PageUp/PageDown nearer/further
-    C  (webcam) sit centred in front of the screen and press: recentre, saved to the profile
+    C  (webcam) sit centred in front of the screen and press: centre the view (camera pitch and yaw re-aimed), saved to the profile
     Z  (webcam) sit at --calibration-distance-cm from the screen and press: fix depth, saved
 ";
 
@@ -83,6 +88,7 @@ pub struct Args {
     pub display_w_m: f64,
     pub display_h_m: f64,
     pub fullscreen: bool,
+    pub vsync: bool,
     pub headless: bool,
     pub output: Option<PathBuf>,
     pub size: (u32, u32),
@@ -92,7 +98,8 @@ pub struct Args {
     pub camera: tracking::Camera,
     pub camera_size: (u32, u32),
     pub landmarks: openseeface::config::NetConfig,
-    pub tracker_device: String,
+    pub tracker_device: tracking::Executor,
+    pub openvino_libs: Option<PathBuf>,
     pub calibration_distance_m: f64,
     /// The calibration the webcam mode starts from.
     pub profile: Profile,
@@ -121,6 +128,7 @@ fn parse() -> Result<Args, String> {
         display_w_m: 0.344,
         display_h_m: 0.194,
         fullscreen: false,
+        vsync: true,
         headless: false,
         output: None,
         size: (1280, 720),
@@ -130,13 +138,15 @@ fn parse() -> Result<Args, String> {
         camera: tracking::Camera::Device("/dev/video0".into()),
         camera_size: (640, 480),
         landmarks: openseeface::config::LANDMARKS_FAST,
-        tracker_device: "cpu".into(),
+        tracker_device: tracking::Executor::Auto,
+        openvino_libs: None,
         calibration_distance_m: 0.5,
         profile: Profile {
             display_width_m: 0.344,
             display_height_m: 0.194,
             camera_gap_m: 0.008,
             camera_pitch_deg: 0.0,
+            camera_yaw_deg: 0.0,
             camera_offset_x_m: 0.0,
             camera: headpose::calibration::CameraProfile::Fov { width: 640, height: 480, hfov_deg: 60.0 },
             ipd_m: 0.063,
@@ -171,13 +181,8 @@ fn parse() -> Result<Args, String> {
                     other => return Err(format!("--landmarks must be fast or best, got {other:?}")),
                 }
             }
-            "--tracker-device" => {
-                a.tracker_device = value("--tracker-device")?;
-                let d = a.tracker_device.as_str();
-                if !(d == "cpu" || d == "gpu" || d.strip_prefix("gpu").is_some_and(|i| i.parse::<u32>().is_ok())) {
-                    return Err(format!("--tracker-device must be cpu, gpu or gpu<i>, got {d:?}"));
-                }
-            }
+            "--tracker-device" => a.tracker_device = tracking::Executor::parse(&value("--tracker-device")?)?,
+            "--openvino-libs" => a.openvino_libs = Some(PathBuf::from(value("--openvino-libs")?)),
             "--calibration-distance-cm" => {
                 a.calibration_distance_m = value("--calibration-distance-cm")?.parse::<f64>().map_err(|e| format!("--calibration-distance-cm: {e}"))? / 100.0
             }
@@ -189,6 +194,7 @@ fn parse() -> Result<Args, String> {
             }
             "--profile" => profile = Some(PathBuf::from(value("--profile")?)),
             "--fullscreen" => a.fullscreen = true,
+            "--no-vsync" => a.vsync = false,
             "--headless" => a.headless = true,
             "--output" => a.output = Some(PathBuf::from(value("--output")?)),
             "--size" => a.size = parse_wxh("--size", &value("--size")?)?,
@@ -232,9 +238,9 @@ fn parse() -> Result<Args, String> {
     Ok(a)
 }
 
-/// The clip planes, metres from the eye along the display normal: near
-/// enough for an orb a few centimetres in front of the glass, far enough
-/// for the tank's back and the sky behind it.
+/// The clip planes, metres from the eye along the display normal. The scene
+/// is ray traced, so they only fix the projection's depth range: each ray
+/// runs from the eye through its pixel to whatever it meets.
 const NEAR: f64 = 0.01;
 const FAR: f64 = 50.0;
 
@@ -242,7 +248,6 @@ const FAR: f64 = 50.0;
 pub fn view_through<'a>(glass: &Display, eye: eye::Eye, time_s: f32, grid: bool, hud: Option<(&'a [u8], u32, u32)>) -> Result<renderer::View<'a>, String> {
     let p = off_axis(glass, eye, NEAR, FAR).map_err(|e| e.to_string())?;
     Ok(renderer::View {
-        view_proj: p.view_projection(),
         inv_view_proj: p.inverse_view_projection(),
         eye: [eye[0] as f32, eye[1] as f32, eye[2] as f32],
         time_s,
@@ -259,7 +264,9 @@ fn headless(a: &Args) -> Result<(), String> {
         compatible_surface: None,
     }))
     .map_err(|e| format!("no GPU adapter: {e}"))?;
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("fishtank"), ..Default::default() })).map_err(|e| format!("opening the GPU: {e}"))?;
+    let timestamps = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("fishtank"), required_features: timestamps, ..Default::default() }))
+        .map_err(|e| format!("opening the GPU: {e}"))?;
     let info = adapter.get_info();
     eprintln!("fishtank: {} ({:?})", info.name, info.backend);
     let (w, h) = a.size;
@@ -269,6 +276,20 @@ fn headless(a: &Args) -> Result<(), String> {
     let tank = scene::Tank::for_display(a.display_w_m, a.display_h_m);
     let mut r = renderer::Renderer::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb, w, h, tank);
     let frames = a.frames.unwrap_or(1);
+    // every frame but the last renders into one scratch target; only the
+    // last is read back
+    let scratch = r.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("scratch"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let scratch = scratch.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut times = Vec::new();
     let mut last = None;
     for k in 0..frames {
         let t = a.time + (k as f64 - (frames - 1) as f64) / 60.0;
@@ -283,8 +304,26 @@ fn headless(a: &Args) -> Result<(), String> {
             format!("gpu   {}", info.name),
         ];
         let hud = a.hud.then(|| hud::render(&lines));
-        let v = view_through(&glass, eye, t as f32, true, hud.as_ref().map(|(p, w, h)| (p.as_slice(), *w, *h)))?;
-        last = Some((r.render_to_rgb(&v)?, eye));
+        let v = view_through(&glass, eye, t as f32, false, hud.as_ref().map(|(p, w, h)| (p.as_slice(), *w, *h)))?;
+        if k + 1 < frames {
+            r.render(&scratch, &v);
+        } else {
+            last = Some((r.render_to_rgb(&v)?, eye));
+        }
+        // the first frame pays for pipeline warm-up
+        if k > 0 {
+            if let Some(ms) = r.wait_gpu_ms()? {
+                times.push(ms);
+            }
+        }
+    }
+    if !times.is_empty() {
+        let median = |i: usize| {
+            let mut v: Vec<f64> = times.iter().map(|t| t[i]).collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        eprintln!("fishtank: GPU time over {} frames at {w}x{h}, median: scene {:.2} ms, whole frame {:.2} ms", times.len(), median(0), median(1));
     }
     let (img, eye) = last.expect("at least one frame");
     let out = a.output.as_ref().expect("checked by parse");

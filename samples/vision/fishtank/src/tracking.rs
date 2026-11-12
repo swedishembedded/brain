@@ -26,8 +26,81 @@ use std::time::Duration;
 use capture::{Frame, FrameSlot};
 use headpose::calibration::Profile;
 use headpose::{fit_head, Calibration, EstimatorConfig, FaceModel, TrackedViewer, ViewerEstimator};
-use openseeface::config::{NetConfig, LANDMARKS_BEST, LANDMARKS_FAST};
-use openseeface::{Tracker, TrackerConfig};
+use openseeface::config::{NetConfig, DETECTOR, LANDMARKS_BEST, LANDMARKS_FAST};
+use openseeface::openvino::OvNet;
+use openseeface::{Infer, Net, Tracker, TrackerConfig};
+
+/// The OpenVINO release `fetch-data.sh` unpacks.
+pub const OPENVINO_VERSION: &str = "2026.4.1";
+
+/// Where `fetch-data.sh` puts the OpenVINO libraries.
+pub fn default_openvino_libs() -> PathBuf {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("brain").join("runtimes").join(format!("openvino-{OPENVINO_VERSION}")).join("libs")
+}
+
+/// Where the face networks run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Executor {
+    /// The NPU, else the GPU (both through OpenVINO), else brain's CPU
+    /// backend - the first that loads.
+    Auto,
+    /// Through OpenVINO: the Intel NPU, GPU or CPU.
+    OpenVino(&'static str),
+    /// On brain's own kernels: the CPU JIT or the wgpu GPU backend.
+    Brain(&'static str),
+}
+
+impl Executor {
+    pub fn parse(s: &str) -> Result<Executor, String> {
+        match s {
+            "auto" => Ok(Executor::Auto),
+            "npu" => Ok(Executor::OpenVino("npu")),
+            "gpu" => Ok(Executor::OpenVino("gpu")),
+            "cpu" => Ok(Executor::OpenVino("cpu")),
+            "brain-cpu" => Ok(Executor::Brain("cpu")),
+            "brain-gpu" => Ok(Executor::Brain("gpu")),
+            other => Err(format!("--tracker-device must be auto, npu, gpu, cpu, brain-cpu or brain-gpu, got {other:?}")),
+        }
+    }
+}
+
+type Pair = (Box<dyn Infer>, Box<dyn Infer>);
+
+fn on_openvino(dir: &std::path::Path, lm: NetConfig, dev: &str) -> Result<Pair, String> {
+    let d = openseeface::openvino::device(dev).ok_or_else(|| format!("no OpenVINO device {dev:?}"))?;
+    let present = openvino_rt::available_devices().map_err(|e| format!("the OpenVINO runtime: {e} (fetch-data.sh installs it)"))?;
+    if !present.iter().any(|p| p.starts_with(d.ov_str())) {
+        return Err(format!("OpenVINO sees no {} on this machine (it sees {present:?})", d.ov_str()));
+    }
+    Ok((Box::new(OvNet::load(dir, DETECTOR, d)?), Box::new(OvNet::load(dir, lm, d)?)))
+}
+
+fn on_brain(dir: &std::path::Path, lm: NetConfig, dev: &str) -> Result<Pair, String> {
+    let device = gpu_core::Gpu::open(Some(dev), openseeface::model::PIPELINES);
+    Ok((Box::new(Net::load(&device, dir, DETECTOR)?), Box::new(Net::load(&device, dir, lm)?)))
+}
+
+/// Build the two networks where `choice` says, reporting what `auto` skipped.
+fn executors(dir: &std::path::Path, lm: NetConfig, choice: Executor) -> Result<(Pair, Vec<String>), String> {
+    match choice {
+        Executor::OpenVino(d) => Ok((on_openvino(dir, lm, d)?, Vec::new())),
+        Executor::Brain(d) => Ok((on_brain(dir, lm, d)?, Vec::new())),
+        Executor::Auto => {
+            let mut skipped = Vec::new();
+            for d in ["npu", "gpu"] {
+                match on_openvino(dir, lm, d) {
+                    Ok(p) => return Ok((p, skipped)),
+                    Err(e) => skipped.push(format!("{d}: {e}")),
+                }
+            }
+            Ok((on_brain(dir, lm, "cpu")?, skipped))
+        }
+    }
+}
 
 /// The model-store id the weights live under (see `fetch-data.sh`).
 pub const WEIGHTS_ID: &str = "emilianavt/OpenSeeFace";
@@ -50,6 +123,8 @@ pub struct Stats {
     pub fit_rmse_px: f64,
     pub confidence: f64,
     pub last_problem: String,
+    /// Where the detector and the landmark network run.
+    pub devices: String,
 }
 
 pub struct Tracking {
@@ -92,8 +167,10 @@ pub struct Options {
     pub camera: Camera,
     pub size: (u32, u32),
     pub landmarks: NetConfig,
-    /// Where the face networks run (`cpu`, `gpu`, `gpu<i>`).
-    pub device: String,
+    /// Where the face networks run.
+    pub executor: Executor,
+    /// The OpenVINO libraries; `None` for where `fetch-data.sh` puts them.
+    pub openvino_libs: Option<PathBuf>,
     pub profile: Profile,
     pub save_to: PathBuf,
 }
@@ -101,6 +178,11 @@ pub struct Options {
 impl Tracking {
     pub fn start(o: Options) -> Result<Tracking, String> {
         let dir = weights_dir()?;
+        // before any OpenVINO session opens: the runtime fetch-data.sh put here
+        let libs = o.openvino_libs.clone().unwrap_or_else(default_openvino_libs);
+        if !openvino_rt::use_library_dir(libs.clone()) && o.openvino_libs.is_some() {
+            return Err(format!("--openvino-libs {}: no OpenVINO C library there", libs.display()));
+        }
         let source = FrameSource::open(&o.camera, o.size)?;
         let (w, h) = source.size();
         // the lens is described at the size the driver actually gave
@@ -139,13 +221,20 @@ impl Tracking {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let tracking = {
             let (slot, stop, stats, est, cal) = (slot.clone(), stop.clone(), stats.clone(), estimator.clone(), calibration.clone());
-            let (lm, dev) = (o.landmarks, o.device.clone());
+            let (lm, choice) = (o.landmarks, o.executor);
             std::thread::Builder::new()
                 .name("fishtank-track".into())
                 .spawn(move || {
-                    let device = gpu_core::Gpu::open(Some(&dev), openseeface::model::PIPELINES);
-                    let mut tracker = match Tracker::load(&device, &dir, lm, TrackerConfig::default()) {
-                        Ok(t) => {
+                    let mut tracker = match executors(&dir, lm, choice) {
+                        Ok(((det, land), skipped)) => {
+                            let t = Tracker::new(det, land, TrackerConfig::default());
+                            let (a, b) = t.devices();
+                            let devices = if a == b { a } else { format!("detector {a}, landmarks {b}") };
+                            for why in &skipped {
+                                eprintln!("fishtank: skipped {why}");
+                            }
+                            eprintln!("fishtank: face tracker on {devices}");
+                            stats.lock().unwrap().devices = devices;
                             let _ = ready_tx.send(Ok(()));
                             t
                         }
@@ -163,36 +252,50 @@ impl Tracking {
                         let t0 = std::time::Instant::now();
                         let found = tracker.track(&frame.rgb, frame.w, frame.h);
                         let ms = t0.elapsed().as_secs_f64() * 1e3;
+                        // Work out the frame's outcome holding no lock, feed the
+                        // estimator holding only its lock, and report under only
+                        // the stats lock: the render thread takes the estimator
+                        // then the stats, and nesting them here in the other
+                        // order deadlocked the two threads.
+                        let mut detected = false;
+                        let mut fitted = None;
+                        let problem = match found {
+                            Err(e) => format!("inference: {e}"),
+                            Ok(None) => "no face".into(),
+                            Ok(Some(found)) => {
+                                detected = found.detected;
+                                let pts: Vec<[f64; 2]> = found.landmarks.points.iter().map(|p| [p[0] as f64, p[1] as f64]).collect();
+                                let conf: Vec<f64> = found.landmarks.confidence.iter().map(|&c| c as f64).collect();
+                                let c = cal.lock().unwrap().clone();
+                                let model = FaceModel::canonical(c.ipd_m);
+                                let span = ((pts[45][0] - pts[36][0]).powi(2) + (pts[45][1] - pts[36][1]).powi(2)).sqrt();
+                                match fit_head(&pts, &conf, &c.camera, &model, prior.as_ref(), MIN_POINT_CONFIDENCE, MAX_RMSE_OF_FACE * span) {
+                                    Ok(fit) => {
+                                        prior = Some(fit.head_to_camera);
+                                        let score = found.landmarks.score() as f64;
+                                        let t = frame.stamp.ns as f64 * 1e-9;
+                                        let _ = est.lock().unwrap().observe(t, c.to_screen(fit.right_eye), c.to_screen(fit.left_eye), score, fit.rmse_px);
+                                        fitted = Some((fit.rmse_px, score));
+                                        String::new()
+                                    }
+                                    Err(e) => e.to_string(),
+                                }
+                            }
+                        };
+                        if fitted.is_none() {
+                            prior = None;
+                        }
+                        let dropped = slot.stats().dropped;
                         let mut s = stats.lock().unwrap();
                         s.frames += 1;
-                        s.dropped = slot.stats().dropped;
-                        s.inference_ms = 0.9 * s.inference_ms + 0.1 * ms;
-                        let Some(found) = found else {
-                            prior = None;
-                            s.last_problem = "no face".into();
-                            continue;
-                        };
-                        s.detections += found.detected as u64;
-                        let pts: Vec<[f64; 2]> = found.landmarks.points.iter().map(|p| [p[0] as f64, p[1] as f64]).collect();
-                        let conf: Vec<f64> = found.landmarks.confidence.iter().map(|&c| c as f64).collect();
-                        let c = cal.lock().unwrap().clone();
-                        let model = FaceModel::canonical(c.ipd_m);
-                        let span = ((pts[45][0] - pts[36][0]).powi(2) + (pts[45][1] - pts[36][1]).powi(2)).sqrt();
-                        match fit_head(&pts, &conf, &c.camera, &model, prior.as_ref(), MIN_POINT_CONFIDENCE, MAX_RMSE_OF_FACE * span) {
-                            Ok(fit) => {
-                                prior = Some(fit.head_to_camera);
-                                let t = frame.stamp.ns as f64 * 1e-9;
-                                let score = found.landmarks.score() as f64;
-                                let _ = est.lock().unwrap().observe(t, c.to_screen(fit.right_eye), c.to_screen(fit.left_eye), score, fit.rmse_px);
-                                s.fit_rmse_px = fit.rmse_px;
-                                s.confidence = score;
-                                s.last_problem.clear();
-                            }
-                            Err(e) => {
-                                prior = None;
-                                s.last_problem = e.to_string();
-                            }
+                        s.dropped = dropped;
+                        s.inference_ms = if s.frames == 1 { ms } else { 0.9 * s.inference_ms + 0.1 * ms };
+                        s.detections += detected as u64;
+                        if let Some((rmse, score)) = fitted {
+                            s.fit_rmse_px = rmse;
+                            s.confidence = score;
                         }
+                        s.last_problem = problem;
                     }
                 })
                 .map_err(|e| format!("starting the tracking thread: {e}"))?
@@ -210,15 +313,16 @@ impl Tracking {
         self.estimator.lock().unwrap().predict(t)
     }
 
-    /// "I am sitting centred in front of the screen": absorb the current
-    /// horizontal offset into the camera mount, and save the profile.
+    /// "I am sitting centred in front of the screen": re-aim the camera so
+    /// the current eye reads as centred, horizontally and vertically, and
+    /// save the profile.
     pub fn recentre(&self, now: f64) -> Result<String, String> {
         let v = self.viewer(now);
         if v.status != headpose::TrackingStatus::Tracking {
             return Err("no face is tracked right now".into());
         }
         let mut c = self.calibration.lock().unwrap();
-        c.recentre(v.cyclopean());
+        c.recentre(v.cyclopean()).map_err(|e| e.to_string())?;
         self.save(&c)
     }
 
