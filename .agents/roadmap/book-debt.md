@@ -23,19 +23,19 @@ Training kernels and graphs:
       kernel stays for a device with no workgroup reduction (the CPU JIT) and as the bench reference (v03 ch08).
 - [x] rmsnorm/layernorm: shared builder resolves the `_rows` twins by default (`Gpu::twin_of`); the "per-row loop is fine"
       comments are corrected (v03 ch10, v04 ch04).
-- [ ] model: rename `LayerTape`/`TapeEdge` to names that say what they are (v03 ch04).
+- [x] model: `LayerTape`/`TapeEdge` are `SegmentedPass`/`SegmentEdge` (module `model::segmented`), `RevisitingTape` is `RevisitingPass` (v03 ch04).
 - [x] toyautoencoder: delete the unused first-layer dX and its buffer (v03 ch04).
 - [x] wgsl-cpu: bounds-checked dispatch that returns an error naming kernel and binding (v03 ch10); on in debug builds of the CPU backend
       and via `backend_api::set_checked_kernels`; the native fast paths of `backend-cpu` are not covered.
 - [x] wgsl-cpu: typed compile error instead of matching the word "barrier" (v04 ch09).
 - [x] backend-cuda / gpt2: derive golden tolerances from the round-off bound (v04 ch09); the CUDA comparisons skip without a card, the
       derived gpt2 bound is checked against CPU vs the default device.
-- [ ] gpt2: tie lm_head to the token embedding, with gradcheck (v05 ch03, ch10, ch15).
-- [ ] gpt2: derive the forward bound and assert the greedy top-2 gap instead of choosing a seed (v05 ch15).
+- [x] gpt2: lm_head is tied to the token embedding (`check_gpt_tied`); a checkpoint with a separate `lm_head.weight` is refused on load (v05 ch03, ch10, ch15).
+- [x] gpt2: the cached-decode bound is derived from the round-off bound and the greedy test asserts the top-2 gap (`tests/it/kv_decode.rs`, v05 ch15).
 - [x] rope.wgsl: theta as a parameter (v05 ch08).
 - [ ] modernbert: banded local attention over a [rows, 2w+1] slab (v05 ch14).
 - [x] checkpoint: `read_model_dir` errors on an index key no shard returned (v06 ch02).
-- [ ] gradcheck: `check_moe` differentiates a loss that includes the aux and z terms (v06 ch04).
+- [x] gradcheck: `check_moe` and `check_moe_balance` differentiate a host loss that includes the aux and z terms (v06 ch04).
 - [ ] modelcost: register gemma4 and minimaxh3, wire Recording in qwen35/qwen35moe, real-config pins (v06 ch10).
 - [ ] serve sampler: exact top-p/min-p over the full row, exact penalties (v05 ch11); the one top-k tie rule is done (qwen3vl keeps exactly k, lowest id first).
 

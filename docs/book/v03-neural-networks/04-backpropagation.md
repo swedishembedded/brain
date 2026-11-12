@@ -969,13 +969,7 @@ nobody reads. The
 decoder-only language model `crates/gpt2/src/model.rs` has the same shape, with
 attention and normalisation kernels in between.
 
-**The word "tape".** `crates/model/src/tape.rs` defines `LayerTape`, and the
-name is misleading for a reader coming from automatic differentiation. It is not
-a recording of operations to be differentiated. It is a list of already-built
-dispatches cut into per-layer segments so that a trainer streaming layers
-through a small device window can act between them (load the next layer's
-weights before it runs, finish a layer's update after its backward). The
-differentiation was done by the person who wrote the backward list.
+**A pass cut into segments, not a tape.** Automatic differentiation records the operations of a forward pass as they run and replays the record backward. brain records nothing that it differentiates, and the type that holds a model's lists says so in its name. `crates/model/src/segmented.rs` defines `SegmentedPass`: a list of already-built dispatches cut into per-layer segments, with `SegmentEdge` marking where a layer's segment is about to run and where it has run. The cut exists so that a trainer streaming layers through a small device window can act between the segments (load the next layer's weights before it runs, finish a layer's update after its backward). The differentiation was done by the person who wrote the backward list, and the segments only record where each layer's part of it begins and ends.
 
 **The correctness gate.** Without an automatic engine, the guarantee that the
 hand-written backward is the derivative of the hand-written forward is a
