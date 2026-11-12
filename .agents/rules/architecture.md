@@ -63,11 +63,11 @@ layer 4 - models
     diamond, ecapatdnn, eval, fastvlm, fincast, florence2, flux1, flux2, fly, flybody, gemma4,
     genieredux, glmdsa, gpt2, headpose, horizon, huginn, imaging, imgpipe, instantid, januspro,
     kronos, lfm2, llava, llmserve, lpips, ltxv, mimi, minicpmv, minimaxh3, minimaxmusic3,
-    mirage, modernbert, moondream3, mujoco, mvs, nemotronasr, npu, ocrserve, ouro, pulid, qwen3,
-    qwen35, qwen35moe, qwen3asr, qwen3omnimoe, qwen3tts, qwen3vl, qwen3vlmoe, recon, ricursive,
-    rrdbnet, s3dit, s3tokenizer, sam1, sam2, scrfd, sdxlunet, sfm, spectrallm, splat, supir,
-    t5encoder, timesfm3, toyautoencoder, toymoe, toypid, toyseq2seq, viewport, vqgan, wan, wm-
-    core, wm-display, worldmirror2, yolov5, yolov8, yolov8-faces, zipdepth
+    mirage, modernbert, moondream3, mujoco, mvs, nemotronasr, npu, ocrserve, openseeface, ouro,
+    pulid, qwen3, qwen35, qwen35moe, qwen3asr, qwen3omnimoe, qwen3tts, qwen3vl, qwen3vlmoe,
+    recon, ricursive, rrdbnet, s3dit, s3tokenizer, sam1, sam2, scrfd, sdxlunet, sfm, spectrallm,
+    splat, supir, t5encoder, timesfm3, toyautoencoder, toymoe, toypid, toyseq2seq, viewport,
+    vqgan, wan, wm-core, wm-display, worldmirror2, yolov5, yolov8, yolov8-faces, zipdepth
 layer 5 - cross-cutting evaluation and tooling
     bench, capture, fcbench, federated, forecastops, gradcheck, modelcost, modelopt, rl
 layer 6 - serving, front ends, SDK, samples
@@ -85,8 +85,8 @@ layer 6 - serving, front ends, SDK, samples
     sample-models-zipdepth, sample-npu-rockchip, sample-reconstruction-splat, sample-study-chat,
     sample-study-document, sample-study-timeline, sample-text-chat-full-finetune, sample-text-
     embed, sample-text-embed-train, sample-text-encoder-finetune, sample-text-retrieve, sample-
-    text-retrieve-json, sample-text-spectral-lm, sample-tts-clone, sample-vision-perception,
-    server, serving, trainjob, web
+    text-retrieve-json, sample-text-spectral-lm, sample-tts-clone, sample-vision-fishtank,
+    sample-vision-perception, server, serving, trainjob, web
 ```
 <!-- crate-layers:end -->
 

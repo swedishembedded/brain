@@ -189,3 +189,40 @@ https://github.com/Prefrontal-AI/latent-sparse-attention
     tools/goldens/lsa_dump_reference.py.
 
   (Apache-2.0 text: see LICENSE.)
+
+================================================================================
+OpenSeeFace -- BSD 2-Clause License
+Copyright (c) 2019, Emiliana (https://github.com/emilianavt/)
+https://github.com/emilianavt/OpenSeeFace
+
+  - crates/openseeface/src/decode.rs, tools/goldens/openseeface_dump_reference.py:
+    the networks' input and output conventions follow tracker.py (pinned at
+    commit 50c09741897010faad721a218b2bbe14ecad6251): the ImageNet
+    normalization, the detector's peak decode (`Tracker.detect_faces`: the
+    max-pool survivor, radius x 112, stride 4), the landmark crop margins
+    and the clamp's one-pixel vertical shift (`Tracker.predict`,
+    `clamp_to_im`), and the landmark decode (`Tracker.landmarks`,
+    `logit_arr`: heatmap argmax, logit offsets / 16, the 223 / 27 scale).
+  - crates/openseeface/src/track.rs: the detect-then-track-from-landmarks
+    loop and the default thresholds (0.6) follow `Tracker.predict`.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

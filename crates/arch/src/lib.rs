@@ -558,6 +558,7 @@ pub const ARCHS: &[Arch] = &[
             Variant { reference: "facebook/sam2.1-hiera-large", params: 224_447_154, quants: &[], license: None },
         ]),
     arch!("scrfd", "SCRFD face detector", Vision, Brain, "brain-scrfd"),
+    arch!("openseeface", "OpenSeeFace face detector and 66-point face landmarks", Vision, Brain, "brain-openseeface"),
     arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-arcface"),
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
     arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),

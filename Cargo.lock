@@ -2438,6 +2438,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-openseeface"
+version = "5.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-onnx",
+ "brain-paramstore",
+ "brain-testutil",
+ "brain-vision",
+]
+
+[[package]]
 name = "brain-optim"
 version = "5.1.0"
 dependencies = [

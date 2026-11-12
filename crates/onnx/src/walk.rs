@@ -197,6 +197,12 @@ pub fn input(n: &NodeProto, i: usize) -> Result<&str, String> {
 /// geometry comes from its own config, not from the file, which is exactly why
 /// the file has to be checked against it.
 pub fn check_conv(n: &NodeProto, at: usize, k: i64, stride: i64, pad: i64) -> Result<(), String> {
+    check_conv_grouped(n, at, k, stride, pad, 1)
+}
+
+/// [`check_conv`] for a grouped convolution: the same geometry check, and the
+/// `group` attribute must equal `groups` (depthwise: the channel count).
+pub fn check_conv_grouped(n: &NodeProto, at: usize, k: i64, stride: i64, pad: i64, groups: i64) -> Result<(), String> {
     let want = |name: &str, got: Vec<i64>, want: Vec<i64>| -> Result<(), String> {
         if got != want {
             return Err(format!(
@@ -210,16 +216,12 @@ pub fn check_conv(n: &NodeProto, at: usize, k: i64, stride: i64, pad: i64) -> Re
     want("pads", read::attr_ints(n, "pads", &[pad; 4]), vec![pad; 4])?;
     want("dilations", read::attr_ints(n, "dilations", &[1, 1]), vec![1, 1])?;
     let g = read::attr_int(n, "group", 1);
-    if g != 1 {
-        return Err(format!("import: Conv at node {at} has group {g}; this walk imports dense convs (group 1)"));
+    if g != groups {
+        return Err(format!("import: Conv at node {at} has group {g}, expected {groups} for this architecture"));
     }
     Ok(())
 }
 
-/// [`check_conv`]'s general form: independent per-axis kernel/stride/pad, for
-/// a release whose 2D convs are NOT square-symmetric (CAM++'s `FCM` stem
-/// downsamples frequency only, stride `(2,1)`. `check_conv` cannot express
-/// that - it asserts `strides == [s, s]`).
 pub fn check_conv2d(
     n: &NodeProto,
     at: usize,

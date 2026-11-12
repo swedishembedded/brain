@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+[package]
+name = "brain-openseeface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenSeeFace face detection and 66-point face landmarks (BSD-2-Clause weights): the released MobileNetV3 detector and landmark networks rebuilt on brain's shared vision blocks, imported from their ONNX graphs, with the reference tracker's detect, crop, decode and track-from-landmarks loop."
+
+[lib]
+name = "openseeface"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-paramstore.workspace = true
+# The shared conv-net blocks: Conv, SqueezeExcite, Cat, MaxPool, the
+# name-resolved kernel ids.
+brain-vision.workspace = true
+# The released graphs are ONNX only: tensor decoding and the positional,
+# two-way-coverage import walk.
+brain-onnx.workspace = true
+# Host-side crop resize (`resize_bilinear_hwc`, the reference's cv2 bilinear).
+brain-imaging.workspace = true
+
+[dev-dependencies]
+brain-checkpoint.workspace = true
+brain-model.workspace = true
+brain-testutil.workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

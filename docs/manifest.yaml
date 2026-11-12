@@ -112,6 +112,7 @@ navigation:
           - docs/reference/models/zipdepth.md
           - docs/reference/models/mirage.md
           - docs/reference/models/scrfd.md
+          - docs/reference/models/openseeface.md
           - docs/reference/models/arcface.md
           - docs/reference/models/lpips.md
           - docs/reference/models/sam1.md
