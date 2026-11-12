@@ -6,13 +6,11 @@
 //!
 //! Chronos-2 emits **21 fixed quantile levels** natively. The adapter runs the
 //! forward once, then serves the caller's requested levels by interpolating
-//! across those 21 (they are monotone in level); requested levels that coincide
+//! across those 21 (sorted first, since the head does not guarantee order); requested levels that coincide
 //! with a native level are exact. The native representation is `Quantiles`, so
 //! the honesty layer derives samples / point / etc. from there on request.
 //!
-//! Phase 1 is univariate: it forecasts the first target series and advertises no
-//! covariate support (`CovariateSupport::None`). Multivariate + covariates land
-//! with the group-attention path in Phase 2.
+//! The adapter advertises full covariate support (`CovariateSupport::Full`).
 
 use crate::config::QUANTILES;
 use crate::Chronos2;
@@ -48,6 +46,10 @@ impl Chronos2Forecaster {
     /// (step-major) — the layout the API's quantile block expects.
     fn interp_levels(native: &[f32], horizon: usize, levels: &[f32]) -> Vec<f32> {
         let nq = QUANTILES.len();
+        // The head is unconstrained; interpolate between ordered levels.
+        let mut native = native.to_vec();
+        forecast::convert::sort_quantile_columns(&mut native, nq, horizon);
+        let native = native.as_slice();
         let mut out = vec![0.0f32; horizon * levels.len()];
         for t in 0..horizon {
             for (j, &lv) in levels.iter().enumerate() {

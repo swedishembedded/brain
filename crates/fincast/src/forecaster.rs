@@ -6,7 +6,8 @@
 //!
 //! FinCast emits **9 fixed quantile levels** natively (`[0.1..0.9]`) plus a mean.
 //! The adapter runs the forward once, then serves the caller's requested levels
-//! by interpolating across those 9 (monotone in level); requested levels that
+//! by interpolating across those 9 (sorted first, since the head does not
+//! guarantee order); requested levels that
 //! coincide with a native level are exact. Native representation is `Quantiles`;
 //! the honesty layer derives samples / point / etc. from there on request.
 //!
@@ -63,6 +64,11 @@ impl FincastForecaster {
     /// Interpolate the requested `levels` from the native 9-quantile matrix
     /// `native` (`[9, horizon]`, quantile-major). Returns `[horizon, n_levels]`.
     fn interp_levels(native: &[f32], horizon: usize, levels: &[f32]) -> Vec<f32> {
+        // The head is unconstrained; interpolate between ordered levels.
+        let mut native = native.to_vec();
+        let nq = native.len() / horizon.max(1);
+        forecast::convert::sort_quantile_columns(&mut native, nq, horizon);
+        let native = native.as_slice();
         let mut out = vec![0.0f32; horizon * levels.len()];
         for t in 0..horizon {
             for (j, &lv) in levels.iter().enumerate() {

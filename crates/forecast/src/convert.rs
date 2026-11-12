@@ -263,6 +263,33 @@ fn gaussian_to_samples(
     Ok(Block::derived(vec![n, h], out, "gaussian_sampling"))
 }
 
+/// Put every step's quantiles in non-decreasing order, in place. Model heads
+/// have no monotonicity constraint, so a lower level can come out above a
+/// higher one, which inverts an interval and corrupts every score read off
+/// it; sorting is the reference forecasters' own repair and the least change
+/// that restores order (it lowers the pinball loss of any crossed pair).
+/// `values` is step-major `[steps, nq]`.
+pub fn sort_quantile_rows(values: &mut [f32], nq: usize) {
+    for row in values.chunks_exact_mut(nq) {
+        row.sort_by(f32::total_cmp);
+    }
+}
+
+/// [`sort_quantile_rows`] for a quantile-major `[nq, horizon]` matrix: sorts
+/// each step's column.
+pub fn sort_quantile_columns(values: &mut [f32], nq: usize, horizon: usize) {
+    let mut col = vec![0.0f32; nq];
+    for t in 0..horizon {
+        for (q, c) in col.iter_mut().enumerate() {
+            *c = values[q * horizon + t];
+        }
+        col.sort_by(f32::total_cmp);
+        for (q, &c) in col.iter().enumerate() {
+            values[q * horizon + t] = c;
+        }
+    }
+}
+
 /// Standard-normal inverse CDF (Acklam's rational approximation, ~1e-9 abs
 /// error). Dependency-free, adequate for fp32.
 pub fn norm_ppf(p: f32) -> f32 {
@@ -457,6 +484,17 @@ mod tests {
         assert!((q.data[0] - 0.0).abs() < 1e-4); // median
         assert!((q.data[1] - 1.959_964).abs() < 1e-2); // the 0.975 quantile ~ 1.96
         assert_eq!(q.method, "gaussian_ppf");
+    }
+
+    #[test]
+    fn crossed_quantiles_are_put_back_in_order() {
+        // quantile-major [3, 2]: step 0 crossed (2, 1, 3), step 1 already ordered
+        let mut qm = vec![2.0, 0.0, 1.0, 1.0, 3.0, 2.0];
+        sort_quantile_columns(&mut qm, 3, 2);
+        assert_eq!(qm, vec![1.0, 0.0, 2.0, 1.0, 3.0, 2.0]);
+        let mut sm = vec![2.0, 1.0, 3.0, 0.0, 1.0, 2.0];
+        sort_quantile_rows(&mut sm, 3);
+        assert_eq!(sm, vec![1.0, 2.0, 3.0, 0.0, 1.0, 2.0]);
     }
 
     #[test]

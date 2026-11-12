@@ -98,19 +98,6 @@ fn interp_one(native: &[f32], native_levels: &[f32], t: usize, nq: usize, lv: f3
     at(nq - 1)
 }
 
-/// Sort every (batch*variate, step) row's quantile values into non-decreasing
-/// order - the output head has no monotonicity constraint built in, so a
-/// lower quantile can come out numerically above a higher one; the reference
-/// forecaster corrects this the same way (`sort_quantiles`, applied before
-/// any other postprocessing). `out` is `[bv, horizon, nq]` flattened - every
-/// row across the WHOLE buffer is sorted, not just the first `horizon` rows
-/// (a bug that would silently skip every variate past the first).
-fn sort_quantiles_inplace(out: &mut [f32], nq: usize) {
-    for row in out.chunks_exact_mut(nq) {
-        row.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    }
-}
-
 impl ForecastModel for Timesfm3Forecaster {
     fn capabilities(&self) -> Capabilities {
         let cfg = self.model.config();
@@ -240,7 +227,9 @@ impl ForecastModel for Timesfm3Forecaster {
             let n = built.num_context_patches + built.num_horizon_patches;
             let raw_logits = self.model.core_forward(&built.resblock_input, &built.patch_mask, shape.batch, shape.num_variates(), n);
             let mut out = preprocess::postprocess(cfg, shape, &built, &raw_logits);
-            sort_quantiles_inplace(&mut out, cfg.num_quantiles);
+            // The head is unconstrained; the reference sorts before any other
+            // postprocessing, every row of the whole [bv, horizon, nq] buffer.
+            forecast::convert::sort_quantile_rows(&mut out, cfg.num_quantiles);
 
             for (bi, &i) in idxs.iter().enumerate() {
                 let p = &plans[i];
