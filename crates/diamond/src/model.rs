@@ -3,7 +3,7 @@
 
 //! The DIAMOND conditional EDM UNet as a pre-recorded brain kernel graph.
 //!
-//! Inference-only (fine-tuning lands with the training unit): weights are
+//! The inference graph (fine-tuning is `crate::train`): weights are
 //! uploaded once, the whole forward is recorded once as a `Vec<Step>`, and a
 //! denoise call is: host-compute cond → write ~44 AdaGroupNorm gamma/beta
 //! buffers + the noisy input → ONE submit → read the model output. Per-sigma

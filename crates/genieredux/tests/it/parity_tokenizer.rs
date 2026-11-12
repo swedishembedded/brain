@@ -8,7 +8,7 @@
 //! and codebook indices. Ignored by default (needs the checkpoint + the parity
 //! dump in scratch):
 //!   python scripts/parity-dump/genie_tokenizer.py
-//!   cargo test -p brain-wm-genie --test parity_tokenizer -- --ignored --nocapture
+//!   cargo test -p brain-genieredux --test parity_tokenizer -- --ignored --nocapture
 use gpu_core::Gpu;
 use genieredux::import::import_tokenizer;
 use genieredux::{kernel_sources, tokenizer_forward};

@@ -5,7 +5,7 @@
 //! SSA-recorded once) behind the `model::Model` seam, which buys the blanket
 //! finite-difference gradcheck and the AdamW/checkpoint machinery.
 //!
-//! Scope (v1): every CONVOLUTION's weight+bias is trainable (~3.7M params —
+//! Scope (v1): every CONVOLUTION's weight+bias is trainable (~2.43M params -
 //! conv_in/conv_out, all resblock conv1/conv2/proj, down/upsample convs,
 //! attention qkv/out projections). The conditioning path (Fourier, action
 //! embedding, cond MLP, AdaGroupNorm linears) and the three tiny affine-GN

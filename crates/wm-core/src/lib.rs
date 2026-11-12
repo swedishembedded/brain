@@ -32,12 +32,14 @@ pub trait WorldModel {
     /// `(ctx_frames, ctx_actions)` always produce the same state.
     fn reset(&mut self, ctx_frames: &[f32], ctx_actions: &[u32]);
 
-    /// Advance one step with `action` (must be `< num_actions()`, panics
-    /// otherwise) and return the next frame: CHW `f32` in `[0, 1]`, length
+    /// Advance one step with `action` (`< num_actions()`; what a model does
+    /// with one out of range is its own, DIAMOND clamps it) and return the
+    /// next frame: CHW `f32` in `[0, 1]`, length
     /// `C*H*W`, freshly allocated.
     fn step(&mut self, action: u32) -> Vec<f32>;
 
-    /// Diffusion-sampler quality knob (number of function evaluations).
+    /// Diffusion-sampler quality knob: a small code, 0 the model's default and
+    /// larger codes cheaper (the model maps it to its evaluation count).
     /// Models without an NFE concept ignore it; default is a no-op.
     fn set_nfe(&mut self, _n: u32) {}
 

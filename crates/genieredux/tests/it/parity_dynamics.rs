@@ -7,7 +7,7 @@
 //! dynamics_forward on the exact input the Python reference used, and compare
 //! the next-token logits. Ignored by default (needs both checkpoints + dump):
 //!   python scripts/parity-dump/genie_dynamics.py
-//!   cargo test -p brain-wm-genie --test parity_dynamics -- --ignored --nocapture
+//!   cargo test -p brain-genieredux --test parity_dynamics -- --ignored --nocapture
 use gpu_core::Gpu;
 use genieredux::import::{import_dynamics, import_tokenizer};
 use genieredux::{dynamics_forward, kernel_sources};

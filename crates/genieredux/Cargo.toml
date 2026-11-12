@@ -3,7 +3,7 @@ name = "brain-genieredux"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "GenieRedux-G (CoinRun) world model: the shared ST-transformer building blocks (QK-normalized biased attention, GEGLU feed-forward, PEG) reimplemented from scratch over brain's WGSL kernels, plus tokenizer / MaskGIT dynamics to follow."
+description = "GenieRedux-G (CoinRun) world model: the shared ST-transformer building blocks (QK-normalized biased attention, GEGLU feed-forward, PEG) reimplemented from scratch over brain's WGSL kernels, with the tokenizer and the MaskGIT dynamics."
 
 [lib]
 name = "genieredux"

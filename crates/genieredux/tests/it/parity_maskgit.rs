@@ -8,7 +8,7 @@
 //! EXACTLY, then closes the loop by decoding prime+generated tokens to a video.
 //! Ignored by default:
 //!   python scripts/parity-dump/genie_maskgit.py
-//!   cargo test -p brain-wm-genie --test parity_maskgit -- --ignored --nocapture
+//!   cargo test -p brain-genieredux --test parity_maskgit -- --ignored --nocapture
 use gpu_core::Gpu;
 use genieredux::import::{import_dynamics, import_tokenizer};
 use genieredux::{decode_indices, kernel_sources, maskgit_sample};

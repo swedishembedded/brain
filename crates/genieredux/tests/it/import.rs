@@ -4,7 +4,7 @@
 #![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 //! Import the real GenieRedux tokenizer checkpoint (gitignored scratch) with
 //! full-coverage validation. Ignored by default; run manually with the file:
-//!   cargo test -p brain-wm-genie --test import -- --ignored --nocapture
+//!   cargo test -p brain-genieredux --test import -- --ignored --nocapture
 use genieredux::import::import_tokenizer;
 
 #[allow(dead_code)]

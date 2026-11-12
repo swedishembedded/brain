@@ -252,8 +252,8 @@ pub struct VqWeights {
     pub project_out_w: Vec<f32>, pub project_out_b: Vec<f32>, // [dim,cd], [dim]
 }
 
-/// Cosine-similarity VQ forward: `project_in` → L2-normalize → argmax cosine
-/// against the L2-normalized codebook → gather `codebook[idx]` → `project_out`.
+/// VQ forward: `project_in` → L2-normalize → argmax of the dot product with
+/// the RAW (unnormalized) codebook, as the reference does → gather `codebook[idx]` → `project_out`.
 /// Returns `(quantized [n,dim], indices [n])`. (Straight-through / commitment
 /// are training-only and handled by the caller via `wm_core::vq`.)
 pub fn vq_quantize(gpu: &Gpu, x: &[f32], w: &VqWeights, n: u32, dim: u32, code_dim: u32, n_codes: u32) -> (Vec<f32>, Vec<u32>) {

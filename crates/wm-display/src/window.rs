@@ -458,7 +458,7 @@ impl FrameSink for SdlWindow {
             }
 
             let title = format!(
-                "brain wm — {} | {:.1}/{} fps | step {}{}{}",
+                "brain diamond - {} | {:.1}/{} fps | step {}{}{}",
                 hud.model,
                 hud.fps,
                 hud.target_fps,

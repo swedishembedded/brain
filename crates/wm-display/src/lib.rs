@@ -10,7 +10,7 @@
 //! human latency is at most one frame period and a step never consumes a
 //! stale queued action.
 //!
-//! The SDL window (feature `sdl`, default on) uses SDL2's SOFTWARE renderer
+//! The SDL window uses SDL2's SOFTWARE renderer
 //! deliberately: presentation stays on the CPU and the whole iGPU compute
 //! budget belongs to the model.
 
@@ -211,8 +211,9 @@ pub fn play_loop<C: Clock>(
     PlayReport { steps: hud.step, fps: hud.fps, work_ms_mean: mean, work_ms_p95: p95 }
 }
 
-/// Quality level `q<=0` -> `set_nfe(base >> -q)` convention: level 0 is the
-/// model's default; each level halves the NFE knob. Models clamp internally.
+/// Quality level `q<=0` -> `set_nfe(-q)`: a small code the model interprets,
+/// 0 its default and larger codes cheaper (DIAMOND: 3, 2, 1, 1 evaluations
+/// for codes 0, 1, 2, 3).
 fn apply_quality(model: &mut dyn WorldModel, q: i64) {
     // 0 => leave default; negative => degrade. The knob is model-defined;
     // we pass a small code the model interprets (0 = default).

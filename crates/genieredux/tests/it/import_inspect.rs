@@ -3,7 +3,7 @@
 
 //! One-off structural inspection of the GenieRedux tokenizer checkpoint (in
 //! gitignored scratch). Skipped unless the file is present. Run with:
-//!   cargo test -p brain-wm-genie --test import_inspect -- --nocapture --ignored
+//!   cargo test -p brain-genieredux --test import_inspect -- --nocapture --ignored
 #![allow(clippy::print_stderr)]
 #![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 
