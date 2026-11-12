@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+[package]
+# `samples/vision/fishtank` -> `sample-vision-fishtank`; see samples/README.md rule 4.
+name = "sample-vision-fishtank"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: head-coupled perspective (fish tank VR) - a shader-rendered scene that stays fixed behind and in front of the laptop screen while the viewer moves."
+publish = false
+
+[dependencies]
+# The geometry this sample demonstrates: the off-axis projection through the
+# display, the calibration profile, the eye estimator. Not an SDK surface yet
+# (samples/README.md rule 1: an engine mechanism the SDK does not wrap).
+brain-headpose.workspace = true
+serde_json.workspace = true
+# The renderer: a raster pipeline presented to a window surface. The engine's
+# own GPU seam (`gpu-core`) is compute-only, so the sample talks to wgpu
+# directly, at the version the workspace already pins.
+wgpu.workspace = true
+winit = "0.30"
+pollster.workspace = true
+bytemuck.workspace = true
+# The HUD's bitmap font and the headless PNG writer.
+brain-imaging.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 28

@@ -109,6 +109,31 @@ impl OffAxis {
         column_major(&mul(&self.projection_rows(), &self.view_rows()))
     }
 
+    /// Column-major inverse of [`OffAxis::view_projection`]: clip space back
+    /// to the screen frame, for passes that turn a pixel into a ray (a sky at
+    /// infinity, a picking query). Built from the two closed-form inverses -
+    /// the rigid view's transpose-and-translate and the frustum's - rather
+    /// than a general 4x4 inversion of their product.
+    pub fn inverse_view_projection(&self) -> [f32; 16] {
+        let [vr, vu, vn] = self.basis;
+        let e = self.eye;
+        let inv_view = [
+            [vr[0], vu[0], vn[0], e[0]],
+            [vr[1], vu[1], vn[1], e[1]],
+            [vr[2], vu[2], vn[2], e[2]],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let p = self.projection_rows();
+        let (a, c, b, d, k, g) = (p[0][0], p[0][2], p[1][1], p[1][2], p[2][2], p[2][3]);
+        let inv_proj = [
+            [1.0 / a, 0.0, 0.0, c / a],
+            [0.0, 1.0 / b, 0.0, d / b],
+            [0.0, 0.0, 0.0, -1.0],
+            [0.0, 0.0, 1.0 / g, k / g],
+        ];
+        column_major(&mul(&inv_view, &inv_proj))
+    }
+
     /// Where a screen-frame point lands in normalized device coordinates
     /// (`x, y` in `[-1, 1]` across the display, `z` in `[0, 1]` between the
     /// clip planes), or `None` when it is behind the eye.

@@ -369,6 +369,8 @@ navigation:
         path: examples/text/spectral-lm.md
       - source: samples/tts/clone/README.md
         path: examples/tts/clone.md
+      - source: samples/vision/fishtank/README.md
+        path: examples/vision/fishtank.md
       - source: samples/vision/perception/README.md
         path: examples/vision/perception.md
       # END SAMPLES MANIFEST

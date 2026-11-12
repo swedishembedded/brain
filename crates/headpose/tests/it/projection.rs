@@ -115,6 +115,19 @@ fn the_matrices_agree_with_ndc() {
 }
 
 #[test]
+fn the_inverse_takes_clip_space_back_to_the_screen_frame() {
+    let d = yawed();
+    let p = off_axis(&d, [-0.12, 0.08, 0.55], 0.02, 6.0).unwrap();
+    let (m, inv) = (p.view_projection(), p.inverse_view_projection());
+    for i in 0..4 {
+        for j in 0..4 {
+            let v: f64 = (0..4).map(|k| inv[k * 4 + i] as f64 * m[j * 4 + k] as f64).sum();
+            assert!(close(v, (i == j) as u8 as f64, 1e-4), "inv * vp [{i}][{j}] = {v}");
+        }
+    }
+}
+
+#[test]
 fn an_eye_at_or_behind_the_glass_is_refused() {
     let d = laptop();
     assert!(matches!(off_axis(&d, [0.0, 0.0, 0.0], 0.01, 10.0), Err(GeometryError::EyeBehindDisplay { .. })));

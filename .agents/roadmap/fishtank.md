@@ -41,12 +41,18 @@ while the viewer moves - motion parallax, not stereo.
 - [x] `capture::Frame` carries a `Stamp`: the driver's V4L2 timestamp when
       it declares `CLOCK_MONOTONIC` and is plausible, else the dequeue time,
       marked as such; `capture::clock::monotonic_ns` reads the same clock.
+- [x] `samples/vision/fishtank` with a fixed, mouse or scripted eye: a wgpu
+      raster pipeline presented to a winit surface (sky at infinity, neon
+      tank grid, instanced crystal / pillars / rings / orbs, fog, bloom
+      pyramid, ACES), the glass taken from the window's place on the
+      monitor, HUD, `P` screenshots, `--headless --output` PNGs.
 
 ## Not yet done
 
-- [ ] `samples/vision/fishtank`: wgpu renderer (grid, crystal, pillars and
-      rings at several depths, starfield, fog, bloom), manual eye mode
-      (mouse/arrows), headless `--output` screenshot, HUD.
+- [ ] Sample: the window's glass assumes a top-left client origin and a
+      monitor whose pixel grid spans the `--display-cm` area; a monitor's
+      own physical size (EDID) would remove the flag. The HUD texture is
+      re-created whenever its text width changes.
 - [ ] `crates/openseeface`: arch row, import with two-way coverage,
       detector + landmark nets on `crates/vision`, reference goldens
       (`tools/goldens/`), parity ladder (preprocess, layer taps, output,
