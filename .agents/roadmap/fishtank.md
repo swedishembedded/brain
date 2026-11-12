@@ -51,6 +51,12 @@ while the viewer moves - motion parallax, not stereo.
       `hardsigmoid`, `relu6` kernel pairs (`Act::HardSwish`,
       `Act::HardSigmoid`, `Act::Relu6`; FD-checked in `crates/gradcheck`)
       and `vision::SqueezeExcite` with a selectable gate.
+- [x] Sample webcam mode: capture, tracking and render threads, the
+      tracker on the CPU backend by default, `C` recentre and `Z`
+      measured-distance calibration saved to a profile that later runs
+      load, `--camera-image` replaying a photo through the whole chain
+      (verified here: fit residual 2.4 px on the portrait, render 57 fps on
+      the Arc iGPU while tracking).
 
 ## Not yet done
 
@@ -67,8 +73,19 @@ while the viewer moves - motion parallax, not stereo.
       is Hugging Face; until a pinned GitHub source exists the weights come
       from a sha256-checked fetch script into a local directory.
 - [ ] SDK `FaceLandmarkPipeline` (detect + streaming track), its e2e test.
-- [ ] Sample webcam mode: capture thread, tracking thread, persisted profile,
-      calibration keys; a recorded-webcam replay for regression.
+- [ ] Run against a live webcam: this development container may not open
+      `/dev/video0` (EPERM), so live tracking, jitter and latency are
+      unmeasured on a real camera.
+- [ ] GPU inference cost: every `vision` block submits eagerly, so a face
+      network is a few hundred small submissions; on the iGPU beside the
+      renderer that measured 80-116 ms per forward (2026-11-12, loaded box)
+      against 23-42 ms on the CPU backend. Record a forward as one
+      submission (or a captured program) before making `gpu` the default.
+- [ ] Intel NPU: `crates/npu` exports whole brain graphs to OpenVINO; the
+      openseeface networks have no exporter there yet, and this box's
+      container exposes no `/dev/accel` device to test one.
+- [ ] Recorded-webcam replay (a frame sequence with timestamps) for
+      regression; `--camera-image` replays a still photo only.
 - [ ] `crates/fastvlm` and `crates/ecapatdnn` each keep a private
       squeeze-excite; move them onto `vision::SqueezeExcite` (needs their
       parity goldens to re-prove). The shared block has no backward yet, and

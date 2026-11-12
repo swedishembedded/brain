@@ -23,7 +23,16 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::eye::{self, Eye, Source};
 use crate::renderer::Renderer;
+use crate::tracking::{self, Tracking};
 use crate::{hud, scene, view_through, Args};
+
+/// How far ahead of "now" a frame is seen: one refresh at 60 Hz, the time a
+/// frame rendered now waits for its scan-out.
+const PRESENT_LEAD_S: f64 = 1.0 / 60.0;
+
+fn now_s() -> f64 {
+    capture::clock::monotonic_ns() as f64 * 1e-9
+}
 
 struct Gfx {
     window: Arc<Window>,
@@ -49,10 +58,29 @@ struct App {
     shots: u32,
     frame_times: Vec<f64>,
     presented: u64,
+    tracking: Option<Tracking>,
+    /// The last calibration message, shown in the HUD.
+    note: String,
 }
 
 pub fn run(args: Args) -> Result<(), String> {
     let display = Display::flat(args.display_w_m, args.display_h_m).map_err(|e| e.to_string())?;
+    let tracking = match args.source {
+        Source::Webcam => {
+            eprintln!("fishtank: opening {:?} and loading the face tracker", args.camera);
+            let t = Tracking::start(tracking::Options {
+                camera: args.camera.clone(),
+                size: args.camera_size,
+                landmarks: args.landmarks,
+                device: args.tracker_device.clone(),
+                profile: args.profile.clone(),
+                save_to: args.profile_path.clone(),
+            })
+            .map_err(|e| format!("{e}\n(run with --pose-source manual to use the mouse instead)"))?;
+            Some(t)
+        }
+        _ => None,
+    };
     let event_loop = EventLoop::new().map_err(|e| format!("no window system: {e} (use --headless --output PATH to render without one)"))?;
     let mut app = App {
         args,
@@ -69,6 +97,8 @@ pub fn run(args: Args) -> Result<(), String> {
         shots: 0,
         frame_times: Vec::new(),
         presented: 0,
+        tracking,
+        note: String::new(),
     };
     event_loop.run_app(&mut app).map_err(|e| format!("event loop: {e}"))?;
     match app.error {
@@ -128,6 +158,7 @@ impl App {
         let e = match self.args.source {
             Source::Fixed(e) => e,
             Source::Synthetic => eye::synthetic(t),
+            Source::Webcam => self.tracking.as_ref().map(|tr| tr.viewer(now_s() + PRESENT_LEAD_S).cyclopean()).unwrap_or(eye::REST),
             Source::Manual => {
                 let p = glass.point(self.cursor[0], 1.0 - self.cursor[1]);
                 eye::manual([p[0], p[1]], self.manual_z)
@@ -138,13 +169,28 @@ impl App {
 
     fn hud_lines(&self, g: &Gfx, eye: Eye, glass: &Display) -> Vec<String> {
         let fps = if self.frame_times.len() > 1 { (self.frame_times.len() - 1) as f64 / (self.frame_times.last().unwrap() - self.frame_times[0]) } else { 0.0 };
-        vec![
+        let mut lines = vec![
             format!("FISHTANK  {}{}", self.args.source.label(), if self.frozen.is_some() { "  [FROZEN]" } else { "" }),
             format!("eye   x {:+6.1}  y {:+6.1}  z {:6.1} cm", eye[0] * 100.0, eye[1] * 100.0, eye[2] * 100.0),
             format!("glass {:.1} x {:.1} cm   render {:5.1} fps", glass.width() * 100.0, glass.height() * 100.0, fps),
             format!("gpu   {}", g.adapter_name),
-            "keys  Esc G D Space P F  arrows  PgUp/PgDn".to_string(),
-        ]
+        ];
+        if let Some(tr) = &self.tracking {
+            let v = tr.viewer(now_s() + PRESENT_LEAD_S);
+            let s = tr.stats.lock().unwrap().clone();
+            lines.push(format!("track {:?}  conf {:.2}  fit {:.1} px  age {:3.0} ms  lead {:2.0} ms", v.status, s.confidence, s.fit_rmse_px, v.sample_age_s.min(9.999) * 1e3, v.lead_s * 1e3));
+            lines.push(format!("cam   {}  infer {:4.1} ms  frames {}  dropped {}  detects {}", s.camera, s.inference_ms, s.frames, s.dropped, s.detections));
+            if !s.last_problem.is_empty() {
+                lines.push(format!("      {}", s.last_problem.chars().take(70).collect::<String>()));
+            }
+            lines.push("keys  C recentre  Z set distance  Esc G D Space P F".to_string());
+        } else {
+            lines.push("keys  Esc G D Space P F  arrows  PgUp/PgDn".to_string());
+        }
+        if !self.note.is_empty() {
+            lines.push(self.note.chars().take(76).collect());
+        }
+        lines
     }
 
     fn frame(&mut self) -> Result<(), String> {
@@ -176,16 +222,24 @@ impl App {
         Ok(())
     }
 
-    fn screenshot(&mut self) -> Result<String, String> {
+    /// Render the current view offscreen, with the HUD when it is on, and
+    /// save it to `path` (or the next `fishtank-NNN.png`).
+    fn screenshot(&mut self, path: Option<&std::path::Path>) -> Result<String, String> {
         let Some(g) = self.gfx.as_ref() else { return Err("no window yet".into()) };
         let t = self.start.elapsed().as_secs_f64();
         let glass = self.glass(g);
         let eye = self.eye(&glass, t);
-        let v = view_through(&glass, eye, t as f32, self.grid, None)?;
+        let hud = self.diagnostics.then(|| hud::render(&self.hud_lines(g, eye, &glass)));
+        let v = view_through(&glass, eye, t as f32, self.grid, hud.as_ref().map(|(p, w, h)| (p.as_slice(), *w, *h)))?;
         let g = self.gfx.as_mut().expect("checked above");
         let img = g.renderer.render_to_rgb(&v)?;
-        self.shots += 1;
-        let path = format!("fishtank-{:03}.png", self.shots);
+        let path = match path {
+            Some(p) => p.display().to_string(),
+            None => {
+                self.shots += 1;
+                format!("fishtank-{:03}.png", self.shots)
+            }
+        };
         imaging::codec::save_png(&path, &img)?;
         Ok(path)
     }
@@ -211,6 +265,18 @@ impl App {
             }
             Key::Character(c) => match c.as_str() {
                 "g" | "G" => self.grid = !self.grid,
+                "c" | "C" => {
+                    if let Some(tr) = &self.tracking {
+                        self.note = tr.recentre(now_s()).unwrap_or_else(|e| format!("recentre: {e}"));
+                        eprintln!("fishtank: {}", self.note);
+                    }
+                }
+                "z" | "Z" => {
+                    if let Some(tr) = &self.tracking {
+                        self.note = tr.set_distance(now_s(), self.args.calibration_distance_m).unwrap_or_else(|e| format!("set distance: {e}"));
+                        eprintln!("fishtank: {}", self.note);
+                    }
+                }
                 "d" | "D" => self.diagnostics = !self.diagnostics,
                 "f" | "F" => {
                     if let Some(g) = self.gfx.as_ref() {
@@ -218,7 +284,7 @@ impl App {
                         g.window.set_fullscreen(if full { None } else { Some(Fullscreen::Borderless(None)) });
                     }
                 }
-                "p" | "P" => match self.screenshot() {
+                "p" | "P" => match self.screenshot(None) {
                     Ok(p) => eprintln!("fishtank: saved {p}"),
                     Err(e) => eprintln!("fishtank: screenshot failed: {e}"),
                 },
@@ -278,6 +344,22 @@ impl ApplicationHandler for App {
                 if self.args.frames.is_some_and(|n| self.presented >= n) {
                     let fps = if self.frame_times.len() > 1 { (self.frame_times.len() - 1) as f64 / (self.frame_times.last().unwrap() - self.frame_times[0]) } else { 0.0 };
                     eprintln!("fishtank: presented {} frames, {fps:.1} fps over the last {}", self.presented, self.frame_times.len());
+                    if let Some(out) = self.args.output.clone() {
+                        match self.screenshot(Some(&out)) {
+                            Ok(p) => eprintln!("fishtank: saved the last frame to {p}"),
+                            Err(e) => eprintln!("fishtank: saving the last frame failed: {e}"),
+                        }
+                    }
+                    if let Some(tr) = &self.tracking {
+                        let v = tr.viewer(now_s() + PRESENT_LEAD_S);
+                        let s = tr.stats.lock().unwrap().clone();
+                        let e = v.cyclopean();
+                        eprintln!(
+                            "fishtank: tracking {:?}, eye ({:.1}, {:.1}, {:.1}) cm, conf {:.2}, fit {:.1} px, {} frames ({} dropped, {} detections), inference {:.1} ms{}",
+                            v.status, e[0] * 100.0, e[1] * 100.0, e[2] * 100.0, s.confidence, s.fit_rmse_px, s.frames, s.dropped, s.detections, s.inference_ms,
+                            if s.last_problem.is_empty() { String::new() } else { format!(", last problem: {}", s.last_problem) }
+                        );
+                    }
                     el.exit();
                 }
             }

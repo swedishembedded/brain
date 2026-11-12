@@ -22,6 +22,8 @@ pub enum Source {
     Manual,
     /// A slow Lissajous orbit around [`REST`].
     Synthetic,
+    /// The webcam: tracked, calibrated, filtered and predicted.
+    Webcam,
 }
 
 impl Source {
@@ -29,7 +31,8 @@ impl Source {
         match s {
             "manual" => Ok(Source::Manual),
             "synthetic" => Ok(Source::Synthetic),
-            other => Err(format!("--pose-source must be manual or synthetic, got {other:?}")),
+            "webcam" => Ok(Source::Webcam),
+            other => Err(format!("--pose-source must be webcam, manual or synthetic, got {other:?}")),
         }
     }
 
@@ -38,6 +41,7 @@ impl Source {
             Source::Fixed(_) => "fixed eye",
             Source::Manual => "manual eye (mouse, wheel, arrows)",
             Source::Synthetic => "synthetic orbit",
+            Source::Webcam => "webcam tracking",
         }
     }
 }

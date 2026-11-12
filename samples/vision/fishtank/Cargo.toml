@@ -23,9 +23,18 @@ wgpu.workspace = true
 winit = "0.30"
 pollster.workspace = true
 bytemuck.workspace = true
-# The HUD's bitmap font and the headless PNG writer.
+# The HUD's bitmap font, the headless PNG writer, YUYV to RGB.
 brain-imaging.workspace = true
+# Webcam head tracking: V4L2 frames with their capture time, the OpenSeeFace
+# landmark tracker on brain's own kernels and the device it runs on, and the
+# model store the weights are found in.
+brain-capture.workspace = true
+brain-openseeface.workspace = true
+brain-gpu-core.workspace = true
+brain-modelstore.workspace = true
+brain-modelref.workspace = true
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
-max-brain-crates = 28
+# 28 -> 34: webcam tracking (capture, openseeface, its vision blocks, the model store).
+max-brain-crates = 34
