@@ -33,7 +33,8 @@ Decode and NMS are written here independently of the Rust implementation, from
 the published YOLOv5 v6 formulas (xy = (2s - 0.5 + grid) * stride, wh = (2s)^2 *
 anchor, score = objectness * class, class-aware greedy NMS with strict `>`).
 The letterbox mirrors `imaging::letterbox_rgb` operation for operation in f32
-(half-pixel nearest resize, 114/255 grey pad) so both sides feed the network
+(integer half-pixel nearest resize, one integral centre pad shared by pixels and
+boxes, 114/255 grey fill) so both sides feed the network
 the same pixels.
 
 The ONNX is exported with a fixed 640 input; its Resize nodes carry constant
@@ -97,22 +98,30 @@ def round_half_away(x):
     return np.floor(x + np.float32(0.5))  # inputs here are non-negative
 
 
+def nearest_tap(o, in_len, out_len):
+    """`imaging::letterbox::nearest_tap`: `min(((2o + 1) * in) // (2 * out), in - 1)`, exact integers."""
+    return np.minimum(((2 * o.astype(np.int64) + 1) * in_len) // (2 * out_len), in_len - 1)
+
+
 def letterbox(rgb_u8, size):
-    """`imaging::letterbox_rgb` in numpy, f32 throughout. Returns CHW and the transform."""
+    """`imaging::letterbox_rgb` in numpy. Returns CHW and the transform.
+
+    The content size is `round(w0 * s) x round(h0 * s)` in f32; the pad is whole
+    pixels, `floor((size - new) / 2)`, shared by the pixels and the returned
+    transform (the extra pixel of an odd slack goes right/bottom); the resize
+    taps are the integer half-pixel nearest rule `nearest_tap`.
+    """
     h0, w0, _ = rgb_u8.shape
     src = rgb_u8.astype(np.float32) / np.float32(255.0)
     s = min(np.float32(size) / np.float32(w0), np.float32(size) / np.float32(h0))
     new_w = int(round_half_away(np.float32(w0) * s))
     new_h = int(round_half_away(np.float32(h0) * s))
-    pad_x = (np.float32(size) - np.float32(new_w)) * np.float32(0.5)
-    pad_y = (np.float32(size) - np.float32(new_h)) * np.float32(0.5)
-    inv = np.float32(1.0) / s
+    dx, dy = (size - new_w) // 2, (size - new_h) // 2
     out = np.full((3, size, size), PAD, dtype=np.float32)
-    ys = np.clip(round_half_away((np.arange(new_h, dtype=np.float32) + np.float32(0.5)) * inv - np.float32(0.5)), 0, h0 - 1).astype(int)
-    xs = np.clip(round_half_away((np.arange(new_w, dtype=np.float32) + np.float32(0.5)) * inv - np.float32(0.5)), 0, w0 - 1).astype(int)
-    dy, dx = int(pad_y), int(pad_x)  # truncation, as in the Rust
+    ys = nearest_tap(np.arange(new_h), h0, new_h)
+    xs = nearest_tap(np.arange(new_w), w0, new_w)
     out[:, dy:dy + new_h, dx:dx + new_w] = src[ys][:, xs].transpose(2, 0, 1)
-    return out, (float(s), float(pad_x), float(pad_y))
+    return out, (float(s), float(dx), float(dy))
 
 
 def decode(heads, conf=CONF):

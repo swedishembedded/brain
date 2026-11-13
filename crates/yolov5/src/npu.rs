@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use checkpoint::mmap::MmapSafetensors;
 use imaging::nms::Detection;
-use imaging::Letterbox;
+use imaging::{nearest_tap, Letterbox};
 use rknpu::graph::{Calibration, ConvParams, Graph as NpuGraph};
 use rknpu::layout::Shape;
 use rknpu::model::{Model, Timing};
@@ -156,8 +156,10 @@ pub fn npu_graph(ckpt: &MappedCheckpoint, size: usize) -> Result<NpuGraph, Error
     Ok(g)
 }
 
-/// Letterbox an RGB8 image into `size` x `size` (nearest-neighbour scaling,
-/// [`PAD`] fill) and say how to map boxes back. An image already of that size
+/// Letterbox an RGB8 image into `size` x `size` (half-pixel nearest-neighbour
+/// scaling by [`imaging::letterbox::nearest_tap`], the pad of
+/// [`Letterbox::compute`], [`PAD`] fill) and say how to map boxes back: the
+/// `u8` twin of [`imaging::letterbox_rgb`]. An image already of that size
 /// passes through untouched.
 pub fn letterbox_rgb8(rgb: &[u8], w: u32, h: u32, size: u32) -> (Cow<'_, [u8]>, Letterbox) {
     let lb = Letterbox::compute(w, h, size);
@@ -166,10 +168,9 @@ pub fn letterbox_rgb8(rgb: &[u8], w: u32, h: u32, size: u32) -> (Cow<'_, [u8]>, 
     }
     let mut out = vec![PAD; (size * size * 3) as usize];
     for y in 0..lb.new_h {
-        let sy = ((y as f32 + 0.5) / lb.scale) as u32;
-        let sy = sy.min(h - 1);
+        let sy = nearest_tap(y, h, lb.new_h);
         for x in 0..lb.new_w {
-            let sx = (((x as f32 + 0.5) / lb.scale) as u32).min(w - 1);
+            let sx = nearest_tap(x, w, lb.new_w);
             let (dx, dy) = (x + lb.pad_x as u32, y + lb.pad_y as u32);
             let s = ((sy * w + sx) * 3) as usize;
             let d = ((dy * size + dx) * 3) as usize;
