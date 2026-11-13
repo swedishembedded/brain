@@ -190,7 +190,7 @@ pub fn gpu_totals() -> Vec<(u32, u64)> {
 /// estimate omits ([`HEADROOM`], the floor). A budget `b` of the `free`
 /// bytes then holds when `b * (1 + overhead) + context <= free`.
 ///
-/// Three measured cases on a Tesla P40 set the terms:
+/// Two measured cases on a Tesla P40 set the terms:
 ///
 /// * FLUX.2 klein-9B's `dit`+`vae_enc` (13,154,417,928 + 2,220,175,360 bytes)
 ///   on a card reporting 15.4 GiB free: judged a fit at 1 GiB headroom with
