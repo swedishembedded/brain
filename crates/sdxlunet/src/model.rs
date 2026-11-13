@@ -944,8 +944,8 @@ impl Unet {
     /// and read their shapes from [`Unet::control_shapes`].
     ///
     /// The residual is added to the SKIP COPY, not to the running hidden state
-    /// - diffusers adds it to `down_block_res_samples`, which only the up path
-    /// consumes. Adding it to `hh` as well would double-count it through the
+    /// (diffusers adds it to `down_block_res_samples`, which only the up path
+    /// consumes). Adding it to `hh` as well would double-count it through the
     /// next down block, and every shape still matches, so nothing would fail.
     /// The mid residual *is* added to the running state, because there the
     /// residual list and the hidden state are the same tensor.

@@ -164,7 +164,7 @@ fn step_floor(precision: mirage::model::Precision) {
     for mut dev in devices("step floor").into_iter().take(1) {
         dev.set_cq_activations(precision.activations());
         let dd = DeviceDecoder::upload(&dev, model.decoder());
-        let memory: Vec<f32> = cats["memory"].iter().map(|&v| v as f32).collect();
+        let memory: Vec<f32> = cats["memory"].to_vec();
         let tokens: Vec<u32> = cats["tokens"].iter().map(|&t| t as u32).collect();
         let (rounds, inner) = (40, 10);
         for batch in [1usize, 8, 32, 64] {
@@ -266,7 +266,7 @@ fn step_once(batch: usize) {
     let model = mirage::model::Mirage::open(&dir).unwrap();
     let dev = devices("step profile").into_iter().next().expect("a device");
     let dd = DeviceDecoder::upload(&dev, model.decoder());
-    let memory: Vec<f32> = cats["memory"].iter().map(|&v| v as f32).collect();
+    let memory: Vec<f32> = cats["memory"].to_vec();
     let tokens: Vec<u32> = cats["tokens"].iter().map(|&t| t as u32).collect();
     let mems: Vec<&[f32]> = (0..batch).map(|_| &memory[..]).collect();
     let cross = dd.cross(&dev, &memory_batch(&dev, &mems, 512));

@@ -87,7 +87,10 @@ fn the_cooperative_row_norm_matches_the_one_barrier_kernel() {
     }
 }
 
-fn kron_factors(fa: usize, fb: usize, seed: u64) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u32>) {
+/// The Kronecker factors, the pre and post scales and the permutation of one rotation.
+type KronFactors = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u32>);
+
+fn kron_factors(fa: usize, fb: usize, seed: u64) -> KronFactors {
     let n = fa * fb;
     let mut perm: Vec<u32> = (0..n as u32).collect();
     let mut rng = Lcg::new(seed); // seed: a shuffled gather permutation compared between two paths

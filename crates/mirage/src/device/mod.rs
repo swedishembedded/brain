@@ -283,7 +283,7 @@ impl Device {
 
     /// `(1 + scale)`-weighted RMS norm over rows of width `d`: `weight` is `1 + scale`.
     pub fn zc_norm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, weight: &DeviceBuffer, rows: u32, d: u32, y: &DeviceBuffer) {
-        let kernel = if self.cooperative() && d <= 2048 && d % 4 == 0 { "rmsnorm_rows_wg" } else { "rmsnorm_rows" };
+        let kernel = if self.cooperative() && d <= 2048 && d.is_multiple_of(4) { "rmsnorm_rows_wg" } else { "rmsnorm_rows" };
         s.push(self.gpu().dispatch(self.k(kernel), &[x, weight, y], &[d, rows, NORM_EPS.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
     }
 
@@ -297,7 +297,7 @@ impl Device {
     #[allow(clippy::too_many_arguments)]
     pub fn zc_norm_axpy_norm(&self, s: &mut Vec<Step>, scale: f32, x: &DeviceBuffer, w1: &DeviceBuffer, w2: &DeviceBuffer, rows: u32, d: u32, y: &DeviceBuffer) -> DeviceBuffer {
         let h = self.alloc((rows * d) as usize);
-        let kernel = if self.cooperative() && d <= 512 && d % 4 == 0 { "mirage_rms_axpy_norm_wg" } else { "mirage_rms_axpy_norm" };
+        let kernel = if self.cooperative() && d <= 512 && d.is_multiple_of(4) { "mirage_rms_axpy_norm_wg" } else { "mirage_rms_axpy_norm" };
         s.push(self.gpu().dispatch(self.k(kernel), &[x, w1, y, w2, &h], &[d, rows, NORM_EPS.to_bits(), scale.to_bits()], gpu_core::Dispatch::Workgroups(rows)));
         h
     }

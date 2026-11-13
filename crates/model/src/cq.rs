@@ -465,6 +465,8 @@ mod tests {
 
     /// The vendor engine's integer tables, read from its memory while it served the released archive (`cq_row4_dp`
     /// and `project_batch_neon_dequant` hold them next to their scales).
+    // The tables are the vendor engine's own, recorded with every digit it printed.
+    #[allow(clippy::excessive_precision)]
     #[test]
     fn the_integer_tables_are_the_vendor_engines() {
         let released: [(&[f32], &[i8]); 3] = [

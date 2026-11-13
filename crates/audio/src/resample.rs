@@ -136,28 +136,6 @@ pub fn rational(samples: &[f32], up: u32, down: u32) -> Vec<f32> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bessel_i0_at_zero_is_one() {
-        assert!((bessel_i0(0.0) - 1.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn kaiser_beta_zero_is_rectangular() {
-        let w = kaiser(5, 0.0);
-        for v in w {
-            assert!((v - 1.0).abs() < 1e-9);
-        }
-    }
-
-    #[test]
-    fn gcd_reduces_ratio() {
-        assert_eq!(gcd(16000, 24000), 8000);
-    }
-}
 
 /// `torchaudio.transforms.Resample(orig_rate, new_rate)` with its defaults,
 /// to float rounding: a Hann-windowed sinc (`lowpass_filter_width = 6`,
@@ -208,4 +186,27 @@ pub fn sinc_hann(samples: &[f32], orig_rate: u32, new_rate: u32) -> Vec<f32> {
     }
     out.truncate(target);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bessel_i0_at_zero_is_one() {
+        assert!((bessel_i0(0.0) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn kaiser_beta_zero_is_rectangular() {
+        let w = kaiser(5, 0.0);
+        for v in w {
+            assert!((v - 1.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn gcd_reduces_ratio() {
+        assert_eq!(gcd(16000, 24000), 8000);
+    }
 }

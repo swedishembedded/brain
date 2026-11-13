@@ -1086,6 +1086,29 @@ impl model::ModelConfig for OuroConfig {
     }
 }
 
+
+/// The exit pass of one row, the reference's CDF rule: pass `t` exits with
+/// probability `sigmoid(gate[t])` of the mass still remaining (the last pass
+/// takes all of it, so its gate is unused), and the chosen pass is the first
+/// whose cumulative exit mass reaches `threshold`. `gates` holds one logit per
+/// pass. Every exit decision (training's [`Ouro::exit_steps`], decode and
+/// serving) goes through this one function.
+pub fn exit_pass(gates: &[f64], threshold: f64) -> usize {
+    let t = gates.len();
+    let (mut remaining, mut cdf, mut out) = (1.0f64, 0.0f64, t - 1);
+    for (pass, &gate) in gates.iter().enumerate() {
+        let lambda = 1.0 / (1.0 + (-gate).exp());
+        let p = if pass + 1 < t { lambda * remaining } else { remaining };
+        remaining *= 1.0 - lambda;
+        cdf += p;
+        if cdf >= threshold {
+            out = pass;
+            break;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1136,26 +1159,4 @@ mod tests {
             assert!(gpu_core::cost::covers(name), "kernel {name} has no cost formula");
         }
     }
-}
-
-/// The exit pass of one row, the reference's CDF rule: pass `t` exits with
-/// probability `sigmoid(gate[t])` of the mass still remaining (the last pass
-/// takes all of it, so its gate is unused), and the chosen pass is the first
-/// whose cumulative exit mass reaches `threshold`. `gates` holds one logit per
-/// pass. Every exit decision (training's [`Ouro::exit_steps`], decode and
-/// serving) goes through this one function.
-pub fn exit_pass(gates: &[f64], threshold: f64) -> usize {
-    let t = gates.len();
-    let (mut remaining, mut cdf, mut out) = (1.0f64, 0.0f64, t - 1);
-    for (pass, &gate) in gates.iter().enumerate() {
-        let lambda = 1.0 / (1.0 + (-gate).exp());
-        let p = if pass + 1 < t { lambda * remaining } else { remaining };
-        remaining *= 1.0 - lambda;
-        cdf += p;
-        if cdf >= threshold {
-            out = pass;
-            break;
-        }
-    }
-    out
 }

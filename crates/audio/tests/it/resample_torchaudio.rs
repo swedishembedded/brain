@@ -8,6 +8,9 @@
 //! `tools/goldens/audio_resample_torchaudio_reference.py` (torchaudio 2.11)
 //! over the same fixture.
 
+// The reference outputs are pasted with every digit the reference printed; they are compared, never computed.
+#![allow(clippy::excessive_precision)]
+
 use audio::resample::sinc_hann;
 
 /// `0.6 sin(0.21 i) + 0.3 cos(1.7 i + 0.4)`, the reference script's fixture.

@@ -257,7 +257,7 @@ impl Device {
     #[allow(clippy::too_many_arguments)]
     pub fn attention_gated(&self, s: &mut Vec<Step>, a: AttnShape, [q, k, v, key_mask, pos]: [&DeviceBuffer; 5], gate: (&DeviceBuffer, u32, u32), out: &DeviceBuffer) {
         let visible = if a.visible == u32::MAX { a.nk } else { a.visible.min(a.nk) };
-        if self.cooperative() && a.nq == 1 && a.hd <= 64 && a.vd <= 64 && a.hd % 4 == 0 && a.vd % 4 == 0 && visible <= SINGLE_BLOCK_KEYS && a.heads.is_multiple_of(a.kvh) {
+        if self.cooperative() && a.nq == 1 && a.hd <= 64 && a.vd <= 64 && a.hd.is_multiple_of(4) && a.vd.is_multiple_of(4) && visible <= SINGLE_BLOCK_KEYS && a.heads.is_multiple_of(a.kvh) {
             let scale = (1.0 / (a.hd as f32).sqrt()).to_bits();
             let p = [a.batch, a.heads, a.kvh, a.hd, a.vd, a.nk, a.visible, scale, gate.1, gate.2];
             s.push(self.gpu().dispatch(self.k("mirage_attn_step_wg"), &[q, k, v, key_mask, pos, gate.0, out], &p, gpu_core::Dispatch::Workgroups(a.batch * a.heads)));
@@ -363,7 +363,7 @@ impl Device {
     /// barriers and the lanes are the released four (a width of at most 512) this is one dispatch; elsewhere the three.
     #[allow(clippy::too_many_arguments)]
     pub fn mhc_front(&self, s: &mut Vec<Step>, g: MhcShape, a: [f32; 3], lanes: &DeviceBuffer, phi: &DeviceBuffer, b: [&DeviceBuffer; 3], d: u32, (maps, u, y): (&DeviceBuffer, &DeviceBuffer, &DeviceBuffer)) {
-        if self.cooperative() && g.n == 4 && d <= 512 && d % 4 == 0 {
+        if self.cooperative() && g.n == 4 && d <= 512 && d.is_multiple_of(4) {
             let p = [g.rows, g.n, g.lane_id, g.iters, a[0].to_bits(), a[1].to_bits(), a[2].to_bits(), d];
             s.push(self.gpu().dispatch(self.k("mirage_mhc_front_wg"), &[lanes, phi, b[0], b[1], b[2], maps, u, y], &p, gpu_core::Dispatch::Workgroups(g.rows)));
             return;

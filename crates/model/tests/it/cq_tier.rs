@@ -169,7 +169,7 @@ fn the_int8_rotation_kernels_equal_the_host_quantiser_bit_for_bit() {
     x[k + 3] = 400.0;
     let xb = g.storage_init("x", &x);
     let rotated = Cq::rotate(&x, m, k);
-    let want: Vec<(Vec<i8>, f32)> = rotated.chunks_exact(GROUP).map(a8_quantize_group).collect();
+    let want: Vec<(Vec<i8>, f32)> = rotated.as_chunks::<GROUP>().0.iter().map(|c| a8_quantize_group(c.as_slice())).collect();
     let params = [m as u32, k as u32, kpad as u32, 0];
     let groups = (m * kpad / GROUP) as u32;
     let mut variants = vec![("cq_rotate_a8", Dispatch::Threads(groups))];
@@ -205,8 +205,8 @@ fn the_int8_product_kernels_equal_the_host_integer_emulation() {
             let want = cq.matmul_a8(&x, m);
             let scale = want.iter().map(|v| v.abs()).fold(0f32, f32::max);
             let (kpad, groups) = (padded(k), padded(k) / GROUP);
-            let rows: Vec<(Vec<i8>, f32)> = Cq::rotate(&x, m, k).chunks_exact(GROUP).map(a8_quantize_group).collect();
-            let packed: Vec<f32> = rows.iter().flat_map(|(q, _)| q.chunks_exact(4).map(|c| f32::from_bits(u32::from_le_bytes([c[0] as u8, c[1] as u8, c[2] as u8, c[3] as u8])))).collect();
+            let rows: Vec<(Vec<i8>, f32)> = Cq::rotate(&x, m, k).as_chunks::<GROUP>().0.iter().map(|c| a8_quantize_group(c.as_slice())).collect();
+            let packed: Vec<f32> = rows.iter().flat_map(|(q, _)| q.as_chunks::<4>().0.iter().map(|c| f32::from_bits(u32::from_le_bytes([c[0] as u8, c[1] as u8, c[2] as u8, c[3] as u8])))).collect();
             let (q, a) = (g.storage_init("q", &packed), g.storage_init("a", &rows.iter().map(|r| r.1).collect::<Vec<_>>()));
             assert_eq!(packed.len(), m * kpad / 4);
             assert_eq!(rows.len(), m * groups);

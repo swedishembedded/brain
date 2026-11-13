@@ -108,7 +108,10 @@ pub trait Rollout {
 /// architecture-specific part (which engine, its geometry and the adapter shape it refits to)
 /// is the closure's.
 #[derive(Clone)]
-pub struct RolloutFactory(std::rc::Rc<dyn Fn(&std::path::Path, u32) -> std::io::Result<Box<dyn SyncRollout>>>);
+pub struct RolloutFactory(std::rc::Rc<BuildRollout>);
+
+/// The recipe a [`RolloutFactory`] holds: a cycle's starting checkpoint and row length to its rollout.
+type BuildRollout = dyn Fn(&std::path::Path, u32) -> std::io::Result<Box<dyn SyncRollout>>;
 
 impl RolloutFactory {
     /// A factory that calls `build` with a cycle's starting checkpoint and row length.
