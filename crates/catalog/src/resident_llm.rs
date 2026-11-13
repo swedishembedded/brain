@@ -1301,7 +1301,7 @@ impl ResidentModel for QwenResident {
         // on why this must be the actual engine capacity, not the
         // checkpoint's architectural `max_position_embeddings`.
         let generate = llmserve::with_sampling_defaults(generate_spec("generate text (Qwen3; chat template optional)", true), &self.id, self.sampling_defaults());
-        Manifest::new(&self.id, "text generation (Qwen3 BPE decoder)", vec![generate])
+        Manifest::new(&self.id, "text generation (Qwen3 BPE decoder)", vec![generate, llmserve::score_spec()])
             .with_max_context_tokens(self.ctx as u64)
     }
     /// One key for the base and every adapter riding on it: a constant, because
@@ -1578,8 +1578,11 @@ impl Instance for QwenInstance {
     /// the one batched forward. The engine's bank is brought in line with the
     /// registry first, between calls, when no sequence is running, so a hot
     /// swap never changes what a running sequence reads.
-    fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         self.adapters.sync(self.engine.decoder_mut());
+        if action == llmserve::SCORE_ACTION {
+            return llmserve::score_batch_scheduled(&mut self.engine, &QwenFrontend { decoding: &self.decoding, adapters: &self.adapters }, invs);
+        }
         run_batch_scheduled(&mut self.engine, &QwenFrontend { decoding: &self.decoding, adapters: &self.adapters }, invs, progress)
     }
 
@@ -1589,7 +1592,11 @@ impl Instance for QwenInstance {
     /// when the group starts (no sequence is running then); an adapter offered
     /// while a group runs is routable from the next group, a request naming it
     /// earlier is answered "no model".
-    fn run_open(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn residency::JobFeed) -> bool {
+    fn run_open(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn residency::JobFeed) -> bool {
+        // A scoring group is closed: it is answered by `run_batch`.
+        if action == llmserve::SCORE_ACTION {
+            return false;
+        }
         self.adapters.sync(self.engine.decoder_mut());
         let capacity = self.max_batch;
         let mut invs = invs;

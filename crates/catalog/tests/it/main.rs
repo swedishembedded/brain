@@ -22,6 +22,7 @@ mod resident_packed;
 mod ricursive_chat;
 mod ricursive_served;
 mod scheduled_batch;
+mod scored;
 mod served_bounds;
 mod served_paths;
 mod served_training;

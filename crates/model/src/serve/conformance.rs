@@ -30,6 +30,9 @@
 //! * [`adapters_never_share_kv_with_the_base`]: K/V computed under an adapter
 //!   is never served to the base or to another adapter, in either direction.
 //!
+//! * [`scoring_is_declared_exactly_when_it_works`]: a decoder that declares a teacher-forced scoring pass scores a
+//!   continuation deterministically (under the base and under an adapter) and releases what it took; one that does not
+//!   declare it refuses by naming the gap.
 //! * [`embedded_prompts_batch_and_never_share_a_prefix`]: a decoder that takes
 //!   embedding rows in a prompt ([`PagedDecoder::embed_width`]) decodes
 //!   batched embedded requests as it does each alone, and never serves a cached
@@ -133,6 +136,37 @@ pub fn run_all<D: PagedDecoder>(c: &Conformance<D>) {
         adapters_serve_embedded_prompts_apart_from_the_base(c);
     }
     speculation_equals_plain_greedy(c);
+    scoring_is_declared_exactly_when_it_works(c);
+}
+
+/// A decoder that declares [`PagedDecoder::scores_continuations`] returns one finite, non-positive log-probability for
+/// each scored token, the same on a second decoder, under an adapter as well as under the base, and leaves the pool as
+/// it found it; one that does not declare it refuses the call by name of the gap, so a caller is refused by capability.
+pub fn scoring_is_declared_exactly_when_it_works<D: PagedDecoder>(c: &Conformance<D>) {
+    let mut sched = Scheduler::new((c.make)(), 4);
+    let vocab = sched.decoder_mut().vocab();
+    let sequence = tokens(vocab, 3, 14);
+    let free = sched.free_blocks();
+    if !sched.scores_continuations() {
+        let error = sched.score_continuation(None, &sequence, 6, 1.0).expect_err("a decoder that declares no scoring pass refuses to score");
+        assert!(error.contains("cannot score"), "the refusal names the gap: {error}");
+        return;
+    }
+    let scored = sched.score_continuation(None, &sequence, 6, 1.0).expect("the decoder scores what it declares it can");
+    assert_eq!(scored.len(), sequence.len() - 6, "one log-probability per scored token");
+    assert!(scored.iter().all(|l| l.is_finite() && *l <= 1e-6), "log-probabilities of the full distribution: {scored:?}");
+    assert_eq!(sched.free_blocks(), free, "a scoring pass releases what it took");
+    let mut other = Scheduler::new((c.make)(), 4);
+    assert_eq!(other.score_continuation(None, &sequence, 6, 1.0).unwrap(), scored, "scoring is deterministic across decoders built alike");
+    if let Some(load) = c.load_adapter {
+        let adapter = load(sched.decoder_mut());
+        let under = sched.score_continuation(Some(adapter), &sequence, 6, 1.0).expect("the decoder scores under a resident adapter");
+        assert_eq!(under.len(), scored.len());
+        assert_eq!(sched.free_blocks(), free);
+    }
+    // The arguments are checked: a start outside the sequence and a temperature that is not positive are refused.
+    assert!(sched.score_continuation(None, &sequence, 0, 1.0).is_err() && sched.score_continuation(None, &sequence, sequence.len() + 1, 1.0).is_err());
+    assert!(sched.score_continuation(None, &sequence, 6, 0.0).is_err());
 }
 
 pub fn batched_output_equals_single_request_output<D: PagedDecoder>(c: &Conformance<D>) {

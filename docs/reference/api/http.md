@@ -202,6 +202,20 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   generation on the serving thread. Train rollouts at temperature 1.0 without
   top-k or top-p so the sampler's distribution and the trace's coincide; `logprobs`
   (above) is the sampler's own, truncated figure and is a different quantity.
+- **Scoring given text (`score`).** A served Qwen3 or Qwen3.8 chat model (and each adapter id riding on it) has a
+  `score` action, called through `POST /v1/run` with `model` the base or adapter id and `blobs.records` a
+  `generic-messages-v2` JSONL text blob. Each message marked `"train": true` is an answer, scored teacher-forced
+  under the model's full distribution at temperature 1, as the model is asked for it: the prompt is what a `generate`
+  call renders for the messages before it (client text cannot spell a control token), the answer's tokens are its
+  content plus the end-of-turn token that closes it (`include_stop`, default true). Params: `per_token` (also return
+  each answer's `token_ids` and `token_logprobs`), `include_stop`, `enable_thinking` (render the prompts as a request
+  that allows reasoning would). The reply's `outputs` hold `records` (each with its `answers`: `message`, `tokens`,
+  `logprob`, `mean_logprob`), the totals `tokens`, `logprob`, `mean_logprob`, the `tokenizer_digest`,
+  `chat_template_digest` and `base_digest`, and the `adapter` that scored. At most 4096 records of at most 64
+  supervised answers each, and 8192 answers in a call; a record with tool calls, tool results, tool schemas or reasoning content, one with no
+  supervised message, a malformed one, or one longer than the model holds fails the whole call by record number
+  before any pass (400). A model that cannot score a continuation does not declare the action. Scoring is one
+  prefill per answer on the serving instance, between its decode steps; it does not read or write the prefix cache.
 - **Seed and served identity.** An OpenAI or OpenRouter chat or completions
   reply (and the terminal chunk of a stream) carries a non-standard
   `brain: {"seed": <int>, "adapter": {"id", "digest", "version"}, "base_digest", "backend",

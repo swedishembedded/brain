@@ -660,12 +660,19 @@ impl<D: PagedDecoder + BankedEngine + Send, F: Frontend + Send> Instance for Ada
         self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
     }
 
-    fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         self.adapters.sync(self.sched.decoder_mut());
+        if action == llmserve::SCORE_ACTION {
+            return llmserve::score_batch_scheduled(&mut self.sched, &AdaptedFrontend { front: &self.front, adapters: &self.adapters }, invs);
+        }
         run_batch_scheduled(&mut self.sched, &AdaptedFrontend { front: &self.front, adapters: &self.adapters }, invs, progress)
     }
 
-    fn run_open(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn residency::JobFeed) -> bool {
+    fn run_open(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn residency::JobFeed) -> bool {
+        // A scoring group is closed: it is answered by `run_batch`.
+        if action == llmserve::SCORE_ACTION {
+            return false;
+        }
         self.adapters.sync(self.sched.decoder_mut());
         let mut invs = invs;
         // A group that idles while the registry has moved hands back: refresh the

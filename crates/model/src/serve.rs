@@ -1358,6 +1358,9 @@ fn accept_token(r: &mut Running, next: u32, logprob: f32) {
     }
 }
 
+/// How many times a scoring pass asks whether its adapter is resident yet (a millisecond apart) before it gives up.
+const ADAPTER_LOAD_POLLS: u32 = 10_000;
+
 /// **Continuous-batching scheduler.** Requests are submitted at any time, admitted
 /// when the KV pool + batch have room (prefilled + first token sampled), then every
 /// running sequence advances together in one batched decode step per iteration.
@@ -1803,7 +1806,25 @@ impl<D: PagedDecoder> Scheduler<D> {
             return Err(format!("score_continuation: the temperature is {temperature}; it must be finite and positive"));
         }
         let namespace = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
-        self.dec.score_continuation(namespace, tokens, from, temperature)
+        let Some(adapter) = adapter else { return self.dec.score_continuation(namespace, tokens, from, temperature) };
+        // An adapter must be resident in the decoder's bank while its rows run, as for a decoded sequence: made
+        // resident (it may be loading), pinned for the pass, unpinned however the pass ends.
+        let mut attempts = 0u32;
+        loop {
+            match self.dec.adapter_availability(adapter) {
+                AdapterAvailability::Resident => break,
+                AdapterAvailability::Unknown => return Err("score_continuation: the adapter is not served by this decoder".to_string()),
+                AdapterAvailability::Loading if attempts < ADAPTER_LOAD_POLLS => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                AdapterAvailability::Loading => return Err("score_continuation: the adapter did not become resident in time".to_string()),
+            }
+        }
+        self.dec.pin_adapter(adapter);
+        let scored = self.dec.score_continuation(namespace, tokens, from, temperature);
+        self.dec.unpin_adapter(adapter);
+        scored
     }
 
     /// The most context one sequence may hold, prompt and reply together:

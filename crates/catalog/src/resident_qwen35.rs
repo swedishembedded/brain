@@ -197,7 +197,7 @@ impl ResidentModel for Qwen35Resident {
         Manifest::new(
             &self.id,
             "text generation (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder; single-GPU, weights as the checkpoint stores them (f32, bf16 or packed int8) + fp32 KV; continuous batching: every resident sequence decodes in one batched step per iteration -- see crate::resident_qwen35's module doc)",
-            vec![generate_spec("generate text (Qwen3.8-27B; chat template optional)", true)],
+            vec![generate_spec("generate text (Qwen3.8-27B; chat template optional)", true), llmserve::score_spec()],
         )
         .with_max_context_tokens(self.ctx() as u64)
     }
