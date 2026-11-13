@@ -182,7 +182,7 @@ reader, JSON). `extract` adds `memory_reused`.
 ```bash
 brain mirage describe --image photo.jpg --precision cq --json
 brain mirage describe --image photo.jpg --precision cq-a8 --json
-brain mirage quantize --out ./mirage-cq [--weights DIR]
+brain mirage quantize --dest ./mirage-cq [--weights DIR]
 ```
 
 `fp32` (default) keeps every weight as float32: about 206 MB resident (the 65-tap

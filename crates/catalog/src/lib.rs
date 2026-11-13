@@ -648,7 +648,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(mirage::caps::MirageProvider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("mirage", &mirage::resolver::MirageSpec)),
-            resident: crate::resident_in_store!(crate::resident_mirage::MirageResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_mirage::MirageResident::from_store),
         },
         ModelEntry {
             manifest: arcface::caps::manifest,

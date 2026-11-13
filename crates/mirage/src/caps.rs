@@ -143,9 +143,26 @@ pub fn extract_spec() -> ActionSpec {
         .input(BlobSpec::new("image", Media::Image, "the image to read the form from (HWC f32 in [0,1])").required())
 }
 
+/// The `quantize` action: the packed deployment archive from the FP32
+/// checkpoint, with the plan (which tensors are CQ at which width,
+/// codebooks, tokenizer) of the released `mirage.cact` beside it; an adapter
+/// in the weights directory is folded in first.
+pub fn quantize_spec() -> ActionSpec {
+    ActionSpec::new("quantize", "write the packed deployment archive (mirage.cact, 2-4 bits per weight) from the FP32 checkpoint, the archive `precision cq` serves and the vendor engine loads")
+        .param(ParamSpec::new("dest", ParamType::Str, "the directory that receives mirage.cact (written through a temporary name) and config.json, on the serving machine").required().host_resolved())
+}
+
+const DESCRIPTION: &str = "Mirage visual perception: describe an image (objects, masks, text, relations) or extract a form from it.";
+
 /// The full, static capability manifest: safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
-    Manifest::new(MODEL, "Mirage visual perception: describe an image (objects, masks, text, relations) or extract a form from it.", vec![describe_spec(), extract_spec()])
+    Manifest::new(MODEL, DESCRIPTION, vec![describe_spec(), extract_spec(), quantize_spec()])
+}
+
+/// The actions the scheduled service batches; `quantize` writes files on the
+/// host and is run locally.
+pub fn manifest_resident() -> Manifest {
+    Manifest::new(MODEL, DESCRIPTION, vec![describe_spec(), extract_spec()])
 }
 
 // ===================== requests =====================
@@ -476,6 +493,11 @@ impl Action for MirageAction {
         self.spec.clone()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if self.spec.name == "quantize" {
+            let dest = inv.get_str("dest").ok_or("mirage quantize: missing required param 'dest'")?;
+            let written = crate::model::quantize_dir(std::path::Path::new(&self.dir), std::path::Path::new(&dest)).map_err(|e| format!("mirage quantize: {e}"))?;
+            return Ok(capability::Outcome::new().set("archive", serde_json::json!(written.display().to_string())));
+        }
         let precision = precision_of(inv)?;
         // One resident session at a time: a request for other weights replaces it.
         let load = || match precision {
@@ -511,7 +533,9 @@ mod tests {
 
     #[test]
     fn the_manifest_declares_two_actions_and_no_path_param() {
-        let m = manifest();
+        assert_eq!(manifest().actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["describe", "extract", "quantize"]);
+        assert!(quantize_spec().params.iter().all(|p| p.host_resolved), "the archive is written on the host");
+        let m = manifest_resident();
         assert_eq!(m.model, MODEL);
         assert_eq!(m.actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["describe", "extract"]);
         for a in &m.actions {

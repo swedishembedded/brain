@@ -44,7 +44,7 @@ impl MirageResident {
     /// Whatever the model-store resolver finds for [`mirage::resolver::MirageSpec`]'s `weights` role.
     /// `None` (not served, never a startup failure) when the store holds no released checkpoint, or holds more than
     /// one and nothing says which.
-    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<MirageResident> {
+    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<MirageResident> {
         let assembly = loader::served::served_assembly(models_dir, "mirage", &mirage::resolver::MirageSpec, &[])?;
         Self::from_assembly(&assembly)
     }
@@ -83,7 +83,7 @@ pub const HOST_BYTES: u64 = 2 << 30;
 
 impl ResidentModel for MirageResident {
     fn manifest(&self) -> Manifest {
-        mirage::caps::manifest()
+        mirage::caps::manifest_resident()
     }
 
     /// One instance per weight source: a request naming a `precision` is served by the instance holding exactly those
