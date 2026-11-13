@@ -426,6 +426,8 @@ pub struct TrackCall {
     pub height: u32,
     pub fps: f64,
     pub request: crate::track::TrackRequest,
+    /// The caller's cancellation, polled between frames.
+    pub cancel: capability::CancelToken,
 }
 
 /// Decode and check a `track` invocation. Every refusal (no clicks, a click
@@ -460,7 +462,7 @@ pub fn track_call(inv: &Invocation) -> Result<TrackCall, String> {
         binary: !inv.get_bool("soft").unwrap_or(false),
     };
     request.check(decoded.len(), width, height)?;
-    Ok(TrackCall { frames: decoded.into_iter().map(|f| f.0).collect(), width, height, fps, request })
+    Ok(TrackCall { frames: decoded.into_iter().map(|f| f.0).collect(), width, height, fps, request, cancel: inv.cancel.clone() })
 }
 
 /// `'x,y;x,y'` as `(x, y, label)` clicks.
@@ -478,7 +480,8 @@ fn clicks(s: &str, label: f32) -> Result<Vec<(f32, f32, f32)>, String> {
 /// Run a checked `track` call on a tracking model ([`crate::track::load_video`]).
 pub fn run_track(model: &Sam2, call: &TrackCall, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let masks = crate::track::track_clip(model, &call.frames, call.width, call.height, call.fps, &call.request, &mut |done, total| {
-        progress(Progress::step(done as u32, total as u32, "tracking"))
+        progress(Progress::step(done as u32, total as u32, "tracking"));
+        !call.cancel.is_cancelled()
     })?;
     let occluded: Vec<usize> = masks.occluded_frames().into_keys().collect();
     Ok(Outcome::new().set("frames", json!(masks.frames.len())).set("occluded_frames", json!(occluded)).blob("masks", masks.to_blob()))

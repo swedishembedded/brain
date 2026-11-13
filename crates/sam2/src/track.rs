@@ -64,10 +64,11 @@ pub fn load_video(weights: &str, cfg: Sam2Config, gpu: Gpu) -> Result<Sam2, Stri
 }
 
 /// Track `req`'s object through `frames` (interleaved `h * w * 3` RGB in
-/// `[0,1]`), reporting `(done, total)` per frame. Frames before the prompt
+/// `[0,1]`), reporting `(done, total)` per frame; the run stops with
+/// `"cancelled"` as soon as `progress` returns false. Frames before the prompt
 /// frame take its mask (reverse tracking is not ported), so every frame has
 /// one and frame indices never shift.
-pub fn track_clip(m: &Sam2, frames: &[Vec<f32>], w: u32, h: u32, fps: f64, req: &TrackRequest, progress: &mut dyn FnMut(usize, usize)) -> Result<MaskClip, String> {
+pub fn track_clip(m: &Sam2, frames: &[Vec<f32>], w: u32, h: u32, fps: f64, req: &TrackRequest, progress: &mut dyn FnMut(usize, usize) -> bool) -> Result<MaskClip, String> {
     let n = frames.len();
     req.check(n, w, h)?;
     let s = m.cfg.image_size;
@@ -96,7 +97,9 @@ pub fn track_clip(m: &Sam2, frames: &[Vec<f32>], w: u32, h: u32, fps: f64, req: 
         // reference's `_get_orig_video_res_output` does: one bilinear step.
         let (up, ushape) = ctx.resize(&step.low_res_mask, Shape::new(1, 1, low, low), h, w, Filter::Bilinear, AlignCorners::HalfPixel);
         rows[f] = Some((ctx.download(&up, ushape.numel()), step.object_score, step.iou));
-        progress(f + 1 - req.prompt_frame, n - req.prompt_frame);
+        if !progress(f + 1 - req.prompt_frame, n - req.prompt_frame) {
+            return Err("cancelled".into());
+        }
     }
     let seed = rows[req.prompt_frame].clone().ok_or("sam2 track: the prompt frame produced no mask")?;
     for slot in &mut rows[..req.prompt_frame] {

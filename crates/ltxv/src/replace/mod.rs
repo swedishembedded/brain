@@ -359,7 +359,7 @@ pub fn run(paths: &Paths, components: &dyn Components, req: &Request, clip: Vide
         }
         None => {
             let unit: Vec<Vec<f32>> = source.frames.iter().map(|px| px.iter().map(|&v| v as f32 / 255.0).collect()).collect();
-            track(&tracker, &unit, w as u32, h as u32, req.prompt_frame, &points)?
+            track(&tracker, &unit, w as u32, h as u32, req.prompt_frame, &points, cancel)?
         }
     };
     if !resume.holds("actor", &track_key) {
@@ -604,9 +604,9 @@ fn load_tracker(components: &dyn Components, overrides: &BTreeMap<String, String
 
 /// The object `points` pick, tracked through `frames`: one mask per frame,
 /// empty where SAM 2 believes the object is occluded.
-fn track(m: &sam2::Sam2, frames: &[Vec<f32>], w: u32, h: u32, prompt_frame: usize, points: &[(f32, f32, f32)]) -> Result<Vec<Vec<bool>>, String> {
+fn track(m: &sam2::Sam2, frames: &[Vec<f32>], w: u32, h: u32, prompt_frame: usize, points: &[(f32, f32, f32)], cancel: &capability::CancelToken) -> Result<Vec<Vec<bool>>, String> {
     let req = sam2::track::TrackRequest { points: points.to_vec(), prompt_frame, object_id: 0, polarity: Polarity::ObjectWhite, binary: true };
-    let masks = sam2::track::track_clip(m, frames, w, h, 0.0, &req, &mut |_, _| {})?;
+    let masks = sam2::track::track_clip(m, frames, w, h, 0.0, &req, &mut |_, _| !cancel.is_cancelled())?;
     Ok(masks.frames.iter().zip(&masks.info).map(|(p, i)| if i.object_score > 0.0 { p.iter().map(|&v| v > 0.5).collect() } else { vec![false; p.len()] }).collect())
 }
 

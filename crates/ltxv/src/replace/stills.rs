@@ -261,7 +261,8 @@ impl Editor<'_> {
         let figure: Vec<bool> = if points.is_empty() {
             vec![false; w * h]
         } else {
-            let pick = track(self.tracker, std::slice::from_ref(&painted_unit), w as u32, h as u32, 0, &points)?.remove(0);
+            // One frame: nothing to interrupt between frames.
+            let pick = track(self.tracker, std::slice::from_ref(&painted_unit), w as u32, h as u32, 0, &points, &capability::CancelToken::default())?.remove(0);
             if count(&pick) <= 2 * actor_px {
                 pick
             } else {
