@@ -163,40 +163,57 @@ fn fft_bluestein(re: &mut [f32], im: &mut [f32]) {
     }
 }
 
-/// Power spectrogram: `[n_frames, n_fft/2+1]` row-major. Reflect-padded by
-/// `n_fft/2` each side when `cfg.center` (the `torch.stft(center=True)`
-/// convention), or by `(n_fft-hop)/2` when not (the `center=False` manual
-/// reflect-pad `matcha.utils.audio.mel_spectrogram` uses) - either way the
-/// framing loop below adds no further padding.
-pub fn power_spectrogram(samples: &[f32], cfg: &MelConfig) -> (Vec<f32>, usize, usize) {
-    let window = hann(cfg.win);
-    let pad = if cfg.center { cfg.n_fft / 2 } else { (cfg.n_fft - cfg.hop) / 2 };
-    let mut padded = vec![0.0f32; samples.len() + 2 * pad];
-    padded[pad..pad + samples.len()].copy_from_slice(samples);
-    // reflect padding at the edges
+/// Reflect padding each side of the framing: `n_fft/2` when `cfg.center` (the `torch.stft(center=True)`
+/// convention), `(n_fft-hop)/2` when not (the manual reflect-pad `matcha.utils.audio.mel_spectrogram` uses).
+fn stft_pad(cfg: &MelConfig) -> usize {
+    if cfg.center {
+        cfg.n_fft / 2
+    } else {
+        (cfg.n_fft - cfg.hop) / 2
+    }
+}
+
+/// `samples` reflect-padded by `pad` on each side (excluding the edge sample), out-of-range reflections reading 0.
+fn reflect_pad(samples: &[f32], pad: usize) -> Vec<f32> {
+    let s = samples.len();
+    let mut padded = vec![0.0f32; s + 2 * pad];
+    padded[pad..pad + s].copy_from_slice(samples);
     for i in 0..pad {
         padded[pad - 1 - i] = samples.get(i + 1).copied().unwrap_or(0.0);
-        let s = samples.len();
         padded[pad + s + i] = samples.get(s.wrapping_sub(2 + i)).copied().unwrap_or(0.0);
     }
+    padded
+}
+
+/// Complex one-sided spectrogram `(re, im, n_frames, bins)`, each `[n_frames, n_fft/2+1]` row-major, of the
+/// reflect-padded signal ([`stft_pad`]) under `cfg`'s Hann window. The framing loop adds no further padding.
+/// This is the one STFT the power spectrogram, the log-mel and the log-mel backward share.
+pub fn complex_spectrogram(samples: &[f32], cfg: &MelConfig) -> (Vec<f32>, Vec<f32>, usize, usize) {
+    let window = hann(cfg.win);
+    let padded = reflect_pad(samples, stft_pad(cfg));
     let bins = cfg.n_fft / 2 + 1;
     let n_frames = if padded.len() >= cfg.n_fft { 1 + (padded.len() - cfg.n_fft) / cfg.hop } else { 0 };
-    let mut spec = vec![0.0f32; n_frames * bins];
+    let mut spec_re = vec![0.0f32; n_frames * bins];
+    let mut spec_im = vec![0.0f32; n_frames * bins];
     let mut re = vec![0.0f32; cfg.n_fft];
     let mut im = vec![0.0f32; cfg.n_fft];
     for fr in 0..n_frames {
         let start = fr * cfg.hop;
-        for v in im.iter_mut() {
-            *v = 0.0;
-        }
+        im.fill(0.0);
         for i in 0..cfg.n_fft {
             re[i] = if i < cfg.win { padded[start + i] * window[i] } else { 0.0 };
         }
         fft(&mut re, &mut im);
-        for b in 0..bins {
-            spec[fr * bins + b] = re[b] * re[b] + im[b] * im[b];
-        }
+        spec_re[fr * bins..(fr + 1) * bins].copy_from_slice(&re[..bins]);
+        spec_im[fr * bins..(fr + 1) * bins].copy_from_slice(&im[..bins]);
     }
+    (spec_re, spec_im, n_frames, bins)
+}
+
+/// Power spectrogram: `[n_frames, n_fft/2+1]` row-major, `re^2 + im^2` of [`complex_spectrogram`].
+pub fn power_spectrogram(samples: &[f32], cfg: &MelConfig) -> (Vec<f32>, usize, usize) {
+    let (re, im, n_frames, bins) = complex_spectrogram(samples, cfg);
+    let spec = re.iter().zip(&im).map(|(r, i)| r * r + i * i).collect();
     (spec, n_frames, bins)
 }
 
@@ -262,7 +279,10 @@ pub fn mel_filterbank(cfg: &MelConfig) -> Vec<f32> {
     fb
 }
 
-/// Log-mel spectrogram `[n_frames, n_mels]` row-major: `log(mel·power + eps)`.
+/// The floor inside the log of [`log_mel`]: `log(mel + LOG_MEL_FLOOR)`.
+pub const LOG_MEL_FLOOR: f32 = 1e-6;
+
+/// Log-mel spectrogram `[n_frames, n_mels]` row-major: `log(mel·power + LOG_MEL_FLOOR)`.
 pub fn log_mel(samples: &[f32], cfg: &MelConfig) -> (Vec<f32>, usize) {
     let (spec, n_frames, bins) = power_spectrogram(samples, cfg);
     let fb = mel_filterbank(cfg);
@@ -273,10 +293,69 @@ pub fn log_mel(samples: &[f32], cfg: &MelConfig) -> (Vec<f32>, usize) {
             for b in 0..bins {
                 acc += fb[m * bins + b] * spec[fr * bins + b];
             }
-            out[fr * cfg.n_mels + m] = (acc + 1e-6).ln();
+            out[fr * cfg.n_mels + m] = (acc + LOG_MEL_FLOOR).ln();
         }
     }
     (out, n_frames)
+}
+
+/// The gradient of a loss wrt the waveform given its gradient `d_log_mel` (`[n_frames, n_mels]`) wrt
+/// [`log_mel`]`(samples, cfg)`: the chain of adjoints, last stage first.
+///
+/// 1. log with floor: `d_acc = d_log_mel / (acc + LOG_MEL_FLOOR)`, `acc` being the pre-log mel energy.
+/// 2. mel filterbank: `d_power[b] = sum_m fb[m, b] d_acc[m]` (the transpose).
+/// 3. power `P = re^2 + im^2`: `d_re = 2 re d_power`, `d_im = 2 im d_power`. This is smooth everywhere, including at
+///    zero magnitude (the gradient is 0 there); a loss on the magnitude `sqrt(P)` would need a convention at 0.
+/// 4. one-sided real DFT, `re[b] = sum_n x_n cos(2 pi b n / N)`, `im[b] = -sum_n x_n sin(2 pi b n / N)`: the adjoint is
+///    `dx_n = sum_{b < bins} d_re[b] cos(.) - d_im[b] sin(.)` (the sum runs over the one-sided bins only, since the
+///    forward kept only those), which is the real part of the forward FFT of `d_re - i d_im` zero-extended to `N`.
+/// 5. window and framing: `dpadded[start + i] += window[i] dx_i` (overlap-add, the adjoint of framing).
+/// 6. reflect padding: a padded position reflecting sample `j` hands its gradient to `j`; positions that read the 0
+///    fallback hand it to nothing.
+pub fn log_mel_backward(samples: &[f32], cfg: &MelConfig, d_log_mel: &[f32]) -> Vec<f32> {
+    let (re, im, n_frames, bins) = complex_spectrogram(samples, cfg);
+    assert_eq!(d_log_mel.len(), n_frames * cfg.n_mels, "log_mel_backward: gradient length != n_frames * n_mels");
+    let fb = mel_filterbank(cfg);
+    let window = hann(cfg.win);
+    let (s, pad) = (samples.len(), stft_pad(cfg));
+    let mut dpadded = vec![0.0f32; s + 2 * pad];
+    let mut fr_re = vec![0.0f32; cfg.n_fft];
+    let mut fr_im = vec![0.0f32; cfg.n_fft];
+    for fr in 0..n_frames {
+        // 1-2: through the log and the filterbank to the power spectrum.
+        let mut d_power = vec![0.0f32; bins];
+        for m in 0..cfg.n_mels {
+            let acc: f32 = (0..bins).map(|b| fb[m * bins + b] * (re[fr * bins + b].powi(2) + im[fr * bins + b].powi(2))).sum();
+            let d_acc = d_log_mel[fr * cfg.n_mels + m] / (acc + LOG_MEL_FLOOR);
+            for b in 0..bins {
+                d_power[b] += fb[m * bins + b] * d_acc;
+            }
+        }
+        // 3-4: through the power and the one-sided DFT.
+        fr_re.fill(0.0);
+        fr_im.fill(0.0);
+        for b in 0..bins {
+            fr_re[b] = 2.0 * re[fr * bins + b] * d_power[b];
+            fr_im[b] = -2.0 * im[fr * bins + b] * d_power[b];
+        }
+        fft(&mut fr_re, &mut fr_im);
+        // 5: window and overlap-add.
+        let start = fr * cfg.hop;
+        for i in 0..cfg.win {
+            dpadded[start + i] += window[i] * fr_re[i];
+        }
+    }
+    // 6: fold the reflected padding back onto the samples.
+    let mut dx = dpadded[pad..pad + s].to_vec();
+    for i in 0..pad {
+        if i + 1 < s {
+            dx[i + 1] += dpadded[pad - 1 - i];
+        }
+        if s >= 2 + i {
+            dx[s - 2 - i] += dpadded[pad + s + i];
+        }
+    }
+    dx
 }
 
 #[cfg(test)]
@@ -403,5 +482,77 @@ mod tests {
         assert_eq!(ours.len(), theirs.len());
         let max_abs = ours.iter().zip(&theirs).map(|(&a, &b)| (a - b as f32).abs()).fold(0.0f32, f32::max);
         assert!(max_abs < 1e-5, "mel filterbank vs asr_frontend reference maxdiff {max_abs}");
+    }
+
+    /// `sum_i w_i log_mel_i` of `x`, evaluated in f64 by a naive DFT that shares no code with the f32 path (only the
+    /// constant filterbank and window values), so its central differences are an accurate oracle for the adjoint.
+    fn weighted_log_mel64(x: &[f64], cfg: &MelConfig, w: &[f32]) -> f64 {
+        let pad = if cfg.center { cfg.n_fft / 2 } else { (cfg.n_fft - cfg.hop) / 2 };
+        let s = x.len();
+        let mut padded = vec![0.0f64; s + 2 * pad];
+        padded[pad..pad + s].copy_from_slice(x);
+        for i in 0..pad {
+            padded[pad - 1 - i] = x.get(i + 1).copied().unwrap_or(0.0);
+            padded[pad + s + i] = x.get(s.wrapping_sub(2 + i)).copied().unwrap_or(0.0);
+        }
+        let window: Vec<f64> = (0..cfg.win).map(|n| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / cfg.win as f64).cos()).collect();
+        let fb = mel_filterbank(cfg);
+        let (bins, n_frames) = (cfg.n_fft / 2 + 1, 1 + (padded.len() - cfg.n_fft) / cfg.hop);
+        let mut total = 0.0f64;
+        for fr in 0..n_frames {
+            let power: Vec<f64> = (0..bins)
+                .map(|b| {
+                    let (mut re, mut im) = (0.0f64, 0.0f64);
+                    for n in 0..cfg.win {
+                        let ang = 2.0 * std::f64::consts::PI * (b * n % cfg.n_fft) as f64 / cfg.n_fft as f64;
+                        let v = padded[fr * cfg.hop + n] * window[n];
+                        re += v * ang.cos();
+                        im -= v * ang.sin();
+                    }
+                    re * re + im * im
+                })
+                .collect();
+            for m in 0..cfg.n_mels {
+                let acc: f64 = (0..bins).map(|b| fb[m * bins + b] as f64 * power[b]).sum();
+                total += w[fr * cfg.n_mels + m] as f64 * (acc + LOG_MEL_FLOOR as f64).ln();
+            }
+        }
+        total
+    }
+
+    /// The backward is the gradient of the forward: per-sample central differences of the f64 oracle against the
+    /// analytic `log_mel_backward`, for both framing conventions (`center` reflects by `n_fft/2`, else by
+    /// `(n_fft - hop)/2`, and `win < n_fft` zero-extends the frame).
+    ///
+    /// Tolerance: the oracle's difference quotient is exact to ~1e-9 (f64, step 1e-5, third derivative bounded by
+    /// `(2 pi bins / n_fft)^3` times the loss scale), so the difference is the f32 rounding of the analytic adjoint. Each
+    /// `dx_i` is a sum of `terms` products (frames x mels x bins, an FFT of `8 log2 n_fft` operations, the overlap-add),
+    /// within `gamma_terms * sum |dx|` of the exact value by `rounding::accumulation_bound`.
+    #[test]
+    fn log_mel_backward_matches_finite_differences() {
+        for (cfg, len) in [
+            (MelConfig { sample_rate: 8000, n_fft: 32, hop: 8, win: 32, n_mels: 6, fmin: 0.0, fmax: 4000.0, slaney: true, center: true }, 70),
+            (MelConfig { sample_rate: 8000, n_fft: 24, hop: 6, win: 20, n_mels: 5, fmin: 0.0, fmax: 4000.0, slaney: false, center: false }, 61),
+        ] {
+            let x = Lcg::new(data::rng::random_seed()).vec(len);
+            let (_, n_frames) = log_mel(&x, &cfg);
+            let w = Lcg::new(data::rng::random_seed()).vec(n_frames * cfg.n_mels);
+            let dx = log_mel_backward(&x, &cfg, &w);
+            let bins = cfg.n_fft / 2 + 1;
+            let terms = n_frames * cfg.n_mels * bins + 8 * cfg.n_fft.ilog2() as usize + cfg.win + n_frames;
+            let tol = brain_testutil::rounding::accumulation_bound(terms, dx.iter().map(|v| f64::from(v.abs())).sum());
+            let x64: Vec<f64> = x.iter().map(|&v| f64::from(v)).collect();
+            let step = 1e-5;
+            let mut worst = 0.0f64;
+            for i in 0..len {
+                let (mut up, mut dn) = (x64.clone(), x64.clone());
+                up[i] += step;
+                dn[i] -= step;
+                let fd = (weighted_log_mel64(&up, &cfg, &w) - weighted_log_mel64(&dn, &cfg, &w)) / (2.0 * step);
+                worst = worst.max((f64::from(dx[i]) - fd).abs());
+            }
+            eprintln!("log_mel_backward center={}: worst abs error {worst:.3e}, rounding bound {tol:.3e}", cfg.center);
+            assert!(worst <= tol, "center={}: backward off the oracle by {worst:.3e} > {tol:.3e}", cfg.center);
+        }
     }
 }

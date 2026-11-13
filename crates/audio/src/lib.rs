@@ -11,8 +11,8 @@
 //!     Also hosts [`conv::fold_weight_norm`], the `nn.utils.weight_norm`
 //!     fold every weight-normalized checkpoint import needs.
 //!   * [`act`] - elementwise activation `Step`-builders (currently ELU).
-//!   * [`mel`] - STFT + mel-spectrogram features (forward), with a
-//!     mixed-radix FFT for non-power-of-two `n_fft`.
+//!   * [`mel`] - STFT + mel-spectrogram features and the log-mel backward (the
+//!     gradient wrt the waveform), with a mixed-radix FFT for non-power-of-two `n_fft`.
 //!   * [`kaldi_fbank`] - `torchaudio.compliance.kaldi.fbank`-compatible
 //!     mel features (a genuinely different filter shape from [`mel`]'s -
 //!     Kaldi's own triangular filters are linear in the MEL domain, not the
