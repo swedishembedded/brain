@@ -2738,15 +2738,13 @@ pub fn ref_from_hwc(hwc: &[f32], w: u32, h: u32) -> Result<(Vec<f32>, u32, u32),
         return Err(format!("reference image {w}×{h} is smaller than 16×16"));
     }
     let (x0, y0) = (((w - cw) / 2) as usize, ((h - ch) / 2) as usize);
-    let mut chw = vec![0.0f32; 3 * (cw * ch) as usize];
-    for c in 0..3usize {
-        for y in 0..ch as usize {
-            for x in 0..cw as usize {
-                let v = hwc[((y + y0) * w as usize + (x + x0)) * 3 + c];
-                chw[(c * ch as usize + y) * cw as usize + x] = 2.0 * v - 1.0;
-            }
-        }
+    let (rows, row_len) = (ch as usize, cw as usize * 3);
+    let mut cropped = Vec::with_capacity(rows * row_len);
+    for y in 0..rows {
+        let start = ((y + y0) * w as usize + x0) * 3;
+        cropped.extend_from_slice(&hwc[start..start + row_len]);
     }
+    let chw = imaging::pixels::hwc_unit_to_chw_signed(&cropped, 3, ch as usize, cw as usize);
     Ok((chw, ch, cw))
 }
 
@@ -3881,6 +3879,26 @@ mod tests {
             }
         }
         v
+    }
+
+    /// `ref_from_hwc` center-crops to multiples of 16 and maps `[0,1]` HWC to
+    /// `[-1,1]` CHW: every output cell is `2 * src(crop origin + (x, y), c) - 1`.
+    /// Pinned on an image that crops on both axes (35x21 -> 32x16, odd margins).
+    #[test]
+    fn ref_from_hwc_center_crops_and_maps_to_signed_chw() {
+        let (w, h) = (35u32, 21u32);
+        let src: Vec<f32> = (0..w * h * 3).map(|i| (i as f32 * 0.071).fract()).collect();
+        let (chw, ch, cw) = ref_from_hwc(&src, w, h).unwrap();
+        assert_eq!((cw, ch), (32, 16));
+        let (x0, y0) = (((w - cw) / 2) as usize, ((h - ch) / 2) as usize);
+        for c in 0..3usize {
+            for y in 0..ch as usize {
+                for x in 0..cw as usize {
+                    let want = 2.0 * src[((y + y0) * w as usize + x + x0) * 3 + c] - 1.0;
+                    assert_eq!(chw[(c * ch as usize + y) * cw as usize + x], want, "c{c} ({x},{y})");
+                }
+            }
+        }
     }
 
     /// **The reference-size bound is opt-in.** Without a bound - and with one
