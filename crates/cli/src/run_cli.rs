@@ -1114,7 +1114,10 @@ pub fn run_serve(args: &[String]) {
         Ok(provider) => ctrl.register_provider(std::sync::Arc::new(provider)),
         Err(e) => residency::log::not_served(&format!("brain: z-image not served ({e})")),
     }
-    ctrl.register_provider(std::sync::Arc::new(lfm2::caps::LfmProvider::new()));
+    match catalog::provider(lfm2::caps::MODEL) {
+        Ok(provider) => ctrl.register_provider(provider),
+        Err(e) => residency::log::not_served(&format!("brain: lfm2 not served ({e})")),
+    }
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();

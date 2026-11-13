@@ -191,6 +191,8 @@ navigation:
         path: examples/learning/visualclick.md
       - source: samples/models/flux2/README.md
         path: examples/models/flux2.md
+      - source: samples/models/lfm2/README.md
+        path: examples/models/lfm2.md
       - source: samples/models/ltxv/README.md
         path: examples/models/ltxv.md
       - source: samples/models/sam2/README.md

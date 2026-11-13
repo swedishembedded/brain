@@ -1434,7 +1434,6 @@ dependencies = [
  "brain-data",
  "brain-ecapatdnn",
  "brain-gpt2",
- "brain-lfm2",
  "brain-rlcd",
  "brain-testutil",
  "brain-yolov8",
@@ -6852,6 +6851,14 @@ version = "5.1.0"
 dependencies = [
  "brain-flux2",
  "brain-invoke",
+]
+
+[[package]]
+name = "sample-models-lfm2"
+version = "5.1.0"
+dependencies = [
+ "brain-invoke",
+ "brain-lfm2",
 ]
 
 [[package]]

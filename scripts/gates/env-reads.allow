@@ -596,8 +596,6 @@ crates/kronos/tests/it/t0_param_layout.rs	BRAIN_KRONOS_DECODER
 crates/kronos/tests/it/t0_param_layout.rs	BRAIN_KRONOS_TOKENIZER
 crates/kronos/tests/train_gradcheck.rs	MOE_SKIP_GPU_TESTS
 crates/kronos/tests/train_parity.rs	MOE_SKIP_GPU_TESTS
-crates/lfm2/src/caps.rs	BRAIN_LFM2
-crates/lfm2/src/caps.rs	BRAIN_LFM2_TOKENIZER
 crates/lfm2/src/model.rs	BRAIN_LFM2_NAIVE_MM
 crates/lfm2/src/model.rs	MOE_SKIP_GPU_TESTS
 crates/lfm2/tests/it/parity.rs	<env_var>

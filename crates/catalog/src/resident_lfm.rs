@@ -108,14 +108,17 @@ impl LfmResident {
 
 impl ResidentModel for LfmResident {
     fn manifest(&self) -> Manifest {
-        // The shared resident manifest, re-keyed to this model's catalog id so
+        // The model's own manifest, re-keyed to this model's catalog id so
         // variants coexist.
-        let mut m = lfm2::caps::manifest_resident();
+        let mut m = lfm2::caps::manifest();
         m.model = self.id.clone();
         m
     }
 
-    fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
+    fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
+        if !lfm2::caps::BATCHED.contains(&action) {
+            return InstanceKey::new(self.id.as_str(), WORKFLOW_KEY);
+        }
         // Tokenize on the dispatcher; carry the length in the key so only
         // equal-length jobs group. Un-tokenizable requests share a key and
         // fail cleanly inside run().
@@ -124,6 +127,11 @@ impl ResidentModel for LfmResident {
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
+        if key.config == WORKFLOW_KEY {
+            // Fine-tuning holds the weights, their gradients and AdamW's two
+            // moments: four copies, the dominant term at any batch.
+            return MemCost::new(self.weight_bytes * 4, 0);
+        }
         let t = key.config.strip_prefix('t').and_then(|s| s.parse::<u64>().ok()).unwrap_or(1024);
         let n = t * self.batch as u64;
         // Weights + the chunked regime's working set (fused qkv ~3nd, FFN ~3nf,
@@ -134,6 +142,10 @@ impl ResidentModel for LfmResident {
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        if key.config == WORKFLOW_KEY {
+            let provider = lfm2::caps::LfmProvider::new(Some(self.weights.clone()), Some(self.tokenizer_path.clone()));
+            return Ok(Box::new(WorkflowInstance { provider, device }));
+        }
         let t: u32 = key
             .config
             .strip_prefix('t')
@@ -151,6 +163,24 @@ impl ResidentModel for LfmResident {
             crate::resident_llm::on_device(device, || Lfm::from_reader_chunked(&reader, self.batch, t, SLAB_BUDGET, PROBE_CAP))?
         };
         Ok(Box::new(LfmInstance { model, tok: self.tok.clone(), tokenizer_path: self.tokenizer_path.clone(), t, batch: self.batch as usize }))
+    }
+}
+
+/// Instance key of the actions that are not batched inference: tokenizing,
+/// fine-tuning, evaluation, import.
+const WORKFLOW_KEY: &str = "workflow";
+
+/// The provider's own actions, run on the device the scheduler assigned.
+struct WorkflowInstance {
+    provider: lfm2::caps::LfmProvider,
+    device: Device,
+}
+
+impl Instance for WorkflowInstance {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        use capability::Provider;
+        let act = self.provider.action(action).ok_or_else(|| format!("lfm: unknown action '{action}'"))?;
+        crate::resident_llm::on_device(self.device, || act.run(inv, progress))?
     }
 }
 

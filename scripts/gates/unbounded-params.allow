@@ -37,6 +37,8 @@ brain/huginn	generate	top_p
 brain/januspro	text2image	seed
 brain/kronos	forecast	seed
 brain/kronos	forecast	temperature
+brain/lfm2	eval	seed
+brain/lfm2	finetune	seed
 brain/ltxv	dfr	audio_guidance
 brain/ltxv	dfr	audio_modality_guidance
 brain/ltxv	dfr	audio_rescale

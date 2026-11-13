@@ -101,11 +101,15 @@ pub fn finetune(
     t: u32,
     o: &MlmTrainOpts,
     log: &mut dyn FnMut(String),
-) -> f32 {
+    cancelled: &dyn Fn() -> bool,
+) -> Result<f32, String> {
     log(format!("seed {} (pass it back to reproduce the run)", o.seed));
     let mut rng = Rng::new(o.seed);
     let mut last_val = f32::NAN;
     for step in 0..o.steps {
+        if cancelled() {
+            return Err(format!("cancelled after step {step}"));
+        }
         let (x, y) = get_mlm_batch(train, b as usize, t as usize, mlm, &mut rng);
         let y_u32: Vec<u32> = y.iter().map(|&v| v as u32).collect();
         model.set_batch(&x, &y_u32);
@@ -124,7 +128,23 @@ pub fn finetune(
     if !val.is_empty() && last_val.is_nan() {
         last_val = mlm_val_loss(model, val, mlm, o.eval_batches, b, t, o.seed ^ 0xe7a1);
     }
-    last_val
+    Ok(last_val)
+}
+
+/// What [`evaluate`] measures on a validation split.
+pub struct MlmEval {
+    pub pseudo_perplexity: f32,
+    pub masked_accuracy: f32,
+    pub masked_tokens: usize,
+}
+
+/// Pseudo-perplexity and masked-token accuracy of `model` on the token split
+/// `val`, over `batches` batches of `b x t` with deterministic corruption
+/// from `seed`: a fixed input distribution, so two checkpoints compare.
+pub fn evaluate(model: &Lfm, val: &[u32], mlm: &MlmConfig, batches: u32, b: u32, t: u32, seed: u64) -> MlmEval {
+    let loss = mlm_val_loss(model, val, mlm, batches, b, t, seed);
+    let (masked_accuracy, masked_tokens) = mlm_masked_accuracy(model, val, mlm, b, t, seed ^ 0xacc);
+    MlmEval { pseudo_perplexity: loss.exp(), masked_accuracy, masked_tokens }
 }
 
 #[cfg(test)]

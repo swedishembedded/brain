@@ -28,7 +28,6 @@ mod glm_cli;
 mod gguf_cli;
 mod gpt_cli;
 mod image_io;
-mod lfm_cli;
 mod lsa_cli;
 mod mirage_cli;
 mod ouro_cli;
@@ -430,12 +429,13 @@ QWEN3-OMNI (text/audio/image/video in, text + speech out)
       # (serve it with BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT=<out>)
 
 LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
-  brain lfm2 import    --hf <dir> --out lfm.safetensors
-  brain lfm2 fill-mask --weights F --tokenizer T --text \"… <|mask|> …\" [--topk K]
-  brain lfm2 embed     --weights F --tokenizer T (--text \"…\" | --input FILE) [--seq T]
-  brain lfm2 data      --input corpus.txt --tokenizer T --out data/lfm
-  brain lfm2 finetune  --weights F --tokenizer T [--data D --steps N --batch B --seq T --activations keep|recompute]
-  brain lfm2 eval      --weights F --tokenizer T [--data D]     # pseudo-ppl + masked-acc
+  brain lfm2 fill_mask --text \"… <|mask|> …\" [--topk K]
+  brain lfm2 embed --text \"…\" --out embeddings=emb.f32
+  brain lfm2 tokenize --corpus corpus.txt --dest data/lfm
+  brain lfm2 finetune --data data/lfm --save ft.safetensors [--steps N --batch B --seq T]
+  brain lfm2 eval --data data/lfm                       # pseudo-ppl + masked-acc
+  brain lfm2 import --source <hf_dir> --dest lfm.safetensors
+      every parameter: brain lfm2 <action> --help; --weights/--tokenizer name a role
   brain npu lfm        --weights F --seq S --out model.onnx [--int8]   # OpenVINO export
   make perf/model/lfm                      # standalone concurrency benchmark (scheduler+residency)
 

@@ -47,7 +47,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("januspro", crate::januspro_cli::run_januspro),
     ("minicpmv", crate::minicpmv_cli::run_minicpmv),
     ("glmdsa", crate::glm_cli::run_glm),
-    ("lfm2", crate::lfm_cli::run_lfm),
     ("ouro", crate::ouro_cli::run_ouro),
     ("huginn", crate::huginn_cli::run_huginn),
     ("qwen3tts", crate::tts_cli::run_tts),
@@ -149,6 +148,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("splat", "brain/splat"),
     ("zipdepth", "brain/zipdepth"),
     ("worldmirror2", "brain/worldmirror2"),
+    ("lfm2", "brain/lfm2"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
@@ -360,6 +360,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "sam2",
     "zipdepth",
     "worldmirror2",
+    "lfm2",
     "lpips",
     "rrdbnet",
     "timesfm3",
@@ -540,19 +541,8 @@ fn weights_already_named_with(arch: &str, a: Option<&brain_arch::Arch>, rest: &[
 /// for an architecture with no `default_ref`, or when `--weights` is already
 /// present -- this never silently overrides an explicit flag with a fetched
 /// one.
-///
-/// A small, explicit per-arch allowlist extends this past `canon_verb`'s
-/// generic "infer" mapping for architectures whose own dedicated CLI never
-/// uses that spelling at all: `lfm2`'s real verbs are `fill-mask`/`embed`,
-/// both genuinely inference-shaped (never trains from them), but neither
-/// canonicalizes to "infer" - so without this, `default_ref: Some(...)` on
-/// its `Arch` entry would be dead weight, unreachable from any verb its own
-/// CLI actually supports. Kept local and explicit rather than widening
-/// `canon_verb` itself, which is shared by every architecture and would
-/// risk giving some future, unrelated arch's own "embed" verb a training
-/// path this injection was never meant to touch.
 fn wants_default_weights(arch: &str, verb: Option<&str>) -> bool {
-    wants_default_weights_with(arch, brain_arch::by_id(arch), verb)
+    wants_default_weights_with(brain_arch::by_id(arch), verb)
 }
 
 /// [`wants_default_weights`]'s logic, taking an already-looked-up `Arch`
@@ -561,7 +551,7 @@ fn wants_default_weights(arch: &str, verb: Option<&str>) -> bool {
 /// registry-wide migration (every `weights_env` row moving to the resolver,
 /// as one eventually will) would otherwise leave with no real example left
 /// to test against at all.
-fn wants_default_weights_with(arch: &str, a: Option<&brain_arch::Arch>, verb: Option<&str>) -> bool {
+fn wants_default_weights_with(a: Option<&brain_arch::Arch>, verb: Option<&str>) -> bool {
     // A `Arch::weights_env` architecture whose vars the caller has ALREADY
     // exported has fully specified its weights, so there is nothing to fetch
     // and nothing to inject. `supply::ensure_default_weights` below would
@@ -586,7 +576,6 @@ fn wants_default_weights_with(arch: &str, a: Option<&brain_arch::Arch>, verb: Op
     }
     let verb = verb.map(crate::args::canon_verb);
     verb.is_some_and(|v| v == "infer")
-        || (arch == "lfm2" && verb.is_some_and(|v| v == "fill-mask" || v == "embed"))
 }
 
 fn maybe_inject_default_weights(arch: &str, rest: Vec<String>) -> Vec<String> {
@@ -723,28 +712,6 @@ mod tests {
     }
 
     #[test]
-    fn wants_default_weights_recognizes_lfm2s_own_verbs() {
-        // `lfm2`'s real verbs are `fill-mask`/`embed`, both genuinely
-        // inference-shaped, but neither canonicalizes to "infer" the way
-        // `generate`/`gen`/`sample` do for other architectures - so without
-        // this arch-specific allowlist, `default_ref: Some("LiquidAI/
-        // LFM2.5-350M")` on `lfm2`'s `Arch` entry was unreachable dead weight
-        // from any verb its own CLI actually supports.
-        assert!(wants_default_weights("lfm2", Some("fill-mask")));
-        assert!(wants_default_weights("lfm2", Some("embed")));
-        // Not for a verb lfm2's own CLI does not define, even one another
-        // architecture's dedicated CLI happens to use for training.
-        assert!(!wants_default_weights("lfm2", Some("train")));
-        assert!(!wants_default_weights("lfm2", Some("finetune")));
-        assert!(!wants_default_weights("lfm2", None));
-        // The `fill-mask`/`embed` allowlist is scoped to `lfm2` alone - some
-        // future, unrelated architecture's own "embed" verb (if one exists)
-        // must not silently start auto-fetching a default checkpoint it
-        // never asked for.
-        assert!(!wants_default_weights("clip", Some("embed")));
-    }
-
-    #[test]
     fn wants_default_weights_still_recognizes_the_generic_infer_mapping() {
         assert!(wants_default_weights("zipdepth", Some("infer")));
         assert!(wants_default_weights("qwen3vl", Some("generate")));
@@ -804,18 +771,18 @@ mod tests {
         for v in &vars {
             std::env::remove_var(v);
         }
-        assert!(wants_default_weights_with(fixture.id, Some(&fixture), Some("generate")), "unset env must still fetch");
+        assert!(wants_default_weights_with(Some(&fixture), Some("generate")), "unset env must still fetch");
 
         // Every path exported: nothing to fetch, nothing to inject.
         for v in &vars {
             std::env::set_var(v, "/nonexistent/for-test");
         }
-        assert!(!wants_default_weights_with(fixture.id, Some(&fixture), Some("generate")), "fully configured must not fetch");
-        assert!(!wants_default_weights_with(fixture.id, Some(&fixture), Some("infer")));
+        assert!(!wants_default_weights_with(Some(&fixture), Some("generate")), "fully configured must not fetch");
+        assert!(!wants_default_weights_with(Some(&fixture), Some("infer")));
 
         // Partially configured is NOT fully specified, so it still fetches.
         std::env::remove_var(vars[0]);
-        assert!(wants_default_weights_with(fixture.id, Some(&fixture), Some("generate")), "partial env must still fetch");
+        assert!(wants_default_weights_with(Some(&fixture), Some("generate")), "partial env must still fetch");
 
         for v in &vars {
             std::env::remove_var(v);
@@ -831,19 +798,17 @@ mod tests {
     fn weights_env_and_the_weights_flag_are_not_mutually_exclusive() {
         let fixture = multi_role_fixture();
         assert!(!fixture.weights_env.is_empty() && fixture.default_ref.is_some(), "the fixture should declare both");
-        assert!(wants_default_weights_with(fixture.id, Some(&fixture), Some("infer")), "default fetch must survive when unset");
+        assert!(wants_default_weights_with(Some(&fixture), Some("infer")), "default fetch must survive when unset");
     }
 
     #[test]
     fn maybe_inject_default_weights_leaves_an_explicit_weights_flag_untouched() {
         // `--weights` already present must short-circuit BEFORE the
         // network-dependent `ensure_default_weights` call, for both the
-        // generic "infer" path and the lfm2-specific allowlist above -
-        // never silently override an explicit flag with a fetched one.
+        // generic "infer" path - never silently override an explicit flag
+        // with a fetched one.
         let rest = s(&["infer", "--weights", "explicit.safetensors"]);
         assert_eq!(maybe_inject_default_weights("zipdepth", rest.clone()), rest);
-        let rest = s(&["fill-mask", "--weights", "explicit.safetensors", "--text", "hi"]);
-        assert_eq!(maybe_inject_default_weights("lfm2", rest.clone()), rest);
     }
 
     /// `--model` names the weights too (the generic resolver): an invocation

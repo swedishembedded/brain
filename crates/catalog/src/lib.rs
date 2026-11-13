@@ -535,8 +535,8 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: lfm2::caps::manifest,
-            provider: always!(lfm2::caps::LfmProvider::new()),
-            spec: None,
+            provider: lfm2::caps::provider,
+            spec: Some(("lfm2", &lfm2::spec::Lfm2Spec)),
             resident: None,
         },
         ModelEntry {

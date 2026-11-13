@@ -21,30 +21,34 @@ that's what Qwen3 is for.
 
 ## Getting the weights
 
-`LiquidAI/LFM2.5-350M` (also available as the smaller `-230M` variant) is
-auto-fetched on first use (opt-in: `--autofetch`). To import a checkpoint you already have locally:
+`LiquidAI/LFM2.5-350M` (also available as the smaller `-230M` variant). Import
+the release once into brain's checkpoint and keep it, with its
+`tokenizer.json`, in the model store, where every action finds it:
 
 ```bash
-brain lfm2 import --hf <hf_dir> --out lfm-350m.safetensors
+brain pull LiquidAI/LFM2.5-350M
+S=~/.local/share/brain/models
+brain lfm2 import --source "$S/LiquidAI/LFM2.5-350M" --dest "$S/brain/lfm2/lfm2-350m.safetensors"
+cp "$S/LiquidAI/LFM2.5-350M/tokenizer.json" "$S/brain/lfm2/"
 ```
 
-To serve a checkpoint, point `BRAIN_LFM2` (and `BRAIN_LFM2_TOKENIZER`) at it.
+`--weights` and `--tokenizer` name either outright.
 
 ## Running it
 
+`brain lfm2 <action>` runs the served actions; `sample-models-lfm2`
+(`make samples/models/lfm2/build`) is the same program on its own.
+`<action> --help` lists every parameter with its default.
+
 ```bash
-brain lfm2 embed     --weights F --tokenizer tokenizer.json --text "..."
-brain lfm2 fill-mask --weights F --tokenizer tokenizer.json \
-    --text "The capital of France is <|mask|>." --topk 5
-brain lfm2 finetune  --weights F --tokenizer tokenizer.json --data <dir> [--activations keep|recompute] [...]
-brain lfm2 eval      --weights F --tokenizer tokenizer.json --data <dir>
-brain lfm2 data      --input corpus.txt --tokenizer tokenizer.json --out data/lfm
+brain lfm2 embed --text "..." --out embeddings=emb.f32
+brain lfm2 fill_mask --text "The capital of France is <|mask|>." --topk 5
+brain lfm2 tokenize --corpus corpus.txt --dest data/lfm
+brain lfm2 finetune --data data/lfm --save ft.safetensors [--steps N --batch B --seq T --activations keep|recompute] --seed $RANDOM
+brain lfm2 eval --data data/lfm --weights ft.safetensors --seed $RANDOM
 ```
 
-lfm2 also has a capability manifest (`brain caps brain/lfm2` lists it, and it
-is reachable over D-Bus/HTTP) - but it dispatches through the `brain lfm2 ...`
-verbs above on the CLI specifically, same as every other architecture with
-its own dedicated CLI module.
+A long document comes from a file with `--in text=doc.txt`.
 
 To serve it over HTTP or D-Bus:
 
@@ -53,13 +57,15 @@ BRAIN_LFM2=lfm-350m.safetensors BRAIN_LFM2_TOKENIZER=tokenizer.json brain serve 
 ```
 
 Embeddings are reachable at the standard `POST /embeddings` endpoint once
-serving.
+serving; the serving process batches `fill_mask` and `embed` and runs the
+other actions as they are.
 
 ## Options
 
-- `--seq T` - sequence length for `embed` (up to the 8,192-token usable
+- `--max-tokens T` - truncate the `embed` input (up to the 8,192-token usable
   context).
 - `--topk K` - number of mask-fill candidates to return.
+- `--normalize true` - L2-normalize the mean-pooled embedding.
 - `BRAIN_LFM2_BATCH` - batched-forward slots per serving instance (default 2).
 
 ## Hardware and limits

@@ -1,0 +1,19 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/lfm2` -> `sample-models-lfm2`.
+name = "sample-models-lfm2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: LFM2.5-Encoder from the command line - fill-mask, long-context embeddings and masked-language fine-tuning, every served action with every parameter."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-lfm2.workspace = true
+brain-invoke.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 40
