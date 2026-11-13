@@ -9,7 +9,7 @@ A run of FLUX.2 chose the empty card for its denoiser, completed all fourteen de
 
 The previous eight chapters built the parts one at a time: the autoencoder that makes a latent space, the schedules and solvers that walk through it, the denoisers that predict a velocity, and the encoders that turn a sentence into rows. This chapter puts them in one process and asks what the assembly is. It is not a single network. It is a plan, with a ledger of operations (how much arithmetic each stage does) and a ledger of bytes (what each stage needs on a device, and when). The questions come in the order in which a request meets the plan. Where does the work of one image go, stage by stage? What do the stages have to agree on in order to hand each other arrays? What happens to a request that carries a picture, or a picture and a mask, in place of nothing? And, last, who is on the card at each moment, and what has to be moved to make that true?
 
-Six ideas from earlier chapters come back first. Try them from memory; the answers are at the end, under "Recall questions".
+A latent diffusion system joins six earlier ideas.
 
 1. (Volume VIII, [Chapter 2](02-vae.md), the variational autoencoder.) A $1024 \times 1024$ picture goes through an autoencoder with 32 latent channels at one eighth of the side, and the latent is then packed in $2 \times 2$ patches. How many numbers does the latent hold, and how many tokens of how many numbers does the denoiser see?
 2. (Volume VIII, [Chapter 6](06-flow-matching.md), flow matching.) A distilled sampler takes four Euler steps with noise fractions $1, 0.9674, 0.9081, 0.7672, 0$. What is the size of the last step, and what does it do to the latent?

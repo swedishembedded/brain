@@ -11,7 +11,7 @@ The first cuts the series at bar $96$, as Chapter 1 did, and finds SND at $0.574
 
 Everything below is about what stands behind those differences. A score from a few origins is a draw from a distribution, and the question is how wide it is. A score can be inflated without a single wrong line of arithmetic, by the order in which bars are used, by the way origins overlap, by which baseline was chosen, and by what was looked at before the number was written down. Honest evaluation is mostly a list of such ways, and a procedure that closes each of them.
 
-Before the machinery, six things from earlier are needed. Answer them from memory; the answers are at the end of the chapter.
+Scoring a forecast starts from six earlier ideas.
 
 1. (Volume I, Chapter 12) Why is the standard error of the difference between two models smaller when both are scored on the same questions, and when would pairing not help at all?
 2. (Volume I, Chapter 12) Twenty variants are each compared with one baseline at the $5\%$ level, and none is really different. What is the chance that at least one is declared different if the tests were independent, and what does Bonferroni's correction do about it?

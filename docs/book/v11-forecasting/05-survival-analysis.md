@@ -11,7 +11,7 @@ Four people answer it, and none of them makes an arithmetic mistake. The first a
 
 This chapter is about learning from that information. The target is the time until something happens (a failure, a purchase, a diagnosis, a default), and the data are rows for which the something has happened and rows for which it has not yet. The forecasts of the previous chapters could be scored when the outcome arrived; here the outcome of a large share of the rows never arrives inside the data, and every tool of the volume (the estimate of a rate, the error of a prediction, the comparison of two models) has to be rebuilt so that an open row counts for what it knows and no more.
 
-Before the machinery, six things from earlier are needed. Answer them from memory; the answers are at the end of the chapter.
+Six earlier ideas come before the survival machinery.
 
 1. (Volume I, Chapter 17) The exponential waiting time of rate $\lambda$ has the cumulative distribution $1 - e^{-\lambda x}$. Which draw turns a uniform number $u$ into such a time, and what is the mean?
 2. (Volume I, Chapter 9) What does the fundamental theorem say about the derivative of $\int_0^t r(s)\,ds$ with respect to $t$, and how does the trapezoid rule approximate that integral from values of $r$ on a grid?

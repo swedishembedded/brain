@@ -22,7 +22,7 @@ The two are equal at 798 tokens (3,268,608 / 4,096); 262,144 is the model's `max
 
 The last column is worth reading twice. Above 798 tokens the second layer is the smaller one, and by 262,144 it is 328.5 times smaller. Below 798 tokens it is the larger, so the saving is not free at short lengths and pays only at long ones. What is that second layer, and what does it hold in its 3,268,608 bytes in place of a cache? It holds a matrix per head, which is rewritten at every token and never grows, and the rest of the chapter derives it from the attention of Volume V by removing one operation. We will meet what the removal costs, a repair of the first thing that goes wrong, a second repair for the second, an arrangement of the arithmetic that makes the layer fast to train and to prefill, and finally the counts for a stack that mixes both kinds of layer.
 
-Six ideas from earlier chapters are needed. The answers are at the end.
+Six earlier ideas carry the rewrite of attention that follows.
 
 1. (Volume V, [Chapter 7](../v05-sequences/07-self-attention.md), scaled dot-product attention and the causal mask.) What does row $i$ of causal attention output, written with the scores $\mathbf{q}_i\cdot\mathbf{k}_j$, and why must the layer look at every earlier key before it can write the row?
 2. (Volume V, [Chapter 5](../v05-sequences/05-recurrent-networks.md), recurrent networks.) A recurrent cell carries a state $\mathbf{h}_t$ from token to token. How many sequential steps does the forward pass over $T$ tokens take, and why can a larger device not shorten that?

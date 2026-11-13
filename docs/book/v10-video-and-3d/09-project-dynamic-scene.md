@@ -446,7 +446,7 @@ One update reads the 12 target frames (110,592 bytes) and the parameters (8,736 
 
 ## What the scene pipeline must reproduce
 
-The tests are the values the worked module prints, collected as a checklist. Test in the order of the milestones: a disagreement at milestone 6 that follows agreement at 1 to 5 points at the prediction and not at the reconstruction. 'Exact' means equal integers; a tolerance is absolute unless the row says relative, and "the digits shown" means the digits on which the run and its four nudged copies agree.
+Checks come from the values the worked module prints. Test in the order of the milestones: a disagreement at milestone 6 that follows agreement at 1 to 5 points at the prediction and not at the reconstruction. 'Exact' means equal integers; a tolerance is absolute unless the row says relative, and "the digits shown" means the digits on which the run and its four nudged copies agree.
 
 <!-- worked: project_dynamic_scene.acceptance_tests -->
 Expected values of the project, computed by this module. 'Exact' means equal; a number is compared with the tolerance in the last column, absolute unless it says relative; 'the digits shown' means the digits on which the run and its four nudged copies agree, and no more can be asked of another implementation.

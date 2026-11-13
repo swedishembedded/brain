@@ -30,7 +30,7 @@ Two things happened on those lines. The first is the rule of the update. On the 
 
 The second thing is that the numbers are bad. After ten days $V(2)$ is $-0.355$ and $V(0)$ is $-1.069$, against the true $11.168$ and $6.750$. A second route to an estimate uses the same notebook and no guess at all: wait until the days that follow are known and use the discounted sum of what was actually paid, the return $G_t$ of the previous chapter. The return of the first day on a shelf of two is $-6.012$, so the keeper who averages returns would start from $-6.012$ for $V(2)$ and from $-4.400$ for $V(0)$. Both routes are far from the truth, for the same reason: ten days that happened to open with four idle mornings are not the shop. The interesting question is what each route does once there are thousands of lines, and which of them to trust when there are few.
 
-Four ideas from earlier chapters are the tools of the answer. Bring them back from memory; the answers are at the end of the chapter.
+Four ideas from earlier chapters are the tools of the answer.
 
 1. (Volume XII, Chapter 1, "Markov Decision Processes", the Bellman equation.) Write the Bellman equation for the value $V^\pi(s)$ of a policy $\pi$, and say in a sentence what it expresses.
 2. (Volume XII, Chapter 1, the value function.) The return of one trajectory is a random number. What is the value $V^\pi(s)$ in terms of returns, and which number is $V^\pi(0)$ for the policy $(1, 0, 0, 0)$ at $\gamma = 0.9$?

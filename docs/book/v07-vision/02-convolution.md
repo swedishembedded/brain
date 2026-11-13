@@ -9,7 +9,7 @@ The previous chapter ended with a tensor of $3 \times 224 \times 224$ numbers, 1
 
 The remedy is to build the structure of the input into the layer. Look at a small neighbourhood, say $3 \times 3$ pixels, with nine weights, and use the same nine weights at every position of the image. An edge detector then has to be learned once and finds edges everywhere; a shift of the image shifts the output by the same amount. The operation is called a convolution, and this chapter takes it apart: what it computes on a printed example, how large its output is, how much of the image one output can see, how to run it as a single matrix product, how to make it cheaper, how to differentiate it, what its adjoint does when it is used to enlarge an image, and when the Fourier transform of Volume I beats the sliding sum. Each of these has its own failure in practice, and brain's history has examples: weights bound in the transposed layout, which never fails a size check; a backward kernel that must add to its buffer and not overwrite it; a threshold between two code paths that went stale; and a gradient check that never reached the path a real network takes.
 
-Six ideas from earlier chapters come first; the answers are at the end.
+Convolution needs six earlier ideas at the outset.
 
 1. (Volume VII, [Chapter 1](01-images.md), pixel.) What are the shape and strides of a $4 \times 4$ RGB image stored planar (channels first), and at what offset does the green sample of the pixel at row 1, column 2 sit?
 2. (Volume I, [Chapter 3](../v01-mathematics/03-vectors.md), dot product.) What is the dot product of $(1, 2, 3)$ and $(4, 5, 6)$, and what does a large dot product between two vectors of equal length say about them?

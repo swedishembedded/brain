@@ -11,7 +11,7 @@ That is the position of every network in this chapter, and the strange fact is t
 
 The chapter answers with three machines, one for each way of choosing among the readings that brain keeps, and with the same two instruments each time: a toy small enough to compute exactly, and a count of the real network from its configuration. The first machine is a convolutional network that regresses the restored picture, Real-ESRGAN's `RRDBNet`, and the toy shows what any such network must do to a texture that the input has lost, even the best one. The second reads a face as a short list of codes from a codebook of clean faces and predicts the codes from the whole degraded face at once, CodeFormer. The third draws the restoration with a diffusion sampler, steered by the degraded picture, SUPIR. Each gives up something the previous one kept, and the numbers say what.
 
-Five ideas from earlier chapters are needed first. Try them from memory; the answers are at the end, under "Recall questions".
+Restoration starts from five earlier ideas.
 
 1. (Volume VII, [Chapter 3](../v07-vision/03-cnns.md), convolutional networks.) A $3 \times 3$ convolution with bias maps 64 channels to 32. How many parameters has it, and how many operations does it take on a $128 \times 128$ map, counting a multiply-add as two?
 2. (Volume VII, [Chapter 1](../v07-vision/01-images.md), shrinking an image.) A shrink by 2 replaces each non-overlapping $2 \times 2$ block by its mean. What does the block $(10, 30; 50, 70)$ become, and what is the block $(30, 10; 70, 50)$ turned into?

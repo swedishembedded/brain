@@ -9,7 +9,7 @@ The sentence of the last chapter lasted 3.04 seconds, and the Talker wrote it in
 
 That division is the subject of this chapter. **Music generation**, as brain's crate does it, is the production of a long stereo signal from a description by a chain of models that each see a different length of the song: a causal language model that sees all of it as codes, a denoiser that sees eight seconds of latents, and a decoder that turns the same eight seconds into samples. The way a piece of that length is made from windows that each see a part of it is what the chapter calls **long-form audio generation**, and the part that needs the most care is the joint between one window and the next. Chapter 6 supplied the codec language model and the guidance, Volume VIII the latent denoiser and the idea of keeping a region fixed; the chapter follows the song through the five components in the order in which it is made.
 
-Five things from earlier chapters are needed first. The answers are at the end.
+Music uses five earlier ideas straight away.
 
 1. ([Volume IX, Chapter 3](03-audio-codecs.md), the neural audio codec.) A codec writes 12.5 columns of 16 codes a second, each code from a codebook of 2048 entries. How many integers and how many bits is that a second?
 2. ([Volume IX, Chapter 6](06-speech-synthesis.md), the codec language model.) Why does the Talker run one position per frame and not one per code, and what is the price of adding the codes of a frame into one row?

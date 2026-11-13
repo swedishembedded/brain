@@ -9,7 +9,7 @@ A prompt of seven words, `a red cube on a blue sphere`, reaches SDXL's denoiser 
 
 The last chapter took the prompt as given, a sequence of vectors that "some encoder produced", and spent its pages on the network that reads it. This chapter opens the given. A sentence is a string of characters, and the denoiser is a function of arrays, so something has to turn one into the other, and everything that something does is part of what the denoiser was trained on: which encoder, which of its layers, how long the window is, what fills it past the words, and whether the encoder was told which positions are real. The questions come in the order in which a prompt meets them. What does the encoder hand over, and where in the denoiser does each part of it go? Which of the encoder's states is the one that is read? And how much of the signal is decided by the padding, which looks like nothing?
 
-Five ideas from earlier chapters come back first. Try them from memory; the answers are at the end, under "Recall questions".
+Conditioning on text leans on five earlier ideas.
 
 1. (Volume V, [Chapter 14](../v05-sequences/14-encoders.md), the bidirectional encoder.) A text of 5 tokens is padded to a window of 8 and read under the full mask. How many keys does the query at position 0 read, and what does that do to the vectors of the 5 real positions?
 2. (Volume V, [Chapter 6](../v05-sequences/06-seq2seq.md), cross-attention.) Image queries at 6 positions read a prompt of 4 rows. What is the shape of the matrix of attention weights, what does each row of it sum to, and which side has its vectors rewritten by the layer?

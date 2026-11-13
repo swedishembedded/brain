@@ -26,7 +26,7 @@ Total over used: 11.76. In billions: 34.66 and 2.95.
 
 The model holds 11.76 times more numbers than a token touches, and nearly all the difference sits in one group of the table: the routed experts, 32.2 billion parameters of which a token meets 1.0 billion. The rest of this chapter is about that group: what it is, how a token finds the part of it that is meant for it, what goes wrong when the finding is left to chance, and what the arrangement does to the bytes a device must hold and the bytes it must read.
 
-Six ideas from earlier chapters are needed before the new layer can be built, and each is a one-line question. The answers are at the end.
+Six ideas from earlier chapters are needed before the new layer can be built, and each is a one-line question.
 
 1. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the gated feed-forward network.) How many parameters and how many FLOPs per token does a SwiGLU network of model width $D = 2{,}048$ and hidden width $F = 512$ have?
 2. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), the softmax.) What are the two outputs of a softmax whose logits are $(0, \ln 3)$?

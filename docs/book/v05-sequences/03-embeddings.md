@@ -9,7 +9,7 @@ Sort the parameters of a decoder of the Qwen3 0.6B shape by what they do, and on
 
 Two things about the cabinet look wrong at first. The first is that it is there at all. A token id is a name: id 3 is not a little more than id 2, and a network that multiplied the id by a weight would be claiming that the token numbered 3 sits between the tokens numbered 2 and 4, which is a fact about the order in which a tokenizer happened to write its vocabulary down and about nothing in the language. The second is that nobody designs the contents. The rows begin as random numbers and are changed by gradient descent like every other weight, under a loss that mentions no meaning at all, and yet at the end the row for `cat` lies near the row for `dog` and far from the row for `sat`. This chapter takes the two puzzles in order: what a table of rows is and what it costs to read and to train, and then why training it on nothing but the prediction of the next token makes similar tokens get similar rows.
 
-Some things from earlier chapters will be needed, so bring them back first. Answer from memory; the answers are at the end of the chapter.
+Some things from earlier chapters will be needed, so bring them back first.
 
 1. (Volume V, [Chapter 2](02-tokenization.md), tokens.) A byte-level tokenizer with 40 merges has a vocabulary of how many tokens, and what does the number of rows of a model's embedding table have to equal?
 2. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), one-hot encoding.) Write token 3 of a vocabulary of six as a one-hot vector. What is the dot product of that vector with any vector $\mathbf{u}$ of length six?

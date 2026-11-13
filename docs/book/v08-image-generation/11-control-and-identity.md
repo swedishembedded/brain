@@ -11,7 +11,7 @@ The need comes from the last chapter. A latent diffusion pipeline of Chapter 10 
 
 The questions come in that order. What must a branch be, so that its first step changes nothing and it can still learn? Where in the U-Net do its outputs go, and what goes wrong, silently, when they go somewhere else? What changes when the signal is a vector, and how does a vector become something a network can attend to? And what do brain's three adapters, `crates/controlnet`, `crates/pulid` and `crates/instantid`, add to a generator, counted from their configurations?
 
-Five ideas from earlier chapters come back first. Try them from memory; the answers are at the end, under "Recall questions".
+Control signals build on five earlier ideas, recalled before the first one is added.
 
 1. (Volume III, [Chapter 4](../v03-neural-networks/04-backpropagation.md), backpropagation.) A layer $\mathbf{y} = \mathbf{W}\mathbf{x} + \mathbf{b}$ has $\mathbf{W} = \mathbf{0}$ and $\mathbf{b} = \mathbf{0}$, input $\mathbf{x} = (1, 2)$ and an upstream gradient $\mathrm{d}\mathbf{y} = (-0.5, 1)$. What are the gradients of the weights, of the bias and of the input?
 2. (Volume VIII, [Chapter 8](08-denoiser-architectures.md), the U-Net.) How many entries does the SDXL U-Net's skip stack hold, what are their widths, and how many extra inputs does the chapter say a control signal needs?

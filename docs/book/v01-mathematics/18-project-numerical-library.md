@@ -478,7 +478,7 @@ Four slips are common here.
 
 ## The values your library must print
 
-The tests are the blocks printed in the milestones above, collected here as a checklist. A library passes when every statement below holds. "Bit-exact" means integers or text equal; "to $t$" means the stated absolute tolerance.
+Every block printed in the milestones is checked again below. A library passes when every statement below holds. "Bit-exact" means integers or text equal; "to $t$" means the stated absolute tolerance.
 
 | milestone | test | expected | tolerance |
 |---|---|---|---|

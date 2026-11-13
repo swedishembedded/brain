@@ -9,7 +9,7 @@ Recognition was handed its input and had to find the words. Synthesis is handed 
 
 That failure is the chapter's subject in its smallest form. A synthesiser writes a long sequence one step at a time, nothing says how long the sequence must be, and what it writes is not yet sound. **Text-to-speech** is the task of turning a text, and usually a description of a voice, into the waveform of someone saying it. Two of brain's crates do it by two different routes, and Chapter 3 and Chapter 5 supplied one half of each: the codec of Chapter 3 that turns audio into tokens a language model can write, and the speaker vector of Chapter 5 that says whose voice it is. What is left is the part in the middle, which this chapter takes in the order the routes meet it: how a language model is made to write sound, how its choices are drawn, how a voice reaches it, and then the second route, which cuts the sentence in a different place and needs an iterative decoder and a vocoder to get back to samples.
 
-Six things from earlier chapters are needed first. The answers are at the end.
+Six earlier ideas come into play as soon as the first sound is synthesised.
 
 1. ([Volume IX, Chapter 3](03-audio-codecs.md), audio tokens.) How many integers a second does brain's codec write, and which of the 16 codes of a column comes from a separate codebook group?
 2. ([Volume V, Chapter 4](../v05-sequences/04-language-modeling.md), the causal language model.) How does a causal language model score a sequence, and what does teacher forcing give it as input during training?

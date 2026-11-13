@@ -39,7 +39,7 @@ The kernels are the candidates the stages work on. The figure shows the stages, 
 
 All the numbers of this chapter come from one seeded model, `scripts/book/worked/kernel_selection.py`, and nothing in it times a real machine. Costs are in the equivalent bytes of [Chapter 8](08-fusion.md): the roofline time multiplied by the bandwidth, so that a cost carries no seconds and holds for any machine with the same ridge point.
 
-The stages ahead lean on six earlier ideas, from the roofline to the standard error. Bring them back from memory; the answers are at the end of the chapter.
+The stages ahead lean on six earlier ideas, from the roofline to the standard error.
 
 1. (Volume IV, Chapter 3, the roofline.) A computation does $2 \times 10^9$ FLOP on 100 MB. On a device with $F_{\mathrm{pk}} = 40{,}000$ GFLOP/s and $\mathrm{BW} = 800$ GB/s, what is its intensity, on which side of the ridge point is it, and what is its cost $B_{\mathrm{eq}}$ in equivalent bytes (Chapter 8)?
 2. (Volume IV, Chapter 6, the tile.) A $128 \times 128$ output tile is used for a product with $m = 1$ row. What share of the tile's outputs is real?

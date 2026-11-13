@@ -329,7 +329,7 @@ Samples needed for 99.9% confidence of drawing at least one all-inlier sample, c
 | 0.3 | 253 | 2840 | 9473 | 105282 |
 <!-- /worked -->
 
-Read the table from the top. The first hypotheses explain 6 to 13 of the 100 matches; the 45th explains 41, and from there the bound starts to fall, since the best inlier fraction is about 0.45 to 0.5. The row at iteration 329 has fewer inliers (42) than the one before it (45) and is still recorded, because its truncated score is lower: it fits its inliers better. The loop finishes after 2076 iterations with 49 inliers, an inlier fraction of 0.49 and a bound of 2076, against the cap of 5000; the five-point solver, at the same fraction, would have needed $0.49^5$ in the denominator of equation (4), 242 samples. It is worth looking at what the vote found.
+The first hypotheses explain 6 to 13 of the 100 matches; the 45th explains 41, and from there the bound starts to fall, since the best inlier fraction is about 0.45 to 0.5. The row at iteration 329 has fewer inliers (42) than the one before it (45) and is still recorded, because its truncated score is lower: it fits its inliers better. The loop finishes after 2076 iterations with 49 inliers, an inlier fraction of 0.49 and a bound of 2076, against the cap of 5000; the five-point solver, at the same fraction, would have needed $0.49^5$ in the denominator of equation (4), 242 samples. It is worth looking at what the vote found.
 
 ![The 640 by 480 image of view 1 with ten slightly sloping lines, the epipolar lines of ten keypoints of view 0, six blue for correct matches and four green for wrong ones; each blue dot, the matched keypoint, lies on its blue line, and each green dot is well away from its green line.](img/epipolar-lines.svg)
 

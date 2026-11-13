@@ -19,7 +19,7 @@ A word about what is real in this list. The pipeline's interfaces are the real o
 
 ![A data-flow diagram. The frame (96 by 61 bytes) feeds two rows. The top row, a letterbox of 64 by 41 inside 64 by 64 with grey padding (0, 11), a head of 1,024 cells, a filter and non-maximum suppression at score 0.25 and IoU 0.45, and an inverse letterbox that outputs boxes in frame pixels. The bottom row, a stretch to 64 by 64 with the ImageNet constants, a segmenter with a box prompt, a tracker with a bank of 7 slots, and the output of masks and presence per frame and per track. An arrow carries the boxes of frame 0 from the top row to the segmenter.](img/project-vision-pipeline.svg)
 
-The figure is a valid build order. The two preprocessing boxes come first because every later stage reads their output, the detector tail ends in the boxes that the segmenter takes as prompts, and the tracker needs the segmenter's mask of frame 0 as its first memory. Build and check each milestone before the next: a mask that is wrong because the box arrived in the wrong frame is found in a minute at milestone 3 and in an afternoon at milestone 4. The **acceptance tests** at the end gather every expected value. You need the book's generator ([Volume I, Chapter 17](../v01-mathematics/17-randomness.md)), double-precision arithmetic with a correctly rounded `exp` and `sqrt`, and the bilinear resize of Chapter 1.
+Building along the arrows is a sound order. The two preprocessing boxes come first because every later stage reads their output, the detector tail ends in the boxes that the segmenter takes as prompts, and the tracker needs the segmenter's mask of frame 0 as its first memory. Build and check each milestone before the next: a mask that is wrong because the box arrived in the wrong frame is found in a minute at milestone 3 and in an afternoon at milestone 4. The **acceptance tests** at the end gather every expected value. You need the book's generator ([Volume I, Chapter 17](../v01-mathematics/17-randomness.md)), double-precision arithmetic with a correctly rounded `exp` and `sqrt`, and the bilinear resize of Chapter 1.
 
 Five questions bring back what the milestones lean on. They reach back as far as Chapter 1; answer each from memory, since the answers are at the end.
 
@@ -572,7 +572,7 @@ Three tracks that share the trunk cost 1.40 times what one track costs over the 
 
 ## What a correct pipeline prints
 
-The tests are the values the worked module prints, collected as a checklist. Test in the order of the milestones: a disagreement at milestone 4 that follows agreement at 1 to 3 points at the tracker and not at the preprocessing. "Exact" means equal digests, integers and strings; a numeric tolerance is absolute.
+The values the worked module prints are the tests for the pipeline. Test in the order of the milestones: a disagreement at milestone 4 that follows agreement at 1 to 3 points at the tracker and not at the preprocessing. "Exact" means equal digests, integers and strings; a numeric tolerance is absolute.
 
 <!-- worked: project_vision_pipeline.acceptance_fingerprint -->
 Expected values of the project, computed by this module. A tolerance of 0.001 or 1e-6 is absolute; exact means equal.

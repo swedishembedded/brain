@@ -36,7 +36,7 @@ Before the first line of code, six questions reach across the whole volume, and 
 
 ## Building the library from layers to a diagnosis
 
-A note on language and style. The pseudocode follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. Use 64-bit floats throughout; the acceptance tests are computed in double precision. Store every tensor row-major, so that a model's parameters are one flat vector once concatenated and the optimizer needs no knowledge of layers. Write the checks of each milestone as a test file that you rerun after every change, and compare tables to the digits printed (a difference below half a unit in the last printed place), unless a milestone states another tolerance.
+A note on language and style. [Pseudocode Conventions](../pseudocode.md) govern the pseudocode: zero-based indices, row-major storage, and broadcasts, randomness and input checks all written out. Use 64-bit floats throughout; the acceptance tests are computed in double precision. Store every tensor row-major, so that a model's parameters are one flat vector once concatenated and the optimizer needs no knowledge of layers. Write the checks of each milestone as a test file that you rerun after every change, and compare tables to the digits printed (a difference below half a unit in the last printed place), unless a milestone states another tolerance.
 
 Almost every table below comes from a **fixture**, a small input defined by a formula instead of by random draws, so that you can reproduce it before your generator is right. The one rule is
 
@@ -741,7 +741,7 @@ The diagnosis itself can go wrong in four ways.
 
 ## The checklist your library must pass
 
-The tests are the blocks printed in the milestones above, collected here as a checklist. An implementation passes when every statement holds. "Exact" means integers or text equal; "to $t$" means the stated absolute tolerance.
+The checklist repeats the blocks printed in the milestones. The network is correct when every line of it holds. "Exact" means integers or text equal; "to $t$" means the stated absolute tolerance.
 
 | milestone | test | expected | tolerance |
 |---|---|---|---|

@@ -40,7 +40,7 @@ BPE pieces: the _baker _ k e e p s _baking _bread s (11 tokens)
 
 The two ends of the range fail in opposite ways. Characters keep the table tiny (22 rows) and make the sequence as long as the text, and even they are not safe: a vocabulary built from a corpus is a claim about that corpus, and the letter `p` is not in it. Words make the sequence short (5 tokens) but two of the five are `[UNK]`, a single entry standing for everything the vocabulary lacks, and once a word has become `[UNK]` nothing the model computes can tell `keeps` from `breads`. Words also hide what they share: `baker`, `bakers`, `baked` and `baking` are four unrelated rows, though a reader sees one stem and four endings. Bytes (the alphabet of the previous chapter) cannot be unknown, at the price of a sequence as long as the file. The last row is what this chapter is about: 296 rows, 11 tokens, no unknown piece, because a word the vocabulary lacks is spelled by smaller pieces it has.
 
-Before building those pieces, four things from earlier volumes. Answer from memory; the answers are at the end of the chapter.
+Before building those pieces, four things from earlier volumes are worth recalling.
 
 1. (Volume IV, [Chapter 1](../v04-computation/01-number-formats.md), binary representation.) How many different values does an 8-bit pattern take, and what is the largest one read as an unsigned number?
 2. (Volume V, [Chapter 1](01-text.md), UTF-8.) Write U+00E9 in UTF-8. Which of its two bytes can begin a character, and which can only continue one?

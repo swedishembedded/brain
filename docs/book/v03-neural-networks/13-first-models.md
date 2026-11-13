@@ -15,7 +15,7 @@ The second is a **learned controller**. A tank follows the law $y_{t+1} = y_t + 
 
 Both builds use only what earlier chapters taught: layers with GELU (chapter 2), the mean squared error (Volume II, chapter 2), the backward pass (chapters 4 and 5), the gradient check (chapter 6), AdamW (chapter 7), the schedule and the clip (chapter 8), the starting scale (chapter 9), the checklist (chapter 12) and the principal components of Volume II, chapter 7. Every table of this chapter was produced by the chapter's reference program, with randomness from the book's own generator, so that you can rebuild each model in your own language and compare numbers.
 
-Six ideas from the earlier chapters will be used at once, and it is worth answering these from memory before the first build. The answers are at the end of the chapter; if one is hard, go back to the chapter named.
+Six ideas from the earlier chapters will be used at once, and it is worth answering these from memory before the first build.
 
 1. ("Multilayer Networks", chapter 2 of this volume.) Two linear layers follow each other with no activation between them, $16 \to 3 \to 16$. What single map do they compute, and what is the largest rank it can have?
 2. ("Optimizers: From SGD to AdamW", chapter 7.) What is the size of the first AdamW step of a weight whose first gradient is $g = 0.002$, with rate $\eta = 0.01$ and no weight decay?

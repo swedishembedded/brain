@@ -9,7 +9,7 @@ The file that `brain forecast` reads for TimesFM-3 holds $330{,}710{,}976$ numbe
 
 brain holds the weights and the code that runs, checks and fine-tunes them, and not the collections they were fitted to, so this chapter says nothing about what those collections contained. It asks what a model has to do for such a claim to be even possible: what it must not be allowed to see about a series, what unit it reads, how it states uncertainty and conditions on more than one series, how it reaches a horizon longer than anything it emits at once, and how someone who did not train it can be sure that the copy they run is the copy that was trained. Four forecasters in brain give four sets of answers, `crates/chronos2`, `crates/timesfm3`, `crates/fincast` and `crates/kronos`, and the chapter reads them against one another.
 
-Six ideas from earlier are needed. Answer them from memory; the answers are at the end of the chapter.
+A foundation forecaster reuses six earlier ideas.
 
 1. (Chapter 2 of this volume, quantile forecast.) A forecast gives $8$, $10$ and $15$ for one bar at the levels $0.1$, $0.5$ and $0.9$, and the bar turns out to be $12$. What is the pinball loss at each level?
 2. (Volume V, Chapter 9, "The Transformer Block", with Chapter 7, causal mask.) In a causal block over four positions, numbered from 0, which keys may position 2 attend to, and what happens to the score of a key it may not attend to before the softmax?

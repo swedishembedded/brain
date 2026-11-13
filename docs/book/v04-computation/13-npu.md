@@ -53,7 +53,7 @@ Three questions stand between this table and a device that knows only integers a
 
 The figure is the map of the chapter. Each arrow is a step that runs once, on a host, before deployment; what remains for the device is the last box.
 
-Six older ideas carry the road from here to the command words: affine quantization and its error, the narrow sum, fusion, ahead-of-time compilation and the computational graph. Bring them back from memory; the answers are at the end of the chapter.
+Six older ideas carry the road from here to the command words: affine quantization and its error, the narrow sum, fusion, ahead-of-time compilation and the computational graph.
 
 1. (Chapter 12, affine quantization.) A tensor takes values in $[-0.5, 1.5]$ and is stored in unsigned 8-bit codes $0 \ldots 255$. What are the scale $\Delta$ and the zero point $q_0$?
 2. (Chapter 12, quantization error.) A value is rounded to the nearest code of a grid with step $\Delta$. What is the largest error, and what happens to a value outside the range the codes cover?

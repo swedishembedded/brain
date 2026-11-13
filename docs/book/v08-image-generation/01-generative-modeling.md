@@ -9,7 +9,7 @@ Draw every pixel of a $28 \times 28$ grey image independently and uniformly from
 
 To generate images is to put the weight where the images are. This chapter asks what that means precisely and how a program can be built around it. The answer will be a function that takes an image and returns how probable the model finds it, and a procedure that returns images in proportion to that function. The whole volume is about doing both for images of real size; this chapter does it where every number can be written down, in a world of $2 \times 2$ black-and-white pictures. There are only 16 of them, so a distribution over all of them is a table that fits on a page, every likelihood in this chapter is an exact sum, and the questions that decide whether a generative model is any good (does it see data it was not trained on, does it need a table as large as the world, can it be sampled) can be answered with arithmetic instead of with a training run.
 
-Six earlier ideas will be used at once. Try them from memory; the answers are at the end, under "Recall questions".
+Six earlier ideas will be used at once.
 
 1. (Volume I, [Chapter 10](../v01-mathematics/10-probability.md), probability tables and Bayes' rule.) A part comes from machine A with probability $0.6$ and from machine B with probability $0.4$; A's parts are defective with probability $0.01$ and B's with $0.05$. Given a defective part, what is the probability that it came from B?
 2. (Volume I, [Chapter 17](../v01-mathematics/17-randomness.md), sampling.) A distribution on four outcomes has probabilities $0.4, 0.3, 0.2, 0.1$. Which outcome does the uniform number $u = 0.75$ select, and why does the long-run frequency of each outcome equal its probability?

@@ -48,7 +48,7 @@ Sequence A, the 128 queries i = 128 .. 255 (each reads i + 1 keys, between 129 a
 
 The concentration is the typical case on this toy and not the luck of one row: one key holds 0.3850 of the mass on average, 4 keys hold 0.7115 and 16 keys hold 0.8260, which is 8.6% of the keys a query reads. The same table shows the tail: 64 keys, a third of them, are needed for 0.9417.
 
-Six ideas from earlier chapters are needed. The answers are at the end.
+Six earlier ideas set up the question of which attention entries can be skipped.
 
 1. (Volume V, [Chapter 7](../v05-sequences/07-self-attention.md), scaled dot-product attention and the causal mask.) For one query at position $i$ and keys of width $d_h$, how many multiply-adds do the scores and the weighted sum of the values need, and which keys does the causal mask leave out?
 2. (Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache.) A layer has 8 key-value heads of width 128 and stores bf16 (2 bytes). How many bytes does one token add to the cache of one layer?

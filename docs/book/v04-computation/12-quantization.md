@@ -37,7 +37,7 @@ range the group really occupies, has a step of 0.0085 against 0.0125, and a mean
 it grows, shows what a single large weight does to a scale, and builds the group-wise and two-level formats that real checkpoints use,
 down to the bytes of one block. It ends with the question of which tensors may have fewer bits than others.
 
-Five older ideas carry the rest of this chapter: the integer code and the fp8 format of Chapter 1, rounding to a grid, the mean squared error, and the roofline account of a decode step. Bring them back from memory; the answers are at the end of the chapter.
+Five older ideas carry the rest of this chapter: the integer code and the fp8 format of Chapter 1, rounding to a grid, the mean squared error, and the roofline account of a decode step.
 
 1. (Chapter 1, number formats.) An int8 code $q = -37$ is stored with the scale $\Delta = 0.01$. What number does it stand for, and what is the largest error that
    rounding to the nearest code can make?

@@ -32,7 +32,7 @@ The weight is w = 0.0731 (first entry of the group [0.0731, -0.412, 0.0098, 0.9,
 | int8 with scale | 8 | 0x0A | 00001010 | 0.070866142 | -0.00223 | 0.0306 |
 <!-- /worked -->
 
-Read the table from the top. The 32-bit pattern gives back $0.073100001$: the
+The 32-bit pattern gives back $0.073100001$: the
 error is in the ninth digit. Two 16-bit formats with the same number of bits
 land on different numbers, $0.07312$ and $0.07324$, because they divide their
 16 bits differently. The two 8-bit floating-point formats are off by 4% and
@@ -57,7 +57,7 @@ count the bytes. Volume I, Chapter 15 derived how 32- and 64-bit floating
 point rounds and where it fails; this chapter builds on that and does not
 repeat its derivations.
 
-The chapter leans on Volume I's account of floating point and on one number from the optimizer chapter of Volume III. Answer from memory; the answers are at the end of the chapter.
+The chapter leans on Volume I's account of floating point and on one number from the optimizer chapter of Volume III.
 
 1. (Volume I, Chapter 1, integers.) How many different patterns can 8 bits
    take? What range of whole numbers do they cover if all are non-negative, and

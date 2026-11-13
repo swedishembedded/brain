@@ -20,7 +20,7 @@ The ratio of the two token counts is 256, and of the pair counts 65,536.
 
 The score matrix of one head would have two and a half billion entries, ten gigabytes at 32 bits, and that is for one of twelve heads in one of twelve layers. The products alone are 7.7 trillion FLOPs per block. Cutting the picture into patches of 16 by 16 pixels brings the token count down by a factor of 256 and the pair count by 65,536, to a size at which a block runs routinely. The rest of the chapter is about what that cut costs, what it needs from the model to make up for it, and the several ways, windows, pyramids and convolutional early stages, in which the count of tokens is kept small when the picture is large.
 
-Six ideas from earlier chapters come first; the answers are at the end.
+Six earlier ideas meet in the vision transformer, and the questions below collect them.
 
 1. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the transformer block.) A block of width $D$ reads $T$ tokens. How many entries does one head's score matrix have, and how many FLOPs do the score and weighted-average products of the whole block cost?
 2. (Volume VII, [Chapter 2](02-convolution.md), convolution.) A convolution with a $2 \times 2$ kernel, stride 2 and 4 filters is applied to a map of shape $[3, 8, 8]$. What is the output shape, how many weights does it have and how many multiply-adds does it do?

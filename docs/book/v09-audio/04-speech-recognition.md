@@ -22,7 +22,7 @@ There are three ways out, and brain runs two of them (the engines are drawn in t
 
 ![Two pipelines on one grid: Qwen3-ASR takes log-mel frames at 100 a second through three strided convolutions to 13 rows a second of width 1024, 24 windowed blocks and a projector to width 2048, and hands the rows to a 28-layer decoder that writes the text; Nemotron takes the same frames through three strided convolutions to 12.5 rows a second of width 1024, 24 Conformer blocks over chunks of 4 rows and projectors to width 640, and a predictor with a joint network that writes a blank or a piece at each row.](img/asr-pipelines.svg)
 
-Six things from earlier chapters are needed first. The answers are at the end.
+Speech recognition draws on six earlier ideas.
 
 1. ([Volume IX, Chapter 2](02-spectrograms.md), front ends.) A clip of 16,000 samples goes through a front end with a 512-point frame at a hop of 160 samples and zero padding of 256 on each side. How many frames does it make, and how many of them does the Nemotron encoder read as valid?
 2. ([Volume VII, Chapter 2](../v07-vision/02-convolution.md), receptive field.) A convolution of kernel 3, stride 2 and padding 1 reads 100 positions. How many does it write, and what are the receptive field and the jump after three such layers on top of one another?

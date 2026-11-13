@@ -73,7 +73,7 @@ $n/6 = 170.7$, to the right of both ridge points. The gap between 0.25 and 170.7
 four steps: reuse in the cache of a CPU, reuse in the shared memory of a GPU workgroup, reuse in the registers of one invocation, and finally arithmetic units built for the
 product itself. A last section asks what these rearrangements do to the numbers, since a sum added in a different order is, in floating point, a different sum.
 
-Five ideas from earlier chapters carry the argument, from the cost of a product (Volume IV, Chapter 3) to the order of floating-point additions (Volume I, Chapter 15). Try them from memory first; the answers are at the end of the chapter, under "Recall questions".
+Five ideas from earlier chapters carry the argument, from the cost of a product (Volume IV, Chapter 3) to the order of floating-point additions (Volume I, Chapter 15).
 
 1. (Volume IV, Chapter 3, arithmetic intensity.) How many floating-point operations does $C = AB$ take for two $[512, 512]$ fp32 matrices, how many bytes must cross
    the memory boundary at the very least (read $A$ and $B$ once, write $C$ once), and what is the intensity?

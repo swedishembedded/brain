@@ -11,7 +11,7 @@ Ordering one unit onto an empty shelf earns, on average, exactly nothing. The un
 
 The two-button game of Volume II hid nothing of this kind. Its buttons never changed, so the best button was the best button on every press, and a choice affected only the one reward it earned. Here a choice also changes the situation in which the next choice is made, and the reward for it may come days later. Describing that exactly, saying what it is worth to be in a situation and then computing the best thing to do in every one of them, is the subject of the chapter, and it is the frame in which every method of the rest of the volume is stated.
 
-Four ideas from earlier volumes are needed first. Answer them from memory; the answers are at the end of the chapter.
+A decision process begins from four ideas in earlier volumes.
 
 1. (Volume II, Chapter 1, "The Learning Problem", reinforcement learning, overview.) In the two-button game, what did the agent's choice change, and what did it leave unchanged?
 2. (Volume I, Chapter 10, "Probability: Reasoning Under Uncertainty", conditional probability.) A day's demand is $0$, $1$ or $2$ with probabilities $0.3$, $0.4$ and $0.3$. Given that at least one customer came, what is the probability that two did?

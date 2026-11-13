@@ -9,7 +9,7 @@ In the lookup experiment of Chapter 7 the trained attention layer put a weight o
 
 Volume III met this problem in networks too deep to train, and the cure was one line: let a layer return its input plus a correction. This chapter turns that line into the repeating unit of every transformer. The first question is what a stack of attention layers should pass along, and the answer, a running sum that every sublayer reads and adds to, leaves three more to settle. What does a sublayer read from a sum that keeps growing? Attention moves information between positions and does no work on any one position, so what does? And what does one such unit cost, in parameters and in arithmetic, so that a stack of dozens can be planned?
 
-Some things from earlier chapters come back first. Answer them from memory; the answers are at the end of the chapter.
+The block composes parts built earlier, and the questions below name them.
 
 1. (Volume V, [Chapter 7](07-self-attention.md), multi-head attention.) A multi-head attention layer has width $D = 512$ and $H = 8$ heads. What is the shape of its output for an input of shape $[T, 512]$, how many parameters do its four matrices hold, and what must be added to its scores to make it causal?
 2. (Volume III, [Chapter 12](../v03-neural-networks/12-training-dynamics.md), residual connections.) A layer returns $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$. What is the Jacobian of $\mathbf{y}$ with respect to $\mathbf{x}$, and what does the gradient $d\mathbf{x}$ consist of, given $d\mathbf{y}$?

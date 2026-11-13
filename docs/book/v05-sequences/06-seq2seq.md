@@ -9,7 +9,7 @@ Say the digits `2 3 1` backwards. You did it without effort: `1 3 2`. Now try it
 
 Every model so far in this volume either reads a sequence or writes one. The recurrent network of the last chapter reads tokens into a state of fixed size, and the language model of the chapter before it writes the next token from the tokens already written. Translation, summarisation, speech recognition and this chapter's digit reversal do both, with two different sequences: the thing to write depends on a sequence the writer has not produced, and the two sequences do not have the same length. The obvious design joins the two parts we have, and this chapter builds it, trains it, and watches it break in exactly the way the digits above suggest. The break shows what to change, and the change, a decoder that looks back at the input instead of trusting a summary of it, is the first form of the idea the rest of the volume builds on.
 
-Some things from earlier chapters come back first. Answer them from memory; the answers are at the end of the chapter.
+A decoder that looks back at an encoder needs these earlier ideas in hand.
 
 1. (Volume V, [Chapter 5](05-recurrent-networks.md), the recurrent network.) A recurrent network reads a sequence of 10 tokens with a state of 16 numbers. How many numbers does it carry from one step to the next, and does that number depend on the length of the sequence?
 2. (Volume V, [Chapter 4](04-language-modeling.md), teacher forcing.) A model is trained to predict the tokens $y_1, \dots, y_n$ of a sentence one at a time. What token does it receive as input when predicting $y_j$ during training, and what does it receive when it generates text?

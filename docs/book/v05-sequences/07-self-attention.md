@@ -9,7 +9,7 @@ Count the steps that separate the first word of a hundred-word paragraph from th
 
 That answer had a gap in it. The encoder that produced the states was still a chain: its state at the fiftieth digit was reached only by passing through the forty-nine before it, and the decoder still wrote one token after another. The question for this chapter is what is left if the chain is removed and only the look is kept. Every position of one sequence asks a question of every position of the same sequence, and the answers are combined, with no state carried from one position to the next. If that works, all the positions can be computed at once, and any two of them are one step apart.
 
-Some things from earlier chapters come back first. Answer them from memory; the answers are at the end of the chapter.
+Attention is assembled from earlier pieces, and the questions below gather them.
 
 1. (Volume V, [Chapter 6](06-seq2seq.md), cross-attention.) In the attention of the last chapter, which vector played the question, which was compared with it to give a score, and which was averaged with the weights?
 2. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), the softmax and its loss.) The scores $(0, 0, \ln 3)$ go through a softmax. What are the three weights, and if the third is the correct class, what is the cross-entropy loss and the gradient of the loss with respect to the three scores?

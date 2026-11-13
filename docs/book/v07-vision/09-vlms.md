@@ -9,7 +9,7 @@ Every decoder of Volumes V and VI has exactly one door. A token id comes in, the
 
 The second way is open because of a fact about the decoder that Volumes V and VI established without needing it. By the time attention reads a row, the row carries no label of where it came from. The table does not stamp its rows, and position is not added to them either: a rotary decoder applies it inside attention, by turning queries and keys. A row computed from a picture, of the right width, is a row. What remains is a list of engineering questions, and they are the sections of this chapter. How are the picture's rows made to have the decoder's width (the projector), and put in the right places of the prompt (the splice)? How many rows does a picture cost, and how can the number follow the picture instead of being fixed (the budget, and a grid that follows the picture)? What do the rows' positions say about where they sit in the picture? And what changes when the answer is not a sentence but a box?
 
-Six things from earlier chapters are needed first. The answers are at the end.
+A vision-language model joins parts built earlier, and six of them are recalled first.
 
 1. ([Volume V, Chapter 12](../v05-sequences/12-kv-cache.md), the cache.) A decoder has 36 layers and 8 key-value heads of width 128 and stores bf16 numbers. How many bytes does one token occupy in its cache?
 2. ([Volume VII, Chapter 6](06-vision-transformers.md), patches.) A 448 by 448 picture is cut into patches of 16 pixels. How many tokens does the tower attend over, and how many does it hand on if each 2 by 2 block of patches is merged into one?

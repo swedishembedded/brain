@@ -73,7 +73,7 @@ length of the longest chain of dependent operations are the same wherever you ru
 reasons with counts. Where it needs a cost in cycles it takes it from a small model whose assumptions are
 printed beside the result, and says so; it never reports a stopwatch reading as a fact about your computer.
 
-The cache arguments below lean on layout and strides from Volume I and on its treatment of floating-point sums. Answer from memory; the answers are at the end of the chapter.
+The cache arguments below lean on layout and strides from Volume I and on its treatment of floating-point sums.
 
 1. (Volume I, Chapter 5, row-major layout.) A $[m, n]$ array of 4-byte numbers is stored row-major starting at
    address 0. At what address is element $(i, j)$? What is the stride of the first axis, in elements?

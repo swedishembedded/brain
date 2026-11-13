@@ -19,7 +19,7 @@ Nothing in the list is new. Every part was derived and worked by hand in a chapt
 
 ![Five boxes labelled with the milestones in build order. Milestone 1 (four blocks) is at the left. Milestone 2 (cost model) is above and to the right of it and milestone 3 (parity harness) below and to the right; both receive an arrow from milestone 1. Milestone 4 (comparison, highlighted) is to the right of both and receives arrows from milestones 1, 2 and 3. Milestone 5 (hybrid) is at the far right and receives an arrow from milestone 4.](img/project-architecture-milestones.svg)
 
-The figure is a valid build order. The comparison reads everything before it: the blocks, the costs that turn a loss into a point on a plane of quality against FLOPs, and a harness that says the implementations compute what they claim. Build and check each milestone before the next, because a comparison of a block that has a wrong backward pass is a comparison of the bug. The **acceptance tests** at the end collect the expected values in one place. You need the book's generator (Volume I, Chapter 17), double-precision arithmetic with a correctly rounded `exp`, `log`, `sqrt`, `sin` and `cos`, and the libraries of Volumes III and V. The 32-bit rounding of milestone 3 is a conversion of a 64-bit number to the nearest 32-bit float.
+Read along the arrows, the figure orders the work. The comparison reads everything before it: the blocks, the costs that turn a loss into a point on a plane of quality against FLOPs, and a harness that says the implementations compute what they claim. Build and check each milestone before the next, because a comparison of a block that has a wrong backward pass is a comparison of the bug. The **acceptance tests** at the end collect the expected values in one place. You need the book's generator (Volume I, Chapter 17), double-precision arithmetic with a correctly rounded `exp`, `log`, `sqrt`, `sin` and `cos`, and the libraries of Volumes III and V. The 32-bit rounding of milestone 3 is a conversion of a 64-bit number to the nearest 32-bit float.
 
 Six questions bring back what the milestones lean on. They reach across the volume and back into Volume V; answer each from memory before reading on, since the answers are at the end.
 
@@ -450,7 +450,7 @@ Against the pure dense stack, the hybrid learned the task in these runs where th
 
 ## What the comparison must report
 
-The tests are the values the worked module prints, collected as a checklist; an implementation passes when every statement holds. "Exact" means integers, text and digests equal; "criterion" means the stated inequality; the trained numbers are not in the list because the nudge rule leaves them as bounds, but the verdict of each registered claim is.
+The tests are the values the worked module prints. A comparison passes when every statement holds. "Exact" means integers, text and digests equal; "criterion" means the stated inequality; the trained numbers are not in the list because the nudge rule leaves them as bounds, but the verdict of each registered claim is.
 
 <!-- worked: project_architecture_comparison.acceptance_fingerprint -->
 | milestone | quantity | value | tolerance |

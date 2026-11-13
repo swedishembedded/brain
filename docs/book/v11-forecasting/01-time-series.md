@@ -25,7 +25,7 @@ The reason is that every statistic of Volume I came with an assumption that this
 
 That is the subject of this chapter in one experiment. Data ordered in time cannot be shuffled without losing something, its values depend on each other in a way that has a shape, and every part of the machinery of Volumes I and II that quietly assumed independent samples has to be re-examined: the standard errors, the correlations, and above all the split between the rows a model learns from and the rows it is judged on. By the end the reader can read the memory of a series out of its autocorrelation, decide what to remove before modelling it, build forecasts from nothing but the series itself and know which of them a fitted model has to beat, fit an autoregressive model by least squares, and cut a series into training and test windows so that no future leaks into either.
 
-Five ideas from earlier volumes are needed first. Answer them from memory; the answers are at the end of the chapter.
+Time series draw on five ideas from earlier volumes.
 
 1. (Volume I, Chapter 11, "The Distributions Machine Learning Uses", covariance.) Two quantities have variances $4$ and $9$ and covariance $3$. What is the variance of their sum, and what is their correlation?
 2. (Volume II, Chapter 2, "Linear Regression and the First Descent", least squares.) Fit $y = a + bx$ by least squares to the points $(0, 1)$, $(1, 2)$, $(2, 4)$: write the normal equations and solve them.

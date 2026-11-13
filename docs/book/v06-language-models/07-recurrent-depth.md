@@ -21,7 +21,7 @@ Read the first row against the third. The released model applies its 48 layers f
 
 [Chapter 4](04-mixture-of-experts.md) ran the trade in the other direction. A mixture holds parameters that a token never touches, and the cost of a token stays near that of a small model while the capacity grows. This model touches every parameter four times. One chapter bought parameters without compute and this one buys compute without parameters, and the question it has to answer is whether the second purchase is worth anything. A model that can apply the same weights again can, in principle, spend more arithmetic on a hard token than on an easy one, and that is the reason to want it. The chapter builds the smallest version of the idea, trains it on a task that needs repeated steps, lets the model choose how many steps to take, and then reads the two crates of brain that carry the idea in two different forms.
 
-Six things from earlier chapters are used before this chapter explains them again, each as a one-line question. The answers are at the end.
+Six things from earlier chapters are used before this chapter explains them again, each as a one-line question.
 
 1. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the residual stream.) A pre-norm block reads the stream $\mathbf{x}$ and writes two sublayers into it. What is the block's output in terms of $\mathbf{x}$, the attention sublayer $\mathrm{attn}$, the feed-forward network $\mathrm{ffn}$ and the norm?
 2. (Volume V, [Chapter 5](../v05-sequences/05-recurrent-networks.md), backpropagation through time.) The same matrix $\mathbf{W}$ is used at each of $n$ steps of an unrolled recurrence. How is the gradient of the loss with respect to $\mathbf{W}$ built from the steps?

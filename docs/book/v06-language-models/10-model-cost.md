@@ -22,7 +22,7 @@ Nothing was wrong, and each of the three numbers was right in its own unit. The 
 
 There are three ledgers. The first is the **parameter count**, the number of numbers a model stores. The second is the arithmetic that one token needs, the third is the memory a run needs, and all three are functions of the shape of the model alone, so they can be written down before a single weight is read. Earlier chapters counted them for particular models: Volume V counted GPT-2 and its training step, Volume VI counted decoders, a mixture, a hybrid and a looped stack, each for the question of its own chapter. This chapter writes the general formulas that those counts were instances of, applies them to two models that brain ports, the text tower of Gemma-4 and the diffusion transformer of MiniMax-H3, and ends with what the best-known empirical studies say about how to spend the budget the three ledgers define.
 
-Six things from earlier chapters are used before this chapter explains them again, each as a one-line question. The answers are at the end.
+Six things from earlier chapters are used before this chapter explains them again, each as a one-line question.
 
 1. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the transformer block.) A pre-norm block with a gated network holds which weight matrices, and what are their shapes in terms of the width $D$ and the hidden width $F$?
 2. (Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache.) How many bytes does a decoder add to its cache for each token, in terms of the layers $L$, the key-value heads $h_{\mathrm{kv}}$, the head width $d_h$ and the bytes $b$ of a stored value?

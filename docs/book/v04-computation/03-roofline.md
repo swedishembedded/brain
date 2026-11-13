@@ -36,7 +36,7 @@ performs and the bytes it moves, and a machine has two rates, the operations it 
 second. Comparing the two ratios says which resource limits the computation and gives a number it cannot beat. The picture that
 shows it is called the roofline. Volume IV, Chapter 2 ended with the count of operations and bytes; this chapter says what to do with it.
 
-The method leans on six earlier ideas, so bring them back before the counting starts. Answer from memory; the answers are at the end of the chapter.
+The method leans on six earlier ideas, so bring them back before the counting starts.
 
 1. (Volume I, Chapter 4, matrix multiplication.) How many floating-point operations does the product of an $[m, k]$
    matrix and a $[k, n]$ matrix cost, counting a multiplication and an addition as one operation each?

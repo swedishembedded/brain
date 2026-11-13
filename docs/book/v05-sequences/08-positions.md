@@ -9,7 +9,7 @@ Swap the first and last words of "dog bites man" and the layer of the last chapt
 
 This chapter is about writing it in. There are three places to do it. The position can be added to the vectors that enter the layer, as one more vector per token. It can be applied to the queries and keys, so that the score of a pair depends on where the two tokens are. Or it can be added to the score itself, as a number that depends on how far apart the two tokens are. The first is the oldest, the third is the most direct, and the second is the one that the Qwen decoders in brain use; following it takes most of the chapter, because its consequences reach everywhere: how channels are paired, how far a signal travels, what happens when a model reads past the length it was trained on, and how a picture, which has two directions, is given positions.
 
-Some things from earlier chapters come back first. Answer them from memory; the answers are at the end of the chapter.
+Position codes lean on earlier chapters, which the questions below revisit.
 
 1. (Volume V, [Chapter 7](07-self-attention.md), scaled dot-product attention.) The rows of $\mathbf{X}$ are shuffled by a permutation matrix $\boldsymbol{\Pi}$. What happens to $\mathbf{Q}$, $\mathbf{K}$ and $\mathbf{V}$, to the score matrix $\mathbf{S}$, and to the output $\mathbf{O}$?
 2. (Volume I, [Chapter 6](../v01-mathematics/06-decompositions.md), rotation matrices.) What is the product $\mathbf{R}(\alpha)\mathbf{R}(\beta)$ of two plane rotations, and what is $\mathbf{R}(\theta)^\top$?

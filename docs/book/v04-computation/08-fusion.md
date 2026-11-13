@@ -28,7 +28,7 @@ Read the last column against the ridge point of 50. The matrix product, at 204.8
 
 A single kernel could read $x$, $W$, $b$, $\gamma$ and $\beta$ once and write $y$ once. That is 20,983,808 bytes, 4.6 times fewer, and the numbers it computes are the same. This chapter is about when that is possible, what it saves, what it costs, and what changes in the last bits of the answer. Its central claim is the one in the title: the cheapest computation is the one whose intermediate result never touches memory.
 
-Six ideas from earlier chapters carry the argument, from the roofline to the layer normalization of Volume III. Try them from memory first; the answers are at the end of the chapter, under "Recall questions".
+Six ideas from earlier chapters carry the argument, from the roofline to the layer normalization of Volume III.
 
 1. (Volume IV, Chapter 3, bandwidth-bound.) For $c = a + b$ on $2^{20}$ float32 numbers, count the FLOPs, the bytes and the intensity. Is it limited by arithmetic or by bandwidth on the model GPU, whose ridge point is 50 FLOP per byte?
 2. (Volume IV, Chapter 3, fixed costs.) Starting one dispatch costs 5 microseconds in the model, and the model GPU moves 800 (GB/s). How many bytes of memory traffic is the start worth?

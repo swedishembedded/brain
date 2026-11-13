@@ -82,7 +82,7 @@ Read the map before the listings. The line `if (g >= p.n) { return; }` stays a g
 
 Three programs from one text raise four questions, and the chapter takes them in order. What does the code above the devices see, so that it never has to know which one it runs on (the **backend abstraction**)? What must a translation preserve, and where do translations break (**shader translation**)? When is the translation compiled to machine code, at the moment the program starts or before it ships (**JIT** and **ahead-of-time compilation**)? And what does it mean that the three devices give "the same results", given that floating-point arithmetic is not associative and a fused multiply-add rounds once where two operations round twice (**cross-backend parity**)?
 
-The comparisons ahead lean on six earlier ideas, some of which the first example already uses. Bring them back from memory; the answers are at the end of the chapter.
+The comparisons ahead lean on six earlier ideas, some of which the first example already uses.
 
 1. (Volume IV, Chapter 5, the guard.) A kernel is launched over $N = 10$ elements with workgroups of 4 invocations. How many invocations run, and what does the guard `if g >= N: return` do for them?
 2. (Volume IV, Chapter 5, the barrier rule.) When is a `return` before a `barrier` legal, and what happens to the others when it is not?

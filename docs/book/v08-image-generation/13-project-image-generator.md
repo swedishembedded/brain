@@ -497,7 +497,7 @@ Every pass is close to $0.5$ FLOPs per byte, which is what a weight that is read
 
 ## The yardstick numbers the generator must hit
 
-The tests are the values the worked module prints, collected as a checklist. Test in the order of the milestones: a disagreement at milestone 4 that follows agreement at 1 to 3 points at training and not at the data. "Exact" means equal integers and strings; a numeric tolerance is absolute.
+Each value the worked module prints doubles as a test of the generator. Test in the order of the milestones: a disagreement at milestone 4 that follows agreement at 1 to 3 points at training and not at the data. "Exact" means equal integers and strings; a numeric tolerance is absolute.
 
 <!-- worked: project_image_generator.acceptance_tests -->
 Expected values of the project, computed by this module. 'Exact' means equal; a number is compared with the tolerance in the last column, absolute. A cell of five numbers is the five measures of the chapter in the order accuracy, share on data, distance to the template, mean ln p, TV.

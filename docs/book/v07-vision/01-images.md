@@ -9,7 +9,7 @@ In July 2026 a depth model in brain was losing accuracy on real photographs, and
 
 So the first job of a vision model's input is not clever. It is to be exactly what the model was trained to see. An image arrives as a file of bytes, or as the packed output of a camera, and must become a tensor of floating-point numbers of a fixed shape in a fixed range, in a fixed channel order and layout, resampled by a fixed rule. Each of those words hides a choice, the model's author made it once, silently, and the weights have never seen anything else. The chapter takes the choices in the order that the bytes meet them: what a pixel holds, how the numbers are laid out in memory, what the numbers mean as light, how cameras pack them, how an image is resized, how it is fitted to the size a model wants, and how the values are scaled before the first layer. Every one of them is implemented in the chapter's worked module on stated inputs, and every one has a way of being half a pixel, one channel or one constant off.
 
-Six ideas from earlier chapters come first; the answers are at the end.
+Images build on six earlier ideas, which the questions below bring back.
 
 1. (Volume I, [Chapter 5](../v01-mathematics/05-arrays.md), strides.) A row-major tensor has shape $[2, 3, 4]$. What are its strides in elements, and at what offset does the element with index $(1, 2, 3)$ sit?
 2. (Volume I, [Chapter 15](../v01-mathematics/15-floating-point.md), rounding error.) For 32-bit numbers, what is the unit round-off $u$, and how large can the relative error of one rounded addition, subtraction, multiplication or division be?

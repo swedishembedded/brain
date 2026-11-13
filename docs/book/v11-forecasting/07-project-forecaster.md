@@ -459,7 +459,7 @@ The fit of the learned model, the scaling, the Gram accumulation and the elimina
 
 ## What the forecaster must report
 
-The tests are the values the worked module prints, collected as a checklist. Test in the order of the milestones: a disagreement at milestone 6 that follows agreement at 1 to 5 points at the repair and not at the panel. 'Exact' means equal integers; a number with decimals is matched to the digits shown, which are the digits on which the run and its four nudged copies agree.
+The forecaster is tested against the values the worked module prints. Test in the order of the milestones: a disagreement at milestone 6 that follows agreement at 1 to 5 points at the repair and not at the panel. 'Exact' means equal integers; a number with decimals is matched to the digits shown, which are the digits on which the run and its four nudged copies agree.
 
 <!-- worked: project_forecaster.acceptance_tests -->
 Each row is a number of a block above, collected in the order of the milestones. 'Exact' means equal integers or equal text; a number with decimals is to be matched to the digits shown, which are the digits on which the run and its four nudged copies agree.

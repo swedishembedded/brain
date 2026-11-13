@@ -38,7 +38,7 @@ Before the first milestone, six questions bring back what the project leans on. 
 
 ## From honest splits to the report
 
-A note on language and style. The pseudocode follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. Use 64-bit floats. Write the checks of each milestone as a test file that you rerun after every change, and compare tables to the digits printed (a difference below half a unit in the last printed place), unless a milestone states another tolerance. Every generator below is the book's SplitMix64, started at the printed seed with `Generator(seed)`. Every random number is drawn in the printed order, so a reader whose generator is right sees the same numbers.
+A note on language and style. Its pseudocode keeps to [Pseudocode Conventions](../pseudocode.md), so indices start at 0 and every broadcast, random draw and input assumption is written out. Use 64-bit floats. Write the checks of each milestone as a test file that you rerun after every change, and compare tables to the digits printed (a difference below half a unit in the last printed place), unless a milestone states another tolerance. Every generator below is the book's SplitMix64, started at the printed seed with `Generator(seed)`. Every random number is drawn in the printed order, so a reader whose generator is right sees the same numbers.
 
 Two letters are used for different things in different milestones, as in Chapters 2 and 3. In milestone 3, $\mathbf{y}$ is the vector of the continuous target `wear`. In milestones 4 to 7, $y_n \in \{0, 1\}$ is the binary outcome `fail`. The tables name the column.
 
@@ -750,7 +750,7 @@ The habits of this chapter are ones brain's own code enforces. `crates/decisions
 
 ## What your predictor must reproduce
 
-The tests are the blocks printed in the milestones above, collected here as a checklist. An implementation passes when every statement holds. "Exact" means integers or text equal; "to $t$" means the stated absolute tolerance.
+Every block the milestones print is also a test, and the list gathers them. The predictor is correct when each statement below holds. "Exact" means integers or text equal; "to $t$" means the stated absolute tolerance.
 
 | milestone | test | expected | tolerance |
 |---|---|---|---|

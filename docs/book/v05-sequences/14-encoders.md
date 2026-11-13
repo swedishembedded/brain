@@ -9,7 +9,7 @@ Cover one word of a sentence and ask what it was. "The ___ purred near the mat."
 
 For writing, that mask is a requirement and not a defect. A model that will be sampled from left to right has to be trained so that position $i$ never uses what it will later be asked to produce. Most of what language models do for a living is not writing, though. A search engine holds the whole document and the whole query. A spam filter holds the whole message, and a classifier of support tickets the whole ticket. Nothing is left to the right to predict, and a representation of the text that reads only leftwards throws half of the evidence away. So this chapter takes the mask off, and three things follow from that one move. The next-token task stops working, because with every position visible the answer to "what comes next" is sitting in the input, and a new task has to be found. The output of the network is a vector for every token, and search wants one vector for the whole text. And the comparison that search is built on, the cosine of two such vectors, has to mean something, which no objective so far has asked of it.
 
-Some things from earlier chapters come back first. Answer them from memory; the answers are at the end of the chapter.
+An encoder reuses much of the decoder stack, so these earlier ideas come first.
 
 1. ([Chapter 7](07-self-attention.md), the causal mask.) For a text of four tokens, which pairs (query $i$, key $j$) does the causal mask allow, and how many of the 16 are they?
 2. ([Chapter 10](10-training-gpt.md), loss masking.) A row has 12 positions and 5 of them are supervised. How is the loss of the row written from the 12 per-position cross-entropies, and what is the sum divided by?

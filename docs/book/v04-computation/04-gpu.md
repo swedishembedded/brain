@@ -35,7 +35,7 @@ the same time. This chapter is about how such a machine is built, how its thread
 that the grouping works for it and not against it: which threads may cooperate, what happens when they disagree, how many
 fit at once, and which addresses they must ask for so that memory answers all of them with few transactions.
 
-A GPU is easiest to understand with six earlier ideas fresh in mind, so bring them back first. Answer from memory; the answers are at the end of the chapter.
+A GPU is easiest to understand with six earlier ideas fresh in mind, so bring them back first.
 
 1. (Volume I, Chapter 4, matrix multiplication.) How many floating-point operations does the product of an $[n, n]$ matrix
    with an $[n, n]$ matrix cost, counting a multiplication and an addition as one operation each?

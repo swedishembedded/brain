@@ -11,7 +11,7 @@ Suppose the coin has bias $\theta$ and the flips are independent. The probabilit
 
 Two puzzles from the previous chapters get answered along the way. Chapter 2 minimised the mean squared error and chapter 3 the binary cross-entropy, and each time the justification was "it works": the first is smooth and has a closed-form minimiser, the second does not saturate. Both were also promised a deeper reason, and here it is: each is the probability of the data under an assumption about how the data arose, read backwards. The second puzzle is the one chapter 3 ended on. Data that a straight boundary separates have no best weights; gradient descent pushes them to infinity. Something has to say that huge weights are implausible, and saying it with probability turns out to be exactly an added penalty on the size of the weights, the practice called regularization (defined where it arises, below).
 
-Six ideas from earlier chapters do the work below. Try them from memory first; the answers are at the end of the chapter, under "Recall questions".
+Six ideas from earlier chapters do the work below.
 
 1. (Chapter 10, Bayes' rule) A defect occurs in 1% of parts. A detector alarms on 90% of defective parts and on 10% of good parts. Given an alarm, is the probability of a defect near $0.9$? Compute it.
 2. (Chapter 1, logarithms) What is $\ln(ab)$ in terms of $\ln a$ and $\ln b$, and what is $\ln(0.5^{10})$?

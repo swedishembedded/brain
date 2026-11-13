@@ -9,7 +9,7 @@ A keeper who has learned, to four decimals, what every order on an empty shelf i
 
 The alternative is to let the keeper choose at random, with a probability for every order, and to change the probabilities. The expected return is then a smooth function of the numbers that set them, and a smooth function has a gradient. The whole chapter is about that gradient: what it is, how to estimate it from the days a shop actually lives without ever writing down a probability of demand, why the estimate is so noisy that a subtraction of one number can cut its variance twelvefold, how a learned value function turns it into an actor and a critic, and how to take several steps on one batch of experience without running away from the data that justified them. The last of these is the clipped objective on which much policy-gradient training of language models rests, and it is where brain's `crates/rl` lives.
 
-Six ideas from earlier are the tools. Answer them from memory; the answers are at the end of the chapter.
+Six ideas from earlier are the tools.
 
 1. (Volume XII, Chapter 1, "Markov Decision Processes", return.) Three days pay $1$, $1$ and $1$ and nothing after. With $\gamma = 0.5$, what are $G_2$, $G_1$ and $G_0$?
 2. (Volume XII, Chapter 2, "Learning Values from Experience", temporal-difference learning.) Write the TD error $\delta$ of one day, and say what a positive $\delta$ tells the learner about the state it started from.

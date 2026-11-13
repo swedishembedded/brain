@@ -25,7 +25,7 @@ For symmetric costs the two rules are the same and cost $0.648$ per day, because
 
 That is the case for a forecast that is more than a number, and it also hands over the right yardstick. The cost of an order $q$ against a demand $y$ is $c_{\mathrm{over}}(q - y)$ when $q$ exceeds $y$ and $c_{\mathrm{short}}(y - q)$ when it falls short, and, with $\tau = c_{\mathrm{short}}/(c_{\mathrm{short}} + c_{\mathrm{over}})$, that equals $(c_{\mathrm{short}} + c_{\mathrm{over}})$ times a single asymmetric function of $q$ and $y$ that this chapter calls the pinball loss. The cost of a wrong order is a loss function, and the loss function says which statement about the future to make. The chapter follows that thread: from a quantile to the loss that finds it, to a whole distribution trained by likelihood, to a single score for a whole distribution, to the question of whether a forecast's claims are borne out, and to what happens when the claims concern a sum of several bars.
 
-Four ideas from earlier are needed first. Answer them from memory; the answers are at the end of the chapter.
+Probabilistic forecasts lean on four earlier ideas.
 
 1. (Volume I, Chapter 10, "Probability: Reasoning Under Uncertainty", probability distribution.) A random variable $Y$ has distribution function $F(x) = P(Y \le x)$. Write $P(a < Y \le b)$ in terms of $F$, and say in a sentence what it means that $q$ is the $0.9$-quantile of $Y$.
 2. (Volume I, Chapter 11, "The Distributions Machine Learning Uses", the Gaussian.) If $X \sim \mathcal{N}(\mu, \sigma^2)$, which interval $\mu \pm c\,\sigma$ holds $95\%$ of the probability, and what is the probability that $X$ lies more than $1.2816\,\sigma$ above $\mu$?

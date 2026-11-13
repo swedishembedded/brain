@@ -21,7 +21,7 @@ For scale: the 8,190,735,360 parameters of this shape are 16,381,470,720 bytes i
 
 Grouped-query attention is a dial with a stop. Turn it to its end, one key-value head, and the cache is 2.25 GiB at this context, but every query head then reads the same keys and values, and it is not obvious what that costs. The question of this chapter is whether the cache can be made smaller than the groups make it without turning that dial to its stop: by storing something other than the keys and values themselves, or by storing fewer positions of them. Both ideas are in use in the decoders brain serves, and both have a price that can be counted before anything is trained.
 
-Five ideas from earlier chapters will be used before they are explained again. The answers are at the end.
+Five ideas from earlier chapters will be used before they are explained again.
 
 1. (Volume VI, [Chapter 1](01-modern-decoder.md), grouped-query attention.) How many numbers does one token add to the cache of one layer with 32 query heads and 8 key-value heads of width 128, and how many query heads read each key-value head?
 2. (Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the decode phase.) For one cached key, how many FLOPs does a layer spend on it and how many bytes does it read, at those shapes in bf16? What ratio is that?

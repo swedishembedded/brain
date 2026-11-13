@@ -25,7 +25,7 @@ At $c = 1$ the draws are mostly good: $0.3\%$ are off the curve, though only $42
 
 This chapter replaces luck with a requirement. If the codes are to be drawn from a known distribution, then the training must make the codes follow it. That requires saying what the model is (a distribution over readings, with the code as a latent variable), what training should maximize (a likelihood, which cannot be computed), and what to maximize instead (a bound that can). The result is the **variational autoencoder**, and its consequences reach well beyond this toy: the encoder and decoder that move an image to and from the compact space where a modern image generator works are trained descendants of it.
 
-Four earlier ideas are used at once. Try them from memory; the answers are at the end, under "Recall questions".
+Four earlier ideas are used at once.
 
 1. (Volume III, [Chapter 13](../v03-neural-networks/13-first-models.md), the autoencoder.) What loss is an autoencoder trained on, and why does a trained code determine the span of the decoder's columns but not a particular basis of it?
 2. (Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), KL divergence.) What does $D_{\mathrm{KL}}(p \,\Vert\, q)$ measure, when is it zero, and is it symmetric? Compute it in nats for $p = \mathrm{Bernoulli}(\tfrac12)$ and $q = \mathrm{Bernoulli}(\tfrac14)$.

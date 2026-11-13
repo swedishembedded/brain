@@ -7,7 +7,7 @@
 
 A published wiring diagram of an animal's nerve cord is two spreadsheets. One has a row for each neuron and the other a row for each pair of neurons and each region of tissue they touch, with the number of synapses between them. Nothing in either file moves, fires or weighs anything. A 12 in the synapse column is a count of contacts that someone saw in an electron microscope, and it is not a current, a conductance or even a sign: whether the contact excites or inhibits is not visible in the image at all. The question of this chapter is what can be learned by putting such a diagram inside a simulated body and letting it run, and the first thing to find out is how much has to be added before it can run at all. What has to be added turns out to be the interesting part. Every number of that kind is a modelling decision with a discretisation behind it, and a simulation of an animal is only as honest as its account of what each of them cost.
 
-Five ideas from earlier chapters are needed first. The answers are at the end.
+Neural simulation starts from five earlier ideas.
 
 1. (Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), differential equations.) A quantity obeys $dx/dt = -kx$ with $x(0) = x_0$. What is $x(t)$, and why is it the only solution?
 2. (Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), Euler's method.) One Euler step of size $h$ on that equation multiplies $x$ by what? For which $kh$ does one step cross zero, and for which does the sequence of steps grow in size?

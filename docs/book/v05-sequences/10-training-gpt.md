@@ -11,7 +11,7 @@ The stages are seven. Raw text is cut into tokens (Chapter 2). The tokens of man
 
 ![The pipeline of the chapter. Raw documents go through the tokenizer to a token stream with a separator before every document, and are packed into rows of inputs, targets, loss mask and document id. The GPT turns a batch of rows into logits, the masked loss turns them into gradients, AdamW with clipping and a learning-rate schedule turns gradients into new weights, which go back into the GPT for the next step. A checkpoint of the weights and moments feeds the validation loss and the generated text.](img/training-pipeline.svg)
 
-Some things from earlier chapters come back first. Answer them from memory; the answers are at the end of the chapter.
+Training a GPT draws on earlier chapters, recalled before the loop is written.
 
 1. (Chapter 2, byte-pair encoding.) Two words are in the corpus, `aab` three times and `ab` twice. Which adjacent pair is merged first, and how is `aab` written afterwards?
 2. (Chapter 4, the causal language model.) A document has five tokens, $x_1, \dots, x_5$, after a start marker $x_0$. Which tokens are the inputs and which the targets, and what loss does a model that guesses uniformly over 73 tokens get?

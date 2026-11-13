@@ -36,7 +36,7 @@ Before the first milestone, six questions bring back what it leans on. They reac
 
 ## Building the engine from tensor to quantized weights
 
-The pseudocode follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. Every `f32` operation rounds to float32 one operation at a time, as the pseudocode defines; a fused multiply-add is written `fma`. Store every matrix row-major. Every random input comes from the book's SplitMix64 at a seed printed beside the table, and the draws are taken in the order the table states. Write the checks of each milestone as a test file that you rerun after every change.
+The pseudocode is written under [Pseudocode Conventions](../pseudocode.md) (zero-based, row-major, broadcasts and randomness explicit, a `require` for each input assumption). Every `f32` operation rounds to float32 one operation at a time, as the pseudocode defines; a fused multiply-add is written `fma`. Store every matrix row-major. Every random input comes from the book's SplitMix64 at a seed printed beside the table, and the draws are taken in the order the table states. Write the checks of each milestone as a test file that you rerun after every change.
 
 Results are compared by digest wherever a table would be too long to print. A digest is SHA-256 over the bytes of a result in row-major order, written as 64 lowercase hexadecimal digits and cut to the first 16, with each number as its IEEE 754 value in little-endian byte order: 4 bytes (binary32) for a result held in float32 and 8 bytes (binary64) for a result of the oracle. The check is exact: one different bit changes the digest. Counts are exact integers. A quantity that depends on a rounding in a library function (`exp`, `log`, `tanh`) is printed to the few digits that do not depend on the library, and the tolerance column says so.
 
@@ -661,7 +661,7 @@ Filtering by the name of the device ("the CPU never runs barrier kernels") inste
 
 ## Digests and counts your engine must match
 
-The tests are the blocks printed in the milestones above, collected here as a checklist. An implementation passes when every statement holds. "Exact" means integers, digests and text equal; a tolerance is absolute unless stated.
+Each block printed in the milestones appears again as a test below. The engine is correct when every one holds. "Exact" means integers, digests and text equal; a tolerance is absolute unless stated.
 
 | milestone | test | expected | tolerance |
 |---|---|---|---|

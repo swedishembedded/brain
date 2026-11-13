@@ -9,7 +9,7 @@ A language model never says anything. Ask the counting model of [Chapter 4](04-l
 
 The first choice repeats itself: the model's favourite continuation of every word is fixed, so the text walks a short circle and stays on it. The second is faithful to the model and therefore to its mistakes: a model that gives 9 percent of its probability to twelve tokens that cannot follow `the` will put one of them there about one time in eleven. Everything in this chapter sits between those two, and everything is a rule applied to the same eighteen numbers: reshape them, cut them, penalize some of them, or give up choosing one token at a time.
 
-Some ideas from earlier chapters are needed at once, so bring them back first. The answers are at the end of the chapter.
+Some ideas from earlier chapters are needed at once, so bring them back first.
 
 1. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), softmax and logits.) Three logits are $(2, 0, 0)$. What probabilities does the softmax give them, and what happens to the probabilities when every logit is increased by 5?
 2. (Volume I, [Chapter 17](../v01-mathematics/17-randomness.md), sampling from a distribution.) The probabilities of three tokens are $(0.5, 0.3, 0.2)$, listed in that order, and the uniform number drawn is $u = 0.83$. Which token does the cumulative walk return?

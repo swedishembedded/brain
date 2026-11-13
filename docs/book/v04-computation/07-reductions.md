@@ -58,7 +58,7 @@ A loop and the single cell have depth $n - 1$ and $n$: no number of workers help
 
 So the question of the chapter has two halves. Why is the obvious way slow? Because its depth is its work: the shared word is a queue. And how do thousands of threads add up an array? With a tree that never makes two of them wait for the same word, spread over the machine's levels of cooperation: inside a workgroup with shared memory and barriers, across workgroups with several dispatches. The tree changes the order of the additions, which for floating-point numbers changes the answer, and the same pattern (a reduction, a prefix sum, a sort built from them) turns up wherever a kernel needs a total, an offset or an ordering. The chapter takes them in that order.
 
-Six ideas from earlier chapters carry the argument, from the tree of Volume I to the barrier rule of Chapter 5. Try them from memory first; the answers are at the end of the chapter, under "Recall questions".
+Six ideas from earlier chapters carry the argument, from the tree of Volume I to the barrier rule of Chapter 5.
 
 1. (Volume I, Chapter 16, reduction algorithm.) How many layers does a tree need to add 1,000 numbers, and how many additions does it perform?
 2. (Volume I, Chapter 16, prefix sum.) Write the exclusive scan of $[2, 7, 1, 8]$. How many additions does the doubling scan of that chapter use for $n = 8$?

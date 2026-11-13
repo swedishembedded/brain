@@ -45,7 +45,7 @@ Next come kernels that read tensors through strides, a kernel that uses shared m
 parameters (where the host and the kernel can silently disagree), and the host side that creates the buffers, launches the kernel and reads the answer
 back. Every claim about a kernel is checked by the simulator against a direct computation.
 
-Writing a kernel leans on four ideas from the chapter just behind us and one from much further back. Answer from memory; the answers are at the end of the chapter.
+Writing a kernel leans on four ideas from the chapter just behind us and one from much further back.
 
 1. (Volume IV, Chapter 4, workgroup and grid.) A kernel is launched for 1000 elements with workgroups of 64 invocations. How many
    workgroups does the grid have, and how many invocations have no element?

@@ -32,7 +32,7 @@ Read the columns one at a time. Paying by the side of $1/2$ (a penalty of $1$ fo
 
 The rest of the volume has used scores like these without asking why they should be trusted. Chapter 2 scored a distribution by the pinball loss and the CRPS, Chapter 4 compared forecasters by them, and Chapter 5 scored a survival probability at a horizon by the mean of $(y - \hat p)^2$ and promised to say where that number comes from. This chapter says. It asks what a score must satisfy so that a model trained or ranked by it has no reason to lie, shows that two familiar scores satisfy it and takes one of them apart into a part about calibration and a part about discrimination, repairs a model's probabilities without fooling oneself about the repair, and then does what probabilities are for: it combines them with costs to choose an action, including the action of not answering.
 
-Before the machinery, six things from earlier are needed. Answer them from memory; the answers are at the end of the chapter.
+The decision machinery rests on six earlier ideas.
 
 1. (Volume I, Chapter 10) A random variable takes the value $1$ with probability $p$ and $0$ otherwise. What is the expected value of $(Y - q)^2$ for a fixed number $q$, and how does it change if you write it as $E[Y^2] - 2qE[Y] + q^2$?
 2. (Volume I, Chapter 13) For distributions $p$ and $q$, how is the cross-entropy of $q$ relative to $p$ related to the entropy of $p$, and when is the difference zero?

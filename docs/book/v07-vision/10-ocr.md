@@ -20,7 +20,7 @@ The patch grid of a page at its own pixels (whole patches of 16 pixels), the que
 
 A reader of documents has to square two demands that pull in opposite directions: the letters must reach the model large enough to be told apart, and the pages must reach the decoder in few enough rows to be affordable. This chapter is about the arithmetic of that bargain and about the three crates in brain that strike it: `crates/deepseek2ocr`, a document reader whose vision half is SAM followed by a 16-fold compressor and CLIP (the first generation, v1 in the tables); `crates/deepseekocr2`, its successor, which replaces CLIP by a stack of learned queries (the second generation, v2); and `crates/ocrserve`, which turns either of them into a server that decodes many pages at once.
 
-Six things from earlier chapters are needed first. The answers are at the end.
+Reading text from an image reuses six earlier ideas, recalled first.
 
 1. ([Volume VII, Chapter 9](09-vlms.md), projector.) A tower writes rows of width 1,024 and the decoder's rows are 1,280 wide. How many parameters has the smallest map that joins them, with a bias?
 2. ([Volume VII, Chapter 9](09-vlms.md), splicing.) A prompt has a placeholder that was expanded to 273 ids, and the picture's tower produces 256 rows. What does the splice require, and what does that leave unexplained?

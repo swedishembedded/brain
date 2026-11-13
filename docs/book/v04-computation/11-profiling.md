@@ -39,7 +39,7 @@ This chapter is about asking the question first. The rest of the book states spe
 4. When explaining a time, divide it among the kernels, and then check the division against the whole.
 5. Decide what to optimize by what the whole pass would gain.
 
-Those habits lean on six ideas from earlier chapters, from the dispatch to seeded randomness. Bring them back from memory; the answers are at the end of the chapter.
+Those habits lean on six ideas from earlier chapters, from the dispatch to seeded randomness.
 
 1. (Volume IV, Chapter 5, the dispatch.) A host program calls `dispatch` for a kernel and reads the host clock the moment the call returns. What has the clock measured?
 2. (Volume IV, Chapter 3, the achieved fraction.) A computation moves 100 MB and does far fewer FLOPs than the machine could do in that time. The machine has $\mathrm{BW} = 800$ (GB/s) and the run takes 200 microseconds. What fraction of the roofline is that?

@@ -25,7 +25,7 @@ The two front ends of the table are two of those of the previous chapter, the 24
 
 That second demand is the odd one. A log-mel spectrogram changes mostly with the words: change the sentence and the picture changes completely, change the speaker and it changes a little, in the spacing of the horizontal bands that vowels leave, the pitch, the tilt of the spectrum. A vector for a speaker has to ignore the large change and keep the small one. The recipe that works is the one of the faces chapter, an identity embedding trained so that two clips of one person point the same way and clips of two people do not; what differs here is the input, which is a sequence, and so the encoder must first look at the frames in small groups and then summarise them across the whole clip. The vector it produces is a **speaker embedding**: a vector of fixed length computed from a recording of any length so that recordings of one voice are close in cosine and recordings of different voices are not.
 
-Five things from earlier chapters are needed first. The answers are at the end.
+Speaker embeddings draw on five earlier ideas.
 
 1. ([Volume IX, Chapter 2](02-spectrograms.md), front ends.) A clip of 16,000 samples goes through a filterbank with 400-sample frames at a hop of 160 and no padding. How many frames does it make? A clip of 24,000 samples goes through a log-mel front end with 1024-sample frames at a hop of 256 after a reflect pad of 384 on each side. How many?
 2. ([Volume VII, Chapter 2](../v07-vision/02-convolution.md), two-dimensional convolution.) A convolution with 32 input channels, 32 output channels and a $3 \times 3$ kernel holds how many weights, and how many multiply-adds does it make over an output of $40 \times 100$ positions?

@@ -33,7 +33,7 @@ Dividing it out is a geometric problem with a clean solution, and it is the firs
 
 ![The photograph goes to a detector. Its five landmarks are cut into two crops, one aligned to a 112 pixel template and read by an embedding network that writes 512 numbers compared by cosine, and one aligned to a 512 pixel template and read by a parsing network that writes a class for every pixel.](img/faces-pipeline.svg)
 
-Four things from earlier chapters are needed first. The answers are at the end.
+Face recognition rests on four earlier ideas.
 
 1. ([Volume I, Chapter 3](../v01-mathematics/03-vectors.md), cosine similarity.) What is the cosine similarity of $(3, 4)$ and $(4, 3)$, and what does the value tell you about the angle between them?
 2. ([Volume III, Chapter 3](../v03-neural-networks/03-softmax.md), softmax cross-entropy.) The logits are $(2, 0)$ and the correct class is the first. What is the gradient of the loss with respect to each logit?

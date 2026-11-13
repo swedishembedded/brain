@@ -9,7 +9,7 @@ Take away the table of values that the first chapter spent so long computing and
 
 The price of that repair is the part worth counting. Every imagined day branches over the orders that fit on the shelf and the demands that could follow, and the tree of two days from the empty shelf has $76$ nodes, of three days $542$, of eight days $9\,132\,652$. This is **search**, and the number of nodes is its cost. The table of values that Chapter 1 built is what search would leave behind if it kept every answer, and the tree is what a decision costs when it does not. Learning, the subject of the three chapters before this one, pays once and answers cheaply afterwards, but it has to be fed experience and it can be wrong in states it has not seen. Search pays at every decision, needs a model of what the world does (the rules of the shop, a simulator, a program that can check an answer), and is as exact as the model and the patience allow. Which to use, and how each can make the other cheaper, is the subject of the chapter.
 
-Four ideas from earlier are the tools. Answer them from memory; the answers are at the end of the chapter.
+Search leans on four earlier ideas.
 
 1. (Volume XII, Chapter 1, "Markov Decision Processes", the lookahead $q(s, a)$.) With every value taken as $0$, what are $q(0, a)$ for $a = 0, 1, 2, 3$ on the empty shelf of the shop? Which action does the tie rule of that chapter choose?
 2. (Volume XII, Chapter 1, the policy.) What is a policy, and how many deterministic policies does the shop have?
@@ -125,7 +125,7 @@ Seven searches of the map above, all from the routine of the chapter. The step c
 | greedy, f = h | 12 | 28 | 12 | 18 | no (+4) |
 <!-- /worked -->
 
-Read the table from the top. Breadth-first search finds the path with the fewest moves, $12$, and pays $18$ for it, because it cannot see that three of those moves are expensive; it also closes $77$ of the $79$ cells, nearly the whole map. Uniform-cost search finds the cheapest path, $14$, and expands $72$ cells: it is exact and blind, and it spends its expansions in every direction, since a cell far to the left costs no more than one near the goal until the cheapest cost reaches it. A\* with the Manhattan distance returns the same cheapest path after $38$ expansions, because the heuristic pulls the frontier toward the goal. Greedy search expands $12$ cells, the length of its path, and returns the path through the mud at cost $18$: it never asked what the way had cost, only what the way still looked like.
+Breadth-first search finds the path with the fewest moves, $12$, and pays $18$ for it, because it cannot see that three of those moves are expensive; it also closes $77$ of the $79$ cells, nearly the whole map. Uniform-cost search finds the cheapest path, $14$, and expands $72$ cells: it is exact and blind, and it spends its expansions in every direction, since a cell far to the left costs no more than one near the goal until the cheapest cost reaches it. A\* with the Manhattan distance returns the same cheapest path after $38$ expansions, because the heuristic pulls the frontier toward the goal. Greedy search expands $12$ cells, the length of its path, and returns the path through the mud at cost $18$: it never asked what the way had cost, only what the way still looked like.
 
 The figure shows where the expansions went. Uniform-cost search floods the whole upper-left, including every cell of the open rows to the left of the start; A\* expands a narrow band toward the goal and leaves most of the left of the map untouched.
 

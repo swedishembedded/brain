@@ -9,7 +9,7 @@ Read this sentence up to its last word and stop: `the dogs near the cat near the
 
 The last chapter ended on that limit and on what would remove it: a memory of fixed size, updated as each token is read, so that the cost of remembering does not grow with the distance. This chapter builds that memory in the form it took for two decades before attention, and then asks what the form costs. The answer has two parts, both about the same product of matrices. One says why the memory fades, and with it the gradient that would teach the network to keep it. The other says what to change so that it fades more slowly, and the change turns out to be a single idea, a sigmoid that multiplies.
 
-Some things from earlier volumes come back first. Answer them from memory; the answers are at the end of the chapter.
+Recurrence reuses ideas from earlier volumes, and the questions below bring them back.
 
 1. (Volume II, [Chapter 3](../v02-learning/03-logistic-regression.md), the sigmoid.) What is $\sigma(0)$, and what is the largest value the slope $\sigma(z)(1 - \sigma(z))$ can take?
 2. (Volume III, [Chapter 2](../v03-neural-networks/02-mlp.md), the tanh unit of a hidden layer.) A hidden unit's output is $h = \tanh(a) = 0.9$. What is the slope of $\tanh$ at that point, and what does the gradient passing through the unit become?
