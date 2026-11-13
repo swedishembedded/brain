@@ -192,4 +192,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume XII: Reinforcement Learning and Continuous Improvement](v12-reinforcement-learning/index.md)
 
 1. [Markov Decision Processes](v12-reinforcement-learning/01-mdps.md): How do we describe an agent that acts, sees consequences and wants long-term reward?
+2. [Learning Values from Experience](v12-reinforcement-learning/02-value-learning.md): How can an agent learn what states are worth without a model of the world?
 <!-- /contents -->
