@@ -471,7 +471,7 @@ impl Scrfd {
 
     /// Nearest-neighbour upsample to an explicit target size.
     ///
-    /// `resize_nearest` Params `[N, C, H, W, Ho, Wo]`, one invocation per OUTPUT
+    /// `resize_nearest` Params `[N, C, H, W, Ho, Wo, mode]` (mode 0, the floor rule), one invocation per OUTPUT
     /// element, with the rule `src = floor(o*in/out)` - which IS the graph's
     /// `Resize(mode=nearest, coordinate_transformation_mode=asymmetric,
     /// nearest_mode=floor)`. `upsample2` would agree only because the ratio here
@@ -481,7 +481,7 @@ impl Scrfd {
         let s = ctx.step(
             ctx.ids.need(ctx.ids.resize_nearest, "resize_nearest"),
             &[x, dst],
-            &[src_shape.n, src_shape.c, src_shape.h, src_shape.w, dst_shape.h, dst_shape.w],
+            &[src_shape.n, src_shape.c, src_shape.h, src_shape.w, dst_shape.h, dst_shape.w, 0],
             dst_shape.numel(),
         );
         ctx.gpu.submit(&[], &[s]);
