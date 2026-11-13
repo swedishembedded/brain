@@ -118,12 +118,12 @@ fn global_avgpool(ctx: &Ctx, shape: Shape, x: &DeviceBuffer) -> DeviceBuffer {
 }
 
 /// Nearest-neighbor upsample of a `[N,C,H,W]` map to `(oh, ow)` -
-/// `F.interpolate(..., mode='nearest')`. At `H=W=1` (the two `avg`/`atten`
+/// `F.interpolate(..., mode='nearest')`, `resize_nearest` mode 0 (the 7th Params word). At `H=W=1` (the two `avg`/`atten`
 /// broadcasts) this is a pure tile/broadcast, the same operator.
 fn nearest_upsample(ctx: &Ctx, shape: Shape, oh: u32, ow: u32, x: &DeviceBuffer) -> (DeviceBuffer, Shape) {
     let out_shape = Shape::new(shape.n, shape.c, oh, ow);
     let y = ctx.act(out_shape.numel());
-    let s = ctx.step(ctx.ids.resize_nearest, &[x, &y], &[shape.n, shape.c, shape.h, shape.w, oh, ow], out_shape.numel());
+    let s = ctx.step(ctx.ids.resize_nearest, &[x, &y], &[shape.n, shape.c, shape.h, shape.w, oh, ow, 0], out_shape.numel());
     ctx.gpu.submit(&[], &[s]);
     (y, out_shape)
 }
