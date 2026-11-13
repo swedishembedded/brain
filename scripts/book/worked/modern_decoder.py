@@ -473,8 +473,8 @@ def logit_growth():
     return (_seed_line(NAME_LOGITS) + f" Six tokens (T = {LOGIT_T}) of width D = {LOGIT_D}, one head of width {LOGIT_DH}. Draws, in this "
             "order: X [6, 8] as `round(normal(), 1)` row by row, then W_Q and W_K [8, 8] as `normal() / sqrt(8)` (unrounded), row by row. "
             "The weights of a row are the factor in its first column times these, for queries and keys alike; the mask is causal and the "
-            "logit of a pair is the query-key dot product divided by sqrt(8). The normalized columns apply the RMS norm of Volume V, "
-            "Chapter 9 (epsilon 1e-6, gain 1) to every query row and every key row before the dot product. Largest absolute logit over "
+            "logit of a pair is the query-key dot product divided by sqrt(8). The normalized columns apply the RMS norm of Volume III, "
+            "Chapter 10 (epsilon 1e-6, gain 1) to every query row and every key row before the dot product. Largest absolute logit over "
             "the 21 allowed pairs, and the largest attention weight in the last row (the weight of the sharpest position out of 6; a "
             f"uniform row has {_fx(1 / LOGIT_T, 4)}):\n\n"
             + _table(["factor", "largest absolute logit, no norm", "largest absolute logit, QK-norm", "largest weight, no norm", "largest weight, QK-norm"], rows)
@@ -526,7 +526,7 @@ def norm_rope_order():
     return (_seed_line(NAME_ORDER) + f" One query and one key of width {ORDER_D}. Draws, in this order: q and k, each as 8 times "
             "`round(normal(), 1)`; then the gain vectors for queries and keys, each 8 times `1 + 0.5 * normal()` (unrounded). The "
             f"rotation is the half-split rotary embedding of Volume V, Chapter 8 with base {ORDER_BASE:g} (rates "
-            + ", ".join(_fx(w, 4) for w in ws) + f"), the norm the RMS norm of Volume V, Chapter 9 with epsilon 1e-6. The score is the dot "
+            + ", ".join(_fx(w, 4) for w in ws) + f"), the norm the RMS norm of Volume III, Chapter 10 with epsilon 1e-6. The score is the dot "
             "product of the processed query at position i and key at position j, for three pairs of positions with the same offset "
             f"{ORDER_OFFSET}:\n\n"
             + _table(["order", *[f"i = {i}, j = {j}" for i, j in ORDER_PAIRS], "largest difference"], rows)
@@ -889,7 +889,7 @@ def gradient_check():
         rows = [(name, _int(n), f"{big:.3f}", _below(worst, CRITERION)) for name, (n, big, worst) in res.items()]
         total = sum(n for n, _, _ in res.values())
         worst_all = max(w for _, _, w in res.values())
-        out.append(f"{label}: loss {loss(p, cfg, ids):.4f} on the text; {_int(total)} entries checked, largest difference over all "
+        out.append(f"{label}: mean cross-entropy {loss(p, cfg, ids):.4f} nats per predicted token; {_int(total)} entries checked, largest difference over all "
                    f"tensors {_below(worst_all, CRITERION)} (criterion: below 1e-6).\n\n"
                    + _table(["tensor (both layers merged)", "entries", "largest absolute gradient", "largest difference from central difference"], rows))
     return ("Gradient check of the hand-written backward pass against central differences, entry by entry, with step "

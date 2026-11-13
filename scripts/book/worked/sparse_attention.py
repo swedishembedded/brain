@@ -165,7 +165,7 @@ def measure(name, i, sel):
 
 def _setup_text():
     return (f"A toy layer of one head: {T} positions, head width d_h = {D}, {TOPICS} topics. Draw order: the {TOPICS} topic "
-            f"centres from {_seed_line(MODEL)}, {D} normal draws per centre, row by row, each row divided by its length. A "
+            f"centers from {_seed_line(MODEL)}, {D} normal draws per center, row by row, each row divided by its length. A "
             f"sequence from its own generator, in this order: {T} key topics (integer draws below {TOPICS}); the key noise "
             f"({T} x {D} normals, key by key); the values ({T} x {D} normals, key by key); {T} query topics (integer draws "
             f"below {TOPICS}); the query noise ({T} x {D} normals, query by query). Key j is {GAIN:g} c[z_j] + {NOISE:g} n_j, "
@@ -651,8 +651,8 @@ def bucket_index_toy():
                     pairs += 1
                     together += 1 if home[x] == home[y] else 0
     return (f"Sequence B. Index vectors are the keys divided by their length. Blocks of {BLOCK_KEYS} keys; {BLOCK_KEYS // BUCKET} "
-            f"buckets a block (average {BUCKET} keys, at most {CAP}); pools of {POOL} key, because the toy's neighbouring keys "
-            "are unrelated by construction; the merge is the Ward rule of the chapter; a bucket's centroid is the sum of its "
+            f"buckets a block (average {BUCKET} keys, at most {CAP}); pools of {POOL} key, because the toy's neighboring keys "
+            "are unrelated by construction; the merge is the Ward merge described above; a bucket's centroid is the sum of its "
             "keys divided by its length. Block 0 (positions 0 .. 31): the members of each bucket and their topics.\n\n"
             + _table(["bucket", "member positions", "member topics"], rows, "lll")
             + f"\n\nIn the {T // BLOCK_KEYS} blocks, {pairs} pairs of keys share a topic and lie in the same block; {together} of "

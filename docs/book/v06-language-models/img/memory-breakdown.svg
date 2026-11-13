@@ -1,4 +1,4 @@
-<!-- source-sha256: 354a8333e2f3f76cb19d6791538cf297b3ba80150d3ae9cba9249a43a3cc34dc -->
+<!-- source-sha256: d9f525e8b11cc6c421d6b8061d5c33afa997651f2699b5e6e36d8393bb9f4aad -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420" width="800" height="420"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="420" fill="#ffffff"/>
 <text x="400" y="28.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Memory by component, GiB (bar length proportional to the total)</text>
 <text x="20" y="88.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a202c" text-anchor="start">inference, Gemma-4 tower, bf16, one cache of 32,768 tokens</text>

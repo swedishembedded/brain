@@ -251,7 +251,7 @@ def ledger_agrees():
         pt, agg, sl, fu = g4_flops(T)
         ok = (P, f, c) == (g4_total(), pt + agg + sl + fu, g4_kv_bytes(T))
         rows.append((f"Gemma-4 text tower, T = {_int(T)}, bf16", _int(P), _int(f), _int(c), "yes" if ok else "NO"))
-    return ("The routine `ledger` of the chapter, run on a list of layer records, against the closed forms of the earlier tables (the parameter formula, "
+    return ("The routine `ledger` above, run on a list of layer records, against the closed forms of the earlier tables (the parameter formula, "
             "2 N_p + 4 L H d_h T, and the cache formula with the window). FLOPs per token are those of a token that sees T keys. For Gemma-4 the 40 sliding "
             f"layers carry a window of {_int(G4['window'])} and the 8 full layers none; the tail is the aggregate projection (used: its weights; stored: weights and biases) and "
             "the final norm gain.\n\n"
@@ -900,9 +900,9 @@ def activation_estimates():
     rows = [("two points of the 27B run: (78 - 67) GiB over (16,384 - 8,192) tokens", f"{per_token_8k_16k / 1048576:.3f} MiB per token", ""),
             ("the constant in the code, 1.4 MiB per token over 64 layers of width 5,120", f"{const:.4f} bytes per token, layer and unit of width", ""),
             ("planner estimate for the Gemma-4 tower at 8,192 tokens (48 layers, width 3,840)", _int(round(planner)), f"{_gib(planner):.2f} GiB"),
-            ("this chapter's count, every layer kept, bf16", _int(keep * tokens * 2), f"{_gib(keep * tokens * 2):.2f} GiB"),
-            ("this chapter's count, recomputed, bf16", _int(rec * tokens * 2), f"{_gib(rec * tokens * 2):.2f} GiB")]
-    return ("Activation memory of one training step: the planner's calibrated estimate against the counts of this chapter. The code's own description "
+            ("count by the activation rule, every layer kept, bf16", _int(keep * tokens * 2), f"{_gib(keep * tokens * 2):.2f} GiB"),
+            ("count by the activation rule, recomputed, bf16", _int(rec * tokens * 2), f"{_gib(rec * tokens * 2):.2f} GiB")]
+    return ("Activation memory of one training step: the planner's calibrated estimate against the counts by the activation rule. The code's own description "
             "of the constant is \"calibrated on the 27B (64 layers, width 5120): 78 GiB at 16K tokens against 67 GiB at 8K for the bf16 base\"; "
             "it prices the Gemma-4 tower here only to set the scales side by side.\n\n" + _table(["quantity", "value", "in GiB"], rows, "lrr"))
 

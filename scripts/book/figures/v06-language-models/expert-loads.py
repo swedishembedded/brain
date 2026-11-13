@@ -20,7 +20,7 @@ def render() -> str:
     data = moe.balance_data()
     ideal = moe.TR_N * moe.TR_K // moe.TR_E
     p = Plot((-0.4, moe.TR_E - 0.6), (0, 80), width=620, height=360, xlabel="expert", ylabel="slots routed to the expert",
-             title="Load of each expert after training (initialisation 0)", legend_loc="ur")
+             title="Load of each expert after training (initialization 0)", legend_loc="ur")
     p.hline(ideal)
     for color, a in ((3, 0.0), (1, 0.05), (0, 0.5)):
         loads = data[a][0]

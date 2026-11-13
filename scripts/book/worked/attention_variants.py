@@ -183,8 +183,8 @@ def cache_sizes():
 
 def cache_sizes_latent():
     return ("The same shape with multi-head latent attention added, with the settings reported for DeepSeek-V2: a latent of "
-            f"$d_c = 4 d_h = {LATENT}$ numbers and a rotary key of $d_R = d_h / 2 = {ROPE_KEY}$. This chapter counts this layer and "
-            "does not train it. Numbers per layer: $d_c + d_R$ for the latent variant, 2 x key-value heads x head width for "
+            f"$d_c = 4 d_h = {LATENT}$ numbers and a rotary key of $d_R = d_h / 2 = {ROPE_KEY}$. "
+            "Numbers per layer: $d_c + d_R$ for the latent variant, 2 x key-value heads x head width for "
             "the others. The last column counts the parameters of the matrices that produce keys and values: $2 D h_{kv} d_h$, "
             "and for the latent variant $d_c D + d_R D + 2 H d_h d_c$ (the down-projection, the rotary key and the two "
             "up-projections of all heads).\n\n"

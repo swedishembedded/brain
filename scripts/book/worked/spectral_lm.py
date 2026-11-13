@@ -217,7 +217,7 @@ def transform_cost():
         _fft([0j] * d, cnt)
         cnt_rows.append((d, _int(cnt["mul"]), _int(cnt["add"]), _int(6 * cnt["mul"] + 2 * cnt["add"]), _int(fft_flops(d))))
     t2 = _table(["D", "twiddle multiplications", "complex additions", "6 x mult + 2 x add", "5 D log2 D"], cnt_rows)
-    shapes = [("the toy of this chapter", M_TOY, D_TOY, C_TOY, 4, 72), ("the paper's shape", 256, 512, 24, 24, 1024)]
+    shapes = [("the toy model trained here", M_TOY, D_TOY, C_TOY, 4, 72), ("the paper's shape", 256, 512, 24, 24, 1024)]
     rows3 = []
     for name, m, d, c, f_par, f_big in shapes:
         rows3.append((name, f"m = {m}, D = {d}, C = {c}", _int(3 * c * m), _int(mixer_flops(m, d, c, False)),
@@ -229,7 +229,7 @@ def transform_cost():
             "(2 D m: D outputs, m multiply-adds each) and by the FFT count 5 D log2 D.\n\n" + t1 +
             "\n\nSecond table: the recursion of this module run on D zeros and its operations counted (a complex multiplication is 6 real "
             "operations, a complex addition 2); the total equals 5 D log2 D exactly.\n\n" + t2 +
-            "\n\nThird table: per token and block, FLOPs as the chapter counts them (filters 4 C m, gated product 5 C D, 3 C transforms; "
+            "\n\nThird table: per token and block, FLOPs as counted in the text (filters 4 C m, gated product 5 C D, 3 C transforms; "
             "SwiGLU 6 m f), parameters 3 C m against 3 m f.\n\n" + t3)
 
 
@@ -997,12 +997,12 @@ def first_attempt():
         mv.append((arm, r[arm], _bound(max(moves)), _bound(sum(moves) / len(moves))))
     t2 = _table(["arm", "peak rate", "largest change of a run's final loss", "mean change"], mv)
     sds = [mean_sd(_vals(cfg, arm, "pop"))[1] for arm in ARMS]
-    return (f"The recipe written into the module before its first run: a constant rate chosen from {CONFIGS['first']['grid']} by the same selection "
+    return (f"The recipe registered before the first run: a constant rate chosen from {CONFIGS['first']['grid']} by the same selection "
             f"(one run per arm and rate from the initial parameters of run 0, {SEL_STEPS} steps at the constant rate, the lowest final training loss), 1200-token "
             f"sequences, {STEPS} steps, the same eight runs. Each run was repeated once with the embedding weight E1[0][0] increased by 1e-12. Verdicts of the original runs and "
             "of the repeats by the registered rule:\n\n" + t1 + "\n\nHow far the repeat of a run ends from the run, in population cross-entropy (nats per token). A run at a "
-            "constant rate is chaotic at the end, so the change itself cannot be reproduced; each cell is a bound that is at least ten times the value found in "
-            "the module (the smallest of 0.05, 0.1, 0.5 that does so):\n\n" + t2
+            "constant rate is chaotic at the end, so the change itself cannot be reproduced; each cell is a bound that is at least ten times the value measured "
+            "(the smallest of 0.05, 0.1, 0.5 that does so):\n\n" + t2
             + f"\n\nFor scale, the standard deviation over the eight runs of one arm lies between {_fx(math.floor(min(sds) * 100) / 100, 2)} and "
             f"{_fx(math.ceil(max(sds) * 100) / 100, 2)} (to the nearest hundredth outward, for the same reason).")
 

@@ -236,7 +236,7 @@ def two_forms_random():
             ["recurrent: state update, then read", "2 T d_k d_v", _int(mr)]]
     return (
         _seed_line(name) + f" T = {T}, d_k = d_v = {dk}. Draws, in order, for t = 0 to {T - 1}: q_t ({dk} values of `normal()`), k_t ({dk}), v_t ({dv}); "
-        "no normalisation of any vector. Multiply-adds are counted by the loops that perform them.\n\n"
+        "no normalization of any vector. Multiply-adds are counted by the loops that perform them.\n\n"
         + _table(["form", "multiply-adds (formula)", "multiply-adds counted"], rows, align="llr")
         + f"\n\nLargest difference between the two outputs over all {T * dv} numbers: below 1e-12 (the bound the program asserts)."
     )
@@ -415,7 +415,7 @@ def decay_gate_table():
     return (
         "The decay gate of one value head for one token: $\\Delta = \\mathrm{softplus}(a + \\mathrm{bias})$ with `softplus` of the pseudocode, "
         "$g = -A\\,\\Delta$ with $A = \\exp(A_{\\log})$, and $\\alpha = \\exp(g)$. The half-life is $\\ln 2 / (-g)$ tokens. The first row is the "
-        "reference initialisation at its mean ($A$ uniform on $(0, 16)$, bias 1, $a = 0$).\n\n"
+        "reference initialization at its mean ($A$ uniform on $(0, 16)$, bias 1, $a = 0$).\n\n"
         + _table(["case", "Delta", "g", "alpha", "half-life in tokens"], rows)
     )
 
@@ -469,8 +469,8 @@ def gated_delta_by_hand():
         "Three tokens, one head, $d_k = d_v = 2$, zero initial state. Raw inputs:\n\n"
         + _table(["t", "q raw", "k raw", "v", "g", "beta"], raw, align="llllll")
         + "\n\nWhat the layer makes of them: $\\alpha = \\exp(g)$; $\\mathbf{k}$ and $\\mathbf{q}$ divided by $\\sqrt{\\lVert\\cdot\\rVert^2 + 10^{-6}}$ (the L2 "
-        "normalisation), and $\\mathbf{q}$ then scaled by $1/\\sqrt{d_k}$.\n\n"
-        + _table(["t", "alpha", "k normalised", "q normalised and scaled"], made, align="llll")
+        "normalization), and $\\mathbf{q}$ then scaled by $1/\\sqrt{d_k}$.\n\n"
+        + _table(["t", "alpha", "k normalized", "q normalized and scaled"], made, align="llll")
         + "\n\nThe recurrence per token: $\\mathbf{S} \\leftarrow \\alpha\\mathbf{S}$; $\\hat{\\mathbf{v}} = \\mathbf{S}^\\top\\mathbf{k}$; $\\mathbf{S} \\leftarrow \\mathbf{S} + "
         "\\mathbf{k}\\,\\beta(\\mathbf{v} - \\hat{\\mathbf{v}})^\\top$; $\\mathbf{o} = \\mathbf{S}^\\top\\mathbf{q}$. State (rows) and output after each token:\n\n"
         + _table(["t", "state S_t (rows)", "o_t"], steps, align="lll")
@@ -600,10 +600,10 @@ def chunk_equivalence():
     return (
         _seed_line(name) + f" T = {T}, d_k = {dk}, d_v = {dv}, one head, zero initial state. Draws, in order, for t = 0 to {T - 1}: raw q_t ({dk} values of "
         f"`normal()`), raw k_t ({dk}), v_t ({dv}), then u = `uniform()` for the decay ($g_t = -0.5\\,u$) and u = `uniform()` for the write strength "
-        "($\\beta_t = 0.2 + 0.7\\,u$); q and k are L2-normalised (with the $10^{-6}$) and q scaled by $1/\\sqrt{d_k}$ as in the layer. The reference is the "
+        "($\\beta_t = 0.2 + 0.7\\,u$); q and k are L2-normalized (with the $10^{-6}$) and q scaled by $1/\\sqrt{d_k}$ as in the layer. The reference is the "
         f"token-by-token recurrence ({_int(tokenwise_macs(T, dk, dv))} multiply-adds).\n\n"
         + _table(["chunk size C", "chunks", "largest absolute difference of the outputs", "largest absolute difference of the final state", "multiply-adds counted"], rows)
-        + "\n\nThe counts are those of the loops of the program, and each equals the closed form of the chapter."
+        + "\n\nThe counts are those of the loops of the program, and each equals the closed form given below the table."
     )
 
 
@@ -677,7 +677,7 @@ def neumann_failure():
     assert err > 1.0 and max(abs(x) for r in prod for x in r) > 1.0
     return (
         _seed_line(name) + f" C = {C}, d_k = {dk}. Draws, in order: a base direction ({dk} values of `normal()`); then for each of the {C} tokens, {dk} values of "
-        "`normal()` that are added after scaling by 0.06 to the base, the sum L2-normalised (with $10^{-6}$) into the key; $u$ = `uniform()` for the decay "
+        "`normal()` that are added after scaling by 0.06 to the base, the sum L2-normalized (with $10^{-6}$) into the key; $u$ = `uniform()` for the decay "
         "($g = -0.002\\,u$) and $u$ = `uniform()` for the write strength ($\\beta = 0.97 + 0.02\\,u$). $\\mathbf{N}_{ij} = \\beta_i\\exp(c_i - c_j)(\\mathbf{k}_i\\cdot\\mathbf{k}_j)$ "
         f"for $j < i$. Largest entry of $\\mathbf{{N}}$: {max(abs(x) for r in N for x in r):.3f}.\n\n"
         + _table(["power of N", "largest absolute entry (3 digits)"], rows, align="lr")
@@ -851,7 +851,7 @@ def hybrid_costs():
         f"KV cache in bf16 ({z['kv_bytes_token']} bytes per token and full-attention layer), recurrent state and convolution history in fp32 ({_int(z['state_bytes'])} bytes per Gated DeltaNet layer). "
         f"Token-mixer projections: {_int(z['full_proj'])} parameters in a full-attention layer and {_int(z['lin_proj'])} in a Gated DeltaNet layer, 2 FLOPs each per token; "
         f"attention core $4 H d_h T$ = {_int(4 * z['heads'] * z['hd'])} T FLOPs per layer; Gated DeltaNet core 8 x {z['nv']} x {z['dk']} x {z['dv']} for the states plus 2 x {z['conv_k']} x {_int(z['conv_dim'])} "
-        "for the convolution. Normalisations, gates, the feed-forward network and the output head are the same in all three stacks and left out.\n\n"
+        "for the convolution. Normalizations, gates, the feed-forward network and the output head are the same in all three stacks and left out.\n\n"
         "Bytes held for one sequence (GiB; a decode step reads all of the cache, and reads and writes the state):\n\n"
         + _table(["tokens", "pure attention", "hybrid", "pure Gated DeltaNet"], mem_rows)
         + "\n\nToken-mixer FLOPs per decoded token (GFLOP):\n\n"
@@ -895,7 +895,7 @@ def lfm_layers():
         f"LFM2.5-Encoder-230M (`LfmConfig::lfm25_encoder_230m`): model width {d}, {L['heads']} query heads and {L['kv_heads']} key-value heads of width {L['hd']}, SwiGLU width {_int(L['ff'])}, "
         f"convolution width {L['conv_k']}; layer pattern (C convolution, A attention) `{L['pattern']}`. A convolution layer has the fused input projection $d \\to 3d$, "
         "the depthwise taps $d \\times 3$ and the output projection $d \\to d$; an attention layer has $\\mathbf{W}_Q$, $\\mathbf{W}_K$, $\\mathbf{W}_V$, $\\mathbf{W}_O$ (the two head-width "
-        "gains of the query and key normalisation are left out).\n\n"
+        "gains of the query and key normalization are left out).\n\n"
         + _table(["layer", "mixer parameters", "feed-forward parameters", "total", "layers of this kind"], stack_rows)
         + "\n\nToken-mixer FLOPs per token over a sequence of $T$ tokens: projections $2P$ plus, for the convolution, $2 \\cdot 3 d$, for attention $4 T H d_h$ (every token attends to all $T$):\n\n"
         + _table(["T", "convolution layer", "attention layer"], rows)

@@ -10,7 +10,7 @@ picture and the table beside it cannot disagree.
 
 * the parameters and FLOPs per token of a dense feed-forward network and of mixture-of-experts layers of the same expert width,
   and the parameters of Qwen3.5-35B-A3B counted in total and per token;
-* one token through a router by hand: softmax scores, top-k, renormalisation, the weighted sum of expert outputs, the shared
+* one token through a router by hand: softmax scores, top-k, renormalization, the weighted sum of expert outputs, the shared
   expert, and the sigmoid router with a selection bias;
 * the dispatch of a batch: histogram, exclusive scan and stable emission of the expert-major order, the experts run on their
   tokens and combined, compared with evaluating every expert and masking;
@@ -286,7 +286,7 @@ def router_scores():
             + f"\n\nThe two chosen experts are {chosen[0]} and {chosen[1]}, with probabilities {_fx(p[chosen[0]])} and "
             f"{_fx(p[chosen[1]])}, which sum to {_fx(tot)}. Dividing each by that sum gives the combine weights "
             f"({_fx(w[0])}, {_fx(w[1])}). The softmax of the two chosen logits alone is ({_fx(zsel[0])}, {_fx(zsel[1])}); the two "
-            f"agree to below 1e-12 in absolute value, as the algebra of the chapter says they must.")
+            f"agree to below 1e-12 in absolute value, as the algebra below shows they must.")
 
 
 def combine_by_hand():
@@ -429,7 +429,7 @@ def dispatch_trace():
             f"{DISP_E}, row-major), then for e = 0 to {DISP_E - 1} the matrices $\\mathbf{{W}}_{{\\mathrm{{gate}}}}$ ({DISP_D} x "
             f"{DISP_F}), $\\mathbf{{W}}_{{\\mathrm{{up}}}}$ ({DISP_D} x {DISP_F}) and $\\mathbf{{W}}_{{\\mathrm{{down}}}}$ ({DISP_F} x "
             f"{DISP_D}), each row-major, each entry 0.5 `normal()`, then the batch ({DISP_N} x {DISP_D}, row-major, `normal()`). "
-            "Routing is the softmax router: top-2 of the softmax, renormalised.\n\n"
+            "Routing is the softmax router: top-2 of the softmax, renormalized.\n\n"
             + _table(["token", "x", "chosen experts", "combine weights"], route_rows, "lrrr")
             + "\n\nSlot $s = k\\,i + r$ is the $r$-th choice of token $i$ (rank 0 is the largest score). The expert of each slot, in slot "
             "order, is the input of the counting sort:\n\n"
@@ -616,7 +616,7 @@ def balance_gradient():
     return (_seed_line(NAME_AUX) + f" n = {AUX_N} tokens, E = {AUX_E}, k = {AUX_K}; the logits are the {AUX_N} x {AUX_E} draws of "
             f"`normal()`, row-major. $\\alpha_{{\\mathrm{{bal}}}} = {AUX_ALPHA}$ and the z-loss coefficient is {AUX_Z}. The shares $f_e$ "
             "are counted once and held fixed in the loss. Token 0's row of the gradient with respect to the logits, from the formula "
-            "of the chapter and from central differences with step 1e-6.\n\n"
+            "derived in the text and from central differences with step 1e-6.\n\n"
             + _table(["e", "f", "$\\bar p$", "logit of token 0", "formula", "central difference"], rows)
             + f"\n\nLoss {_fx(router_regulariser(logits, f, AUX_ALPHA, AUX_Z), 6)} (balancing term "
             f"{_fx(balance_loss(f, pbar, AUX_ALPHA), 6)}). Over all {AUX_N * AUX_E} entries the largest difference between formula and "
@@ -795,7 +795,7 @@ def balance_training():
             f"of 6 x 6 entries, each `normal() / sqrt(6)`, row by row; then for each of the {TR_N} tokens the cluster `integer(6)` and 6 "
             f"values of `{TR_NOISE:g} * normal()` added to the center. The initial weights are `{TR_INIT:g} * normal()`. "
             f"Slots per expert after {TR_STEPS} steps, on the {TR_N} training tokens, for three strengths of the balancing loss and "
-            f"three initialisations (each initialisation is the generator `mixture_of_experts.train_init.<seed>`, with seed "
+            f"three initializations (each initialization is the generator `mixture_of_experts.train_init.<seed>`, with seed "
             + ", ".join(f"{s}: {bookrng.seed_of(train_init_name(s)):#018x}" for s in TR_SEEDS)
             + f"). A balanced router has {ideal} slots per expert. The last column is the training loss, "
             "half the squared error summed over the 6 outputs and averaged over tokens, as computed in the forward pass of step "
@@ -852,7 +852,7 @@ def all_to_all():
             "layer, one direction (the results return the same number of bytes). 'Both ways / weights' divides twice that by the expert "
             "weights a device holds. The last column is the n at which that ratio is 1: $n^\\ast = 3EF / (2k(n_{\\mathrm{dev}}-1))$.\n\n"
             + _table(["devices", "experts per device", "share of slots leaving", "MiB sent", "MiB of expert weights", "both ways / weights", "$n^\\ast$"], rows)
-            + f"\n\nWith 8 devices one pass over all {layer} layers moves {_fx(2 * p8[3] * layer / 1024, 2)} GiB through each device's "
+            + f"\n\nWith 8 devices one pass over all {layer} layers moves {_fx(2 * p8[3] * layer / 1024, 2)} GiB, counting both directions, through each device's "
             "network port.")
 
 

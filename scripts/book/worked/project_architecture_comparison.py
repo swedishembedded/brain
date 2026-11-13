@@ -818,7 +818,7 @@ def gradient_checks():
         rows.append((f"`{arm}`", f"{ce + aux:.4f}", len(by_path), len(pts), f"{big:.3f}", _below(worst, CRITERION)))
     return (f"Central differences with step {CHECK_STEP:g} against the hand-written backward pass, in double precision, for each stack on the "
             f"reference sequence (ids {' '.join(str(i) for i in ref_ids())}, drawn from `{NAME_REF}`, seed {_seed(NAME_REF)}). "
-            "The loss is the mean cross-entropy of the six predictions plus the balancing loss. Two coordinates of every tensor are "
+            "The loss is the mean cross-entropy (nats) of the six scored predictions of milestone 4 plus the balancing loss. Two coordinates of every tensor are "
             "checked, drawn from the generator `" + NAME + ".gradcheck.<arm>`: for each tensor in storage order, a row `integer(rows)` "
             "then a column `integer(columns)`, twice. Storage order is the order of the draws of milestone 1 with the token table first and "
             "the final gain last, layer by layer (the dense layer: g1, W_Q, W_K, W_V, the two QK gains, W_O, g2, W_gate, W_up, W_down; "
@@ -1002,8 +1002,8 @@ def big_shape():
     for arm in ("dense", "moe", "gdn", "swa", "hybrid"):
         specs = big_specs(arm)
         P, n_act, f, cache, state = costs(specs, BIG, 131072)
-        rows.append((f"`{arm}`", f"{P / 1e6:.1f}", f"{n_act / 1e6:.1f}", f"{costs(specs, BIG, 4096)[2] / 1e6:.1f}", f"{f / 1e6:.1f}",
-                     f"{(cache + state) / 2 ** 20:.1f}"))
+        rows.append((f"`{arm}`", f"{P / 1e6:,.1f}", f"{n_act / 1e6:,.1f}", f"{costs(specs, BIG, 4096)[2] / 1e6:,.1f}", f"{f / 1e6:,.1f}",
+                     f"{(cache + state) / 2 ** 20:,.1f}"))
     return (f"The ledger at a size where the blocks differ in what they cost: width 1,024, 24 layers, vocabulary 32,000, 16 query heads and 4 "
             "key-value heads of width 64, SwiGLU hidden width 2,816, a window of 1,024 keys, a mixture of 16 experts of hidden width 704 "
             "with 2 used, and a gated delta layer of 16 heads with $d_k = d_v = 64$; the hybrid has a gated delta layer in three of every "
@@ -1443,7 +1443,7 @@ def selection():
             f"(the square root of the sum of squares of every entry) at {RECIPE['clip']:g}: when the norm exceeds it the gradient is multiplied by clip over norm, then "
             f"{RECIPE['steps']} steps of {RECIPE['B']} sequences, each sequence the next seven draws of the data generator, the gradient being the mean over the "
             "batch. The loss that is differentiated is the mean over the six scored predictions plus, for a mixture, the balancing loss with weight 0.01; "
-            "the 'training loss' columns of this chapter report the cross-entropy part alone (the balancing term is a regulariser of the "
+            "the 'training loss' columns below report the cross-entropy part alone (the balancing term is a regulariser of the "
             "router and is not a quality). Each arm chose its peak rate from "
             f"{', '.join(f'{r:g}' for r in RATES)} by the held-out cross-entropy on {RECIPE['n_eval']} sequences after one run of {RECIPE['steps']} steps on the selection seed (`{SELECT_SEED}`, "
             f"data from `{NAME}.data.{SELECT_SEED}`, held-out set from `{NAME}.eval.{SELECT_SEED}`, initial weights from `{NAME}.init.<arm>.{SELECT_SEED}`, "
@@ -1471,7 +1471,7 @@ def comparison():
         rows.append((f"`{arm}`", f"{selected_rate(arm):g}", _int(costs(ARMS[arm], CFG, 1)[0]), mu, sd, _interval(lo, hi), tr_))
     return (f"Held-out loss (mean cross-entropy of the six scored predictions, nats) after {RECIPE['steps']} steps, on the {len(SEEDS)} reported seeds "
             f"({', '.join(f'`{s}`' for s in SEEDS)}; data `{NAME}.data.<seed>`, held-out `{NAME}.eval.<seed>`, weights `{NAME}.init.<arm>.<seed>`, "
-            f"the seed of a stream is a function of its full name by the rule of Chapter 17: `{NAME}.data.r1` has the seed {_seed(f'{NAME}.data.r1')}, "
+            f"the seed of a stream is a function of its full name by the rule of Volume I, Chapter 17: `{NAME}.data.r1` has the seed {_seed(f'{NAME}.data.r1')}, "
             f"`{NAME}.data.r2` {_seed(f'{NAME}.data.r2')}, and every other stream named here has the seed of its own name). All arms see the same sequences in the same order "
             "for a seed. Mean over seeds, sample standard deviation (divisor $n - 1$), the 95 percent interval of the mean (Student $t$ with "
             f"{len(SEEDS) - 1} degrees of freedom, multiplier {_fx(sl.ex._t95(len(SEEDS) - 1), 4)}), and the training loss: the batch cross-entropy of the last 10 steps (the balancing term excluded), averaged over the steps and the seeds. " + stable.RULE + "\n\n"

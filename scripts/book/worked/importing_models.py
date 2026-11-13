@@ -175,7 +175,7 @@ def safetensors_file():
         a, b = offsets[name]
         rows.append((f"`{name}`", dtype, str(shape), f"{a} .. {b}", start + a, (start + a) % 4,
                      ", ".join(f"{v:g}" for v in back[name][2])))
-    return ("The file of three tensors written by `write_safetensors`: `w` is F32 with shape [2, 3] holding 1, -2, 0.5, 0.25, 3, -0.125 "
+    return ("A safetensors file of three tensors: `w` is F32 with shape [2, 3] holding 1, -2, 0.5, 0.25, 3, -0.125 "
             "(row by row); `b` is BF16 with shape [3] holding 1, -2.5, 0.3; `h` is F16 with shape [2] holding 0.1, 65504. The header is "
             "the JSON of `{\"__metadata__\": {\"format\": \"pt\"}}` and the three entries in that order, written without spaces, with "
             "each entry's keys in the order dtype, shape, data_offsets, and padded with spaces to a multiple of 8. "
@@ -705,7 +705,7 @@ def import_mistakes():
     return ("Each mistake of the mapping, made in the import plan and run through the 64-bit forward pass on the text of Chapter 1 "
             "(ids 3, 9, 1, 7, 4, 4, 10, 2, eps 1e-6, the epsilon of the published configuration, base 100). The published numbers are the bf16 weights; the golden is the logits of "
             "those weights, and the three measures compare the 8 x 11 logits of the imported model with it (max_abs, rel_l2 and cosine "
-            "are defined in the next section). \"Square\" is a model whose matrices are all square (V = 11, D = 8, L = 2, H = HKV = 4, "
+            "are defined below, with the goldens). \"Square\" is a model whose matrices are all square (V = 11, D = 8, L = 2, H = HKV = 4, "
             f"head width 2, F = 8; weights from the generator `{NAME_SQUARE}`, seed {bookrng.seed_of(NAME_SQUARE):#018x}, drawn in "
             "the order of Chapter 1). A plan checks the shape of each tensor it builds before it runs anything.\n\n"
             + _table(["mistake", "model", "outcome", "max_abs", "rel_l2", "cosine", "argmax agrees"], rows, "llllrrr"))
@@ -906,8 +906,8 @@ def metric_blindness():
         rows.append((label, "below 1e-12" if 1 - m[2] < 1e-12 else _sci(1 - m[2], 2), cos_pass, _sci(m[1], 2), rl_pass, _sci(m[0], 2), loose))
     return (f"Eight outputs compared with the 64-bit logits of the published tiny model (the two rows about the rotary base and the "
             f"epsilon: with the logits at the published eps 1e-6, base 100) by the three measures and by three tests: cosine at least "
-            f"{COS_FLOOR} (the floor of the DeepSeek ladder described below), rel_l2 at most the bound {_sci(tol, 2)} of the previous "
-            "table, and the gate of Chapter 1's forward-parity test (the top prediction agrees at all 8 positions and max_abs is below "
+            f"{COS_FLOOR} (the floor of the DeepSeek ladder described below), rel_l2 at most the bound {_sci(tol, 2)} derived below "
+            "from the count of roundings, and the gate of Chapter 1's forward-parity test (the top prediction agrees at all 8 positions and max_abs is below "
             "1.0). 1 - cosine is printed because cosine is 1 to six places for most rows.\n\n"
             + _table(["output", "1 - cosine", "cosine test", "rel_l2", "rel_l2 test", "max_abs", "gate of Chapter 1"], rows, "lrlrlrl"))
 
@@ -922,8 +922,9 @@ def bf16_weights_effect():
     rel = max(abs(nf.quantize(x, "bf16") - x) / abs(x) for x in ws if x != 0)
     return (f"The weights of the tiny model as drawn (64 bits) and rounded to bf16, {_int(n)} numbers. Largest relative change of one "
             f"weight {_sci(rel, 2)} (the bound for round to nearest is 2^-8 = {_sci(2.0 ** -8, 2)}). Logits of the two models on the text of "
-            f"Chapter 1: rel_l2 {_sci(rel_l2(gbf, g64), 2)}, max_abs {_sci(max_abs(gbf, g64), 2)}, cosine {cosine(gbf, g64):.6f}. "
-            f"The bound of the previous section, {_sci(bound_logits(cfg, len(md.IDS)), 2)}, is {rel_l2(gbf, g64) / bound_logits(cfg, len(md.IDS)):.0f} "
+            f"Chapter 1: relative L2 difference {_sci(rel_l2(gbf, g64), 2)}, largest absolute difference {_sci(max_abs(gbf, g64), 2)}, "
+            f"cosine similarity {cosine(gbf, g64):.6f}. The bound on the rounding of a 32-bit forward pass (the error budget "
+            f"below), {_sci(bound_logits(cfg, len(md.IDS)), 2)}, is {rel_l2(gbf, g64) / bound_logits(cfg, len(md.IDS)):.0f} "
             "times smaller than this change, which is why a golden has to be computed from the published weights and not from "
             "the weights before they were rounded.")
 
@@ -972,9 +973,9 @@ def golden_contents():
     total = sum(r[3] for r in rows)
     return ("The golden for a 6-layer version of the tiny decoder (V = 11, D = 6, H = 4, 2 key-value heads of width 4, F = 10, "
             f"L = 6; weights from the generator `{NAME_BIS}`, seed {bookrng.seed_of(NAME_BIS):#018x}, drawn in the order of Chapter 1 "
-            "and rounded to bf16), written by `write_safetensors` as one safetensors file. It holds the text, the hidden state "
+            "and rounded to bf16), written as one safetensors file. It holds the text, the hidden state "
             "after the embedding and after each layer, the output of the final norm and the logits, each tensor stored in the order "
-            "listed below with the data back to back. The header is the compact JSON of `write_safetensors` (`__metadata__` first, "
+            "listed below with the data back to back. The header is the compact JSON of the three-tensor file above (`__metadata__` first, "
             "then the tensors in that order), padded with spaces to a multiple of 8, and its `__metadata__` is exactly "
             f"`{json.dumps(json.loads(header.decode())['__metadata__'], separators=(',', ':'))}`, "
             f"so the header is {len(header)} bytes. "
@@ -1026,7 +1027,7 @@ def bisection():
     n_layer, n_norm = sum(c for _, c in layer), head[0][1]
     body = [(nm, _sci(g, 2) if g else "0", _sci(b, 2) if b else "0", _sci(bound, 2), "above" if b > bound else "within")
             for nm, g, b, bound in rows]
-    return ("Layer-by-layer comparison for the 6-layer model of the previous table. The implementation under test is the 32-bit forward "
+    return ("Layer-by-layer comparison for the 6-layer model whose golden is listed above. The implementation under test is the 32-bit forward "
             "pass (summation left to right); the golden is the stored 64-bit one. The mistake is an import in which gate and up are "
             f"exchanged in layer {BIS_BUG_LAYER} only. For each hidden state, the rel_l2 of the correct import, the rel_l2 of the "
             "mistaken one, and the bound (roundings of the layers so far, plus one for the stored golden, times 2^-24). Every layer "

@@ -293,8 +293,8 @@ def exit_by_hand():
         worst = max(worst, abs(fd - grad[t]))
     assert worst < 1e-6
     return ("Four passes. Gate logits z of passes 1 to 3 and the cross-entropy c of the head after each pass are given. "
-            "lambda = sigmoid(z); q_t = lambda_t times the mass remaining; the last pass takes what remains. Tolerance: 4 decimals.\n\n"
-            + _table(["pass t", "gate logit z", "lambda", "mass remaining before t", "exit probability q", "cumulative", "c"], rows)
+            "rho = sigmoid(z), the probability of stopping at a pass that is reached; q_t = rho_t times the mass remaining; the last pass takes what remains. Tolerance: 4 decimals.\n\n"
+            + _table(["pass t", "gate logit z", "rho", "mass remaining before t", "exit probability q", "cumulative", "c"], rows)
             + f"\n\nThe weighted loss sum q_t c_t = {_fx(loss, 4)} nats. The expected number of passes sum t q_t = {_fx(mean_passes, 4)} of {total}. "
             "The first pass whose cumulative probability reaches the threshold: "
             + "; ".join(f"threshold {a}: pass {b}" for a, b in rule) + ". The gradient of the loss with respect to z_1, z_2, z_3 by the "

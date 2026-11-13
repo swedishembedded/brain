@@ -166,13 +166,13 @@ def temperature_factor():
     s = L_EXT // L_TRAIN
     lam = attention_factor(s) ** 2
     h0, h1, h2 = _entropy(xs[:L_TRAIN]), _entropy(xs[:L_EXT]), _entropy(xs[:L_EXT], lam)
-    return ("t(s) = 0.1 ln s + 1 multiplies the cosine and the sine of every pair, so the rotated query and key are each t(s) times "
-            "larger and the score is multiplied by lambda = t(s)^2. Keeping the entropy of the row at its value for n keys when "
+    return ("mu(s) = 0.1 ln s + 1 multiplies the cosine and the sine of every pair, so the rotated query and key are each mu(s) times "
+            "larger and the score is multiplied by lambda = mu(s)^2. Keeping the entropy of the row at its value for n keys when "
             "there are s n of them needs lambda^2 = 1 + 2 ln(s) / variance (derived in the text); the last column solves "
-            "that for the variance of the scores that t(s) would be exactly right for.\n\n"
-            + _table(["extension s", "t(s)", "lambda = t(s)^2", "lambda^2", "variance that makes t exact"], rows)
+            "that for the variance of the scores that mu(s) would be exactly right for.\n\n"
+            + _table(["extension s", "mu(s)", "lambda = mu(s)^2", "lambda^2", "variance that makes mu exact"], rows)
             + f"\n\nThe scores of the previous block (variance {SIGMA ** 2}): entropy with n = {L_TRAIN} keys and lambda = 1: "
-            f"{h0:.4f}; with n = {L_EXT} keys and lambda = 1: {h1:.4f}; with n = {L_EXT} keys and lambda = t({s})^2 = {lam:.4f}: "
+            f"{h0:.4f}; with n = {L_EXT} keys and lambda = 1: {h1:.4f}; with n = {L_EXT} keys and lambda = mu({s})^2 = {lam:.4f}: "
             f"{h2:.4f}.")
 
 
@@ -316,7 +316,7 @@ def eightfold_counts():
         attn_prefill = per_key * (n * (n + 1) // 2)
         rows.append((_int(n), _int(kc.cache_bytes_per_token(s) * n), _int(attn_decode), _int(attn_prefill)))
     r = (L_EXT * (L_EXT + 1) // 2) / (L_TRAIN * (L_TRAIN + 1) // 2)
-    return ("The 7.5-billion decoder of Volume V, Chapter 12 (32 layers, 32 query heads and 8 key-value heads of width 128, bf16), "
+    return ("The 7.5-billion-parameter decoder of Volume V, Chapter 12 (32 layers, 32 query heads and 8 key-value heads of width 128, bf16), "
             f"a sequence of n tokens. Cache bytes: 131,072 per token. Attention FLOPs: 4 L H d_h = {_int(per_key)} per visible key "
             "(scores and weighted sum, all layers); a decoded token at context n sees n keys, a prefill of n tokens sees "
             "n (n + 1) / 2 key-query pairs in all.\n\n"
@@ -341,7 +341,7 @@ def score_slab_limit():
 # ------------------------------------------------------------------------------------------------ cache bytes per token
 
 TIERS = (("f32", 4.0), ("bf16", 2.0), ("int8", None), ("fp8", None))   # int8 and fp8: 1 byte + one f32 scale per (token, head) row
-MODELS = (("7.5-billion decoder (8 key-value heads)", kc.DECODER_8B), ("70-billion decoder (8 key-value heads)", kc.DECODER_70B))
+MODELS = (("7.5-billion-parameter decoder (8 key-value heads)", kc.DECODER_8B), ("70-billion-parameter decoder (8 key-value heads)", kc.DECODER_70B))
 RIPPLE = {"L": 80, "global_every": 5, "kv_dim": 1024, "window": 1024}
 
 
@@ -358,7 +358,7 @@ def cache_bytes_per_token(s, tier):
 
 
 def hybrid_bytes(n, tier="bf16", window=RIPPLE["window"]):
-    """Cache bytes of one sequence of n tokens for the Ripple layer pattern of Volume VI, Chapter 3 (80 layers, every 5th global)."""
+    """Cache bytes of one sequence of n tokens for the Ripple layer pattern of Chapter 3 (80 layers, every 5th global)."""
     r = RIPPLE
     n_global = r["L"] // r["global_every"]
     n_slide = r["L"] - n_global
@@ -394,7 +394,7 @@ def cache_budget():
             "bytes per element, 1.03125 at d_h = 128. GiB for ONE sequence.\n\n"
             + _table(["model", "tier", "bytes per element", "bytes per token", "GiB at 131,072 tokens", "GiB at 4,096 tokens"],
                      rows, "llrrrr")
-            + "\n\nThe 80-layer decoder of Volume VI, Chapter 3 (every 5th layer global, the others a window of 1,024 keys, "
+            + "\n\nThe 80-layer decoder of Chapter 3 (every 5th layer global, the others a window of 1,024 keys, "
             "1,024 key and 1,024 value numbers per token and layer):\n\n"
             + _table(["tier", "GiB at 131,072 tokens", "GiB at 4,096 tokens"], rr))
 
@@ -541,7 +541,7 @@ def chunked_prefill_memory():
         chunks = -(-n // c)
         rows.append((_int(c), _int(chunks), _fx(_gib(mlp), 3), _fx(_gib(resid), 3), _fx(_gib(slab), 1),
                      _fx(_gib(chunks * w_bytes), 1)))
-    return ("A prompt of n = 131,072 tokens through the 7.5-billion decoder of Volume V, Chapter 12 (D = 4096, F = 14336, 32 query "
+    return ("A prompt of n = 131,072 tokens through the 7.5-billion-parameter decoder of Volume V, Chapter 12 (D = 4096, F = 14336, 32 query "
             "heads of width 128, 8 key-value heads, bf16, weights 15,009,316,864 bytes), in chunks of c tokens. One layer's "
             "widest activation is the pair of outputs of the gate and up matrices, 2 c F x 2 bytes; the stream is c D x 2 bytes; "
             "a materialised score slab for the last chunk is H c n x 4 bytes (f32). Every chunk reads the weights once, so the "
@@ -603,7 +603,7 @@ def offload_traffic():
         f_m = kc.flops_new(s, 0, m)
         assert f_m == w_term + a_term + head
         grow.append([_int(m), _g(w_term + head, 4), _g(a_term, 4), _g(f_m, 4), _g(f_m / PEAK / (2 * per * m / BUS), 3)])
-    return (f"The 7.5-billion decoder (L = 32, 8 key-value heads of width 128) with an int8 cache: "
+    return (f"The 7.5-billion-parameter decoder (L = 32, 8 key-value heads of width 128) with an int8 cache: "
             f"{_int(int(per))} bytes per token, {_int(int(total))} bytes ({_fx(_gib(total), 2)} GiB) for 131,072 tokens. Model of "
             "Volume IV, Chapter 4: device memory 800 (GB/s), host bus 32 (GB/s), arithmetic 40,000 (GFLOP/s). The model time of an "
             "operation is its bytes over the bandwidth (or its FLOPs over the arithmetic rate); the last column divides it by the "
@@ -649,8 +649,8 @@ def needle_dilution():
     for n, w1, w2 in needle_data():
         s = n / L_TRAIN
         rows.append((_int(n), _g(s, 3), _fx(attention_factor(s) ** 2, 4), _fx(w1, 4), _fx(w2, 4)))
-    return (f"One query. Among n keys, n have a score of {SIGMA} x `normal()` (the first n of {max(N_NEEDLE):,} draws from the "
+    return (f"One query. n noise keys each have a score of {SIGMA} x `normal()` (the first n of {max(N_NEEDLE):,} draws from the "
             f"generator seeded {_seed(NAME_NEEDLE)}, `seed_of` of the name `{NAME_NEEDLE}`) and one needle has the score "
-            f"{NEEDLE_SCORE:g}, which is 5 standard deviations. The table is the softmax weight of the needle. 'Unscaled': the "
+            f"{NEEDLE_SCORE:g}, which is 5 standard deviations above their mean of 0. The table is the softmax weight of the needle. 'Unscaled': the "
             "scores as they are. 'YaRN factor': every score multiplied by lambda = (0.1 ln s + 1)^2 with s = n / 4096.\n\n"
             + _table(["n noise keys", "s", "lambda", "needle weight, unscaled", "needle weight, YaRN factor"], rows))
