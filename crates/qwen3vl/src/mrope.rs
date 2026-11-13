@@ -191,10 +191,12 @@ pub type PlaceholderGrids<'a> = (u32, &'a [(u32, u32, u32)]);
 /// exercises this code path). A video run is `(n_frames, h, w)` with real
 /// `h > 1`/`w > 1` -- the SAME meshgrid math images use (unaffected by this
 /// special case), just with `t > 1` (one real frame per T step, each frame's
-/// own merged patch grid on H/W). This is still a documented approximation of
-/// HF's exact reference (which additionally scales audio's and video's T axis
-/// by wall-clock seconds via `position_id_per_seconds`/`seconds_per_chunk`),
-/// not a byte-exact port -- see `crate::generate`'s module doc.
+/// own merged patch grid on H/W). Video positions are therefore frame-ordinal:
+/// HF's reference scales a video's T axis by its seconds per frame group
+/// (`position_id_per_seconds * second_per_grid`, from the clip's frame rate)
+/// and interleaves audio-in-video by that axis, neither of which a caller
+/// holding only frames can supply. `qwen3omnimoe` refuses audio and video in
+/// one prompt for that reason.
 ///
 /// The post-run anchor advance is `max(t, h, w)` (not `max(h, w)` — the
 /// single-type version's original formula, which only ever saw `t = 1`
