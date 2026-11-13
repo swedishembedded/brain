@@ -3,7 +3,8 @@
 
 //! The policy network: a residual MLP, trained and evaluated on the device.
 //!
-//! Both dispatch graphs are built ONCE and resubmitted. The shapes never move
+//! The three dispatch graphs (forward with loss, inference-only forward, and
+//! backward) are built ONCE and resubmitted. The shapes never move
 //! between steps - a fixed row count, a fixed feature width, a fixed move
 //! count - so rebuilding them per step would buy nothing and cost the whole
 //! encode each time.

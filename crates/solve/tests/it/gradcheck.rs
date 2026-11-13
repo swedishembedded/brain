@@ -33,8 +33,10 @@ fn value_targets(rows: u32) -> Vec<f32> {
 }
 
 /// How heavily the value head is weighted against the policy in the checks
-/// below. Not 1.0: with both at equal weight a mistake in one can be masked
-/// by the other's much larger gradient.
+/// below: 1.0, the unscaled sum of the two losses. The fixture's value targets
+/// are kept small (see `value_targets`) so neither term's gradient swamps the
+/// other at this weight; a different weight would test a different objective
+/// than the one training uses by default.
 const VALUE_WEIGHT: f32 = 1.0;
 
 fn fixture(cfg: &Config, rows: u32) -> (Vec<f32>, Vec<u32>) {

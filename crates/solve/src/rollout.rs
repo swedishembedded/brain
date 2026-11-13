@@ -4,10 +4,16 @@
 //! Playing the policy: one forward pass per move, for many instances at once.
 //!
 //! There is no search here and that is the point of the crate. No frontier,
-//! no priority queue, no node expansions, no heuristic evaluated on
-//! candidates. The policy names a move, the move is played, and the state it
-//! lands on is the next query. The cost of an instance is its solution length
-//! in forward passes.
+//! no priority queue, no node expansions. Two ways to play, both greedy and
+//! never reconsidered:
+//!
+//! - [`solve_batch`]: the policy names a move, the move is played, and the
+//!   state it lands on is the next query. No heuristic is evaluated on
+//!   candidates; the cost of an instance is its solution length in forward
+//!   passes.
+//! - [`solve_batch_by_value`]: the value head scores EVERY successor of the
+//!   current state and the best-scoring one is played, at one batched
+//!   forward pass over `instances * moves` states per turn.
 //!
 //! Instances are rolled out in LOCKSTEP so a batch shares each pass: a
 //! network this small is latency-bound on a single state and throughput-bound

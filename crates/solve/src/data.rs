@@ -14,7 +14,11 @@
 
 use crate::StateSpace;
 
-/// How far from the goal to walk, and how to seed it.
+/// How far from the goal to walk.
+///
+/// Deliberately carries no seed: [`batch`] draws from the caller's [`Rng`], so
+/// the caller owns the stream and a run is re-run by re-creating that `Rng`. A
+/// second seed here would be a second source of truth that nothing read.
 #[derive(Clone, Copy, Debug)]
 pub struct Walk {
     /// The length of every walk, and the deepest bucket examples are kept
@@ -26,7 +30,6 @@ pub struct Walk {
     /// learns nothing more from. [`batch`] harvests the whole walk and
     /// enforces the balance with a per-depth quota instead.
     pub depth: usize,
-    pub seed: u64,
 }
 
 /// One training batch: dense one-hot features and the move that undoes the

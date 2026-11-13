@@ -233,7 +233,7 @@ fn the_test_spaces_have_real_inverses() {
 #[test]
 fn every_walk_depth_gets_an_equal_share_of_the_batch() {
     let space = Perm54::new();
-    let walk = Walk { depth: 26, seed: seed::random_seed() };
+    let walk = Walk { depth: 26 };
     // Divisible, remainder, and exactly one example per depth.
     for rows in [2048usize, 2000, 130, 26] {
         let b = batch(&space, &walk, rows, &mut Rng::new(seed::random_seed()));
@@ -263,7 +263,7 @@ fn every_walk_depth_gets_an_equal_share_of_the_batch() {
 #[test]
 fn every_label_steps_back_onto_the_walk_it_came_from() {
     let space = Word::new(3, 10);
-    let walk = Walk { depth: 10, seed: seed::random_seed() };
+    let walk = Walk { depth: 10 };
     let width = space.feature_len();
     let b = batch(&space, &walk, 250, &mut Rng::new(seed::random_seed()));
 
@@ -287,7 +287,7 @@ fn every_label_steps_back_onto_the_walk_it_came_from() {
 #[test]
 fn the_same_seed_generates_the_same_batch() {
     let space = Perm54::new();
-    let walk = Walk { depth: 26, seed: seed::random_seed() };
+    let walk = Walk { depth: 26 };
     let seed = seed::random_seed();
     let a = batch(&space, &walk, 512, &mut Rng::new(seed));
     let b = batch(&space, &walk, 512, &mut Rng::new(seed));
@@ -310,7 +310,7 @@ fn the_same_seed_generates_the_same_batch() {
 #[test]
 fn a_harvested_walk_costs_one_move_application_per_example() {
     let space = Perm54::new();
-    let walk = Walk { depth: 26, seed: seed::random_seed() };
+    let walk = Walk { depth: 26 };
     let rows = 2048usize;
     let reps = 20usize;
     let mut rng = Rng::new(seed::random_seed());
