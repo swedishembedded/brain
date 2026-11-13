@@ -161,6 +161,21 @@ fn decode_omni_chunked_emits_more_than_one_chunk_for_small_chunk_frames() {
     assert!(n_calls > 1, "chunk_frames=1 over t=12 must emit more than one chunk, got {n_calls}");
 }
 
+/// A caller that stops (a cancelled request) gets no further chunk: the decode ends at the chunk that asked.
+#[test]
+fn decode_omni_chunked_until_stops_when_the_caller_says_so() {
+    let codec = tiny_omni_codec(0xBEEF);
+    let codes = random_codes(0xBEEF2, 12, 2, 4);
+    let mut n_calls = 0u32;
+    let finished = codec.decode_omni_chunked_until(&codes, 1, |_| {
+        n_calls += 1;
+        n_calls < 2
+    });
+    assert!(!finished, "a stopped decode must not claim to have finished");
+    assert_eq!(n_calls, 2, "no chunk is decoded after the one that stopped it");
+    assert!(codec.decode_omni_chunked_until(&codes, 1, |_| true), "an unstopped decode finishes");
+}
+
 #[test]
 #[should_panic(expected = "empty codes")]
 fn decode_omni_chunked_rejects_empty_codes() {

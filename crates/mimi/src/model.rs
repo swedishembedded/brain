@@ -474,6 +474,16 @@ impl Codec {
     /// `left_context_size` shape). `chunk_frames == 0` decodes the whole
     /// thing in one `Back::step` call.
     pub fn decode_omni_chunked(&self, codes: &[u32], chunk_frames: usize, mut on_chunk: impl FnMut(&[f32])) {
+        self.decode_omni_chunked_until(codes, chunk_frames, |chunk| {
+            on_chunk(chunk);
+            true
+        });
+    }
+
+    /// [`Self::decode_omni_chunked`], where `on_chunk` returns `false` to stop
+    /// decoding (the caller was cancelled): no further chunk is computed.
+    /// Returns whether every chunk was decoded.
+    pub fn decode_omni_chunked_until(&self, codes: &[u32], chunk_frames: usize, mut on_chunk: impl FnMut(&[f32]) -> bool) -> bool {
         let nq = self.cfg.num_quantizers as usize;
         assert_eq!(codes.len() % nq, 0, "codes length not a multiple of {nq}");
         let t = (codes.len() / nq) as u32;
@@ -502,11 +512,12 @@ impl Codec {
                 slab[c * l_new..c * l_new + l_new].copy_from_slice(&latent[c * t as usize + a..c * t as usize + b]);
             }
             let out = back.step(&slab, l_new);
-            if !out.is_empty() {
-                on_chunk(&out);
+            if !out.is_empty() && !on_chunk(&out) {
+                return false;
             }
             a = b;
         }
+        true
     }
 
     /// This Code2Wav's `upsample.*`/`decoder.*` weights as a plain host map
