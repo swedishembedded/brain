@@ -20,6 +20,6 @@ You can write a small decision problem as states, actions, transition probabilit
 3. [Policy Gradients](03-policy-gradients.md): how do we directly adjust a policy so that good actions become more likely?
 4. [Reinforcement and Preference Learning for Language Models](04-llm-alignment.md): how is a pretrained language model taught to follow instructions and prefer good answers?
 5. [Search, Planning and Discovery](05-search.md): when should an agent search instead of learn, and how do the two help each other?
-6. Decision Models in Practice: how is a small learned model used to make fast, auditable decisions inside an application?
+6. [Decision Models in Practice](06-decision-models.md): how is a small learned model used to make fast, auditable decisions inside an application?
 7. Continual Learning and Promotion: how can a model keep learning from new experience without forgetting, and how do we decide a new version is better?
 8. Project: An Agent That Improves from Verified Feedback: can you train an agent that solves progressively harder tasks from verified rewards, and decide when a new version is better?

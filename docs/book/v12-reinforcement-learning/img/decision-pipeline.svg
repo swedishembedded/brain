@@ -1,0 +1,46 @@
+<!-- source-sha256: d1f91bc61257738f6d1c053eb517a16a921f2b9f4658b5bf0b035d0ec3696f5d -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 998 358" width="998" height="358"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="998" height="358" fill="#ffffff"/>
+<rect x="20" y="70" width="117" height="74" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="78.5" y="103.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">request text</text>
+<text x="78.5" y="119.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">five words</text>
+<rect x="20" y="184" width="117" height="74" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="78.5" y="209.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">request fields</text>
+<text x="78.5" y="225.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">amount, age,</text>
+<text x="78.5" y="241.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">device, contacts</text>
+<rect x="171" y="70" width="151" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="246.5" y="95.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sentence encoder</text>
+<text x="246.5" y="111.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mean of word vectors,</text>
+<text x="246.5" y="127.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">length 1: 6 numbers</text>
+<rect x="171" y="184" width="151" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="246.5" y="209.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">scaling</text>
+<text x="246.5" y="225.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(v - mean) / sd:</text>
+<text x="246.5" y="241.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 numbers</text>
+<rect x="356" y="127" width="101" height="74" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="406.5" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">state vector x</text>
+<text x="406.5" y="176.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">10 numbers</text>
+<rect x="491" y="127" width="104" height="74" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="543" y="152.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decision head</text>
+<text x="543" y="168.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">z = W x + b</text>
+<text x="543" y="184.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 logits</text>
+<rect x="629" y="127" width="125" height="74" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="691.5" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">temperature</text>
+<text x="691.5" y="176.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">p = softmax(z / T)</text>
+<rect x="788" y="127" width="190" height="74" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="883" y="152.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decision rule</text>
+<text x="883" y="168.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">act if p_max &gt;= 1 - c_e / c_w</text>
+<text x="883" y="184.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">otherwise escalate</text>
+<line x1="140" y1="107" x2="168" y2="107" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="140" y1="221" x2="168" y2="221" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M322,107 L329,107 Q339,107 339,117 L339,140 Q339,150 349,150 L353,150" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M322,221 L329,221 Q339,221 339,211 L339,188 Q339,178 349,178 L353,178" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="460" y1="164" x2="488" y2="164" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="598" y1="164" x2="626" y2="164" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="757" y1="164" x2="785" y2="164" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="339" y="288" width="611.5" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="644.75" y="314.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">record: state vector, logits, T, probabilities, threshold, action, model identity</text>
+<line x1="406.5" y1="201" x2="406.5" y2="288" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<line x1="543" y1="201" x2="543" y2="288" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<line x1="883" y1="204" x2="883" y2="285" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="805" y="232.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">action: route to a team</text>
+<text x="805" y="248.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">or escalate</text>
+</svg>
