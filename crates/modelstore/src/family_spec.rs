@@ -22,18 +22,28 @@ use crate::inventory::{ArtifactKind, ArtifactRecord};
 use crate::resolve::{classify_tokenizer_role, ArchSpec, AssembleOutcome, AssembledVariant, Confidence};
 use capability::Assembly;
 
+/// Whether a family has a `tokenizer.json` role beside its checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenizerRole {
+    /// The checkpoint carries its own vocabulary, or its directory holds it.
+    None,
+    /// The checkpoint cannot be served without one.
+    Required,
+    /// Taken when the store holds one; without it the model runs on token ids.
+    Optional,
+}
+
 /// The spec of architecture `arch`; `card_family` is what a brain checkpoint
-/// of it carries on its card. `tokenizer` says whether the family is served
-/// with a `tokenizer.json` role (a family whose checkpoint carries its own
-/// vocabulary, or whose directory holds its tokenizer, has none).
+/// of it carries on its card.
 pub struct FamilySpec {
     pub arch: &'static str,
     pub card_family: &'static str,
-    pub tokenizer: bool,
+    pub tokenizer: TokenizerRole,
 }
 
 const WEIGHTS_ONLY: &[&str] = &["weights"];
 const WEIGHTS_AND_TOKENIZER: &[&str] = &["weights", "tokenizer"];
+const TOKENIZER: &[&str] = &["tokenizer"];
 
 impl FamilySpec {
     fn is_weights(&self, rec: &ArtifactRecord) -> bool {
@@ -54,16 +64,22 @@ impl ArchSpec for FamilySpec {
     }
 
     fn roles(&self) -> &'static [&'static str] {
-        if self.tokenizer {
-            WEIGHTS_AND_TOKENIZER
-        } else {
-            WEIGHTS_ONLY
+        match self.tokenizer {
+            TokenizerRole::None => WEIGHTS_ONLY,
+            TokenizerRole::Required | TokenizerRole::Optional => WEIGHTS_AND_TOKENIZER,
+        }
+    }
+
+    fn optional_roles(&self) -> &'static [&'static str] {
+        match self.tokenizer {
+            TokenizerRole::Optional => TOKENIZER,
+            TokenizerRole::None | TokenizerRole::Required => &[],
         }
     }
 
     fn classify(&self, records: &[ArtifactRecord], inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out: Vec<(usize, String, Confidence)> = records.iter().enumerate().filter(|(_, r)| r.usable() && self.is_weights(r)).map(|(idx, _)| (idx, "weights".to_string(), Confidence::Declared)).collect();
-        if self.tokenizer {
+        if self.tokenizer != TokenizerRole::None {
             let weights: Vec<&Path> = out.iter().map(|(idx, ..)| records[*idx].path.as_path()).collect();
             classify_tokenizer_role(records, inventory_root, "tokenizer", &weights, &mut out);
         }
@@ -108,7 +124,7 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join("config.json"), serde_json::json!({"architectures": [class]}).to_string()).unwrap();
         }
-        let spec = FamilySpec { arch: "huginn", card_family: "huginn", tokenizer: true };
+        let spec = FamilySpec { arch: "huginn", card_family: "huginn", tokenizer: TokenizerRole::Required };
         let records = vec![record(ours.clone(), ArtifactKind::HfDir), record(other, ArtifactKind::HfDir)];
         let out = spec.classify(&records, &root);
         assert!(out.contains(&(0, "weights".to_string(), Confidence::Declared)), "{out:?}");

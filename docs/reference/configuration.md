@@ -27,7 +27,7 @@ another. It holds two kinds of key:
 serve:
   api-key-file: /etc/brain/key
   checkpoint: checkpoints/qwen3.8-27b
-BRAIN_QWEN35MOE_CTX: 8192
+BRAIN_TRACE: ltxv=3
 ```
 
 A variable brain no longer reads (`BRAIN_API_KEY`, `BRAIN_QWEN_WEIGHTS`,
@@ -116,7 +116,6 @@ model is not served.
 
 | Variable | Serves | Value |
 | --- | --- | --- |
-| `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint (produced by `brain import`) + `tokenizer.json` |
 | `BRAIN_GPT2_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
 | `BRAIN_S3DIT_DIT`, `BRAIN_S3DIT_VAE`, `BRAIN_S3DIT_QWEN`, `BRAIN_S3DIT_TOKENIZER` | Z-Image text2image/edit | optional overrides, one per component -- unset, each is resolved from the model store instead (`s3dit::spec::S3ditSpec`); set, it pins that exact file |
 | `BRAIN_SCRFD_DIR` | antelopev2 face detection | dir holding `scrfd_10g_bnkps.onnx` |
@@ -159,8 +158,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `BRAIN_QWEN35MOE_CTX` | Qwen3.5 MoE built context length | model default |
-| `BRAIN_QWEN35MOE_MAX_BATCH` | Qwen3.5 MoE serving batch slots | model default |
 | `BRAIN_FLUX2_MAX_BATCH` | FLUX.2 concurrent same-size batch cap | 4 |
 | `BRAIN_FLUX2_FAMILY` | `klein` or `base`, combined with the DiT's own sniffed size (`4b`/`9b`) to pick the served variant when a resident is bound to explicit weight paths rather than a `--variant` flag | `klein` |
 | `BRAIN_FLUX2_TE_DEVICE` | **Override** for FLUX.2 text-encoder placement (`gpu<i>[:i8]` for a truncated shard on that card). Unset, placement is automatic: the pipeline declares the DiT, encoder and VAE with their costs and the engine places them on cards that can hold them (`residency::plan`, reached through `gpu_core::devices::place`), printing what it chose | automatic |

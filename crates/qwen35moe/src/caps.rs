@@ -12,9 +12,9 @@
 //! What differs from `qwen3::caps`, because `qwen35moe::model::Qwen35` is a
 //! different model at a different stage of the port:
 //! - Loading goes through `checkpoint::load(path).by_role("")` +
-//!   `Qwen35Config::from_json` + [`Qwen35::new`]/[`Qwen35::new_i8`] — the same
-//!   load path `crate::qwen35moe_cli`'s own `infer` command already uses
-//!   (there is no `Qwen::load_inference`-style convenience constructor here).
+//!   `Qwen35Config::from_json` + [`Qwen35::new`]/[`Qwen35::new_i8`] (there is
+//!   no `Qwen::load_inference`-style convenience constructor here). The
+//!   checkpoint is the store's `weights` role, built into the provider.
 //! - Decoding is `crate::sample::generate_kv_stream_with_head`, itself a thin
 //!   wrapper around [`Qwen35::step`] fed one token at a time (P11b's
 //!   single-sequence incremental decode primitive) — there is no fast batched
@@ -78,13 +78,11 @@ pub const DEFAULT_MAX_NEW: i64 = 128;
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder, KV-cache decode, one Progress per token)")
         .streaming()
-        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen3.5-35B-A3B checkpoint (.safetensors)").required().host_env("BRAIN_QWEN35MOE_WEIGHTS"))
         .param(ParamSpec::new(
             "prompt",
             ParamType::Str,
             "the prompt: text (with a tokenizer) or whitespace/comma-separated token ids (without); ignored when `messages` is set",
         ))
-        .param(ParamSpec::new("tokenizer", ParamType::Str, "path to tokenizer.json; omit to feed/return raw token ids").host_env("BRAIN_QWEN35MOE_TOKENIZER"))
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(DEFAULT_MAX_NEW)))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").min(0.0).max(capability::bounds::TOP_K).default(json!(40)))
@@ -129,18 +127,44 @@ struct QwenResident {
 /// same resident (the acceptance rule, not equality, decides).
 type HotKey = (String, u32, String);
 
-/// The executable Qwen3.5-35B-A3B model behind the manifest. Construction is
-/// free — the checkpoint loads lazily on the first `generate` and stays
-/// resident.
-#[derive(Default)]
+/// The executable Qwen3.5-35B-A3B model behind the manifest, over one
+/// brain-format checkpoint and, when there is one, its tokenizer (a
+/// `tokenizer.json`, or a `.gguf` whose embedded tokenizer is read). Without a
+/// tokenizer the prompt and the result are token ids. Construction is free -
+/// the checkpoint loads lazily on the first `generate` and stays resident.
 pub struct Qwen35Provider {
+    weights: String,
+    tokenizer: Option<String>,
     hot: Arc<Hot<HotKey, QwenResident>>,
 }
 
 impl Qwen35Provider {
-    pub fn new() -> Qwen35Provider {
-        Qwen35Provider::default()
+    pub fn new(weights: impl Into<String>, tokenizer: Option<String>) -> Qwen35Provider {
+        Qwen35Provider { weights: weights.into(), tokenizer, hot: Arc::default() }
     }
+}
+
+/// The provider over the checkpoint the model store resolved (`weights`, and
+/// `tokenizer` when the store holds one). A published Hugging Face directory
+/// is served by `brain serve`'s paged engine; this one-shot path reads the
+/// brain checkpoint `brain import-gguf` writes.
+pub fn provider(assembly: &capability::Assembly) -> Result<Arc<dyn Provider>, String> {
+    let weights = assembly.role_path("weights")?;
+    if Path::new(&weights).is_dir() {
+        return Err(format!("qwen35moe: {weights} is a Hugging Face directory; serve it with `brain serve`, or convert a GGUF with `brain import-gguf` for one-shot generation"));
+    }
+    let tokenizer = assembly.roles.get("tokenizer").map(|p| p.to_string_lossy().into_owned());
+    Ok(Arc::new(Qwen35Provider::new(weights, tokenizer)))
+}
+
+/// The tokenizer at `path`: a `tokenizer.json`, or the one a `.gguf` embeds.
+fn load_tokenizer(path: &str) -> Result<QwenBpe, String> {
+    if path.ends_with(".gguf") {
+        let gguf = checkpoint::gguf::MmapGguf::open(path).map_err(|e| format!("qwen35moe: {path}: {e}"))?;
+        let embedded = gguf.tokenizer().ok_or_else(|| format!("qwen35moe: {path} embeds no tokenizer"))?;
+        return QwenBpe::from_gguf(&embedded).map_err(|e| format!("qwen35moe: {path}: {e}"));
+    }
+    QwenBpe::from_file(path)
 }
 
 impl Provider for Qwen35Provider {
@@ -148,11 +172,13 @@ impl Provider for Qwen35Provider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "generate").then(|| Arc::new(GenerateAction { hot: self.hot.clone() }) as Arc<dyn Action>)
+        (name == "generate").then(|| Arc::new(GenerateAction { weights: self.weights.clone(), tokenizer: self.tokenizer.clone(), hot: self.hot.clone() }) as Arc<dyn Action>)
     }
 }
 
 struct GenerateAction {
+    weights: String,
+    tokenizer: Option<String>,
     hot: Arc<Hot<HotKey, QwenResident>>,
 }
 
@@ -162,7 +188,7 @@ impl Action for GenerateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let weights = inv.get_str("weights").ok_or("qwen35moe generate: missing required param 'weights'")?;
+        let weights = self.weights.clone();
         if !Path::new(&weights).exists() {
             return Err(format!("qwen35moe generate: weights not found at '{weights}'"));
         }
@@ -177,10 +203,7 @@ impl Action for GenerateAction {
         // chat-template/tool-call/stop-string/cancellation logic `qwen3`'s
         // HTTP/D-Bus serving path runs (`qwen3::chat`) — see this module's own
         // doc for why that is safe to reuse as-is.
-        let tok = match inv.get_str("tokenizer").filter(|p| !p.is_empty()) {
-            Some(p) => Some(QwenBpe::from_file(&p)?),
-            None => None,
-        };
+        let tok = self.tokenizer.as_deref().filter(|p| !p.is_empty()).map(load_tokenizer).transpose()?;
         let plan = match &tok {
             Some(t) => {
                 let mut req = parse_request(t, inv)?;
@@ -317,8 +340,8 @@ mod tests {
         checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
 
         let mut reg = Registry::new();
-        reg.register(Arc::new(Qwen35Provider::new()));
-        let request = || Invocation::new().set("weights", json!(path.to_str().unwrap())).set("prompt", json!("1 2 3")).set("max_new", json!(8)).set("temp", json!(1.5)).set("top_k", json!(0));
+        reg.register(Arc::new(Qwen35Provider::new(path.to_str().unwrap(), None)));
+        let request = || Invocation::new().set("prompt", json!("1 2 3")).set("max_new", json!(8)).set("temp", json!(1.5)).set("top_k", json!(0));
         let first = reg.run(MODEL, "generate", request(), &mut |_| {}).unwrap();
         let drawn = first.outputs["seed"].as_u64().expect("the outcome carries the seed the draw used");
         let replay = reg.run(MODEL, "generate", request().set("seed", json!(drawn)), &mut |_| {}).unwrap();
@@ -338,7 +361,7 @@ mod tests {
         let g = &m.actions[0];
         assert_eq!(g.name, "generate");
         assert!(g.streaming, "generate must stream (one Progress per token)");
-        assert!(g.params.iter().any(|p| p.name == "weights" && p.required));
+        assert!(!g.params.iter().any(|p| p.name == "weights" || p.name == "tokenizer"), "the checkpoint is the provider's, not a request's");
         // `prompt` is NOT required: `messages` (the shared chat-serving parse)
         // can supply the request instead, matching `qwen3::caps`'s own spec.
         assert!(g.params.iter().any(|p| p.name == "prompt" && !p.required));
@@ -346,10 +369,9 @@ mod tests {
         assert_eq!(g.params.iter().find(|p| p.name == "max_new").unwrap().default, Some(json!(DEFAULT_MAX_NEW)));
         assert_eq!(g.outputs[0].media, Media::Text);
         // validation: defaults fill, missing required rejected, no weights loaded.
-        let inv = g.validate(Invocation::new().set("weights", json!("w")).set("prompt", json!("1 2"))).unwrap();
+        let inv = g.validate(Invocation::new().set("prompt", json!("1 2"))).unwrap();
         assert_eq!(inv.get_i64("max_new"), Some(DEFAULT_MAX_NEW));
-        assert!(g.validate(Invocation::new().set("prompt", json!("1"))).is_err());
-        assert!(g.validate(Invocation::new().set("weights", json!("w")).set("prompt", json!("1")).set("bogus", json!(1))).is_err());
+        assert!(g.validate(Invocation::new().set("prompt", json!("1")).set("bogus", json!(1))).is_err());
         // the manifest round-trips to JSON for discovery.
         assert_eq!(manifest().to_json()["actions"][0]["name"], "generate");
     }
@@ -358,11 +380,11 @@ mod tests {
     fn missing_weights_is_a_clean_error() {
         let reg = {
             let mut r = Registry::new();
-            r.register(Arc::new(Qwen35Provider::new()));
+            r.register(Arc::new(Qwen35Provider::new("/nonexistent/qwen35.safetensors", None)));
             r
         };
         let err = reg
-            .run(MODEL, "generate", Invocation::new().set("weights", json!("/nonexistent/qwen35.safetensors")).set("prompt", json!("1 2")), &mut |_| {})
+            .run(MODEL, "generate", Invocation::new().set("prompt", json!("1 2")), &mut |_| {})
             .unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
     }
@@ -389,11 +411,11 @@ mod tests {
         checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
 
         let mut reg = Registry::new();
-        reg.register(Arc::new(Qwen35Provider::new()));
+        reg.register(Arc::new(Qwen35Provider::new(path.to_str().unwrap(), None)));
         let mut steps = 0u32;
         let ids: Vec<u32> = (0..4).map(|i| (i * 7 + 1) % cfg.vocab).collect();
         let prompt = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(" ");
-        let inv = Invocation::new().set("weights", json!(path.to_str().unwrap())).set("prompt", json!(prompt)).set("max_new", json!(4));
+        let inv = Invocation::new().set("prompt", json!(prompt)).set("max_new", json!(4));
         let out = reg.run(MODEL, "generate", inv, &mut |_p| steps += 1).unwrap();
         let n = out.outputs["tokens"].as_u64().unwrap();
         assert_eq!(n, 4, "greedy decode with no eos must emit max_new tokens");
@@ -409,7 +431,7 @@ mod tests {
         // Same weights, small request: the resident model is reused (no
         // reload). A second, larger request past the built cap forces a
         // rebuild — both must still succeed, proving the cache key logic.
-        let inv2 = Invocation::new().set("weights", json!(path.to_str().unwrap())).set("prompt", json!(prompt)).set("max_new", json!(2));
+        let inv2 = Invocation::new().set("prompt", json!(prompt)).set("max_new", json!(2));
         let out2 = reg.run(MODEL, "generate", inv2, &mut |_| {}).unwrap();
         assert_eq!(out2.outputs["tokens"].as_u64().unwrap(), 2);
 
@@ -449,13 +471,11 @@ mod tests {
         checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
 
         let mut reg = Registry::new();
-        reg.register(Arc::new(Qwen35Provider::new()));
+        reg.register(Arc::new(Qwen35Provider::new(path.to_str().unwrap(), Some(tok_path))));
         let mut events = 0u32;
         let messages = json!([{"role": "user", "content": "what's the weather in Paris?"}]).to_string();
         let tools = json!([{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]).to_string();
         let inv = Invocation::new()
-            .set("weights", json!(path.to_str().unwrap()))
-            .set("tokenizer", json!(tok_path))
             .set("messages", json!(messages))
             .set("tools", json!(tools))
             .set("max_new", json!(4));

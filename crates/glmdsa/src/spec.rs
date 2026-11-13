@@ -13,13 +13,13 @@
 //! model distribution and resolution then you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
-use brain_modelstore::family_spec::FamilySpec;
+use brain_modelstore::family_spec::{FamilySpec, TokenizerRole};
 
 /// The `ModelCard.family` of every brain GLM checkpoint.
 pub const CARD_FAMILY: &str = "glm";
 
 /// The resolver spec for the `glmdsa` architecture.
-pub const SPEC: FamilySpec = FamilySpec { arch: "glmdsa", card_family: CARD_FAMILY, tokenizer: false };
+pub const SPEC: FamilySpec = FamilySpec { arch: "glmdsa", card_family: CARD_FAMILY, tokenizer: TokenizerRole::None };
 
 #[cfg(test)]
 mod tests {

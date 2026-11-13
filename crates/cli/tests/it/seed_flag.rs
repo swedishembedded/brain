@@ -52,7 +52,7 @@ const SEEDED_VERBS: &[&[&str]] = &[
     &["qwen3", "toolcall", "eval"],
     &["qwen35", "infer"],
     &["qwen35", "finetune"],
-    &["qwen35moe", "infer", "--weights", "w"],
+    &["qwen35moe", "generate", "--weights", "w"],
     &["serve"],
     &["flux2", "text2image", "--prompt", "p"],
     &["flux2", "lora_train", "--data", "d", "--save", "s"],
@@ -77,7 +77,7 @@ const USAGE_STOPPED_VERBS: &[&[&str]] = &[
     &["qwen3", "train"],
     &["qwen3", "toolcall", "gen"],
     &["qwen3", "toolcall", "eval"],
-    &["qwen35moe", "infer", "--weights", "w"],
+    &["qwen35moe", "generate", "--weights", "w"],
 ];
 
 #[test]

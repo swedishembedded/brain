@@ -458,16 +458,13 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("glmdsa", &glmdsa::spec::SPEC)),
             resident: crate::resident_in_store!(crate::resident_llm::GlmResident::from_store),
         },
-        // Qwen3.5-35B-A3B: like qwen3, `weights` is a per-invocation action
-        // param (not baked into the Provider at construction), so this
-        // manifest is genuinely weights-free -- the same reason qwen3's own
-        // entry above needs no `resident` (the HTTP/D-Bus-served, always-hot
-        // path is `crate::resident_qwen35moe::Qwen35Resident`, registered
-        // directly by the serving executor, not through this ctor).
+        // Qwen3.5-35B-A3B: the one-shot provider over the store's checkpoint.
+        // `brain serve` serves each checkpoint the model-dir scan finds through
+        // the paged engine (`crate::resident_qwen35moe::Qwen35Resident`).
         ModelEntry {
             manifest: qwen35moe::caps::manifest,
-            provider: always!(qwen35moe::caps::Qwen35Provider::new()),
-            spec: None,
+            provider: qwen35moe::caps::provider,
+            spec: Some(("qwen35moe", &qwen35moe::spec::SPEC)),
             resident: None,
         },
         // Qwen3.8-27B dense hybrid GDN/GQA decoder: `weights`/`tokenizer` are
@@ -547,13 +544,13 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: resident_ouro::direct_manifest,
             provider: resident_ouro::provider,
-            spec: Some(("ouro", &family_spec::FamilySpec { arch: "ouro", card_family: "ouro", tokenizer: true })),
+            spec: Some(("ouro", &family_spec::FamilySpec { arch: "ouro", card_family: "ouro", tokenizer: family_spec::TokenizerRole::Required })),
             resident: None,
         },
         ModelEntry {
             manifest: resident_huginn::direct_manifest,
             provider: resident_huginn::provider,
-            spec: Some(("huginn", &family_spec::FamilySpec { arch: "huginn", card_family: "huginn", tokenizer: true })),
+            spec: Some(("huginn", &family_spec::FamilySpec { arch: "huginn", card_family: "huginn", tokenizer: family_spec::TokenizerRole::Required })),
             resident: None,
         },
         // FastVLM: `weights` is resolved through `fastvlm::spec::FastvlmSpec`

@@ -2540,6 +2540,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-optim",
  "brain-paramstore",
  "brain-qwen3",
@@ -6921,6 +6922,17 @@ dependencies = [
  "brain-invoke",
  "brain-loader",
  "brain-ltxv",
+ "serde_json",
+]
+
+[[package]]
+name = "sample-models-qwen35moe"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-invoke",
+ "brain-npu",
+ "brain-qwen35moe",
  "serde_json",
 ]
 

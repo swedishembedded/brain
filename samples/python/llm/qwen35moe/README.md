@@ -17,9 +17,8 @@ doc has the complete list of what's deliberately not here yet: int8 KV, LoRA
 adapter folding, multi-GPU sharding, a `.gguf` serving path.
 
 ```bash
-BRAIN_QWEN35MOE_WEIGHTS=/path/to/qwen35.safetensors \
-BRAIN_QWEN35MOE_TOKENIZER=/path/to/tokenizer.json \
-  tools/dbus-session.sh --serve "--dbus" -- \
+brain import-gguf /path/to/Qwen3.5-35B-A3B.gguf --id brain/qwen35moe   # once: a brain checkpoint in the model store
+tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/llm/qwen35moe/qwen35moe.py --dbus --in-text "Say hello in French." --out-stdio
 ```
 
@@ -27,9 +26,7 @@ Over OpenAI-compatible HTTP (the server prints `APIKEY openai <key>` at
 startup - pass it with `--api-key`):
 
 ```bash
-BRAIN_QWEN35MOE_WEIGHTS=/path/to/qwen35.safetensors \
-BRAIN_QWEN35MOE_TOKENIZER=/path/to/tokenizer.json \
-  brain serve --openai 8788 &
+brain serve --openai 8788 &
 python3 samples/python/llm/qwen35moe/qwen35moe.py --openai localhost:8788 --api-key sk-brain-... \
     --in-text "2+2=" --out-stdio
 ```
@@ -44,13 +41,11 @@ BRAIN_MOCK=1 tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/llm/qwen35moe/qwen35moe.py --dbus --model brain/mock --in-text hi --out-stdio
 ```
 
-Ad hoc, no server at all - `brain qwen35moe infer` loads a checkpoint and
-generates directly (weights are a per-call flag, not an env-configured
-resident):
+Ad hoc, no server at all - `brain qwen35moe generate` loads the store's
+checkpoint (or `--weights`/`--tokenizer` name one) and generates directly:
 
 ```bash
-brain qwen35moe infer --weights /path/to/qwen35.safetensors \
-    --tokenizer /path/to/tokenizer.json --prompt "2+2=" --max-new 8 --chat
+brain qwen35moe generate --prompt "2+2=" --max_new 8 --chat true --out text=answer.txt
 ```
 
 ## What it demonstrates
@@ -67,7 +62,9 @@ brain qwen35moe infer --weights /path/to/qwen35.safetensors \
 
 ## What it needs
 
-`BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` for a real model, or
+A Qwen3.5-35B-A3B checkpoint in the model store with its `tokenizer.json`
+beside it (`brain serve` serves it under its card id: `--id brain/qwen35moe`
+on `brain import-gguf`, or `--model <its id>` here), or
 `BRAIN_MOCK=1` for the weight-free wire-contract check. `jeepney` for
 `--dbus` (`pip install -e brain-py`); nothing extra for `--openai`/
 `--anthropic` (`brain_py.openai`/`brain_py.anthropic` are plain `urllib`,

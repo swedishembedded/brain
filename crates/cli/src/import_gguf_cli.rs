@@ -6,8 +6,7 @@
 
 /// `brain import-gguf FILE [--out PATH] [--id NAME]` / `brain import-gguf --list`:
 /// the ONE generic conversion command, dispatching by the file's own
-/// `general.architecture` through [`import_file`]. Replaces the per-model
-/// `brain qwen35moe import` (which still works, as a thin wrapper).
+/// `general.architecture` through [`import_file`].
 pub fn run_import_gguf(args: &[String]) {
     let usage = "usage: brain import-gguf FILE [--out PATH] [--id VENDOR/REPO]\n       brain import-gguf --list";
     if args.iter().any(|a| a == "--list") {
@@ -36,9 +35,7 @@ pub fn run_import_gguf(args: &[String]) {
                     std::process::exit(2);
                 };
                 match flag.as_str() {
-                    // `--gguf` is accepted as an alias for the positional FILE so
-                    // the old `brain qwen35moe import --gguf F --out O` spelling
-                    // keeps working verbatim through the generic command.
+                    // `--gguf` is accepted as an alias for the positional FILE.
                     "--gguf" => file = Some(v),
                     "--out" => out = Some(v),
                     _ => id = Some(v),

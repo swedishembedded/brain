@@ -60,11 +60,20 @@ batch of up to 8 sequences; a taller batch decodes unrecorded.
 ## Running it
 
 ```bash
-brain qwen35moe import --gguf model-Q4_K_M.gguf --out qwen35moe.safetensors
-brain qwen35moe infer --weights qwen35moe.safetensors --prompt "..."
-brain qwen35moe export --weights qwen35moe.safetensors --out model.onnx
+brain import-gguf model-Q4_K_M.gguf --id brain/qwen35moe   # a brain checkpoint the store finds
+brain qwen35moe generate --prompt "..." --out text=out.txt --seed $RANDOM
+brain serve --openai                                        # the paged engine, every checkpoint in the store
+```
+
+`generate` reads the store's checkpoint and the `tokenizer.json` beside it
+(`--weights`/`--tokenizer` name others; a `.gguf` as `--tokenizer` lends its
+embedded tokenizer; without one the prompt is token ids). `brain serve` serves
+each checkpoint the store holds, and a published Hugging Face directory in
+place, under its card id; `--ctx` and `--max-batch` size the engine. The ONNX
+decoder export is an action of the sample (`samples/models/qwen35moe`):
+
+```bash
+cargo run --release -p sample-models-qwen35moe -- export --dest model.onnx --seq 32
 ```
 
 ## Hardware and limits
-
-No D-Bus/HTTP serving adapter yet - CLI only.

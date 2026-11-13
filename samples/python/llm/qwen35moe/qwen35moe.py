@@ -13,7 +13,7 @@ interleaved by the scheduler, never batched into one GPU dispatch) - see
 that module's own doc for the complete list of current gaps
 (int8 KV, LoRA adapter folding, multi-GPU sharding, a `.gguf` serving path).
 `--dbus`/`--openai`/`--anthropic` all converge on the exact same `generate`
-action (`brain qwen35moe infer`/D-Bus-direct-dispatch callers reach it ad
+action (`brain qwen35moe generate`/D-Bus-direct-dispatch callers reach it ad
 hoc; the residency-managed, always-hot path above for the served HTTP/
 D-Bus surfaces) - this script is what proves that: same `messages`/`prompt`/
 `max_new`/... params, same response shape, three wires.
@@ -29,12 +29,12 @@ using `brain_py.dbus.BrainDBus.subscribe(..., on_delta=...)` directly (not
 through this script) can watch it arrive live.
 
 Examples:
-  # D-Bus (needs `BRAIN_QWEN35MOE_WEIGHTS=... BRAIN_QWEN35MOE_TOKENIZER=... \\
-  # brain serve --dbus` running):
+  # D-Bus (needs `brain serve --dbus` running over a model store holding the
+  # checkpoint, imported with `brain import-gguf FILE --id brain/qwen35moe`):
   python3 samples/python/llm/qwen35moe/qwen35moe.py --dbus --in-text "Say hello in French." --out-stdio
 
-  # OpenAI-compatible HTTP (needs `brain serve --openai 8788` running, with
-  # BRAIN_QWEN35MOE_WEIGHTS/_TOKENIZER set for that process):
+  # OpenAI-compatible HTTP (needs `brain serve --openai 8788` running over the
+  # same store):
   python3 samples/python/llm/qwen35moe/qwen35moe.py --openai localhost:8788 --api-key sk-brain-... \\
       --in-text "2+2=" --out-stdio
 
@@ -106,7 +106,7 @@ def main() -> None:
         served = None
     if served is not None and args.model not in served:
         skip(f"model {args.model!r} is not served (served: {served}); for real Qwen3.5-35B-A3B: "
-             "BRAIN_QWEN35MOE_WEIGHTS=<checkpoint.safetensors> BRAIN_QWEN35MOE_TOKENIZER=<tokenizer.json> brain serve --dbus")
+             "brain import-gguf <file.gguf> --id brain/qwen35moe, with tokenizer.json beside it, then brain serve --dbus")
 
     kwargs = {"model": args.model, "max_new": args.max_new}
     if args.system:

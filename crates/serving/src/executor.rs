@@ -211,17 +211,10 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     // when it is, and is what makes auto-sizing real when it is not.
     let qwen_cfg = catalog::resident_llm::QwenServeConfig { auto_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(), card_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(), ..qwen_cfg };
     let mut qwen = register_qwen(&mut models, QwenResident::from_config(qwen_cfg.clone()));
-    // Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder
-    // (BRAIN_QWEN35MOE_WEIGHTS + BRAIN_QWEN35MOE_TOKENIZER) -- single-GPU,
-    // fp32 weights + KV only (see resident_qwen35moe.rs's own module doc for
-    // the exact scope vs QwenResident's).
-    if let Some(q) = catalog::resident_qwen35moe::Qwen35Resident::from_env() {
-        models.push(Arc::new(q));
-    }
     // Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, a brain-format
     // checkpoint resolved through `qwen35::spec::Qwen35Fp32Spec`'s
-    // `weights`/`tokenizer` roles -- same single-GPU, fp32 weights + KV scope
-    // as qwen35moe above (see resident_qwen35.rs's own module doc). Released
+    // `weights`/`tokenizer` roles -- single-GPU, fp32 weights + KV (see
+    // resident_qwen35.rs's own module doc). Released
     // GGUFs are not candidates: the model-dir scan serves each as its own
     // multi-card model. Sized from the caller's parsed `fp32` knobs (context,
     // batch ceiling).

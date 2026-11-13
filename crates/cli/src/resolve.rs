@@ -40,7 +40,6 @@ type Handler = fn(&[String]);
 const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("qwen3", crate::qwen_cli::run_qwen),
     ("qwen35", crate::qwen35_cli::run_qwen35),
-    ("qwen35moe", crate::qwen35moe_cli::run_qwen35moe),
     ("qwen3omnimoe", crate::omni_cli::run_omni),
 ];
 
@@ -128,6 +127,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("toymoe", "brain/toymoe"),
     ("huginn", "brain/huginn"),
     ("ouro", "brain/ouro"),
+    ("qwen35moe", "brain/qwen35moe"),
     ("qwen3tts", "brain/qwen3tts"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
@@ -365,6 +365,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "minimaxh3",
     "ouro",
     "huginn",
+    "qwen35moe",
     "edgerock",
     "ricursive",
 ];

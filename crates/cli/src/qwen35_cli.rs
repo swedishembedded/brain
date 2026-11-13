@@ -21,7 +21,7 @@
 //! GGUF import lives in the GENERIC `brain import-gguf` command
 //! ([`serving::gguf_import`]), which dispatches on the file's own
 //! `general.architecture`; `brain qwen35 import` remains as a deprecated
-//! forward to it - mirrors `qwen35moe_cli`'s own `import` exactly. This
+//! forward to it. This
 //! architecture now HAS a GGUF importer registered there
 //! (`qwen35::gguf_import`, `general.architecture = "qwen35"`), a second
 //! source format alongside the HF-safetensors FP8 route the upstream
@@ -67,7 +67,6 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
 
 /// `brain qwen35 import --gguf FILE --out qwen35.safetensors` - **deprecated**
 /// alias for the generic `brain import-gguf FILE [--out PATH] [--id NAME]`.
-/// Mirrors `qwen35moe_cli::import` exactly.
 fn import(args: &[String]) {
     eprintln!("brain qwen35 import is deprecated -- use `brain import-gguf FILE [--out PATH] [--id NAME]`");
     crate::import_gguf_cli::run_import_gguf(args);

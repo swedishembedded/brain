@@ -773,7 +773,7 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
         // What `crate::gguf_import`'s registry-driven conversion stamps on the
         // checkpoint it writes - so an imported GGUF is picked up by the very
         // next scan with no env vars and no per-model wiring.
-        "qwen35moe" => match catalog::resident_qwen35moe::Qwen35Resident::from_card(weights, card, tokenizer) {
+        "qwen35moe" => match catalog::resident_qwen35moe::Qwen35Resident::from_card(weights, card, tokenizer, qwen35_sizing) {
             Ok(q) => Some(Arc::new(q)),
             Err(e) => {
                 eprintln!("brain: skip {} ({e})", card.id);
@@ -875,7 +875,7 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
     // A Qwen3.5/3.6 MoE release is served from its published directory, every tensor in the format it is stored in.
     if implementation == Some("qwen35moe") {
         let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
-        return catalog::resident_qwen35moe::Qwen35Resident::from_hf_dir(dir, card).map(|q| Built::Other(Arc::new(q)));
+        return catalog::resident_qwen35moe::Qwen35Resident::from_hf_dir(dir, card, qwen35_sizing).map(|q| Built::Other(Arc::new(q)));
     }
     // A pulled YOLOv8 is served from its downloaded `.pt`.
     if card.family == "yolo" {

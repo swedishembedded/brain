@@ -46,7 +46,6 @@ mod optimize_cli;
 mod prune_cli;
 mod quantize_cli;
 mod qwen35_cli;
-mod qwen35moe_cli;
 mod qwen_cli;
 mod resolver_cli;
 mod adapter_directory;
@@ -80,7 +79,7 @@ USAGE: brain <verb> <architecture> [options]   OR   brain <architecture> <verb> 
 Both orders are the SAME command - `brain train gpt2 ...` and `brain gpt2
 train ...` dispatch identically. `brain caps` lists every architecture brain
 knows about, along with its actions (its \"verbs\"). An architecture with its
-own dedicated flags (gpt2, qwen3, qwen35, qwen35moe, glmdsa, lfm2,
+own dedicated flags (gpt2, qwen3, qwen35, glmdsa, lfm2,
 yolov8, zipdepth, flux2, wan, worldmirror2, splat, qwen3omnimoe,
 toypid, toymoe)
 is documented below; every other one (`brain caps` shows the full list -
@@ -401,6 +400,12 @@ GLM-5.2 (MLA + sigmoid noaux_tc MoE)
   brain glmdsa generate --prompt \"...\" [--weights F --max-new N --temp X --top-k K]
   brain glmdsa import --source <hf_dir> --dest glm.safetensors
       # the OpenVINO export and NPU decode are actions of samples/models/glmdsa
+
+QWEN3.5-35B-A3B (brain/qwen35moe: hybrid Gated-DeltaNet/GQA sparse-MoE decoder)
+  brain import-gguf Qwen3.5-35B-A3B-Q8_0.gguf             # a brain checkpoint the store finds
+  brain qwen35moe generate --prompt \"...\" --out text=out.txt [--chat true --precision int8 --seed $RANDOM]
+      every parameter: brain qwen35moe generate --help; --weights/--tokenizer name a role
+      # the ONNX export is an action of samples/models/qwen35moe
 
 QWEN3-OMNI (text/audio/image/video in, text + speech out)
   brain qwen3omnimoe import --hf <dir> --out Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors [--id VENDOR/REPO]
@@ -1366,6 +1371,19 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_QWEN_WEIGHTS", replacement: "serve: {checkpoint: PATH}" },
     Retired { name: "BRAIN_QWEN_TOKENIZER", replacement: "serve: {tokenizer: PATH}" },
     Retired { name: "BRAIN_RUNTIME_DIR", replacement: "serve: {runtime-dir: DIR}" },
+    Retired { name: "BRAIN_CONTROLNET_DIR", replacement: "serve: {pin: [controlnet.control=DIR]}" },
+    Retired { name: "BRAIN_T5ENCODER_DIR", replacement: "serve: {pin: [t5encoder.root=DIR]}" },
+    Retired { name: "BRAIN_ESRGAN_WEIGHTS", replacement: "serve: {pin: [rrdbnet.weights=FILE]}" },
+    Retired { name: "BRAIN_NEMOTRONASR", replacement: "serve: {pin: [nemotronasr.weights=DIR]}" },
+    Retired { name: "BRAIN_QWEN3ASR", replacement: "serve: {pin: [qwen3asr.weights=DIR]}" },
+    Retired { name: "BRAIN_QWEN3ASR_WINDOW", replacement: "qwen3asr transcribe: {window_secs: S}" },
+    Retired { name: "BRAIN_QWEN3ASR_MAXNEW", replacement: "qwen3asr transcribe: {max_new: N}" },
+    Retired { name: "BRAIN_GLMDSA_WEIGHTS", replacement: "serve: {pin: [glmdsa.weights=FILE]}" },
+    Retired { name: "BRAIN_QWEN35MOE_WEIGHTS", replacement: "serve: {pin: [qwen35moe.weights=FILE]}" },
+    Retired { name: "BRAIN_QWEN35MOE_TOKENIZER", replacement: "serve: {pin: [qwen35moe.tokenizer=FILE]}" },
+    Retired { name: "BRAIN_QWEN35MOE_CTX", replacement: "serve: {ctx: N}" },
+    Retired { name: "BRAIN_QWEN35MOE_MAX_BATCH", replacement: "serve: {max-batch: N}" },
+    Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 
 /// One entry of [`RETIRED_VARIABLES`].

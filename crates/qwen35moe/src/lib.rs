@@ -23,6 +23,7 @@ pub mod q8;
 pub mod sample;
 pub mod serve;
 pub mod shard;
+pub mod spec;
 pub mod vl;
 
 pub use config::{LayerType, Qwen35Config};

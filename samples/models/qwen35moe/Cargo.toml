@@ -1,0 +1,23 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/qwen35moe` -> `sample-models-qwen35moe`.
+name = "sample-models-qwen35moe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: the Qwen3.5-35B-A3B decoder from the command line - generate with every parameter, plus the ONNX decoder export for OpenVINO and the NPU."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-qwen35moe.workspace = true
+brain-invoke.workspace = true
+brain-capability.workspace = true
+# The ONNX export writer.
+brain-npu.workspace = true
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 72

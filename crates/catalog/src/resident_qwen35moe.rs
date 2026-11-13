@@ -25,35 +25,19 @@
 //! `QwenResident` there is only ONE engine kind here, not a `Legacy`/`Batched`
 //! split.
 //!
-//! Two ways in. [`Qwen35Resident::from_card`] serves a checkpoint the
-//! model-dir scan found (family `"qwen35moe"` - what `brain import-gguf`'s
-//! conversion stamps, distinct from the dense sibling's own `"qwen35"`
-//! family, `crates/qwen35`), under its own card id and with its sibling
-//! `tokenizer.json`; no env vars involved. The env path below is the manual
-//! alternative, for a checkpoint outside the models directory.
+//! Two ways in, both found by the model-dir scan: [`Qwen35Resident::from_card`]
+//! serves a brain checkpoint (family `"qwen35moe"` - what `brain import-gguf`'s
+//! conversion stamps, distinct from the dense sibling's own `"qwen35"` family,
+//! `crates/qwen35`) under its own card id with its sibling `tokenizer.json`, and
+//! [`Qwen35Resident::from_hf_dir`] a published HuggingFace directory in place.
 //!
-//! Env config follows `BRAIN_QWEN_*`'s naming convention:
-//!   * `BRAIN_QWEN35MOE_WEIGHTS` — a brain-format Qwen3.5-35B-A3B checkpoint
-//!     (`.safetensors`, f32, bf16 or packed int8 - what `brain
-//!     import-gguf` writes). The primary gate; unset ⇒ not served.
-//!   * `BRAIN_QWEN35MOE_TOKENIZER` - the sibling `tokenizer.json`. If unset,
-//!     `activate()` falls back to a GGUF checkpoint's own embedded
-//!     `tokenizer.ggml.*` KV (see `crate::resident_llm::QwenResident::
-//!     activate`, the sibling this mirrors) before giving up - `Engine`
-//!     itself still never touches a `.gguf` file at all, so a GGUF
-//!     checkpoint gets a real tokenizer but no further than that today.
-//!   * `BRAIN_QWEN35MOE_CTX` — the hard `prompt + max_new` cap for any ONE
-//!     sequence (`Engine::from_map`'s `max_seq_len`, which this engine also
-//!     uses as its per-sequence block size — see `qwen35moe::serve`'s module
-//!     doc). Default 4096: far more conservative than `QwenResident`'s 24576
-//!     default, since every block here costs a WHOLE `max_seq_len`-sized GQA
-//!     KV allocation per full-attention layer (no int8 KV to shrink it, and
-//!     no sub-`max_seq_len` paging to share a big context economically across
-//!     many short sequences).
-//!   * `BRAIN_QWEN35MOE_MAX_BATCH` — how many sequences may be RESIDENT at
-//!     once (`Engine::from_map`'s `max_concurrent`, i.e. `num_blocks` — NOT
-//!     how many are dispatched together on the GPU per step, which is always
-//!     1 for this engine). Default 4.
+//! Sizing is the serving policy's ([`Qwen35Sizing`]: `brain serve --ctx`,
+//! `--max-batch`): `ctx` is the hard `prompt + max_new` cap for any ONE
+//! sequence (`Engine`'s `max_seq_len`, also its per-sequence block size - see
+//! `qwen35moe::serve`'s module doc), and `max_batch` how many sequences may be
+//! RESIDENT at once (`num_blocks`). Every block costs a WHOLE
+//! `max_seq_len`-sized GQA KV allocation per full-attention layer, so the
+//! defaults (4096, 4) are conservative.
 
 use capability::{Invocation, Manifest};
 use std::sync::Arc;
@@ -64,17 +48,12 @@ use qwen35moe::serve::{Engine, EngineOptions, Scheduler};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
 use crate::parkable::{Build, HostWeights, ParkableInstance};
+use crate::resident_qwen35::Qwen35Sizing;
 use crate::resident_llm::{est_vram, generate_spec, on_device, open_stored_checkpoint};
 use llmserve::{ScheduledInstance, TextFrontend};
 
-/// Catalog id: a `brain/`-prefixed synthetic id, matching `qwen35moe::caps::MODEL`
-/// exactly (`GptResident::from_env`'s doc explains why an env-loaded
-/// checkpoint with no upstream provenance gets this fallback rather than the
-/// real `Qwen/Qwen3.5-35B-A3B` HF id).
-const MODEL: &str = qwen35moe::caps::MODEL;
-
 /// The Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder behind
-/// the scheduler (`BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER`).
+/// the scheduler.
 /// See this module's own doc for the exact (single-GPU, fp32-only) scope.
 pub struct Qwen35Resident {
     id: String,
@@ -83,53 +62,44 @@ pub struct Qwen35Resident {
     /// `path` is a HuggingFace checkpoint directory read in place (ModelOpt FP8/NVFP4, compressed-tensors or bf16
     /// safetensors, as published), not a brain-native file.
     hf_dir: bool,
+    sizing: Qwen35Sizing,
 }
 
 impl Qwen35Resident {
-    pub fn from_env() -> Option<Qwen35Resident> {
-        let path = std::env::var("BRAIN_QWEN35MOE_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        let tokenizer = std::env::var("BRAIN_QWEN35MOE_TOKENIZER").ok().unwrap_or_default();
-        Some(Qwen35Resident { id: MODEL.to_string(), path, tokenizer, hf_dir: false })
-    }
-
-    /// The model-dir counterpart of [`from_env`](Self::from_env): a checkpoint
-    /// discovered by `serving::model_dir` (family `"qwen35moe"` - what
-    /// `qwen35moe::import`'s conversion stamps on its `ModelCard`) served under
-    /// its OWN card id rather than the env fallback [`MODEL`].
+    /// A checkpoint discovered by `serving::model_dir` (family `"qwen35moe"` -
+    /// what `qwen35moe::import`'s conversion stamps on its `ModelCard`), served
+    /// under its own card id.
     ///
     /// `tokenizer` is the sibling `tokenizer.json` the scan found. It is
     /// required: `Engine` never opens a `.gguf`, so unlike `QwenResident` there
     /// is no embedded-tokenizer fallback (see this module's own doc) - a
     /// checkpoint without one would activate straight into an error, so it is
     /// declined at discovery instead, exactly like the `lfm` family.
-    pub fn from_card(path: &str, card: &checkpoint::st::ModelCard, tokenizer: Option<&str>) -> Result<Qwen35Resident, String> {
+    pub fn from_card(path: &str, card: &checkpoint::st::ModelCard, tokenizer: Option<&str>, sizing: Qwen35Sizing) -> Result<Qwen35Resident, String> {
         let tokenizer = tokenizer.filter(|t| !t.is_empty()).ok_or("qwen35moe: no sibling tokenizer.json")?;
-        Ok(Qwen35Resident { id: card.id.clone(), path: path.to_string(), tokenizer: tokenizer.to_string(), hf_dir: false })
+        Ok(Qwen35Resident { id: card.id.clone(), path: path.to_string(), tokenizer: tokenizer.to_string(), hf_dir: false, sizing: sizing.sanitized() })
     }
 
     /// A HuggingFace checkpoint directory (`config.json`, `tokenizer.json` and safetensors shards, as pulled), served
     /// where it lies: every tensor reaches the card in the format it is stored in.
-    pub fn from_hf_dir(dir: &str, card: &checkpoint::st::ModelCard) -> Result<Qwen35Resident, String> {
+    pub fn from_hf_dir(dir: &str, card: &checkpoint::st::ModelCard, sizing: Qwen35Sizing) -> Result<Qwen35Resident, String> {
         let tokenizer = std::path::Path::new(dir).join("tokenizer.json");
         if !tokenizer.is_file() {
             return Err(format!("qwen35moe: {dir} has no tokenizer.json"));
         }
-        Ok(Qwen35Resident { id: card.id.clone(), path: dir.to_string(), tokenizer: tokenizer.to_string_lossy().into_owned(), hf_dir: true })
+        Ok(Qwen35Resident { id: card.id.clone(), path: dir.to_string(), tokenizer: tokenizer.to_string_lossy().into_owned(), hf_dir: true, sizing: sizing.sanitized() })
     }
 
-    /// The hard per-sequence `prompt + max_new` cap, which this engine also
-    /// uses as its physical block size (`Engine::from_map`'s `max_seq_len`
-    /// parameter — see this module's own doc on why the default is far more
-    /// conservative than `QwenResident::ctx`'s).
-    fn ctx() -> u32 {
-        std::env::var("BRAIN_QWEN35MOE_CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(4096u32).max(1)
+    /// The hard per-sequence `prompt + max_new` cap, also the engine's
+    /// physical block size.
+    fn ctx(&self) -> u32 {
+        self.sizing.ctx
     }
 
-    /// How many sequences may be resident at once (`Engine::from_map`'s
-    /// `max_concurrent`, i.e. its `num_blocks`), all decoded in one batched
+    /// How many sequences may be resident at once, all decoded in one batched
     /// step.
-    fn max_concurrent() -> u32 {
-        std::env::var("BRAIN_QWEN35MOE_MAX_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(4u32).max(1)
+    fn max_concurrent(&self) -> u32 {
+        self.sizing.max_batch
     }
 }
 
@@ -149,7 +119,7 @@ impl Qwen35Resident {
             return MemCost::new(stored, 0);
         };
         let weights = stored + cfg.vocab as u64 * cfg.d_model as u64 * 2;
-        let kv = qwen35moe::serve::kv_pool_bytes(&cfg, qwen35moe::serve::EngineOptions::new(Self::ctx(), Self::max_concurrent()).kv_tier, Self::max_concurrent(), Self::ctx());
+        let kv = qwen35moe::serve::kv_pool_bytes(&cfg, qwen35moe::serve::EngineOptions::new(self.ctx(), self.max_concurrent()).kv_tier, self.max_concurrent(), self.ctx());
         MemCost::new(weights + kv, 0)
     }
 
@@ -159,7 +129,7 @@ impl Qwen35Resident {
         let cfg = qwen35moe::hf_source::hf_config(dir)?;
         let tok = QwenBpe::from_file(&self.tokenizer)?;
         let stop = data::generation::stop_ids(Some(dir), &tok, None, Some("<|im_end|>")).map_err(|e| format!("qwen35moe: {e}"))?;
-        let (ctx, max_concurrent) = (Self::ctx(), Self::max_concurrent());
+        let (ctx, max_concurrent) = (self.ctx(), self.max_concurrent());
         let front = Arc::new(TextFrontend::new(tok, stop, "qwen35moe", Arc::new(parse_request)));
         let src = qwen35moe::hf_source::open_dir(dir, &cfg)?;
         let names = src.names().into_iter().map(str::to_string).collect();
@@ -175,7 +145,7 @@ impl Qwen35Resident {
 
 impl ResidentModel for Qwen35Resident {
     fn manifest(&self) -> Manifest {
-        // `Self::ctx()` is exactly the `max_seq_len` `activate()` below builds
+        // `self.ctx()` is exactly the `max_seq_len` `activate()` below builds
         // the engine with, so advertising it is a safe, never-overstated
         // floor on real serving capacity (`Manifest::max_context_tokens`'s own
         // doc on why this must be real engine capacity, not an architectural
@@ -185,13 +155,13 @@ impl ResidentModel for Qwen35Resident {
             "text generation (Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder; single-GPU, f32 or packed-int8 weights as the checkpoint stores them + fp32 KV, one active sequence at a time -- see crate::resident_qwen35moe's module doc)",
             vec![generate_spec("generate text (Qwen3.5-35B-A3B; chat template optional)", true)],
         )
-        .with_max_context_tokens(Self::ctx() as u64)
+        .with_max_context_tokens(self.ctx() as u64)
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
         InstanceKey::new(&self.id, "default")
     }
     fn batch_limit(&self) -> Option<usize> {
-        Some(Self::max_concurrent() as usize)
+        Some(self.max_concurrent() as usize)
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         if self.hf_dir {
@@ -202,8 +172,8 @@ impl ResidentModel for Qwen35Resident {
             return cost;
         };
         let cfg = Qwen35Config::from_json(&reader.config());
-        let ctx = Self::ctx() as u64;
-        let max_concurrent = Self::max_concurrent() as u64;
+        let ctx = self.ctx() as u64;
+        let max_concurrent = self.max_concurrent() as u64;
         let n_full = cfg.layer_types().iter().filter(|t| **t == LayerType::Full).count() as u64;
         // The GQA side of `Engine::kv_pool_bytes()` ONLY (`n_full * num_blocks
         // * 2 * block_size * kv_dim * 4`, `block_size == ctx` here) --
@@ -229,21 +199,20 @@ impl ResidentModel for Qwen35Resident {
         // from the stored checkpoint view ([`engine_from`]); this reader
         // exists for the tokenizer fallback.
         let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("qwen35moe: {e}"))?;
-        // Tokenizer precedence: an explicit sibling tokenizer.json (or an
-        // env override) wins; else a .gguf builds from its embedded
+        // Tokenizer precedence: the sibling tokenizer.json wins; else a .gguf builds from its embedded
         // tokenizer.ggml.* KV; else there is nothing to tokenize with.
         let (tok, tok_dir, gguf_eos) = if !self.tokenizer.is_empty() {
             (QwenBpe::from_file(&self.tokenizer)?, std::path::Path::new(&self.tokenizer).parent(), None)
         } else if let Some(gt) = reader.tokenizer() {
             (QwenBpe::from_gguf(&gt).map_err(|e| format!("qwen35moe: {e}"))?, None, gt.eos)
         } else {
-            return Err("qwen35moe: no tokenizer (set BRAIN_QWEN35MOE_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
+            return Err("qwen35moe: no tokenizer (a sibling tokenizer.json, or a GGUF with an embedded tokenizer)".to_string());
         };
         // The checkpoint's own eos ids, plus ChatML's end-of-turn marker: this
         // resident renders every prompt as ChatML.
         let stop = data::generation::stop_ids(tok_dir, &tok, gguf_eos, Some("<|im_end|>")).map_err(|e| format!("qwen35moe: {e}"))?;
-        let ctx = Self::ctx();
-        let max_concurrent = Self::max_concurrent();
+        let ctx = self.ctx();
+        let max_concurrent = self.max_concurrent();
         let front = Arc::new(TextFrontend::new(tok, stop, "qwen35moe", Arc::new(parse_request)));
         let (config, host) = HostWeights::open(&self.path, |config| Qwen35Config::from_json(config).param_list().into_iter().map(|(name, _)| name).collect())?;
         let build: Build = Box::new(move |host, device| {
@@ -283,30 +252,7 @@ fn engine_from(src: &dyn checkpoint::TensorSource, config: &serde_json::Value, c
 mod tests {
     use super::*;
 
-    /// `BRAIN_QWEN35MOE_CTX`/`BRAIN_QWEN35MOE_MAX_BATCH` parse with sane
-    /// defaults and floor at 1 (matching `QwenResident::ctx`/`max_batch`'s own
-    /// tests) — pure parsing, no env mutation (this crate's tests run
-    /// concurrently; see `resident_llm`'s own tests for why env vars are
-    /// never mutated directly in a test).
-    #[test]
-    fn ctx_and_max_concurrent_have_sane_defaults() {
-        // Only assert defaults when the env vars are genuinely unset in this
-        // process, mirroring the honesty `QwenResident`'s own env tests need
-        // to keep (a real value on the runner would make this a lie).
-        if std::env::var("BRAIN_QWEN35MOE_CTX").is_err() {
-            assert_eq!(Qwen35Resident::ctx(), 4096);
-        }
-        if std::env::var("BRAIN_QWEN35MOE_MAX_BATCH").is_err() {
-            assert_eq!(Qwen35Resident::max_concurrent(), 4);
-        }
-    }
-
-    #[test]
-    fn from_env_is_none_without_the_weights_var() {
-        // SAFETY: no other test in this process reads/writes this exact var.
-        unsafe { std::env::remove_var("BRAIN_QWEN35MOE_WEIGHTS") };
-        assert!(Qwen35Resident::from_env().is_none());
-    }
+    const MODEL: &str = qwen35moe::caps::MODEL;
 
     /// REGRESSION for the whole point of this file: registering
     /// `Qwen35Resident` with the residency `Executor` must be enough, with NO
@@ -324,7 +270,7 @@ mod tests {
     /// needing a real checkpoint/tokenizer.
     #[test]
     fn brain_qwen35moe_is_auto_exposed_on_openai_and_anthropic_model_lists() {
-        let resident = Qwen35Resident { id: MODEL.to_string(), path: "/nonexistent/qwen35.safetensors".to_string(), tokenizer: String::new(), hf_dir: false };
+        let resident = Qwen35Resident { id: MODEL.to_string(), path: "/nonexistent/qwen35.safetensors".to_string(), tokenizer: String::new(), hf_dir: false, sizing: Qwen35Sizing::default() };
         let models: Vec<std::sync::Arc<dyn ResidentModel>> = vec![std::sync::Arc::new(resident)];
         let mut budgets = residency::budget::Budgets::new();
         budgets.set(Device::Cpu, 8 << 30, 0);

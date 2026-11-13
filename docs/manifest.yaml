@@ -201,6 +201,8 @@ navigation:
         path: examples/models/lfm2.md
       - source: samples/models/ltxv/README.md
         path: examples/models/ltxv.md
+      - source: samples/models/qwen35moe/README.md
+        path: examples/models/qwen35moe.md
       - source: samples/models/qwen3tts/README.md
         path: examples/models/qwen3tts.md
       - source: samples/models/sam2/README.md
