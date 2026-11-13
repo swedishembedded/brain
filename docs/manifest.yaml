@@ -199,6 +199,8 @@ navigation:
         path: examples/models/splat.md
       - source: samples/models/wan/README.md
         path: examples/models/wan.md
+      - source: samples/models/worldmirror2/README.md
+        path: examples/models/worldmirror2.md
       - source: samples/models/zipdepth/README.md
         path: examples/models/zipdepth.md
       - source: samples/npu/rockchip/README.md

@@ -6,7 +6,7 @@
 D-Bus surface.
 
 Takes an initial scene plus N posed target views (a `cameras.json` in the same
-shape `brain mirror infer`/`brain splat fit` write, and one binary PPM per
+shape `brain worldmirror2 reconstruct`/`brain splat fit` write, and one binary PPM per
 camera, in order) and optimizes the scene to match them - the rasterizer
 backward pass, driven remotely. `fit` is streaming: `on_progress` prints the
 per-iteration MSE as it improves, exactly like `brain splat fit`'s own
@@ -14,7 +14,7 @@ per-iteration MSE as it improves, exactly like `brain splat fit`'s own
 
     tools/dbus-session.sh --serve "--dbus" -- \
       python3 samples/python/vision/splat/splat_fit.py --scene init.ply \\
-          --cameras out/mirror/cameras.json --images out/mirror \\
+          --cameras scene/cameras.json --images photos/ \\
           --out fitted.ply --iters 200
 """
 from __future__ import annotations
@@ -54,7 +54,7 @@ def load_video(images: str, n_expected: int) -> tuple[bytes, int, int]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scene", required=True, help="initial scene: Inria-layout binary PLY")
-    ap.add_argument("--cameras", required=True, help="cameras.json (brain mirror infer's format)")
+    ap.add_argument("--cameras", required=True, help="cameras.json (brain worldmirror2 reconstruct's format)")
     ap.add_argument("--images", required=True, help="directory of *.ppm (sorted) or a comma-separated list, one per camera")
     ap.add_argument("--out", default="fitted.ply", help="output PLY path")
     ap.add_argument("--iters", type=int, default=200)

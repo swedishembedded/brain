@@ -35,7 +35,6 @@ mod ouro_cli;
 mod huginn_cli;
 mod load_line;
 mod minicpmv_cli;
-mod mirror_cli;
 mod import_gguf_cli;
 mod models_cli;
 mod npu_cli;
@@ -289,14 +288,10 @@ World models (playable action-conditioned video models; docs/reference/models/wo
                  [--dump-ppm DIR] [--hashes]        # deterministic rollout + fnv1a hashes (CI)
   brain diamond bench --model fake [--frames N]          # ms/frame + fps
 
-WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/reference/models/mirror/)
-  brain worldmirror2 import <model.safetensors|hf_dir> --out mirror.safetensors
-      One-time conversion of the reference HY-WorldMirror-2.0 checkpoint (strict
-      1:1, every tensor verified).
-  brain worldmirror2 infer --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
-      [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X] [--prune VOXEL]
-      Images → navigable 3DGS scene (scene.ply + cameras.json + depth/normal
-      maps). Any aspect ratio; --prune 0.002 voxel-merges multi-view duplicates.
+WorldMirror-2 (brain/worldmirror2: multi-view images to a 3D Gaussian Splatting scene; samples/models/worldmirror2)
+  brain worldmirror2 import --source <model.safetensors|hf_dir> --dest mirror.safetensors
+  brain worldmirror2 reconstruct --images <dir|clip.mp4> --out scene=scene.ply --out cameras=cameras.json
+      every parameter: brain worldmirror2 <action> --help
 
 3D GAUSSIAN SPLATTING (brain/splat; the fly-through window is samples/models/splat)
   brain splat render --scene s.ply --out image=view.png [--width W --height H --eye x,y,z --target x,y,z]

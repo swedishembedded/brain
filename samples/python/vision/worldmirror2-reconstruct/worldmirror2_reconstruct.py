@@ -8,9 +8,10 @@ Packs N local images into one `video` blob (the same convention every other
 video input in this repo uses - `capability::blob::video_blob`, one shared
 `(w, h)` for every frame) and sends them to the one-shot `reconstruct` action:
 back comes a Gaussian-splat scene (Inria-layout PLY) plus the per-frame
-cameras WorldMirror-2 predicted (no poses go IN - this model estimates them).
-`reconstruct` is NOT streaming: it is a single feed-forward pass, nothing to
-report progress about.
+cameras WorldMirror-2 predicted (no poses go IN here - this model estimates
+them; the action also takes known ones as a `poses` blob). `reconstruct` is
+NOT streaming: it is a single feed-forward pass, nothing to report progress
+about.
 
     BRAIN_WORLDMIRROR2_WEIGHTS=<mirror.safetensors> \\
       tools/dbus-session.sh --serve "--dbus" -- \
@@ -61,19 +62,40 @@ def main() -> int:
     ap.add_argument("--cameras", default=None, help="output cameras.json path (default: <out> with .ply -> _cameras.json)")
     ap.add_argument("--min-opacity", type=float, default=0.01, help="drop gaussians below this opacity")
     ap.add_argument("--max-depth", type=float, default=0.0, help="clip gaussians past this depth (0 = off)")
-    ap.add_argument("--prune-voxel", type=float, default=0.0, help="voxel-merge duplicate gaussians at this edge length (0 = off)")
-    ap.add_argument("--maps", action="store_true", help="also fetch a per-frame depth-map video, written as maps_NN.ppm")
+    ap.add_argument("--prune", type=float, default=0.002, help="voxel-merge duplicate gaussians at this edge length (0 = off)")
+    ap.add_argument("--target-size", type=int, default=952, help="longest-edge cap the frames are resized to")
+    ap.add_argument("--stride", type=int, default=1, help="use every Nth frame")
+    ap.add_argument("--max-frames", type=int, default=0, help="use at most N frames, spread across the capture (0 = all)")
+    ap.add_argument("--keep-camera-frame", action="store_true", help="return the scene in frame 0's frame instead of upright")
+    ap.add_argument("--maps", action="store_true", help="also fetch the per-frame depth and normal clips, written as <out>_depth_NN.ppm / <out>_normals_NN.ppm")
+    ap.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="any other reconstruct parameter (see `brain caps brain/worldmirror2`), e.g. --param position_from=blend",
+    )
     args = ap.parse_args()
 
     video, n_frames, w, h = load_video(args.images)
-    cameras_path = args.cameras or (Path(args.out).with_suffix("").as_posix() + "_cameras.json")
+    stem = Path(args.out).with_suffix("").as_posix()
+    cameras_path = args.cameras or f"{stem}_cameras.json"
 
     params = {
         "min_opacity": args.min_opacity,
         "max_depth": args.max_depth,
-        "prune_voxel": args.prune_voxel,
+        "prune": args.prune,
+        "target_size": args.target_size,
+        "stride": args.stride,
+        "max_frames": args.max_frames,
+        "keep_camera_frame": args.keep_camera_frame,
         "maps": args.maps,
     }
+    for item in args.param:
+        name, sep, value = item.partition("=")
+        if not sep:
+            raise SystemExit(f"--param {item!r}: want NAME=VALUE")
+        params[name] = json.loads(value) if value[:1] in "0123456789-[{" or value in ("true", "false") else value
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():
@@ -91,18 +113,18 @@ def main() -> int:
 
         scene = out.blobs["scene"]
         Path(args.out).write_bytes(scene)
-        cameras = out.outputs["cameras"]
-        Path(cameras_path).write_text(json.dumps(cameras, indent=2))
-        print(f"wrote {args.out} ({len(scene)} bytes) + {cameras_path} ({len(cameras)} camera(s))")
+        cameras = out.blobs["cameras"]
+        Path(cameras_path).write_bytes(cameras)
+        print(f"wrote {args.out} ({len(scene)} bytes, {out.outputs['gaussians']} gaussians) + {cameras_path} ({len(json.loads(cameras))} camera(s))")
 
-        if args.maps and "maps" in out.blobs:
-            maps_meta = out.meta.get("maps", {}).get("meta", {})
+        for name in ("depth", "normals") if args.maps else ():
+            maps_meta = out.meta.get(name, {}).get("meta", {})
             mw, mh = maps_meta.get("w", w), maps_meta.get("h", h)
-            data = out.blobs["maps"]
+            data = out.blobs[name]
             per_frame = mw * mh * 3 * 4
             for i in range(len(data) // per_frame):
                 chunk = data[i * per_frame : (i + 1) * per_frame]
-                path = f"{Path(args.out).with_suffix('').as_posix()}_depth_{i:02d}.ppm"
+                path = f"{stem}_{name}_{i:02d}.ppm"
                 save_ppm(path, chunk, mw, mh)
                 print(f"wrote {path}")
     return 0

@@ -25,13 +25,13 @@ photos. Runs on any GPU or the CPU. See
 ## The round trip
 
 The two compose into one pipeline, and the second stage is not optional if you
-care about the result: `worldmirror2 infer` gets you a scene and the camera
+care about the result: `worldmirror2 reconstruct` gets you a scene and the camera
 poses for it in one pass, and `splat fit` then optimises that scene against the
 same photos, using the poses the first stage recovered.
 
 ```bash
-brain worldmirror2 infer --weights mirror.safetensors --images photos/ \
-    --prune 0.002 --out scene
+brain worldmirror2 reconstruct --images photos/ \
+    --out scene=scene/scene.ply --out cameras=scene/cameras.json
 brain splat fit --scene scene/scene.ply --cameras scene/cameras.json --images photos/ \
     --iters 280 --out scene=fitted.ply
 sample-models-splat view fitted.ply   # make samples/models/splat/build

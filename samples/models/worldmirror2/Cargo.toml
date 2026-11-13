@@ -1,0 +1,26 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/worldmirror2` -> `sample-models-worldmirror2`.
+name = "sample-models-worldmirror2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: WorldMirror-2 multi-view 3D reconstruction from the command line - photographs or a video to a Gaussian-splat scene and cameras, checkpoint import, and ONNX export of the model's stages for the Intel NPU."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1): the actions are WorldMirror-2's own,
+# served ones, and `invoke` turns their manifest into this program's command
+# line.
+brain-worldmirror2.workspace = true
+brain-invoke.workspace = true
+# `export-npu`: the stage graphs and the ONNX writer.
+brain-npu.workspace = true
+brain-onnx.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this. Most
+# of it is `export-npu`: the NPU crate that builds the stage graphs links every
+# model it can export.
+max-brain-crates = 72

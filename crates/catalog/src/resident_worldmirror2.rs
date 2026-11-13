@@ -30,15 +30,10 @@
 //!
 //! # Serving contract
 //!
-//! `manifest()` is `worldmirror2::caps::manifest_resident()`: `weights`
-//! carries [`capability::ParamSpec::host_env`]
-//! (`BRAIN_WORLDMIRROR2_WEIGHTS`), so the served action never advertises it -
-//! a remote caller cannot answer "where is the checkpoint on THIS machine".
-//! `Instance::run` therefore calls
-//! [`worldmirror2::caps::run_reconstruct`] directly (the `Session`
-//! `activate` already built), never through `worldmirror2::caps::Provider`'s
-//! own `Action` - that layer's `weights` resolution is for the DIRECT
-//! (`brain do worldmirror2 reconstruct --weights …`) path only. Same shape as
+//! `manifest()` is `worldmirror2::caps::manifest_resident()`: the
+//! reconstruction action alone, with the host-resolved `import` left to the
+//! direct runner. `Instance::run` calls [`worldmirror2::caps::run_reconstruct`]
+//! directly on the `Session` `activate` already built, the same shape as
 //! `sam2::caps::Session::segment` being called straight from
 //! `crate::resident_sam2::Sam2Instance`.
 
@@ -108,11 +103,11 @@ struct WorldMirror2Instance {
 }
 
 impl Instance for WorldMirror2Instance {
-    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         if action != "reconstruct" {
             return Err(format!("worldmirror2: unknown action '{action}'"));
         }
         let session = &mut self.session;
-        crate::resident_llm::on_device(self.device, || worldmirror2::caps::run_reconstruct(session, inv))?
+        crate::resident_llm::on_device(self.device, || worldmirror2::caps::run_reconstruct(session, inv, progress))?
     }
 }

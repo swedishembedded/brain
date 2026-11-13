@@ -37,7 +37,7 @@ tools/dbus-session.sh --serve "--dbus" -- \
 ## `splat_fit.py` - N posed views in, an optimized scene out
 
 A `Subscribe`: an initial scene plus a `cameras.json` (the format `brain
-mirror infer`/`brain splat fit` write) and one PPM per camera, in order.
+worldmirror2 reconstruct`/`brain splat fit` write) and one PPM per camera, in order.
 The rasterizer backward pass (`crates/splat/src/opt.rs::fit`), driven
 remotely and cancellable mid-run like any other long training action - the
 per-iteration MSE streams as it improves, exactly like `brain splat fit`'s

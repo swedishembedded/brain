@@ -101,9 +101,58 @@ pub fn intrinsic_vector(c: &CameraPrior, width: u32, height: u32) -> [f32; 4] {
     [c.fx / w, c.fy / h, c.cx / w, c.cy / h]
 }
 
+/// Read known cameras, one per frame, from the `cameras.json` shape a
+/// reconstruction itself writes, so one run's output can be fed straight back
+/// in as the next run's prior. A missing intrinsic reads as 0 (unknown); the
+/// pose must be a 16-entry row-major `c2w`.
+pub fn parse_cameras(text: &str, frames: usize) -> Result<Vec<CameraPrior>, String> {
+    let doc: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("cameras: {e}"))?;
+    let cams = doc.as_array().ok_or("cameras: expected a JSON array of cameras")?;
+    if cams.len() != frames {
+        return Err(format!("cameras: {} camera(s) for {frames} frame(s); a pose prior is per frame", cams.len()));
+    }
+    cams.iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let entries = c["c2w"].as_array().ok_or_else(|| format!("cameras: camera {i} has no 'c2w'"))?;
+            let c2w: Vec<f32> = entries
+                .iter()
+                .map(|v| v.as_f64().map(|x| x as f32).ok_or_else(|| format!("cameras: camera {i}: 'c2w' holds a non-number")))
+                .collect::<Result<_, _>>()?;
+            let c2w: [f32; 16] = c2w.try_into().map_err(|v: Vec<f32>| format!("cameras: camera {i}: 'c2w' has {} entries, expected 16", v.len()))?;
+            let k = |key: &str| c[key].as_f64().unwrap_or(0.0) as f32;
+            Ok(CameraPrior { c2w, fx: k("fx"), fy: k("fy"), cx: k("cx"), cy: k("cy") })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cameras_parse_from_the_shape_a_reconstruction_writes() {
+        let c2w: Vec<f64> = (0..16).map(|i| if i % 5 == 0 { 1.0 } else { 0.0 }).collect();
+        let doc = serde_json::json!([
+            {"c2w": c2w, "fx": 400.0, "fy": 410.0, "cx": 256.0, "cy": 192.0, "width": 512, "height": 384},
+            {"c2w": c2w}
+        ]);
+        let got = parse_cameras(&doc.to_string(), 2).unwrap();
+        assert_eq!((got[0].fx, got[0].fy, got[0].cx, got[0].cy), (400.0, 410.0, 256.0, 192.0));
+        assert_eq!(got[0].c2w[15], 1.0);
+        assert_eq!(got[1].fx, 0.0, "a missing intrinsic is unknown, not an error");
+    }
+
+    #[test]
+    fn a_prior_that_does_not_fit_the_run_is_a_named_error() {
+        let one = serde_json::json!([{"c2w": vec![0.0; 16]}]).to_string();
+        assert!(parse_cameras(&one, 2).unwrap_err().contains("per frame"));
+        assert!(parse_cameras("{}", 1).unwrap_err().contains("array"));
+        assert!(parse_cameras("not json", 1).is_err());
+        let short = serde_json::json!([{"c2w": vec![0.0; 12]}]).to_string();
+        assert!(parse_cameras(&short, 1).unwrap_err().contains("16"));
+        assert!(parse_cameras(&serde_json::json!([{}]).to_string(), 1).unwrap_err().contains("c2w"));
+    }
 
     fn cam(px: f32, py: f32, pz: f32) -> CameraPrior {
         let mut c2w = [0.0f32; 16];

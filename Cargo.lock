@@ -1073,7 +1073,6 @@ dependencies = [
  "brain-server",
  "brain-serving",
  "brain-shutdown",
- "brain-splat",
  "brain-supir",
  "brain-t5encoder",
  "brain-testutil",
@@ -1089,7 +1088,6 @@ dependencies = [
  "brain-wan",
  "brain-wm-core",
  "brain-wm-display",
- "brain-worldmirror2",
  "brain-yolov8",
  "clap",
  "crossterm",
@@ -3378,6 +3376,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-paramstore",
  "brain-recon",
  "brain-splat",
@@ -6893,6 +6892,16 @@ version = "5.1.0"
 dependencies = [
  "brain-invoke",
  "brain-wan",
+]
+
+[[package]]
+name = "sample-models-worldmirror2"
+version = "5.1.0"
+dependencies = [
+ "brain-invoke",
+ "brain-npu",
+ "brain-onnx",
+ "brain-worldmirror2",
 ]
 
 [[package]]

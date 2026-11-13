@@ -1240,32 +1240,6 @@ depth/camera: samples/models/zipdepth/build
 depth/train: build/release
 	$(BRAIN) zipdepth train --save $(OUT)/zipdepth.safetensors --steps 50 --batch 2 $(DEPTH_WEIGHTS)
 
-# WorldMirror-2 (multi-view 3D reconstruction). MIRROR_CKPT = the reference
-# model.safetensors (or its HF dir); the converted .safetensors is what infer uses.
-MIRROR_CKPT    ?=
-MIRROR_WEIGHTS ?= $(OUT)/mirror.safetensors
-# images -> 3DGS scene (+ view). MIRROR_IMAGES = dir of .ppm or comma list.
-MIRROR_IMAGES ?=
-
-## mirror - lists the WorldMirror-2 multi-view reconstruction targets; does nothing
-mirror:
-	$(LIST_CHILDREN)
-
-## mirror/import - convert the reference checkpoint (MIRROR_CKPT=<model.safetensors|hf_dir>)
-mirror/import: build/release
-	@test -n "$(MIRROR_CKPT)" || (echo "set MIRROR_CKPT=<model.safetensors|hf_dir>"; exit 2)
-	$(BRAIN) worldmirror2 import $(MIRROR_CKPT) --out $(MIRROR_WEIGHTS)
-
-## mirror/infer - images -> 3DGS scene (MIRROR_IMAGES=<dir|a.ppm,b.ppm>, MIRROR_ARGS=...)
-mirror/infer: build/release
-	@test -n "$(MIRROR_IMAGES)" || (echo "set MIRROR_IMAGES=<dir|a.ppm,b.ppm>"; exit 2)
-	$(BRAIN) worldmirror2 infer --weights $(MIRROR_WEIGHTS) --images $(MIRROR_IMAGES) $(MIRROR_ARGS)
-
-## mirror/demo - images -> 3DGS scene, then view it (MIRROR_IMAGES=<dir|a.ppm,b.ppm>)
-mirror/demo: build/release
-	@test -n "$(MIRROR_IMAGES)" || (echo "set MIRROR_IMAGES=<dir|a.ppm,b.ppm>"; exit 2)
-	$(BRAIN) worldmirror2 demo --weights $(MIRROR_WEIGHTS) --images $(MIRROR_IMAGES) $(MIRROR_ARGS)
-
 ## tts - lists the text-to-speech targets; does nothing
 tts:
 	$(LIST_CHILDREN)
@@ -1543,7 +1517,7 @@ perf/model:
 # context. LFM_WEIGHTS/LFM_TOKENIZER select the model (230m/350m).
 # LFM_TOKENIZER has NO default: the tokenizer lives outside the repo, and a
 # baked-in absolute path is one dev box's layout (same @test -n guard as the
-# depth/mirror/splat targets).
+# depth/splat targets).
 LFM_WEIGHTS ?= out/lfm-230m.safetensors
 LFM_INPUT ?= 8192
 ## perf/model/lfm - LFM2.5 8k-context concurrency benchmark (LFM_WEIGHTS / LFM_TOKENIZER select the model)
@@ -2266,7 +2240,7 @@ help:
         yolo yolo/data yolo/train yolo/eval yolo/detect \
         yolo/npu yolo/npu/export yolo/npu/quantize yolo/npu/sim-int8 yolo/npu/run yolo/npu/bench \
         qwen qwen/finetune depth depth/demo depth/smoke depth/camera depth/train \
-        mirror mirror/import mirror/infer mirror/demo tts tts/data \
+        tts tts/data \
         flux2 flux2/generate flux2/edit wan wan/t2v forecast forecast/compare forecast/serve \
         wm wm/play wm/fixtures federated federated/demo web web/dev web/build \
         bench bench/run $(BENCH_RUN_TARGETS) bench/scaling bench/distributed bench/eval bench/scale bench/advise \

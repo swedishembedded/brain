@@ -14,30 +14,36 @@ yourself; for rendering or further optimizing the resulting scene, see the
 |---|---|
 | Inference             | [x] |
 | Training from scratch | [ ] |
-| CLI (`brain <arch> <action>`)       | [ ] (has its own `brain worldmirror2 …` subcommand instead - see "Running it" below) |
+| CLI (`brain <arch> <action>`)       | [x] `brain worldmirror2 reconstruct` / `import`, and the standalone [`sample-models-worldmirror2`](../../../samples/models/worldmirror2/README.md) |
 | HTTP API               | [ ] `reconstruct` takes a REQUIRED `images` input blob, so it is not a text-to-image/chat action |
-| D-Bus                  | [x] `reconstruct` (one-shot) |
+| D-Bus                  | [x] `reconstruct` (one-shot; `import` runs on files of the host and is not served) |
 | Batched serving        | [ ] |
 
 ## Getting the weights
 
-There's no auto-fetched model id - import a released WorldMirror-2
-checkpoint (a `.safetensors` file or a Hugging Face-style directory) into
-brain's own format once:
+The checkpoint is found in the model store: a `.safetensors` holding the
+released WorldMirror-2 tensors is recognised by its content, and
+`--weights PATH` names one outright. To convert the released checkpoint (a
+`.safetensors` file or a Hugging Face-style directory) once into brain's own
+container, with the configuration embedded and every tensor shape-verified:
 
 ```bash
-brain worldmirror2 import <model.safetensors|hf_dir> --out out/mirror.safetensors
+brain worldmirror2 import --source <model.safetensors|hf_dir> --dest out/mirror.safetensors
 ```
 
 ## Running it
 
 ```bash
-# Reconstruct a scene from a folder of photos
-brain worldmirror2 infer --weights out/mirror.safetensors --images photos/ --maps
+# Reconstruct a scene from a folder of photos (or a video)
+brain worldmirror2 reconstruct --images photos/ --maps \
+    --out scene=scene.ply --out cameras=cameras.json --out depth=depth.mp4 --out normals=normals.mp4
 
 # Fly through the result (WASD + mouse)
-sample-models-splat view out/mirror/scene.ply   # make samples/models/splat/build
+sample-models-splat view scene.ply   # make samples/models/splat/build
 ```
+
+`sample-models-worldmirror2` is the same actions as a standalone program
+(`make samples/models/worldmirror2/build`), with `export-npu` added.
 
 ## Turntable captures need a mask
 
@@ -62,8 +68,8 @@ over the clip are the ones that rotate:
 ```bash
 ffmpeg -i turntable.mp4 -vf "select='not(mod(n\,10))'" -vsync 0 f%03d.png
 # then: mask = white where the per-pixel standard deviation across f*.png is high
-brain worldmirror2 infer --weights mirror.safetensors --images turntable.mp4 \
-    --mask mask.png --max-frames 24 --out scene
+brain worldmirror2 reconstruct --images turntable.mp4 \
+    --mask mask.png --max-frames 24 --out scene=scene.ply
 ```
 
 Shooting the camera around a stationary object avoids all of this and is
@@ -76,10 +82,12 @@ structure-from-motion step, in; a Gaussian-splat scene and the camera each
 photograph was taken from, out:
 
 ```console
-$ brain worldmirror2 infer --weights mirror.safetensors --images views/ --maps --out scene
-running WorldMirror-2 on 4 frame(s) at 518x392 ...
-forward + assembly: 99.2s, 812224 gaussians <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
-wrote scene/scene.ply (812224 gaussians) + scene/cameras.json
+$ brain worldmirror2 reconstruct --images views/ --maps --out scene=scene/scene.ply --out cameras=scene/cameras.json
+reconstruct [3/3] 812224 gaussians
+gaussians: 812224
+frames: 4
+width: 518
+height: 392
 
 $ brain splat render --scene scene/scene.ply --width 640 --height 480 --eye 0.53,-0.28,0.12 --target 0.02,-0.03,1.02 --out image=view.ppm
 scene/scene.ply: 812224 gaussians -> view.ppm (640x480, tiled, 1496463 isects, 195 ms) <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
@@ -93,37 +101,51 @@ feed-forward model interpolates between the views it was given; it does not
 invent the ones it was not. For a scene you want to hold up to arbitrary
 viewpoints, optimise it afterwards with [`splat fit`](splat.md).
 
-## Options
+## Inputs
 
-`--images` takes a directory, a comma-separated list, or a **video file**
+`--images` takes a directory of frames or a **video file**
 (`.mp4/.mov/.mkv/.webm/.avi/.m4v`; AV1 is read in process, any other codec
-through `ffmpeg` when it is on `PATH`). A directory is
-read in sorted order, so a capture's own frame numbering is the order the
-model sees. PPM, PNG, JPEG, BMP and TIFF all decode; any aspect ratio is fine,
-since non-square inputs are resized and cropped automatically.
+through `ffmpeg` when it is on `PATH`). A directory is read in sorted order,
+so a capture's own frame numbering is the order the model sees. PPM, PNG, JPEG,
+BMP and TIFF all decode; any aspect ratio is fine, since frames are resized and
+cropped to the model's patch grid automatically - as long as every frame shares
+one size. A set of photographs of mixed sizes is first brought to one size.
 
 This model was built for sequences, not for a handful of stills: the paper
 evaluates it at 2-8 views (sparse) and 32-64 (dense), and reports the margin
 over prior work GROWING with view count. A slow orbit video is the input it
-wants. `infer` writes `scene.ply` (the Gaussian scene) and
-`cameras.json` (the recovered camera for each input photo) into `--out`
-(default `out/mirror/`); `--maps` additionally writes a per-frame depth and
-normal-map PPM for inspection.
+wants. `reconstruct` returns the scene (`scene`, a PLY) and the recovered
+camera of every frame (`cameras`, JSON in the shape `splat fit` takes); `--maps`
+additionally returns the per-frame depth and normal maps as the `depth` and
+`normals` clips, and `--frames-out` the frames exactly as the model saw them
+(`frames`).
 
 ## Options
 
 | Flag | Effect |
 |---|---|
-| `--out DIR` | output directory for `infer` (default `out/mirror`) |
-| `--ply <path>` | write the scene to a specific `.ply` path instead |
-| `--maps` | also write per-frame depth/normal PPMs |
-| `--min-opacity X` | drop gaussians below this opacity when assembling the scene (default `0.01`) |
-| `--max-depth X` | drop gaussians beyond this depth (default: no limit) |
-| `--prune VOXEL` | voxel-merge duplicate gaussians across overlapping views - try `0.002` for multi-view scenes |
+| `--images PATH` | the capture: a directory of frames or a video (required) |
+| `--mask PATH` | black out everything the mask does not cover (white keeps), in every frame - for turntable captures, see above |
+| `--poses PATH` | known cameras, one per selected frame, in the shape `cameras` has: condition the trunk and become the back-projection cameras |
 | `--stride N` | use every Nth input frame |
-| `--max-frames N` | use at most N frames, spread ACROSS the capture rather than taking a prefix (default: unbounded for a directory, 48 for a video) |
-| `--fps X` | resample a video to X frames per second before selecting (default: the clip's own rate) |
-| `--mask <image>` | black out everything the mask does not cover, in every frame - for turntable captures, see below |
+| `--max-frames N` | use at most N frames, spread ACROSS the capture rather than taking a prefix (default 0: 48 for a video, a set of photographs is used whole) |
+| `--fps X` | resample a video to X frames per second before selecting (default 0: the clip's own rate) |
+| `--target-size N` | longest-edge cap the frames are resized to, floored to the 14px patch grid (default 952, the reference's inference default) |
+| `--min-opacity X` | drop gaussians below this opacity (default `0.01`) |
+| `--max-depth X` | drop gaussians beyond this depth, in scene units (default 0: no limit) |
+| `--prune VOXEL` | voxel-merge duplicate gaussians across overlapping views (default `0.002`; 0 = off) |
+| `--gs-mask-threshold X` | keep a pixel only where the Gaussian head's validity mask is above this (default `0.5`) |
+| `--edge-depth-threshold X` | drop pixels on a depth discontinuity, a relative step above this between neighbours (default `0.03`) |
+| `--fuse-depth X` | reconcile the per-view depth maps before they become geometry; pairs differing by more than this fraction are occlusions (default `0.05`) |
+| `--min-support N` | keep a pixel only where at least N other frames agree a surface is there (default 0) |
+| `--conf-percentile P` | drop this percentage of pixels, least confident first (default 0) |
+| `--surface-align X` | lay each gaussian flat against its surface at this thickness ratio (default `4`; 0 = the model's own orientation) |
+| `--position-from gsdepth\|points\|blend` | which head places the gaussians (default `gsdepth`) |
+| `--normals-from geometry\|head` | where the normal behind `--surface-align` comes from (default `geometry`) |
+| `--max-scale-quantile Q` | drop the gaussians whose scale is above this quantile (default `0.98`; 0 or 1 = off) |
+| `--keep-camera-frame` | return the scene in frame 0's frame instead of re-framing it upright |
+| `--maps` | also return the per-frame depth and normal maps |
+| `--frames-out` | also return the frames exactly as the model saw them |
 
 The trunk's global attention is quadratic in frame count, so a long capture
 needs thinning before it reaches the model - hence the video default. The
@@ -131,29 +153,30 @@ spread-not-truncate rule matters: capping a 360-degree orbit to its first N
 frames leaves a 60-degree arc, which reconstructs far worse than the same
 budget spread over the whole path.
 
-`brain worldmirror2 export-npu` exports individual model stages as ONNX for
-running on the Intel NPU or CPU via OpenVINO - an advanced path for NPU
-deployment rather than everyday use.
+`sample-models-worldmirror2 export-npu` exports individual model stages
+(`--stage dino|trunk|heads`) as ONNX for running on the Intel NPU or CPU via
+OpenVINO - an advanced path for NPU deployment rather than everyday use.
 
 ## Serving (D-Bus)
 
-Model id: `brain/worldmirror2`. `BRAIN_WORLDMIRROR2_WEIGHTS` names the
-imported checkpoint - a machine-side setting, not a per-request param (a
-remote caller cannot answer "where is the checkpoint on THIS machine").
+Model id: `brain/worldmirror2`. The checkpoint is a machine-side setting
+(the model store, or `BRAIN_WORLDMIRROR2_WEIGHTS` for the scheduled service),
+not a per-request param: a remote caller cannot answer "where is the
+checkpoint on THIS machine".
 
 ```bash
 brain caps brain/worldmirror2
 ```
 
 `reconstruct` (one-shot): takes `images` (N unposed frames, concatenated
-interleaved-HWC f32 RGB - the same video convention every other video input
-in this repo uses; every frame shares one `(w,h)`, which must also be a
-multiple of the model's 14px patch grid) plus `min_opacity`/`max_depth`/
-`prune_voxel`/`maps`, mirroring `brain worldmirror2 infer`'s own flags exactly.
-Returns `scene` (the reconstructed Gaussian scene, Inria-layout binary PLY)
-and `cameras` (the per-frame cameras WorldMirror-2 predicted, the same JSON
-shape `cameras.json` uses); `maps` additionally returns a per-frame depth-map
-video when requested. See
+interleaved-HWC f32 RGB - the same video convention every other video input in
+this repo uses; every frame shares one `(w,h)`, and any size is resized to the
+model's 14px patch grid), optional `mask` and `poses`, and every parameter of
+the table above except the paths. Returns `scene` (the reconstructed Gaussian
+scene, Inria-layout binary PLY), `cameras` (the per-frame cameras
+WorldMirror-2 predicted, the same JSON shape `cameras.json` uses) and the
+counts `gaussians`, `frames`, `width`, `height`; `depth`, `normals` and
+`frames` clips when requested. See
 [`samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py`](../../../samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py).
 
 One resident instance serves every request shape: the model is
@@ -167,10 +190,9 @@ cost, not a correctness bug.
 
 ## Hardware and limits
 
-This is reconstruction only - there's no training or fine-tuning verb for
-this model. Camera or depth prompts (guiding the reconstruction with known
-poses) aren't exposed on the CLI yet; every run starts from images alone.
-There's no built-in sky-segmentation filter - use `--min-opacity` /
+This is reconstruction only - there's no training or fine-tuning action for
+this model. Known camera poses can guide a run (`--poses`); depth priors are
+not exposed. There's no built-in sky-segmentation filter - use `--min-opacity` /
 `--max-depth` to prune sky and background artifacts from the reconstructed
 scene. The released WorldMirror-2 weights are under Tencent's community
 license, which excludes the EU - treat an imported checkpoint as

@@ -47,7 +47,7 @@ pub fn fit_spec() -> ActionSpec {
         .param(ParamSpec::new(
             "views",
             ParamType::Str,
-            "camera array as JSON, one entry per target-view frame in order: [{\"c2w\":[16 floats],\"fx\":...,\"fy\":...,\"cx\":...,\"cy\":...,\"width\":...,\"height\":...}, ...] - the same shape `mirror_cli.rs`'s cameras.json uses; a lens (\"model\": \"opencv\"|\"fisheye\"|\"equirect\" with \"k\"/\"p\"/\"s\" coefficients) and a rolling-shutter \"shutter\" twist are optional. Give this or 'cameras'",
+            "camera array as JSON, one entry per target-view frame in order: [{\"c2w\":[16 floats],\"fx\":...,\"fy\":...,\"cx\":...,\"cy\":...,\"width\":...,\"height\":...}, ...] - the same shape the worldmirror2 `cameras` output uses; a lens (\"model\": \"opencv\"|\"fisheye\"|\"equirect\" with \"k\"/\"p\"/\"s\" coefficients) and a rolling-shutter \"shutter\" twist are optional. Give this or 'cameras'",
         ))
         .param(ParamSpec::new("cameras", ParamType::Str, "path of a cameras JSON file on the serving machine (the array 'views' takes), one camera per photograph in order; give this or 'views'").host_resolved())
         .param(ParamSpec::new("images", ParamType::Str, "folder of photographs on the serving machine (read in name order), or a comma-separated list of image file paths, one per camera; give this or the 'video' input").host_resolved())

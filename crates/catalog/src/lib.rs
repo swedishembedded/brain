@@ -980,12 +980,12 @@ pub fn models() -> Vec<ModelEntry> {
             spec: None,
             resident: resident!(resident_splat::SplatResident::from_env),
         },
-        // WorldMirror-2 multi-view 3D reconstruction. `weights` is a
-        // per-invocation action param, so `manifest` is weights-free.
+        // WorldMirror-2 multi-view 3D reconstruction: its checkpoint is the
+        // `weights` role, resolved from the model store.
         ModelEntry {
             manifest: worldmirror2::caps::manifest,
-            provider: always!(worldmirror2::caps::WorldMirror2Provider::new()),
-            spec: None,
+            provider: worldmirror2::caps::provider,
+            spec: Some(("worldmirror2", &worldmirror2::spec::MirrorSpec)),
             resident: resident!(resident_worldmirror2::WorldMirror2Resident::from_env),
         },
         // No-weights utility models, listed by `brain caps` and served as

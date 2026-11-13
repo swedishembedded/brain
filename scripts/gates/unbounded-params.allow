@@ -168,5 +168,3 @@ brain/wan	t2v	guidance
 brain/wan	t2v	seed
 brain/wan	t2v	shift
 brain/zipdepth	train	seed
-brain/worldmirror2	reconstruct	max_depth
-brain/worldmirror2	reconstruct	prune_voxel
