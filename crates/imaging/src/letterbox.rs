@@ -37,8 +37,10 @@
 //! where `--device` says. [`letterbox_rgb`] is the same rule on the host, for
 //! callers whose input and consumer both live in host memory, where a device
 //! round trip would only add copies: the NPU paths (`crates/npu`,
-//! `crates/cli/src/npu_cli.rs`), the board path in `yolov5`'s `npu.rs`, and
-//! detectors fed host images. A test (`device_ops.rs`) proves the two bitwise
+//! `crates/cli/src/npu_cli.rs`) and the board path in `yolov5`'s `npu.rs`.
+//! The GPU detectors (`yolov8`, and `yolov5`'s GPU forward) do not use it:
+//! they upload the decoded image once and letterbox on the device with
+//! [`crate::device::Ctx::letterbox_hwc_into`]. A test (`device_ops.rs`) proves the two bitwise
 //! equal, so neither can drift from the other.
 //!
 //! The ZipDepth INT8 calibration does not letterbox: it preprocesses with

@@ -91,6 +91,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // `crate::tiling::BlendPlan`'s compositor: per-pixel weighted accumulate,
     // one value broadcast across every channel.
     ("blend_accumulate", kernels::BLEND_ACCUMULATE),
+    // `Ctx::letterbox_hwc_into`: one image written into its slot of a batch buffer.
+    ("chan_place", kernels::CHAN_PLACE),
 ];
 
 /// Pipeline indices for the kernels this crate dispatches, resolved by name.
@@ -113,6 +115,7 @@ pub struct ImagingKernelIds {
     pub conv2d_gd: usize,
     pub bsq_quantize: usize,
     pub blend_accumulate: usize,
+    pub chan_place: usize,
 }
 
 impl ImagingKernelIds {
@@ -147,6 +150,7 @@ impl ImagingKernelIds {
             conv2d_gd: k("conv2d_gd"),
             bsq_quantize: k("bsq_quantize"),
             blend_accumulate: k("blend_accumulate"),
+            chan_place: k("chan_place"),
         }
     }
 
@@ -364,6 +368,35 @@ impl<'g> Ctx<'g> {
         debug_assert_eq!((border.left as f32, border.top as f32), (lb.pad_x, lb.pad_y));
         let (padded, _) = self.pad(&content, cs, border, Fill::Constant(fill));
         (padded, lb)
+    }
+
+    /// Decode-to-input in one device pass: upload the interleaved-HWC image
+    /// `hwc` (`w0 x h0 x 3`), [`Ctx::to_chw`], [`Ctx::letterbox`] it to `size`,
+    /// and write the result into slot `slot` of `dst`, a batch buffer of
+    /// `slots` stacked `[3, size, size]` images (a model's input buffer).
+    /// Bitwise equal to the host [`crate::letterbox::letterbox_rgb`] followed by
+    /// a host upload, without the host-side resize and pad.
+    ///
+    /// # Panics
+    /// If `slot >= slots`, or `chan_place`, `resize_nearest`, `pad2d` or
+    /// `nlc_nchw` is not registered on this handle.
+    pub fn letterbox_hwc_into(&self, hwc: &[f32], w0: u32, h0: u32, size: u32, fill: f32, dst: &DeviceBuffer, slots: u32, slot: u32) -> Letterbox {
+        assert!(slot < slots, "slot {slot} out of the {slots} slots of the destination batch");
+        assert_eq!(hwc.len(), 3 * (w0 as usize) * (h0 as usize), "image is not {w0}x{h0}x3");
+        let s = Shape::new(1, 3, h0, w0);
+        let interleaved = self.upload("letterbox_hwc", hwc);
+        let chw = self.to_chw(&interleaved, s);
+        let (boxed, lb) = self.letterbox(&chw, s, size, fill);
+        // `chan_place` over the batch viewed as one `[1, slots*3, size, size]`
+        // tensor: slot `i` is the channel range `3i..3i+3`.
+        let step = self.gpu.step(
+            self.ids.need(self.ids.chan_place, "chan_place"),
+            &[&boxed, dst],
+            &[1, slots * 3, 3, slot * 3, size, size],
+            3 * size * size,
+        );
+        self.gpu.submit(&[], &[step]);
+        lb
     }
 
     /// Crop `rect` out of `x`.
@@ -627,6 +660,7 @@ mod tests {
                 "conv2d_gd" => ids.conv2d_gd,
                 "bsq_quantize" => ids.bsq_quantize,
                 "blend_accumulate" => ids.blend_accumulate,
+                "chan_place" => ids.chan_place,
                 other => panic!("PIPELINES has `{other}` but ImagingKernelIds has no field for it"),
             };
             assert_eq!(got, i, "`{name}` resolved to the wrong slot");
