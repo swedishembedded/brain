@@ -854,6 +854,14 @@ train_body() { # train_body <extra params json fragment, with a leading comma or
   [ "$STATUS" -eq 400 ]
   validate openai.json ErrorResponse "$RESP"
 
+  # embeddings extensions: the mock's `embed` declares neither, so each is refused by the action's own contract.
+  post_json openai /v1/embeddings '{"model":"brain/mock","input":"hello","instruction":"find letters"}'
+  [ "$STATUS" -eq 400 ]
+  validate openai.json ErrorResponse "$RESP"
+  post_json openai /v1/embeddings '{"model":"brain/mock","input":"hello","max_tokens":1000000000000}'
+  [ "$STATUS" -eq 400 ]
+  validate openai.json ErrorResponse "$RESP"
+
   # embeddings token-array input (documented unsupported — brain has no tokenizer).
   post_json openai /v1/embeddings '{"model":"brain/mock","input":[1,2,3,4]}'
   [ "$STATUS" -eq 400 ]

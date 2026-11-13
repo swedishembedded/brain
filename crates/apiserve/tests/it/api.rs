@@ -67,6 +67,20 @@ fn embed_manifest() -> Manifest {
         "an embedding model",
         vec![ActionSpec::new("embed", "embed text")
             .param(ParamSpec::new("text", ParamType::Str, "input text").required())
+            .param(ParamSpec::new("instruction", ParamType::Str, "the query's task instruction"))
+            // The longest input this model reads.
+            .param(ParamSpec::new("max_tokens", ParamType::Int, "tokens kept of each input").min(0.0).max(8192.0))
+            .output(BlobSpec::new("embedding", Media::Bytes, "embedding vector"))],
+    )
+}
+
+/// An embed-only model that takes the text and nothing else, as an encoder without a query convention does.
+fn plain_embed_manifest() -> Manifest {
+    Manifest::new(
+        "brain-embed-plain",
+        "an embedding model without an instruction or a token bound",
+        vec![ActionSpec::new("embed", "embed text")
+            .param(ParamSpec::new("text", ParamType::Str, "input text").required())
             .output(BlobSpec::new("embedding", Media::Bytes, "embedding vector"))],
     )
 }
@@ -159,19 +173,39 @@ impl ResidentModel for FakeEmbed {
     }
 }
 impl Instance for FakeEmbedInst {
-    fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+    /// Reports the tokens it "read": the call's `max_tokens` (3 when absent) plus one per character of its
+    /// `instruction`, so a test sees which of them reached the action.
+    fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        let tokens = inv.get_i64("max_tokens").unwrap_or(3) + inv.get_str("instruction").map_or(0, |s| s.len() as i64);
         Ok(Outcome::new()
-            .set("tokens", json!(3))
+            .set("tokens", json!(tokens))
             .set("dim", json!(FAKE_EMBED.len()))
             .set("mean", json!(FAKE_EMBED.to_vec()))
             .blob("embeddings", Blob::new(Media::Bytes, Vec::new())))
     }
 }
 
+/// [`FakeEmbed`] under the manifest of a model whose `embed` takes no `instruction` or `max_tokens`.
+struct FakePlainEmbed;
+impl ResidentModel for FakePlainEmbed {
+    fn manifest(&self) -> Manifest {
+        plain_embed_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-embed-plain", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(FakeEmbedInst))
+    }
+}
+
 /// An executor with the RUNNABLE [`FakeEmbed`] model plus the RUNNABLE [`FakeChat`]
 /// (so "non-embeddings model -> 404" can be exercised on a real chat model).
 fn embed_executor() -> Executor {
-    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeEmbed), Arc::new(FakeChat)];
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeEmbed), Arc::new(FakePlainEmbed), Arc::new(FakeChat)];
     let mut budgets = Budgets::new();
     budgets.set(Device::Cpu, 8 << 30, 0);
     Executor::start(models, budgets, Policy::default())
@@ -1356,6 +1390,31 @@ async fn openai_embeddings_bad_bodies_are_400() {
         .unwrap();
     let (st, _) = send(&app, req).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+/// `instruction` and `max_tokens` reach the model's `embed` action; a value the action's own bound refuses, a
+/// model that does not take them, and a malformed value are each a 400 before any model runs.
+#[tokio::test]
+async fn openai_embeddings_instruction_and_max_tokens_reach_the_action_or_are_refused() {
+    let (app, key) = embed_app(Provider::OpenAI);
+    let body = json!({"model": "brain-embed", "input": ["a"], "instruction": "abcd", "max_tokens": 7});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["usage"]["prompt_tokens"], 11, "the action saw max_tokens 7 and a 4-character instruction: {v}");
+    for bad in [json!({"max_tokens": 1_000_000_000_000_i64}), json!({"max_tokens": 8193}), json!({"max_tokens": -1}), json!({"instruction": ""}), json!({"instruction": 5})] {
+        let mut body = json!({"model": "brain-embed", "input": ["a"]});
+        body.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "must 400: {body}");
+        assert_valid("openai.json", "ErrorResponse", &v);
+    }
+    for field in [json!({"instruction": "q"}), json!({"max_tokens": 5})] {
+        let mut body = json!({"model": "brain-embed-plain", "input": ["a"]});
+        body.as_object_mut().unwrap().extend(field.as_object().unwrap().clone());
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "a model that does not take it refuses it: {body}");
+        assert!(v["error"]["message"].as_str().is_some_and(|m| m.contains("unknown param")), "{v}");
+    }
 }
 
 /// OpenRouter `/embeddings` works the same (same grammar, spec-valid response).

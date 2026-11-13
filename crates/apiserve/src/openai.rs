@@ -108,6 +108,18 @@ fn embed_invocation(req: &EmbeddingRequest, text: &str) -> Invocation {
     call
 }
 
+/// One `embed` call per input of `req`, each validated against the resolved model's own `embed` spec.
+fn embed_calls(state: &AppState, req: &EmbeddingRequest) -> Result<Vec<Invocation>, ApiError> {
+    let provider = state.provider;
+    let manifests = state.exec.manifests();
+    let spec = manifests
+        .iter()
+        .find(|m| m.model == req.model)
+        .and_then(|m| m.actions.iter().find(|a| a.name == "embed"))
+        .ok_or_else(|| ApiError::model_not_found(provider, &req.model))?;
+    req.inputs.iter().map(|text| spec.validate_served(embed_invocation(req, text)).map_err(|e| ApiError::invalid_request(provider, e))).collect()
+}
+
 /// Parse + validate a `CreateEmbeddingRequest`. `input` accepts a single string or
 /// an array of strings; a token-array input (array of ints, or array of int arrays)
 /// is a 400 with a clear message — brain has no tokenizer at this layer to decode
@@ -222,11 +234,14 @@ pub async fn handle_embeddings(state: AppState, body: Bytes) -> Response {
     // batch. Admission (429) is still enforced per job by `bridge::submit`;
     // `try_join_all` returns the FIRST failure and drops (cancels) the
     // remaining futures, keeping the request's all-or-nothing semantics.
-    let outcomes = match futures::future::try_join_all(
-        req.inputs.iter().map(|text| bridge::submit(&state, &req.model, "embed", embed_invocation(&req, text))),
-    )
-    .await
-    {
+    // The call is held to the model's own `embed` contract (the bounds of `max_tokens`, a param the model does
+    // not take) before any job exists, as `/v1/run` holds every call: a dialect route reaches the same action and
+    // must not be a way around its ranges.
+    let calls = match embed_calls(&state, &req) {
+        Ok(calls) => calls,
+        Err(e) => return e.into_response(),
+    };
+    let outcomes = match futures::future::try_join_all(calls.into_iter().map(|call| bridge::submit(&state, &req.model, "embed", call))).await {
         Ok(o) => o,
         Err(e) => return e.into_response(),
     };
