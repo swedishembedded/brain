@@ -103,7 +103,14 @@ def structure(book, errors):
     explained = {c for ch in book.chapters() for c in ch.brain}
     for c in sorted(explained - crates):
         errors.append(f"book.yaml: names crate '{c}', which does not exist under crates/")
-    for c in sorted(crates - explained):
+    for c, reason in sorted(book.omitted.items()):
+        if c not in crates:
+            errors.append(f"book.yaml: omits crate '{c}', which does not exist under crates/")
+        if c in explained:
+            errors.append(f"book.yaml: crate '{c}' is both omitted and explained by a chapter")
+        if not str(reason).strip():
+            errors.append(f"book.yaml: omitted crate '{c}' has no reason")
+    for c in sorted(crates - explained - set(book.omitted)):
         errors.append(f"book.yaml: crate '{c}' is explained by no chapter")
     return introduced
 

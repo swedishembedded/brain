@@ -181,7 +181,6 @@ Parameters of the vision-to-language maps of the crates, counted from the tensor
 | LLaVA-1.5-13B, two layers | 1024 -> 5120 -> 5120 | 31,467,520 | 31,457,280 | crates/llava |
 | Qwen3-VL-4B, main merger | 1024 x 4 -> 4096 -> 2560 | 27,271,680 | 27,262,976 | crates/qwen3vl |
 | Qwen3-VL-4B, one DeepStack merger | 1024 x 4 -> 4096 -> 2560 | 27,277,824 | 27,262,976 | norm over the 4096 |
-| Qwen3-VL-30B-A3B, main merger | 1152 x 4 -> 4608 -> 2048 | 30,679,808 | 30,670,848 | crates/qwen3vlmoe |
 | DeepSeek-VL-7B, split aligner | (1024, 1024) -> (2048 + 2048) -> 4096 | 20,979,712 | 20,971,520 | crates/deepseekvl |
 | Janus-Pro-7B, understanding aligner | 1024 -> 4096 -> 4096 | 20,979,712 | 20,971,520 | crates/januspro |
 | Janus-Pro-7B, generation aligner | 8 -> 4096 -> 4096 | 16,818,176 | 16,809,984 | Volume VIII |
@@ -191,7 +190,7 @@ Parameters of the vision-to-language maps of the crates, counted from the tensor
 For comparison, one cross-attention layer of a resampler with 64 learned queries of width 2048 reading towers of width 1152 (queries 64 x 2048, W_q and W_o 2048 x 2048, W_k and W_v 1152 x 2048, no biases) has 13,238,272 parameters and always returns 64 tokens, whatever the number of patches it reads.
 <!-- /worked -->
 
-Three things stand out. The projectors are small, 17 to 36 million parameters against a tower of some hundreds of millions and a decoder of several billions, and the split aligner of DeepSeek-VL and the single-stream aligner of Janus-Pro have exactly the same count because the two halves of 2,048 the split aligner joins add up to the 4,096 the other has. The window merger of MiniCPM-V is nearly three times the largest of them, because it is a block of attention plus an MLP of its own and not a map, which is what the previous table's saving pays for. And the DeepStack mergers of Qwen3-VL are whole projectors of their own: the tower is tapped after blocks 5, 11 and 17, counting from 0 (8, 16 and 24 in the 30-billion-parameter model), each tap is merged by a copy of the merger, and the merged rows are added to the image rows of the residual stream after decoder layers 0, 1 and 2 (the convention stated in `crates/qwen3vlmoe/src/model.rs`), so the decoder receives the picture three more times at shallow depth. That is three more projectors, 82 million parameters, and the FLOPs below.
+Three things stand out. The projectors are small, 17 to 36 million parameters against a tower of some hundreds of millions and a decoder of several billions, and the split aligner of DeepSeek-VL and the single-stream aligner of Janus-Pro have exactly the same count because the two halves of 2,048 the split aligner joins add up to the 4,096 the other has. The window merger of MiniCPM-V is nearly three times the largest of them, because it is a block of attention plus an MLP of its own and not a map, which is what the previous table's saving pays for. And the DeepStack mergers of Qwen3-VL are whole projectors of their own: the tower is tapped after blocks 5, 11 and 17, counting from 0, each tap is merged by a copy of the merger, and the merged rows are added to the image rows of the residual stream after decoder layers 0, 1 and 2 (the convention checked in `crates/qwen3vl/src/text_tower.rs`: DeepStack adds follow layers 0 up to the number of taps), so the decoder receives the picture three more times at shallow depth. That is three more projectors, 82 million parameters, and the FLOPs below.
 
 <!-- worked: vlms.projector_flops -->
 FLOPs of the projector for one picture: 2 FLOPs per matmul weight per row it maps (the merger maps one row per merged block of patches). The pictures are the usual size of each design, see the next section.
@@ -207,7 +206,7 @@ FLOPs of the projector for one picture: 2 FLOPs per matmul weight per row it map
 
 A DeepStack picture costs the main merger and three more, $4 \times 55.83 = 223.32$ billion FLOPs for a 1024 by 1024 picture, against 36.24 billion for LLaVA's projector on its 576 rows. The reason is the merged width: a merger multiplies four times the tower's width, and each of the 1,024 rows it maps costs 2 FLOPs per weight of $27.3$ million.
 
-A third family produces a fixed number of tokens whatever the tower's output, the perceiver resampler of Flamingo (Alayrac et al., 2022): $n_q$ learned query vectors cross-attend to all of the tower's rows and the $n_q$ results are the tokens. One layer of it with 64 queries of width 2,048 over a tower of width 1,152 has 13,238,272 parameters, and the number of tokens it hands on does not depend on the picture. It is the design to choose when the budget is fixed and the pictures vary, and none of the nine crates of this chapter uses one: MiniCPM-V 4.6 reads its patches through the window merger and the merger instead.
+A third family produces a fixed number of tokens whatever the tower's output, the perceiver resampler of Flamingo (Alayrac et al., 2022): $n_q$ learned query vectors cross-attend to all of the tower's rows and the $n_q$ results are the tokens. One layer of it with 64 queries of width 2,048 over a tower of width 1,152 has 13,238,272 parameters, and the number of tokens it hands on does not depend on the picture. It is the design to choose when the budget is fixed and the pictures vary, and none of the eight crates of this chapter uses one: MiniCPM-V 4.6 reads its patches through the window merger and the merger instead.
 
 ## What a picture costs the decoder
 
@@ -480,7 +479,7 @@ function crop_tiling(h: int, w: int, crop: int, max_crops: int) -> (int, int):
     return (max(1, ht), max(1, wt))
 ```
 
-It is called as `crop_tiling(h - 112, w - 112, 266, 12)`. The decoder reads 729 rows at every size: all the added resolution is paid in tower passes and lost in the pool, which is a choice of a fixed decoder cost over a growing one, and a coarser view of a large picture at high resolution than the others give. The crop policy is a named function of `crates/imaging/src/tiling.rs` and the module's convention keeps it apart from the discrete policy of another model: the two agree on many sizes and disagree on others, and a pinned test of that crate holds a counterexample so that nobody merges them in the name of tidiness. One caveat is in the code's own comments: the pixel-space crop geometry of `crates/moondream3/src/preprocess.rs` is not checked against a dumped reference, only against the feature-space stitch it must agree with, and that test is what ties the two halves together.
+It is called as `crop_tiling(h - 112, w - 112, 266, 12)`. The decoder reads 729 rows at every size: all the added resolution is paid in tower passes and lost in the pool, which is a choice of a fixed decoder cost over a growing one, and a coarser view of a large picture at high resolution than the others give. The crop policy is a named function of `crates/imaging/src/tiling.rs` and the module's convention keeps it apart from the discrete policy of another model: the two agree on many sizes and disagree on others, and a pinned test of that crate holds a counterexample so that nobody merges them in the name of tidiness. The pixel-space crop geometry of `crates/moondream3/src/preprocess.rs` is checked against the feature-space stitch it must agree with, and that test is what ties the two halves together.
 
 ## Where an image token sits
 
@@ -550,7 +549,7 @@ Scoring is of two kinds. A captioning model is scored against reference captions
 
 ## Florence-2 answers with boxes
 
-Every model so far reads a picture and writes a sentence. Florence-2 (Xiao et al., 2024) has a different shape, and its crate `crates/florence2` is the smallest of the nine, 0.23 billion parameters by the header's count. The tower is a DaViT, four stages of convolutional downsampling and window and channel attention, that turns a 768 by 768 picture (resized directly, not padded) into a 24 by 24 grid of 1,024 numbers. A learned two-axis position and a projection to 768 give 576 vision rows, plus one more that is their average:
+Every model so far reads a picture and writes a sentence. Florence-2 (Xiao et al., 2024) has a different shape, and its crate `crates/florence2` is the smallest of the eight, 0.23 billion parameters by the header's count. The tower is a DaViT, four stages of convolutional downsampling and window and channel attention, that turns a 768 by 768 picture (resized directly, not padded) into a 24 by 24 grid of 1,024 numbers. A learned two-axis position and a projection to 768 give 576 vision rows, plus one more that is their average:
 
 <!-- worked: vlms.florence_tokens -->
 The tokens of Florence-2-base: the picture is resized to 768 x 768 and cut by the tower into a 24 x 24 grid (24 per side, stride 32), so 576 tokens of width 1024; one more token is their average; a projection maps each to width 768. The 577 vision tokens come before the prompt tokens in the encoder input. The vocabulary is 50,265 + 1,024 = 51,289 ids: the base byte-level BPE, 24 task markers and the 1,000 location tokens. Parameters of the projection: 1024 x 768 + 2 x 768 = 787,968.
@@ -620,7 +619,7 @@ Labelling a folder of pictures is not a property of one model. The work (walk th
 
 The folder labeller, `label_dir`, is resumable and idempotent: it re-reads the caption file before the run and rewrites it after each picture, so an interrupted run starts again where it stopped; a picture that already has a caption is left exactly as it is, so a caption corrected by hand survives a later run unless `overwrite` is set. The instruction is the whole of the prompt engineering: what the caption covers, how long it is, a trigger phrase for an adapter all live there and not in the model wrapper. The Qwen3-VL implementor lets the caller cap the pixel area, `with_max_pixels`, and its default of $1280 \times 1280$ gives a picture 1,600 tokens and the tower a score slab of 2.44 GiB, in the table above, because a labelling pass has one picture at a time and no other tenant to budget against, and detail in the caption is the point.
 
-## The nine crates side by side
+## The eight crates side by side
 
 What each crate holds, read off its configuration and constructors:
 
@@ -631,7 +630,6 @@ The tower, the projector and the token count at each model's native input, from 
 |---|---|---|---:|---|---:|---|
 | llava | CLIP-L/14, 24 x 1024, tapped at the penultimate block, class token dropped | 336 x 336 | 576 | two layers 1024 -> 5120 -> 5120 | 576 | Vicuna-1.5-13B, 40 layers, width 5120, no grouping |
 | qwen3vl | ViT 24 x 1024, two-axis RoPE, DeepStack taps after blocks 5, 11, 17 (from 0) | 448 x 448 | 784 | merge 2 x 2, then 4096 -> 4096 -> 2560 | 196 | Qwen3 4B preset, 36 layers, width 2560, 32 / 8 heads |
-| qwen3vlmoe | the same tower at 27 x 1152, taps after blocks 8, 16, 24 (from 0) | 448 x 448 | 784 | merge 2 x 2, then 4608 -> 4608 -> 2048 | 196 | 48-layer sparse decoder, 128 experts, 8 per token |
 | minicpmv | NaViT SigLIP 27 x 1152, window merger after block 6 | 448 x 448 | 256 (of 1,024 patches) | merge 2 x 2 (MLP), after the window merger | 64 | Qwen3.5-0.8B, hybrid layers |
 | moondream3 | SigLIP 27 x 1152 on 378-pixel crops | 378 x 378 | 729 | global and pooled local maps joined, 2304 -> 8192 -> 2048 | 729 | 24 layers, width 2048, sparse from layer 4 |
 | deepseekvl | SAM-B at 1024 and SigLIP-L at 384, 24 x 24 each | 1024 and 384 | 2 x 576 | split: (1024, 1024) -> 2 x 2048 -> 4096 | 576 | Llama, 30 layers, width 4096 |
@@ -648,7 +646,6 @@ How each crate fits a picture to its tower, how the rows enter the sequence and 
 |---|---|---|---|
 | llava | shortest edge to 336, centre crop | id `-200`, expanded to 576 rows | one-dimensional |
 | qwen3vl | dynamic: multiples of 32, area 56^2 to 3584^2 | `vision_start`, N pad ids, `vision_end` | multi-axis, sections 24, 20, 20 |
-| qwen3vlmoe | as qwen3vl | as qwen3vl (host-side gather, then row splice) | multi-axis, sections 24, 20, 20 |
 | minicpmv | source view and up to 9 slices of about 448 | `image` marker, pad ids, then a `slice` marker and pad run per slice | one-dimensional |
 | moondream3 | global crop and up to 12 overlapping crops, pooled to 27 x 27 | `bos`, then 729 rows as a prefix attended bidirectionally | one-dimensional, 32 of 64 channels rotated |
 | deepseekvl | pad to a square, 1024 and 384 | `image_placeholder` expanded to 576 pad ids | one-dimensional |
@@ -656,7 +653,7 @@ How each crate fits a picture to its tower, how the rows enter the sequence and 
 | florence2 | direct resize to 768 x 768 | no placeholder: the rows are the first of the encoder input | two learned axes on the rows, learned absolute positions in the encoder |
 <!-- /worked -->
 
-Three caveats come from the crates' own words. `crates/qwen3vlmoe` is a shape and not a port: its module header says that no 30B-A3B checkpoint was available, that the composite is exercised on synthetic tiny configurations, and that it must not be read as working on the real checkpoint. `crates/captioner`, the ninth, holds no model, as the section above said. And the understanding tower of `crates/januspro` is `crates/deepseekvl`'s `SiglipTower`, not a tower of its own.
+Two facts about the crates complete the table. `crates/captioner`, the eighth, holds no model, as the section above said. And the understanding tower of `crates/januspro` is `crates/deepseekvl`'s `SiglipTower`, not a tower of its own.
 
 ## Check your understanding
 

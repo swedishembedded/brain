@@ -1,4 +1,4 @@
-<!-- source-sha256: 68a2d60f199544deae5f3b0fc2bdcbdf5730caabdcd0a837e815b0f94457a84d -->
+<!-- source-sha256: 85f15912e5918f9a2cea4f4e694b7d82cad4af78902f43eb5de146331964c958 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 310" width="780" height="310"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="310" fill="#ffffff"/>
 <rect x="20" y="16" width="740" height="130" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Encode: one clip in, T frames of 16 integers out</text>

@@ -233,10 +233,6 @@ def projector_rows():
     add("Qwen3-VL-4B, main merger", "1024 x 4 -> 4096 -> 2560", 4, 1, p, mm, "crates/qwen3vl")
     p_ds = ln_post + linear_count(mrg, mrg) + linear_count(mrg, 2560)
     add("Qwen3-VL-4B, one DeepStack merger", "1024 x 4 -> 4096 -> 2560", 4, 1, p_ds, mm, "norm over the 4096")
-    # Qwen3-VL-30B-A3B: tower 1152, out 2048
-    mrg2 = 4 * 1152
-    p = 2 * 1152 + linear_count(mrg2, mrg2) + linear_count(mrg2, 2048)
-    add("Qwen3-VL-30B-A3B, main merger", "1152 x 4 -> 4608 -> 2048", 4, 1, p, mrg2 * mrg2 + mrg2 * 2048, "crates/qwen3vlmoe")
     # DeepSeek-VL: split aligner, two streams of 1024, each to 2048, concatenated to 4096, then 4096 -> 4096
     p = 2 * linear_count(1024, 2048) + linear_count(4096, 4096)
     add("DeepSeek-VL-7B, split aligner", "(1024, 1024) -> (2048 + 2048) -> 4096", 2, 1, p, 2 * 1024 * 2048 + 4096 * 4096, "crates/deepseekvl")
@@ -875,8 +871,6 @@ def _crate_rows():
          "two layers 1024 -> 5120 -> 5120", sq(336, 14), "Vicuna-1.5-13B, 40 layers, width 5120, no grouping"),
         ("qwen3vl", "ViT 24 x 1024, two-axis RoPE, DeepStack taps after blocks 5, 11, 17 (from 0)", "448 x 448", _int(sq(448, 16)),
          "merge 2 x 2, then 4096 -> 4096 -> 2560", sq(448, 16) // 4, "Qwen3 4B preset, 36 layers, width 2560, 32 / 8 heads"),
-        ("qwen3vlmoe", "the same tower at 27 x 1152, taps after blocks 8, 16, 24 (from 0)", "448 x 448", _int(sq(448, 16)),
-         "merge 2 x 2, then 4608 -> 4608 -> 2048", sq(448, 16) // 4, "48-layer sparse decoder, 128 experts, 8 per token"),
         ("minicpmv", "NaViT SigLIP 27 x 1152, window merger after block 6", "448 x 448", f"{_int(sq(448, 14) // 4)} (of {_int(sq(448, 14))} patches)",
          "merge 2 x 2 (MLP), after the window merger", sq(448, 14) // 16, "Qwen3.5-0.8B, hybrid layers"),
         ("moondream3", "SigLIP 27 x 1152 on 378-pixel crops", "378 x 378", _int(sq(378, 14)),
@@ -906,7 +900,6 @@ def crate_entry():
         ("llava", "shortest edge to 336, centre crop", "id `-200`, expanded to 576 rows", "one-dimensional"),
         ("qwen3vl", "dynamic: multiples of 32, area 56^2 to 3584^2", "`vision_start`, N pad ids, `vision_end`",
          "multi-axis, sections 24, 20, 20"),
-        ("qwen3vlmoe", "as qwen3vl", "as qwen3vl (host-side gather, then row splice)", "multi-axis, sections 24, 20, 20"),
         ("minicpmv", "source view and up to 9 slices of about 448", "`image` marker, pad ids, then a `slice` marker and pad run per slice",
          "one-dimensional"),
         ("moondream3", "global crop and up to 12 overlapping crops, pooled to 27 x 27", "`bos`, then 729 rows as a prefix attended bidirectionally",

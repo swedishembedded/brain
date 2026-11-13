@@ -69,6 +69,7 @@ class Book:
     front: list[str]
     back: list[str]
     volumes: list[Volume]
+    omitted: dict[str, str]
 
     def chapters(self):
         for v in self.volumes:
@@ -91,4 +92,5 @@ def load() -> Book:
             ))
         volumes.append(vol)
     return Book(title=raw["title"], subtitle=raw["subtitle"], author=raw["author"], author_email=raw["author_email"],
-                front=list(raw["front"]), back=list(raw["back"]), volumes=volumes)
+                front=list(raw["front"]), back=list(raw["back"]), volumes=volumes,
+                omitted=dict(raw.get("omitted") or {}))

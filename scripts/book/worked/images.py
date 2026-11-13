@@ -508,10 +508,6 @@ def bilinear_examples():
     return "\n".join(out).rstrip()
 
 
-def nearest_pixel(o, n_in, n_out):
-    return (2 * o + 1) * n_in // (2 * n_out)
-
-
 def nearest_floor(o, n_in, n_out):
     return o * n_in // n_out
 
@@ -522,11 +518,11 @@ def nearest_rules():
            "pick different source pixels. The counts use exact integer arithmetic, the rule of real numbers.", ""]
     rows = []
     for n_in, n_out in ((3, 2), (4, 2), (5, 3), (7, 4), (479, 640), (640, 224), (1080, 640), (2048, 576)):
-        diff = sum(1 for o in range(n_out) if nearest_pixel(o, n_in, n_out) != nearest_floor(o, n_in, n_out))
+        diff = sum(1 for o in range(n_out) if nearest_tap(o, n_in, n_out) != nearest_floor(o, n_in, n_out))
         rows.append([n_in, n_out, diff, n_out, f"{100 * diff / n_out:.1f}"])
     out.append(_table(["n_in", "n_out", "outputs that differ", "of", "%"], rows))
     out.append("")
-    out.append(f"For 3 to 2: half-pixel picks source indices {[nearest_pixel(o, 3, 2) for o in range(2)]}, asymmetric picks "
+    out.append(f"For 3 to 2: half-pixel picks source indices {[nearest_tap(o, 3, 2) for o in range(2)]}, asymmetric picks "
                f"{[nearest_floor(o, 3, 2) for o in range(2)]}.")
     return "\n".join(out)
 
@@ -534,28 +530,36 @@ def nearest_rules():
 # ------------------------------------------------------------------------------------------------ letterbox
 
 
+def nearest_tap(o, n_in, n_out):
+    """The source index half-pixel nearest neighbour takes for output o: the integer form of round_half_up((o + 0.5) n_in / n_out
+    - 0.5), clamped to the last source index. n_in is the source extent and n_out the extent of the resized image."""
+    return min((2 * o + 1) * n_in // (2 * n_out), n_in - 1)
+
+
 def letterbox_plan(w0, h0, size):
+    """Scale, content size, and the whole-pixel pad above/left (floor of half the slack). The extra pixel of an odd slack goes below
+    and right."""
     s = min(size / w0, size / h0)
     new_w, new_h = half_up(w0 * s), half_up(h0 * s)
-    return s, new_w, new_h, (size - new_w) / 2, (size - new_h) / 2
+    return s, new_w, new_h, (size - new_w) // 2, (size - new_h) // 2
 
 
 def letterbox_grid():
     w0, h0, size = 7, 4, 8
     s, nw, nh, px, py = letterbox_plan(w0, h0, size)
-    sy = [min(max(half_up((yi + 0.5) / s - 0.5), 0), h0 - 1) for yi in range(nh)]
-    sx = [min(max(half_up((xi + 0.5) / s - 0.5), 0), w0 - 1) for xi in range(nw)]
-    ox, oy = int(px), int(py)
+    sy = [nearest_tap(yi, h0, nh) for yi in range(nh)]
+    sx = [nearest_tap(xi, w0, nw) for xi in range(nw)]
     grid = [["  ." for _ in range(size)] for _ in range(size)]
     for yi in range(nh):
         for xi in range(nw):
-            grid[yi + oy][xi + ox] = f"{sy[yi] * w0 + sx[xi]:3d}"
+            grid[yi + py][xi + px] = f"{sy[yi] * w0 + sx[xi]:3d}"
     out = [f"A {w0} by {h0} image (pixels numbered 0 to {w0 * h0 - 1} in row-major order) is letterboxed onto an {size} by {size} "
-           f"square. Scale s = min({size}/{w0}, {size}/{h0}) = {s:.6f}; content {nw} by {nh}; padding (pad_x, pad_y) = ({_num(px, 1)}, {_num(py, 1)}); "
-           f"the content is pasted at the integer offset ({ox}, {oy}). Source column of each content column: {sx}; source row of each content row: {sy}. "
-           "Both axes use the scale itself, not the ratio of the rounded content size: content cell o takes source index "
-           "floor((o + 0.5) / s), clamped to the image (the half-pixel rule above written for the inverse scale), which is why the five "
-           "content rows are not the five-row ratio 4/5 of the source. "
+           f"square. Scale s = min({size}/{w0}, {size}/{h0}) = {s:.6f}; content {nw} by {nh}; slack ({size - nw}, {size - nh}); "
+           f"padding above and left (pad_x, pad_y) = ({px}, {py}) = floor(slack / 2), below and right ({size - nw - px}, {size - nh - py}). "
+           f"Source column of each content column: {sx}; source row of each content row: {sy}. "
+           "Each axis takes content cell o from source index min(floor((2 o + 1) n_in / (2 n_out)), n_in - 1), "
+           "where n_in is the source extent of the axis (7 and 4) and n_out the content extent (8 and 5): "
+           "the half-pixel rule above written in integers, with the sizes of the two images and not the scale. "
            "Each cell shows the number of the source pixel that fills it, and . is padding.", ""]
     out.append("```text")
     for row in grid:
@@ -567,30 +571,33 @@ def letterbox_grid():
 def letterbox_data():
     w0, h0, size = 7, 4, 8
     s, nw, nh, px, py = letterbox_plan(w0, h0, size)
-    sy = [min(max(half_up((yi + 0.5) / s - 0.5), 0), h0 - 1) for yi in range(nh)]
-    sx = [min(max(half_up((xi + 0.5) / s - 0.5), 0), w0 - 1) for xi in range(nw)]
-    return w0, h0, size, nw, nh, int(px), int(py), sx, sy
+    sy = [nearest_tap(yi, h0, nh) for yi in range(nh)]
+    sx = [nearest_tap(xi, w0, nw) for xi in range(nw)]
+    return w0, h0, size, nw, nh, px, py, sx, sy
 
 
-def letterbox_bias():
-    out = ["The content of a letterbox is pasted at the truncated offset int(pad), while boxes are mapped with the float pad. "
-           "For an image whose scale is exactly 1 the two differ by pad - int(pad).", ""]
+def box_iou_shifted(k, shift):
+    """IoU of the box (0, 0, k, k) with the same box moved down by `shift` rows (areas of rectangles, x extents equal)."""
+    inter = k * max(k - shift, 0.0)
+    return inter / (2 * k * k - inter)
+
+
+def letterbox_pad():
+    out = ["The pad of a letterbox is whole pixels: floor(slack / 2) above and left, the rest below and right. Pixels and boxes "
+           "share it, so the box mapping sends the original's row 0 to the row where the content starts (pad above). "
+           "slack = size - content.", ""]
     rows = []
     for w0, h0, size in ((4, 3, 4), (640, 479, 640), (640, 480, 640)):
         s, nw, nh, px, py = letterbox_plan(w0, h0, size)
-        rows.append([f"{w0} x {h0} to {size}", _num(s, 4), f"{nw} x {nh}", _num(px, 1), _num(py, 1), int(py), _num(py - int(py), 1)])
-    out.append(_table(["image to square", "scale", "content", "pad_x", "pad_y", "pasted at y", "bias in y (px)"], rows))
-    # IoU of a w x w box mapped by float pad against the pixels' true footprint, for a box of side k
+        slack = size - nh
+        rows.append([f"{w0} x {h0} to {size}", _num(s, 4), f"{nw} x {nh}", slack, py, slack - py, py])
+    out.append(_table(["image to square", "scale", "content", "slack in y", "pad above", "pad below", "row 0 maps to y"], rows))
     out.append("")
-    ious = []
-    for k in (1, 2, 4, 16, 64):
-        inter = k - 0.5
-        ious.append([k, f"{inter / (k + 0.5):.4f}"])
-    out.append("A box of k by k pixels at the top of the image, mapped with the float pad 0.5 while its pixels sit at pad 0, overlaps the "
-               "footprint of the pixels it should cover by k - 0.5 rows of k, so the intersection over union (here the area of the "
-               "overlap divided by the area of the union, in one dimension of extent k with a shift of 0.5) is:")
+    out.append("What a frame that disagrees with its pixels by half a row would cost. A box of k by k pixels, written (x1, y1, x2, y2) = "
+               "(0, 0, k, k), is compared with the same box moved down by 0.5; the IoU is the overlap area divided by the union "
+               "area, k (k - 0.5) / (2 k^2 - k (k - 0.5)) = (k - 0.5) / (k + 0.5).")
     out.append("")
-    out.append(_table(["k", "(k - 0.5) / (k + 0.5)"], ious))
+    out.append(_table(["k", "IoU after a shift of 0.5"], [[k, f"{box_iou_shifted(k, 0.5):.4f}"] for k in (1, 2, 4, 16, 64)]))
     return "\n".join(out)
 
 

@@ -1,4 +1,4 @@
-<!-- source-sha256: cbbbf49e566611b525f4d5a93dedd90968404c404295adb6b5915bb4d5bcb04c -->
+<!-- source-sha256: 3471c3dbd8e134c236c86b627f03e7e1769adfaebbdf6743b7dfbac84bd3cf44 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400" width="700" height="400"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="700" height="400" fill="#ffffff"/>
 <text x="350" y="32.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Toy network: 283 parameters, 5,778 multiply-adds per image</text>
 <rect x="34" y="62" width="140" height="124" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>

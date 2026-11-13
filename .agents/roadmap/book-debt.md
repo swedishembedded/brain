@@ -44,26 +44,42 @@ Vision and generation:
       `resize_nearest` mode 1 (half-pixel, integer form) and `pad2d` constant/edge fill; `Ctx::letterbox` on the device,
       `letterbox_rgb` its bitwise-equal host twin for host-memory callers, yolov5's board letterbox on the same tap;
       yolov5 golden regenerated (v07 ch01, ch04, ch12).
-- [ ] yolov8 `detect_batch` and yolov5 `Yolov5::detect` letterbox on the host and upload: feed `Ctx::letterbox`'s buffer
-      into the network input with a device copy (`Gpu::copy_to`, per-image offset for yolov8's batch), registering
-      `resize_nearest`/`pad2d` on their handles.
-- [ ] imaging: migrate the call sites the crate header lists as owed (v07 ch01).
-- [ ] clip: DeepSeek-OCR vision tower activation agrees with upstream (v07 ch08).
-- [ ] zipdepth: scale-and-shift-invariant loss with gradient term and a real loader (v07 ch05).
+- [x] yolov8 `detect_batch` and yolov5 `detect` letterbox on the device (`Ctx::letterbox_hwc_into`), bitwise equal to the
+      host path.
+- [ ] yolov8 tests (p5_overfit, p6_infer, p7, p11) and the GPT convergence suite gate on `MOE_SKIP_GPU_TESTS` directly,
+      which .agents/rules/testing.md routes through `brain_testutil` (found while moving the letterbox).
+- [x] imaging: the owed call sites moved: s3dit latent mask (`mask::downsample`, `feather` with `FeatherEdge::Replicate`),
+      outpaint canvas (two `Ctx::pad` on the VAE device), range maps via `pixels::{hwc_unit_to_chw_signed,
+      chw_signed_to_hwc_unit}` in s3dit, flux1, flux2, sdxlunet, supir, controlnet (v07 ch01).
+- [x] clip: DeepSeek-OCR vision tower runs quick-GELU on both import paths, as upstream and the tiny ladder; the tiny
+      ladder runs again (trainable taps, frozen build gated at its outputs) (v07 ch08).
+- [x] zipdepth: MiDaS SSI MSE + 4-scale gradient matching (closed-form fit, exact gradient, f64-oracle check), a paired
+      RGB/16-bit depth dataset, `--data`/`--grad-weight` (v07 ch05).
 - [x] instantid: per-site k and v computed once in `set_id` (v08 ch11).
-- [ ] rrdbnet: exact tiling or an asserted seam bound (v08 ch12).
-- [ ] vqgan / mimi: perceptual (lpips) and adversarial terms wired into training (v08 ch03, ch04, v09 ch03).
+- [x] rrdbnet: exact tiling, windows of tile + 2R inside the image with R derived from the graph (349 at x4plus);
+      bitwise equal to the whole-image pass (v08 ch12).
+- [x] vqgan: LPIPS (VGG16 and AlexNet trunks, input gradient), PatchGAN with hinge loss, adaptive weight, disc_start,
+      device entropy term; llamagen_vq16 and codeformer presets read off the upstream files (v08 ch03, ch04).
+- [x] mimi: HiFi-GAN multi-period and multi-scale discriminators, LSGAN and feature matching in the trainer, taking
+      the saved-activation policy (v08 ch04, v09 ch03).
 
 Audio, video, simulation:
-- [ ] mimi: apply the encoder sliding window (v09 ch03).
-- [ ] mimi: mel reconstruction backward with gradcheck, used by the trainer (v09 ch03).
-- [ ] qwen3omnimoe: time-aligned M-RoPE positions and chunked interleave, or reject what is parsed and ignored; reject
-      ignored sampling parameters (v09 ch08).
-- [ ] minimaxmusic3: wire or remove the uncalled discriminator backward; train.rs states only what exists (v09 ch07).
-- [ ] videocodec / imaging: seek to the preceding key frame (v10 ch01).
-- [ ] ltxv / wan: real positions and per-token timesteps in `make_flow_batch`; Wan image-to-video or drop `Task::I2v` (v10 ch02).
-- [ ] genieredux: multi-pass MaskGIT sampler gated against a reference (v10 ch07).
-- [ ] genieredux / diamond: what the volume promises (KV cache, `WorldModel`, reward head) or a corrected promise (v10 ch07).
+- [x] mimi: the encoder applies its sliding window (unit spec: frames outside the window cannot reach the output) (v09 ch03).
+- [x] mimi: multi-scale log-mel L1 with its backward (`audio::mel::log_mel_backward`, gradchecked), weight 45 in the trainer (v09 ch03).
+- [x] qwen3omnimoe: generate samples, stops, scans tool calls and thinking through the shared machinery; audio+video in
+      one prompt refused (positions frame-ordinal; the unread config fields removed); DeepStack injected; speak and
+      converse cancellable (v09 ch08).
+- [x] minimaxmusic3: joint vocoder GAN loop (multi-resolution STFT discriminators, LSGAN, feature matching) (v09 ch07).
+- [x] videocodec / imaging: `decode_from` starts at the key frame before the first asked frame (container key flags,
+      sequence header prepended when missing); `decode_frames_at` uses it (v10 ch01).
+- [x] ltxv / wan: training batches use inference's positions, keyframe mask and per-token timesteps (conditioned
+      tokens clean, timestep 0, outside the loss, as LTX-Video-Trainer); wan has one RoPE grid builder (v10 ch02). Wan image-to-video: user decision
+      2026-11-13, `Task::I2v` stays and the book does not describe it.
+- [x] genieredux: the reference MaskGIT sampler (Dynamics.sample) ported and pinned on a tiny model; real-checkpoint
+      parity of more than one pass needs the checkpoint (v10 ch07).
+- [x] genieredux: frame cache (bitwise equal to recompute), `WorldModel`, CLI entry. The chapter describes DIAMOND as
+      the port it is (no reward head) (v10 ch07).
+- [x] genieredux cache is device-resident (no per-frame re-upload, `Gpu::uploaded_bytes` proves it).
 - [ ] flybody: muscle polarity pinned per muscle by a MuJoCo sweep (v10 ch08).
 
 Forecasting and decisions:
@@ -101,13 +117,20 @@ Forecasting and decisions:
 - [x] Commit d9da9049b (gradcheck tied GPT-2 check) landed before 961487746 (the gpt2 tie) and does not build alone. Both
       are published, so history is not rewritten; every commit from 961487746 on builds, and no chapter cites d9da9049b.
 
+- [x] mimi `recon::tests::decoder_weight_grad_is_taken_at_the_quantized_latent` checks with a relative `2e-2`: its
+      weights (seed 42) and input are fixed, so the comparison is one deterministic number, not a random draw that can
+      land on a cancellation; no change needed.
+
+- [x] ltxv `av_concept_learning`: an unprinted random seed with ~1/30 negative margin; now 8 printed seeds, mean gain.
+
 ## Open: needs hardware, weights or a reference the box does not have
 
 - [ ] cli: `brain forecast finetune --chronos2/--fincast` over the new host fine-tunes (needs a brain-cli build, which
       this workstation does not run; the forecast CLI's control-gate line is likewise compiled only in CI).
 - [ ] vulkan coopmat: parity test against a CPU reference, gated on the capability (written here, run on an sm_75+ device) (v04 ch06).
 - [ ] rknpu: SiLU LUT lowering, stem space-to-depth, max pool on the NPU, CMA load order (needs the board) (v04 ch13).
-- [ ] qwen3vlmoe: import and gate the 30B-A3B checkpoint, or remove the crate (v07 ch09).
+- [ ] qwen3vlmoe: import and gate the 30B-A3B checkpoint. User decision 2026-11-13: the crate stays and the book does
+      not describe it (v07 ch09).
 - [ ] moondream3 crop geometry, fastvlm preprocessing, pulid end to end: reference dumps (v07 ch06, ch09, v08 ch11).
 - [ ] kaldi fbank: torchaudio reference dump (v09 ch05).
 - [ ] s3tokenizer: speech_tokenizer_v3 for CosyVoice 3 (v09 ch06).
@@ -118,5 +141,5 @@ Forecasting and decisions:
 
 - [ ] The 16 passages that describe defects already fixed (stale text). Done: v03 ch10, ch11; v05 ch09, ch11; v06 ch10;
       v08 ch11; v09 ch08; v10 ch07, ch08 (two); v11 ch04, ch06 (reframed as found and fixed, with a crate test of the
-      floor trade). Narrated as found-and-fixed history, kept: v03 ch12, v09 ch06, ch09. Open: v07 ch12 (two, with the
-      letterbox rewrite of v07 ch01, ch04, ch12).
+      floor trade). Narrated as found-and-fixed history, kept: v03 ch12, v09 ch06, ch09. v07 ch12 (two) rewritten with the
+      letterbox. Volume VII describes the corrected code throughout; VIII to X follow.

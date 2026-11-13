@@ -176,9 +176,10 @@ def letterbox_plan():
     return s, nw, nh, (SIZE - nw) // 2, (SIZE - nh) // 2
 
 
-def src_index(o, s, n_in):
-    """Source index of content pixel o: the nearest rule, round half up of (o + 0.5) / s - 0.5, clamped to the image."""
-    return min(max(images.half_up((o + 0.5) / s - 0.5), 0), n_in - 1)
+def src_index(o, n_in, n_out):
+    """Source index of content pixel o: the half-pixel nearest rule floor((2 o + 1) n_in / (2 n_out)), clamped to the image, with
+    n_in the frame's extent on the axis and n_out the content's."""
+    return images.nearest_tap(o, n_in, n_out)
 
 
 def detector_view(t):
@@ -187,9 +188,9 @@ def detector_view(t):
     s, nw, nh, px, py = letterbox_plan()
     out = [[[PAD] * SIZE for _ in range(SIZE)] for _ in range(3)]
     for yo in range(nh):
-        ys = src_index(yo, s, H)
+        ys = src_index(yo, H, nh)
         for xo in range(nw):
-            xs = src_index(xo, s, W)
+            xs = src_index(xo, W, nw)
             for c in range(3):
                 out[c][py + yo][px + xo] = frames[t][ys][xs][c] / 255.0
     return out
@@ -230,8 +231,8 @@ def views_table():
     sv = segmenter_view(0)
     data = bytes(int(images.half_up(v[c][y][x] * 255)) for y in range(SIZE) for x in range(SIZE) for c in range(3))
     sdig = hashlib.sha256(data).hexdigest()[:12]
-    ys = [src_index(o, s, H) for o in range(nh)]
-    xs_first = [src_index(o, s, W) for o in range(8)]
+    ys = [src_index(o, H, nh) for o in range(nh)]
+    xs_first = [src_index(o, W, nw) for o in range(8)]
     pad_rows = [y for y in range(SIZE) if not (py <= y < py + nh)]
     sumd = sum(v[c][y][x] for c in range(3) for y in range(SIZE) for x in range(SIZE))
     sums = sum(sv[c][y][x] for c in range(3) for y in range(SIZE) for x in range(SIZE))
@@ -251,7 +252,7 @@ def views_table():
     ]
     lead = ("Frame 0 of the clip, read two ways. The detector's view: scale = min(64/96, 64/61); content size round half up of "
             "(96 * scale, 61 * scale); padding floor((64 - content) / 2) per axis; content pixel (yo, xo) copies the frame pixel "
-            "(floor((yo + 0.5) / scale), floor((xo + 0.5) / scale)) (the nearest rule, round half up of (o + 0.5) / scale - 0.5); values byte / 255, "
+            "(floor((2 yo + 1) 61 / (2 41)), floor((2 xo + 1) 96 / (2 64))) (the half-pixel nearest rule in integers: floor((2 o + 1) n_in / (2 n_out)) with the frame's extent on the axis and the content's); values byte / 255, "
             "padding 114 / 255, no normalization. The segmenter's view: each channel's byte / 255 plane resized to 64 by 64 by the "
             "half-pixel bilinear rule of Chapter 1, then (x - mean) / std with mean (0.485, 0.456, 0.406) and std (0.229, 0.224, 0.225). "
             "Sums run over channel, row, column with one accumulator.")
@@ -767,7 +768,7 @@ def planted_mistakes():
     rows.append(["the inverse letterbox does not subtract the padding", "detector tail",
                  f"{m[0]} of {m[1]} found" + (f", mean IoU {_fx(m[2], 3)}" if m[0] else ""), "found count"])
     m = detection_quality(inverse=_float_pad_inverse)
-    rows.append(["the inverse uses the padding 11.5 where the pixels were pasted at 11", "detector tail",
+    rows.append(["the inverse uses half the slack, 11.5, where the pixels were pasted at 11", "detector tail",
                  f"{m[0]} of {m[1]} found, mean IoU {_fx(m[2], 3)}", "mean IoU, not the count"])
     view0 = segmenter_view(0)
     tr = truth(0)

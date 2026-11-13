@@ -793,8 +793,8 @@ def map_table():
 
 def letterbox(w0, h0, size):
     s = min(size / w0, size / h0)
-    nw, nh = round(w0 * s), round(h0 * s)
-    return s, nw, nh, (size - nw) / 2, (size - nh) / 2
+    nw, nh = math.floor(w0 * s + 0.5), math.floor(h0 * s + 0.5)
+    return s, nw, nh, (size - nw) // 2, (size - nh) // 2
 
 
 def apply_lb(b, lb):
@@ -827,15 +827,18 @@ def unletterbox():
     }
     rows = [[k, _box(tuple(round(v, 2) for v in b)), _f(iou(b, truth))] for k, b in errs.items()]
     out.append("\nWhat each mistake in the inverse gives, and its IoU with the true box:\n\n" + _table(["inverse", "box", "IoU with the truth"], rows, "llr"))
-    # odd padding: 7 x 4 into 8 x 8 (the case of Volume VII, Chapter 1)
+    # whole-pixel padding: 7 x 4 into 8 x 8 (the case of Volume VII, Chapter 1)
     w1, h1, s1 = 7, 4, 8
     lb1 = letterbox(w1, h1, s1)
+    slack = s1 - lb1[2]
     pad = lb1[4]
-    out.append(f"\nWith odd padding the pixels and the boxes can disagree. A {w1} by {h1} image fitted to {s1} by {s1} has scale {_f(lb1[0], 6)}, content "
-               f"{lb1[1]} x {lb1[2]} and pad_y = {_g(pad)}. Boxes are mapped with the float {_g(pad)}, but a pixel row y of the content is written to "
-               f"row y + int(pad_y) = y + {int(pad)}. An edge at row y of the original is therefore drawn by the box rule at y * scale + {_g(pad)} while "
-               f"the pixels of that row are written near y * scale + {int(pad)}: the boxes sit {_g(pad - int(pad))} input pixel below the pixels, "
-               f"which is {_f((pad - int(pad)) / lb1[0], 4)} pixel of the original.")
+    ious = [iou((0, 0, k, k), (0, 0.5, k, k + 0.5)) for k in (10, 100)]
+    out.append(f"\nThe padding is whole pixels. A {w1} by {h1} image fitted to {s1} by {s1} has scale {_f(lb1[0], 6)}, content "
+               f"{lb1[1]} x {lb1[2]}, a slack of {slack} rows and pad_y = floor({slack} / 2) = {pad}: {pad} padding row above the content and {slack - pad} below. "
+               f"The pixels are written from row {pad} and the boxes are mapped with the same {pad}, so the original's row 0 is at input row {pad} for both. "
+               f"A box rule that took half the slack, {_g(slack / 2)}, would put every box {_g(slack / 2 - pad)} input pixel below the pixels it was found on, "
+               f"{_f((slack / 2 - pad) / lb1[0], 4)} pixel of the original; the IoU of a box of height 10 input pixels with itself shifted by 0.5 is "
+               f"{_f(ious[0], 4)}, and of one of height 100 {_f(ious[1], 4)}.")
     return "\n".join(out)
 
 

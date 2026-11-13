@@ -956,6 +956,139 @@ def alignment():
             + _table(["(a, b)", "sum of squared residuals", "increase over the minimum"], probes))
 
 
+MIDAS_SCALES = 4
+MIDAS_ALPHA = 0.5
+
+
+def _midas_grid():
+    """The scene's 8 by 8 maps for the loss: prediction p (the alignment example's u, 0 on the sky), target t (the true inverse
+    depth, 0 on the sky) and the validity mask M (1 on the non-sky pixels). The sky values never enter any sum."""
+    px = valid_pixels()
+    pred = predicted_inverse_depth()
+    p = [[0.0] * W for _ in range(H)]
+    t = [[0.0] * W for _ in range(H)]
+    m = [[False] * W for _ in range(H)]
+    for (y, x, v), u in zip(px, pred):
+        p[y][x], t[y][x], m[y][x] = u, v, True
+    return p, t, m
+
+
+def _midas_fit(p, t, m):
+    """(a, b) of the masked least squares by the closed form (8), or the degenerate-case rule of the loss."""
+    cells = [(y, x) for y in range(H) for x in range(W) if m[y][x]]
+    if len(cells) < 2:
+        raise ValueError("fewer than 2 valid pixels")
+    a00 = sum(p[y][x] * p[y][x] for y, x in cells)
+    a01 = sum(p[y][x] for y, x in cells)
+    a11 = float(len(cells))
+    b0 = sum(p[y][x] * t[y][x] for y, x in cells)
+    b1 = sum(t[y][x] for y, x in cells)
+    det = a00 * a11 - a01 * a01
+    if det / (a00 * a11) <= 1e-6:
+        return 1.0, (b1 - a01) / a11, (a00, a01, a11, b0, b1, det)
+    return (a11 * b0 - a01 * b1) / det, (a00 * b1 - a01 * b0) / det, (a00, a01, a11, b0, b1, det)
+
+
+def _midas_terms(p, t, m, fit=None):
+    """(L_ssi, per-scale gradient-matching sums, number of pairs per scale, |M|, s, b). R = s p + b - t. At scale k the residual is
+    subsampled at rows and columns that are multiples of 2^k; each subsampled pixel is paired with its right neighbour (x + 2^k)
+    and the one below it (y + 2^k); a pair counts only if both pixels are valid."""
+    s, b, _ = fit if fit else _midas_fit(p, t, m)
+    r = [[s * p[y][x] + b - t[y][x] for x in range(W)] for y in range(H)]
+    n = sum(1 for y in range(H) for x in range(W) if m[y][x])
+    ssi = sum(r[y][x] ** 2 for y in range(H) for x in range(W) if m[y][x]) / (2 * n)
+    sums, pairs = [], []
+    for k in range(MIDAS_SCALES):
+        step = 1 << k
+        g, c = 0.0, 0
+        for y in range(0, H, step):
+            for x in range(0, W, step):
+                for y2, x2 in ((y, x + step), (y + step, x)):
+                    if y2 < H and x2 < W and m[y][x] and m[y2][x2]:
+                        g += abs(r[y2][x2] - r[y][x])
+                        c += 1
+        sums.append(g)
+        pairs.append(c)
+    return ssi, sums, pairs, n, s, b
+
+
+def midas_loss_value(p, t, m, fit=None):
+    ssi, sums, _, n, _, _ = _midas_terms(p, t, m, fit)
+    return ssi + MIDAS_ALPHA * sum(sums) / n
+
+
+def midas_gradient(p, t, m):
+    """dL/dp_i for the loss with (s, b) refitted, by the closed form: m_i (s R_i / |M| + alpha s g_i + w_t t_i + w_p p_i + w_0) with
+    g_i the derivative of the unweighted gradient-matching sum (divided by |M|) with respect to R_i, and the three weights of the
+    terms through (s, b)."""
+    s, b, (a00, a01, a11, b0, b1, det) = _midas_fit(p, t, m)
+    n = a11
+    r = [[s * p[y][x] + b - t[y][x] for x in range(W)] for y in range(H)]
+    g = [[0.0] * W for _ in range(H)]
+    for k in range(MIDAS_SCALES):
+        step = 1 << k
+        for y in range(0, H, step):
+            for x in range(0, W, step):
+                for y2, x2 in ((y, x + step), (y + step, x)):
+                    if y2 < H and x2 < W and m[y][x] and m[y2][x2]:
+                        sg = (r[y2][x2] > r[y][x]) - (r[y2][x2] < r[y][x])
+                        g[y2][x2] += sg / n
+                        g[y][x] -= sg / n
+    g1 = sum(g[y][x] * p[y][x] for y in range(H) for x in range(W))
+    g0 = sum(g[y][x] for y in range(H) for x in range(W))
+    wt = MIDAS_ALPHA * (g1 * a11 - g0 * a01) / det
+    wp = MIDAS_ALPHA * (g1 * (-2 * s * a11) + g0 * (2 * b1 - 2 * b * a11)) / det
+    w0 = MIDAS_ALPHA * (g1 * (2 * s * a01 - b1) + g0 * (2 * b * a01 - b0)) / det
+    return [[(s * r[y][x] / n + MIDAS_ALPHA * s * g[y][x] + wt * t[y][x] + wp * p[y][x] + w0) if m[y][x] else 0.0
+             for x in range(W)] for y in range(H)]
+
+
+def midas_loss():
+    p, t, m = _midas_grid()
+    ssi, sums, pairs, n, s, b = _midas_terms(p, t, m)
+    grad_term = sum(sums) / n
+    total = ssi + MIDAS_ALPHA * grad_term
+    rows = [(k, 1 << k, pairs[k], _fx(sums[k], 6), _fx(sums[k] / n, 6)) for k in range(MIDAS_SCALES)]
+    # the gradient against central differences of the whole loss with (a, b) refitted at every probe
+    an = midas_gradient(p, t, m)
+    h = 1e-6
+    worst, scale = 0.0, 0.0
+    for y in range(H):
+        for x in range(W):
+            if not m[y][x]:
+                continue
+            old = p[y][x]
+            p[y][x] = old + h
+            up = midas_loss_value(p, t, m)
+            p[y][x] = old - h
+            dn = midas_loss_value(p, t, m)
+            p[y][x] = old
+            worst = max(worst, abs((up - dn) / (2 * h) - an[y][x]))
+            scale = max(scale, abs(an[y][x]))
+    # the degenerate cases: a constant prediction on the same mask, and one valid pixel
+    pc = [[0.3] * W for _ in range(H)]
+    sc, bc, _ = _midas_fit(pc, t, m)
+    one = [[(y, x) == (4, 4) for x in range(W)] for y in range(H)]
+    try:
+        _midas_fit(p, t, one)
+        refused = "accepted"
+    except ValueError as e:
+        refused = f"refused ({e})"
+    return ("The loss of a trained depth network on the 8 by 8 scene, with the predictions u of the alignment example on the 40 non-sky "
+            "pixels (valid, M) and the true inverse depth v as the target. R = a u + b - v with (a, b) the closed form (8) on M; "
+            "L_ssi = sum_M R^2 / (2 |M|); the gradient-matching term sums, for each scale k = 0, 1, 2, 3, abs(R_j - R_i) over the pairs "
+            "(i, j) of pixels at rows and columns that are multiples of 2^k, j the right neighbour (column + 2^k) or the one below "
+            "(row + 2^k) of i, counting a pair only where both pixels are valid, and divides the total by |M|; "
+            "L = L_ssi + 0.5 L_grad. Sums run over the pixels in row-major order.\n\n"
+            f"|M| = {n}, a = {s:.6f}, b = {b:.6f}, L_ssi = {ssi:.6f}, L_grad = {grad_term:.6f}, L = {total:.6f}.\n\n"
+            + _table(["scale k", "step 2^k", "valid pairs", "sum of abs(R_j - R_i)", "divided by |M|"], rows)
+            + f"\n\nThe analytic gradient of L with respect to the 40 valid predictions (the derivation of the text: a R / |M| for L_ssi, "
+            f"and for L_grad the direct term plus the terms through a and b) agrees with central differences (step 1e-6, (a, b) refitted at every probe), "
+            f"whose gradient entries are as large as {scale:.3f}, to the criterion: the largest difference is below 1e-7 ({'met' if worst < 1e-7 else 'NOT met'}).\n\n"
+            f"Degenerate cases. A constant prediction 0.3 on the same mask has no unique scale, and the fit falls back to a = 1, "
+            f"b = mean(v - u) = {bc:.6f} (here a = {sc:.0f}). One valid pixel is {refused}.")
+
+
 def depth_metrics(z_hat, z):
     """AbsRel, RMSE and the shares of pixels whose ratio max(z_hat/z, z/z_hat) is below 1.25, 1.25^2, 1.25^3."""
     n = len(z)

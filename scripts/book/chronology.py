@@ -100,7 +100,8 @@ def build(through: str) -> str:
     for ch in book.chapters():
         for c in ch.brain:
             explained[c].append(ch)
-    current = sorted(p.name for p in (ROOT / "crates").iterdir() if (p / "Cargo.toml").is_file())
+    # A crate the book deliberately omits (book.yaml `omitted`) has no place in its timeline either.
+    current = sorted(p.name for p in (ROOT / "crates").iterdir() if (p / "Cargo.toml").is_file() and p.name not in book.omitted)
     births = defaultdict(list)
     for c in current:
         if c in first_seen:

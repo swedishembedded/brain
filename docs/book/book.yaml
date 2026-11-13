@@ -21,6 +21,9 @@
 #   introduces  concept ids defined here (kebab-case, unique book-wide)
 #   requires    concept ids the chapter builds on
 #   brain       crates under crates/ whose implementation the chapter explains
+#
+# `omitted` lists, each with its reason, the crates the book deliberately does
+# not describe; every other crate must be explained by a chapter.
 
 title: "From First Principles to Intelligent Machines"
 subtitle: "The mathematics, algorithms and engineering of machine learning, told through the building of brain"
@@ -37,6 +40,9 @@ back:
   - glossary.md
   - history/chronology.md
   - about-the-author.md
+
+omitted:
+  qwen3vlmoe: "an architecture port not gated against its real checkpoint, which the book does not describe (author's decision, 2026-11-13)"
 
 volumes:
   - id: v01
@@ -618,7 +624,7 @@ volumes:
         question: "How do we give a language model eyes?"
         introduces: [vision-projector, image-token-splicing, dynamic-resolution, multimodal-position-encoding]
         requires: [vision-transformer, modern-decoder-recipe, contrastive-pretraining, multi-axis-rope, patch-embedding, image-resampling, special-tokens, kv-cache, prefill-phase, grouped-query-attention, rotary-position-embedding, cross-attention, bounding-box]
-        brain: [llava, qwen3vl, qwen3vlmoe, minicpmv, moondream3, deepseekvl, januspro, florence2, captioner, mirage]
+        brain: [llava, qwen3vl, minicpmv, moondream3, deepseekvl, januspro, florence2, captioner, mirage]
       - id: ocr
         title: "Reading Documents"
         question: "How does a model read a page of text from pixels, and how few tokens can a page be squeezed into?"

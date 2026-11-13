@@ -73,9 +73,9 @@ function detector_view(frame: array<int>[H, W, 3], S: int, fill: real) -> array<
             for x in 0 .. S:
                 out[c, y, x] = fill
     for yo in 0 .. new_h:
-        ys = min(floor((yo + 0.5) / s), H - 1)
+        ys = min((2 * yo + 1) * H // (2 * new_h), H - 1)
         for xo in 0 .. new_w:
-            xs = min(floor((xo + 0.5) / s), W - 1)
+            xs = min((2 * xo + 1) * W // (2 * new_w), W - 1)
             for c in 0 .. 3:
                 out[c, pad_y + yo, pad_x + xo] = frame[ys, xs, c] / 255.0
     return out
@@ -95,10 +95,10 @@ function segmenter_view(frame: array<int>[H, W, 3], S: int, mean: array<real>[3]
     return out
 ```
 
-The source index `floor((o + 0.5) / s)` is the nearest rule of Chapter 1 (round half up of $(o + 0.5)/s - 0.5$) written without the subtraction and the rounding. The padding is $\lfloor (S - \text{content})/2 \rfloor$ on each axis, and it is used both to paste the content and, later, to map boxes. That is a decision, and brain made a different one, which the section at the end of the chapter explains; this project keeps one padding for pixels and for boxes because a frame and its own coordinates should not disagree, and milestone 5 measures what the other choice costs. The fill is a parameter, 114/255, never a constant buried in the function.
+The source index `(2 * o + 1) * n_in // (2 * n_out)` is the nearest rule of Chapter 1, round half up of $(o + 0.5)\, n_{\mathrm{in}}/n_{\mathrm{out}} - 0.5$ written in integers, with $n_{\mathrm{in}}$ the frame's extent on the axis and $n_{\mathrm{out}}$ the content's (the rows use 61 and 41, and not the scale $2/3$, because the content was rounded). The padding is $\lfloor (S - \text{content})/2 \rfloor$ on each axis, and it is used both to paste the content and, later, to map boxes. That is the convention of brain's own letterbox too (the section at the end of the chapter): a frame and its own coordinates should not disagree, and milestone 5 measures what the other choice costs. The fill is a parameter, 114/255, never a constant buried in the function.
 
 <!-- worked: project_vision_pipeline.views_table -->
-Frame 0 of the clip, read two ways. The detector's view: scale = min(64/96, 64/61); content size round half up of (96 * scale, 61 * scale); padding floor((64 - content) / 2) per axis; content pixel (yo, xo) copies the frame pixel (floor((yo + 0.5) / scale), floor((xo + 0.5) / scale)) (the nearest rule, round half up of (o + 0.5) / scale - 0.5); values byte / 255, padding 114 / 255, no normalization. The segmenter's view: each channel's byte / 255 plane resized to 64 by 64 by the half-pixel bilinear rule of Chapter 1, then (x - mean) / std with mean (0.485, 0.456, 0.406) and std (0.229, 0.224, 0.225). Sums run over channel, row, column with one accumulator.
+Frame 0 of the clip, read two ways. The detector's view: scale = min(64/96, 64/61); content size round half up of (96 * scale, 61 * scale); padding floor((64 - content) / 2) per axis; content pixel (yo, xo) copies the frame pixel (floor((2 yo + 1) 61 / (2 41)), floor((2 xo + 1) 96 / (2 64))) (the half-pixel nearest rule in integers: floor((2 o + 1) n_in / (2 n_out)) with the frame's extent on the axis and the content's); values byte / 255, padding 114 / 255, no normalization. The segmenter's view: each channel's byte / 255 plane resized to 64 by 64 by the half-pixel bilinear rule of Chapter 1, then (x - mean) / std with mean (0.485, 0.456, 0.406) and std (0.229, 0.224, 0.225). Sums run over channel, row, column with one accumulator.
 
 | quantity | value | view |
 |---|---|---:|
@@ -108,15 +108,15 @@ Frame 0 of the clip, read two ways. The detector's view: scale = min(64/96, 64/6
 | padding rows | 0 to 10 and 52 to 63 (23 rows) | detector view |
 | source rows of the first 6 content rows | [0, 2, 3, 5, 6, 8] | detector view |
 | source columns of the first 8 content columns | [0, 2, 3, 5, 6, 8, 9, 11] | detector view |
-| SHA-256 (first 12 hex digits) of the 12,288 bytes round half up (255 v), serialized in H W C order: for each row, each column, the bytes r, g, b | 7e0df808cb20 | detector view |
-| sum of the 12,288 values (tolerance 1e-9) | 3543.070588 | detector view |
+| SHA-256 (first 12 hex digits) of the 12,288 bytes round half up (255 v), serialized in H W C order: for each row, each column, the bytes r, g, b | 257286e7bda2 | detector view |
+| sum of the 12,288 values (tolerance 1e-9) | 3547.631373 | detector view |
 | scale per axis (64/96, 64/61) | (0.666667, 1.049180) | segmenter view |
 | sum of the 12,288 normalized values (tolerance 1e-9) | -13516.819217 | segmenter view |
 | normalized value, channel 0, row 0, column 0 | -1.424351 | segmenter view |
 | normalized value, channel 2, row 31, column 40 | -0.947929 | segmenter view |
 <!-- /worked -->
 
-The frame is 96 by 61, so the letterbox scale is exactly $2/3$, the content is 64 by 41 and the 23 padding rows split 11 above and 12 below: the slack is odd, which is the case where a half pixel is in play. The segmenter's two scales are not equal, $64/96$ and $64/61$, which is the whole point of the next table: a box in frame pixels lands in different places in the two inputs, and a program that carries a box from one to the other by the wrong map is wrong by an amount that depends on the box.
+The frame is 96 by 61, so the letterbox scale is exactly $2/3$, the content is 64 by 41 and the 23 padding rows split 11 above and 12 below: the slack is odd, and the pad is whole pixels, 11 above (the floor of half the slack) and the extra row below, for the pixels and for the boxes alike. The segmenter's two scales are not equal, $64/96$ and $64/61$, which is the whole point of the next table: a box in frame pixels lands in different places in the two inputs, and a program that carries a box from one to the other by the wrong map is wrong by an amount that depends on the box.
 
 <!-- worked: project_vision_pipeline.box_maps_table -->
 The visible box of each object on frame 0 (frame pixels, x1 <= x < x2, y1 <= y < y2) carried into the detector's input (x s + pad_x, y s + pad_y with the integer padding) and into the segmenter's input (x 64/96, y 64/61); the last column maps the detector's box back by the inverse letterbox of Chapter 4.
@@ -244,21 +244,21 @@ The detector of milestone 2 on every frame: confidence threshold 0.25, class-awa
 
 | t | raw candidates | score >= 0.25 | kept by NMS | matched | false positives | missed | mean IoU of matches |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 0 | 57 | 29 | 3 | 3 | 0 | - | 0.815 |
-| 1 | 62 | 30 | 3 | 3 | 0 | - | 0.908 |
-| 2 | 63 | 28 | 3 | 3 | 0 | - | 0.852 |
-| 3 | 57 | 29 | 3 | 3 | 0 | - | 0.854 |
-| 4 | 62 | 30 | 3 | 3 | 0 | - | 0.909 |
-| 5 | 63 | 28 | 3 | 3 | 0 | - | 0.853 |
-| 6 | 57 | 28 | 3 | 3 | 0 | - | 0.799 |
-| 7 | 50 | 28 | 2 | 2 | 0 | - | 0.907 |
-| 8 | 54 | 26 | 2 | 2 | 0 | - | 0.879 |
-| 9 | 54 | 28 | 3 | 3 | 0 | - | 0.850 |
-| 10 | 62 | 30 | 3 | 3 | 0 | - | 0.909 |
-| 11 | 63 | 28 | 3 | 3 | 0 | - | 0.853 |
+| 0 | 60 | 29 | 3 | 3 | 0 | - | 0.823 |
+| 1 | 66 | 30 | 3 | 3 | 0 | - | 0.860 |
+| 2 | 66 | 28 | 3 | 3 | 0 | - | 0.827 |
+| 3 | 60 | 29 | 3 | 3 | 0 | - | 0.862 |
+| 4 | 66 | 30 | 3 | 3 | 0 | - | 0.861 |
+| 5 | 66 | 28 | 3 | 3 | 0 | - | 0.828 |
+| 6 | 60 | 28 | 3 | 3 | 0 | - | 0.807 |
+| 7 | 54 | 28 | 2 | 2 | 0 | - | 0.835 |
+| 8 | 57 | 26 | 2 | 2 | 0 | - | 0.842 |
+| 9 | 57 | 28 | 3 | 3 | 0 | - | 0.858 |
+| 10 | 66 | 30 | 3 | 3 | 0 | - | 0.861 |
+| 11 | 66 | 28 | 3 | 3 | 0 | - | 0.828 |
 <!-- /worked -->
 
-All 34 visible objects of the clip are found, none twice and none wrongly, and on the two frames where A is hidden the detector returns two boxes, which is the right answer and also the thing the tracker will be asked to agree with. The mean IoU of 0.864 over all 34 matches (the acceptance table repeats it) is a property of the stand-in's prescribed error and of the nearest-neighbour resize, which loses up to a frame pixel at each edge; it is not a number to improve, it is a number to reproduce.
+All 34 visible objects of the clip are found, none twice and none wrongly, and on the two frames where A is hidden the detector returns two boxes, which is the right answer and also the thing the tracker will be asked to agree with. The mean IoU of 0.841 over all 34 matches (the acceptance table repeats it) is a property of the stand-in's prescribed error and of the nearest-neighbour resize, which loses up to a frame pixel at each edge; it is not a number to improve, it is a number to reproduce.
 
 The threshold of the suppression is a choice with a range, and the stand-in lets you see the range:
 
@@ -322,10 +322,10 @@ The box prompts of frame 0 (the kept detections, in frame pixels) run through th
 |---|---:|---:|---:|---:|---:|---:|---:|
 | A | (7.19, 22.72, 18.32, 29.78) | 56 | 88 | 80 | 0.909 | 77 | 0.805 |
 | B | (71.18, 13.10, 90.92, 30.59) | 224 | 336 | 352 | 0.955 | 273 | 0.776 |
-| C | (76.82, 41.86, 85.28, 49.82) | 48 | 72 | 80 | 0.900 | 117 | 0.010 |
+| C | (76.19, 42.32, 85.73, 50.78) | 48 | 72 | 80 | 0.900 | 123 | 0.015 |
 <!-- /worked -->
 
-The three masks have IoU 0.909, 0.955 and 0.900 with the truth, from boxes that were themselves detected (so their errors are included). The last two columns are the mistake this milestone exists to catch. Carrying the box to the segmenter by the detector's map, scale $2/3$ and a padding of 11 rows, leaves A and B with a seed that still lands on the right object, since both are tall and near the middle, and masks that are shifted and clipped (0.805 and 0.776); for C, which sits low in the frame, the same error puts the seed on the background, and the mask is a patch of background of 117 pixels (0.010). A single test on the largest object would not have seen it. The lesson of Chapter 4 about boxes carries over: every map between coordinate systems is a place for a one-line mistake that leaves the output in a plausible place, and it needs a test per object, including an object that is not in the middle.
+The three masks have IoU 0.909, 0.955 and 0.900 with the truth, from boxes that were themselves detected (so their errors are included). The last two columns are the mistake this milestone exists to catch. Carrying the box to the segmenter by the detector's map, scale $2/3$ and a padding of 11 rows, leaves A and B with a seed that still lands on the right object, since both are tall and near the middle, and masks that are shifted and clipped (0.805 and 0.776); for C, which sits low in the frame, the same error puts the seed on the background, and the mask is a patch of background of 123 pixels (0.015). A single test on the largest object would not have seen it. The lesson of Chapter 4 about boxes carries over: every map between coordinate systems is a place for a one-line mistake that leaves the output in a plausible place, and it needs a test per object, including an object that is not in the middle.
 
 Chapter 7's decoder returns several masks with a predicted overlap each, and a caller picks one; the stand-in returns one. That is where the stand-in is weakest, and the extensions return to it. Everything else of the interface is kept: the encoder runs once per image and each prompt is a cheap call, which is how milestone 5 prices three prompts on one frame.
 
@@ -508,21 +508,21 @@ Each frame is also run through the detector. For every track that reports its ob
 
 | t | track A | track B | track C |
 |---|---:|---:|---:|
-| 0 | 0.845 | 0.864 | 0.850 |
-| 1 | 0.910 | 0.847 | 0.931 |
-| 2 | 0.832 | 0.882 | 0.827 |
-| 3 | 0.845 | 0.905 | 0.850 |
-| 4 | 0.910 | 0.925 | 0.931 |
-| 5 | 0.832 | 0.886 | 0.827 |
-| 6 | 0.806 | 0.864 | 0.850 |
-| 7 | absent | 0.847 | 0.931 |
-| 8 | absent | 0.882 | 0.827 |
-| 9 | 0.813 | 0.905 | 0.850 |
-| 10 | 0.910 | 0.925 | 0.931 |
-| 11 | 0.832 | 0.886 | 0.827 |
+| 0 | 0.845 | 0.864 | 0.797 |
+| 1 | 0.910 | 0.847 | 0.788 |
+| 2 | 0.832 | 0.882 | 0.765 |
+| 3 | 0.845 | 0.905 | 0.797 |
+| 4 | 0.910 | 0.925 | 0.788 |
+| 5 | 0.832 | 0.886 | 0.765 |
+| 6 | 0.806 | 0.864 | 0.797 |
+| 7 | absent | 0.847 | 0.788 |
+| 8 | absent | 0.882 | 0.765 |
+| 9 | 0.813 | 0.905 | 0.797 |
+| 10 | 0.910 | 0.925 | 0.788 |
+| 11 | 0.832 | 0.886 | 0.765 |
 <!-- /worked -->
 
-Every present track agrees with a detection of its class at an IoU of at least 0.8 (the smallest is 0.806), and the two frames where A is absent are the two where the detector returned two boxes. A pipeline that does this check on every frame has a tripwire: a track that is present with no agreeing detection is a drifted mask or a missed object, and one that is absent where a detection exists is an object the memory has lost.
+Every present track agrees with a detection of its class at an IoU of at least 0.75 (the smallest is 0.765), and the two frames where A is absent are the two where the detector returned two boxes. A pipeline that does this check on every frame has a tripwire: a track that is present with no agreeing detection is a drifted mask or a missed object, and one that is absent where a detection exists is an object the memory has lost.
 
 Now the mistakes. The acceptance of a project is meaningful only if it fails when the pipeline is wrong, so each of six is planted into an otherwise correct pipeline and measured:
 
@@ -531,18 +531,18 @@ Each planted mistake changes one thing in an otherwise correct pipeline and repo
 
 | planted mistake | stage | what the pipeline reports | the check that sees it |
 |---|---|---|---|
-| none | all three stages | 34 of 34 found, mean IoU 0.864 | baseline |
+| none | all three stages | 34 of 34 found, mean IoU 0.841 | baseline |
 | the detector's view has its channels in the order b, g, r | preprocessing | 12 of 34 found, mean IoU 0.885 | found count |
 | the inverse letterbox does not subtract the padding | detector tail | 0 of 34 found | found count |
-| the inverse uses the padding 11.5 where the pixels were pasted at 11 | detector tail | 34 of 34 found, mean IoU 0.786 | mean IoU, not the count |
-| the box prompt reaches the segmenter through the letterbox map | segmenter | mask IoU on frame 0: A 0.805, B 0.776, C 0.010 (correct: 0.909, 0.955, 0.900) | mask IoU per object |
+| the inverse uses half the slack, 11.5, where the pixels were pasted at 11 | detector tail | 34 of 34 found, mean IoU 0.823 | mean IoU, not the count |
+| the box prompt reaches the segmenter through the letterbox map | segmenter | mask IoU on frame 0: A 0.805, B 0.776, C 0.015 (correct: 0.909, 0.955, 0.900) | mask IoU per object |
 | attention without locality (rho = 1000) | tracker | mean mask IoU of A 0.505 and C 0.601 (correct: 0.928 and 0.936) | mean mask IoU of the two look-alikes |
 | a bank of the prompt frame and 2 recent frames | tracker | A present 111111100000 (correct: 111111100111); C mean IoU 0.830 (correct: 0.936) | presence pattern of A |
 <!-- /worked -->
 
 Three of the six are caught by a count of the objects found or by a pixel-level IoU, and a count is the cheapest check there is. A channel-order error in the detector's view (here because the red of A and C looks like blue to a program that expects red) finds only B, the green object that survives a swap of red and blue almost unchanged: which is why a test on a single neutral object would have passed. A missing padding subtraction finds nothing at all, because every box is 16.5 frame rows off (the padding of 11 input rows divided by the scale 2/3), more than the height of A.
 
-The one the count does not catch is the padding. The inverse letterbox with 11.5 where the pixels were pasted at 11 still finds all 34 objects, because a shift of half an input pixel is 0.75 frame pixel and the matching threshold is a coarse test; what it does is lower the mean IoU from 0.864 to 0.786, and the right acceptance test is the mean and not the count. This is the half-pixel defect that brain's own letterbox carries on purpose (the section below), measured here on objects of 8 to 22 pixels: 0.078 of IoU, which is the price of one convention being used for pixels and another for boxes. The last two are the tracker's: locality removed, and a short bank, each leaving the two look-alikes entangled or a track lost.
+The one the count does not catch is the padding. The inverse letterbox with 11.5 (half the slack, which no pixel row can sit at) where the pixels were pasted at 11 still finds all 34 objects, because a shift of half an input pixel is 0.75 frame pixel and the matching threshold is a coarse test; what it does is lower the mean IoU from 0.841 to 0.823, and the right acceptance test is the mean and not the count. This is the half-pixel disagreement that brain's letterbox once had between its pixels and its boxes (Chapter 1 tells the story of commit `4a7148ae9`, which gave them one whole-pixel pad), measured here on objects of 8 to 22 pixels: 0.018 of mean IoU, which is the price of one convention being used for pixels and another for boxes. The last two are the tracker's: locality removed, and a short bank, each leaving the two look-alikes entangled or a track lost.
 
 The last number is the cost. A frame costs the segmenter side what the formulas of Chapter 7 say, and the point of the pipeline's structure is which parts are paid once. The trunk (Hiera, 1,812 billion FLOPs for the large model) depends on the frame only; the memory attention, the decoder and the memory encoder are paid per track.
 
@@ -582,11 +582,11 @@ Expected values of the project, computed by this module. A tolerance of 0.001 or
 | 1 | SHA-256 (first 16 hex) of frames 0, 7 and 11 | 5206fd6a9bf2e8c8 / 2f3971e198d70e95 / 1d0bc3156b7d8ead | exact |
 | 1 | visible pixels of A at frames 0, 6, 7, 9 | 80 / 64 / 0 / 56 | exact |
 | 1 | detector view: scale, content, padding | 0.666667; 64 x 41; (0, 11) | 6 digits; exact |
-| 1 | sum of the 12,288 values: detector view, segmenter view of frame 0 | 3543.070588 / -13516.819217 | 1e-6 |
-| 2 | frame 0: candidates, with score at least 0.25, kept | 57 / 29 / 3 | exact |
+| 1 | sum of the 12,288 values: detector view, segmenter view of frame 0 | 3547.631373 / -13516.819217 | 1e-6 |
+| 2 | frame 0: candidates, with score at least 0.25, kept | 60 / 29 / 3 | exact |
 | 2 | frame 0: IoU evaluations of suppression at 0.45 and kept at 0.8 and 0.99 | 30; 6 and 29 | exact |
-| 2 | boxes found, of all visible, over the 12 frames; mean IoU | 34 of 34; 0.864 | exact; 0.001 |
-| 2 | frame 0 kept boxes in frame pixels, by falling score, with the object each matches | A (7.19, 22.72, 18.32, 29.78) 1.000; B (71.18, 13.10, 90.92, 30.59) 0.775; C (76.82, 41.86, 85.28, 49.82) 0.553 | 0.01; 0.001 |
+| 2 | boxes found, of all visible, over the 12 frames; mean IoU | 34 of 34; 0.841 | exact; 0.001 |
+| 2 | frame 0 kept boxes in frame pixels, by falling score, with the object each matches | A (7.19, 22.72, 18.32, 29.78) 1.000; B (71.18, 13.10, 90.92, 30.59) 0.775; C (76.19, 42.32, 85.73, 50.78) 0.714 | 0.01; 0.001 |
 | 3 | mask pixels in the input / in the frame (A, B, C) and IoU with the truth | A 56/88; B 224/336; C 48/72; IoU 0.909, 0.955, 0.900 | exact; 0.001 |
 | 4 | presence string over frames 0 to 11 of A, B, C | A 111111100111, B 111111111111, C 111111111111 | exact |
 | 4 | mean mask IoU over the visible frames of A, B, C | 0.928, 0.970, 0.936 | 0.001 |
@@ -596,19 +596,17 @@ Expected values of the project, computed by this module. A tolerance of 0.001 or
 | 5 | GFLOPs of the clip, 3 tracks sharing the trunk / not sharing it | 37,860.28 / 81,351.80 | 0.01 |
 <!-- /worked -->
 
-Beyond the table, an implementation passes when it also meets these, all of which are in the tables above: the per-frame rows of the detector table (the raw, filtered and kept counts, and 34 of 34 found); the pixel counts of the segmentation table and its two shifted-prompt IoUs (0.805, 0.776 and 0.010); the three presence strings of the full bank, with A absent on frames 7 and 8 and nowhere else; the ablation table's presence strings and mean IoUs; and every one of the six planted mistakes producing the number the table prints, to its stated resolution. The mistakes are not optional: a pipeline that passes the clean rows and does not fail the planted ones has a test that cannot fail.
+Beyond the table, an implementation passes when it also meets these, all of which are in the tables above: the per-frame rows of the detector table (the raw, filtered and kept counts, and 34 of 34 found); the pixel counts of the segmentation table and its two shifted-prompt IoUs (0.805, 0.776 and 0.015); the three presence strings of the full bank, with A absent on frames 7 and 8 and nowhere else; the ablation table's presence strings and mean IoUs; and every one of the six planted mistakes producing the number the table prints, to its stated resolution. The mistakes are not optional: a pipeline that passes the clean rows and does not fail the planted ones has a test that cannot fail.
 
 ## What stands behind each stand-in in brain
 
 The seams of the pipeline are typed in brain's SDK. `DetectionPipeline::detect` in `crates/sdk/src/detect.rs` returns `Detection` values with `x1, y1, x2, y2`, a confidence and a class index "in ORIGINAL image pixel coordinates (already mapped back through the model's internal letterbox)", with the defaults 0.25 and 0.45 that this project uses. `Prompt::bbox` in `crates/sdk/src/segment.rs` takes a box in source-image pixel coordinates, the space that the image's own width and height report and not the model's internal square, and turns it into the two corner points with the labels 2 and 3 of Chapter 7 (`to_coords_labels` puts them before any click point). A detection's four numbers are therefore a box prompt's four numbers with no conversion, which is the property milestone 3 tests: the one map that has to be right is the one inside each model.
 
-The detector tail is shared, as Chapter 4 told: IoU, class-aware suppression with a strict comparison and ties to the lower index, and the letterbox are in `crates/imaging/src/nms.rs` and `crates/imaging/src/letterbox.rs`, moved there from the YOLOv8 crate so that a second detector would not depend on its training code (commit `c3a161a5d`). The detector fills the padding with 114/255 and passes no normalization, in `crates/yolov8/src/infer.rs`. The segmenter does the opposite on every count, in `crates/sam2/src/caps.rs`: it resizes the source image to the square input with each axis on its own scale, by a plain bilinear resize (the module header records that the reference's antialiased resize has no kernel in brain, and that parity is gated on the normalized input), then normalizes with the ImageNet constants held in `Sam2Config` (`pixel_mean`, `pixel_std`), and it maps a prompt's source-pixel coordinates with the same per-axis scales. Two models, two preprocessings, one coordinate convention at the seam: that is the structure of this project, and it is not an accident of the project.
+The detector tail is shared, as Chapter 4 told: IoU, class-aware suppression with a strict comparison and ties to the lower index, and the letterbox are in `crates/imaging/src/nms.rs` and `crates/imaging/src/letterbox.rs`, moved there from the YOLOv8 crate so that a second detector would not depend on its training code (commit `c3a161a5d`). The detector fills the padding with 114/255 and passes no normalization, in `crates/yolov8/src/infer.rs`. The segmenter does the opposite on every count, in `crates/sam2/src/caps.rs`: it resizes the source image to the square input with each axis on its own scale, by a bilinear resize, with the parity tests gated on the normalized input, then normalizes with the ImageNet constants held in `Sam2Config` (`pixel_mean`, `pixel_std`), and it maps a prompt's source-pixel coordinates with the same per-axis scales. Two models, two preprocessings, one coordinate convention at the seam: that is the structure of this project, and it is not an accident of the project.
 
 The tracker is `Tracker` in `crates/sam2/src/video.rs`, ported with its memory attention and encoder in commit `6bcc0e79f`: `prompt` places the conditioning frame and `track` conditions every later frame on the memories recorded so far, the slot rule is Chapter 7's, and the object score is carried in each memory entry with the meaning that a value at or below 0 is absent or fully occluded. A `Tracker` follows one object, and its module header says what that implies for several: one tracker per object, sharing the encoder's output for each frame, which is the arrangement of milestone 5 and the reason the shared-trunk column of its ledger is the right one. The mask sequence a tracker emits is defined in `crates/imaging/src/maskseq.rs`, one sequence that travels as a blob between served actions and as a directory of per-frame images and a manifest on disk, and whose header insists that polarity is declared and that a negative object score means the mask is legitimately empty: a consumer that treats an empty mask as a bug chases a phantom, which is the stand-in's rule that an absent object is a valid output. The served action `track` (`crates/sam2/src/track.rs`, run as `brain sam2 track`) prompts with clicks on one frame; the `Prompt` of the library takes a box as well, so a detection can place the first frame's prompt.
 
-The INT8 calibration of the depth network (`calib`, in `crates/zipdepth/src/caps.rs`) prepares every image exactly as the predictor does, with `zipdepth::predict::preprocess_chw` and no letterbox: scales fitted to a padded square would describe activations the model never produces at inference.
-
-The half-pixel disagreement of milestone 1 is brain's choice and not an oversight: `letterbox_rgb` pastes the content at the truncated padding and `Letterbox::apply_box` and `invert_box` map boxes with the float one, a defect that the module header of `crates/imaging/src/letterbox.rs` records and keeps, because the YOLO weights and every reported `map50` were obtained with it and a correction has to be measured. A pipeline written afresh does not have that history, and milestone 5 shows what its convention costs: 0.078 of mean IoU on this clip.
+The letterbox of the detector's view is one rule in one place. `Letterbox::compute` in `crates/imaging/src/letterbox.rs` takes the pad as the floor of half the slack, with the extra row of an odd slack below, and the pixels, `apply_box`, `invert_box` and `content_rect` all use it; the content's source taps come from `nearest_tap`, the integer form of the half-pixel nearest rule with the source and content extents, which is the rule of this milestone's table. The host loop `letterbox_rgb` and the device path `Ctx::letterbox` in `crates/imaging/src/device.rs` run that one rule, and a test (`host_letterbox_equals_the_device_letterbox_bitwise` in `crates/imaging/tests/it/device_ops.rs`) holds them bitwise equal. The half-pixel disagreement of milestone 1's planted mistake is the one the first version of the crate had: commit `4a7148ae9` found that pixels were pasted at the truncated pad while boxes were mapped with the float one, on an odd slack half a pixel apart, and replaced it with the single whole-pixel pad, a spec test (`pixels_and_boxes_share_one_integral_pad`) holding the two together. The depth model's INT8 calibration, the other caller Chapter 1 told about, does not letterbox at all: the served `calib` action (`crates/zipdepth/src/caps.rs`) prepares every image exactly as the predictor does, with `zipdepth::predict::preprocess_chw`, because scales fitted to a padded square would describe activations the model never produces at inference.
 
 ## Summary
 
@@ -638,7 +636,7 @@ These are optional. Each is a larger test of the same ideas, and each changes on
 
 **Recall questions.**
 
-1. $s = \min(64/96, 64/61) = 2/3$; the content is $64 \times \mathrm{round}(40.67) = 64 \times 41$; the padding is $(0, 11.5)$ on $(x, y)$. A pixel row cannot sit at 11.5, so a pipeline pastes at 11 (or 12) and must map boxes with the same integer.
+1. $s = \min(64/96, 64/61) = 2/3$; the content is $64 \times \mathrm{round}(40.67) = 64 \times 41$; the slack is $(0, 23)$ on $(x, y)$ and half of it $(0, 11.5)$. A pixel row cannot sit at 11.5, so the pad is whole pixels, 11 above and 12 below (the floor of half the slack above), and boxes are mapped with the same integer 11.
 2. The IoU of the two boxes is $45/100 = 0.45$ exactly, which is not greater than 0.45, so the second is kept. The strict comparison makes the threshold an exclusive upper bound on the IoU of two same-class survivors, as the code's module header says, and the evaluation of Chapter 4 calls a detection at exactly the matching threshold correct: one convention, written down once.
 3. $(8.5 - 3.5,\ 28.5 - 2.5,\ 8.5 + 3.5,\ 28.5 + 2.5) = (5, 26, 12, 31)$.
 4. Three: the two corners with the labels 2 and 3, and the padding point with the label $-1$ that every prompt carries. With the six output tokens the decoder has 9.
