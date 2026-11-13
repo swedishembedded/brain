@@ -697,6 +697,26 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
 - 2026-11-05 (one replica per card, `residency::affinity`): `brain serve --device gpu0,gpu1,...` serves the released-checkpoint Qwen3.8 (`Qwen35GgufServed`) with a replica for every group of the offered cards that holds it (each its own KV pool and prefix cache; `ResidentModel::replicas`). A model declares `replica_routing` (decode slots, cached prompts) and `prefix_chain` to opt into the new routing, otherwise jobs spread by load as before (OCR). Routing order: the replica holding the longest useful prefix (>= 2 KiB of prompt) among those with a free slot; else the least-loaded active replica; else the next unbuilt replica, built on its card; else the best match or shortest queue. The dispatcher keeps a bounded `PrefixDirectory` per replica (the prompts its cache keeps, superseded by the next turn, cleared when the replica is not built) keyed by the one-pass request digest `llmserve::request_prefix_chain` (tools, system prompt, template switches and adapter as the root, one link per chat message); it is a hint, not the cache. An idle extra replica is released by the existing multi-device eviction. Adapter views forward the base's replicas, routing and chain. Stats: every multi-device instance is now a snapshot row per device carrying `replica`, `queued`, `running` and its metrics. Tests: `residency::affinity`, `executor::tests` (on-demand build, prefix affinity over load, shared prefix not pinning, released replica forgotten), `llmserve::routing`, `catalog::resident_qwen35` (replica per card, adapters on all), `stats::build`. Open, needs the cards: the 64-conversation real-weight run (per-card utilisation, hit share per replica); the directory mirrors the cache by prompt count, not by what the cache evicted under block pressure; `Instance::run_open` admits late jobs per replica only (a job queued behind a full replica is not moved to a replica that frees first).
 - 2026-11-06 (full card, knowledge 435): a device out-of-memory (activation scratch outside the KV pool; the production 500 was 139890688 bytes = 8036 x 17408, one feed-forward intermediate of a prefill round) no longer fails the sequences of the failing call: they go back to the queue, the scheduler admits half as many at once and grows back one per 32 calm iterations (`MemoryPressure`); a request alone on the card that fails three times (prefix cache given back first) is `unavailable`, HTTP 503 with `Retry-After`, instead of `backend_failure` 500. Tests: `model::serve_device_oom` (CPU, including 100 conversations over a small pool and card). Open, needs the cards: which planner margin was short on the GH200 and a real-weight 100-conversation run with zero 500s; the verify path has the same recovery but no dedicated test; an admitted request has no queue deadline of its own inside the scheduler (the executor inbox has `--admit-deadline-ms`).
 
+## Batch-invariant decode for exams and on-policy training (2026-11-13, knowledge #447)
+
+`--exact-decode` exists (#358) and is built for the int8 GGUF path. Measured on real weights (one GH200), it does not yet
+serve the checkpoints exams and RL use:
+
+- [ ] Qwen3.8-27B-FP8: `--exact-decode` makes a repeated single request deterministic (speculation off) but a request beside
+      7 others still diverges (token 25-126, log-probability delta up to 0.04) and 8 identical concurrent requests give 3-4
+      distinct outputs, at 0.32-0.35 of the default throughput. Needed: FP8 projections and the head on a fixed split and
+      summation order independent of the row count, selected through `select`'s capability and the autotuner (a candidate
+      that declares row-count invariance), not a per-model branch; then the end-to-end gate of #358 (one request's tokens and
+      per-token log-probabilities unchanged while co-batched) on this checkpoint, with the throughput cost measured.
+- [ ] Qwen3: the family refuses the flag. Its decode batch (int8 and bf16 projections, the head, the split-count of the
+      attention) needs the same treatment; measured co-batch variance at the default serving is divergence at token 29 and
+      log-probability delta up to 0.07 (int8) or 0.18 (bf16 weights, int8 KV).
+- [ ] The warm-versus-cold prefix cache path computes a different prefill arithmetic than the cold prompt on Qwen3 at bf16 (a
+      repeated request differs from its first answer at token 76): a bit-identical mode must serve a cached prefix with the
+      arithmetic that computed it, or recompute.
+- Until these land, an exam gets its paired same-load base replicate from the harness, and a trainer takes its serve/train gap from
+  `brain finetune --policy-gradient --numerics-gate` (#446) and corrects for it with `--importance`.
+
 ## Refusals that name the setting (2026-11-13, knowledge #448)
 
 - [ ] A model whose default serving plan does not fit the memory it was given (Qwen3-4B in a 13 GB share of a card: HTTP 400 and

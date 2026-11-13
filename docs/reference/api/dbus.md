@@ -122,3 +122,12 @@ read back over a file descriptor, and a streaming request - plus
 [`samples/shell/dbus/busctl-smoke/`](../../../samples/shell/dbus/busctl-smoke/README.md),
 a `busctl`-based smoke test (`busctl_smoke.sh`) that needs no Python at all. See
 those directories' READMEs for the exact commands.
+
+The token facts of a text `generate` are params of the same action over D-Bus as over HTTP: `logprobs` and `return_token_ids`
+(the sampler's figure, `completion_logprobs` and the ids in the result) and `policy_trace: true`, which adds a `policy_trace`
+object to the result (prompt ids, generated ids with the stop token, and their log-probabilities under the model's full
+distribution at the request temperature, with `tokenizer_digest` and `chat_template_digest`); the served identity is the
+result's `base_digest` and `adapter` (`id`, `digest`, `version`). The validation is the generate spec's, the same on both
+surfaces; a request that sets penalties, DRY, no-repeat bans or a thinking budget, or a model that cannot score its own
+generation, fails with the `invalid-request` or `unsupported-capability` class. The HTTP reference
+([HTTP API](http.md)) describes the object.

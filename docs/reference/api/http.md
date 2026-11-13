@@ -183,6 +183,8 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   gap a numerics gate measures. The object also names the `policy` that generated
   it (`base_digest`, and `adapter: {id, digest, version}` or null), `finish_reason`, and
   `truncated` (the token budget ended the generation, which a trainer masks).
+  A streamed reply carries the trace, the `brain` object (served identity) and the sampled-token fields together on the terminal
+  chunk (the one with `finish_reason`); the usage chunk after it carries none of them.
   The request is refused (400, `invalid-request`) when it sets penalties, DRY,
   no-repeat bans or a thinking budget, which reshape the distribution the tokens
   are drawn from, and fails with `unsupported-capability` on a model that cannot
