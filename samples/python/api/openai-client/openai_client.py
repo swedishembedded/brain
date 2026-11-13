@@ -27,7 +27,7 @@ Two ways to run it:
 
   # 2. let the script launch (and stop) its own server -- the default with no
   #    --base-url/--api-key given, mirroring samples/shell/api/claude-with-brain/claude-with-brain.sh:
-  BRAIN_MOCK=1 python3 samples/python/api/openai-client/openai_client.py --model brain/mock
+  python3 samples/python/api/openai-client/openai_client.py --model brain/mock
   python3 samples/python/api/openai-client/openai_client.py --model Qwen/Qwen3-0.6B   # real model,
                                                                    # auto-fetched
 
@@ -78,11 +78,12 @@ class Server:
         self.keys = rundir / "keys.json"
         ready = rundir / "ready"
         env = dict(os.environ)
+        argv = [brain, "serve", "--openai", str(port), "--api-keys-out", str(self.keys), "--ready-file", str(ready)]
         if mock:
-            env["BRAIN_MOCK"] = "1"
+            argv.append("--mock")
             env.setdefault("BRAIN_DEVICE", "cpu")
         with open(self.log, "wb") as f:
-            self.proc = subprocess.Popen([brain, "serve", "--openai", str(port), "--api-keys-out", str(self.keys), "--ready-file", str(ready)], stdout=f, stderr=subprocess.STDOUT, env=env)
+            self.proc = subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, env=env)
         for _ in range(60):
             if ready.exists():
                 break

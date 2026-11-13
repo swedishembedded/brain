@@ -4,7 +4,7 @@
 
 # HTTP conformance harness for brain's inference API surface, driven end-to-end over a
 # REAL socket against a single `brain serve` process backed by the built-in
-# deterministic mock model (BRAIN_MOCK=1). No real weights, no GPU, no `claude` — the
+# deterministic mock model (`brain serve --mock`). No real weights, no GPU, no `claude` - the
 # mock is instant, so the whole suite runs in seconds and is fully deterministic.
 #
 # It validates every provider dialect (OpenAI, Anthropic, OpenRouter) against the
@@ -59,7 +59,7 @@ setup_file() {
   mkdir -p "$ARTIFACTS"
 
   # ONE server, all three surfaces, CPU-only, backed by the mock. Record its PID.
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve \
+  BRAIN_DEVICE=cpu "$BRAIN" serve --mock \
     --models-dir "$MODELS_DIR" \
     --training --artifact-store "$ARTIFACTS" \
     --openai "$OPENAI_PORT" \
@@ -917,8 +917,8 @@ train_body() { # train_body <extra params json fragment, with a leading comma or
 
   # A SECOND server: one CPU lane, a 3s mock delay (pins the lane), a 500ms admit
   # deadline (fast shed). OpenAI surface only. Record its PID for teardown.
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu BRAIN_MOCK_DELAY_MS=3000 \
-    "$BRAIN" serve --admit-deadline-ms 500 --models-dir "$MODELS_DIR" --openai "$port" --api-keys-out "$keys2" >"$log2" 2>&1 &
+  BRAIN_DEVICE=cpu \
+    "$BRAIN" serve --mock --mock-delay-ms 3000 --admit-deadline-ms 500 --models-dir "$MODELS_DIR" --openai "$port" --api-keys-out "$keys2" >"$log2" 2>&1 &
   local pid2=$!
   echo "$pid2" > "$CONF_DIR/pid2"
 

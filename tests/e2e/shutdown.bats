@@ -126,7 +126,7 @@ signal_and_wait() {
 
 @test "brain serve --dbus alone: SIGINT stops it within the deadline" {
   start_private_bus
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --dbus >"$TDIR/log" 2>&1 &
+  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --dbus >"$TDIR/log" 2>&1 &
   SERVER_PID=$!
   wait_for_bus_name "com.swedishembedded.Brain1" || { cat "$TDIR/log" >&3; skip "server never claimed the bus name"; }
 
@@ -137,7 +137,7 @@ signal_and_wait() {
 
 @test "brain serve --dbus alone: SIGTERM stops it within the deadline" {
   start_private_bus
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --dbus >"$TDIR/log" 2>&1 &
+  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --dbus >"$TDIR/log" 2>&1 &
   SERVER_PID=$!
   wait_for_bus_name "com.swedishembedded.Brain1" || { cat "$TDIR/log" >&3; skip "server never claimed the bus name"; }
 
@@ -152,7 +152,7 @@ signal_and_wait() {
   # never exited — regardless of the HTTP surface being perfectly healthy.
   start_private_bus
   PORT=8991
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --dbus --openai "$PORT" >"$TDIR/log" 2>&1 &
+  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --dbus --openai "$PORT" >"$TDIR/log" 2>&1 &
   SERVER_PID=$!
   wait_for_bus_name "com.swedishembedded.Brain1" || { cat "$TDIR/log" >&3; skip "server never claimed the bus name"; }
   wait_for_http "$PORT" || { cat "$TDIR/log" >&3; skip "HTTP surface never came up"; }
@@ -167,7 +167,7 @@ signal_and_wait() {
 
 @test "brain serve --openai alone (no dbus): SIGINT stops it within the deadline" {
   PORT=8992
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --openai "$PORT" >"$TDIR/log" 2>&1 &
+  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --openai "$PORT" >"$TDIR/log" 2>&1 &
   SERVER_PID=$!
   wait_for_http "$PORT" || { cat "$TDIR/log" >&3; skip "HTTP surface never came up"; }
 

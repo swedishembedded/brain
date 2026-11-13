@@ -24,9 +24,10 @@ carry.
 ## Getting the weights
 
 `brain/gpt` is a reserved built-in id with no upstream checkpoint - there's
-nothing to fetch. Train your own with `brain gpt2 train`, or point
-`BRAIN_GPT2_WEIGHTS` at an existing brain-format checkpoint to serve one you
-already have. The actions name a checkpoint with `--weights PATH`.
+nothing to fetch. Train your own with `brain gpt2 train`; a checkpoint it
+writes into the model store (`--save` under `--models-dir`) is served by
+`brain serve` under its card id. The actions name a checkpoint with
+`--weights PATH`.
 
 ## Running it
 
@@ -47,7 +48,8 @@ and `--profile-collectives FILE` writes what its collectives cost.
 To serve it over HTTP or D-Bus:
 
 ```bash
-BRAIN_GPT2_WEIGHTS=gpt.safetensors brain serve --dbus --openai
+brain gpt2 train --data <data_dir> --save ~/.local/share/brain/models/brain/gpt/gpt.safetensors --seed $RANDOM
+brain serve --dbus --openai
 ```
 
 Once serving, it's reachable over `brain do` and D-Bus - one request decodes

@@ -612,7 +612,7 @@ test/parity/wan:
 test/e2e: test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e/samples test/e2e/ready
 
 # End-to-end: HTTP API conformance over a real socket against a single `brain serve`
-# backed by the built-in deterministic mock model (BRAIN_MOCK=1) - no weights, no GPU,
+# backed by the built-in deterministic mock model (brain serve --mock) - no weights, no GPU,
 # no `claude`. Validates every provider dialect (OpenAI/Anthropic/OpenRouter) against
 # the vendored OpenAPI specs. Fast + deterministic. Needs only a debug/release brain
 # binary + jq (+ optional Python jsonschema for full schema validation).
@@ -622,7 +622,7 @@ test/e2e/api-conformance: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/api_conformance.bats
 
 # End-to-end: the OpenRouter /videos contract over a real socket against the mock
-# video model (BRAIN_MOCK=1): list, submit, poll, download, edit. No weights, no GPU.
+# video model (brain serve --mock): list, submit, poll, download, edit. No weights, no GPU.
 ## test/e2e/video-api - the /videos contract end to end against the mock video model
 test/e2e/video-api: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/video_api.bats
@@ -638,7 +638,7 @@ test/e2e/shutdown: build/debug
 
 # End-to-end: every sample script under samples/{shell,python}/ is actually
 # exercised - the harness that did not exist when they all silently rotted
-# after the P19 brain-py rewrite. ONE shared BRAIN_MOCK=1 server (D-Bus +
+# after the P19 brain-py rewrite. ONE shared `brain serve --mock` server (D-Bus +
 # Anthropic HTTP); each sample that CAN run against the weight-free mock does
 # so for real, the rest skip honestly with a printed reason. A completeness
 # check (tests/e2e/samples_manifest.bats, not gated behind this harness's own
@@ -688,7 +688,7 @@ test/gpu/ripple/e2e: build/debug
 # End-to-end: `brain serve --ready-file PATH` fires only once EVERY requested
 # surface (HTTP dialects + D-Bus) has actually bound, never on a failed or
 # partial bind, and strictly AFTER --api-keys-out is written - so a script can
-# wait on PATH alone and then read the keys with no retry. BRAIN_MOCK=1,
+# wait on PATH alone and then read the keys with no retry. --mock,
 # CPU-only, no real weights. Needs a debug/release binary + jq + curl (+
 # dbus-daemon/busctl for the D-Bus cases, which skip cleanly without them).
 ## test/e2e/ready - `brain serve --ready-file` fires only after every surface has bound
@@ -696,7 +696,7 @@ test/e2e/ready: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/ready.bats
 
 # End-to-end: drive the real `claude` CLI against a local `brain serve --anthropic`
-# on the BRAIN_MOCK model, proving brain works as a Claude Code backend. Skips
+# on the mock model (--mock), proving brain works as a Claude Code backend. Skips
 # cleanly unless `claude` is installed.
 ## test/e2e/claude-code - OPT-IN: drive the real `claude` CLI against a local `brain serve --anthropic`
 test/e2e/claude-code: build/release

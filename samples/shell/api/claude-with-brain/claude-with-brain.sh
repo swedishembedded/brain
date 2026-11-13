@@ -25,10 +25,10 @@
 #
 # --check runs the same preflight -> launch -> key-capture sequence, makes ONE
 # authenticated GET /v1/models, prints OK, and exits WITHOUT exec'ing `claude` - the
-# non-interactive mode `tests/e2e/examples.bats` drives. Under BRAIN_MOCK=1 it also
+# non-interactive mode `tests/e2e/examples.bats` drives. With --mock it also
 # skips the `claude`-installed check (the mock model needs no real `claude` binary
 # to prove the server + key path works), so `--check` is runnable in CI with no
-# weights and no `claude` install. Without BRAIN_MOCK, `GET /v1/models` alone never
+# weights and no `claude` install. Without --mock, `GET /v1/models` alone never
 # triggers a fetch (discovery routes are deliberately fetch-free), so `--check`
 # stays fast and offline-safe even
 # though MODEL is a real, not-yet-fetched reference; see `tests/e2e/claude_code.bats`
@@ -37,14 +37,18 @@
 set -uo pipefail
 
 CHECK=0
-if [ "${1:-}" = "--check" ]; then
-  CHECK=1
+MOCK=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) CHECK=1 ;;
+    --mock) MOCK=1 ;;   # serve the weight-free mock model instead
+    *) break ;;
+  esac
   shift
-fi
+done
 
 # ---- config (override via env) ----------------------------------------------
 PORT="${PORT:-8787}"
-MOCK="${BRAIN_MOCK:-0}"
 MODEL="${MODEL:-$([ "$MOCK" = "0" ] && echo Qwen/Qwen3-0.6B || echo brain/mock)}"
 BRAIN="${BRAIN:-./target/release/brain}"
 
@@ -62,7 +66,7 @@ KEYS="$RUNDIR/keys.json"   # 0600; the key is kept out of the server log
 if [ "$MOCK" = "0" ]; then
   "$BRAIN" serve --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
 else
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
+  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
 fi
 BRAIN_PID=$!
 echo "brain serve --anthropic on http://127.0.0.1:$PORT  (pid $BRAIN_PID)"

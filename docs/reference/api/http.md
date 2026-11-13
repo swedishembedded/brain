@@ -335,10 +335,10 @@ default `$XDG_DATA_HOME/brain/models`), scanned for `*.safetensors` and `*.gguf`
 file a distinct catalog entry keyed by its model-card id (a base and a finetune are two
 entries) - plus whichever models are enabled via their `BRAIN_*_WEIGHTS`-style
 environment variables (see [`docs/reference/configuration.md`](../configuration.md)), and, for
-testing, the `BRAIN_MOCK` model.
+testing, the mock model (`brain serve --mock`).
 
 Import a HuggingFace checkpoint into brain's format:
-`brain qwen3 import --hf <hf_dir> --out qwen3.safetensors`.
+`brain qwen3 import --source <hf_dir> --dest qwen3.safetensors`.
 
 ### Discovery fields on a model entry
 

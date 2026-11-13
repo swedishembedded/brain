@@ -15,9 +15,8 @@
 //! selection ([`on_device`]), exactly like z-image.
 //!
 //! Model SELECTION: `--checkpoint` (+ `--tokenizer`) names the Qwen3
-//! checkpoint to serve; `BRAIN_GPT2_WEIGHTS` still names GPT-2's (`from_env`
-//! returns `None` when it is unset/empty) and the model-dir scan serves each
-//! GLM checkpoint in the store ([`GlmResident::from_card`]). HOW to serve Qwen3 - context length, batching, KV/weight
+//! checkpoint to serve; the model-dir scan serves each GPT-2 and GLM checkpoint
+//! in the store ([`GptResident::from_card`], [`GlmResident::from_card`]). HOW to serve Qwen3 - context length, batching, KV/weight
 //! precision - is [`QwenServeConfig`], which `run_cli.rs`'s serving-policy
 //! flags build; see that struct's own doc for every field and its default.
 //! With no `--ctx` given, context auto-sizes to the target device's
@@ -286,7 +285,7 @@ pub(crate) fn open_stored_checkpoint(path: &str) -> Result<(serde_json::Value, B
 
 // ---------------------------------------------------------------- gpt
 
-/// The dense char-level GPT baseline behind the scheduler (`BRAIN_GPT2_WEIGHTS`).
+/// The dense char-level GPT baseline behind the scheduler.
 /// The checkpoint must embed its char vocab (trained with vocab embedding).
 pub struct GptResident {
     /// Catalog id (the model-card id): the manifest/instance-key key, so two
@@ -296,15 +295,6 @@ pub struct GptResident {
 }
 
 impl GptResident {
-    pub fn from_env() -> Option<GptResident> {
-        let path = std::env::var("BRAIN_GPT2_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        // Back-compat: synthesize a card whose id is the canonical brain/
-        // fallback (see crates/modelref/src/alias.rs's module docs) -- a
-        // checkpoint loaded straight from an env var carries no upstream
-        // vendor/repo provenance to build a fully-qualified ref from.
-        Some(Self::from_card(&path, &ModelCard::new("brain/gpt", "gpt"), None))
-    }
-
     /// Construct under the card's id. `_tokenizer` is unused - GPT is char-level
     /// (its vocab is embedded in the checkpoint).
     pub fn from_card(path: &str, card: &ModelCard, _tokenizer: Option<&str>) -> GptResident {
@@ -328,7 +318,7 @@ impl ResidentModel for GptResident {
         // the vocab, the config, and the tensor upload.
         let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("gpt: {e}"))?;
         let itos = gpt2::model::Gpt::itos_from_config(&reader.config())
-            .ok_or("gpt: checkpoint has no embedded char vocab (BRAIN_GPT2_WEIGHTS)")?;
+            .ok_or("gpt: checkpoint has no embedded char vocab")?;
         let tok = CharTokenizer::from_itos(itos);
         let block = gpt2::GptConfig::from_json(&reader.config()).block_size;
         let model = on_device(device, || gpt2::model::Gpt::from_reader(&reader, 1, block))?;
@@ -908,8 +898,8 @@ impl QwenResident {
                 .unwrap_or_default(),
         };
 
-        // See GptResident::from_env's comment: named by path, no upstream
-        // provenance. Adapters are bound to the id the spelling resolved to, the id a
+        // Named by path, so no upstream provenance: the canonical brain/
+        // fallback id (see crates/modelref/src/alias.rs's module docs). Adapters are bound to the id the spelling resolved to, the id a
         // trainer resolving the same spelling writes on an adapter's card.
         Some(Self::build(&path, "brain/qwen3".to_string(), base_id, &tokenizer, cfg))
     }

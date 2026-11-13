@@ -48,7 +48,7 @@ every request after is instant.
 | `MODEL` | `Qwen/Qwen3-0.6B` |
 | `PORT` | `8787` |
 | `BRAIN` | `./target/release/brain` |
-| `BRAIN_MOCK=1` | serve the weight-free mock model instead (also skips the `claude`-installed check under `--check`) |
+| `--mock` (flag) | serve the weight-free mock model instead (also skips the `claude`-installed check under `--check`) |
 
 `--check` runs the same preflight -> launch -> key-capture sequence, makes
 ONE authenticated `GET /v1/models`, prints `OK`, and exits without exec'ing
@@ -58,11 +58,11 @@ terminal.
 ## Why this needs a real model (today)
 
 Unlike the other API sample, this one cannot run its interactive path
-against `BRAIN_MOCK` in an automated harness - Claude Code makes real,
+against the mock model in an automated harness - Claude Code makes real,
 multi-turn tool-calling requests that need an actual language model behind
 them, not a canned echo. `--check` is what stays fast and offline-safe
 (a discovery route, which never triggers a fetch). The full end-to-end
 interactive path is `tests/e2e/claude_code.bats` (`make test/e2e/claude-code`),
-which runs against the deterministic `BRAIN_MOCK` model instead (so it needs
+which runs against the deterministic mock model (`brain serve --mock`) instead (so it needs
 no network and never hangs on a cold fetch) and skips cleanly unless
 `claude`/`jq`/`timeout` and a brain binary are present.

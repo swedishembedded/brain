@@ -1,5 +1,5 @@
 path	mode	notes
-samples/shell/api/claude-with-brain/claude-with-brain.sh	check	--check against BRAIN_MOCK; real interactive run auto-fetches Qwen/Qwen3-0.6B (needs claude), see tests/e2e/claude_code.bats
+samples/shell/api/claude-with-brain/claude-with-brain.sh	check	--check --mock; real interactive run auto-fetches Qwen/Qwen3-0.6B (needs claude), see tests/e2e/claude_code.bats
 samples/python/api/openai-client/openai_client.py	run	--model brain/mock exercises chat (non-stream + SSE), embeddings, and images.generations for real against the shared harness server's --openai surface
 samples/python/api/deepseek-chat/deepseek_chat.py	run	--model brain/mock exercises the chat and streamed-reasoning path against the shared harness server; real R1 run in tests/e2e/deepseek_chat.bats
 samples/python/api/fim-completion/fim_completion.py	skip	needs a checkpoint with fill-in-the-middle tokens (deepseek-coder base); real run in tests/e2e/deepseek_chat.bats
@@ -15,7 +15,7 @@ samples/python/embedding/t5-embed/t5_embed.py	skip	hardcodes brain/t5encoder (no
 samples/python/forecast/forecast-client/forecast_client.py	run	--model mock exercises the forecast wire contract for real
 samples/python/imagegen/controlnet/controlnet_generate.py	skip	hardcodes brain/sdxl-controlnet (no --model override); needs BRAIN_SDXL_DIR + BRAIN_CONTROLNET_DIR
 samples/python/imagegen/flux1/flux1_generate.py	skip	hardcodes brain/flux1 (no --model override); needs BRAIN_FLUX1_DIR
-samples/python/imagegen/flux2-klein/cancel_generation.py	run	--model mock with BRAIN_MOCK_DELAY_MS so the cancel race is observable
+samples/python/imagegen/flux2-klein/cancel_generation.py	run	--model mock with --mock-delay-ms on the server so the cancel race is observable
 samples/python/imagegen/flux2-klein/edit_image.py	skip	needs real FLUX.2 weights; the mock model has no edit action
 samples/python/imagegen/flux2-klein/generate.py	run	--model mock streams real denoise ticks and returns a real image blob
 samples/python/imagegen/pulid/pulid_generate.py	skip	hardcodes brain/flux1-pulid (no --model override); needs BRAIN_FLUX1_DIR + BRAIN_PULID_DIR + BRAIN_ARCFACE_DIR + BRAIN_CLIP_DIR

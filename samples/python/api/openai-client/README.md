@@ -7,7 +7,7 @@ OpenAI-compatible surface (`crates/apiserve`) in one pass: chat completions
 (non-streaming, then streaming SSE), embeddings, and image generation.
 
 ```bash
-BRAIN_MOCK=1 python3 samples/python/api/openai-client/openai_client.py --model brain/mock
+python3 samples/python/api/openai-client/openai_client.py --model brain/mock   # launches brain serve --mock
 ```
 
 That launches (and stops) its own `brain serve --openai` on the weight-free

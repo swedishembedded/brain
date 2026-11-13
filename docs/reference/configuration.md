@@ -116,7 +116,6 @@ model is not served.
 
 | Variable | Serves | Value |
 | --- | --- | --- |
-| `BRAIN_GPT2_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
 | `BRAIN_S3DIT_DIT`, `BRAIN_S3DIT_VAE`, `BRAIN_S3DIT_QWEN`, `BRAIN_S3DIT_TOKENIZER` | Z-Image text2image/edit | optional overrides, one per component -- unset, each is resolved from the model store instead (`s3dit::spec::S3ditSpec`); set, it pins that exact file |
 | `BRAIN_SCRFD_DIR` | antelopev2 face detection | dir holding `scrfd_10g_bnkps.onnx` |
 | `BRAIN_ARCFACE_DIR` | antelopev2 face identity embedding | dir holding `glintr100.onnx` (plus `scrfd_10g_bnkps.onnx` for the default `align=true` path) |
@@ -130,7 +129,6 @@ model is not served.
 | `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | Kronos OHLCV forecasting (the served path, `brain serve`, and `brain forecast compare`/`finetune`). `brain forecast predict` instead resolves both roles from the models directory (`NeoQuasar/Kronos-Tokenizer-base` + `NeoQuasar/Kronos-base`, told apart by their own `config.json` content) via `--tokenizer-dir`/`--decoder-dir` or automatically when the store holds exactly one candidate each | the two checkpoint dirs (the decoder also accepts a `.safetensors` fine-tune file) |
 | `BRAIN_KRONOS_ARGMAX` | force Kronos's deterministic modal rollout (argmax over the token distribution) instead of nucleus sampling: one reproducible path, N times cheaper. Set by `brain forecast predict --samples 1` | `0` (sample) |
 | `BRAIN_QWEN3TTS_WEIGHTS` (+ `BRAIN_QWEN3TTS_CKPT`) | Qwen3-TTS in the `qwen3tts-synth` stdio controller only; `brain serve` and `brain qwen3tts` resolve the checkpoint from the model store (`--weights-dir`/`--ckpt` name one outright) | the checkpoint dir, or a dir of files from `brain qwen3tts import` (+ HF checkpoint dir for config/tokenizer) |
-| `BRAIN_MOCK` | deterministic, weight-free mock model (for exercising the serving stack without real weights) | any non-empty value |
 
 ## Serving & admission
 
@@ -179,7 +177,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |
 | `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` | forecast horizon / sample count | 64 / 1 |
-| `BRAIN_MOCK_DELAY_MS` | mock model artificial latency | 0 |
 
 The Qwen3 and Qwen3.8 serving sizes are `brain serve` flags, not variables:
 `--ctx` (default: auto-sized to the card), `--max-batch` (default

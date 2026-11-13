@@ -38,7 +38,7 @@ Over OpenAI/Anthropic-compatible HTTP: `brain serve --openai 8788` /
 Quick, deps-free wire-contract check (no Omni weights needed):
 
 ```bash
-BRAIN_MOCK=1 tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --mock" -- \
   python3 samples/python/qwen3omnimoe/omni/omni.py --dbus --model brain/mock --in-text hi --out-stdio
 ```
 

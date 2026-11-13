@@ -179,6 +179,11 @@ SERVING OPTIONS
                          what the store holds (repeatable; e.g. --pin flux2.dit=F).
                          It also settles a store holding two candidates for a role:
                          the startup log names the --pin for each.
+  --mock                 also serve the deterministic, weight-free mock models (brain/mock,
+                         brain/mock-asr, brain/mock-video) for exercising the serving stack
+                         and its clients with no checkpoint and no GPU
+  --mock-delay-ms MS     (with --mock) each mock call takes MS milliseconds before it
+                         answers, pinning its lane - for admission and cancellation tests
   --training             serve training as a job: the model `brain/train`, action
                          `train`, fine-tunes a chat model's LoRA adapter (supervised, or
                          by the clipped policy gradient on rollout records, with teacher
@@ -705,6 +710,8 @@ pub fn run_serve(args: &[String]) {
     let mut pins = loader::served::ServedStore::default();
     // `--training` / `--artifact-store DIR`: serve the training workload, and the store it exchanges bulk data through.
     let mut training = false;
+    // `--mock [--mock-delay-ms MS]`: serve the weight-free mock models.
+    let (mut mock, mut mock_delay_ms) = (false, None::<u64>);
     let mut artifact_store: Option<String> = None;
     // Opt-in continuous-learning hot swap (`--watch-adapters DIR`): watch DIR
     // for a promoted LoRA adapter and point the served Qwen3 at it without a
@@ -824,6 +831,8 @@ pub fn run_serve(args: &[String]) {
                 }
             }
             "--training" => training = true,
+            "--mock" => mock = true,
+            "--mock-delay-ms" => mock_delay_ms = Some(parsed(args, &mut i, "--mock-delay-ms")),
             "--artifact-store" => artifact_store = Some(val(args, &mut i, "--artifact-store")),
             "--watch-adapters" => watch_adapters = Some(val(args, &mut i, "--watch-adapters")),
             "--serve-adapters" => serve_adapters = Some(val(args, &mut i, "--serve-adapters")),
@@ -1046,6 +1055,19 @@ pub fn run_serve(args: &[String]) {
         }
     };
 
+    let mock_delay_ms = match (mock, mock_delay_ms) {
+        (false, Some(_)) => {
+            eprintln!("brain serve: --mock-delay-ms is the latency of the mock models; add --mock");
+            std::process::exit(2);
+        }
+        (true, _) if stdio => {
+            eprintln!("brain serve: --mock applies to the HTTP and D-Bus surfaces; the stdio controller serves none. Add --openai, --anthropic, --openrouter or --dbus.");
+            std::process::exit(2);
+        }
+        (true, delay) => Some(delay.unwrap_or(0)),
+        (false, None) => None,
+    };
+
     // Any surface replaces the stdio loop: it serves every registered model
     // over HTTP and/or `com.swedishembedded.Brain1` until Ctrl-C.
     if !stdio {
@@ -1069,7 +1091,7 @@ pub fn run_serve(args: &[String]) {
             ready,
             deadlines,
             adapter_mode,
-            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, encoder_batch: policy.limits.max_batch, train },
+            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, encoder_batch: policy.limits.max_batch, train, mock_delay_ms },
         });
     }
 
@@ -1714,7 +1736,7 @@ mod tests {
     fn help_documents_every_flag_the_parser_accepts() {
         for f in [
             "--gpt", "--yolo", "--max-new", "--temp", "--top-k", "--seed", "--conf", "--dbus", "--dbus-system", "--dbus-name",
-            "--reserve-gb", "--models-dir", "--pin", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
+            "--reserve-gb", "--models-dir", "--pin", "--mock", "--mock-delay-ms", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
             "--admit-deadline-ms", "--cold-build-admit-deadline-ms",
         ] {
             assert!(HELP.contains(f), "{f} is parsed by run_serve but not documented in HELP");

@@ -89,11 +89,11 @@ def main() -> None:
     with BrainDBus(bus=args.bus) as brain:
         served = brain.models()
         if args.model not in served:
-            env = {"brain/chronos2": "BRAIN_CHRONOS2=<weights>", "brain/fincast": "BRAIN_FINCAST=<weights>",
-                   "brain/kronos": "BRAIN_KRONOS_TOKENIZER=<dir> BRAIN_KRONOS_DECODER=<dir>",
-                   "brain/timesfm3": "BRAIN_TIMESFM3=<weights>",
-                   "brain/mock": "BRAIN_MOCK=1"}[args.model]
-            skip(f"model {args.model!r} is not served (served: {served}); start it with: {env} brain serve --dbus")
+            how = {"brain/chronos2": "BRAIN_CHRONOS2=<weights> brain serve --dbus", "brain/fincast": "BRAIN_FINCAST=<weights> brain serve --dbus",
+                   "brain/kronos": "BRAIN_KRONOS_TOKENIZER=<dir> BRAIN_KRONOS_DECODER=<dir> brain serve --dbus",
+                   "brain/timesfm3": "BRAIN_TIMESFM3=<weights> brain serve --dbus",
+                   "brain/mock": "brain serve --dbus --mock"}[args.model]
+            skip(f"model {args.model!r} is not served (served: {served}); start it with: {how}")
         out = brain.run(
             args.model, "forecast", params,
             blobs={"context": payload},

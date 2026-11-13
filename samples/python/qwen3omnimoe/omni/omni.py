@@ -66,7 +66,7 @@ Examples:
   python3 samples/python/qwen3omnimoe/omni/omni.py --anthropic localhost:8787 --in-text "2+2=" --out-stdio
 
   # Quick, deps-free wire-contract check against the mock resident:
-  BRAIN_MOCK=1 brain serve --dbus &
+  brain serve --dbus --mock &
   python3 samples/python/qwen3omnimoe/omni/omni.py --dbus --model brain/mock --in-text hi --out-stdio
 """
 from __future__ import annotations

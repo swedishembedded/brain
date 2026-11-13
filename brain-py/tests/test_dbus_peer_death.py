@@ -42,8 +42,7 @@ pytestmark = [
 
 
 def test_killing_brain_mid_stream_raises_instead_of_returning_empty():
-    env = dict(os.environ, BRAIN_MOCK="1", BRAIN_MOCK_DELAY_MS="5000")
-    proc = subprocess.Popen([str(BRAIN_BIN), "serve", "--dbus"], env=env,
+    proc = subprocess.Popen([str(BRAIN_BIN), "serve", "--dbus", "--mock", "--mock-delay-ms", "5000"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         deadline = time.monotonic() + 10

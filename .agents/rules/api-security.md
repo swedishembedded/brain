@@ -12,7 +12,7 @@ note the audit in the change. Write automated tests for whatever the audit finds
 a checklist item that is only ever verified by eye will regress silently the next
 time a route changes. The tests live in two places, and a new route or field adds
 its assertions to both: the socket-level `tests/e2e/api_conformance.bats` (against
-the `BRAIN_MOCK` model: auth matrix including no enumeration, no key leak, 413,
+the mock model (`brain serve --mock`): auth matrix including no enumeration, no key leak, 413,
 error hygiene, input-bound 400s, admission 429) and the in-process
 `crates/apiserve/tests/it/api.rs`. These surfaces are internet-reachable when the operator binds
 them, so treat all request input as hostile.

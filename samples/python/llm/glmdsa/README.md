@@ -15,7 +15,7 @@ Quick, deps-free wire-contract check (no GLM checkpoint needed - exercises
 the exact same `generate` action shape against the mock resident):
 
 ```bash
-BRAIN_MOCK=1 tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --mock" -- \
   python3 samples/python/llm/glmdsa/glmdsa.py --dbus --model brain/mock --prompt hi
 ```
 

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! A deterministic, weight-free **mock** resident model, gated on `BRAIN_MOCK`.
+//! A deterministic, weight-free **mock** resident model, served by `brain serve --mock`.
 //!
-//! It is a real [`ResidentModel`] so a `BRAIN_MOCK=1 brain serve` exercises the true
+//! It is a real [`ResidentModel`] so a `brain serve --mock` exercises the true
 //! serving path — placement → claim → activate → `run_batch` — with no weights, no
 //! GPU, and no external model. Registered under the id **`mock`**, it advertises
 //! the actions the apiserve handlers (and the examples regression harness) dispatch:
@@ -41,13 +41,18 @@ use serde_json::{json, Value};
 /// The catalog id the mock registers under.
 pub const MODEL: &str = "brain/mock";
 
-/// The mock model family (no state — every action is a pure function of its inputs).
-pub struct MockResident;
+/// The mock model family (no state: every action is a pure function of its
+/// inputs). `delay_ms` (`brain serve --mock-delay-ms`, default 0 = instant) is
+/// how long it spends "producing" before it streams: a positive value pins the
+/// single CPU lane long enough to exercise admission (a concurrent request is
+/// shed with 429) and cancellation.
+pub struct MockResident {
+    delay_ms: u64,
+}
 
 impl MockResident {
-    /// The mock resident when `BRAIN_MOCK` is set to a non-empty value, else `None`.
-    pub fn from_env() -> Option<MockResident> {
-        std::env::var("BRAIN_MOCK").ok().filter(|v| !v.is_empty()).map(|_| MockResident)
+    pub fn new(delay_ms: u64) -> MockResident {
+        MockResident { delay_ms }
     }
 
     /// The streaming chat action. Declares every param the OpenAI/Anthropic/OpenRouter
@@ -138,11 +143,11 @@ impl ResidentModel for MockResident {
     }
     fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
         // No weights — the instance is built instantly.
-        Ok(Box::new(MockInstance))
+        Ok(Box::new(MockInstance { delay_ms: self.delay_ms }))
     }
 }
 
-/// The deterministic mock speech-to-text model (`BRAIN_MOCK`, beside
+/// The deterministic mock speech-to-text model (`--mock`, beside
 /// [`MockResident`]): speech-only, so it exercises exactly the path a real ASR
 /// checkpoint takes - discovered from its `transcribe` action alone, listed as
 /// audio-in/text-out, served on `/audio/transcriptions`.
@@ -184,14 +189,16 @@ impl Instance for MockAsrInstance {
 }
 
 /// The built mock instance (holds nothing — actions are pure functions).
-struct MockInstance;
+struct MockInstance {
+    delay_ms: u64,
+}
 
 impl Instance for MockInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match action {
-            "generate" => generate(inv, progress),
+            "generate" => generate(inv, self.delay_ms, progress),
             "embed" => embed(inv),
-            "text2image" => text2image(inv, progress),
+            "text2image" => text2image(inv, self.delay_ms, progress),
             "forecast" => forecast(inv),
             other => Err(format!("mock: unknown action '{other}'")),
         }
@@ -270,13 +277,6 @@ fn generate_tool_call(user: &str, progress: &mut dyn FnMut(Progress)) -> ActionR
         .blob("text", Blob::new(Media::Text, Vec::new())))
 }
 
-/// The delay (ms) the mock spends "producing" before it streams, from
-/// `BRAIN_MOCK_DELAY_MS` (default 0 = instant). A positive value pins the single CPU
-/// lane long enough to exercise admission (a concurrent request is shed with 429).
-fn mock_delay_ms() -> u64 {
-    std::env::var("BRAIN_MOCK_DELAY_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0)
-}
-
 /// A fake internal error detail for the failure mode. Assembled at runtime from
 /// pieces so **no absolute-path string literal** appears in `crates/**` (the repo's
 /// absolute-path grep gate stays clean). The string deliberately contains a
@@ -315,7 +315,7 @@ use capability::last_user_text;
 /// audio (`bytes.len() / 4`, the blob wire format being f32-LE). Empty when
 /// neither is present, so a text-only reply is unchanged.
 ///
-/// This is what makes `BRAIN_MOCK=1 brain serve --openai --anthropic --dbus` able
+/// This is what makes `brain serve --mock --openai --anthropic --dbus` able
 /// to prove an attached image/audio actually REACHED the model, not merely that
 /// the request parsed - the mock has no weights to look at the content with, so
 /// the shape of what arrived is the observable. Format matches the
@@ -353,10 +353,10 @@ fn parse_stop(inv: &Invocation) -> Vec<String> {
 /// * **failure** — if the user text contains [`FAIL_TRIGGER`], return an `Err` whose
 ///   string embeds a fake internal detail ([`fake_internal_detail`]); the apiserve
 ///   layer must scrub it and return only a generic message.
-/// * **delay** — if `BRAIN_MOCK_DELAY_MS` > 0, sleep that long (polling `cancel`)
+/// * **delay**: if `delay_ms` > 0, sleep that long (polling `cancel`)
 ///   before producing, pinning the single CPU lane so a concurrent request is shed
 ///   (429). A cancelled/timed-out job returns promptly (`Err("cancelled")`).
-fn generate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+fn generate(inv: &Invocation, delay: u64, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let max_new = inv.get_i64("max_new").unwrap_or(1024).max(1) as usize;
     let user = last_user_text(inv);
 
@@ -371,7 +371,6 @@ fn generate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResul
     }
 
     // Delay mode: pin the lane, polling cancel so a shed/disconnected job frees it.
-    let delay = mock_delay_ms();
     if delay > 0 && sleep_cancellable(delay, &inv.cancel) {
         return Err("cancelled".into());
     }
@@ -502,16 +501,16 @@ fn forecast(inv: &Invocation) -> ActionResult {
 /// Deterministic image generation: a seed-shifted RGB gradient in brain's raw HWC-f32
 /// `[0,1]` wire format, after a couple of `step` denoise ticks (mapped to
 /// `image_generation.partial_image` events on the streaming surface). Polls
-/// `inv.cancel` between steps (honoring `BRAIN_MOCK_DELAY_MS` split evenly across
+/// `inv.cancel` between steps (honoring the mock's delay split evenly across
 /// them) so `Cancel` has a real, runnable action to exercise — the D-Bus/HTTP
 /// examples cancel-generation demos, and `roundtrip.rs`'s synthetic `slow` action,
 /// were previously the only paths that ever hit `Cancel` at all.
-fn text2image(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+fn text2image(inv: &Invocation, delay: u64, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let w = inv.get_i64("width").unwrap_or(1024).clamp(1, 4096) as u32;
     let h = inv.get_i64("height").unwrap_or(1024).clamp(1, 4096) as u32;
     let seed = inv.get_i64("seed").unwrap_or(0).rem_euclid(256) as u32;
     let steps = 4u32;
-    let per_step_delay = mock_delay_ms() / u64::from(steps);
+    let per_step_delay = delay / u64::from(steps);
     for s in 0..steps {
         if per_step_delay > 0 && sleep_cancellable(per_step_delay, &inv.cancel) {
             return Err("cancelled".into());
@@ -538,7 +537,7 @@ mod tests {
 
     #[test]
     fn manifest_classifies_as_chat_embeddings_and_image() {
-        let caps = apiserve::api_caps(&MockResident.manifest());
+        let caps = apiserve::api_caps(&MockResident::new(0).manifest());
         assert!(caps.chat, "generate must classify as chat");
         assert!(caps.embeddings, "embed must classify as embeddings");
         assert!(caps.image, "text2image must classify as image");
@@ -549,7 +548,7 @@ mod tests {
         // Text-media output, and no "embed"-ish output name, so none of
         // `api_caps`'s three rules should ever fire on it.
         assert!(
-            MockResident.manifest().actions.iter().any(|a| a.name == "forecast"),
+            MockResident::new(0).manifest().actions.iter().any(|a| a.name == "forecast"),
             "forecast must be advertised"
         );
     }
@@ -565,7 +564,7 @@ mod tests {
 
     #[test]
     fn tool_call_trigger_streams_one_scripted_call_by_default() {
-        let mut inst = MockInstance;
+        let mut inst = MockInstance { delay_ms: 0 };
         let messages = serde_json::to_string(&json!([{ "role": "user", "content": format!("weather please {TOOL_CALL_TRIGGER}") }])).unwrap();
         let inv = Invocation::new().set("messages", json!(messages));
 
@@ -611,7 +610,7 @@ mod tests {
 
     #[test]
     fn tool_call_trigger_repeated_emits_a_second_call_with_the_next_index() {
-        let mut inst = MockInstance;
+        let mut inst = MockInstance { delay_ms: 0 };
         let messages =
             serde_json::to_string(&json!([{ "role": "user", "content": format!("{TOOL_CALL_TRIGGER} and {TOOL_CALL_TRIGGER}") }]))
                 .unwrap();
@@ -635,7 +634,7 @@ mod tests {
 
     #[test]
     fn generate_streams_deltas_that_concatenate_to_the_text_blob() {
-        let model = MockResident;
+        let model = MockResident::new(0);
         let mut inst = model.activate(&model.instance_key("generate", &Invocation::new()), Device::Cpu).unwrap();
         let messages = serde_json::to_string(&json!([{ "role": "user", "content": "hello there" }])).unwrap();
         let inv = Invocation::new().set("messages", json!(messages)).set("max_new", json!(1024));
@@ -656,7 +655,7 @@ mod tests {
 
     #[test]
     fn generate_caps_at_max_new_and_reports_length() {
-        let mut inst = MockInstance;
+        let mut inst = MockInstance { delay_ms: 0 };
         let inv = Invocation::new().set("prompt", json!("one two three four five")).set("max_new", json!(2));
         let out = inst.run("generate", &inv, &mut |_| {}).unwrap();
         assert_eq!(out.outputs["completion_tokens"], 2);
@@ -665,7 +664,7 @@ mod tests {
 
     #[test]
     fn failure_mode_errors_and_embeds_internal_detail_for_the_layer_to_scrub() {
-        let mut inst = MockInstance;
+        let mut inst = MockInstance { delay_ms: 0 };
         let inv = Invocation::new().set("prompt", json!("please __mock_fail__ now"));
         let err = inst.run("generate", &inv, &mut |_| {}).unwrap_err();
         // The RAW mock error carries the internal detail (paths/panic) that the
@@ -711,7 +710,7 @@ mod tests {
 
     #[test]
     fn embed_returns_fixed_dim_mean_vector() {
-        let mut inst = MockInstance;
+        let mut inst = MockInstance { delay_ms: 0 };
         let out = inst.run("embed", &Invocation::new().set("text", json!("hello world")), &mut |_| {}).unwrap();
         let mean = out.outputs["mean"].as_array().unwrap();
         assert_eq!(mean.len(), EMBED_DIM);
@@ -731,7 +730,7 @@ mod tests {
 
     #[test]
     fn embed_accepts_text_as_an_input_blob_instead_of_a_param() {
-        let mut inst = MockInstance;
+        let mut inst = MockInstance { delay_ms: 0 };
         let inv = Invocation::new().blob("text", Blob::new(Media::Text, b"hello world".to_vec()));
         let by_blob = inst.run("embed", &inv, &mut |_| {}).unwrap();
         let by_param = inst.run("embed", &Invocation::new().set("text", json!("hello world")), &mut |_| {}).unwrap();
@@ -740,14 +739,14 @@ mod tests {
 
     #[test]
     fn embed_errors_clearly_when_neither_text_param_nor_blob_is_given() {
-        let mut inst = MockInstance;
+        let mut inst = MockInstance { delay_ms: 0 };
         let err = inst.run("embed", &Invocation::new(), &mut |_| {}).unwrap_err();
         assert!(err.contains("text"), "error should name the missing input: {err}");
     }
 
     #[test]
     fn text2image_emits_raw_hwc_image_blob() {
-        let mut inst = MockInstance;
+        let mut inst = MockInstance { delay_ms: 0 };
         let inv = Invocation::new().set("prompt", json!("a cat")).set("width", json!(4)).set("height", json!(4));
         let mut steps = 0u32;
         let out = inst.run("text2image", &inv, &mut |_| steps += 1).unwrap();
@@ -761,10 +760,10 @@ mod tests {
     #[test]
     fn text2image_aborts_promptly_when_already_cancelled() {
         // Armed and pre-cancelled BEFORE the run: the plain `is_cancelled()` check
-        // (independent of BRAIN_MOCK_DELAY_MS, which this test deliberately never
+        // (independent of the mock delay, which this test deliberately never
         // touches — see the delay tests' own note on the process-global env race)
         // must abort on the very first step.
-        let mut inst = MockInstance;
+        let mut inst = MockInstance { delay_ms: 0 };
         let cancel = capability::CancelToken::armed();
         cancel.cancel();
         let mut inv = Invocation::new().set("prompt", json!("a cat"));
@@ -783,7 +782,7 @@ mod tests {
 
     #[test]
     fn forecast_extrapolates_the_context_drift_with_quantile_spread() {
-        let mut inst = MockInstance;
+        let mut inst = MockInstance { delay_ms: 0 };
         let inv = Invocation::new().set("horizon", json!(8)).blob("context", ramp_context(16));
         let out = inst.run("forecast", &inv, &mut |_| {}).unwrap();
         assert_eq!(out.outputs["horizon"], 8);
@@ -810,13 +809,13 @@ mod tests {
 
     #[test]
     fn forecast_requires_a_context_blob() {
-        let mut inst = MockInstance;
+        let mut inst = MockInstance { delay_ms: 0 };
         let err = inst.run("forecast", &Invocation::new().set("horizon", json!(4)), &mut |_| {}).unwrap_err();
         assert!(err.contains("context"), "error should name the missing input: {err}");
     }
 
     /// The chat action must ACCEPT (spec-validate) and ECHO attached media, so a
-    /// weights-free `BRAIN_MOCK=1 brain serve` can prove an image/audio actually
+    /// weights-free `brain serve --mock` can prove an image/audio actually
     /// reached the model over any transport - not just that the request parsed.
     #[test]
     fn generate_echoes_attached_image_and_audio_blobs() {
@@ -831,7 +830,7 @@ mod tests {
         let inv = spec.validate(inv).expect("an invocation carrying both optional blobs must validate");
 
         let mut deltas = String::new();
-        let out = MockInstance
+        let out = MockInstance { delay_ms: 0 }
             .run("generate", &inv, &mut |p| {
                 if let Some(d) = p.delta {
                     deltas.push_str(&d);
@@ -849,7 +848,7 @@ mod tests {
     fn generate_without_media_is_the_plain_echo() {
         let messages = serde_json::to_string(&json!([{ "role": "user", "content": "hi" }])).unwrap();
         let inv = Invocation::new().set("messages", json!(messages));
-        let out = MockInstance.run("generate", &inv, &mut |_| {}).unwrap();
+        let out = MockInstance { delay_ms: 0 }.run("generate", &inv, &mut |_| {}).unwrap();
         assert_eq!(String::from_utf8(out.blobs["text"].bytes.clone()).unwrap(), "You said: hi");
     }
 }

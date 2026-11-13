@@ -100,7 +100,7 @@ mod tests {
     /// Every model whose checkpoint declares sampling defaults shows them in its manifest, whatever its family.
     #[test]
     fn a_resident_is_served_with_the_defaults_its_checkpoint_declares() {
-        let plain: Arc<dyn ResidentModel> = Arc::new(MockResident);
+        let plain: Arc<dyn ResidentModel> = Arc::new(MockResident::new(0));
         assert_eq!(default_of(&plain, "top_p"), Some(serde_json::json!(1.0)), "the mock's own constant");
         assert_eq!(default_of(&plain, "temp"), Some(serde_json::json!(1.0)));
         let dir = declared("declared", r#"{"temperature": 0.6, "top_k": 20, "top_p": 0.95}"#);

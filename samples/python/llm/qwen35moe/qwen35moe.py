@@ -44,7 +44,7 @@ Examples:
 
   # Quick, deps-free wire-contract check against the mock resident (no
   # Qwen3.5 weights needed -- exercises the exact same `generate` action shape):
-  BRAIN_MOCK=1 tools/dbus-session.sh --serve "--dbus" -- \
+  tools/dbus-session.sh --serve "--dbus --mock" -- \
     python3 samples/python/llm/qwen35moe/qwen35moe.py --dbus --model brain/mock --in-text hi --out-stdio
 """
 from __future__ import annotations

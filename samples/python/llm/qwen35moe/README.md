@@ -37,7 +37,7 @@ and `--anthropic localhost:8787`.
 Quick, deps-free wire-contract check (no Qwen3.5 weights needed):
 
 ```bash
-BRAIN_MOCK=1 tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --mock" -- \
   python3 samples/python/llm/qwen35moe/qwen35moe.py --dbus --model brain/mock --in-text hi --out-stdio
 ```
 
@@ -65,7 +65,7 @@ brain qwen35moe generate --prompt "2+2=" --max_new 8 --chat true --out text=answ
 A Qwen3.5-35B-A3B checkpoint in the model store with its `tokenizer.json`
 beside it (`brain serve` serves it under its card id: `--id brain/qwen35moe`
 on `brain import-gguf`, or `--model <its id>` here), or
-`BRAIN_MOCK=1` for the weight-free wire-contract check. `jeepney` for
+`brain serve --mock` for the weight-free wire-contract check. `jeepney` for
 `--dbus` (`pip install -e brain-py`); nothing extra for `--openai`/
 `--anthropic` (`brain_py.openai`/`brain_py.anthropic` are plain `urllib`,
 stdlib only).

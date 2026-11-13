@@ -1308,11 +1308,9 @@ impl Gpt {
             let arr: Vec<Value> = itos.iter().map(|c| Value::from(c.to_string())).collect();
             config["itos"] = Value::Array(arr);
         }
-        // "brain/gpt" matches the reserved-vendor fallback
-        // -- the same id crates/catalog/src/resident_llm.rs::GptResident::from_env
-        // synthesizes for an env-loaded checkpoint -- so a checkpoint saved
-        // here is auto-discoverable by crates/serving/src/model_dir.rs without
-        // requiring BRAIN_GPT2_WEIGHTS to be set.
+        // "brain/gpt" is the reserved-vendor fallback id, and the card is what
+        // makes a checkpoint saved here discoverable by
+        // crates/serving/src/model_dir.rs.
         checkpoint::save_carded(path, config, &tensors, &checkpoint::st::ModelCard::new("brain/gpt", "gpt"));
     }
 

@@ -40,8 +40,7 @@ pytestmark = [
 
 @pytest.fixture
 def brain_server():
-    env = dict(os.environ, BRAIN_MOCK="1", BRAIN_MOCK_DELAY_MS="2000")
-    proc = subprocess.Popen([str(BRAIN_BIN), "serve", "--dbus"], env=env)
+    proc = subprocess.Popen([str(BRAIN_BIN), "serve", "--dbus", "--mock", "--mock-delay-ms", "2000"])
     try:
         deadline = time.monotonic() + 10
         up = False

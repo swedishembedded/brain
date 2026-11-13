@@ -39,7 +39,7 @@ Without the model the script prints what to run and exits cleanly. A
 deps-free wire-contract check against the mock resident:
 
 ```bash
-BRAIN_MOCK=1 tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --mock" -- \
   python3 samples/python/llm/edgerock/edgerock.py --dbus --model brain/mock
 ```
 

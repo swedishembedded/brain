@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 # The OpenRouter /videos contract over a real socket, against one
-# `BRAIN_MOCK=1 brain serve` (the deterministic mock video model: no weights, no
+# `brain serve --mock` (the deterministic mock video model: no weights, no
 # GPU). curl does what any OpenRouter-style client does: list, submit, poll,
 # download, then send the result back as the input of an edit.
 #
@@ -23,7 +23,7 @@ setup_file() {
   export LOG="$CONF_DIR/serve.log"
   export PORT="${VIDEO_API_PORT:-8899}"
   mkdir -p "$CONF_DIR/models"
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --models-dir "$CONF_DIR/models" \
+  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --models-dir "$CONF_DIR/models" \
     --openrouter "$PORT" --api-keys-out "$KEYS" --ready-file "$CONF_DIR/ready" >"$LOG" 2>&1 &
   export SERVER_PID=$!
   for _ in $(seq 1 60); do

@@ -4,7 +4,7 @@
 
 # End-to-end proof that the REAL `claude` CLI works against brain's Anthropic Messages
 # surface — the core "brain as a Claude Code backend" claim. Runs against the built-in
-# BRAIN_MOCK model (deterministic, instant), so it needs no weights and never hangs on
+# `brain serve --mock` model (deterministic, instant), so it needs no weights and never hangs on
 # a slow model; every claude call has a hard timeout.
 #
 # Env isolation: claude uses ONLY our locally-generated key and talks ONLY to the local
@@ -35,7 +35,7 @@ setup_file() {
   export E2E_LOG="$E2E_DIR/serve.log"
 
   # Local Anthropic surface backed by the deterministic mock model.
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --anthropic "$E2E_PORT" \
+  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --anthropic "$E2E_PORT" \
     --api-keys-out "$E2E_KEYS" >"$E2E_LOG" 2>&1 &
   echo "$!" > "$E2E_DIR/pid"
 

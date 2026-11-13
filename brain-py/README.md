@@ -106,6 +106,6 @@ python -m pytest brain-py/tests -q
   subprocess (fake detector / echo model); **skipped** when the `brain` binary is
   absent.
 
-A full live D-Bus round-trip runs `BRAIN_MOCK=1 BRAIN_DEVICE=cpu brain serve
+A full live D-Bus round-trip runs `BRAIN_DEVICE=cpu brain serve --mock
 --dbus` (see `tests/e2e/scheduler.bats` in the repo).
 ```

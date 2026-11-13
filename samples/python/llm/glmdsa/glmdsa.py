@@ -27,7 +27,7 @@ Examples:
 
   # Quick, deps-free wire-contract check against the mock resident (no GLM
   # checkpoint needed -- exercises the exact same generate action shape):
-  BRAIN_MOCK=1 tools/dbus-session.sh --serve "--dbus" -- \
+  tools/dbus-session.sh --serve "--dbus --mock" -- \
     python3 samples/python/llm/glmdsa/glmdsa.py --dbus --model brain/mock --prompt hi
 """
 from __future__ import annotations

@@ -103,6 +103,9 @@ pub struct ServeKnobs {
     pub encoder_batch: Option<u32>,
     /// Serve training (`brain/train`) beside the models; `None` serves none.
     pub train: Option<TrainKnobs>,
+    /// Serve the deterministic, weight-free mock models (`--mock`), each call
+    /// taking this many milliseconds (`--mock-delay-ms`); `None` serves none.
+    pub mock_delay_ms: Option<u64>,
 }
 
 /// What `brain serve --training` decides about the training workload.
@@ -147,7 +150,7 @@ pub struct TrainKnobs {
 /// resident, and `knobs.decision` naming the decision models served beyond
 /// those the store holds.
 pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedStore, policy: Policy, knobs: ServeKnobs) -> Serving {
-    let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, encoder_batch, train } = knobs;
+    let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, encoder_batch, train, mock_delay_ms } = knobs;
     // Process-wide, before any OCR model is built: the models read it when they load.
     ocrserve::configure(ocr);
     let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
@@ -196,10 +199,6 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
         models.push(Arc::new(y));
     } else {
         residency::log::not_served("brain: yolo not served over the scheduler (pull Ultralytics/YOLOv8 into the model dir)");
-    }
-    // The text-generation LLM gated on its own weights env var.
-    if let Some(g) = catalog::resident_llm::GptResident::from_env() {
-        models.push(Arc::new(g));
     }
     // The one resident kept BOTH ways: erased for the executor, concrete for
     // the adapter flags' `adapter_view` -- see `Serving::qwen`.
@@ -273,14 +272,14 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     // store id, plus the family model that answers inventory and `auto`
     // selection without loading anything.
     models.extend(catalog::resident_decision::serve_all(&decision, store.models_dir()));
-    // Deterministic mock model (BRAIN_MOCK): a real ResidentModel - no weights, no
+    // Deterministic mock model (`--mock`): a real ResidentModel - no weights, no
     // GPU - registered as `mock` so the HTTP conformance harness can validate the
     // whole API surface through the true serving path (placement → activate →
     // run_batch). Advertises generate (chat) + embed + text2image; a
     // speech-only sibling `mock-asr` advertises transcribe, and `mock-video`
     // text-to-video and extend.
-    if let Some(m) = catalog::resident_mock::MockResident::from_env() {
-        models.push(Arc::new(m));
+    if let Some(delay_ms) = mock_delay_ms {
+        models.push(Arc::new(catalog::resident_mock::MockResident::new(delay_ms)));
         models.push(Arc::new(catalog::resident_mock::MockAsrResident));
         models.push(Arc::new(catalog::resident_mock_video::MockVideoResident));
     }
@@ -455,7 +454,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     if let Some(t) = catalog::resident_omni::int8_thinker_multi_from_store(store, gpus, reserved) {
         exec.register_multi(Arc::new(t));
     } else {
-        residency::log::not_served(&format!("brain: {} not served over the scheduler (set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT)", qwen3omnimoe::int8_thinker_resident::MODEL));
+        residency::log::not_served(&format!("brain: {} not served over the scheduler (no Qwen3-Omni checkpoint in the model store; brain qwen3omnimoe import writes one)", qwen3omnimoe::int8_thinker_resident::MODEL));
     }
     // Released Qwen3.8 GGUFs found by the model scan: INT8 straight from the
     // file, layer-sharded across as many of the allowed cards as their real

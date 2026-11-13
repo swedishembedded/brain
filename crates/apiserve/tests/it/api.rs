@@ -3172,7 +3172,7 @@ async fn a_model_that_does_stream_deltas_gets_no_synthetic_duplicate_chunk() {
 /// its invocation into its reply text - byte-for-byte the format
 /// `crates/catalog/src/resident_mock.rs::media_suffix` uses (`" [image:{w}x{h}]"`,
 /// `" [audio:{n}samples@16k]"`), so the HTTP surfaces are exercised against the
-/// same observable a `BRAIN_MOCK=1 brain serve` exposes.
+/// same observable a `brain serve --mock` exposes.
 ///
 /// The point is the POSITIVE case: `apiserve::media`'s own unit tests only cover
 /// decoding in isolation plus the negative (bad format) paths, and nothing proved

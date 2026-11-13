@@ -104,7 +104,7 @@ Done (2026-11-06), all on the mock model, no GPU:
    mapping unit tests (grid snapping in both directions, bounds, refusals),
    and a catalog test that every contract names params and inputs its action
    really has.
-2. `brain/mock-video` (`BRAIN_MOCK`): `t2v` with an optional sound track, and
+2. `brain/mock-video` (`brain serve --mock`): `t2v` with an optional sound track, and
    `extend`; flat colours a test can recognise after AV1 coding.
 3. `crates/apiserve/src/video.rs`: routes, spool, `Idempotency-Key`, `Range`,
    cancel/delete; `tests/it/video.rs` (7 cases: listing, generate-poll-

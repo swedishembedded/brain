@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! A deterministic, weight-free **mock video model**, served beside the other
-//! mocks when `BRAIN_MOCK` is set, so the whole video path - contract mapping,
+//! mocks by `brain serve --mock`, so the whole video path - contract mapping,
 //! the executor, encoding, the spool and every HTTP route above it - runs on a
 //! machine with no GPU and no checkpoint.
 //!

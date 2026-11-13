@@ -23,7 +23,7 @@ Examples:
   python3 samples/python/llm/edgerock/edgerock.py --openai localhost:8788 --api-key sk-brain-...
 
   # Quick wire-contract check against the mock resident (no weights needed):
-  BRAIN_MOCK=1 tools/dbus-session.sh --serve "--dbus" -- \\
+  tools/dbus-session.sh --serve "--dbus --mock" -- \\
       python3 samples/python/llm/edgerock/edgerock.py --dbus --model brain/mock
 """
 from __future__ import annotations

@@ -14,7 +14,7 @@ aborts at its next per-step poll (the current denoise step finishes first).
       python3 samples/python/imagegen/flux2-klein/cancel_generation.py
 
 Also runs against the weight-free mock model (`--model brain/mock`), which polls the
-same cancel token between denoise steps - set `BRAIN_MOCK_DELAY_MS` (e.g. 200) so
+same cancel token between denoise steps - serve it with `--mock --mock-delay-ms 200` so
 there is actually time to call `Cancel` between the first two progress frames;
 without it the mock's 4 steps complete before the second frame is even read.
 

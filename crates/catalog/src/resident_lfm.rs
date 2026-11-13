@@ -50,8 +50,8 @@ pub struct LfmResident {
 impl LfmResident {
     /// Explicit-path constructor (the perf harness builds it directly): the
     /// canonical brain/ fallback as the catalog id (see
-    /// `resident_llm.rs::GptResident::from_env`'s comment -- no upstream
-    /// vendor/repo provenance from an env-loaded checkpoint).
+    /// crates/modelref/src/alias.rs's module docs) -- a checkpoint named by
+    /// path carries no upstream vendor/repo provenance.
     pub fn new(weights: &str, tokenizer_path: &str, batch: u32) -> Result<LfmResident, String> {
         Self::from_card(weights, &ModelCard::new("brain/lfm2", "lfm"), Some(tokenizer_path), batch)
     }

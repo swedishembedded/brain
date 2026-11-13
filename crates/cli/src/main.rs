@@ -1387,6 +1387,9 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_QWEN3OMNIMOE_HF_DIR", replacement: "serve: {pin: [qwen3omnimoe.weights=DIR]}" },
     Retired { name: "BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT", replacement: "serve: {pin: [qwen3omnimoe-int8.weights=FILE]}" },
     Retired { name: "BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR", replacement: "serve: {pin: [qwen3omnimoe-int8.tokenizer=FILE]}" },
+    Retired { name: "BRAIN_GPT2_WEIGHTS", replacement: "serve: {models-dir: DIR} (the model-dir scan serves every GPT checkpoint)" },
+    Retired { name: "BRAIN_MOCK", replacement: "serve: {mock: true}" },
+    Retired { name: "BRAIN_MOCK_DELAY_MS", replacement: "serve: {mock-delay-ms: MS}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 

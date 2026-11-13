@@ -7,7 +7,7 @@
 # silently rotted after the P19 brain-py API rewrite (see the git history around
 # commit 38f384e).
 #
-# ONE shared server for the whole suite (BRAIN_MOCK=1, D-Bus + Anthropic HTTP, on
+# ONE shared server for the whole suite (--mock, D-Bus + Anthropic HTTP, on
 # a private per-run dbus-daemon - never the real session/system bus), matching
 # tests/e2e/api_conformance.bats's pattern. Each sample that CAN run against the
 # weight-free mock model does so for real; the rest skip (exit 77, mapped to a
@@ -52,13 +52,13 @@ setup_file() {
   OPENAI_PORT="${OPENAI_PORT:-8992}"
   export OPENAI_PORT
 
-  # BRAIN_MOCK_DELAY_MS is a SERVER-side knob (crates/catalog/src/resident_mock.rs
-  # reads it once per request from ITS OWN environment) - it must be set on this
-  # launch, not on a client invocation later, or the cancellation test below
+  # --mock-delay-ms is a SERVER-side knob (crates/catalog/src/resident_mock.rs
+  # holds it per instance) - it must be set on this launch, not on a client
+  # invocation later, or the cancellation test below
   # races every step to completion before Cancel can land. 300ms split across
   # text2image's 4 steps is unnoticeable for every other test here.
-  BRAIN_MOCK=1 BRAIN_MOCK_DELAY_MS=300 BRAIN_DEVICE=cpu \
-    dbus_session_start_serve "$BRAIN" "--dbus --anthropic $ANTHROPIC_PORT --openai $OPENAI_PORT"
+  BRAIN_DEVICE=cpu \
+    dbus_session_start_serve "$BRAIN" "--dbus --mock --mock-delay-ms 300 --anthropic $ANTHROPIC_PORT --openai $OPENAI_PORT"
   SERVER_PID="$DBUS_SESSION_SERVER_PID"
   export SERVER_PID
 
@@ -208,7 +208,7 @@ run_example() {
 }
 
 @test "samples/python/imagegen/flux2-klein/cancel_generation.py actually cancels a mock job" {
-  # The shared server was started with BRAIN_MOCK_DELAY_MS=300 (see setup_file)
+  # The shared server was started with --mock-delay-ms 300 (see setup_file)
   # so there is real time to call Cancel between the first two progress frames.
   run_example "$REPO/samples/python/imagegen/flux2-klein/cancel_generation.py" --model brain/mock
   [[ "$output" == *"'cancelled' (expected)"* ]]
@@ -247,7 +247,7 @@ run_example() {
 # ------------------------------------------------------------- api/
 
 @test "samples/shell/api/claude-with-brain/claude-with-brain.sh --check runs against the mock" {
-  run env BRAIN="$BRAIN" BRAIN_MOCK=1 PORT=8993 bash "$REPO/samples/shell/api/claude-with-brain/claude-with-brain.sh" --check
+  run env BRAIN="$BRAIN" PORT=8993 bash "$REPO/samples/shell/api/claude-with-brain/claude-with-brain.sh" --check --mock
   if [ "$status" -ne 0 ]; then
     echo "$output" >&3
   fi
