@@ -558,6 +558,13 @@ navigation:
           - docs/book/v12-reinforcement-learning/06-decision-models.md
           - docs/book/v12-reinforcement-learning/07-continual-learning.md
           - docs/book/v12-reinforcement-learning/08-project-agent.md
+      - title: "Volume XIII: Training Large Models Efficiently"
+        pages:
+          - docs/book/v13-training-at-scale/index.md
+          - docs/book/v13-training-at-scale/01-training-data.md
+          - docs/book/v13-training-at-scale/02-mixed-precision.md
+          - docs/book/v13-training-at-scale/03-training-memory.md
+          - docs/book/v13-training-at-scale/04-peft.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

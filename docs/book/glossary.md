@@ -14,13 +14,21 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **accuracy**: the share of a classifier's decisions that are right, $(\mathrm{TP} + \mathrm{TN})/N$; equivalently the average of the per-class success rates weighted by the class shares, so a rare class barely affects it. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
+**activation checkpointing**: keeping only the inputs of a stack's blocks or segments in the forward pass and replaying each segment's forward just before its backward, so that one segment's activations exist at a time, for one more forward pass of arithmetic. *([Where Training Memory Goes](v13-training-at-scale/03-training-memory.md))*
+
 **activation function**: the fixed one-input function $g$ a neuron applies to its weighted sum to produce its output, for example the identity, the sigmoid or the step. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
+
+**activation memory**: the memory that holds the saved activations of one training step, a number per token that grows with the batch and with depth, as opposed to the per-parameter memory of weights, gradients and optimizer state. *([Where Training Memory Goes](v13-training-at-scale/03-training-memory.md))*
 
 **actor-critic**: a learner that keeps a policy (the actor) and a value function (the critic) and updates the policy along the score of its actions times the critic's temporal-difference error. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
 
 **Adam**: an update that steps along a bias-corrected running average of the gradient divided by the root of a bias-corrected running average of its square, keeping two state arrays per parameter. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **AdamW**: Adam with decoupled weight decay: $\theta \leftarrow \theta - \eta\lambda\theta - \eta\hat{\mathbf{m}}/(\sqrt{\hat{\mathbf{v}}} + \epsilon_{\mathrm{den}})$. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
+
+**adapter merging**: forming the sum of a base weight and the scaled products of one or several adapters, exact in a dense base, and in a quantized base replaced by a correction computed beside the codes because the sum would be rounded onto the base's grid. *([Parameter-Efficient Fine-Tuning](v13-training-at-scale/04-peft.md))*
+
+**adapter serving**: serving many adapters from one resident base, a bank of adapters padded to a common rank with a slot vector that names the adapter of each row of a batch, and a cache namespace so that stored keys and values are never shared between adapters. *([Parameter-Efficient Fine-Tuning](v13-training-at-scale/04-peft.md))*
 
 **adaptive computation**: letting the amount of computation depend on the input, here through a learned probability, read from each pass's state, of stopping at that pass, which weights the loss and selects how many passes a token receives. *([Looped and Recurrent-Depth Transformers](v06-language-models/07-recurrent-depth.md))*
 
@@ -298,6 +306,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **data leakage**: any route by which information about the rows used for scoring reaches the fitting (duplicates, statistics computed from all the rows, the future, the same subject on both sides), which makes the score too good to be true. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
+**data mixture**: the shares in which groups of records contribute to training, which must name what they are shares of (rows, tokens or supervised tokens) and be realised by a draw or a listing. *([Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md))*
+
 **data-parallel loop**: a loop in which no iteration reads anything another iteration writes, so its iterations can be run in any order or at the same time with the same result; the `parallel for` of the book's pseudocode. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 
 **dataset**: a collection of $N$ examples, each a vector of features paired with a label, written as the pairs $(\mathbf{x}_n, y_n)$. *([The Learning Problem](v02-learning/01-learning-problem.md))*
@@ -317,6 +327,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **decode phase**: generating one token at a time, each step running one row through the model, appending one key and one value per layer to the cache and attending to everything in it; limited by the bytes of the weights and the cache. *([The KV Cache](v05-sequences/12-kv-cache.md))*
 
 **decoupled weight decay**: shrinking every weight by the factor $1 - \eta\lambda$ directly, outside the gradient and the adaptive scaling, so that the decay means the same for every parameter. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
+
+**deduplication**: removing records that repeat other records, exactly by a hash of the text and approximately by a set similarity of shingles, within the training data and between it and the held-out data. *([Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md))*
 
 **delta rule**: updating a key-value memory by the outer product of the key and the prediction error, $\mathbf{S} \leftarrow \mathbf{S} + \beta\,\mathbf{k}(\mathbf{v} - \mathbf{S}^\top\mathbf{k})^\top$, one gradient step of a regression of the value on the key, so that a write replaces what the key returned. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
@@ -482,6 +494,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **fp8 format**: either of the two 8-bit floating-point layouts, E4M3 (4 exponent, 3 fraction bits, no infinity, one NaN pattern, largest finite number 448) and E5M2 (5 exponent, 2 fraction bits, IEEE infinities and NaNs, largest finite number 57344), used with a scale per block of values. *([Bits and Number Formats](v04-computation/01-number-formats.md))*
 
+**fp8 training**: running the forward and backward products on 8-bit floating-point operands (E4M3 for weights and activations, E5M2 for gradients), each tensor with a scale, accumulated and updated in wider formats. *([Mixed-Precision Training](v13-training-at-scale/02-mixed-precision.md))*
+
 **frame sequence**: a video as an ordered list of pictures of one size, each shown at its own time, usually at a fixed rate in frames per second. *([Video as Data](v10-video-and-3d/01-video.md))*
 
 **function**: a rule that assigns exactly one output to each input from its domain; the range is the set of outputs that actually occur. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
@@ -544,7 +558,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **GRPO**: group relative policy optimisation, which samples several answers to a prompt and uses the group's mean reward (and optionally its standard deviation) in place of a learned critic to form each answer's advantage. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
 
-**gru**: gated recurrent unit, a recurrent cell with one state, an update gate that sets how far the state moves toward a new candidate and a reset gate that sets how much of the old state the candidate may read, so that the old state reaches the new one through a gate and not through a matrix. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
+**GRU**: gated recurrent unit, a recurrent cell with one state, an update gate that sets how far the state moves toward a new candidate and a reset gate that sets how much of the old state the candidate may read, so that the old state reaches the new one through a gate and not through a matrix. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
 
 **guidance distillation**: training a student network by regression on the guided prediction of a teacher, optionally with the guidance scale as an input, so that one pass of the student gives what two passes of the teacher gave. *([Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md))*
 
@@ -732,9 +746,13 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **loss masking**: giving every position a mask of 1 or 0, so that padding and prompt tokens are computed but contribute nothing to the loss or the gradient, and dividing by the count of positions with mask 1 and not by the size of the batch. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
 
+**loss scaling**: multiplying the loss by a power-of-two constant so that the backward pass's gradients fit the range of a narrow format, then dividing the gradients by it in 32 bits before anything reads their size; dynamic loss scaling halves the constant and skips the step on an overflow and doubles it after a run of good steps. *([Mixed-Precision Training](v13-training-at-scale/02-mixed-precision.md))*
+
+**low-rank adaptation (LoRA)**: fine-tuning a layer by adding the scaled product of two thin trained matrices to its frozen weight, $\mathbf{W} = \mathbf{W}_0 + s\mathbf{B}\mathbf{A}$, with $\mathbf{B}$ starting at zero so that the adapted layer begins as the base. *([Parameter-Efficient Fine-Tuning](v13-training-at-scale/04-peft.md))*
+
 **low-rank approximation**: replacing a matrix by one of small rank, best obtained by keeping the largest singular values; it stores $r(m + n)$ numbers instead of $mn$ and its error is the dropped singular values. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
-**lstm**: long short-term memory, a recurrent cell with a cell state that is kept by a forget gate and added to by an input gate and shown through an output gate, so that the gradient has a path along the cell state with no weight matrix and no slope of the activation. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
+**LSTM**: long short-term memory, a recurrent cell with a cell state that is kept by a forget gate and added to by an input gate and shown through an output gate, so that the gradient has a path along the cell state with no weight matrix and no slope of the activation. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
 
 ## M
 
@@ -747,6 +765,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **masked language modeling**: the training task of an encoder in which a random subset of positions is selected, the input there is replaced (by a mask token, a random token or nothing, in the proportions 80, 10 and 10 percent), and the model is trained to recover the original tokens at the selected positions only, from both sides. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
 
 **masked-token prediction**: predicting a grid of codes by hiding all of them, predicting all in parallel, keeping the most confident and predicting the rest again with the kept ones visible. *([World Models](v10-video-and-3d/07-world-models.md))*
+
+**master weights**: the full-precision copy of every weight that the optimizer reads and updates, from which the narrow working copy used by the model's arithmetic is rebuilt after each step. *([Mixed-Precision Training](v13-training-at-scale/02-mixed-precision.md))*
 
 **matrix**: a table of numbers with $m$ rows and $n$ columns, which is also a linear map from $n$ numbers to $m$ numbers. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
@@ -864,6 +884,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **optical character recognition**: turning the pixels of a page into the characters that were printed on it; in this chapter a decoder writes the page as text while it attends to rows computed from the picture. *([Reading Documents](v07-vision/10-ocr.md))*
 
+**optimizer-state memory**: the bytes an optimizer holds for each parameter beyond its weight and gradient: the moment slots, a master copy when the value is narrow, and the scales or statistics that go with them. *([Where Training Memory Goes](v13-training-at-scale/03-training-memory.md))*
+
+**optimizer-state quantization**: storing the moments of an optimizer as 8-bit codes with one scale per block, using a spacing of the codes that favours small values and never decoding a positive second moment as zero. *([Where Training Memory Goes](v13-training-at-scale/03-training-memory.md))*
+
 **ordinary differential equation**: an equation $dx/dt = f(t, x)$ that gives the rate of change of an unknown function of one variable in terms of the function itself; its solution is a curve that follows the prescribed slopes from a given starting value. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
 **orthogonal matrix**: a square matrix whose columns are orthonormal, so that $\mathbf{Q}^\top\mathbf{Q} = \mathbf{I}$, its inverse is its transpose, and it preserves lengths and angles. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
@@ -892,7 +916,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **parameter**: one of the numbers that set a model's behaviour; fixed while the model predicts and changed while it learns. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
-**parameter count**: the number of numbers a model stores, the sum over its tensors of the product of their shape; multiplied by the bytes of a format it gives the size of the weights, and it is larger than the number a token's arithmetic uses for a mixture or a model with parameters that are not products. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
+**parameter count**: the number of numbers a model stores, the sum over its tensors of the product of their shape; multiplied by the bytes of a format it gives the size of the weights, and it is larger than the number a token's arithmetic uses for a mixture or for a model with parameters that take part in no per-token product. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
 
 **parity tolerance**: the largest difference between two implementations of the same function that rounding alone can explain, derived from the count of roundings along the longest chain of dependent operations times the unit round-off, so that anything above it is evidence of a bug. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
 
@@ -998,6 +1022,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **quantization error**: the difference $e = w' - w$ between a decoded weight and the original, bounded by half a step, and summarized by its mean squared error or the signal-to-quantization-noise ratio $10\log_{10}(\mathrm{mean}(w^2)/\mathrm{MSE})$ in decibels. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
+**quantized-base fine-tuning**: training an adapter beside a frozen base stored as low-bit codes with group scales, reading the base through its decoded value, so that the weights cost a fraction of their fp32 size and no update ever has to land on a rounded weight. *([Parameter-Efficient Fine-Tuning](v13-training-at-scale/04-peft.md))*
+
 **query, key and value**: the three vectors that each position's input gives by three separate learned linear maps: the query is what the position asks of the others, the key is what it can be matched on, and the value is what it hands over when matched. *([Self-Attention](v05-sequences/07-self-attention.md))*
 
 ## R
@@ -1100,6 +1126,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **saved activations**: the values of the forward pass that are kept in memory because the backward pass reads them. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
+**saved-activation policy**: the rule that says what the forward pass keeps for the backward pass: every layer's tensors, only the layer boundaries with each layer replayed, or only the boundaries held in a narrower format. *([Where Training Memory Goes](v13-training-at-scale/03-training-memory.md))*
+
 **scalar multiplication**: multiplying every entry of a vector by one number, which stretches, shrinks or flips the arrow. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **scale and zero point**: the pair $(\Delta, q_0)$ of a group: the distance between neighbouring levels and the code that stands for the number 0, chosen so that the codes cover the group's range and 0 is exactly a code. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
@@ -1122,9 +1150,13 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **sequence packing**: laying the tokens of many documents end to end in one stream and cutting it into rows of a fixed length, with the targets one place later and a padded, masked last row, so that almost every position of every row does useful work. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
 
+**sequence-length bucketing**: forming batches of records of similar length by sorting inside a pool of batches, so that less of each batch is padding, at the cost of batches that are no longer draws of the data. *([Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md))*
+
 **series tokenizer**: a map from bars or stretches of a series to symbols of a finite vocabulary and back, by uniform bins after a scale or by a learned code, so that the machinery of a language model applies to a forecast, at the price of a floor on the resolution of the values. *([Foundation Models for Time Series](v11-forecasting/03-foundation-forecasters.md))*
 
 **set**: a collection of distinct elements, written with braces and combined by union, intersection and difference. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
+
+**SFT data format**: the agreement between the producer of fine-tuning records and the trainer about what a record holds, how it becomes token ids, which ids are scored and where each record starts. *([Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md))*
 
 **shader translation**: rewriting a kernel from its own language into the form a device accepts so that it still computes what the source computes, which requires keeping every promise the language makes (clamped bounds, wrapping integers, barrier and return semantics, zeroed workgroup memory, layout) that the target does not make by itself. *([One Program, Many Devices](v04-computation/09-backends.md))*
 
@@ -1194,15 +1226,19 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **stochastic gradient descent**: gradient descent that steps along the gradient of a small random batch of examples instead of the whole training set, $\theta \leftarrow \theta - \eta\,\mathbf{g}_t$, an unbiased but noisy estimate of the full step. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
+**stochastic rounding**: rounding to one of the two neighbouring numbers with the probability that makes the result right on average, up with the probability equal to the fraction of the gap the value covers. *([Mixed-Precision Training](v13-training-at-scale/02-mixed-precision.md))*
+
 **storage buffer**: a large array in device memory that a kernel reads or reads and writes, whose element type the kernel declares and whose length the host chooses when it binds the buffer. *([Writing Compute Kernels](v04-computation/05-compute-kernels.md))*
 
 **straight-through estimator**: the rule that passes the gradient at a quantizer's output to its input unchanged, written $\mathbf{z} + \mathrm{sg}[\mathbf{z}_q - \mathbf{z}]$ with a stop-gradient $\mathrm{sg}$; it replaces a derivative that is zero by a biased one that trains the encoder. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
+
+**streamed optimizer**: an optimizer update that walks through each tensor in tiles, decoding a tile of state, applying the update rule and encoding the state again, so that its working memory is the size of a tile and independent of the model, with a rounding draw that does not depend on how the tensor was cut. *([Where Training Memory Goes](v13-training-at-scale/03-training-memory.md))*
 
 **streaming speech output**: speech that begins to leave the model while the text it says is still being written and its own later frames are still being drawn, so that the work before the first sound is that of a prefix of the reply and not of the whole reply. *([Models That Listen, See and Speak](v09-audio/08-omni-models.md))*
 
 **stride**: the distance in memory, counted in elements, between two neighbours along one axis; a view is described by one stride per axis, and stride 0 repeats one number. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
-**subgroup**: the group of consecutive invocations of a workgroup, 32 in this book's model, that the hardware executes with one instruction at a time. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
+**subgroup**: the group of consecutive invocations of a workgroup, 32 in the model of Volume IV, that the hardware executes with one instruction at a time. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
 **summation notation**: the symbol $\sum_{i=a}^{b} x_i$ for the sum of the terms $x_i$ as the index $i$ runs from $a$ to $b$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
