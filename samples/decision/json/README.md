@@ -50,8 +50,8 @@ Flags: `--model NAME|DIR` (`laya` by default, `minilm` for a
 directory), `--head FILE` (trained head weights for an encoder that ships
 without one - `samples/decision/triage` writes one; a Laya checkpoint carries
 its own), `--jsonl`, plus the usual `--device`/`--backend`. The model
-directory is found under `$BRAIN_MODELS_DIR`, `$XDG_DATA_HOME/brain/models`, or
-`$HOME/.local/share/brain/models` - wherever `brain pull` put it.
+directory is found under `--models-dir DIR` when given, else wherever
+`brain pull` put it (brain's default model store).
 
 **stdout carries nothing but responses**, one JSON object per request, so it
 pipes straight into `jq`. Progress, the model that loaded and the device it

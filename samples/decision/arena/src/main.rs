@@ -41,6 +41,7 @@
 mod arena;
 
 use arena::Arena;
+use brain::options::{Args as FlagArgs, Hardware, Options};
 use brain::{ControlPipeline, ControlSpec, Env};
 
 /// The game, presented to the SDK.
@@ -94,6 +95,7 @@ impl Env for ArenaEnv {
 }
 
 struct Args {
+    hardware: Hardware,
     encoder: String,
     head_in: Option<String>,
     save_to: String,
@@ -127,12 +129,18 @@ fn parse_seed(flag: &str, text: &str) -> Result<u64, String> {
     text.parse().map_err(|_| format!("{flag}: {text:?} is not a seed (an unsigned integer)"))
 }
 
+/// The MiniLM encoder `brain pull sentence-transformers/all-MiniLM-L6-v2`
+/// stores, under brain's default model store; `--encoder DIR` overrides it.
+fn default_encoder() -> String {
+    let store = brain::default_models_dir().unwrap_or_default();
+    store.join("sentence-transformers").join("all-MiniLM-L6-v2").display().to_string()
+}
+
 fn parse_args_from(argv: &[String]) -> Result<Args, String> {
-    let home = std::env::var("HOME").unwrap_or_default();
+    let hardware = Hardware::take(&mut FlagArgs::new(argv))?;
     let mut a = Args {
-        encoder: std::env::var("BRAIN_MINILM_DIR").unwrap_or_else(|_| {
-            format!("{home}/.local/share/brain/models/sentence-transformers/all-MiniLM-L6-v2")
-        }),
+        hardware,
+        encoder: default_encoder(),
         head_in: None,
         save_to: "out/arena-policy.safetensors".into(),
         iterations: 12,
@@ -151,6 +159,8 @@ fn parse_args_from(argv: &[String]) -> Result<Args, String> {
         let next = || argv.get(i + 1).cloned().unwrap_or_default();
         match argv[i].as_str() {
             "--encoder" => a.encoder = next(),
+            // The values are read once, at construction, by the shared flag grammar.
+            "--device" | "--backend" => {}
             "--head" => a.head_in = Some(next()),
             "--save" => a.save_to = next(),
             "--iterations" => a.iterations = next().parse().unwrap_or(a.iterations),
@@ -171,7 +181,7 @@ fn parse_args_from(argv: &[String]) -> Result<Args, String> {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: arena [--encoder DIR] [--head FILE] [--save FILE]\n\
+                    "usage: arena [--encoder DIR] [--head FILE] [--save FILE] [--device SPEC] [--backend NAME]\n\
                      \x20            [--iterations N] [--episodes N] [--epochs N]\n\
                      \x20            [--play N] [--warmup N] [--entropy F] [--train-encoder] [--batch]\n\
                      \x20            [--seed N] [--head-seed N]\n\n\
@@ -203,6 +213,10 @@ fn main() {
         eprintln!("arena: {e}");
         std::process::exit(2);
     });
+    if let Err(e) = args.hardware.apply() {
+        eprintln!("arena: {e}");
+        std::process::exit(2);
+    }
     require(
         &std::path::Path::new(&args.encoder).join("config.json"),
         "encoder checkpoint",

@@ -58,9 +58,11 @@ make samples/study/timeline/run ARGS="--out /tmp/timeline"
 --steps N        optimizer steps at most (default 3000)
 --seed N         seed of the weights and batches (default: drawn at random
                  and printed)
+--device SPEC    cpu | gpu | npu | gpu0 | gpu,cpu (default: all present)
+--backend NAME   wgpu | vulkan | cuda | cpu (default: the device implies)
 ```
 
-`BRAIN_BACKEND` chooses the device (`cpu` runs anywhere, slowly).
+`--device cpu` runs anywhere, slowly.
 
 ## Builds with
 

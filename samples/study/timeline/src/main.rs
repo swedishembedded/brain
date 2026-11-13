@@ -26,6 +26,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use brain::options::{Args as FlagArgs, Hardware, Options};
 use brain::survival::brier::brier;
 use brain::survival::calibration::at_horizon;
 use brain::survival::concordance::uno;
@@ -38,6 +39,7 @@ use brain::{TimelineModel, TimelineSpec};
 
 const USAGE: &str = "\
 usage: sample-study-timeline [--out DIR] [--subjects N] [--steps N] [--seed N]
+                             [--device SPEC] [--backend NAME]
 
   --out DIR        where the saved model and a file of test subjects go
                    (default: <tmp>/sample-study-timeline)
@@ -46,6 +48,8 @@ usage: sample-study-timeline [--out DIR] [--subjects N] [--steps N] [--seed N]
   --steps N        optimizer steps at most (default 3000)
   --seed N         seed of the weights and batches (default: drawn at random
                    and printed)
+  --device SPEC    cpu | gpu | npu | gpu0 | gpu,cpu  (default: all present)
+  --backend NAME   wgpu | vulkan | cuda | cpu  (default: the device implies)
 ";
 
 /// The cause the sample reports on, and the horizon, in years.
@@ -89,11 +93,21 @@ impl Args {
 }
 
 fn main() -> ExitCode {
-    let mut a = Args(std::env::args().skip(1).collect());
-    if a.0.iter().any(|x| x == "--help" || x == "-h") {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.iter().any(|x| x == "--help" || x == "-h") {
         print!("{USAGE}");
         return ExitCode::SUCCESS;
     }
+    let mut flags = FlagArgs::new(&argv);
+    let hardware = match Hardware::take(&mut flags).and_then(|h| h.apply().map(|_| h)) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("{e}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    eprintln!("timeline: {}", hardware.describe());
+    let mut a = Args(flags.leftovers());
     let parsed = (|| -> Result<(PathBuf, usize, u32, u64), String> {
         let out = a.take("--out").map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("sample-study-timeline"));
         let config = (out, a.parse("--subjects", 20_000)?, a.parse("--steps", 3000)?, a.seed()?);

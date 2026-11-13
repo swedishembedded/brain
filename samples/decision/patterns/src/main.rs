@@ -65,6 +65,8 @@ const ALIASES: &[(&str, &str)] = &[("laya", "convaiinnovations/laya"), ("minilm"
 
 struct Settings {
     model: ModelChoice,
+    /// The model store to look a named model up in; brain's default when absent.
+    models_dir: Option<String>,
     head: Option<String>,
     demo: Demo,
     eval_n: usize,
@@ -109,6 +111,8 @@ model
 {}
   --head FILE         trained head weights, for an encoder that ships
                       without one (a Laya checkpoint carries its own)
+  --models-dir DIR    the model store a named model is looked up in
+                      (default: where `brain pull` puts models)
 
 hardware
 {}
@@ -134,6 +138,7 @@ fn parse_from(argv: &[String]) -> Result<Settings, String> {
     let mut args = Args::new(argv);
     let hardware = Hardware::take(&mut args)?;
     let model = ModelChoice::new("laya").take_over(&mut args)?;
+    let models_dir = args.take_str("--models-dir");
     let head = args.take_str("--head");
     let demo = match args.take_str("--demo").as_deref() {
         None | Some("report") => Demo::Report,
@@ -147,7 +152,7 @@ fn parse_from(argv: &[String]) -> Result<Settings, String> {
     let seed = args.seed("patterns");
     let finetune_steps = args.usize_or("--finetune-steps", 0);
     args.finish();
-    Ok(Settings { model, head, demo, eval_n, seed, finetune_steps, hardware })
+    Ok(Settings { model, models_dir, head, demo, eval_n, seed, finetune_steps, hardware })
 }
 
 fn main() {
@@ -162,7 +167,7 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let s = parse()?;
-    let dir = locate(&s.model.name)?;
+    let dir = locate(&s.model.name, s.models_dir.as_deref())?;
     s.hardware.apply()?;
     eprintln!("patterns: {} from {} on {}", s.model.name, dir, s.hardware.describe());
 
@@ -388,12 +393,12 @@ fn run_rerank(pipe: &mut DecisionPipeline, seed: u64) {
 /// Rule 5 of samples/README.md: a missing checkpoint is a message naming the
 /// command that fetches it and a clean exit, never a panic or a surprise
 /// download.
-fn locate(name: &str) -> Result<String, String> {
+fn locate(name: &str, models_dir: Option<&str>) -> Result<String, String> {
     if let Some(dir) = checkpoint_at(Path::new(name)) {
         return Ok(dir);
     }
     let id = hub_id(name);
-    let root = models_root()?;
+    let root = models_root(models_dir)?;
     if let Some(dir) = checkpoint_at(&root.join(id)) {
         return Ok(dir);
     }
@@ -413,19 +418,13 @@ fn checkpoint_at(dir: &Path) -> Option<String> {
     shaped.then(|| dir.display().to_string())
 }
 
-/// Where `brain pull` puts models, in brain's own precedence order.
-fn models_root() -> Result<PathBuf, String> {
-    if let Some(p) = env_nonempty("BRAIN_MODELS_DIR") {
-        return Ok(PathBuf::from(p));
-    }
-    if let Some(x) = env_nonempty("XDG_DATA_HOME") {
-        return Ok(Path::new(&x).join("brain").join("models"));
-    }
-    env_nonempty("HOME").map(|h| Path::new(&h).join(".local").join("share").join("brain").join("models")).ok_or_else(|| "no models directory: set BRAIN_MODELS_DIR, or pass --model DIR".to_string())
-}
-
-fn env_nonempty(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
+/// The model store `brain pull` fills: the `--models-dir` the caller named,
+/// else brain's own default (`brain::default_models_dir`).
+fn models_root(flag: Option<&str>) -> Result<PathBuf, String> {
+    flag.filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(brain::default_models_dir)
+        .ok_or_else(|| "no models directory: pass --models-dir DIR, or pass --model DIR".to_string())
 }
 
 #[cfg(test)]
@@ -452,8 +451,21 @@ mod tests {
 
     #[test]
     fn a_missing_checkpoint_names_the_command_that_fetches_it() {
-        let err = locate("definitely-not-a-model").unwrap_err();
+        let err = locate("definitely-not-a-model", None).unwrap_err();
         assert!(err.contains("brain pull definitely-not-a-model"), "{err}");
         assert!(err.contains("--model DIR"), "{err}");
+    }
+
+    /// `--models-dir` decides where a named model is looked up, ahead of
+    /// brain's default store.
+    #[test]
+    fn models_dir_flag_names_the_store_a_model_is_looked_up_in() {
+        let store = std::env::temp_dir().join(format!("{}-models-{}", env!("CARGO_PKG_NAME"), std::process::id()));
+        let repo = store.join("vendor").join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("config.json"), "{}").unwrap();
+        let found = locate("vendor/repo", store.to_str());
+        std::fs::remove_dir_all(&store).ok();
+        assert_eq!(found.unwrap(), repo.display().to_string());
     }
 }

@@ -64,7 +64,19 @@ impl MuJoCo {
     /// because "not found" without a list is the least actionable message a
     /// native dependency can produce.
     pub fn load() -> Result<Arc<MuJoCo>, String> {
-        let inner = sys::Lib::open()?;
+        Self::open(None)
+    }
+
+    /// [`MuJoCo::load`] with the install root named by the caller: looked up
+    /// as `<root>/lib/libmujoco.so` or `<root>/libmujoco.so`, then the plain
+    /// soname. No environment variable is read, so an application that takes
+    /// the directory as a flag passes it here.
+    pub fn load_from(root: &std::path::Path) -> Result<Arc<MuJoCo>, String> {
+        Self::open(Some(root))
+    }
+
+    fn open(root: Option<&std::path::Path>) -> Result<Arc<MuJoCo>, String> {
+        let inner = sys::Lib::open(root)?;
         let v = unsafe { (inner.version)() };
         // Not pinned to one build: the layout risk this binding takes is
         // limited to three leading size fields, and `Model::from_xml`

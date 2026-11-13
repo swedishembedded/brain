@@ -3,9 +3,8 @@
 A real *Drosophila* connectome driving a real body, in a window.
 
 ```bash
-. /path/to/buzzfly/env.sh
-make samples/fly/interactive/run ARGS="--connectome $BRAIN_CONNECTOME_DIR \
-                                       --body $BRAIN_FLYBODY_FRUITFLY_XML"
+make samples/fly/interactive/run ARGS="--connectome /path/to/manc-export \
+                                       --body /path/to/flybody/fruitfly.xml"
 ```
 
 ## What it demonstrates
@@ -29,21 +28,22 @@ make samples/fly/interactive/run ARGS="--connectome $BRAIN_CONNECTOME_DIR \
 
 ## What it needs
 
-* **MuJoCo**, found through `$BRAIN_MUJOCO_DIR`, `$MUJOCO_DIR` or the loader's
-  own search path. It is loaded at run time; nothing here builds against it.
+* **MuJoCo**, found through `--mujoco-dir DIR` (the install root holding
+  `lib/libmujoco.so`) or, without the flag, the loader's own search path. It
+  is loaded at run time; nothing here builds against it.
 * **The MANC connectome export**, a directory containing `manc-codex/` with
   `neurons.csv.gz` and `connections_princeton.csv.gz`.
 * **The flybody MJCF** - the BARE body (`fruitfly.xml`,
-  `$BRAIN_FLYBODY_FRUITFLY_XML`), not a scene. This sample builds its own
+  passed as `--body`), not a scene. This sample builds its own
   world around it (`flybody::scene::world`: sky, light, a grid floor sized to
   what the animal will be doing, and an explicit `<statistic extent>` so the
   camera frames a 2.5 mm animal rather than a 20 cm plain). Passing a ready-
   made scene such as `floor.xml` fails at MuJoCo's parser with `repeated name
   'floor' in geom`, because the world already has one.
 
-  The distinction is why `env.sh` exports both: `$BRAIN_FLYBODY_XML` is a
-  loadable scene, for the examples that call `Model::from_xml` themselves;
-  `$BRAIN_FLYBODY_FRUITFLY_XML` is the body those that build a world need.
+  The distinction matters: a loadable scene is for code that calls
+  `Model::from_xml` itself; `--body` takes the bare body, which is what a
+  program that builds a world needs.
 * A GPU for the spiking network, and EGL for the renderer. There is no display
   server requirement: rendering goes through an EGL device context, so this
   works over SSH.
@@ -56,7 +56,7 @@ the whole path - connectome, body, renderer, window blit - is exercised under
 
 ```bash
 SDL_VIDEODRIVER=dummy make samples/fly/interactive/run \
-  ARGS="--connectome $BRAIN_CONNECTOME_DIR --body $BRAIN_FLYBODY_FRUITFLY_XML \
+  ARGS="--connectome /path/to/manc-export --body /path/to/flybody/fruitfly.xml \
         --frames 150 --shot fly.ppm"
 ```
 
@@ -93,7 +93,7 @@ constant scales with the step, so a coarser step means a softer floor and legs
 that sink further into it. Measure gait at the published value; use this to
 watch the animal move at its own speed.
 
-**If `cord` dominates, try `BRAIN_DEVICE=cpu`.** The gather over the edge list
+**If `cord` dominates, try `--device cpu`.** The gather over the edge list
 is pure streaming - about 11 MB per tick and almost no arithmetic - so it runs
 at whatever memory bandwidth the device has. `brain perf roofline` measures both:
 on a Meteor Lake laptop that is 23 GB/s for the integrated GPU against 68 GB/s
@@ -101,13 +101,16 @@ for the CPU, and the CPU backend also has no readback to wait on, which makes
 it 8x faster there. On a discrete card the GPU wins by the same argument.
 
 ```bash
-BRAIN_DEVICE=cpu make samples/fly/interactive/run ARGS="..."
+make samples/fly/interactive/run ARGS="--device cpu ..."
 ```
 
 ## Options
 
 | flag | meaning |
 |---|---|
+| `--mujoco-dir DIR` | MuJoCo install root holding `lib/libmujoco.so` (default: the loader's search) |
+| `--device SPEC` | `cpu`, `gpu`, `gpu0`, `gpu,cpu`, ... (default: all present) |
+| `--backend NAME` | `wgpu`, `vulkan`, `cuda`, `cpu` (default: the device implies) |
 | `--connectome DIR` | directory holding `manc-codex/` |
 | `--body FILE` | the flybody MJCF, the one with a floor |
 | `--drive X` | starting descending command (default 1.5) |

@@ -79,6 +79,7 @@ pub struct CreatureBuilder {
     timestep: Option<f64>,
     food: Option<[f64; 3]>,
     device: Device,
+    mujoco_dir: Option<PathBuf>,
 }
 
 /// [`CreatureBuilder::arena`]'s parameter, re-exported (not reinvented) for
@@ -123,6 +124,15 @@ impl CreatureBuilder {
     /// Ground to walk on, or air to fly through. See [`Arena`].
     pub fn arena(mut self, arena: Arena) -> CreatureBuilder {
         self.arena = arena;
+        self
+    }
+
+    /// The MuJoCo install root (the directory holding `lib/libmujoco.so`) to
+    /// load the physics engine from. Without it the loader searches
+    /// `BRAIN_MUJOCO_DIR`, `MUJOCO_DIR`, `MUJOCO_PATH` and then the system
+    /// library path; with it, no variable is read.
+    pub fn mujoco_dir(mut self, dir: impl AsRef<Path>) -> CreatureBuilder {
+        self.mujoco_dir = Some(dir.as_ref().to_path_buf());
         self
     }
 
@@ -255,7 +265,11 @@ impl CreatureBuilder {
             fly::Cns::BrainAndCord => fly::cns::load(&dir, fly::Cns::BrainAndCord).map_err(backend)?,
         };
 
-        let mj = mujoco::MuJoCo::load().map_err(backend)?;
+        let mj = match &self.mujoco_dir {
+            Some(root) => mujoco::MuJoCo::load_from(root),
+            None => mujoco::MuJoCo::load(),
+        }
+        .map_err(backend)?;
         // The generated scene lives in a scratch directory the creature keeps
         // alive: MuJoCo reads the file at load and never again, but a caller
         // who wants to look at what was generated should find it still there.
@@ -439,6 +453,7 @@ impl Creature {
             timestep: None,
             food: None,
             device: Device::default(),
+            mujoco_dir: None,
         }
     }
 

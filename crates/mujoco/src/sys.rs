@@ -111,16 +111,22 @@ pub struct Lib {
     pub render: Option<Render>,
 }
 
-/// Candidate paths, most specific first. A `*_DIR` variable names a MuJoCo
-/// INSTALL root (the directory holding `lib/` and `include/`), matching how
-/// MuJoCo's own distribution is laid out and what its other bindings expect.
-fn candidates() -> Vec<String> {
+/// The two places a MuJoCo INSTALL root (the directory holding `lib/` and
+/// `include/`, matching how MuJoCo's own distribution is laid out and what its
+/// other bindings expect) keeps the library.
+fn in_install_root(root: &str, out: &mut Vec<String>) {
+    out.push(format!("{root}/lib/libmujoco.so"));
+    out.push(format!("{root}/libmujoco.so"));
+}
+
+/// Candidate paths when the caller names no install root, most specific
+/// first: the `*_DIR` variables, then the bare soname.
+fn candidates_from_environment() -> Vec<String> {
     let mut out = Vec::new();
     for var in ["BRAIN_MUJOCO_DIR", "MUJOCO_DIR", "MUJOCO_PATH"] {
         if let Ok(root) = std::env::var(var) {
             if !root.is_empty() {
-                out.push(format!("{root}/lib/libmujoco.so"));
-                out.push(format!("{root}/libmujoco.so"));
+                in_install_root(&root, &mut out);
             }
         }
     }
@@ -130,9 +136,21 @@ fn candidates() -> Vec<String> {
     out
 }
 
+/// Candidate paths when the caller names the install root: that root, then
+/// the bare soname. No variable is consulted.
+fn candidates_in(root: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    in_install_root(&root.display().to_string(), &mut out);
+    // Bare soname last, so the dynamic loader's own search path applies.
+    out.push("libmujoco.so".to_string());
+    out
+}
+
 impl Lib {
-    pub fn open() -> Result<Lib, String> {
-        let tried = candidates();
+    /// `root` is the MuJoCo install root to look in; `None` searches the
+    /// environment variables and then the loader's own path.
+    pub fn open(root: Option<&std::path::Path>) -> Result<Lib, String> {
+        let tried = root.map_or_else(candidates_from_environment, candidates_in);
         let mut last = String::new();
         for path in &tried {
             // SAFETY: loading a shared library runs its initialisers. MuJoCo
@@ -144,7 +162,7 @@ impl Lib {
         }
         Err(format!(
             "MuJoCo not found. Tried: {}. Last error: {last}. \
-             Install MuJoCo and point $BRAIN_MUJOCO_DIR at the directory holding lib/libmujoco.so.",
+             Install MuJoCo and name the directory holding lib/libmujoco.so (e.g. --mujoco-dir).",
             tried.join(", ")
         ))
     }

@@ -19,6 +19,18 @@ fn lib() -> Option<std::sync::Arc<MuJoCo>> {
     }
 }
 
+/// A named install root is looked in and reported, and no variable stands in
+/// for it: the error lists the root's two library locations.
+#[test]
+fn load_from_names_the_install_root_it_tried() {
+    let err = match MuJoCo::load_from(std::path::Path::new("/nonexistent/mujoco-root")) {
+        Ok(_) => return brain_testutil::skip("a MuJoCo on the system library path answers for the missing root"),
+        Err(e) => e,
+    };
+    assert!(err.contains("/nonexistent/mujoco-root/lib/libmujoco.so"), "{err}");
+    assert!(err.contains("/nonexistent/mujoco-root/libmujoco.so"), "{err}");
+}
+
 /// The fly, if this machine has it. `$BRAIN_FLYBODY_XML` names the MJCF.
 fn fly(mj: &std::sync::Arc<MuJoCo>) -> Option<Model> {
     let Some(path) = std::env::var_os("BRAIN_FLYBODY_XML").filter(|v| !v.is_empty()) else {

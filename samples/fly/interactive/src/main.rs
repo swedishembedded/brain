@@ -28,6 +28,7 @@
 
 use std::time::Instant;
 
+use brain::options::{Args as FlagArgs, Hardware, Options};
 use brain::{Arena, Creature, Error, View};
 
 /// The body's own control rate: 2 ms per control tick.
@@ -61,12 +62,18 @@ struct Args {
     smell: bool,
     tuning: Option<String>,
     log: Option<String>,
+    mujoco_dir: Option<String>,
+    hardware: Hardware,
 }
 
 fn usage() -> ! {
     eprintln!(
         "usage: sample-fly-interactive --connectome <dir> --body <fruitfly.xml> [options]
 
+  --mujoco-dir DIR       the MuJoCo install root (holding lib/libmujoco.so);
+                         default: the loader's own search
+  --device SPEC          cpu | gpu | npu | gpu0 | gpu,cpu  [all present]
+  --backend NAME         wgpu | vulkan | cuda | cpu  [device implies]
   --connectome DIR       where the MANC export is (a dir with neurons.csv.gz,
                          or a parent holding manc/ or manc-codex/)
   --brain                give it a BRAIN: join BANC's brain to that cord at
@@ -133,6 +140,11 @@ Mouse: drag to orbit around the fly, right-drag to pan, wheel to zoom.
 }
 
 fn parse() -> Args {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let hardware = Hardware::take(&mut FlagArgs::new(&argv)).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2)
+    });
     let mut a = Args {
         connectome: String::new(),
         body: String::new(),
@@ -152,13 +164,20 @@ fn parse() -> Args {
         smell: false,
         tuning: None,
         log: None,
+        mujoco_dir: None,
+        hardware,
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = argv.iter().cloned();
     while let Some(arg) = it.next() {
         let mut value = || it.next().unwrap_or_else(|| usage());
         match arg.as_str() {
             "--connectome" => a.connectome = value(),
             "--body" => a.body = value(),
+            "--mujoco-dir" => a.mujoco_dir = Some(value()),
+            // Read once, above, by the shared flag grammar.
+            "--device" | "--backend" => {
+                value();
+            }
             "--air" => a.arena = Arena::Air,
             "--food" => {
                 let v: Vec<f64> = value().split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -290,9 +309,16 @@ fn main() {
 fn run() -> Result<(), Error> {
     let args = parse();
 
+    if let Err(e) = args.hardware.apply() {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
     let loading = Instant::now();
     let mut builder =
         Creature::fruit_fly().connectome(&args.connectome).body(&args.body).arena(args.arena).plasticity(args.plastic).learning(args.learn);
+    if let Some(dir) = &args.mujoco_dir {
+        builder = builder.mujoco_dir(dir);
+    }
     if let Some(at) = args.food {
         builder = builder.food(at);
     }

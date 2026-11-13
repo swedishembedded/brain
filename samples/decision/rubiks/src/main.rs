@@ -62,6 +62,8 @@ const ALIASES: &[(&str, &str)] = &[
 
 struct Settings {
     model: ModelChoice,
+    /// The model store to look a named model up in; brain's default when absent.
+    models_dir: Option<String>,
     cubes: usize,
     scramble: u8,
     /// How deep the cubes that get SOLVED are scrambled, when that differs
@@ -112,6 +114,8 @@ run
   --seed N            which cubes                    [random, printed]
   --encode WHICH      how the cube is written down: grid | compact | rows [grid]
   --head FILE         a trained decision head to answer with
+  --models-dir DIR    the model store a named model is looked up in
+                      (default: where `brain pull` puts models)
   --search WIDTH      plan the whole solution with a model-guided beam search
                       of this width, then play it (0 = move by move)     [0]
   --search-depth N    how many moves deep that search may look          [14]
@@ -157,6 +161,7 @@ fn parse_from(argv: &[String]) -> Result<(Settings, bool), String> {
     let mut args = Args::new(argv);
     let hardware = Hardware::take(&mut args)?;
     let model = ModelChoice::new("laya").take_over(&mut args)?;
+    let models_dir = args.take_str("--models-dir");
     let cubes = args.usize_or("--cubes", 3);
     let scramble = args.usize_or("--scramble", 6) as u8;
     let solve_scramble = args.usize_or("--solve-scramble", scramble as usize) as u8;
@@ -183,7 +188,7 @@ fn parse_from(argv: &[String]) -> Result<(Settings, bool), String> {
     if scramble == 0 || scramble > Solver::MAX_DEPTH {
         return Err(format!("--scramble must be 1..{} (this planner is exact, not heuristic)", Solver::MAX_DEPTH));
     }
-    Ok((Settings { model, cubes, scramble, solve_scramble, seed, encoding, head, train, batch, rounds, freeze, examples, save, eval, unassisted, search, search_depth, hardware, view, record }, quiet))
+    Ok((Settings { model, models_dir, cubes, scramble, solve_scramble, seed, encoding, head, train, batch, rounds, freeze, examples, save, eval, unassisted, search, search_depth, hardware, view, record }, quiet))
 }
 
 fn main() {
@@ -527,7 +532,7 @@ struct Tally {
 
 fn run() -> Result<bool, String> {
     let (s, quiet) = parse()?;
-    let dir = locate(&s.model.name)?;
+    let dir = locate(&s.model.name, s.models_dir.as_deref())?;
     s.hardware.apply()?;
     eprintln!("rubiks: {} from {} on {}", s.model.name, dir, s.hardware.describe());
 
@@ -984,12 +989,12 @@ fn report(s: &Settings, t: &Tally) {
 }
 
 /// Rule 5 of samples/README.md: say what is missing and leave cleanly.
-fn locate(name: &str) -> Result<String, String> {
+fn locate(name: &str, models_dir: Option<&str>) -> Result<String, String> {
     if let Some(dir) = checkpoint_at(Path::new(name)) {
         return Ok(dir);
     }
     let id = ALIASES.iter().find(|(a, _)| *a == name).map(|(_, i)| *i).unwrap_or(name);
-    let root = models_root()?;
+    let root = models_root(models_dir)?;
     if let Some(dir) = checkpoint_at(&root.join(id)) {
         return Ok(dir);
     }
@@ -1004,17 +1009,13 @@ fn checkpoint_at(dir: &Path) -> Option<String> {
     shaped.then(|| dir.display().to_string())
 }
 
-fn models_root() -> Result<PathBuf, String> {
-    for key in ["BRAIN_MODELS_DIR", "XDG_DATA_HOME", "HOME"] {
-        if let Some(v) = std::env::var(key).ok().filter(|v| !v.is_empty()) {
-            return Ok(match key {
-                "BRAIN_MODELS_DIR" => PathBuf::from(v),
-                "XDG_DATA_HOME" => Path::new(&v).join("brain").join("models"),
-                _ => Path::new(&v).join(".local").join("share").join("brain").join("models"),
-            });
-        }
-    }
-    Err("no models directory: set BRAIN_MODELS_DIR, or pass --model DIR".into())
+/// The model store `brain pull` fills: the `--models-dir` the caller named,
+/// else brain's own default (`brain::default_models_dir`).
+fn models_root(flag: Option<&str>) -> Result<PathBuf, String> {
+    flag.filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(brain::default_models_dir)
+        .ok_or_else(|| "no models directory: pass --models-dir DIR, or pass --model DIR".to_string())
 }
 
 #[cfg(test)]
@@ -1041,9 +1042,22 @@ mod tests {
     /// is looking at a terminal rather than at this code.
     #[test]
     fn a_missing_checkpoint_names_the_command_that_fetches_it() {
-        let err = locate("definitely-not-a-model").unwrap_err();
+        let err = locate("definitely-not-a-model", None).unwrap_err();
         assert!(err.contains("brain pull definitely-not-a-model"), "{err}");
         assert!(err.contains("--model DIR"), "{err}");
+    }
+
+    /// `--models-dir` decides where a named model is looked up, ahead of
+    /// brain's default store.
+    #[test]
+    fn models_dir_flag_names_the_store_a_model_is_looked_up_in() {
+        let store = std::env::temp_dir().join(format!("{}-models-{}", env!("CARGO_PKG_NAME"), std::process::id()));
+        let repo = store.join("vendor").join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("config.json"), "{}").unwrap();
+        let found = locate("vendor/repo", store.to_str());
+        std::fs::remove_dir_all(&store).ok();
+        assert_eq!(found.unwrap(), repo.display().to_string());
     }
 
     /// THE property this sample rests on, with no model in the loop: play the

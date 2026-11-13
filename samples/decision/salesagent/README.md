@@ -46,7 +46,7 @@ brain pull sentence-transformers/all-MiniLM-L6-v2
 
 Lands in `~/.local/share/brain/models/sentence-transformers/all-MiniLM-L6-v2`
 and needs `config.json`, `model.safetensors` and `tokenizer.json`. Override the
-location with `--encoder DIR` or `BRAIN_MINILM_DIR`.
+location with `--encoder DIR`.
 
 This is a 22M-parameter 6-layer BERT. It is the *only* pretrained weight in the
 system; everything this sample trains sits on top of it.
@@ -59,8 +59,10 @@ python3 -m pip install pyarrow     # the one dependency, used only by this scrip
 ./fetch-dataset.sh --rows 4000     # a quicker start
 ```
 
-Writes `testdata/decide/salesconv/{train,test}.jsonl` (gitignored). Override
-with `--data DIR` or `BRAIN_TESTDATA`.
+Writes `testdata/decide/salesconv/{train,test}.jsonl` (gitignored). Write
+elsewhere with `./fetch-dataset.sh --data-root DIR` (it creates
+`DIR/decide/salesconv`) and point the sample at it with
+`--data DIR/decide/salesconv`.
 
 **Why a script rather than `make testdata/fetch`.** The published dataset is a
 single **7.2 GB CSV** whose 3072 of 3088 columns are Azure OpenAI embeddings
@@ -71,7 +73,7 @@ wants over HTTP range requests, because parquet is columnar: **53 MB instead of
 
 ### 1.3 A GPU, or not
 
-Runs on the default device. `BRAIN_DEVICE=cpu` works and is slow; training on
+Runs on every device the machine has. `--device cpu` works and is slow (`--backend NAME` picks the backend); training on
 CPU is not recommended.
 
 ---
@@ -630,8 +632,8 @@ salesagent [--encoder DIR] [--data DIR] [--head FILE] [--save FILE]
 
 | flag | default | meaning |
 |---|---|---|
-| `--encoder DIR` | `~/.local/share/brain/models/sentence-transformers/all-MiniLM-L6-v2` | encoder checkpoint directory. Also `BRAIN_MINILM_DIR` |
-| `--data DIR` | `testdata/decide/salesconv` | dataset directory. Also `BRAIN_TESTDATA` |
+| `--encoder DIR` | `~/.local/share/brain/models/sentence-transformers/all-MiniLM-L6-v2` | encoder checkpoint directory |
+| `--data DIR` | `testdata/decide/salesconv` | dataset directory |
 | `--head FILE` | none | load trained head weights and **skip training** |
 | `--save FILE` | `out/sales-head.safetensors` | where to write the trained head |
 | `--train N` | 4000 | training conversations to use |
@@ -640,16 +642,19 @@ salesagent [--encoder DIR] [--data DIR] [--head FILE] [--save FILE]
 | `--policy N` | 1000 | policy-gradient steps (phase 2) |
 | `--replay N` | 2 | conversations to replay turn by turn |
 | `--batch` | off | skip the interactive stage, for scripted runs |
+| `--device SPEC` | all present | `cpu`, `gpu`, `gpu0`, `gpu,cpu`, ... |
+| `--backend NAME` | device implies | `wgpu`, `vulkan`, `cuda`, `cpu` |
 | `--seed N` | random, printed | seed of the training run; pass the printed value to repeat a run |
 
 ```bash
-./fetch-dataset.sh [--rows N] [--force]
+./fetch-dataset.sh [--rows N] [--force] [--data-root DIR]
 ```
 
 | flag | default | meaning |
 |---|---|---|
 | `--rows N` | 20000 | conversations to fetch. One in ten is held out |
 | `--force` | off | refetch even if the output already looks complete |
+| `--data-root DIR` | `<repo>/testdata` | where `decide/salesconv` is written |
 
 ## Cost
 

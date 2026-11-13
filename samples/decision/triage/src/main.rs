@@ -61,15 +61,17 @@ fn parse_args() -> Args {
     parse_args_from(&std::env::args().skip(1).collect::<Vec<String>>())
 }
 
+/// The MiniLM encoder `brain pull sentence-transformers/all-MiniLM-L6-v2`
+/// stores, under brain's default model store; `--encoder DIR` overrides it.
+fn default_encoder() -> String {
+    let store = brain::default_models_dir().unwrap_or_default();
+    store.join("sentence-transformers").join("all-MiniLM-L6-v2").display().to_string()
+}
+
 fn parse_args_from(argv: &[String]) -> Args {
-    let home = std::env::var("HOME").unwrap_or_default();
     let mut a = Args {
-        encoder: std::env::var("BRAIN_MINILM_DIR").unwrap_or_else(|_| {
-            format!("{home}/.local/share/brain/models/sentence-transformers/all-MiniLM-L6-v2")
-        }),
-        data: std::env::var("BRAIN_TESTDATA")
-            .map(|r| format!("{r}/decide/banking77"))
-            .unwrap_or_else(|_| "testdata/decide/banking77".into()),
+        encoder: default_encoder(),
+        data: "testdata/decide/banking77".into(),
         head_in: None,
         save_to: "out/triage-head.safetensors".into(),
         steps: 600,

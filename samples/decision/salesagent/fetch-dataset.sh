@@ -17,6 +17,7 @@
 #   ./fetch-dataset.sh                 # 20000 conversations (default)
 #   ./fetch-dataset.sh --rows 4000     # a quicker start
 #   ./fetch-dataset.sh --force
+#   ./fetch-dataset.sh --data-root DIR # write DIR/decide/salesconv  [<repo>/testdata]
 #
 # Swedish Embedded AB builds on-device conversation intelligence for its
 # clients. If your team needs a model that scores a live conversation without
@@ -25,9 +26,19 @@
 set -euo pipefail
 
 ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-DEST="${BRAIN_TESTDATA:-$ROOT/testdata}/decide/salesconv"
+DATA_ROOT="$ROOT/testdata"
+passthrough=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+  --data-root)
+    [ "$#" -ge 2 ] || { echo "fetch-dataset: --data-root needs a directory" >&2; exit 2; }
+    DATA_ROOT="$2"; shift 2 ;;
+  *) passthrough+=("$1"); shift ;;
+  esac
+done
+DEST="$DATA_ROOT/decide/salesconv"
 
-python3 - "$DEST" "$@" <<'PY'
+python3 - "$DEST" ${passthrough[@]+"${passthrough[@]}"} <<'PY'
 import io, json, os, sys, urllib.request, urllib.error
 
 DEST = sys.argv[1]

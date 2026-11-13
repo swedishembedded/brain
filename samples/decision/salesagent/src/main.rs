@@ -39,9 +39,11 @@
 //! shipping it to a third party. If your team needs that, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 
+use brain::options::{Args as FlagArgs, Hardware, Options};
 use brain::{ConversionPipeline, ConversionSpec, DecisionPipeline, SalesConversation, Stages};
 
 struct Args {
+    hardware: Hardware,
     encoder: String,
     data: String,
     head_in: Option<String>,
@@ -57,18 +59,25 @@ struct Args {
 }
 
 fn parse_args() -> Args {
-    parse_args_from(&std::env::args().skip(1).collect::<Vec<String>>())
+    parse_args_from(&std::env::args().skip(1).collect::<Vec<String>>()).unwrap_or_else(|e| {
+        eprintln!("salesagent: {e}");
+        std::process::exit(2);
+    })
 }
 
-fn parse_args_from(argv: &[String]) -> Args {
-    let home = std::env::var("HOME").unwrap_or_default();
+/// The MiniLM encoder `brain pull sentence-transformers/all-MiniLM-L6-v2`
+/// stores, under brain's default model store; `--encoder DIR` overrides it.
+fn default_encoder() -> String {
+    let store = brain::default_models_dir().unwrap_or_default();
+    store.join("sentence-transformers").join("all-MiniLM-L6-v2").display().to_string()
+}
+
+fn parse_args_from(argv: &[String]) -> Result<Args, String> {
+    let hardware = Hardware::take(&mut FlagArgs::new(argv))?;
     let mut a = Args {
-        encoder: std::env::var("BRAIN_MINILM_DIR").unwrap_or_else(|_| {
-            format!("{home}/.local/share/brain/models/sentence-transformers/all-MiniLM-L6-v2")
-        }),
-        data: std::env::var("BRAIN_TESTDATA")
-            .map(|r| format!("{r}/decide/salesconv"))
-            .unwrap_or_else(|_| "testdata/decide/salesconv".into()),
+        hardware,
+        encoder: default_encoder(),
+        data: "testdata/decide/salesconv".into(),
         head_in: None,
         save_to: "out/sales-head.safetensors".into(),
         train: 4000,
@@ -84,6 +93,8 @@ fn parse_args_from(argv: &[String]) -> Args {
         let next = || argv.get(i + 1).cloned().unwrap_or_default();
         match argv[i].as_str() {
             "--encoder" => a.encoder = next(),
+            // The values are read once, at construction, by the shared flag grammar.
+            "--device" | "--backend" => {}
             "--data" => a.data = next(),
             "--head" => a.head_in = Some(next()),
             "--save" => a.save_to = next(),
@@ -101,6 +112,7 @@ fn parse_args_from(argv: &[String]) -> Args {
             "--help" | "-h" => {
                 eprintln!(
                     "usage: salesagent [--encoder DIR] [--data DIR] [--head FILE] [--save FILE]\n\
+                     \x20                 [--device SPEC] [--backend NAME]\n\
                      \x20                 [--train N] [--eval N] [--warmup N] [--policy N]\n\
                      \x20                 [--replay N] [--batch] [--seed N]\n\n\
                      --seed:         drawn at random and printed when not given.\n\n\
@@ -115,7 +127,7 @@ fn parse_args_from(argv: &[String]) -> Args {
         }
         i += 2;
     }
-    a
+    Ok(a)
 }
 
 /// Rule 5 of samples/README.md: say what is missing and leave cleanly, rather
@@ -148,6 +160,10 @@ fn require_encoder_dir(dir: &str) {
 
 fn main() {
     let args = parse_args();
+    if let Err(e) = args.hardware.apply() {
+        eprintln!("salesagent: {e}");
+        std::process::exit(2);
+    }
     require_encoder_dir(&args.encoder);
     require(
         &std::path::Path::new(&args.data).join("train.jsonl"),
@@ -305,8 +321,8 @@ mod tests {
 
     #[test]
     fn a_given_seed_is_used_and_an_absent_one_is_drawn_per_run() {
-        let given = parse_args_from(&["--seed".to_string(), "5".to_string()]);
+        let given = parse_args_from(&["--seed".to_string(), "5".to_string()]).unwrap();
         assert_eq!(given.seed, 5);
-        assert_ne!(parse_args_from(&[]).seed, parse_args_from(&[]).seed);
+        assert_ne!(parse_args_from(&[]).unwrap().seed, parse_args_from(&[]).unwrap().seed);
     }
 }

@@ -78,12 +78,12 @@ brain pull sentence-transformers/all-MiniLM-L6-v2
 ```
 
 ~90 MB, lands in `~/.local/share/brain/models/sentence-transformers/all-MiniLM-L6-v2`.
-Override with `--encoder DIR` or `BRAIN_MINILM_DIR`.
+Override with `--encoder DIR`.
 
 **No dataset.** The agent generates its own data by playing. The game is plain
 Rust in `src/arena.rs` with no dependencies at all.
 
-Runs on the default device; `BRAIN_DEVICE=cpu` works and is slow.
+Runs on every device the machine has; `--device cpu` works and is slow (`--backend NAME` picks the backend).
 
 ---
 
@@ -359,14 +359,14 @@ its baselines turned out to have been measured wrong.
 ## 8. Command reference
 
 ```text
-arena [--encoder DIR] [--head FILE] [--save FILE]
+arena [--encoder DIR] [--head FILE] [--save FILE] [--device SPEC] [--backend NAME]
       [--iterations N] [--episodes N] [--epochs N] [--warmup N]
       [--play N] [--entropy F] [--head-seed N] [--train-encoder] [--batch]
 ```
 
 | flag | default | meaning |
 |---|---|---|
-| `--encoder DIR` | the model store path | encoder checkpoint. Also `BRAIN_MINILM_DIR` |
+| `--encoder DIR` | the model store path | encoder checkpoint |
 | `--head FILE` | none | load a trained policy and **skip training** |
 | `--save FILE` | `out/arena-policy.safetensors` | where to write the policy head |
 | `--iterations N` | 12 | rollout-then-update cycles |
@@ -379,6 +379,8 @@ arena [--encoder DIR] [--head FILE] [--save FILE]
 | `--seed N` | random, printed | rollouts and minibatch order; the seed used is printed so a run can be repeated |
 | `--train-encoder` | off | fine-tune the encoder too. Measured to collapse a working policy |
 | `--batch` | off | skip the interactive stage |
+| `--device SPEC` | all present | `cpu`, `gpu`, `gpu0`, `gpu,cpu`, ... |
+| `--backend NAME` | device implies | `wgpu`, `vulkan`, `cuda`, `cpu` |
 
 ## Cost
 
