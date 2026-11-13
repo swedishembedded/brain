@@ -343,6 +343,14 @@ The requests the temperature takes out of the routed set (the raw probabilities 
 | 2 | 11 | 6 | 10 | 11 |
 | 4 | 40 | 30 | 40 | 40 |
 | 10 | 98 | 85 | 130 | 98 |
+
+The tie convention in numbers: the scaled probabilities rounded to two decimals put p_max exactly on the threshold for this many of the 1000 test requests. All of them act under the rule above and would escalate under a strict inequality, so the coverage of that variant is lower by this count over 1000 (for rounded probabilities).
+
+| c | threshold | requests with p_max on it |
+|---:|---:|---:|
+| 2 | 0.50 | 10 |
+| 4 | 0.75 | 7 |
+| 10 | 0.90 | 27 |
 <!-- /worked -->
 
 Reading the table from the top, the rule's behaviour is what Volume XI's was. At $c_{\mathrm{w}} = 2$ it hardly escalates ($0.9780$ of the requests are routed with the scaled probabilities) and the cost, $0.3260$, is within $0.002$ of always routing, $0.3240$. At $c_{\mathrm{w}} = 4$ it routes $0.7880$ of the requests, those it routes are right $0.9010$ of the time, and the cost is $0.5240$, against $0.6480$ for always routing and $1.0000$ for always escalating. At $c_{\mathrm{w}} = 10$, where a mistake is dear, routing every request would cost $1.6200$ and the rule pays $0.7090$ by sending $0.4490$ of the requests to a person, the other $0.5510$ being routed right $0.9528$ of the time. The price of a wrong route moves the rule from a router that rarely asks to one that asks nearly half the time, and nothing in the model changed.
@@ -477,7 +485,7 @@ The case for a small model over a large one is a count, not an impression. A dec
 The word-vector table of the desk is a stand-in and costs nothing to count, so the count is for the encoder brain actually reads, and the comparison is with the way a large language model would be asked the same question. That model is an assumption of the count, not a measured or a named one: a decoder with seven billion parameters, 2 FLOPs per parameter per prompt token and 2 bytes per weight, reading a prompt of 200 tokens (160 of state and 40 of instruction and options) and answering from one step of its output distribution, the cheapest way of using it. The count is for one request and for ten questions about the same state, where the small model encodes the state once and the large one is shown in two ways: reading the whole prompt for every question, and, kinder to it, reading the shared 160 tokens once.
 
 <!-- worked: decision_models.cost_per_decision -->
-The encoder is the 6-layer, 384-wide, 12-head, 1536-wide-feed-forward, 30522-word encoder that `crates/decide` reads from a released checkpoint (token table 30522 x 384, position table 512 x 384, type table 2 x 384, one layer norm; per layer a fused query-key-value matrix 384 -> 1152, an output matrix 384 -> 384, two layer norms and the feed-forward pair 384 -> 1536 -> 384, each with a bias). Parameter counts:
+The encoder is the 6-layer, 384-wide, 12-head, 1536-wide-feed-forward, 30522-word encoder that `crates/decide` reads from a released checkpoint (token table 30522 x 384, position table 512 x 384, type table 2 x 384, one layer norm; per layer a fused query-key-value matrix 384 -> 1152, an output matrix 384 -> 384, two layer norms and the feed-forward pair 384 -> 1536 -> 384, each with a bias). The cross-attention head is a query matrix 384 x 384 with a bias (147,840), a fused key-value matrix 384 -> 768 with a bias (295,680), one layer norm of 384 (gain and bias, 768) and a score vector of 384 with a bias (385). Parameter counts:
 
 | part | numbers |
 |---|---:|
@@ -675,7 +683,7 @@ brain's `crates/decide` puts the options in the request and scores them as text 
 3. At $a = 1$ the probabilities are $(0.8808, 0.1192)$, the probability-weighted mean logit is $0.8808 \times 2 = 1.7616$ and the logit of the right route is $0$, so the slope is $1.7616 > 0$: the cross-entropy rises with $a$ and the fitted $a$ is below $1$, because the one request is confidently wrong. Here the slope is positive for every $a \ge 0$ (at $a = 0$ it is $(2 + 0)/2 - 0 = 1$), so the routine's first requirement fails: a single wrong request would push the temperature to infinity, and that is why a temperature is fitted on hundreds of requests. A slope of exactly zero at $a = 1$ means the logits are already calibrated on that set in the sense of the cross-entropy.
 4. The expected costs are card $2 \times 0.90 = 1.8$, payment $2 \times 0.60 = 1.2$, account $2 \times 0.95 = 1.9$, dispute $10 \times 0.55 = 5.5$ and a person $1.5$. The argmax is dispute ($0.45$) and the cheapest action is payment, at $1.2$.
 5. The sum of $r/\mu$ is $1/0.775 + 1/0.075 + 0 + 1/0.775 + 1/0.775 = 1.2903 \times 3 + 13.3333 = 17.2043$, so the inverse propensity estimate is $17.2043/5 = 3.4409$ (an estimate above 1 is a sign of how noisy the weights are). The self-normalised one divides the same sum by $3 \times 1.2903 + 2 \times 13.3333 = 30.5376$ (the sum of $1/\mu$ over the five): $0.5634$, much smaller, because it is a weighted mean of outcomes and so lies between 0 and 1.
-6. Routing costs $(1 - 0.75) \times 4 = 1$ and escalating $1$: a tie, and the rule routes. With a strict inequality it would escalate, and a model whose probabilities are rounded to two decimals would send every request that lands exactly on $0.75$ to a person, lowering the coverage by the share of such requests.
+6. Routing costs $(1 - 0.75) \times 4 = 1$ and escalating $1$: a tie, and the rule routes. With a strict inequality it would escalate, and a model whose probabilities are rounded to two decimals would send every request that lands exactly on $0.75$ to a person, lowering the coverage by the share of such requests: in the table of the rule the scaled probabilities rounded to two decimals sit exactly on the threshold for 7 of the 1000 test requests at $c_{\mathrm{w}} = 4$ (a coverage lower by $0.007$), 10 at $c_{\mathrm{w}} = 2$ and 27 at $c_{\mathrm{w}} = 10$.
 7. The block of the chapter, to the digits printed; the draw order is in the block.
 8. The block of the chapter; the temperature is $T = 1.1762$ on the validation requests.
 9. The block of the chapter; at $c_{\mathrm{w}} = 6$ the threshold is $1 - 1/6 = 0.8333$.

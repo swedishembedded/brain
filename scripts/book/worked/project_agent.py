@@ -78,14 +78,14 @@ def target(x):
     return [(x[j] + j + 1) % RADIX for j in range(N_IN)]
 
 
-def verify_exact(out, t):
-    """Reward 1 when every output digit equals the target digit, else 0 (out has `level` digits)."""
-    return 1.0 if all(out[j] == t[j] for j in range(len(out))) else 0.0
+def verify_exact(out, t, level):
+    """Reward 1 when the answer has `level` digits and every one equals the target digit, else 0."""
+    return 1.0 if len(out) == level and all(out[j] == t[j] for j in range(level)) else 0.0
 
 
-def verify_weak(out, t):
-    """The planted verifier: reward 1 when every output digit has the parity of the target digit."""
-    return 1.0 if all(out[j] % 2 == t[j] % 2 for j in range(len(out))) else 0.0
+def verify_weak(out, t, level):
+    """The planted verifier: reward 1 when the answer has `level` digits and each has the parity of the target digit."""
+    return 1.0 if len(out) == level and all(out[j] % 2 == t[j] % 2 for j in range(level)) else 0.0
 
 
 def _split():
@@ -153,7 +153,7 @@ def train_step(theta, level, rng, verify=verify_exact, record=None, ascent=1.0):
         x = digits(m)
         t = target(x)
         answers = [sample_answer(theta, x, level, rng) for _ in range(GROUP)]
-        rewards = [verify(a, t) for a in answers]
+        rewards = [verify(a, t, level) for a in answers]
         adv = la._group_advantages(rewards, False)
         if all(a == 0.0 for a in adv):
             flat += 1
@@ -399,14 +399,11 @@ def verifier_cases():
              ("the input digits unchanged", list(x[:level]))]
     rows = []
     for label, out in cases:
-        if len(out) != level:
-            rows.append([label, _digits_text(out), "wrong length: 0", "wrong length: 0"])
-            continue
-        rows.append([label, _digits_text(out), f"{verify_exact(out, t):.0f}", f"{verify_weak(out, t):.0f}"])
+        rows.append([label, _digits_text(out), f"{verify_exact(out, t, level):.0f}", f"{verify_weak(out, t, level):.0f}"])
     return (
         f"The input m = {m} (the first probe input), digits {_digits_text(x)}, target {_digits_text(t)}, at level {level}: the policy must "
         f"emit the first {level} target digits, {_digits_text(t4)}. The exact verifier rewards 1 when all {level} output digits equal the target digits "
-        f"and 0 otherwise (an answer of the wrong length is 0). The weak verifier rewards 1 when every output digit has the same "
+        f"and 0 otherwise (an answer of any other length is 0, as in the row of three digits). The weak verifier rewards 1 when every output digit has the same "
         f"parity as the target digit (digit mod 2); it accepts every answer the exact verifier accepts and others besides.\n\n"
         + _table(["output", "digits", "exact reward", "weak reward"], rows, "lrrr"))
 
@@ -478,7 +475,7 @@ def policy():
         f"Gradient check. For the starting point theta_k = ((37 k) mod 101 - 50) / 500 for k = 0 .. {N_PARAM - 1}, the input m = {m}, level 3 and "
         f"the answer 2, 0, 1, the gradient of ln pi(answer | x) = the sum over positions of ln pi_j(answer_j) has {touched} nonzero "
         f"entries (3 positions x 3 digits x 6 features, the constant and the five indicators that are 1); the largest "
-        f"relative difference between the analytic gradient and a central finite difference with step 1e-6, over all {N_PARAM} numbers, "
+        f"relative difference |fd - g| / max(1, |g|) between the analytic gradient g and a central finite difference fd with step 1e-6, over all {N_PARAM} numbers, "
         f"is {'below 1e-6' if worst < 1e-6 else 'NOT below 1e-6'}.")
 
 

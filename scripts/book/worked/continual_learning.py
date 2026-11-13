@@ -384,12 +384,10 @@ def _forget(nudge):
     on = _lora_effective(tA, ad)
     run["adapter_on"] = (_count(on, At), _count(on, Bt))
     run["adapter_off"] = (_count(tA, At), _count(tA, Bt))
-    routed = 0
-    routed_b = 0
-    for (x, y) in At:
-        routed += (_forward(tA, x)[2] > 0.0) == (y == 1)
-    for (x, y) in Bt:
-        routed_b += (_forward(on, x)[2] > 0.0) == (y == 1)
+    # the router is the stated rule applied to every test row of either task: base where x0 < 0, adapter where x0 >= 0
+    def _routed(rows):
+        return sum((_forward(tA if x[0] < 0.0 else on, x)[2] > 0.0) == (y == 1) for x, y in rows)
+    routed, routed_b = _routed(At), _routed(Bt)
     run["adapter_routed"] = (routed, routed_b)
     run["adapter_theta"] = on
     # joint training from the same start, as the reference
@@ -425,6 +423,10 @@ def _st(getter, full, runs=None):
 
 def _n0(x):
     return f"{x:.0f}"
+
+
+def _n4(x):
+    return f"{x:.4f}"
 
 
 def _n3(x):
@@ -573,7 +575,7 @@ def replay_table():
            f"step size {PROTOCOL_RATE}, {PROTOCOL_STEPS} steps, from the numbers trained on A. The buffer is Algorithm R over the 100 rows of A in their order "
            f"with generator {_seed_line(RESERVOIR)}. Each m starts the generator afresh; the first m rows fill the buffer and row i (0-based) replaces slot "
            f"`rng.integer(i + 1)` when that is below m, one draw for each i = m .. 99. For m = 10 the buffer holds the A rows "
-           f"{', '.join(str(i) for i in keep10)} (slot order).", ""]
+           f"{', '.join(str(i) for i in keep10)} (slot order). A step lists the 100 rows of B in their order and then the buffer rows in slot order, and sums their gradients in that order.", ""]
     rows = []
     for m in BUFFERS:
         rows.append([str(m), f"{m / N_TRAIN:.2f}", str(N_TRAIN + m), _st(lambda r, m=m: r["replay"][m][0], _n0), _st(lambda r, m=m: r["replay"][m][1], _n0)])
@@ -603,11 +605,11 @@ def adapter_table():
            f"{ADAPTER_SCALE} times 6 `normal()` calls of generator {_seed_line('continual_learning.adapter', True)} (v starts at "
            + ", ".join(_fmt(v, 4) for v in v0) + f"). Gradient descent on the 100 rows of B only, step size {ADAPTER_RATE}, {ADAPTER_STEPS} steps; the gradient "
            f"of u is G_W2 v and that of v is G_W2^T u, with G_W2 the gradient of the loss with respect to the matrix in use. "
-           f"'Routed' serves the base where x0 < 0 and the adapter where x0 >= 0.", ""]
+           f"'Routed' serves the base where x0 < 0 and the adapter where x0 >= 0, by the row's own x0 and for every test row of both tasks (the router does not see the task label, so a row of A with x0 >= 0 reaches the adapter).", ""]
     rows = [["adapter off (the base alone)", _st(lambda r: r["adapter_off"][0], _n0), _st(lambda r: r["adapter_off"][1], _n0)],
             ["adapter on, always", _st(lambda r: r["adapter_on"][0], _n0), _st(lambda r: r["adapter_on"][1], _n0)]]
-    # routed accuracy: base on the A test rows, adapter on the B test rows (the region is where each task lives)
-    rows.append(["routed by the sign of x0 (A rows to the base, B rows to the adapter)", _st(lambda r: r["adapter_routed"][0], _n0),
+    # routed accuracy: the rule is applied to every test row, so a row of A with x0 >= 0 goes to the adapter and is served wrongly
+    rows.append(["routed by the sign of x0 (every test row of either task)", _st(lambda r: r["adapter_routed"][0], _n0),
                  _st(lambda r: r["adapter_routed"][1], _n0)])
     out.append(_table(["served", "A correct", "B correct"], rows))
     return "\n".join(out)
@@ -877,10 +879,10 @@ def _reader_runs():
     return out
 
 
-def _joint_reader():
+def _joint_reader(nudge=0.0):
     eps = _stream()
     rows = [r for ep in eps for r in ep["train"]]
-    t, _ = _gd(_init(), rows, JOINT_RATE, 800)
+    t, _ = _gd(_init(nudge), rows, JOINT_RATE, 800)
     return [_count(t, ep["test"]) for ep in eps]
 
 
@@ -908,7 +910,7 @@ def reader_arms():
             rows.append([arm if k == 0 else "", str(k), lab])
     out = [f"The four arms on the stream of the previous block. Every arm starts from the same initial numbers and restarts the generator {_seed_line(REPLAY)}; a candidate is trained from the incumbent for {EP_STEPS} steps of size {EP_RATE} on the episode's own rows and, in the replay arms, "
            f"as many rows drawn without replacement from the rows of the promoted episodes (ratio 1.0, 60 rows: a partial Fisher-Yates, `rng.integer(len - i)` for i = 0 .. 59, "
-           f"or all of them when fewer are held). Before training, triage drops an episode whose mean loss under the incumbent on its own rows is at most {KNOWN_BELOW} ('already known'). "
+           f"in the order drawn; a pool of exactly 60 still does the shuffle, and a pool is never smaller since an episode is held only after it is promoted). Before training, triage drops an episode whose mean loss under the incumbent on its own rows is at most {KNOWN_BELOW} ('already known'). "
            f"The gate is the one of the previous block: the sign test at {ALPHA} on the 48 own probes, effect at least {MIN_EFFECT}, the pooled anchor drop over all promoted episodes' "
            f"probes at most {POOLED_BUDGET} and the worst block drop at most {BLOCK_DROP}. An arm without the gate promotes whatever it trains. The outcome of each episode:", "",
            _table(["arm", "episode", "outcome"], rows, "lll"), "",
@@ -928,10 +930,14 @@ def reader_arms():
         elif any(b is None for b in bwts):
             bwt = "unstable"
         else:
-            bwt = stable.text(bwts[0], bwts[1:], _n3)
+            bwt = stable.text(bwts[0], bwts[1:], _n4)
         rows.append([arm] + finals + [str(npro.pop()) if len(npro) == 1 else "unstable", bwt])
-    joint = _joint_reader()
-    rows.append(["joint on all four (800 steps, 240 rows)"] + [str(v) for v in joint] + ["4", "-"])
+    jruns = [_joint_reader(n) for n in (0.0,) + stable.NUDGES]
+    joint = []
+    for k in range(len(CENTRES)):
+        lo, hi = min(r[k] for r in jruns), max(r[k] for r in jruns)
+        joint.append(str(lo) if lo == hi else f"{lo} to {hi}")
+    rows.append(["joint on all four (800 steps of size %s, 240 rows of episodes 0 to 3 in order), range over the run and its four nudged copies" % JOINT_RATE] + joint + ["4", "-"])
     out.append(_table(["arm", "episode 0", "episode 1", "episode 2", "episode 3", "promoted", "backward transfer"], rows))
     return "\n".join(out)
 

@@ -67,14 +67,18 @@ function target_digits(x: array<int>[5]) -> array<int>[5]:
         t[j] = (x[j] + j + 1) mod 3
     return t
 
-function verify_exact(answer: array<int>[ell], t: array<int>[5]) -> real:
-    for j in 0 .. len(answer):
+function verify_exact(answer: array<int>[ell], t: array<int>[5], level: int) -> real:
+    if len(answer) != level:
+        return 0.0
+    for j in 0 .. level:
         if answer[j] != t[j]:
             return 0.0
     return 1.0
 
-function verify_weak(answer: array<int>[ell], t: array<int>[5]) -> real:
-    for j in 0 .. len(answer):
+function verify_weak(answer: array<int>[ell], t: array<int>[5], level: int) -> real:
+    if len(answer) != level:
+        return 0.0
+    for j in 0 .. level:
         if answer[j] mod 2 != t[j] mod 2:
             return 0.0
     return 1.0
@@ -104,7 +108,7 @@ The family: an input is a number m in 0 .. 242 and its five digits are x_i = flo
 <!-- /worked -->
 
 <!-- worked: project_agent.verifier_cases -->
-The input m = 156 (the first probe input), digits 01221, target 10200, at level 4: the policy must emit the first 4 target digits, 1020. The exact verifier rewards 1 when all 4 output digits equal the target digits and 0 otherwise (an answer of the wrong length is 0). The weak verifier rewards 1 when every output digit has the same parity as the target digit (digit mod 2); it accepts every answer the exact verifier accepts and others besides.
+The input m = 156 (the first probe input), digits 01221, target 10200, at level 4: the policy must emit the first 4 target digits, 1020. The exact verifier rewards 1 when all 4 output digits equal the target digits and 0 otherwise (an answer of any other length is 0, as in the row of three digits). The weak verifier rewards 1 when every output digit has the same parity as the target digit (digit mod 2); it accepts every answer the exact verifier accepts and others besides.
 
 | output | digits | exact reward | weak reward |
 |---|---:|---:|---:|
@@ -112,7 +116,7 @@ The input m = 156 (the first probe input), digits 01221, target 10200, at level 
 | digit 0 changed by +1 (the parity changes unless the digit goes 2 to 0) | 2020 | 0 | 0 |
 | digit 1 changed by +2 (the parity is kept only when the digit goes 0 to 2) | 1220 | 0 | 1 |
 | digit 3 changed by +1 | 1021 | 0 | 0 |
-| the first three digits only | 102 | wrong length: 0 | wrong length: 0 |
+| the first three digits only | 102 | 0 | 0 |
 | the input digits unchanged | 0122 | 0 | 0 |
 <!-- /worked -->
 
@@ -162,7 +166,7 @@ The policy has 240 = 5 positions x 3 digits x 16 features numbers, all 240 initi
 
 A digit is drawn by the inverse CDF of Chapter 3: one `uniform()` from the generator, the first digit whose running sum of probabilities exceeds it. At theta = 0 the first six draws of the generator `project_agent.demo` (seed 0x1c6ff2374fdbdd57, 2049122674853797207) are 0.021606, 0.799760, 0.995796, 0.871607, 0.444788, 0.285809, which give the digits 0, 2, 2, 2, 1, 0 (the thresholds are 1/3 and 2/3; the position-0 probabilities of input 66 are 0.333333, 0.333333, 0.333333).
 
-Gradient check. For the starting point theta_k = ((37 k) mod 101 - 50) / 500 for k = 0 .. 239, the input m = 66, level 3 and the answer 2, 0, 1, the gradient of ln pi(answer | x) = the sum over positions of ln pi_j(answer_j) has 54 nonzero entries (3 positions x 3 digits x 6 features, the constant and the five indicators that are 1); the largest relative difference between the analytic gradient and a central finite difference with step 1e-6, over all 240 numbers, is below 1e-6.
+Gradient check. For the starting point theta_k = ((37 k) mod 101 - 50) / 500 for k = 0 .. 239, the input m = 66, level 3 and the answer 2, 0, 1, the gradient of ln pi(answer | x) = the sum over positions of ln pi_j(answer_j) has 54 nonzero entries (3 positions x 3 digits x 6 features, the constant and the five indicators that are 1); the largest relative difference |fd - g| / max(1, |g|) between the analytic gradient g and a central finite difference fd with step 1e-6, over all 240 numbers, is below 1e-6.
 <!-- /worked -->
 
 **Milestone 2 ends** when your policy gives 3^-level at theta = 0, reproduces the six draws, and your gradient of the log-probability of an answer agrees with a central difference below $10^{-6}$ on every one of the 240 numbers: a gradient you have not checked is the usual source of a policy that trains and does not improve.
@@ -173,7 +177,7 @@ A step takes $B = 4$ tasks from the pool, with replacement, asks the policy for 
 
 ```text
 function train_step(theta: array<real>[240], level: int, pool: list<int>,
-                    verify: function(array<int>[ell], array<int>[5]) -> real,
+                    verify: function(array<int>[ell], array<int>[5], int) -> real,
                     ascent: real, rng: Generator) -> (array<real>[240], real, int):
     require 1 <= level and level <= 5
     require ascent == 1.0 or ascent == -1.0
@@ -198,7 +202,7 @@ function train_step(theta: array<real>[240], level: int, pool: list<int>,
             for j in 0 .. level:
                 a[j] = sample_index(position_probs(theta, x, j), rng)
             append a to group
-            rewards[g] = verify(a, t)
+            rewards[g] = verify(a, t, level)
             total = total + rewards[g]
         adv = group_advantages(rewards, false)
         signal = false
@@ -289,7 +293,7 @@ The probe bank has 5 x 48 = 240 probes: for level 1 .. 5 and each probe input in
 A policy trained from scratch at level 5 sees a right answer once in 243. With eight answers to a task, a group is flat with probability $(1 - 1/243)^8 = 0.968$, and a flat group teaches nothing. The curriculum starts at level 1 and raises the level when the policy has become good enough at the current one for the next to produce rewards: after the update of step $s$, the probe success at the level used in step $s$ is computed, and when it is at least $\tau_{\mathrm{c}} = 0.6$ and the level is below 5 the level of step $s + 1$ is one higher. Training is the loop below, with a snapshot of the policy kept every 10 steps and its level (the level the trainer will use next).
 
 ```text
-function train_agent(pool: list<int>, probes: list<int>, verify: function(array<int>[ell], array<int>[5]) -> real,
+function train_agent(pool: list<int>, probes: list<int>, verify: function(array<int>[ell], array<int>[5], int) -> real,
                      reads_training: bool, steps: int, rng: Generator)
                     -> list<(int, int, array<real>[240])>:
     tau = 0.6
@@ -451,6 +455,8 @@ At level 1 the candidate improves by $+0.0100$ on average, and the paired standa
 ### 7. Keeping the old version and taking it back
 
 A gate is a statistical test on 48 probes per level, and its decision can be wrong in ways it cannot see: the same bank has now been used 30 times to choose among versions, and a candidate that clears it may have learned the bank's inputs rather than the task. So a promotion is followed by an **audit** on the audit bank, inputs that no training row and no gate decision has touched, with the non-inferiority bars of the gate (without the gain bar) against the version that was served before. If the audit finds a level regressed the version stays in the registry but the served pointer does not move to it; a promotion that has been served and is later found wanting is taken back by moving the pointer to the version served before. Both need the same thing: the previous version must still exist, byte-identical to what was served, and the pointer must move in one step.
+
+The routine `bank_scores(theta, inputs)` that `serve` calls is the list over levels 1 to 5 of the `success` of every input of `inputs`, in order.
 
 ```text
 function serve(snapshots: list<(int, int, array<real>[240])>, init: array<real>[240], probes: list<int>,
@@ -671,7 +677,7 @@ Each row is a number of a block above for the headline run (generator `project_a
 | 8 | unpaired gate: promotions of 30, lag, served level 5 | 10, 0.1155, 0.704 | exact; 4 and 3 decimals |
 <!-- /worked -->
 
-A system that passes the first seventeen rows is the specified agent. The last three rows are what tell it from its three planted variants: with a weak verifier the reward is near 1 and the level stops at 2, with a training-reward curriculum the advances come early and the probe success at three of the four is far below 0.6, with an unpaired gate a third of the snapshots are promoted. A reader who reproduces the first rows and not the last has built the agent and has not built the tests.
+A system that passes the first sixteen rows is the specified agent. The last three rows are what tell it from its three planted variants: with a weak verifier the reward is near 1 and the level stops at 2, with a training-reward curriculum the advances come early and the probe success at three of the four is far below 0.6, with an unpaired gate a third of the snapshots are promoted. A reader who reproduces the first rows and not the last has built the agent and has not built the tests.
 
 ## Where the loop's parts sit in brain
 
@@ -741,5 +747,5 @@ Check your understanding.
 2. The advance steps are 7, 19, 32 and 67 against 6, 32, 79 and 130, at probe successes of 0.65, 0.39, 0.21 and 0.23, three of them below the rule's own 0.6; the flat groups of the 10 steps after an advance are 35 against 15 of 160. The end state hides it because the five positions are learned independently and every reward a group finds still teaches, so a policy that was moved early catches up; a test of the final probe success passes it and a test of the process does not.
 3. The 48 inputs differ in difficulty, so the scores vary widely from probe to probe, and the candidate improves every probe by nearly the same amount, so the paired differences hardly vary at all. The paired standard error counts only the second variation (0.0035), the unpaired one counts the first as well (0.0219). They would be equal if the candidate's and the incumbent's scores were uncorrelated across probes. A policy that improves every probe by the same small amount has a paired standard error near 0 and is promoted; the unpaired gate sees a gain smaller than its standard error and refuses it.
 4. A check is $48\ell$ token evaluations per step and sampling is $32\ell$, so the check costs $1.5$ times the sampling and, with the other stages, 24.5 percent of the 245,904 token evaluations of the run. Made on the 24 pool inputs it would read the policy on the inputs it trains on, which it has partly memorised, and it would be the flawed curriculum of mistake 2 with a lower noise.
-5. It is not a defect: the gate names the first level whose bound fails, and decides on all of them. A gate that names the worst level needs the five bounds and their minimum, which the gate already computes for its decision, so the decision does not change, only the cause reported. The level-1 loss of 0.02 is the one the margin of 0.02 exactly cannot absorb, while the loss of 0.206 at level 4 shows where the damage is.
+5. It is not a defect: the gate names the first level whose bound fails, and decides on all of them. A gate that names the worst level needs the five bounds and their minimum, which the gate already computes for its decision, so the decision does not change, only the cause reported. The margin of 0.02 is applied to the paired lower bound and not to the mean loss: at level 1 the mean loss is 0.020, but the lower bound is $-0.044$, below $-0.02$, so level 1 is named, while the loss of 0.206 at level 4 shows where the damage is.
 6. No. The audit bank is a second sample of 48 inputs per level that did not choose the version, so agreement to the digit shown says that the selection did not stand out against it; the audit has a standard error of its own. A disagreement larger than that, an audit that finds a level regressed where the probe bank did not, would be the signature of selection on the probes: thirty decisions have been made on the same 48 inputs. An audit on every promotion costs the candidate's scores on the audit bank, $48 \times 15 = 720$ token evaluations, 8.2 percent of the run.

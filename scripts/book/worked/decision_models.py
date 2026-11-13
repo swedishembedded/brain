@@ -516,6 +516,10 @@ def decision_rule():
                 if _decide(p, c) is not None and _decide(q, c) is None]
         right = sum(1 for p, r in held if _argmax(p) == r["y"])
         moved.append([f"{c:g}", str(len(held)), str(right), f"{(len(held) - right) * c:g}", f"{len(held) * C_ESCALATE:g}"])
+    def _on_threshold(r, c):
+        t = round(1.0 - C_ESCALATE / c, 2)
+        return sum(1 for p in r["cal"]["test"] if round(max(p), 2) == t)
+    ties = [[f"{c:g}", f"{1.0 - C_ESCALATE / c:.2f}", _st("both", lambda r, c=c: _on_threshold(r, c), lambda x: f"{x:.0f}")] for c in C_WRONG]
     return ("A wrong route costs c, a right route 0 and handing the request to a person costs 1 whatever the truth. The rule acts when "
             "p_max >= 1 - 1/c (a tie acts) and otherwise escalates. 'coverage' is the share of requests the rule acts on; 'selective "
             "accuracy' the share of those whose route is right (an escalated request is in neither the numerator nor the denominator); "
@@ -527,7 +531,11 @@ def decision_rule():
             + "\n\nThe requests the temperature takes out of the routed set (the raw probabilities act, the scaled ones escalate; no request moves the "
             "other way, since T > 1 only lowers p_max), unnudged run: how many, how many of them the raw argmax routes right, what routing "
             "them costs (the wrong ones at c) and what escalating them costs (1 each).\n\n"
-            + _table(["c", "requests", "routed right", "cost if routed", "cost if escalated"], moved, "rrrrr"))
+            + _table(["c", "requests", "routed right", "cost if routed", "cost if escalated"], moved, "rrrrr")
+            + "\n\nThe tie convention in numbers: the scaled probabilities rounded to two decimals put p_max exactly on the threshold for this many of the 1000 test "
+            "requests. All of them act under the rule above and would escalate under a strict inequality, so the coverage of that variant is lower by this count over 1000 "
+            "(for rounded probabilities).\n\n"
+            + _table(["c", "threshold", "requests with p_max on it"], ties, "rrr"))
 
 
 # ------------------------------------------------------------------ a cost matrix that is not argmax
@@ -774,7 +782,8 @@ def cost_per_decision():
     return ("The encoder is the 6-layer, 384-wide, 12-head, 1536-wide-feed-forward, 30522-word encoder that `crates/decide` reads from a released "
             "checkpoint (token table 30522 x 384, position table 512 x 384, type table 2 x 384, one layer norm; per layer a fused query-key-value "
             "matrix 384 -> 1152, an output matrix 384 -> 384, two layer norms and the feed-forward pair 384 -> 1536 -> 384, each with a bias). "
-            "Parameter counts:\n\n" + _table(["part", "numbers"], ptab, "lr")
+            "The cross-attention head is a query matrix 384 x 384 with a bias (147,840), a fused key-value matrix 384 -> 768 with a bias (295,680), "
+            "one layer norm of 384 (gain and bias, 768) and a score vector of 384 with a bias (385). Parameter counts:\n\n" + _table(["part", "numbers"], ptab, "lr")
             + f"\n\nIn 32-bit floats the weights are {sb:,} bytes. A span of n tokens costs, per layer, n x 2(3 d^2 + d^2 + 2 d f) FLOPs for the "
             "matrix products and 4 n^2 d for the attention, with d = 384 and f = 1536; the head costs 2 R d (2d) for the keys and values of the R "
             "state rows once, and per option 2 d^2 for the query, 4 R d for the attention and 2 d for the score. Assumptions: a state of "
