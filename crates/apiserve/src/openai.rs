@@ -89,6 +89,23 @@ struct EmbeddingRequest {
     inputs: Vec<String>,
     encoding_format: EncodingFormat,
     dimensions: Option<usize>,
+    /// Brain extension: the task instruction of an asymmetric (query) embedding.
+    instruction: Option<String>,
+    /// Brain extension: truncate each input to this many tokens (0 or absent: the model's own limit).
+    max_tokens: Option<i64>,
+}
+
+/// The `embed` call for one input: the text, and the instruction and token bound
+/// the request carried when it carried any.
+fn embed_invocation(req: &EmbeddingRequest, text: &str) -> Invocation {
+    let mut call = Invocation::new().set("text", json!(text));
+    if let Some(instruction) = &req.instruction {
+        call = call.set("instruction", json!(instruction));
+    }
+    if let Some(max_tokens) = req.max_tokens {
+        call = call.set("max_tokens", json!(max_tokens));
+    }
+    call
 }
 
 /// Parse + validate a `CreateEmbeddingRequest`. `input` accepts a single string or
@@ -147,7 +164,17 @@ fn parse_embedding_request(provider: Provider, body: &Value) -> Result<Embedding
         }
     };
 
-    Ok(EmbeddingRequest { model, inputs, encoding_format, dimensions })
+    let instruction = match body.get("instruction") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(_) => return Err(ApiError::invalid_request(provider, "'instruction' must be a non-empty string")),
+    };
+    let max_tokens = match body.get("max_tokens") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_i64().filter(|&n| n >= 0).ok_or_else(|| ApiError::invalid_request(provider, "'max_tokens' must be a non-negative integer"))?),
+    };
+
+    Ok(EmbeddingRequest { model, inputs, encoding_format, dimensions, instruction, max_tokens })
 }
 
 /// Read the mean-pooled embedding vector from an `embed` [`capability::Outcome`]:
@@ -196,7 +223,7 @@ pub async fn handle_embeddings(state: AppState, body: Bytes) -> Response {
     // `try_join_all` returns the FIRST failure and drops (cancels) the
     // remaining futures, keeping the request's all-or-nothing semantics.
     let outcomes = match futures::future::try_join_all(
-        req.inputs.iter().map(|text| bridge::submit(&state, &req.model, "embed", Invocation::new().set("text", json!(text)))),
+        req.inputs.iter().map(|text| bridge::submit(&state, &req.model, "embed", embed_invocation(&req, text))),
     )
     .await
     {
@@ -1576,6 +1603,27 @@ mod tests {
         assert!(parse_embedding_request(Provider::OpenAI, &at(MAX_EMBEDDING_INPUTS)).is_ok());
         let err = parse_embedding_request(Provider::OpenAI, &at(MAX_EMBEDDING_INPUTS + 1)).err().expect("refused");
         assert!(err.message.contains("at most"), "{}", err.message);
+    }
+
+    /// A query embedding names its task instruction and every input is bounded in tokens: both reach the
+    /// `embed` call, and a malformed one is refused by name before any job exists.
+    #[test]
+    fn an_embeddings_request_may_carry_an_instruction_and_a_token_bound() {
+        let req = parse_embedding_request(
+            Provider::OpenAI,
+            &json!({"model": "m", "input": ["a"], "instruction": "find letters", "max_tokens": 512}),
+        )
+        .unwrap();
+        let call = embed_invocation(&req, "a");
+        assert_eq!(call.params["instruction"], json!("find letters"));
+        assert_eq!(call.params["max_tokens"], json!(512));
+        let plain = embed_invocation(&parse_embedding_request(Provider::OpenAI, &json!({"model": "m", "input": "a"})).unwrap(), "a");
+        assert!(plain.params.get("instruction").is_none() && plain.params.get("max_tokens").is_none());
+        for bad in [json!({"instruction": ""}), json!({"instruction": 3}), json!({"max_tokens": -1}), json!({"max_tokens": "x"})] {
+            let mut body = json!({"model": "m", "input": ["a"]});
+            body.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+            assert!(parse_embedding_request(Provider::OpenAI, &body).is_err(), "{body}");
+        }
     }
 
     /// An unseeded image request leaves the seed to each image's action (a

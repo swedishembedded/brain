@@ -168,6 +168,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   temperature-scaled, top-k and top-p truncated softmax), `0.0` for greedy
   decoding where the choice is deterministic; it is not the untruncated model
   distribution. A request that sets neither flag pays for neither.
+- **Embeddings extensions.** `POST /v1/embeddings` also takes `instruction` (a non-empty string rendered as `Instruct: {instruction}\nQuery: {text}`, the Qwen3-Embedding query convention; omit for a passage) and `max_tokens` (truncate each input to this many tokens; 0 or absent: the model's own limit). A malformed value is a 400.
 - **Policy trace (chat, for training).** `policy_trace: true` (a boolean; anything
   else is a 400) makes the reply carry a top-level `policy_trace` object (a
   streamed reply: on the terminal chunk) holding `prompt_token_ids`,
