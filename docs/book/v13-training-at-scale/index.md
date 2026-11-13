@@ -16,7 +16,7 @@ You can write the records of a fine-tuning set as ids, a mask and start offsets,
 1. [Data Pipelines for Large Models](01-training-data.md): how is training data prepared, mixed and fed at scale?
 2. [Mixed-Precision Training](02-mixed-precision.md): how do we train in 16 or 8 bits without the model falling apart?
 3. [Where Training Memory Goes](03-training-memory.md): why does training a model need several times the memory of running it, and how do we get it back?
-4. Parameter-Efficient Fine-Tuning: how can we adapt a billion-parameter model by training only a few million numbers?
+4. [Parameter-Efficient Fine-Tuning](04-peft.md): how can we adapt a billion-parameter model by training only a few million numbers?
 5. Parallel and Distributed Training: how is one training run spread across many devices without changing its result?
 6. Distillation: how does a small model learn from a large one?
 7. Checkpoints, Determinism and Recovery: how does a long training run survive a crash and still produce the same model?

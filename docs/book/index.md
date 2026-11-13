@@ -205,4 +205,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 1. [Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md): How is training data prepared, mixed and fed at scale?
 2. [Mixed-Precision Training](v13-training-at-scale/02-mixed-precision.md): How do we train in 16 or 8 bits without the model falling apart?
 3. [Where Training Memory Goes](v13-training-at-scale/03-training-memory.md): Why does training a model need several times the memory of running it, and how do we get it back?
+4. [Parameter-Efficient Fine-Tuning](v13-training-at-scale/04-peft.md): How can we adapt a billion-parameter model by training only a few million numbers?
 <!-- /contents -->

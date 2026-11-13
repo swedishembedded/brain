@@ -1,0 +1,31 @@
+<!-- source-sha256: 36603dabde7498f37bfb67319a1974ac5ad82166c9c5d70f594e32fd5b8f3fe5 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 380" width="1000" height="380"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="380" fill="#ffffff"/>
+<rect x="35" y="29" width="150" height="66" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">batch rows x_i</text>
+<text x="110" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 rows, 32 numbers</text>
+<rect x="35" y="247" width="150" height="66" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="276.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">slot vector</text>
+<text x="110" y="292.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[0, 2, none, 1, 0, 2]</text>
+<rect x="245" y="29" width="170" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">one resident W0</text>
+<text x="330" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">every row, one product</text>
+<rect x="245" y="247" width="170" height="66" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="276.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bank of adapters</text>
+<text x="330" y="292.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">A_k, B_k, rank r_k</text>
+<rect x="525" y="247" width="170" height="66" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="610" y="276.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per-row correction</text>
+<text x="610" y="292.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s_k B_k (A_k x_i)</text>
+<rect x="755" y="137" width="170" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="840" y="166.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">y_i = W0 x_i + correction</text>
+<text x="840" y="182.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">none: W0 x_i alone</text>
+<line x1="188" y1="62" x2="242" y2="62" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="417.94" y1="62.57" x2="797.06" y2="136.43" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="188" y1="280" x2="242" y2="280" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="215" y="271.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">slot z_i</text>
+<line x1="418" y1="280" x2="522" y2="280" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="470" y="271.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">rows of z_i</text>
+<line x1="697.42" y1="278.23" x2="797.58" y2="204.77" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M110,95 L110,160 Q110,170 120,170 L600,170 Q610,170 610,180 L610,244" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="800" y="338.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">a row with no adapter adds nothing;</text>
+<text x="800" y="354.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">padding rows beyond r_k are never read</text>
+</svg>

@@ -1,0 +1,29 @@
+<!-- source-sha256: c97f76b0da7459e00852a03cc13007154cbeca0c063d895e7b661892db663bce -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 330" width="1000" height="330"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="330" fill="#ffffff"/>
+<ellipse cx="110" cy="135" rx="75" ry="28" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="131.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">input x</text>
+<text x="110" y="147.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">32 numbers</text>
+<rect x="245" y="37" width="170" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">frozen base W0</text>
+<text x="330" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 x 32</text>
+<text x="330" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">never updated</text>
+<rect x="245" y="167" width="170" height="66" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="330" y="188.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">A</text>
+<text x="330" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r x 32</text>
+<text x="330" y="220.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">trained, random start</text>
+<rect x="535" y="167" width="170" height="66" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="188.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B</text>
+<text x="620" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16 x r</text>
+<text x="620" y="220.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">trained, starts at 0</text>
+<rect x="755" y="102" width="190" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="850" y="131.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">y = W0 x + s B (A x)</text>
+<text x="850" y="147.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">s = alpha / r</text>
+<line x1="187.03" y1="132.8" x2="242.97" y2="72.2" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="187.03" y1="137.2" x2="242.97" y2="197.8" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="417.95" y1="70.56" x2="752.05" y2="134.44" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="585" y="93.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">W0 x</text>
+<line x1="418" y1="200" x2="532" y2="200" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="475" y="191.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">A x: r numbers</text>
+<line x1="706.83" y1="197.62" x2="753.17" y2="137.38" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="590" y="300.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the gradient reaches only A and B; W0 is read, never written</text>
+</svg>
