@@ -198,6 +198,43 @@ impl ParamStore {
         Self::new_with_roles(gpu, roles, &init)
     }
 
+    /// A trainable store over buffers a graph already owns: each `(name, numel, weight, grad)` is adopted as it is, so
+    /// the weight the forward reads and the gradient the backward accumulates into ARE the store's, and only the AdamW
+    /// moments are allocated here. For a model whose graph builder uploads its own weights and allocates its own
+    /// gradients (`vae::blocks`) and still wants the one device optimiser (`optim::Optim`) instead of a second
+    /// AdamW. Names are kept in the order given.
+    pub fn adopt(gpu: &Gpu, tensors: Vec<(String, usize, gpu_core::DeviceBuffer, gpu_core::DeviceBuffer)>) -> ParamStore {
+        let policy = precision::ParamPrecision::FP32;
+        let (mut params, mut weight, mut grad) = (Vec::new(), HashMap::new(), HashMap::new());
+        let (mut adam_m, mut adam_v) = (HashMap::new(), HashMap::new());
+        for (name, numel, w, g) in tensors {
+            let moments = DeviceMoments::alloc(gpu, &name, numel, &policy).unwrap_or_else(|e| panic!("{e}"));
+            adam_m.insert(name.clone(), moments.m);
+            adam_v.insert(name.clone(), moments.v);
+            weight.insert(name.clone(), w);
+            grad.insert(name.clone(), g);
+            params.push((name, numel));
+        }
+        let n_parts: u64 = params.iter().map(|(_, n)| gradnorm_parts(*n) as u64).sum();
+        let norms = gpu.storage(n_parts.max(params.len() as u64).max(1));
+        ParamStore {
+            trainable: params.clone(),
+            params,
+            weight,
+            grad,
+            adam_m,
+            adam_v,
+            norms,
+            clip_coef: gpu.storage(1),
+            offload: Vec::new(),
+            frozen: Vec::new(),
+            lr_mult: HashMap::new(),
+            moment_scales: HashMap::new(),
+            precision: HashMap::new(),
+            streamed: Vec::new(),
+        }
+    }
+
     /// Role-aware store: `Frozen` parameters allocate weights only. Used for
     /// inference (all frozen) and LoRA (frozen base + trainable adapters).
     pub fn new_with_roles(
@@ -579,6 +616,23 @@ mod tests {
         assert_eq!(ps.read_grad(&gpu, "w"), vec![9.0, 9.0, 9.0]);
         ps.zero_grads(&gpu);
         assert_eq!(ps.read_grad(&gpu, "w"), vec![0.0, 0.0, 0.0]);
+    }
+
+    /// Spec: an adopted store trains the buffers it was handed, not copies of them: a gradient written through the store
+    /// is the caller's buffer, a weight the caller writes is what the store reads, and every adopted tensor is
+    /// optimised.
+    #[test]
+    fn adopt_aliases_the_callers_weight_and_gradient_buffers() {
+        static KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];
+        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let (w, g) = (gpu.storage_init("w", &[1.0f32, 2.0]), gpu.storage(2));
+        let ps = ParamStore::adopt(&gpu, vec![("t".to_string(), 2, w.clone(), g.clone())]);
+        gpu.write(ps.g("t"), bytemuck::cast_slice(&[5.0f32, 6.0]));
+        assert_eq!(gpu.read(&g, 2), vec![5.0, 6.0]);
+        gpu.write(&w, bytemuck::cast_slice(&[7.0f32, 8.0]));
+        assert_eq!(ps.read_weight(&gpu, "t"), vec![7.0, 8.0]);
+        assert_eq!(ps.opt_params(), &[("t".to_string(), 2)]);
+        assert_eq!(gpu.read(&ps.adam_m["t"], 2), vec![0.0, 0.0]);
     }
 
     /// Spec: the store reports the physical training-state bytes of each
