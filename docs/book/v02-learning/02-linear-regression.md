@@ -5,15 +5,14 @@
 
 *How do we find the straight line that best explains our measurements, and what does "best" mean?*
 
-The previous chapter ended with a promise and a complaint. The promise: a model
-is a function with open parameters, and learning is choosing them with data. The
-complaint: the only way we had to choose was to try thousands of lines on a grid
-and keep the one with the smallest "average off by", and the cost of that grows
-as $m^k$ with $k$ parameters. The workshop that built the temperature sensor
+A model is a function with open parameters, and learning is choosing them with
+data. So far the only way to choose has been to try thousands of lines on a grid
+and keep the one with the smallest "average off by", at a cost that grows as
+$m^k$ with $k$ parameters. The workshop that built the temperature sensor
 still wants an answer for a sensor that reads $1.75$ V, and it would like to
 get it without computing $58{,}081$ scores.
 
-Three questions hide in that complaint. The first is what "best" ought to mean.
+Three questions hide in that cost. The first is what "best" ought to mean.
 The average of absolute differences was chosen because it is easy to read, not
 because it is right, so we need a number that scores a choice of parameters,
 with a name, a definition and a reason. The second is whether the best line can
@@ -21,9 +20,9 @@ be computed instead of searched for. For a line scored the right way it can: it
 is the solution of a short system of equations, and the same derivation works
 for any number of features. The third is what to do when that system cannot be
 solved, because there are too many parameters or too much data. Then a guess has
-to be improved step by step, and that method, which earns its name in a section
-below, is the one that will train every network in this book. We study it on the
-one problem where all of it can be seen at once: the line.
+to be improved step by step, and the method that does so is the one that trains
+every neural network in the later volumes. The line is the one problem where all
+of it can be seen at once.
 
 The data are the ten sensor rows of chapter 1 (their generator and seed are given there, in the section "Too small, too big").
 
@@ -44,9 +43,11 @@ N = 10 measured rows (sorted by voltage; the source that produced them and the o
 | 10 | 2.68 | 70.6 |
 <!-- /worked -->
 
-The derivations that follow lean on six ideas from earlier chapters. Try these
-from memory before reading on; the answers are at the end of the chapter, and
-a hard one names the chapter to revisit.
+Each step of the derivations below stands on an earlier idea: the score of
+chapter 1, the gradient, the shapes of a matrix product, elimination, convexity
+and the stability of Euler's method. Six questions, one per idea, show whether
+they are ready; each names the chapter that taught it, and the answers close the
+chapter.
 
 1. (Chapter 1 of this volume, "The Learning Problem".) The score of chapter 1 for the line $f(v) = 24v + 9$ was $4.29$ degrees. If we change the line to $f(v) = 20v + 18$, which things change: the ten rows, the parameters, the score?
 2. (Volume I, chapter 8, "Gradients, Jacobians and Many Variables", the gradient.) For $L(w_1, w_2) = w_1^2 + 3 w_1 w_2$, what is the gradient at $(1, 1)$, and in which direction does $L$ fall fastest?
@@ -129,7 +130,7 @@ that is $8$ degrees off is a failure and one that is $2$ off is a nuisance,
 this is usually what we want.
 
 **It is smooth.** The absolute value has a corner at zero, where the slope
-jumps from $-1$ to $+1$ and the derivative of chapter 7 does not exist. The
+jumps from $-1$ to $+1$ and the derivative of Volume I, chapter 7, does not exist. The
 square $(\hat{y} - y)^2$ has a derivative $2(\hat{y} - y)$ everywhere, which
 shrinks to zero as the prediction approaches the label. A method that follows
 slopes (gradient descent, below) takes smaller steps as it nears a good fit,
@@ -137,12 +138,12 @@ without being told to.
 
 **It is convex in the parameters of a line.** For a model that is a line, the
 prediction is a linear function of $(w, b)$, the square of a linear function is
-a bowl (a curve or surface with one lowest point that rises on every side), and an average of bowls is a bowl (the chord inequality of chapter 7
+a bowl (a curve or surface with one lowest point that rises on every side), and an average of bowls is a bowl (the chord inequality of Volume I, chapter 7,
 can be added term by term, so a sum of convex functions is convex). So the MSE of a line has one lowest point and no other valleys. We
 check this by computing the curvature below.
 
 **It has a probabilistic reading.** Suppose the label is the model's value plus
-noise from a Gaussian distribution (chapter 11) with standard deviation
+noise from a Gaussian distribution (Volume I, chapter 11) with standard deviation
 $\sigma$: $y = f_\theta(\mathbf{x}) + \varepsilon$. The density of the label is
 $\frac{1}{\sqrt{2\pi\sigma^2}}\exp\bigl(-\frac{(y - \hat{y})^2}{2\sigma^2}\bigr)$,
 and its negative logarithm,
@@ -154,11 +155,11 @@ $$
 is the squared difference, scaled, plus a number that does not depend on
 $\theta$. So minimising the squared error is the same as choosing the
 parameters under which the observed labels were most probable, if the noise is
-Gaussian. The chapter "Maximum Likelihood, Priors and Regularization" makes
+Gaussian. Chapter 4, "Maximum Likelihood, Priors and Regularization", makes
 that precise and shows what changes when the noise is not Gaussian. For now it
 is the reason the squared error is not an arbitrary choice: noise that is the
 sum of many small independent effects is nearly Gaussian (the central limit
-theorem of chapter 11), and the thermometer's error is that kind.
+theorem of Volume I, chapter 11), and the thermometer's error is that kind.
 
 ### What each loss does when there is nothing to learn
 
@@ -180,7 +181,7 @@ The squared error is smallest at the mean of the labels, $53.44$, and the
 absolute error is smallest at the median, $58.20$ (the midpoint of the two
 middle labels). Both facts have one-line proofs. The derivative of
 $\frac{1}{N}\sum_n (c - y_n)^2$ is $\frac{2}{N}\sum_n (c - y_n)$, which is zero
-at $c = \bar{y}$, the sample mean of chapter 12. The absolute loss has slope
+at $c = \bar{y}$, the sample mean of Volume I, chapter 12. The absolute loss has slope
 $+1$ for each label below $c$ and $-1$ for each above it, and the total slope
 changes sign where half of the labels are on each side, the median. This is the
 cleanest statement of what the squared error asks for: **the prediction that
@@ -196,16 +197,16 @@ $$
 $$
 
 This is a function of two numbers, the same kind of object as the two-knob loss
-of chapter 8, and every tool of that chapter applies. In particular the loss
+of Volume I, chapter 8, and every tool of that chapter applies. In particular the loss
 can be pictured as a surface above the $(w, b)$ plane, with the best line at the
-lowest point. We will not compute the lowest point by trying. The chapter 8
-facts are enough: at the lowest point of a smooth function the gradient is zero.
+lowest point. There is no need to find the lowest point by trying. One fact from
+that chapter is enough: at the lowest point of a smooth function the gradient is zero.
 
-The partial derivatives come from the chain rule of chapter 7. Write
+The partial derivatives come from the chain rule of Volume I, chapter 7. Write
 $r_n = \hat{y}_n - y_n = w v_n + b - y_n$ for the difference between prediction and label on row
 $n$: the **residual** of the row. Every residual in this chapter is
 "prediction minus label", in the formulas and in the tables. (The residual of
-chapter 3, what is left of a vector after a projection, is the label side minus the
+Volume I, chapter 3, what is left of a vector after a projection, is the label side minus the
 prediction side, the opposite sign; the sign changes no length and no right
 angle, and it is fixed here once so that the gradient and the tables agree.) Then
 
@@ -244,7 +245,7 @@ S_{vy} = \sum_n (v_n - \bar{v})(y_n - \bar{y}).
 $$
 
 The slope is the covariance of voltage and temperature divided by the variance
-of voltage (both unnormalised: the factors of $N - 1$ cancel), the quantities of chapter 12. For
+of voltage (both unnormalised: the factors of $N - 1$ cancel), the quantities of Volume I, chapter 12. For
 the sensor:
 
 <!-- worked: linear_regression.closed_form_line -->
@@ -266,18 +267,18 @@ Gradient entries and the sums below are zero up to rounding noise: a reproductio
 The two gradient entries at the solution are zero to the rounding of the
 arithmetic (below $10^{-9}$ in size, as the header of the table says; the digits printed after that are noise), as they must be. We should also check that the
 point is a minimum and not a maximum or a saddle: the second derivatives are
-$\partial^2 M/\partial b^2 = 2$, $\partial^2 M/\partial w^2 = \frac{2}{N}\sum_n v_n^2$
+$\partial^2 \mathrm{MSE}/\partial b^2 = 2$, $\partial^2 \mathrm{MSE}/\partial w^2 = \frac{2}{N}\sum_n v_n^2$
 and the cross derivative is $2\bar{v}$. The determinant of this Hessian
-(chapter 8) is $\frac{4}{N}\sum v_n^2 - 4\bar{v}^2 = \frac{4}{N} S_{vv}$, positive unless all the
+(Volume I, chapter 8) is $\frac{4}{N}\sum v_n^2 - 4\bar{v}^2 = \frac{4}{N} S_{vv}$, positive unless all the
 voltages are equal. A Hessian with positive diagonal and positive determinant is positive definite, so
-the loss is a bowl, convex in the sense of chapter 7, and the solution is its
+the loss is a bowl, convex in the sense of Volume I, chapter 7, and the solution is its
 one and only lowest point.
 
 This procedure, choosing the parameters that minimise the sum of squared
 differences between predictions and labels, is **least squares**. The line it
 produces is the least-squares line, and the closed form above (the line through the
-means with slope $S_{vy}/S_{vv}$) is known to anyone who has drawn a line through
-a scatter plot in a spreadsheet.
+means with slope $S_{vy}/S_{vv}$) is what a spreadsheet computes when it draws a
+trend line through a scatter plot.
 
 The residuals of the least-squares line:
 
@@ -305,7 +306,7 @@ negative (below them): a curved pattern that a line cannot follow. The picture d
 vertical segment from the point to the line. The loss is the average of the
 squares of those segment lengths.
 
-![The ten measured rows as dots, the least-squares line drawn solid, and the vertical segment from each dot to the line. The segments are the residuals: longest at the highest voltage and at the lowest, where the line overshoots, shorter in the middle, where it mostly undershoots.](img/least-squares-line.svg)
+![The ten measured rows as dots, the least-squares line drawn solid, and a vertical segment from each dot to the line.](img/least-squares-line.svg)
 
 ### How it compares with the grid search
 
@@ -345,7 +346,7 @@ all of them, and it is the form every later chapter uses.
 Take $N$ examples with $d$ features each. As in chapter 1, stack the feature
 vectors as the rows of $\mathbf{X}$ with shape $[N, d]$. A model that is a
 weighted sum of the features, $\hat{y} = w_1 x_1 + \dots + w_d x_d$, predicts all
-$N$ rows at once as the matrix-vector product of chapter 4,
+$N$ rows at once as the matrix-vector product of Volume I, chapter 4,
 
 $$
 \hat{\mathbf{y}} = \mathbf{X}\mathbf{w}, \qquad \mathbf{X}: [N, d],\ \mathbf{w}: [d],\ \hat{\mathbf{y}}: [N].
@@ -359,7 +360,7 @@ ones, is the **design matrix** of the model. From here on the parameter vector i
 $\mathbf{w} = (w_0, w_1)$, intercept first, and every model in this chapter has
 the form $\hat{\mathbf{y}} = \mathbf{X}\mathbf{w}$.
 
-With this notation the loss is a norm (chapter 3): the vector of residuals is
+With this notation the loss is a norm (Volume I, chapter 3): the vector of residuals is
 $\mathbf{X}\mathbf{w} - \mathbf{y}$ and
 
 $$
@@ -370,7 +371,7 @@ $$
 ### The gradient, derived once
 
 Expand the product, using $(\mathbf{X}\mathbf{w})^\top = \mathbf{w}^\top\mathbf{X}^\top$
-(the transpose rule of chapter 4):
+(the transpose rule of Volume I, chapter 4):
 
 $$
 N\cdot\mathrm{MSE} = \mathbf{w}^\top\mathbf{X}^\top\mathbf{X}\mathbf{w}
@@ -381,7 +382,7 @@ $$
 equals its own transpose.) Write $\mathbf{A} = \mathbf{X}^\top\mathbf{X}$, a
 matrix of shape $[d, d]$ that is symmetric, and $\mathbf{c} = \mathbf{X}^\top\mathbf{y}$,
 a vector of shape $[d]$. We need the gradient of $\mathbf{w}^\top\mathbf{A}\mathbf{w}$
-and of $\mathbf{w}^\top\mathbf{c}$ with respect to $\mathbf{w}$, entry by entry, as in chapter 8.
+and of $\mathbf{w}^\top\mathbf{c}$ with respect to $\mathbf{w}$, entry by entry, as in Volume I, chapter 8.
 
 - $\mathbf{w}^\top\mathbf{c} = \sum_j w_j c_j$, whose derivative with respect to $w_k$ is $c_k$. The gradient is $\mathbf{c}$.
 - $\mathbf{w}^\top\mathbf{A}\mathbf{w} = \sum_{i}\sum_{j} A_{ij} w_i w_j$. The derivative with respect to $w_k$ collects the terms with $i = k$ and the terms with $j = k$: $\sum_j A_{kj} w_j + \sum_i A_{ik} w_i = 2(\mathbf{A}\mathbf{w})_k$, using $A_{ik} = A_{ki}$. The gradient is $2\mathbf{A}\mathbf{w}$.
@@ -423,10 +424,10 @@ $$
 This is a system of $d$ linear equations in the $d$ unknowns $\mathbf{w}$: the
 matrix $\mathbf{X}^\top\mathbf{X}$ has shape $[d, d]$, however many examples there
 are, so the system's size depends on the number of features and not on the
-number of rows. If $\mathbf{X}^\top\mathbf{X}$ has an inverse (chapter 4), the
+number of rows. If $\mathbf{X}^\top\mathbf{X}$ has an inverse (Volume I, chapter 4), the
 solution is $\mathbf{w} = (\mathbf{X}^\top\mathbf{X})^{-1}\mathbf{X}^\top\mathbf{y}$. That
 formula is the standard way to write the answer. It is not the standard way to
-compute it: chapter 4 showed that elimination solves the system without
+compute it: Volume I, chapter 4, showed that elimination solves the system without
 forming the inverse, at about a third of the cost, and with fewer rounding errors.
 We solve the system.
 
@@ -460,7 +461,7 @@ numbers, so the same line. The two derivations are one derivation, and the
 matrix form is the one that does not change when the features do.
 
 The algorithm, in the book's pseudocode, is three short loops and a call to the
-elimination of chapter 4:
+elimination of Volume I, chapter 4:
 
 ```text
 function fit_least_squares(X: array<real>[N, d], y: array<real>[N])
@@ -474,13 +475,13 @@ function fit_least_squares(X: array<real>[N, d], y: array<real>[N])
                 A[i, j] = A[i, j] + X[n, i] * X[n, j]
         for n in 0 .. N:
             c[i] = c[i] + X[n, i] * y[n]
-    return solve(A, c, true)            # partial pivoting, chapter 4; vanishing-pivot test as in the text
+    return solve(A, c, true)            # partial pivoting, Volume I, chapter 4; vanishing-pivot test as in the text
 ```
 
 Forming $\mathbf{A}$ costs $N d^2$ multiply-adds and solving costs about $d^3/3$.
 Both numbers are tabulated at the end of the next section, where they matter.
 
-The `solve` of chapter 4 refuses a matrix only when a pivot is exactly zero, the
+The `solve` of Volume I, chapter 4, refuses a matrix only when a pivot is exactly zero, the
 right test in exact arithmetic. In floating point a singular
 $\mathbf{X}^\top\mathbf{X}$ leaves a pivot of rounding noise instead of a zero, so
 wherever this chapter's tables need to detect a vanishing pivot they call
@@ -497,22 +498,22 @@ and elimination stops at the first pivot that counts as zero.
 
 The normal equations have a second reading, geometric, that explains the name.
 Think of the $d$ columns of $\mathbf{X}$ as $d$ vectors in $N$-dimensional space
-(chapter 3), and the label vector $\mathbf{y}$ as one more vector in that space.
+(Volume I, chapter 3), and the label vector $\mathbf{y}$ as one more vector in that space.
 The vectors $\mathbf{X}\mathbf{w}$ obtainable by choosing $\mathbf{w}$ fill a flat
 sheet through the origin: the **column space** of $\mathbf{X}$ (a line if $d = 1$, a plane if
 $d = 2$). The loss is the squared distance between $\mathbf{y}$ and the point
 $\mathbf{X}\mathbf{w}$ of that sheet, so least squares asks for the point on the
 sheet nearest to $\mathbf{y}$.
 
-Chapter 3 found the nearest point on a line: the residual, what is left of
+Chapter 3 of Volume I found the nearest point on a line: the residual, what is left of
 $\mathbf{y}$, is at a right angle to the line. The same must hold for a sheet:
-the residual vector $\mathbf{r} = \mathbf{X}\mathbf{w} - \mathbf{y}$ (the entries $r_n$ above, prediction minus label; its negative is chapter 3's) is at a right angle
+the residual vector $\mathbf{r} = \mathbf{X}\mathbf{w} - \mathbf{y}$ (the entries $r_n$ above, prediction minus label; its negative is the residual of Volume I, chapter 3) is at a right angle
 to every column of $\mathbf{X}$, that is, $\mathbf{X}^\top\mathbf{r} = \mathbf{0}$. Written out,
 $\mathbf{X}^\top(\mathbf{X}\mathbf{w} - \mathbf{y}) = \mathbf{0}$, which is the
 normal equations rearranged. "Normal" is the old word for "at a right angle", and
 the equations say that the residual is normal to the column space. So the fitted
 vector $\hat{\mathbf{y}} = \mathbf{X}\mathbf{w}$ is the projection of $\mathbf{y}$
-onto the column space, the same idea as chapter 3 with a sheet in place of a line.
+onto the column space, the same idea as Volume I, chapter 3, with a sheet in place of a line.
 
 Numbers make the picture checkable. For the sensor ($N = 10$, so these are
 vectors in ten dimensions that nobody can draw), compute the residual vector and take its dot
@@ -547,7 +548,7 @@ once in millivolts, and feeds the model both. The third column of
 $\mathbf{X}$ is exactly $1000$ times the second. The model
 $w_1 v + w_2 (1000 v)$ depends only on the combination $w_1 + 1000 w_2$, so
 infinitely many weights give identical predictions and none can be called the
-best. In the language of chapter 4 the columns are dependent, the rank of
+best. In the language of Volume I, chapter 4, the columns are dependent, the rank of
 $\mathbf{X}$ is smaller than its number of columns, and elimination finds a
 pivot that is zero.
 
@@ -582,8 +583,8 @@ the first is large and positive ($99.0$, then $109.3$), the second large and neg
 which is what the predictions depend on, stays at $26.1$, near the slope $26.0$ of the
 single-feature line. The predictions at $1.75$ V are nearly the same in both
 runs; the individual weights are meaningless. The cause is the condition number
-of chapter 8. The eigenvalues of $\mathbf{X}^\top\mathbf{X}$ are the squares of
-the singular values of $\mathbf{X}$ (chapter 6), so forming $\mathbf{X}^\top\mathbf{X}$
+of Volume I, chapter 8. The eigenvalues of $\mathbf{X}^\top\mathbf{X}$ are the squares of
+the singular values of $\mathbf{X}$ (Volume I, chapter 6), so forming $\mathbf{X}^\top\mathbf{X}$
 squares the conditioning of the problem: the table's condition number of
 millions comes from a design matrix whose own condition number is its square
 root, in the thousands. The smallest eigenvalue measures how well the data pin
@@ -594,7 +595,7 @@ redundancy** (drop one meter, or combine the two into their average).
 **Prefer small weights** when the data cannot decide between large ones, which
 is the idea of regularization, developed in the chapter on maximum likelihood.
 **Do not form $\mathbf{X}^\top\mathbf{X}$** at all and use a method that works
-on $\mathbf{X}$ directly: the decompositions of chapter 6 and the iterative
+on $\mathbf{X}$ directly: the decompositions of Volume I, chapter 6, and the iterative
 method of the next section are of this kind.
 
 ### Why an iterative method is still needed
@@ -617,16 +618,16 @@ Multiply-adds for the normal equations (forming X^T X, then elimination) against
 | a 7B-parameter model | 1,000,000,000 | 7,000,000,000 | 4.90 x 10^28 | 1.14 x 10^29 | 1.40 x 10^19 | 1.83 x 10^11 |
 <!-- /worked -->
 
-For the sensor everything is instantaneous. For a model with a thousand features
+For the sensor every count is negligible. For a model with a thousand features
 and a million rows, forming the matrix costs the same as five hundred gradient
 passes. For a model with ten thousand features the matrix alone is $0.37$ GiB
-and solving it costs $3.3 \times 10^{11}$. The last row is a language model of
+and solving it costs $3.3 \times 10^{11}$ multiply-adds. The last row is a language model of
 seven billion parameters, where it does not even make sense to ask: $\mathbf{X}^\top\mathbf{X}$ would
 hold more numbers than any machine has memory for. (A network is not linear in its
 parameters, so there are no normal equations to write down; the row shows only
 what the size would do.) What always remains possible is the gradient, whose cost
-and memory grow linearly with the number of parameters. The rest of the chapter
-is the method that uses only it.
+and memory grow linearly with the number of parameters, and a method that needs
+nothing more is the way forward.
 
 ## Gradient descent
 
@@ -645,7 +646,7 @@ fastest, since the gradient is the direction of steepest ascent. The positive
 number $\eta$ that scales the step is the **learning rate**. It is the one number
 of the method that the person choosing the method must pick, and the next two
 sections explain how much depends on it. (It is called a rate because, in the
-flow picture of chapter 9, it is the step of time; it is not a speed in any
+flow picture of Volume I, chapter 9, it is the step of time; it is not a speed in any
 everyday sense.)
 
 For the MSE of a linear model the gradient is the formula just derived, so one
@@ -737,8 +738,8 @@ The three columns behave in three different ways.
 **Too small ($\eta = 0.01$).** The loss falls at every step and never overshoots,
 but after $200$ steps it is still at $56.44$ against a minimum of $13.15$, and
 the slope has reached $15.83$ of its final $26.02$. The path is safe and
-inefficient, which for a model with millions of parameters means days of training
-instead of hours.
+wasteful: every step is a full pass over the data, and for a model with millions
+of parameters ten times as many steps means ten times the arithmetic.
 
 **Good ($\eta = 0.2$).** The loss falls fast at first and then settles; by step
 $100$ it is within $0.07$ of the minimum, and by step $200$ the weights are within $0.02$ of
@@ -749,9 +750,8 @@ for one of the two directions of the bowl.
 **Too large ($\eta = 0.24$).** The loss rises. It is $940$ after one step, $3{,}509$
 after ten, and about $4.5 \times 10^9$ after a hundred. The slope swings from side
 to side with growing amplitude and the weights run away. This is not an accident
-of this data set: the next section shows it is the unavoidable behaviour for any
-learning rate above a limit that we can compute in advance. A loss that
-rises is the signal.
+of this dataset: every learning rate above a limit that can be computed in
+advance behaves this way. A loss that rises is the signal.
 
 The picture draws the same three runs on the contours of the loss: the paths
 across the long valley. The $\eta = 0.01$ path creeps. The $\eta = 0.2$ path
@@ -764,8 +764,8 @@ by more at each step and leaves the frame.
 ## How large a step: the stability limit
 
 Why did $0.2$ work and $0.24$ not? The loss of a linear model is exactly a
-quadratic, so the question has an exact answer, the same one as in chapters 8 and
-9 with one new ingredient: the Hessian of the MSE is known.
+quadratic, so the question has an exact answer, the same one as in Volume I, chapters 8 and
+9, with one new ingredient: the Hessian of the MSE is known.
 
 The gradient is $\frac{2}{N}\mathbf{X}^\top(\mathbf{X}\mathbf{w} - \mathbf{y})$ and the
 minimiser $\mathbf{w}^\star$ satisfies the normal equations
@@ -779,7 +779,7 @@ $$
 \mathbf{e} = \mathbf{w} - \mathbf{w}^\star .
 $$
 
-$\mathbf{H}$ is the Hessian of chapter 8 (it is the matrix of second derivatives
+$\mathbf{H}$ is the Hessian of Volume I, chapter 8 (it is the matrix of second derivatives
 we computed for the line, in matrix form), and it does not depend on $\mathbf{w}$.
 One step of descent therefore acts on the error as
 
@@ -787,7 +787,7 @@ $$
 \mathbf{e}_{k+1} = \mathbf{e}_k - \eta\mathbf{H}\mathbf{e}_k = (\mathbf{I} - \eta\mathbf{H})\,\mathbf{e}_k .
 $$
 
-$\mathbf{H}$ is symmetric, so by chapter 6 it has orthogonal eigenvectors
+$\mathbf{H}$ is symmetric, so by Volume I, chapter 6, it has orthogonal eigenvectors
 $\mathbf{u}_i$ with eigenvalues $\lambda_i$ (positive, when $\mathbf{X}^\top\mathbf{X}$
 is invertible). Write the error as $\mathbf{e} = \sum_i \xi_i\mathbf{u}_i$. Then
 $(\mathbf{I} - \eta\mathbf{H})\mathbf{e} = \sum_i (1 - \eta\lambda_i)\xi_i\mathbf{u}_i$: each
@@ -804,7 +804,7 @@ $$
 \eta < \frac{2}{\lambda_{\max}} .
 $$
 
-This is the stability limit of Euler's method from chapter 9, with the largest
+This is the stability limit of Euler's method from Volume I, chapter 9, with the largest
 curvature of the bowl playing the part of the rate $\lambda$. Above it the factor
 $1 - \eta\lambda_{\max}$ is below $-1$, and the component of the error along
 the steepest direction is multiplied by more than $1$ in size and changes sign at
@@ -897,8 +897,8 @@ has risen to $0.9298$, the square of the slow factor ($0.9643$), and stays there
 predicts the number of steps: the excess is at most $\gamma^{2k}$ times its starting value,
 so it is below a tolerance $\tau$ once
 $k \ge \ln(\tau/\text{excess}_0)\,/\,(2\ln\gamma)$. That is the column "bound from the worst factor" of the
-stability table, and the measured steps are always below it (they coincide when
-the starting error lies along the slow direction). The count grows with $\kappa$:
+stability table, and the measured steps are never above it (they coincide at
+$\eta^\star$, where both factors are equal). The count grows with $\kappa$:
 for $\gamma = (\kappa - 1)/(\kappa + 1) \approx 1 - 2/\kappa$ the step count is
 proportional to $\kappa$.
 
@@ -946,7 +946,7 @@ design matrix $[1, v]$.
 
 First, the columns are not at a right angle: the voltages are all positive and
 centred near $1.7$, so the column of voltages is largely a copy of the column of
-ones. (Their cosine, chapter 3, is $\sum v/\sqrt{N\sum v^2} = 0.942$.) A change
+ones. (Their cosine, Volume I, chapter 3, is $\sum v/\sqrt{N\sum v^2} = 0.942$.) A change
 in the intercept and a change in the slope can nearly cancel in their effect on
 the predictions, which is the long valley: the near-collinearity of the previous
 section, in a mild form. **Centring** the feature (subtracting its mean) makes the column
@@ -958,7 +958,7 @@ be in the thousands, and the curvature along the slope would be a million times
 the one along the intercept. Dividing by the standard deviation puts every
 feature on the same scale.
 
-Together these are the z-score of chapter 12, $z = (v - \bar{v})/s$, with $s$ the
+Together these are the z-score of Volume I, chapter 12, $z = (v - \bar{v})/s$, with $s$ the
 standard deviation of the voltages (divisor $N - 1$). A feature rewritten this way
 is called **standardised** (or z-scored), and the standardised features are what
 is fitted. With the design matrix $[1, z]$ the matrix
@@ -980,9 +980,9 @@ fits all three. Their conditioning could hardly differ more. In millivolts the
 condition number is $3.0 \times 10^{7}$, the stable learning rate is below
 $10^{-6}$, and the run is not within tolerance after $200{,}000$ steps (the bound says
 $1.0 \times 10^{8}$). In volts it is $48.5$ and takes $166$ steps. After z-scoring it is $1.11$ and the loss is
-within tolerance in three. The comparison of the two cases that can be run is in the picture.
+within tolerance in three. The picture compares the two cases that can be run to the end.
 
-![Base-ten logarithm of the loss above its minimum against iteration number, for gradient descent at its best learning rate from the same start. The raw-volts line falls slowly and crosses the line marking a gap of 0.001 near step 166; the z-scored line drops almost vertically to the floor of rounding noise within a few steps.](img/scaling-convergence.svg)
+![Base-ten logarithm of the loss above its minimum against iteration number, for gradient descent on raw volts and on z-scored voltage, each at its best learning rate, with a horizontal line at a gap of 0.001.](img/scaling-convergence.svg)
 
 Nothing was lost in the change: a fit in z-score units can be mapped back.
 Since $\hat{y} = w_0 + w_1(v - \bar{v})/s$, the slope in volts is $w_1/s$ and the
@@ -1000,8 +1000,8 @@ One rule has to be kept for later chapters: **the mean and standard deviation
 come from the training rows and are then fixed**. A new sensor reading is scaled
 with the same $\bar{v}$ and $s$, not with its own, since a single reading has no
 meaningful standard deviation and a statistic computed on the rows a model is
-later judged on leaks information about them. Chapter "Generalization,
-Overfitting and Honest Evaluation" names this.
+later judged on leaks information about them. Chapter 5, "Generalization,
+Overfitting and Honest Evaluation", names this leakage.
 
 ## Polynomial features: linear regression in disguise
 
@@ -1025,12 +1025,12 @@ Polynomial features of the voltage (columns 1, v, v^2, ...), fitted by the norma
 <!-- /worked -->
 
 The parabola is $(w_0, w_1, w_2) = (-6.41, 49.52, -7.72)$, close to the grid's
-$(-6, 50, -8)$ and it cut the error on the fresh rows from $14.08$ for the line to
+$(-6, 50, -8)$, and it cut the MSE on the fresh rows from $14.08$ for the line to
 $1.73$. The cubic fits the ten known rows a little better than the parabola
 ($0.544$ against $0.599$), as any larger family must, and it does *worse* on the
 fresh rows ($1.97$ against $1.73$): the extra freedom has begun to fit the noise,
-the pattern of chapter 1 that the generalization chapter develops. The last two
-columns show the other lesson of the section: powers of $v$ are strongly correlated, and the
+the pattern of chapter 1 that chapter 5 develops. The last two
+columns show a second effect: powers of $v$ are strongly correlated, and the
 condition number of $\mathbf{X}^\top\mathbf{X}$ grows from $49$ for the line to
 $1.4 \times 10^3$ for the parabola and $1.2 \times 10^5$ for the cubic. Applying
 the z-score to $v$ before taking its powers brings them to $1.1$, $8.0$ and $83$.
@@ -1049,7 +1049,7 @@ residual on each of the seven points (in log space); $\mathrm{SS}_{\mathrm{res}}
 best a model with no slope could do is the mean of the log-losses, and $\mathrm{SS}_{\mathrm{tot}}$ is the sum of the
 squared deviations from it. The ratio
 $R^2 = 1 - \mathrm{SS}_{\mathrm{res}}/\mathrm{SS}_{\mathrm{tot}}$ is $1$ for a line through every point and
-$0$ for a line no better than that mean (the metrics chapter treats it properly):
+$0$ for a line no better than that mean (chapter 6 treats it properly):
 
 <!-- worked: linear_regression.power_law_log_fit -->
 Seven (size n_p, loss) points generated from loss = 0.5 + 10 n_p^-0.3 with multiplicative noise of one percent. Generator: the book's SplitMix64, seed 0x1377ca06b334a36f (1402811939074384751). For the sizes in the order listed, one `rng.normal()` each, the loss is (0.5 + 10 n_p^-0.3) * (1 + 0.01 * rng.normal()), shown to 4 decimals.
@@ -1077,8 +1077,8 @@ For each candidate floor, an ordinary least-squares line (closed form of the cha
 Only a floor near the truth, $\mathcal{L}_\infty = 0.5$, gives a straight line in the logarithms:
 $R^2$ (the share of the variance of the log-losses that the line explains) is $0.99978$ there and lower for the others,
 and the fit recovers $\alpha = 0.301$ (truth $0.3$) and $\zeta = 10.2$ (truth $10$). The
-loss is no longer the loss in degrees: least squares in log space minimises the
-squares of *relative* errors, so every size counts equally rather than the
+quantity minimised is now a squared error in log space, which is close to the
+square of the *relative* error, so every size counts equally rather than the
 largest losses dominating. That is a modelling decision, made by the transformation, and
 is worth making deliberately.
 
@@ -1107,11 +1107,11 @@ the features should be examined before the rate is touched.
 
 That points at the habit that pays most: scale the features, then start with a
 rate near $1/\lambda_{\max}$. For z-scored features of a linear model
-$\lambda_{\max}$ is of order $1$ times a small constant, so a rate of $0.1$ to
+$\lambda_{\max}$ is a small number ($2$ for the sensor line), so a rate of $0.1$ to
 $0.5$ is a safe first try. For larger models the reasoning does not transfer
-unchanged, and the next volume's optimizers chapter asks what to do instead.
-Scaling also protects against three misreadings. A stopping rule on the change
-in the loss is not a guarantee of being near the minimum. A loss in z-score
+unchanged, and Volume III's chapter on optimizers asks what to do instead.
+Three misreadings remain to be avoided. A stopping rule on the change
+in the loss is not a guarantee of being near the minimum. A fit in z-score
 units and one in raw units cannot be compared by their weights, which change with
 the scale, although the predictions and the loss do not. And a learning rate that
 worked on one scale of data can be millions of times too large, or too small, on
@@ -1119,9 +1119,10 @@ another with no change to the code.
 
 ## Least squares and the plain step in brain's crates
 
-brain is mostly about models that no formula can solve, so exact least squares
-is rare in it, but the closed form turns up wherever a small fit is needed
-beside a big model, and the descent step lives at the heart of its optimiser.
+Most of the models in brain have no formula that solves them, so exact least
+squares is rare there, but the closed form turns up wherever a small fit is
+needed beside a big model, and the descent step lives at the heart of brain's
+optimiser.
 
 **Fitting a scaling law in log space.** `crates/bench/src/scaling.rs` trains the
 same task at several model sizes, measures the final loss at each size and fits
@@ -1136,20 +1137,20 @@ three-parameter fit optimised jointly is unstable, so one parameter is fixed by
 a coarse search and the other two are found exactly. The module's test
 `fits_a_known_power_law` builds the loss $0.5 + 10\,n_{\mathrm{p}}^{-0.3}$ from four noiseless
 points and checks that $\alpha$ is recovered to within $0.05$. Commit `f6069a024`
-(24 June 2026) introduced the harness. Its default sweep trains three model sizes,
-and that is worth a reader's caution drawn from this chapter's arithmetic: a fit
-with a free floor, a scale and an exponent has three numbers for three points, so
-a score near $1$ on the default sweep says the fit can pass through the points,
-not that the loss follows a power law. The module's own table of fitted laws is only evidence
-when it is given more sizes than free numbers.
+(24 June 2026) introduced the harness. Its default sweep trains three model
+sizes, and the arithmetic of this chapter says what that can show: a fit with a
+free floor, a scale and an exponent has three numbers for three points, so an
+$R^2$ near $1$ on the default sweep says only that the fit can pass through the
+points, not that the loss follows a power law. A fitted law is evidence only
+when there are more sizes than free numbers.
 
 **The same closed form with an error bar.** `crates/bench/src/metrics.rs`
 holds `ols_slope_ci`, which fits a line by the same two formulas and adds the
 standard error of the slope, $\sqrt{(\mathrm{SS}_{\mathrm{res}}/(n-2))/S_{vv}}$ (in this chapter's names), and a $95\%$
-interval from a small table of $t$ values (chapter 12). It came with commit
+interval from a small table of $t$ values (Volume I, chapter 12). It came with commit
 `05446791a` (6 September 2026), the multi-cycle continual-learning harness, and
 `crates/rl/src/continual.rs` calls it on a twelve-point series of a plasticity
-measure. Its doc comment states the lesson of this chapter's data-size theme: a
+measure. Its doc comment states what so few points can support: a
 twelve-point, single-seed series cannot support a significance test, so the
 interval is a diagnostic that is reported and never used to pass or fail a model,
 and an interval containing zero means "no trend distinguishable at this
@@ -1163,7 +1164,7 @@ and $\mathbf{X}^\top\mathbf{y}$ row by row, as the pseudocode above does, and
 calls `solve` in `crates/fcbench/src/util.rs`, a Gaussian elimination with row
 swaps that returns `None` when a pivot vanishes. The caller treats `None` as the
 rank-deficient case of this chapter: for a constant (differenced) series, every lag
-column is equal to the column of ones, the matrix is singular, and the baseline
+column is a multiple of the column of ones, the matrix is singular, and the baseline
 falls back to a random walk instead of returning weights. The test
 `solve_reports_singular` feeds it the matrix of ones. The pivot test is an
 absolute threshold of $10^{-12}$ on `f32` numbers, so it catches exact
@@ -1173,12 +1174,12 @@ equations is the more serious risk. Commit `5ce448795` (21 July 2026) added the
 baseline with the forecasting subsystem.
 
 **The plain gradient step.** The update $\mathbf{w} \leftarrow \mathbf{w} - \eta\,\mathbf{g}$
-is brain's `Rule::SgdMomentum` in `crates/optim/src/rule.rs` with momentum zero:
-the code path does `w -= lr * g` when weight decay is also zero, applied to
+is brain's `Rule::SgdMomentum` in `crates/optim/src/rule.rs` with momentum and
+weight decay zero, where its update reduces to `w -= lr * g`, applied to
 the gradient of a batch's loss (the gradient of an average over a few rows is a
-sample mean of chapter 12, an estimate of the full gradient that costs a few rows
-instead of $N$; that variant is stochastic gradient descent, and the optimizers
-chapter develops it and the momentum and adaptive rules that surround it). The notable
+sample mean of Volume I, chapter 12, an estimate of the full gradient that costs a few rows
+instead of $N$; that variant is stochastic gradient descent, and Volume III's
+chapter on optimizers develops it and the momentum and adaptive rules that surround it). The notable
 test in `crates/optim/src/streamed.rs`,
 `master_keeps_updates_a_low_precision_value_would_lose`, is a lesson about the
 learning rate that this chapter's formulas alone do not give: it runs a hundred
@@ -1288,8 +1289,8 @@ shows; it needs a model whose output is a probability, and a loss that fits it.
 
 ## References
 
-- Legendre, A.-M., *Nouvelles methodes pour la determination des orbites des cometes*, 1805, and Gauss, C. F., *Theoria motus corporum coelestium*, 1809 (the method of least squares).
-- Cauchy, A.-L., "Methode generale pour la resolution des systemes d'equations simultanees", 1847 (gradient descent).
+- Legendre, A.-M., *Nouvelles méthodes pour la détermination des orbites des comètes*, 1805, and Gauss, C. F., *Theoria motus corporum coelestium*, 1809 (the method of least squares).
+- Cauchy, A.-L., "Méthode générale pour la résolution des systèmes d'équations simultanées", 1847 (gradient descent).
 - Golub, G. H. and Van Loan, C. F., *Matrix Computations*, fourth edition, 2013 (normal equations, conditioning and their alternatives).
 - Hastie, T., Tibshirani, R. and Friedman, J., *The Elements of Statistical Learning*, second edition, 2009 (linear regression and least squares).
 - Nocedal, J. and Wright, S. J., *Numerical Optimization*, second edition, 2006 (convergence rate of steepest descent on a quadratic).

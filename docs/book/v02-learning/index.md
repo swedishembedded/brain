@@ -22,8 +22,8 @@ the habits that keep the later work honest: separating the data used to choose
 parameters from the data used to judge them, choosing a metric before looking at
 a result, and comparing against a baseline.
 
-You can state a learning problem precisely: the data, the model, the score and
-the goal on new examples. You can fit a line by solving equations and by
+By the end of the volume you can state a learning problem precisely: the data,
+the model, the score and the goal on new examples. You can fit a line by solving equations and by
 gradient descent and say how the two relate, build a model that outputs a
 probability and train it, explain why the losses in use are the right ones
 (maximum likelihood) and what it means to prefer simple explanations

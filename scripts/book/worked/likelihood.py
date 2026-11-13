@@ -399,7 +399,7 @@ def coin_map():
             mean = (h + a) / (h + t + a + b)
             xs = grid(0.0, 1.0, 1000)[1:-1]
             best = max(xs, key=lambda th: coin_loglik(th, h + a - 1, t + b - 1))
-            rows.append((f"Beta({a}, {b})", f"{a - 1} heads, {b - 1} tails", f"{h + a - 1}/{h + t + a + b - 2}",
+            rows.append((f"Beta({a}, {b})", f"{a - 1} head{'' if a - 1 == 1 else 's'}, {b - 1} tail{'' if b - 1 == 1 else 's'}", f"{h + a - 1}/{h + t + a + b - 2}",
                          f"{map_:.4f}", f"{best:.3f}", f"{mean:.4f}"))
         out.append(f"{h} heads, {t} tails (maximum likelihood {h / (h + t):.4f}); the grid argmax maximises the "
                    f"log-posterior (h + a - 1) ln(theta) + (t + b - 1) ln(1 - theta) over theta = i/1000, "

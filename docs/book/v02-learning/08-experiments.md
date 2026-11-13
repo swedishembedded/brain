@@ -7,20 +7,20 @@
 
 A colleague reports: "my new feature transform improves accuracy by 1.2 points." The sentence is short and every word of it can be false. The accuracy may have been measured on a test set so small that 1.2 points is inside its noise. The two numbers may come from one training run each, and one run of a learning algorithm is one draw from a spread of possible outcomes. The "baseline" may have been run with a stale learning rate while the new method was tuned for a week. The transform may have been compared with a method nobody uses. The best of several runs, or the best of several metrics, may have been reported. The test set may have been used to choose among variants. And nobody else may be able to run it again and get the same numbers.
 
-None of these needs bad faith. Each is what happens by default when the person who wants the result to be true is the person who runs the experiment. This chapter is about the habits that turn a number into a claim that can be checked: what to hold fixed, what to compare against, how much a result moves when nothing has changed, how large a difference has to be to matter, how to take a result apart, and what to write next to it.
+None of these needs bad faith. Each is what happens by default when the person who wants the result to be true is the person who runs the experiment. What protects against them is a set of habits that turn a number into a claim that can be checked: what to hold fixed, what to compare against, how much a result moves when nothing has changed, how large a difference has to be to matter, how to take a result apart, and what to write next to it.
 
-Before any of it, six questions that bring back what the chapter leans on. Answer them from memory; the answers are at the end, and a hard one sends you to the chapter it names.
+Those habits rest on hypothesis tests, paired comparisons, seeds, the test set, the trivial baseline and the training loop. The six questions below bring each back, naming the chapter that taught it; the answers are under "Recall questions" at the end.
 
 1. (Volume I, chapter 12, "Statistics", hypothesis tests.) Two models score $70.4\%$ and $71.2\%$ on the same $500$ questions and a test returns $p = 0.55$. What does that number say, and what does it not say about whether the models differ?
 2. (Volume I, chapter 12, paired tests.) Why is the standard error of the gap between two models scored on the same questions smaller than for two models scored on different questions, and which questions carry the information in a paired comparison?
 3. (Volume I, chapter 17, "Randomness on a Deterministic Machine", seeds and reproducibility.) Name the three things that must be the same for a run to be repeated exactly, and say what "one stream per purpose" buys you.
-4. (Chapter 5, "Generalization", the test set.) A team tries a hundred variants, looks at the test score of each and reports the best. Why is that score too high, and what would an honest report need?
-5. (Chapter 6, "Measuring Models", accuracy.) A screening model reaches $97\%$ accuracy on a task where $3\%$ of cases are positive. What simple predictor reaches the same accuracy?
-6. (Chapters 2 and 3, gradient descent and logistic regression.) One example $\mathbf{x} = (1, 2)$ with label $y = 1$, weights $\mathbf{w} = (0.2, -0.1)$, bias $b = 0$, learning rate $0.1$. Compute one step of the update in the `sgd_logistic` function defined below.
+4. (Chapter 5 of this volume, "Generalization", the test set.) A team tries a hundred variants, looks at the test score of each and reports the best. Why is that score too high, and what would an honest report need?
+5. (Chapter 6 of this volume, "Measuring Models", accuracy.) A screening model reaches $97\%$ accuracy on a task where $3\%$ of cases are positive. What simple predictor reaches the same accuracy?
+6. (Chapters 2 and 3 of this volume, gradient descent and logistic regression.) One example $\mathbf{x} = (1, 2)$ with label $y = 1$, weights $\mathbf{w} = (0.2, -0.1)$, bias $b = 0$, learning rate $0.1$. Compute one step of the update in the `sgd_logistic` function defined below.
 
 ## One small world, with the truth written down
 
-To have something to measure, the chapter uses one small world for every experiment, so that every table can be compared with every other. The book plays the part of nature, which means the truth is known: the rule that generates the labels is written down, and the accuracy of that rule is the ceiling for every classifier.
+One small world serves every experiment below, so that every table can be compared with every other. Its data are generated, which means the truth is known: the rule that generates the labels is written down, and the accuracy of that rule is the ceiling for every classifier.
 
 A machine has four sensors. A reading is four numbers, each sitting at a resting level (the first two at $2$, the other two at $0$) plus a standard Gaussian wobble. The label, 0 or 1, is a noisy function of the wobbles of the first three sensors and of the product of the wobbles of the first two. A classifier sees only the four readings with the resting level included, learns from $200$ labelled rows, is tuned on $300$ others and is scored on $1000$ more.
 
@@ -48,7 +48,7 @@ Share of label 1 in each part:
 Average of each reading over the training rows (used for centring): 1.934, 2.098, -0.029, -0.069.
 <!-- /worked -->
 
-The learner is logistic regression (chapter 3) trained by stochastic gradient descent (chapter 2), one example per step, a fixed number of epochs. Its randomness comes from two places, the initial weights and the order in which the examples are visited, and the recipe fixes both streams from one run seed, one stream per purpose as Volume I, chapter 17, taught.
+The learner is logistic regression (chapter 3) trained by the gradient descent of chapter 2 with one example per step, a variant called stochastic gradient descent (SGD, treated fully in Volume III), for a fixed number of epochs (passes over the training rows). Its randomness comes from two places, the initial weights and the order in which the examples are visited, and the recipe fixes both streams from one run seed, one stream per purpose as Volume I, chapter 17, taught.
 
 ```text
 function sgd_logistic(F: array<real>[N, p], y: array<int>[N], lr: real, epochs: int,
@@ -89,7 +89,7 @@ Generator: the book's SplitMix64, seed 0x62005bedda8f6496 (7061745292849144982).
 | 4 | 0xccfac44ab4c52316 | 71.0 | 74.4 | +3.4 |
 <!-- /worked -->
 
-Run 0 says the transform changes nothing ($-0.2$ points). Run 1 says it gains $7.2$ points. Runs 2, 3 and 4 say $+0.3$, $+6.5$ and $+3.4$. The data, the code and the test rows are identical in all five. Any one of these differences could have been written down as "the" result, and none of them is $1.2$. The chapter's job is to say what we can and cannot conclude from numbers like these.
+Run 0 says the transform changes nothing ($-0.2$ points). Run 1 says it gains $7.2$ points. Runs 2, 3 and 4 say $+0.3$, $+6.5$ and $+3.4$. The data, the code and the test rows are identical in all five. Any one of these differences could have been written down as "the" result, and none of them is $1.2$. The question is what can and cannot be concluded from numbers like these.
 
 ## A controlled experiment
 
@@ -101,7 +101,7 @@ A claim of the form "B is better than A because of X" is a causal claim, and the
 | preprocessing | what is fitted on the training rows only (the centring means), applied to all three parts |
 | model and recipe | the same learner, learning rate, epochs and batch size, unless the recipe itself is the thing under test |
 | seeds | a stated number of seeds, the same ones for both arms, drawn before looking at any result |
-| compute | the same training budget (steps, epochs, model size, wall time), reported with the result |
+| compute | the same training budget (steps, epochs, model size, floating-point operations), reported with the result |
 | tuning effort | the same number of tuning trials over the same ranges, on the validation set |
 | metric and test use | the metric named in advance, the test set read once at the end |
 
@@ -153,9 +153,9 @@ Tuning effort is one instance of a general rule: every degree of freedom the cla
 
 "$74.3\%$" cannot be judged until we know what a model with no skill, a simple model and the best earlier model get on the same rows. A **baseline** is a method, run under the same protocol as the new one (same split, same metric, comparable tuning and care), whose result the new one has to beat to count as progress. A convincing experiment has several, in three kinds.
 
-A **trivial** baseline uses no features: for classification, the majority class; for regression, the mean of the training targets; for a probability, the training share of the label. It sets the floor and catches the experiment that measures nothing (chapter 6: $97\%$ accuracy at a $3\%$ base rate). A **simple** baseline is a method from the earlier chapters, fitted properly: logistic regression to convergence (chapter 3), nearest neighbours or naive Bayes (chapter 7). It is the number a colleague could have produced in an afternoon, and the new method must beat it by enough to justify its complexity. The **previous best** is the strongest earlier method on the same task, tuned as carefully as the new method will be.
+A **trivial** baseline uses no features: for classification, the majority class; for regression, the mean of the training targets; for a probability, the training share of the label. It sets the floor and catches the experiment that measures nothing (chapter 6: $97\%$ accuracy at a $3\%$ base rate). A **simple** baseline is a method from the earlier chapters, fitted properly: logistic regression to convergence (chapter 3), nearest neighbours or naive Bayes (chapter 7). It is the number a colleague could have produced with little effort, and the new method must beat it by enough to justify its complexity. The **previous best** is the strongest earlier method on the same task, tuned as carefully as the new method will be.
 
-The ladder for the chapter's world follows. The two SGD rows average the $100$ runs of the seed section; the other methods are deterministic given the training rows.
+The ladder for this world follows. The two SGD rows average the $100$ runs of the seed section; the other methods are deterministic given the training rows.
 
 <!-- worked: experiments.baseline_ladder -->
 Every row is scored on the same 1000 test rows except the last. A classifier with a logit z predicts label 1 when z >= 0 and label 0 otherwise. The interval is the Wald interval of the accuracy a (Volume I, chapter 12): a +- 1.96 sqrt(a (1 - a) / n), with n the number of rows scored (1000, or 20,000 in the last row), shown in points. For the two SGD rows a is the average accuracy over the 100 paired seeds of the seed table and n is 1000; accuracy and log loss are each averaged over the seeds. Log loss is the mean negative log-likelihood in nats of the predicted probability (Volume II, chapter 4), shown where the model outputs one; for the majority class it is the loss of the constant probability equal to the training share of label 1.
@@ -177,15 +177,15 @@ Majority class: predict the more frequent label of the training rows (label 0 if
 The last row is the true logit rule, 'predict 1 when the true logit z of the row is at least 0', on 20,000 fresh rows. Generator: the book's SplitMix64, seed 0x66512cc854f215b9 (7372723303912445369). The rows come from this one generator in the recipe of the dataset: for each row four calls of `rng.normal()`, then one `rng.uniform()`, with the same logit and label rule. The accuracy of this row is itself an estimate: its Wald interval has half-width 0.6 points, so it is a measurement of the ceiling and not the ceiling itself.
 <!-- /worked -->
 
-![A dot and a 95 percent interval for each rung of the ladder: the majority class far to the left near 47 percent, and every other method between about 71 and 75 percent with heavily overlapping intervals, the lab baseline at 71.7 and the candidate at 74.3 near the dashed line of the measured ceiling, 74.5, the last row of the table.](img/baseline-ladder.svg)
+![A dot and a 95 percent interval for each rung of the baseline ladder, with a dashed line at the measured ceiling.](img/baseline-ladder.svg)
 
-Read it from the bottom. The majority class scores $46.7\%$, below a coin flip. That is not a mistake in the code: the training rows contain $47.0\%$ of label 1, so the majority class is label 0, and the test rows contain $53.3\%$ of label 1. A trivial baseline is itself an estimate from a sample, and the one that shortcuts it (take the majority from the rows being scored) would flatter it. Its log loss is $0.699$ nats, a little above $\ln 2 = 0.693$, which is the log loss of knowing nothing, for the same reason.
+Read it from the lowest rung. The majority class scores $46.7\%$, below a coin flip. That is not a mistake in the code: the training rows contain $47.0\%$ of label 1, so the majority class is label 0, and the test rows contain $53.3\%$ of label 1. A trivial baseline is itself an estimate from a sample, and the one that shortcuts it (take the majority from the rows being scored) would flatter it. Its log loss is $0.699$ nats, a little above $\ln 2 = 0.693$, which is the log loss of knowing nothing, for the same reason.
 
 Everything with features lies between $70.9\%$ and $74.3\%$, and every interval is about $5.5$ points wide, so the test set alone cannot rank them. Within that band the rungs matter for the claim. The lab's baseline, SGD on the plain readings, reaches $71.7\%$ on average over seeds. Logistic regression fitted to convergence on the same readings reaches $73.3\%$, $1.6$ points higher, with no tuning at all, only a loop that runs until the gradient is zero instead of for three epochs. The previous best, all products of the centred readings with a penalty chosen on validation, reaches $73.8\%$. The candidate averages $74.3\%$. Against the ceiling, $74.5\%$ in the last row of the table (the accuracy of the true rule on twenty thousand fresh rows from the generator printed under the table), there is almost nothing left to gain.
 
 So the size of the improvement depends entirely on which baseline is named. The candidate's mean gain is $+2.6$ points over the lab's baseline, $+1.0$ over the converged model and $+0.5$ over the previous best. The colleague's $1.2$ points could be a true statement about the converged model and a false one about the lab's baseline and the previous best, and a paper that reports only the lab's baseline is making the largest claim the data allow. A strong baseline is the most important number in a report because every improvement is a difference with it. Beating a weak baseline is easy and says little; the result is only as strong as the strongest thing it was compared with.
 
-Two cautions come with the ladder. First, a baseline must be treated as carefully as the method. The lab baseline is a logistic regression stopped early at an ill-conditioned starting point; the converged one is the same model finished. Reporting the first as "the baseline" compares the candidate with a handicapped version of the best-known method. Second, the ceiling is measured too. The true rule scores $73.7\%$ on the $1000$ test rows and $74.5\%$ on twenty thousand others, and that second number has an interval of its own, $\pm 0.6$ points: it is a measurement of the ceiling and no more precise than that. On this test set a model can score above the true rule by luck, and a gap of a point on $1000$ rows is not evidence of anything. Knowing the ceiling is what tells us whether a claimed improvement has room to be real.
+Two cautions come with the ladder. First, a baseline must be treated as carefully as the method. The lab baseline is a logistic regression stopped after three epochs on ill-conditioned (uncentred) readings; the converged one is the same model finished. Reporting the first as "the baseline" compares the candidate with a handicapped version of the best-known method. Second, the ceiling is measured too. The true rule scores $73.7\%$ on the $1000$ test rows and $74.5\%$ on twenty thousand others, and that second number has an interval of its own, $\pm 0.6$ points: it is a measurement of the ceiling and no more precise than that. On this test set a model can score above the true rule by luck, and a gap of a point on $1000$ rows is not evidence of anything. Knowing the ceiling is what tells us whether a claimed improvement has room to be real.
 
 ## Seeds: how much a run moves when nothing changes
 
@@ -235,12 +235,12 @@ $$
 z = \frac{\bar{D}}{s_D}\,\sqrt{n}.
 $$
 
-At a fixed standardised effect, $z$ grows with the square root of the number of examples $n$, without bound. A difference that is real but tiny becomes significant once $n$ is large enough, and a difference that is large can stay insignificant while $n$ is small. The first value of $n$ at which the expected $z$ reaches $1.96$ is $(1.96/(\bar{D}/s_D))^2$. When every difference $D_i$ is $0$ the standard deviation $s_D$ is $0$ and $z$ has no value; the book defines $z = 0$ then, so that an experiment in which the two models never disagree counts as not significant.
+At a fixed standardised effect, $z$ grows with the square root of the number of examples $n$, without bound. A difference that is real but tiny becomes significant once $n$ is large enough, and a difference that is large can stay insignificant while $n$ is small. The first value of $n$ at which the expected $z$ reaches $1.96$ is $(1.96/(\bar{D}/s_D))^2$. When every difference $D_i$ is $0$ the standard deviation $s_D$ is $0$ and $z$ has no value; $z$ is defined as $0$ then, so that an experiment in which the two models never disagree counts as not significant.
 
 To see it with numbers, take two models and give each question four outcomes: both right, only A right, only B right, both wrong. In the tiny-effect scenario B gains $0.3$ points over A; in the large-effect scenario it gains $6$. For each size $n$ the table draws one sample of $n$ questions and reports the paired statistic of Volume I, chapter 12.
 
 <!-- worked: experiments.effect_vs_n -->
-Generator: the book's SplitMix64, seed 0x6bd1da19bce40a98 (7769230636268915352). One generator, the tiny-effect scenario first and then the large-effect one; within a scenario the sizes in the order of the table, each size a fresh sample. A question is one `rng.uniform()` u: both right if u is below p11, only A right if below p11 + p10, only B right if below p11 + p10 + p01, else both wrong. D = +1 when only B is right, -1 when only A is. D-bar is the mean of D, SE is s_D / sqrt(n) (s_D with divisor n - 1), z = D-bar / SE, p is the two-sided Gaussian area outside |z|, the interval is D-bar +- 1.96 SE, and the last column is D-bar / s_D (the standardised effect). When s_D = 0 (every D is 0) the statistic has no value: the book sets z = 0, p = 1 and D-bar / s_D = 0, so the experiment counts as not significant.
+Generator: the book's SplitMix64, seed 0x6bd1da19bce40a98 (7769230636268915352). One generator, the tiny-effect scenario first and then the large-effect one; within a scenario the sizes in the order of the table, each size a fresh sample. A question is one `rng.uniform()` u: both right if u is below p11, only A right if below p11 + p10, only B right if below p11 + p10 + p01, else both wrong. D = +1 when only B is right, -1 when only A is. D-bar is the mean of D, SE is s_D / sqrt(n) (s_D with divisor n - 1), z = D-bar / SE, p is the two-sided Gaussian area outside |z|, the interval is D-bar +- 1.96 SE, and the last column is D-bar / s_D (the standardised effect). When s_D = 0 (every D is 0) the statistic has no value, so z, p and D-bar / s_D are set to 0, 1 and 0, and the experiment counts as not significant.
 
 Scenario 'tiny effect': p11 = 0.7, p10 = 0.03, p01 = 0.033, p00 = 0.237. True gain of B over A: +0.30 points; true standardised effect 0.0120; the n at which the expected z reaches 1.96 is (1.96 / 0.0120)^2 = 26,887.
 
@@ -317,11 +317,11 @@ Paired differences over the seeds (points of accuracy):
 Interaction contrast per seed, (full - centring only) - (interaction only - plain): mean +3.79 points, standard error 0.36, 95% interval +3.07 to +4.52. Sum of the two removal losses 6.40 points against the loss of removing both 2.61 points.
 <!-- /worked -->
 
-![An interaction plot: mean test accuracy for inputs not centred (left) and centred (right), a blue line without the interaction feature rising from 71.7 to 73.1 and an orange line with it rising from 69.1 to 74.3, crossing between the two columns.](img/ablation-interaction.svg)
+![An interaction plot: mean test accuracy for uncentred and centred inputs, one line without the interaction feature and one with it; the two lines cross.](img/ablation-interaction.svg)
 
 The table contradicts the colleague's story. The interaction feature added to the plain pipeline makes things worse, by $2.58$ points (interval $-3.30$ to $-1.87$). Centring alone helps by $1.40$ points. Together they reach $74.33\%$, which is $2.61$ points above the plain pipeline. The parts **interact**: the effect of one depends on the level of the other. Adding the interaction feature to a centred pipeline gains $+1.21$ points, adding it to an uncentred one loses $2.58$; adding centring to the plain pipeline gains $1.40$ points, adding it to the pipeline with the interaction gains $5.19$. The interaction contrast, the difference between the two effects of the feature, is $+3.79$ points with an interval of $+3.07$ to $+4.52$ over the seeds.
 
-A mechanism, flagged as a likely explanation and not a proof. The product of two uncentred readings is nearly a linear combination of the readings themselves, as the correlations show:
+A likely mechanism, though not a proof, shows in the correlations: the product of two uncentred readings is nearly a linear combination of the readings themselves.
 
 <!-- worked: experiments.product_correlations -->
 Pearson correlation coefficient over the 200 training rows (the training means are those of the dataset table).
@@ -400,7 +400,7 @@ The first row is the honest single comparison with a metric named in advance. It
 
 *Unequal compute.* B trains four times as long. In this world that buys nothing on average ($+0.04$ points, standard error $0.34$, and $22\%$ of the repetitions at $1.2$ or more against $20\%$ in the first row), so this row manufactures no win. It stays on the list because it does elsewhere: where the shorter run is still under-trained, the longer one wins for real, and the win would be credited to the method if the budget were not stated. Under a fixed training budget the comparison is between methods; without it, between budgets. The same holds for model size and for the number of tuning trials, as in the first table.
 
-*Unequal tuning* was the first table. Together these protocols are the large part of what separates results that replicate from results that do not.
+*Unequal tuning* was the first table. Each of these protocols is a common reason why a reported result fails to replicate.
 
 ## Habits that keep a result honest
 
@@ -408,15 +408,15 @@ Every table above comes back to a handful of habits, and they cost nothing compa
 
 One baseline in the protocol should be able to embarrass you. Run the strongest simple method you can think of and the trivial one, with the same care as the new method; if the new method does not beat the simple one by more than the noise, that is the result.
 
-The unit of repetition needs the same thought. Seeds vary the training and do not vary the data, so a claim about a distribution of datasets needs the dataset resampled too, as the tuning table did when each repetition drew its own rows. A single fixed test set gives every seed the same answer about its own idiosyncrasies.
+The unit of repetition needs the same thought. Seeds vary the training and do not vary the data, so a claim about a distribution of datasets needs the dataset resampled too, as the tuning table did when each repetition drew its own rows. A single fixed test set measures every seed against the same idiosyncrasies of that one set.
 
 The record of the run belongs in the result: seed, commit, configuration and command sit in the artifact next to the numbers, so a later reader can tell whether a difference is a change in the method or only in the run. A negative or inconclusive ablation goes in the record too, since omitting it means the next person repeats it.
 
-Each habit answers a mistake that the chapter measured. Reading a single seed as the result: the seed table shows differences of $-0.2$ to $+7.2$ points between the same two pipelines. Comparing with a baseline nobody would choose: the gain shrinks from $2.6$ to $0.5$ points along the ladder. Calling a significant result important: with enough examples a gain of $0.42$ points has $z = 5.2$ (the tiny-effect table at $100{,}000$ questions). Calling an insignificant one unimportant: at $50$ questions an honest test misses a six-point gain in $85\%$ of experiments. Reporting a one-at-a-time ablation as an attribution of shares, when interacting parts do not add. And reporting the better of two runs, where the best of ten seeds against one is worth $+1.61$ points for nothing (the failure table).
+Each habit answers a mistake that the tables above measured. Reading a single seed as the result: the seed table shows differences of $-0.2$ to $+7.2$ points between the same two pipelines. Comparing with a baseline nobody would choose: the gain shrinks from $2.6$ to $0.5$ points along the ladder. Calling a significant result important: with enough examples a gain of $0.42$ points has $z = 5.2$ (the tiny-effect table at $100{,}000$ questions). Calling an insignificant one unimportant: at $50$ questions an honest test misses a six-point gain in $85\%$ of experiments. Reporting a one-at-a-time ablation as an attribution of shares, when interacting parts do not add. And reporting the better of two runs, where the best of ten seeds against one is worth $+1.61$ points for nothing (the failure table).
 
 ## What brain's benchmarks, gates and samples show
 
-The habits above were not invented for the chapter: brain's own code and history contain each of them, and each time because something went wrong without it.
+Each of these habits appears in brain's own code and history, each time because something went wrong without it.
 
 ### The architecture battery
 
@@ -434,7 +434,7 @@ Commit `310824ded` (October 2026) added `MixerAblation` in `crates/bench/src/sur
 
 ### A baseline for a procedure
 
-`crates/promote/src/gate.rs` holds the promotion gate (the check that decides whether a newly trained model replaces the current one), whose exact sign test Volume I, chapter 12 described. It is a controlled comparison by construction: its documentation requires both arms to be decoded greedily on the same held-out tasks in the same order from checkpoints reloaded from disk, and it demands a minimum effect size next to the significance, which is the "state the margin in advance" habit. Its `GatePolicy::CoinFlip` is a baseline in the sense of this chapter, one for the procedure instead of the model: the null arm that runs the same gate and then lets a coin decide what carries forward. Commit `596d2df16` (September 2026) added the document study that runs the real gated loop and the coin-flip arm on the same frozen probes, and the policy's doc comment says what the pair is for: a gated run that is not separated from the coin "beyond seed noise" has a decorative gate. The same commit makes the gate and the training regime fixed inside the study instead of options, because "a knob for either is an invitation to tune after seeing the result", the protocol-before-the-run rule.
+`crates/promote/src/gate.rs` holds the promotion gate (the check that decides whether a newly trained model replaces the current one), whose exact sign test Volume I, chapter 12, described. It is a controlled comparison by construction: its documentation requires both arms to be decoded greedily on the same held-out tasks in the same order from checkpoints reloaded from disk, and it demands a minimum effect size next to the significance, which is the "state the margin in advance" habit. Its `GatePolicy::CoinFlip` is a baseline in the sense of this chapter, one for the procedure instead of the model: the null arm that runs the same gate and then lets a coin decide what carries forward. Commit `596d2df16` (September 2026) added the document study that runs the real gated loop and the coin-flip arm on the same frozen probes, and the policy's doc comment says what the pair is for: a gated run that is not separated from the coin "beyond seed noise" has a decorative gate. The same commit makes the gate and the training regime fixed inside the study instead of options, because a knob for either "would be an invitation to tune after seeing the result", the protocol-before-the-run rule.
 
 ### The ladder before the criterion
 

@@ -240,12 +240,12 @@ def sensor_source():
         f"The source: voltage v uniform on [{V_LO}, {V_HI}], temperature y = {LAW[0]:g} + {LAW[1]:g} v - {-LAW[2]:g} v^2 + "
         f"eps, where the noise is eps = {NOISE_SD} * (a standard Gaussian sample). A row is two draws in this order: "
         f"v = {V_LO} + {V_HI - V_LO:.1f} * rng.uniform(), then eps = {NOISE_SD} * rng.normal(); v and y are kept unrounded. "
-        f"Each data set is drawn from its own generator (seeds below), rows in turn, and rng.normal() follows the rule of the "
+        f"Each dataset is drawn from its own generator (seeds below), rows in turn, and rng.normal() follows the rule of the "
         f"randomness chapter: a call that finds a held value returns it without drawing. Every model of this chapter uses the "
         f"feature x = (v - {X_CENTRE}) / {X_HALF}, which maps the voltage range to [-1, 1], and the columns 1, x, x^2, ..., "
         f"x^d. Wherever a later example scores on 'fresh' rows, these are the {N_FRESH} fresh rows of the second line of the "
         f"table below, in order.\n\n"
-        + _table(["data set", "generator seed", "rows", "use"],
+        + _table(["dataset", "generator seed", "rows", "use"],
                  [("training rows", f"{bookrng.seed_of(TRAIN_NAME):#018x}", N_TRAIN, "the rows every model below is fitted to"),
                   ("fresh rows", f"{bookrng.seed_of(FRESH_NAME):#018x}", N_FRESH, "scoring only, never used to choose anything")],
                  "llrl") + "\n\n")

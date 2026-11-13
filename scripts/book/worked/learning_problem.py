@@ -185,13 +185,13 @@ def data_source():
             f"`rng.normal()` call, the held value is used by every second row, and it stays held across the "
             f"row boundary and across the ten-row blocks of the last line below (it is never discarded or reset); only a "
             f"new generator starts with nothing held.\n\n"
-            + _table(["data set", "generator seed", "rows", "how they are used"],
+            + _table(["dataset", "generator seed", "rows", "how they are used"],
                      [("sensor table", f"{bookrng.seed_of(SENSOR_NAME):#018x}", N_TRAIN,
                        "the ten known rows, sorted by (v, y) for display"),
                       ("fresh rows", f"{bookrng.seed_of(FRESH_NAME):#018x}", N_FRESH,
                        "scoring only, never used to choose parameters"),
-                      ("five resampled data sets", f"{bookrng.seed_of(RESAMPLE_NAME):#018x}", 5 * N_TRAIN,
-                       "one generator; data set 1 takes the first 10 rows, data set 2 the next 10, and so on")],
+                      ("five resampled datasets", f"{bookrng.seed_of(RESAMPLE_NAME):#018x}", 5 * N_TRAIN,
+                       "one generator; dataset 1 takes the first 10 rows, dataset 2 the next 10, and so on")],
                      "lrrl"))
 
 
@@ -264,8 +264,8 @@ def hypothesis_spaces():
             f"text, the lookup table by storing the rows); then scored on {len(fresh)} fresh rows from the same source "
             f"(seed {bookrng.seed_of(FRESH_NAME):#018x}). The lookup table answers with the label of the stored row whose "
             f"voltage is closest to the question; a question exactly between two stored voltages goes to the lower "
-            f"one, and the two stored rows with equal voltage are tried in order of increasing label, so the first "
-            f"(lower) label answers. Averages are shown to 2 decimals.\n\n"
+            f"one; stored rows with equal voltage (none occur here) would be tried in order of increasing label, so "
+            f"the lowest label would answer. Averages are shown to 2 decimals.\n\n"
             + _table(["hypothesis space", "numbers that define a member", "average off by on the 10 known rows",
                       f"average off by on {len(fresh)} fresh rows"], body))
 
@@ -292,7 +292,7 @@ def resampled_lines():
         w, b, e, _ = _best_line(rows)
         body.append((k + 1, f"{rows[0][0]:.2f}", f"{rows[-1][0]:.2f}", f"{w:g}", f"{b:g}", f"{e:.2f}",
                      f"{_mean_abs_error(_line(w, b), fresh):.2f}"))
-    return (f"{_generator_line(RESAMPLE_NAME)} One generator; data set k takes the next 10 rows (two draws per row, as "
+    return (f"{_generator_line(RESAMPLE_NAME)} One generator; dataset k takes the next 10 rows (two draws per row, as "
             f"in the source of the previous section), and the line is the best of the grid of this chapter (same grid, "
             f"same tie rule). Fresh rows: the 2000 above.\n\n"
             + _table(["dataset", "lowest voltage (V)", "highest voltage (V)", "best w", "best b", "off by on its own 10 rows",
@@ -410,7 +410,7 @@ def button_game():
             f"(A on a tie), one `rng.uniform()` each, continuing the same generator.\n\n"
             + _table(["step", "button pressed", "reward"], body)
             + f"\n\nAverage reward: A {avg[0]:.1f}, B {avg[1]:.1f}. The agent now presses {'AB'[pick]} "
-              f"for 10 more steps and collects {steady} reward. Total over 20 steps: "
+              f"for 10 more steps and collects {steady} units of reward. Total over 20 steps: "
               f"{sum(rewards[0]) + sum(rewards[1]) + steady}.")
 
 

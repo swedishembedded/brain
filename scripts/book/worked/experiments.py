@@ -652,7 +652,7 @@ def effect_vs_n():
              "each size a fresh sample. A question is one `rng.uniform()` u: both right if u is below p11, only A right if below p11 + p10, only B right if below p11 + p10 + p01, "
              "else both wrong. D = +1 when only B is right, -1 when only A is. D-bar is the mean of D, SE is s_D / sqrt(n) (s_D with divisor n - 1), z = D-bar / SE, "
              "p is the two-sided Gaussian area outside |z|, the interval is D-bar +- 1.96 SE, and the last column is D-bar / s_D (the standardised effect). "
-             "When s_D = 0 (every D is 0) the statistic has no value: the book sets z = 0, p = 1 and D-bar / s_D = 0, so the experiment counts as not significant."]
+             "When s_D = 0 (every D is 0) the statistic has no value, so z, p and D-bar / s_D are set to 0, 1 and 0, and the experiment counts as not significant."]
     for name, (p11, p10, p01, p00) in EFFECT_SCENARIOS:
         true = p01 - p10
         var = (p01 + p10) - true * true

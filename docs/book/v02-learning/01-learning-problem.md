@@ -41,25 +41,21 @@ $55.5$ degrees and row 5 says that $1.80$ V was $57.5$, so the answer is
 somewhere near $57$, and you can say that without being able to
 write down a rule for how you got there. That small act, producing an answer
 for an input you have never seen from a handful of inputs you have, is what
-this volume is about. This chapter builds the vocabulary for it precisely:
-what the table is, what a model is, what it means for a model to be
-chosen using data, what makes a choice good, and the three broad situations
-(with labels, without them, and with only rewards) in which the same idea
-appears.
+machine learning does. Saying it precisely takes a vocabulary: what the table
+is, what a model is, what it means for a model to be chosen using data, what
+makes a choice good, and the three broad situations (with labels, without
+them, and with only rewards) in which the same idea appears.
 
-Everything later in the book, from fitting a line to training a model with
-billions of numbers in it, is a refinement of the picture drawn here. The
-chapter does not teach any method well; it names the parts and shows each
-one at a size where every number can be checked by hand.
+Everything from fitting a line to training a model with billions of numbers
+in it is a refinement of that vocabulary, and here each part is shown at a
+size where every number can be checked by hand.
 
-You may use from earlier chapters: functions with parameters (Volume I,
-chapter 2), vectors (chapter 3), probability and its distributions
-(chapters 10 and 11), and the idea that a measurement taken from a sample
-estimates a number about the whole source (chapter 12).
-
-Five questions on those ideas, to answer from memory before the vocabulary
-starts. The answers are at the end of the chapter; if one is hard, go back to
-the chapter named.
+The vocabulary is built from four ideas of Volume I: functions with
+parameters (chapter 2), vectors (chapter 3), probability and its
+distributions (chapters 10 and 11), and the fact that a measurement taken
+from a sample estimates a number about the whole source (chapter 12). Five
+questions test whether they are at hand; each names its chapter, and the
+answers are under "Recall questions" at the end.
 
 1. (Chapter 2, "Functions and Their Shapes", families and parameters.) The line $f(x) = w x + b$ has the numbers $w = 3$ and $b = 1$ set. What is $f(2)$, and which of $w$, $b$, $x$ is changed to move from one member of the family of lines to another?
 2. (Chapter 2, "Functions and Their Shapes", polynomials.) How many points with different $x$ values determine exactly one parabola through them, and what happens to the count for a family with $k$ parameters?
@@ -109,10 +105,10 @@ as the notation page has it. For the sensor $N = 10$ and $d = 1$: each
 $\mathbf{x}_n$ is a vector with a single entry, the voltage, which we simply
 write $x_n$ or $v_n$. For the houses $N = 5$ and $d = 3$. Stacking the
 vectors $\mathbf{x}_n$ as rows gives a matrix $\mathbf{X}$ of shape $[N, d]$
-(the layout of chapter 5: the first axis counts examples), and the labels form
-a vector $\mathbf{y}$ of shape $[N]$. This is how every dataset in the rest of
-the book is held in memory, and it is why the first axis of an array in this
-book is so often called the batch dimension (chapter 5): it is the axis of examples.
+(the layout of Volume I, chapter 5: the first axis counts examples), and the
+labels form a vector $\mathbf{y}$ of shape $[N]$. Every dataset from here on
+is held in memory this way, and it is why the first axis of an array is so
+often called the batch dimension: it is the axis of examples.
 
 Two things about labels are worth saying early. First, a label does not have
 to be a number measured on a scale. It can be one choice out of a short list
@@ -126,12 +122,12 @@ both. A line of English text can be cut the same way: the words so far are the
 features and the next word is the label, a source of an enormous number of
 labelled examples that needs no one to label anything.
 
-What counts as a feature is a decision, and a good deal of this book's history
+What counts as a feature is a decision, and much of the history of the field
 is about moving that decision from people to the model. Here it is a measured
 voltage. For an image it could be a few hand-chosen numbers (average
 brightness, the length of the longest edge) or it could be every pixel and
-nothing else, leaving the model to find what matters; the second choice is the
-one the rest of the book makes.
+nothing else, leaving the model to find what matters; the models of the later
+volumes take the second choice.
 
 ## A model is a function with parameters
 
@@ -141,9 +137,9 @@ seen, and returns a good guess for its label. The function is the **model**,
 and the guess is a **prediction**, written $\hat{y}$ (the hat means "an
 estimate of").
 
-Chapter 2 showed how to describe whole collections of functions with a few
-numbers: the line $f(x) = wx + b$ is a family, and choosing $w$ and $b$ picks
-one member. The model of this book is always such a thing. It is a function
+Volume I, chapter 2, showed how to describe whole collections of functions
+with a few numbers: the line $f(x) = wx + b$ is a family, and choosing $w$
+and $b$ picks one member. A model is always such a thing. It is a function
 whose rule has a shape fixed in advance and whose behaviour is set by a list of
 numbers, the **parameters**, written together as one vector $\theta$. We write
 the model as $f_\theta$:
@@ -212,12 +208,12 @@ show how.
   $N(d + 1)$ parameters.) Its members are staircases that jump from one stored
   label to the next.
 
-By the counting of chapter 2 (a family with $k$ parameters can pass through $k$
-chosen points), the lookup table can reproduce any ten points exactly. A line
-cannot even reproduce three that do not lie on one. Bigger spaces can say more,
-and that sounds like a pure advantage; the next sections show that it is not,
-and that choosing the size of $\mathcal{H}$ is one of the main design decisions
-in the field.
+By the counting of Volume I, chapter 2 (a family with $k$ parameters can pass
+through $k$ chosen points), the lookup table can reproduce any ten points
+exactly. A line cannot even reproduce three that do not lie on one. Bigger
+spaces can say more, and that sounds like a pure advantage. It is not, and
+choosing the size of $\mathcal{H}$ is one of the main design decisions in the
+field.
 
 ## Learning: choosing parameters with data
 
@@ -332,7 +328,7 @@ The search found a better line than any of the three attempts, and it paid for
 it with a large amount of arithmetic: every one of the grid's settings costs a
 pass over the data. For a grid of $m$ values per parameter and $k$ parameters
 the count is $m^k$ settings, which is already hopeless at ten parameters and
-unthinkable at seven billion. Every learning method in this book can be read as
+unthinkable at seven billion. Every learning method that follows can be read as
 a way around that count: a rule that, from the current parameters and the
 data, says which way to change them (the slope of $E$ with respect to every
 parameter at once, the gradient of Volume I, chapter 8, which the next chapter
@@ -356,23 +352,23 @@ Here the source of the data is a program, so we can draw two thousand more rows
 from the same source, never looked at while choosing parameters, and score the
 three on those as well.
 
-The program is the book playing the part of nature, and for the sake of
-reproduction it is written out here. The learner never uses it to choose
-parameters; it only supplies the rows. It also produced the ten rows of the
-first table and the data sets of the section after this one.
+The program plays the part of nature, and it is written out here so that every
+number can be reproduced. The learner never uses it to choose parameters; it
+only supplies the rows. It also produced the ten rows of the first table and
+the datasets of the section after this one.
 
 <!-- worked: learning_problem.data_source -->
 The source (the learner never sees these lines): voltage v uniform on [0.4, 2.8], temperature y = -6 + 50 v - 8 v^2 + 1.2 z with z a standard Gaussian sample, evaluated left to right in double precision. A row is made by two draws in this order: v = 0.4 + 2.4 * rng.uniform(), then z = rng.normal(); v is then rounded to 2 decimals and y (computed from the unrounded v) to 1, with `round` of the pseudocode page (ties away from zero). `rng.normal()` is the Box-Muller sample defined on the pseudocode page: it draws two uniforms for every second call and holds the second result for the call after. Because a row makes one `rng.uniform()` call and one `rng.normal()` call, the held value is used by every second row, and it stays held across the row boundary and across the ten-row blocks of the last line below (it is never discarded or reset); only a new generator starts with nothing held.
 
-| data set | generator seed | rows | how they are used |
+| dataset | generator seed | rows | how they are used |
 |---|---:|---:|---|
 | sensor table | 0xa95942cd28758354 | 10 | the ten known rows, sorted by (v, y) for display |
 | fresh rows | 0x0fe67df3a852f39e | 2000 | scoring only, never used to choose parameters |
-| five resampled data sets | 0x799f7c35126cfcea | 50 | one generator; data set 1 takes the first 10 rows, data set 2 the next 10, and so on |
+| five resampled datasets | 0x799f7c35126cfcea | 50 | one generator; dataset 1 takes the first 10 rows, dataset 2 the next 10, and so on |
 <!-- /worked -->
 
 <!-- worked: learning_problem.hypothesis_spaces -->
-Best member of each space found on the 10 known rows (the line and parabola by the grids of the text, the lookup table by storing the rows); then scored on 2000 fresh rows from the same source (seed 0x0fe67df3a852f39e). The lookup table answers with the label of the stored row whose voltage is closest to the question; a question exactly between two stored voltages goes to the lower one, and the two stored rows with equal voltage are tried in order of increasing label, so the first (lower) label answers. Averages are shown to 2 decimals.
+Best member of each space found on the 10 known rows (the line and parabola by the grids of the text, the lookup table by storing the rows); then scored on 2000 fresh rows from the same source (seed 0x0fe67df3a852f39e). The lookup table answers with the label of the stored row whose voltage is closest to the question; a question exactly between two stored voltages goes to the lower one; stored rows with equal voltage (none occur here) would be tried in order of increasing label, so the lowest label would answer. Averages are shown to 2 decimals.
 
 | hypothesis space | numbers that define a member | average off by on the 10 known rows | average off by on 2000 fresh rows |
 |---|---:|---:|---:|
@@ -407,17 +403,16 @@ way. The lookup table is large enough to hold the smooth part and the noise, and
 it dutifully stores the noise of each of its ten rows, so each stored answer is
 the real temperature plus an error that will not be there for the next sensor.
 The parabola is big enough for the smooth part and too small to store much of the
-noise, and that is the sweet spot of this dataset.
+noise, and that is the right size for this dataset.
 
 ![The best line, the best parabola and the lookup table, all chosen using the same ten known rows (large dots), drawn over eighty of the fresh rows (small grey dots). The line misses the curvature, and the lookup table's steps follow the individual known rows away from the cloud of fresh ones.](img/hypothesis-spaces.svg)
 
 A hypothesis space that is too small cannot represent the pattern. One that is
 too large represents the pattern and also the accidents of the particular
-rows. The next chapters turn this plain observation into a theory. The
-chapter "Generalization, Overfitting and Honest Evaluation" gives the second
-failure a name, explains why the score on the rows used for choosing
-parameters is always too optimistic, and shows how to keep a set of rows apart
-for an honest score. What this chapter needs is only the consequence: the goal
+rows. Chapter 5, "Generalization, Overfitting and Honest Evaluation", gives
+the second failure a name, explains why the score on the rows used for
+choosing parameters is always too optimistic, and shows how to keep a set of
+rows apart for an honest score. The consequence is needed at once: the goal
 cannot be a small error on the known rows. It has to be a small error on rows
 the model has not seen.
 
@@ -427,7 +422,7 @@ What does "rows the model has not seen" mean? The rows of the sensor dataset
 are not the only rows that could have been measured. The workshop could have
 chosen other temperatures, other sensors, other days, and got other ten rows.
 We describe this by saying that each example is a draw from a **probability
-distribution**, in the sense of chapters 10 and 11, over pairs of a feature
+distribution**, in the sense of Volume I, chapters 10 and 11, over pairs of a feature
 and a label: $(\mathbf{x}, y) \sim p$. The distribution $p$ is whatever
 produces the world's examples (here: sensors from this batch, a temperature
 chosen by the experimenter, a noisy thermometer), and the dataset is $N$ draws
@@ -437,7 +432,7 @@ $$
 (\mathbf{x}_n, y_n) \sim p, \qquad n = 1, \dots, N, \text{ drawn independently.}
 $$
 
-We never see $p$. We see only the draws. In this book's tables $p$ is a short
+We never see $p$. We see only the draws. In the tables here $p$ is a short
 program, and the program is not shown to the learner: to the code that picks
 parameters, it is as unknown as the physics of the sensor is to the workshop.
 
@@ -448,12 +443,12 @@ $$
 \mathbb{E}_{(\mathbf{x}, y) \sim p}\bigl[\, \lvert f_\theta(\mathbf{x}) - y \rvert \,\bigr].
 $$
 
-This is an expectation in the sense of chapter 10, and it cannot be computed
+This is an expectation in the sense of Volume I, chapter 10, and it cannot be computed
 without $p$. What we computed instead, $E(\theta)$, is the same expectation
 taken under the empirical distribution of the dataset, which gives each of the
-$N$ examples probability $1/N$ (chapter 10 called this "a dataset is a
-distribution"). That is an estimate of the quantity we want, and chapter 12
-described how such an estimate behaves: it is itself random, it has a sampling
+$N$ examples probability $1/N$ (that chapter called this "a dataset is a
+distribution"). That is an estimate of the quantity we want, and Volume I,
+chapter 12, described how such an estimate behaves: it is itself random, it has a sampling
 distribution, and it improves as the sample grows. The two thousand fresh rows
 of the previous section are a second, much larger sample, used as a better
 estimate of the same expectation.
@@ -464,7 +459,7 @@ five different datasets of ten rows from the same source and pick the best line
 for each.
 
 <!-- worked: learning_problem.resampled_lines -->
-Generator: the book's SplitMix64, seed 0x799f7c35126cfcea (8763859967270517994). One generator; data set k takes the next 10 rows (two draws per row, as in the source of the previous section), and the line is the best of the grid of this chapter (same grid, same tie rule). Fresh rows: the 2000 above.
+Generator: the book's SplitMix64, seed 0x799f7c35126cfcea (8763859967270517994). One generator; dataset k takes the next 10 rows (two draws per row, as in the source of the previous section), and the line is the best of the grid of this chapter (same grid, same tie rule). Fresh rows: the 2000 above.
 
 | dataset | lowest voltage (V) | highest voltage (V) | best w | best b | off by on its own 10 rows | off by on 2000 fresh rows |
 |---|---:|---:|---:|---:|---:|---:|
@@ -481,8 +476,8 @@ good on new rows: dataset 2 chose a line that is worse on fresh data ($4.65$
 degrees) than any of the others ($3.00$ to $3.97$), although its voltages
 cover the range as well as the others do. Nothing was done wrong: the line
 is the best one for its ten rows, and ten noisy rows are a small sample. A model's parameters carry the uncertainty of the data they came from.
-More data narrows this spread, in the way chapter 12's standard error shrinks as
-the sample grows, and it is the main reason the large models of the later
+More data narrows this spread, in the way the standard error of Volume I,
+chapter 12, shrinks as the sample grows, and it is the main reason the large models of the later
 volumes want datasets of billions of examples.
 
 There is one more thing the sentence "new draws from the same distribution"
@@ -491,8 +486,8 @@ projects go wrong: the examples the model will meet in use must come from the
 same $p$ as the ones it learned from. If the sensors in the machines run hotter
 than the ones in the experiment, or the model will be used in a different way
 than the way its data was collected, the guarantee in this section does not
-apply. The chapter on generalization names this problem (distribution shift),
-and the last section below shows a real instance from brain.
+apply. This problem is called distribution shift; chapter 5 treats it, and
+brain met a real instance of it, told in the last section below.
 
 ## Three ways to learn
 
@@ -555,7 +550,7 @@ Generator: the book's SplitMix64, seed 0xe99380969c0c4dcd (16830937616765177293)
 <!-- /worked -->
 
 A procedure that finds two groups can be
-written with nothing beyond the vectors of chapter 3 (the distance between two
+written with nothing beyond the vectors of Volume I, chapter 3 (the distance between two
 of them) and averages. Pick two starting centres. Then repeat two steps:
 assign every row to the nearest centre, and move each centre to the mean of the
 rows assigned to it. Stop when the assignment no longer changes. The starting
@@ -644,11 +639,10 @@ groups it found, with the rows that fell into each:
 
 The parameters of this model are the positions of the two centres, four numbers
 in all, and "learning" chose them from the data without any label. The same
-two-step procedure is a well-known method with a name of its own, which a later
-chapter (on classical methods) gives and examines; what this chapter needs is
-the shape. Unsupervised learning is also how a model can learn from far more
-data than anyone could label, and many of the large models later in the book
-use it as a first stage.
+two-step procedure is a well-known method with a name of its own, which
+chapter 7 gives and examines. Unsupervised learning is also how a model can
+learn from far more data than anyone could label, and many of the large models
+of the later volumes use it as a first stage.
 
 ### Reinforcement learning
 
@@ -657,8 +651,8 @@ that decides) acts in an **environment** (everything else): it picks an action,
 the environment responds, and the agent receives a number, the **reward**, that
 says how well that went. Nobody tells the agent what it should have done. It
 learns which actions lead to good rewards by trying them. This is
-**reinforcement learning**, and this chapter gives only an overview of it (the
-concept is introduced here as the overview; the full treatment is Volume XII).
+**reinforcement learning**. An overview of it is enough here; Volume XII gives
+the full treatment.
 
 Two things set it apart from the other settings. The data depends on what the
 agent does: if the agent never tries an action it never learns what the action
@@ -687,12 +681,12 @@ Generator: the book's SplitMix64, seed 0x82293971ebaab7f0 (9379090860423690224).
 | 9 | A | 0 |
 | 10 | B | 1 |
 
-Average reward: A 0.2, B 1.0. The agent now presses B for 10 more steps and collects 8 reward. Total over 20 steps: 14.
+Average reward: A 0.2, B 1.0. The agent now presses B for 10 more steps and collects 8 units of reward. Total over 20 steps: 14.
 <!-- /worked -->
 
 The agent measured B as better ($1.0$ against $0.2$, the true values being
 $0.7$ and $0.3$), chose it, and collected most of the possible reward in the
-second half. Ten presses is a small sample, in the sense of chapter 12: with a
+second half. Ten presses is a small sample, in the sense of Volume I, chapter 12: with a
 slightly different run of luck it might have preferred A. How often that
 happens depends on how long the agent explores and on how far apart the buttons
 are. The next table repeats the game many times with the same rule, exploring
@@ -728,11 +722,10 @@ be viewed in more than one. A language model trained to predict the next word
 is doing supervised learning on labels the text supplied; a model that is later
 tuned from human preferences is learning from rewards. A project usually begins
 with a question ("what will the temperature be?", "which machines are alike?",
-"what should the robot do?") and the question picks the setting. The first two
-settings are the subject of Volume II. The rest of this volume is supervised
-learning, because it is the setting in which "how good is this model" has the
-most direct answer, and because the tools it develops carry over to the other
-two.
+"what should the robot do?") and the question picks the setting. Most of this
+volume is supervised learning (chapter 7 returns to unsupervised methods),
+because it is the setting in which "how good is this model" has the most
+direct answer, and because the tools it develops carry over to the other two.
 
 ## Questions to settle before trusting a dataset
 
@@ -746,7 +739,7 @@ over. Before counting $N$, decide what one example is.
 **Keep features in comparable units.** A feature measured in thousands (price in
 kronor) next to one measured in fractions (a rate) will make some learning
 procedures struggle for reasons that have nothing to do with the problem.
-Chapter 12's z-score (subtract the mean, divide by the standard deviation) is
+The z-score of Volume I, chapter 12 (subtract the mean, divide by the standard deviation), is
 the standard remedy, and the next chapter shows why it matters.
 
 **State the question the numbers answer.** The average error on a dataset is
@@ -755,12 +748,11 @@ The two thousand fresh rows were drawn from the same source, so they answer
 "how well will it do on sensors like these?". They say nothing about sensors
 that are hotter, older or built differently.
 
-Three mistakes follow from skipping them, the first of which is the lesson of
-the whole chapter.
+Skipping them leads to three common mistakes, the first the most costly.
 
 - Reporting the error on the rows used to choose the parameters as if it were the
-  error on new data. The lookup table's $0.00$ against its $3.14$ is the whole
-  lesson.
+  error on new data. The lookup table's $0.00$ against its $3.14$ degrees shows
+  how far apart the two can be.
 - Taking a bigger hypothesis space to be better by definition. It contains more
   functions, including the one that is right, and a great many that are wrong
   in ways the known rows cannot reveal.
@@ -769,9 +761,8 @@ the whole chapter.
 
 ## Generated data, trained parameters and a mismatched distribution in brain
 
-brain is a collection of models, but each one starts from the same three things
-this chapter named: examples, a function with parameters, and a rule for picking
-the parameters.
+Each of the many models in brain starts from the same three things: examples,
+a function with parameters, and a rule for picking the parameters.
 
 **Datasets are generated, labels and all.** `crates/data` is brain's data layer,
 and its generators play for the models the part that a program played for the
@@ -821,10 +812,11 @@ so a split that scattered them would put near-copies of the training rows into
 the held-out set and make the score look better than it is. A larger version of
 the lesson is knowledge #145. A sample (`samples/decision/rubiks`) generated its
 labelled examples by walking scrambled cubes home, a method that produces many
-examples one move from solved and few far away. A policy fitted to them scored 87%
-on a held-out set drawn the same way, and picked a shortest move on 37% of the
-turns it took when driving itself, solving 9 cubes in 50 (the figures are the
-entry's and the sample's own comment's, from one run). The held-out number was a
+examples one move from solved and few far away. A policy fitted to them picked
+a correct move on 87% of the decisions in a held-out set drawn the same way,
+but picked a shortest move on only 37% of the turns it took when driving
+itself, and solved 9 cubes in 50 (figures from one run, recorded in the
+knowledge entry and in the sample's source). The held-out number was a
 correct average over the distribution it was drawn from; it was not a number
 about the task. The fix, in commit `3cbc3bbfb` (23 September 2026), was to stop
 letting the sampling method decide the distribution: every distance from solved
@@ -897,7 +889,7 @@ exactly, and replaces the grid by following the gradient.
 
 5. **[Calculate]** Do two rounds of the grouping loop by hand on the four one-feature rows $1, 2, 8, 9$ with starting centres $1$ and $2$. Give the assignment, the new centres, and say whether a third round changes anything.
 
-6. **[Implement]** Implement the book's generator (chapter "Randomness on a Deterministic Machine"), the source of `learning_problem.data_source` and the grid search of the pseudocode. Seed the generator with the seed printed for the sensor table, draw the ten rows in the stated order and check that sorted by voltage they are the table of `learning_problem.sensor_table`; then reproduce `learning_problem.grid_search` (the grid, the best setting and its average error $2.77$, to the digits printed) and the three hand attempts of `learning_problem.hand_tuning`.
+6. **[Implement]** Implement the book's generator (Volume I, chapter 17, "Randomness on a Deterministic Machine"), the source of `learning_problem.data_source` and the grid search of the pseudocode. Seed the generator with the seed printed for the sensor table, draw the ten rows in the stated order and check that sorted by voltage they are the table of `learning_problem.sensor_table`; then reproduce `learning_problem.grid_search` (the grid, the best setting and its average error $2.77$, to the digits printed) and the three hand attempts of `learning_problem.hand_tuning`.
 
 7. **[Implement]** Implement `group_rows` of this chapter and reproduce `learning_problem.grouping_loop` and `learning_problem.grouping_points`: take the twelve rows of `learning_problem.readings_table` as input (or regenerate them from the seed and recipe printed there), start from the centres $(0, 0)$ and $(1, 0.5)$ with at most 10 rounds, and your centres (to the 5 decimals printed) and group sizes round by round must match.
 
@@ -905,7 +897,7 @@ exactly, and replaces the grid by following the gradient.
 
 9. **[Investigate]** Reproduce the three rows of `learning_problem.hypothesis_spaces` with your implementation of exercise 6 (the fresh rows come from the seed printed in `learning_problem.data_source`), including the parabola grid of `learning_problem.parabola_grid`. Then add a fourth hypothesis space: cubic polynomials. Does the error on the fresh rows fall below the parabola's? Repeat with a dataset of $N = 100$ rows instead of $10$ and say what changed.
 
-10. **[Investigate]** Reproduce `learning_problem.resampled_lines` (seed and draw order in its header), then redo it with $N = 100$ rows per dataset instead of $10$. Report the range of the best $w$ across five datasets and compare with the range at $N = 10$. How does the spread seem to scale with $N$, and what does chapter 12 predict?
+10. **[Investigate]** Reproduce `learning_problem.resampled_lines` (seed and draw order in its header), then redo it with $N = 100$ rows per dataset instead of $10$. Report the range of the best $w$ across five datasets and compare with the range at $N = 10$. How does the spread seem to scale with $N$, and what does Volume I, chapter 12, predict?
 
 11. **[Investigate]** Make the fresh rows come from a slightly different distribution (for example, voltages from $[2.0, 3.2]$ V, partly outside the range of the known rows) and score the line, the parabola and the lookup table on them. Which of the three degrades most, and why?
 
