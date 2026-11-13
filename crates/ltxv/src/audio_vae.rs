@@ -250,7 +250,7 @@ fn pad2d(gpu: &Gpu, c: u32, h: u32, w: u32, l: u32, r: u32, t: u32, b: u32, x: &
     let (hp, wp) = (h + t + b, w + l + r);
     let total = c * hp * wp;
     let y = gpu.storage(total as u64);
-    gpu.submit(&[], &[gpu.step(K_PAD2D, &[x, &y], &[total, h, w, l, r, t, b], total)]);
+    gpu.submit(&[], &[gpu.step(K_PAD2D, &[x, &y], &[total, h, w, l, r, t, b, 0, 0.0f32.to_bits()], total)]);
     y
 }
 
