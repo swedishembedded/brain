@@ -565,7 +565,7 @@ fn resize_nearest_selects_the_floor_tap_and_dx_is_adjoint() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     // 2x up of a 2x2 must replicate each pixel into a 2x2 block.
     let x = vec![1.0f32, 2.0, 3.0, 4.0];
-    let y = run2(&gpu, 19, &x, 16, &[1, 1, 2, 2, 4, 4]);
+    let y = run2(&gpu, 19, &x, 16, &[1, 1, 2, 2, 4, 4, 0]);
     assert_eq!(
         y,
         vec![1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 3.0, 3.0, 4.0, 4.0]
@@ -578,7 +578,7 @@ fn resize_nearest_selects_the_floor_tap_and_dx_is_adjoint() {
         let xx = Lcg::random().vec(xn);
         let yy = Lcg::random().vec(yn);
         let params = [n, c, h, w, ho, wo];
-        let ax = run2(&gpu, 19, &xx, yn, &params);
+        let ax = run2(&gpu, 19, &xx, yn, &[n, c, h, w, ho, wo, 0]);
         let aty = run2(&gpu, 20, &yy, xn, &params);
         assert_adjoint(&format!("resize_nearest {h}x{w}->{ho}x{wo}"), &ax, &yy, &xx, &aty);
     }
@@ -712,7 +712,7 @@ fn resize_nearest_agrees_with_the_fast_pathed_upsample2() {
         let x = Lcg::random().vec((n * c * h * w) as usize);
         let on = (n * c * h * 2 * w * 2) as usize;
         let up = run2(&gpu, 28, &x, on, &[n, c, h, w]);
-        let rn = run2(&gpu, 19, &x, on, &[n, c, h, w, h * 2, w * 2]);
+        let rn = run2(&gpu, 19, &x, on, &[n, c, h, w, h * 2, w * 2, 0]);
         assert_eq!(up, rn, "upsample2 and resize_nearest(2x) disagree at {n}x{c}x{h}x{w}");
     }
 }

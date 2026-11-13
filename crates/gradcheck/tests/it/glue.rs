@@ -161,7 +161,8 @@ fn k_pinball_grad_w(gpu: &Gpu, pred: &[f32], tgt: &[f32], levels: &[f32], w: &[f
 }
 
 /// `pad2d`: x is [NC, h, w] (unpadded); output [NC, h+t+b, w+l+r].
-/// Params [total_out, h, w, l, r, t, b]; total_out threads.
+/// Params [total_out, h, w, l, r, t, b, mode, value]; mode 0 = constant fill,
+/// here value 0.0, the adjoint pairing with crop2d; total_out threads.
 fn k_pad2d(gpu: &Gpu, x: &[f32], h: usize, w: usize, o: (usize, usize, usize, usize)) -> Vec<f32> {
     let (l, r, t, b) = o;
     assert_eq!(x.len() % (h * w), 0);
@@ -171,7 +172,7 @@ fn k_pad2d(gpu: &Gpu, x: &[f32], h: usize, w: usize, o: (usize, usize, usize, us
         gpu,
         K_PAD2D,
         &[x],
-        &[total as u32, h as u32, w as u32, l as u32, r as u32, t as u32, b as u32],
+        &[total as u32, h as u32, w as u32, l as u32, r as u32, t as u32, b as u32, 0, 0],
         total,
         total as u32,
     )
