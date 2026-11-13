@@ -462,6 +462,14 @@ pub const EDM_WRAP: &str = include_str!("../wgsl/edm_wrap.wgsl");
 pub const ELU: &str = include_str!("../wgsl/elu.wgsl");
 /// `wgsl/elu_bwd.wgsl`
 pub const ELU_BWD: &str = include_str!("../wgsl/elu_bwd.wgsl");
+/// `wgsl/entropy_cols.wgsl`
+pub const ENTROPY_COLS: &str = include_str!("../wgsl/entropy_cols.wgsl");
+/// `wgsl/entropy_dcb.wgsl`
+pub const ENTROPY_DCB: &str = include_str!("../wgsl/entropy_dcb.wgsl");
+/// `wgsl/entropy_dz.wgsl`
+pub const ENTROPY_DZ: &str = include_str!("../wgsl/entropy_dz.wgsl");
+/// `wgsl/entropy_logp.wgsl`
+pub const ENTROPY_LOGP: &str = include_str!("../wgsl/entropy_logp.wgsl");
 /// `wgsl/emb_bwd.wgsl`
 pub const EMB_BWD: &str = include_str!("../wgsl/emb_bwd.wgsl");
 /// `wgsl/emb_bwd_part.wgsl`
@@ -1921,6 +1929,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("edm_wrap", EDM_WRAP),
     ("elu", ELU),
     ("elu_bwd", ELU_BWD),
+    ("entropy_cols", ENTROPY_COLS),
+    ("entropy_dcb", ENTROPY_DCB),
+    ("entropy_dz", ENTROPY_DZ),
+    ("entropy_logp", ENTROPY_LOGP),
     ("emb_bwd", EMB_BWD),
     ("emb_bwd_part", EMB_BWD_PART),
     ("emb_bwd_uniq", EMB_BWD_UNIQ),

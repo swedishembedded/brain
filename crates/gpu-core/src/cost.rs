@@ -1536,6 +1536,35 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // and a write; `masked_l1_grad` is sign(diff)*scale over three.
         "mse_grad" => f(3 * p(0)?, 12 * p(0)?),
         "masked_l1_grad" => f(3 * n0(), 16 * n0()),
+        // LlamaGen's codebook entropy loss (vqgan `entropy.rs`); transcendentals count 1. Params [R tokens, K codes, D]
+        // (the f32 temperature and scale follow and are not read here). Bytes are the ideal traffic: the rows and
+        // codebook read once, `logp` [R, K] written by the distance pass, then read and rewritten by the normalise
+        // pass, read by the entropy pass (five accesses).
+        // Per (token, code): D x (sub, mul, add) distance + negate/divide (2) + max (1) + exp-sum (3: sub, exp, add)
+        // + normalise and entropy (4: sub, exp, mul, sub); per token the log of the sum and one add.
+        "entropy_logp" => {
+            let (r, k, d) = (p(0)?, p(1)?, p(2)?);
+            f(r * (k * (3 * d + 10) + 2), 4 * (r * d + k * d + 5 * r * k + r))
+        }
+        // Per (token, code): exp + add; per code: the mean (1), `log(avg + eps)` (2), `-avg * l` (2), `avg / (avg + eps)`
+        // plus the sum (3).
+        "entropy_cols" => {
+            let (r, k) = (p(0)?, p(1)?);
+            f(k * (2 * r + 8), 4 * (r * k + 2 * k))
+        }
+        // Per (token, dim): the token's mean `m` (exp, mul, add per code) and the gradient sum per code (exp, divide,
+        // three subtractions, mul for g; sub, mul, add for the accumulate: 10), then scale, 2x, divide (3) and the `m`
+        // store.
+        "entropy_dz" => {
+            let (r, k, d) = (p(0)?, p(1)?, p(2)?);
+            f(r * d * (13 * k + 3), 4 * (2 * r * d + k * d + r * k + k + 2 * r))
+        }
+        // Per (code, dim): the same per-token gradient term (exp, divide, three subtractions, mul; sub, mul, add: 10)
+        // summed over the tokens, then scale, 2x, divide (3).
+        "entropy_dcb" => {
+            let (r, k, d) = (p(0)?, p(1)?, p(2)?);
+            f(k * d * (10 * r + 3), 4 * (r * d + 2 * k * d + r * k + k + 2 * r))
+        }
         // ZipDepth's objective (`zipdepth::loss`), params [total = N*hw, hw, ...]; `n_img` images of `hw` pixels.
         // The five moment terms of a scale-and-shift fit: m*p, (m*p)*p, (m*p)*t, m*t over three reads and five writes.
         "ssi_moments" => f(4 * p(0)?, 32 * p(0)?),
@@ -2234,6 +2263,7 @@ mod tests {
             "silu", "silu_bwd", "scale_chan", "dw_splitk_reduce", "gn_dsum_part", "gn_dsum2",
             "gn_dgb_part", "gn_dgb2", "mse_value", "masked_l1", "upsample2_dx", "concat2",
             "concat_split", "matmul_i8", "roof_fma", "roof_dp4a", "mse_grad", "masked_l1_grad",
+            "entropy_logp", "entropy_cols", "entropy_dz", "entropy_dcb",
             "matmul_reg3_splitk",
             // the served paged tape
             "paged_decode_scores_batched", "paged_decode_scores_wg", "paged_decode_apply_batched",
@@ -2253,6 +2283,13 @@ mod tests {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }
         assert_eq!(cost("conv1d_dw", &[2, 6, 10, 4, 3, 1, 1, 1, 2, 10], 36).flops, 1440);
+        // The entropy loss's four kernels at R = 4 tokens, K = 8 codes, D = 3: each formula written out.
+        assert_eq!(cost("entropy_logp", &[4, 8, 3], 4).flops, 4 * (8 * 19 + 2));
+        assert_eq!(cost("entropy_logp", &[4, 8, 3], 4).bytes, 4 * (12 + 24 + 160 + 4));
+        assert_eq!(cost("entropy_cols", &[4, 8], 8).flops, 8 * 16);
+        assert_eq!(cost("entropy_cols", &[4, 8], 8).bytes, 4 * (32 + 16));
+        assert_eq!(cost("entropy_dz", &[4, 8, 3], 12).flops, 12 * 107);
+        assert_eq!(cost("entropy_dcb", &[4, 8, 3], 24).flops, 24 * 43);
     }
 
     /// Hand-computed expectations for the ltxv (Phase 8) formulas: 3D conv,
