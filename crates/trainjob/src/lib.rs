@@ -21,12 +21,14 @@
 //! * [`request`]: the action's contract and the typed, bounded request.
 //! * [`store`]: the content-addressed artifact store datasets and adapters
 //!   move through, by blake3 digest; a caller never names a path.
+//! * [`dryrun`]: `check_dataset`, a dataset checked against a base without training.
 //! * [`consolidate`]: the jobs that produce a checkpoint, `full_train` and `merge`.
 //! * [`job`]: one run, from staged inputs to the adapter and its report.
 //! * [`resident`]: the run as a workload the residency executor places,
 //!   evicting idle serving instances for it and refusing when serving is busy.
 
 pub mod consolidate;
+pub mod dryrun;
 pub mod job;
 pub mod request;
 pub mod resident;

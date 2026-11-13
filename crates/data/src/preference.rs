@@ -96,11 +96,15 @@ impl PreferenceSample {
             if line.is_empty() {
                 continue;
             }
-            let invalid = |e: String| io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: {e}", path.display(), lineno + 1));
-            let record: WirePreference = serde_json::from_str(line).map_err(|e| invalid(e.to_string()))?;
-            out.push(pair_from_wire(record).map_err(invalid)?);
+            out.push(Self::from_json_line(line).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: {e}", path.display(), lineno + 1)))?);
         }
         Ok(out)
+    }
+
+    /// One pair of a dataset file, as [`Self::from_jsonl`] reads each line of it.
+    pub fn from_json_line(line: &str) -> Result<PreferenceSample, String> {
+        let record: WirePreference = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        pair_from_wire(record)
     }
 }
 

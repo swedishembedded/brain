@@ -101,7 +101,7 @@ fn checkpoint_jobs_refuse_what_is_not_a_digest_a_blob_or_a_plain_name_before_any
     assert!(merge(json!({"base": BASE, "adapter_digest": absent.hex()}), &[]).contains("not in the artifact store"));
     assert!(merge(json!({"base": "nobody/nothing", "adapter_digest": train.hex()}), &[]).contains("not in the model store"));
     for path in ["path", "out", "save", "checkpoint"] {
-        let e = merge(json!({"base": BASE, "adapter_digest": train.hex(), path: "/tmp/x"}), &[]);
+        let e = merge(json!({"base": BASE, "adapter_digest": train.hex(), path: "elsewhere"}), &[]);
         assert!(e.contains("unknown param"), "{path}: {e}");
     }
     let held = json!({"train": {"digest": train.hex()}, "held_out": {"digest": train.hex()}}).to_string();
@@ -122,4 +122,43 @@ fn a_server_without_an_artifact_store_must_install_what_it_trains() {
     assert!(e.contains("install_as"), "{e}");
     let e = run_action(&rig, MERGE_ACTION, &merge_spec(), json!({"base": BASE, "adapter_digest": trainjob::store::digest_of(b"x").hex()}), &[], &frames).unwrap_err();
     assert!(e.contains("no artifact store"), "{e}");
+}
+
+/// A dry run reports the whole file without training: counts, token lengths in the base's own tokenizer, supervised
+/// tokens, the examples a row of `max_block` would refuse, and every bad line (not only the first), with an example that supervises nothing counted.
+#[test]
+fn a_dataset_dry_run_reports_the_file_and_names_every_bad_line_without_claiming_a_card() {
+    use trainjob::dryrun::{spec, ACTION};
+    let rig = rig_qwen3("dryrun", 16 << 30);
+    let long = crate::support::record(&"c".repeat(150), "bad", None);
+    let file = [crate::support::record("cab", "bad", None), long, "{\"messages\": 5}".to_string(), String::new(), crate::support::record("ace", "cab", None), r#"{"messages":[{"role":"user","content":"x","train":false}]}"#.to_string()].join("\n");
+    let digest = data_digest(&rig, file.as_bytes());
+    let frames = Frames::default();
+    let ask = |params: Value, blobs: &[(&str, Vec<u8>)]| run_action(&rig, ACTION, &spec(), params, blobs, &frames);
+
+    let out = ask(json!({"base": BASE, "dataset_digest": digest.hex(), "max_block": 64}), &[]).expect("the report").outputs;
+    assert_eq!((out["records"].as_u64(), out["valid_records"].as_u64(), out["examples"].as_u64()), (Some(5), Some(4), Some(4)), "{out}");
+    assert_eq!((out["over_max_block"].as_u64(), out["over_max_block_lines"].clone()), (Some(1), json!([2])), "only the long record is past a 64-token row");
+    assert_eq!(out["invalid_total"], 1, "a record that does not parse is invalid; one that parses and supervises nothing is counted, not refused");
+    assert_eq!(out["invalid"][0]["line"], 3);
+    assert!(out["invalid"][0]["error"].as_str().is_some_and(|e| !e.is_empty()));
+    assert!(out["tokens"]["max"].as_u64().unwrap() > 150 && out["tokens"]["min"].as_u64().unwrap() < 64, "{out}");
+    assert!(out["supervised_tokens"]["max"].as_u64().unwrap() < out["tokens"]["max"].as_u64().unwrap());
+    assert_eq!(out["examples_without_supervision"], 1, "the user-only record on line 6 would train on nothing");
+    assert_eq!(out["supervised_tokens"]["min"], 0);
+
+    // The same file attached as a blob reads the same; preference pairs are their own kind.
+    let by_blob = ask(json!({"base": BASE, "max_block": 64}), &[("dataset", file.clone().into_bytes())]).expect("the report").outputs;
+    assert_eq!(by_blob, out);
+    let pairs = ask(json!({"base": BASE, "kind": "preference"}), &[("dataset", crate::support::pairs())]).expect("the report").outputs;
+    assert_eq!((pairs["records"].as_u64(), pairs["examples"].as_u64(), pairs["invalid_total"].as_u64()), (Some(4), Some(8), Some(0)), "two candidates per pair: {pairs}");
+
+    // Nothing was staged for later, trained, or reserved; a file that is not named once, or by a path, is refused.
+    assert!(work_is_clean(&rig.work_root));
+    assert_reservation_returned(&rig);
+    assert!(ask(json!({"base": BASE}), &[]).unwrap_err().contains("exactly once"));
+    assert!(ask(json!({"base": BASE, "dataset_digest": "/etc/passwd"}), &[]).unwrap_err().contains("64 lowercase hexadecimal"));
+    assert!(ask(json!({"base": BASE, "dataset_digest": digest.hex(), "path": "/etc/passwd"}), &[]).unwrap_err().contains("unknown param"));
+    assert!(ask(json!({"base": "nobody/nothing", "dataset_digest": digest.hex()}), &[]).unwrap_err().contains("not in the model store"));
+    assert!(ask(json!({"base": BASE, "dataset_digest": trainjob::store::digest_of(b"absent").hex()}), &[]).unwrap_err().contains("not in the artifact store"));
 }

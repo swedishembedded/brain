@@ -682,7 +682,7 @@ train_body() { # train_body <extra params json fragment, with a leading comma or
 @test "training: it is offered like any model, with no param that names a path" {
   get_url openai /v1/capabilities
   [ "$STATUS" -eq 200 ]
-  jq -e '[.data[] | select(.model=="brain/train")] | length == 1' "$RESP"
+  jq -e '[.data[] | select(.model=="brain/train") | .action] | sort == ["check_dataset","full_train","merge","train"]' "$RESP"
   jq -e '[.data[] | select(.model=="brain/train") | .params[].name] | all(. != "weights" and . != "out_dir" and . != "path" and . != "models_dir" and . != "save")' "$RESP"
 }
 

@@ -40,6 +40,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::consolidate::{self, FullRequest, MergeRequest};
+use crate::dryrun;
 use crate::job::{self, FootprintCache, JobEnv};
 use crate::request::{self, Request};
 use crate::store::{ArtifactStore, StoreError};
@@ -83,6 +84,7 @@ impl TrainResident {
             request::ACTION => self.admit_train(inv),
             consolidate::FULL_ACTION => self.admit_full(inv),
             consolidate::MERGE_ACTION => self.admit_merge(inv),
+            dryrun::ACTION => self.admit_check(inv),
             other => Err(format!("{} has no action '{other}'", request::MODEL)),
         }
     }
@@ -140,6 +142,23 @@ impl TrainResident {
         Ok(Reservation::Host(2 * job::tree_bytes(&base_dir)))
     }
 
+    fn admit_check(&self, inv: &Invocation) -> Result<Reservation, String> {
+        let request = dryrun::Request::from_invocation(inv)?;
+        match (&self.env.store, &request.dataset) {
+            (None, crate::request::Source::Digest(_)) => return Err("check_dataset: this server has no artifact store (--artifact-store), so a dataset cannot be named by digest".to_string()),
+            (_, crate::request::Source::Digest(digest)) => self.check_digests(&[*digest])?,
+            _ => {}
+        }
+        job::resolve_base(self.env.models_dir.as_deref(), &request.params.base)?;
+        // The tokenizer and the template are read, and the dataset is held while it is measured: host memory only.
+        let dataset_bytes = match (&request.dataset, &self.env.store) {
+            (crate::request::Source::Blob(name), _) => inv.blobs.get(name).map_or(0, |b| b.bytes.len() as u64),
+            (crate::request::Source::Digest(d), Some(store)) => std::fs::metadata(store.root().join(d.hex())).map_or(0, |m| m.len()),
+            _ => 0,
+        };
+        Ok(Reservation::Host((256u64 << 20) + dataset_bytes))
+    }
+
     fn check_digests(&self, digests: &[crate::store::Digest]) -> Result<(), String> {
         if let Some(store) = &self.env.store {
             if let Some(missing) = digests.iter().find(|d| !store.contains(d)) {
@@ -173,7 +192,7 @@ enum Reservation {
 
 impl ResidentModel for TrainResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec()])
+        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec(), dryrun::spec()])
     }
 
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
@@ -228,6 +247,7 @@ impl Instance for TrainInstance {
             request::ACTION => &mut || job::run(env, inv, progress),
             consolidate::FULL_ACTION => &mut || consolidate::run_full(env, inv, progress),
             consolidate::MERGE_ACTION => &mut || consolidate::run_merge(env, inv),
+            dryrun::ACTION => &mut || dryrun::run(env, inv),
             other => return Err(format!("{} has no action '{other}'", request::MODEL)),
         };
         // The trainer reports a device failure (an allocation the card cannot hold) as a panic. One run's failure is

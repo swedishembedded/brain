@@ -106,10 +106,11 @@ fn what_a_caller_may_not_set_is_refused_as_unknown() {
 }
 
 #[test]
-fn the_service_has_exactly_the_train_action() {
+fn the_service_has_exactly_its_four_actions_and_nothing_that_runs_a_command() {
     let rig = rig("door-action", 8 << 30, true);
     let manifest = rig.exec.manifests().iter().find(|m| m.model == trainjob::MODEL).cloned().unwrap();
-    assert_eq!(manifest.actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["train"]);
+    assert_eq!(manifest.actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["train", "full_train", "merge", "check_dataset"]);
+    assert!(manifest.actions.iter().all(|a| a.training), "every action of the service is a training action: off without --training, and below the training role");
     let mut inv = capability::Invocation::new();
     inv.params = json!({});
     let e = rig.exec.run_blocking(trainjob::MODEL, "shell", inv, |_| {}).unwrap_err();

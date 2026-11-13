@@ -40,6 +40,22 @@ digits, `.`, `_`, `-`; a name that exists is refused), where a later job names i
 artifact store can only install. The files of an installed checkpoint are as large as the model: the operator owns
 the model store's disk.
 
+## Checking a dataset first
+
+`check_dataset` reads a dataset with the base's own tokenizer and chat template, as the trainer would, and reports
+without training or claiming a card. Params: `base`, `kind` (`chat` for `generic-messages-v2` records, `preference`
+for `generic-preference-v1` pairs), the dataset as the input blob `dataset` or as `dataset_digest` (exactly one),
+`thinking` and `pack_answers` (rendered as a run with those settings would), and `max_block`. The result:
+
+| field | meaning |
+|---|---|
+| `records`, `valid_records` | non-blank lines, and those that parse and encode |
+| `examples` | what the valid records are trained as (a record of several answers can be several examples; a pair is two) |
+| `tokens`, `supervised_tokens` | per example: `total`, `min`, `mean`, `p50`, `p90`, `p99`, `max`, in the base's tokens |
+| `examples_without_supervision` | examples that would train on nothing |
+| `over_max_block`, `over_max_block_lines` | examples longer than `max_block` (a run refuses them rather than cutting them) and the first lines holding one |
+| `invalid_total`, `invalid` | records the trainer refuses, and the first 20 as `{line, error}` |
+
 ## Serving it
 
 ```
