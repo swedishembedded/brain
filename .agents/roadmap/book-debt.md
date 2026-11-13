@@ -40,8 +40,13 @@ Training kernels and graphs:
 - [x] serve sampler: exact top-p/min-p and exact penalties over the full logits row on every serving engine and every sampling path (decode, first token, rollout, speculative verification, mixed iteration); `check/serve-conformance` requires the row readback (v05 ch11); the one top-k tie rule is done (qwen3vl keeps exactly k, lowest id first).
 
 Vision and generation:
-- [ ] imaging letterbox: pixels and boxes share one pad; half-pixel nearest resize and pad value on device; retire the
-      host loop and the pinning test (v07 ch01, ch04, ch12).
+- [x] imaging letterbox: pixels and boxes share one integral pad (floor of half the slack, the upstream detectors' pad);
+      `resize_nearest` mode 1 (half-pixel, integer form) and `pad2d` constant/edge fill; `Ctx::letterbox` on the device,
+      `letterbox_rgb` its bitwise-equal host twin for host-memory callers, yolov5's board letterbox on the same tap;
+      yolov5 golden regenerated (v07 ch01, ch04, ch12).
+- [ ] yolov8 `detect_batch` and yolov5 `Yolov5::detect` letterbox on the host and upload: feed `Ctx::letterbox`'s buffer
+      into the network input with a device copy (`Gpu::copy_to`, per-image offset for yolov8's batch), registering
+      `resize_nearest`/`pad2d` on their handles.
 - [ ] imaging: migrate the call sites the crate header lists as owed (v07 ch01).
 - [ ] clip: DeepSeek-OCR vision tower activation agrees with upstream (v07 ch08).
 - [ ] zipdepth: scale-and-shift-invariant loss with gradient term and a real loader (v07 ch05).
@@ -82,17 +87,19 @@ Forecasting and decisions:
 - [x] Flaky: moondream3 `geglu_shift_grads_match_finite_differences` (tolerance scaled by a cancelling derivative; now
       derived from the absolute sum of the terms), backend-wgpu `kernel_timing::dropping_a_shared_handle_does_not_wait_for_the_device`
       (`submit` drained the device through the unsynchronised-workgroup valve before the test looked; now one naive matmul).
-      Latent, same shape, not changed: the `rel < 1e-2` against `max(|d|, 1e-3)` checks of the other tests in
-      `crates/moondream3/src/kernels_check.rs`.
+      The other three checks in `crates/moondream3/src/kernels_check.rs` (rope_partial, adaptive_avgpool2d,
+      tau_scale) had the same relative tolerance; they perturb ops linear in the perturbed argument and now assert
+      the derived rounding bound of `assert_linear_directional`.
 - [x] Binding-offset alignment: every listed `step_sliced` site proved aligned in a comment (`head_ce.rs`/`lossw.rs` chunk
       starts, `moe.rs` `route_rows` regions, `ops.rs` quant rows/embed tiles/two-level passes); the six `chunked_bidir_*`
       entry points refuse a window off the grain at the call (`block::assert_row_windows_bindable`).
       Open: CUDA's `step_native_sliced` and `step_library_gemm` (`crates/backend-cuda/src/backend.rs`) do not call
       `check_binding_offsets`, so a misaligned native slice is accepted there and refused everywhere else; adding it
       needs a CUDA device to confirm no provider passes an unaligned offset.
-- [ ] gemma4 and minimaxh3 `measure` landed (`modelcost`: held/peak bytes; gemma4 is the peak of one forward under its
-      layer stream); `brain models profile --measure` still does not print the new byte fields (CLI; needs a brain-cli build).
-- [ ] Commit d9da9049b (gradcheck tied GPT-2 check) landed before 961487746 (the gpt2 tie) and does not build alone.
+- [x] gemma4 and minimaxh3 `measure` landed (`modelcost`: held/peak bytes; gemma4 is the peak of one forward under its
+      layer stream); `brain models profile --measure` prints both, or "not measured" (CLI; compiled in CI).
+- [x] Commit d9da9049b (gradcheck tied GPT-2 check) landed before 961487746 (the gpt2 tie) and does not build alone. Both
+      are published, so history is not rewritten; every commit from 961487746 on builds, and no chapter cites d9da9049b.
 
 ## Open: needs hardware, weights or a reference the box does not have
 
@@ -109,4 +116,7 @@ Forecasting and decisions:
 
 ## Book text only
 
-- [ ] The 16 passages that describe defects already fixed (stale text; v05 ch11 and v08 ch11 done), and the v11 ch06 sentence on an old commit message.
+- [ ] The 16 passages that describe defects already fixed (stale text). Done: v03 ch10, ch11; v05 ch09, ch11; v06 ch10;
+      v08 ch11; v09 ch08; v10 ch07, ch08 (two); v11 ch04, ch06 (reframed as found and fixed, with a crate test of the
+      floor trade). Narrated as found-and-fixed history, kept: v03 ch12, v09 ch06, ch09. Open: v07 ch12 (two, with the
+      letterbox rewrite of v07 ch01, ch04, ch12).

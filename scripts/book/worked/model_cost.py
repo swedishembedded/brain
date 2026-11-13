@@ -447,7 +447,7 @@ def minimaxh3_parameters():
     pins = [
         ("QKV width H d_h", _int(inner), "7,168 (56 x 128), not equal to D", "`real_config_matches_the_checkpoint_header_numbers`"),
         ("adaln_proj output width 18 D", _int(18 * hid), "96,768", "the same test"),
-        ("one block without adaln_proj", f"{block / 1e6:.1f} M", "within 3.5e8 to 4.5e8 (the comment says ~395M)", "`the_cost_model_ranks_a_block_above_the_endpoint_weights`"),
+        ("one block without adaln_proj", f"{block / 1e6:.1f} M", "within 3.5e8 to 4.5e8 (the comment says ~385M)", "`the_cost_model_ranks_a_block_above_the_endpoint_weights`"),
         ("adaln_proj of one block", f"{ada / 1e6:.1f} M", "260M per block", "doc of `crates/minimaxh3/src/lib.rs`"),
         ("adaln_proj of the 50 blocks", f"{H3['layers'] * ada / 1e9:.2f} B of {total / 1e9:.2f} B", "13.0B of 33B", "the same doc"),
         ("adaln_proj share of a block's bytes", _fx(100.0 * ada / (ada + block), 1) + "%", "40%", "doc of `StreamingDit`"),
