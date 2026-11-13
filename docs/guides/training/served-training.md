@@ -136,6 +136,31 @@ and gives them back:
 - When a run ends, by completion, failure or cancel, it gives its card back at
   once, and its files are removed.
 
+## Refitting while sampling (asynchronous rollouts)
+
+A learning loop that keeps sampling while it trains publishes each trained
+adapter to a running server (`brain serve --serve-adapters DIR`, see
+[Serving LoRA adapters](../serving/serving.md#the-adapter-bank)) and samples
+from the adapter's model id. The server tags every sample with the policy
+version that drew it, so the trainer can decide what is too stale to train on:
+
+- The adapter's `version` (in `GET /v1/models` and in the `adapter` object of
+  every reply and of a `policy_trace`) is 1 for the first release of its card
+  id and +1 for each later release with different weights. A sequence runs on
+  the release it started on and never spans a refit, so every token of a reply
+  carries the one version it names.
+- The loop keeps the mapping from its own optimiser step to the version it
+  published; a sample whose version is more than the loop's staleness bound
+  behind the version it trains is masked or dropped. Nothing on the server
+  interprets the bound.
+- A refit never reads what an earlier release cached: each release has its own
+  prefix-cache namespace, so the first request after a refit recomputes its
+  prompt and later ones share it.
+- Several adapters are served at once, each under its own id, in the same
+  batches; a version is per adapter id. The rank cap (`--adapter-rank-cap`,
+  default 32) is fixed when the server starts, so an adapter above it cannot be
+  hot-loaded.
+
 ## Security
 
 The surface is behind the server's key like every route and takes no parameter

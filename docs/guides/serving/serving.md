@@ -264,7 +264,10 @@ per layer) are part of the model's footprint, so placement budgets them.
   links, hidden files and files not named `*.safetensors` are ignored, the
   search goes at most four directories down and holds at most 1024 files, and
   a file larger than any adapter is refused. Publish a release by writing it
-  to a hidden name and renaming it into place. A server holds at most 64
+  to a hidden name and renaming it into place. The directory is the operator's:
+  anyone who can write to it can put an adapter on the server (verification
+  binds an adapter to the base it was trained on; it does not authenticate who
+  wrote it), so only the server and the trainer may. A server holds at most 64
   adapters at once; those beyond the bank's slots are swapped in on demand.
 - Each adapter has a policy version: 1 for the first release of its id the
   process served, +1 each time a file for the id with different weights

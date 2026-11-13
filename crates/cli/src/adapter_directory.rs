@@ -21,7 +21,9 @@
 //! batches. This is the directory form of [`LiveAdapters`]; `--watch-adapters`
 //! follows a promotion sequence (one adapter, the highest version) instead.
 //!
-//! The directory is the operator's, but its files are hostile input:
+//! The directory is the operator's (whoever can write to it can put an adapter
+//! on the server: verification binds an adapter to its base, it does not
+//! authenticate its author), but its files are hostile input:
 //!
 //! * symbolic links, hidden files, other file types and anything not named
 //!   `*.safetensors` are ignored, so a link cannot lead the server out of the
