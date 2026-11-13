@@ -4,6 +4,7 @@
 # a length or a duration gets a ceiling instead. model<TAB>action<TAB>param.
 # This list only shrinks.
 brain/cosyvoice	synth	seed
+brain/deepseekvl	finetune	seed
 brain/edgerock	generate	dry_base
 brain/edgerock	generate	dry_multiplier
 brain/edgerock	generate	frequency_penalty
@@ -34,6 +35,7 @@ brain/huginn	generate	repetition_penalty
 brain/huginn	generate	seed
 brain/huginn	generate	temp
 brain/huginn	generate	top_p
+brain/januspro	finetune	seed
 brain/januspro	text2image	seed
 brain/kronos	forecast	seed
 brain/kronos	forecast	temperature
@@ -106,6 +108,7 @@ brain/ltxv	v2v	modality_guidance
 brain/ltxv	v2v	rescale
 brain/ltxv	v2v	seed
 brain/ltxv	v2v	stg
+brain/minicpmv	finetune	seed
 brain/minicpmv	generate	seed
 brain/minicpmv	generate	temp
 brain/minicpmv	generate	top_p

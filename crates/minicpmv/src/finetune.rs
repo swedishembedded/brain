@@ -241,11 +241,11 @@ pub struct Job<'a> {
 /// Run `job` with `opts` on `gpu`. The trainer's device memory is
 /// reclaimed before this returns, so the caller can load the tune (or any
 /// other model) right after.
-pub fn finetune(gpu: &Gpu, job: Job, opts: &Options, progress: &mut dyn FnMut(&Event)) -> Result<Outcome, String> {
-    gpu_core::reclaiming(gpu, || run(gpu, job, opts, progress))
+pub fn finetune(gpu: &Gpu, job: Job, opts: &Options, progress: &mut dyn FnMut(&Event), cancelled: &dyn Fn() -> bool) -> Result<Outcome, String> {
+    gpu_core::reclaiming(gpu, || run(gpu, job, opts, progress, cancelled))
 }
 
-fn run(gpu: &Gpu, job: Job, opts: &Options, progress: &mut dyn FnMut(&Event)) -> Result<Outcome, String> {
+fn run(gpu: &Gpu, job: Job, opts: &Options, progress: &mut dyn FnMut(&Event), cancelled: &dyn Fn() -> bool) -> Result<Outcome, String> {
     let Job { dir, base_id, train, held_out, out, label } = job;
     if opts.epochs == 0 || opts.batch == 0 {
         return Err("minicpmv finetune: epochs and batch must be at least 1".into());
@@ -321,10 +321,10 @@ fn run(gpu: &Gpu, job: Job, opts: &Options, progress: &mut dyn FnMut(&Event)) ->
             resume_from,
             &state,
             Some(|st: &mut SessionTrainer<'_>| evaluate(&mut st.t, &b, e)),
-            || false,
+            cancelled,
             &mut report,
         )?,
-        None => model::session::run(&mut session, &spec, &schedule, resume_from, &state, || false, &mut report)?,
+        None => model::session::run(&mut session, &spec, &schedule, resume_from, &state, cancelled, &mut report)?,
     };
     session.t.save_tune(out, base_id, label)?;
     Ok(Outcome { turns: n, block, steps: outcome.steps, initial_eval: outcome.initial_eval, final_eval: outcome.final_eval })

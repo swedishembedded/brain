@@ -1864,6 +1864,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-imaging",
  "brain-model",
+ "brain-modelstore",
  "brain-qwen3",
  "brain-testutil",
  "brain-vqgan",

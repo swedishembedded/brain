@@ -43,9 +43,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("qwen35", crate::qwen35_cli::run_qwen35),
     ("qwen35moe", crate::qwen35moe_cli::run_qwen35moe),
     ("qwen3omnimoe", crate::omni_cli::run_omni),
-    ("deepseekvl", crate::deepseekvl_cli::run_deepseekvl),
-    ("januspro", crate::januspro_cli::run_januspro),
-    ("minicpmv", crate::minicpmv_cli::run_minicpmv),
     ("glmdsa", crate::glm_cli::run_glm),
     ("ouro", crate::ouro_cli::run_ouro),
     ("huginn", crate::huginn_cli::run_huginn),
@@ -149,6 +146,9 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("zipdepth", "brain/zipdepth"),
     ("worldmirror2", "brain/worldmirror2"),
     ("lfm2", "brain/lfm2"),
+    ("deepseekvl", "brain/deepseekvl"),
+    ("januspro", "brain/januspro"),
+    ("minicpmv", "brain/minicpmv"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same

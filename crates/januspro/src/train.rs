@@ -42,13 +42,13 @@ use crate::t2i::{conditional_prompt, prompt_specials, unconditional_prompt};
 
 /// Fine-tune Janus-Pro's understanding path on the image-and-reply dataset in
 /// `dataset` (see [`deepseekvl::train::read_dataset`]).
-pub fn finetune_understanding(dir: &Path, dataset: &Path, opts: &Options, progress: &mut dyn FnMut(&StepInfo)) -> Result<Outcome, String> {
+pub fn finetune_understanding(dir: &Path, dataset: &Path, opts: &Options, progress: &mut dyn FnMut(&StepInfo), cancelled: &dyn Fn() -> bool) -> Result<Outcome, String> {
     let (cfg, rd) = crate::model::open(dir)?;
     let examples = deepseekvl::train::load_examples(dataset)?;
     let tower = Box::new(deepseekvl::tower::SiglipTower::load(&rd, TOWER_PREFIX, deepseekvl::import::ALIGNER_PREFIX, &cfg.aligner)?);
     let parts = deepseekvl::model::Parts { tower, style: deepseekvl::prompt::JANUS, wrap: Some((IMAGE_START, IMAGE_END)), language: cfg.language };
     let frontend = deepseekvl::model::Frontend::open(dir, parts)?;
-    deepseekvl::train::run(frontend, &rd, deepseekvl::import::ALIGNER_PREFIX, examples, opts, progress)
+    deepseekvl::train::run(frontend, &rd, deepseekvl::import::ALIGNER_PREFIX, examples, opts, progress, cancelled)
 }
 
 /// The generation heads to train, with their starting weights.
@@ -401,7 +401,7 @@ impl model::session::SampleTrainer for GenSession<'_> {
     }
 }
 
-pub fn finetune_generation(dir: &Path, dataset: &Path, opts: &GenOptions, progress: &mut dyn FnMut(&StepInfo)) -> Result<GenOutcome, String> {
+pub fn finetune_generation(dir: &Path, dataset: &Path, opts: &GenOptions, progress: &mut dyn FnMut(&StepInfo), cancelled: &dyn Fn() -> bool) -> Result<GenOutcome, String> {
     let (cfg, rd) = crate::model::open(dir)?;
     let base_cfg = qwen3::hf::decoder_config_as(&cfg.language.to_string(), "llama")?;
     let processor = deepseekvl::preprocess::ImageProcessor::from_dir(dir)?;
@@ -486,7 +486,7 @@ pub fn finetune_generation(dir: &Path, dataset: &Path, opts: &GenOptions, progre
         steps: 0,
     };
     let mut final_loss = None;
-    model::session::run(&mut run, &session, &schedule, None, Path::new(""), || false, &mut |e| {
+    model::session::run(&mut run, &session, &schedule, None, Path::new(""), cancelled, &mut |e| {
         if let model::session::Event::Step { step, steps, loss, lr, .. } = e {
             final_loss = Some(loss);
             progress(&StepInfo { step, steps, loss, lr });

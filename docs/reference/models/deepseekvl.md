@@ -57,9 +57,13 @@ let reply = m.generate_greedy(&ids, &embeds, 256, &mut |_| true)?; // or generat
 ### Fine-tuning
 
 ```text
-brain deepseekvl finetune --weights deepseek-ai/deepseek-vl-7b-chat \
-    --dataset DIR --out DIR [--rank 16 --steps 200 --lr 1e-4 --aligner-lr X --batch N ...]
+brain deepseekvl finetune --dataset DIR --save OUT --seed $RANDOM \
+    [--rank 16 --steps 200 --lr 1e-4 --aligner-lr X --batch N --base-format bf16 ...]
 ```
+
+The checkpoint resolves from the model store (`--dir DIR` names one).
+The LoRA parameters are the ones every LoRA fine-tune in brain takes
+(`brain deepseekvl finetune --help` lists them with their defaults).
 
 `--activations keep|recompute` sets what the decoder's backward keeps of the
 forward. The Qwen decoder rebuilds each layer from its residual whatever is
@@ -86,7 +90,7 @@ supervised, and the messages place one `<image_placeholder>` per image.
 that does not fit one card is split across the cards by what each has free,
 with no flag (the images are spliced into the first stage, and their
 gradient comes back from it); `--device` pins one card. The checkpoint is
-read as downloaded and nothing is written beside it: `--out` receives
+read as downloaded and nothing is written beside it: `--save` receives
 `adapter.safetensors` and `aligner.safetensors`. The schedule and optimiser
 flags (`--weight-decay`, `--grad-clip`, `--warmup`, `--min-lr`) are
 `brain qwen3 finetune --lora`'s.

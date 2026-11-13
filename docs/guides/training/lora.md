@@ -147,8 +147,8 @@ decoder (LoRA, full or frozen), the connector and the vision tower (LoRA,
 full or frozen) each trained on its own, at its own rate:
 
 ```bash
-brain minicpmv finetune --dataset train.jsonl --held-out val.jsonl --vision lora:4 --label acme:receipts:v1
-brain minicpmv export-peft --tune acme:receipts:v1 --out receipts-peft
+brain minicpmv finetune --dataset train.jsonl --held-out val.jsonl --vision lora:4 --label acme:receipts:v1 --seed $RANDOM
+brain minicpmv export_peft --tune acme:receipts:v1 --save receipts-peft
 ```
 
 The tune is served as `brain/minicpmv:acme:receipts:v1`; the export is one

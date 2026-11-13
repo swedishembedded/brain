@@ -82,20 +82,18 @@ pub fn generate_spec() -> ActionSpec {
     spec.output(BlobSpec::new("text", Media::Text, "the reply"))
 }
 
+const DESCRIPTION: &str = "MiniCPM-V 4.6 -- images, a video and text in, text out. A NaViT SigLIP tower whose token count a window merger and a 2x2 \
+     merger cut 16x (or 4x), spliced into a Qwen3.5-0.8B hybrid decoder; high-resolution images are sliced. fp32.";
+
 pub fn manifest() -> Manifest {
-    Manifest::new(
-        MODEL,
-        "MiniCPM-V 4.6 -- images, a video and text in, text out. A NaViT SigLIP tower whose token count a window merger and a 2x2 \
-         merger cut 16x (or 4x), spliced into a Qwen3.5-0.8B hybrid decoder; high-resolution images are sliced. fp32.",
-        vec![generate_spec()],
-    )
-    .with_max_context_tokens(SERVE_CONTEXT as u64)
+    Manifest::new(MODEL, DESCRIPTION, vec![generate_spec(), crate::caps_train::finetune_spec(), crate::caps_train::export_peft_spec()]).with_max_context_tokens(SERVE_CONTEXT as u64)
 }
 
-/// The manifest for the scheduled service: the checkpoint is service-side
-/// configuration, so `weights` is stripped.
+/// The manifest for the scheduled service: `generate`, with the checkpoint as
+/// service-side configuration. Training reads and writes files on the host,
+/// so it is run locally.
 pub fn manifest_resident() -> Manifest {
-    manifest().for_serving()
+    Manifest::new(MODEL, DESCRIPTION, vec![generate_spec()]).with_max_context_tokens(SERVE_CONTEXT as u64).for_serving()
 }
 
 /// The request's images, in blob order.
@@ -327,7 +325,13 @@ impl Provider for MiniCpmVProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<std::sync::Arc<dyn Action>> {
-        (name == "generate").then(|| std::sync::Arc::new(GenerateAction { default_dir: self.default_dir.clone() }) as std::sync::Arc<dyn Action>)
+        let dir = self.default_dir.clone();
+        match name {
+            "generate" => Some(std::sync::Arc::new(GenerateAction { default_dir: dir })),
+            "finetune" => Some(std::sync::Arc::new(crate::caps_train::FinetuneAction { dir })),
+            "export_peft" => Some(std::sync::Arc::new(crate::caps_train::ExportPeftAction { dir })),
+            _ => None,
+        }
     }
 }
 

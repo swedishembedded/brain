@@ -121,6 +121,19 @@ pub fn from_invocation(inv: &Invocation, d: &LoraDefaults, action: &str) -> Resu
     })
 }
 
+/// The `base_format` parameter of a model whose LoRA trainer can hold its
+/// frozen base in any of `bases`: the format names it accepts, `default`
+/// when the caller names none.
+pub fn base_format_param(bases: &model::policy::TrainBases, default: crate::Dtype) -> ParamSpec {
+    let names: Vec<String> = bases.bases.iter().map(|d| model::policy::format_name(*d).to_string()).collect();
+    ParamSpec::new("base_format", ParamType::Enum(names), "the format the frozen base is held in while the adapter trains").default(json!(model::policy::format_name(default)))
+}
+
+/// The base format `inv` names, `default` when it names none.
+pub fn base_format(inv: &Invocation, bases: &model::policy::TrainBases, default: crate::Dtype) -> Result<crate::Dtype, String> {
+    inv.get_str("base_format").map_or(Ok(default), |f| bases.parse(&f))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

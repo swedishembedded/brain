@@ -50,18 +50,18 @@ let images = t2i.generate(&req, &|| false, &mut |_, _| {})?;
 ### Fine-tuning
 
 ```text
-brain januspro finetune --mode understanding|generation --weights deepseek-ai/Janus-Pro-7B \
-    --dataset DIR --out DIR [--rank 16 --steps 200 --lr 1e-4 --aligner-lr X --cfg-dropout 0.1 ...]
+brain januspro finetune --mode understanding|generation --dataset DIR --save OUT --seed $RANDOM \
+    [--rank 16 --steps 200 --lr 1e-4 --aligner-lr X --cfg-dropout 0.1 ...]
 ```
 
 Both modes train a LoRA over the frozen bf16 decoder (`--base-format f32` to
 hold it at fp32) and read the checkpoint as downloaded; nothing is written
-beside it. The flags are `brain deepseekvl finetune`'s, `--activations
+beside it. The parameters are `brain deepseekvl finetune`'s, `--activations
 keep|recompute` included.
 
 - **understanding** is that command's trainer with Janus-Pro's tower and
   roles: `DIR/train.jsonl` holds an `image` and the `messages` to learn,
-  and `--out` receives `adapter.safetensors` and `aligner.safetensors`.
+  and `--save` receives `adapter.safetensors` and `aligner.safetensors`.
 - **generation** teaches the decoder to draw. Each line of `DIR/train.jsonl`
   is a `prompt` and the `image` (relative to `DIR`) to draw for it:
 
@@ -77,7 +77,7 @@ keep|recompute` included.
   back through all of it. The adapter, the generation head, the generation
   aligner and the code embedding train; `--cfg-dropout` of the steps (a
   tenth by default) run on a padded prompt, which is what classifier-free
-  guidance contrasts against. `--out` receives `adapter.safetensors` and
+  guidance contrasts against. `--save` receives `adapter.safetensors` and
   `generation.safetensors`.
 
 An understanding fine-tune is served by starting `brain serve` with

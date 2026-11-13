@@ -189,6 +189,17 @@ pub fn models_dir_in(data_root: &Path) -> PathBuf {
     data_root.join("models")
 }
 
+/// The `vendor/repo` id a repo directory is filed under: the inverse of
+/// [`Store::repo_dir`], read off its last two components. A checkpoint
+/// directory outside that layout is `local/<path>`.
+pub fn repo_id(dir: &Path) -> String {
+    let parts: Vec<String> = dir.components().rev().take(2).map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    match parts.as_slice() {
+        [repo, vendor] => format!("{vendor}/{repo}"),
+        _ => format!("local/{}", dir.display()),
+    }
+}
+
 /// Resolve the models directory. Precedence, highest first:
 ///
 /// 1. the data root published by `--brain-data-dir <root>`, as

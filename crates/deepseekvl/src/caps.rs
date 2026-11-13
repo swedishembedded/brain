@@ -55,20 +55,81 @@ pub fn generate_spec(model_desc: &str) -> ActionSpec {
     spec.output(BlobSpec::new("text", Media::Text, "the reply"))
 }
 
-pub fn manifest() -> Manifest {
-    Manifest::new(
-        MODEL,
-        "DeepSeek-VL-7B-chat -- images and text in, text out. SAM-B at 1024 px and SigLIP-L at 384 px joined by a split \
-         aligner into a Llama decoder, at the checkpoint's own fp16. Greedy.",
-        vec![generate_spec("DeepSeek-VL: up to 8 images + a conversation in, greedy text out (streamed per token)")],
-    )
-    .with_max_context_tokens(MAX_CONTEXT as u64)
+const DESCRIPTION: &str = "DeepSeek-VL-7B-chat -- images and text in, text out. SAM-B at 1024 px and SigLIP-L at 384 px joined by a split \
+     aligner into a Llama decoder, at the checkpoint's own fp16. Greedy.";
+
+fn generate() -> ActionSpec {
+    generate_spec("DeepSeek-VL: up to 8 images + a conversation in, greedy text out (streamed per token)")
 }
 
-/// The manifest for the scheduled service: the checkpoint is service-side
-/// configuration, so `weights` is stripped.
+pub fn manifest() -> Manifest {
+    Manifest::new(MODEL, DESCRIPTION, vec![generate(), finetune_spec("finetune", "LoRA fine-tune on a folder of images and conversations: the towers stay frozen, the aligner trains from the checkpoint's own weights and the decoder as a LoRA over its frozen base")])
+        .with_max_context_tokens(MAX_CONTEXT as u64)
+}
+
+/// The manifest for the scheduled service: `generate`, with the checkpoint as
+/// service-side configuration. Fine-tuning reads a dataset and writes an
+/// adapter on the host, so it is run locally.
 pub fn manifest_resident() -> Manifest {
-    manifest().for_serving()
+    Manifest::new(MODEL, DESCRIPTION, vec![generate()]).with_max_context_tokens(MAX_CONTEXT as u64).for_serving()
+}
+
+/// What a fine-tune of this composite trains with when the caller names nothing.
+pub const LORA_DEFAULTS: qwen3::lora_params::LoraDefaults = qwen3::lora_params::LoraDefaults { rank: 16, steps: 200, lr: 1e-4, batch: 1, block: None };
+
+/// The formats its LoRA run holds the frozen decoder in.
+pub const TRAIN_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "deepseekvl", bases: &[qwen3::Dtype::F32, qwen3::Dtype::BF16, qwen3::Dtype::I8] };
+
+/// A fine-tune action of the composite (DeepSeek-VL's, and Janus-Pro's
+/// understanding and generation fine-tunes): the dataset, where the adapter
+/// goes, the shared LoRA parameters and the aligner's own rate.
+pub fn finetune_spec(name: &str, summary: &str) -> ActionSpec {
+    ActionSpec::new(name, summary)
+        .training()
+        .streaming()
+        .param(ParamSpec::new("dataset", ParamType::Str, "folder holding train.jsonl: one example a line, {\"image\": \"cat.png\", \"messages\": [...]}, image paths relative to the folder").required().host_resolved())
+        .param(ParamSpec::new("save", ParamType::Str, "folder the adapter and the aligner are written to; nothing is written beside the checkpoint").required().host_resolved())
+        .params(qwen3::lora_params::specs(&LORA_DEFAULTS))
+        .param(ParamSpec::new("aligner_lr", ParamType::Float, "the aligner's learning rate; omit for a tenth of lr").min(0.0).max(capability::bounds::UNIT))
+        .param(qwen3::lora_params::base_format_param(&TRAIN_BASES, qwen3::Dtype::BF16))
+}
+
+/// The training options `inv` describes, with the dataset and save folders.
+pub fn finetune_options(inv: &Invocation, action: &str) -> Result<(crate::train::Options, std::path::PathBuf, std::path::PathBuf), String> {
+    let run = qwen3::lora_params::from_invocation(inv, &LORA_DEFAULTS, action)?;
+    let dataset = inv.get_str("dataset").ok_or_else(|| format!("{action}: missing required param 'dataset'"))?;
+    let save = inv.get_str("save").ok_or_else(|| format!("{action}: missing required param 'save'"))?;
+    let options = crate::train::Options {
+        rank: run.rank,
+        alpha: run.alpha,
+        targets: run.targets,
+        steps: run.steps,
+        lr: run.lr,
+        aligner_lr: inv.get_f64("aligner_lr").map(|v| v as f32),
+        seed: run.seed,
+        block: run.block,
+        batch: run.batch,
+        dtype: qwen3::lora_params::base_format(inv, &TRAIN_BASES, qwen3::Dtype::BF16)?,
+        hyper: run.hyper,
+        saved: run.saved,
+    };
+    Ok((options, dataset.into(), save.into()))
+}
+
+/// Training progress as the action reports it.
+pub fn step_progress(progress: &mut dyn FnMut(Progress)) -> impl FnMut(&crate::train::StepInfo) + '_ {
+    move |s| progress(Progress::step(s.step, s.steps, format!("loss {:.4}  lr {:.2e}", s.loss, s.lr)))
+}
+
+/// What a finished fine-tune reports.
+pub fn trained(examples: usize, block: u32, initial_loss: f32, final_loss: Option<f32>, seed: u64, save: &std::path::Path) -> Outcome {
+    Outcome::new()
+        .set("examples", json!(examples))
+        .set("block", json!(block))
+        .set("initial_loss", json!(initial_loss))
+        .set("final_loss", json!(final_loss))
+        .set("seed", json!(seed))
+        .set("saved", json!(save.display().to_string()))
 }
 
 /// The request's images, in blob order.
@@ -312,7 +373,31 @@ impl Provider for DeepseekVlProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<std::sync::Arc<dyn Action>> {
-        (name == "generate").then(|| std::sync::Arc::new(GenerateAction { default_dir: self.default_dir.clone() }) as std::sync::Arc<dyn Action>)
+        let dir = self.default_dir.clone();
+        match name {
+            "generate" => Some(std::sync::Arc::new(GenerateAction { default_dir: dir })),
+            "finetune" => Some(std::sync::Arc::new(FinetuneAction { dir })),
+            _ => None,
+        }
+    }
+}
+
+struct FinetuneAction {
+    dir: Option<String>,
+}
+
+impl Action for FinetuneAction {
+    fn spec(&self) -> ActionSpec {
+        manifest().actions.into_iter().find(|a| a.name == "finetune").expect("declared")
+    }
+
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let dir = std::path::PathBuf::from(self.dir.clone().ok_or("deepseekvl finetune: no DeepSeek-VL checkpoint (pull one, or name its directory with --dir)")?);
+        let (options, dataset, save) = finetune_options(inv, "deepseekvl finetune")?;
+        let base = brain_modelstore::repo_id(&dir);
+        let outcome = crate::train::finetune(&dir, &dataset, &options, &mut step_progress(progress), &|| inv.cancel.is_cancelled())?;
+        outcome.save(&save, &format!("{base}:local:vl-adapter:latest"), &base)?;
+        Ok(trained(outcome.examples, outcome.block, outcome.initial_loss, outcome.final_loss, options.seed, &save))
     }
 }
 
@@ -370,6 +455,26 @@ impl Action for GenerateAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fine-tune names its dataset and where the adapter goes; everything
+    /// else is the composite's LoRA recipe, and the served manifest keeps
+    /// only inference.
+    #[test]
+    fn a_finetune_takes_the_shared_lora_parameters_with_its_own_defaults() {
+        let spec = manifest().actions.into_iter().find(|a| a.name == "finetune").unwrap();
+        assert!(spec.training && spec.streaming);
+        assert!(spec.validate(Invocation::new().set("save", json!("/out"))).is_err(), "the dataset is required");
+        let inv = spec.validate(Invocation::new().set("dataset", json!("/data")).set("save", json!("/out")).set("seed", json!(5))).unwrap();
+        let (o, dataset, save) = finetune_options(&inv, "finetune").unwrap();
+        assert_eq!((o.rank, o.alpha, o.steps, o.lr, o.batch, o.block, o.seed, o.dtype), (16, 32.0, 200, 1e-4, 1, None, 5, qwen3::Dtype::BF16));
+        assert_eq!((dataset, save), ("/data".into(), "/out".into()));
+        let int8 = spec.validate(Invocation::new().set("dataset", json!("d")).set("save", json!("s")).set("base_format", json!("int8"))).unwrap();
+        assert_eq!(finetune_options(&int8, "finetune").unwrap().0.dtype, qwen3::Dtype::I8);
+        assert!(spec.validate(Invocation::new().set("dataset", json!("d")).set("save", json!("s")).set("base_format", json!("nf4"))).is_err());
+        let served: Vec<String> = manifest_resident().actions.into_iter().map(|a| a.name).collect();
+        assert_eq!(served, ["generate"]);
+        assert_eq!(brain_modelstore::repo_id(std::path::Path::new("/m/deepseek-ai/deepseek-vl-7b-chat")), "deepseek-ai/deepseek-vl-7b-chat");
+    }
 
     fn inv_with(messages: Value) -> Invocation {
         Invocation::new().set("messages", json!(messages.to_string()))

@@ -379,7 +379,7 @@ impl model::session::SampleTrainer for VlSession<'_> {
     }
 }
 
-pub fn run(frontend: Frontend, rd: &WeightReader, aligner_prefix: &str, examples: Vec<(Vec<Rgb8>, Vec<Turn>)>, opts: &Options, progress: &mut dyn FnMut(&StepInfo)) -> Result<Outcome, String> {
+pub fn run(frontend: Frontend, rd: &WeightReader, aligner_prefix: &str, examples: Vec<(Vec<Rgb8>, Vec<Turn>)>, opts: &Options, progress: &mut dyn FnMut(&StepInfo), cancelled: &dyn Fn() -> bool) -> Result<Outcome, String> {
     let prepared = examples.iter().map(|(images, turns)| frontend.prepare(images, turns)).collect::<Result<Vec<_>, String>>()?;
     let aligner_cfg = frontend.tower.aligner_config();
     let rows = frontend.splice.rows;
@@ -417,7 +417,7 @@ pub fn run(frontend: Frontend, rd: &WeightReader, aligner_prefix: &str, examples
     };
     let mut run = VlSession { t: trainer, prepared: &prepared, aligner_ratio, weight_decay: fit.weight_decay, grad_clip: fit.grad_clip, steps: 0 };
     let mut final_loss = None;
-    model::session::run(&mut run, &session, &schedule, None, Path::new(""), || false, &mut |e| {
+    model::session::run(&mut run, &session, &schedule, None, Path::new(""), cancelled, &mut |e| {
         if let model::session::Event::Step { step, steps, loss, lr, .. } = e {
             final_loss = Some(loss);
             progress(&StepInfo { step, steps, loss, lr });
@@ -431,14 +431,14 @@ pub fn run(frontend: Frontend, rd: &WeightReader, aligner_prefix: &str, examples
 /// in `dataset` ([`read_dataset`]), on the ambient device: the hybrid tower
 /// extracts every image's features, is released, and the decoder and aligner
 /// train.
-pub fn finetune(dir: &Path, dataset: &Path, opts: &Options, progress: &mut dyn FnMut(&StepInfo)) -> Result<Outcome, String> {
+pub fn finetune(dir: &Path, dataset: &Path, opts: &Options, progress: &mut dyn FnMut(&StepInfo), cancelled: &dyn Fn() -> bool) -> Result<Outcome, String> {
     let cfg = crate::DeepseekVlConfig::from_dir(dir)?;
     let rd = WeightReader::open_hf_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     crate::import::check_coverage(&rd, &[crate::import::SAM_PREFIX, clip::import::siglip::DEEPSEEK_VL_LOW_PREFIX, crate::import::ALIGNER_PREFIX, "language_model."])?;
     let examples = load_examples(dataset)?;
     let tower = Box::new(crate::tower::HybridTower::load(&rd, &cfg)?);
     let frontend = Frontend::open(dir, crate::model::Parts { tower, style: crate::prompt::DEEPSEEK_VL, wrap: None, language: cfg.language })?;
-    run(frontend, &rd, crate::import::ALIGNER_PREFIX, examples, opts, progress)
+    run(frontend, &rd, crate::import::ALIGNER_PREFIX, examples, opts, progress, cancelled)
 }
 
 /// One dataset example with its images decoded.

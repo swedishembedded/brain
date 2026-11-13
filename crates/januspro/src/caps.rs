@@ -40,22 +40,37 @@ pub fn text2image_spec() -> ActionSpec {
         .output(BlobSpec::new("image", Media::Image, "the image: raw HWC f32 pixels in [0,1], meta {w,h,c} (capability::blob's wire convention)"))
 }
 
-pub fn manifest() -> Manifest {
-    Manifest::new(
-        MODEL,
-        "Janus-Pro-7B -- one Llama decoder that reads images (SigLIP-L + aligner) and draws them (VQ-16 tokens under \
-         classifier-free guidance), at the checkpoint's own bf16.",
-        vec![
-            deepseekvl::caps::generate_spec("Janus-Pro: up to 8 images + a conversation in, greedy text out (streamed per token)"),
-            text2image_spec(),
-        ],
-    )
-    .with_max_context_tokens(deepseekvl::caps::MAX_CONTEXT as u64)
+const DESCRIPTION: &str = "Janus-Pro-7B -- one Llama decoder that reads images (SigLIP-L + aligner) and draws them (VQ-16 tokens under \
+     classifier-free guidance), at the checkpoint's own bf16.";
+
+fn served_actions() -> Vec<ActionSpec> {
+    vec![deepseekvl::caps::generate_spec("Janus-Pro: up to 8 images + a conversation in, greedy text out (streamed per token)"), text2image_spec()]
 }
 
-/// The manifest for the scheduled service (`weights` stripped).
+/// Share of generation-fine-tune steps whose prompt is replaced by padding
+/// when the caller names none.
+pub const DEFAULT_CFG_DROPOUT: f64 = 0.1;
+
+pub fn finetune_spec() -> ActionSpec {
+    deepseekvl::caps::finetune_spec(
+        "finetune",
+        "LoRA fine-tune: understanding (images and conversations, as DeepSeek-VL's) or generation (prompts and the images to draw for them)",
+    )
+    .param(ParamSpec::new("mode", ParamType::Enum(vec!["understanding".into(), "generation".into()]), "which half of the model learns: reading images, or drawing them").required())
+    .param(ParamSpec::new("cfg_dropout", ParamType::Float, "generation: the share of steps whose prompt is replaced by padding, which teaches the unconditional branch guidance contrasts against").default(json!(DEFAULT_CFG_DROPOUT)).min(0.0).max(capability::bounds::UNIT))
+}
+
+pub fn manifest() -> Manifest {
+    let mut actions = served_actions();
+    actions.push(finetune_spec());
+    Manifest::new(MODEL, DESCRIPTION, actions).with_max_context_tokens(deepseekvl::caps::MAX_CONTEXT as u64)
+}
+
+/// The manifest for the scheduled service: the inference actions, with the
+/// checkpoint as service-side configuration. Fine-tuning reads a dataset and
+/// writes an adapter on the host, so it is run locally.
 pub fn manifest_resident() -> Manifest {
-    manifest().for_serving()
+    Manifest::new(MODEL, DESCRIPTION, served_actions()).with_max_context_tokens(deepseekvl::caps::MAX_CONTEXT as u64).for_serving()
 }
 
 /// Janus-Pro's understanding session, for serving, as `placement` puts it.
@@ -202,7 +217,45 @@ impl Provider for JanusProProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<std::sync::Arc<dyn Action>> {
-        matches!(name, "generate" | "text2image").then(|| std::sync::Arc::new(JanusAction { name: name.to_string(), default_dir: self.default_dir.clone() }) as std::sync::Arc<dyn Action>)
+        match name {
+            "generate" | "text2image" => Some(std::sync::Arc::new(JanusAction { name: name.to_string(), default_dir: self.default_dir.clone() })),
+            "finetune" => Some(std::sync::Arc::new(FinetuneAction { dir: self.default_dir.clone() })),
+            _ => None,
+        }
+    }
+}
+
+struct FinetuneAction {
+    dir: Option<String>,
+}
+
+impl Action for FinetuneAction {
+    fn spec(&self) -> ActionSpec {
+        finetune_spec()
+    }
+
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        use deepseekvl::caps::{finetune_options, step_progress, trained};
+        let dir = std::path::PathBuf::from(self.dir.clone().ok_or("januspro finetune: no Janus-Pro checkpoint (pull one, or name its directory with --dir)")?);
+        let (options, dataset, save) = finetune_options(inv, "januspro finetune")?;
+        let base = brain_modelstore::repo_id(&dir);
+        let card = format!("{base}:local:janus-adapter:latest");
+        let seed = options.seed;
+        let cancelled = || inv.cancel.is_cancelled();
+        match inv.get_str("mode").as_deref() {
+            Some("understanding") => {
+                let o = crate::train::finetune_understanding(&dir, &dataset, &options, &mut step_progress(progress), &cancelled)?;
+                o.save(&save, &card, &base)?;
+                Ok(trained(o.examples, o.block, o.initial_loss, o.final_loss, seed, &save))
+            }
+            Some("generation") => {
+                let cfg_dropout = inv.get_f64("cfg_dropout").unwrap_or(DEFAULT_CFG_DROPOUT) as f32;
+                let o = crate::train::finetune_generation(&dir, &dataset, &crate::train::GenOptions { options, cfg_dropout }, &mut step_progress(progress), &cancelled)?;
+                o.save(&save, &card, &base)?;
+                Ok(trained(o.examples, o.block, o.initial_loss, o.final_loss, seed, &save))
+            }
+            other => Err(format!("januspro finetune: mode {other:?}: expected understanding or generation")),
+        }
     }
 }
 
@@ -245,6 +298,20 @@ impl Action for JanusAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finetune_needs_its_mode_and_serving_keeps_inference() {
+        let spec = finetune_spec();
+        let base = || Invocation::new().set("dataset", json!("d")).set("save", json!("s"));
+        assert!(spec.validate(base()).is_err(), "mode is required");
+        assert!(spec.validate(base().set("mode", json!("drawing"))).is_err());
+        let inv = spec.validate(base().set("mode", json!("generation"))).unwrap();
+        assert_eq!(inv.get_f64("cfg_dropout"), Some(DEFAULT_CFG_DROPOUT));
+        let names: Vec<String> = manifest().actions.into_iter().map(|a| a.name).collect();
+        assert_eq!(names, ["generate", "text2image", "finetune"]);
+        let served: Vec<String> = manifest_resident().actions.into_iter().map(|a| a.name).collect();
+        assert_eq!(served, ["generate", "text2image"]);
+    }
     use capability::CancelToken;
     use imaging::pixels::Rgb8;
 

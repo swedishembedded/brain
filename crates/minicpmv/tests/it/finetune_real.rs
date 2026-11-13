@@ -85,7 +85,7 @@ fn every_part_trains_and_the_saved_tune_answers_unseen_images() {
         if let Event::Eval { loss, .. } = e {
             evals.push(*loss);
         }
-    })
+    }, &|| false)
     .expect("fine-tune");
     let (before, after) = (outcome.initial_eval.unwrap(), outcome.final_eval.unwrap());
     assert_eq!(evals.len(), 1 + opts.epochs as usize, "held-out scored before training and after every epoch");

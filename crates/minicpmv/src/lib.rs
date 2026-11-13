@@ -37,6 +37,7 @@
 //! info@swedishembedded.com.
 
 pub mod caps;
+pub mod caps_train;
 pub mod config;
 pub mod dataset;
 pub mod export;

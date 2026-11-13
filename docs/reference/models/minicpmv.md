@@ -52,9 +52,9 @@ python3 samples/python/vision/minicpmv-chat/minicpmv_chat.py --image a.png --ima
 ## Fine-tuning
 
 ```bash
-brain minicpmv finetune --dataset train.jsonl --held-out val.jsonl --label acme:receipts:v1
+brain minicpmv finetune --dataset train.jsonl --held-out val.jsonl --label acme:receipts:v1 --seed $RANDOM
 brain serve --openai 8789          # now also lists brain/minicpmv:acme:receipts:v1
-brain minicpmv export-peft --tune acme:receipts:v1 --out receipts-peft
+brain minicpmv export_peft --tune acme:receipts:v1 --save receipts-peft
 ```
 
 The dataset is `generic-messages-v2` JSONL - one conversation per line,
@@ -79,7 +79,7 @@ Each part trains on its own:
 | flag | part | modes (default first) |
 |---|---|---|
 | `--decoder` | the Qwen3.5 decoder | `lora:16:32` (rank:alpha), `full`, `frozen` |
-| `--freeze-connector` | the merger | trained unless given |
+| `--connector false` | the merger | trained unless given |
 | `--vision` | the SigLIP tower and window merger | `frozen`, `lora:R:A` (on every layer's qkv, out, fc1, fc2), `full` |
 
 | option | effect |
@@ -92,9 +92,9 @@ Each part trains on its own:
 | `--block T` | tokens per sample (default: the longest sample) |
 | `--downsample`, `--max-slices`, `--max-frames` | the processor options, as for `generate` |
 | `--checkpoint-every N`, `--resume` | save the whole training state every N steps (always at each epoch's end); `--resume` continues from it, drawing the same batches |
-| `--label owner:name:tag` / `--out DIR` | where the tune goes: beside the checkpoint in the model store under the label (served as `brain/minicpmv:<label>`), or a directory |
+| `--label owner:name:tag` / `--save DIR` | where the tune goes: beside the checkpoint in the model store under the label (served as `brain/minicpmv:<label>`), or a directory |
 | `--activations keep|recompute` | what the backward keeps of the forward in the parts that train: the decoder as `qwen35` does, and a vision tower that trains always rebuilds its blocks, so `keep` is refused by name there; absent leaves each part's default |
-| `--device gpuN`, `--seed S` | the card; the seed of the data order and adapter initialisation (random and printed when not given) |
+| `--device gpuN` (global), `--seed S` | the card; the seed of the data order and adapter initialisation (random and printed when not given) |
 
 A tune directory holds `tune.json`, the decoder's LoRA adapter (or its full
 weights), and the vision side's trained tensors and LoRA factors. Serving
