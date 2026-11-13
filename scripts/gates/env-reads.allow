@@ -147,8 +147,6 @@ crates/cli/src/resolve.rs	BRAIN_QWEN3TTS_WEIGHTS
 crates/cli/src/resolve.rs	BRAIN_RESOLVETESTARCH_DIT
 crates/cli/src/resolve.rs	BRAIN_RESOLVETESTARCH_VAE
 crates/cli/src/run_cli.rs	BRAIN_AUTO_FETCH
-crates/cli/src/run_cli.rs	BRAIN_CONF
-crates/cli/src/run_cli.rs	BRAIN_GPT2
 crates/cli/src/serve_daemon.rs	XDG_RUNTIME_DIR
 crates/cli/src/supply.rs	<var>
 crates/cli/src/supply.rs	BRAIN_AUTO_FETCH

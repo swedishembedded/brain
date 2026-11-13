@@ -8,13 +8,13 @@
 //! back as a JSONL line to stdout (flushed per line). Diagnostics go to stderr.
 //!
 //! Flags:
-//!   * `--gpt <path>` (or env `BRAIN_GPT2`) - load a GPT checkpoint as the text
+//!   * `--gpt <path>` - load a GPT checkpoint as the text
 //!     model. With none, a fake echo model is used so the loop is testable
 //!     without a trained model.
 //!   * `--yolo <path>` - load a YOLO checkpoint as the
 //!     object detector. With none, a `FakeDetectModel` returns a fixed box so the
 //!     loop runs without a trained detector.
-//!   * `--conf <f32>` (or env `BRAIN_CONF`) - detection confidence threshold for
+//!   * `--conf <f32>` - detection confidence threshold for
 //!     the YOLO detector (default 0.25). Lower it so a lightly-trained tiny model's
 //!     low-confidence boxes still surface. No effect on the fake detector.
 //!   * `--max-new N`, `--temp X`, `--top-k K`, `--seed S` - generation config.
@@ -398,9 +398,9 @@ DECISION MODELS  (decide + Laya; every servable one in the model store is
                          a validated decide model, else fails with the reason.
 
 STDIO CONTROLLER  (--stdio)
-  --gpt PATH             GPT checkpoint (else $BRAIN_GPT2; else a fake echo model)
+  --gpt PATH             GPT checkpoint (else a fake echo model)
   --yolo PATH             YOLO checkpoint (else a fake detector)
-  --conf X                detection confidence threshold (else $BRAIN_CONF, 0.25)
+  --conf X                detection confidence threshold (default 0.25)
   --max-new N  --temp X  --top-k K  --seed S      generation config
   Reads JSONL events on stdin, writes JSONL events on stdout, one per line.
   Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain serve --stdio
@@ -446,9 +446,8 @@ EXAMPLES
 ";
 
 /// The value that must follow a value-taking flag. A flag with no value is a
-/// typo, not a request for the default: a trailing `--gpt` used to silently
-/// mean \"no checkpoint\", erasing a `BRAIN_GPT2` already read from the
-/// environment, and a trailing `--models-dir` used to silently scan the XDG
+/// typo, not a request for the default: a trailing `--gpt` would otherwise
+/// mean \"no checkpoint\", and a trailing `--models-dir` would scan the XDG
 /// default instead of the directory the caller meant to name.
 /// A policy value or flag that does not parse: say so with the usage and stop.
 fn policy_error(e: &str) -> ! {
@@ -678,7 +677,7 @@ fn serve_daemon_record(runtime_dir: Option<&Path>) -> PathBuf {
 pub fn run_serve(args: &[String]) {
     let (seed, rest) = crate::args::split_seed(args, "brain serve");
     let args = &rest[..];
-    let mut gpt_path = std::env::var("BRAIN_GPT2").ok();
+    let mut gpt_path: Option<String> = None;
     // `--stdio` selects the event-driven controller; every other run serves
     // HTTP and/or D-Bus. The first stdio-only flag given is kept so a run that
     // names one without `--stdio` is refused instead of ignoring it.
@@ -688,9 +687,8 @@ pub fn run_serve(args: &[String]) {
     let mut cfg = GenConfig { max_new: 256, temperature: 0.0, top_k: 0, eos: None, seed };
     // Optional detection confidence threshold for the YOLO detector. A tiny model
     // trained for only a few hundred steps emits low-confidence boxes that the
-    // default 0.25 filter would drop, so the demo can lower it (also `BRAIN_CONF`).
-    let mut conf: Option<f32> =
-        std::env::var("BRAIN_CONF").ok().and_then(|s| s.parse().ok());
+    // default 0.25 filter would drop, so the demo can lower it.
+    let mut conf: Option<f32> = None;
     // D-Bus control surface (`--dbus [--dbus-system] [--dbus-name NAME]`).
     let (mut dbus, mut dbus_system, mut dbus_name) = (false, false, None::<String>);
     let mut dbus_reserve_gb: Option<u64> = None; // GB kept free per GPU (headroom for activations); unset: sized from --max-batch

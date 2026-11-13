@@ -145,12 +145,10 @@ The two admission deadlines are `brain serve` flags, not variables: `--admit-dea
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup (also `--models-dir`) | `$XDG_DATA_HOME/brain/models` |
 | `BRAIN_AUTO_FETCH` | `1`/`true`/`on` enables on-demand fetching of missing model files (`--autofetch` publishes the same thing and wins over an exported `0`); a pulled model still resolves with the gate off | disabled |
-| `BRAIN_CONF` | stdio-loop YOLO confidence threshold (also `--conf`) | 0.25 |
 | `BRAIN_SCHED_MAX_BATCH` | maximum jobs the scheduler groups into one batch | 8 |
 | `BRAIN_SCHED_AGE_WEIGHT` | scheduler priority weight per millisecond a job has waited | 1.0 |
 | `BRAIN_SCHED_BATCH_WEIGHT` | scheduler priority weight favoring larger batches | 200.0 |
 | `BRAIN_SCHED_MAX_WAIT_MS` | a group whose oldest job has waited longer than this is force-picked regardless of batch size | 2000 |
-| `BRAIN_CONF` | see above | 0.25 |
 | `BRAIN_LIMIT_VRAM_TOTAL` | environment fallback for `--limit-vram-total`: a ceiling on VRAM the whole process may hold, summed over every GPU (not per card) | no ceiling |
 | `BRAIN_LIMIT_RAM_TOTAL` | environment fallback for `--limit-ram-total`: a ceiling on host RAM the process may hold (CPU + every NPU) | no ceiling |
 
@@ -195,7 +193,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_QWEN3ASR_WINDOW` / `BRAIN_QWEN3ASR_MAXNEW` | Qwen3-ASR window (s) / max tokens | 30 / 200 |
 | `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` | forecast horizon / sample count | 64 / 1 |
 | `BRAIN_MOCK_DELAY_MS` | mock model artificial latency | 0 |
-| `BRAIN_GPT2` | stdio-loop GPT checkpoint (also `--gpt`) | fake echo model |
 
 The Qwen3 and Qwen3.8 serving sizes are `brain serve` flags, not variables:
 `--ctx` (default: auto-sized to the card), `--max-batch` (default
