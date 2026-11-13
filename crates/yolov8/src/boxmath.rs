@@ -97,18 +97,16 @@ pub fn ciou(pred: Xyxy, tgt: Xyxy) -> f32 {
 /// `imaging::letterbox` — the image substrate crate that owns every pixel-layout
 /// operation in the workspace.
 ///
-/// It used to be defined here, and this module is still where detection code
-/// names it (`boxmath::Letterbox`, `boxmath::letterbox_rgb`), so no call site
-/// moved. But the letterbox is not box *math*: it is an image transform, and
-/// keeping a second definition next to `imaging`'s is exactly the drift the
-/// "one implementation" rule (AGENTS.md) exists to prevent — the pad fill, the
-/// `pad_y as usize` truncation and the half-pixel nearest rule are all baked
-/// into the trained yolo weights and into every reported `map50`, so there must
-/// be exactly one place they can be changed.
+/// This module is where detection code names it (`boxmath::Letterbox`,
+/// `boxmath::letterbox_rgb`). The letterbox is not box *math*: it is an image
+/// transform, and a second definition next to `imaging`'s is exactly the drift
+/// the "one implementation" rule (AGENTS.md) exists to prevent. The pad (one
+/// integral pad shared by pixels and boxes), the fill and the half-pixel
+/// nearest rule are all baked into the trained yolo weights and every reported
+/// `map50`, so there is exactly one place they live.
 ///
-/// `imaging::letterbox`'s module header documents why the nearest rule is
-/// half-pixel (and therefore *not* `resize_nearest.wgsl`) and why the
-/// truncation must not be "fixed" without a `map50` gate.
+/// `imaging::letterbox`'s module header states the rule and its device twin,
+/// `imaging::Ctx::letterbox`.
 pub use imaging::letterbox::{letterbox_rgb, Letterbox};
 
 /// Is the pixel point `(px, py)` strictly inside the pixel `xyxy` box?
