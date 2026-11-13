@@ -246,7 +246,7 @@ const MOE_DECODE_HEADROOM: u32 = 256;
 const MOE_SCRATCH_FIXED: u64 = 3 << 30;
 const MOE_SCRATCH_PER_SEQUENCE: u64 = 24 << 20;
 
-/// The Qwen3.6-35B-A3B GGUF (`qwen35moe:<gguf>` / `qwen35moe-gguf`).
+/// The Qwen3.6-35B-A3B GGUF (`qwen35moe:<gguf>[:kv<tier>]`).
 pub struct Qwen35MoeEngine {
     path: String,
     cfg: qwen35moe::config::Qwen35Config,
@@ -260,15 +260,15 @@ pub struct Qwen35MoeEngine {
 }
 
 impl Qwen35MoeEngine {
-    pub fn open(path: &str) -> Result<Qwen35MoeEngine, String> {
+    pub fn open(path: &str, tier: model::ops::TierPolicy, kv_tier: model::kv_tier::KvTier) -> Result<Qwen35MoeEngine, String> {
         let gpu = gpu_budget().into_iter().next().ok_or("no GPU with queryable memory: longctx is GPU-only and has no host fallback")?;
         let mg = MmapGguf::open(path).map_err(|e| format!("open {path}: {e}"))?;
         let cfg = qwen35moe::gguf_load::resident_config(&mg, 1)?;
         Ok(Qwen35MoeEngine {
             path: path.to_string(),
             cfg,
-            tier: qwen35moe::gguf_load::tier_from_env(),
-            kv_tier: qwen35moe::gguf_load::kv_tier_from_env()?,
+            tier,
+            kv_tier,
             gpu,
             eng: None,
             tables: Vec::new(),
@@ -563,6 +563,9 @@ pub struct Args {
     pub steps: Option<u32>,
     /// `--kernels`: profile each batch size's decode steps per kernel.
     pub kernels: bool,
+    /// `--weight-format`: the weight tier of an engine that takes one
+    /// (`qwen35moe:`); `None` is the engine's default.
+    pub weight_format: Option<model::ops::TierPolicy>,
 }
 
 /// Defaults when a flag is absent. A context is always stated in the artifact,
@@ -598,7 +601,7 @@ pub fn options(args: &Args, device: &str, smoke: bool) -> Result<perf::scenarios
 /// Run the scenario on the engine `spec` names.
 pub fn run(spec: &str, args: &Args, device: &str, smoke: bool) -> Result<perf::schema::Artifact, String> {
     let opt = options(args, device, smoke)?;
-    let mut engine = build_engine(spec)?;
+    let mut engine = build_engine(spec, args)?;
     perf::scenarios::longctx::run(engine.as_mut(), &opt)
 }
 
@@ -608,19 +611,17 @@ pub fn run(spec: &str, args: &Args, device: &str, smoke: bool) -> Result<perf::s
 /// `qwen:<weights>`) replaced the bare `-gguf` forms that read env vars: the
 /// checkpoint is named on the command line, as the env-variable phase-out
 /// wants, so artifacts record exactly which file was measured.
-pub fn build_engine(spec: &str) -> Result<Box<dyn LongContextEngine>, String> {
+pub fn build_engine(spec: &str, args: &Args) -> Result<Box<dyn LongContextEngine>, String> {
     if let Some(rest) = spec.strip_prefix("qwen35:") {
         // `:kv<tier>` names the GQA cache storage; f32 when absent.
         let (path, kv) = crate::perf_qwen35::parse_spec(rest)?;
         let kv = kv.unwrap_or(model::kv_tier::KvTier::F32);
         return Ok(Box::new(Qwen35Engine::open(path, kv)?));
     }
-    if let Some(path) = spec.strip_prefix("qwen35moe:") {
-        return Ok(Box::new(Qwen35MoeEngine::open(path)?));
-    }
-    if spec == "qwen35moe-gguf" {
-        let path = std::env::var(qwen35moe::gguf_load::GGUF_ENV).map_err(|_| format!("target qwen35moe-gguf reads {}; set it to a Qwen3.6-35B-A3B GGUF", qwen35moe::gguf_load::GGUF_ENV))?;
-        return Ok(Box::new(Qwen35MoeEngine::open(&path)?));
+    if let Some(rest) = spec.strip_prefix("qwen35moe:") {
+        let (path, kv) = crate::perf_qwen35::parse_spec(rest).map_err(|e| e.replace("qwen35:", "qwen35moe:"))?;
+        let tier = args.weight_format.clone().unwrap_or_else(crate::perf_qwen35moe::default_tier);
+        return Ok(Box::new(Qwen35MoeEngine::open(path, tier, kv.unwrap_or(model::kv_tier::KvTier::F32))?));
     }
     if let Some(weights) = spec.strip_prefix("qwen:") {
         return Ok(Box::new(QwenPagedEngine::open(weights)?));
@@ -646,7 +647,7 @@ mod tests {
 
     #[test]
     fn smoke_shrinks_the_run_and_flags_are_validated() {
-        let args = Args { context: Some(131_072), ladder: Some("1,2,4,8".into()), prefill: Some("4096,8192".into()), steps: Some(16), kernels: false };
+        let args = Args { context: Some(131_072), ladder: Some("1,2,4,8".into()), prefill: Some("4096,8192".into()), steps: Some(16), kernels: false, weight_format: None };
         let o = options(&args, "gpu", true).unwrap();
         assert!(o.smoke && o.context <= 256 && o.steps == 2 && o.ladder == vec![1, 2] && o.prefill == vec![128]);
         let full = options(&args, "gpu", false).unwrap();
@@ -710,7 +711,7 @@ mod tests {
 
     #[test]
     fn targets_outside_the_supported_families_are_refused_by_name() {
-        let e = build_engine("yolo:/nowhere").err().unwrap();
+        let e = build_engine("yolo:/nowhere", &Args::default()).err().unwrap();
         assert!(e.contains("yolo:/nowhere") && e.contains("qwen35:<gguf>"), "{e}");
     }
 
@@ -718,7 +719,7 @@ mod tests {
     /// the spec, and the `:kv*` suffix is the KV tier as parsed data.
     #[test]
     fn the_qwen35_target_carries_the_path_and_kv_tier() {
-        let e = build_engine("qwen35-gguf").err().unwrap();
+        let e = build_engine("qwen35-gguf", &Args::default()).err().unwrap();
         assert!(e.contains("qwen35-gguf") && e.contains("qwen35:<gguf>"), "{e}");
         // `Qwen35Engine::open` propagates `MmapGguf::open`'s error verbatim
         // (its own GPU-only gate runs first, so the propagation is asserted

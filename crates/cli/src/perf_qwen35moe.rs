@@ -6,8 +6,8 @@
 //! Qwen3.6-35B-A3B GGUF behind `qwen35moe::serve::Engine` and the shared
 //! `model::serve::Scheduler`, so its goodput, TTFT and KV-pressure numbers are
 //! measured the way `qwen35:` measures the dense model and can be compared with
-//! it. The weight tier comes from the engine's own loader (`BRAIN_QWEN35MOE_TIER`,
-//! default int8) and the KV tier from the spec or `BRAIN_QWEN35_KV`.
+//! it. The weight tier is `brain perf run --weight-format` (default int8) and
+//! the KV tier the spec's `:kv<tier>` suffix (default f32).
 //!
 //! Swedish Embedded AB implements solutions for measuring LLM serving
 //! performance against production behaviour for its clients. If your team needs
@@ -26,16 +26,13 @@ const CONTEXT: u32 = 8192;
 const MAX_BATCH: u32 = 16;
 
 /// The engine target for one released GGUF, on the first `--device` card.
-pub(crate) fn build(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+pub(crate) fn build(rest: &str, weights: &model::ops::TierPolicy) -> Result<Box<dyn PerfTarget>, String> {
     let (path, kv) = crate::perf_qwen35::parse_spec(rest).map_err(|e| e.replace("qwen35:", "qwen35moe:"))?;
     if !std::path::Path::new(path).is_file() {
         return Err(format!("qwen35moe target: GGUF not found: {path}"));
     }
-    let kv_tier = match kv {
-        Some(kv) => kv,
-        None => qwen35moe::gguf_load::kv_tier_from_env()?,
-    };
-    let tier = qwen35moe::gguf_load::tier_from_env();
+    let kv_tier = kv.unwrap_or(model::kv_tier::KvTier::F32);
+    let tier = weights.clone();
     let mg = MmapGguf::open(path).map_err(|e| format!("open {path}: {e}"))?;
     let cfg = qwen35moe::gguf_load::resident_config(&mg, CONTEXT)?;
     let src = qwen35moe::gguf_load::source(&mg, &cfg)?;
@@ -52,19 +49,25 @@ pub(crate) fn build(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, Vec::new(), vocab)))
 }
 
+/// The weight tier a run that names no `--weight-format` measures: uniform
+/// int8, the tier the engine serves by default.
+pub(crate) fn default_tier() -> model::ops::TierPolicy {
+    model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn a_spec_without_a_checkpoint_names_this_target_not_the_dense_one() {
-        let e = build(":kvint8").err().expect("an empty path is refused");
+        let e = build(":kvint8", &default_tier()).err().expect("an empty path is refused");
         assert!(e.contains("qwen35moe:") && !e.contains("qwen35:"), "{e}");
     }
 
     #[test]
     fn a_missing_checkpoint_is_reported_before_any_device_work() {
-        let e = build("/nonexistent/q.gguf").err().expect("a missing file is refused");
+        let e = build("/nonexistent/q.gguf", &default_tier()).err().expect("a missing file is refused");
         assert!(e.contains("GGUF not found"), "{e}");
     }
 }

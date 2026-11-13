@@ -77,7 +77,6 @@ crates/cli/src/main.rs	BRAIN_TEST_CONFIG_INHERITED
 crates/cli/src/main.rs	BRAIN_TEST_CONFIG_NUMBER
 crates/cli/src/main.rs	HOME
 crates/cli/src/main.rs	XDG_CONFIG_HOME
-crates/cli/src/perf_longctx.rs	<qwen35moe::gguf_load::GGUF_ENV>
 crates/cli/src/serve_daemon.rs	XDG_RUNTIME_DIR
 crates/cli/src/supply.rs	YOLO_RAW_PT
 crates/cli/tests/it/device_routing.rs	BRAIN_DEVICE

@@ -108,6 +108,8 @@ OPTIONS
   --prefill <a,b,c>     longctx: prompt lengths for the real cold-prefill table
                         (default none)
   --steps <N>           longctx: timed decode steps per batch size (default 8)
+  --weight-format SPEC  the weight tier of a qwen35moe: target (the `brain serve --weight-format`
+                        grammar: int8, f32, or per-leaf like i8,out_proj=f32; default int8)
   --kernels             longctx: also profile each batch size's decode steps per kernel on
                         the device and roll the table up into phases (linear, experts,
                         attention, recurrent mixer, norm/epilogue, sampling) - the same
@@ -132,7 +134,7 @@ OPTIONS
   --device cpu|gpu|vulkan  (global flag, handled by the main dispatcher)
 
 LONG CONTEXT
-  brain perf run longctx --target <qwen35:<gguf>[:kvf32|:kvbf16|:kvint8] | qwen35moe:<gguf> | qwen35moe-gguf | qwen:<weights> | ricursive:<dir>[:kvbf16|:kvint8|:kvfp8]>
+  brain perf run longctx --target <qwen35:<gguf>[:kvf32|:kvbf16|:kvint8] | qwen35moe:<gguf>[:kv<tier>] | qwen:<weights> | ricursive:<dir>[:kvbf16|:kvint8|:kvfp8]>
                          --context N [--ladder 1,2,4,...] [--prefill 1024,4096,...]
                          [--steps N]
       One model on one GPU at a long context: prefill speed, single-stream
@@ -405,6 +407,13 @@ fn run(args: &[String]) {
             "--prefill" => longctx.prefill = Some(val(args, &mut i, "--prefill")),
             "--steps" => longctx.steps = Some(parse_flag(args, &mut i, "--steps")),
             "--kernels" => longctx.kernels = true,
+            "--weight-format" => {
+                let spec = val(args, &mut i, "--weight-format");
+                longctx.weight_format = Some(model::ops::TierPolicy::parse(&spec).unwrap_or_else(|e| {
+                    eprintln!("perf run: --weight-format {spec:?}: {e}");
+                    std::process::exit(2);
+                }));
+            }
             "--horizon" => forecast.horizon = parse_flag(args, &mut i, "--horizon"),
             "--samples" => forecast.samples = parse_flag(args, &mut i, "--samples"),
             "--requests" => opt.num_requests = val(args, &mut i, "--requests").parse().unwrap_or(opt.num_requests),
@@ -439,7 +448,7 @@ fn run(args: &[String]) {
         let art = match scenario.as_str() {
             "longctx" => target_spec
                 .as_deref()
-                .ok_or_else(|| "longctx needs --target qwen35:<gguf>[:kvf32|:kvbf16|:kvint8] | qwen35moe:<gguf> | qwen35moe-gguf | qwen:<weights> | ricursive:<dir>[:kvbf16|:kvint8|:kvfp8]".to_string())
+                .ok_or_else(|| "longctx needs --target qwen35:<gguf>[:kvf32|:kvbf16|:kvint8] | qwen35moe:<gguf>[:kv<tier>] | qwen:<weights> | ricursive:<dir>[:kvbf16|:kvint8|:kvfp8]".to_string())
                 .and_then(|spec| crate::perf_longctx::run(spec, &longctx, &opt.device, opt.smoke)),
             "residency" => crate::perf_engine::run_residency_with(&opt, 24, 4.0, &policy),
             // Budget (device slots) and passes (denoise steps) are fixed,
@@ -485,7 +494,8 @@ fn run(args: &[String]) {
         eprintln!("perf run: --target is required (no default - see `brain perf list` or `brain perf --help`)");
         std::process::exit(2);
     };
-    let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override, forecast) {
+    let weights = longctx.weight_format.clone().unwrap_or_else(crate::perf_qwen35moe::default_tier);
+    let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override, forecast, &weights) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("perf: {e}");
@@ -690,7 +700,7 @@ impl SynthSpec {
     }
 }
 
-fn build_target(spec: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, forecast: ForecastShape) -> Result<Box<dyn PerfTarget>, String> {
+fn build_target(spec: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, forecast: ForecastShape, weights: &model::ops::TierPolicy) -> Result<Box<dyn PerfTarget>, String> {
     if let Some(shape) = spec.strip_prefix("qwen-synth:") {
         return build_qwen_synth(shape, workload, input_override, output_override);
     }
@@ -701,7 +711,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
         return crate::perf_qwen35::build(rest);
     }
     if let Some(rest) = spec.strip_prefix("qwen35moe:") {
-        return crate::perf_qwen35moe::build(rest);
+        return crate::perf_qwen35moe::build(rest, weights);
     }
     if let Some(rest) = spec.strip_prefix("http:") {
         return build_http(rest, workload, input_override, output_override);
