@@ -29,8 +29,10 @@ pub fn command(program: &str, spec: &ActionSpec) -> Command {
             arg = arg.action(ArgAction::Set).value_name("BOOL").num_args(0..=1).default_missing_value("true").value_parser(["true", "false", "1", "0"]);
         } else {
             arg = arg.action(ArgAction::Set).value_name(p.ty.name().to_uppercase());
-            if let ParamType::Enum(vals) = &p.ty {
-                arg = arg.value_parser(vals.clone());
+            match &p.ty {
+                ParamType::Enum(vals) => arg = arg.value_parser(vals.clone()),
+                ParamType::Int | ParamType::Float => arg = arg.value_parser(number_parser(p)).allow_negative_numbers(true),
+                _ => {}
             }
             if p.required && p.default.is_none() {
                 arg = arg.required(true);
@@ -54,6 +56,23 @@ pub fn command(program: &str, spec: &ActionSpec) -> Command {
         cmd = cmd.arg(Arg::new("out").long("out").action(ArgAction::Append).value_name("NAME=PATH").help(format!("write an output blob to a file ({outs})")));
     }
     cmd.arg(Arg::new("json").long("json").action(ArgAction::SetTrue).help("print the scalar outputs as one JSON object"))
+}
+
+/// A parser that accepts a number of `p`'s type inside its bounds, so a
+/// malformed value is named with its flag before anything else happens. A
+/// seed is never negative, whatever its manifest says.
+fn number_parser(p: &capability::ParamSpec) -> impl Fn(&str) -> Result<String, String> + Clone + Send + Sync + 'static {
+    let (int, min, max) = (p.ty == ParamType::Int, p.min.or_else(|| (p.name == "seed").then_some(0.0)), p.max);
+    move |s: &str| {
+        let v = if int { s.parse::<i64>().map(|v| v as f64).map_err(|_| format!("'{s}' is not a whole number"))? } else { s.parse::<f64>().ok().filter(|v| v.is_finite()).ok_or_else(|| format!("'{s}' is not a number"))? };
+        if let Some(m) = min.filter(|m| v < *m) {
+            return Err(format!("{s} is below the least allowed, {m}"));
+        }
+        if let Some(m) = max.filter(|m| v > *m) {
+            return Err(format!("{s} is above the most allowed, {m}"));
+        }
+        Ok(s.to_string())
+    }
 }
 
 /// What a parsed command line asks for: the params as an [`Invocation`]
@@ -197,6 +216,21 @@ mod tests {
         let e = parsed(&["--prompt", "x", "--out", "picture=o.png"]).unwrap_err();
         assert!(e.contains("no output 'picture'") && e.contains("mask"), "{e}");
         assert!(parsed(&["--prompt", "x", "--out", "mask="]).unwrap_err().contains("NAME=PATH"));
+    }
+
+    /// A number is checked against its type and bounds while parsing, and a
+    /// seed is never negative.
+    #[test]
+    fn numbers_are_checked_where_they_are_typed() {
+        let s = ActionSpec::new("a", "s")
+            .param(ParamSpec::new("seed", ParamType::Int, "seed"))
+            .param(ParamSpec::new("strength", ParamType::Float, "s").min(0.0).max(1.0));
+        let run = |argv: &[&str]| command("t", &s).try_get_matches_from(argv).map(|_| ()).map_err(|e| e.to_string());
+        assert!(run(&["--seed", "7", "--strength", "0.5"]).is_ok());
+        for bad in [["--seed", "x"], ["--seed", "-1"], ["--seed", "1.5"], ["--strength", "2"], ["--strength", "nan"]] {
+            let e = run(&bad).unwrap_err();
+            assert!(e.contains(bad[0]), "{bad:?}: {e}");
+        }
     }
 
     /// A param owns its word: an input blob of the same name is reachable
