@@ -57,6 +57,7 @@ pub mod openrouter;
 pub mod png;
 pub mod preprocess;
 pub mod sampling;
+pub mod speech;
 pub mod state;
 pub mod surface;
 pub mod systemone;

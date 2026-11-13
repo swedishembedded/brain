@@ -679,6 +679,18 @@ train_body() { # train_body <extra params json fragment, with a leading comma or
   printf '{"model":"brain/train","action":"train","params":{"base":"nobody/nothing","data":"{\\"train\\":{\\"digest\\":\\"%s\\"}}"%s}}' "$TRAIN_DIGEST" "$1"
 }
 
+@test "speech: POST /v1/audio/speech needs the key and refuses what it cannot honour by name" {
+  local st
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"model":"brain/mock","input":"hi"}' "$(base openai)/v1/audio/speech")
+  [ "$st" -eq 401 ]
+  post_json openai /v1/audio/speech '{"model":"brain/mock","input":"hi","voice":"alloy"}'
+  [ "$STATUS" -eq 400 ]
+  grep -qF voice "$RESP"
+  validate openai.json ErrorResponse "$RESP"
+  post_json openai /v1/audio/speech '{"model":"brain/mock","input":"hi"}'
+  [ "$STATUS" -eq 404 ]
+}
+
 @test "devices: GET /v1/devices needs the key and names no path, address or uuid" {
   local st
   st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$(base openai)/v1/devices")

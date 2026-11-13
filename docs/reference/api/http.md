@@ -37,6 +37,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
 | embeddings | - | `POST /embeddings` | `POST /embeddings` |
 | image generation | - | `POST /images/generations` | `POST /images/generations` |
 | transcription (speech to text) | - | `POST /audio/transcriptions` | `POST /audio/transcriptions` |
+| speech synthesis (text to speech) | - | `POST /audio/speech` | `POST /audio/speech` |
 | video (generate and edit) | - | `POST /videos`, `GET /videos/{id}`, `GET /videos/{id}/content`, `GET /videos/models` | same |
 
 - **Transcription** (`POST /v1/audio/transcriptions`, also without `/v1`): an
@@ -51,6 +52,14 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   `{"text", "usage": {"type": "duration", "seconds"}}`, where `seconds` is the
   decoded duration. `language` reaches a model only if its `transcribe` action
   takes one.
+- **Speech** (`POST /v1/audio/speech`, also without `/v1`): `{"model", "input", "response_format"?}` and nothing
+  else. `input` is 1 to 4096 characters; `response_format` is `wav` (default, 16-bit mono) or `pcm` (raw 16-bit
+  signed little-endian mono); the reply is the audio itself, with `Content-Type` `audio/wav` or `audio/pcm` and
+  `X-Sample-Rate` (the model's own rate, 24000 for Qwen3-TTS). A compressed format, `voice`, `speed`,
+  `instructions`, `stream_format` and any unknown field are a 400 naming it: brain's speech models take the text and
+  nothing that steers the voice (Qwen3-TTS's voice is fixed by the operator's configuration). The model is any one
+  whose `speak` action takes `text` and returns `audio`, listed as capability `speech`; the call is held to that
+  action's own contract before it runs and its length is capped at 1024 codec frames (about a minute and a half).
 - **Video** (`/v1/videos`, also without `/v1`), OpenRouter's asynchronous
   video contract. `POST /videos` takes `{"model", "prompt", "duration"?,
   "resolution"?, "aspect_ratio"?, "size"?, "generate_audio"?, "seed"?,
@@ -325,7 +334,7 @@ The Anthropic entry is unchanged.
 
 | Field | Meaning |
 |---|---|
-| `capabilities` | Names derived from the model's manifest: `chat`, `tools` (chat whose `generate` accepts `tools`), `vision` (chat whose `generate` reads `image` inputs; image parts sent to any other model are refused with 400), `embeddings`, `images`, `transcription` (a `transcribe` action taking `audio`). On OpenRouter the card's `architecture` modalities follow from the same set, e.g. `audio->text` for a speech model. |
+| `capabilities` | Names derived from the model's manifest: `chat`, `tools` (chat whose `generate` accepts `tools`), `vision` (chat whose `generate` reads `image` inputs; image parts sent to any other model are refused with 400), `embeddings`, `images`, `transcription` (a `transcribe` action taking `audio`), `speech` (a `speak` action taking `text` and returning `audio`). On OpenRouter the card's `architecture` modalities follow from the same set, e.g. `audio->text` for a speech model. |
 | `max_images_per_request`, `max_image_pixels_per_request` | On a `vision` model: the most images, and pixels over all of them, one request may carry; a request past either is refused with 400. |
 | `architecture.input_modalities` | On a chat model: `["text", "image"]` for a `vision` model, else `["text"]` (the field an agent runtime reads to decide whether it may attach images). |
 | `max_output_tokens` | The most new tokens one request may ask for, when the model's `generate` action declares an upper bound. On OpenRouter it is also `top_provider.max_completion_tokens`. |

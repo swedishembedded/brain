@@ -13,6 +13,7 @@ mod callers;
 mod connections;
 mod seams;
 mod shutdown;
+mod speech;
 mod tls;
 mod training_gate;
 mod video;

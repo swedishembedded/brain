@@ -31,6 +31,8 @@ pub fn routes() -> Router<AppState> {
         .route("/images/generations", post(images_generations))
         .route("/v1/audio/transcriptions", post(crate::audio::transcriptions))
         .route("/audio/transcriptions", post(crate::audio::transcriptions))
+        .route("/v1/audio/speech", post(crate::speech::speech))
+        .route("/audio/speech", post(crate::speech::speech))
 }
 
 /// `POST /chat/completions` — the OpenAI chat handler with OpenRouter's response

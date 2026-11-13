@@ -58,6 +58,8 @@ pub struct CapSet {
     pub image: bool,
     /// Speech to text, served on `/audio/transcriptions`.
     pub transcription: bool,
+    /// Text to speech, served on `/audio/speech`: a `speak` action that takes `text` and returns an `audio` blob.
+    pub speech: bool,
     /// Video generation offered as a product, served on `/videos`: a sellable
     /// action declaring a `capability::video::VideoContract` with no input clip.
     pub video: bool,
@@ -66,7 +68,7 @@ pub struct CapSet {
 impl CapSet {
     /// Does this model advertise any exposable capability?
     pub fn any(&self) -> bool {
-        self.chat || self.embeddings || self.image || self.transcription || self.video
+        self.chat || self.embeddings || self.image || self.transcription || self.speech || self.video
     }
 
     /// What a chat request to this model may carry, as model cards spell it.
@@ -87,6 +89,7 @@ impl CapSet {
             ("embeddings", self.embeddings),
             ("images", self.image),
             ("transcription", self.transcription),
+            ("speech", self.speech),
             ("video", self.video),
         ]
             .into_iter()
@@ -139,8 +142,9 @@ pub fn api_caps(m: &Manifest) -> CapSet {
             && a.inputs.iter().any(|b| b.name == "audio" && b.media == Media::Audio)
             && a.outputs.iter().any(|o| o.media == Media::Text)
     });
+    let speech = speak_action(m).is_some();
     let video = m.actions.iter().any(|a| a.video.as_ref().is_some_and(|c| c.sellable && c.clip_input.is_none()));
-    CapSet { chat, tools, vision, embeddings, image, transcription, video }
+    CapSet { chat, tools, vision, embeddings, image, transcription, speech, video }
 }
 
 /// Does `provider` expose a model with capabilities `caps`?
@@ -204,6 +208,17 @@ pub fn resolve_embed(manifests: &[Manifest], model: &str) -> bool {
 pub fn resolve_transcription(manifests: &[Manifest], model: &str) -> Option<bool> {
     let m = manifests.iter().find(|m| m.model == model && api_caps(m).transcription)?;
     Some(m.actions.iter().any(|a| a.name == "transcribe" && a.params.iter().any(|p| p.name == "language")))
+}
+
+/// The action that realises text to speech: a `speak` action with a `text` param and an `audio` output.
+fn speak_action(m: &Manifest) -> Option<&capability::ActionSpec> {
+    m.actions.iter().find(|a| a.name == "speak" && a.params.iter().any(|p| p.name == "text") && a.outputs.iter().any(|o| o.name == "audio" && o.media == Media::Audio))
+}
+
+/// Resolve a speech request's `model` string to the name of the action to invoke, when a manifest whose
+/// `model == id` advertises speech. Snapshot-taking - see [`resolve_chat`].
+pub fn resolve_speech(manifests: &[Manifest], model: &str) -> Option<String> {
+    manifests.iter().find(|m| m.model == model).and_then(speak_action).map(|a| a.name.clone())
 }
 
 /// Resolve an image request's `model` string to the **action name** to invoke: is
