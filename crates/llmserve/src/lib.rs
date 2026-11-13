@@ -22,7 +22,9 @@
 //! a call is already running waits for the next call.
 
 mod routing;
+mod score;
 pub use routing::request_prefix_chain;
+pub use score::{score_batch_scheduled, score_spec, MAX_ANSWERS_PER_CALL, MAX_ANSWERS_PER_RECORD, MAX_SCORE_RECORDS, SCORE_ACTION};
 
 use capability::{ActionResult, ActionSpec, Invocation, ParamSpec, ParamType, Progress};
 use data::qwen_tokenizer::QwenBpe;
@@ -762,7 +764,10 @@ impl<D: PagedDecoder + Send, F: Frontend + Send> Instance for ScheduledInstance<
         self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
     }
 
-    fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        if action == SCORE_ACTION {
+            return score_batch_scheduled(&mut self.sched, &self.front, invs);
+        }
         let started = std::time::Instant::now();
         let results = run_batch_scheduled(&mut self.sched, &self.front, invs, progress);
         let tokens = results.iter().filter_map(|r| r.as_ref().ok()).filter_map(|o| o.outputs.get("completion_tokens").and_then(|v| v.as_u64())).sum::<u64>() as usize;
@@ -770,7 +775,11 @@ impl<D: PagedDecoder + Send, F: Frontend + Send> Instance for ScheduledInstance<
         results
     }
 
-    fn run_open(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+    fn run_open(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+        // A scoring group is closed: it is answered by `run_batch`.
+        if action == SCORE_ACTION {
+            return false;
+        }
         let started = std::time::Instant::now();
         let capacity = self.capacity;
         let mut counting = CountingFeed { inner: feed, requests: invs.len(), tokens: 0 };

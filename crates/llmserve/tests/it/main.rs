@@ -15,3 +15,4 @@ mod encode_overlap;
 mod outcome_report;
 mod rejection;
 mod sampling_defaults;
+mod score;
