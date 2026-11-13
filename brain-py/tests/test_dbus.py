@@ -215,3 +215,10 @@ def test_text2image_decodes_to_pil():
 def test_outcome_text_prefers_blob_then_outputs():
     assert Outcome(blobs={"text": b"hi"}).text() == "hi"
     assert Outcome(outputs={"text": "yo"}).text() == "yo"
+
+
+def test_devices_is_the_json_the_server_answers():
+    brain = object.__new__(BrainDBus)
+    document = {"object": "list", "host": {"backend": "cpu"}, "data": [{"id": "cpu", "kind": "cpu", "memory": {"total_bytes": 8}}]}
+    brain._call = lambda method, *a, **k: (json.dumps(document),) if method == "Devices" else pytest.fail(method)
+    assert brain.devices() == document

@@ -6,7 +6,7 @@
 // needs expertise in hardware-aware model serving, you can procure our services
 // by sending an email to info@swedishembedded.com.
 
-//! What `GET /v1/devices` says about the machine: the [`apiserve::DeviceInventory`] of `brain serve`.
+//! What `GET /v1/devices` and the D-Bus `Devices` method say about the machine: the [`residency::DeviceInventory`] of `brain serve`.
 //!
 //! It reports identity and capability, never anything that names this machine's layout or a card uniquely: no PCI
 //! address, no UUID, no path. Memory is the executor's (`apiserve` adds it); this adds what each device is.
@@ -34,7 +34,7 @@ fn fields(value: Value) -> Map<String, Value> {
     }
 }
 
-impl apiserve::DeviceInventory for HostDevices {
+impl residency::DeviceInventory for HostDevices {
     fn host(&self) -> Map<String, Value> {
         let inventory = gpu_core::Inventory::probe();
         fields(json!({

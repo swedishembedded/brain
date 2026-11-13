@@ -81,6 +81,10 @@ class BrainDBus(BrainBase):
     def manifests(self) -> list[dict[str, Any]]:
         return json.loads(self._call("Manifests")[0])
 
+    def devices(self) -> dict[str, Any]:
+        """The devices the server schedules on, with their memory and what each is (`Devices`)."""
+        return json.loads(self._call("Devices")[0])
+
     def stats(self) -> dict[str, int]:
         """Scheduler counters: builds, evictions, batches, max_batch, resident, …."""
         return json.loads(self._call("Stats")[0])

@@ -23,9 +23,9 @@ Scope: Training as a job of the serving process (`crates/trainjob`): `brain/trai
 
 ## Not built (lane api, 2026-11-13)
 
-- [ ] Standalone teacher-forced scoring (`score` action of a served chat model, per record and per token, through the serving scheduler): the scheduler already scores a continuation under an adapter (`Scheduler::score_continuation`, behind `policy_trace`), but the chat `Frontend` has no hook that renders a `generic-messages-v2` record with its supervised mask (the template lives in the resident's parse closure), so a `score` action needs that hook on `Frontend` (and on `AdaptedFrontend`, `VisionFrontend`), a branch in `ScheduledInstance::run_batch`, and the action on every scheduler-backed chat manifest. Until then a held-out score of a trained adapter is the job report's `base_score`/`tuned_score` (sft) or `train_score`/`held_out_score` (dpo).
+- [x] Standalone teacher-forced scoring: the `score` action of the served Qwen3 and Qwen3.8 chat models (`llmserve::score`), adapter-aware, one prefill per answer through `Scheduler::score_continuation`, declared exactly where the decoder scores (conformance property `scoring_is_declared_exactly_when_it_works`). Other families (huginn, ouro, edgerock, ricursive, the GGUF qwen35) do not declare it: their decoders have no teacher-forced pass.
 - [ ] Timeline model as a served class: `horizon` already is one (`predict`, `eval`, `calibrate`, `train` with `timeline-v1` blobs, batched `predict`), but it is configured by host environment variables (`BRAIN_HORIZON_DIR` to load, `BRAIN_HORIZON_TRAIN_DIR` to write), so a remote caller can neither load a model it trained nor retrieve it: `train` returns a report only. Needs the model on the model store (resolver spec) and `train` publishing its model directory to the artifact store as a manifest, as `full_train` does (`trainjob::consolidate`).
-- [ ] No D-Bus equivalent of `GET /v1/devices` (the bus has `Manifests`, no device listing); `brain devices` is the local view.
+- [x] D-Bus `Devices()` answers the document `GET /v1/devices` does (`residency::devices::report`, one implementation; `brain_py.BrainDBus.devices`).
 - [ ] Paired sign test and bootstrap interval: deliberately no API (pure arithmetic; the orchestrator implements its statistics itself).
 
 ## Adapter hot-load (lane rollout, 2026-11-13)

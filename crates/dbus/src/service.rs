@@ -68,6 +68,8 @@ pub struct Manager {
     /// Whether training actions are served ([`capability::ActionSpec::training`]);
     /// off unless the operator passed `--training`.
     training: bool,
+    /// What the host knows of its devices beyond the executor's budgets, for `Devices`; `None` reports the budgets alone.
+    devices: Option<Arc<dyn residency::DeviceInventory>>,
 }
 
 impl Manager {
@@ -82,6 +84,7 @@ impl Manager {
             admit_deadline: residency::admission::DEFAULT_ADMIT_DEADLINE,
             cold_build_admit_deadline: residency::admission::DEFAULT_COLD_BUILD_ADMIT_DEADLINE,
             training: false,
+            devices: None,
         }
     }
 
@@ -100,6 +103,12 @@ impl Manager {
     /// Serve training actions (builder-style); see the field's doc.
     pub fn with_training(mut self, training: bool) -> Manager {
         self.training = training;
+        self
+    }
+
+    /// Describe the devices beyond their budgets (builder-style); see the field's doc.
+    pub fn with_devices(mut self, devices: Option<Arc<dyn residency::DeviceInventory>>) -> Manager {
+        self.devices = devices;
         self
     }
 
@@ -503,6 +512,14 @@ impl Manager {
     /// params a caller may set (`Manifest::for_serving`).
     async fn manifests(&self) -> String {
         serde_json::to_string(&Value::Array(self.executor.manifests().iter().map(|m| m.clone().for_serving().to_json()).collect())).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// The devices the server schedules on, as JSON: `{"object": "list", "host": {...}, "data": [{id, kind, memory,
+    /// ...}]}`, the same document `GET /v1/devices` answers ([`residency::devices::report`]): each device's memory as
+    /// the executor accounts it and what the host says it is. No path, bus address or UUID.
+    async fn devices(&self) -> String {
+        let (exec, inventory) = (self.executor.clone(), self.devices.clone());
+        blocking_query(move || residency::devices::report(&exec, inventory.as_deref()).to_string(), r#"{"object":"list","host":{},"data":[]}"#).await
     }
 
     /// The served model names.
@@ -1178,6 +1195,43 @@ mod tests {
         // A call that names only what a caller may set still runs.
         mgr.run(HOST_PATH_MODEL.into(), "ingest".into(), r#"{"prompt": "hi"}"#.into(), Default::default(), String::new(), String::new()).await.expect("a served param is accepted");
         assert_eq!(reached.load(Ordering::SeqCst), 1);
+    }
+
+    /// `Devices` is the document `GET /v1/devices` answers: the executor's devices with their memory, merged with what
+    /// the host says each is, in a fixed order, and nothing that names a path or an address of the machine.
+    #[tokio::test]
+    async fn devices_lists_the_executors_devices_with_memory_and_what_the_host_says_they_are() {
+        struct Host;
+        impl residency::DeviceInventory for Host {
+            fn host(&self) -> serde_json::Map<String, serde_json::Value> {
+                serde_json::json!({"backend": "cpu"}).as_object().unwrap().clone()
+            }
+            fn device(&self, device: Device) -> serde_json::Map<String, serde_json::Value> {
+                match device {
+                    Device::Gpu(_) => serde_json::json!({"name": "toy card", "class": "discrete"}).as_object().unwrap().clone(),
+                    _ => serde_json::Map::new(),
+                }
+            }
+        }
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(1), 4 * GB, GB);
+        budgets.set(Device::Cpu, 8 * GB, 0);
+        budgets.set(Device::Gpu(0), 2 * GB, 0);
+        let exec = Executor::start(Vec::new(), budgets, Policy::default());
+
+        let bare: serde_json::Value = serde_json::from_str(&Manager::new(exec.clone()).devices().await).unwrap();
+        assert_eq!(bare["host"], serde_json::json!({}), "a host that describes nothing adds nothing");
+        let ids: Vec<&str> = bare["data"].as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["cpu", "gpu0", "gpu1"], "a fixed order whatever the registration order");
+
+        let described: serde_json::Value = serde_json::from_str(&Manager::new(exec.clone()).with_devices(Some(std::sync::Arc::new(Host))).devices().await).unwrap();
+        assert_eq!(described["host"]["backend"], "cpu");
+        let gpu1 = &described["data"][2];
+        assert_eq!((gpu1["name"].as_str(), gpu1["memory"]["total_bytes"].as_u64(), gpu1["memory"]["free_bytes"].as_u64()), (Some("toy card"), Some(4 * GB), Some(3 * GB)));
+        assert!(described["data"][0].get("name").is_none(), "the CPU got no card facts");
+        let text = described.to_string();
+        assert!(!text.contains('/') && !text.to_lowercase().contains("uuid") && !text.contains("pci"), "no path, address or identifier of the machine: {text}");
+        exec.shutdown();
     }
 
     /// A decision model needs nothing from this crate: it is a capability like

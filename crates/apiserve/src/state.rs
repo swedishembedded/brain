@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use capability::CancelToken;
-use residency::{Executor, ModelSupplier};
+use residency::{DeviceInventory, Executor, ModelSupplier};
 use uuid::Uuid;
 
 use crate::auth::{Authenticator, CallerExt, Principal, StaticKey};
@@ -73,16 +73,6 @@ pub struct AppState {
     /// What the host knows of its devices beyond what the executor budgets ([`DeviceInventory`]); `None` reports
     /// the budgets alone.
     pub devices: Option<Arc<dyn DeviceInventory>>,
-}
-
-/// The facts about the machine's devices that only the host can supply, for `GET /v1/devices`. The executor's
-/// budgets say how much memory each device has and how much is spoken for; this adds what each one is. It
-/// reports identity and capability only: never a path, a bus address, a serial or a UUID.
-pub trait DeviceInventory: Send + Sync {
-    /// Facts about the machine as a whole (backend, core count), merged into the reply's `host`.
-    fn host(&self) -> serde_json::Map<String, serde_json::Value>;
-    /// Facts about `device` (its name, vendor, class), merged into its entry; empty for one the host cannot describe.
-    fn device(&self, device: residency::Device) -> serde_json::Map<String, serde_json::Value>;
 }
 
 impl AppState {

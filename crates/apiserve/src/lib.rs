@@ -81,7 +81,8 @@ pub use error::{ApiError, Kind};
 pub use hooks::{Call, CallResult, RequestHooks, Ticket};
 pub use listener::ConnectionLimits;
 pub use tls::Tls;
-pub use state::{AppState, DeviceInventory, JobRegistry, DEFAULT_ADMIT_DEADLINE};
+pub use residency::DeviceInventory;
+pub use state::{AppState, JobRegistry, DEFAULT_ADMIT_DEADLINE};
 pub use surface::{write_keys, Provider, Surface};
 
 use residency::Executor;

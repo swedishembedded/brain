@@ -36,6 +36,7 @@ Bus `com.swedishembedded.Brain1`, object `/com/swedishembedded/Brain1`, interfac
 |---|---|
 | `Manifests()` | JSON of every model/action/param (discovery) |
 | `ListModels()` | served model names |
+| `Devices()` | JSON of the devices the server schedules on: each one's `id` (`cpu`, `gpu<i>`, `npu<i>`), `kind`, `memory` (`total_bytes`, `reserved_bytes`, `used_bytes`, `free_bytes`) and, where the host can say, a card's `name`, `vendor_id`, `class` and `backends`, plus `host` (backend, core and card counts); the same document as HTTP `GET /v1/devices`, with no path, bus address or UUID |
 | `Run(model, action, params, in_fds, in_meta, transport)` | one-shot request → result + output data |
 | `Subscribe(model, action, params, in_fds, in_meta)` | a job that streams progress/result frames back — for long-running generation |
 | `Cancel(job)` | cooperative cancel of an in-flight `Subscribe` job |

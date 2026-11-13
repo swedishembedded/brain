@@ -122,6 +122,8 @@ pub struct ServeOpts {
     pub deadlines: residency::admission::Deadlines,
     /// Serve training actions; off unless the operator passed `--training`.
     pub training: bool,
+    /// What the host knows of its devices, for `Devices` ([`service::Manager::with_devices`]).
+    pub devices: Option<std::sync::Arc<dyn residency::DeviceInventory>>,
 }
 
 impl ServeOpts {
@@ -144,6 +146,10 @@ impl ServeOpts {
         self.deadlines = deadlines;
         self
     }
+    pub fn with_devices(mut self, devices: Option<std::sync::Arc<dyn residency::DeviceInventory>>) -> ServeOpts {
+        self.devices = devices;
+        self
+    }
     pub fn with_training(mut self, training: bool) -> ServeOpts {
         self.training = training;
         self
@@ -159,13 +165,13 @@ impl ServeOpts {
 #[cfg(target_os = "linux")]
 pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyhow::Result<()> {
     let shutdown = serve_opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
-    let ServeOpts { supplier, ready, deadlines, training, .. } = serve_opts;
+    let ServeOpts { supplier, ready, deadlines, training, devices, .. } = serve_opts;
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         // A cheap executor clone drives the background stats stream, so the
         // snapshot source is independent of the served `Manager` instance.
         let stats_executor = executor.clone();
-        let manager = service::Manager::new(executor).with_supplier(supplier).with_admit_deadline(deadlines.admit).with_cold_build_admit_deadline(deadlines.cold_build).with_training(training);
+        let manager = service::Manager::new(executor).with_supplier(supplier).with_admit_deadline(deadlines.admit).with_cold_build_admit_deadline(deadlines.cold_build).with_training(training).with_devices(devices);
         let builder = match &opts.bus {
             BusKind::Session => zbus::connection::Builder::session()?,
             BusKind::System => zbus::connection::Builder::system()?,

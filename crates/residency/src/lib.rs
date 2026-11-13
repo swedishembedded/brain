@@ -29,6 +29,7 @@ pub mod affinity;
 pub mod admission;
 pub mod bridge;
 pub mod budget;
+pub mod devices;
 pub mod devpool;
 pub mod executor;
 pub mod jobs;
@@ -63,6 +64,7 @@ pub use supply::{ModelSupplier, Supply};
 /// (`gpu_core::devices`, PCI-bus order); `Cpu` is RAM-resident/CPU-executed;
 /// `Npu(u32)` is a whole-graph (OpenVINO) device.
 pub use memauth::Device;
+pub use devices::DeviceInventory;
 
 /// The memory footprint of a model instance when it is **Hot**.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

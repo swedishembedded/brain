@@ -210,42 +210,12 @@ async fn list(State(state): State<AppState>) -> Json<Value> {
 }
 
 /// `GET /v1/devices`: the devices the executor schedules on, each with its memory as the scheduler accounts it,
-/// merged with what the host's [`crate::DeviceInventory`] says each is. Nothing here names a path or an address of
-/// the machine: an id is `cpu`, `gpu<i>` or `npu<i>`, the names `--device` takes.
+/// merged with what the host's [`crate::DeviceInventory`] says each is ([`residency::devices::report`], the one answer
+/// the D-Bus `Devices` method gives too). The query goes through the dispatcher, so it runs off the async workers.
 async fn devices(State(state): State<AppState>) -> Json<Value> {
-    let report = state.exec.residency();
-    let mut budgets = report.budgets;
-    budgets.sort_by_key(|b| match b.device {
-        residency::Device::Cpu => (0, 0),
-        residency::Device::Gpu(i) => (1, i),
-        residency::Device::Npu(i) => (2, i),
-    });
-    let data: Vec<Value> = budgets
-        .iter()
-        .map(|b| {
-            let (id, kind) = match b.device {
-                residency::Device::Cpu => ("cpu".to_string(), "cpu"),
-                residency::Device::Gpu(i) => (format!("gpu{i}"), "gpu"),
-                residency::Device::Npu(i) => (format!("npu{i}"), "npu"),
-            };
-            let mut entry = json!({
-                "id": id,
-                "kind": kind,
-                "memory": {
-                    "total_bytes": b.total,
-                    "reserved_bytes": b.reserved,
-                    "used_bytes": b.used,
-                    "free_bytes": b.total.saturating_sub(b.reserved).saturating_sub(b.used),
-                },
-            });
-            if let (Some(inventory), Some(fields)) = (&state.devices, entry.as_object_mut()) {
-                fields.extend(inventory.device(b.device));
-            }
-            entry
-        })
-        .collect();
-    let host = state.devices.as_ref().map(|inventory| Value::Object(inventory.host())).unwrap_or_else(|| json!({}));
-    Json(json!({ "object": "list", "host": host, "data": data }))
+    let (exec, inventory) = (state.exec.clone(), state.devices.clone());
+    let report = tokio::task::spawn_blocking(move || residency::devices::report(&exec, inventory.as_deref())).await.unwrap_or_else(|_| json!({"object": "list", "host": {}, "data": []}));
+    Json(report)
 }
 
 async fn run(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {

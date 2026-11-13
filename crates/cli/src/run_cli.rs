@@ -1425,7 +1425,7 @@ fn run_apis(a: RunApis) {
             let ready = a.ready.clone();
             let ready_state = a.ready.clone();
             Some(std::thread::spawn(move || {
-                let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(sd).with_supplier(sup).with_ready(ready).with_deadlines(a.deadlines).with_training(training);
+                let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(sd).with_supplier(sup).with_ready(ready).with_deadlines(a.deadlines).with_training(training).with_devices(Some(std::sync::Arc::new(crate::devices_api::HostDevices)));
                 let Err(err) = brain_dbus::serve(e, opts, serve_opts) else { return };
                 eprintln!("{}", dbus_connect_hint(&err, dbus_system));
                 // Before ready, this is a FAILED start and has to end the
@@ -1447,7 +1447,7 @@ fn run_apis(a: RunApis) {
                 std::process::exit(1);
             }))
         } else {
-            let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(shutdown).with_supplier(sup).with_ready(a.ready.clone()).with_deadlines(a.deadlines).with_training(training);
+            let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(shutdown).with_supplier(sup).with_ready(a.ready.clone()).with_deadlines(a.deadlines).with_training(training).with_devices(Some(std::sync::Arc::new(crate::devices_api::HostDevices)));
             if let Err(err) = brain_dbus::serve(e, opts, serve_opts) {
                 eprintln!("{}", dbus_connect_hint(&err, a.dbus_system));
                 eprintln!("brain serve: the D-Bus surface was the only one requested -- exiting");
