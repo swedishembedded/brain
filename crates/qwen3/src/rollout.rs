@@ -201,3 +201,21 @@ impl SyncRollout for EngineRollout {
         }
     }
 }
+
+/// The serving-path rollout of a LoRA run on a Qwen3 checkpoint, as a recipe a multi-cycle
+/// trainer calls with each cycle's starting checkpoint: an engine whose base streams from the
+/// checkpoint, with room for `group` sequences of the cycle's row length, refit from the
+/// trainer's `lora` factors on every sync.
+pub fn engine_factory(lora: LoraCfg, group: usize) -> model::rollout::RolloutFactory {
+    const BLOCK: u32 = 16;
+    model::rollout::RolloutFactory::new(move |base: &std::path::Path, row_len: u32| {
+        let invalid = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, what);
+        let path = base.to_str().ok_or_else(|| invalid(format!("{} is not a UTF-8 path", base.display())))?;
+        let (cfg, src) = crate::open_checkpoint(path).map_err(invalid)?;
+        let max_blocks_per_seq = row_len.div_ceil(BLOCK) + 1;
+        let group = u32::try_from(group).map_err(|_| invalid(format!("group size {group} is too large")))?.max(1);
+        // Two groups of sequences fit at once, so a finished group's blocks (cached for the next) never starve the next.
+        let geometry = EngineGeometry { block_size: BLOCK, num_blocks: 2 * group * max_blocks_per_seq, max_batch: group, max_blocks_per_seq, max_prefill: row_len.min(512), tier: Dtype::F32, gpu: None };
+        Ok(Box::new(EngineRollout::from_source(cfg, src, lora.clone(), geometry)) as Box<dyn model::rollout::SyncRollout>)
+    })
+}

@@ -300,6 +300,7 @@ fn a_document_curriculum_runs_a_full_study_and_emits_a_retention_matrix() {
     let spec = rl::continual::StudySpec {
         base_checkpoint: &base,
         adapter: AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "document-fixture", dataset_id: None },
+        rollout: None,
     };
     let mut study = DocumentStudyConfig { work_dir: dir.join("work"), ..DocumentStudyConfig::default() };
     study.cycles = CYCLES;

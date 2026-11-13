@@ -102,6 +102,32 @@ pub trait Rollout {
     fn sample_n(&mut self, prompt: &[u32], n: usize, params: &RolloutParams, rng: &mut Rng) -> Vec<Completion>;
 }
 
+/// Builds the serving-path rollout of one cycle's starting weights: a trainer that runs
+/// several cycles (each from a checkpoint) holds the recipe, and each cycle calls
+/// [`Self::build`] with its own starting checkpoint and the longest row it trains. The
+/// architecture-specific part (which engine, its geometry and the adapter shape it refits to)
+/// is the closure's.
+#[derive(Clone)]
+pub struct RolloutFactory(std::rc::Rc<dyn Fn(&std::path::Path, u32) -> std::io::Result<Box<dyn SyncRollout>>>);
+
+impl RolloutFactory {
+    /// A factory that calls `build` with a cycle's starting checkpoint and row length.
+    pub fn new(build: impl Fn(&std::path::Path, u32) -> std::io::Result<Box<dyn SyncRollout>> + 'static) -> RolloutFactory {
+        RolloutFactory(std::rc::Rc::new(build))
+    }
+
+    /// The rollout whose base is the checkpoint at `base`, for rows of up to `row_len` tokens.
+    pub fn build(&self, base: &std::path::Path, row_len: u32) -> std::io::Result<Box<dyn SyncRollout>> {
+        (self.0)(base, row_len)
+    }
+}
+
+impl std::fmt::Debug for RolloutFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RolloutFactory")
+    }
+}
+
 /// A [`Rollout`] that samples from its own copy of a policy (a serving engine,
 /// possibly on another device) rather than from the model being trained, and
 /// so has to be told what the trained model now holds. `trained` maps every

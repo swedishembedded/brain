@@ -362,6 +362,7 @@ fn spec<'a>(base: &'a Path, targets: &'a [String]) -> StudySpec<'a> {
     StudySpec {
         base_checkpoint: base,
         adapter: AdapterMeta { rank: LORA_RANK, alpha: LORA_ALPHA, targets, family: "qwen", base_id: "poscopy-pretrained", dataset_id: None },
+        rollout: Some(qwen3::rollout::engine_factory(lora_cfg(), GROUP_SIZE)),
     }
 }
 

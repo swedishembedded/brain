@@ -440,6 +440,11 @@ pub struct StudySpec<'a> {
     /// incumbent, and also Arm 2's fresh-adapter starting point.
     pub base_checkpoint: &'a Path,
     pub adapter: AdapterMeta<'a>,
+    /// How the GRPO regime's groups are sampled: on the architecture's serving engine
+    /// (`Some`, built per cycle from the cycle's starting checkpoint, refit from the
+    /// trainer's adapters before every group) or by the model being trained (`None`, one
+    /// whole-sequence forward per token, the oracle).
+    pub rollout: Option<model::rollout::RolloutFactory>,
 }
 
 /// One cycle's full record - what the gate said, what actually carried
@@ -1024,7 +1029,11 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
         // cannot be `'static`.
         let objective: Box<dyn model::Objective<M> + '_> = match &cfg.regime {
             Regime::Grpo => {
-                Box::new(Grpo::try_new(ReplayEnv::new(curr, k, cfg.replay_frac), curr.verifier(), grpo_cfg(cfg, block as usize, completion_len))?.with_log(log.clone()))
+                let grpo = Grpo::try_new(ReplayEnv::new(curr, k, cfg.replay_frac), curr.verifier(), grpo_cfg(cfg, block as usize, completion_len))?.with_log(log.clone());
+                match &spec.rollout {
+                    Some(factory) => Box::new(grpo.with_rollout(factory.build(&incumbent, block)?, 1)),
+                    None => Box::new(grpo),
+                }
             }
             Regime::Sft(sft) => Box::new(sft_objective::<M, C>(curr, sft, k, &cycle_dir, &opts, ARM1_SALT)?),
         };
@@ -1108,9 +1117,13 @@ pub fn run_study<M: Model, C: Curriculum>(spec: &StudySpec, curr: &C, cfg: &Stud
             // (`ARM2_SALT`) rather than a replay of Arm 1's own draws.
             let fresh_dir = cycle_dir.join("fresh");
             let fresh_obj: Box<dyn model::Objective<M> + '_> = match &cfg.regime {
-                Regime::Grpo => Box::new(
-                    Grpo::try_new(ReplayEnv::new(curr, k, cfg.replay_frac), curr.verifier(), grpo_cfg(cfg, block as usize, completion_len))?.with_log(fresh_log.clone()),
-                ),
+                Regime::Grpo => {
+                    let grpo = Grpo::try_new(ReplayEnv::new(curr, k, cfg.replay_frac), curr.verifier(), grpo_cfg(cfg, block as usize, completion_len))?.with_log(fresh_log.clone());
+                    match &spec.rollout {
+                        Some(factory) => Box::new(grpo.with_rollout(factory.build(spec.base_checkpoint, block)?, 1)),
+                        None => Box::new(grpo),
+                    }
+                }
                 Regime::Sft(sft) => {
                     std::fs::create_dir_all(&fresh_dir)?;
                     Box::new(sft_objective::<M, C>(curr, sft, k, &fresh_dir, &opts, ARM2_SALT)?)

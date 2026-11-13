@@ -67,7 +67,7 @@ use serde::{Deserialize, Serialize};
 
 use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
-use model::rollout::{RolloutParams, SyncRollout};
+use model::rollout::RolloutParams;
 use model::serve::SampleParams;
 use model::training::{Capability, Unsupported};
 use model::{Model, ModelConfig};
@@ -125,13 +125,12 @@ pub(crate) trait StudyArch {
     /// silently truncated.
     fn study_config(base: &<Self::M as Model>::Config, lora: LoraCfg, block: u32) -> <Self::M as Model>::Config;
 
-    /// The serving engine this architecture samples GRPO groups on: built from
-    /// `base_weights` (the caller's checkpoint, no adapters), taking the trainer's
-    /// `lora` factors on every sync, with room for `group` sequences of up to
-    /// `row_len` tokens. `Ok(None)`: the architecture has no rollout engine and its
-    /// groups are sampled by the model being trained.
-    fn rollout_engine(_base_weights: &Path, _lora: &LoraCfg, _row_len: u32, _group: usize) -> std::io::Result<Option<Box<dyn SyncRollout>>> {
-        Ok(None)
+    /// The recipe of the serving engine this architecture samples GRPO groups on, for a trainer
+    /// whose adapters are `lora`, in groups of `group`;
+    /// `None`: the architecture has no rollout engine and its groups are sampled by the model
+    /// being trained.
+    fn rollout_factory(_lora: &LoraCfg, _group: usize) -> Option<model::rollout::RolloutFactory> {
+        None
     }
 }
 
@@ -148,16 +147,8 @@ impl StudyArch for Qwen3 {
     fn study_config(base: &qwen3::config::QwenConfig, lora: LoraCfg, block: u32) -> qwen3::config::QwenConfig {
         qwen3::config::QwenConfig { block_size: block, max_position_embeddings: base.max_position_embeddings.max(block), lora: Some(lora), ..base.clone() }
     }
-    fn rollout_engine(base_weights: &Path, lora: &LoraCfg, row_len: u32, group: usize) -> std::io::Result<Option<Box<dyn SyncRollout>>> {
-        const BLOCK: u32 = 16;
-        let invalid = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, what);
-        let path = base_weights.to_str().ok_or_else(|| invalid(format!("{} is not a UTF-8 path", base_weights.display())))?;
-        let (cfg, base) = qwen3::open_checkpoint(path).map_err(invalid)?;
-        let max_blocks_per_seq = row_len.div_ceil(BLOCK) + 1;
-        let group = u32::try_from(group).map_err(|_| invalid(format!("group size {group} is too large")))?.max(1);
-        // Two groups of sequences fit at once, so a finished group's blocks (cached for the next) never starve the next.
-        let geometry = qwen3::rollout::EngineGeometry { block_size: BLOCK, num_blocks: 2 * group * max_blocks_per_seq, max_batch: group, max_blocks_per_seq, max_prefill: row_len.min(512), tier: qwen3::Dtype::F32, gpu: None };
-        Ok(Some(Box::new(qwen3::rollout::EngineRollout::from_source(cfg, base, lora.clone(), geometry))))
+    fn rollout_factory(lora: &LoraCfg, group: usize) -> Option<model::rollout::RolloutFactory> {
+        Some(qwen3::rollout::engine_factory(lora.clone(), group))
     }
 }
 
@@ -575,6 +566,8 @@ fn run_for<A: StudyArch>(i: &Inputs) -> std::io::Result<DocumentStudyReport> {
     let spec = StudySpec {
         base_checkpoint: &study_base,
         adapter: AdapterMeta { rank: i.rank, alpha: i.alpha, targets: &targets, family: A::FAMILY, base_id: i.base_id, dataset_id: Some(i.dataset) },
+        // Document studies train by supervised fine-tuning: no rollouts.
+        rollout: None,
     };
     let cfg = DocumentStudyConfig {
         cycles: i.cycles.len(),
@@ -1565,8 +1558,8 @@ fn run_improve_for<A: StudyArch, E: Environment, V: Verifier + Clone>(
     let objective = Grpo::try_new(env, verifier, grpo_cfg)?;
     let objective = match opts.model_rollouts {
         true => objective,
-        false => match A::rollout_engine(base_weights, &lora, train_block, opts.group_size)? {
-            Some(engine) => objective.with_rollout(engine, 1),
+        false => match A::rollout_factory(&lora, opts.group_size) {
+            Some(factory) => objective.with_rollout(factory.build(base_weights, train_block)?, 1),
             None => objective,
         },
     };
