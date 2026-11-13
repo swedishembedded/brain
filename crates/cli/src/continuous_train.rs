@@ -117,7 +117,11 @@ pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&A
         AdapterMode::Latest(dir) => Ok((Some(Follow::latest(dir)), None)),
         AdapterMode::Directory(dir) => {
             let resident = required("--serve-adapters")?;
-            Ok((Some(Follow { source: FollowSource::Directory(BankDirectory::new(dir, resident.served_base())), served: None }), None))
+            let mut bank = BankDirectory::new(dir, resident.served_base());
+            // What the directory holds now is offered before any surface binds, so the first request after
+            // readiness finds its adapter; the watcher follows the changes from here.
+            bank.poll(&LiveAdapters::new(resident.clone(), executor.clone()));
+            Ok((Some(Follow { source: FollowSource::Directory(bank), served: None }), None))
         }
         AdapterMode::Pinned(path) => {
             let resident = required("--adapter")?;
@@ -708,6 +712,28 @@ mod tests {
         };
         assert!(err.contains("--adapter-slots"), "{err}");
         assert!(start_adapter_mode::<QwenResident>(AdapterMode::Pinned(adapter), None, &executor).is_err(), "an adapter with no Qwen3 to put it on is an error");
+    }
+
+    /// `--serve-adapters`: what the directory holds when the server starts is
+    /// offered before `start_adapter_mode` returns (so before any surface binds
+    /// and readiness is signalled), not on the watcher's first tick.
+    #[test]
+    fn a_served_directory_is_offered_before_anything_binds() {
+        let dir = tmp("serve-dir-startup");
+        let base = dir.join("base.safetensors");
+        write_base(&base, 1.0);
+        let bank = dir.join("bank");
+        std::fs::create_dir_all(&bank).unwrap();
+        write_adapter(&bank.join("one.safetensors"), ONE, "local/base", Some(digest(&base)), 0.5);
+        write_adapter(&bank.join("two.safetensors"), TWO, "local/base", Some(digest(&base)), 0.25);
+
+        let card = ModelCard::new("brain/qwen3", "qwen");
+        let resident = Arc::new(QwenResident::from_card_configured(base.to_str().unwrap(), &card, None, banked()));
+        let executor = cpu_executor(vec![resident.clone()]);
+        let (follow, line) = start_adapter_mode(AdapterMode::Directory(bank), Some(&resident), &executor).expect("a directory of adapters for the served base starts");
+        assert!(follow.is_some() && line.is_none(), "the directory is followed, nothing is announced as pinned");
+        assert!(listed(&executor, ONE) && listed(&executor, TWO) && listed(&executor, "brain/qwen3"), "both adapters are models as soon as startup returns");
+        assert!(start_adapter_mode::<QwenResident>(AdapterMode::Directory(dir.clone()), None, &executor).is_err(), "no served Qwen3 to put them on is an error");
     }
 
     /// `--adapter-manifest`: a replaced manifest offers the new release only
