@@ -30,9 +30,9 @@ pub struct EncodeSettings {
     /// is visible: rav1e's fixed quantizer codes a key frame about a quarter
     /// finer than the frames between, which settle a few dB lower within a
     /// few dozen frames, so every forced key frame reads as the picture
-    /// sharpening all at once (+3.9 dB at each of frames 120 and 240 of a
-    /// real 313-frame clip at the old interval of 120, against at most
-    /// 0.84 dB between any two frames without them, in 3% fewer bytes).
+    /// sharpening all at once (a jump of several dB at each forced key frame of a
+    /// real 313-frame clip at the old interval of 120, against a fraction of a dB between any two frames
+    /// without them, in a few percent fewer bytes).
     pub key_frame_interval: Option<u64>,
     /// Tiles per frame (0: one tile per 64K pixels, at least one): the unit
     /// both coders spread over threads, at a small cost in compression.
@@ -41,10 +41,10 @@ pub struct EncodeSettings {
 
 impl Default for EncodeSettings {
     /// Measured on a panning 1024x512 photograph (48 frames, release build,
-    /// no assembly, a busy 48-core host): quantizer 80 holds 41.5 dB PSNR at
-    /// about 220 kbit/s; speed 10 codes as well as 6-9 there at 2.3x the
-    /// rate; eight tiles (one per 64K pixels) halve the time again for 7%
-    /// more bytes, to about 185 ms a frame - 35 s for an 8 s clip at 24 fps.
+    /// no assembly, a busy host): quantizer 80 holds a high PSNR at a modest
+    /// bitrate; speed 10 codes as well as 6-9 there at a multiple of the
+    /// rate; eight tiles (one per 64K pixels) halve the time again for a few
+    /// percent more bytes.
     fn default() -> EncodeSettings {
         EncodeSettings { quantizer: 80, speed: 10, key_frame_interval: None, tiles: 0 }
     }

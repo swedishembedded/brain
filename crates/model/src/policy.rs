@@ -135,9 +135,9 @@ impl LinearActivations {
     /// What `auto` means. The one place the default is decided: change it here and every consumer follows.
     ///
     /// bf16: brain must be at least as precise as vLLM and SGLang, and a faster path below their precision is opt-in.
-    /// Against the bf16 checkpoint computed in f32 (HF transformers), teacher forced over 12280 positions of fixed text:
-    /// NVFP4 W4A16 agrees with the top-1 token 93.84 % of the time (truncated KL 1.87e-2, mean |d log p| 0.113), W4A8
-    /// 93.53 % (1.74e-2, 0.121), vLLM's W4A16 93.96 % (2.00e-2, 0.114). `e4m3` stays the explicit choice for throughput.
+    /// Against the bf16 checkpoint computed in f32 (HF transformers), teacher forced over a fixed text:
+    /// NVFP4 W4A16 agrees with the top-1 token about as often as vLLM's W4A16 does, and W4A8 is measurably below both
+    /// in top-1 agreement and KL. `e4m3` stays the explicit choice for throughput.
     pub const AUTO: LinearActivations = LinearActivations::Bf16;
 
     /// Parse the `--linear-activations` value (`auto`, `bf16` or `e4m3`).

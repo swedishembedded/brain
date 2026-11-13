@@ -1230,9 +1230,9 @@ impl<'t> DecoderWeights<'t> {
     /// Resident when the card's measured free memory holds the stack with
     /// as much again to spare for the decode's own buffers, streamed
     /// otherwise (and on a device whose free memory cannot be measured). A
-    /// resident decode of a 704x384, 124-frame clip measured a 19.2 GB peak
-    /// on a P40 against a 9.6 GB stack, in 158 s where the streamed one took
-    /// 450 s.
+    /// resident decode of a 704x384, 124-frame clip measured about twice the
+    /// stack's size at its peak on a P40, and was several times faster than
+    /// the streamed one.
     fn for_decode(cx: &Ctx, tensors: &'t Tensors, cfg: &VideoVaeConfig) -> DecoderWeights<'t> {
         let stack: u64 = (0..cfg.decoder_num_layers)
             .flat_map(|i| tensors.iter().filter(move |(name, _)| name.starts_with(&format!("decoder.transformer_blocks.{i}."))))

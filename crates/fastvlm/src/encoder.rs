@@ -818,7 +818,7 @@ impl Layer {
 /// FastViTHD encoder: stem (3 MobileOne convs, /4) → 5 stages (RepMixer blocks in
 /// 0–2, RepCPE + AttentionBlocks in 3–4) with PatchEmbed downsamples between → a
 /// conv_exp MobileOne (last-dim → last-dim·cls_ratio) → feature_select (NCHW →
-/// `[tokens, feature_dim]`). Total downsample 64×, so a 1024² image → 256 tokens ×
+/// `[tokens, feature_dim]`). Total downsample 64 times per side, so a 1024² image → 256 tokens ×
 /// 3072. conv_exp takes mobileclip's squeeze-excite gate when `se_reduction > 0`.
 pub struct Encoder {
     layers: Vec<Layer>,

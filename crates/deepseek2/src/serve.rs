@@ -575,7 +575,7 @@ impl Engine {
             Mlp::Moe(m) => {
                 // The router is fp32 in both tiers: a quantisation-noised logit can flip which experts are chosen.
                 // The fast tier takes the library's exact fp32 product (the 64-column output is one 128x128 tile of the in-house kernel,
-                // i.e. one multiprocessor: 0.12 ms a layer); the reference tier keeps the in-house kernel it is stated against.
+                // i.e. one multiprocessor, a fixed per-layer cost); the reference tier keeps the in-house kernel it is stated against.
                 let library = self.router_gemm.as_ref().filter(|_| self.fast).is_some_and(|p| {
                     let (x, w, y) = (Operand { buf: &sc.xn2, range: (0, 0) }, Operand { buf: &m.router_f32, range: (0, 0) }, Operand { buf: &sc.router_logits, range: (0, 0) });
                     p.gemm_f32(g, s, &x, &w, &y, F32Product { m: n, n: e, k: d, trans_a: false, trans_b: true, alpha: 1.0, beta: 0.0, tf32: false })

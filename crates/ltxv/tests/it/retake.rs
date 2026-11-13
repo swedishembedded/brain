@@ -30,6 +30,7 @@ fn a_retake_regenerates_its_window_and_holds_the_rest() {
         return;
     };
     let paths = Paths::new(vae.clone());
+    // perf-number: frame-time arithmetic of the test clip, not a measurement
     // A smooth gradient the VAE reconstructs well, 17 frames at 8 fps:
     // latent frames span [0, 1/8), [1/8, 9/8) and [9/8, 17/8) seconds.
     let side = 64usize;

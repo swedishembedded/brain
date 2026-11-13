@@ -2500,7 +2500,7 @@ impl Qwen35 {
     /// on a device with int8 tensor cores (groups of 4) that is two passes
     /// where the step made one, and those passes stream at the dp4a rate the
     /// kernel was measured at rather than the batched tensor-core block's, so
-    /// the projection weight time grows by roughly 2.4-3x and batch-8 aggregate
+    /// the projection weight time grows several times over and batch-8 aggregate
     /// throughput falls to about the batch-4 level
     /// (`crates/gpu-core/tests/it/i8_gemv_batched_variants.rs` has the rates).
     /// A speculative verify pass is not grouped

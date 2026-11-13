@@ -210,7 +210,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         assert_eq!(m.find(&text), Some((text.len() - 11, 11, 1999)));
         // A per-special search costs 2000 passes over 600 KB (~1e9 byte
-        // compares); the single pass is milliseconds. The bound is ~100x slack.
+        // compares); the single pass is a small fraction of the bound.
         assert!(t0.elapsed() < std::time::Duration::from_secs(2));
     }
 }

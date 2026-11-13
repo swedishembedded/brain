@@ -294,7 +294,7 @@ const PARAM_BLOCK_WORDS: usize = 1 << 14;
 /// The device block the parameters of a batch of eagerly issued dispatches are uploaded into with ONE copy.
 ///
 /// A parameter copy in front of every kernel is a stream operation: the kernel before it must finish, the copy engine runs it, and only then may the next kernel
-/// start. Measured on the 27B mixed iteration (nsys): 14 us of card idle per kernel, 61 of 234 ms. A batch that is
+/// start. Measured on the 27B mixed iteration with nsys: the card idled for a visible share of the iteration, a gap per kernel. A batch that is
 /// issued eagerly instead packs its steps' parameters into one image, copies it into this block once, and points
 /// each kernel's uniform argument at its slice.
 ///

@@ -13,6 +13,7 @@
 //! per modality - `"<Picture i>: "` plus an image vision block, `"<Audio j>:
 //! "` alone (a waveform never reaches the conditioner), `"<Video k>: "` plus
 //! one `"<{t:.1} seconds>"`-labelled vision block per merged pair of frames
+// perf-number: the reference presenter's sampling rate, a model contract
 //! sampled at 2 fps - then the prompt verbatim, with no chat template and no
 //! special tokens. A video that carries sound is labelled `"<Audio j>: "`
 //! first, mirroring the order its rows are packed in. `t2va` is the prompt
@@ -311,6 +312,7 @@ impl PresentationEncoder {
 mod tests {
     use super::*;
 
+    // perf-number: the presenter's sampling rate and the model's clip rate, test inputs
     /// The 2 fps sampling of a 24 fps clip, and its round-half-to-even block
     /// labels: 30 frames sample 0, 12 and 24, merged as (0, 12) and (24, 24).
     #[test]

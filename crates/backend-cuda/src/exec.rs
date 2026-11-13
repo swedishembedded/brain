@@ -1879,8 +1879,8 @@ impl DeviceMem {
         self.d.check(unsafe { (self.fns.ctx_set_current)(self.ctx) }, "cuCtxSetCurrent")?;
         let access = crate::driver::CuMemAccessDesc { location: b.prop.location, flags: 3 };
         // Map every fresh granule first, then grant access once per contiguous run of them: one cuMemSetAccess covers a
-        // fully mapped range of any number of allocations, and a call a granule was 1.5 s of the 3.5 s a 96 GB card's pool
-        // took to back at load (23392 granules).
+        // fully mapped range of any number of allocations, and a call a granule was the larger part of the time a 96 GB
+        // card's pool took to back at load (23392 granules).
         let fresh: Vec<usize> = (first..end).filter(|&g| handles[g] == 0).collect();
         let at = |g: usize| self.ptr + (g * b.granule) as CuDevicePtr;
         let mut mapped: Vec<(usize, u64)> = Vec::with_capacity(fresh.len());

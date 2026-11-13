@@ -168,7 +168,7 @@ impl Ops {
     ///
     /// A training layer reads each frozen weight several times: the forward, the rebuild of its activations in
     /// the backward and the input gradient, and the MLP once per row chunk. Without a scope each read decodes
-    /// again (about 140 us per MLP matrix at 27B width, 7.8 % of a W8K step); with one a layer decodes each
+    /// again (a visible share of a W8K step at 27B width); with one a layer decodes each
     /// weight once per pass for the scratch of its largest consumers (a layer's weights in bf16, under 1 GB).
     ///
     /// The contract is the caller's: the weights do not change while a scope is open (a frozen base never does;

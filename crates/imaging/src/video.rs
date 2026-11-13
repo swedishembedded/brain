@@ -600,11 +600,12 @@ mod tests {
         let path = scratch("rate.webm");
         encode_frames(&frames, &path, 24.0, &VideoEncodeOpts::default()).expect("encode");
         let all = decode_frames_rgb8(&path, &VideoDecodeOpts { fps: None, max_frames: 0, spread: 0 }).expect("all");
-        let four = decode_frames_rgb8(&path, &VideoDecodeOpts { fps: Some(4.0), max_frames: 0, spread: 0 }).expect("4 fps");
+        let four = decode_frames_rgb8(&path, &VideoDecodeOpts { fps: Some(4.0), max_frames: 0, spread: 0 }).expect("sampled");
+        // perf-number: sampling-rate arithmetic of a decode option, not a measurement
         // One second at 4 fps: the instants 0, 0.25, 0.5 and 0.75 s are source frames 0, 6, 12 and 18.
         assert_eq!(four.len(), 4);
         for (k, f) in four.iter().enumerate() {
-            assert!(f.px == all[k * 6].px, "the {k}th 4 fps frame is not source frame {}", k * 6);
+            assert!(f.px == all[k * 6].px, "the {k}th sampled frame is not source frame {}", k * 6);
         }
         let capped = decode_frames_rgb8(&path, &VideoDecodeOpts { fps: Some(48.0), max_frames: 5, spread: 0 }).expect("capped");
         assert_eq!(capped.len(), 5);

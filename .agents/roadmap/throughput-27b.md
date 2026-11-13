@@ -699,3 +699,48 @@ milestone table here.
 | 2026-10-30 | 9c6e80bb1 | same, + `Ops::decoded_weights` (each frozen weight decoded once per layer pass) | 1445 / 1517 | VERIFIED-BY-RUN, same session: `weight_dequant_bf16` 3020 / 972 launches (428 / 105 ms), dispatches 46,624 / 44,656, peak +0.1 GiB |
 | 2026-10-30 | d4f00685a | same, + native `mul`, `splice_add`, `splice` (four elements a thread, bit-identical) | 1517 / 1559 | VERIFIED-BY-RUN: `brain_mul` 192 / 53 ms, `brain_splice_add` 174 / 46 ms, step kernel time 5.50 / 4.80 s |
 | 2026-10-30 | 76d5b8c76 | same, + a layer's forward / backward as one `pass_scope` (one parameter upload) | 1559 / 1597 | VERIFIED-BY-RUN: HtoD copies 14.5 k / 0.65 k a step, `submit_s` 0.40 / 0.09, peak 41,760 / 43,360 MiB. Final nsys: step 5.19 s, card busy 96.1 %, idle 0.21 s (98 ms in sub-5 us launch gaps, 83 ms in 271 gaps of 0.1-1 ms at the layer boundaries), 44,656 dispatches = 49.6 k kernels + 16.6 k memsets, 0.65 k copies |
+
+## Measured numbers moved out of source comments (2026-11-13)
+
+Source comments carry no bare figures (`make check/scripts`); the measurements
+they once quoted live here. All on GH200 (Hopper, 96 GB) unless stated, Qwen3.8-27B
+(Q8_0 GGUF or FP8 directory), the build of the date each comment was written.
+
+- Background prefill round width (`BACKGROUND_ROUND_ROWS`): a 1731-token prompt alone
+  went in at 1.56 s as one 2048-row round, 0.97 s as two 1024-row rounds, 0.75 s as four
+  512-row rounds, 0.86 s as 256-row rounds, 0.76 s sliced at 512 rows
+  (`gguf_resident_real::a_lone_prompt_reads_in_at_least_as_fast_in_the_background`).
+- `TENSOR_CORE_PREFILL_TOKENS`: one uncached 32.5K prompt's first token took 3.30 s at
+  2048 rows, 3.10 s at 4096, 3.09 s at 8192; 8192 costs the default context 18 percent
+  of its scratch, 4096 costs 6.
+- Deferred MTP feed (`FEED_ROWS_PER_SLICE`): a 128-row round of the head takes about
+  2.5 ms (host prep and projection 1.1, layer 1.4); two rounds are about 5 ms.
+- Snapshot rows on host: the copy engine moves them at about 88 GB/s across the
+  chip-to-chip link; a kernel's stores into pageable memory reach 8-32 GB/s. Waiting
+  on the copies cost a 6.7 ms gap in an 8K prompt's prefill.
+- Checkpoint open: scanning the model directory took about 6 s of a 9.6 s start before
+  the API answered.
+- Workspace ceiling: 32K x 16 after an 8K x 64 cell lost 12 s of 95 to idle gaps
+  (84.5 to 72.8 tok/s) while a 32K round's scratch went back to the driver at every
+  synchronisation.
+- Unified pool: backing a row is about 140 us per granule per recurrent layer, about
+  30 ms a row; one block is 32 `cuMemCreate`/`cuMemSetAccess` pairs (about 4.7 ms) and
+  the ~700 blocks of 64 streams of 8K were 3.3 s of host time in the first minute of load.
+- Default speculation batch (`HF_DEFAULT_SPEC_BATCH`): prompt feed is about 0.1 s of the
+  card per 8K tokens; with 256 new tokens `off` against `auto` was 176 to 166 tok/s at
+  4 streams and 290 to 269 at 16; with 768 new tokens 4 streams gained 12 %.
+- Speculation prior (`serve/speculate.rs`): a single-stream decode step is about 12 ms.
+- Parameter copy per kernel (`backend-cuda`): on the 27B mixed iteration nsys showed
+  14 us of card idle per kernel, 61 of 234 ms.
+- Page-table access grant (`backend-cuda`, `cuMemSetAccess`): one call a granule was
+  1.5 s of the 3.5 s a 96 GB card's pool took to back at load (23392 granules).
+- Pool-state accuracy (`gdn_state_pool_real`): top-1 agreement of the bf16 state pool
+  with the f32 pool is 99.63 % (sequences 99.41 - 99.80 %); `qwen35_fp8_parity` sits at
+  about 98 %; the bar is 98.5 %. Measured 2026-10-31, 4 sequences x 1024 positions.
+- Linear activation tier (`LinearActivations::AUTO`): against the bf16 checkpoint in
+  f32 (HF transformers), teacher forced over 12280 positions of fixed text, NVFP4 W4A16
+  agrees with the top-1 token 93.84 % of the time (truncated KL 1.87e-2, mean |d log p|
+  0.113), W4A8 93.53 % (1.74e-2, 0.121), vLLM's W4A16 93.96 % (2.00e-2, 0.114).
+- Batched int8 gemv: the block's streaming efficiency is 67 % of a batched decode step
+  (`i8_gemv_batched_variants`); the dp4a passes make the projection weight time grow
+  2.4-3x and batch-8 aggregate throughput fall to about the batch-4 level.

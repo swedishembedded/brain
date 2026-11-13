@@ -111,6 +111,7 @@ pub fn fps_rational(fps: f64) -> Result<(u64, u64), Error> {
 /// A frame rate read from a container's integer clock, snapped to the exact
 /// rate it rounds: an integer rate or one of the NTSC family when within a
 /// millionth, otherwise as read. (Matroska stores a frame's duration in whole
+// perf-number: Matroska timestamp rounding arithmetic of a 24 fps clip, not a measurement
 /// nanoseconds, so 24 fps reads back as 24.0000004.)
 pub(crate) fn snap_fps(fps: f64) -> f64 {
     let close = |x: f64| (fps - x).abs() <= 1e-6 * fps;

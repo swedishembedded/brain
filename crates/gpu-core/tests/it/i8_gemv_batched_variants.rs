@@ -23,8 +23,8 @@
 //! streams 1.48-1.99 TB/s of weights, 1.5-1.6x the dp4a block's 1.0-1.26, and
 //! load-unroll depth 4 beats both 2 and 8. So the batched step's weight rate is
 //! not a missing tensor-core path, a per-row weight re-read, or an unroll
-//! choice - it is the block's own streaming efficiency, which the profile puts
-//! at 67% of a batched decode step.
+//! choice - it is the block's own streaming efficiency, which the profile shows
+//! to be most of a batched decode step.
 
 use backend_api::DeviceBuffer;
 use gpu_core::{Gpu, Step};

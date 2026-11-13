@@ -311,7 +311,7 @@ pub fn lora_bank_rows(g: &Gpu, rq: &LoraBankRows) -> [Step; 2] {
 /// give a window of `rows` rows over `width` rank rows (`Op::LoraBankProject`): the
 /// row-tiled pair where the selector offers it, the model registered it and the bank holds ONE
 /// adapter (so the rows of a tile share it: with several slots a tile of interleaved adapters
-/// runs the tiled kernel's slow path, measured 2x slower than the row-wise kernel), else the
+/// runs the tiled kernel's slow path, measured slower than the row-wise kernel), else the
 /// row-wise projection with its epilogue.
 fn bank_variant(g: &Gpu, kernels: LoraBankKernels, slots: u32, rows: u32, width: u32, k: u32, delta_tiled: Option<usize>) -> gpu_core::select::KernelVariant {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};

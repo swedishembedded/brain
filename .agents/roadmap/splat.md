@@ -413,3 +413,9 @@ PLY round-trip's own quantization, not fit nondeterminism - the two are
 distinguished by comparing bit-for-bit BEFORE any PLY round trip (this test)
 and by tolerance AFTER one (the capability action test, whose wire format IS
 PLY bytes).
+
+## Measured numbers moved out of source comments (2026-11-13)
+
+- Radix sort chunk (`SORT_CHUNK_MAX`), GH200, 10-25M-key frames of a truck capture, sort
+  passes' device time per profile run: 12.3 s at 256, 8.9 s at 512, 7.3 s at 1024,
+  7.0 s at 2048, 8.8 s at 4096 (`fit_profile`).

@@ -1484,8 +1484,8 @@ const FLASH_PREFILL_WG_LAUNCH: backend_api::CudaLaunch = backend_api::CudaLaunch
 const FLASH_PREFILL_WG_SPLITS_MAX: u32 = 4;
 
 /// Query rows from which the version-3 kernel runs unsplit: 2048 rows are 16 row blocks of 24 heads, 2.9 waves of the
-/// multiprocessors, and a split's partial sums and merge cost more than the wave it saves (4096 rows at 4K-32K context:
-/// 0.92 / 2.08 / 4.18 / 6.25 / 8.19 ms with splits, 0.82 / 1.88 / 3.96 / 5.98 / 7.97 without).
+/// multiprocessors, and a split's partial sums and merge cost more than the wave it saves (4096 rows at 4K-32K context
+/// ran faster without splits at every length; `brain roofline gpu --kernels` times the two).
 const FLASH_PREFILL_WG_UNSPLIT_ROWS: u32 = 2048;
 
 static FLASH_PREFILL_WG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);

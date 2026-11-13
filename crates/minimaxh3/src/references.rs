@@ -14,6 +14,7 @@
 //! * [`normalize_references`] puts every reference on the model's own rates
 //!   and resolutions - an image onto its own short edge (2048 for the
 //!   released checkpoint, upscaling included, no area cap), a video onto
+// perf-number: the model's fixed reference frame rate, a contract constant
 //!   24 fps (whole frames dropped or held, as `ffmpeg`'s `fps` filter does),
 //!   truncated to the generated frame count and put on the canvas its own
 //!   aspect resolves to, a soundtrack truncated to the generated duration at
@@ -71,6 +72,7 @@ pub type Stereo = [Vec<f32>; 2];
 #[derive(Clone, Debug)]
 pub enum NormalizedReference {
     Image(Rgb8),
+    // perf-number: the model's fixed reference frame rate, a contract constant
     /// 24 fps frames on the reference's own canvas.
     Video { frames: Vec<Rgb8>, soundtrack: Option<Stereo> },
     Audio(Stereo),

@@ -140,8 +140,7 @@ fn choose_next(remaining: &[usize], streak: &mut u32) -> Option<usize> {
 const FEED_EWMA: f64 = 0.3;
 
 /// Pairs of a deferred MTP prompt feed run with each slice of prompt (and each draft call): two rounds of the
-/// head, about 5 ms, so a thousand-token prompt's feed is spread over four decode steps.
-// perf-number: a 128-row round of the head takes about 2.5 ms (host prep and projection 1.1, layer 1.4)
+/// head, so a thousand-token prompt's feed is spread over four decode steps.
 const FEED_ROWS_PER_SLICE: usize = 256;
 
 /// Pairs of a prompt's feed run before one draft: a prompt's rows go in over a few steps, not one stall of every sequence.

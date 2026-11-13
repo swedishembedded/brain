@@ -48,7 +48,7 @@ pub const SINGLE_BLOCK_KEYS: u32 = 1024;
 ///
 /// A slice is at most [`DecodePlan::MAX_CHUNK`] keys (the kernel's workgroup array holds 128): the weighted-sum
 /// walk of a slice is the kernel's serial chain, and measured on the step (batch 1 to 64, 700 key positions) 32
-/// keys beat 128 by 15-30 % of the attention time and 16 keys were slower at batch 32 and 64 (the merge folds more
+/// keys beat 128 by a clear share of the attention time and 16 keys were slower at batch 32 and 64 (the merge folds more
 /// partials). A few rows (a batch of one has 8 heads) are spread over more slices, down to [`DecodePlan::MIN_CHUNK`]
 /// keys each, until about [`DecodePlan::TARGET_BLOCKS`] workgroups are in flight. Slices past the visible keys end at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

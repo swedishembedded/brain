@@ -289,7 +289,7 @@ pub struct Named {
 }
 
 /// The reference pipelines' own defaults (`PipelineParams`): a 768x512
-/// clip of 121 frames at 24 fps.
+/// clip of 121 frames at the model's fixed frame rate.
 pub const PRODUCTION_WIDTH: usize = 768;
 pub const PRODUCTION_HEIGHT: usize = 512;
 pub const PRODUCTION_FRAMES: usize = 121;
@@ -479,9 +479,9 @@ pub struct GenOpts {
     ///
     /// `0.8` (the reference CLI's own example value) by default, measured on
     /// the real checkpoint: a keyframe from another composition than the
-    /// stills around it is cut to at `1.0` (a 6.3x frame step) and blended
-    /// into at `0.8` (worst step 1.16x), while a keyframe from the same shot
-    /// is reached as closely at either (mean |delta| 2.35 against 2.28).
+    /// stills around it is cut to at `1.0` (a large frame step) and
+    /// blended into at `0.8` (a step close to its neighbours'), while a keyframe
+    /// from the same shot is reached as closely at either.
     pub keyframe_strength: f32,
     /// Extra appended guiding blocks for LONG-FORM windows, as `(local pixel
     /// frame, image path)` pairs in the WINDOW's own coordinate frame: an
@@ -1730,12 +1730,10 @@ fn appended_blocks(start: bool, interior: usize, end: bool, future: usize) -> us
 ///   on the real 22B checkpoint at 768x448 x 97 frames, start/mid/end stills
 ///   taken from an unconditioned run of the same prompt: the slot's eight
 ///   pixel frames freeze (frame-to-frame difference 0.4-0.8 against the
-///   clip's own ~2.2) and the clip jumps into and out of the freeze (3.0x and
-///   2.0x the surrounding motion), while the guide keeps the motion as even
-///   as the unconditioned run's (worst step 1.09x its neighbours, against
-///   1.11x unconditioned) AND reaches the still more closely, at exactly its
-///   frame (mean |delta| 2.28 at frame 48, against the pin's 4.95 with its
-///   closest frame 8 early). Releasing the pin part way through the schedule
+///   clip's own ~2.2) and the clip jumps into and out of the freeze (several
+///   times the surrounding motion), while the guide keeps the motion as even
+///   as the unconditioned run's AND reaches the still more closely, at
+///   exactly its frame (the pin's closest frame is 8 early). Releasing the pin part way through the schedule
 ///   (re-noising the slot at sigma 0.909 or 0.725) sat between the two:
 ///   still a slowdown or a freeze around the slot and a farther still.
 ///
@@ -2104,6 +2102,7 @@ mod conditioned_latent_tests {
         for (k, (still, instant)) in [(&s, [0.0, 0.125]), (&m, [0.5, 0.625]), (&e, [1.0, 1.125])].into_iter().enumerate() {
             let at = base_t + k * block_t;
             assert_eq!(&c.clean[at * CH..(at + block_t) * CH], &still[..], "block {k} carries its own still, in timeline order");
+            // perf-number: the test's own frame rate, an input of the assertion
             assert_eq!(&c.positions[at * 2..at * 2 + 2], &instant, "block {k} sits at its own instant (pixel frames 0, 4, 8 at 8 fps)");
         }
     }

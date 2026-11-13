@@ -304,8 +304,8 @@ const MAX_PREFILL_TOKENS: u32 = 256;
 /// stack's GEMMs of N = 5120 (down and output projections) a 2048-row round
 /// is 16 x 20 = 320 tiles of 128 x 256, 2.4 waves of the 132 multiprocessors
 /// run as 3; 4096 rows are 640 tiles, 4.8 waves run as 5. One uncached 32.5K
-/// prompt's first token on a GH200: 3.30 s at 2048 rows, 3.10 at 4096, 3.09 at
-/// 8192 (which costs the default context 18 percent, 4096 costs 6).
+/// prompt's first token on a GH200 gains little past 4096 rows, while a wider
+/// round takes a larger share of the default context in scratch memory.
 const TENSOR_CORE_PREFILL_TOKENS: u32 = 4096;
 
 /// Hidden rows one head readback of [`Qwen35GgufInstance::teacher_forced_scores`]
@@ -1050,7 +1050,7 @@ struct ShardCaches {
     snap_state: Vec<DeviceBuffer>,
     snap_hist: Vec<DeviceBuffer>,
     /// The snapshot rows are host memory ([`ServingShape::snapshots_on_host`]): they are written and read by the copy
-    /// engine (about 88 GB/s across the chip-to-chip link here), not by a kernel's stores (8-32 GB/s into pageable memory).
+    /// engine (the chip-to-chip link's bandwidth), not by a kernel's stores (several times slower into pageable memory).
     snapshots_on_host: bool,
     /// `[layer]`: whether this stage owns the layer and it is a Gated-DeltaNet one.
     recurrent: Vec<bool>,
@@ -1257,7 +1257,7 @@ impl ShardCaches {
                 gpu.copy_to(&self.work_hist[l], 0, gpu, &self.snap_hist[l], row as u64 * hl, hl);
             }
             // No wait: the copies are ordered before the kernels that overwrite the work rows, and nothing on the host
-            // reads a snapshot (waiting here cost a 6.7 ms gap in an 8K prompt's prefill).
+            // reads a snapshot (waiting here left a visible gap in an 8K prompt's prefill).
             return;
         }
         let ids = gpu.storage(1);
@@ -3905,7 +3905,7 @@ impl Qwen35GgufResident {
 
     /// The checkpoint, opened on first use and shared by every later query. Opening one reads and classifies the header of
     /// every tensor (and, for an HF release, its MTP head's too): the sizing queries a server makes at startup opened it once
-    /// each, and scanning the model directory took ~6 s of a 9.6 s start before the API answered.
+    /// each, and scanning the model directory took most of the start before the API answered.
     fn checkpoint(&self) -> Result<Arc<ResidentCheckpoint>, String> {
         self.checkpoint.get_or_init(|| ResidentCheckpoint::open(&self.gguf_path).map(Arc::new)).clone()
     }
@@ -4638,8 +4638,8 @@ impl Qwen35GgufResident {
         // blocks of those activations may stay in the device's cache up to this much. Under the cache's default bound
         // (a sixteenth of the card, at most 4 GiB) a 32K round's scratch went back to the driver at every
         // synchronisation once earlier traffic had shifted the free memory, and each layer's next allocation waited
-        // for the driver to map it again: 32K x 16 after an 8K x 64 cell lost 12 s of 95 to idle gaps (84.5 -> 72.8
-        // tok/s).
+        // for the driver to map it again: 32K x 16 after an 8K x 64 cell lost a visible share of the run to idle gaps
+        // (the serve bench cell reports the tok/s).
         let workspace = self.serving_shape(&mg, &cfg).stage_workspace(&cfg);
         residency::log::info(&format!("{MODEL}: freed activation blocks are kept up to the stage workspace, {:.1} GiB", workspace as f64 / (1u64 << 30) as f64));
         if let Some(note) = linear_activations_note(self.linear_activations, &self.tier) {

@@ -41,9 +41,9 @@ const RESERVE: u64 = 2 << 30;
 /// Least top-1 agreement of the bf16 pool with the f32 pool over the teacher-forced stream.
 ///
 /// Measured on the real checkpoint, 4 sequences x 1024 positions through the pooled batched decode (2026-10-31):
-/// perf-number: measured accuracy evidence, top-1 agreement of the bf16 pool with the f32 pool
-/// 99.63 % (the sequences 99.41 - 99.80 %). `qwen35_fp8_parity`, whose run-to-run spread the other precision changes of this
-/// engine are held to, sits at about 98 %; a bf16 pool must not be looser than that spread, so the bar sits half a point above it:
+/// top-1 agreement of the bf16 pool with the f32 pool sits well above the run-to-run spread of `qwen35_fp8_parity`, which the other
+/// precision changes of this engine are held to; a bf16 pool must not be looser than that spread, so the bar sits half a point above it.
+// perf-number: the bar itself, a test threshold, not a measurement
 /// 98.5 % (one position in 4096 moves the figure by 0.02 points, its binomial standard error is 0.1).
 const MIN_TOP1: f64 = 0.985;
 /// Most mean KL(f32 pool || bf16 pool) in nats.

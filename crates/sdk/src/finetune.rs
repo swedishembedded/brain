@@ -253,7 +253,7 @@ impl ChatFamily {
                 qwen3::Dtype::F32 => 4 * params,
                 qwen3::Dtype::BF16 => 2 * params,
                 qwen3::Dtype::I8 | qwen3::Dtype::NF4 => self.quantised_base_bytes(params),
-                // FP8 weights: a byte each, and a scale per block of them (an f32 per 128x128 tile is well under 1%).
+                // FP8 weights: a byte each, and a scale per block of them (an f32 per 128x128 tile is a small fraction).
                 _ => params + params / 64,
             },
         }

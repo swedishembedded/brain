@@ -190,8 +190,8 @@ mod tests {
         assert_eq!(reloaded.rank(), 4);
         // Each step draws its own sigma and noise, so the per-step losses are too noisy to show a trend over 60
         // steps. The trained adapter is measured instead on one fixed set of probe batches drawn like the training
-        // ones: it lowers their mean loss against the base weights by 5-9% (measured over eight random draws), so a
-        // 2% bar holds with room.
+        // ones: it lowers their mean loss against the base weights by a margin that stays clear of the bar over eight
+        // random draws, so the bar holds with room.
         let clip = &clips[0];
         let probes: Vec<_> = (0..16)
             .map(|_| {

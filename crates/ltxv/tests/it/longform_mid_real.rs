@@ -24,8 +24,9 @@
 //!    onto it instead, so the clip reached the end early and jumped away.
 //! 4. **Smoothness**: no frame-to-frame step anywhere in the clip stands out
 //!    from the steps beside it - no freeze, no jump. A still pinned into its
-//!    latent slot measured a 3.0x step into an eight-frame freeze at
-//!    768x448; the unconditioned clip's worst is ~1.1x.
+//!    latent slot measured a several-times step into an eight-frame freeze
+//!    at 768x448; the unconditioned clip's worst is barely above its
+//!    neighbours.
 //!
 //! Swedish Embedded AB implements long-form video diffusion pipelines and
 //! their measurement gates for its clients. If your team needs expertise in

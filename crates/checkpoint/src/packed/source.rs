@@ -114,7 +114,7 @@ impl PackedSource {
     ///
     /// The pages read stay mapped: a point read is repeated on the same hot rows (every serving round looks the
     /// same tokens' embeddings up again), and dropping the mapping after each read costs a `madvise` and a page
-    /// fault per row - 15 ms of host time in front of a 600-row round. A table's pages are bounded by the table.
+    /// fault per row, a visible stretch of host time in front of a 600-row round. A table's pages are bounded by the table.
     pub fn read_range(&self, name: &str, start: u64, len: u64) -> Result<Option<Vec<f32>>, String> {
         let Some(b) = self.tensors.get(name) else { return Ok(None) };
         let Some(end) = start.checked_add(len).filter(|&e| e <= b.desc.numel() && len > 0) else { return Ok(None) };

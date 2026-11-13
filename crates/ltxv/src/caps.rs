@@ -54,6 +54,7 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("keyframes", ParamType::Str, "interior keyframes, comma-separated FRAME:PATH pairs (e.g. 40:a.png,80:b.png): each server-side PNG/JPEG still anchors the pixel frame it names, strictly between 0 and frames-1, as a clean image-guidance latent appended at that instant; the clip moves through every one of them in a single generation. Same eta/dit_config requirements as start_frame.").host_resolved())
     .param(ParamSpec::new("keyframe_strength", ParamType::Float, "ImageConditioningInput.strength for the interior keyframes (mid_frame, keyframes) alone; start_frame and end_frame keep conditioning_strength").min(0.0).max(capability::bounds::UNIT).default(json!(d.keyframe_strength)))
     .param(ParamSpec::new("conditioning_strength", ParamType::Float, "ImageConditioningInput.strength for every given still: 1.0 pins the conditioned tokens to the encoded image exactly, lower values (the reference's own CLI example is 0.8) leave the model room to move. Only read when one of start_frame/mid_frame/keyframes/end_frame is set.").min(0.0).max(capability::bounds::UNIT).default(json!(d.conditioning_strength)))
+    // perf-number: duration-head range, a model contract
     .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 8k (the causal VAE gives the first frame its own latent frame). Unset, the duration head predicts the length from the prompt (1-20 s) when the real checkpoint, text encoder and duration head are configured; otherwise 121 with the real checkpoint, 9 for the tiny smoke test").min(0.0).max(capability::bounds::VIDEO_FRAMES))
     .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 32); unset, 768 with the real checkpoint, 64 for the smoke test").min(0.0).max(capability::bounds::SIDE_PX))
     .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 32); unset, 512 with the real checkpoint, 64 for the smoke test").min(0.0).max(capability::bounds::SIDE_PX))
@@ -110,6 +111,7 @@ pub fn manifest() -> Manifest {
     )
     .streaming()
     .param(ParamSpec::new("prompt", ParamType::Str, "what the clip should sound like").required())
+    // perf-number: duration-head range and default length, a model contract
     .param(ParamSpec::new("seconds", ParamType::Float, "clip length in seconds; unset, the duration head predicts it from the prompt (1-20 s), or 5 s without one").max(capability::bounds::SECONDS).min(0.04))
     .params(guidance_params())
     .param(ParamSpec::new("steps", ParamType::Int, "denoise steps (a non-distilled checkpoint's; the distilled one has a fixed schedule)").min(0.0).max(capability::bounds::DENOISE_STEPS).default(json!(a.base.steps)))

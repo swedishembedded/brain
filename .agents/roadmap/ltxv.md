@@ -9394,3 +9394,8 @@ both still hold (mixed 1.15x / 3.94, same 1.10x / 2.29): the cut sits
 between 0.9 and 1.0 for this pair, so 0.8 - the reference CLI's own example
 value, with margin for stills further apart - is the keyframes' default: a still no continuous motion reaches is blended into
 rather than cut to.
+
+## Measured numbers moved out of source comments (2026-11-13)
+
+- AV fine-tune test: the trained adapter lowers the mean probe loss against the base
+  weights by 5-9 % over eight random draws; the test's bar is 2 %.

@@ -167,3 +167,13 @@ multimodal prompt).
   and a Wan i2v action.
 - Live previews through `Progress.chunk`, measured for overhead on a GPU.
 - Real-weight end-to-end runs on hardware that holds the checkpoints.
+
+## Measured numbers moved out of source comments (2026-11-13)
+
+- AV1 defaults (`videocodec::av1::EncodeSettings`), panning 1024x512 photograph, 48
+  frames, release build, no assembly, busy 48-core host: quantizer 80 holds 41.5 dB PSNR
+  at about 220 kbit/s; speed 10 codes as well as 6-9 at 2.3x the rate; eight tiles halve
+  the time again for 7 % more bytes, about 185 ms a frame, 35 s for an 8 s clip at 24 fps.
+- Forced key frames: a real 313-frame clip at the old interval of 120 jumped +3.9 dB at
+  each of frames 120 and 240, against at most 0.84 dB between any two frames without
+  them, in 3 % fewer bytes.

@@ -1189,3 +1189,12 @@ The encoder stage runs two worker threads, each owning a tower set, with SAM act
 1/2/3 threads): 44.3 / 61.9 / 69.5. Server A/B, 64 clients: 256-token pages 238 -> 268 (v1) / 319 (v2) pages/min, 1024-token pages 107 -> 111 (v1) and
 187 -> 206 (v2). Cost: 32.6 GiB per replica (22.7 before; 34 before the shared scratch), so the footprints are now 15 + 18 GiB. Peer load on the card was
 present throughout; numbers are best of N alternating runs.
+
+## Measured numbers moved out of source comments (2026-11-13)
+
+- Decode step cost against batch (`ocrserve::frontend::MAX_BATCH`, `engine_bench`): 4.8 ms
+  a step at 32 rows, 6.9 ms at 64.
+- `PREFILL_BUDGET` of one chunk (8 full pages and 8 clients of small crops, best of two
+  alternating runs per setting, a neighbour on the card): the scheduler's default of two
+  chunks makes a step that admits a page about 80 ms longer; the crops' median latency fell
+  3.5 to 1.9 s (1.1 alone) and the pages' throughput rose 36 to 51 per minute.

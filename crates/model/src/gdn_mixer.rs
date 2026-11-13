@@ -950,7 +950,7 @@ pub fn gdn_mixer_decode_pooled_fused_into(
         return true;
     }
     // The exact body as two launches: the conv of every channel, then a block per (sequence, value head) for the rest. The
-    // single-launch body keeps one block per key head (16 of the card's 132 SMs at one sequence) and runs 4x slower at 16.
+    // single-launch body keeps one block per key head (16 of the card's 132 SMs at one sequence) and runs several times slower at 16.
     let (conv, recur) = if pool.bf16 { (gpu_core::Fused::GdnConvPoolBf16, gpu_core::Fused::GdnRecurPoolBf16) } else { (gpu_core::Fused::GdnConvPool, gpu_core::Fused::GdnRecurPool) };
     if g.has_fused(conv) && g.has_fused(recur) && conv.serves(&[shape.nkh, gdn.h, gdn.b, 0]) && recur.serves(&params) {
         let conv_out = g.storage_uninit(gdn.b as u64 * shape.conv_dim() as u64);

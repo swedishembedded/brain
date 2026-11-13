@@ -524,8 +524,9 @@ pub const GDN_STATE_DEFAULTS: &[Rule<model::policy::GdnState>] = &[
 pub const HF_SPEC_SCRATCH_ROWS: u32 = 16;
 
 /// Running sequences up to which an FP8 directory speculates when `--speculative` is not given. Past it a request's prompt feed (about
-/// 0.1 s of the card per 8K tokens) and the drafts repay less than they cost on replies of a few hundred tokens: measured with 256 new
-/// tokens, `off` against `auto` 4 streams 176 -> 166 tok/s, 16 streams 290 -> 269; with 768 new tokens 4 streams gain 12 %.
+/// a short slice of the card per 8K tokens) and the drafts repay less than they cost on replies of a few hundred tokens: measured with
+/// short replies, `off` against `auto` at 4 and 16 streams is slightly ahead of speculation, while with longer replies 4 streams gain
+/// from it (`brain perf run --speculative off` against `--speculative auto` reproduces both).
 pub const HF_DEFAULT_SPEC_BATCH: usize = 2;
 
 /// How many prompts a GGUF resident keeps for prefix reuse.

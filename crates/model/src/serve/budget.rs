@@ -160,6 +160,7 @@ mod tests {
 
     #[test]
     fn a_prompt_always_advances_however_busy_decode_is() {
+        // perf-number: synthetic step costs fed to the cost model, not a measurement
         // Every row costs a millisecond: the minimum slice alone overruns the target, and 25 % more than it takes
         // buys the 16 rows beyond the minimum.
         let c = trained(0.040, 0.001);
@@ -178,6 +179,7 @@ mod tests {
 
     #[test]
     fn the_rows_fill_the_last_tile_of_the_products() {
+        // perf-number: synthetic step costs fed to the cost model, not a measurement
         // 20 ms of weights, 0.1 ms a row: 45 ms holds 250 rows, 16 of them decode: 234 prompt rows. 250 rows leave the
         // second 128-row tile part empty, so the iteration takes the 240 prompt rows that make 256 rows in all.
         let c = trained(0.020, 0.0001);

@@ -39,11 +39,10 @@ use crate::model::{ChunkRound, StageRows};
 /// Rows of one background round, at most.
 ///
 /// A round is the unit the pump records, the device runs and a decode step can interleave with, and the widest
-/// ([`Qwen35GgufInstance::prefill_round_rows`], 2048) is not the fastest: a 1731-token prompt alone went in at 1.56 s
-/// as one 2048-row round, 0.97 s as two 1024-row rounds, 0.75 s as four 512-row rounds and 0.86 s as 256-row rounds,
-/// against 0.76 s sliced at 512 rows (GH200, Qwen3.8-27B Q8_0). Narrower rounds also hold the scratch arena and
+/// ([`Qwen35GgufInstance::prefill_round_rows`], 2048) is not the fastest: a 1731-token prompt alone went in slowest
+/// as one 2048-row round, faster as two 1024-row rounds, fastest as four 512-row rounds, slower again as 256-row rounds,
+/// and no faster sliced at 512 rows (GH200, Qwen3.8-27B Q8_0; the test below measures it). Narrower rounds also hold the scratch arena and
 /// the launch queue for less time between two decode steps.
-// perf-number: measured by `gguf_resident_real::a_lone_prompt_reads_in_at_least_as_fast_in_the_background`
 const BACKGROUND_ROUND_ROWS: usize = 512;
 
 /// What the working copy of the recurrent state holds when a task starts.

@@ -50,7 +50,7 @@ const NATIVE_BASE: usize = 1 << 30;
 /// The fewest kernel invocations one pool task runs. Below it the wake and steal
 /// cost of a task outweighs the work it carries (see the dispatch fan-out). The
 /// kernels that reach the fan-out are the per-element ones (products and
-/// attention take the host paths above), so 16K invocations is ~0.1 ms of work.
+/// attention take the host paths above), so 16K invocations is too little work to repay a task of its own.
 const MIN_CHUNK_INVOCATIONS: u64 = 16 * 1024;
 
 /// One registered native function's signature: the raw uniform pointer and
@@ -1206,8 +1206,8 @@ impl CpuBackend {
         // never fewer than `MIN_CHUNK_INVOCATIONS` a chunk: waking and stealing
         // across a wide pool costs microseconds a task, so a few-thousand
         // invocation kernel cut into 1152 one-invocation tasks (144 cores) spent
-        // its time in the scheduler - a tiny-model gradcheck took 31 min, 32 s on
-        // one thread.
+        // its time in the scheduler - a tiny-model gradcheck took minutes where one
+        // thread took seconds.
         let span = (self.shared.threads as u64 * 8).max(1);
         let mut chunk = total.div_ceil(span).max(MIN_CHUNK_INVOCATIONS);
         // Work-group kernels (workgroup memory + barriers) must be handed whole

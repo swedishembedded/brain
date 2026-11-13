@@ -150,5 +150,6 @@ fn rescaling_every_advantage_does_not_change_the_step() {
     println!("mean |change in token log-probability| after one step at lr 1e-3: {:.3e}", mean(&small));
     assert!(mean(&small) > 0.0);
     let worst = small.iter().zip(&large).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    // perf-number: advantage scale of the test input, not a measurement
     assert!(worst <= 0.05 * small.iter().fold(0.0f32, |a, x| a.max(x.abs())), "a 1000x advantage changed the step by {worst}");
 }

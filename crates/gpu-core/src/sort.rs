@@ -49,9 +49,9 @@ pub const SORT_CHUNK_LEN: usize = 256;
 /// of keys with 256-key chunks launches tens of thousands of threads that each
 /// stream 256 keys and keep a 256-bin table in local memory, and the scan of
 /// the `256 * chunks` histogram grows with them. Measured on a GH200 over the
-/// 10-25M-key frames of a truck capture, the sort passes took 12.3 s of device
-/// time per profile run at 256, 8.9 s at 512, 7.3 s at 1024, 7.0 s at 2048
-/// and 8.8 s at 4096.
+/// 10-25M-key frames of a truck capture (`fit_profile` in `crates/splat`
+/// reproduces it), the sort passes' device time fell steeply from 256 to 1024,
+/// was lowest at 2048 and rose again at 4096.
 pub const SORT_CHUNK_MAX: usize = 2048;
 
 /// Keys per chunk for a sort of `n` keys: about 8192 chunks' worth of work

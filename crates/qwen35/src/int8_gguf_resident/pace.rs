@@ -104,6 +104,7 @@ mod tests {
 
     fn pace() -> PrefillPace {
         let mut p = PrefillPace::new(Duration::from_millis(40));
+        // perf-number: synthetic layer timing fed to the pacer, not a measurement
         // A layer of a 512-row round takes 4 ms.
         p.observe_slice(10, 512, 0.04);
         p
@@ -118,6 +119,7 @@ mod tests {
     fn a_short_round_is_sized_from_its_own_layer_cost_not_a_wide_rounds() {
         let mut p = pace();
         p.observe_iteration(Some(0.020));
+        // perf-number: synthetic layer timings fed to the pacer, not a measurement
         // 100 rows cost 0.6 ms a layer: 20 ms of slice is 33 of them, where the 512-row rate (4 ms) says 5.
         assert_eq!(p.layers(100), FIRST_SLICE_LAYERS, "not timed yet");
         p.observe_slice(10, 100, 0.006);
@@ -134,6 +136,7 @@ mod tests {
     fn a_prompt_gets_what_the_decode_iteration_leaves_of_the_target() {
         let mut p = pace();
         p.observe_iteration(Some(0.020));
+        // perf-number: synthetic layer timings fed to the pacer, not a measurement
         // 40 - 20 ms of slice, 4 ms a layer.
         assert_eq!(p.layers(512), 5);
         // A busier decode loop leaves less.

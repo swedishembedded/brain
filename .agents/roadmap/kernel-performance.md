@@ -7589,3 +7589,32 @@ paid only where that pool is actually open (`model::CHUNK_ARENA_MIN_ROWS`,
 Unpooled rounds instead drain on BYTES against
 `Gpu::reclaim_ceiling_bytes()`, which is a different obligation this entry
 never had to consider and which a 128-row unpooled round does cross.
+
+## Measured numbers moved out of source comments (2026-11-13)
+
+Source comments carry no bare figures (`make check/scripts`); the measurements they
+once quoted live here (GH200 unless stated).
+
+- Flash prefill split (`FLASH_PREFILL_WG_UNSPLIT_ROWS`), 4096 rows at 4K/8K/16K/24K/32K
+  context, ms: 0.92 / 2.08 / 4.18 / 6.25 / 8.19 with splits, 0.82 / 1.88 / 3.96 /
+  5.98 / 7.97 without.
+- Native tuning budget (`native_tune::BUDGET`): the FP8 grid's 120 classes take about
+  37 s on a Hopper card (96 classes took 29 s).
+- Plain one-thread-per-output fp32 GEMM is about 100x slower than the register-tiled
+  kernel on a CUDA device.
+- Unfused SAM relative-position chain was 70 % of the tower's device time
+  (`flash_attn_cross_relpos`).
+- Gated-DeltaNet pooled decode: the single-launch body (one block per key head, 16 of
+  132 SMs at one sequence) runs 4x slower at 16 sequences than the two-launch body.
+- LoRA bank: a tile of interleaved adapters on the tiled kernel's slow path measured 2x
+  slower than the row-wise kernel.
+- Mirage decode slices: 32 keys beat 128 by 15-30 % of the attention time (batch 1-64,
+  700 key positions); 16 keys were slower at batch 32 and 64.
+- Training weight decode scope (`ops/tiled`): decoding again costs about 140 us per MLP
+  matrix at 27B width, 7.8 % of a W8K step.
+- DeepSeek2 fast-tier router GEMM: one 128x128 tile, one multiprocessor, 0.12 ms a layer.
+- Packed checkpoint point reads: dropping the mapping after each read cost 15 ms of
+  host time in front of a 600-row round.
+- CPU backend fan-out: a tiny-model gradcheck cut into 1152 one-invocation tasks (144
+  cores) took 31 min 32 s on a pool where one thread took seconds; 16K invocations are
+  about 0.1 ms of work (`MIN_CHUNK_INVOCATIONS`).

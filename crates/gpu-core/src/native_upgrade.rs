@@ -1987,7 +1987,7 @@ pub(crate) const ROWS: &[Row] = &[
         launch: CudaLaunch::NONE,
     },
     // The plain one-thread-per-output fp32 GEMM: what a small output (a ViT tile's 101 rows, a conditioning row)
-    // gets from `model::block::pick_gemm`, and ~100x slower than the register-tiled kernel on a CUDA device. The
+    // gets from `model::block::pick_gemm`, and far slower than the register-tiled kernel on a CUDA device. The
     // same arithmetic (one fp32 accumulator per output, product and sum each rounded, k ascending), so the same
     // native kernel serves it bit for bit (`tests/f32_reg_native.rs`).
     Row {

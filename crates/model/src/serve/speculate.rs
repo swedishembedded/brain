@@ -517,7 +517,7 @@ struct BucketCosts {
     draft_fixed: Option<f64>,
 }
 
-/// Prices assumed before they were measured, optimistic so that speculation is tried and measured: a token costs the 12 ms of a
+/// Prices assumed before they were measured, optimistic so that speculation is tried and measured: a token costs a
 /// single-stream decode step, a verify row a tenth of a token, a proposal nothing to draft. The decision to speculate uses them
 /// only until the first rounds have been timed.
 const PRIOR_TOKEN_SECS: f64 = 0.012;

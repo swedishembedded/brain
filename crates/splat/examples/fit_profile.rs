@@ -11,6 +11,7 @@
 //! ```
 //!
 //! `--densify` runs density control (a round every iters/4
+// perf-number: fraction of the run density control covers, a parameter of the schedule
 //! steps, until 60% of them), so its rounds are in the account too.
 //!
 //! Prints the per-kernel DEVICE times (`gpu_core::profile::profile_live`),

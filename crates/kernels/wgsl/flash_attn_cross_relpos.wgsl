@@ -33,7 +33,7 @@
 // and `q0/q1/o0/o1` stay in registers. Rows past `t_dec` are computed against a zero query and never written.
 //
 // What it replaces is SAM's materialized chain per window and query chunk: scores, `attn_relpos_add`, softmax,
-// apply - one-thread-per-element kernels whose cost is the score slab (the unfused chain was 70% of the
+// apply - one-thread-per-element kernels whose cost is the score slab (the unfused chain was most of the
 // tower's device time). NOT bit-identical to it: an online softmax reassociates both sums, so a gate holds
 // the two to a stated tolerance (`crates/sam1/tests`).
 //

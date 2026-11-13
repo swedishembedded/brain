@@ -146,8 +146,8 @@ const TRIALS: usize = 3;
 /// Launches timed per candidate at least, so a class with one weight copy still has several to take the minimum of.
 const MIN_LAUNCHES: usize = 6;
 /// Wall time one device's tuning may take; classes not reached keep their default candidate until a rebuild retunes. The
-/// FP8 grid's 120 classes take about 37 s on a Hopper card (96 classes took 29 s): the budget leaves the table room to
-/// finish on a card that is slower or shared.
+/// FP8 grid's classes tune in a fraction of this budget on a Hopper card (`brain roofline gpu --kernels` reports the time): the
+/// budget leaves the table room to finish on a card that is slower or shared.
 const BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The read-bandwidth probe: every thread streams 16-byte vectors with the loads a decode GEMV issues (L1

@@ -252,7 +252,7 @@ impl BlockBacking for UnifiedPool {
 /// rows backed now.
 ///
 /// A released row stays backed until the scheduler needs its blocks ([`Self::reclaim`]): backing a row is one `cuMemCreate` and
-/// one `cuMemSetAccess` per granule per recurrent layer (~140 us each) on the serving thread, ~30 ms a row, and the blocks lent to
+/// one `cuMemSetAccess` per granule per recurrent layer on the serving thread (tens of milliseconds a row), and the blocks lent to
 /// cover it are blocks of a pool that is backed at load anyway, so keeping it costs no device memory. Dropping released rows
 /// eagerly (beyond eight while others ran, all of them once the server went idle) made every burst of requests after an idle
 /// spell, and every admission past the eighth at a concurrency limit, pay that cost before its first token.
@@ -269,7 +269,7 @@ impl StateLedger {
     }
 
     /// Back every block now, so that no block is backed on the serving thread the first time a sequence takes it: one block is
-    /// 32 `cuMemCreate` and `cuMemSetAccess` pairs (~4.7 ms), and the ~700 blocks of 64 streams of 8K were 3.3 s of host time in
+    /// 32 `cuMemCreate` and `cuMemSetAccess` pairs, and the ~700 blocks of 64 streams of 8K were seconds of host time in
     /// the first minute of load. A block a state row displaces gives its memory back (`admit`), as it does from any state.
     pub(crate) fn back_all_blocks(&self) -> Result<(), String> {
         self.pool.lock().unwrap_or_else(|e| e.into_inner()).back_all_blocks()

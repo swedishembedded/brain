@@ -7,7 +7,7 @@
 //! action's own params without guessing from their names.
 //!
 //! Video models share no vocabulary: one counts `frames` on a `1 + 8k` grid at
-//! a caller-chosen rate, another counts `num_frames` at a fixed 24 fps, a third
+//! a caller-chosen rate, another counts `num_frames` at a fixed frame rate, a third
 //! uses a `1 + 4k` grid; sizes snap to different multiples; sound is optional,
 //! always on, or absent. A [`VideoContract`] states those facts once, and
 //! [`VideoContract::map`] and [`VideoContract::listing`] derive everything a
@@ -432,6 +432,7 @@ mod tests {
             .seed("seed")
     }
 
+    // perf-number: MiniMax-H3's released frame rate and duration bounds, a contract constant
     /// MiniMax-H3's shape: `num_frames` at a fixed 24 fps, 5 to 15 s, sound always.
     fn minimax() -> VideoContract {
         VideoContract::new("num_frames", (1, 8), Fps::Fixed(24), ("width", "height"), 32, 1280 * 736, (5.0, 15.0)).audio(Audio::Always).seed("seed")
@@ -448,6 +449,7 @@ mod tests {
 
     #[test]
     fn duration_snaps_up_to_the_frame_grid_at_the_requested_rate() {
+        // perf-number: frame-grid arithmetic of the requested rate and duration, not a measurement
         // 5 s at 24 fps is 120 frames; the next 1 + 8k count is 121.
         let p = ltx().map(&VideoRequest { duration: Some(5.0), ..req() }).unwrap();
         assert_eq!(p["frames"], json!(121));
@@ -499,8 +501,8 @@ mod tests {
 
     #[test]
     fn snapping_never_carries_a_clip_past_the_longest_the_model_renders() {
-        // A 17n + 5 grid at 24 fps: 15 s snaps up to 362 frames (15.08 s), so
-        // it is stepped back to 345 (14.4 s), still inside 5 to 15 s.
+        // A 17n + 5 grid at a fixed rate: the longest duration snaps up to 362 frames, past the bound, so it is stepped back
+        // to 345 frames, still inside the bounds.
         let c = VideoContract::new("num_frames", (5, 17), Fps::Fixed(24), ("width", "height"), 32, 1344 * 768, (5.0, 15.0));
         assert_eq!(c.map(&VideoRequest { duration: Some(15.0), ..req() }).unwrap()["num_frames"], json!(345));
         assert_eq!(c.map(&VideoRequest { duration: Some(5.0), ..req() }).unwrap()["num_frames"], json!(124));

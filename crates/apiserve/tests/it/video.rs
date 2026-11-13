@@ -258,6 +258,7 @@ async fn a_clip_is_generated_polled_and_downloaded_whole_and_by_range() {
     let id = submit(&app, json!({"model": MODEL, "prompt": "a ball", "duration": 1, "size": "32x16", "seed": 4})).await;
     let done = wait(&app, &id).await;
     assert_eq!(done["status"], "completed", "{done}");
+    // perf-number: frame-grid arithmetic of the request (8 fps asked, 1 + 4k grid), not a measurement
     // 1 s at 8 fps on the 1 + 4k grid is 9 frames.
     assert_eq!(done["usage"]["frames"], json!(9));
     assert_eq!(done["usage"]["seconds"], json!(9.0 / 8.0));

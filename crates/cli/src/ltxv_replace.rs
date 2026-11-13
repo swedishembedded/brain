@@ -153,7 +153,7 @@ flux2.dit, flux2.vae, flux2.text_encoder, flux2.tokenizer, flux2.variant
 /// tuned at; each is a flag (see [`HELP`]).
 struct Tuning {
     /// Without `--guide-frames`, a guide every this many frames: about every
-    /// 1.7 s at 24 fps, often enough that the figure's identity has no time
+    /// second and a half at the usual clip rate, often enough that the figure's identity has no time
     /// to drift between guides.
     guide_every: usize,
     /// How hard the video pass holds a guide. Guides held at 1.0 are each a
@@ -1032,8 +1032,8 @@ fn paste(px: &mut [u8], w: usize, b: Box2, tile: &[u8]) {
     }
 }
 
-/// Ten clicks spread over a silhouette: two per row at five heights, 30 % and
-/// 70 % across the row, so head, torso and legs are all asked about.
+/// Ten clicks spread over a silhouette: two per row at five heights, at three tenths and
+/// seven tenths of the way across the row, so head, torso and legs are all asked about.
 fn spread_points(m: &[bool], w: usize, h: usize) -> Vec<(f32, f32)> {
     let rows: Vec<usize> = (0..h).filter(|&y| m[y * w..(y + 1) * w].contains(&true)).collect();
     if rows.is_empty() {

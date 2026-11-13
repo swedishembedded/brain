@@ -270,6 +270,7 @@ fn a_forward_is_sized_to_the_latency_target_once_the_step_cost_is_known() {
     load.extend((0..6).map(|i| (10 + i * 5, 20 + i as u32, 3000, 2)));
     run(&mut s, &load);
     let log = log.lock().unwrap();
+    // perf-number: synthetic step costs of the test scheduler, not a measurement
     // 45 ms holds (45 - 20) / 0.1 = 250 rows. After the cost is learnt no forward that carries decode rows and a
     // slice larger than the minimum is expected to overrun it (a small margin for the fit).
     let warm = &log.forwards[12..];
@@ -286,6 +287,7 @@ fn a_forward_is_sized_to_the_latency_target_once_the_step_cost_is_known() {
 #[test]
 fn a_prompt_advances_every_iteration_however_busy_decode_is() {
     let (mut s, log) = scheduler(true);
+    // perf-number: synthetic step costs of the test scheduler, not a measurement
     // 60 sequences decoding: their rows alone cost 26 ms of the 45, which leaves less than the minimum slice.
     let mut load: Vec<(usize, u32, usize, usize)> = (0..60).map(|i| (0, i as u32, 8, 200)).collect();
     load.push((5, 99, 640, 2));
