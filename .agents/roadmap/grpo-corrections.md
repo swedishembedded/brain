@@ -6,16 +6,16 @@ The objective in `crates/rl/src/objective/grpo.rs` now trains the distribution
 that sampled, never steps on an empty batch and normalises per token (knowledge
 290). What is left:
 
-- [ ] Batched, KV-cached rollouts. The model's own rollout still re-prefills the whole
-      sequence per token through `Model::logits_all` (O(T^2), a different
-      forward from training). The serving path exists: `model::rollout::SchedulerRollout` submits a group to the
-      generic scheduler over any paged engine (shared prompt prefill, batched decode, per-token log-probabilities and
-      the policy version on each completion; gated against the dense model on a tiny `qwen3`), and `qwen3`'s
-      `EngineRollout` builds on it and refits by publishing the trainer's LoRA factors to the engine's adapter bank
-      as the next policy version (no engine rebuild, the previous version's cached prompts purged; a full fine-tune
-      still rebuilds). Not yet the default of the SDK's improve cycle, and not yet measured on real
-      weights. The trainer's behaviour log-probabilities are recomputed by the training forward either way, so only
-      speed is at stake.
+- [x] Batched, KV-cached rollouts through the serving path. `model::rollout::SchedulerRollout` submits a group to the
+      generic scheduler over any paged engine (shared prompt prefill, batched decode, per-token log-probabilities, the
+      stop token's log-probability and the policy version on each completion; gated against the dense model on a tiny
+      `qwen3`), and `qwen3`'s `EngineRollout` builds on it and refits by publishing the trainer's LoRA factors to the
+      engine's adapter bank as the next policy version (no engine rebuild, the previous version's cached prompts purged;
+      a full fine-tune still rebuilds). It is the default sampler of the SDK's improve cycle for `qwen3`
+      (`ImproveOptions::model_rollouts` selects the model's own O(T^2) forward, the oracle); other users of `Grpo`
+      (`rl::continual`, the conformance suite) and architectures without a rollout engine still sample with the model.
+      Real-weight cost: the section below. The trainer's behaviour log-probabilities are recomputed by the training
+      forward either way, so only speed is at stake.
 - [ ] An entropy term (or an entropy floor) next to the KL term; neither is in
       the loss, and the KL to the adapter-disabled reference is logged only.
 - [ ] The documented 12-cycle study (`crates/rl/tests/continual_study.rs`) was

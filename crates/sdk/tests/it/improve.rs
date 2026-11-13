@@ -127,6 +127,29 @@ fn an_improve_cycle_runs_gates_and_publishes_an_adapter_only_on_promote() {
     }
 }
 
+/// The serving engine samples the groups by default; the model's own
+/// forward stays available as the oracle, and both run a cycle.
+#[test]
+fn a_cycle_can_sample_with_the_models_own_forward_instead_of_the_engine() {
+    if skip() {
+        return;
+    }
+    let dir = tmp("own-rollouts");
+    let base = dir.join("base.safetensors");
+    write_base(&base);
+    assert!(!ImproveOptions::default().model_rollouts, "the serving engine is the default");
+    let outcome = Improve::from_pretrained(base.to_string_lossy().into_owned())
+        .expect("from_pretrained")
+        .adapter_dir(dir.join("adapters"))
+        .work_dir(dir.join("work"))
+        .lora(4)
+        .seed(brain::random_seed())
+        .held_out_seed(brain::random_seed())
+        .run(FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4, 5, 6] }, FracMatchVerifier, &ImproveOptions { steps: 4, max_new: 8, model_rollouts: true, ..ImproveOptions::default() })
+        .expect("the improve cycle must run");
+    assert!(outcome.p_value.is_finite());
+}
+
 /// An unregistered `--arch` is refused by name, listing the ones that are -
 /// the same contract `DocumentStudy` gives (`crates/sdk/tests/
 /// document_study.rs`).

@@ -48,9 +48,18 @@ pub struct EngineGeometry {
     pub gpu: Option<u32>,
 }
 
+/// Where the engine's base weights come from.
+enum Base {
+    /// Host tensors: the one form a full fine-tune's refit can replace tensors in.
+    Map(HashMap<String, Vec<f32>>),
+    /// A checkpoint, streamed onto the device a tensor at a time and never held
+    /// whole on the host; refits are adapters only.
+    Source(Box<dyn checkpoint::TensorSource>),
+}
+
 pub struct EngineRollout {
     cfg: QwenConfig,
-    base: HashMap<String, Vec<f32>>,
+    base: Base,
     lora: Option<LoraCfg>,
     geometry: EngineGeometry,
     inner: Option<SchedulerRollout<Engine>>,
@@ -64,7 +73,13 @@ impl EngineRollout {
     /// serves plain linears) with weights `base`, publishing adapters of shape
     /// `lora` on each sync. No engine exists until the first sync.
     pub fn new(cfg: QwenConfig, base: HashMap<String, Vec<f32>>, lora: Option<LoraCfg>, geometry: EngineGeometry) -> EngineRollout {
-        EngineRollout { cfg: QwenConfig { lora: None, ..cfg }, base, lora, geometry, inner: None, versions: 0 }
+        EngineRollout { cfg: QwenConfig { lora: None, ..cfg }, base: Base::Map(base), lora, geometry, inner: None, versions: 0 }
+    }
+
+    /// [`Self::new`] over a checkpoint `base` that is streamed onto the engine
+    /// and never copied into host memory. Only adapters can be synced to it.
+    pub fn from_source(cfg: QwenConfig, base: Box<dyn checkpoint::TensorSource>, lora: LoraCfg, geometry: EngineGeometry) -> EngineRollout {
+        EngineRollout { cfg: QwenConfig { lora: None, ..cfg }, base: Base::Source(base), lora: Some(lora), geometry, inner: None, versions: 0 }
     }
 
     /// The engine, once synced.
@@ -77,9 +92,12 @@ impl EngineRollout {
         self.inner.as_ref().map(|r| r.scheduler())
     }
 
-    fn build(&self, weights: &HashMap<String, Vec<f32>>) -> Result<Engine, String> {
+    fn build(&self, weights: &Base) -> Result<Engine, String> {
         let g = self.geometry;
-        let make = || Engine::from_map_tier(self.cfg.clone(), weights, g.block_size, g.num_blocks, g.max_batch, g.max_blocks_per_seq, g.max_prefill, false, g.tier);
+        let make = || match weights {
+            Base::Map(map) => Engine::from_map_tier(self.cfg.clone(), map, g.block_size, g.num_blocks, g.max_batch, g.max_blocks_per_seq, g.max_prefill, false, g.tier),
+            Base::Source(src) => Engine::from_source_tier(self.cfg.clone(), src.as_ref(), g.block_size, g.num_blocks, g.max_batch, g.max_blocks_per_seq, g.max_prefill, false, g.tier),
+        };
         match g.gpu {
             Some(i) => gpu_core::devices::with_gpu(i, make),
             None => Ok(make()),
@@ -103,7 +121,7 @@ impl EngineRollout {
         for (name, a) in trained {
             let Some(base_name) = name.strip_suffix(LORA_A) else { continue };
             let b = trained.get(&format!("{base_name}{LORA_B}")).ok_or_else(|| format!("{name} has no {LORA_B}"))?;
-            if !self.base.contains_key(base_name) {
+            if !self.cfg.param_list().iter().any(|(known, _)| known == base_name) {
                 return Err(format!("{base_name}: the adapter's base is not a weight of this model"));
             }
             sites.push(AdapterSite { base: base_name.to_string(), a: a.clone(), b: b.clone() });
@@ -131,15 +149,19 @@ impl EngineRollout {
     /// A full fine-tune: the trained tensors replace the base's, and the engine
     /// is rebuilt from them.
     fn rebuild(&mut self, trained: &HashMap<String, Vec<f32>>) -> Result<(), String> {
+        if matches!(self.base, Base::Source(_)) {
+            return Err("this rollout streams its base from a checkpoint and takes adapters only; a full fine-tune needs EngineRollout::new over host tensors".to_string());
+        }
         // Free the previous engine before the next one allocates.
         self.inner = None;
         let mut swapped: Vec<(String, Vec<f32>)> = Vec::new();
         let result = (|| -> Result<(), String> {
+            let Base::Map(map) = &mut self.base else { unreachable!("checked above") };
             for (name, value) in trained {
-                if !self.base.contains_key(name) {
+                let Some(orig) = map.insert(name.clone(), value.clone()) else {
+                    map.remove(name);
                     return Err(format!("{name} is not a weight of this model"));
-                }
-                let orig = self.base.insert(name.clone(), value.clone()).expect("checked present");
+                };
                 swapped.push((name.clone(), orig));
             }
             let engine = self.build(&self.base)?;
@@ -150,8 +172,10 @@ impl EngineRollout {
             Ok(())
         })();
         // Back out the replaced tensors, so only those are ever copied.
-        for (name, orig) in swapped {
-            self.base.insert(name, orig);
+        if let Base::Map(map) = &mut self.base {
+            for (name, orig) in swapped {
+                map.insert(name, orig);
+            }
         }
         result
     }
