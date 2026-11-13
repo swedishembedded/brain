@@ -111,7 +111,7 @@ def shop_lookahead():
         "children. 'Nodes' counts every state node of the tree without sharing, root and leaves included; 'values with "
         "sharing' is the number of (stock, days-left) pairs that need a value when equal subtrees are computed once, "
         "4 stocks times d. The columns Q_d(0, a) are the lookahead values of the orders a = 0, 1, 2, 3 at the root with "
-        "zero leaves; 'best a' is the smallest order within 1e-9 of the largest value (the tie rule of Chapter 1).",
+        "zero leaves, printed to 3 decimals; the exact value of Q_3(0, 3) is -0.7875 and is printed -0.788 (half away from zero), though a double may land on either side of that tie, so compare these columns to within 0.001; 'best a' is the smallest order within 1e-9 of the largest value (the tie rule of Chapter 1).",
         "",
         _table(["d", "nodes", "values with sharing", "Q_d(0, a) with zero leaves", "best a, zero leaves", "best a, leaves V*"],
                rows, "lrrrrr"),
@@ -438,7 +438,7 @@ def learned_heuristic():
         f"initial weights from the book's generator `{NET_NAME}`, {mdps._seed_text(NET_NAME)}: W1 (2 x 12, row-major, "
         "each normal() divided by sqrt(2)), then W2 (12 values, each normal() divided by sqrt(12)). Loss: mean squared "
         "error over the 79 cells; full-batch gradient descent, learning rate 0.1, tanh the correctly rounded library tanh. "
-        "The prediction of a cell is the output times 14. Each line is the network after the stated number of steps. "
+        "The prediction of a cell is the output times 14. Each line is the network after the stated number of steps, except 'training loss', which is the loss computed on the network just before the last of those steps updated it (weights after steps - 1 updates); the other columns use the weights after all the steps. "
         "'too high' counts the cells whose prediction exceeds CTG; 'largest excess' is the largest prediction minus CTG. "
         "A* then uses h = max(0, prediction), 'raw', or h = max(0, prediction - largest excess), 'shifted', which never "
         "exceeds CTG on these cells. Priority g + h, the conventions of the previous table. Digits follow the nudge rule "
@@ -1110,7 +1110,7 @@ def hindsight_relabelling():
         "come first (all 300 episodes), the draws of the relabelling after them, from the same generator and in the order of "
         "the three rows of the table (only the third row draws). A transition is (state, move, next state, goal) and its "
         f"reward is 1 when the next state is the goal. Learning: tabular Q(state, move, goal), start 0, {HER_SWEEPS} sweeps "
-        f"over the stored transitions in stored order, target 1 when the next state is the goal and otherwise "
+        f"over the stored transitions in stored order (per episode its original-goal transitions, then its relabelled ones, episode after episode), target 1 when the next state is the goal and otherwise "
         f"{HER_GAMMA} times the largest Q of the next state for the same goal, step {HER_ALPHA}. Evaluation: for every "
         f"start-goal pair of different cells ({total}), follow the move of largest Q (a tie to the smaller move) for up "
         f"to {2 * HER_H} moves; success if the goal is reached. A table that is all zero (always the first move, up) "

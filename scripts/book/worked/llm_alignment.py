@@ -235,7 +235,10 @@ def sft_masked_loss():
         f"row a, in the stable form. Conversation A is the three messages of that chapter ((system, `{CONV_A[0][1]}`), (user, "
         f"`{CONV_A[1][1]}`), (assistant, `{CONV_A[2][1]}`)) in its ChatML template, {len(a.ids)} ids; position t has the input id "
         f"ids[t] and the target ids[t + 1], t = 0 .. {len(a.ids) - 2}, so there are {len(a.targets())} targets and the first id is "
-        f"never one. In the table START, END and the pieces are written as in that chapter ('_' is a space, <0A> a line feed). "
+        f"never one. The ids come from the tokenizer of Volume V, Chapter 2 (`tokenization.ToyTokenizer`: byte-level BPE with 70 "
+        f"merges trained on that corpus, pre-tokenized as there, ids 0 .. 325, then the three special ids); conversation B, "
+        f"used for the two divisors below, is (system, `{CONV_B[0][1]}`), (user, `{CONV_B[1][1]}`), (assistant, "
+        f"`{CONV_B[2][1]}`) in the same template. In the table START, END and the pieces are written as in that chapter ('_' is a space, <0A> a line feed). "
         f"Chosen by this chapter's rule, the supervised targets are the assistant's text and END (7 targets); the line feed after "
         f"END is listed below them.\n\n{first}\n\n"
         f"Loss of the same model on conversation A under four conventions for which targets count (sum of -ln p over the counted "
@@ -474,7 +477,7 @@ def learned_reward_cost():
         f"The reward model of the previous blocks, s = {_row(s, 3)} (a table of scores after {RM_STEPS} steps), used as the reward "
         f"of the KL-regularised objective: for each beta the optimum pi*_s(y) = pi_ref(y) exp(s(y) / beta) / Z. 'E s' is the "
         f"reward the model believes the policy earns, 'E r' the reward the labeller's r = {_row(R_TRUE, 1)} gives it, and 'best "
-        f"E r at that KL' is the largest E r among the optima of r itself (beta found by bisection on ln beta, 200 halvings) "
+        f"E r at that KL' is the largest E r among the optima of r itself (beta found by bisection on ln beta over [ln 0.001, ln 10000], 200 halvings: the KL of the optimum falls as beta rises, so a midpoint whose KL exceeds the target becomes the new lower end and any other midpoint the new upper end, and beta is the final midpoint) "
         f"that spend the same KL(pi || pi_ref); the last column is the shortfall, the price of the reward model's errors at that "
         f"distance from the reference.\n\n"
         + _table(["beta", "pi*_s", "KL of pi from pi_ref", "E s", "E r", "best E r at that KL", "shortfall"], rows, "rlrrrrr"))
@@ -1185,7 +1188,7 @@ def alignment_costs():
     dpo = 2 * p * 2 * t + 6 * p * 2 * t
     totals = [["RLHF with PPO (sampling, reference, reward model, critic, policy; one epoch)", _sci(ppo)],
               ["GRPO with a program as the reward (sampling, reference, policy; one epoch)", _sci(grpo)],
-              [f"DPO on {g} pairs (reference once, update; one epoch)", _sci(g * dpo)]]
+              [f"DPO on {g} pairs (the reference scored once for each pair, then the update; one epoch)", _sci(g * dpo)]]
     mem = [["RLHF with PPO", "policy, reference, reward model, critic", 2 * (p + p + pr + pv)],
            ["GRPO", "policy, reference", 2 * (p + p)],
            ["DPO", "policy, reference", 2 * (p + p)]]
