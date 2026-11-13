@@ -44,6 +44,12 @@ also has arch-specific long-tail flags:
 | `bench` | the architecture's own benchmark |
 | `import` / `export` | one-time checkpoint conversion |
 
+`brain qwen3 toy --out DIR [--seed N] [--store-layout]` writes a tiny randomly initialised chat checkpoint (2 layers, 32 wide, a
+byte-level tokenizer and a bare chat template; the same seed writes the same weights) that trains and samples on
+the CPU in seconds: the base a consumer's tests use when they need no real weights. Put the directory in a model
+store, or write it there directly with `--store-layout --out <models-dir>/local/<name>`, to serve it or train a
+job on it by name.
+
 An architecture with no dedicated CLI module dispatches the action name
 directly as the verb - `brain caps` prints the exact list. For example:
 

@@ -44,6 +44,7 @@ const DEDICATED_VERBS: &[&str] = &[
     "eval",
     "calib",
     "lora_gate",
+    "toy",
 ];
 
 /// Whether `verb` should be served by this module or handed to the generic
@@ -101,8 +102,15 @@ pub fn run_qwen(args: &[String]) {
         Some("eval") => eval_chat(&args[1..]),
         Some("calib") => calib(&args[1..]),
         Some("lora_gate") => lora_gate(&args[1..]),
+        Some("toy") => match write_toy(&args[1..]) {
+            Ok(done) => println!("{done}"),
+            Err(e) => {
+                eprintln!("brain qwen3 toy: {e}");
+                std::process::exit(2);
+            }
+        },
         other => {
-            eprintln!("usage: brain qwen3 <import|infer|export|precompile|train|finetune|toolcall|eval|calib|lora_gate> ...  (got {other:?})");
+            eprintln!("usage: brain qwen3 <import|infer|export|precompile|train|finetune|toolcall|eval|calib|lora_gate|toy> ...  (got {other:?})");
             eprintln!("       plus every action on the generic manifest (`brain caps qwen3`), e.g. `generate`.");
         }
     }
@@ -111,6 +119,32 @@ pub fn run_qwen(args: &[String]) {
 #[cfg(test)]
 mod routing_tests {
     use super::*;
+
+    /// The toy checkpoint is written from the command line with the files a consumer's tests load, the same seed
+    /// writes the same weights, and a typo in a flag is refused instead of ignored.
+    #[test]
+    fn toy_writes_a_loadable_checkpoint_and_refuses_what_it_does_not_know() {
+        assert!(DEDICATED_VERBS.contains(&"toy"));
+        let dir = std::env::temp_dir().join(format!("brain-cli-toy-{}", std::process::id()));
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        let args = |out: &Path| ["--out".to_string(), out.display().to_string(), "--seed".to_string(), "5".to_string()];
+        assert!(write_toy(&args(&a)).unwrap().contains("seed 5"));
+        write_toy(&args(&b)).unwrap();
+        for file in ["model.safetensors", "tokenizer.json", "tokenizer_config.json"] {
+            assert!(a.join(file).is_file(), "{file}");
+        }
+        assert_eq!(std::fs::read(a.join("model.safetensors")).unwrap(), std::fs::read(b.join("model.safetensors")).unwrap());
+        // In the model store's layout it is found by name, as `local/<name>`.
+        let models = dir.join("models");
+        write_toy(&["--out".into(), models.join("local").join("toy").display().to_string(), "--seed".into(), "5".into(), "--store-layout".into()]).unwrap();
+        let found = brain_modelstore::Store::new(&models).local(&brain_modelref::ModelRef::parse("local/toy").unwrap());
+        assert!(found.is_some_and(|m| m.weights.ends_with("model.brain.safetensors")), "the store finds the toy checkpoint by name");
+        assert!(write_toy(&["--out".into(), a.display().to_string(), "--sed".into(), "5".into()]).unwrap_err().contains("unknown flag"));
+        assert!(write_toy(&[]).unwrap_err().contains("--out"));
+        assert!(write_toy(&["--out".into()]).unwrap_err().contains("requires a value"));
+        assert!(write_toy(&["--out".into(), "x".into(), "--seed".into(), "no".into()]).unwrap_err().contains("--seed"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// The reported defect: `brain qwen3 generate --precision int8` ran this
     /// module's `infer` and ignored `--precision`, because `canon_verb` folds
@@ -294,6 +328,39 @@ fn export(args: &[String]) {
             std::process::exit(2)
         }
     }
+}
+
+/// `brain qwen3 toy --out DIR [--seed N] [--store-layout]`: writes a tiny randomly initialised chat checkpoint (2 layers, 32 wide, a
+/// byte-level tokenizer, a bare chat template) that trains and samples on the CPU in seconds, so a consumer's tests
+/// need no real weights. The same seed writes the same weights; without one a random seed is drawn and printed.
+/// `--store-layout` names the weights file as the model store reads it (`model.brain.safetensors`), so `--out` may
+/// be `<models-dir>/local/<name>` and the checkpoint is then served and trained on by that name. Every flag is
+/// checked: an unknown one is an error, not a silently ignored typo.
+fn write_toy(args: &[String]) -> Result<String, String> {
+    const USAGE: &str = "usage: brain qwen3 toy --out DIR [--seed N] [--store-layout]";
+    let (mut out, mut seed, mut store_layout) = (None, None, false);
+    let mut i = 0;
+    while i < args.len() {
+        let value = || args.get(i + 1).cloned().ok_or_else(|| format!("{} requires a value", args[i]));
+        match args[i].as_str() {
+            "--out" => out = Some(value()?),
+            "--seed" => seed = Some(value()?.parse::<u64>().map_err(|e| format!("--seed: {e}"))?),
+            "--store-layout" => {
+                store_layout = true;
+                i += 1;
+                continue;
+            }
+            other => return Err(format!("unknown flag {other:?}; {USAGE}")),
+        }
+        i += 2;
+    }
+    let out = out.ok_or_else(|| format!("--out DIR is required; {USAGE}"))?;
+    let seed = seed.unwrap_or_else(data::rng::random_seed);
+    brain::toy::write_toy_chat_checkpoint(Path::new(&out), seed).map_err(|e| e.to_string())?;
+    if store_layout {
+        std::fs::rename(Path::new(&out).join("model.safetensors"), Path::new(&out).join("model.brain.safetensors")).map_err(|e| format!("{out}: {e}"))?;
+    }
+    Ok(format!("ok: wrote a toy chat checkpoint to {out} (seed {seed})"))
 }
 
 fn val(args: &[String], i: &mut usize, flag: &str) -> String {
