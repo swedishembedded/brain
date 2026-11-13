@@ -54,3 +54,12 @@ Plan for fp8 (follow-up, not started):
 2. A measured accuracy gate against the bf16 reference at the kernel and at the first-step gradient
    and a 10-step loss curve on the real 27B, as for every tensor-core tier.
 3. `choose_base_tier` then prefers fp8 where the card has it and the gate passed.
+
+## Since (2026-11-13)
+
+Step 1 is partly in place. `b87dd8e0d` (2026-10-21) added the resident bf16/FP8 full fine-tune with
+an off-device master. `32134efec` (2026-10-29) added e4m3-by-e4m3 candidates (`matmul_fp8_wgmma*`,
+cc 9.0) on the shared dispatch seam that a resident FP8 weight's forward product also uses
+(`Ops::fp8_forward`). The input gradient still decodes weight tiles to a 16- or 32-bit scratch, and
+`choose_base_tier` still picks bf16 as described above; steps 2 and 3 remain the condition for
+preferring fp8.
