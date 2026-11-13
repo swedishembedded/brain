@@ -16,6 +16,10 @@
 //!   each token of that answer, one per token of the answer as the chat template renders it after the prompt (the
 //!   answer's text and its closing end-of-turn marker; the whitespace the template writes after the marker, such as the newline after Qwen's
 //!   `<|im_end|>`, is context: the sampler stops at the marker and never chose it). A value above zero is not a log-probability.
+//! * `"token_ids": [<id>, ...]` on a supervised assistant message (beside `behavior_logprobs`): the ids the sampler generated
+//!   for the answer. The trainer renders the answer's text through the chat template again; the ids it gets must be exactly
+//!   these, or the record is refused naming the first position that differs: a text that does not round-trip to the
+//!   generated ids (trimmed whitespace, a merged token) carries log-probabilities of tokens the trainer would not train.
 //! * `"truncated": true` on the record: the rollout did not reach an outcome (the token budget cut it, a step timed
 //!   out), so its advantage says nothing about the action. A policy-gradient run never trains on such a record; it is
 //!   counted, not drawn. A truncated rollout is masked as a whole, because the sampler's budget, not the policy,
@@ -52,6 +56,10 @@ pub struct Rollout {
     pub truncated: bool,
     /// One entry per message of the record; `Some` only on a supervised assistant message.
     pub behavior_logprobs: Vec<Option<Vec<f32>>>,
+    /// One entry per message of the record: the ids the sampler generated for that answer, when the collector recorded
+    /// them (`"token_ids"`). They are never used to train: they are checked against the tokens the chat template renders
+    /// for the answer, which proves that the text the trainer sees is the sequence the log-probabilities belong to.
+    pub token_ids: Vec<Option<Vec<u32>>>,
     /// What the teacher is shown instead of the record's own conversation, when the record carries a
     /// `"teacher_context"`.
     pub teacher: Option<Teacher>,
@@ -75,8 +83,8 @@ impl Rollout {
 
     /// The rollout of a sample derived from this record's (a prefix, one answer, a packing): the same advantage, with
     /// the derived sample's log-probabilities and teacher view.
-    pub(crate) fn derived(&self, behavior_logprobs: Vec<Option<Vec<f32>>>, teacher: Option<Teacher>) -> Rollout {
-        Rollout { advantage: self.advantage, truncated: self.truncated, behavior_logprobs, teacher }
+    pub(crate) fn derived(&self, behavior_logprobs: Vec<Option<Vec<f32>>>, token_ids: Vec<Option<Vec<u32>>>, teacher: Option<Teacher>) -> Rollout {
+        Rollout { advantage: self.advantage, truncated: self.truncated, behavior_logprobs, token_ids, teacher }
     }
 }
 

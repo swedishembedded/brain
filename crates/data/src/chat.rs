@@ -227,25 +227,40 @@ pub struct RenderedSegment {
     pub supervised: bool,
     /// The log-probabilities the sampler gave the tokens of this supervised answer, when the collector recorded them.
     pub behavior_logprobs: Option<Vec<f32>>,
+    /// The ids the sampler generated for this supervised answer, which the rendering must reproduce ([`crate::chat_rollout`]).
+    pub token_ids: Option<Vec<u32>>,
+}
+
+impl RenderedSegment {
+    fn context(text: &str) -> RenderedSegment {
+        RenderedSegment { text: text.to_string(), supervised: false, behavior_logprobs: None, token_ids: None }
+    }
+}
+
+/// What a collector recorded about one answer's sampled tokens: their log-probabilities and ids.
+#[derive(Clone, Default)]
+struct Sampled {
+    behavior_logprobs: Option<Vec<f32>>,
+    token_ids: Option<Vec<u32>>,
 }
 
 impl Rendered {
-    fn answer(prompt: &str, completion: &str, behavior_logprobs: Option<Vec<f32>>) -> Self {
-        Self { segments: vec![RenderedSegment { text: prompt.to_string(), supervised: false, behavior_logprobs: None }, RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs }] }
+    fn answer(prompt: &str, completion: &str, sampled: Sampled) -> Self {
+        Self { segments: vec![RenderedSegment::context(prompt), RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: sampled.behavior_logprobs, token_ids: sampled.token_ids }] }
     }
 
     /// [`Self::answer`] for a rollout: the whitespace the template writes after the end-of-turn marker (Qwen's
     /// `<|im_end|>` then a newline) is context, not action. The sampler stops at the marker, so that text is never
     /// sampled: it has no behaviour log-probability, and training it would move the policy on tokens it did not choose.
-    fn rollout_answer(prompt: &str, completion: &str, behavior_logprobs: Option<Vec<f32>>, end: &str) -> Self {
+    fn rollout_answer(prompt: &str, completion: &str, sampled: Sampled, end: &str) -> Self {
         let tail = &end[end.trim_end().len()..];
         match completion.strip_suffix(tail).filter(|_| !tail.is_empty()) {
-            Some(sampled) => {
-                let mut rendered = Self::answer(prompt, sampled, behavior_logprobs);
-                rendered.segments.push(RenderedSegment { text: tail.to_string(), supervised: false, behavior_logprobs: None });
+            Some(answer) => {
+                let mut rendered = Self::answer(prompt, answer, sampled);
+                rendered.segments.push(RenderedSegment::context(tail));
                 rendered
             }
-            None => Self::answer(prompt, completion, behavior_logprobs),
+            None => Self::answer(prompt, completion, sampled),
         }
     }
 }
@@ -326,7 +341,7 @@ impl ChatSample {
 
     /// The first `len` messages as a sample of their own.
     fn until(&self, len: usize) -> ChatSample {
-        ChatSample { messages: self.messages[..len].to_vec(), tools: self.tools.clone(), rendered: None, media: self.media.clone(), rollout: self.rollout.as_ref().map(|r| r.derived(r.behavior_logprobs[..len].to_vec(), r.teacher.as_ref().map(|t| Teacher { sample: Box::new(t.sample.until(len + t.inserted)), inserted: t.inserted }))) }
+        ChatSample { messages: self.messages[..len].to_vec(), tools: self.tools.clone(), rendered: None, media: self.media.clone(), rollout: self.rollout.as_ref().map(|r| r.derived(r.behavior_logprobs[..len].to_vec(), r.token_ids[..len].to_vec(), r.teacher.as_ref().map(|t| Teacher { sample: Box::new(t.sample.until(len + t.inserted)), inserted: t.inserted }))) }
     }
 
     /// This sample's last message as one example the way the model is asked
@@ -338,13 +353,13 @@ impl ChatSample {
         let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
         let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
         let (prompt, completion) = full.split_at(answer.start);
-        let behavior = self.rollout.as_ref().and_then(|r| r.behavior_logprobs.last().cloned().flatten());
+        let sampled = Sampled { behavior_logprobs: self.rollout.as_ref().and_then(|r| r.behavior_logprobs.last().cloned().flatten()), token_ids: self.rollout.as_ref().and_then(|r| r.token_ids.last().cloned().flatten()) };
         let teacher = match self.rollout.as_ref().and_then(|r| r.teacher.as_ref()) {
             Some(t) => Some(Teacher { sample: Box::new(t.sample.rendered_final_turn(tmpl, thinking, is_rollout)?), inserted: t.inserted }),
             None => None,
         };
-        let rollout = self.rollout.as_ref().map(|r| r.derived(Vec::new(), teacher));
-        Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(if is_rollout { Rendered::rollout_answer(prompt, completion, behavior, &tmpl.assistant_turn_end()?) } else { Rendered::answer(prompt, completion, behavior) }), media: self.media.clone(), rollout })
+        let rollout = self.rollout.as_ref().map(|r| r.derived(Vec::new(), Vec::new(), teacher));
+        Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(if is_rollout { Rendered::rollout_answer(prompt, completion, sampled, &tmpl.assistant_turn_end()?) } else { Rendered::answer(prompt, completion, sampled) }), media: self.media.clone(), rollout })
     }
 
     /// This sample as ONE example in which every supervised answer is
@@ -399,18 +414,19 @@ impl ChatSample {
                     .ok_or_else(|| TemplateError(format!("the prompt of message {at} does not render the earlier answer closed by the end-of-turn marker {end:?}")))?;
                 &prompt[shared + after + end.len()..]
             };
-            segments.push(RenderedSegment { text: context.to_string(), supervised: false, behavior_logprobs: None });
+            segments.push(RenderedSegment::context(context));
             let behavior = self.rollout.as_ref().and_then(|r| r.behavior_logprobs[at].clone());
+            let token_ids = self.rollout.as_ref().and_then(|r| r.token_ids[at].clone());
             if self.rollout.is_some() {
                 // The text after the marker is context (see `Rendered::rollout_answer`).
                 let tail = &end[end.trim_end().len()..];
                 let sampled = completion.strip_suffix(tail).unwrap_or(completion);
-                segments.push(RenderedSegment { text: sampled.to_string(), supervised: true, behavior_logprobs: behavior });
+                segments.push(RenderedSegment { text: sampled.to_string(), supervised: true, behavior_logprobs: behavior, token_ids });
                 if !tail.is_empty() {
-                    segments.push(RenderedSegment { text: tail.to_string(), supervised: false, behavior_logprobs: None });
+                    segments.push(RenderedSegment::context(tail));
                 }
             } else {
-                segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior });
+                segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior, token_ids });
             }
             previous_prompt = prompt.to_string();
         }
@@ -421,7 +437,7 @@ impl ChatSample {
             }
             None => None,
         };
-        let rollout = self.rollout.as_ref().map(|r| r.derived(Vec::new(), teacher));
+        let rollout = self.rollout.as_ref().map(|r| r.derived(Vec::new(), Vec::new(), teacher));
         Ok(Some(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { segments }), media: self.media.clone(), rollout }))
     }
 
@@ -518,8 +534,20 @@ impl ChatSample {
         if let Some(Rendered { segments }) = &self.rendered {
             let (mut ids, mut mask, mut behavior) = (Vec::new(), Vec::new(), Vec::new());
             let mut answer = 0;
-            for RenderedSegment { text, supervised, behavior_logprobs } in segments {
+            for RenderedSegment { text, supervised, behavior_logprobs, token_ids } in segments {
                 let encoded = tok.encode(text);
+                if let Some(recorded) = token_ids {
+                    if let Some(at) = (0..recorded.len().max(encoded.len())).find(|&i| recorded.get(i) != encoded.get(i)) {
+                        let show = |ids: &[u32]| ids.get(at).map_or("nothing (the sequence ended)".to_string(), |t| t.to_string());
+                        return Err(TemplateError(format!(
+                            "\"token_ids\" of supervised answer {answer} ({} ids) are not the tokens the chat template renders for its text ({} tokens): they first differ at position {at}, where the sampler generated {} and the text renders {}; the answer text did not round-trip to the generated ids, so its behaviour log-probabilities do not belong to the tokens a trainer would train",
+                            recorded.len(),
+                            encoded.len(),
+                            show(recorded),
+                            show(&encoded)
+                        )));
+                    }
+                }
                 match behavior_logprobs {
                     Some(lps) if lps.len() == encoded.len() => behavior.extend_from_slice(lps),
                     Some(lps) => {
@@ -703,6 +731,9 @@ pub(crate) struct WireMessage {
     /// ([`crate::chat_rollout`]).
     #[serde(default)]
     pub(crate) behavior_logprobs: Option<serde_json::Value>,
+    /// Only on a supervised assistant message: the ids the sampler generated for the answer ([`crate::chat_rollout`]).
+    #[serde(default)]
+    pub(crate) token_ids: Option<Vec<u32>>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -746,19 +777,20 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
     if record.messages.is_empty() {
         return Err("\"messages\" is empty".to_string());
     }
-    let (messages, media, behavior_logprobs) = messages_from_wire_with(record.messages, reader)?;
+    let (messages, media, behavior_logprobs, token_ids) = messages_from_wire_with(record.messages, reader)?;
     reader.check_record(&media)?;
     let teacher = record.teacher_context.map(|context| teacher_view(&messages, &record.tools, &media, context)).transpose()?;
     let advantage = record.advantage.as_ref().map(chat_rollout::check_advantage).transpose()?;
     let truncated = record.truncated;
     let rollout = match (advantage, teacher) {
         (None, None) if truncated => return Err("\"truncated\" belongs to a rollout, and the record has no \"advantage\" or \"teacher_context\"".to_string()),
+        (None, None) if token_ids.iter().any(Option::is_some) => return Err("\"token_ids\" belong to a rollout, and the record has no \"advantage\" or \"teacher_context\"".to_string()),
         (None, None) => match behavior_logprobs.iter().position(Option::is_some) {
             Some(at) => return Err(format!("messages[{at}]: \"behavior_logprobs\" belong to a rollout, and the record has no \"advantage\" or \"teacher_context\"")),
             None => None,
         },
         // A teacher context alone trains on its per-token advantage: the scalar part is 0.
-        (advantage, teacher) => Some(Rollout { advantage: advantage.unwrap_or(0.0), truncated, behavior_logprobs, teacher }),
+        (advantage, teacher) => Some(Rollout { advantage: advantage.unwrap_or(0.0), truncated, behavior_logprobs, token_ids, teacher }),
     };
     Ok(ChatSample { messages, tools: record.tools, rendered: None, media, rollout })
 }
@@ -801,15 +833,16 @@ fn teacher_view(messages: &[ChatMessage], tools: &[minijinja::Value], media: &[I
 /// conversation ([`check_tool_pairing`]). `messages[i]` in an error is the
 /// index into `wire`.
 pub(crate) fn messages_from_wire(wire: Vec<WireMessage>) -> Result<Vec<ChatMessage>, String> {
-    messages_from_wire_with(wire, &TextOnly::TRAINER).map(|(messages, _, _)| messages)
+    messages_from_wire_with(wire, &TextOnly::TRAINER).map(|(messages, _, _, _)| messages)
 }
 
 /// [`messages_from_wire`] for a reader of images: the conversation's messages, and its images in the order its
 /// text places them, and the behaviour log-probabilities each message carried.
 #[allow(clippy::type_complexity)]
-fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> Result<(Vec<ChatMessage>, Vec<ImageBytes>, Vec<Option<Vec<f32>>>), String> {
+fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> Result<(Vec<ChatMessage>, Vec<ImageBytes>, Vec<Option<Vec<f32>>>, Vec<Option<Vec<u32>>>), String> {
     let mut messages = Vec::with_capacity(wire.len());
     let mut behavior = Vec::with_capacity(wire.len());
+    let mut token_ids = Vec::with_capacity(wire.len());
     let mut media = Vec::new();
 
     for (i, m) in wire.into_iter().enumerate() {
@@ -840,11 +873,18 @@ fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> 
             None => None,
         };
         behavior.push(lps);
+        if m.token_ids.is_some() && !(matches!(m.role, WireRole::Assistant) && m.train) {
+            return Err(format!("messages[{i}]: only a supervised \"assistant\" message carries \"token_ids\" (its \"train\" is true)"));
+        }
+        if m.token_ids.as_ref().is_some_and(Vec::is_empty) {
+            return Err(format!("messages[{i}]: \"token_ids\" is empty; omit it when the sampler did not record any"));
+        }
+        token_ids.push(m.token_ids.clone());
         let content = m.content.into_text(reader, m.train, &mut media).map_err(|e| format!("messages[{i}]: {e}"))?;
         messages.push(ChatMessage { role: role.to_string(), content, tool_calls, tool_call_id: m.tool_call_id, reasoning_content: m.reasoning_content, train: m.train });
     }
     check_tool_pairing(&messages)?;
-    Ok((messages, media, behavior))
+    Ok((messages, media, behavior, token_ids))
 }
 
 /// The lengths of the runs of `token` in `ids`, in order: how many images a text places, and how many rows each takes.

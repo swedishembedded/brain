@@ -207,3 +207,47 @@ fn the_tokens_of_an_observation_are_never_supervised() {
     let supervised: String = ids.iter().zip(&mask).filter(|(_, m)| **m).map(|(i, _)| tokenizer().decode(&[*i])).collect();
     assert_eq!(supervised, "y<|im_end|>", "only the final answer is action; the observation and the earlier turns are context");
 }
+
+/// `"token_ids"` on a supervised answer is the proof that its text is the sequence the sampler generated: the ids the chat
+/// template renders for the text must be exactly those, and a record whose text renders to others (the case where
+/// recorded log-probabilities would belong to tokens a trainer never trains) is refused at the first position that differs.
+#[test]
+fn recorded_token_ids_must_be_the_tokens_the_template_renders_for_the_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rendered: Vec<u32> = tokenizer().encode("a<|im_end|>");
+    let line = |ids: &[u32], lps: usize| {
+        format!(
+            r#"{{"advantage": 1.0, "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{},"token_ids":{}}}]}}"#,
+            serde_json::to_string(&vec![-0.5f32; lps]).unwrap(),
+            serde_json::to_string(ids).unwrap()
+        )
+    };
+    let ok = write_records(tmp.path(), &[line(&rendered, ANSWER_TOKENS)]);
+    prepare(&examples(&ok).unwrap(), &tmp.path().join("prepared")).expect("ids that match render");
+
+    let mut wrong = rendered.clone();
+    wrong[2] = wrong[2].wrapping_add(1);
+    let bad = write_records(tmp.path(), &[line(&wrong, ANSWER_TOKENS)]);
+    let why = prepare(&examples(&bad).unwrap(), &tmp.path().join("prepared")).expect_err("refused");
+    assert!(why.contains("token_ids") && why.contains("first differ at position 2") && why.contains("did not round-trip"), "{why}");
+
+    // A sequence that ends early or runs on is the first difference too.
+    let short = write_records(tmp.path(), &[line(&rendered[..rendered.len() - 1], ANSWER_TOKENS)]);
+    let why = prepare(&examples(&short).unwrap(), &tmp.path().join("prepared")).expect_err("refused");
+    assert!(why.contains(&format!("position {}", rendered.len() - 1)) && why.contains("nothing (the sequence ended)"), "{why}");
+}
+
+#[test]
+fn token_ids_belong_to_a_supervised_answer_of_a_rollout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let refused = |line: &str| {
+        let path = write_records(tmp.path(), &[line.to_string()]);
+        examples(&path).expect_err("refused")
+    };
+    let why = refused(r#"{"messages": [{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true,"token_ids":[1]}]}"#);
+    assert!(why.contains("token_ids") && why.contains("advantage"), "{why}");
+    let why = refused(r#"{"advantage": 1.0, "messages": [{"role":"user","content":"q","train":false,"token_ids":[1]},{"role":"assistant","content":"a","train":true}]}"#);
+    assert!(why.contains("messages[0]") && why.contains("token_ids"), "{why}");
+    let why = refused(r#"{"advantage": 1.0, "messages": [{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true,"token_ids":[]}]}"#);
+    assert!(why.contains("messages[1]") && why.contains("empty"), "{why}");
+}
