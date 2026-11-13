@@ -143,8 +143,7 @@ impl Sdxl {
         let vae = VaeDecoder::from_diffusers(self.vae_cfg.clone(), &vmap, lh, lw, Some(&o.vae_device));
         let chw = vae.decode(&z);
         // diffusers maps the decoder's [-1,1] output to [0,1].
-        let rgb: Vec<f32> = chw.iter().map(|v| ((v + 1.0) * 0.5).clamp(0.0, 1.0)).collect();
-        Ok(imaging::pixels::chw_to_hwc(&rgb, 3, h as usize, w as usize))
+        Ok(imaging::pixels::chw_signed_to_hwc_unit(&chw, 3, h as usize, w as usize))
     }
 
     pub fn gpu(&self) -> &Gpu {
