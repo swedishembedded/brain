@@ -299,6 +299,8 @@ navigation:
         path: examples/shell/timeline/lifecycle.md
       - source: samples/shell/timeline/predict/README.md
         path: examples/shell/timeline/predict.md
+      - source: samples/shell/videogen/character_replace/README.md
+        path: examples/shell/videogen/character_replace.md
       - source: samples/shell/videogen/ltxv/README.md
         path: examples/shell/videogen/ltxv.md
       - source: samples/study/chat/README.md
