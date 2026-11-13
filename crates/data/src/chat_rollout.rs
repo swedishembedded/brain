@@ -14,7 +14,8 @@
 //!   the weight of every supervised token of the record in a policy-gradient run;
 //! * `"behavior_logprobs": [<number>, ...]` on a supervised assistant message: the log-probability the sampler gave
 //!   each token of that answer, one per token of the answer as the chat template renders it after the prompt (the
-//!   answer's text and its closing end-of-turn marker). A value above zero is not a log-probability.
+//!   answer's text and its closing end-of-turn marker; the whitespace the template writes after the marker, such as the newline after Qwen's
+//!   `<|im_end|>`, is context: the sampler stops at the marker and never chose it). A value above zero is not a log-probability.
 //! * `"truncated": true` on the record: the rollout did not reach an outcome (the token budget cut it, a step timed
 //!   out), so its advantage says nothing about the action. A policy-gradient run never trains on such a record; it is
 //!   counted, not drawn. A truncated rollout is masked as a whole, because the sampler's budget, not the policy,

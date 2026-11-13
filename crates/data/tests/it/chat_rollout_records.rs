@@ -27,8 +27,9 @@ fn template() -> ChatTemplate {
     ChatTemplate::compile(TEMPLATE).unwrap()
 }
 
-/// `"x<|im_end|>\n"`: what a one-letter answer supervises under this template (the answer and the closing marker).
-const ANSWER_TOKENS: usize = 1 + "<|im_end|>\n".len();
+/// `"x<|im_end|>"`: what a one-letter answer supervises under this template (the answer and the closing marker; the
+/// newline the template writes after it is context, since the sampler stops at the marker).
+const ANSWER_TOKENS: usize = 1 + "<|im_end|>".len();
 
 fn write_records(dir: &std::path::Path, lines: &[String]) -> std::path::PathBuf {
     let path = dir.join("records.jsonl");
@@ -204,5 +205,5 @@ fn the_tokens_of_an_observation_are_never_supervised() {
     let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
     let mask = binio::read_mask_bin(&out.join("train.mask.bin")).unwrap();
     let supervised: String = ids.iter().zip(&mask).filter(|(_, m)| **m).map(|(i, _)| tokenizer().decode(&[*i])).collect();
-    assert_eq!(supervised, "y<|im_end|>\n", "only the final answer is action; the observation and the earlier turns are context");
+    assert_eq!(supervised, "y<|im_end|>", "only the final answer is action; the observation and the earlier turns are context");
 }

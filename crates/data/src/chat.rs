@@ -233,6 +233,21 @@ impl Rendered {
     fn answer(prompt: &str, completion: &str, behavior_logprobs: Option<Vec<f32>>) -> Self {
         Self { segments: vec![RenderedSegment { text: prompt.to_string(), supervised: false, behavior_logprobs: None }, RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs }] }
     }
+
+    /// [`Self::answer`] for a rollout: the whitespace the template writes after the end-of-turn marker (Qwen's
+    /// `<|im_end|>` then a newline) is context, not action. The sampler stops at the marker, so that text is never
+    /// sampled: it has no behaviour log-probability, and training it would move the policy on tokens it did not choose.
+    fn rollout_answer(prompt: &str, completion: &str, behavior_logprobs: Option<Vec<f32>>, end: &str) -> Self {
+        let tail = &end[end.trim_end().len()..];
+        match completion.strip_suffix(tail).filter(|_| !tail.is_empty()) {
+            Some(sampled) => {
+                let mut rendered = Self::answer(prompt, sampled, behavior_logprobs);
+                rendered.segments.push(RenderedSegment { text: tail.to_string(), supervised: false, behavior_logprobs: None });
+                rendered
+            }
+            None => Self::answer(prompt, completion, behavior_logprobs),
+        }
+    }
 }
 
 impl ChatSample {
@@ -304,7 +319,7 @@ impl ChatSample {
         }
         let mut out = Vec::new();
         for at in (0..self.messages.len()).filter(|&at| self.messages[at].train) {
-            out.push(self.until(at + 1).rendered_final_turn(tmpl, thinking)?);
+            out.push(self.until(at + 1).rendered_final_turn(tmpl, thinking, self.rollout.is_some())?);
         }
         Ok(Some(out))
     }
@@ -318,18 +333,18 @@ impl ChatSample {
     /// for it ([`ChatTemplate::render_with_supervised_suffix`]): the prompt is
     /// context and only what the template renders for that message is
     /// supervised.
-    fn rendered_final_turn(&self, tmpl: &ChatTemplate, thinking: bool) -> Result<ChatSample, TemplateError> {
+    fn rendered_final_turn(&self, tmpl: &ChatTemplate, thinking: bool, is_rollout: bool) -> Result<ChatSample, TemplateError> {
         let values: Vec<minijinja::Value> = self.messages.iter().map(|m| m.to_template_value(tmpl.reads_argument_objects())).collect();
         let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
         let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
         let (prompt, completion) = full.split_at(answer.start);
         let behavior = self.rollout.as_ref().and_then(|r| r.behavior_logprobs.last().cloned().flatten());
         let teacher = match self.rollout.as_ref().and_then(|r| r.teacher.as_ref()) {
-            Some(t) => Some(Teacher { sample: Box::new(t.sample.rendered_final_turn(tmpl, thinking)?), inserted: t.inserted }),
+            Some(t) => Some(Teacher { sample: Box::new(t.sample.rendered_final_turn(tmpl, thinking, is_rollout)?), inserted: t.inserted }),
             None => None,
         };
         let rollout = self.rollout.as_ref().map(|r| r.derived(Vec::new(), teacher));
-        Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered::answer(prompt, completion, behavior)), media: self.media.clone(), rollout })
+        Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(if is_rollout { Rendered::rollout_answer(prompt, completion, behavior, &tmpl.assistant_turn_end()?) } else { Rendered::answer(prompt, completion, behavior) }), media: self.media.clone(), rollout })
     }
 
     /// This sample as ONE example in which every supervised answer is
@@ -386,7 +401,17 @@ impl ChatSample {
             };
             segments.push(RenderedSegment { text: context.to_string(), supervised: false, behavior_logprobs: None });
             let behavior = self.rollout.as_ref().and_then(|r| r.behavior_logprobs[at].clone());
-            segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior });
+            if self.rollout.is_some() {
+                // The text after the marker is context (see `Rendered::rollout_answer`).
+                let tail = &end[end.trim_end().len()..];
+                let sampled = completion.strip_suffix(tail).unwrap_or(completion);
+                segments.push(RenderedSegment { text: sampled.to_string(), supervised: true, behavior_logprobs: behavior });
+                if !tail.is_empty() {
+                    segments.push(RenderedSegment { text: tail.to_string(), supervised: false, behavior_logprobs: None });
+                }
+            } else {
+                segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior });
+            }
             previous_prompt = prompt.to_string();
         }
         let teacher = match self.rollout.as_ref().and_then(|r| r.teacher.as_ref()) {
@@ -429,7 +454,7 @@ impl ChatSample {
         if !self.supervises_only_final_turn() {
             return Ok(None);
         }
-        self.rendered_final_turn(tmpl, thinking).map(Some)
+        self.rendered_final_turn(tmpl, thinking, self.rollout.is_some()).map(Some)
     }
 
     /// The conversation obeys [`check_tool_pairing`].
@@ -499,7 +524,7 @@ impl ChatSample {
                     Some(lps) if lps.len() == encoded.len() => behavior.extend_from_slice(lps),
                     Some(lps) => {
                         return Err(TemplateError(format!(
-                            "\"behavior_logprobs\" of supervised answer {answer} holds {} values, the answer encodes to {} tokens (the answer as the chat template renders it after its prompt, with its end-of-turn marker)",
+                            "\"behavior_logprobs\" of supervised answer {answer} holds {} values, the answer encodes to {} tokens (the answer as the chat template renders it after its prompt, with its end-of-turn marker and not the whitespace after it)",
                             lps.len(),
                             encoded.len()
                         )))

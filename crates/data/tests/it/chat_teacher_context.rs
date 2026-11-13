@@ -83,14 +83,14 @@ fn a_teacher_context_may_come_with_a_scalar_advantage_and_behaviour_log_probs() 
     let tmp = tempfile::tempdir().unwrap();
     let line = format!(
         r#"{{"advantage": 0.75, "teacher_context": {HINT}, "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{}}}]}}"#,
-        serde_json::to_string(&vec![-0.5f32; 1 + "<|im_end|>\n".len()]).unwrap()
+        serde_json::to_string(&vec![-0.5f32; 1 + "<|im_end|>".len()]).unwrap()
     );
     let out = tmp.path().join("prepared");
     prepare(&read(&line).unwrap(), TEMPLATE, &out).unwrap();
     let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
     let rollout = chat_rollout::read(&out, "train", 1, ids.len()).unwrap().unwrap();
     assert_eq!(rollout.advantage, [0.75]);
-    assert_eq!(rollout.behavior.iter().filter(|b| !b.is_nan()).count(), 1 + "<|im_end|>\n".len());
+    assert_eq!(rollout.behavior.iter().filter(|b| !b.is_nan()).count(), 1 + "<|im_end|>".len());
 }
 
 #[test]
