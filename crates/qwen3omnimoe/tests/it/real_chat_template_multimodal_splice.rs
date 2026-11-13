@@ -55,11 +55,11 @@ fn real_template_places_image_and_audio_placeholders_inline_after_their_own_capt
         brain_testutil::skip("BRAIN_OMNI_HF_DIR unset or chat_template.json missing");
         return;
     };
-    let tmpl = data::chat_template::ChatTemplate::from_model_dir(&dir).expect("load real chat template");
+    let tmpl = qwen3::chat::ChatFormat::own_template(&dir).expect("load real chat template");
 
     let messages = agent_shaped_messages();
     let inv = Invocation::new().set("messages", json!(serde_json::to_string(&messages).unwrap())).set("enable_thinking", json!(false));
-    let prompt = qwen3omnimoe::caps::render_chat_prompt(&tmpl, &inv).expect("render");
+    let prompt = qwen3omnimoe::caps::chat_prompt(&tmpl, &inv).expect("render");
 
     let img_pos = prompt.find("<|vision_start|><|image_pad|><|vision_end|>").expect("image placeholder must be present in the rendered text");
     let audio_pos = prompt.find("<|audio_start|><|audio_pad|><|audio_end|>").expect("audio placeholder must be present in the rendered text");
@@ -98,7 +98,7 @@ fn real_template_places_image_and_audio_placeholders_inline_after_their_own_capt
 /// Gap C's regression test: `inv.get_str("tools")` (already set by
 /// `crates/apiserve/src/openai.rs`'s `to_invocation` whenever a real request
 /// supplies one) must now actually reach the template's own `{%- if tools %}`
-/// preamble -- previously `render_chat_prompt` always rendered with
+/// preamble -- previously `chat_prompt` always rendered with
 /// `tools: None`, so this branch NEVER fired for any real request, no matter
 /// what the client sent.
 #[test]
@@ -108,7 +108,7 @@ fn real_template_renders_the_tools_preamble_when_tools_are_forwarded() {
         brain_testutil::skip("BRAIN_OMNI_HF_DIR unset or chat_template.json missing");
         return;
     };
-    let tmpl = data::chat_template::ChatTemplate::from_model_dir(&dir).expect("load real chat template");
+    let tmpl = qwen3::chat::ChatFormat::own_template(&dir).expect("load real chat template");
 
     let messages = json!([{"role": "system", "content": "be helpful"}, {"role": "user", "content": "what's the weather?"}]);
     let tools = json!([{"type": "function", "function": {"name": "get_weather", "description": "Get the weather", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}}}]);
@@ -116,7 +116,7 @@ fn real_template_renders_the_tools_preamble_when_tools_are_forwarded() {
         .set("messages", json!(serde_json::to_string(&messages).unwrap()))
         .set("tools", json!(serde_json::to_string(&tools).unwrap()))
         .set("enable_thinking", json!(false));
-    let prompt = qwen3omnimoe::caps::render_chat_prompt(&tmpl, &inv).expect("render");
+    let prompt = qwen3omnimoe::caps::chat_prompt(&tmpl, &inv).expect("render");
 
     assert!(prompt.contains("# Tools"), "tools preamble must render when tools are supplied: {prompt:?}");
     assert!(prompt.contains("<tools>"), "tool schema block must render: {prompt:?}");
@@ -126,7 +126,7 @@ fn real_template_renders_the_tools_preamble_when_tools_are_forwarded() {
     // `{%- if tools %}` branch is genuinely conditional, not a bug pinned to
     // "always on" by this fix).
     let inv_no_tools = Invocation::new().set("messages", json!(serde_json::to_string(&messages).unwrap())).set("enable_thinking", json!(false));
-    let prompt_no_tools = qwen3omnimoe::caps::render_chat_prompt(&tmpl, &inv_no_tools).expect("render");
+    let prompt_no_tools = qwen3omnimoe::caps::chat_prompt(&tmpl, &inv_no_tools).expect("render");
     assert!(!prompt_no_tools.contains("# Tools"), "no tools supplied -> no tools preamble: {prompt_no_tools:?}");
 
     println!("real chat template renders the tools preamble exactly when tools are forwarded.");
@@ -148,7 +148,7 @@ fn typed_array_plus_strip_matches_the_old_always_flatten_prompt_byte_for_byte() 
         brain_testutil::skip("BRAIN_OMNI_HF_DIR unset or chat_template.json missing");
         return;
     };
-    let tmpl = data::chat_template::ChatTemplate::from_model_dir(&dir).expect("load real chat template");
+    let tmpl = qwen3::chat::ChatFormat::own_template(&dir).expect("load real chat template");
 
     let system = "You are a specialized AI coding agent built for professional software engineering.";
     let instruction = "Follow the spoken instruction.";
@@ -161,7 +161,7 @@ fn typed_array_plus_strip_matches_the_old_always_flatten_prompt_byte_for_byte() 
         {"role": "user", "content": old_user_content},
     ]);
     let old_inv = Invocation::new().set("messages", json!(serde_json::to_string(&old_messages).unwrap())).set("enable_thinking", json!(false));
-    let old_prompt = qwen3omnimoe::caps::render_chat_prompt(&tmpl, &old_inv).expect("render old");
+    let old_prompt = qwen3omnimoe::caps::chat_prompt(&tmpl, &old_inv).expect("render old");
 
     let new_messages = json!([
         {"role": "system", "content": system},
@@ -174,7 +174,7 @@ fn typed_array_plus_strip_matches_the_old_always_flatten_prompt_byte_for_byte() 
         ]},
     ]);
     let new_inv = Invocation::new().set("messages", json!(serde_json::to_string(&new_messages).unwrap())).set("enable_thinking", json!(false));
-    let new_prompt_raw = qwen3omnimoe::caps::render_chat_prompt(&tmpl, &new_inv).expect("render new");
+    let new_prompt_raw = qwen3omnimoe::caps::chat_prompt(&tmpl, &new_inv).expect("render new");
     let new_prompt = qwen3omnimoe::mm::strip_media_placeholder_text(&new_prompt_raw);
 
     println!("old_prompt len={}", old_prompt.len());

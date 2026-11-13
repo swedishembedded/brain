@@ -98,21 +98,22 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use capability::blob::{decode_image, decode_video};
-use capability::{last_user_text, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, Progress};
+use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, Progress};
 use checkpoint::weightio::WeightReader;
 use checkpoint::TensorSource;
 use data::qwen_tokenizer::QwenBpe;
-use data::tokenizer::Tokenizer;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::shard::LayerBytes;
 use paramstore::upload::Uploader;
+use qwen3::chat::ChatFormat;
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::config::{MoeTextConfig, ThinkerConfig};
 use crate::int8_resident::{expert_bytes, ThinkerInt8Store};
-use crate::mm::{build_multimodal_prompt, MultimodalPrompt};
+use crate::chat::{MediaInputs, ThinkerChat};
+use crate::decode::{decode_tokens, Decoded, TokenPicker};
+use crate::mm::{build_multimodal_prompt, Deepstack, MultimodalPrompt};
 use crate::thinker::{final_norm, layer_decode_step, layer_fwd, lm_head_fwd, thinker_pipelines, ThinkerLayerCache, ThinkerLayerWeights};
 
 /// `W8A16`, not `INT8`/GGUF's `Q8_0`: this checkpoint is per-output-channel
@@ -443,13 +444,12 @@ pub struct Int8ThinkerInstance {
     /// not be read - the raw `ids` contract still works, so a missing
     /// tokenizer degrades one request shape instead of failing the load.
     tok: Option<(QwenBpe, Vec<u32>)>,
-    /// This checkpoint's own Jinja chat template (`crate::caps::
-    /// load_chat_template`, read from the SAME directory `tok` came from --
-    /// see `crate::caps::chat_prompt`'s doc for why a template-less checkpoint
-    /// degrades to `last_user_text` rather than failing). Shared with the bf16
-    /// `OmniInner` path (`crate::caps`) rather than a second templating
-    /// implementation -- see `crate::caps::render_chat_prompt`'s doc.
-    chat_template: Option<data::chat_template::ChatTemplate>,
+    /// This checkpoint's own chat format (`crate::caps::load_chat_format`, read
+    /// from the SAME directory `tok` came from -- see `crate::caps::chat_prompt`'s
+    /// doc for why a template-less checkpoint degrades to the last user turn
+    /// rather than failing). Shared with the bf16 `OmniInner` path
+    /// (`crate::caps`) rather than a second templating implementation.
+    chat_format: ChatFormat,
     /// A REAL HF checkpoint directory's `WeightReader`, open ONLY to feed the
     /// vision/audio tower encoders for a multimodal `generate` request (see
     /// this module's doc, "Multimodal input", for why this is a second
@@ -520,7 +520,7 @@ impl Int8ThinkerInstance {
         let tokens: Vec<u32> = (0..n).collect();
         let positions = qwen3vl::mrope::get_rope_index(&tokens, u32::MAX, &[]);
         let (cos_tab, sin_tab) = self.mrope_tables(&positions);
-        self.run_shards(x_host, n, &cos_tab, &sin_tab, Pass::Batched { cache: None })
+        self.run_shards(x_host, n, &cos_tab, &sin_tab, Pass::Batched { cache: None }, None)
     }
 
     /// Sum of every shard's `Gpu::reclaim_event_count()` - test-observability
@@ -551,7 +551,7 @@ impl Int8ThinkerInstance {
     /// each decode step differ only in the [`Pass`] handed in, never in how the
     /// stack is traversed - so cross-device handoff is written and reasoned
     /// about once.
-    fn run_shards(&self, x_host: &[f32], n: u32, cos_tab: &[f32], sin_tab: &[f32], pass: Pass) -> Vec<f32> {
+    fn run_shards(&self, x_host: &[f32], n: u32, cos_tab: &[f32], sin_tab: &[f32], pass: Pass, deepstack: Option<&Deepstack>) -> Vec<f32> {
         let d = self.cfg.text.hidden;
         assert_eq!(x_host.len(), (n * d) as usize, "x must be [n, d]");
         let mut h_host = x_host.to_vec();
@@ -597,6 +597,13 @@ impl Int8ThinkerInstance {
                         layer_decode_step(gpu, &self.cfg.text, &w, &cache.layer(l), &h, &cos, &sin, *pos, cache.cap, Some(experts8))
                     }
                 };
+                // The vision tower's DeepStack taps join the residual stream
+                // after the first layers of a prefill (decode steps are text only).
+                if let Some(ds) = deepstack.filter(|ds| l < ds.levels() && matches!(pass, Pass::Batched { .. })) {
+                    let mut hidden = gpu.read(&h, (n * d) as usize);
+                    ds.add_level(l, &mut hidden, d as usize);
+                    h = gpu.storage_init("h", &hidden);
+                }
                 if (i + 1) % FLUSH_EVERY == 0 {
                     gpu.flush();
                 }
@@ -622,38 +629,45 @@ impl Int8ThinkerInstance {
     /// `int8_experts` argument. Each layer's cache lives on the device that
     /// owns that layer ([`Int8KvCache`]), so nothing crosses a card.
     pub fn generate(&self, prompt_ids: &[u32], max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
-        if prompt_ids.is_empty() {
-            return Vec::new();
-        }
-        let positions = qwen3vl::mrope::get_rope_index(prompt_ids, u32::MAX, &[]);
-        self.generate_with_embeds(prompt_ids, None, &positions, max_new_tokens, eos_ids)
+        self.generate_sampled(prompt_ids, max_new_tokens, eos_ids, &mut TokenPicker::greedy(), &mut |_| false).tokens
     }
 
-    /// [`Self::generate`], multimodal: `prompt.x_host` already has real
+    /// [`Self::generate`] with a request's own sampler, and `on_token` called
+    /// with every token generated so far (it returns `true` to stop: a stop
+    /// string, a cancellation).
+    pub fn generate_sampled(&self, prompt_ids: &[u32], max_new_tokens: u32, eos_ids: &[u32], picker: &mut TokenPicker, on_token: &mut dyn FnMut(&[u32]) -> bool) -> Decoded {
+        if prompt_ids.is_empty() {
+            return Decoded { tokens: Vec::new(), eos: None };
+        }
+        let positions = qwen3vl::mrope::get_rope_index(prompt_ids, u32::MAX, &[]);
+        self.generate_with_embeds(prompt_ids, None, &positions, None, max_new_tokens, eos_ids, picker, on_token)
+    }
+
+    /// [`Self::generate_sampled`], multimodal: `prompt.x_host` already has real
     /// audio/image/video embeddings spliced in
     /// (`crate::mm::build_multimodal_prompt`), and `prompt.positions` are the
     /// real per-axis M-RoPE positions that splice implies - this method does
     /// no splicing or positioning of its own, only the prefill/decode/sample
     /// loop [`Self::generate_with_embeds`] shares with the plain-text path.
-    pub fn generate_multimodal(&self, prompt: &MultimodalPrompt, max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
-        self.generate_with_embeds(&prompt.token_ids, Some(prompt.x_host.clone()), &prompt.positions, max_new_tokens, eos_ids)
+    pub fn generate_multimodal_sampled(&self, prompt: &MultimodalPrompt, max_new_tokens: u32, eos_ids: &[u32], picker: &mut TokenPicker, on_token: &mut dyn FnMut(&[u32]) -> bool) -> Decoded {
+        self.generate_with_embeds(&prompt.token_ids, Some(prompt.x_host.clone()), &prompt.positions, prompt.deepstack.as_ref(), max_new_tokens, eos_ids, picker, on_token)
     }
 
-    /// The shared implementation behind [`Self::generate`]/[`Self::generate_multimodal`]:
+    /// The shared implementation behind [`Self::generate_sampled`]/[`Self::generate_multimodal_sampled`]:
     /// `x_host_override`, when `Some`, is used as the prompt's embedding
     /// buffer verbatim (already spliced with media, `crate::mm::build_multimodal_prompt`);
     /// when `None`, it's built by a plain per-token gather from `self.embed`
-    /// (the pure-text case). Mirrors `crate::generate::generate_greedy_with_embeds`'s
+    /// (the pure-text case). Mirrors `crate::generate::generate_with_embeds`'s
     /// shape exactly - same reason the bf16 path has that split: one loop
     /// serving both request shapes rather than two copies that could drift.
-    fn generate_with_embeds(&self, prompt_ids: &[u32], x_host_override: Option<Vec<f32>>, positions: &[[u32; 3]], max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
+    #[allow(clippy::too_many_arguments)]
+    fn generate_with_embeds(&self, prompt_ids: &[u32], x_host_override: Option<Vec<f32>>, positions: &[[u32; 3]], deepstack: Option<&Deepstack>, max_new_tokens: u32, eos_ids: &[u32], picker: &mut TokenPicker, on_token: &mut dyn FnMut(&[u32]) -> bool) -> Decoded {
         let d = self.cfg.text.hidden as usize;
         let last = self.shards.last().expect("Int8ThinkerInstance has no shards");
         assert_eq!(positions.len(), prompt_ids.len(), "generate: positions/prompt_ids length mismatch");
 
-        let mut out = Vec::with_capacity(max_new_tokens as usize);
         if prompt_ids.is_empty() || max_new_tokens == 0 {
-            return out;
+            return Decoded { tokens: Vec::new(), eos: None };
         }
 
         let n0 = prompt_ids.len() as u32;
@@ -668,158 +682,102 @@ impl Int8ThinkerInstance {
             }
             x
         });
-        let hidden = self.run_shards(&x_host, n0, &cos_tab, &sin_tab, Pass::Batched { cache: Some(&cache) });
-        let mut next = self.head_argmax(last, &hidden[(n0 as usize - 1) * d..n0 as usize * d]);
+        let hidden = self.run_shards(&x_host, n0, &cos_tab, &sin_tab, Pass::Batched { cache: Some(&cache) }, deepstack);
+        let first_row = self.head_logits(last, &hidden[(n0 as usize - 1) * d..n0 as usize * d]);
 
         // New tokens are always plain text: continue the prompt's last
         // position diagonally, +1 on every axis per step.
         let mut mrope_pos = positions[positions.len() - 1].map(|p| p + 1);
-        for cache_row in (n0..).take(max_new_tokens as usize) {
-            if eos_ids.contains(&next) {
-                break;
-            }
-            out.push(next);
-            if out.len() as u32 == max_new_tokens {
-                break;
-            }
+        let mut cache_row = n0;
+        let step = |previous: u32| {
             let (cos_tab, sin_tab) = self.mrope_tables(&[mrope_pos]);
-            let x_row = self.embed.row(&self.reader, next);
-            let hidden = self.run_shards(&x_row, 1, &cos_tab, &sin_tab, Pass::Decode { cache: &cache, pos: cache_row });
-            next = self.head_argmax(last, &hidden);
+            let x_row = self.embed.row(&self.reader, previous);
+            let hidden = self.run_shards(&x_row, 1, &cos_tab, &sin_tab, Pass::Decode { cache: &cache, pos: cache_row }, None);
+            cache_row += 1;
             mrope_pos = mrope_pos.map(|p| p + 1);
-        }
-        out
+            self.head_logits(last, &hidden)
+        };
+        decode_tokens(prompt_ids, max_new_tokens, eos_ids, picker, first_row, step, on_token)
     }
 
     /// Final norm + `lm_head` over ONE hidden row, on the shard that carries
-    /// the head, and the argmax of the resulting logits.
-    fn head_argmax(&self, last: &DeviceShard, row: &[f32]) -> u32 {
+    /// the head: the logits row the sampler picks from.
+    fn head_logits(&self, last: &DeviceShard, row: &[f32]) -> Vec<f32> {
         let gpu = &last.gpu;
         let h1 = gpu.storage_init("h1", row);
         let normed = final_norm(gpu, &self.cfg.text, &self.final_norm_w, &h1, 1);
         let logits = lm_head_fwd(gpu, &self.lm_head_w, &normed, 1, self.cfg.text.hidden, self.cfg.text.vocab);
         let logits = gpu.read(&logits, self.cfg.text.vocab as usize);
-        debug_log_top_candidates("first-generated-token", &logits);
-        argmax(&logits)
+        debug_log_top_candidates("generated-token", &logits);
+        logits
+    }
+}
+
+/// The chat request shape (`messages`/`prompt` in, generated `text` out) is
+/// served by `crate::chat::serve_chat`, the SAME flow `brain/qwen3omnimoe`
+/// uses, so the two Thinker-backed models answer an identical request the same
+/// way and differ only in how the weights are stored/placed and (for
+/// multimodal) which checkpoint the vision/audio towers read from (see this
+/// module's doc).
+impl ThinkerChat for Int8ThinkerInstance {
+    fn tokenizer(&self) -> &QwenBpe {
+        &self.tok.as_ref().expect("serve_chat is only reached with a tokenizer").0
+    }
+    fn chat_format(&self) -> &ChatFormat {
+        &self.chat_format
+    }
+    fn media_prompt(&self, text_ids: &[u32], splice_at: usize, media: &MediaInputs) -> Result<MultimodalPrompt, String> {
+        let Some(mm_reader) = &self.mm_reader else {
+            return Err(format!(
+                "{MODEL}: got audio/image/video input but no HF checkpoint directory is configured for the \
+                 vision/audio towers (the int8 checkpoint's own audio.*/vision.* tensors are quantized and this \
+                 model's encoders only read plain f32 -- see this module's own doc). Put the published checkpoint \
+                 directory in the model store, or start brain serve with --pin qwen3omnimoe.weights=DIR."
+            ));
+        };
+        let embed_host = self.embed.to_host(&self.reader);
+        let image = media.image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
+        build_multimodal_prompt(mm_reader, &self.shards[0].gpu, &self.cfg, &embed_host, text_ids, media.audio.as_deref(), image, media.video.as_deref(), splice_at).map_err(|e| format!("{MODEL}: {e}"))
+    }
+    fn decode_text(&self, prompt_ids: &[u32], max_new: u32, picker: &mut TokenPicker, on_token: &mut dyn FnMut(&[u32]) -> bool) -> Decoded {
+        let t0 = std::time::Instant::now();
+        let decoded = self.generate_sampled(prompt_ids, max_new, &self.eos_ids(), picker, on_token);
+        self.profile_generate(t0);
+        decoded
+    }
+    fn decode_media(&self, prompt: &MultimodalPrompt, max_new: u32, picker: &mut TokenPicker, on_token: &mut dyn FnMut(&[u32]) -> bool) -> Decoded {
+        let t0 = std::time::Instant::now();
+        let decoded = self.generate_multimodal_sampled(prompt, max_new, &self.eos_ids(), picker, on_token);
+        self.profile_generate(t0);
+        decoded
     }
 }
 
 impl Int8ThinkerInstance {
-    /// The chat request shape: `messages`/`prompt` in, generated `text` out.
-    ///
-    /// Deliberately the same steps `qwen3omnimoe::caps::GenerateAction::run`/
-    /// `OmniInner::generate`/`generate_multimodal` take - `last_user_text`
-    /// (the shared messages-array extraction, not a second parser), decode
-    /// the same three optional blobs the SAME way (`audio::asr_caps::
-    /// wav_from_blob`, `capability::blob::decode_image`/`decode_video`),
-    /// splice via the SAME `crate::mm::build_multimodal_prompt` when any are
-    /// present, greedy generate, `decode` - so the two Thinker-backed models
-    /// answer an identical request the same way and differ only in how the
-    /// weights are stored/placed and (for multimodal) which checkpoint the
-    /// vision/audio towers read from (see this module's doc).
+    /// The chat request: `crate::chat::serve_chat` over this instance, which
+    /// needs a tokenizer.
     fn generate_chat(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let Some((tok, eos_ids)) = &self.tok else {
+        if self.tok.is_none() {
             return Err(format!(
                 "{MODEL}: no tokenizer configured, so this model serves only the raw token-id contract \
                  (a 'generate' call with an 'ids' blob). Put tokenizer.json (or vocab.json + merges.txt) beside \
                  the checkpoint, or start brain serve with --pin qwen3omnimoe-int8.tokenizer=FILE."
             ));
-        };
-        // Client text cannot spell a control token (`Invocation::escape_client_text`).
-        let inv = &inv.escape_client_text(&|text| tok.escape_untrusted(text));
-        if last_user_text(inv).trim().is_empty() {
-            return Err(format!("{MODEL} generate: empty prompt (need 'messages' with a user turn, or 'prompt')"));
         }
-        // The real Jinja chat template when this checkpoint has one (see
-        // `chat_template`'s field doc) -- `crate::caps::render_chat_prompt`,
-        // the SAME implementation `qwen3omnimoe::caps::GenerateAction` uses, not a
-        // second copy.
-        let prompt = crate::caps::chat_prompt(self.chat_template.as_ref(), inv)?;
-        let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
+        crate::chat::serve_chat(self, inv, progress)
+    }
 
-        let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
-        let image = inv.get_blob("image").map(|_| decode_image(inv, "image")).transpose()?;
-        let video = inv.get_blob("video").map(|_| decode_video(inv, "video")).transpose()?;
+    /// The stop ids that go with the tokenizer (empty without one).
+    fn eos_ids(&self) -> Vec<u32> {
+        self.tok.as_ref().map(|(_, eos)| eos.clone()).unwrap_or_default()
+    }
 
-        progress(Progress::step(0, max_new, "generating"));
-        let t0 = std::time::Instant::now();
-        let new_ids = if audio.is_some() || image.is_some() || video.is_some() {
-            let Some(mm_reader) = &self.mm_reader else {
-                return Err(format!(
-                    "{MODEL}: got audio/image/video input but no HF checkpoint directory is configured for the \
-                     vision/audio towers (the int8 checkpoint's own audio.*/vision.* tensors are quantized and this \
-                     model's encoders only read plain f32 -- see this module's own doc). Put the published checkpoint \
-                     directory in the model store, or start brain serve with --pin qwen3omnimoe.weights=DIR."
-                ));
-            };
-            // Strip the chat template's own inline media-placeholder literals
-            // before tokenizing -- real embeddings always splice in as a
-            // whole block (never expanded in place), and tokenizing WITH the
-            // placeholder literal present splits the surrounding caption
-            // text into separate BPE runs at that boundary, which measurably
-            // broke real-hardware generation even after stripping the
-            // resulting placeholder TOKENS back out post-hoc -- see
-            // `crate::mm::strip_media_placeholder_text`'s doc for the full
-            // real-hardware account.
-            let stripped_prompt = crate::mm::strip_media_placeholder_text(&prompt);
-            let text_ids = tok.encode(&stripped_prompt);
-            let embed_host = self.embed.to_host(&self.reader);
-            let gpu = &self.shards[0].gpu;
-            let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
-            // Splice media right after a leading system turn rather than
-            // before it -- see `crate::mm::media_splice_point`'s doc for the
-            // real-hardware failure (a long system prompt + media producing
-            // exactly one bogus `<|im_start|>` token then immediate EOS) this closes.
-            // Leading "\n" -- see the matching comment in caps.rs's call sites.
-            let user_open = tok.encode("\n<|im_start|>user\n");
-            let splice_at = crate::mm::media_splice_point(&stripped_prompt, &text_ids, tok.special_id("<|im_end|>"), Some(&user_open));
-            let mm_prompt = build_multimodal_prompt(mm_reader, gpu, &self.cfg, &embed_host, &text_ids, audio.as_deref(), image_ref, video.as_deref(), splice_at)
-                .map_err(|e| format!("{MODEL}: {e}"))?;
-            if std::env::var("BRAIN_OMNI_DEBUG_LOGITS").is_ok() {
-                let n = mm_prompt.token_ids.len();
-                let tail = &mm_prompt.token_ids[n.saturating_sub(8)..];
-                let tail_pos = &mm_prompt.positions[n.saturating_sub(8)..];
-                eprintln!("{MODEL}: multimodal prompt: {n} token(s), last 8 ids={tail:?} positions={tail_pos:?}");
-                eprintln!(
-                    "{MODEL}: pre-assembly text_ids: {} token(s), image_token_id({}) occurs {}x, audio_token_id({}) occurs {}x",
-                    text_ids.len(),
-                    self.cfg.image_token_id,
-                    text_ids.iter().filter(|&&t| t == self.cfg.image_token_id).count(),
-                    self.cfg.audio_token_id,
-                    text_ids.iter().filter(|&&t| t == self.cfg.audio_token_id).count(),
-                );
-                for (label, tok_id) in [("image", self.cfg.image_token_id), ("audio", self.cfg.audio_token_id)] {
-                    if let Some(p) = mm_prompt.token_ids.iter().position(|&t| t == tok_id) {
-                        let lo = p.saturating_sub(6);
-                        let hi = (p + 6).min(n);
-                        eprintln!(
-                            "{MODEL}: {label} placeholder first at index {p}: ids[{lo}..{hi}]={:?} positions[{lo}..{hi}]={:?}",
-                            &mm_prompt.token_ids[lo..hi],
-                            &mm_prompt.positions[lo..hi]
-                        );
-                    }
-                }
-            }
-            self.generate_multimodal(&mm_prompt, max_new, eos_ids)
-        } else {
-            let prompt_ids = tok.encode(&prompt);
-            self.generate(&prompt_ids, max_new, eos_ids)
-        };
-        gpu_core::profile::stage_time("omni-int8 generate", t0);
+    fn profile_generate(&self, started: std::time::Instant) {
+        gpu_core::profile::stage_time("omni-int8 generate", started);
         for shard in &self.shards {
             shard.gpu.dump_profile();
         }
-        let text = tok.decode(&new_ids);
-        progress(Progress::step(max_new, max_new, text.clone()));
-        Ok(Outcome::new()
-            .set("text", serde_json::json!(text))
-            .set("tokens", serde_json::json!(new_ids))
-            .blob("text", Blob::new(Media::Text, text.into_bytes())))
     }
-}
-
-fn argmax(row: &[f32]) -> u32 {
-    row.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).expect("non-empty vocab")
 }
 
 /// Opt-in (`BRAIN_OMNI_DEBUG_LOGITS=1`) top-3 logit dump, mirroring
@@ -1093,6 +1051,13 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
     }
 
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(self.build_instance(devices)?))
+    }
+}
+
+impl Int8ThinkerResident {
+    /// The loaded instance for `devices`, which must be the devices the plan chose.
+    fn build_instance(&self, devices: &[Device]) -> Result<Int8ThinkerInstance, String> {
         let plan = self.plan();
         if plan.stages.is_empty() {
             return Err(format!("{MODEL}: no placement (checkpoint unreadable, or it does not fit the budgeted devices)"));
@@ -1150,11 +1115,11 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
         // or a standalone chat_template.json/chat_template.jinja, same
         // directory) -- read from the SAME `tokenizer_dir`, not a second env
         // var, so the two can never point at different checkpoints. A missing
-        // template degrades to `last_user_text` (see `crate::caps::
+        // template degrades to the last user turn (see `crate::caps::
         // chat_prompt`), same non-fatal shape as the tokenizer/mm_reader
         // degrades above -- there is no tokenizer to read a template beside
         // when `tokenizer_dir` is `None`.
-        let chat_template = self.tokenizer_dir.as_ref().and_then(|dir| crate::caps::load_chat_template(dir));
+        let chat_format = self.tokenizer_dir.as_ref().map_or(ChatFormat::None, |dir| crate::caps::load_chat_format(dir));
         // Same non-fatal degrade as the tokenizer above: a bad/missing HF dir
         // costs multimodal input only, not the whole activation.
         let mm_reader = self.hf_dir.as_ref().and_then(|dir| match WeightReader::open_hf_dir(std::path::Path::new(dir)) {
@@ -1164,6 +1129,80 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
                 None
             }
         });
-        Ok(Box::new(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, reader, embed, final_norm_w, lm_head_w, tok, chat_template, mm_reader }))
+        Ok(Int8ThinkerInstance { cfg: self.cfg.clone(), shards, reader, embed, final_norm_w, lm_head_w, tok, chat_format, mm_reader })
+    }
+}
+
+/// The synthetic checkpoint the integration tests load, for the tests below.
+#[cfg(test)]
+#[path = "../tests/common/int8_thinker_fixture.rs"]
+mod int8_fixture;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use super::int8_fixture as fixture;
+
+    /// A loaded one-device instance of a synthetic `n_layers`-layer checkpoint.
+    fn instance(n_layers: u32, seed: u64) -> (Int8ThinkerInstance, std::path::PathBuf) {
+        let cfg = fixture::tiny_cfg(n_layers);
+        let dir = std::env::temp_dir().join(format!("int8_deepstack_{}_{seed}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("thinker.safetensors");
+        fixture::write_synthetic_checkpoint(path.to_str().unwrap(), &cfg, seed);
+        let caps = fixture::caps_for_split(path.to_str().unwrap(), &cfg, &[Device::Gpu(0)], 1);
+        let resident = Int8ThinkerResident::new(path.to_str().unwrap().to_string(), ThinkerConfig::defaults().with_text(cfg), caps);
+        (resident.build_instance(&[Device::Gpu(0)]).expect("activate"), dir)
+    }
+
+    fn prefill(inst: &Int8ThinkerInstance, x: &[f32], n: u32, deepstack: Option<&Deepstack>) -> Vec<f32> {
+        let tokens: Vec<u32> = (0..n).collect();
+        let positions = qwen3vl::mrope::get_rope_index(&tokens, u32::MAX, &[]);
+        let (cos, sin) = inst.mrope_tables(&positions);
+        inst.run_shards(x, n, &cos, &sin, Pass::Batched { cache: None }, deepstack)
+    }
+
+    fn tap(rows: usize, d: usize, seed: u64) -> Vec<f32> {
+        data::rng::Lcg::new(seed).vec_scaled(rows * d, 1.0)
+    }
+
+    /// The reference adds tap `l` to the visual rows right after decoder layer `l`, for the
+    /// first `levels` layers: after a one-layer stack the hidden state is the plain
+    /// output plus the tap at the visual rows, and unchanged elsewhere.
+    #[test]
+    fn deepstack_is_added_after_the_layer_at_the_visual_rows_only() {
+        let (inst, dir) = instance(1, 31);
+        let d = inst.cfg.text.hidden as usize;
+        let n = 6u32;
+        let x = tap(n as usize, d, 5);
+        let ds = Deepstack { rows: vec![1, 2, 4], levels: vec![tap(3, d, 6)] };
+        let plain = prefill(&inst, &x, n, None);
+        let with = prefill(&inst, &x, n, Some(&ds));
+        let mut want = plain.clone();
+        ds.add_level(0, &mut want, d);
+        let worst = with.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-5, "max abs difference {worst} from plain + tap");
+        assert_ne!(with, plain, "the taps changed nothing");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Taps beyond the stack's depth are not applied, and a later tap joins after ITS layer: in a two-layer stack tap 1 changes the result
+    /// and, with only tap 0 given, the second layer sees exactly what the one-tap hidden state is.
+    #[test]
+    fn each_tap_joins_after_its_own_layer() {
+        let (inst, dir) = instance(2, 32);
+        let d = inst.cfg.text.hidden as usize;
+        let n = 5u32;
+        let x = tap(n as usize, d, 7);
+        let rows = vec![0, 3];
+        let (t0, t1) = (tap(2, d, 8), tap(2, d, 9));
+        let one = Deepstack { rows: rows.clone(), levels: vec![t0.clone()] };
+        let two = Deepstack { rows: rows.clone(), levels: vec![t0.clone(), t1.clone()] };
+        let beyond = Deepstack { rows, levels: vec![t0, t1, tap(2, d, 10)] };
+        let (a, b, c) = (prefill(&inst, &x, n, Some(&one)), prefill(&inst, &x, n, Some(&two)), prefill(&inst, &x, n, Some(&beyond)));
+        assert_ne!(a, b, "tap 1 must change what layer 1 produces");
+        assert_eq!(b, c, "a third tap has no third layer to follow, and must change nothing");
+        std::fs::remove_dir_all(dir).ok();
     }
 }

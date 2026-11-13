@@ -163,11 +163,37 @@ pub struct GenOpts {
     /// RNG seed of the sampled codec frames; [`GenOpts::default`] draws a fresh one.
     pub seed: u64,
     pub min_new: u32,
+    /// Polled once per frame; an armed token ends generation with `Err("cancelled")`.
+    pub cancel: capability::CancelToken,
 }
 
 impl Default for GenOpts {
     fn default() -> GenOpts {
-        GenOpts { max_frames: 256, temperature: 0.9, top_k: 50, seed: data::rng::random_seed(), min_new: 2 }
+        GenOpts { max_frames: 256, temperature: 0.9, top_k: 50, seed: data::rng::random_seed(), min_new: 2, cancel: capability::CancelToken::default() }
+    }
+}
+
+/// Why the frame loop ends before sampling another frame, if it does.
+#[derive(Debug, PartialEq, Eq)]
+enum FrameStop {
+    /// The caller cancelled: checked first, so a cancelled request never reports a finished clip.
+    Cancelled,
+    /// The codec end token came after the minimum length.
+    Eos,
+    /// The frame budget is spent.
+    Budget,
+}
+
+/// The loop head of [`generate_codes_streaming`]: `cb0` is the codebook-0 token drawn for frame `s`.
+fn frame_stop(cb0: u32, codec_eos_id: u32, s: u32, opts: &GenOpts) -> Option<FrameStop> {
+    if opts.cancel.is_cancelled() {
+        Some(FrameStop::Cancelled)
+    } else if cb0 == codec_eos_id && s >= opts.min_new {
+        Some(FrameStop::Eos)
+    } else if s >= opts.max_frames {
+        Some(FrameStop::Budget)
+    } else {
+        None
     }
 }
 
@@ -280,8 +306,10 @@ pub fn generate_codes_streaming(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextC
     let mut s = 0u32;
     let mut cache_row = n_prefix;
     loop {
-        if (cb0 == codec_eos_id && s >= opts.min_new) || s >= opts.max_frames {
-            break;
+        match frame_stop(cb0, codec_eos_id, s, opts) {
+            Some(FrameStop::Cancelled) => return Err("cancelled".to_string()),
+            Some(FrameStop::Eos | FrameStop::Budget) => break,
+            None => {}
         }
         let cb0_embed = codec_embed(cb0);
         let (residuals, res_sum) = mtp.generate_residuals_with(&past_hidden, &cb0_embed, &residual_sampler(opts), &mut rng);
@@ -314,6 +342,23 @@ pub fn generate_codes_streaming(reader: &WeightReader, gpu: &Gpu, cfg: &MoeTextC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spec: a cancelled request stops the Talker before its next frame and is never mistaken for a finished clip; without
+    /// cancellation the end token and the frame budget end the loop as before.
+    #[test]
+    fn the_frame_loop_stops_on_cancellation_before_anything_else() {
+        let live = GenOpts { max_frames: 4, min_new: 1, ..GenOpts::default() };
+        assert_eq!(frame_stop(7, 99, 0, &live), None);
+        assert_eq!(frame_stop(99, 99, 0, &live), None, "an end token before the minimum length is not an end");
+        assert_eq!(frame_stop(99, 99, 1, &live), Some(FrameStop::Eos));
+        assert_eq!(frame_stop(7, 99, 4, &live), Some(FrameStop::Budget));
+        let token = capability::CancelToken::armed();
+        let cancelled = GenOpts { cancel: token.clone(), ..live };
+        assert_eq!(frame_stop(7, 99, 0, &cancelled), None);
+        token.cancel();
+        assert_eq!(frame_stop(7, 99, 0, &cancelled), Some(FrameStop::Cancelled));
+        assert_eq!(frame_stop(99, 99, 4, &cancelled), Some(FrameStop::Cancelled), "cancellation outranks an end the loop would have reached");
+    }
 
     /// The residual codebooks are drawn under the caller's sampling controls:
     /// a positive temperature samples them, zero pins them to the argmax.

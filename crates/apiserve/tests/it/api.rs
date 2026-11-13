@@ -3411,7 +3411,7 @@ fn messages_echo_app(provider: Provider) -> (Router, String) {
 /// Gap A's regression test: a genuinely multimodal message's `content` must
 /// reach the chat-templated `messages` JSON as a TYPED ARRAY (so the real
 /// Jinja template can place each medium's placeholder at its own position -
-/// see `omni::caps::render_chat_prompt`'s doc), not `content_text`'s old
+/// see `omni::caps::chat_prompt`'s doc), not `content_text`'s old
 /// always-flatten-to-a-string behavior, which silently dropped every
 /// non-"text" part before the template ever saw it. Also proves the real
 /// base64 PAYLOAD is stripped, not duplicated into this JSON string -- the

@@ -254,8 +254,7 @@ impl MoeTextConfig {
     }
 }
 
-/// `thinker_config`'s own scalar fields (special-token ids, cross-modal
-/// timing) that sit alongside `audio_config`/`vision_config`/`text_config`
+/// `thinker_config`'s own scalar fields (the special-token ids) that sit alongside `audio_config`/`vision_config`/`text_config`
 /// rather than inside any of them.
 #[derive(Clone, Debug)]
 pub struct ThinkerConfig {
@@ -269,8 +268,6 @@ pub struct ThinkerConfig {
     pub video_token_id: u32,
     pub vision_start_token_id: u32,
     pub vision_end_token_id: u32,
-    pub position_id_per_seconds: u32, // 13
-    pub seconds_per_chunk: u32,       // 2
 }
 
 impl ThinkerConfig {
@@ -312,8 +309,6 @@ impl ThinkerConfig {
             video_token_id: gu(t, "video_token_id", 151656),
             vision_start_token_id: gu(t, "vision_start_token_id", 151652),
             vision_end_token_id: gu(t, "vision_end_token_id", 151653),
-            position_id_per_seconds: gu(t, "position_id_per_seconds", 13),
-            seconds_per_chunk: gu(t, "seconds_per_chunk", 2),
         }
     }
 }
@@ -340,8 +335,6 @@ pub struct TalkerConfig {
     pub num_code_groups: u32, // 16
     pub thinker_hidden_size: u32, // 2048 — width of the hidden state accept_hidden_layer reads
     pub spatial_merge_size: u32,
-    pub position_id_per_seconds: u32,
-    pub seconds_per_chunk: u32,
     /// name -> codec speaker id, e.g. `{"chelsie": 2301, "ethan": 2302, "aiden": 2303}`.
     pub speaker_id: std::collections::BTreeMap<String, u32>,
 }
@@ -374,8 +367,6 @@ impl TalkerConfig {
             num_code_groups: gu(t, "num_code_groups", 16),
             thinker_hidden_size: gu(t, "thinker_hidden_size", 2048),
             spatial_merge_size: gu(t, "spatial_merge_size", 2),
-            position_id_per_seconds: gu(t, "position_id_per_seconds", 13),
-            seconds_per_chunk: gu(t, "seconds_per_chunk", 2),
             speaker_id,
         }
     }

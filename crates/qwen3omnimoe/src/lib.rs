@@ -11,9 +11,15 @@
 //! `qwen-asr`'s audio encoder shape, `qwenvl`'s vision tower + M-RoPE,
 //! `tts`'s MTP code predictor, and `codec`'s SEANet vocoder.
 
+// The in-crate tests share the integration tests' fixtures, which name this crate from outside.
+#[cfg(test)]
+extern crate self as qwen3omnimoe;
+
 pub mod caps;
+pub mod chat;
 pub mod codec_bridge;
 pub mod config;
+pub mod decode;
 pub mod generate;
 pub mod import;
 pub mod int8_resident;

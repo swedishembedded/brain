@@ -198,11 +198,20 @@ exported shapes, `--out-dir` the destination, and the OpenVINO options
 
 ## Hardware and limits
 
-- Text generation is greedy (argmax) only - `temp`/`top_p`/`top_k` are
-  accepted for API compatibility but have no effect, and `seed` has none on
-  `generate`. The Talker's codec frames in `speak`/`converse` are sampled:
-  `seed` fixes them, and an omitted one is drawn and returned as `seed` in the
-  outcome.
+- Text generation samples the way every brain chat model does: `temp`
+  (default 0, greedy), `top_p`, `top_k` and `seed` (an omitted one is drawn and
+  returned as `seed` in the outcome), `stop` strings, `tools` / `tool_choice`
+  (a model's call comes back as structured `tool_calls`) and `enable_thinking`
+  (reasoning comes back as `reasoning_content`). The Talker's codec frames in
+  `speak`/`converse` are sampled too: `seed` fixes them.
+- One prompt carries audio or video, not both: a request that attaches both is
+  refused, because their positions interleave by time and a video blob carries
+  no frame rate. Video positions advance one step per temporal group of frames.
+- Image and video features also reach the Thinker's first three layers
+  (DeepStack), as in the reference. Video frames are encoded in temporal pairs.
+- `generate`, `speak` and `converse` honour cancellation; a `speak` or `converse`
+  cancelled while its audio is being decoded returns the audio streamed so far
+  with `finish_reason` `cancelled`.
 - `speak` is text-only on the input side today: a `speak` call does not also
   take audio/image input, and it's single-turn (no multi-turn spoken
   context).

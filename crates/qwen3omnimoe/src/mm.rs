@@ -15,7 +15,7 @@
 //! prompt.
 //!
 //! **Chat-template placeholder rendering (real HF shape)**: the Jinja chat
-//! template (`crate::caps::render_chat_prompt`, given a real typed
+//! template (`crate::caps::chat_prompt`, given a real typed
 //! content-part array per message rather than flattened text) renders ONE
 //! placeholder token per medium (`<|vision_start|><|image_pad|><|vision_end|>`
 //! / `<|audio_start|><|audio_pad|><|audio_end|>`) at the exact position that
@@ -53,12 +53,17 @@
 //! this caller's shape.
 //!
 //! **M-RoPE**: real per-axis positions for a mixed sequence, not the
-//! diagonal collapse `crate::generate`'s pure-text path uses — built via
-//! `qwen3vl::mrope::get_rope_index_multi`, hoisted in this same workstream to
-//! handle image/audio/video placeholder runs in one scan (see that
-//! function's doc for the audio/video grid-shape convention and its one
-//! documented approximation: wall-clock audio-timestamp scaling is not
-//! ported, only frame-ordinal T-axis advance).
+//! diagonal collapse `crate::generate`'s pure-text path uses - built via
+//! `qwen3vl::mrope::get_rope_index_multi`, which handles image/audio/video
+//! placeholder runs in one scan. The positions are frame-ordinal: an audio
+//! row takes one position on all three axes, as the reference's does; an
+//! image sits at temporal position 0 with its merged patch grid on height and
+//! width; a video advances the temporal axis by one per temporal group of
+//! frames. The reference also scales a video's temporal axis by the clip's
+//! seconds per group (`second_per_grids`, from the frame rate); a video blob
+//! carries frames and no frame rate, so no such scaling is applied, and a
+//! prompt that combines audio and video (whose reference positions interleave
+//! the two by that time axis) is refused ([`check_media_combination`]).
 //!
 //! **Whole-block splice position**: [`media_splice_point`]'s doc has the
 //! real-hardware failure that motivated moving it OFF index 0 (media once
@@ -69,10 +74,13 @@ use gpu_core::Gpu;
 use qwen3asr::config::AudioEncoderConfig;
 use qwen3asr::encoder::{audio_pipelines, AudioEncoder};
 use qwen3vl::config::VisionConfig;
-use qwen3vl::encoder::{vision_pipelines, PatchMerger, VisionEncoder};
+use qwen3vl::encoder::{vision_pipelines, VisionFeatures, VisionTower};
 use qwen3vl::preprocess::{image_token_count, normalize_unit, pack_patches, pack_patches_temporal, patch_grid, smart_resize_default};
 
 use qwen3vl::mrope::get_rope_index_multi;
+
+use data::qwen_tokenizer::QwenBpe;
+use data::tokenizer::Tokenizer;
 
 use crate::config::ThinkerConfig;
 use crate::import::hf_to_brain;
@@ -92,6 +100,41 @@ pub struct ImageSplice {
     pub embeds: Vec<f32>,
     pub n_rows: u32,
     pub grid: (u32, u32, u32),
+    /// One `[n_rows, hidden]` feature set per DeepStack tap of the vision
+    /// tower, each projected by its own merger: what
+    /// [`Deepstack`] adds to the Thinker's early layers.
+    pub deepstack: Vec<Vec<f32>>,
+}
+
+/// The vision tower's DeepStack features for a prompt, positioned where the
+/// Thinker adds them. The reference
+/// (`Qwen3OmniMoeThinkerTextModel.forward`, `_deepstack_process`) adds the
+/// tower's tap `l` to the hidden state at every image/video position after
+/// decoder layer `l`, for the first `levels()` layers, during the prompt's
+/// prefill (decoded text tokens carry no visual features).
+#[derive(Debug)]
+pub struct Deepstack {
+    /// Token index of each visual row, ascending.
+    pub rows: Vec<usize>,
+    /// Per tap, `[rows.len(), hidden]`, row `i` belonging to token `rows[i]`.
+    pub levels: Vec<Vec<f32>>,
+}
+
+impl Deepstack {
+    /// Taps the tower produced: the number of early layers that receive one.
+    pub fn levels(&self) -> usize {
+        self.levels.len()
+    }
+
+    /// `hidden[rows[i]] += levels[level][i]` for every visual row: `hidden` is
+    /// the `[n, d]` hidden state after decoder layer `level`.
+    pub fn add_level(&self, level: usize, hidden: &mut [f32], d: usize) {
+        for (i, &row) in self.rows.iter().enumerate() {
+            for (h, f) in hidden[row * d..(row + 1) * d].iter_mut().zip(&self.levels[level][i * d..(i + 1) * d]) {
+                *h += f;
+            }
+        }
+    }
 }
 
 /// Stream every `thinker.audio_tower.*` tensor from `reader` (mmap-backed)
@@ -185,21 +228,29 @@ pub(crate) fn audio_weights(reader: &WeightReader) -> Result<std::collections::H
 }
 
 /// The `thinker.visual.*` tensors split by consumer: `(vision encoder weights,
-/// primary patch-merger weights)`, each keyed by brain parameter name.
-pub(crate) type VisionWeights =
-    (std::collections::HashMap<String, Vec<f32>>, std::collections::HashMap<String, Vec<f32>>);
+/// primary patch-merger weights, one DeepStack merger weight set per tap)`,
+/// each keyed by brain parameter name.
+pub(crate) type VisionWeights = (
+    std::collections::HashMap<String, Vec<f32>>,
+    std::collections::HashMap<String, Vec<f32>>,
+    Vec<std::collections::HashMap<String, Vec<f32>>>,
+);
 
 /// Stream + remap every `thinker.visual.*` tensor from `reader` into the
-/// `VisionEncoder` + primary `PatchMerger` weight maps (same remap
-/// `crate::import`/`tests/vision_parity.rs` use) — the loader half of
+/// `VisionEncoder` + primary `PatchMerger` + DeepStack merger weight maps (same
+/// remap `crate::import`/`tests/vision_parity.rs` use) - the loader half of
 /// [`encode_image`], factored out so [`crate::npu_export`] can build the SAME
 /// weight maps for ONNX export without also running a GPU encode.
-/// DeepStack merger weights are skipped (see [`encode_image`]'s doc for why
-/// the plain single-merger path is what's actually served).
+///
+/// # Errors
+/// A tensor cannot be read, or a DeepStack merger is missing part of its six
+/// tensors (a partial checkpoint): a request fails, the process does not.
 pub(crate) fn vision_weights(reader: &WeightReader) -> Result<VisionWeights, String> {
     use std::collections::HashMap;
+    let taps = VisionConfig::qwen3_omni().deepstack_indexes.len();
     let mut encoder_w: HashMap<String, Vec<f32>> = HashMap::new();
     let mut main_merger_w: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut deepstack_w: Vec<HashMap<String, Vec<f32>>> = vec![HashMap::new(); taps];
     for name in reader.names() {
         if !name.starts_with("thinker.visual.") {
             continue;
@@ -208,14 +259,19 @@ pub(crate) fn vision_weights(reader: &WeightReader) -> Result<VisionWeights, Str
         let data = reader.tensor(name).ok_or_else(|| format!("omni: cannot read tensor {name}"))?;
         if let Some(rest) = brain_name.strip_prefix("vision.merger.") {
             main_merger_w.insert(rest.to_string(), data);
+        } else if let Some(rest) = brain_name.strip_prefix("vision.deepstack_merger.") {
+            let (tap, leaf) = rest.split_once('.').ok_or_else(|| format!("omni: unparseable DeepStack merger tensor name {name}"))?;
+            let slot = tap.parse::<usize>().ok().and_then(|t| deepstack_w.get_mut(t)).ok_or_else(|| format!("omni: DeepStack merger tensor {name} is outside the tower's {taps} taps"))?;
+            slot.insert(leaf.to_string(), data);
         } else if let Some(rest) = brain_name.strip_prefix("vision.") {
-            if rest.starts_with("deepstack_merger.") {
-                continue; // not needed for a plain (non-DeepStack) splice path
-            }
             encoder_w.insert(rest.to_string(), data);
         }
     }
-    Ok((encoder_w, main_merger_w))
+    const MERGER_TENSORS: usize = 6; // ln, fc1, fc2: weight and bias
+    if let Some((tap, w)) = deepstack_w.iter().enumerate().find(|(_, w)| w.len() != MERGER_TENSORS) {
+        return Err(format!("omni: DeepStack merger {tap} has {} of {MERGER_TENSORS} tensors (partial checkpoint?)", w.len()));
+    }
+    Ok((encoder_w, main_merger_w, deepstack_w))
 }
 
 /// Stream every `thinker.visual.*` tensor from `reader` into the
@@ -226,7 +282,7 @@ pub(crate) fn vision_weights(reader: &WeightReader) -> Result<VisionWeights, Str
 /// `capability::blob::decode_image`'s output shape).
 pub fn encode_image(reader: &WeightReader, gpu: &Gpu, rgb_hwc: &[f32], w: u32, h: u32) -> Result<ImageSplice, String> {
     let cfg = VisionConfig::qwen3_omni();
-    let (encoder_w, main_merger_w) = vision_weights(reader)?;
+    let (encoder_w, main_merger_w, deepstack_w) = vision_weights(reader)?;
 
     // Real bilinear resize to the smart-resized (patch-multiple) extent --
     // NOT a crop/pad: `smart_resize_default` picks dimensions close to but
@@ -240,15 +296,12 @@ pub fn encode_image(reader: &WeightReader, gpu: &Gpu, rgb_hwc: &[f32], w: u32, h
     let (gh, gw) = patch_grid(hp, wp, cfg.patch_size);
     let patches = pack_patches(&chw, 3, hp, wp, cfg.patch_size, cfg.spatial_merge_size, cfg.temporal_patch_size);
 
-    let gpu_local = gpu.new_like(vision_pipelines());
-    let enc = VisionEncoder::new(&gpu_local, cfg.clone(), &encoder_w);
-    let encoder_out = enc.encode(&gpu_local, gh, gw, &patches);
-    let merger = PatchMerger::new(&gpu_local, &main_merger_w, cfg.hidden, cfg.spatial_merge_size, cfg.out_hidden_size, false);
-    let embeds = merger.merge(&gpu_local, &encoder_out, gh * gw);
+    let tower = VisionTower::new(gpu.new_like(vision_pipelines()), cfg.clone(), &encoder_w, &main_merger_w, &deepstack_w, cfg.out_hidden_size);
+    let VisionFeatures { visual: embeds, deepstack } = tower.features(gh, gw, &patches);
 
     let merge = cfg.spatial_merge_size;
     let n_rows = image_token_count(hp, wp, cfg.patch_size, merge);
-    Ok(ImageSplice { embeds, n_rows, grid: (1, gh / merge, gw / merge) })
+    Ok(ImageSplice { embeds, n_rows, grid: (1, gh / merge, gw / merge), deepstack })
 }
 
 /// Encode a short video as a list of ALREADY-DECODED frames (RGB HWC each) —
@@ -282,7 +335,7 @@ pub fn encode_video_frames(reader: &WeightReader, gpu: &Gpu, frames: &[(Vec<f32>
         return Err("omni: encode_video_frames: at least one frame required".to_string());
     }
     let cfg = VisionConfig::qwen3_omni();
-    let (encoder_w, main_merger_w) = vision_weights(reader)?;
+    let (encoder_w, main_merger_w, deepstack_w) = vision_weights(reader)?;
 
     let (_, w0, h0) = &frames[0];
     let (hp, wp) = smart_resize_default(*h0, *w0);
@@ -303,21 +356,23 @@ pub fn encode_video_frames(reader: &WeightReader, gpu: &Gpu, frames: &[(Vec<f32>
 
     let (gh, gw) = patch_grid(hp, wp, cfg.patch_size);
     let merge = cfg.spatial_merge_size;
-    let gpu_local = gpu.new_like(vision_pipelines());
-    let enc = VisionEncoder::new(&gpu_local, cfg.clone(), &encoder_w);
-    let merger = PatchMerger::new(&gpu_local, &main_merger_w, cfg.hidden, merge, cfg.out_hidden_size, false);
+    let tower = VisionTower::new(gpu.new_like(vision_pipelines()), cfg.clone(), &encoder_w, &main_merger_w, &deepstack_w, cfg.out_hidden_size);
 
     let n_groups = chw_frames.len() as u32 / temporal;
     let n_rows_per_group = image_token_count(hp, wp, cfg.patch_size, merge);
     let mut embeds = Vec::with_capacity((n_groups * n_rows_per_group * cfg.out_hidden_size) as usize);
+    let mut deepstack: Vec<Vec<f32>> = vec![Vec::new(); tower.n_deepstack()];
     for g in 0..n_groups {
         let group: Vec<&[f32]> = chw_frames[(g * temporal) as usize..((g + 1) * temporal) as usize].iter().map(|f| f.as_slice()).collect();
         let patches = pack_patches_temporal(&group, 3, hp, wp, cfg.patch_size, merge, temporal);
-        let encoder_out = enc.encode(&gpu_local, gh, gw, &patches);
-        embeds.extend(merger.merge(&gpu_local, &encoder_out, gh * gw));
+        let features = tower.features(gh, gw, &patches);
+        embeds.extend(features.visual);
+        for (level, rows) in features.deepstack.into_iter().enumerate() {
+            deepstack[level].extend(rows);
+        }
     }
 
-    Ok(ImageSplice { embeds, n_rows: n_groups * n_rows_per_group, grid: (n_groups, gh / merge, gw / merge) })
+    Ok(ImageSplice { embeds, n_rows: n_groups * n_rows_per_group, grid: (n_groups, gh / merge, gw / merge), deepstack })
 }
 
 /// One resolved multimodal prompt: the full token id sequence (each attached
@@ -331,6 +386,9 @@ pub struct MultimodalPrompt {
     pub token_ids: Vec<u32>,
     pub x_host: Vec<f32>,
     pub positions: Vec<[u32; 3]>,
+    /// The vision tower's DeepStack features for the prompt's image/video rows;
+    /// `None` when the prompt has neither.
+    pub deepstack: Option<Deepstack>,
 }
 
 struct MediaBlock {
@@ -434,6 +492,38 @@ pub fn strip_media_placeholder_text(prompt: &str) -> String {
         .replace("<|vision_start|><|video_pad|><|vision_end|>", "")
 }
 
+/// The rendered chat `prompt` as [`build_multimodal_prompt`] takes it: the
+/// template's inline media placeholders stripped ([`strip_media_placeholder_text`]),
+/// tokenized, and the whole-block splice position ([`media_splice_point`]).
+/// The leading "\n" of the user-turn opener belongs to the system turn's own
+/// `<|im_end|>\n` closer, so it is part of the match that starts right at
+/// `<|im_end|>`.
+pub fn splice_plan(tok: &QwenBpe, prompt: &str) -> (Vec<u32>, usize) {
+    let stripped = strip_media_placeholder_text(prompt);
+    let text_ids = tok.encode(&stripped);
+    let user_open = tok.encode("\n<|im_start|>user\n");
+    let splice_at = media_splice_point(&stripped, &text_ids, tok.special_id("<|im_end|>"), Some(&user_open));
+    (text_ids, splice_at)
+}
+
+/// Why one prompt cannot carry both audio and video: the reference places the
+/// two on one time axis (the video's temporal positions scaled by its seconds
+/// per frame group, merged with the audio rows), and a request has no frame
+/// rate to build that axis from.
+pub const AUDIO_WITH_VIDEO_UNSUPPORTED: &str =
+    "omni: audio and video in one prompt is not supported (their positions are interleaved by time, and a video blob carries no frame rate); send them in separate requests";
+
+/// Refuse a combination of media [`build_multimodal_prompt`] cannot position.
+///
+/// # Errors
+/// Both `audio` and `video` are present.
+pub fn check_media_combination(audio: bool, video: bool) -> Result<(), String> {
+    if audio && video {
+        return Err(AUDIO_WITH_VIDEO_UNSUPPORTED.to_string());
+    }
+    Ok(())
+}
+
 /// One medium's merged M-RoPE grid: `(temporal, height, width)` position
 /// extents, as `qwen3vl::mrope::get_rope_index_multi` consumes them.
 type Grid = (u32, u32, u32);
@@ -468,8 +558,11 @@ pub fn build_multimodal_prompt(
     video: Option<&[(Vec<f32>, u32, u32)]>,
     splice_at: usize,
 ) -> Result<MultimodalPrompt, String> {
+    check_media_combination(audio.is_some(), video.is_some())?;
     let d = cfg.text.hidden;
     let mut blocks = Vec::new();
+    // Per image/video block: its placeholder token and its DeepStack feature sets.
+    let mut visual: Vec<(u32, Vec<Vec<f32>>)> = Vec::new();
     if let Some(samples) = audio {
         let a = encode_audio(reader, gpu, samples)?;
         blocks.push(MediaBlock {
@@ -492,6 +585,7 @@ pub fn build_multimodal_prompt(
             n_rows: im.n_rows,
             grid: im.grid,
         });
+        visual.push((cfg.image_token_id, im.deepstack));
         reclaim_tower_vram(gpu);
     }
     if let Some(frames) = video {
@@ -504,6 +598,7 @@ pub fn build_multimodal_prompt(
             n_rows: v.n_rows,
             grid: v.grid,
         });
+        visual.push((cfg.video_token_id, v.deepstack));
         reclaim_tower_vram(gpu);
     }
 
@@ -514,7 +609,39 @@ pub fn build_multimodal_prompt(
     let placeholders: Vec<(u32, &[Grid])> = placeholder_grids.iter().map(|(id, g)| (*id, g.as_slice())).collect();
     let positions = get_rope_index_multi(&token_ids, &placeholders);
 
-    Ok(MultimodalPrompt { token_ids, x_host, positions })
+    let deepstack = assemble_deepstack(&token_ids, &visual, d as usize)?;
+
+    Ok(MultimodalPrompt { token_ids, x_host, positions, deepstack })
+}
+
+/// Place the DeepStack features of `visual` (per image/video block: its
+/// placeholder token id and one `[n_rows, d]` feature set per tap) at the
+/// token positions of `token_ids` where that block's rows were spliced.
+///
+/// # Errors
+/// The blocks disagree on the number of taps, or a block's feature rows do not
+/// match its placeholder tokens in the prompt (the splice and the encoder
+/// disagree about how many rows the block has).
+fn assemble_deepstack(token_ids: &[u32], visual: &[(u32, Vec<Vec<f32>>)], d: usize) -> Result<Option<Deepstack>, String> {
+    let taps = visual.first().map_or(0, |(_, levels)| levels.len());
+    if taps == 0 {
+        return Ok(None);
+    }
+    if visual.iter().any(|(_, levels)| levels.len() != taps) {
+        return Err("omni: the image and the video give different numbers of DeepStack taps".to_string());
+    }
+    // (token index, block, row within the block)
+    let mut placed: Vec<(usize, usize, usize)> = Vec::new();
+    for (block, (placeholder, levels)) in visual.iter().enumerate() {
+        let at: Vec<usize> = token_ids.iter().enumerate().filter(|&(_, t)| t == placeholder).map(|(i, _)| i).collect();
+        if levels.iter().any(|level| level.len() != at.len() * d) {
+            return Err(format!("omni: DeepStack features of {} rows do not match the {} spliced visual tokens", levels[0].len() / d, at.len()));
+        }
+        placed.extend(at.into_iter().enumerate().map(|(row, i)| (i, block, row)));
+    }
+    placed.sort_unstable();
+    let levels = (0..taps).map(|t| placed.iter().flat_map(|&(_, block, row)| visual[block].1[t][row * d..(row + 1) * d].iter().copied()).collect()).collect();
+    Ok(Some(Deepstack { rows: placed.iter().map(|&(i, ..)| i).collect(), levels }))
 }
 
 /// The real assembly logic behind [`build_multimodal_prompt`], factored out
@@ -541,7 +668,7 @@ pub fn build_multimodal_prompt(
 /// embedding placement stays a single whole-block splice (unconditionally,
 /// for every attached medium) at [`media_splice_point`]'s `splice_at`; the
 /// only thing this function still does with an INLINE placeholder run the
-/// chat template correctly rendered (`crate::caps::render_chat_prompt`,
+/// chat template correctly rendered (`crate::caps::chat_prompt`,
 /// given the typed content array `crates/apiserve/src/openai.rs`'s
 /// `message_content` now preserves - a real, independently-useful fix kept
 /// for its own sake, e.g. it is what makes the RENDERED TEXT correct even
@@ -669,6 +796,44 @@ fn reclaim_tower_vram(gpu: &Gpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audio with an image, or video with an image, is positioned; audio with video is refused by name.
+    #[test]
+    fn audio_with_video_is_refused_and_every_other_mix_is_allowed() {
+        let err = check_media_combination(true, true).unwrap_err();
+        assert!(err.contains("audio and video"), "{err}");
+        for (audio, video) in [(false, false), (true, false), (false, true)] {
+            assert!(check_media_combination(audio, video).is_ok());
+        }
+    }
+
+    /// DeepStack features land on the token positions their rows were spliced at, in
+    /// sequence order, whichever block came first; a block whose rows disagree with the
+    /// prompt is an error, not a silent shift.
+    #[test]
+    fn deepstack_rows_follow_the_spliced_visual_tokens() {
+        // tokens: 0 text, 1-2 image rows (placeholder 20), 3 text, 4 video row (placeholder 21).
+        let tokens = [9, 20, 20, 9, 21];
+        let image = vec![vec![1.0, 2.0, 3.0, 4.0], vec![11.0, 12.0, 13.0, 14.0]]; // 2 taps x 2 rows x d=2
+        let video = vec![vec![5.0, 6.0], vec![15.0, 16.0]];
+        let ds = assemble_deepstack(&tokens, &[(21, video.clone()), (20, image.clone())], 2).unwrap().expect("two blocks give DeepStack");
+        assert_eq!(ds.rows, vec![1, 2, 4]);
+        assert_eq!(ds.levels, vec![vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![11.0, 12.0, 13.0, 14.0, 15.0, 16.0]]);
+        let short = vec![vec![1.0, 2.0], vec![11.0, 12.0]];
+        assert!(assemble_deepstack(&tokens, &[(20, short)], 2).unwrap_err().contains("do not match"));
+        assert!(assemble_deepstack(&tokens, &[(20, image.clone()), (21, vec![vec![5.0, 6.0]])], 2).unwrap_err().contains("different numbers"));
+        assert!(assemble_deepstack(&tokens, &[], 2).unwrap().is_none(), "no visual block, no DeepStack");
+        assert!(assemble_deepstack(&tokens, &[(20, vec![])], 2).unwrap().is_none(), "a tower without taps adds nothing");
+    }
+
+    /// The residual add of the reference's `_deepstack_process`: only the visual rows of the hidden state change, by their own feature row.
+    #[test]
+    fn deepstack_adds_each_feature_row_to_its_own_token_only() {
+        let ds = Deepstack { rows: vec![1, 3], levels: vec![vec![1.0, 2.0, 3.0, 4.0]] };
+        let mut hidden = vec![10.0, 10.0, 20.0, 20.0, 30.0, 30.0, 40.0, 40.0];
+        ds.add_level(0, &mut hidden, 2);
+        assert_eq!(hidden, vec![10.0, 10.0, 21.0, 22.0, 30.0, 30.0, 43.0, 44.0]);
+    }
 
     // Real ids from the real Qwen3-Omni tokenizer (`tokenizer_config.json`/
     // `vocab.json`, verified directly against the actual checkpoint's

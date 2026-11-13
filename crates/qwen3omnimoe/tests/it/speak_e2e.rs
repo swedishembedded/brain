@@ -41,12 +41,14 @@ fn speak_runs_end_to_end_and_produces_a_real_waveform() {
     let mut streamed = Vec::new();
     let mut n_chunks = 0u32;
     // seed: the end-to-end assertions below must see the same sampled codec frames every run
-    let (text, wav, sample_rate) = inner
-        .speak("Say hello.", "Say hello.", 8, "chelsie", 1, |chunk| {
+    let spoken = inner
+        .speak("Say hello.", "Say hello.", 8, "chelsie", 1, &capability::CancelToken::default(), |chunk| {
             n_chunks += 1;
             streamed.extend_from_slice(chunk);
         })
         .expect("speak failed on real weights");
+    let qwen3omnimoe::caps::Spoken { text, wav, sample_rate, cancelled } = spoken;
+    assert!(!cancelled);
 
     println!("text: {text:?}");
     println!("wav: {} samples at {sample_rate} Hz ({:.2}s), {n_chunks} chunks", wav.len(), wav.len() as f32 / sample_rate as f32);

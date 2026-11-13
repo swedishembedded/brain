@@ -153,6 +153,27 @@ fn generate_spec_declares_every_param_the_http_handlers_set() {
     assert!(spec.outputs.iter().any(|o| o.media == Media::Text), "generate_spec must output a Media::Text blob");
 }
 
+/// Spec: a model must not advertise what it ignores (`serving-contract.md`). Every
+/// `generate` param is applied: sampling by the shared sampler, `stop` by the stop
+/// matcher, `tools`/`tool_choice`/`enable_thinking` by the chat template and scanner.
+#[test]
+fn generate_spec_advertises_nothing_it_ignores() {
+    for p in qwen3omnimoe::caps::generate_spec().params {
+        let help = p.help.to_lowercase();
+        for phrase in ["ignored", "not yet", "no chatscanner parity", "accepted;", "accepted,"] {
+            assert!(!help.contains(phrase), "param '{}' says '{phrase}': {}", p.name, p.help);
+        }
+    }
+}
+
+/// Spec: temperature defaults to greedy, so a request that names no sampler is deterministic as it always was.
+#[test]
+fn generate_spec_defaults_to_greedy() {
+    let spec = qwen3omnimoe::caps::generate_spec();
+    let temp = spec.params.iter().find(|p| p.name == "temp").expect("temp");
+    assert_eq!(temp.default, Some(serde_json::json!(0.0)));
+}
+
 /// `speak` IS `.streaming()`: `OmniInner::speak` now vocodes via
 /// `Codec::decode_omni_chunked`, emitting real audio chunks mid-run via
 /// `Progress::chunk` for a `Subscribe`-based caller (the terminal `Outcome`

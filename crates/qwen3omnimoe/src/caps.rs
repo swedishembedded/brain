@@ -6,8 +6,8 @@
 //! video input FUSED WITH speech output in one call.
 //!
 //! Three actions: `generate` (text prompt in, plus an optional speech clip
-//! and/or image and/or video spliced in via `crate::mm`, greedy text out —
-//! `crate::generate::generate_greedy`/`generate_greedy_multimodal`); `speak`
+//! and/or image and/or video spliced in via `crate::mm`, text out sampled and
+//! scanned for reasoning and tool calls by `crate::chat::serve_chat`); `speak`
 //! (text prompt in, response text + a real spoken waveform out —
 //! `OmniInner::speak`, chaining Thinker -> Talker -> MTP -> Code2Wav via
 //! `crate::talker_prompt`/`crate::talker_generate` — text-only user turn:
@@ -57,16 +57,19 @@ use std::path::Path;
 use std::sync::Arc;
 
 use capability::blob::{decode_image, decode_video};
-use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
+use capability::{Action, CancelToken, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use checkpoint::weightio::WeightReader;
 use data::qwen_tokenizer::QwenBpe;
+use qwen3::chat::{render_prompt_as, ChatFormat};
 use data::tokenizer::Tokenizer;
 use gpu_core::Gpu;
 use serde_json::json;
 
 use crate::config::OmniConfig;
-use crate::generate::{generate_greedy, generate_greedy_multimodal, thinker_hidden_at_layer, EmbedTable, ThinkerStack};
-use crate::mm::build_multimodal_prompt;
+use crate::chat::{MediaInputs, ThinkerChat};
+use crate::decode::{Decoded, TokenPicker};
+use crate::generate::{generate_greedy, generate_greedy_multimodal, generate_sampled, generate_sampled_multimodal, thinker_hidden_at_layer, EmbedTable, ThinkerStack};
+use crate::mm::{build_multimodal_prompt, splice_plan, MultimodalPrompt};
 use crate::talker_generate::{self, GenOpts};
 use crate::talker_prompt::{build_talker_prompt, UserMediaSplice};
 use crate::thinker::thinker_pipelines;
@@ -92,16 +95,16 @@ pub fn chat_generate_spec(desc: &str) -> ActionSpec {
         .streaming()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages; no chat template applied)"))
-        .param(ParamSpec::new("system", ParamType::Str, "system prompt (accepted; folded into the flattened prompt only via messages)"))
+        .param(ParamSpec::new("system", ParamType::Str, "system prompt, placed before the messages"))
         .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(32)))
-        .param(ParamSpec::new("temp", ParamType::Float, "accepted; greedy (argmax) generation ignores it -- see this module's doc").min(0.0).max(2.0))
-        .param(ParamSpec::new("top_p", ParamType::Float, "accepted; greedy generation ignores it").min(0.0).max(capability::bounds::UNIT))
-        .param(ParamSpec::new("top_k", ParamType::Int, "accepted; greedy generation ignores it").min(0.0).max(capability::bounds::TOP_K))
-        .param(ParamSpec::new("seed", ParamType::Int, "accepted; greedy generation is deterministic already"))
-        .param(ParamSpec::new("stop", ParamType::Str, "accepted; not yet applied (JSON array string)"))
-        .param(ParamSpec::new("tools", ParamType::Str, "accepted, rendered into the chat template's own tool-schema preamble (see render_chat_prompt's doc) -- but a tool-call response is NOT scanned back out of generated text into a structured tool_calls array (no ChatScanner parity yet), so it comes back as literal <tool_call> text in message.content"))
-        .param(ParamSpec::new("tool_choice", ParamType::Str, "accepted, ignored"))
-        .param(ParamSpec::new("enable_thinking", ParamType::Bool, "accepted, ignored"))
+        .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)).min(0.0).max(2.0).step(0.01))
+        .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)).min(0.0).max(1.0).step(0.01))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (0 or negative = disabled)").default(json!(40)).min(0.0).max(capability::bounds::TOP_K).step(1.0))
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random; the outcome echoes the one used)"))
+        .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings; the reply ends before the first one"))
+        .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema), rendered by the chat template; a call the model writes comes back as structured tool_calls"))
+        .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{\"type\":\"function\",...}); none withholds the tool schemas, required/named are enforced after generation (finish_reason \"tool_choice_unmet\" when unmet)"))
+        .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to reason in a <think> block, returned as reasoning_content; false asks the chat template for its no-think prompt").default(json!(true)))
         .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
 }
 
@@ -123,7 +126,7 @@ pub fn with_multimodal_inputs(spec: ActionSpec) -> ActionSpec {
 /// `MockResident::generate_spec()`'s param list exactly. [`chat_generate_spec`]
 /// plus this path's real audio/image/video inputs ([`with_multimodal_inputs`]).
 pub fn generate_spec() -> ActionSpec {
-    with_multimodal_inputs(chat_generate_spec("Qwen3-Omni Thinker: greedy text completion (KV-cached decode; see this module's doc)"))
+    with_multimodal_inputs(chat_generate_spec("Qwen3-Omni Thinker: text completion with optional audio/image/video input (KV-cached decode; see this module's doc)"))
 }
 
 /// The `speak` action schema: text in, spoken text + a real waveform out.
@@ -271,111 +274,51 @@ impl Action for ImportAction {
 /// re-exported so existing `qwen3omnimoe::caps::last_user_text` callers keep working.
 pub use capability::last_user_text;
 
-/// Compile this checkpoint's OWN chat template (`data::chat_template::
-/// ChatTemplate::from_model_dir`), so both the bf16 (`OmniInner`) and int8
-/// (`crate::int8_thinker_resident::Int8ThinkerInstance`) Thinker paths render
-/// requests through the real Jinja `<|im_start|>`/`<|im_end|>` turn framing
-/// the checkpoint was trained on, instead of [`last_user_text`]'s raw-text
-/// extraction (no system prompt, no role framing, no special tokens --
-/// directly observed this session to degrade output quality/coherence
-/// against this Qwen3-family instruct checkpoint).
+/// This checkpoint's OWN chat format (`qwen3::chat::ChatFormat::own_template`),
+/// so both the bf16 (`OmniInner`) and int8 (`crate::int8_thinker_resident::
+/// Int8ThinkerInstance`) Thinker paths render requests through the real Jinja
+/// `<|im_start|>`/`<|im_end|>` turn framing the checkpoint was trained on
+/// (tools, `enable_thinking` and all), instead of [`last_user_text`]'s raw-text
+/// extraction - directly observed to degrade output quality/coherence against
+/// this Qwen3-family instruct checkpoint.
 ///
-/// `None` (never an error) when `dir` has no template -- a base,
-/// non-instruction-tuned checkpoint is a real, expected case, and a model
-/// that can't find one should degrade to [`last_user_text`], not fail to
-/// load. Logs why, once, at load time (not per request).
-pub fn load_chat_template(dir: &str) -> Option<data::chat_template::ChatTemplate> {
-    match data::chat_template::ChatTemplate::from_model_dir(Path::new(dir)) {
-        Ok(t) => Some(t),
+/// [`ChatFormat::None`] (never an error) when `dir` has no template - a base,
+/// non-instruction-tuned checkpoint is a real, expected case, and a model that
+/// can't find one should degrade to the last user turn as a raw prompt
+/// (`crate::chat::serve_chat`), not fail to load. Logs why, once, at load time
+/// (not per request).
+pub fn load_chat_format(dir: &str) -> ChatFormat {
+    match ChatFormat::own_template(Path::new(dir)) {
+        Ok(format) => format,
         Err(e) => {
             eprintln!("omni: no chat template in '{dir}' ({e}) -- falling back to last_user_text's raw-prompt extraction");
-            None
+            ChatFormat::None
         }
     }
 }
 
-/// Render a chat-shaped [`Invocation`] (`messages` JSON array + optional
-/// `system` + `enable_thinking` + `tools`, or a bare `prompt`) through `tmpl`
-/// -- the ONE implementation [`GenerateAction`]/[`SpeakAction`]/
-/// [`ConverseAction`] (bf16) and `Int8ThinkerInstance::generate_chat` (int8)
-/// all call, so Omni has a single chat-templating code path rather than two
-/// that could drift.
+/// The text prompt a chat-shaped [`Invocation`] (`messages` JSON array +
+/// optional `system` + `enable_thinking` + `tools`, or a bare `prompt`) renders
+/// to under `format` - the ONE render [`GenerateAction`] (through
+/// `qwen3::chat::parse_request_as`, so its scanner reads the reply the way the
+/// render taught it), [`SpeakAction`], [`ConverseAction`] and
+/// `Int8ThinkerInstance::generate_chat` all share, so Omni has a single
+/// chat-templating code path.
 ///
-/// `messages` wins when present (`[{"role","content"}, ...]`, the same shape
-/// `capability::last_user_text` and `qwen3::chat::parse_chat_messages` read);
-/// `system` is prepended as a leading system turn UNLESS `messages` already
-/// opens with one (mirrors `qwen3::chat::parse_chat_messages`'s own rule).
-/// With no `messages`, the bare `prompt` becomes a single synthesized user
-/// turn -- the same fallback shape `last_user_text` and `qwen3::chat::
-/// parse_request` already accept, so callers that never adopted `messages`
-/// keep working. `add_generation_prompt` is always `true`: every caller here
-/// wants a completion, never a training-style full-conversation render.
-///
-/// `tools` (`inv.get_str("tools")`, the JSON array `crates/apiserve/src/
-/// openai.rs`'s `to_invocation` already sets when a request supplies one) is
-/// now forwarded into the template's own `tools` context variable -- real
-/// Qwen3-Omni's chat template has a `{%- if tools %}` branch that renders a
-/// `# Tools\n\n...` system-prompt section listing each schema (`tool |
-/// tojson`, matching `ChatTemplate::render`'s already-registered Python-json
-/// `tojson` filter); previously this branch was NEVER exercised
-/// (`tmpl.render(..., None, ...)`, unconditionally), so a real request's real
-/// tool schemas never reached the model at all, contradicting the request.
-/// KNOWN GAP THIS DOES NOT CLOSE: neither this function's caller
-/// (`Int8ThinkerInstance::generate_chat`) nor the bf16 `GenerateAction::run`
-/// parses `<tool_call>...</tool_call>` XML back out of the generated text
-/// the way `qwen3::chat::ChatScanner` does for the qwen3 family (scanning
-/// into a structured `tool_calls` array + `finish_reason: "tool_calls"`) --
-/// so telling the model about its tools now makes it ABLE to try calling one
-/// (previously it had no idea any existed), but a real tool-call attempt
-/// still comes back as literal `<tool_call>` text in `message.content`, not
-/// an OpenAI-shaped `tool_calls` response. Building that scanner for Omni is
-/// real, separate, larger work (parity with `qwen3::chat`'s own), not
-/// attempted here.
-pub fn render_chat_prompt(tmpl: &data::chat_template::ChatTemplate, inv: &Invocation) -> Result<String, String> {
-    let mut messages: Vec<serde_json::Value> = match inv.get_str("messages").filter(|s| !s.is_empty()) {
-        Some(raw) => {
-            let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("omni: messages JSON: {e}"))?;
-            v.as_array().cloned().ok_or("omni: messages must be a JSON array")?
-        }
-        None => {
-            let prompt = inv.get_str("prompt").unwrap_or_default();
-            vec![json!({"role": "user", "content": prompt})]
-        }
-    };
-    if let Some(system) = inv.get_str("system").filter(|s| !s.is_empty()) {
-        let opens_with_system = messages.first().and_then(|m| m.get("role")).and_then(|r| r.as_str()) == Some("system");
-        if !opens_with_system {
-            messages.insert(0, json!({"role": "system", "content": system}));
-        }
-    }
-    let messages_text = serde_json::to_string(&messages).map_err(|e| format!("omni: messages: {e}"))?;
-    let messages_value = data::chat_template::parse_json_ordered(&messages_text).map_err(|e| format!("omni: chat template: {e}"))?;
-
-    let tools = match inv.get_str("tools").filter(|s| !s.is_empty()) {
-        Some(raw) => Some(data::chat_template::parse_json_ordered(&raw).map_err(|e| format!("omni: tools JSON: {e}"))?),
-        None => None,
-    };
-
-    let mut extra = std::collections::BTreeMap::new();
-    if let Some(t) = inv.get_bool("enable_thinking") {
-        extra.insert("enable_thinking".to_string(), minijinja::Value::from(t));
-    }
-    tmpl.render(messages_value, tools, true, &extra).map_err(|e| format!("omni: chat template: {e}"))
-}
-
-/// [`render_chat_prompt`] when a template is available, else [`last_user_text`]
-/// -- the one call site both `Self::run`s and `generate_chat` use, so "does
-/// this model have a template" is decided in ONE place, not re-checked ad hoc
-/// at every action. Never errors on a missing template (that is the
-/// degrade-gracefully case [`load_chat_template`]'s doc describes); a
-/// template that IS present but fails to render (a malformed `messages`
-/// param, a template bug) still surfaces as a real error rather than
-/// silently falling back, since that would mask a genuine request/template
-/// problem behind degraded output quality.
-pub fn chat_prompt(tmpl: Option<&data::chat_template::ChatTemplate>, inv: &Invocation) -> Result<String, String> {
-    match tmpl {
-        Some(t) => render_chat_prompt(t, inv),
-        None => Ok(last_user_text(inv)),
+/// `tools` is forwarded into the template's own `tools` variable (real
+/// Qwen3-Omni's template renders a `# Tools` section listing each schema),
+/// `enable_thinking: false` asks for the template's no-think prompt, and
+/// `tool_choice: none` withholds the schemas. With no template
+/// ([`ChatFormat::None`]) the prompt is [`last_user_text`], the
+/// degrade-gracefully case [`load_chat_format`] describes; a template that IS
+/// present but fails to render (a malformed `messages` param, a template bug)
+/// still surfaces as a real error rather than silently falling back, since
+/// that would mask a genuine request/template problem behind degraded output
+/// quality.
+pub fn chat_prompt(format: &ChatFormat, inv: &Invocation) -> Result<String, String> {
+    match format {
+        ChatFormat::None => Ok(last_user_text(inv)),
+        format => Ok(render_prompt_as(format, inv)?.text),
     }
 }
 
@@ -401,10 +344,10 @@ pub struct OmniInner {
     tok: QwenBpe,
     embed: EmbedTable,
     eos_ids: Vec<u32>,
-    /// This checkpoint's own Jinja chat template ([`load_chat_template`]),
-    /// `None` for a checkpoint that does not ship one (degrades to
+    /// This checkpoint's own chat format ([`load_chat_format`]); [`ChatFormat::None`]
+    /// for a checkpoint that does not ship a template (degrades to
     /// [`last_user_text`] -- see [`chat_prompt`]).
-    chat_template: Option<data::chat_template::ChatTemplate>,
+    chat_format: ChatFormat,
 }
 
 pub struct OmniProvider {
@@ -441,7 +384,7 @@ impl OmniProvider {
         let cfg = OmniConfig::from_json(&root);
         let tok = QwenBpe::from_dir(dir)?;
         let eos_ids: Vec<u32> = ["<|im_end|>", "<|endoftext|>"].into_iter().filter_map(|s| tok.special_id(s)).collect();
-        let chat_template = load_chat_template(dir);
+        let chat_format = load_chat_format(dir);
         let embed = EmbedTable::open(&reader)?;
         if embed.hidden() != cfg.thinker.text.hidden as usize {
             return Err(format!("omni: the embedding table is [_, {}] but the config says hidden={}", embed.hidden(), cfg.thinker.text.hidden));
@@ -459,7 +402,7 @@ impl OmniProvider {
             (gs, devices.iter().map(|&(_, c)| c).collect())
         };
         let stack = ThinkerStack::build(&reader, &cfg.thinker.text, &gpus, &caps)?;
-        Ok(OmniProvider { inner: Arc::new(OmniInner { reader, stack, gpus, cfg, tok, embed, eos_ids, chat_template }) })
+        Ok(OmniProvider { inner: Arc::new(OmniInner { reader, stack, gpus, cfg, tok, embed, eos_ids, chat_format }) })
     }
 
     /// The shared inner state — the seam `cli::resident_omni`'s
@@ -556,6 +499,29 @@ impl OmniInner {
         (text, new_ids)
     }
 
+    /// Greedy Thinker text (the end-of-turn id included when one ended it) from `prompt_ids`, or from `media`'s
+    /// spliced prompt when given, polling `cancel` after every token.
+    ///
+    /// # Errors
+    /// `"cancelled"` when `cancel` fired: nothing has been streamed to the caller yet, so there is no partial result to report.
+    fn thinker_ids(&self, prompt_ids: &[u32], media: Option<&MultimodalPrompt>, max_new: u32, cancel: &CancelToken) -> Result<Vec<u32>, String> {
+        let t0 = std::time::Instant::now();
+        let mut stop = |_: &[u32]| cancel.is_cancelled();
+        let mut picker = TokenPicker::greedy();
+        let text = &self.cfg.thinker.text;
+        let decoded = match media {
+            Some(prompt) => generate_sampled_multimodal(&self.stack, &self.gpus, &self.reader, text, &self.embed, prompt, max_new, &self.eos_ids, &mut picker, &mut stop),
+            None => generate_sampled(&self.stack, &self.gpus, &self.reader, text, &self.embed, prompt_ids, max_new, &self.eos_ids, &mut picker, &mut stop),
+        };
+        gpu_core::profile::stage_time("omni generate", t0);
+        if cancel.is_cancelled() {
+            return Err("cancelled".to_string());
+        }
+        let mut ids = decoded.tokens;
+        ids.extend(decoded.eos);
+        Ok(ids)
+    }
+
     /// The whole embedding table as f32, for the two callers that genuinely
     /// need it in one piece (the multimodal splice and the Talker prompt).
     /// Borrowed when a host copy already exists, decoded on demand otherwise -
@@ -586,20 +552,7 @@ impl OmniInner {
         video: Option<&[(Vec<f32>, u32, u32)]>,
         max_new: u32,
     ) -> Result<(String, Vec<u32>), String> {
-        // Strip the chat template's own inline media-placeholder literals
-        // before tokenizing -- see `crate::mm::strip_media_placeholder_text`'s
-        // doc for the real-hardware tokenization-boundary bug this avoids
-        // (real embeddings always splice in as a whole block, never expanded
-        // in place).
-        let stripped_prompt = crate::mm::strip_media_placeholder_text(prompt);
-        let text_ids = self.tok.encode(&stripped_prompt);
-        // Leading "\n": the template's own system-turn closer is the single
-        // literal `<|im_end|>\n`, so the "\n" immediately after `im_end_id`
-        // in `text_ids` belongs to the system turn's own close, not to the
-        // user turn's open tag - `next_turn_open` must include it to match
-        // starting right at `im_end_id`'s position (see `media_splice_point`'s doc).
-        let user_open = self.tok.encode("\n<|im_start|>user\n");
-        let splice_at = crate::mm::media_splice_point(&stripped_prompt, &text_ids, self.tok.special_id("<|im_end|>"), Some(&user_open));
+        let (text_ids, splice_at) = splice_plan(&self.tok, prompt);
         let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpus[0], &self.cfg.thinker, &self.embed_host(), &text_ids, audio, image, video, splice_at)?;
         let n_prompt = mm_prompt.token_ids.len();
         let out_ids = generate_greedy_multimodal(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, &mm_prompt, max_new, &self.eos_ids);
@@ -620,12 +573,12 @@ impl OmniInner {
     /// (`ConverseAction`/`SpeakAction::run` turn this into
     /// `Progress::chunk`); `on_chunk` may be a no-op for a caller that only
     /// wants the final reassembled waveform this still returns. Returns
-    /// `(text, wav_samples, sample_rate)` — the SAME complete waveform
+    /// a [`Spoken`] (text, wav samples, sample rate) - the SAME complete waveform
     /// regardless of whether `on_chunk` streamed it too.
     ///
     /// `prompt` and `user_text` are DELIBERATELY separate strings, not one
     /// reused twice: `prompt` (the full chat-templated conversation, via
-    /// [`chat_prompt`]/[`render_chat_prompt`] - see [`SpeakAction::run`]) is
+    /// [`chat_prompt`] - see [`SpeakAction::run`]) is
     /// what the Thinker actually generates from, but `user_text` (the bare
     /// last-user-turn text, [`last_user_text`]) is what becomes the Talker's
     /// user-segment token ids below - the Talker's voice/prosody context
@@ -635,8 +588,10 @@ impl OmniInner {
     /// behavior change to `build_talker_prompt`'s tested contract, not a fix
     /// to the Thinker's own text-completion bug this parameter split exists
     /// to isolate.
-    pub fn speak(&self, prompt: &str, user_text: &str, max_new: u32, speaker: &str, seed: u64, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
-        let (text, new_ids) = self.generate(prompt, max_new);
+    pub fn speak(&self, prompt: &str, user_text: &str, max_new: u32, speaker: &str, seed: u64, cancel: &CancelToken, mut on_chunk: impl FnMut(&[f32])) -> Result<Spoken, String> {
+        let prompt_ids = self.tok.encode(prompt);
+        let new_ids = self.thinker_ids(&prompt_ids, None, max_new, cancel)?;
+        let text = self.tok.decode(&new_ids);
         let user_ids = self.tok.encode(user_text);
 
         let tc = &self.cfg.talker;
@@ -666,15 +621,10 @@ impl OmniInner {
         // 16`, i.e. the thinker-sized table): a fresh Gpu handle on the same
         // device, with Talker's own pipeline table, is required here.
         let talker_gpu = self.gpus[0].new_like(crate::talker::talker_pipelines());
-        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts { seed, ..GenOpts::default() })?;
+        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &prompt, &GenOpts { seed, cancel: cancel.clone(), ..GenOpts::default() })?;
 
         let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav)?;
-        let mut wav = Vec::new();
-        codec.decode_omni_chunked(&codes, SPEAK_CHUNK_FRAMES, |chunk| {
-            wav.extend_from_slice(chunk);
-            on_chunk(chunk);
-        });
-        Ok((text, wav, self.cfg.code2wav.output_sample_rate))
+        Ok(self.vocode(&codec, &codes, text, cancel, &mut on_chunk))
     }
 
     /// [`Self::speak`], but the user turn carries real audio/image/video
@@ -696,25 +646,11 @@ impl OmniInner {
     /// identical to `speak`: Talker -> MTP -> Code2Wav, chunked/streamed the
     /// same way (see [`Self::speak`]'s doc on `on_chunk`).
     #[allow(clippy::too_many_arguments)]
-    pub fn converse(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, video: Option<&[(Vec<f32>, u32, u32)]>, max_new: u32, speaker: &str, seed: u64, mut on_chunk: impl FnMut(&[f32])) -> Result<(String, Vec<f32>, u32), String> {
-        // Strip the chat template's own inline media-placeholder literals
-        // before tokenizing -- see `crate::mm::strip_media_placeholder_text`'s
-        // doc for the real-hardware tokenization-boundary bug this avoids
-        // (real embeddings always splice in as a whole block, never expanded
-        // in place).
-        let stripped_prompt = crate::mm::strip_media_placeholder_text(prompt);
-        let text_ids = self.tok.encode(&stripped_prompt);
-        // Leading "\n": the template's own system-turn closer is the single
-        // literal `<|im_end|>\n`, so the "\n" immediately after `im_end_id`
-        // in `text_ids` belongs to the system turn's own close, not to the
-        // user turn's open tag - `next_turn_open` must include it to match
-        // starting right at `im_end_id`'s position (see `media_splice_point`'s doc).
-        let user_open = self.tok.encode("\n<|im_start|>user\n");
-        let splice_at = crate::mm::media_splice_point(&stripped_prompt, &text_ids, self.tok.special_id("<|im_end|>"), Some(&user_open));
+    pub fn converse(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, video: Option<&[(Vec<f32>, u32, u32)]>, max_new: u32, speaker: &str, seed: u64, cancel: &CancelToken, mut on_chunk: impl FnMut(&[f32])) -> Result<Spoken, String> {
+        let (text_ids, splice_at) = splice_plan(&self.tok, prompt);
         let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpus[0], &self.cfg.thinker, &self.embed_host(), &text_ids, audio, image, video, splice_at)?;
         let n_prompt = mm_prompt.token_ids.len() as u32;
-        let out_ids = generate_greedy_multimodal(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, &mm_prompt, max_new, &self.eos_ids);
-        let new_ids = out_ids[n_prompt as usize..].to_vec();
+        let new_ids = self.thinker_ids(&mm_prompt.token_ids, Some(&mm_prompt), max_new, cancel)?;
         let text = self.tok.decode(&new_ids);
 
         let tc = &self.cfg.talker;
@@ -731,7 +667,7 @@ impl OmniInner {
             .or_else(|| tc.speaker_id.values().next().copied())
             .ok_or("omni: TalkerConfig::speaker_id has no entries (checkpoint config.json missing the speaker map?)")?;
 
-        let user_hidden = thinker_hidden_at_layer(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &mm_prompt.x_host, &mm_prompt.positions, n_prompt, tc.accept_hidden_layer);
+        let user_hidden = thinker_hidden_at_layer(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &mm_prompt.x_host, &mm_prompt.positions, n_prompt, tc.accept_hidden_layer, mm_prompt.deepstack.as_ref());
         let tcfg = &self.cfg.thinker;
         let media_mask: Vec<bool> = mm_prompt.token_ids.iter().map(|&t| t == tcfg.audio_token_id || t == tcfg.image_token_id || t == tcfg.video_token_id).collect();
         let splice = UserMediaSplice { hidden_proj: &hidden_proj, hidden: &user_hidden, media_mask: &media_mask };
@@ -742,16 +678,43 @@ impl OmniInner {
         let mtp = crate::codec_bridge::load_mtp(&self.reader, mtp_gpu, &tc.code_predictor)?;
         let codec_head_w = self.reader.tensor("talker.codec_head.weight").ok_or("omni: missing tensor talker.codec_head.weight")?;
         let talker_gpu = self.gpus[0].new_like(crate::talker::talker_pipelines());
-        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &tprompt, &GenOpts { seed, ..GenOpts::default() })?;
+        let codes = talker_generate::generate_codes(&self.reader, &talker_gpu, &tc.text, &codec_head_w, tc.codec_eos_token_id, &mtp, codec_embed, &tprompt, &GenOpts { seed, cancel: cancel.clone(), ..GenOpts::default() })?;
 
         let codec = crate::codec_bridge::load_codec(&self.reader, &self.cfg.code2wav)?;
+        Ok(self.vocode(&codec, &codes, text, cancel, &mut on_chunk))
+    }
+}
+
+/// A spoken reply: the text, the waveform, and whether the request was
+/// cancelled while the waveform was being decoded (the audio already streamed
+/// is kept, so the reply is partial, never presented as finished).
+pub struct Spoken {
+    pub text: String,
+    pub wav: Vec<f32>,
+    pub sample_rate: u32,
+    pub cancelled: bool,
+}
+
+impl OmniInner {
+    /// Code2Wav over `codes` in `SPEAK_CHUNK_FRAMES` chunks, handing each to
+    /// `on_chunk`, until `cancel` fires.
+    fn vocode(&self, codec: &mimi::model::Codec, codes: &[u32], text: String, cancel: &CancelToken, on_chunk: &mut dyn FnMut(&[f32])) -> Spoken {
         let mut wav = Vec::new();
-        codec.decode_omni_chunked(&codes, SPEAK_CHUNK_FRAMES, |chunk| {
+        let finished = codec.decode_omni_chunked_until(codes, SPEAK_CHUNK_FRAMES, |chunk| {
             wav.extend_from_slice(chunk);
             on_chunk(chunk);
+            !cancel.is_cancelled()
         });
-        Ok((text, wav, self.cfg.code2wav.output_sample_rate))
+        Spoken { text, wav, sample_rate: self.cfg.code2wav.output_sample_rate, cancelled: !finished }
     }
+}
+
+/// The outcome of a spoken reply: `cancelled` is reported as such, with the partial audio kept.
+fn spoken_outcome(spoken: Spoken, seed: u64) -> Outcome {
+    let audio_bytes: Vec<u8> = spoken.wav.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let out = Outcome::new().set("text", json!(spoken.text)).set("seed", json!(seed));
+    let out = if spoken.cancelled { out.set("finish_reason", json!("cancelled")) } else { out };
+    out.blob("text", Blob::new(Media::Text, spoken.text.into_bytes())).blob("audio", Blob::new(Media::Audio, audio_bytes).with_meta(json!({"sample_rate": spoken.sample_rate})))
 }
 
 /// Code frames (12.5 Hz) per `Codec::decode_omni_chunked` call in
@@ -771,27 +734,30 @@ impl Action for GenerateAction {
         generate_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        // Client text cannot spell a control token (`Invocation::escape_client_text`).
-        let inv = &inv.escape_client_text(&|text| self.inner.tok.escape_untrusted(text));
-        if last_user_text(inv).trim().is_empty() {
-            return Err("omni generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
-        }
-        let prompt = chat_prompt(self.inner.chat_template.as_ref(), inv)?;
-        let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
+        crate::chat::serve_chat(&*self.inner, inv, progress)
+    }
+}
 
-        let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
-        let image = inv.get_blob("image").map(|_| decode_image(inv, "image")).transpose()?;
-        let video = inv.get_blob("video").map(|_| decode_video(inv, "video")).transpose()?;
-
-        progress(Progress::step(0, max_new, "generating"));
-        let (text, new_ids) = if audio.is_some() || image.is_some() || video.is_some() {
-            let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
-            self.inner.generate_multimodal(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new)?
-        } else {
-            self.inner.generate(&prompt, max_new)
-        };
-        progress(Progress::step(max_new, max_new, text.clone()));
-        Ok(Outcome::new().set("text", json!(text)).set("tokens", json!(new_ids)).blob("text", Blob::new(Media::Text, text.into_bytes())))
+impl ThinkerChat for OmniInner {
+    fn tokenizer(&self) -> &QwenBpe {
+        &self.tok
+    }
+    fn chat_format(&self) -> &ChatFormat {
+        &self.chat_format
+    }
+    fn media_prompt(&self, text_ids: &[u32], splice_at: usize, media: &MediaInputs) -> Result<MultimodalPrompt, String> {
+        let image = media.image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
+        build_multimodal_prompt(&self.reader, &self.gpus[0], &self.cfg.thinker, &self.embed_host(), text_ids, media.audio.as_deref(), image, media.video.as_deref(), splice_at)
+    }
+    fn decode_text(&self, prompt_ids: &[u32], max_new: u32, picker: &mut TokenPicker, on_token: &mut dyn FnMut(&[u32]) -> bool) -> Decoded {
+        let t0 = std::time::Instant::now();
+        let decoded = generate_sampled(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, prompt_ids, max_new, &self.eos_ids, picker, on_token);
+        gpu_core::profile::stage_time("omni generate", t0);
+        crate::generate::dump_stream_profile(&self.gpus);
+        decoded
+    }
+    fn decode_media(&self, prompt: &MultimodalPrompt, max_new: u32, picker: &mut TokenPicker, on_token: &mut dyn FnMut(&[u32]) -> bool) -> Decoded {
+        generate_sampled_multimodal(&self.stack, &self.gpus, &self.reader, &self.cfg.thinker.text, &self.embed, prompt, max_new, &self.eos_ids, picker, on_token)
     }
 }
 
@@ -814,26 +780,21 @@ impl Action for SpeakAction {
         // (`prompt`); the Talker's user-segment context stays the bare
         // utterance (`user_text`) -- see `OmniInner::speak`'s doc for why
         // these are deliberately two different strings.
-        let prompt = chat_prompt(self.inner.chat_template.as_ref(), inv)?;
+        let prompt = chat_prompt(&self.inner.chat_format, inv)?;
         let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
         let speaker = inv.get_str("speaker").unwrap_or_else(|| "chelsie".to_string());
         let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
 
         progress(Progress::step(0, 2, "generating text"));
         let mut n_chunks = 0u32;
-        let (text, wav, sample_rate) = self.inner.speak(&prompt, &user_text, max_new, &speaker, seed, |chunk| {
+        let spoken = self.inner.speak(&prompt, &user_text, max_new, &speaker, seed, &inv.cancel, |chunk| {
             n_chunks += 1;
             let bytes: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
             let blob = Blob::new(Media::Audio, bytes).with_meta(json!({"index": n_chunks}));
             progress(Progress::chunk(1, 2, format!("audio chunk {n_chunks}"), "audio", blob));
         })?;
-        let audio_bytes: Vec<u8> = wav.iter().flat_map(|s| s.to_le_bytes()).collect();
         progress(Progress::step(2, 2, "done"));
-        Ok(Outcome::new()
-            .set("text", json!(text))
-            .set("seed", json!(seed))
-            .blob("text", Blob::new(Media::Text, text.into_bytes()))
-            .blob("audio", Blob::new(Media::Audio, audio_bytes).with_meta(json!({"sample_rate": sample_rate}))))
+        Ok(spoken_outcome(spoken, seed))
     }
 }
 
@@ -863,19 +824,14 @@ impl Action for ConverseAction {
 
         progress(Progress::step(0, 2, "generating text"));
         let mut n_chunks = 0u32;
-        let (text, wav, sample_rate) = self.inner.converse(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new, &speaker, seed, |chunk| {
+        let spoken = self.inner.converse(&prompt, audio.as_deref(), image_ref, video.as_deref(), max_new, &speaker, seed, &inv.cancel, |chunk| {
             n_chunks += 1;
             let bytes: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
             let blob = Blob::new(Media::Audio, bytes).with_meta(json!({"index": n_chunks}));
             progress(Progress::chunk(1, 2, format!("audio chunk {n_chunks}"), "audio", blob));
         })?;
-        let audio_bytes: Vec<u8> = wav.iter().flat_map(|s| s.to_le_bytes()).collect();
         progress(Progress::step(2, 2, "done"));
-        Ok(Outcome::new()
-            .set("text", json!(text))
-            .set("seed", json!(seed))
-            .blob("text", Blob::new(Media::Text, text.into_bytes()))
-            .blob("audio", Blob::new(Media::Audio, audio_bytes).with_meta(json!({"sample_rate": sample_rate}))))
+        Ok(spoken_outcome(spoken, seed))
     }
 }
 
@@ -898,6 +854,18 @@ mod tests {
         let has_audio = |spec: &ActionSpec| spec.outputs.iter().any(|b| b.media == Media::Audio);
         assert!(has_audio(&speak_spec()), "speak_spec must declare an audio output");
         assert!(!has_audio(&generate_spec()), "generate_spec must not declare an audio output");
+    }
+
+    /// Spec: a spoken reply cancelled while it was being vocoded keeps the audio already streamed and says it is
+    /// partial; a finished one carries no such marker.
+    #[test]
+    fn a_cancelled_spoken_reply_reports_cancellation_with_its_partial_audio() {
+        let reply = |cancelled| Spoken { text: "hi".to_string(), wav: vec![0.5; 4], sample_rate: 24_000, cancelled };
+        let done = spoken_outcome(reply(false), 7);
+        assert!(done.outputs.get("finish_reason").is_none());
+        let partial = spoken_outcome(reply(true), 7);
+        assert_eq!(partial.outputs["finish_reason"], "cancelled");
+        assert_eq!(partial.blobs["audio"].bytes.len(), 16, "the audio decoded so far is kept");
     }
 
     /// Spec: every action the manifest advertises resolves to a handler, and

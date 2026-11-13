@@ -55,6 +55,8 @@ use paramstore::upload::Uploader;
 use qwen3vl::mrope::{get_rope_index, mrope_tables};
 
 use crate::config::MoeTextConfig;
+use crate::decode::{decode_tokens, Decoded, TokenPicker};
+use crate::mm::Deepstack;
 use crate::thinker::{final_norm, layer_decode_step, layer_fwd, lm_head_fwd, ThinkerLayerCache, ThinkerLayerWeights};
 use crate::thinker_plan::{layer_cost, place_fewest_devices, ThinkerPlacement, EMBED_TENSOR};
 
@@ -309,6 +311,7 @@ fn run_layers(
     sin_tab: &[f32],
     stop: usize,
     pass: Pass,
+    deepstack: Option<&Deepstack>,
 ) -> (DeviceBuffer, usize) {
     let d = cfg.hidden as usize;
     let rows = x_host.len() / d.max(1);
@@ -360,6 +363,16 @@ fn run_layers(
             }
             Pass::Decode { cache, pos } => layer_decode_step(g, cfg, &weights, &cache.layer(l), h, cos, sin, *pos, cache.cap, None),
         };
+        // The vision tower's DeepStack taps join the residual stream after the
+        // first layers of a prefill (decode steps are text only).
+        let out = match deepstack.filter(|ds| l < ds.levels() && matches!(pass, Pass::Prefill { .. })) {
+            Some(ds) => {
+                let mut hidden = g.read(&out, rows * d);
+                ds.add_level(l, &mut hidden, d);
+                Uploader::new(g).host_f32(&hidden)
+            }
+            None => out,
+        };
         // Replace the residual BEFORE the streamed weights are dropped, then
         // reclaim them. Both halves are load-bearing: dropping without
         // reclaiming is exactly the unbounded accumulation that OOM'd a 24 GB
@@ -390,10 +403,10 @@ fn run_layers(
 
 /// Prefill: the whole prompt through every layer once, bulk-filling `cache`.
 /// Returns the final-normed hidden state `[n, hidden]` on the head device.
-fn prefill(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, x_host: &[f32], positions: &[[u32; 3]], n: u32, cache: &ThinkerKvCache) -> DeviceBuffer {
+fn prefill(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, x_host: &[f32], positions: &[[u32; 3]], n: u32, cache: &ThinkerKvCache, deepstack: Option<&Deepstack>) -> DeviceBuffer {
     let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
     let (cos_tab, sin_tab) = mrope_tables(positions, section, cfg.head_dim, cfg.rope_theta);
-    let (h, dev) = run_layers(stack, gpus, reader, cfg, x_host, &cos_tab, &sin_tab, cfg.n_layers as usize, Pass::Prefill { cache: Some(cache), n });
+    let (h, dev) = run_layers(stack, gpus, reader, cfg, x_host, &cos_tab, &sin_tab, cfg.n_layers as usize, Pass::Prefill { cache: Some(cache), n }, deepstack);
     debug_assert_eq!(dev, stack.placement.last_device());
     final_norm(&gpus[dev], cfg, &stack.final_norm_w, &h, n)
 }
@@ -405,12 +418,8 @@ fn prefill(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeT
 fn decode_step(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, x_host: &[f32], mrope_pos: [u32; 3], cache_row: u32, cache: &ThinkerKvCache) -> DeviceBuffer {
     let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
     let (cos_tab, sin_tab) = mrope_tables(&[mrope_pos], section, cfg.head_dim, cfg.rope_theta);
-    let (h, dev) = run_layers(stack, gpus, reader, cfg, x_host, &cos_tab, &sin_tab, cfg.n_layers as usize, Pass::Decode { cache, pos: cache_row });
+    let (h, dev) = run_layers(stack, gpus, reader, cfg, x_host, &cos_tab, &sin_tab, cfg.n_layers as usize, Pass::Decode { cache, pos: cache_row }, None);
     final_norm(&gpus[dev], cfg, &stack.final_norm_w, &h, 1)
-}
-
-fn argmax(row: &[f32]) -> u32 {
-    row.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).expect("non-empty vocab")
 }
 
 /// Opt-in (`BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS=1`) top-3 logit dump for one decode step
@@ -434,26 +443,57 @@ fn debug_log_top_candidates(cache_row: u32, logits: &[f32]) {
 /// KV cache sized `prompt_ids.len() + max_new_tokens`), samples the first new
 /// token from the prefill's last logit row, then decodes one token at a time
 /// until `max_new_tokens` or an id in `eos_ids`. Returns the FULL sequence
-/// (prompt + generated).
+/// (prompt + generated, the end-of-turn id included when one ended it).
 ///
 /// Positions are plain-sequential - the pure-text M-RoPE-collapse case (see
 /// `crate::thinker`'s module doc); a caller with an image/audio/video span
 /// goes through [`generate_greedy_multimodal`], which carries real per-axis
-/// positions.
+/// positions. A caller that samples, streams or stops on text goes through
+/// [`generate_sampled`].
 pub fn generate_greedy(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, embed_table: &EmbedTable, prompt_ids: &[u32], max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
-    if prompt_ids.is_empty() {
-        return prompt_ids.to_vec();
-    }
-    let positions = get_rope_index(prompt_ids, u32::MAX, &[]); // plain-sequential: no placeholder id ever matches u32::MAX
-    generate_greedy_with_embeds(stack, gpus, reader, cfg, embed_table, prompt_ids, None, &positions, max_new_tokens, eos_ids)
+    let decoded = generate_sampled(stack, gpus, reader, cfg, embed_table, prompt_ids, max_new_tokens, eos_ids, &mut TokenPicker::greedy(), &mut |_| false);
+    with_eos(prompt_ids, decoded)
 }
 
-/// The shared implementation behind [`generate_greedy`] and
-/// [`generate_greedy_multimodal`]: `x_host_override`, when `Some`, is the
+/// [`generate_greedy`] with a request's own sampler, and `on_token` called
+/// with every token generated so far (it returns `true` to stop: a stop
+/// string, a cancellation). Returns what [`decode_tokens`] does: the generated
+/// tokens only, the end-of-turn id excluded.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_sampled(
+    stack: &ThinkerStack,
+    gpus: &[Gpu],
+    reader: &WeightReader,
+    cfg: &MoeTextConfig,
+    embed_table: &EmbedTable,
+    prompt_ids: &[u32],
+    max_new_tokens: u32,
+    eos_ids: &[u32],
+    picker: &mut TokenPicker,
+    on_token: &mut dyn FnMut(&[u32]) -> bool,
+) -> Decoded {
+    if prompt_ids.is_empty() {
+        return Decoded { tokens: Vec::new(), eos: None };
+    }
+    let positions = get_rope_index(prompt_ids, u32::MAX, &[]); // plain-sequential: no placeholder id ever matches u32::MAX
+    generate_with_embeds(stack, gpus, reader, cfg, embed_table, prompt_ids, None, &positions, None, max_new_tokens, eos_ids, picker, on_token)
+}
+
+/// `prompt_ids` + the decode's tokens + the end-of-turn id that ended it, the
+/// shape [`generate_greedy`] has always returned.
+fn with_eos(prompt_ids: &[u32], decoded: Decoded) -> Vec<u32> {
+    let mut ids = prompt_ids.to_vec();
+    ids.extend_from_slice(&decoded.tokens);
+    ids.extend(decoded.eos);
+    ids
+}
+
+/// The shared implementation behind [`generate_sampled`] and
+/// [`generate_sampled_multimodal`]: `x_host_override`, when `Some`, is the
 /// prompt's embedding buffer verbatim (already spliced with media); when
 /// `None` it is built by a plain per-token gather.
 #[allow(clippy::too_many_arguments)]
-fn generate_greedy_with_embeds(
+fn generate_with_embeds(
     stack: &ThinkerStack,
     gpus: &[Gpu],
     reader: &WeightReader,
@@ -462,13 +502,15 @@ fn generate_greedy_with_embeds(
     prompt_ids: &[u32],
     x_host_override: Option<Vec<f32>>,
     positions: &[[u32; 3]],
+    deepstack: Option<&Deepstack>,
     max_new_tokens: u32,
     eos_ids: &[u32],
-) -> Vec<u32> {
-    let mut ids: Vec<u32> = prompt_ids.to_vec();
-    assert_eq!(positions.len(), prompt_ids.len(), "generate_greedy: positions/prompt_ids length mismatch");
+    picker: &mut TokenPicker,
+    on_token: &mut dyn FnMut(&[u32]) -> bool,
+) -> Decoded {
+    assert_eq!(positions.len(), prompt_ids.len(), "generate: positions/prompt_ids length mismatch");
     if max_new_tokens == 0 || prompt_ids.is_empty() {
-        return ids;
+        return Decoded { tokens: Vec::new(), eos: None };
     }
     let head_gpu = &gpus[stack.placement.last_device()];
 
@@ -483,33 +525,25 @@ fn generate_greedy_with_embeds(
         }
         x
     });
-    let hidden = prefill(stack, gpus, reader, cfg, &x_host, positions, n0, &cache);
+    let hidden = prefill(stack, gpus, reader, cfg, &x_host, positions, n0, &cache, deepstack);
     let logits = lm_head_fwd(head_gpu, &stack.lm_head_w, &hidden, n0, cfg.hidden, cfg.vocab);
     let last_row = head_gpu.read(&logits, (n0 * cfg.vocab) as usize);
-    let mut next = argmax(&last_row[((n0 - 1) * cfg.vocab) as usize..(n0 * cfg.vocab) as usize]);
-    ids.push(next);
+    let first_row = last_row[((n0 - 1) * cfg.vocab) as usize..(n0 * cfg.vocab) as usize].to_vec();
     let mut cache_row = n0;
     // New tokens are always plain text: continue the diagonal from the
     // prompt's last position + 1 on every axis.
     let mut mrope_pos = positions[positions.len() - 1].map(|p| p + 1);
-
-    if !eos_ids.contains(&next) {
-        for _ in 1..max_new_tokens {
-            let x_row = embed_table.row(reader, next);
-            let hidden = decode_step(stack, gpus, reader, cfg, &x_row, mrope_pos, cache_row, &cache);
-            let logits = lm_head_fwd(head_gpu, &stack.lm_head_w, &hidden, 1, cfg.hidden, cfg.vocab);
-            let row = head_gpu.read(&logits, cfg.vocab as usize);
-            next = argmax(&row);
-            debug_log_top_candidates(cache_row, &row);
-            ids.push(next);
-            cache_row += 1;
-            mrope_pos = mrope_pos.map(|p| p + 1);
-            if eos_ids.contains(&next) {
-                break;
-            }
-        }
-    }
-    ids
+    let step = |previous: u32| {
+        let x_row = embed_table.row(reader, previous);
+        let hidden = decode_step(stack, gpus, reader, cfg, &x_row, mrope_pos, cache_row, &cache);
+        let logits = lm_head_fwd(head_gpu, &stack.lm_head_w, &hidden, 1, cfg.hidden, cfg.vocab);
+        let row = head_gpu.read(&logits, cfg.vocab as usize);
+        debug_log_top_candidates(cache_row, &row);
+        cache_row += 1;
+        mrope_pos = mrope_pos.map(|p| p + 1);
+        row
+    };
+    decode_tokens(prompt_ids, max_new_tokens, eos_ids, picker, first_row, step, on_token)
 }
 
 /// Re-run a full KNOWN sequence (prompt + already-generated ids, teacher-
@@ -520,21 +554,40 @@ fn generate_greedy_with_embeds(
 /// during the incremental decode loop: the capture is needed for EVERY
 /// position (prompt and generated alike), while decode only ever computes one
 /// NEW position per step. Early-exits after `capture_layer`.
-pub fn thinker_hidden_at_layer(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, x_host: &[f32], positions: &[[u32; 3]], n: u32, capture_layer: u32) -> Vec<f32> {
+#[allow(clippy::too_many_arguments)]
+pub fn thinker_hidden_at_layer(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, x_host: &[f32], positions: &[[u32; 3]], n: u32, capture_layer: u32, deepstack: Option<&Deepstack>) -> Vec<f32> {
     assert!(capture_layer < cfg.n_layers, "capture_layer {capture_layer} out of range ({} layers)", cfg.n_layers);
     let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
     let (cos_tab, sin_tab) = mrope_tables(positions, section, cfg.head_dim, cfg.rope_theta);
     let stop = capture_layer as usize + 1;
-    let (h, dev) = run_layers(stack, gpus, reader, cfg, x_host, &cos_tab, &sin_tab, stop, Pass::Prefill { cache: None, n });
+    let (h, dev) = run_layers(stack, gpus, reader, cfg, x_host, &cos_tab, &sin_tab, stop, Pass::Prefill { cache: None, n }, deepstack);
     gpus[dev].read(&h, (n * cfg.hidden) as usize)
 }
 
 /// The multimodal entry: `prompt.x_host` already has media spliced in
 /// (`crate::mm::build_multimodal_prompt`), so no embedding gather is needed
 /// for the prompt itself - only for tokens generated after it (always plain
-/// text).
+/// text). Greedy; returns prompt + generated like [`generate_greedy`].
 pub fn generate_greedy_multimodal(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &MoeTextConfig, embed_table: &EmbedTable, prompt: &crate::mm::MultimodalPrompt, max_new_tokens: u32, eos_ids: &[u32]) -> Vec<u32> {
-    generate_greedy_with_embeds(stack, gpus, reader, cfg, embed_table, &prompt.token_ids, Some(prompt.x_host.clone()), &prompt.positions, max_new_tokens, eos_ids)
+    let decoded = generate_sampled_multimodal(stack, gpus, reader, cfg, embed_table, prompt, max_new_tokens, eos_ids, &mut TokenPicker::greedy(), &mut |_| false);
+    with_eos(&prompt.token_ids, decoded)
+}
+
+/// [`generate_sampled`] over a prompt with media spliced in.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_sampled_multimodal(
+    stack: &ThinkerStack,
+    gpus: &[Gpu],
+    reader: &WeightReader,
+    cfg: &MoeTextConfig,
+    embed_table: &EmbedTable,
+    prompt: &crate::mm::MultimodalPrompt,
+    max_new_tokens: u32,
+    eos_ids: &[u32],
+    picker: &mut TokenPicker,
+    on_token: &mut dyn FnMut(&[u32]) -> bool,
+) -> Decoded {
+    generate_with_embeds(stack, gpus, reader, cfg, embed_table, &prompt.token_ids, Some(prompt.x_host.clone()), &prompt.positions, prompt.deepstack.as_ref(), max_new_tokens, eos_ids, picker, on_token)
 }
 
 /// How this model reads one embedding row.

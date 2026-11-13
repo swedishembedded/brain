@@ -32,7 +32,6 @@ fastvlm
 llava
 minimaxmusic3
 moondream3
-qwen3omnimoe
 "
 
 fail=0

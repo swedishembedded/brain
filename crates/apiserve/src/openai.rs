@@ -778,7 +778,7 @@ fn content_text(c: Option<&Value>) -> String {
 /// **Real bug this closes**: this used to be [`content_text`]
 /// unconditionally - ANY multimodal content part (`image_url`,
 /// `input_audio`, ...) was silently dropped before the chat-templated
-/// `messages` JSON was ever built, so `omni::caps::render_chat_prompt`'s
+/// `messages` JSON was ever built, so `omni::caps::chat_prompt`'s
 /// real Jinja template (which DOES detect typed parts and place
 /// `<|vision_start|><|image_pad|><|vision_end|>` /
 /// `<|audio_start|><|audio_pad|><|audio_end|>` at each part's own position -

@@ -67,7 +67,7 @@ pub fn export_audio_onnx(reader: &WeightReader, out_path: &str, n_audio: u32) ->
 /// export). Writes `out_path` (+ `.data` sidecar).
 pub fn export_vision_onnx(reader: &WeightReader, out_path: &str, grid_h: u32, grid_w: u32) -> std::io::Result<()> {
     let cfg = VisionConfig::qwen3_omni();
-    let (encoder_w, merger_w) = crate::mm::vision_weights(reader).map_err(std::io::Error::other)?;
+    let (encoder_w, merger_w, _deepstack) = crate::mm::vision_weights(reader).map_err(std::io::Error::other)?;
     let mut weights = encoder_w;
     for (k, v) in merger_w {
         weights.insert(format!("merger.{k}"), v);

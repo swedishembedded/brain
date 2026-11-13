@@ -27,13 +27,12 @@ backward pass.
       client, only into the D-Bus/HTTP serving layer
 - [ ] Streaming Code2Wav decode (chunked, with left-context) - decoding is
       currently whole-utterance only
-- [ ] Real wall-clock audio-timestamp scaling for M-RoPE on audio spans
-      (currently approximated by frame-ordinal advance instead)
-- [ ] DeepStack multi-scale vision features are not applied on the served
-      image path - only the primary (non-DeepStack) merger output is used
-- [ ] True temporal patching for video input - frames are currently encoded
-      as independent single images rather than grouped per the model's
-      temporal-patch convention
+- [ ] Time-aligned M-RoPE positions for video (the reference scales a video's
+      temporal axis by seconds per frame group, which needs a frame rate the
+      video blob does not carry; positions are frame-ordinal today) and, with
+      it, audio together with video in one prompt (refused today)
+- [ ] Video frames are patched in temporal pairs, but each pair is encoded by
+      its own vision-tower pass: there is no attention across temporal groups
 - [ ] A numeric/parity golden for the composed Thinker→Talker→Code2Wav speech
       pipeline - end-to-end validation currently only checks that the output
       is a real, non-silent waveform, not that it matches a reference

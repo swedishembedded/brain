@@ -746,7 +746,7 @@ impl Invocation {
 /// `to_invocation` now preserves a genuinely multimodal message's typed
 /// parts instead of always flattening them (needed so a real chat template
 /// can place `<|vision_start|><|image_pad|><|vision_end|>` etc. at the
-/// content part's own position -- see `omni::caps::render_chat_prompt`'s
+/// content part's own position -- see `omni::caps::chat_prompt`'s
 /// doc), so `content` is a plain string ONLY for a text-only message now, an
 /// array for any message with a non-text part.
 pub fn content_text(content: Option<&Value>) -> String {

@@ -57,7 +57,7 @@ pub fn parse_chat_messages(raw: &str, system: Option<&str>) -> Result<Vec<ChatMe
         // ARRAY for a genuinely multimodal one (`crates/apiserve/src/
         // openai.rs`'s `to_invocation` now preserves that shape instead of
         // always flattening it, for omni's chat-template splice -- see
-        // `omni::caps::render_chat_prompt`'s doc). Qwen3 has no image/audio
+        // `omni::caps::chat_prompt`'s doc). Qwen3 has no image/audio
         // input of its own, but a client sending one anyway should still get
         // this message's TEXT, not silently lose it (`.as_str()` alone
         // would return `None` for an array and drop the whole turn).
