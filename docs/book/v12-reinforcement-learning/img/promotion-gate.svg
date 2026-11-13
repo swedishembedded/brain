@@ -1,0 +1,58 @@
+<!-- source-sha256: bec9de3ab942009dd46f0689420e8d83859145c8e69e888b6d5877a8bc2939ca -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1167 302" width="1167" height="302"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1167" height="302" fill="#ffffff"/>
+<rect x="20" y="23" width="115" height="66" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="77.5" y="44.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">candidate</text>
+<text x="77.5" y="60.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(trained from</text>
+<text x="77.5" y="76.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the incumbent)</text>
+<rect x="20" y="131" width="115" height="66" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="77.5" y="160.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">incumbent</text>
+<text x="77.5" y="176.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(what is served)</text>
+<rect x="169" y="68" width="154" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="246" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">same frozen probes,</text>
+<text x="246" y="114.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">same order, both arms</text>
+<text x="246" y="130.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decoded from disk</text>
+<path d="M135,56 L142,56 Q152,56 152,66 L152,86 Q152,96 162,96 L166,96" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M135,164 L142,164 Q152,164 152,154 L152,134 Q152,124 162,124 L166,124" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="357" y="68" width="138" height="84" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="426" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 significance</text>
+<text x="426" y="106.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sign test on the</text>
+<text x="426" y="122.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">episode&#x27;s probes:</text>
+<text x="426" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">p &lt;= 0.05</text>
+<line x1="326" y1="110" x2="354" y2="110" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="529" y="68" width="138" height="84" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="598" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 effect size</text>
+<text x="598" y="114.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mean gain on those</text>
+<text x="598" y="130.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">probes &gt;= 0.15</text>
+<line x1="498" y1="110" x2="526" y2="110" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="512" y="101.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">pass</text>
+<rect x="701" y="68" width="138" height="84" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="770" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3 pooled anchor</text>
+<text x="770" y="106.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mean drop over all</text>
+<text x="770" y="122.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">earlier blocks</text>
+<text x="770" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">&lt;= the budget</text>
+<line x1="670" y1="110" x2="698" y2="110" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="684" y="101.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">pass</text>
+<rect x="873" y="68" width="138" height="84" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="942" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 block bar</text>
+<text x="942" y="114.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">worst single</text>
+<text x="942" y="130.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block drop &lt;= 0.20</text>
+<line x1="842" y1="110" x2="870" y2="110" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="856" y="101.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">pass</text>
+<rect x="1045" y="68" width="102" height="84" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="1096" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">promote:</text>
+<text x="1096" y="106.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the candidate</text>
+<text x="1096" y="122.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">becomes the</text>
+<text x="1096" y="138.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">incumbent</text>
+<line x1="1014" y1="110" x2="1042" y2="110" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="1028" y="101.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">pass</text>
+<rect x="357" y="220" width="654" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="684" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reject, naming the first bar that failed; every number is still reported</text>
+<line x1="426" y1="155" x2="426" y2="217" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="435" y="190.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">fail</text>
+<line x1="598" y1="155" x2="598" y2="217" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="607" y="190.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">fail</text>
+<line x1="770" y1="155" x2="770" y2="217" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="779" y="190.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">fail</text>
+<line x1="942" y1="155" x2="942" y2="217" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="951" y="190.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">fail</text>
+</svg>

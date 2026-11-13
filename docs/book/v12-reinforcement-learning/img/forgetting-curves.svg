@@ -1,0 +1,45 @@
+<!-- source-sha256: f1dfd5f9de8de6f58362c9b4816bef1114cbfdd0cf943b0a8803bc22920c29e6 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 402" width="620" height="402">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="402" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="194" y1="314" x2="194" y2="30" stroke="#edf2f7"/>
+<text x="194" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">50</text>
+<line x1="330" y1="314" x2="330" y2="30" stroke="#edf2f7"/>
+<text x="330" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="466" y1="314" x2="466" y2="30" stroke="#edf2f7"/>
+<text x="466" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">150</text>
+<line x1="602" y1="314" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">200</text>
+<line x1="58" y1="314" x2="602" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="257.2" x2="602" y2="257.2" stroke="#edf2f7"/>
+<text x="52" y="261.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="200.4" x2="602" y2="200.4" stroke="#edf2f7"/>
+<text x="52" y="204.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="143.6" x2="602" y2="143.6" stroke="#edf2f7"/>
+<text x="52" y="147.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="86.8" x2="602" y2="86.8" stroke="#edf2f7"/>
+<text x="52" y="90.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="544" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,30 71.6,30 85.2,34.26 98.8,39.94 112.4,48.46 126,54.14 139.6,61.95 153.2,66.21 166.8,69.05 180.4,74.02 194,79.7 207.6,84.67 221.2,89.64 234.8,95.32 248.4,101 262,103.13 275.6,110.23 289.2,112.36 302.8,116.62 316.4,120.88 330,124.43 343.6,130.82 357.2,136.5 370.8,143.6 384.4,155.67 398,169.87 411.6,181.23 425.2,182.65 438.8,184.07 452.4,185.49 466,186.2 479.6,188.33 493.2,189.75 506.8,194.01 520.4,201.82 534,223.12 547.6,281.34 561.2,303.35 574.8,309.03 588.4,314 602,314"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" stroke-dasharray="6 4" points="58,314 71.6,311.16 85.2,252.23 98.8,218.15 112.4,201.82 126,195.43 139.6,193.3 153.2,190.46 166.8,189.04 180.4,187.62 194,186.91 207.6,184.78 221.2,183.36 234.8,183.36 248.4,183.36 262,183.36 275.6,183.36 289.2,183.36 302.8,181.23 316.4,181.23 330,181.23 343.6,180.52 357.2,180.52 370.8,180.52 384.4,158.51 398,126.56 411.6,100.29 425.2,70.47 438.8,49.17 452.4,37.1 466,31.42 479.6,30 493.2,30 506.8,30 520.4,30 534,30 547.6,30 561.2,30 574.8,30 588.4,30 602,30"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,30 71.6,46.33 85.2,67.63 98.8,88.93 112.4,104.55 126,123.01 139.6,157.09 153.2,185.49 166.8,199.69 180.4,309.03 194,314 207.6,314 221.2,314 234.8,314 248.4,314 262,314 275.6,314 289.2,314 302.8,314 316.4,314 330,314 343.6,314 357.2,314 370.8,314 384.4,314 398,314 411.6,314 425.2,314 438.8,314 452.4,314 466,314 479.6,314 493.2,314 506.8,314 520.4,314 534,314 547.6,314 561.2,314 574.8,314 588.4,314 602,314"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="58,314 71.6,205.37 85.2,189.04 98.8,184.78 112.4,183.36 126,181.23 139.6,162.77 153.2,61.24 166.8,30 180.4,30 194,30 207.6,30 221.2,30 234.8,30 248.4,30 262,30 275.6,30 289.2,30 302.8,30 316.4,30 330,30 343.6,30 357.2,30 370.8,30 384.4,30 398,30 411.6,30 425.2,30 438.8,30 452.4,30 466,30 479.6,30 493.2,30 506.8,30 520.4,30 534,30 547.6,30 561.2,30 574.8,30 588.4,30 602,30"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,30 71.6,78.28 85.2,184.78 98.8,314 112.4,314 126,314 139.6,314 153.2,314 166.8,314 180.4,314 194,314 207.6,314 221.2,314 234.8,314 248.4,314 262,314 275.6,314 289.2,314 302.8,314 316.4,314 330,314 343.6,314 357.2,314 370.8,314 384.4,314 398,314 411.6,314 425.2,314 438.8,314 452.4,314 466,314 479.6,314 493.2,314 506.8,314 520.4,314 534,314 547.6,314 561.2,314 574.8,314 588.4,314 602,314"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" stroke-dasharray="6 4" points="58,314 71.6,186.2 85.2,105.97 98.8,30 112.4,30 126,30 139.6,30 153.2,30 166.8,30 180.4,30 194,30 207.6,30 221.2,30 234.8,30 248.4,30 262,30 275.6,30 289.2,30 302.8,30 316.4,30 330,30 343.6,30 357.2,30 370.8,30 384.4,30 398,30 411.6,30 425.2,30 438.8,30 452.4,30 466,30 479.6,30 493.2,30 506.8,30 520.4,30 534,30 547.6,30 561.2,30 574.8,30 588.4,30 602,30"/></g>
+<text x="330" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">steps of gradient descent on task B alone</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">share of 400 test rows classified right</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Training on B takes accuracy on A away</text>
+<line x1="78.43" y1="373" x2="98.43" y2="373" stroke="#2b6cb0" stroke-width="2"/>
+<text x="104.43" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">task A, step size 0.05</text>
+<line x1="239.53" y1="373" x2="259.53" y2="373" stroke="#2b6cb0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="265.53" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">task B, step size 0.05</text>
+<line x1="400.63" y1="373" x2="420.63" y2="373" stroke="#c05621" stroke-width="2"/>
+<text x="426.63" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">task A, step size 0.2</text>
+<line x1="84.59" y1="390" x2="104.59" y2="390" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="110.59" y="394" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">task B, step size 0.2</text>
+<line x1="239.53" y1="390" x2="259.53" y2="390" stroke="#2f855a" stroke-width="2"/>
+<text x="265.53" y="394" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">task A, step size 0.5</text>
+<line x1="394.47" y1="390" x2="414.47" y2="390" stroke="#2f855a" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="420.47" y="394" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">task B, step size 0.5</text>
+</svg>
