@@ -472,8 +472,8 @@ fn a_bad_serving_policy_value_names_its_flag_and_exits_2() {
 
 #[test]
 fn a_policy_no_served_family_can_honour_is_refused_naming_the_families() {
-    // The Qwen3 engine has no nf4 weights and the Qwen3.8 resident has no --gemm.
-    let out = run(&["serve", "--weight-format", "nf4", "--gemm", "fp32"]);
+    // The Qwen3 engine has no f16 weights and the Qwen3.8 resident has no --gemm.
+    let out = run(&["serve", "--weight-format", "f16", "--gemm", "fp32"]);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("qwen3") && stderr.contains("qwen35") && stderr.contains("supported"), "stderr:\n{stderr}");
