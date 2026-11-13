@@ -369,13 +369,10 @@ const FILES_RECIPES: &[FilesRecipe] = &[
     // repos with no combined release. Unlike `wan` -- where picking the
     // self-contained native repo sidestepped the limit entirely -- there is no
     // single Kronos repo to pick, so the pair is expressed as two recipes
-    // producing two DISJOINT roles of one family, and `brain_arch`'s
-    // `extra_refs` is what tells `ensure_env_weights` to fetch both and merge
-    // their manifests. Splitting it that way keeps the plan/store layer
-    // strictly one-repo-per-plan (nothing here learned about a second repo)
-    // and puts the "this model needs two checkpoints" fact in the one table
-    // that already answers "where does this architecture's weights come
-    // from".
+    // producing two DISJOINT roles of one family; `kronos::spec::KronosSpec`
+    // tells the two apart by `config.json` content. Splitting it that way
+    // keeps the plan/store layer strictly one-repo-per-plan (nothing here
+    // learned about a second repo).
     //
     // Both repos' listings are exactly `.gitattributes`, `README.md`,
     // `config.json`, `model.safetensors` (confirmed live via the HF API):

@@ -93,14 +93,9 @@ crates/cli/src/perf_cli.rs	<var>
 crates/cli/src/perf_cli.rs	BRAIN_FORECAST_HORIZON
 crates/cli/src/perf_cli.rs	BRAIN_FORECAST_SAMPLES
 crates/cli/src/perf_longctx.rs	<qwen35moe::gguf_load::GGUF_ENV>
-crates/cli/src/resolve.rs	<var>
-crates/cli/src/resolve.rs	BRAIN_RESOLVETESTARCH_DIT
-crates/cli/src/resolve.rs	BRAIN_RESOLVETESTARCH_VAE
 crates/cli/src/run_cli.rs	BRAIN_AUTO_FETCH
 crates/cli/src/serve_daemon.rs	XDG_RUNTIME_DIR
-crates/cli/src/supply.rs	<var>
 crates/cli/src/supply.rs	BRAIN_AUTO_FETCH
-crates/cli/src/supply.rs	BRAIN_QWEN3TTS_WEIGHTS
 crates/cli/src/supply.rs	YOLO_RAW_PT
 crates/cli/tests/it/device_routing.rs	BRAIN_DEVICE
 crates/cli/tests/it/flops_diffusion_cli.rs	BRAIN_FLUX2_VAE

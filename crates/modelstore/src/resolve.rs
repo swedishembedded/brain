@@ -211,9 +211,7 @@ pub trait ArchSpec: Send + Sync {
     /// content-based `classify` could ever recognize as a fetchable default -
     /// `llava`/`campplus`/`s3tokenizer`'s shared case) overrides this with
     /// [`no_default_checkpoint_doc`] to name the real escape hatch (the
-    /// override flag) instead of a bare "no artifact classifies" - the
-    /// resolver-side equivalent of `crate::supply::ensure_env_weights_with`'s
-    /// identically-worded env-based "no default checkpoint known" error.
+    /// override flag) instead of a bare "no artifact classifies".
     fn missing_doc(&self, role: &str) -> String {
         format!("no artifact classifies as {role} for arch {}", self.arch())
     }

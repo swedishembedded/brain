@@ -586,8 +586,8 @@ pub(crate) fn validate_av_dit_gguf_shapes(mg: &MmapGguf, cfg: &LtxAvDitConfig) -
 /// this checkpoint carries the transformer alone (confirmed: the real
 /// header's 4349 tensors are exactly [`av_dit_tensor_manifest`]'s own count
 /// at the real config, no VAE/text-encoder tensors mixed in). The VAEs, the
-/// Gemma-4 text encoder and the tokenizer come from their own source
-/// (`crates/arch`'s `ltxv` row's `weights_env`).
+/// Gemma-4 text encoder and the tokenizer come from their own roles
+/// (`ltxv::spec::LtxvSpec`).
 ///
 /// **Streaming, one tensor at a time**, same discipline as `wan`'s: the
 /// two-way manifest check ([`validate_av_dit_gguf_shapes`]) runs on shapes

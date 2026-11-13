@@ -1159,15 +1159,9 @@ fn install_tracing(argv: Vec<String>) -> Vec<String> {
 /// test in this binary over `residency::log`'s one `AtomicU8`; [`main`] is
 /// the sole caller of [`residency::log::set_verbosity`] with this result.
 ///
-/// [`main`] runs this FIRST, alongside [`install_tracing`]: auto-fetch
-/// download progress (`residency::log::info`, from
-/// `crate::supply::ensure_env_weights`) fires from `resolve::dispatch`,
-/// before any subcommand's own argument parsing even starts, so a level
-/// installed any later would miss it. This used to be `run_serve`'s own
-/// local flag (`-v` only took effect on `brain serve`); every other command,
-/// including a plain `brain s3dit text2image` that triggers a multi-gigabyte
-/// weight fetch, had no way to ask for the progress lines that code already
-/// emits.
+/// [`main`] runs this FIRST, alongside [`install_tracing`], so a resolver
+/// auto-fetch's download progress (`residency::log::info`) is visible on
+/// every command, not only `brain serve`.
 fn parse_verbosity(argv: Vec<String>) -> (u8, Vec<String>) {
     let mut level: u8 = std::env::var("BRAIN_VERBOSE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let mut rest = Vec::with_capacity(argv.len());
@@ -1394,6 +1388,9 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_WAN_VAE", replacement: "serve: {pin: [wan.vae=FILE]} (with the other three wan roles)" },
     Retired { name: "BRAIN_WAN_T5", replacement: "serve: {pin: [wan.text_encoder=FILE]} (with the other three wan roles)" },
     Retired { name: "BRAIN_WAN_TOKENIZER", replacement: "serve: {pin: [wan.tokenizer=DIR]} (with the other three wan roles)" },
+    Retired { name: "BRAIN_LLAVA_WEIGHTS", replacement: "serve: {pin: [llava.weights=DIR]}" },
+    Retired { name: "BRAIN_S3TOKENIZER_V2", replacement: "serve: {pin: [cosyvoice.s3tokenizer=FILE]}" },
+    Retired { name: "BRAIN_CAMPPLUS_DIR", replacement: "serve: {pin: [cosyvoice.campplus=FILE]}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 

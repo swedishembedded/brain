@@ -4,9 +4,9 @@
 //! The default-checkpoint auto-fetch policy, and the fetch/convert engine it
 //! sits on -- moved out of `crates/cli/src/supply.rs`. What stays in
 //! `crates/cli`: [`residency::supply::ModelSupplier`]'s serving-side
-//! implementation (`StoreSupplier`, single-flight, background healing), the
-//! `BRAIN_AUTO_FETCH` environment gate, and `ensure_env_weights` -- all of
-//! which construct or register a CLI-local `ResidentModel`
+//! implementation (`StoreSupplier`, single-flight, background healing) and the
+//! `BRAIN_AUTO_FETCH` environment gate -- all of which construct or register
+//! a CLI-local `ResidentModel`
 //! (`crate::model_dir::resident_for_local`), the same "residency-adapter
 //! glue" line `crates/catalog`'s own module doc draws.
 //!
@@ -134,11 +134,9 @@ fn default_weights_from_local(arch: &str, local: &brain_modelstore::LocalModel) 
     Ok(DefaultWeights { weights, tokenizer })
 }
 
-/// Fetch ONE `<vendor>/<repo>` and run its recipe's finish step. Factored out
-/// so an architecture whose checkpoint upstream publishes as several repos
-/// (`brain_arch::Arch::extra_refs`) can drive this once per repo - one
-/// `ModelRef` to one listing to one `Plan` each time, which is exactly the
-/// shape `brain_modelstore::plan` supports.
+/// Fetch ONE `<vendor>/<repo>` and run its recipe's finish step - one
+/// `ModelRef` to one listing to one `Plan`, which is exactly the shape
+/// `brain_modelstore::plan` supports.
 pub fn fetch_one_ref(default_ref: &str, store: &Store, hub: &dyn Hub) -> Result<brain_modelstore::LocalModel, String> {
     let reference = ModelRef::parse(default_ref).map_err(|e| format!("{default_ref}: {e}"))?;
     let plan = brain_modelstore::plan(&reference, store, hub).map_err(|e| format!("{default_ref}: {e}"))?;

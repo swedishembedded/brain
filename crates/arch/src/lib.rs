@@ -156,43 +156,6 @@ pub struct Arch {
     /// here is a claim that repo is real and fetchable, not that every verb
     /// honors it yet).
     pub default_ref: Option<&'static str>,
-    /// Further `<vendor>/<repo>` checkpoints this architecture needs beyond
-    /// [`default_ref`], for a model upstream publishes as SEVERAL repos.
-    ///
-    /// brain's fetch plan is one `ModelRef` -> one repo listing -> one
-    /// `Plan`, and that stays true: this is not a second repo inside one plan,
-    /// it is a second plan. `crates/cli/src/supply.rs::ensure_env_weights`
-    /// fetches `default_ref` and then each of these in turn, and merges the
-    /// roles of every resulting manifest into one map before resolving
-    /// [`weights_env`](Self::weights_env) against it -- so role names must be
-    /// DISJOINT across the set (a repo-wide test in this file enforces that).
-    ///
-    /// `wan` did not need this: choosing the native repo over `-Diffusers`
-    /// found one listing carrying all four roles. `kronos` has no such
-    /// option - upstream ships the BSQ tokenizer
-    /// (`NeoQuasar/Kronos-Tokenizer-base`) and the decoder
-    /// (`NeoQuasar/Kronos-base`) as two repos with no combined release - so
-    /// the honest answer is to say so here rather than to teach the planner
-    /// about compound fetches it would need for exactly one model.
-    pub extra_refs: &'static [&'static str],
-    /// `(env var, manifest role)` pairs this architecture's OWN weights
-    /// resolution reads (`BRAIN_S3DIT_DIT`, ...) -- the
-    /// capability-path counterpart to [`default_ref`](Self::default_ref):
-    /// architectures reached via `brain <arch> <action>`'s generic capability
-    /// dispatch (never through the `--weights`-flag injection the
-    /// `ARCH_HANDLERS` path gets) resolve weights from environment variables
-    /// their own provider's `from_env` reads, one role each when
-    /// `default_ref` fetches a single file/directory, several when a compound
-    /// checkpoint has named parts (`s3dit`'s DiT/VAE/text-encoder/tokenizer
-    /// four). `crates/cli/src/supply.rs::ensure_env_weights` is what actually
-    /// resolves this: for each listed var that is UNSET, it fetches
-    /// `default_ref`, reads its role back from the store (a single-file
-    /// [`LocalModel::weights`] path for a `"weights"` role, else
-    /// [`LocalModel::roles`]), and sets the var -- never overriding one
-    /// already set. Empty when this architecture has no env-var-driven
-    /// weights resolution (an `ARCH_HANDLERS` architecture using `--weights`
-    /// directly, or one with no auto-fetch story yet).
-    pub weights_env: &'static [(&'static str, &'static str)],
     /// Upstream `<vendor>/<repo>` checkpoints this architecture is known to be
     /// published at, and the GGUF quantizations each one officially ships
     /// (repo file listing, or its conventional `-GGUF` sibling repo) - `brain
@@ -259,8 +222,6 @@ const DEFAULT: Arch = Arch {
     hf: &[],
     hf_config_key: None,
     default_ref: None,
-    extra_refs: &[],
-    weights_env: &[],
     variants: &[],
     families: &[],
     caps: Caps::NONE,
@@ -309,10 +270,8 @@ pub const ARCHS: &[Arch] = &[
     // and never a community (bartowski/unsloth) repo, which is a different
     // vendor namespace `Variant`'s one `reference` field cannot also name.
     // The 0.6B/1.7B vendor GGUF repos ship Q8_0 only; 4B and up ship five.
-    // `weights_env` is empty: `weights`/`tokenizer` are resolved through
-    // `qwen3::spec::Qwen3Spec` (the model-store resolver) - see
-    // `crates/catalog/src/lib.rs`'s `resolver_spec_for`, same shape as
-    // `qwen35`'s own row.
+    // `weights`/`tokenizer` are resolved through `qwen3::spec::Qwen3Spec`
+    // (the model-store resolver), same shape as `qwen35`'s own row.
     // `families: &["qwen"]`: the `model` a brain-format qwen3 checkpoint records in its own config.
     arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"], default_ref: Some("Qwen/Qwen3-0.6B"), families: &["qwen"],
         caps: Caps::NONE.full_ft().lora(&[BaseTier::F32, BaseTier::Bf16, BaseTier::I8, BaseTier::Nf4, BaseTier::Fp8]).other(),
@@ -391,15 +350,8 @@ pub const ARCHS: &[Arch] = &[
     // real `architectures[0]` class and the `model_type` fallback spelling,
     // same convention as `qwen3`'s row - a config lacking `architectures`
     // still resolves via `model_type: "qwen3_5"`.
-    // `weights_env` is empty: this row used to declare a FOURTH spelling
-    // (`BRAIN_QWEN35_DIR`) that matched none of the three the crate's own
-    // code actually checked (`BRAIN_QWEN35_WEIGHTS`/`BRAIN_QWEN35_TOKENIZER`
-    // in `caps.rs`, plus the serving executor's third GGUF variable) - the
-    // row was already dead on arrival. All three (and this row's own stale
-    // one) are now resolved through `qwen35::spec::Qwen35Spec`'s
-    // `weights`/`tokenizer` roles instead - see `crates/catalog/src/lib.rs`'s
-    // `resolved_assembly_for`; the serving path finds a GGUF release in the
-    // model store.
+    // `weights`/`tokenizer` are resolved through `qwen35::spec::Qwen35Spec`;
+    // the serving path finds a GGUF release in the model store.
     arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8"),
         caps: Caps::NONE.full_ft().lora(&[BaseTier::F32, BaseTier::Bf16, BaseTier::Nf4, BaseTier::Fp8]).other()),
     // EdgeRock is the `qwen35` decoder with a causal sliding window and an anchor
@@ -429,9 +381,8 @@ pub const ARCHS: &[Arch] = &[
     // is a brain-defined id per the naming rule's "no entry there yet" branch,
     // not a lowercased `LLM_ARCH_*` spelling - re-verify against a real
     // llama.cpp checkout before this assumption is load-bearing anywhere.
-    // `hf` names the real gated checkpoint's class; no `default_ref`/
-    // `weights_env` yet - this milestone never fetches or imports the real
-    // checkpoint.
+    // `hf` names the real gated checkpoint's class; no `default_ref` yet -
+    // nothing fetches or imports the real checkpoint.
     arch!("gemma4", "Gemma-4 unified text tower (LTX-2.5's text encoder)", Text, Brain, "brain-gemma4", hf: &["Gemma4UnifiedForConditionalGeneration"]),
     // Ripple-65B: a dense decoder mixing sliding-window RoPE layers and global
     // NoPE layers (4:1) with value residual, sigmoid-gated attention and a
@@ -452,12 +403,7 @@ pub const ARCHS: &[Arch] = &[
     // a top-k sparse-MoE decoder, not this dense one; it used to be listed as a
     // `Variant` here, which was wrong (this arch cannot load it) - see the
     // `qwen3vlmoe` row below, confirmed against the real released config.json.
-    // `weights_env` is empty: `generate`/`lora_train`'s checkpoint is
-    // resolved through `qwen3vl::spec::Qwen3VlSpec` (the model-store
-    // resolver) instead of `BRAIN_QWEN3VL_WEIGHTS` - see
-    // `crates/catalog/src/lib.rs`'s `resolved_assembly_for`. The residency
-    // adapter (`crates/catalog/src/resident_qwen3vl.rs`) still reads that
-    // variable directly - out of this migration's scope.
+    // The checkpoint is resolved through `qwen3vl::spec::Qwen3VlSpec`.
     arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"),
         variants: &[
             Variant { reference: "Qwen/Qwen3-VL-2B-Instruct", params: 2_127_532_032, quants: &["Q4_K_M", "Q8_0"], license: None },
@@ -474,7 +420,7 @@ pub const ARCHS: &[Arch] = &[
     // `gguf: None` - the id IS the expected GGUF spelling per the
     // `Source::LlamaCpp` naming rule (`LLM_ARCH_QWEN3VLMOE` lowercased), the
     // same spelling this model's own user-facing documentation already named
-    // before this row existed. No `default_ref`/`weights_env` yet: no real
+    // before this row existed. No `default_ref` yet: no real
     // checkpoint (HF or GGUF) was available to import against in this pass -
     // see `crates/qwen3vlmoe/src/import.rs`'s own doc.
     arch!("qwen3vlmoe", "Qwen3-VL-30B-A3B (ViT+PatchMerger+DeepStack + top-k sparse-MoE decoder)", Multimodal, LlamaCpp, "brain-qwen3vlmoe", hf: &["Qwen3VLMoeForConditionalGeneration"],
@@ -482,15 +428,9 @@ pub const ARCHS: &[Arch] = &[
             // ~3B active of 31B total.
             Variant { reference: "Qwen/Qwen3-VL-30B-A3B-Instruct", params: 31_070_000_000, quants: &["Q4_K_M", "Q8_0"], license: None },
         ]),
-    // `weights_env` is empty: FastVLM's checkpoint is resolved through
-    // `fastvlm::spec::FastvlmSpec` (the model-store resolver) instead of
-    // `BRAIN_FASTVLM_WEIGHTS` - see `crates/catalog/src/lib.rs`'s
-    // `resolved_assembly_for`.
+    // The checkpoint is resolved through `fastvlm::spec::FastvlmSpec`.
     arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm", hf: &["LlavaQwen2ForCausalLM"], default_ref: Some("apple/FastVLM-0.5B")),
-    // `weights_env` is empty: `dir` is resolved through
-    // `moondream3::spec::Moondream3Spec` (the model-store resolver) instead
-    // of `BRAIN_MOONDREAM3_WEIGHTS` - see `crates/catalog/src/lib.rs`'s
-    // `resolved_assembly_for`.
+    // `dir` is resolved through `moondream3::spec::Moondream3Spec`.
     // MiniCPM-V 4.6: a NaViT SigLIP tower with an in-tower 2x2 window merger,
     // a 2x2 MLP merger, and the Qwen3.5-0.8B hybrid decoder `brain-qwen35`
     // implements. `hf:` is the checkpoint's own `architectures[0]` and its
@@ -511,7 +451,7 @@ pub const ARCHS: &[Arch] = &[
     // no auto-fetch here because SUPIR's own weights don't either, for the
     // same non-commercial-license reason - see the `supir` row below.
     // `weights` is resolved through `llava::spec::LlavaSpec`.
-    arch!("llava", "LLaVA-1.5-13B (CLIP-L/14@336 + Vicuna-1.5 decoder)", Multimodal, Brain, "brain-llava", hf: &["LlavaLlamaForCausalLM"], weights_env: &[]),
+    arch!("llava", "LLaVA-1.5-13B (CLIP-L/14@336 + Vicuna-1.5 decoder)", Multimodal, Brain, "brain-llava", hf: &["LlavaLlamaForCausalLM"]),
     // BOTH published releases of this model are pullable, and
     // `crates/deepseek2ocr`'s `import::Files::locate` recognizes either on
     // disk: `default_ref` stays the GGUF pair (`ggml-org/DeepSeek-OCR-GGUF`,
@@ -522,10 +462,7 @@ pub const ARCHS: &[Arch] = &[
     // `UnsupportedArchitecture`. That repo needs no tensor rewrite at
     // download time -- `deepseek2ocr` reads its safetensors in place -- so
     // `crates/cli/src/supply.rs` lists it as a passthrough family.
-    // `weights_env` is empty: `dir` is resolved through
-    // `deepseek2ocr::spec::Deepseek2ocrSpec` (the model-store resolver)
-    // instead of `BRAIN_DEEPSEEK_OCR_DIR` - see
-    // `crates/catalog/src/lib.rs`'s `resolved_assembly_for`.
+    // `dir` is resolved through `deepseek2ocr::spec::Deepseek2ocrSpec`.
     // DeepSeek-VL and Janus-Pro: a Llama decoder behind a vision tower, one
     // HF class and one `model_type` between them. DeepSeek-VL's tower is a
     // SAM-B high-resolution branch plus a SigLIP-L low-resolution one;
@@ -549,13 +486,9 @@ pub const ARCHS: &[Arch] = &[
     // `deepseekocr2::spec::Deepseekocr2Spec` (the model-store resolver). The
     // served release is the vendor's own `transformers` checkpoint, read in place.
     arch!("deepseekocr2", "DeepSeek-OCR-2 (SAM + Qwen2 GQA resampler DeepEncoder V2 + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseekocr2", hf: &["DeepseekOCR2ForCausalLM"], default_ref: Some("deepseek-ai/DeepSeek-OCR-2")),
-    // No `weights_env`: qwen3asr resolves its single `weights` role through
-    // `brain_modelstore::resolve` (`crates/qwen3asr/src/spec.rs`), not
-    // `BRAIN_QWEN3ASR`.
+    // `weights` is resolved through `crates/qwen3asr/src/spec.rs`.
     arch!("qwen3asr", "Qwen3-ASR-1.7B (Whisper-style encoder + Qwen3 decoder)", Audio, Brain, "brain-qwen3asr", hf: &["Qwen3ASRForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-ASR-1.7B")),
-    // No `weights_env`: nemotronasr resolves its single `weights` role
-    // through `brain_modelstore::resolve` (`crates/nemotronasr/src/spec.rs`),
-    // not `BRAIN_NEMOTRONASR`.
+    // `weights` is resolved through `crates/nemotronasr/src/spec.rs`.
     arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotronasr", hf: &["Nemotron3_5AsrForRNNT"], default_ref: Some("nvidia/nemotron-3.5-asr-streaming-0.6b"),
         variants: &[Variant { reference: "nvidia/nemotron-3.5-asr-streaming-0.6b", params: 637_997_088, quants: &["Q8_0"], license: None }]),
     // -- Audio / TTS ------------------------------------------------------
@@ -563,10 +496,9 @@ pub const ARCHS: &[Arch] = &[
     // names a different vendor than this row's `reference` could carry; see
     // the `qwen3` row's comment on why community quantizer repos are omitted.
     // Weight resolution is the model-store resolver (`qwen3tts::spec::
-    // Qwen3TtsSpec`), not `weights_env` - `brain qwen3tts import`'s own
-    // two-role `brain.manifest.json` (`weights_dir`/`ckpt`) is what
-    // `classify()` recognizes, so there is no `(env var, role)` table for
-    // this row to declare any more.
+    // Qwen3TtsSpec`): `brain qwen3tts import`'s own two-role
+    // `brain.manifest.json` (`weights_dir`/`ckpt`) is what `classify()`
+    // recognizes.
     arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
         variants: &[Variant { reference: "Qwen/Qwen3-TTS-12Hz-0.6B-Base", params: 914_643_008, quants: &[], license: None }]),
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
@@ -583,14 +515,12 @@ pub const ARCHS: &[Arch] = &[
     // DiT) and small vocoder causality deltas; the release is a config
     // (`Variant::CosyVoice2`/`CosyVoice3`), exactly as `wan` spans 2.1/2.2.
     // No official llama.cpp/GGUF architecture entry exists upstream, hence
-    // `gguf: None`. `s3tokenizer`/`campplus` are separate rows above, not
-    // roles here, because they are independently useful architectures, not
-    // CosyVoice internals (the same split `qwen3tts`/`mimi`/`ecapatdnn`
-    // already use).
+    // `gguf: None`. `s3tokenizer`/`campplus` keep rows of their own as
+    // architectures, and are also roles of this one (its reference-audio
+    // front end).
     //
-    // No `weights_env`: this architecture resolves `llm`/`flow`/`hift`/
-    // `tokenizer` through the model-store resolver (`crate::spec::
-    // CosyVoiceSpec`), not `BRAIN_COSYVOICE_*` - see that module's own doc.
+    // Every role resolves through the model-store resolver (`crate::spec::
+    // CosyVoiceSpec`) - see that module's own doc.
     // `default_ref` still names ONLY the CosyVoice 2 repo; a store holding
     // BOTH generations' checkpoints resolves as an `Ambiguous` `llm`/`flow`/
     // `hift` role (two real candidates, same confidence), never a silent
@@ -602,9 +532,8 @@ pub const ARCHS: &[Arch] = &[
     // architecture - reused via `crates/qwen3`, not reimplemented here), a
     // 4-layer causal "RVQ depth decoder", a small conv "condition encoder", a
     // 36-layer flow-matching DiT, and a DAC-style vocoder. No official GGUF
-    // release exists upstream, hence `gguf: None`. No `weights_env`: this
-    // architecture resolves its six roles through the model-store resolver
-    // (`crate::spec::MinimaxMusic3Spec`), not `BRAIN_MINIMAXMUSIC3_*`.
+    // release exists upstream, hence `gguf: None`. The six roles resolve
+    // through the model-store resolver (`crate::spec::MinimaxMusic3Spec`).
     arch!("minimaxmusic3", "MiniMax Music 3 (lyrics+caption-conditioned music generation)", Audio, Brain, "brain-minimaxmusic3",
           hf: &["MiniMaxMusic3ForConditionalGeneration"],
           default_ref: Some("MiniMaxAI/MiniMax-Music3")),
@@ -619,10 +548,8 @@ pub const ARCHS: &[Arch] = &[
     // llama.cpp/GGUF ecosystem. Rows below have empty `quants` deliberately,
     // not omitted: "this repo is real, no official quant exists" is itself
     // useful information for `brain models list` to render.
-    // No `weights_env`: sam2 resolves its single `weights` role through
-    // `brain_modelstore::resolve` (`crates/sam2/src/spec.rs`, which also
-    // derives the tiny/large variant from the checkpoint's own trunk width),
-    // not a weights variable.
+    // `weights` is resolved through `crates/sam2/src/spec.rs`, which also
+    // derives the tiny/large variant from the checkpoint's own trunk width.
     arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2", default_ref: Some("facebook/sam2.1-hiera-tiny"),
         variants: &[
             Variant { reference: "facebook/sam2.1-hiera-tiny", params: 38_963_010, quants: &[], license: None },
@@ -634,8 +561,7 @@ pub const ARCHS: &[Arch] = &[
     arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-arcface"),
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
     arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),
-    // No `weights_env`: lpips resolves its `trunk` and `heads` roles through
-    // `brain_modelstore::resolve` (`crates/lpips/src/spec.rs`).
+    // `trunk` and `heads` are resolved through `crates/lpips/src/spec.rs`.
     arch!("lpips", "LPIPS (AlexNet) perceptual image distance", Vision, Brain, "brain-lpips"),
     // No GGUF/llama.cpp conversion exists upstream for Florence-2 (an open,
     // unresolved llama.cpp issue) - `gguf` is left unset, so `id` itself
@@ -659,11 +585,8 @@ pub const ARCHS: &[Arch] = &[
     // checkpoint's family string finds no row here and falls into `brain
     // models list`'s "custom checkpoint of an architecture not in
     // brain_arch" bucket despite being correctly classified.
-    // `weights_env` is empty: s3dit's own actions resolve their four roles
-    // through `s3dit::spec::S3ditSpec` (the model-store resolver) instead,
-    // the same migration `flux2`/`wan` already went through. The FIELD stays
-    // on `Arch` for the other architectures not yet migrated.
-    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo"), weights_env: &[], families: &["zimage"],
+    // The four roles resolve through `s3dit::spec::S3ditSpec`.
+    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo"), families: &["zimage"],
         caps: Caps::NONE.lora(&[BaseTier::F32]).other()),
     // `black-forest-labs/FLUX.2-klein-4B` ships the same shape
     // `ZimageRecipe` already matches generically (`model_index.json` +
@@ -672,10 +595,8 @@ pub const ARCHS: &[Arch] = &[
     // no new recipe is needed - confirmed against the real repo listing.
     // Vendor publishes no GGUF at all for either size (community quantizers
     // do - a different vendor namespace, omitted per the `qwen3` row comment).
-    // No `weights_env`: flux2 resolves its weights through
-    // `brain_modelstore::resolve` (crates/cli/src/flux2_cli.rs's `generate`)
-    // rather than `BRAIN_FLUX2_*` environment variables. `default_ref` still
-    // names what `brain pull flux2`/`brain models list` fetch/display.
+    // The roles resolve through `flux2::spec`. `default_ref` names what
+    // `brain pull flux2`/`brain models list` fetch/display.
     arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2",
           default_ref: Some("black-forest-labs/FLUX.2-klein-4B"),
           caps: Caps::NONE.lora(&[BaseTier::F32, BaseTier::I8]).other(),
@@ -692,13 +613,7 @@ pub const ARCHS: &[Arch] = &[
     arch!("instantid", "InstantID (SDXL + IP-Adapter-FaceID)", Image, Brain, "brain-instantid"),
     arch!("autoencoderkl", "diffusers AutoencoderKL (Z-Image/FLUX.2/SDXL VAE)", Image, Brain, "brain-vae"),
     arch!("vqgan", "VQGAN / CodeFormer VQ autoencoder", Image, Brain, "brain-vqgan"),
-    // No `weights_env`: codeformer resolves its single `weights` role
-    // through `brain_modelstore::resolve` (`crates/codeformer/src/spec.rs`),
-    // not `BRAIN_CODEFORMER_WEIGHTS` - the same migration `rrdbnet` (below)
-    // already went through. `crates/catalog/src/resident_restore.rs`'s served
-    // path still reads that env var directly - a tracked, not silent, gap
-    // (`brain rrdbnet upscale`'s own residency adapter has the identical
-    // one).
+    // `weights` is resolved through `crates/codeformer/src/spec.rs`.
     arch!("codeformer", "CodeFormer blind face restoration", Image, Brain, "brain-codeformer"),
     // SUPIR: a frozen SDXL 1.0 base UNet + a 1.24B ControlNet-shaped trunk
     // (`GLVControl`, over the same `sdxlunet::model::Rec` `controlnet` reuses)
@@ -706,13 +621,11 @@ pub const ARCHS: &[Arch] = &[
     // concatenation rather than adding a residual - a seam `controlnet`'s
     // additive injection cannot express. No
     // `hf:` (no `transformers`-native config exists) and deliberately no
-    // `default_ref`/`weights_env` auto-fetch: the SUPIR Software License
+    // `default_ref` auto-fetch: the SUPIR Software License
     // Agreement is non-commercial-only and there is no official HF repo -
     // the user supplies weights they obtained themselves.
     arch!("supir", "SUPIR photo-realistic image restoration (SDXL + GLVControl + ZeroSFT)", Image, Brain, "brain-supir"),
-    // No `weights_env`: rrdbnet resolves its single `weights` role through
-    // `brain_modelstore::resolve` (`crates/rrdbnet/src/spec.rs`), not
-    // `BRAIN_ESRGAN_WEIGHTS`.
+    // `weights` is resolved through `crates/rrdbnet/src/spec.rs`.
     arch!("rrdbnet", "Real-ESRGAN RRDBNet super-resolution", Image, Brain, "brain-rrdbnet", default_ref: Some("schwgHao/RealESRGAN_x4plus")),
     // -- Video generation -----------------------------------------------
     // `wan` names the FAMILY, not the release: Wan2.1 and Wan2.2 share one
@@ -733,22 +646,12 @@ pub const ARCHS: &[Arch] = &[
     // `-Diffusers` remains the tensor-NAMING authority that `import_diffusers`
     // targets; it is just not what we make users download by default.
     //
-    // `BRAIN_WAN_CLIP` (the I2V CLIP ViT-H/14 vision tower) is deliberately
-    // NOT in `weights_env`: it does not exist in the T2V repo, and I2V's own
-    // checkpoint is a different `default_ref` -- so it stays an explicitly-set
-    // variable rather than something auto-fetch would fail to resolve.
     // No vendor GGUF for any Wan repo - what exists (city96/QuantStack) is
     // community-only, omitted per the `qwen3` row comment.
-    // `weights_env` is empty: `brain wan t2v` resolves its four roles through
-    // `wan::spec::WanSpec` (the model-store resolver) instead, the same
-    // migration `flux2`'s own row went through first. `finetune` still reads
-    // the BRAIN_WAN_* variables directly (see `wan_cli::run_wan`'s own doc),
-    // so the FIELD stays on `Arch` for the other ~20 architectures not yet
-    // migrated - only this row's value is empty.
+    // The four roles resolve through `wan::spec::WanSpec`.
     arch!("wan", "Wan2.1/2.2 video diffusion transformer (T2V/I2V)", Video, Brain, "brain-wan",
           hf: &["WanTransformer3DModel"],
           default_ref: Some("Wan-AI/Wan2.1-T2V-1.3B"),
-          weights_env: &[],
           caps: Caps::NONE.lora(&[BaseTier::F32]).other(),
           variants: &[
               Variant { reference: "Wan-AI/Wan2.1-T2V-1.3B", params: 1_418_996_800, quants: &[], license: None },
@@ -766,8 +669,8 @@ pub const ARCHS: &[Arch] = &[
     // separate from the video VAE because upstream ships them as two
     // independent checkpoints with unrelated shapes, unlike Wan's single VAE
     // role. The vocoder ships bundled inside the audio-VAE checkpoint, not as
-    // a file of its own. No `weights_env`: every command, the served provider
-    // and the resident resolve their roles through `brain_modelstore::resolve`
+    // a file of its own. Every command, the served provider and the resident
+    // resolve their roles through `brain_modelstore::resolve`
     // (`ltxv::spec::LtxvSpec`) - `vae` is the only required role, matching
     // this pipeline's own real/optional weight split (see `ltxv::pipeline`'s
     // module doc).
@@ -777,8 +680,7 @@ pub const ARCHS: &[Arch] = &[
     // MiniMax-H3: ONE packed self-attention stack over video+audio+condition
     // rows (not a two-stream architecture like `ltxv` above), dual
     // video/audio Euler schedules in one forward. No `hf:` - the release's
-    // `model_index.json` names classes brain's `weights_env`/GGUF lanes
-    // never read (all five roles resolve through `minimaxh3::spec::H3Spec`/
+    // `model_index.json` names classes brain's GGUF lanes never read (all five roles resolve through `minimaxh3::spec::H3Spec`/
     // `H3Recipe` instead), and the DiT class name is not a registry key for
     // any lane this row serves.
     //
@@ -787,8 +689,7 @@ pub const ARCHS: &[Arch] = &[
     // behind an explicit acceptance (`--allow-community`,
     // `minimaxh3::caps`'s own gate), so a flagless command must never
     // silently download it - the user pulls and accepts deliberately.
-    // No `weights_env` for the same reason all five roles go through the
-    // model-store resolver, and no vendor GGUF exists.
+    // No vendor GGUF exists.
     arch!("minimaxh3", "MiniMax-H3 joint video+audio diffusion transformer (t2va/fl2va)", Video, Brain, "brain-minimaxh3"),
     // -- 3D -----------------------------------------------------------
     arch!("worldmirror2", "WorldMirror-2 multi-view 3D reconstruction", ThreeD, Brain, "brain-worldmirror2"),
@@ -803,14 +704,9 @@ pub const ARCHS: &[Arch] = &[
     // No GGUF anywhere - a small forecasting transformer outside the
     // llama.cpp/GGUF ecosystem, like `sam2` above.
     //
-    // No `weights_env`/`extra_refs`: kronos resolves both roles through
-    // `brain_modelstore::resolve` (`kronos::spec::KronosSpec`, wired into
-    // `crates/cli/src/forecast_cli.rs`'s own `predict`), which tells the two
-    // repos apart by their own `config.json` content rather than needing
-    // `extra_refs` to auto-fetch a second, unclassified checkpoint into an
-    // env var nothing then reads. `extra_refs` itself stays on `Arch` for a
-    // future architecture in this same two-repo shape that has not migrated
-    // yet; `default_ref` still names what `brain pull kronos` fetches.
+    // Both roles resolve through `kronos::spec::KronosSpec`, which tells the
+    // two repos apart by their own `config.json` content; `default_ref`
+    // names what `brain pull kronos` fetches.
     arch!("kronos", "Kronos BSQ-tokenizer candlestick model", Forecast, Brain, "brain-kronos",
           default_ref: Some("NeoQuasar/Kronos-base"),
           variants: &[
@@ -827,9 +723,8 @@ pub const ARCHS: &[Arch] = &[
     // routes the fetch by repo name instead, the same way it does for
     // Kronos's two repos. No GGUF anywhere, like `chronos2`/`kronos` above.
     // The 3.0 pretrained weights are `timesfm-non-commercial-license-v1.0`
-    // (source is Apache-2.0). No `weights_env`: timesfm3 resolves its single
-    // `weights` role through `brain_modelstore::resolve`
-    // (`crates/timesfm3/src/spec.rs`), not `BRAIN_TIMESFM3`.
+    // (source is Apache-2.0). `weights` is resolved through
+    // `crates/timesfm3/src/spec.rs`.
     arch!("timesfm3", "TimesFM-3 stacked mixing transformer (variate attention)", Forecast, Brain, "brain-timesfm3",
           default_ref: Some("google/timesfm-3.0-pytorch"),
           variants: &[
@@ -965,58 +860,16 @@ mod tests {
 
     #[test]
     fn every_fetchable_ref_parses_as_a_non_reserved_two_segment_ref() {
-        // A default_ref (or an extra_ref) names a REAL upstream repo to
+        // A default_ref names a REAL upstream repo to
         // auto-fetch, never a reserved brain/local/test vendor (those are
         // never fetched) and never a stray third path segment.
         for a in ARCHS {
-            for r in a.default_ref.iter().chain(a.extra_refs.iter()) {
+            for r in a.default_ref.iter() {
                 let (vendor, repo) = r.split_once('/').unwrap_or_else(|| panic!("{:?}: ref {r:?} has no '/'", a.id));
                 assert!(!repo.contains('/'), "{:?}: ref {r:?} has more than one '/'", a.id);
                 assert!(!matches!(vendor, "brain" | "local" | "test"), "{:?}: ref {r:?} names a reserved vendor -- reserved vendors are never fetched", a.id);
             }
         }
-    }
-
-    #[test]
-    fn extra_refs_are_distinct_from_the_default_and_imply_weights_env() {
-        for a in ARCHS {
-            if a.extra_refs.is_empty() {
-                continue;
-            }
-            // An extra ref is only ever fetched by `ensure_env_weights`, which
-            // exists to resolve `weights_env`. Listing one without the other
-            // would download a checkpoint nothing then reads.
-            assert!(a.default_ref.is_some(), "{:?}: extra_refs without a default_ref -- there is no first fetch to extend", a.id);
-            assert!(!a.weights_env.is_empty(), "{:?}: extra_refs without weights_env -- nothing would ever read the extra checkpoint", a.id);
-            let mut seen: HashSet<&str> = HashSet::new();
-            for r in a.default_ref.iter().chain(a.extra_refs.iter()) {
-                assert!(seen.insert(r), "{:?}: ref {r:?} listed twice -- it would be fetched twice", a.id);
-            }
-        }
-    }
-
-    #[test]
-    fn weights_env_roles_are_unique_within_an_arch() {
-        // `ensure_env_weights` merges the roles of every fetched ref into one
-        // map, so two roles with the same name would silently resolve to
-        // whichever repo happened to be fetched last.
-        for a in ARCHS {
-            let mut seen: HashSet<&str> = HashSet::new();
-            for (var, role) in a.weights_env {
-                assert!(seen.insert(role), "{:?}: role {role:?} claimed by more than one weights_env var (at {var})", a.id);
-            }
-        }
-    }
-
-    #[test]
-    fn kronos_resolves_its_two_upstream_repos_through_the_resolver_not_weights_env() {
-        // kronos moved off `weights_env`/`extra_refs` onto the model-store
-        // resolver (`kronos::spec::KronosSpec`) - see the row's own comment.
-        // `default_ref` still names what `brain pull kronos` fetches.
-        let k = by_id("kronos").expect("the kronos row exists");
-        assert_eq!(k.default_ref, Some("NeoQuasar/Kronos-base"));
-        assert!(k.extra_refs.is_empty());
-        assert!(k.weights_env.is_empty());
     }
 
     #[test]
@@ -1169,7 +1022,7 @@ mod tests {
 
     #[test]
     fn variant_references_are_non_reserved_two_segment_refs() {
-        // Same shape rule as default_ref/extra_refs: a Variant.reference names
+        // Same shape rule as default_ref: a Variant.reference names
         // a real upstream repo, never a reserved vendor and never a stray
         // third path segment.
         for a in ARCHS {
