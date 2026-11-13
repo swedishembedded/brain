@@ -10,6 +10,35 @@ use crate::sink::{FrameSink, Hud};
 use crate::sys;
 use std::ffi::CString;
 
+/// Which SDL renderer presents the frames.
+///
+/// Which backend can present depends on the display server, the driver and
+/// what else in the process has already touched the GPU, none of which is
+/// knowable from inside the window: the choice is a parameter of the caller,
+/// so it is reachable without a rebuild and without ambient state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Renderer {
+    /// Software, except on Wayland where only an accelerated one can present.
+    #[default]
+    Auto,
+    Software,
+    Accelerated,
+}
+
+impl Renderer {
+    /// The names [`Renderer::parse`] takes.
+    pub const NAMES: [&'static str; 3] = ["auto", "software", "accelerated"];
+
+    pub fn parse(name: &str) -> Result<Renderer, String> {
+        match name {
+            "auto" => Ok(Renderer::Auto),
+            "software" => Ok(Renderer::Software),
+            "accelerated" => Ok(Renderer::Accelerated),
+            other => Err(format!("unknown renderer '{other}' (one of: {})", Renderer::NAMES.join(", "))),
+        }
+    }
+}
+
 /// Which mouse buttons are down.
 ///
 /// Latched across pumps the same way [`KeySet`] is, because a drag is a state
@@ -65,6 +94,11 @@ impl SdlWindow {
     /// error string when no video driver is available (headless CI: run with
     /// SDL_VIDEODRIVER=dummy or skip).
     pub fn new(title: &str, fw: u32, fh: u32, scale: u32) -> Result<SdlWindow, String> {
+        SdlWindow::with_renderer(title, fw, fh, scale, Renderer::Auto)
+    }
+
+    /// [`SdlWindow::new`] presenting through `renderer`.
+    pub fn with_renderer(title: &str, fw: u32, fh: u32, scale: u32, renderer: Renderer) -> Result<SdlWindow, String> {
         sys::load()?;
         unsafe {
             if sys::SDL_Init(sys::SDL_INIT_VIDEO) != 0 {
@@ -96,17 +130,11 @@ impl SdlWindow {
                 std::ffi::CStr::from_ptr(driver).to_string_lossy().into_owned()
             };
             let wayland = driver == "wayland";
-            // `BRAIN_WM_RENDERER=software|accelerated` overrides the choice.
-            // Which backend can present depends on the display server, the
-            // driver and what else in the process has already touched the GPU,
-            // and none of that is knowable from in here - so the choice is
-            // reachable from outside without a rebuild.
-            let forced = std::env::var("BRAIN_WM_RENDERER").unwrap_or_default();
-            let want = match forced.as_str() {
-                "software" => sys::SDL_RENDERER_SOFTWARE,
-                "accelerated" => sys::SDL_RENDERER_ACCELERATED,
-                _ if wayland => sys::SDL_RENDERER_ACCELERATED,
-                _ => sys::SDL_RENDERER_SOFTWARE,
+            let want = match renderer {
+                Renderer::Software => sys::SDL_RENDERER_SOFTWARE,
+                Renderer::Accelerated => sys::SDL_RENDERER_ACCELERATED,
+                Renderer::Auto if wayland => sys::SDL_RENDERER_ACCELERATED,
+                Renderer::Auto => sys::SDL_RENDERER_SOFTWARE,
             };
 
             // A SOFTWARE renderer presents into the window's framebuffer - and

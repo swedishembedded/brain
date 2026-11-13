@@ -18,74 +18,86 @@ episodes.
 | Inference | [x] |
 | Training from scratch | [ ] |
 | LoRA fine-tune | [ ] |
-| CLI | [x] |
-| HTTP API | [ ] |
-| D-Bus | [ ] |
+| CLI (`brain diamond <action>`) | [x] |
+| HTTP API | [x] |
+| D-Bus | [x] |
 | Batched serving | [ ] |
 
 ## Getting the weights
 
-World models have no HF-style model id - you select an architecture
-directly with `--model`:
+Model id: `brain/diamond`. A world model has no HF-style model id; the
+reference checkpoint is an official Atari-100k `agent.pt`, converted once to
+brain's format:
 
-- **`fake`** (the default) - a deterministic, GPU-free test model that
-  needs no weights.
-- **`diamond`** - the real DIAMOND world model. Needs:
-  - `--weights <F.safetensors>`, produced by:
-    ```bash
-    brain diamond import --arch diamond --src <agent.pt> --out <F.safetensors> [--actions-count N]
-    ```
-    from an official Atari-100k `agent.pt` checkpoint.
-  - For the NPU path, additionally: `--onnx <F.onnx>`, produced by:
-    ```bash
-    brain diamond export --arch diamond --weights <F.safetensors> --onnx <F.onnx>
-    ```
+```bash
+brain diamond import --source <agent.pt> --dest <F.safetensors> [--actions_count N]
+```
+
+The converted file (and any checkpoint `finetune` writes) carries a `diamond`
+model card, so once it is in the model store every command finds it; or name
+one outright with `--weights <F.safetensors>`.
+
+`--model fake` (on `rollout`, `replay` and `bench`) is a deterministic,
+GPU-free test model that needs no weights.
+
+For the Intel NPU, export the UNet once and pass it as `--onnx`:
+
+```bash
+brain diamond export --dest <F.onnx>
+```
 
 ## Running it
 
+Every action's flags, defaults and bounds: `brain diamond <action> --help`.
+
 ```bash
-# windowed play (opens a window; WASD move, Enter reset, . pause, e step, [ ] quality, Esc quit)
-brain diamond play --model fake|diamond [--weights F.safetensors] [--device cpu|gpu|npu] \
-    [--onnx F.onnx] [--fps N] [--scale N] [--seed N] [--adaptive] \
-    [--record DIR] [--seed-context DIR] [--denoise-steps N]
+# headless deterministic rollout: a clip, a rollout hash that is equal for equal runs
+brain diamond rollout --action_seq 1,2,0 --seed $RANDOM --out clip=rollout.mp4 \
+    [--model diamond|fake] [--frames N] [--actions <file>] [--fps N] [--hashes] \
+    [--record DIR] [--dump_ppm DIR] [--seed_context DIR] [--denoise_steps N] [--onnx F.onnx]
 
-# headless deterministic rollout
-brain diamond play --headless --frames N [--actions FILE | --action-seq 1,2,0] \
-    [--dump-ppm DIR] [--hashes]
+# replay a recorded episode dataset, optionally verifying it against a live model
+brain diamond replay --episode DIR [--verify --seed <the recording's seed> --denoise_steps N --context N --tolerance T]
 
-# replay a recorded episode, optionally verifying it against a live model
-brain diamond replay --episode DIR [--verify --model fake|diamond [--weights F] \
-    [--device cpu|gpu|npu] [--onnx F.onnx] [--seed N] [--denoise-steps N] \
-    [--context N] [--tolerance T]]
-
-# headless throughput benchmark
-brain diamond bench --model fake|diamond [--weights F] [--onnx F.onnx] [--frames N] [--seed N]
+# throughput, or the per-kernel time of one UNet forward
+brain diamond bench [--model diamond|fake] [--frames N] [--onnx F.onnx] [--profile]
 
 # fine-tune on a recorded episode dataset
-brain diamond finetune --weights <base.safetensors> --data <episode-dir> --out <tuned.safetensors> \
-    [--steps N] [--lr F] [--wd F] [--clip F] [--seed N] [--device cpu|gpu] \
-    [--activations keep|recompute]
+brain diamond finetune --data <episode-dir> --save <tuned.safetensors> --seed $RANDOM \
+    [--steps N] [--lr F] [--wd F] [--clip F] [--activations keep|recompute]
 ```
 
-## Options
+The interactive window is the `play` workflow of `samples/models/diamond`
+(Space fires, A/D or the arrows move, Enter resets, `.` pauses, `e` steps,
+`[` `]` change the quality, Esc quits):
 
-- `play`: `--device cpu|gpu|npu`, `--onnx <file>` (NPU only), `--fps <n>`,
-  `--scale <n>`, `--seed <n>`, `--adaptive`, `--record <dir>` (save an
-  episode as you play), `--seed-context <dir>`, `--denoise-steps <n>`.
-- `play --headless`: `--frames <n>`, `--actions <file>` or
-  `--action-seq <list>`, `--dump-ppm <dir>`, `--hashes`.
-- `replay`: `--episode <dir>`, `--verify` plus the same model/device flags,
-  `--context <n>`, `--tolerance <t>`.
-- `bench`: `--frames <n>`, `--seed <n>`; add `--profile` with `--weights`
-  and `--device` for a per-stage timing breakdown.
-- `finetune`: `--steps` (default 300), `--lr` (default 1e-4), `--wd`
-  (default 1e-2), `--clip` (default 1.0), `--seed` (default: drawn at random and printed), `--device`.
-  Trains an episode dataset produced by `brain data gen` or `brain diamond play
-  --record`; refuses to save a run that diverged (NaN/inf loss).
+```bash
+make samples/models/diamond/run ARGS="play --model diamond --scale 10 [--record DIR] [--renderer auto|software|accelerated]"
+```
+
+## Behavior
+
+- A rollout is deterministic for one model, `seed`, `denoise_steps` and action
+  script; `replay --verify` regenerates a recording and compares it frame by
+  frame, so the same `seed` and `denoise_steps` as at record time are what
+  makes it match. `--context N` skips the first N steps and starts verifying
+  from recorded frames (DIAMOND only; the fake model verifies from 0).
+- A rollout returns at most 2048 frames as one clip; record longer sessions
+  with the window.
+- `finetune` trains an episode dataset recorded by `rollout --record`, the
+  window's `--record` or `brain data gen`; it stops between steps when
+  cancelled and refuses to save a run whose loss diverged (NaN/inf) - lower
+  `--lr` (batch-1 fine-tuning is sensitive). `--seed` omitted draws a random
+  seed, which the run reports.
+- `--onnx` runs the UNet as a compiled OpenVINO graph on the Intel NPU with
+  the sampler on the host; there is no `--device npu`.
 
 ## Hardware and limits
 
-- CLI only (`brain diamond ...`) - no D-Bus and no HTTP route.
+- Served over HTTP and D-Bus like every model; the actions that read or write
+  a path on the machine (`import`, `export`, `finetune`, the `record`,
+  `dump_ppm`, `actions`, `seed_context` and `onnx` params) run on the host
+  only.
 - Fine-tuning is a full fine-tune of the model; there is no LoRA or QLoRA
   path.
 - One episode at a time - no batch-serving of multiple simulations.

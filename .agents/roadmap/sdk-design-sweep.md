@@ -36,7 +36,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | Embedding towers | 3 | 3 | none | **no CLI at all** - `resident_clip/arcface/t5encoder.rs` | no |
 | Forecasting | 4 | 0 (CLI-local) | none | **one unified entry**: `forecast_cli.rs` + generic `resident_forecast.rs` | yes (`brain forecast finetune`) |
 | 3D/scene | 2 | 0 (CLI-local) | none | `splat_cli.rs`, `mirror_cli.rs` | no |
-| World models | 2 | 0 | none | `wm_cli.rs` | no |
+| World models | 2 | 0 | none | `brain/diamond` served actions + `samples/models/diamond` | yes (`brain diamond finetune`) |
 | Toy (excluded from `brain caps`) | 4 | 0 | n/a | `pid_cli.rs` | n/a |
 | Creature (unregistered) | 0 | 0 | **YES - `Creature`** | none (see rule-2 exception in sdk-design.md) | n/a |
 

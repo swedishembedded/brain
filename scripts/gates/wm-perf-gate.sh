@@ -23,12 +23,13 @@ export DISPLAY=
 [ -x "$BIN" ] || { echo "build first: make build/release"; exit 2; }
 [ -f "$WEIGHTS" ] || { echo "missing $WEIGHTS (brain diamond import ...)"; exit 2; }
 
-best_ms() { # "device [extra args]" -> best mean ms/frame over RUNS
+best_ms() { # "flags placing the run" -> best mean ms/frame over RUNS
   local dev="$1" best=999999 ms
   for _ in $(seq "$RUNS"); do
+    # `--device npu` is not a brain device: the NPU runs the ONNX export, named by --onnx.
     # shellcheck disable=SC2086
-    ms=$($BIN diamond bench --model diamond --weights "$WEIGHTS" --device $dev --frames 15 \
-      | sed -n 's/.*ms_per_frame_mean=\([0-9.]*\).*/\1/p')
+    ms=$($BIN diamond bench --model diamond --weights "$WEIGHTS" $dev --frames 15 \
+      | sed -n 's/^ms_per_frame_mean: *\([0-9.]*\).*/\1/p')
     ms=${ms%.*}
     [ "$ms" -lt "$best" ] && best=$ms
   done
@@ -38,10 +39,10 @@ best_ms() { # "device [extra args]" -> best mean ms/frame over RUNS
 NPU_ONNX=out/diamond.onnx
 npu_ms=""
 if [ -f "$NPU_ONNX" ]; then
-  npu_ms=$(best_ms "npu --onnx $NPU_ONNX")
+  npu_ms=$(best_ms "--onnx $NPU_ONNX")
 fi
-cpu_ms=$(best_ms cpu)
-gpu_ms=$(best_ms gpu)
+cpu_ms=$(best_ms "--device cpu")
+gpu_ms=$(best_ms "--device gpu")
 echo "measured best-of-$RUNS: cpu=${cpu_ms}ms gpu=${gpu_ms}ms npu=${npu_ms:-n/a}ms per frame (3 denoise steps)"
 
 if [ "${1:-}" = "--update" ]; then

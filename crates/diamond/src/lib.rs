@@ -11,18 +11,24 @@
 //! - [`model`]: the UNet as one pre-recorded brain kernel graph.
 //! - [`import`]: torch `.pt` -> `.safetensors` with full-coverage validation.
 //! - [`play`]: the context ring + Euler denoising loop behind the trait.
+//! - [`caps`]: the served actions (`brain/diamond`); [`worldrun`]: headless
+//!   rollout, replay verification and timing; [`spec`]: how the model store
+//!   recognizes a checkpoint.
 //! - [`npu`]: fp32 ONNX export + the OpenVINO (Intel NPU) playback path.
 //!
 //! Reference: the DIAMOND repo (github.com/eloialonso/diamond, MIT).
 //! Parity fixtures: `make wm/fixtures`.
 
+pub mod caps;
 pub mod cond;
 pub mod config;
 pub mod import;
 pub mod model;
 pub mod npu;
 pub mod play;
+pub mod spec;
 pub mod train;
+pub mod worldrun;
 
 pub use config::DiamondConfig;
 pub use model::{DiamondUNet, Tensors};

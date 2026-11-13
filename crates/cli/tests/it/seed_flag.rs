@@ -63,9 +63,9 @@ const SEEDED_VERBS: &[&[&str]] = &[
     &["yolov8", "train"],
     &["zipdepth", "train", "--save", "s"],
     &["toypid", "train", "--save", "s"],
-    &["diamond", "finetune", "--weights", "w", "--data", "d", "--out", "o"],
-    &["diamond", "play"],
-    &["diamond", "bench"],
+    &["diamond", "finetune", "--data", "d", "--save", "s"],
+    &["diamond", "rollout", "--model", "fake"],
+    &["diamond", "bench", "--model", "fake"],
 ];
 
 /// Verbs that stop at a usage error with no further arguments, without

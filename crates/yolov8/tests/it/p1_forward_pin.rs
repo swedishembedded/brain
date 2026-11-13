@@ -30,7 +30,7 @@
 //! OR a different host microarchitecture. The failure prints the leading values
 //! so the two are distinguishable: a real change moves them visibly; a microarch
 //! difference shows up in the last ulp. Same trade-off the repo already accepts
-//! for `brain wm play --hashes` rollout goldens.
+//! for the world-model rollout hash goldens.
 
 use model::Model;
 use yolov8::{LossMode, Yolo, YoloConfig};

@@ -610,6 +610,12 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None,
         },
         ModelEntry {
+            manifest: diamond::caps::manifest,
+            provider: diamond::caps::provider,
+            spec: Some(("diamond", &diamond::spec::DiamondSpec)),
+            resident: None,
+        },
+        ModelEntry {
             manifest: zipdepth::caps::manifest,
             provider: zipdepth::caps::provider,
             spec: Some(("zipdepth", &zipdepth::spec::ZipdepthSpec)),

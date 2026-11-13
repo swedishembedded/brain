@@ -876,6 +876,7 @@ dependencies = [
  "brain-deepseekocr2",
  "brain-deepseekvl",
  "brain-dflash2",
+ "brain-diamond",
  "brain-events",
  "brain-fastvlm",
  "brain-fincast",
@@ -1011,7 +1012,6 @@ dependencies = [
  "brain-deepseek2ocr",
  "brain-deepseekocr2",
  "brain-deepseekvl",
- "brain-diamond",
  "brain-ecapatdnn",
  "brain-eval",
  "brain-events",
@@ -1089,8 +1089,6 @@ dependencies = [
  "brain-vqgan",
  "brain-vulkan",
  "brain-wan",
- "brain-wm-core",
- "brain-wm-display",
  "brain-yolov8",
  "clap",
  "crossterm",
@@ -1382,10 +1380,14 @@ dependencies = [
 name = "brain-diamond"
 version = "5.1.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
+ "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-npu",
  "brain-onnx",
  "brain-optim",
@@ -1393,6 +1395,7 @@ dependencies = [
  "brain-testutil",
  "brain-vae",
  "brain-wm-core",
+ "brain-wm-display",
  "serde_json",
 ]
 
@@ -6861,6 +6864,16 @@ name = "sample-learning-visualclick"
 version = "5.1.0"
 dependencies = [
  "brain",
+]
+
+[[package]]
+name = "sample-models-diamond"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-diamond",
+ "brain-invoke",
+ "brain-wm-display",
 ]
 
 [[package]]

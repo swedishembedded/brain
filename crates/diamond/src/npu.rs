@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Intel-NPU (OpenVINO whole-graph) path for DIAMOND: export the UNet inner
-//! model to fp32 ONNX (`brain wm export`) and play it back through
+//! model to fp32 ONNX (the served `export` action) and play it back through
 //! `npu::wm_topology::WmSession` with the sampler staying host-side.
 //!
 //! Split of responsibilities, mirroring `DiamondUNet::denoise_frame`:
@@ -12,8 +12,8 @@
 //!     `F(noisy_scaled, obs_rescaled, cond)`.
 //!
 //! [`DiamondNpuWorldModel`] duplicates the small context-ring logic of
-//! [`crate::play::DiamondWorldModel`] (kept simple on purpose) so `brain wm
-//! play/bench --model diamond --device npu --onnx F.onnx` is a drop-in.
+//! [`crate::play::DiamondWorldModel`] (kept simple on purpose) so the served
+//! `rollout`, `replay` and `bench` actions take it as a drop-in (`onnx`).
 
 use crate::cond::{build_sigmas, conditioners, CondNet};
 use crate::config::DiamondConfig;
@@ -65,7 +65,7 @@ pub fn build_onnx_bytes(cfg: &DiamondConfig, tensors: &Tensors) -> Vec<u8> {
     g.finish()
 }
 
-/// `brain wm export`: `.safetensors` -> fp32 ONNX at `out_path`.
+/// The served `export`: `.safetensors` -> fp32 ONNX at `out_path`.
 pub fn export_onnx(weights_path: &str, out_path: &str) -> Result<DiamondConfig, String> {
     let (cfg, tensors) = crate::import::load(weights_path)?;
     std::fs::write(out_path, build_onnx_bytes(&cfg, &tensors))
@@ -82,7 +82,7 @@ pub struct DiamondNpu {
 
 impl DiamondNpu {
     /// Load `.safetensors` (config + host conditioning tensors) and compile
-    /// `onnx_path` (from `brain wm export`) for the configured device.
+    /// `onnx_path` (from the served `export`) for the configured device.
     pub fn load(weights_path: &str, onnx_path: &str, ov: &NpuConfig) -> Result<DiamondNpu, String> {
         let (cfg, tensors) = crate::import::load(weights_path)?;
         Self::new(cfg, &tensors, onnx_path, ov)

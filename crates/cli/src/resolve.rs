@@ -43,10 +43,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("qwen35moe", crate::qwen35moe_cli::run_qwen35moe),
     ("qwen3omnimoe", crate::omni_cli::run_omni),
     ("glmdsa", crate::glm_cli::run_glm),
-    // wm_cli's own `--arch`/`--model` flags (not this resolver) pick
-    // fake-vs-diamond within `play`/`import`/`export` -- diamond is its one
-    // real served architecture, so that's the id this dispatches from.
-    ("diamond", crate::wm_cli::run_wm),
 ];
 
 /// The catalog model id an [`ARCH_HANDLERS`] architecture ALSO registers under
@@ -120,6 +116,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("ltxv", "brain/ltxv"),
     ("splat", "brain/splat"),
     ("zipdepth", "brain/zipdepth"),
+    ("diamond", "brain/diamond"),
     ("worldmirror2", "brain/worldmirror2"),
     ("lfm2", "brain/lfm2"),
     ("deepseekvl", "brain/deepseekvl"),
@@ -342,6 +339,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "nemotronasr",
     "sam2",
     "zipdepth",
+    "diamond",
     "worldmirror2",
     "lfm2",
     "yolov8",
@@ -1086,8 +1084,8 @@ mod tests {
     /// existed.
     #[test]
     fn verb_is_known_has_no_opinion_on_an_ungated_handler() {
-        assert_eq!(verb_is_known("diamond", "t2i"), None);
-        assert_eq!(verb_is_known("diamond", "play"), None);
+        assert_eq!(verb_is_known("glmdsa", "t2i"), None);
+        assert_eq!(verb_is_known("glmdsa", "infer"), None);
     }
 
     /// The actual gate `dispatch_arch` consults before calling
@@ -1113,8 +1111,8 @@ mod tests {
     fn wants_weight_acquisition_still_proceeds_for_every_real_verb() {
         // An arch with no verb table entry is unaffected: unchanged
         // (pre-existing) behavior, gated only by help/no-verb.
-        assert!(wants_weight_acquisition("diamond", &s(&["t2i"])));
-        assert!(wants_weight_acquisition("diamond", &s(&["play"])));
+        assert!(wants_weight_acquisition("glmdsa", &s(&["t2i"])));
+        assert!(wants_weight_acquisition("glmdsa", &s(&["infer"])));
     }
 
     /// `ARCH_TO_MODEL` architectures validate against their own capability

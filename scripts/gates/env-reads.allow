@@ -1077,7 +1077,6 @@ crates/wm-core/tests/it/conv_bwd.rs	MOE_SKIP_GPU_TESTS
 crates/wm-core/tests/it/dwconv3d.rs	MOE_SKIP_GPU_TESTS
 crates/wm-core/tests/it/gn_multigroup.rs	MOE_SKIP_GPU_TESTS
 crates/wm-core/tests/it/l2norm_scale.rs	MOE_SKIP_GPU_TESTS
-crates/wm-display/src/window.rs	BRAIN_WM_RENDERER
 crates/worldmirror2/tests/it/t0_param_layout.rs	MIRROR_CKPT
 crates/worldmirror2/tests/it/t10_reconstruction_quality.rs	BRAIN_DUMP_DIR
 crates/worldmirror2/tests/it/t10_reconstruction_quality.rs	BRAIN_WORLDMIRROR2_WEIGHTS

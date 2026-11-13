@@ -231,7 +231,7 @@ impl Policy {
 }
 
 /// Frames per second recorded in the dataset meta (matches the default
-/// `brain wm play` pacing).
+/// the world-model play pacing).
 const FPS: u32 = 15;
 
 /// Roll `episodes` episodes of `steps_per_episode` steps under `policy` and

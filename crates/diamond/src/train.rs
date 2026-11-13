@@ -909,24 +909,43 @@ pub struct Transition {
     pub actions: Vec<u32>,
 }
 
-/// Fine-tune loop over a transition sampler (the CLI glues an episode
-/// dataset in; tests use synthetic closures). Returns (first, last) loss.
-#[allow(clippy::too_many_arguments)]
+/// The optimizer schedule of one [`finetune`] run.
+#[derive(Clone, Copy, Debug)]
+pub struct FinetuneConfig {
+    pub steps: u32,
+    pub lr: f32,
+    pub weight_decay: f32,
+    /// Gradient-norm clip; `None` leaves gradients unclipped.
+    pub clip: Option<f32>,
+    pub seed: u64,
+}
+
+/// How a [`finetune`] run ended.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FinetuneEnd {
+    pub first_loss: f32,
+    pub last_loss: f32,
+    /// Optimizer steps actually taken.
+    pub steps_run: u32,
+    /// The step callback asked to stop before `steps` were taken.
+    pub stopped: bool,
+}
+
+/// Fine-tune loop over a transition sampler (the served `finetune` glues an
+/// episode dataset in; tests use synthetic closures). `on_step(step, loss)`
+/// runs after every optimizer step and returns whether to go on; the loop
+/// also ends at once on a non-finite loss, which the caller must not save.
 pub fn finetune(
     tr: &DiamondTrainer,
     mut sample: impl FnMut(&mut crate::play::NormalRng) -> Transition,
-    steps: u32,
-    lr: f32,
-    weight_decay: f32,
-    clip: Option<f32>,
-    seed: u64,
-    mut on_log: impl FnMut(u32, f32),
-) -> (f32, f32) {
-    let mut rng = crate::play::NormalRng::new(seed);
+    cfg: &FinetuneConfig,
+    mut on_step: impl FnMut(u32, f32) -> bool,
+) -> FinetuneEnd {
+    let mut rng = crate::play::NormalRng::new(cfg.seed);
     let dist = SigmaDist::default();
     let n_px = tr.n_px as usize;
-    let (mut first, mut last) = (f32::NAN, f32::NAN);
-    for t in 1..=steps {
+    let mut end = FinetuneEnd { first_loss: f32::NAN, last_loss: f32::NAN, steps_run: 0, stopped: false };
+    for t in 1..=cfg.steps {
         let tx = sample(&mut rng);
         let sigma = dist.sample(&mut rng);
         let noise: Vec<f32> = (0..n_px).map(|_| rng.normal()).collect();
@@ -934,28 +953,28 @@ pub fn finetune(
         tr.zero_grads();
         let loss = tr.forward_loss();
         tr.backward();
-        tr.adamw_step(t, lr, weight_decay, clip);
-        if first.is_nan() {
-            first = loss;
+        tr.adamw_step(t, cfg.lr, cfg.weight_decay, cfg.clip);
+        if end.first_loss.is_nan() {
+            end.first_loss = loss;
         }
-        last = loss;
-        if t % 25 == 0 || t == 1 || t == steps {
-            on_log(t, loss);
-        }
+        end.last_loss = loss;
+        end.steps_run = t;
+        // Divergence: stop immediately - continuing would only burn time.
         if !loss.is_finite() {
-            // Divergence: stop immediately — continuing would only burn time
-            // and the caller must NOT save these weights.
-            on_log(t, loss);
+            break;
+        }
+        if !on_step(t, loss) {
+            end.stopped = t < cfg.steps;
             break;
         }
     }
-    (first, last)
+    end
 }
 
 impl DiamondTrainer {
     /// Save the fine-tuned model as a standard DIAMOND `.safetensors` (trained
     /// convs from the ParamStore merged over the frozen base tensors), so
-    /// `brain wm play --model diamond` loads it unchanged.
+    /// it loads like an imported checkpoint and the model store finds it.
     pub fn save(&self, base: &Tensors, path: &str) -> Result<(), String> {
         let merged = self.export_tensors(base);
         let mut out: Vec<(String, Vec<u64>, Vec<f32>)> = vec![];
@@ -968,7 +987,7 @@ impl DiamondTrainer {
         }
         let config: serde_json::Value = serde_json::from_str(&self.cfg.to_json())
             .map_err(|e| format!("config json: {e}"))?;
-        checkpoint::save(path, config, &out);
+        checkpoint::save_carded(path, config, &out, &crate::import::card());
         Ok(())
     }
 }

@@ -43,6 +43,7 @@ brain-llava.workspace = true
 brain-qwen3vl.workspace = true
 brain-yolov8.workspace = true
 brain-yolov8-faces.workspace = true
+brain-diamond.workspace = true
 brain-zipdepth.workspace = true
 brain-sam2.workspace = true
 brain-lpips.workspace = true

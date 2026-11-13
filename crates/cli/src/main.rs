@@ -59,13 +59,9 @@ mod run_record;
 mod serve_daemon;
 mod supply;
 mod tree;
-/// `brain tts serve`: a Unix domain socket server, so Unix only.
-#[cfg(unix)]
-mod wm_cli;
-
 /// Whether `--device`/`BRAIN_DEVICE` EXPLICITLY named the NPU. The NPU is a
 /// whole-graph (OpenVINO) path, not a `gpu_core` backend, so the commands that
-/// support it (`brain yolo detect`, `glm infer`, `wm play`, `qwen infer`,
+/// support it (`brain yolo detect`, `glm infer`, `qwen infer`,
 /// `tts clone`/`synth`/`design`) consult this instead of a `gpu_core` backend
 /// check. Reads the SAME resolved `ComputeSet` every other caller reads
 /// (`gpu_core::ambient_compute_set()` - published by `select_backend` below
@@ -86,7 +82,7 @@ Both orders are the SAME command - `brain train gpt2 ...` and `brain gpt2
 train ...` dispatch identically. `brain caps` lists every architecture brain
 knows about, along with its actions (its \"verbs\"). An architecture with its
 own dedicated flags (gpt2, qwen3, qwen35, qwen35moe, glmdsa, lfm2,
-yolov8, zipdepth, flux2, wan, worldmirror2, splat, qwen3omnimoe, diamond,
+yolov8, zipdepth, flux2, wan, worldmirror2, splat, qwen3omnimoe,
 toypid, toymoe)
 is documented below; every other one (`brain caps` shows the full list -
 s3dit, fastvlm, qwen3vl, sam2, scrfd, arcface, vqgan, codeformer, rrdbnet,
@@ -267,11 +263,13 @@ WAN 2.1 (text-to-video; 81 frames at 16 fps, 480p on the 1.3B variant)
   brain wan lora_train --data <dir> --save adapter.brain --seed S [--report <dir>]
       every parameter: brain wan <action> --help; --dit/--vae/--text-encoder/--tokenizer name a role
 
-World models (playable action-conditioned video models; docs/reference/models/world-models/)
-  brain diamond play  --model fake|diamond [--weights F --device cpu|gpu|npu --onnx M]   # SDL window
-  brain diamond play  --model fake --headless --frames N [--actions FILE | --action-seq 1,2,0]
-                 [--dump-ppm DIR] [--hashes]        # deterministic rollout + fnv1a hashes (CI)
-  brain diamond bench --model fake [--frames N]          # ms/frame + fps
+DIAMOND world model (brain/diamond; the interactive window and the ONNX/NPU export are samples/models/diamond)
+  brain diamond import --source agent.pt --dest diamond.safetensors [--actions_count N]
+  brain diamond rollout [--model diamond|fake] --action_seq 1,2,0 --seed S --out clip=rollout.mp4 [--record DIR --dump_ppm DIR --hashes]
+  brain diamond replay --episode DIR [--verify --model diamond|fake --seed S --tolerance T --context N]
+  brain diamond bench [--model diamond|fake] [--frames N --profile]       # ms/frame + fps
+  brain diamond finetune --data <episode-dir> --save tuned.safetensors --seed S [--steps N --lr X --wd X --clip X]
+      every parameter: brain diamond <action> --help; --weights names the checkpoint
 
 WorldMirror-2 (brain/worldmirror2: multi-view images to a 3D Gaussian Splatting scene; samples/models/worldmirror2)
   brain worldmirror2 import --source <model.safetensors|hf_dir> --dest mirror.safetensors

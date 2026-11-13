@@ -18,6 +18,15 @@ use std::collections::HashMap;
 
 const PREFIX: &str = "denoiser.inner_model.";
 
+/// The family a brain-format DIAMOND checkpoint declares in its card, which
+/// is how the model store recognizes one ([`crate::spec::DiamondSpec`]).
+pub const CARD_FAMILY: &str = "diamond";
+
+/// The card an imported or fine-tuned checkpoint is written with.
+pub fn card() -> checkpoint::st::ModelCard {
+    checkpoint::st::ModelCard::new(crate::caps::MODEL, CARD_FAMILY)
+}
+
 /// Import `src` (.pt) to `out` (.safetensors). `num_actions` must match the game
 /// (Breakout: 4); it is validated against the embedding shape.
 pub fn import(src: &str, out: &str, num_actions: u32) -> Result<DiamondConfig, String> {
@@ -80,7 +89,7 @@ pub fn import(src: &str, out: &str, num_actions: u32) -> Result<DiamondConfig, S
 
     let config: serde_json::Value = serde_json::from_str(&cfg.to_json())
         .map_err(|e| format!("config json: {e}"))?;
-    checkpoint::save(out, config, &tensors);
+    checkpoint::save_carded(out, config, &tensors, &card());
     Ok(cfg)
 }
 

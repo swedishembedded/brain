@@ -1,0 +1,22 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/diamond` -> `sample-models-diamond`.
+name = "sample-models-diamond"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: the DIAMOND Atari world model from the command line - import, export, finetune, rollout, replay and bench with every parameter - plus an interactive play window."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-diamond.workspace = true
+brain-invoke.workspace = true
+brain-capability.workspace = true
+# The play window and the episode recorder it tees into.
+brain-wm-display.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 76

@@ -11,4 +11,5 @@ mod graph_snapshot;
 mod parity;
 mod recompute;
 mod reset;
+mod served;
 mod train;

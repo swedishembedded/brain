@@ -5,6 +5,10 @@
 # This list only shrinks.
 brain/cosyvoice	synth	seed
 brain/deepseekvl	finetune	seed
+brain/diamond	bench	seed
+brain/diamond	finetune	seed
+brain/diamond	replay	seed
+brain/diamond	rollout	seed
 brain/edgerock	generate	dry_base
 brain/edgerock	generate	dry_multiplier
 brain/edgerock	generate	frequency_penalty

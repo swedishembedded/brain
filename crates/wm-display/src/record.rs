@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Recording sink: tee play-session frames into an episode dataset
-//! (`data::episode`), so any `brain wm play` run doubles as training-data
-//! collection.
+//! (`data::episode`), so any windowed `play` or headless `rollout` run
+//! doubles as training-data collection.
 //!
 //! [`RecorderSink`] wraps [`data::episode::EpisodeWriter`]: each
 //! [`FrameSink::frame`] call converts the interleaved RGB8 frame to CHW `u8`

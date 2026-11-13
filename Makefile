@@ -1310,8 +1310,8 @@ wm:
 # The SDL window is always compiled into the standard build; libSDL2 is
 # loaded only when a run opens it.
 ## wm/play - play the fake world model in an SDL window (WASD)
-wm/play: build/release
-	./target/release/brain diamond play --model fake
+wm/play: samples/models/diamond/build
+	$(MAKE) samples/models/diamond/run ARGS="play --model fake"
 
 # Regenerate the DIAMOND parity fixtures (gitignored - never committed) from
 # the reference implementation (resources/world-models/repos/diamond, or set

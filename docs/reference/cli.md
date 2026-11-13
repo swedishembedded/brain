@@ -60,7 +60,7 @@ brain infer scrfd --in image=photo.ppm --json     # identical, verb-first order
 
 Architectures with their own dedicated flags and a longer verb vocabulary
 (`gpt2`, `qwen3`, `qwen35moe`, `glmdsa`, `lfm2`, `yolov8`,
-`zipdepth`, `flux2`, `worldmirror2`, `splat`, `qwen3omnimoe`, `diamond`,
+`zipdepth`, `flux2`, `worldmirror2`, `splat`, `qwen3omnimoe`,
 `toypid`, `toymoe`) are documented in full by `brain help` and
 `brain <architecture> --help`; every other architecture (`brain caps` lists
 them all - `s3dit`, `fastvlm`, `qwen3vl`, `sam1`, `sam2`, `scrfd`, `arcface`,
