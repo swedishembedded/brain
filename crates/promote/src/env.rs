@@ -18,10 +18,12 @@
 //! run artifact - no model-as-judge, no network call, no nondeterministic
 //! source anywhere in an impl - so a promote/reject decision made from a
 //! reward is always re-derivable later from the same artifact. This is
-//! also why [`Task::answer`] carries only what a verifier needs to
-//! *recompute* the correct answer, never the answer itself: an answer
-//! sitting in `Task` would be indistinguishable from a label, and nothing
-//! that looks like a label may reach training data.
+//! also why [`Task::answer`] holds whatever a verifier needs to *recompute*
+//! correctness. Some families keep only a digest or a target there
+//! (document tasks); others keep the expected answer itself (the exact-match
+//! and `rl::verify::MathAnswer` verifiers read it straight from
+//! `Task::answer`). Either way it is verifier-side material: it is scored
+//! against, and a caller must not copy it into training data as a label.
 //!
 //! ## Single-turn by default, multi-step supported
 //!
@@ -50,10 +52,10 @@ use serde::{Deserialize, Serialize};
 
 /// One task instance: a prompt to present to a policy, plus the material a
 /// [`Verifier`] needs to recompute whether a completion is correct.
-/// `answer` is deliberately named for what it enables (recomputation), not
-/// what it contains - it never carries the answer itself, only e.g. a
-/// target value, a reference program, or a checksum a verifier evaluates
-/// against.
+/// `answer` is named for what it enables (recomputation), not what it
+/// contains: depending on the task family that is the expected answer itself
+/// (a token array, a number), a target value, a reference program, or a
+/// digest a verifier evaluates against.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     /// Stable identifier for this task instance, e.g. for re-scoring a
@@ -61,8 +63,9 @@ pub struct Task {
     pub id: String,
     /// Token ids presented to the policy as the prompt.
     pub prompt: Vec<u32>,
-    /// Whatever a [`Verifier`] needs to recompute correctness - never the
-    /// answer itself. See the module doc comment.
+    /// Whatever a [`Verifier`] needs to recompute correctness: the expected
+    /// answer itself or a digest/target of it, per task family. See the
+    /// module doc comment.
     pub answer: serde_json::Value,
 }
 
