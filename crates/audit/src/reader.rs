@@ -48,9 +48,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bank::{Probe, ProbeConfig, ProbeSet, SpanSelector, UniformSelector};
 use crate::growth::{Action, Diagnosis, Growth, GrowthConfig};
-use crate::pool::{AdapterId, Pool, PoolConfig};
-#[cfg(test)]
-use crate::pool::State;
+use crate::pool::{AdapterId, Pool, PoolConfig, State};
 use crate::reservoir::{Reservoir, ReservoirConfig};
 use crate::retention::Retention;
 use crate::schedule::{block_drop_bar, AuditConfig, Schedule};
@@ -583,6 +581,19 @@ impl<L: Learner> Reader<L> {
             }
         }
 
+        // An archived adapter is retired from the pool, not from the audit:
+        // its probes are still banked and the schedule still plans its block
+        // (see `Schedule`: any earlier episode is re-checked within `L`).
+        // Being asked for again is exactly what resurrection is for, and
+        // demand for an archived id would otherwise be ignored by `select`.
+        for (id, _) in &audit_blocks {
+            let id = AdapterId(id.as_str().to_string());
+            if self.pool.entry(&id).is_some_and(|e| e.state == State::Archived) {
+                if let Err(e) = self.pool.resurrect(&id) {
+                    eprintln!("audit: resurrecting {} for its audit block failed: {e}", id.as_str());
+                }
+            }
+        }
         // Demand is what asked for an adapter this episode: each re-checked
         // block decodes under its own, and the episode that has just been
         // promoted wants the adapter it made. Everything else is not wanted
@@ -1165,6 +1176,37 @@ mod tests {
             let idle = pool.now().saturating_sub(e.last_seen);
             assert!(idle < 3 || pool.slots().iter().flatten().any(|s| *s == e.id), "{:?} idle for {idle} episodes and still live", e.id);
         }
+    }
+
+    /// Retiring an adapter does not retire its episode from the audit: the
+    /// schedule's claim is that a regression on ANY earlier episode is caught
+    /// within `L` steps, and its probes stay in the bank. So a block the
+    /// schedule plans must have its adapter back in the pool, resurrected
+    /// from the archive, rather than being decoded against a pool that no
+    /// longer has it.
+    #[test]
+    fn a_retired_adapter_whose_block_is_planned_again_is_resurrected() {
+        let d = Dir::new();
+        let mut c = cfg();
+        c.audit = AuditConfig { budget: 24, probes_per_block: 8, canary_blocks: 1, canary_refresh: 8 };
+        c.pool = PoolConfig { resident: 1, margin: 0.1, dwell: 0, survival: 2 };
+        let pool = Pool::create(&d.0, c.pool).expect("pool");
+        let mut r = Reader::new(c, Fake { loss: 1.5, wins: 64, ..Default::default() }, pool);
+        let mut resurrected = 0;
+        for i in 0..40 {
+            let planned: Vec<AdapterId> = r.schedule.clone().plan().blocks().into_iter().map(|b| AdapterId(b.as_str().to_string())).collect();
+            let archived_before = planned.iter().filter(|a| r.pool().entry(a).map(|x| x.state) == Some(State::Archived)).count();
+            // An episode refused before the audit never decodes a block, so
+            // nothing is asked of the pool and nothing is owed to it.
+            if r.step(&episode(&format!("z{i}"), 60)).audited == 0 {
+                continue;
+            }
+            resurrected += archived_before;
+            for a in &planned {
+                assert_eq!(r.pool().entry(a).map(|x| x.state), Some(State::Live), "step {i}: {a:?} was planned for audit and must be live, not archived");
+            }
+        }
+        assert!(resurrected > 0, "the fixture must have planned an archived adapter, or this proves nothing");
     }
 
     /// No block re-checked is no anchor evidence: not a regression, and not a

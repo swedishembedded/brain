@@ -80,8 +80,8 @@ pub struct PoolEntry {
     pub state: State,
     /// Episode index when it joined the pool.
     pub born: u64,
-    /// Episode index when it was last IN the working set. What staleness is
-    /// measured from.
+    /// Episode index when it was last addressed: in the working set, or asked
+    /// for by demand without winning a slot. What staleness is measured from.
     pub last_seen: u64,
     /// Episode index when it last ENTERED the working set. What dwell
     /// protection is measured from, and deliberately not the same question as
@@ -233,7 +233,8 @@ impl Pool {
     ///
     /// An adapter absent from `demand` is simply not wanted this episode; it
     /// is not thereby evicted, since a resident is only displaced by a
-    /// candidate that beats it.
+    /// candidate that beats it. One with positive demand counts as addressed
+    /// for retirement even when it won no slot.
     pub fn select(&mut self, demand: &BTreeMap<AdapterId, f64>) -> Vec<AdapterId> {
         let want = |id: &AdapterId| demand.get(id).copied().unwrap_or(0.0);
 
@@ -285,11 +286,20 @@ impl Pool {
             next.next();
         }
 
-        // Being in the working set IS being addressed, which is what
-        // staleness is measured from. `admitted` moves only for an adapter
-        // that actually entered this episode, so dwell protects a newcomer
+        // Being asked for IS being addressed, which is what staleness is
+        // measured from, whether or not there was a slot to serve it from:
+        // an adapter wanted this episode and left out for want of room has
+        // not gone unaddressed. `admitted` moves only for an adapter that
+        // actually entered this episode, so dwell protects a newcomer
         // rather than everything that stayed.
         let now = self.now;
+        for (id, &w) in demand {
+            if w > 0.0 {
+                if let Some(e) = self.entries.get_mut(id).filter(|e| e.state == State::Live) {
+                    e.last_seen = now;
+                }
+            }
+        }
         let entered: Vec<AdapterId> = loaded.clone();
         for id in self.slots.clone().into_iter().flatten() {
             if let Some(e) = self.entries.get_mut(&id) {
