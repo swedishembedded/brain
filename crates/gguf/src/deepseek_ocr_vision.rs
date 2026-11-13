@@ -121,7 +121,8 @@ pub struct DeepseekOcrVisionConfig {
     pub projection_dim: u32,
     pub image_mean: Vec<f32>,
     pub image_std: Vec<f32>,
-    /// `clip.use_gelu`; false means the quick-GELU variant.
+    /// `clip.use_gelu` as stored by the converter. The CLIP tower is quick-GELU
+    /// regardless, as the upstream model runs it (`clip::config::ClipVisionConfig::from_gguf`).
     pub use_gelu: bool,
     /// `clip.vision.projector.scale_factor` - the pixel-shuffle factor
     /// (1 = none) applied before the projector.
