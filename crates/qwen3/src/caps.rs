@@ -209,28 +209,13 @@ pub fn manifest() -> Manifest {
             )
             .host_resolved(),
         )
-        .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").default(json!(8)).min(1.0).max(256.0).step(1.0))
-        .param(ParamSpec::new("alpha", ParamType::Float, "LoRA alpha; omit for 2*rank").min(0.0).max(1024.0))
-        .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(500)).min(1.0).max(1_000_000.0).step(1.0))
-        .param(ParamSpec::new("lr", ParamType::Float, "peak learning rate (cosine schedule down to min_lr)").default(json!(5e-5)).min(0.0))
-        .param(ParamSpec::new("batch", ParamType::Int, "sequences per step").default(json!(4)).min(1.0).max(256.0).step(1.0))
-        .param(ParamSpec::new("block", ParamType::Int, "training context length, tokens; bounded only by the memory training at it needs").max(capability::bounds::CONTEXT_TOKENS).default(json!(1024)).min(1.0).step(1.0))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random; the outcome echoes the one used)"))
-        .param(ParamSpec::new("targets", ParamType::Str, "comma-separated projections to adapt, of wq,wk,wv,wo,gate,up,down").default(json!(crate::finetune::LORA_TARGETS.join(","))))
+        .params(crate::lora_params::specs(&LORA_DEFAULTS))
         .param(ParamSpec::new(
             "keep_reasoning",
             ParamType::Bool,
             "train each trained answer's <think> reasoning even where the chat template drops it from history (DeepSeek-R1's always does)",
         ).default(json!(false)))
-        .param(ParamSpec::new("weight_decay", ParamType::Float, "AdamW decoupled weight decay").default(json!(0.1)).min(0.0).max(1.0))
-        .param(ParamSpec::new("grad_clip", ParamType::Float, "global gradient-norm clip; 0 disables it").max(1000000.0).default(json!(1.0)).min(0.0))
-        .param(ParamSpec::new("warmup", ParamType::Int, "linear warmup steps; omit for 5% of steps").max(capability::bounds::TRAIN_COUNT).min(0.0).step(1.0))
-        .param(ParamSpec::new("min_lr", ParamType::Float, "rate the cosine decays to; omit for lr/10").min(0.0))
-        .param(ParamSpec::new("beta1", ParamType::Float, "AdamW first-moment decay").default(json!(0.9)).min(0.0).max(0.9999))
-        .param(ParamSpec::new("beta2", ParamType::Float, "AdamW second-moment decay").default(json!(0.999)).min(0.0).max(0.99999))
-        .param(ParamSpec::new("eps", ParamType::Float, "AdamW denominator epsilon").default(json!(1e-8)).min(1e-12).max(1e-3))
         .param(ParamSpec::new("dataset_id", ParamType::Str, "provenance id recorded in the adapter's ModelCard"))
-        .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()), "what the backward keeps of the forward: the decoder rebuilds every layer from its residual, so only 'recompute' runs and 'keep' is refused by name before the first step; default: recompute"))
         .input(BlobSpec::new("dataset", Media::Bytes, "the training set: data::chat 'generic-messages-v2' JSONL, one packed sample per line").required())
         .input(BlobSpec::new("validation", Media::Bytes, "optional held-out set, same JSONL schema; enables periodic eval"))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint (safetensors: only the .lora_a/.lora_b tensors)"));
@@ -638,41 +623,16 @@ pub fn train_lora(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Actio
     out
 }
 
-/// `lora_train`'s schedule, optimiser and targets from its params, each
-/// defaulting to [`crate::finetune::LoraHyper::default`]'s recipe.
-fn lora_schedule(inv: &Invocation) -> Result<(crate::finetune::LoraHyper, Vec<String>), String> {
-    let d = crate::finetune::LoraHyper::default();
-    let f = |name: &str, default: f32| inv.get_f64(name).map_or(default, |v| v as f32);
-    let hyper = crate::finetune::LoraHyper {
-        weight_decay: f("weight_decay", d.weight_decay),
-        grad_clip: f("grad_clip", d.grad_clip),
-        warmup: inv.get_i64("warmup").map(|w| w.max(0) as u32),
-        min_lr: inv.get_f64("min_lr").map(|v| v as f32),
-        adam: model::Adam { beta1: f("beta1", d.adam.beta1), beta2: f("beta2", d.adam.beta2), eps: f("eps", d.adam.eps) },
-    };
-    let targets = match inv.get_str("targets") {
-        Some(t) => crate::finetune::parse_lora_targets(&t).map_err(|e| format!("qwen lora_train: {e}"))?,
-        None => crate::finetune::default_lora_targets(),
-    };
-    Ok((hyper, targets))
-}
+/// What `lora_train` trains with when the caller names nothing.
+const LORA_DEFAULTS: crate::lora_params::LoraDefaults = crate::lora_params::LoraDefaults { rank: 8, steps: 500, lr: 5e-5, batch: 4, block: Some(1024) };
 
 /// [`train_lora`]'s body, with `scratch` already created and owned by the
 /// caller (which removes it however this returns).
 fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-    let rank = inv.get_i64("rank").unwrap_or(8).max(1) as u32;
-    let alpha = inv.get_f64("alpha").map(|a| a as f32).unwrap_or(rank as f32 * 2.0);
-    let steps = inv.get_i64("steps").unwrap_or(500).max(1) as u32;
-    let lr = inv.get_f64("lr").unwrap_or(5e-5) as f32;
-    let batch = inv.get_i64("batch").unwrap_or(4).max(1) as u32;
-    let block = inv.get_i64("block").unwrap_or(1024).max(1) as u32;
-    let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
+    let run = crate::lora_params::from_invocation(inv, &LORA_DEFAULTS, "qwen lora_train")?;
+    let crate::lora_params::LoraRun { rank, alpha, steps, lr, batch, seed, targets, hyper, saved: activations, .. } = run;
+    let block = run.block.unwrap_or(1024);
     let dataset_id = inv.get_str("dataset_id").filter(|s| !s.is_empty());
-    let (hyper, targets) = lora_schedule(inv)?;
-    let activations = inv
-        .get_str("activations")
-        .map(|value| model::saved::SavedPolicy::parse_activations(&value).map_err(|e| format!("qwen lora_train: {e}")))
-        .transpose()?;
 
     progress(Progress::step(1, 4, "preparing dataset"));
 
@@ -1566,7 +1526,7 @@ mod tests {
         let names: Vec<&str> = lt.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             names,
-            ["rank", "alpha", "steps", "lr", "batch", "block", "seed", "targets", "keep_reasoning", "weight_decay", "grad_clip", "warmup", "min_lr", "beta1", "beta2", "eps", "dataset_id", "activations"]
+            ["rank", "alpha", "steps", "lr", "batch", "block", "seed", "targets", "weight_decay", "grad_clip", "warmup", "min_lr", "beta1", "beta2", "eps", "activations", "keep_reasoning", "dataset_id"]
         );
         assert!(lt.inputs.iter().any(|b| b.name == "dataset"), "the dataset survives as a blob");
         assert!(lt.outputs.iter().any(|b| b.name == "adapter"), "the adapter survives as a blob");
@@ -1575,6 +1535,10 @@ mod tests {
     /// Every schedule knob `lora_train` declares reaches the run, the
     /// declared defaults are the recipe, and a target that is not a
     /// projection is refused rather than silently not adapted.
+    fn lora_schedule(inv: &Invocation) -> Result<(crate::finetune::LoraHyper, Vec<String>), String> {
+        crate::lora_params::from_invocation(inv, &LORA_DEFAULTS, "qwen lora_train").map(|r| (r.hyper, r.targets))
+    }
+
     #[test]
     fn lora_train_schedule_params_reach_the_run() {
         let spec = manifest().actions.into_iter().find(|a| a.name == "lora_train").unwrap();
@@ -1621,7 +1585,7 @@ mod tests {
                 .set("steps", json!(2))
                 .set("lr", json!(1e-2))
                 .set("batch", json!(1))
-                .set("block", json!(12))
+                .set("block", json!(96))
                 .blob("dataset", Blob::new(Media::Bytes, dataset_jsonl()));
             let inv = match seed {
                 Some(seed) => inv.set("seed", seed),
@@ -1664,7 +1628,7 @@ mod tests {
                 .set("steps", json!(2))
                 .set("lr", json!(1e-2))
                 .set("batch", json!(1))
-                .set("block", json!(12))
+                .set("block", json!(96))
                 .set("seed", json!(7))
                 .blob("dataset", Blob::new(Media::Bytes, dataset_jsonl()));
             let inv = match activations {
@@ -1725,7 +1689,7 @@ mod tests {
             .set("steps", json!(8))
             .set("lr", json!(1e-2))
             .set("batch", json!(2))
-            .set("block", json!(12))
+            .set("block", json!(96))
             .blob("dataset", Blob::new(Media::Bytes, dataset_jsonl()));
         let out = reg.run(MODEL, "lora_train", inv, &mut |_p| steps_seen += 1).unwrap();
         assert!(steps_seen > 0, "lora_train must emit progress");

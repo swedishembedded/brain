@@ -132,8 +132,6 @@ brain/qwen35moe	generate	temp
 brain/qwen35moe	generate	top_p
 brain/qwen3	generate	eos
 brain/qwen3	generate	seed
-brain/qwen3	lora_train	lr
-brain/qwen3	lora_train	min_lr
 brain/qwen3	lora_train	seed
 brain/qwen3tts	batch	repetition_penalty
 brain/qwen3tts	batch	seed

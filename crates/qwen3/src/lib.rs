@@ -23,6 +23,7 @@ pub mod sample;
 pub mod serve;
 pub mod finetune;
 pub mod lora;
+pub mod lora_params;
 mod lora_sites;
 pub mod shard;
 pub mod slice;
