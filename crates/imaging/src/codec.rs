@@ -93,6 +93,48 @@ pub fn decode_bounded(bytes: &[u8], max_pixels: u64) -> Result<Rgb8, String> {
     Rgb8::new(w, h, img.into_raw())
 }
 
+/// A single-channel 16-bit image: the format depth sensors and depth datasets store a map in (a count per pixel,
+/// whose unit the dataset states), which [`Rgb8`] cannot hold without throwing away the low byte.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Gray16 {
+    pub w: u32,
+    pub h: u32,
+    /// Row-major, `w * h` values.
+    pub px: Vec<u16>,
+}
+
+/// Decode a 16-bit grayscale PNG from untrusted bytes. Anything else (an 8-bit, RGB or palette PNG, a JPEG) is
+/// refused naming what it is: reading it as 16-bit would reinterpret or widen values the caller did not mean.
+/// An image of more than `max_pixels` pixels is refused from its header before a pixel is decoded.
+pub fn decode_gray16(bytes: &[u8], max_pixels: u64) -> Result<Gray16, String> {
+    if !bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return Err(format!("not a PNG: leading bytes {:02x?}", &bytes[..bytes.len().min(4)]));
+    }
+    let reader = || image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+    let (w, h) = reader().into_dimensions().map_err(|e| format!("decoding PNG: {e}"))?;
+    if u64::from(w) * u64::from(h) > max_pixels {
+        return Err(format!("image of {w}x{h} pixels is over the limit of {max_pixels} pixels"));
+    }
+    let mut decoder = reader();
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(max_pixels.saturating_mul(8).max(1 << 20));
+    decoder.limits(limits);
+    match decoder.decode().map_err(|e| format!("decoding PNG: {e}"))? {
+        image::DynamicImage::ImageLuma16(img) => Ok(Gray16 { w, h, px: img.into_raw() }),
+        other => Err(format!("expected a 16-bit grayscale PNG, found {:?}", other.color())),
+    }
+}
+
+/// Write a [`Gray16`] as a 16-bit grayscale PNG, creating the parent directory.
+pub fn save_gray16_png(path: impl AsRef<Path>, img: &Gray16) -> Result<(), String> {
+    let path = path.as_ref();
+    create_parent_dir(path)?;
+    image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(img.w, img.h, img.px.clone())
+        .ok_or_else(|| format!("{}: pixel buffer does not match {}x{}", path.display(), img.w, img.h))?
+        .save_with_format(path, image::ImageFormat::Png)
+        .map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
 /// A PPM, PNG or JPEG file's `(width, height)`, read off its header without
 /// decoding a pixel.
 pub fn dimensions(path: impl AsRef<Path>) -> Result<(u32, u32), String> {
@@ -226,6 +268,35 @@ mod tests {
 
     fn tiny() -> Rgb8 {
         Rgb8::new(2, 1, vec![255, 0, 0, 0, 255, 0]).unwrap()
+    }
+
+    #[test]
+    fn gray16_png_round_trips_every_16_bit_value() {
+        let dir = std::env::temp_dir().join(format!("imaging-gray16-{}", std::process::id()));
+        let img = Gray16 { w: 3, h: 2, px: vec![0, 1, 255, 256, 40000, 65535] };
+        let path = dir.join("d.png");
+        save_gray16_png(&path, &img).unwrap();
+        let back = decode_gray16(&std::fs::read(&path).unwrap(), 6).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(back, img);
+    }
+
+    #[test]
+    fn gray16_refuses_what_is_not_16_bit_gray_and_what_is_too_large() {
+        let dir = std::env::temp_dir().join(format!("imaging-gray16-refuse-{}", std::process::id()));
+        let rgb = dir.join("rgb.png");
+        save_png(&rgb, &tiny()).unwrap();
+        let bytes = std::fs::read(&rgb).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = decode_gray16(&bytes, u64::MAX).unwrap_err();
+        assert!(err.contains("16-bit grayscale") && err.contains("Rgb8"), "{err}");
+        assert!(decode_gray16(b"P6\n", u64::MAX).unwrap_err().contains("not a PNG"));
+        let big = Gray16 { w: 4, h: 4, px: vec![7; 16] };
+        let path = std::env::temp_dir().join(format!("imaging-gray16-big-{}.png", std::process::id()));
+        save_gray16_png(&path, &big).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(decode_gray16(&bytes, 15).unwrap_err().contains("over the limit"));
     }
 
     #[test]

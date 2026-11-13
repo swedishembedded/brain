@@ -148,7 +148,7 @@ pub mod video;
 pub mod views;
 pub mod viz;
 
-pub use codec::{decode, dimensions, load, save, save_jpeg, save_png, save_ppm, JPEG_QUALITY};
+pub use codec::{decode, decode_gray16, dimensions, load, save, save_gray16_png, save_jpeg, save_png, save_ppm, Gray16, JPEG_QUALITY};
 pub use color::{Normalization, IMAGENET_MEAN, IMAGENET_STD};
 pub use device::{AlignCorners, Border, Ctx, Fill, Filter, ImagingKernelIds, PIPELINES};
 pub use host::resize_bilinear_hwc;
