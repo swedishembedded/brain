@@ -993,6 +993,9 @@ mod native_facade {
         /// toward over-counting is the safe direction for a ceiling. Empty,
         /// never locked and never allocated when no ceiling is set.
         grants: Mutex<Vec<memauth::Grant>>,
+        /// Bytes of host data this handle has handed to the device through
+        /// `storage_init` and the `write*` family; see [`Gpu::uploaded_bytes`].
+        uploaded: std::sync::atomic::AtomicU64,
         /// The scratch replay arenas of THIS handle, by lane and name, one live
         /// only between [`Gpu::scratch_scope`] and the returned guard's drop.
         /// None live - the state every handle is built in and the only one a
@@ -1063,6 +1066,7 @@ mod native_facade {
                 fused: Mutex::new(Vec::new()),
                 mem_device,
                 grants: Mutex::new(Vec::new()),
+                uploaded: std::sync::atomic::AtomicU64::new(0),
                 arena: Mutex::new(Vec::new()),
                 urgent: std::sync::OnceLock::new(),
                 natives: Mutex::new(Default::default()),
@@ -2013,12 +2017,14 @@ mod native_facade {
         }
         pub fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
             self.charge("storage_init", storage_bytes(data.len() as u64));
+            self.count_upload(data.len() as u64 * 4);
             self.be().storage_init(name, data)
         }
         /// [`Self::storage_init`], returning the ceiling's refusal instead of
         /// panicking on it.
         pub fn try_storage_init(&self, name: &str, data: &[f32]) -> Result<DeviceBuffer, memauth::Denied> {
             self.try_charge("storage_init", storage_bytes(data.len() as u64))?;
+            self.count_upload(data.len() as u64 * 4);
             Ok(self.be().storage_init(name, data))
         }
         pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> DeviceBuffer {
@@ -2042,7 +2048,23 @@ mod native_facade {
             Ok(self.be().uniform_dynamic(len))
         }
         pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
+            self.count_upload(data.len() as u64 * 4);
             self.be().write(buf, data)
+        }
+
+        fn count_upload(&self, bytes: u64) {
+            self.uploaded.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Bytes of host data this handle has uploaded since it was built:
+        /// every `storage_init` and `write`/`write_at`/`write_bytes_at` payload
+        /// (zeroed allocations and device kernels move no host bytes; a
+        /// [`Self::copy_to`] staged through the host counts its pieces). Take
+        /// the difference of two readings to price a stretch of work; it is
+        /// what a test asserts to prove a buffer stays resident instead of
+        /// being re-uploaded.
+        pub fn uploaded_bytes(&self) -> u64 {
+            self.uploaded.load(std::sync::atomic::Ordering::Relaxed)
         }
         /// [`Self::write`] for a host `f32` slice - the bit reinterpretation the
         /// backend's `u32` upload wants.
@@ -2066,6 +2088,7 @@ mod native_facade {
         /// a large upload should chunk through this (or [`Self::write_f32_chunked`])
         /// instead of one `write_f32` for the whole tensor.
         pub fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {
+            self.count_upload(data.len() as u64 * 4);
             self.be().write_at(buf, offset_words, data)
         }
         /// A second handle onto this device for host->device transfers: its own stream, so an upload runs
@@ -2088,6 +2111,7 @@ mod native_facade {
         /// arrives in. Asynchronous on a handle from [`Self::upload_handle`]; see
         /// `backend_api::Backend::write_bytes_at`.
         pub fn write_bytes_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u8]) {
+            self.count_upload(data.len() as u64);
             self.be().write_bytes_at(buf, offset_words, data)
         }
         /// Order the staged writes to `bufs` before any other handle's later use of them.
