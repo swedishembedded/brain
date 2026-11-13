@@ -521,7 +521,7 @@ def chain_rule():
         f"The four tokens `the cat sees fish` have probability {_prefix_prob(sent[:4])}, and adding `.` costs a factor "
         f"{_prefix_prob(sent) / _prefix_prob(sent[:4])}. From the generating recipe directly, subject cat (1/6), no "
         f"phrase (1/2), verb sees (1/2), no adjective (1/3), object fish (1/3): {direct}. "
-        f"The same number: {direct == _true_prob(sent)}. Sum of -ln p over the five factors: {_f(logsum)} "
+        f"The two routes {'agree' if direct == _true_prob(sent) else 'DISAGREE'}. Sum of -ln p over the five factors: {_f(logsum)} "
         f"= ln {int(1 / direct)}.",
     ])
 

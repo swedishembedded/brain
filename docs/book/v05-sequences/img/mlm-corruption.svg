@@ -1,4 +1,4 @@
-<!-- source-sha256: 13e59eb173a766d4ea2e2b1ff787e29fcd8acb1d45679f8e93da976516cda624 -->
+<!-- source-sha256: 3bff0b4d00490cd0e4b9fcb69ad7bc0a2585c4d855cdc393a5ba71aa80ec58e4 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 350" width="1000" height="350"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="350" fill="#ffffff"/>
 <text x="138" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="end">original</text>
 <text x="138" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="end">selected?</text>

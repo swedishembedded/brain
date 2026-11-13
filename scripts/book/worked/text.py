@@ -300,8 +300,8 @@ def ucd_note(what, instead):
     """The sentence that tells the reader a table's cells are data of the Unicode Character Database, which the page
     cannot give, and what can be reproduced from the page instead."""
     return (f"Not reproducible from the page: {what} come from the Unicode Character Database, version "
-            f"{unicodedata.unidata_version} (here read through Python's `unicodedata`), a table of about a hundred thousand "
-            f"entries that this book does not print. {instead}")
+            f"{unicodedata.unidata_version} (here read through Python's `unicodedata`), a table with an entry for every "
+            f"one of the 1,114,112 code points, too large to print here. {instead}")
 
 
 def graphemes():
@@ -632,7 +632,7 @@ def normalization_forms():
         f = _forms(seq)
         rows.append([label, cp_list(seq), cp_list(f["NFC"]), cp_list(f["NFD"]), cp_list(f["NFKC"]), cp_list(f["NFKD"])])
     return (_table(["input", "code points", "NFC", "NFD", "NFKC", "NFKD"], rows, "llllll") +
-            "\n\n" + ucd_note("every cell of the four normalization columns (the decomposition and composition mappings and the "
+            "\n\n" + ucd_note("the cells of the four normalization columns (the decomposition and composition mappings and the "
                                  "combining classes)", "The first two columns are the inputs. A reader who has the Database, or a "
                                  "library's normalization routine built from it, can use the seven rows as test vectors; nothing on "
                                  "this page lets a reader compute them. Code points are in hex."))

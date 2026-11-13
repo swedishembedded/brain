@@ -468,7 +468,7 @@ def bptt_by_hand():
         f"The bias gradient is the sum of the three da vectors, db = {_vec(g['b'])}. The columns of U that were used get "
         f"the da of their step: {gu}; the other nine columns get 0.\n\n"
         f"Check: all {n_checked} entries of W, of the used and unused columns of U and of b, against central differences "
-        f"of L with step 1e-6; the largest absolute difference is below 1e-8: {worst < 1e-8}."
+        f"of L with step 1e-6: the largest absolute difference is {'below' if worst < 1e-8 else 'NOT below'} 1e-8."
     )
 
 
@@ -501,7 +501,7 @@ def gradient_check_cells():
         name = f"recurrent_networks.check.{kind}"
         rows.append((CELL_NAMES[kind], f"`{name}`", f"{bookrng.seed_of(name):#018x}", count, "yes" if worst < 1e-7 else "NO"))
     return (
-        "Each cell has H = 3 units. Its parameters are drawn by the initialization recipe of the text from the generator "
+        "Each cell has H = 3 units. Its parameters are drawn by the initialization recipe stated before the Jacobian table, from the generator "
         "`recurrent_networks.check.<cell>` with `<cell>` equal to `rnn` (the vanilla cell), `lstm` or `gru` (seeds in the table), with W gain 1.5, forget-gate bias 0.5 (the update-gate bias of the GRU -0.5) and U entries "
         "`0.7 * normal()`, and the readout bias set to (0.1, -0.2, 0.05, 0). The loss is the mean cross-entropy of two sequences, one of "
         "k = 2 phrases (8 tokens) and one of k = 1 (5 tokens), in that order, from the generator `recurrent_networks.check.data` "
@@ -841,7 +841,7 @@ def training():
         "the sequence indices drawn by `shuffle` from the generator `recurrent_networks.<cell>.<run>.order`, and "
         f"the gradient of every update is clipped to a global norm of {CLIP:g}. The training sequences are the {N_TRAIN_PER_K * len(TRAIN_KS)} of "
         f"the generator `{NAME_TRAIN}` in the order in which it makes them (index 0 .. {N_TRAIN_PER_K * len(TRAIN_KS) - 1}). At the start of every epoch "
-        "the index array is rebuilt as 0, 1, 2, ... and shuffled in place by the Fisher-Yates `shuffle` of Chapter 17 with the one generator `order` of the "
+        "the index array is rebuilt as 0, 1, 2, ... and shuffled in place by the Fisher-Yates `shuffle` of Volume I, Chapter 17, with the one generator `order` of the "
         "run, which is never re-seeded within a run (so the permutation of epoch 2 is the next draws of that stream, not a shuffle of epoch 1's permutation); "
         f"batch b of the epoch holds the entries {BATCH} b to {BATCH} b + {BATCH - 1} of the shuffled array. The 1/{BATCH} of the mean is "
         "applied to the gradient of the loss with respect to the logits, (p - one-hot) / "
@@ -934,8 +934,8 @@ def cell_costs():
         "2 H (H + D) + 3 H (vanilla), 8 H (H + D) + 17 H (LSTM) and 6 H (H + D) + 14 H (GRU): a matrix-vector product of m by n "
         "counts 2 m n, and every addition, multiplication and activation of a unit counts 1.\n\n"
         + _table(["setting", "cell", "parameters", "FLOPs per step", "FLOPs relative to the vanilla cell"], rows, "llrrr")
-        + f"\n\nThe parameter formula agrees with the number of entries of U, W and b that the initialization recipe builds for the three "
-        f"cells at H = {TRAIN_H}, D = {V}: {ok}. With a one-hot input, the product U x(t) is a lookup of a column and "
+        + f"\n\nThe parameter formula {'agrees' if ok else 'DISAGREES'} with the number of entries of U, W and b that the initialization recipe builds for the three "
+        f"cells at H = {TRAIN_H}, D = {V}. With a one-hot input, the product U x(t) is a lookup of a column and "
         f"costs no multiplication; the trained cells then spend {_int(cell_flops('rnn', TRAIN_H, V) - 2 * TRAIN_H * V)}, "
         f"{_int(cell_flops('lstm', TRAIN_H, V) - 8 * TRAIN_H * V)} and {_int(cell_flops('gru', TRAIN_H, V) - 6 * TRAIN_H * V)} FLOPs per step."
     )

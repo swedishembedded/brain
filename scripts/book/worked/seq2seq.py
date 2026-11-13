@@ -392,7 +392,7 @@ def attention_step():
         f"{_seed_line(STEP_NAME)} Draws, in this order, each `0.8 * normal()`: Wa (4 values, row by row), Ua (4), v (2), the decoder "
         "state s (2), then the three encoder states h_1, h_2, h_3 (2 values each). Two numbers per state (H = 2) and two in the "
         "attention layer (A = 2). Tolerance: values are rounded to 4 decimals.\n\n"
-        f"Wa = {[_vec(r) for r in Wa]}, Ua = {[_vec(r) for r in Ua]}, v = {_vec(v)}, s = {_vec(s)}, so Wa s = {_vec(q)}.\n\n"
+        f"Wa has rows {', '.join(_vec(r) for r in Wa)}, Ua has rows {', '.join(_vec(r) for r in Ua)}, v = {_vec(v)}, s = {_vec(s)}, so Wa s = {_vec(q)}.\n\n"
         + t + "\n\n"
         f"The softmax of the scores {_vec(scores)} gives the weights a = {_vec(w)}, which add to {_fx(_sum(w), 4)}, "
         f"and the context is c = sum of a_i h_i = {_vec(c)}."

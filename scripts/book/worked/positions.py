@@ -254,7 +254,7 @@ def sinusoid_shift():
             "rows at i and i + k.\n\n"
             + _table(["i", "i + k", "first pair at i + k (direct)", "first pair from i by the map", "dot(PE(i), PE(i + k))"], rows)
             + f"\n\nLargest absolute difference over all eight entries and the four positions between the mapped row and the "
-            f"direct row: {_below(worst, 1e-12)}. The four dot products differ by at most {_below(max(dots) - min(dots), 1e-9)}.")
+            f"direct row: {_below(worst, 1e-12)}. The largest spread of the four dot products is {_below(max(dots) - min(dots), 1e-9)}.")
 
 
 def sinusoid_grid_data(positions=32, d=32, base=BASE):

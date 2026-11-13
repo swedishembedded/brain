@@ -13,9 +13,9 @@ does C's `strlen`. Nobody is wrong. Each answer counts a different thing, and a
 language model, which has to turn this string into numbers before it can do anything
 with it, is going to need to know which thing it is counting.
 
-Here is the string laid out. Where it says U+0041 and so on, the book writes a
-character by its number and name, because the typeface this book is set in has no
-glyph for most scripts, and a number is something a reader can check in any language.
+Here is the string laid out. Each character is written by its number and name
+(U+0041 and so on) rather than drawn, because a typeface has glyphs for only a few
+scripts, while a number can be checked in any language.
 
 <!-- worked: text.sample_string -->
 The string has 4 code points; it is written out below.
@@ -36,10 +36,9 @@ takes one unit of four bytes: simple, and 16 bytes for this string. In 16-bit
 units the first three characters take one unit and the emoji takes two, so 5 units
 and 10 bytes. In 8-bit units, which are bytes, the four characters take 1, 2, 3
 and 4 of them, 10 in all. The three languages above are counting these three units:
-Python code points, JavaScript 16-bit units, Go and Rust bytes. This chapter
-explains where the numbers in the table come from, one column at a time, and why
-the third column, the bytes of UTF-8, has become the layout nearly every file, web
-page and model on a modern machine uses.
+Python code points, JavaScript 16-bit units, Go, Rust and C bytes. Each column
+of the table follows from a rule, and the bytes of UTF-8 have become the layout
+nearly every file, web page and model on a modern machine uses.
 
 There is a second puzzle in the same neighbourhood. The word "café" can be typed
 two ways: with the single character e-acute (U+00E9), or with a plain e followed by
@@ -51,12 +50,11 @@ sequences of bytes. Anything that matches, counts or looks up text, the tokenize
 
 The two puzzles are one subject: text is a stack of three layers, a *numbering* of
 characters, a *layout* of those numbers into bytes, and a *convention* about which
-sequences of numbers mean the same thing. We will take them in that order, with
-one rule throughout: nothing is stated about bytes that a small program in this
-chapter does not compute.
+sequences of numbers mean the same thing. Every claim about bytes below is
+computed by a small program.
 
-A few things from earlier volumes will be used straight away. Answer from memory;
-the answers are at the end of the chapter.
+The byte layouts are built from bit patterns, shifts and masks, so bring those
+back before the first table of bits:
 
 1. (Volume IV, Chapter 1, binary representation.) How many different patterns can
    7, 11, 16 and 21 bits take? Which whole numbers does an unsigned pattern of
@@ -74,7 +72,7 @@ the answers are at the end of the chapter.
 Before any of the machinery, the simplest scheme that works. To store text we need
 only agree on a table: this character is that number. A table like that is a
 **character encoding** in the broad sense, and the first one in universal use was
-ASCII, first standardized in 1963. It numbers 128 characters, the numbers
+ASCII (the American Standard Code for Information Interchange), first standardized in 1963. It numbers 128 characters, the numbers
 $0$ to $127$, so that each fits in 7 bits.
 
 <!-- worked: text.ascii_layout -->
@@ -142,7 +140,7 @@ at least four digits, so U+00E9 is 233. The first 128 code points are ASCII's, a
 the next 128 are Latin-1's, so every text that was valid in those encodings keeps
 its numbers.
 
-The numbers run from U+0000 to U+10FFFF, which is 17 blocks of 65,536 called
+The numbers run from U+0000 to U+10FFFF, which is 17 ranges of 65,536 called
 planes. Most of the space is empty, and some of it is not for characters at all:
 
 <!-- worked: text.unicode_space -->
@@ -164,7 +162,7 @@ planes. Most of the space is empty, and some of it is not for characters at all:
 
 Counted with `unicodedata.category` of Python's Unicode database, version 16.0.0. The rows for private use and surrogates are fixed by the standard; the others grow as Unicode assigns more characters, so another version prints other numbers.
 
-Not reproducible from the page: the counts of letters, marks, numbers, punctuation, symbols, separators, controls and format characters, and unassigned code points come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table of about a hundred thousand entries that this book does not print. What a reader can reproduce is the arithmetic: the 1,114,112 code points, the 2,048 surrogates, the 1,112,064 scalar values, the private-use row (137,468: 6,400 in the Basic Multilingual Plane plus two planes of 65,534 each) and the 'all' row. The other rows can be compared with a count made from the Database of the reader's own platform, which reproduces them when its version is the one printed.
+Not reproducible from the page: the counts of letters, marks, numbers, punctuation, symbols, separators, controls and format characters, and unassigned code points come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table with an entry for every one of the 1,114,112 code points, too large to print here. What a reader can reproduce is the arithmetic: the 1,114,112 code points, the 2,048 surrogates, the 1,112,064 scalar values, the private-use row (137,468: 6,400 in the Basic Multilingual Plane plus two planes of 65,534 each) and the 'all' row. The other rows can be compared with a count made from the Database of the reader's own platform, which reproduces them when its version is the one printed.
 <!-- /worked -->
 
 Notice the two fixed rows. The 2,048 code points U+D800 to U+DFFF, the
@@ -172,15 +170,17 @@ Notice the two fixed rows. The 2,048 code points U+D800 to U+DFFF, the
 Removing them leaves 1,112,064 **scalar values**, the code points that can
 actually be a character in a text, and from here on "code point" in running
 text will mean a scalar value unless a surrogate is the subject. The private-use
-range is left to applications for their own symbols. Everything else is assigned by the standard, a little more with each release, which is why the counts for letters and symbols depend on the version of the Unicode database that computed them, printed under the table.
+range is left to applications for their own symbols. The rest is the standard's to assign, a little more with each release, which is why the counts for letters and symbols depend on the version of the database that computed them, printed under the table.
 
-That database, the Unicode Character Database, is also the one source in this chapter that the page cannot stand in for. The
-counts of the table above, the combining classes, the normalization and case mappings, and the segmentation properties behind the
-grapheme clusters are entries of tables that the standard publishes and this book does not print. The blocks that depend on it say
-so under their tables and name the version, 16.0.0, with which they were computed. A reader who implements the chapter in another
-language reproduces everything else from the page (the encodings, the decoders, the counts by arithmetic, the Hangul formula, the
-sorting of marks by class once the classes are given) and uses the numbers that come from the database as test vectors for a
-routine of the language's own library: the same inputs must give the same outputs if the two versions of Unicode agree.
+That database, the Unicode Character Database, holds the tables behind the
+counts above, the combining classes, the normalization and case mappings, and the
+segmentation properties behind grapheme clusters. It is too large to print, so
+every table below that depends on it says so and names the version, 16.0.0, with
+which it was computed. Everything else follows from arithmetic: the encodings, the
+decoders, the counts, the Hangul formula, the sorting of marks once their classes
+are given. The numbers that come from the database serve as test vectors for a
+language's own Unicode library, which must give the same outputs when its version
+of Unicode is the same.
 
 A code point is a number, not a picture. A picture of a character, the *glyph*,
 is chosen by a font, and the same code point can have different glyphs in different
@@ -194,7 +194,7 @@ Unicode is built from many small pieces rather than from one code point per
 visible shape, because the shapes of some scripts are combinations. An accent is a
 code point of its own (a **combining mark**) that attaches to the letter before it;
 the vowel signs of Devanagari attach to consonants; an emoji can be modified by a
-skin tone or joined to others by an invisible joiner (ZWJ, U+200D) into one picture.
+skin tone or joined to others by the invisible zero-width joiner (ZWJ, U+200D) into one picture.
 What a reader sees as one unit, Unicode calls a **grapheme cluster**, and the rules
 that group code points into clusters (Unicode Standard Annex 29) are part of the
 standard. A cluster is as many code points as its script needs:
@@ -213,7 +213,7 @@ standard. A cluster is as many code points as its script needs:
 The last column is not computed: it is what the rules of Unicode text segmentation (UAX 29) and a reader agree on, and those rules need the Grapheme_Cluster_Break property of every code point, which comes from the Unicode Character Database and is not on this page. The code point, byte and unit columns are reproducible from the page.
 <!-- /worked -->
 
-The last column is not computed; the segmentation rules decide it. Four counts of
+Four counts of
 the same text are in play, and none is "the" length: bytes, 16-bit code units,
 code points and grapheme clusters. A family emoji is five code points, eighteen
 bytes and one thing to a reader. The consequences are practical. Cutting a string
@@ -222,8 +222,7 @@ limit, a model that is asked for the first 100 characters, a spelling checker
 that moves the cursor one step: each must say which of the four it means.
 
 Both halves of the first puzzle now have a place. The two spellings of "café" are
-different *code point* sequences for the same cluster, a matter for the last part
-of the chapter. The different lengths of the opening string are different *units*
+different *code point* sequences for the same cluster, a matter for normalization. The different lengths of the opening string are different *units*
 of the same code point sequence, which is next.
 
 ## Three ways to spell a code point in bytes
@@ -239,8 +238,7 @@ Early Unicode had room for 65,536 characters, and the 16-bit **code unit** was i
 natural storage: two bytes per character. When the standard outgrew 16 bits, the 16-bit encoding was extended, without changing the old texts, into **UTF-16**.
 Code points below U+10000 stay one unit. A larger one is split into a pair of
 units, a **surrogate pair**, borrowed from a range of 2,048 values that were
-reserved for the purpose (this is what the surrogates of the last section are
-for). The rule subtracts 0x10000, which leaves 20 bits; the top ten select a
+reserved for the purpose (these are the surrogates of the section on Unicode). The rule subtracts 0x10000, which leaves 20 bits; the top ten select a
 *high* surrogate in U+D800 to U+DBFF and the bottom ten a *low* surrogate in U+DC00
 to U+DFFF. For the grinning face:
 
@@ -258,8 +256,8 @@ to U+DFFF. For the grinning face:
 | byte order mark U+FEFF, as UTF-16BE / UTF-16LE / UTF-8 | FE FF / FF FE / EF BB BF |
 <!-- /worked -->
 
-A reader seeing the unit D83D knows it begins a pair, and a unit in U+DC00 to
-U+DFFF knows it ends one, because no character shares those values: this is why
+A reader seeing the unit D83D knows it begins a pair, and one seeing a unit in
+DC00 to DFFF knows it ends one, because no character shares those values: this is why
 the surrogates could never be code points. UTF-16 then has a byte-order question
 that the others avoid. A 16-bit unit is two bytes and a machine may put either first; the
 two byte orders are called big-endian and little-endian. Text that does not say
@@ -368,7 +366,7 @@ function encode_utf8(cps: list<u32>) -> bytes:
     return out
 ```
 
-The bytes then have the properties we asked for. Requirement 4 holds because a longer sequence has a larger lead byte than any shorter one (`11110xxx` is above `1110xxxx`, which is above `110xxxxx`, which is above `0xxxxxxx`) and, within one length, the bits are poured in from the most significant down, so the bytes sort as the numbers do. Requirement 3 holds because a lead byte is never a continuation byte and the reverse, so the bytes of one whole character can only be matched starting at a boundary. The encoder can be checked against a reference that someone else wrote:
+The bytes then have the properties we asked for. Requirement 4 holds because a longer sequence has a larger lead byte than any shorter one (`11110xxx` is above `1110xxxx`, which is above `110xxxxx`, which is above `0xxxxxxx`) and, within one length, the bits are poured in from the most significant down, so the bytes sort as the numbers do. Requirement 3 holds because a lead byte is never a continuation byte and the reverse, so the bytes of one whole character can only be matched starting at a boundary. The encoder can be checked against an independently written reference:
 
 <!-- worked: text.check_encoder -->
 Generator: the book's SplitMix64, seed 0x47564153f8b89746 (`seed_of` of the name `text.check_encoder`, defined on the pseudocode page). Each draw is `k = integer(1112064)`, then the scalar value `k` if `k < 0xD800` and `k + 0x800` otherwise (which skips the 2,048 surrogates and is uniform over the 1,112,064 scalar values).
@@ -404,7 +402,7 @@ early version of the UTF-8 specification went further, with sequences of five
 and six bytes. The limit that the standard now states, U+10FFFF, comes from
 UTF-16: a surrogate pair carries 20 bits, which is 1,048,576 code points above
 U+FFFF, and that is where the numbering ends. The three encodings must be able to
-carry the same texts, so UTF-8 stops where UTF-16 does (this is RFC 3629). The
+carry the same texts, so UTF-8 stops where UTF-16 does (the rule of RFC 3629, the Internet standard, or Request for Comments, that defines UTF-8 today). The
 constants of the table follow: $17 \times 65{,}536$ code points, less 2,048
 surrogates.
 
@@ -418,8 +416,8 @@ for a reason that has nothing to do with taste: a text must have exactly one
 spelling, or two byte strings that mean the same thing compare as different. The
 reason that has done real damage is security. A filter that scans for the byte `2F`
 (a slash) in a path to block directory tricks does not see `C0 AF`, a perfectly
-decodable spelling of the same slash, and a later stage that decodes it leaves
-the filter's check behind.
+decodable spelling of the same slash, and a later stage that decodes it hands
+the slash on unchecked.
 
 The decoder's rule is therefore the *shortest form only*, and it can be stated as
 ranges of the first continuation byte, derived rather than memorized:
@@ -437,7 +435,7 @@ ranges of the first continuation byte, derived rather than memorized:
 - The largest value is 0x10FFFF, so after `F4` the first continuation is at most
   `8F`, and the lead bytes `F5` to `FF` are never valid.
 
-Those five rules are the eight states of the next section.
+Those five rules shape the decoder's eight states.
 
 ## Decoding is a small state machine
 
@@ -447,13 +445,13 @@ and the range the next one must fall in (the range is `80` to `BF` except in the
 three cases just derived). Call that triple (continuations still expected, lowest
 allowed byte, highest allowed byte) the *state*. The decoder starts in the state
 "expecting nothing". A byte arrives and one of three things happens: it is
-valid in the current state, which changes the state and perhaps completes a
-character, or it is invalid, which is an error. Counting what states are reachable
+valid and completes a character, it is valid and moves the decoder to another
+state, or it is invalid, which is an error. Counting what states are reachable
 gives eight, and the picture is the whole decoder:
 
 ![The decoder's state machine: start, three states that expect 1, 2 or 3 more ordinary continuation bytes, and four states entered after a lead byte that restricts the next byte (E0, ED, F0, F4). Blue edges complete a character; a byte not listed on an edge of the current state is an error.](img/utf8-decoder-states.svg)
 
-The figure is computed: the worked module found the eight states by trying every byte value
+The figure is computed: a program found the eight states by trying every byte value
 in every state it could reach from the start, and the edges are what it
 found. In the pseudocode the state is the three variables `need`, `lo` and `hi`:
 
@@ -506,13 +504,12 @@ function decode_utf8(b: bytes) -> list<u32>:
 ```
 
 Every valid input passes through without ever reaching a `0xFFFD`. What
-the decoder does with invalid input is a policy, and the book's choice is the one
-the Unicode standard recommends. It could stop with an error (the *strict*
+the decoder does with invalid input is a policy. It could stop with an error (the *strict*
 decoder, which is what you want when the input must be exactly text), or it could
 substitute the **replacement character**, U+FFFD (usually drawn as a diamond with a
 question mark), and go on (the *lenient* one, which is what you want when a
 reader must show something, such as a terminal printing a model's output). The
-lenient rule is: each *maximal invalid prefix*, the longest run of bytes that
+pseudocode is lenient, with the rule the Unicode standard recommends: each *maximal invalid prefix*, the longest run of bytes that
 could have begun a valid sequence, becomes one U+FFFD, and decoding restarts at
 the byte that broke it. That is what `again` does in the pseudocode: an interrupting
 byte is not consumed by the broken sequence, it is read again as the start of the
@@ -555,7 +552,7 @@ Generator: the book's SplitMix64, seed 0x333291d0349c0922 (`seed_of` of the name
 | strict verdict (accept or reject) equals Python's | 50,000 of 50,000 |
 <!-- /worked -->
 
-A small share of the random strings is valid (the block counts them) and the rest exercise the error paths; the two decoders agree on all of them, both on the replacement
+About one random string in eleven is valid and the rest exercise the error paths; the two decoders agree on all of them, both on the replacement
 output and on which strings a strict decoder accepts.
 
 ### Chunks, truncation and a dropped byte
@@ -626,15 +623,15 @@ Deleting one byte damages the character it belonged to, and in most rows one
 replacement is all the text loses; deleting the lead byte of the three-byte
 character costs two (its two continuation bytes are orphans) and deleting the lead
 byte of the four-byte one three. Starting the decoder in the middle of a text works the same way: at most three bytes are discarded (each shown as a replacement) before the first boundary.
-Truncating a text at an arbitrary byte count does not preserve this, which is why a
+Truncating a text at an arbitrary byte count can leave a broken character at the end, which is why a
 program that must cut to a byte budget backs up while the byte at the cut is a
 continuation byte (it matches `10xxxxxx`).
 
 ## Where text enters brain
 
-brain's models never see characters; they see integer ids, and the first thing
+The models of brain never see characters; they see integer ids, and the first thing
 between a user's text and those ids is a tokenizer, the subject of the next
-chapter. Three facts about its text-handling are already visible here.
+chapter. Four facts about its handling of text are already visible here.
 
 The tokenizers live under `crates/data`, and a byte-level one such as
 `crates/data/src/bytebpe.rs` gives its first 256 ids to the 256 byte values
@@ -657,11 +654,12 @@ chapter's check blocks: the output equals one-shot decoding for random ids and
 any chunking, including invalid and split UTF-8, and a character split across two
 calls is held back whole and never emitted as a replacement.
 
-The other fact is about normalization, the next topic: a `tokenizer.json` can
+The fourth fact is about normalization, the next topic: a `tokenizer.json` can
 declare an NFC normalizer, and `crates/data/src/hf_pretok.rs` reads it and applies
 it before splitting the text (commit 375f55b8a, which reads the declared
-pipeline instead of assuming one). The BERT-style tokenizer in
-`crates/data/src/wordpiece.rs` also strips accents by decomposing each
+pipeline instead of assuming one). The WordPiece tokenizer in
+`crates/data/src/wordpiece.rs`, used by the encoder models of
+[Chapter 14](14-encoders.md), also strips accents by decomposing each
 character and dropping the combining marks; commit dd299929f replaced a generated
 table of those decompositions with the normalization library already in the
 dependency list, and deleted the table and the script that built it. The
@@ -688,7 +686,7 @@ the word are two different code point sequences:
 | after NFKC | true |
 | after NFKD | true |
 
-Not reproducible from the page: the four equalities of the second table (and the claim behind them, that U+00E9 is canonically equivalent to U+0065 U+0301) come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table of about a hundred thousand entries that this book does not print. The first table is reproducible from the page, from the code points and the UTF-8 rules. For these two spellings a reader can verify the equalities by hand with the single canonical mapping U+00E9 = U+0065 U+0301 (and the compatibility forms, which change neither spelling); for other strings a normalization routine needs the Database.
+Not reproducible from the page: the four equalities of the second table (and the claim behind them, that U+00E9 is canonically equivalent to U+0065 U+0301) come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table with an entry for every one of the 1,114,112 code points, too large to print here. The first table is reproducible from the page, from the code points and the UTF-8 rules. For these two spellings a reader can verify the equalities by hand with the single canonical mapping U+00E9 = U+0065 U+0301 (and the compatibility forms, which change neither spelling); for other strings a normalization routine needs the Database.
 <!-- /worked -->
 
 They differ in code point count, in bytes, and therefore in everything computed
@@ -699,15 +697,15 @@ and a user whose keyboard produces one finds the other missing. The remedy is to
 choose one spelling for every text before it is compared or counted.
 **Normalization of text** is the conversion of a string to a canonical spelling,
 so that strings the standard declares equivalent become identical sequences of code
-points. The last four rows of the table are the point: after a normalization
-form, the two strings compare equal.
+points. The last four rows of the second table show it working: after any of the
+normalization forms, the two strings compare equal.
 
 Unicode defines two kinds of equivalence. **Canonical equivalence** is the one
 in the example: the two sequences are the same abstract character and must look
 and behave the same. **Compatibility equivalence** is weaker: the sequences are
 related but may differ in presentation or meaning. A ligature U+FB01 is the two
 letters f and i drawn as one shape; the superscript two (U+00B2) is a 2 raised;
-the fullwidth A (U+FF21) is an A in a CJK typesetting grid. Replacing them loses
+the fullwidth A (U+FF21) is an A set in the grid of Chinese, Japanese and Korean (CJK) typesetting. Replacing them loses
 information (a formatting choice, an exponent), and it is the right trade for a
 search index and the wrong one for a document. The two kinds of equivalence and the
 two directions (expanded, composed) give the four **normal forms**:
@@ -732,7 +730,7 @@ Applied to the characters of the example and a few more:
 | FULLWIDTH LATIN CAPITAL A (U+FF21) | FF21 | FF21 | FF21 | 0041 | 0041 |
 | long s with dot above, dot below (U+1E9B U+0323) | 1E9B 0323 | 1E9B 0323 | 017F 0323 0307 | 1E69 | 0073 0323 0307 |
 
-Not reproducible from the page: every cell of the four normalization columns (the decomposition and composition mappings and the combining classes) come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table of about a hundred thousand entries that this book does not print. The first two columns are the inputs. A reader who has the Database, or a library's normalization routine built from it, can use the seven rows as test vectors; nothing on this page lets a reader compute them. Code points are in hex.
+Not reproducible from the page: the cells of the four normalization columns (the decomposition and composition mappings and the combining classes) come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table with an entry for every one of the 1,114,112 code points, too large to print here. The first two columns are the inputs. A reader who has the Database, or a library's normalization routine built from it, can use the seven rows as test vectors; nothing on this page lets a reader compute them. Code points are in hex.
 <!-- /worked -->
 
 Read the rows against the steps. The composed and decomposed e-acute meet in
@@ -759,7 +757,7 @@ the order of marks of equal class, since those interact:
 
 The two inputs differ as raw strings (false for equality) and are equal after NFD (true).
 
-Not reproducible from the page: the combining classes (230 for U+0307, 220 for U+0323, 0 for U+0073) and the composition U+1E69 of the NFC column come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table of about a hundred thousand entries that this book does not print. Given the classes, the NFD column follows from the page: the marks of nonzero class are sorted by class, stably. The NFC column needs the table of compositions and is a test vector only.
+Not reproducible from the page: the combining classes (230 for U+0307, 220 for U+0323, 0 for U+0073) and the composition U+1E69 of the NFC column come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table with an entry for every one of the 1,114,112 code points, too large to print here. Given the classes, the NFD column follows from the page: the marks of nonzero class are sorted by class, stably. The NFC column needs the table of compositions and is a test vector only.
 <!-- /worked -->
 
 The composition step is where care is needed, because not every pair that could be merged may be: a short list of composition exclusions keeps some characters decomposed even in NFC. The decomposition step, by contrast, needs
@@ -789,7 +787,8 @@ text cut into pieces must be normalized after it is assembled, never piece by pi
 
 For a tokenizer the practical rule is: normalize first, in one chosen form
 (NFC is the usual choice because it keeps the text close to how it was typed),
-and then cut. Whatever the model never saw, it should not be asked about.
+and then cut, with the same form at training and at inference, so that the model
+is never asked about a spelling it did not see.
 
 ### Case folding
 
@@ -806,7 +805,7 @@ enough.
 | LATIN SMALL LIGATURE FI (U+FB01) | FB01 | FB01 | 0066 0069 | 0046 0049 |
 | LATIN CAPITAL LETTER A | 0041 | 0061 | 0061 | 0041 |
 
-Not reproducible from the page: the lower, casefold and upper columns (the case mappings and the case folding of the standard, and for the Greek row the context rule that gives the final sigma) come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table of about a hundred thousand entries that this book does not print. Python's `lower`, `casefold` and `upper` were used, with the language-independent mappings. The input columns are reproducible from the page; the other three are test vectors for a case-conversion routine built from the Database.
+Not reproducible from the page: the lower, casefold and upper columns (the case mappings and the case folding of the standard, and for the Greek row the context rule that gives the final sigma) come from the Unicode Character Database, version 16.0.0 (here read through Python's `unicodedata`), a table with an entry for every one of the 1,114,112 code points, too large to print here. Python's `lower`, `casefold` and `upper` were used, with the language-independent mappings. The input columns are reproducible from the page; the other three are test vectors for a case-conversion routine built from the Database.
 <!-- /worked -->
 
 Lowering the sharp s leaves it, because its lowercase is itself; the **case
@@ -819,7 +818,7 @@ with a dot above lowers to two code points, so case conversion can change the le
 ## Bytes: the one alphabet every text shares
 
 Whatever the script, the previous sections reduce a text to a sequence of bytes,
-integers from 0 to 255, and that is the interface the rest of the book wants. A
+integers from 0 to 255, and that is the interface a sequence model can take. A
 sequence model handles a finite alphabet, and the 256 byte values are a
 finite alphabet in which every text that can be written has a spelling, with no
 unknown symbol and nothing to normalize at the byte level beyond what was done
@@ -851,14 +850,14 @@ Inputs, as code points in hex:
 Byte counts are exact; the ratio is rounded to three decimals.
 <!-- /worked -->
 
-![UTF-8 bytes consumed while reading the greeting in six languages, one code point at a time, with the fixed 4 bytes per code point of UTF-32 as a dashed line; the slope of each curve is its bytes per code point.](img/bytes-per-character.svg)
+![UTF-8 bytes consumed while reading the greeting in six of the eight languages, one code point at a time, with the fixed 4 bytes per code point of UTF-32 as a dashed line; the slope of each curve is its bytes per code point.](img/bytes-per-character.svg)
 
 Read the figure as slopes. English is one byte per character. Swedish is nearly
 the same, with one two-byte letter. Russian and Greek letters take two bytes
 each and their spaces and commas one, which averages a little below two. Chinese
 and Japanese ideographs take three. Hindi is almost as high: every letter and vowel sign of Devanagari is three bytes (only the space is one), and the vowel signs and the virama are code points of their own, so a short phrase has many more code points than syllables. An emoji is four. In UTF-32 every
 text costs four bytes per code point, so UTF-8 is smaller in every row except
-the emoji, where they tie. The fraction is the work: moving a corpus of
+the emoji, where they tie. The ratio is a cost in work: moving a corpus of
 English through memory as UTF-32 moves four times the bytes it needs to, and a corpus in Russian more than twice as many as UTF-8 would. A model that spends its
 capacity or its context budget per byte spends it unevenly across languages. That
 imbalance, and the fact that bytes are too small a unit for a model to learn
@@ -870,8 +869,8 @@ pieces larger than a byte out of them.
 Text, to a computer, is three layers. A character encoding in the broad sense is an
 agreement between characters and numbers; ASCII made one for 128 characters,
 the code pages made many incompatible ones for the eighth bit, and Unicode
-replaced them with one numbering of 1,112,064 scalar values whose members are
-code points, many smaller than what a reader calls a character. A byte layout
+replaced them with one numbering of 1,112,064 scalar values, whose code points are
+often smaller units than what a reader calls a character. A byte layout
 turns code points into bytes: UTF-32 gives a fixed four, UTF-16 one or two 16-bit
 units (using the surrogates), and UTF-8 one to four bytes whose prefixes announce
 their own role, which makes it ASCII compatible, self-synchronizing, order
@@ -880,12 +879,12 @@ states, strict or lenient (one U+FFFD per maximal invalid prefix), resumable
 across chunks with at most three bytes held back. And a normalization step settles
 which of several spellings of the same text a program will see.
 
-Each statement was computed: the encoder and decoder in the worked module were
-written from the chapter's rules and agree with Python's codec on seeded random
-inputs, the normalization tables are printed with the Unicode version that made them, and the Hangul decomposition is arithmetic checked against the
-whole block.
+An encoder and decoder written from these rules agree with Python's codec on
+seeded random inputs, the normalization tables carry the Unicode version that made
+them, and the Hangul decomposition is arithmetic, checked against all 11,172
+syllables.
 
-The limits are the next chapter's reason to exist. Bytes are a universal alphabet and
+Bytes are a universal alphabet and
 a poor unit: they split words into fragments a model has to reassemble, and they
 charge different languages different amounts for the same sentence. Choosing
 pieces between bytes and words, learned from data, is tokenization.
@@ -895,11 +894,11 @@ pieces between bytes and words, learned from data, is tokenization.
 1. A web application blocks paths containing a slash by searching the received
    UTF-8 bytes for `2F`, then passes the bytes to a library that decodes
    them. Find the flaw, and say where in the pipeline the check must move.
-2. In the table of three spellings, a string has 5 UTF-16 units and 4 code points. A
+2. In the opening table, the string has 5 UTF-16 units and 4 code points. A
    colleague says "UTF-8 needs 4 bytes for it, one per character". What is wrong
    with the argument, and what does the byte count depend on?
 3. Decode `E2 82 41` and `E2 82` by hand with the lenient rule. How many U+FFFD are
-   produced in each, and why not the same?
+   produced in each, and what does the first produce besides them?
 4. A streaming server decodes each chunk of model output as a complete text. When
    would the user see a U+FFFD that is not in the model's output, and how does a
    decoder that keeps state avoid it?
@@ -939,7 +938,7 @@ pieces between bytes and words, learned from data, is tokenization.
 6. **[Implement]** Write an encoder and a strict-and-lenient decoder for UTF-8 from the
    rules in this chapter, in the language of your choice and without its UTF-8
    routines. Reproduce `text.check_encoder` and `text.check_decoder` using the
-   SplitMix64 generator of Volume I and the seeds the blocks print: your counts of
+   SplitMix64 generator of Volume I, chapter 17, and the seeds the blocks print: your counts of
    valid strings and of agreements with your language's own codec must match the
    blocks.
 7. **[Implement]** Make your decoder incremental (state kept between calls, at most
@@ -982,7 +981,7 @@ pieces between bytes and words, learned from data, is tokenization.
 
 1. The check sees the bytes before they are decoded, and `C0 AF` is an overlong spelling of the slash that a lenient decoder may turn into `2F` afterwards. The text must be decoded and validated (a strict decoder rejects the overlong form) first, and the check applied to the code points; or the input must be rejected on any invalid UTF-8.
 2. The 4-byte total assumes one byte per character. UTF-8 uses 1 to 4 bytes per code point by its value; the string of the table has 10. The byte count depends on which code points are in the string, not on how many.
-3. `E2 82 41`: `E2` expects two continuations; `82` is valid, and `41` is not a continuation. One U+FFFD for the maximal prefix `E2 82`, then `41` is read again as ASCII: FFFD, 0041. `E2 82` alone: the input ends inside the sequence, one U+FFFD. Both give one replacement for the broken prefix; the first also keeps the following ASCII byte.
+3. `E2 82 41`: `E2` expects two continuations; `82` is valid, and `41` is not a continuation. One U+FFFD for the maximal prefix `E2 82`, then `41` is read again as ASCII: FFFD, 0041. `E2 82` alone: the input ends inside the sequence, one U+FFFD. Both give one replacement for the broken prefix; the first also produces the ASCII letter A after it, because the interrupting byte is read again.
 4. When a chunk ends inside a multi-byte character, the first half is a truncated sequence and is replaced, and the second half, now a lone continuation, is replaced again. A decoder that keeps `need`, `lo`, `hi` and `value` between calls waits for the rest of the sequence and emits the whole character once.
 5. The first direction is false: a composed and a decomposed spelling look the same and have different bytes. The second is true for the same font, since equal code points give equal glyphs. The tokenizer's problem is the first: strings it should treat as one differ in bytes, so normalization comes before it.
 6. By code point U+FF5E < U+1F600. UTF-8 bytes: `EF BD 9E` against `F0 9F 98 80`, so U+FF5E < U+1F600 as well. UTF-16 units: U+FF5E is `FF5E`, the emoji is `D83D DE00`, and `D83D < FF5E`, so the emoji sorts first. UTF-8 and code point order agree; UTF-16 differs.

@@ -909,7 +909,7 @@ def decode_traffic():
             partial = F32 * 2 * s * (d + 2) if s > 1 else 0
             rows.append((_int(t), s, _int(cache), _int(partial), f"{partial / cache:.5f}", 16 * s))
     return (f"One decode step of one sequence: a cache of T rows of width d_h = {d} for K and for V in float32, split across S workgroups per "
-            "head. Each split writes its state (m, l and d numbers of o) and the combine reads it back, so the extra traffic is "
+            "head. Each split writes its state (m, l and the d_h numbers of o) and the combine reads it back, so the extra traffic is "
             "2 S (d_h + 2) numbers per head; the last column is the number of workgroups for a model with 16 heads and one sequence.\n\n"
             + _table(["T", "S", "cache bytes read per head", "partial states, bytes written and read", "partial / cache", "workgroups, 16 heads"], rows))
 

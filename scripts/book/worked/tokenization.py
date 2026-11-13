@@ -322,7 +322,7 @@ def three_cuts():
         ["bytes", 256, table_bytes(256), len(sent.encode()), "none: 256 values cover every text"],
         ["BPE, 40 merges", 256 + 40, table_bytes(256 + 40), len(sub_ids), "none: an unseen word falls back to smaller pieces"],
     ]
-    return (f"Sentence: `{sent}` ({len(sent)} characters, {len(sent.encode())} bytes). The corpus below has {len(CORPUS)} "
+    return (f"Sentence: `{sent}` ({len(sent)} characters, {len(sent.encode())} bytes). The corpus above has {len(CORPUS)} "
             f"characters and {len(_words(CORPUS))} words, of which {len(words)} are distinct and {len(chars)} characters are distinct "
             "(the space, the comma and the full stop count). The character and word vocabularies are the distinct characters "
             "and words plus one `[UNK]` entry; the BPE vocabulary is 256 bytes plus 40 merges. A table of embeddings, the next chapter's "
@@ -408,7 +408,7 @@ def hand_encode():
             r, i = best
             syms[i:i + 2] = [256 + r]
             trace.append(f"[rank {r}] " + " ".join(show(pieces[s]) for s in syms))
-        rows.append(f"- `{show(w.encode())}`: " + "; ".join(trace) + f". {len(syms)} tokens.")
+        rows.append(f"- `{show(w.encode())}`: " + "; ".join(trace) + f". {len(syms)} token{'' if len(syms) == 1 else 's'}.")
     return "\n".join(rows)
 
 
@@ -433,7 +433,7 @@ def pretokenization_matters(n_merges=64):
     """Train the same number of merges with and without pre-tokenization; show what each learned."""
     data = CORPUS.encode()
     out_rows, learned = [], {}
-    for label, pre in (("with pre-tokenization", True), ("without", False)):
+    for label, pre in (("with pretokenization", True), ("without", False)):
         merges = train_bpe(word_table(data, pretok=pre), n_merges)
         pieces = token_bytes(merges)
         toks = [pieces[256 + k] for k in range(len(merges))]
@@ -442,7 +442,7 @@ def pretokenization_matters(n_merges=64):
         out_rows.append([label, len(merges), len(crossing), " ".join(crossing[:8]) or "none"])
     probe = b" the baker, the baker. the baker"
     rows = []
-    for label in ("with pre-tokenization", "without"):
+    for label in ("with pretokenization", "without"):
         merges, _, pieces = learned[label]
         ids = encode(probe, ranks_of(merges), pretok=(label != "without"))
         rows.append([label, len(ids), " ".join(show(pieces[i]) for i in ids)])
@@ -1211,7 +1211,7 @@ def check_roundtrip():
         longest = max(longest, len(ids))
     return (_seed_line(name) + f" Each of {n:,} byte strings has length `integer(60)` (drawn first) and then its bytes, each an `integer(256)` draw, in "
             "order. They are encoded with the corpus's byte-level BPE of this chapter (256 bytes and its 70 merges, "
-            "pre-tokenization by the four rules above, no special tokens) and decoded by joining the byte strings of the ids.\n\n"
+            "pretokenization by the four rules of the section on pretokenization, no special tokens) and decoded by joining the byte strings of the ids.\n\n"
             + _table(["check", "result"], [
                 ["decode(encode(bytes)) equals the bytes", f"{ok:,} of {n:,}"],
                 ["of these, strings that are valid UTF-8", f"{valid:,}"]], "lr"))

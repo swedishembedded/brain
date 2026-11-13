@@ -218,9 +218,8 @@ def corpus_and_tokens():
             f"{N_VAL_DOCS} validation documents from `{NAME_VAL}` (seed {_seed(NAME_VAL)}). A sentence has "
             f"{math.prod(len(s) for s in SLOTS):,} possible spellings, so its entropy is ln of that, {_fx(SENTENCE_NATS)} nats, "
             f"and {leak} of the {N_VAL_DOCS} validation documents also occur among the training documents.\n\n"
-            f"The tokenizer is the byte-pair encoder of Chapter 2 with its pre-tokenizer (a word carries the space before it; "
-            f"the first word of a document has no space before it, since the text starts with it; every later word carries "
-            f"the space before it and the full stop has none), "
+            f"The tokenizer is the byte-pair encoder of Chapter 2 with its pre-tokenizer (every word but the first of a document carries "
+            f"the space before it, and the full stop carries none), "
             f"learned with {MERGES} merges on the training documents only. The vocabulary has id 0 for the document separator "
             f"`EOT`, then the {tk.n_bytes} bytes that occur in the training text in increasing order, then the {len(tk.merges)} merges: "
             f"V = 1 + {tk.n_bytes} + {len(tk.merges)} = {tk.vocab}. Merges in the order learned (a space is written `_`): {merges}.\n\n"
@@ -1056,7 +1055,7 @@ def mask_choice():
                           *[stable.text(base["final"]["mass"][(l, h)][k], [t["final"]["mass"][(l, h)][k] for t in twins], lambda x: _fx(x, 3))
                             for k in (0, 1)]))
     mrows.append(("uniform weights, for comparison", *[_fx(base["final"]["mass_uniform"][k], 3) for k in (0, 1)]))
-    return ("Validation loss (mean cross-entropy per target token) of the two models of the previous section after 300 steps, "
+    return ("Validation loss (mean cross-entropy per target token) of the two models described above after 300 steps, "
             "evaluated three ways: on the packed validation rows with the causal mask of the row, on the same rows with the "
             "block-diagonal mask, and with each validation document alone in a row (positions from 0). "
             + stable.RULE + "\n\n"

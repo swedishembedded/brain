@@ -1,4 +1,4 @@
-<!-- source-sha256: ee617a4fb50ecbe5e4ecb21b4b380ef190b85114feeaa532c737b667dc2547ce -->
+<!-- source-sha256: 6061cc4f20d7cd4498c7aaf8045c4aa6f70d5aacbcf54c6e37ac9cc38e8a586a -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 630 426" width="630" height="426"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="630" height="426" fill="#ffffff"/>
 <text x="360" y="28.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">input digits, in the order they are read</text>
 <text x="185" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x1 = 3</text>

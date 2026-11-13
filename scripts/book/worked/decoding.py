@@ -587,8 +587,8 @@ def additive_penalties():
         zz = additive(z, counts, pres, freq)
         rows.append((f"{pres:g}", f"{freq:g}", *(_f(x, 2) for x in zz), _f(softmax(zz)[0], 4)))
     return (
-        "Four tokens with logits $(2.4, 2.0, 0.5, -1.0)$; token 0 has been generated 3 times, token 1 once, tokens 2 and 3 never. The penalty subtracted from a token generated $c > 0$ times is "
-        "$\\beta_{\\mathrm{pres}} + \\beta_{\\mathrm{frq}}\\, c$.\n\n"
+        "Four tokens with logits $(2.4, 2.0, 0.5, -1.0)$; token 0 has been generated 3 times, token 1 once, tokens 2 and 3 never. The penalty subtracted from a token generated $g > 0$ times is "
+        "$\\beta_{\\mathrm{pres}} + \\beta_{\\mathrm{frq}}\\, g$.\n\n"
         + _table(["$\\beta_{\\mathrm{pres}}$", "$\\beta_{\\mathrm{frq}}$", "$z_0$", "$z_1$", "$z_2$", "$z_3$", "$p_0$"], rows, "rrrrrrr")
     )
 

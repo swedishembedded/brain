@@ -1,4 +1,4 @@
-<!-- source-sha256: cae495242af0cc0da4bbec07b1531700d167814a49cc0bfb7445345d8ab57263 -->
+<!-- source-sha256: 3bbce57a44c9cbd7b082e11071f0b7e512e45f705e82f0f2fa3144cb89252447 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 492" width="640" height="492"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="640" height="492" fill="#ffffff"/>
 <text x="282" y="22.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Sinusoidal encoding, width 32, base 10000</text>
 <text x="282" y="40.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">channel (pairs: sin, cos at the rate w_m)</text>
