@@ -88,7 +88,7 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; the checkpoint at BRAIN_WAN_DIT must match").default(json!("t2v-1.3B")))
     .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a trained LoRA adapter (from lora_train) to fold in before generation").host_resolved())
     .param(ParamSpec::new("dit_dtype", ParamType::Enum(DIT_DTYPES.iter().map(|s| s.to_string()).collect()), "the DiT's tier: f32 (reference), f16, int8 or int4 (smaller and faster, lower fidelity)").default(json!("f32")))
-    .param(ParamSpec::new("te_device", ParamType::Str, "where the umT5 text encoder runs, a --device spec (unset: cpu)").host_resolved())
+    .param(ParamSpec::new("te_device", ParamType::Str, "where the umT5 text encoder runs, a --device spec (unset: cpu)"))
     .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required())
     // What `/videos` maps onto t2v: the 1 + 4k frame grid at the requested
     // rate, sides on 16 pixels, up to the 14B variant's 1280x720, silent.
