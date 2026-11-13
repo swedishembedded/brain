@@ -10,6 +10,7 @@
 mod decode;
 mod exit_rule;
 mod forward;
+mod hf_fixture;
 mod layer_streamed;
 mod optimizer_state;
 mod parity;

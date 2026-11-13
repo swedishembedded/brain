@@ -8,6 +8,7 @@
 //! others run beside it.
 
 mod decode;
+mod hf_fixture;
 mod layer_streamed;
 mod optimizer_state;
 mod parity;
