@@ -5,17 +5,11 @@
 
 A model that classifies an image answers a question with a handful of possible answers. A model that generates one answers a question with more possible answers than there are atoms to write them on: a $512 \times 512$ colour image has $256^{786432}$ values, and almost none of them is a picture of anything. Making one of the few that are, on request, and different each time, asks for something that no earlier volume built: a model of what images are like, in the sense of a probability for every possible image, and a way to draw from it. The first half of this volume is the history of how that was achieved, from a table of 16 numbers to a network that removes noise; the second half is the machinery that turns a sentence, a pose or a photograph of a face into the signal that steers it.
 
-## Why it comes here
-
 The volume stands on the ones before it. Volume I and Volume II supplied the probability: distributions, likelihood, entropy and the divergences, and the generator that draws from them. Volume III supplied the networks and their training, Volume VII the convolutional and transformer networks that read an image and the preprocessing that gives them their input, and Volume V and Volume VI the transformer blocks and the text encoders that let a sentence condition a model. Every generator in this volume is those ingredients in a different arrangement: an encoder and decoder trained under a bound on likelihood, a codebook that turns pixels into tokens, a pair of networks that train each other, a denoiser that is applied many times, and the sampler that decides how many.
 
 The volume therefore starts with the question every one of those arrangements answers, what it means to learn a distribution over images and to sample from it, and works through the families in the order in which each solved a problem the previous one left: the autoencoder made probabilistic, the discrete codes that language models can predict, the adversarial game that dispenses with a likelihood, then diffusion and flow matching, the samplers and guidance that make them fast and obedient, the denoiser architectures, the conditioning on text, the systems that join the parts, the adapters that add control and identity, and restoration. It ends with a project that trains a small generator and grows it into a conditioned one.
 
-## What you can do after it
-
 You can say what a generative model of images offers (a sampler, a density, or both) and what it gives up, and you can score one on images it has not seen. You can derive the training objective of a variational autoencoder, of a diffusion model and of a flow-matching model from the likelihood they approximate, and write the sampler that turns a trained denoiser into an image, with the number of steps and the guidance scale as choices you can reason about. You can describe what a U-Net and a diffusion transformer take in and why, how a prompt becomes the conditioning signal, how an encoder and a decoder move a model from pixels to a latent space where it is cheap to work, and how a pose, an edge map or a face is fed in without retraining the generator. You can read the cost of generating an image as work, in operations and bytes, before running it.
-
-## Chapters
 
 1. [What It Means to Generate](01-generative-modeling.md): what does it mean for a model to learn a distribution over images, and how can we sample from it?
 2. [Variational Autoencoders](02-vae.md): how an autoencoder can be made into a generator, and why that needs a bound on likelihood.

@@ -126,6 +126,12 @@ def pages(book, errors):
             expected[v.intro_rel] = None
             if not (BOOK / v.intro_rel).is_file():
                 errors.append(f"docs/book/{v.intro_rel}: missing (volume {v.id} has written chapters)")
+            else:
+                # A volume introduction is one page of prose: no section headings,
+                # so no set of labels ("why it comes here") can recur volume to volume.
+                for n, line in enumerate((BOOK / v.intro_rel).read_text(encoding="utf-8").splitlines(), 1):
+                    if line.startswith("## "):
+                        errors.append(f"docs/book/{v.intro_rel}:{n}: a volume introduction has no section headings ({line!r})")
         for ch in v.chapters:
             expected[ch.rel] = ch
     for rel in ["index.md"]:

@@ -13,8 +13,6 @@ architecture that learned it best. It follows one question from the bytes of a
 file to a generative model that can talk: how does a machine come to read and
 write language?
 
-## Why it comes here
-
 A language model is the most expensive object this book describes, and the
 reasons are the ones Volume IV taught. Its cost is set by the arithmetic of
 matrix products and by the bytes those products must move; it is fast or slow
@@ -35,8 +33,6 @@ become and the prediction task that trains them, goes through the recurrent
 networks and encoder-decoder models that were the answer before the
 transformer, and then builds the transformer itself, one part at a time.
 
-## What you can do after it
-
 You can say exactly how text becomes a sequence of integers and what is lost or
 fixed along the way: which bytes a string occupies, how two spellings of the
 same word are made one, how a vocabulary of pieces is learned and how special
@@ -52,8 +48,6 @@ and say how the bidirectional encoders used for search and classification
 differ. The project that ends the volume trains a small language model from raw
 text and generates from it with a cache that provably matches uncached
 generation.
-
-## Chapters
 
 1. [Text as Data](01-text.md): what text is to a computer, byte by byte.
 2. [Tokenization](02-tokenization.md): how text is cut into pieces a model can count,

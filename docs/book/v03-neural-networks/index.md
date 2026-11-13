@@ -14,8 +14,6 @@ gradient descent. Nothing about the update rule changes. What changes is how
 the gradient is obtained, how the starting point is chosen, how the step is
 shaped, and how we find out that a network of this size is silently wrong.
 
-## Why it comes here
-
 A neural network is a composition of simple functions, so its gradient is a
 chain rule applied many times. That sentence is easy to say and hides almost
 all of the engineering. How is the chain rule organised so that the cost is
@@ -30,16 +28,12 @@ The volume needs Volume I (vectors, matrices, the chain rule, Jacobians,
 floating-point numbers) and Volume II (loss functions, gradient descent,
 generalisation). It is needed by everything that follows.
 
-## What you can do after it
-
 You can build a multilayer network from a blank file in any language, derive
 and implement its backward pass layer by layer, prove the gradients correct
 against finite differences, train it with AdamW under a warmed-up schedule
 with gradient clipping, initialise it so that signals neither vanish nor
 explode, regularise it, and read a loss curve well enough to say what is wrong
 with a run that is going badly.
-
-## Chapters
 
 1. [The Neuron and the Perceptron](01-perceptron.md): what an artificial
    neuron is, and what a single one can never learn.

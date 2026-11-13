@@ -12,8 +12,6 @@ workers computes what. This volume is about the machine. It follows one
 question from the bits of a single number to a whole program running on
 several kinds of hardware: where does the time go, and what can we do about it?
 
-## Why it comes here
-
 Every later volume trains or runs models whose cost is set by the ideas of this
 one. Language models are limited by the bytes they read per token, image
 generators by the matrix products inside them, large training runs by memory.
@@ -30,8 +28,6 @@ computation needs (floating-point operations) and the data it must move
 or a larger share of what the device can do. Times appear only as dated
 observations of a named setup.
 
-## What you can do after it
-
 You can say how many bits a number needs and what each format gives up, lay
 out data so a core and its caches use it well, decide from a computation's
 arithmetic intensity whether arithmetic or memory limits it, write the
@@ -42,8 +38,6 @@ correct implementation on hardware nobody tuned for, measure performance
 without fooling yourself, and store a model's weights in four bits. The project
 that ends the volume builds a small tensor engine that does these things on
 more than one kind of device.
-
-## Chapters
 
 1. [Bits and Number Formats](01-number-formats.md): how many bits a number
    needs, and what we lose with each bit we remove.

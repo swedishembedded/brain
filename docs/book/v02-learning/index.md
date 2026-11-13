@@ -12,8 +12,6 @@ works on examples it has never seen. It does so with models small enough to
 solve by hand (a straight line, a yes-or-no classifier) so that every step can
 be computed and checked before the models grow.
 
-## Why it comes here
-
 Volume I supplied the language: functions, vectors, derivatives, probability.
 Volume III builds neural networks, and a neural network is a model with a very
 large number of parameters, trained by exactly the loop this volume develops
@@ -23,8 +21,6 @@ inside a network, where nothing can be checked by hand. The volume also carries
 the habits that keep the later work honest: separating the data used to choose
 parameters from the data used to judge them, choosing a metric before looking at
 a result, and comparing against a baseline.
-
-## What you can do after it
 
 You can state a learning problem precisely: the data, the model, the score and
 the goal on new examples. You can fit a line by solving equations and by
@@ -36,8 +32,6 @@ metric that answers the question actually being asked, recognise when a
 classical method is the right tool, and run an experiment whose result someone
 else can repeat. The project that ends the volume does all of these on real
 measurements.
-
-## Chapters
 
 1. [The Learning Problem](01-learning-problem.md): what a model is, what it
    learns and from what, and the three settings (labels, no labels, rewards) in

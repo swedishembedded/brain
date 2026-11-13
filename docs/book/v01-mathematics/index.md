@@ -10,8 +10,6 @@ arithmetic a real computer actually performs. This volume teaches those ideas
 from school arithmetic upward, in the order in which each one is needed by the
 next, and always with the machine learning problem that makes it necessary.
 
-## Why it comes here
-
 Machine learning is mathematics executed on hardware, and the failures that
 cost the most time are rarely failures of an algorithm. They are a product of
 probabilities that underflows to zero, a matrix whose shape was misread, a
@@ -26,8 +24,6 @@ later volume: Volume II uses functions, derivatives and probability to define
 what it means to learn, and Volume III uses the chain rule, matrices and
 floating-point numbers to build and train networks.
 
-## What you can do after it
-
 You can read and write the notation of the rest of the book: sums, products,
 sets, functions, vectors, matrices and tensors, derivatives, gradients,
 expectations. You can derive the gradient of a function of many variables,
@@ -37,8 +33,6 @@ why a computer's arithmetic is slightly wrong and when it becomes completely
 wrong, estimate the cost of a computation before running it, and explain how
 a deterministic machine produces random numbers and why experiments must be
 repeatable.
-
-## Chapters
 
 1. [Numbers, Quantities and Notation](01-numbers.md): the numbers a machine
    learns with, and the notation (exponents, logarithms, sums, products, sets,
