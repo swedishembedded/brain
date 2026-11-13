@@ -7,8 +7,8 @@ Plain Python 3, standard library only, written from the chapter's own descriptio
 the previous chapter (`mdps`, imported, never copied): its exact values are the ground truth that every learned estimate
 is measured against. The chapter takes the tables away and lets the learner see sampled days only: a ten-day ledger turned
 into estimates, the exact mean and spread of the Monte Carlo and the temporal-difference targets, learning curves of both
-on the same sampled episodes, the conditions on a step-size schedule, greedy-only learning that locks onto the worst
-policy and the two ways out of it, SARSA and Q-learning against their exact fixed points, the maximisation bias of
+on the same sampled episodes, the conditions on a step-size schedule, first-visit against every-visit Monte Carlo, greedy-only learning that locks onto the worst
+policy, the two ways out of it and the starting values of the optimistic one, SARSA and Q-learning against their exact fixed points, the maximisation bias of
 Q-learning on a small example and the double estimator that removes it, linear temporal-difference learning against its
 exact fixed point, a two-state example in which the weights grow without bound, and the work of an update. Each public
 function without a leading underscore that takes no arguments returns a markdown string that the chapter embeds between
@@ -368,6 +368,96 @@ def learning_curves():
     return "\n".join(out)
 
 
+EV_RUNS, EV_EPISODES, EV_DAYS_USED = 200, 200, 50
+EV_CHECKS = (5, 10, 20, 50, 100, 200)
+
+
+def _every_visit_runs():
+    """Per run, after each episode: first-visit and every-visit estimates, and the visits of the episode to each state.
+
+    Every-visit uses the return of each of the first EV_DAYS_USED days of an episode (the returns are those of the whole
+    episode, so the days after it are the only ones ignored); both estimates are running means (step 1/n of the state)."""
+    out = []
+    for name in _run_names("everyvisit", EV_RUNS):
+        rng = bookrng.generator(name)
+        fv, fn = [0.0] * N, [0] * N
+        ev, en = [0.0] * N, [0] * N
+        per_episode = []
+        for _ in range(EV_EPISODES):
+            ep = _episode(rng, PI, EVAL_DAYS)
+            G, returns = 0.0, [0.0] * len(ep)
+            for t in range(len(ep) - 1, -1, -1):
+                G = ep[t][1] + GAMMA * G
+                returns[t] = G
+            for s, (_t, g) in _first_visit_returns(ep).items():
+                fn[s] += 1
+                fv[s] += (g - fv[s]) / fn[s]
+            visits = [0] * N
+            for t in range(EV_DAYS_USED):
+                s = ep[t][0]
+                en[s] += 1
+                visits[s] += 1
+                ev[s] += (returns[t] - ev[s]) / en[s]
+            per_episode.append((list(fv), list(ev), list(fn), list(en), visits))
+        out.append(per_episode)
+    return out
+
+
+def _mean_sd(xs):
+    m = sum(xs) / len(xs)
+    return m, math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
+
+
+def every_visit_monte_carlo():
+    runs = _every_visit_runs()
+    _V, sd_g = _return_moments()
+    rows = []
+    for e in EV_CHECKS:
+        f = [_rms(r[e - 1][0]) for r in runs]
+        v = [_rms(r[e - 1][1]) for r in runs]
+        m, sd = _mean_sd([y - x for x, y in zip(f, v)])
+        rows.append([e, f"{sum(f) / EV_RUNS:.3f}", f"{sum(v) / EV_RUNS:.3f}", f"{m:+.3f}", f"{sd / math.sqrt(EV_RUNS):.3f}"])
+    last = EV_EPISODES - 1
+    rows_state = []
+    for s in range(N):
+        fe = [r[last][0][s] - EXACT[s] for r in runs]
+        ee = [r[last][1][s] - EXACT[s] for r in runs]
+        (fb, fsd), (eb, esd) = _mean_sd(fe), _mean_sd(ee)
+        kish = []
+        for r in runs:
+            m = [ep[4][s] for ep in r]
+            kish.append(sum(m) ** 2 / sum(x * x for x in m))
+        rows_state.append([s, f"{sum(r[last][2][s] for r in runs) / EV_RUNS:.1f}", f"{sum(r[last][3][s] for r in runs) / EV_RUNS:.1f}",
+                           f"{fb:+.3f}", f"{fsd:.3f}", f"{eb:+.3f}", f"{esd:.3f}",
+                           f"{(sd_g[s] / fsd) ** 2:.0f}", f"{(sd_g[s] / esd) ** 2:.0f}", f"{sum(kish) / EV_RUNS:.0f}"])
+    out = [
+        f"First-visit and every-visit Monte Carlo on the same episodes: policy (1, 0, 0, 0), gamma = {GAMMA}, {EV_RUNS} independent "
+        f"repeats (repeat i has the generator named value_learning.everyvisit.run<i>, i = 0 .. {EV_RUNS - 1}; the first seeds are "
+        f"{_seed_line(_run_names('everyvisit', 2))}), each {EV_EPISODES} episodes of {EVAL_DAYS} days drawn as in the table of learning "
+        f"curves. Both estimates start at 0 and are running means with the step 1/n, n counting the returns averaged for that "
+        f"state from 1 (the first step is 1, so the start value never matters). First visit averages the return of the first "
+        f"visit of an episode, every visit the return of each of the first {EV_DAYS_USED} days of an episode (days 0 .. "
+        f"{EV_DAYS_USED - 1}, each return being the discounted sum to the end of the {EVAL_DAYS}-day episode). The first table is the "
+        f"root mean square error over the four states after the stated number of episodes, as in the table of learning curves "
+        f"(divisor 4), averaged over the {EV_RUNS} repeats; 'EV - FV' is the mean over the repeats of the difference of the two "
+        f"errors of the same repeat and 'se' its standard error (the standard deviation of the differences with the divisor "
+        f"{EV_RUNS - 1}, over the square root of {EV_RUNS}).",
+        "",
+        _table(["episodes", "first visit", "every visit", "EV - FV", "se"], rows),
+        "",
+        f"The second table is the state-by-state view after {EV_EPISODES} episodes. 'visits' is the mean over the repeats of the number "
+        f"of returns averaged; bias and sd are the mean and the standard deviation (divisor {EV_RUNS - 1}) over the repeats of "
+        f"V(s) - V*(s); 'equivalent n' is (sd(G) / sd)^2 with sd(G) the exact standard deviation of one return from the table of "
+        f"target spreads, the number of independent returns that would give that spread; 'weight n' is the mean over the repeats of "
+        f"(sum of m_i)^2 / (sum of m_i^2) over the episodes, m_i the number of every-visit returns that episode i contributed to "
+        f"the state: the number of equally weighted episodes that would carry the same weights.",
+        "",
+        _table(["s", "visits FV", "visits EV", "bias FV", "sd FV", "bias EV", "sd EV", "equivalent n FV", "equivalent n EV",
+                "weight n"], rows_state),
+    ]
+    return "\n".join(out)
+
+
 # ------------------------------------------------------------------ step sizes
 
 
@@ -459,6 +549,34 @@ def exploration_lock_in():
         "",
         f"The optimal values of the previous chapter are Q*(0, 0 .. 3) = {', '.join(mdps._fmt(q, 3) for q in Q_STAR[0])} and "
         f"V*(0) = {mdps._fmt(V_STAR[0], 3)}.",
+    ]
+    return "\n".join(out)
+
+
+OPTIMISM_STARTS = (5.0, 11.7, OPTIMISTIC, 100.0)
+
+
+def optimistic_starts():
+    rows = []
+    for q0 in OPTIMISM_STARTS:
+        res = [[_control_run("value_learning.exploration.v2.run%d" % i, CONTROL_DAYS, False, (0.0, 1.0, 0.0), q0, nudge)
+                for i in range(CONTROL_RUNS)] for nudge in VARIANTS]
+        policies, one, top = [], [], []
+        for runs in res:
+            pols = [tuple(_greedy(Q[s]) for s in range(N)) for Q, _c in runs]
+            policies.append("; ".join(f"{_pi_text(p)} x {pols.count(p)}" for p in sorted(set(pols))))
+            one.append(sum(c[0][1] for _Q, c in runs) / CONTROL_RUNS)
+            top.append(sum(max(Q[0]) for Q, _c in runs) / CONTROL_RUNS)
+        rows.append([f"{q0:g}", _same(policies), _cell(one, 1), _cell(top, 2)])
+    out = [
+        f"The third variant of the lock-in table (greedy, no random action, Q starting at the stated value for every pair) with "
+        f"four starting values; every start uses the same {CONTROL_RUNS} generators, run i the one named "
+        f"value_learning.exploration.v2.run<i> (i = 0 .. {CONTROL_RUNS - 1}), so the rows differ only in the starting value, and "
+        f"everything else (days {CONTROL_DAYS}, s_0 = {CONTROL_START}, the draw order, the tie rule, the step n^-0.7) is as there. "
+        f"The row of {OPTIMISTIC:g} is the third row of that table. The last column is the mean over the runs of the largest "
+        f"Q(0, .) after the last day, to be read against V*(0) = {mdps._fmt(V_STAR[0], 3)}.",
+        "",
+        _table(["start value", "final greedy policies of the runs", "days at s = 0, a = 1", "largest Q(0, .)"], rows, align="rlrr"),
     ]
     return "\n".join(out)
 
