@@ -20,10 +20,8 @@ machine.
   server.
 - **What brain talks to on the network:** fetching is opt-in - by default brain
   makes no outbound connections at all and a request for a model it doesn't
-  have locally is an error naming what is missing. Passing `--autofetch` (or
-  exporting `BRAIN_AUTO_FETCH=1`, see
-  [`docs/reference/configuration.md`](../../reference/configuration.md#serving--admission)) allows
-  such a request to trigger an outbound download; the only destination that
+  have locally is an error naming what is missing. Passing `--autofetch` to
+  `brain serve` allows such a request to trigger an outbound download; the only destination that
   ever reaches is `huggingface.co` - nothing else. Leave the gate off (the
   default) to keep brain serving only models already present on disk, or use
   `brain pull <model>` to fetch explicitly, connection watched.

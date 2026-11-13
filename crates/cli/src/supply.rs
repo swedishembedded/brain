@@ -26,8 +26,7 @@
 //! `loader::supply` -- any embedder wants the same "fetch and convert a
 //! checkpoint" primitive, not just this CLI. What stays here is everything
 //! that constructs or registers a CLI-local `ResidentModel`
-//! (`StoreSupplier::ensure` calling `serving::model_dir::resident_for_local`),
-//! plus the `BRAIN_AUTO_FETCH` environment gate itself.
+//! (`StoreSupplier::ensure` calling `serving::model_dir::resident_for_local`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -38,7 +37,7 @@ use brain_modelstore::{Hub, Step, Store};
 use residency::{Executor, ModelSupplier, Supply};
 
 /// Constructed by `run_cli.rs::build_auto_fetch_supplier` -- only when
-/// fetching is enabled ([`auto_fetch_enabled`]) -- and threaded into
+/// `brain serve --autofetch` is given -- and threaded into
 /// every HTTP/D-Bus surface (`run_apis`). Wiring it in went through the full
 /// watertight-API security pass (AGENTS.md).
 #[derive(Clone)]
@@ -64,20 +63,6 @@ pub(crate) fn next_download_pct_bucket(got: u64, total: u64, last: Option<u32>) 
     }
     let bucket = (got.min(total) * 100 / total / 10 * 10) as u32;
     last.is_none_or(|l| bucket > l).then_some(bucket)
-}
-
-/// Whether fetching weights on demand is enabled for this process. Default
-/// OFF: a CLI run or serve request whose weights are not on disk is an error
-/// naming what is missing, never a download -- the network is something the
-/// caller asks for, with `--autofetch` (which `main` publishes by setting
-/// `BRAIN_AUTO_FETCH=1`) or by exporting the variable directly. The old
-/// opt-out spellings (`0`/`false`/`off`) keep reading as off, so an
-/// environment written against the previous default keeps the behavior it
-/// asked for.
-pub fn auto_fetch_enabled() -> bool {
-    std::env::var("BRAIN_AUTO_FETCH").ok().is_some_and(|v| {
-        matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on")
-    })
 }
 
 /// Walk `models_dir` for every `<vendor>/<repo>` entry not already served by
@@ -315,7 +300,6 @@ pub(crate) mod tests {
     use brain_modelstore::FakeHub;
     use residency::budget::Budgets;
     use residency::{Device, Policy};
-    use brain_testutil::env_lock;
 
     fn store(name: &str) -> Store {
         let dir = std::env::temp_dir().join(name);
@@ -355,26 +339,6 @@ pub(crate) mod tests {
     }
 
     // -- The auto-fetch gate: fetching is opt-in -------------------------
-
-    /// Default OFF: unset never fetches, only a truthy `BRAIN_AUTO_FETCH`
-    /// (what `--autofetch` publishes) does. The off spellings stay off so an
-    /// operator who exported `=0` under the old opt-out convention keeps
-    /// exactly the behavior they asked for.
-    #[test]
-    fn auto_fetch_is_off_unless_the_environment_opts_in() {
-        let _serial = env_lock();
-        std::env::remove_var("BRAIN_AUTO_FETCH");
-        assert!(!auto_fetch_enabled(), "unset must be OFF: fetching is opt-in");
-        for off in ["0", "false", "off", "OFF", "False", " nope "] {
-            std::env::set_var("BRAIN_AUTO_FETCH", off);
-            assert!(!auto_fetch_enabled(), "{off:?} must not enable fetching");
-        }
-        for on in ["1", "true", "TRUE", "on", " On "] {
-            std::env::set_var("BRAIN_AUTO_FETCH", on);
-            assert!(auto_fetch_enabled(), "{on:?} must enable fetching");
-        }
-        std::env::remove_var("BRAIN_AUTO_FETCH");
-    }
 
     #[test]
     fn classify_refuses_a_reserved_vendor_with_no_network() {

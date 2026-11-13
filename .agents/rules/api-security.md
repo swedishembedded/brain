@@ -127,8 +127,8 @@ them, so treat all request input as hostile.
       vendor/repo/file) is client-influenced, which this checklist's own precedent
       treats as not a distinct SSRF concern by itself. Confirm: (a) `GET /models` and
       `GET /models/{id}` (pure discovery/read routes) never reach `ensure_and_recheck`/
-      `ensure_resident` — only a dispatch route may fetch; (b) `BRAIN_AUTO_FETCH=0`
-      (operator env var, not request-controlled) fully disables the supplier before a
+      `ensure_resident` - only a dispatch route may fetch; (b) without `--autofetch`
+      (an operator flag, not request-controlled) `brain serve` builds no supplier before a
       process ever constructs one; (c) HTTP surfaces stay loopback-only (item 7) — an
       operator who binds non-loopback is opting a wider set of callers into this
       already-sanctioned egress path, same as any other dispatch route.

@@ -7,6 +7,7 @@
 //! process-wide state (the current directory, environment variables): the
 //! others run beside it.
 
+mod autofetch_flag;
 mod caps_color;
 mod device_routing;
 mod doctor_cli;

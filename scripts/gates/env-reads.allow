@@ -71,7 +71,6 @@ crates/chronos2/tests/it/timing.rs	MOE_SKIP_GPU_TESTS
 crates/cli/src/caps_cli.rs	NO_COLOR
 crates/cli/src/continuous_train.rs	MOE_SKIP_GPU_TESTS
 crates/cli/src/main.rs	<&key>
-crates/cli/src/main.rs	BRAIN_AUTO_FETCH
 crates/cli/src/main.rs	BRAIN_MODELS_DIR
 crates/cli/src/main.rs	BRAIN_TEST_CONFIG_BOOL
 crates/cli/src/main.rs	BRAIN_TEST_CONFIG_FILLED
@@ -81,9 +80,7 @@ crates/cli/src/main.rs	BRAIN_VERBOSE
 crates/cli/src/main.rs	HOME
 crates/cli/src/main.rs	XDG_CONFIG_HOME
 crates/cli/src/perf_longctx.rs	<qwen35moe::gguf_load::GGUF_ENV>
-crates/cli/src/run_cli.rs	BRAIN_AUTO_FETCH
 crates/cli/src/serve_daemon.rs	XDG_RUNTIME_DIR
-crates/cli/src/supply.rs	BRAIN_AUTO_FETCH
 crates/cli/src/supply.rs	YOLO_RAW_PT
 crates/cli/tests/it/device_routing.rs	BRAIN_DEVICE
 crates/cli/tests/it/flops_diffusion_cli.rs	BRAIN_FLUX2_VAE
@@ -105,7 +102,6 @@ crates/cli/tests/it/oos_skill_eval.rs	OOS_UNIVARIATE
 crates/cli/tests/it/perf_longctx.rs	BRAIN_QWEN35_GGUF
 crates/cli/tests/it/qwen_eval.rs	QWEN3_DIR
 crates/cli/tests/it/qwen_lora_finetune.rs	QWEN3_DIR
-crates/cli/tests/it/serve_cli.rs	BRAIN_AUTO_FETCH
 crates/cli/tests/it/serve_cli.rs	BRAIN_BACKEND
 crates/cli/tests/it/serve_cli.rs	BRAIN_DEVICE
 crates/cli/tests/it/serve_cli.rs	BRAIN_MODELS_DIR

@@ -4,9 +4,8 @@
 //! The default-checkpoint auto-fetch policy, and the fetch/convert engine it
 //! sits on -- moved out of `crates/cli/src/supply.rs`. What stays in
 //! `crates/cli`: [`residency::supply::ModelSupplier`]'s serving-side
-//! implementation (`StoreSupplier`, single-flight, background healing) and the
-//! `BRAIN_AUTO_FETCH` environment gate -- all of which construct or register
-//! a CLI-local `ResidentModel`
+//! implementation (`StoreSupplier`, single-flight, background healing), which
+//! constructs and registers a CLI-local `ResidentModel`
 //! (`crate::model_dir::resident_for_local`), the same "residency-adapter
 //! glue" line `crates/catalog`'s own module doc draws.
 //!
@@ -14,10 +13,9 @@
 //! move: `crate::resolve::maybe_inject_default_weights` calls it to fill in
 //! `--weights`/`--tokenizer` for a flagless `brain infer <arch>`, and every
 //! embedder wants the same "give me a runnable default checkpoint for this
-//! architecture" primitive. It used to decide silently from one process-wide
-//! environment variable (`BRAIN_AUTO_FETCH`); [`DownloadPolicy`] makes that
-//! choice an explicit parameter instead, so a caller that must never touch
-//! the network (`DownloadPolicy::Offline`) can say so without an env var.
+//! architecture" primitive. [`DownloadPolicy`] makes how eagerly it touches
+//! the network an explicit parameter, so a caller that must never touch the
+//! network (`DownloadPolicy::Offline`) says so.
 //!
 //! Swedish Embedded AB implements model distribution and weight-management
 //! tooling for its clients. If your team needs expertise in fetching and
@@ -35,14 +33,9 @@ use brain_modelstore::{CompoundManifest, Hub, Step, Store, MANIFEST_FILE};
 use crate::progress::{Mode, Reporter};
 
 /// How eagerly [`ensure_default_weights`] is allowed to touch the network.
-///
-/// This is new, deliberate API surface: the CLI used to decide this
-/// implicitly from one process-wide `BRAIN_AUTO_FETCH` environment variable
-/// (`crate::supply::auto_fetch_enabled`, in `crates/cli`, still does for the
-/// CLI's own default), with no way for a caller to say "never touch the
-/// network, whatever the environment says". An embedder that must guarantee
-/// offline operation now can, by passing [`DownloadPolicy::Offline`]
-/// directly, independent of any process environment.
+/// An embedder that must guarantee offline operation passes
+/// [`DownloadPolicy::Offline`]; the CLI's `--autofetch` is
+/// [`DownloadPolicy::IfMissing`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DownloadPolicy {
     /// Fetch only when nothing local already resolves the reference - the
@@ -55,8 +48,7 @@ pub enum DownloadPolicy {
     /// error naming the remedy, never a download.
     Offline,
     /// Always go through the fetch/plan/execute sequence, even when a local
-    /// copy might already resolve - what `BRAIN_AUTO_FETCH=1` has always
-    /// meant for the CLI. The plan step itself skips whatever has already
+    /// copy might already resolve. The plan step itself skips whatever has already
     /// landed on disk, so this differs from `IfMissing` only in that it
     /// still consults the hub for a resolution/verification pass.
     AlwaysCheck,

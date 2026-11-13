@@ -188,8 +188,8 @@ tells you which applies (look for the **⤓** marker):
   opt-in. `brain pull Qwen/Qwen3-0.6B` (or the HuggingFace URL) fetches a
   model up front, with a progress bar. Auto-fetch is the same
   fetch run implicitly by a first inference or serve request, but only when
-  you ask for it: pass the global `--autofetch` flag (or export
-  `BRAIN_AUTO_FETCH=1`). With it off - the default - a run whose weights are
+  you ask for it: pass `--autofetch` (to `brain serve`, or to a model's
+  action). With it off - the default - a run whose weights are
   not pulled prints an error naming what is missing instead of downloading
   anything. Use `brain pull` when you want the download to happen now, on a
   connection you are watching, rather than in the middle of a first
@@ -197,11 +197,10 @@ tells you which applies (look for the **⤓** marker):
 - **Auto-fetch (⤓, opt-in)** - the model id names a real Hugging Face repo
   (e.g. `Qwen/Qwen3-0.6B`, `Ultralytics/YOLOv8`, `LiquidAI/LFM2.5-350M`), and
   brain fetches it itself the first time it's needed - no manual
-  export, no extra setup. This happens only with `--autofetch` /
-  `BRAIN_AUTO_FETCH=1`, on the CLI and on the serving surfaces (`brain
-  serve`'s HTTP and D-Bus transports, which resolve a named model on demand);
-  `brain do` never auto-fetches - it only reaches models already registered
-  locally by name. The first request against a not-yet-fetched model pays a
+  export, no extra setup. This happens only with `--autofetch`: a model's
+  action (`brain <model> <action> --autofetch`) fetches the architecture's
+  default checkpoint when the store has none, and `brain serve --autofetch`'s
+  HTTP and D-Bus transports resolve a named model on demand. The first request against a not-yet-fetched model pays a
   one-time download cost; every request after that loads the checkpoint
   already on disk.
 - **A local checkpoint** - put it in the model store (or name it with

@@ -597,8 +597,8 @@ get_url() {
 }
 
 @test "security: a well-formed but reserved-vendor model ref 404s fast, with no auto-fetch attempt" {
-  # `BRAIN_AUTO_FETCH` is on by default for this whole suite's server (no env
-  # override in `setup()`), so this exercises the REAL run_cli.rs wiring, not
+  # Whatever the suite's server fetch setting, this exercises the REAL
+  # run_cli.rs wiring, not
   # just the unit-level ModelSupplier stubs. "brain/…" LOOKS like a fetchable
   # <vendor>/<repo> ref but is a reserved vendor (crates/modelref's grammar):
   # classify() must refuse it with zero network I/O, so this returns instantly

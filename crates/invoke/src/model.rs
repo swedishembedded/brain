@@ -64,10 +64,15 @@ pub fn run_model(program: &str, model: &Model, argv: &[String]) -> i32 {
 
 /// [`run_model`], with `workflows` offered beside the actions.
 pub fn run_model_with(program: &str, model: &Model, workflows: &[Workflow], argv: &[String]) -> i32 {
+    // `--autofetch` is a run-level flag, not an action param: it decides
+    // whether a checkpoint the store lacks may be downloaded.
+    let fetch = argv.iter().any(|a| a == "--autofetch");
+    let argv: Vec<String> = argv.iter().filter(|a| *a != "--autofetch").cloned().collect();
+    let argv = &argv[..];
     let p = Program { name: program };
     let help = argv.iter().any(|a| a == "-h" || a == "--help");
     if let Some(wf) = argv.first().and_then(|a| workflows.iter().find(|w| w.name == a)) {
-        return run_workflow(program, model, wf, &argv[1..], help);
+        return run_workflow(program, model, wf, &argv[1..], help, fetch);
     }
     let Some(action) = argv.first().filter(|a| !a.starts_with('-')) else {
         print!("{}", usage(&p, &model.manifest));
@@ -108,7 +113,7 @@ pub fn run_model_with(program: &str, model: &Model, workflows: &[Workflow], argv
     }
     let assembly = match model.weights {
         None => crate::resolve::empty_assembly(),
-        Some((arch, arch_spec)) => match resolve_for(arch, arch_spec, overrides, spec, &flags) {
+        Some((arch, arch_spec)) => match resolve_for(arch, arch_spec, overrides, spec, &flags, fetch) {
             Ok(a) => a,
             Err(e) => {
                 eprint!("{}", e.message());
@@ -129,7 +134,7 @@ pub fn run_model_with(program: &str, model: &Model, workflows: &[Workflow], argv
     }
 }
 
-fn run_workflow(program: &str, model: &Model, wf: &Workflow, args: &[String], help: bool) -> i32 {
+fn run_workflow(program: &str, model: &Model, wf: &Workflow, args: &[String], help: bool, fetch: bool) -> i32 {
     let name = format!("{program} {}", wf.name);
     let Some(spec) = model.manifest.actions.iter().find(|a| a.name == wf.action) else {
         eprintln!("{name}: the model has no action '{}'", wf.action);
@@ -144,7 +149,7 @@ fn run_workflow(program: &str, model: &Model, wf: &Workflow, args: &[String], he
         None => (crate::resolve::empty_assembly(), args.to_vec()),
         Some((arch, arch_spec)) => {
             let (overrides, rest) = crate::resolve::role_overrides(arch_spec, args);
-            match resolve_for(arch, arch_spec, overrides, spec, &rest) {
+            match resolve_for(arch, arch_spec, overrides, spec, &rest, fetch) {
                 Ok(a) => (a, rest),
                 Err(e) => {
                     eprint!("{}", e.message());
@@ -173,10 +178,21 @@ fn run_workflow(program: &str, model: &Model, wf: &Workflow, args: &[String], he
 /// (a tiny and a large release side by side) are settled by the action's
 /// `variant`: the one given on the command line, else the param's default -
 /// only a checkpoint of that variant assembles, so the choice is the user's
-/// stated one, never a guess.
-fn resolve_for(arch: &str, spec: &dyn ArchSpec, overrides: BTreeMap<String, String>, action: &capability::ActionSpec, flags: &[String]) -> Result<Assembly, ResolveFailure> {
+/// stated one, never a guess. With `fetch` (`--autofetch`), a store with no
+/// checkpoint fetches the architecture's default one and resolves again.
+fn resolve_for(arch: &str, spec: &dyn ArchSpec, overrides: BTreeMap<String, String>, action: &capability::ActionSpec, flags: &[String], fetch: bool) -> Result<Assembly, ResolveFailure> {
     let named = !overrides.is_empty();
-    match resolve_in_store(arch, spec, overrides, action, flags) {
+    let first = match resolve_in_store(arch, spec, overrides.clone(), action, flags) {
+        Err(ResolveFailure::Missing(_)) if fetch && !named => match loader::ensure_default_weights(arch, loader::DownloadPolicy::IfMissing) {
+            Ok(_) => resolve_in_store(arch, spec, overrides, action, flags),
+            Err(e) => {
+                eprintln!("{arch}: --autofetch could not fetch a default checkpoint ({e})");
+                resolve_in_store(arch, spec, overrides, action, flags)
+            }
+        },
+        other => other,
+    };
+    match first {
         // A fresh model needs no checkpoint, so a store with none - or with several that tie, none of which it would
         // start from - does not stop it; one the caller named must exist.
         Err(ResolveFailure::Missing(_) | ResolveFailure::NoModelsDir(_) | ResolveFailure::Ambiguous(_)) if action.from_scratch && !named => Ok(crate::resolve::empty_assembly()),
@@ -246,6 +262,7 @@ fn global_options(argv: &[String]) -> Result<Vec<String>, String> {
 
 /// The global options' help lines.
 pub const GLOBAL_HELP: &str = "  --device SPEC          cpu | gpu | gpu0 | gpu0,gpu1 | cpu0-7 ...   [every device]
+  --autofetch            download the model's default checkpoint when the store has none
   --backend NAME         wgpu | vulkan | cuda | cpu                  [the device's own]
   --brain-data-dir DIR   brain's data root; the model store is DIR/models
 ";

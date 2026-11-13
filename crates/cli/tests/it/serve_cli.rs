@@ -242,8 +242,7 @@ fn serve_command(dir: &std::path::Path, base: &std::path::Path, extra: &[&str]) 
         .arg(dir.join("run"))
         .args(extra)
         .stdin(Stdio::null())
-        .args(["--device", "cpu"])
-        .env_remove("BRAIN_AUTO_FETCH");
+        .args(["--device", "cpu"]);
     cmd
 }
 
@@ -297,7 +296,6 @@ fn the_environment_names_no_checkpoint() {
         .stdin(Stdio::null())
         .args(["--device", "cpu"])
         .env("BRAIN_QWEN_WEIGHTS", &base)
-        .env_remove("BRAIN_AUTO_FETCH")
         .output()
         .expect("run brain serve");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -320,7 +318,6 @@ fn an_adapter_with_no_checkpoint_names_the_flag_that_selects_one() {
         .stdin(Stdio::null())
         .args(["--device", "cpu"])
         .env_remove("BRAIN_QWEN_WEIGHTS")
-        .env_remove("BRAIN_AUTO_FETCH")
         .output()
         .expect("run brain serve");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -419,7 +416,6 @@ fn every_startup_resolver_scans_the_models_dir_flag_not_the_environment_store() 
         .env("BRAIN_MODELS_DIR", &env_store)
         .env("HOME", &home)
         .env_remove("XDG_DATA_HOME")
-        .env_remove("BRAIN_AUTO_FETCH")
         .spawn()
         .expect("spawn brain serve");
 

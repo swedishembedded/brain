@@ -179,6 +179,9 @@ SERVING OPTIONS
                          what the store holds (repeatable; e.g. --pin flux2.dit=F).
                          It also settles a store holding two candidates for a role:
                          the startup log names the --pin for each.
+  --autofetch            fetch a requested model that is not pulled (and repair what
+                         the startup scan found incomplete); off by default, so a
+                         request for an unpulled model is an error with no network I/O
   --mock                 also serve the deterministic, weight-free mock models (brain/mock,
                          brain/mock-asr, brain/mock-video) for exercising the serving stack
                          and its clients with no checkpoint and no GPU
@@ -717,6 +720,9 @@ pub fn run_serve(args: &[String]) {
     let mut training = false;
     // `--mock [--mock-delay-ms MS]`: serve the weight-free mock models.
     let (mut mock, mut mock_delay_ms) = (false, None::<u64>);
+    // `--autofetch` (written anywhere on the brain command line; `main`
+    // forwards it here): fetch a requested model that is not pulled.
+    let mut autofetch = false;
     // `--sched-*`: the residency scheduler's batching/fairness weights.
     let mut scheduler = residency::Policy::serving_default();
     let mut artifact_store: Option<String> = None;
@@ -842,6 +848,7 @@ pub fn run_serve(args: &[String]) {
             }
             "--training" => training = true,
             "--mock" => mock = true,
+            "--autofetch" => autofetch = true,
             "--mock-delay-ms" => mock_delay_ms = Some(parsed(args, &mut i, "--mock-delay-ms")),
             "--artifact-store" => artifact_store = Some(val(args, &mut i, "--artifact-store")),
             "--watch-adapters" => watch_adapters = Some(val(args, &mut i, "--watch-adapters")),
@@ -1101,6 +1108,7 @@ pub fn run_serve(args: &[String]) {
             ready,
             deadlines,
             adapter_mode,
+            autofetch,
             scheduler: scheduler_policy(scheduler, policy.limits.max_batch),
             knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, max_batch: policy.limits.max_batch, train, mock_delay_ms },
         });
@@ -1277,6 +1285,9 @@ pub(crate) fn host_ram_available() -> u64 {
 
 /// Which serving surfaces to bring up and their config (see `run_apis`).
 struct RunApis {
+    /// `--autofetch`: fetch a requested model that is not pulled, and heal
+    /// what the startup scan found broken.
+    autofetch: bool,
     /// The residency scheduler's policy (`--sched-*`, `--max-batch`).
     scheduler: residency::Policy,
     dbus: bool,
@@ -1359,9 +1370,7 @@ const DBUS_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Build the transparent auto-fetch supplier for a live `brain serve`, but
-/// only when fetching is enabled: `--autofetch` (which `main` publishes by
-/// setting `BRAIN_AUTO_FETCH=1`) or the same variable the caller exported.
-/// Default is OFF -- a request for a model that is not pulled returns an
+/// only when fetching is enabled (`--autofetch`). Default is OFF -- a request for a model that is not pulled returns an
 /// error to that caller, with zero network I/O; nothing downloads from a
 /// node the operator did not opt in. `None` also when no models directory
 /// can be resolved at all (no `$HOME`), same as before this existed.
@@ -1370,8 +1379,8 @@ const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// one per surface): `StoreSupplier`'s in-flight map is what makes concurrent
 /// requests for the same cold model share a single fetch rather than each
 /// surface racing its own download.
-fn build_auto_fetch_supplier(models_dir: Option<&Path>) -> Option<Arc<dyn residency::ModelSupplier>> {
-    if !crate::supply::auto_fetch_enabled() {
+fn build_auto_fetch_supplier(models_dir: Option<&Path>, autofetch: bool) -> Option<Arc<dyn residency::ModelSupplier>> {
+    if !autofetch {
         eprintln!("brain serve: auto-fetch off -- a request for a model that is not pulled errors (pass --autofetch to enable on-demand fetching)");
         return None;
     }
@@ -1412,7 +1421,7 @@ fn run_apis(a: RunApis) {
     // supplier and the healer - so the flag decides the store everywhere.
     let models_dir = loader::model_dir::resolve(a.models_dir.as_deref());
     let store = a.pins.with_models_dir(models_dir.clone());
-    let supplier = build_auto_fetch_supplier(models_dir.as_deref());
+    let supplier = build_auto_fetch_supplier(models_dir.as_deref(), a.autofetch);
     // `--training` is the one switch for every training action, not only
     // `brain/train`'s: without it every surface refuses them.
     let training = a.knobs.train.is_some();
@@ -1721,48 +1730,25 @@ mod tests {
     }
 
     use super::{scheduler_policy, HELP};
-    use brain_testutil::env_lock;
 
     /// The node's fetch gateway: with the default (no opt-in) there is NO
     /// auto-fetch supplier, so every surface answers a request for an
     /// unpulled model with an error and zero network I/O; `--autofetch`
-    /// (published as `BRAIN_AUTO_FETCH=1`) builds the supplier.
+    /// builds the supplier.
     #[test]
     fn the_auto_fetch_supplier_is_built_only_when_fetching_is_enabled() {
-        let _serial = env_lock();
         let dir = std::env::temp_dir().join(format!("run-cli-autofetch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::remove_var("BRAIN_AUTO_FETCH");
-        assert!(
-            super::build_auto_fetch_supplier(Some(&dir)).is_none(),
-            "unset must build no supplier: fetching is opt-in"
-        );
-        std::env::set_var("BRAIN_AUTO_FETCH", "0");
-        assert!(
-            super::build_auto_fetch_supplier(Some(&dir)).is_none(),
-            "=0 must keep fetching off"
-        );
-        std::env::set_var("BRAIN_AUTO_FETCH", "1");
-        assert!(
-            super::build_auto_fetch_supplier(Some(&dir)).is_some(),
-            "=1 (what --autofetch publishes) must build the supplier"
-        );
-        std::env::remove_var("BRAIN_AUTO_FETCH");
+        assert!(super::build_auto_fetch_supplier(Some(&dir), false).is_none(), "fetching is opt-in");
+        assert!(super::build_auto_fetch_supplier(Some(&dir), true).is_some(), "--autofetch builds the supplier");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Every flag the ad-hoc loop in `run_serve` actually parses must be
-    /// documented in `HELP` -- this is the content-side gate for the bench
-    /// incident (`--listen` was undocumented AND unparsed; a flag that is
-    /// parsed but undocumented is the same bug in the other direction).
-    /// `-v`/`--verbose` are documented here too (still valid on `brain serve
-    /// ...`) but are no longer in this list: `main::install_verbosity` strips
-    /// them from argv globally before `run_serve`'s own loop ever runs.
     #[test]
     fn help_documents_every_flag_the_parser_accepts() {
         for f in [
             "--gpt", "--yolo", "--max-new", "--temp", "--top-k", "--seed", "--conf", "--dbus", "--dbus-system", "--dbus-name",
-            "--reserve-gb", "--models-dir", "--pin", "--mock", "--mock-delay-ms", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
+            "--reserve-gb", "--models-dir", "--pin", "--autofetch", "--mock", "--mock-delay-ms", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
             "--admit-deadline-ms", "--cold-build-admit-deadline-ms", "--sched-max-wait-ms", "--sched-age-weight", "--sched-batch-weight",
         ] {
             assert!(HELP.contains(f), "{f} is parsed by run_serve but not documented in HELP");

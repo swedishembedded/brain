@@ -131,7 +131,6 @@ capping the jobs one run takes (8 when unset).
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup (also `--models-dir`) | `$XDG_DATA_HOME/brain/models` |
-| `BRAIN_AUTO_FETCH` | `1`/`true`/`on` enables on-demand fetching of missing model files (`--autofetch` publishes the same thing and wins over an exported `0`); a pulled model still resolves with the gate off | disabled |
 | `BRAIN_LIMIT_VRAM_TOTAL` | environment fallback for `--limit-vram-total`: a ceiling on VRAM the whole process may hold, summed over every GPU (not per card) | no ceiling |
 | `BRAIN_LIMIT_RAM_TOTAL` | environment fallback for `--limit-ram-total`: a ceiling on host RAM the process may hold (CPU + every NPU) | no ceiling |
 

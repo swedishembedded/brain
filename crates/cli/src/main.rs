@@ -147,8 +147,8 @@ MODEL STORE (global - valid on any subcommand)
 
 AUTO-FETCH (global - valid on any subcommand)
   --autofetch              Allow missing model weights to be downloaded on
-                           demand (same as $BRAIN_AUTO_FETCH=1; the flag wins
-                           over an exported =0). Default OFF: a run whose
+                           demand, by `brain serve` and by a model's action
+                           (`brain <model> <action>`). Default OFF: a run whose
                            weights are not pulled prints an error naming them
                            instead of downloading. `brain pull <model>`
                            fetches without the flag.
@@ -1128,9 +1128,9 @@ fn parse_data_dir(argv: Vec<String>) -> (Option<String>, Vec<String>) {
 }
 
 /// Extract the global `--autofetch` switch from anywhere in `argv` and
-/// return `(present, remaining args)`. Pure - no process-global side effect -
-/// so it's testable like [`parse_verbosity`] and [`parse_limits`]; [`main`]
-/// is the sole caller of [`apply_autofetch`] with this result.
+/// return `(present, remaining args)`. Pure, so it's testable like
+/// [`parse_verbosity`] and [`parse_limits`]; [`forward_autofetch`] hands the
+/// result to the command that uses it.
 fn parse_autofetch(argv: Vec<String>) -> (bool, Vec<String>) {
     let mut on = false;
     let mut rest = Vec::with_capacity(argv.len());
@@ -1144,17 +1144,24 @@ fn parse_autofetch(argv: Vec<String>) -> (bool, Vec<String>) {
     (on, rest)
 }
 
-/// Publish `--autofetch` into the one variable every fetch site gates on
-/// ([`crate::supply::auto_fetch_enabled`]): resolve's weight resolution, the
-/// `--model` resolver and `brain serve`'s supplier. Setting the variable
-/// (rather than threading a bool through every entry point) is what makes
-/// one gate the single source of truth, and an explicitly typed flag
-/// outranking an inherited `BRAIN_AUTO_FETCH=0` is the same flag-beats-env
-/// rule `--brain-data-dir` applies to `BRAIN_MODELS_DIR`.
-fn apply_autofetch(on: bool) {
-    if on {
-        std::env::set_var("BRAIN_AUTO_FETCH", "1");
+/// The generic verbs `--autofetch` means nothing to: they either fetch on
+/// their own terms (`pull`) or never load weights.
+const NO_AUTOFETCH_VERBS: &[&str] = &["data", "devices", "doctor", "npu", "bench", "perf", "label", "caps", "pull", "models", "plan", "help"];
+
+/// Hand `--autofetch` to the command that fetches: `brain serve` and a model's
+/// action (`brain <model> <action>`, which `invoke` runs) take it as their own
+/// flag. A verb with no use for it is told so instead of silently ignoring it.
+fn forward_autofetch(on: bool, mut argv: Vec<String>) -> Vec<String> {
+    if !on {
+        return argv;
     }
+    let verb = argv.get(subcommand_index(&argv)).cloned().unwrap_or_default();
+    if NO_AUTOFETCH_VERBS.contains(&verb.as_str()) {
+        eprintln!("brain: --autofetch has no effect on `brain {verb}`");
+    } else {
+        argv.push("--autofetch".to_string());
+    }
+    argv
 }
 
 /// Publish `--brain-data-dir` into the one models-directory resolver, saying
@@ -1283,6 +1290,20 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_FLUX1_TE_DEVICE", replacement: "flux1 / pulid text2image: {te_device: cpu|gpuN}" },
     Retired { name: "BRAIN_FLUX1_VAE_DEVICE", replacement: "flux1 / pulid text2image: {vae_device: SPEC}" },
     Retired { name: "BRAIN_COSYVOICE_PROFILE", replacement: "cosyvoice synth: {profile: true}" },
+    Retired { name: "BRAIN_AUTO_FETCH", replacement: "serve: {autofetch: true} (or --autofetch on any command)" },
+    Retired { name: "BRAIN_S3DIT_ENCODER_GPU", replacement: "z-image text2image: {encoder_gpu: N}, lora_train: {encoder_gpu: N}" },
+    Retired { name: "BRAIN_S3DIT_ENCODER_RESIDENT", replacement: "z-image text2image: {encoder_resident: true}" },
+    Retired { name: "BRAIN_S3DIT_ENCODER_FP32SPLIT", replacement: "z-image text2image: {encoder_fp32_split: true}" },
+    Retired { name: "BRAIN_S3DIT_ENCODER_CUT", replacement: "z-image text2image: {encoder_cut: N}" },
+    Retired { name: "BRAIN_S3DIT_WINDOW_BLOCKS", replacement: "z-image text2image / image2image / inpaint / outpaint: {window_blocks: N}" },
+    Retired { name: "BRAIN_S3DIT_FLASH", replacement: "z-image text2image / image2image / inpaint / outpaint: {attention: auto|flash|materialized}" },
+    Retired { name: "BRAIN_S3DIT_RETAIN_INT8_CACHE", replacement: "z-image text2image: {retain_int8_cache: true}" },
+    Retired { name: "BRAIN_FLUX2_TE_DEVICE", replacement: "flux2 text2image / edit: {te_device: gpuN[:i8]}" },
+    Retired { name: "BRAIN_FLUX2_NO_STREAM", replacement: "flux2 text2image / edit: {no_stream: true}" },
+    Retired { name: "BRAIN_FLUX2_TE_NO_STREAM", replacement: "flux2 text2image / edit: {te_no_stream: true}" },
+    Retired { name: "BRAIN_FLUX2_LORA_FOLD", replacement: "flux2 text2image / edit: {lora_fold: true}" },
+    Retired { name: "BRAIN_VAE_TILE", replacement: "flux2 text2image / edit: {vae_tiling: true|false}" },
+    Retired { name: "BRAIN_MINIMAXMUSIC3_CFG_PARALLEL", replacement: "minimaxmusic3 generate: {cfg_parallel: false}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
     Retired { name: "BRAIN_CHRONOS2", replacement: "serve: {pin: [chronos2.weights=PATH]}" },
     Retired { name: "BRAIN_FINCAST", replacement: "serve: {pin: [fincast.weights=FILE]}" },
@@ -1504,11 +1525,11 @@ fn main() {
     // same published answer.
     let (data_dir, argv) = parse_data_dir(argv);
     apply_data_dir(data_dir);
-    // Before any subcommand, so every fetch site -- resolve's weight
-    // resolution, the `--model` resolver, `brain serve`'s supplier -- reads
-    // the same published opt-in.
+    // `--autofetch` may be written anywhere; it is handed to the command
+    // that fetches (`serve`, or a model's action through `invoke`) as its own
+    // flag rather than published process-wide.
     let (autofetch, argv) = parse_autofetch(argv);
-    apply_autofetch(autofetch);
+    let argv = forward_autofetch(autofetch, argv);
     if matches!(argv.get(1).map(String::as_str), Some("--version" | "-V")) {
         println!("brain {}", env!("CARGO_PKG_VERSION"));
         return;
@@ -1583,8 +1604,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_autofetch, apply_config, inject_config_flags, parse_autofetch, parse_config, parse_config_text, parse_data_dir, parse_limits, parse_verbosity, ConfigSections, HELP, RETIRED_VARIABLES};
-    use brain_testutil::env_lock;
+    use super::{apply_config, forward_autofetch, inject_config_flags, parse_autofetch, parse_config, parse_config_text, parse_data_dir, parse_limits, parse_verbosity, ConfigSections, HELP, RETIRED_VARIABLES};
 
     /// The opt-in fetch flag is stripped from anywhere in `argv`, consumes
     /// no value (it is a switch, not a dial), and leaves everything else
@@ -1605,18 +1625,15 @@ mod tests {
         assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec());
     }
 
-    /// Publishing is the flag setting the one variable every fetch site
-    /// gates on; an explicitly typed flag outranks an inherited opt-out,
-    /// the same flag-beats-env rule `--brain-data-dir` applies.
+    /// `--autofetch` reaches the command that fetches as its own flag, and
+    /// nothing is published into the environment.
     #[test]
-    fn apply_autofetch_publishes_the_opt_in_over_an_inherited_opt_out() {
-        let _serial = env_lock();
-        std::env::set_var("BRAIN_AUTO_FETCH", "0");
-        apply_autofetch(false);
-        assert_eq!(std::env::var("BRAIN_AUTO_FETCH").as_deref(), Ok("0"), "no flag must not touch the environment");
-        apply_autofetch(true);
-        assert_eq!(std::env::var("BRAIN_AUTO_FETCH").as_deref(), Ok("1"), "the flag outranks an inherited =0");
-        std::env::remove_var("BRAIN_AUTO_FETCH");
+    fn autofetch_is_forwarded_to_the_command_that_fetches() {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(forward_autofetch(true, v(&["brain", "serve", "--openai"])), v(&["brain", "serve", "--openai", "--autofetch"]));
+        assert_eq!(forward_autofetch(true, v(&["brain", "--device", "cpu", "qwen3", "generate"])), v(&["brain", "--device", "cpu", "qwen3", "generate", "--autofetch"]));
+        assert_eq!(forward_autofetch(true, v(&["brain", "caps"])), v(&["brain", "caps"]));
+        assert_eq!(forward_autofetch(false, v(&["brain", "serve"])), v(&["brain", "serve"]));
     }
 
     /// The same two-directional discipline the memory ceilings and the

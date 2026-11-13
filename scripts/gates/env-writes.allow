@@ -1,2 +1,2 @@
-crates/cli/src/main.rs	2	the CLI entry publishes --auto-fetch and --set KEY=VALUE overrides at start-up, before any worker thread exists
+crates/cli/src/main.rs	1	the CLI entry publishes the config file's BRAIN_* keys at start-up, before any worker thread exists
 crates/npu/src/openvino/real.rs	1	LD_LIBRARY_PATH must contain the runtime's directory before the process dlopens it; the dynamic loader reads only the environment
