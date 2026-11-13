@@ -9,15 +9,11 @@
 //! both hold their expensive weights in a process-wide, checkpoint-keyed
 //! host store rather than in a field here.
 //!
-//! Config is env-only, matching `crates/arch`'s own `weights_env`
-//! registration for this architecture and `minimaxmusic3::generate::
-//! Paths::from_env`'s own six roles:
-//!   * `BRAIN_MINIMAXMUSIC3_LM` - Global LLM (Qwen3-8B architecture)
-//!   * `BRAIN_MINIMAXMUSIC3_DEPTH` - RVQ depth decoder
-//!   * `BRAIN_MINIMAXMUSIC3_CONDITION` - condition encoder
-//!   * `BRAIN_MINIMAXMUSIC3_DIT` - flow-matching DiT
-//!   * `BRAIN_MINIMAXMUSIC3_VOCODER` - vocoder
-//!   * `BRAIN_MINIMAXMUSIC3_TOKENIZER` - tokenizer
+//! The six checkpoints come from `minimaxmusic3::spec::MinimaxMusic3Spec`'s
+//! roles, resolved from the serving store or pinned with
+//! `brain serve --pin minimaxmusic3.ROLE=PATH`: `language_model` (the
+//! Qwen3-8B-architecture Global LLM), `depth_decoder`, `condition_encoder`,
+//! `transformer` (the flow-matching DiT), `vocoder` and `tokenizer`.
 //!
 //! One action, `generate`, dispatched straight through
 //! `minimaxmusic3::caps::generate_action` - the SAME param-decode +
@@ -213,7 +209,7 @@ impl ResidentModel for MinimaxMusic3Resident {
             (&self.paths.tokenizer, "tokenizer"),
         ] {
             if !std::path::Path::new(dir).exists() {
-                return Err(format!("minimaxmusic3: {role} weights not found at {dir} (set the matching BRAIN_MINIMAXMUSIC3_* var)"));
+                return Err(format!("minimaxmusic3: {role} weights not found at {dir} (pin it with --pin minimaxmusic3.ROLE=PATH)"));
             }
         }
         Ok(Box::new(MinimaxMusic3Instance { paths: self.paths.clone(), device }))

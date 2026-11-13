@@ -58,9 +58,7 @@ use crate::{condition_encoder, denoise, depth_decoder, global_llm, pipeline, sti
 use data::qwen_tokenizer::QwenBpe;
 use gpu_core::Gpu;
 
-/// One role per checkpoint directory, resolved from the SAME six env vars
-/// `crates/arch`'s `minimaxmusic3` registry row names in its own
-/// `weights_env` table.
+/// One directory per role of `crate::spec::MinimaxMusic3Spec`.
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub lm: String,
@@ -71,32 +69,9 @@ pub struct Paths {
     pub tokenizer: String,
 }
 
-/// `(variable, human role name)`, in the order [`Paths`] declares them -
-/// one table so the env reader and its own error messages cannot disagree
-/// about the spelling (matches `wan::pipeline::PATH_VARS`'s own shape).
-pub const PATH_VARS: [(&str, &str); 6] = [
-    ("BRAIN_MINIMAXMUSIC3_LM", "Global LLM"),
-    ("BRAIN_MINIMAXMUSIC3_DEPTH", "RVQ depth decoder"),
-    ("BRAIN_MINIMAXMUSIC3_CONDITION", "condition encoder"),
-    ("BRAIN_MINIMAXMUSIC3_DIT", "flow-matching DiT"),
-    ("BRAIN_MINIMAXMUSIC3_VOCODER", "vocoder"),
-    ("BRAIN_MINIMAXMUSIC3_TOKENIZER", "tokenizer"),
-];
-
 impl Paths {
-    /// Every role from its environment variable; `Err` names the first
-    /// missing one.
-    pub fn from_env() -> Result<Paths, String> {
-        let get = |i: usize| -> Result<String, String> {
-            let (var, role) = PATH_VARS[i];
-            std::env::var(var).ok().filter(|v| !v.is_empty()).ok_or_else(|| format!("no {role} weights: set {var}"))
-        };
-        Ok(Paths { lm: get(0)?, depth: get(1)?, condition: get(2)?, dit: get(3)?, vocoder: get(4)?, tokenizer: get(5)? })
-    }
-
     /// Build every role from an already-resolved [`capability::Assembly`]
-    /// (`crate::spec::MinimaxMusic3Spec`'s own six roles) - no environment
-    /// involved.
+    /// (`crate::spec::MinimaxMusic3Spec`'s own six roles).
     ///
     /// `language_model` resolves to a real `HfDir` (its own directory,
     /// already what this field wants); `depth_decoder`/`condition_encoder`/
@@ -389,43 +364,4 @@ mod tests {
         assert_eq!(max_frames_for_duration(0.0), 1, "must never return zero frames");
     }
 
-    #[test]
-    fn path_vars_role_order_matches_the_archspecs_own_roles() {
-        // The six `PATH_VARS` entries are `Paths`' own field order
-        // (`lm, depth, condition, dit, vocoder, tokenizer`), which must stay
-        // in exact lockstep with `crate::spec::MinimaxMusic3Spec::roles()` -
-        // the resolver's role list now, not `crates/arch`'s `weights_env`
-        // table (empty for this arch's row).
-        use brain_modelstore::resolve::ArchSpec;
-        let spec = crate::spec::MinimaxMusic3Spec;
-        assert_eq!(spec.roles(), ["language_model", "depth_decoder", "condition_encoder", "transformer", "vocoder", "tokenizer"]);
-
-        let vars: Vec<&str> = PATH_VARS.iter().map(|(v, _)| *v).collect();
-        assert_eq!(
-            vars,
-            [
-                "BRAIN_MINIMAXMUSIC3_LM",
-                "BRAIN_MINIMAXMUSIC3_DEPTH",
-                "BRAIN_MINIMAXMUSIC3_CONDITION",
-                "BRAIN_MINIMAXMUSIC3_DIT",
-                "BRAIN_MINIMAXMUSIC3_VOCODER",
-                "BRAIN_MINIMAXMUSIC3_TOKENIZER",
-            ]
-        );
-    }
-
-    #[test]
-    fn from_env_names_the_first_missing_var() {
-        // Clear every role var for the duration of this test (serial by
-        // construction - `cargo test` runs each test in its own thread but
-        // env vars are process-global; this test only ever asserts on the
-        // Err path, so a concurrent from_env in another test racing this
-        // one would at worst see a spurious extra var set/unset, not a
-        // wrong answer at true parallel envs level in-process).
-        for (var, _) in PATH_VARS {
-            std::env::remove_var(var);
-        }
-        let err = Paths::from_env().unwrap_err();
-        assert!(err.contains("BRAIN_MINIMAXMUSIC3_LM"), "unexpected error: {err}");
-    }
 }

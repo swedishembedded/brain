@@ -1409,6 +1409,12 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_SCHED_AGE_WEIGHT", replacement: "serve: {sched-age-weight: X}" },
     Retired { name: "BRAIN_SCHED_BATCH_WEIGHT", replacement: "serve: {sched-batch-weight: X}" },
     Retired { name: "BRAIN_SCHED_MAX_WAIT_MS", replacement: "serve: {sched-max-wait-ms: N}" },
+    Retired { name: "BRAIN_MINIMAXMUSIC3_LM", replacement: "serve: {pin: [minimaxmusic3.language_model=DIR]}" },
+    Retired { name: "BRAIN_MINIMAXMUSIC3_DEPTH", replacement: "serve: {pin: [minimaxmusic3.depth_decoder=DIR]}" },
+    Retired { name: "BRAIN_MINIMAXMUSIC3_CONDITION", replacement: "serve: {pin: [minimaxmusic3.condition_encoder=DIR]}" },
+    Retired { name: "BRAIN_MINIMAXMUSIC3_DIT", replacement: "serve: {pin: [minimaxmusic3.transformer=DIR]}" },
+    Retired { name: "BRAIN_MINIMAXMUSIC3_VOCODER", replacement: "serve: {pin: [minimaxmusic3.vocoder=DIR]}" },
+    Retired { name: "BRAIN_MINIMAXMUSIC3_TOKENIZER", replacement: "serve: {pin: [minimaxmusic3.tokenizer=DIR]}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 

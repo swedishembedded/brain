@@ -46,8 +46,8 @@ pub const MODEL: &str = "brain/minimaxmusic3";
 /// (`brain-catalog`'s own `ModelEntry::provider`) resolves those through the
 /// model-store resolver (`crate::spec::MinimaxMusic3Spec`) and binds them
 /// into [`MinimaxMusic3Provider`] at construction; the residency adapter
-/// (`crates/catalog/src/resident_minimaxmusic3.rs`) still reads the
-/// `BRAIN_MINIMAXMUSIC3_*` env vars `crate::generate::Paths::from_env` does.
+/// (`crates/catalog/src/resident_minimaxmusic3.rs`) resolves the same spec
+/// from the serving store.
 pub fn generate_spec() -> ActionSpec {
     let d = GenOpts::default();
     ActionSpec::new("generate", "generate a song from lyrics and a caption (Qwen3-8B Global LLM AR sampling, CFG-guided flow-matching DiT denoise, DAC-style vocoder, 44.1 kHz stereo)")
@@ -100,8 +100,8 @@ fn opts_from(inv: &Invocation) -> Result<GenOpts, String> {
 /// [`Outcome`] - ONE implementation, shared by [`MinimaxMusic3Provider`]
 /// and the residency adapter. `paths` is resolved by the caller - the
 /// direct/`brain do` path through the resolver
-/// (`crate::spec::MinimaxMusic3Spec`), the residency adapter still through
-/// [`Paths::from_env`].
+/// (`crate::spec::MinimaxMusic3Spec`), the residency adapter through the
+/// serving store's resolution of the same spec.
 pub fn generate_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let lyrics = inv.get_str("lyrics").ok_or("minimaxmusic3 generate: missing required param 'lyrics'")?;
     let caption = inv.get_str("caption").ok_or("minimaxmusic3 generate: missing required param 'caption'")?;

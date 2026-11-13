@@ -45,30 +45,25 @@ unwritten feature. See this repo's own roadmap ledger
 
 ## Getting the weights
 
-Model id: `brain/minimaxmusic3`. Five components, one role each - no
-combined single-file checkpoint exists upstream, so each is its own env
-var:
+Model id: `brain/minimaxmusic3`. Six roles, resolved from the model store by
+`minimaxmusic3::spec::MinimaxMusic3Spec` - no combined single-file checkpoint
+exists upstream. Name any of them outright with the role flag on a one-shot
+command (`--transformer DIR`) or a serve pin
+(`brain serve --pin minimaxmusic3.transformer=DIR`):
 
-| Env var | Role |
+| Role | Component |
 |---|---|
-| `BRAIN_MINIMAXMUSIC3_LM` | Global LLM (Qwen3-8B architecture) |
-| `BRAIN_MINIMAXMUSIC3_DEPTH` | RVQ depth decoder |
-| `BRAIN_MINIMAXMUSIC3_CONDITION` | Condition encoder |
-| `BRAIN_MINIMAXMUSIC3_DIT` | Flow-matching DiT |
-| `BRAIN_MINIMAXMUSIC3_VOCODER` | Vocoder |
-| `BRAIN_MINIMAXMUSIC3_TOKENIZER` | Tokenizer (Qwen2Tokenizer-compatible) |
+| `language_model` | Global LLM (Qwen3-8B architecture) |
+| `depth_decoder` | RVQ depth decoder |
+| `condition_encoder` | Condition encoder |
+| `transformer` | Flow-matching DiT |
+| `vocoder` | Vocoder |
+| `tokenizer` | Tokenizer (Qwen2Tokenizer-compatible) |
 
 ## Running it
 
 ```bash
-BRAIN_MINIMAXMUSIC3_LM=/path/to/language_model \
-BRAIN_MINIMAXMUSIC3_DEPTH=/path/to/rvq_depth_decoder \
-BRAIN_MINIMAXMUSIC3_CONDITION=/path/to/condition_encoder \
-BRAIN_MINIMAXMUSIC3_DIT=/path/to/transformer \
-BRAIN_MINIMAXMUSIC3_VOCODER=/path/to/vocoder \
-BRAIN_MINIMAXMUSIC3_TOKENIZER=/path/to/qwen3-8B-tokenizer-music \
-BRAIN_DEVICE=cpu \
-brain minimaxmusic3 generate \
+brain --device cpu minimaxmusic3 generate \
     --lyrics "$(printf '[verse]\nquiet morning light\n[chorus]\nhold on to this feeling\n')" \
     --caption "warm acoustic ballad, gentle piano, soft vocals, 80 BPM" \
     --duration_seconds 10 \

@@ -527,13 +527,6 @@ crates/minimaxmusic3/src/bin/mm3_bench.rs	BRAIN_MINIMAXMUSIC3_VOCODER
 crates/minimaxmusic3/src/depth_decoder.rs	BRAIN_MINIMAXMUSIC3_DEPTH
 crates/minimaxmusic3/src/devplan.rs	BRAIN_MINIMAXMUSIC3_CFG_PARALLEL
 crates/minimaxmusic3/src/dit_train.rs	MOE_SKIP_GPU_TESTS
-crates/minimaxmusic3/src/generate.rs	<var>
-crates/minimaxmusic3/src/generate.rs	BRAIN_MINIMAXMUSIC3_CONDITION
-crates/minimaxmusic3/src/generate.rs	BRAIN_MINIMAXMUSIC3_DEPTH
-crates/minimaxmusic3/src/generate.rs	BRAIN_MINIMAXMUSIC3_DIT
-crates/minimaxmusic3/src/generate.rs	BRAIN_MINIMAXMUSIC3_LM
-crates/minimaxmusic3/src/generate.rs	BRAIN_MINIMAXMUSIC3_TOKENIZER
-crates/minimaxmusic3/src/generate.rs	BRAIN_MINIMAXMUSIC3_VOCODER
 crates/minimaxmusic3/tests/it/cfg_parallel.rs	BRAIN_MINIMAXMUSIC3_DIT
 crates/minimaxmusic3/tests/it/condition_encoder_parity.rs	BRAIN_MINIMAXMUSIC3_CONDITION
 crates/minimaxmusic3/tests/it/depth_decoder_parity.rs	BRAIN_MINIMAXMUSIC3_DEPTH

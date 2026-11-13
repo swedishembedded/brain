@@ -17,21 +17,14 @@ residency executor --instance key--> resident minimaxmusic3 (load-per-call)
 ```
 
 ```bash
-BRAIN_MINIMAXMUSIC3_LM=/path/to/language_model \
-BRAIN_MINIMAXMUSIC3_DEPTH=/path/to/rvq_depth_decoder \
-BRAIN_MINIMAXMUSIC3_CONDITION=/path/to/condition_encoder \
-BRAIN_MINIMAXMUSIC3_DIT=/path/to/transformer \
-BRAIN_MINIMAXMUSIC3_VOCODER=/path/to/vocoder \
-BRAIN_MINIMAXMUSIC3_TOKENIZER=/path/to/qwen3-8B-tokenizer-music \
-BRAIN_DEVICE=cpu \
-  tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--device cpu --dbus" -- \
   python3 samples/python/musicgen/generate-song/generate_song.py \
       --caption "warm acoustic ballad, gentle piano, soft vocals, 80 BPM" \
       --lyrics "$(printf "[verse]\nquiet morning light\n[chorus]\nhold on to this feeling\n")" \
       --out song.wav
 ```
 
-`BRAIN_DEVICE=cpu` matters on a machine whose GPU cannot hold the Global
+`--device cpu` matters on a machine whose GPU cannot hold the Global
 LLM's ~3.28 GB embedding/`lm_head` tensors as single buffers (an Intel
 integrated GPU, for instance).
 
@@ -81,9 +74,7 @@ completion.
 The same generation without a server, one command, one playable file:
 
 ```bash
-BRAIN_MINIMAXMUSIC3_LM=... BRAIN_MINIMAXMUSIC3_DEPTH=... BRAIN_MINIMAXMUSIC3_CONDITION=... \
-BRAIN_MINIMAXMUSIC3_DIT=... BRAIN_MINIMAXMUSIC3_VOCODER=... BRAIN_MINIMAXMUSIC3_TOKENIZER=... \
-brain minimaxmusic3 generate --device cpu \
+brain --device cpu minimaxmusic3 generate \
     --lyrics "..." --caption "..." --duration_seconds 10 \
     --out audio=song.wav
 ```

@@ -11,14 +11,12 @@ this action already packs a COMPLETE WAV byte stream (`meta.format ==
 "wav"`, the same convention `qwen3tts synth` uses), so no client-side
 encoding step is needed.
 
-Run under a private session bus (weights via env - six directories, one
-per component: the Global LLM, the RVQ depth decoder, the condition
-encoder, the flow-matching DiT, the vocoder, and the tokenizer):
+Run under a private session bus (the six components - the Global LLM, the
+RVQ depth decoder, the condition encoder, the flow-matching DiT, the vocoder
+and the tokenizer - resolve from the model store; `--pin minimaxmusic3.ROLE=DIR`
+in the `--serve` arguments names one outright):
 
-    BRAIN_MINIMAXMUSIC3_LM=… BRAIN_MINIMAXMUSIC3_DEPTH=… \\
-    BRAIN_MINIMAXMUSIC3_CONDITION=… BRAIN_MINIMAXMUSIC3_DIT=… \\
-    BRAIN_MINIMAXMUSIC3_VOCODER=… BRAIN_MINIMAXMUSIC3_TOKENIZER=… \\
-    BRAIN_DEVICE=cpu tools/dbus-session.sh --serve "--dbus" -- \\
+    tools/dbus-session.sh --serve "--device cpu --dbus" -- \\
       python3 samples/python/musicgen/generate-song/generate_song.py \\
           --caption "warm acoustic ballad, gentle piano, soft vocals, 80 BPM" \\
           --lyrics "$(printf '[verse]\\nquiet morning light\\n[chorus]\\nhold on to this feeling\\n')" \\
