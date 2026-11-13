@@ -154,7 +154,9 @@ def _vision_group_macs(h, w):
     attn = V_DEPTH * n * n * 2 * V_D
     merged = V_D * V_MERGE * V_MERGE
     merge = n_rows * (merged * merged + merged * V_OUT)
-    return {"embed": embed, "dense": dense, "attn": attn, "merge": merge, "total": embed + dense + attn + merge, "rows": n_rows}
+    # The three DeepStack mergers have the main merger's two linear maps and run on the rows of the tower's taps.
+    return {"embed": embed, "dense": dense, "attn": attn, "merge": merge, "deepstack": V_TAPS * merge,
+            "total": embed + dense + attn + merge, "rows": n_rows}
 
 
 def _thinker_layer_params():
@@ -203,13 +205,14 @@ def minute_of_video():
               ("audio tower: projector", a["proj"]),
               (f"vision tower: patch embedding, {groups} pairs", groups * v["embed"]), (f"vision tower: 27 blocks, weights, {groups} pairs", groups * v["dense"]),
               ("vision tower: attention inside each pair's grid", groups * v["attn"]), ("vision tower: merger", groups * v["merge"]),
+              ("vision tower: three DeepStack mergers", groups * v["deepstack"]),
               ("Thinker: weights of 48 layers, every row, and the head once", thinker_w), ("Thinker: attention scores and weighted sums", thinker_a)]
     all_total = sum(m for _, m in stages)
     body = [(n, _t(m, 3), f"{100 * m / all_total:.1f}") for n, m in stages]
     body.append(("everything before the first reply token", _t(all_total, 3), "100.0"))
-    second = ("Multiply-adds, in trillions, that the clip costs before the first token of the reply (the vision tower's three DeepStack mergers, extra copies "
-              "of the final merger that the checkpoint carries to inject early vision features into the decoder's first layers, are not run, as in "
-              "brain's serving path; norms, activations and the position-table resampling are left out).\n\n" + _table(["stage", "trillions of multiply-adds", "percent"], body))
+    second = ("Multiply-adds, in trillions, that the clip costs before the first token of the reply (the vision tower's three DeepStack mergers are extra copies "
+              "of the final merger that the checkpoint carries; their outputs are added to the visual rows after the Thinker's first three layers, "
+              "so each costs the main merger's two linear maps; norms, activations, the additions and the position-table resampling are left out).\n\n" + _table(["stage", "trillions of multiply-adds", "percent"], body))
     kv = _kv_bytes_per_token()
     third = (f"The cache that the prefill leaves behind: 48 layers x 2 x 4 key-value heads x 128 x {KV_BYTES_PER_VALUE} bytes is {_i(kv)} bytes a position (32-bit floats, "
              f"as brain's caches are), so {_i(total)} positions hold {_i(kv * total)} bytes, {kv * total / 2**30:.2f} GiB.")

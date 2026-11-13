@@ -53,6 +53,7 @@ CODE_DIM, BINS, NQ, N_SEM = 256, 2048, 16, 1   # codebook width, entries per cod
 LAT = 512                        # decoder: width after the quantizer's output projections
 LATENT = 1024                    # decoder: width of the pre-convolution and of the upsampling stages
 DEC_HIDDEN, DEC_FFN, DEC_LAYERS, DEC_HEADS, DEC_HEAD_DIM, WINDOW = 512, 1024, 8, 16, 64, 72
+ENC_WINDOW = 250
 UP = (2, 2)                      # transposed convolutions between the frame rate and the SEANet decoder
 RATES = (8, 5, 4, 3)             # SEANet decoder upsampling rates
 DEC_DIM = 1536                   # width of the first SEANet decoder convolution
@@ -496,14 +497,15 @@ def attention_work():
     for secs in (1, 5, 10, 30):
         t25 = _ceil_div(secs * FS, HOP // DOWN_STRIDE)
         t12 = _ceil_div(secs * FS, HOP)
-        enc = 2 * ENC_HEADS * ENC_HEAD_DIM * ENC_LAYERS * (t25 * (t25 + 1) // 2)
+        enc_keys = sum(min(i + 1, ENC_WINDOW) for i in range(t25))
+        enc = 2 * ENC_HEADS * ENC_HEAD_DIM * ENC_LAYERS * enc_keys
         keys = sum(min(i + 1, WINDOW) for i in range(t12))
         dec = 2 * DEC_HEADS * DEC_HEAD_DIM * DEC_LAYERS * keys
         rows.append((secs, t25, _i(enc), t12, _i(dec)))
     return ("Per query and key a layer spends 2 x heads x head width multiply-adds (one product for the score, one for the weighted "
             f"value). The encoder has {ENC_LAYERS} layers of {ENC_HEADS} heads of width {ENC_HEAD_DIM} (2 x {ENC_HEADS * ENC_HEAD_DIM} "
-            f"per query and key per layer) and its attention, as the code runs it, sees every earlier frame, "
-            f"t (t + 1) / 2 pairs for t frames; the decoder has {DEC_LAYERS} layers of {DEC_HEADS} heads of width {DEC_HEAD_DIM} "
+            f"per query and key per layer) and sees at most the {ENC_WINDOW} most recent frames, the sum over frames i of "
+            f"min(i + 1, {ENC_WINDOW}) pairs; the decoder has {DEC_LAYERS} layers of {DEC_HEADS} heads of width {DEC_HEAD_DIM} "
             f"(2 x {DEC_HEADS * DEC_HEAD_DIM}) and sees at most the {WINDOW} most recent frames, the sum over frames i of "
             f"min(i + 1, {WINDOW}) pairs. Frames are ceil(seconds x 24000 / 960) at 25 Hz and ceil(seconds x 24000 / 1920) at "
             f"12.5 Hz.\n\n"

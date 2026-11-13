@@ -274,7 +274,40 @@ One RRDB block has 719,424 parameters (three dense blocks of 239,808). The 6-blo
 
 Almost everything is in the trunk. 92.2 percent of the operations are in the 23 blocks, which run at the input resolution, and the whole upsampling head, though its convolutions work on pictures four and sixteen times as large as the input, takes 7.6 percent: the head has one convolution at twice the side and three at four times the side, and the trunk has $23 \times 15$ at the input size. The parameters are more concentrated still, since 719,424 of the 16,697,987 belong to each block's 15 convolutions. Because the net is fully convolutional, its work is linear in the number of pixels, which is why the crate's serving action does not override the batch default: batching $N$ images saves no work and multiplies the high-water mark by $N$.
 
-Linear work does not make tiling exact. Each of the 15 convolutions of an RRDB (five in each of its three dense blocks) adds a pixel to the neighbourhood that an output pixel depends on, so the receptive field of the trunk has a radius of about $1 + 15 \times 23 + 1 = 347$ input pixels. The serving action's `tile` parameter cuts the image into tiles with a halo of 32 pixels (`TILE_HALO` in `crates/rrdbnet/src/caps.rs`), replicate-pads at the borders, and keeps only the interior of each tile's output. A halo of 32 is far below 347, so the seams are an approximation, as the constant's own comment says; the test that measures the seam on the released network prints the figure and asserts nothing about it, and `tile` defaults to 0, the whole image in one graph, for callers who can afford the memory.
+Linear work does not make tiling free. Each of the 15 convolutions of an RRDB (five in each of its three dense blocks) adds a pixel to the neighbourhood that an output pixel depends on, so the receptive field of the trunk alone is wide, and the crate derives the whole radius from the graph instead of typing it (`RrdbConfig::receptive_radius` in `crates/rrdbnet/src/config.rs`). Counting backwards from the output, $r = 2$ for `conv_last` and `conv_hr`, each doubling of the scale maps $r$ to $\lceil (r + 1)/2 \rceil$ (its convolution works at the lower resolution, and the nearest doubling halves what the layers after it contribute), and then $+1$ for `conv_body`, $+15$ per block and $+1$ for `conv_first`:
+
+<!-- worked: restoration.rrdbnet_tiling -->
+The receptive radius of RRDBNet by the rule of `RrdbConfig::receptive_radius`: r = 2 for conv_last and conv_hr; for each factor of 2 of the scale, r becomes ceil((r + 1) / 2) (the convolution after the doubling, then the doubling); then +1 for conv_body, +15 for every block and +1 for conv_first. Every convolution is 3 x 3 with padding 1, so each adds one pixel at its own resolution. The trace for the released x4 network:
+
+| layer, counted from the output | radius r after it, in input pixels |
+|---|---:|
+| conv_last, conv_hr | 2 |
+| conv_up2 and its doubling | 2 |
+| conv_up1 and its doubling | 2 |
+| conv_body | 3 |
+| 23 blocks | 348 |
+| conv_first | 349 |
+
+| configuration | receptive radius R |
+|---|---:|
+| 23 blocks, x4 | 349 |
+| 23 blocks, x2 | 349 |
+| 6 blocks, x4 | 94 |
+| 6 blocks, x2 | 94 |
+
+A tiled pass cuts, along each axis, cores of `tile` pixels that partition the axis (the last one shorter), reads each core through a window of min(extent, tile + 2R) pixels kept inside the axis, and so runs ceil(extent / tile) windows per axis, each costing a pass over its window. R = 349 here. The work of a pass is proportional to the pixels of its window; the last column is the limit for an axis that is long compared with the tile.
+
+| input | tile | window side min(extent, tile + 2R) | windows | work relative to one whole-image pass | ((tile + 2R) / tile)^2 |
+|---|---:|---:|---:|---:|---:|
+| 600 x 600 | 64 | 600 | 10 x 10 = 100 | 100.00 | 141.76 |
+| 600 x 600 | 256 | 600 | 3 x 3 = 9 | 9.00 | 13.89 |
+| 600 x 600 | 512 | 600 | 2 x 2 = 4 | 4.00 | 5.59 |
+| 2048 x 2048 | 64 | 762 | 32 x 32 = 1024 | 141.76 | 141.76 |
+| 2048 x 2048 | 256 | 954 | 8 x 8 = 64 | 13.89 | 13.89 |
+| 2048 x 2048 | 512 | 1,210 | 4 x 4 = 16 | 5.59 | 5.59 |
+<!-- /worked -->
+
+The released x4 network has a radius of $R = 349$ input pixels, and it is $R$ that the serving action's `tile` parameter is built on (`crates/rrdbnet/src/caps.rs`, commit f0113ff73). A tile of side $t$ is a core of $t$ pixels that the sweep keeps; the core is read through a window of $\min(\text{extent}, t + 2R)$ pixels that lies inside the image, shifted inward at a border instead of padded past it. Every kept pixel then sees its whole receptive field, or a window edge that is the image edge, where the convolutions zero-pad exactly as they do in the whole-image pass. The tiled output is therefore equal to the whole-image output bit for bit, and the parity tests assert that on three odd sizes and tiles. The price is work and memory, not quality: a window holds $(t + 2R)^2$ input pixels, so on a long axis the work is multiplied by $((t + 2R)/t)^2$, which the last table gives as $5.59$ for a tile of 512 and $141.76$ for a tile of 64, and an image shorter than a window is read whole by every core. `tile` defaults to 0, the whole image in one graph, and a tile is worth cutting only for an image larger than about $2R + t$ pixels a side.
 
 ### A silent zero in the gradient
 

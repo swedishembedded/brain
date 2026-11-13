@@ -740,16 +740,6 @@ def wan_params(m, in_ch=16, text_dim=4096, freq=256, patch=4, out=16):
     return n, blk
 
 
-def wan_i2v_extra(m):
-    """The tensors an image-to-video checkpoint adds to a text-to-video one of the same size: a wider patch embedding (36 channels
-    instead of 16), k and v matrices for the image tokens in every block (with biases and a key norm), and the image projection."""
-    d, layers = m["d"], m["layers"]
-    wider = d * (36 - 16) * 4
-    per_block = 2 * (d * d + d) + d
-    proj = 1280 + 1280 + 1280 * 1280 + 1280 + d * 1280 + d + d + d
-    return wider + layers * per_block + proj
-
-
 def gemma_params():
     """Text tower of the Gemma-4 12B config: embeddings, 48 layers (40 sliding, 8 full), final norm; and the two aggregate heads."""
     vocab, h, inter, layers, heads = 262144, 3840, 15360, 48, 16
@@ -773,7 +763,6 @@ def counts_table():
     g_total, g_layers, g_heads, agg_in = gemma_params()
     w13, b13 = wan_params(WAN13)
     w14, b14 = wan_params(WAN14)
-    extra = wan_i2v_extra(WAN14)
     rows = [
         ["LTX-2.5 video stream (48 blocks)", _int(ltx["video"]), f"{ltx['video'] / ltx['total']:.3f}"],
         ["LTX-2.5 audio stream (48 blocks)", _int(ltx["audio"]), f"{ltx['audio'] / ltx['total']:.3f}"],
@@ -785,7 +774,6 @@ def counts_table():
         ["Gemma-4 aggregate heads (188160 -> 4096 and -> 2048)", _int(g_heads), ""],
         ["Wan 1.3B transformer", _int(w13), ""],
         ["Wan 14B transformer", _int(w14), ""],
-        ["added by an image-to-video 14B checkpoint", _int(extra), ""],
     ]
     return (f"Parameters counted from the tensor shapes of each model's checkpoint manifest (weights, biases, norm gains and tables; the {_int(ltx['tensors'])} tensors "
             f"of the LTX-2.5 transformer are 59 outside the blocks, 84 in each of 48 blocks, and 129 in each of two connectors). Per LTX block: video stream "
@@ -813,8 +801,8 @@ def counts_inventory():
         f"A Wan block (d = {w['d']} and f = {w['ffn']} for 1.3B; d = {WAN14['d']} and f = {WAN14['ffn']} for 14B) holds a 6 x d modulation table, the gain and bias of one more norm (2 d), two attentions "
         "(self and text cross-attention) of four d x d linear layers with biases and the gains of two norms (2 d), and a feed-forward d to f to d with biases; outside the blocks are a patch embedding (16 channels "
         "x 4 pixels of d weights and d biases), a text embedding (4096 to d to d, with biases), a timestep embedding (256 to d to d), a time projection (d to 6 d), and a head (d to 4 x 16 values) with a "
-        "2 x d table. An image-to-video checkpoint widens the patch embedding to 36 channels, adds k and v layers with biases and one norm gain for the image tokens in every block, and an image projection "
-        "(a norm of width 1280 with gain and bias, 1280 to 1280 and 1280 to d with biases, and a final norm of width d with gain and bias). Gemma-4's text tower has 262,144 embedding rows of width 3840 and a final norm of 3840; each of its 48 layers has four norms of 3840, one scalar, "
+        "2 x d table. "
+        "Gemma-4's text tower has 262,144 embedding rows of width 3840 and a final norm of 3840; each of its 48 layers has four norms of 3840, one scalar, "
         "bias-free q, k, v, o matrices (16 query heads; 8 key-value heads of width 256 in a sliding layer, and in a full layer, every sixth, 1 of width 512 with no v matrix), two norms of the head width (q and k) and a "
         "bias-free gated feed-forward of three 3840 x 15360 matrices; the two aggregate heads each have a bias. The tensor counts (4,349 for LTX, 825 for Wan 1.3B) are read from the manifests and are data, "
         "not derived here.")

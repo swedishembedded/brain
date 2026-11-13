@@ -164,7 +164,7 @@ The engine's own test of this neuron is small and worth reading as a check on th
 | exact step, no refractory period | 0.6321 | [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] |
 <!-- /worked -->
 
-It also shows something the gate's own comment gets wrong. The comment beside the assertion says that $z = 1$ "drives straight to $V_\infty$", which was true of forward Euler, where the step with $z = 1$ lands on $V_\infty$ exactly. The engine's step is the exact one, $e^{-1} = 0.368$ of the distance is left, the membrane after one tick is $0.6321$, and the neuron still fires on tick 0 only because $0.6321 > 0.5$. The test is right and its comment is a leftover from the integrator the engine used first.
+The table also shows what the refractory gate asserts. The comment beside its assertion reads the step as the engine takes it: $z = 1$ moves $1 - e^{-1} = 0.6321$ of the distance to $V_\infty$, past the threshold $0.5$, on every tick the neuron may integrate, so it fires, sits out three ticks and fires again with a period of 4, where a refractory period that only gated the spike, and did not clamp the membrane, would give a period of 1. Under forward Euler the same step lands on $V_\infty$ exactly, which is the $1.0000$ of the second row, and the spike ticks are the same, so this gate does not tell the two integrators apart and the closed-form test beside it does.
 
 ## Why the engine stopped using forward Euler
 

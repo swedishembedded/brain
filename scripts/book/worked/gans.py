@@ -650,8 +650,8 @@ def _conv_out(h, k, pad, stride=1):
 
 def patch_discriminator():
     rows = []
-    for label, n_fft, hop, clip, c1, c2, k in (("the crate's training-test configuration", 8, 4, 24, 2, 2, 3),
-                                              ("an audio-sized configuration (illustration)", 1024, 256, 24000, 16, 32, 3)):
+    for label, n_fft, hop, clip, c1, c2, k in (("the crate's test configuration", 8, 4, 24, 2, 2, 3),
+                                              ("the joint loop's default widths at one of its sizes", 1024, 256, 24000, 16, 32, 3)):
         bins, frames = n_fft // 2 + 1, (clip - n_fft) // hop + 1
         h1, w1 = _conv_out(bins, k, 1), _conv_out(frames, k, 1)
         h2, w2 = _conv_out(h1, k, 1), _conv_out(w1, k, 1)
@@ -666,8 +666,9 @@ def patch_discriminator():
             "x frames), LeakyReLU after the first two, as in `crates/minimaxmusic3/src/discriminator.rs`: 1 -> c1 -> c2 -> 1 channels. "
             "Frames = (clip - n_fft) / hop + 1 rounded down, bins = n_fft / 2 + 1. A convolution layer with c_in -> c_out channels has "
             "c_out c_in k^2 weights and c_out biases and costs c_out c_in k^2 multiply-adds per output position; the direct "
-            "transform costs 2 n_fft multiply-adds per bin and frame (a real and an imaginary sum). The second row's sizes are chosen "
-            "here for the count and are not a brain model.\n\n"
+            "transform costs 2 n_fft multiply-adds per bin and frame (a real and an imaginary sum). The second row takes the widths "
+            "(16, 32) and the middle STFT size (1024, hop 256) of the joint loop's default recipe, over a 24,000-sample clip chosen "
+            "here for the count.\n\n"
             + _table(["configuration", "n_fft / hop / samples", "spectrogram", "logit map (patches)", "receptive field of one logit",
                       "c1, c2", "parameters", "multiply-adds of D", "multiply-adds of the transform"], rows))
 

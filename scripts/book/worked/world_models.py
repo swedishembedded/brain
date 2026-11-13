@@ -782,6 +782,17 @@ def _genie_pairs(t, hw=256):
     return t * hw * hw + hw * t * (t + 1) // 2
 
 
+def _genie_flops(cached, new, hw=256, inner=512, layers=12, d2=519, ffi=1384, dim=512, code_dim=32, n_codes=1024):
+    """The FLOPs of `cached_forward_flops` in `crates/genieredux/src/cache.rs`, written from the description above: `new` frames
+    run through the dynamics with `cached` frames already kept."""
+    tokens = hw * new
+    half = 2 * (4 * d2 * inner + 3 * d2 * ffi + 27 * d2)
+    spatial = 4 * hw * inner
+    keys = sum(g + 1 for g in range(cached, cached + new))
+    temporal = hw * 4 * inner * keys
+    return layers * (tokens * (2 * half + spatial) + temporal) + tokens * 2 * code_dim * dim + tokens * 2 * d2 * n_codes
+
+
 def genie_context():
     hw, inner, layers = 256, 512, 12
     macs = _genie_macs_per_token_block()
@@ -792,9 +803,9 @@ def genie_context():
         rows.append((t, _int(n), _int(_genie_pairs(t)), _int(full), f"{full / _genie_pairs(t):.1f}"))
     frows = []
     for t in (2, 4, 8, 15):
-        whole = layers * (2 * t * hw * macs + 4 * inner * _genie_pairs(t))
-        new = layers * (2 * hw * macs + 4 * inner * (hw * hw + hw * t))
-        frows.append((t, f"{whole / 1e12:.3f}", f"{new / 1e12:.3f}", f"{whole / new:.2f}"))
+        whole = _genie_flops(0, t)
+        new = _genie_flops(t - 1, 1)
+        frows.append((t, f"{whole / 1e9:.1f}", f"{new / 1e9:.1f}", f"{whole / new:.2f}"))
     return "\n".join([
         "Token arithmetic of the dynamics, from the importer's constants: a 64 by 64 frame is cut into 4 by 4 patches, so a frame is "
         "16 by 16 = 256 tokens of 10 bits (a codebook of 1024), 2,560 bits against the 98,304 bits of the 8-bit frame. The position "
@@ -808,14 +819,14 @@ def genie_context():
         "",
         "Per token and per block the linear parts are, in multiply-adds and for each of the two halves, a query matrix 519 to 512, a key-value matrix 519 to 1024, an output "
         "matrix 512 to 519, a feed-forward input 519 to 2 * 1384, an output 1384 to 519 (three feed-forward matrices of that size in all, counting the gate) and the PEG's 27 per channel "
-        "(27 * 519). Pairs scored for the new frame alone are 256^2 within the frame plus 256 t to the t frames of the clip. "
-        "TFLOPs of one forward pass of the 12-block dynamics over t frames of context (the linear layers and the PEG at 2 FLOPs per "
-        "multiply-add, and attention at 4 * 512 FLOPs per pair scored: scores and weighted sum; the logits and the elementwise work are "
-        "left out), the way brain runs it, with every frame recomputed; and the work that would remain if the keys, values and PEG "
-        "inputs of earlier frames were kept, so that only the 256 new tokens were computed and attended against t frames (brain does "
-        "not keep them):",
+        "(27 * 519). GFLOP of running the 12-block dynamics over a clip of t frames from nothing (the whole clip recomputed, which is "
+        "what a model without a cache does for every new frame), and of the newest frame alone when the keys and values of the earlier t - 1 frames and the inputs of the "
+        "PEG's two earlier frames are cached (`crates/genieredux/src/cache.rs`). The count is `cached_forward_flops` of that file: 2 FLOPs per multiply-add; per token "
+        "the linear layers and PEG above, the token embedding (the 32-number code vector to 512) and the logits head (519 to 1024); spatial attention over the frame's 256 "
+        "tokens and causal temporal attention over the frames up to and including the token's own, each pair scored costing 4 * 512 FLOPs (scores and weighted sum); the "
+        "elementwise work is left out. The cached evaluation computes only the 256 new tokens' projections and attends against the cache:",
         "",
-        _table(["frames t", "TFLOP, whole clip recomputed", "TFLOP, new frame only", "ratio"], frows, "rrrr"),
+        _table(["frames t", "GFLOP, whole clip recomputed", "GFLOP, newest frame cached", "ratio"], frows, "rrrr"),
     ])
 
 

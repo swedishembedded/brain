@@ -1085,6 +1085,57 @@ def rrdbnet_counts():
     )
 
 
+def receptive_radius(num_block, scale):
+    """The radius, in input pixels, of the neighbourhood an output pixel of RRDBNet depends on. Working backwards from the output:
+    conv_last and conv_hr are two 3 x 3 convolutions at the output resolution (r = 2); each 2x of the scale then adds a
+    convolution at the lower resolution and a nearest doubling, which maps the radius r to ceil((r + 1) / 2); after that
+    conv_body (+1), 15 convolutions for each block (+15 per block) and conv_first (+1)."""
+    r = 2
+    trace = [("conv_last, conv_hr", r)]
+    for i in range(scale.bit_length() - 1, 0, -1):
+        r = -(-(r + 1) // 2)
+        trace.append((f"conv_up{i} and its doubling", r))
+    r += 1
+    trace.append(("conv_body", r))
+    r += 15 * num_block
+    trace.append((f"{num_block} blocks", r))
+    r += 1
+    trace.append(("conv_first", r))
+    return r, trace
+
+
+def tile_plan(extent, tile, radius):
+    """One axis of the tiled sweep: cores of `tile` pixels partition the axis; each core is read through a window of
+    min(extent, tile + 2 radius) pixels kept inside the axis. Returns the window length and the number of windows."""
+    return min(extent, tile + 2 * radius), -(-extent // tile)
+
+
+def rrdbnet_tiling():
+    r, trace = receptive_radius(23, 4)
+    t1 = _table(["layer, counted from the output", "radius r after it, in input pixels"], [[n, _int(v)] for n, v in trace])
+    rows = [[f"{nb} blocks, x{sc}", _int(receptive_radius(nb, sc)[0])] for nb, sc in ((23, 4), (23, 2), (6, 4), (6, 2))]
+    t2 = _table(["configuration", "receptive radius R"], rows)
+    rows3 = []
+    for extent in (600, 2048):
+        for tile in (64, 256, 512):
+            win, n = tile_plan(extent, tile, r)
+            work = n * n * win * win / (extent * extent)
+            rows3.append([f"{extent} x {extent}", _int(tile), _int(win), f"{n} x {n} = {n * n}", f"{work:.2f}",
+                          f"{((tile + 2 * r) / tile) ** 2:.2f}"])
+    t3 = _table(["input", "tile", "window side min(extent, tile + 2R)", "windows", "work relative to one whole-image pass",
+                 "((tile + 2R) / tile)^2"], rows3)
+    return (
+        "The receptive radius of RRDBNet by the rule of `RrdbConfig::receptive_radius`: r = 2 for conv_last and conv_hr; for each "
+        "factor of 2 of the scale, r becomes ceil((r + 1) / 2) (the convolution after the doubling, then the doubling); then "
+        "+1 for conv_body, +15 for every block and +1 for conv_first. Every convolution is 3 x 3 with padding 1, so each adds one "
+        "pixel at its own resolution. The trace for the released x4 network:\n\n" + t1 + "\n\n" + t2 +
+        "\n\nA tiled pass cuts, along each axis, cores of `tile` pixels that partition the axis (the last one shorter), reads each "
+        "core through a window of min(extent, tile + 2R) pixels kept inside the axis, and so runs ceil(extent / tile) windows per "
+        "axis, each costing a pass over its window. R = 349 here. The work of a pass is proportional to the pixels of its "
+        "window; the last column is the limit for an axis that is long compared with the tile.\n\n" + t3
+    )
+
+
 def vqgan_tally(nf=64, mult=(1, 2, 2, 4, 4, 8), nres=2, dec_res=2, img=512, attn_res=(16,), emb=256, codes=1024):
     """The VQ autoencoder of CodeFormer: encoder, codebook, generator. A residual block has GroupNorm, 3 x 3 convolution,
     GroupNorm, 3 x 3 convolution and, when the width changes, a 1 x 1 convolution on the shortcut; an attention block has GroupNorm
