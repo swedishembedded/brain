@@ -111,7 +111,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("ckpt_every", ParamType::Int, "write a checkpoint every N steps (0 = final only)").min(0.0).max(capability::bounds::TRAIN_COUNT).default(json!(50)))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "base model to adapt").default(json!("t2v-1.3B")))
         .param(ParamSpec::new("device", ParamType::Str, "device for the VAE encode and the DiT trainer; 'cpu' forces the host trainer (omit for brain's default, which uses the GPU where one is present)"))
-        .param(ParamSpec::new("te_device", ParamType::Str, "device for the umT5 text encoder (omit for $BRAIN_WAN_T5_DEVICE, then cpu)"))
+        .param(ParamSpec::new("te_device", ParamType::Str, "device for the umT5 text encoder, a --device spec (unset: cpu)"))
         .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()), "what the host trainer's backward keeps of the forward: 'keep' every block's activations or 'recompute' them from each block's input (less memory, one extra forward); the device trainer always rebuilds from block inputs; default: keep"))
         .param(ParamSpec::new("report", ParamType::Str, "server-side directory for a base-vs-adapted report after training: held-out clips with and without the adapter, contact sheets, the loss curve").host_resolved())
         .param(ParamSpec::new("report_clip", ParamType::Str, "server-side EVA-CLIP checkpoint directory: adds a concept-vs-distractor score table to the report").host_resolved())

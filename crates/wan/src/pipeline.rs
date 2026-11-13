@@ -273,16 +273,13 @@ fn encode_text(
     let t5cfg = t5encoder::config::T5Config::umt5_xxl();
     let src = read_any(&paths.t5)?;
     let imported = t5encoder::import::import_wan(src, &t5cfg)?;
-    // Placement precedence, matching every weight path in this module: the
-    // explicit value (the CLI's `--t5-device`) beats the variable, and the
-    // default is the CPU because 22.72 GB of fp32 weights plus ~4 GB of
-    // activations do not fit the 24 GB card this was written on.
-    let te_env = std::env::var("BRAIN_WAN_T5_DEVICE").ok().filter(|s| !s.is_empty());
-    let gpu = match o.te_device.as_deref().or(te_env.as_deref()).unwrap_or("cpu") {
+    // The request's `te_device`, else the CPU: 22.72 GB of fp32 weights plus
+    // ~4 GB of activations do not fit a 24 GB card.
+    let gpu = match o.te_device.as_deref().unwrap_or("cpu") {
         "cpu" => gpu_core::Gpu::new_cpu(t5encoder::model::PIPELINES),
         "gpu" | "wgpu" => gpu_core::Gpu::new_gpu(t5encoder::model::PIPELINES),
-        // "default" defers to BRAIN_DEVICE, which is what a caller who knows
-        // their card can hold 22.72 GB would use.
+        // Anything else defers to the global `--device` selection, which is
+        // what a caller who knows their card holds 22.72 GB would use.
         _ => gpu_core::Gpu::new(t5encoder::model::PIPELINES),
     };
     let enc = t5encoder::model::T5Encoder::new_on(gpu, t5cfg, 2, cfg.text_len as u32, &t5encoder::import::to_init(imported));

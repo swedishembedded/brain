@@ -929,8 +929,6 @@ crates/vulkan/src/shader.rs	BRAIN_GPU_CHECKED
 crates/vulkan/tests/peak_flops.rs	BRAIN_VK_DEVICE
 crates/vulkan/tests/peak_flops.rs	BRAIN_VK_NDEV
 crates/wan/src/block.rs	BRAIN_WAN_ATTN
-crates/wan/src/finetune.rs	BRAIN_WAN_T5_DEVICE
-crates/wan/src/pipeline.rs	BRAIN_WAN_T5_DEVICE
 crates/wan/src/vae3d.rs	BRAIN_WAN_VAE_TAPS
 crates/wan/tests/it/dev_grad.rs	BRAIN_DEV_GPU
 crates/wan/tests/it/dev_lora_train.rs	BRAIN_DEV_GPU

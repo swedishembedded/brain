@@ -228,11 +228,9 @@ pub fn encode_samples(
         }?;
         let t5cfg = t5encoder::config::T5Config::umt5_xxl();
         let imported = t5encoder::import::import_wan(crate::pipeline::read_any(&paths.t5)?, &t5cfg)?;
-        // Same precedence as `pipeline::encode_text`'s `--t5-device`: the
-        // explicit option beats the environment variable, which beats the
-        // CPU default (umT5-XXL is 22.72 GB in fp32).
-        let te_env = std::env::var("BRAIN_WAN_T5_DEVICE").ok().filter(|s| !s.is_empty());
-        let gpu = match te_device.or(te_env.as_deref()).unwrap_or("cpu") {
+        // Same rule as `pipeline::encode_text`: the request's `te_device`,
+        // else the CPU (umT5-XXL is 22.72 GB in fp32).
+        let gpu = match te_device.unwrap_or("cpu") {
             "cpu" => gpu_core::Gpu::new_cpu(t5encoder::model::PIPELINES),
             "gpu" | "wgpu" => gpu_core::Gpu::new_gpu(t5encoder::model::PIPELINES),
             _ => gpu_core::Gpu::new(t5encoder::model::PIPELINES),
@@ -294,8 +292,7 @@ pub struct TrainOpts {
     /// default backend resolves to a real accelerator, so a machine without
     /// one keeps the host path (see [`crate::train::Trainer::open`]).
     pub device: Option<String>,
-    /// Device for the umT5 text encoder; `None` falls through to
-    /// `BRAIN_WAN_T5_DEVICE`, then `"cpu"` - the same precedence
+    /// Device for the umT5 text encoder; `None` is `"cpu"`, the same rule
     /// `GenOpts::te_device` uses at inference.
     pub te_device: Option<String>,
     /// What each host-trainer step's backward keeps of its forward (`model::saved::BlockStack`); the device trainer
