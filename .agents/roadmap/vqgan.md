@@ -10,12 +10,27 @@ in place. The same crate runs LlamaGen's VQ-16 (Janus-Pro's image
 tokenizer, `VqganConfig::llamagen_vq16`), parity-gated on the real
 Janus-Pro weights and gradient-checked (`gradcheck::check_vqgan_llamagen`).
 
+The training objective is the published VQGAN recipe (`train::VqganTrainer::train_step`,
+`objective::Objective`): L1 or L2 reconstruction, the LPIPS perceptual term
+(`lpips::Lpips::distance_grad`, LPIPS v0.1 on the VGG16 trunk in both presets, frozen; AlexNet stays for evaluation), the taming PatchGAN discriminator
+(`patchgan`, BatchNorm, hinge, its own AdamW) with the adaptive weight measured at the
+generator's last convolution, and LlamaGen's codebook entropy term (four device kernels, `entropy_{logp,cols,dz,dcb}.wgsl`; `entropy` is their f64 oracle).
+Presets `Objective::codeformer` and `Objective::llamagen_vq16` state their values and
+sources in `objective.rs` (LlamaGen `vq_loss.py`/`vq_train.py`, CodeFormer
+`VQGAN_512_ds32_nearest_stage1.yml`); two values are brain's choices, stated there (CodeFormer's
+discriminator depth and adaptive clamp). Gradient checks live with each term (`lpips/tests/it/backward.rs`, `entropy`,
+`patchgan`); `tests/it/objective.rs` pins the wiring and a short all-terms overfit.
+
 ## Not yet done
+
+- [ ] `gradcheck` entry point for the full objective (`check_vqgan` differentiates the
+      reconstruction-only trainer; the new terms are gated in their own crates because the
+      `gradcheck` crate links every model)
+- [ ] The VGG16 LPIPS weights are not fetched by any tool yet (`lpips::spec::VGG_FILES` names them);
+      the VGG gradient is checked on random weights, the released ones skip by name until in the store
 
 - [ ] Serving the LlamaGen VQ-16 preset - `caps`, the CLI and D-Bus load
       the CodeFormer checkpoints only
-- [ ] LlamaGen's entropy loss (`entropy_loss_ratio`, 0 in its released
-      training recipe)
 
 - [ ] Gradient checkpointing for training — every activation is currently
       kept live, so training memory scales with the fully-tapped graph

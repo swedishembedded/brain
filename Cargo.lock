@@ -3364,10 +3364,15 @@ dependencies = [
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
+ "brain-lpips",
  "brain-modelstore",
+ "brain-optim",
+ "brain-paramstore",
  "brain-testutil",
  "brain-vae",
+ "brain-vision",
  "brain-wm-core",
+ "bytemuck",
  "serde_json",
 ]
 

@@ -36,11 +36,11 @@ fn config() -> VqganConfig {
     }
 }
 
-fn fill(n: usize, k: usize, scale: f32) -> Vec<f32> {
+pub(crate) fn fill(n: usize, k: usize, scale: f32) -> Vec<f32> {
     (0..n).map(|i| scale * (((i + 7 * k) as f32) * 0.754_877_7).sin()).collect()
 }
 
-fn weights(cfg: &VqganConfig) -> Tensors {
+pub(crate) fn weights(cfg: &VqganConfig) -> Tensors {
     cfg.tensor_manifest()
         .into_iter()
         .enumerate()

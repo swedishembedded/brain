@@ -29,7 +29,9 @@
 //!
 //! Scope: the forward graph ([`model`]) plus the **training** graph ([`train`]) —
 //! an SSA forward, an explicit reverse over `vae::blocks::grad`, and the VQ
-//! straight-through estimator, gated by `gradcheck::check_vqgan`. The
+//! straight-through estimator, gated by `gradcheck::check_vqgan` - and the full
+//! published objective around it: [`objective`] (L1/L2, LPIPS, the adaptive adversarial
+//! weight, entropy), [`patchgan`] (the discriminator) and [`entropy`]. The
 //! CodeFormer transformer / controllable feature transformation / fidelity dial
 //! are `crates/codeformer`.
 //!
@@ -39,12 +41,16 @@
 
 pub mod caps;
 pub mod config;
+pub mod entropy;
 pub mod import;
 pub mod model;
+pub mod objective;
+pub mod patchgan;
 pub mod spec;
 pub mod train;
 
 pub use config::{BetaTerm, Block, VqganConfig};
 pub use import::Import;
 pub use model::{Codebook, Reconstruction, Vqgan, KERNELS};
+pub use objective::{Losses, Objective, ReconstructionLoss, StepOptions};
 pub use train::{VqganTrainer, TRAIN_KERNELS, TRAIN_PIPELINES};

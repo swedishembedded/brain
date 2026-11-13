@@ -8,5 +8,6 @@
 //! others run beside it.
 
 mod llamagen_parity;
+mod objective;
 mod parity;
 mod recompute;

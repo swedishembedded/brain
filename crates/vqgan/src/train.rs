@@ -8,8 +8,10 @@
 //! same [`vae::blocks::Builder`] blocks the inference graph records, put in
 //! train mode ([`vae::blocks::Builder::set_train`]) so every stage keeps its own
 //! buffer, and their reverse is [`vae::blocks::grad::Trace::backward`] — shared
-//! with `AutoencoderKL`, added in this workstream. This module owns exactly one
-//! thing the shared builder cannot: the quantiser seam.
+//! with `AutoencoderKL`. This module owns what the shared builder cannot: the
+//! quantiser seam, and the training step that adds the rest of the objective
+//! ([`crate::objective`]: perceptual, adversarial with its discriminator, and
+//! entropy terms) into the same output seed.
 //!
 //! # The quantiser: forward
 //!
@@ -85,8 +87,7 @@
 //! with an unweighted `vq_loss`). The other term carries weight 1. The codebook
 //! is trained by **gradient**, not by the EMA alternative
 //! (`wm_core::vq::ema_update`), so `quantize.embedding.weight` is a trainable
-//! tensor here. LlamaGen's entropy term (`entropy_loss_ratio`, 0 in its
-//! released recipe) is not implemented.
+//! tensor here. LlamaGen's entropy term is the third codebook term, below.
 //!
 //! # The L2-normalised codebook
 //!
@@ -100,14 +101,48 @@
 //! tensor. Everything written above about `z`, `q` and the latch applies to
 //! the normalised rows.
 //!
+//! # The full objective
+//!
+//! [`Objective`] chooses the terms and their weights (presets: `codeformer`, `llamagen_vq16`; their values and where
+//! they come from are in [`crate::objective`]). The generator minimises
+//!
+//! ```text
+//! L_G = L_rec + perceptual_weight * LPIPS(x_hat, x) + L_cb + L_com + entropy_loss_ratio * L_ent
+//!       + disc_weight * lambda * (-mean D(x_hat))              from step disc_start on
+//! ```
+//!
+//! and the discriminator the hinge loss on `D(x)` and `D(x_hat)` ([`crate::patchgan`]), each with its own AdamW.
+//! [`VqganTrainer::loss`] and [`VqganTrainer::backward`] are everything but the adversarial term (the part that needs
+//! no discriminator and is a function of the parameters alone: what a finite-difference check can differentiate);
+//! [`VqganTrainer::train_step`] runs the whole recipe.
+//!
+//! **Reconstruction.** L1 (`masked_l1`, an all-ones mask: `basicsr`, CodeFormer) or L2 (`mse_value`/`mse_grad`:
+//! LlamaGen's default), [`ReconstructionLoss`]. Its gradient is written into `d_out`, the generator output's gradient
+//! buffer, and every other image-space term is one more contribution into that same buffer.
+//!
+//! **Perceptual.** `perceptual_weight * LPIPS(x_hat, x)` ([`lpips::Lpips::distance_grad`]: the objective's trunk, VGG16 in both presets, and heads
+//! frozen, the gradient taken to the reconstruction only). Images are in `[-1, 1]`, the range both nets are
+//! trained on. The trainer owns the LPIPS network on its own handle of the device and refuses a nonzero weight without
+//! the weights ([`VqganTrainer::lpips_weights_from_store`], or any `lpips::import::Tensors`), naming what is
+//! missing.
+//!
+//! **Adversarial.** With the generator's output `x_hat` the discriminator's fake input, `-mean D(x_hat)` is
+//! differentiated to the image and added to `d_out` scaled by `disc_weight * lambda`. `lambda` is taming's
+//! `calculate_adaptive_weight`, `||grad_W L_nll|| / (||grad_W L_adv|| + 1e-4)` clamped to
+//! `[0, adaptive_weight_max]` and detached, with `W` the generator's last convolution weight and `L_nll` the
+//! reconstruction plus perceptual terms. Both norms come from one convolution's backward each
+//! ([`vae::blocks::grad::Trace::last_conv`]) before the one full backward runs on the combined seed: the backward is
+//! linear in its seed, so `lambda` is known before the full pass needs it.
+//!
+//! **Entropy.** On the device: `entropy_logp` and `entropy_cols` join the forward, `entropy_dz` and `entropy_dcb` lead
+//! the reverse and assign their gradients (already scaled by `entropy_loss_ratio`), which are added into the same `d_z`
+//! and codebook gradients as the commitment and codebook terms. Only the two scalar reductions (the mean of the
+//! per-token entropies, the sum of the per-code terms) are read back, like every loss value here. [`crate::entropy`]
+//! is the f64 oracle the kernels are tested against.
+//!
 //! # Reconstruction loss
 //!
-//! **L1**: `mean |out - target|`, the `masked_l1` / `masked_l1_grad` pair with an
-//! all-ones mask. The real VQGAN recipe adds a **perceptual (LPIPS/VGG) term**
-//! and an **adversarial patch-discriminator term** with an adaptive weight; both
-//! need models this crate does not have (a VGG16 and a `NLayerDiscriminator`)
-//! and are **out of scope** — they attach at the same `d_out` seed, so adding
-//! them later is a second contribution into that buffer, not a restructuring.
+//! L1 is `mean |out - target|` and L2 `mean (out - target)^2`, both over every output element.
 //!
 //! # The latch
 //!
@@ -119,12 +154,19 @@
 //! training loop re-latches once per step, before the forward whose gradient it
 //! takes; the gradcheck latches once and holds it across the whole sweep.
 
+use std::cell::{Cell, RefCell};
+
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use lpips::Lpips;
+use optim::Optim;
+use paramstore::ParamStore;
 use vae::blocks::grad::{BwdIds, Grads, Reverse, Trace};
 use vae::blocks::{Activations, BlockNames, Builder, Tensors};
 
 use crate::config::{BetaTerm, VqganConfig};
 use crate::model::{l2norm_step, record_assign, record_lookup, run_blocks, L2_EPS};
+use crate::objective::{Losses, Objective, ReconstructionLoss, StepOptions};
+use crate::patchgan::{self, PatchGan, PatchGanConfig};
 
 /// Where [`vae::blocks::BWD_KERNELS`] sits in [`TRAIN_KERNELS`] — right after
 /// the inference set ([`crate::KERNELS`]).
@@ -137,6 +179,10 @@ const K_MASKED_L1_GRAD: usize = TAIL + 2;
 const K_MSE_VALUE: usize = TAIL + 3;
 const K_MSE_GRAD: usize = TAIL + 4;
 const K_L2NORM_DX: usize = TAIL + 5;
+const K_ENTROPY_LOGP: usize = TAIL + 11;
+const K_ENTROPY_COLS: usize = TAIL + 12;
+const K_ENTROPY_DZ: usize = TAIL + 13;
+const K_ENTROPY_DCB: usize = TAIL + 14;
 /// The quantiser seam is recorded outside any `Builder`, so it needs `axpy` and
 /// `add2` directly — but it must REUSE the shared set's pipelines rather than
 /// register a second copy under the same kernel name: the CPU backend's
@@ -153,8 +199,9 @@ const K_ADD2: usize = vae::blocks::ADD2_SLOT;
 
 /// This model's TRAINING kernel set: the inference set ([`crate::KERNELS`] —
 /// shared blocks, the two VQ assignment kernels, `embed`, `l2norm_scale`), then
-/// the shared block backward set, then the quantiser-seam and loss kernels.
-pub const TRAIN_KERNELS: [(&str, &str); TAIL + 6] = vae::blocks::train_kernel_set::<{ TAIL + 6 }>(
+/// the shared block backward set, then the quantiser-seam and loss kernels and
+/// the optimiser's.
+pub const TRAIN_KERNELS: [(&str, &str); TAIL + 15] = vae::blocks::train_kernel_set::<{ TAIL + 15 }>(
     &crate::KERNELS,
     &[
         ("emb_bwd", kernels::EMB_BWD),
@@ -163,6 +210,17 @@ pub const TRAIN_KERNELS: [(&str, &str); TAIL + 6] = vae::blocks::train_kernel_se
         ("mse_value", kernels::MSE_VALUE),
         ("mse_grad", kernels::MSE_GRAD),
         ("l2norm_scale_dx", kernels::L2NORM_SCALE_DX),
+        // The generator's AdamW (`optim::Optim` resolves the cooperative grad-norm pair by name beside them).
+        ("adamw", kernels::ADAMW),
+        ("gradnorm_sq", kernels::GRADNORM_SQ),
+        ("grad_scale", kernels::GRAD_SCALE),
+        ("clip_coef", kernels::CLIP_COEF),
+        ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
+        // The codebook entropy term ([`crate::entropy`] is its f64 oracle), forward and both gradients.
+        ("entropy_logp", kernels::ENTROPY_LOGP),
+        ("entropy_cols", kernels::ENTROPY_COLS),
+        ("entropy_dz", kernels::ENTROPY_DZ),
+        ("entropy_dcb", kernels::ENTROPY_DCB),
     ],
 );
 
@@ -211,9 +269,13 @@ pub struct VqganTrainer {
     zq_st: DeviceBuffer,
     q0: DeviceBuffer,
     out: DeviceBuffer,
-    l1_val: DeviceBuffer,
+    /// Per-element reconstruction value (L1 or L2, [`Objective::reconstruction`]), summed on the host.
+    rec_val: DeviceBuffer,
     cb_val: DeviceBuffer,
     com_val: DeviceBuffer,
+    /// What the quantiser reads: the encoder rows (normalised under `codebook_l2_norm`) and the codebook.
+    query: DeviceBuffer,
+    cb_q: DeviceBuffer,
 
     // ---- parameters -------------------------------------------------------
     enc: Trace,
@@ -223,6 +285,80 @@ pub struct VqganTrainer {
     codebook: DeviceBuffer,
     codebook_g: DeviceBuffer,
     names: Vec<(String, u64)>,
+
+    // ---- the objective ----------------------------------------------------
+    obj: Objective,
+    /// `d_out`'s writers: the reconstruction gradient (assigned), then the terms added into it.
+    d_out: DeviceBuffer,
+    seed_steps: Vec<Step>,
+    rest_steps: Vec<Step>,
+    /// The generator's AdamW over the encoder, generator and codebook buffers the graphs already own.
+    gen_ps: ParamStore,
+    gen_opt: Optim,
+    gen_updates: Cell<u32>,
+    /// The generator's last convolution weight (the adaptive weight's reference layer), its one-layer reverse from
+    /// the nll seed (`d_out`) and from the adversarial seed (`d_adv`), and their gradient buffers.
+    last_weight: String,
+    tail: Option<TailReverse>,
+    perceptual: Option<Perceptual>,
+    entropy: Option<EntropyBuffers>,
+    adversarial: Option<Adversarial>,
+    /// The terms of the last [`Self::loss`], as they entered it.
+    last: RefCell<Terms>,
+}
+
+/// The adaptive weight's two one-layer reverses (only for [`Objective::adaptive_weight`]).
+struct TailReverse {
+    nll_grads: Grads,
+    adv_grads: Grads,
+    nll_steps: Vec<Step>,
+    adv_steps: Vec<Step>,
+}
+
+/// The LPIPS network on its own handle of the device, the staged pair, and the gradient wrt the reconstruction.
+struct Perceptual {
+    lpips: RefCell<Lpips>,
+    /// A handle on the LPIPS device, to stage into and read from it while the metric is borrowed.
+    gpu: Gpu,
+    pair: DeviceBuffer,
+    /// `d LPIPS / d x_hat` on the trainer's device, scaled by `perceptual_weight` when it is added into `d_out`.
+    d_image: DeviceBuffer,
+}
+
+/// The entropy term's device buffers: the forward's per-token `h` and per-code `term`, summed on the host into the
+/// scalar (as every loss value here is), and the gradients the reverse adds into the quantiser's.
+struct EntropyBuffers {
+    /// `[tokens]`: each token's entropy.
+    h: DeviceBuffer,
+    /// `[codes]`: each code's share of the average-assignment entropy.
+    term: DeviceBuffer,
+    d_rows: DeviceBuffer,
+    d_codebook: DeviceBuffer,
+}
+
+/// The discriminator, and the hinge loss's bookkeeping.
+struct Adversarial {
+    d: PatchGan,
+    updates: Cell<u32>,
+    /// The generator-loss gradient wrt the output image, the discriminator's input gradient copied to the trainer's
+    /// device.
+    d_adv: DeviceBuffer,
+}
+
+/// The terms of the last forward, as they entered the loss.
+#[derive(Clone, Copy, Default)]
+struct Terms {
+    reconstruction: f64,
+    perceptual: f64,
+    codebook: f64,
+    commitment: f64,
+    entropy: f64,
+}
+
+impl Terms {
+    fn total(&self) -> f64 {
+        self.reconstruction + self.perceptual + self.codebook + self.commitment + self.entropy
+    }
 }
 
 /// The codebook tensor's checkpoint name (it is a parameter like any other).
@@ -231,8 +367,50 @@ const CODEBOOK: &str = "quantize.embedding.weight";
 impl VqganTrainer {
     /// Build the training graphs for a `[in_channels, h, w]` input on `gpu`
     /// (which MUST have been created with [`TRAIN_KERNELS`]), the encoder's and
-    /// generator's block internals kept or recomputed (`activations`).
+    /// generator's block internals kept or recomputed (`activations`), for the
+    /// objective [`Objective::reconstruction_only`]: L1 and the VQ terms.
     pub fn new(cfg: VqganConfig, tensors: &Tensors, h: u32, w: u32, gpu: Gpu, activations: Activations) -> VqganTrainer {
+        Self::with_objective(cfg, Objective::reconstruction_only(), None, tensors, h, w, gpu, activations)
+            .expect("the reconstruction-only objective needs nothing that can be missing")
+    }
+
+    /// [`Self::new`] for any [`Objective`]. `lpips_weights` is required exactly when `perceptual_weight` is nonzero
+    /// ([`Self::lpips_weights_from_store`] reads the released ones; tests pass random ones). The perceptual network
+    /// and the discriminator run on handles of `gpu`'s device of their own, built here.
+    ///
+    /// Errors, naming what is wrong: an invalid objective, a nonzero perceptual weight without LPIPS weights, a
+    /// perceptual or adversarial term on an image that is not 3-channel or smaller than the metric's minimum side.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_objective(
+        cfg: VqganConfig,
+        obj: Objective,
+        lpips_weights: Option<&lpips::import::Tensors>,
+        tensors: &Tensors,
+        h: u32,
+        w: u32,
+        gpu: Gpu,
+        activations: Activations,
+    ) -> Result<VqganTrainer, String> {
+        obj.validate()?;
+        if obj.perceptual_weight > 0.0 {
+            if lpips_weights.is_none() {
+                return Err(format!(
+                    "vqgan: perceptual_weight {} needs the LPIPS v0.1 {} weights (the trunk's torchvision checkpoint and LPIPS's heads for it), \
+                     and none were given; `VqganTrainer::lpips_weights_from_store({:?})` reads them from the model store",
+                    obj.perceptual_weight,
+                    obj.perceptual_net.name(),
+                    obj.perceptual_net
+                ));
+            }
+            let min = obj.perceptual_net.min_side();
+            if cfg.out_channels != 3 || h < min || w < min {
+                return Err(format!(
+                    "vqgan: the perceptual term ({} trunk) compares 3-channel images of at least {min}x{min}, this is {} channels at {h}x{w}",
+                    obj.perceptual_net.name(),
+                    cfg.out_channels
+                ));
+            }
+        }
         let scale = cfg.downscale();
         assert!(
             h.is_multiple_of(scale) && w.is_multiple_of(scale),
@@ -342,11 +520,16 @@ impl VqganTrainer {
 
         // ---- per-element loss values (the host sums them, as every brain
         //      loss kernel expects — see mse_value.wgsl) --------------------
-        let l1_val = gpu.storage(n_out);
+        let rec_val = gpu.storage(n_out);
         let cb_val = gpu.storage(te);
         let com_val = gpu.storage(te);
+        let rec_step = match obj.reconstruction {
+            ReconstructionLoss::L1 => gpu.step(K_MASKED_L1, &[&out, &target, &mask, &rec_val], &[n_out as u32], n_out as u32),
+            // `mse_value` already divides by `n`: its host sum IS the mean.
+            ReconstructionLoss::L2 => gpu.step(K_MSE_VALUE, &[&out, &target, &rec_val], &[n_out as u32], n_out as u32),
+        };
         let loss_steps = vec![
-            gpu.step(K_MASKED_L1, &[&out, &target, &mask, &l1_val], &[n_out as u32], n_out as u32),
+            rec_step,
             // L_cb  = ||sg[z] - q||^2 / n : z frozen (`z0`), q live. Weighted
             // on the host, where the reduction happens (`term_weights`).
             gpu.step(K_MSE_VALUE, &[&q_rows, &z0, &cb_val], &[te as u32], te as u32),
@@ -381,13 +564,18 @@ impl VqganTrainer {
             .expect("vqgan: the generator reverse did not reach its own input")
             .clone();
 
-        let mut bwd_steps = vec![gpu.step(
-            K_MASKED_L1_GRAD,
-            &[&out, &target, &mask, &d_out],
-            &[n_out as u32, f(1.0 / n_out as f32)],
-            n_out as u32,
-        )];
-        bwd_steps.extend(gen_rev.steps);
+        // The reconstruction gradient ASSIGNS `d_out`; every other image-space
+        // term is added into it afterwards (`submit_seed`).
+        let seed_steps = vec![match obj.reconstruction {
+            ReconstructionLoss::L1 => gpu.step(
+                K_MASKED_L1_GRAD,
+                &[&out, &target, &mask, &d_out],
+                &[n_out as u32, f(1.0 / n_out as f32)],
+                n_out as u32,
+            ),
+            ReconstructionLoss::L2 => gpu.step(K_MSE_GRAD, &[&out, &target, &d_out], &[n_out as u32], n_out as u32),
+        }];
+        let mut bwd_steps = gen_rev.steps;
         // Straight-through: the decoder gradient crosses the quantiser
         // UNCHANGED. `z_q_st = z + sub0` with `sub0` constant, so this identity
         // IS the exact adjoint of the emitted forward — the estimator's bias
@@ -399,6 +587,21 @@ impl VqganTrainer {
         // `d_z` gets nothing from this term.
         bwd_steps.push(gpu.step(K_MSE_GRAD, &[&q_rows, &z0, &dq_cb], &[te as u32], te as u32));
         bwd_steps.push(gpu.step(K_AXPY, &[&dq_cb_b, &dq_cb], &[te as u32, f(w_cb)], te as u32));
+        // The entropy term differentiates BOTH the rows and the codebook, with nothing detached. Its forward joins the
+        // forward steps; its two gradient kernels (assigning, already scaled by the ratio) lead the reverse.
+        let entropy = (obj.entropy_loss_ratio > 0.0).then(|| {
+            let (logp, c, meanc) = (gpu.storage((t * ncode) as u64), gpu.storage(ncode as u64), gpu.storage(t as u64));
+            let (h_tok, term) = (gpu.storage(t as u64), gpu.storage(ncode as u64));
+            let (d_rows, d_codebook) = (gpu.storage(te), gpu.storage((ncode * emb) as u64));
+            let tau = f(obj.entropy_temperature);
+            fwd_steps.push(gpu.step(K_ENTROPY_LOGP, &[&query, &cb_q, &logp, &h_tok], &[t, ncode, emb, tau], t));
+            fwd_steps.push(gpu.step(K_ENTROPY_COLS, &[&logp, &c, &term], &[t, ncode], ncode));
+            let grad = [f(obj.entropy_loss_ratio)];
+            let p = [t, ncode, emb, tau, grad[0]];
+            bwd_steps.push(gpu.step(K_ENTROPY_DZ, &[&query, &cb_q, &logp, &c, &h_tok, &meanc, &d_rows], &p, t * emb));
+            bwd_steps.push(gpu.step(K_ENTROPY_DCB, &[&query, &cb_q, &logp, &c, &h_tok, &meanc, &d_codebook], &p, ncode * emb));
+            EntropyBuffers { h: h_tok, term, d_rows, d_codebook }
+        });
         // The scatter lands on the codebook the quantiser read. Normalised,
         // that is `cb_q`, whose gradient is taken back through the
         // normalisation onto the parameter; raw, it IS the parameter.
@@ -408,6 +611,9 @@ impl VqganTrainer {
                 let d_cb_q = gpu.storage((ncode * emb) as u64);
                 let d_cb_raw = gpu.storage((ncode * emb) as u64);
                 bwd_steps.push(gpu.step(K_EMB_BWD, &[&idx_in, &dq_cb_b, &d_cb_q], &[t, emb, ncode], ncode * emb));
+                if let Some(e) = &entropy {
+                    bwd_steps.push(gpu.step(K_AXPY, &[&d_cb_q, &e.d_codebook], &[ncode * emb, f(1.0)], ncode * emb));
+                }
                 bwd_steps.push(gpu.step(
                     K_L2NORM_DX,
                     &[&codebook, ones, &d_cb_q, &d_cb_raw],
@@ -417,18 +623,21 @@ impl VqganTrainer {
                 bwd_steps.push(gpu.step(K_AXPY, &[&codebook_g, &d_cb_raw], &[ncode * emb, f(1.0)], ncode * emb));
                 bwd_clears.push(d_cb_q);
             }
-            None => bwd_steps.push(gpu.step(
-                K_EMB_BWD,
-                &[&idx_in, &dq_cb_b, &codebook_g],
-                &[t, emb, ncode],
-                ncode * emb,
-            )),
+            None => {
+                bwd_steps.push(gpu.step(K_EMB_BWD, &[&idx_in, &dq_cb_b, &codebook_g], &[t, emb, ncode], ncode * emb));
+                if let Some(e) = &entropy {
+                    bwd_steps.push(gpu.step(K_AXPY, &[&codebook_g, &e.d_codebook], &[ncode * emb, f(1.0)], ncode * emb));
+                }
+            }
         }
         // Commitment term dL_com/dz = w_com * 2(z - q0)/n, into the ENCODER
         // only. `sg[q]` is why `q0` is bound and why the codebook gets nothing
         // here.
         bwd_steps.push(gpu.step(K_MSE_GRAD, &[&query, &q0, &dz_com], &[te as u32], te as u32));
         bwd_steps.push(gpu.step(K_AXPY, &[&d_z, &dz_com], &[te as u32, f(w_com)], te as u32));
+        if let Some(e) = &entropy {
+            bwd_steps.push(gpu.step(K_AXPY, &[&d_z, &e.d_rows], &[te as u32, f(1.0)], te as u32));
+        }
         // `d_z` is the gradient at the quantiser's query; through the
         // normalisation (when there is one) it becomes the encoder's.
         let d_enc = match &l2_ones {
@@ -449,7 +658,55 @@ impl VqganTrainer {
         names.extend(gen.params().iter().cloned());
         names.push((CODEBOOK.to_string(), (ncode * emb) as u64));
 
-        VqganTrainer {
+        // ---- the generator's AdamW, over the buffers the graphs own -------
+        let adopted = names
+            .iter()
+            .map(|(name, len)| {
+                let (w, g) = if name == CODEBOOK {
+                    (codebook.clone(), codebook_g.clone())
+                } else if name.starts_with("encoder.") {
+                    (enc.weight(name).clone(), enc_g.g(name).clone())
+                } else {
+                    (gen.weight(name).clone(), gen_g.g(name).clone())
+                };
+                (name.clone(), *len as usize, w, g)
+            })
+            .collect();
+        let gen_ps = ParamStore::adopt(&gpu, adopted);
+        let kernel = |name: &str| gpu.kernel_index(name).unwrap_or_else(|| panic!("vqgan: kernel `{name}` is not registered; build the device with TRAIN_KERNELS"));
+        let gen_opt = Optim::new(kernel("adamw"), kernel("gradnorm_sq"), kernel("grad_scale"), kernel("clip_coef"), kernel("grad_scale_buf"));
+
+        // ---- the perceptual network ---------------------------------------
+        let perceptual = match (obj.perceptual_weight > 0.0, lpips_weights) {
+            (true, Some(weights)) => {
+                let lp = Lpips::with_trunk(gpu.new_like(lpips::GRAD_PIPELINES), obj.perceptual_net, weights)?;
+                let (lpips_gpu, pair) = (lp.gpu().share(), lp.gpu().storage(2 * n_out));
+                Some(Perceptual { lpips: RefCell::new(lp), gpu: lpips_gpu, pair, d_image: gpu.storage(n_out) })
+            }
+            _ => None,
+        };
+
+        // ---- the discriminator and, when the recipe adapts its weight, the reference layer -------------
+        let adversarial = obj.adversarial().then(|| {
+            let seed = obj.disc_seed.unwrap_or_else(data::rng::random_seed);
+            eprintln!("vqgan: discriminator weight seed {seed}");
+            let disc_cfg = PatchGanConfig { in_channels: cfg.out_channels, ndf: obj.disc_ndf, n_layers: obj.disc_layers };
+            Adversarial { d: PatchGan::new(gpu.new_like(patchgan::PIPELINES), disc_cfg, h, w, seed), updates: Cell::new(0), d_adv: gpu.storage(n_out) }
+        });
+        let (last_weight, tail) = match adversarial.as_ref().filter(|_| obj.adaptive_weight) {
+            Some(adv) => {
+                let (tail_trace, last_weight) = gen.last_conv();
+                let (nll_grads, adv_grads) = (tail_trace.alloc_grads(&gpu), tail_trace.alloc_grads(&gpu));
+                let nll_steps = tail_trace.backward(&gpu, ids, &nll_grads, &out, &d_out).steps;
+                let adv_steps = tail_trace.backward(&gpu, ids, &adv_grads, &out, &adv.d_adv).steps;
+                (last_weight, Some(TailReverse { nll_grads, adv_grads, nll_steps, adv_steps }))
+            }
+            None => (String::new(), None),
+        };
+
+        let mut bwd_all = seed_steps.clone();
+        bwd_all.extend(bwd_steps.iter().cloned());
+        Ok(VqganTrainer {
             gpu,
             cfg,
             hw: (h, w),
@@ -459,7 +716,7 @@ impl VqganTrainer {
             latch_steps,
             latch_clears: vec![z0, sub0],
             fwd_steps,
-            bwd_steps,
+            bwd_steps: bwd_all,
             bwd_clears,
             img_in,
             target,
@@ -468,9 +725,11 @@ impl VqganTrainer {
             zq_st,
             q0,
             out,
-            l1_val,
+            rec_val,
             cb_val,
             com_val,
+            query,
+            cb_q,
             enc,
             gen,
             enc_g,
@@ -478,7 +737,20 @@ impl VqganTrainer {
             codebook,
             codebook_g,
             names,
-        }
+            obj,
+            d_out,
+            seed_steps,
+            rest_steps: bwd_steps,
+            gen_ps,
+            gen_opt,
+            gen_updates: Cell::new(0),
+            last_weight,
+            tail,
+            perceptual,
+            entropy,
+            adversarial,
+            last: RefCell::new(Terms::default()),
+        })
     }
 
     /// The forward dispatches of one training step, in submit order.
@@ -564,14 +836,38 @@ impl VqganTrainer {
         (self.gpu.read(&self.zq_st, te), self.gpu.read(&self.q0, te))
     }
 
-    /// One forward pass over the installed batch; returns the scalar objective
+    /// The LPIPS weights of `net` in the model store (`lpips::spec::resolve_for`), for [`Self::with_objective`]
+    /// (pass [`Objective::perceptual_net`]); the error names the file that is missing.
+    pub fn lpips_weights_from_store(net: lpips::Trunk) -> Result<lpips::import::Tensors, String> {
+        let (trunk, heads) = lpips::spec::resolve_for(net)?;
+        lpips::import::read(net, &trunk, &heads)
+    }
+
+    /// The objective this trainer was built for.
+    pub fn objective(&self) -> &Objective {
+        &self.obj
+    }
+
+    /// What the quantiser reads in the last [`Self::loss`]: the query rows `[tokens, emb_dim]` (the encoder's, or their
+    /// L2 normalisation) and the codebook `[codebook_size, emb_dim]` (the parameter, or its normalised image). The
+    /// operands of the codebook terms and of [`crate::entropy`].
+    pub fn quantizer_inputs(&self) -> (Vec<f32>, Vec<f32>) {
+        let (emb, ncode) = (self.cfg.emb_dim as usize, self.cfg.codebook_size as usize);
+        let t = (self.lhw.0 * self.lhw.1) as usize;
+        (self.gpu.read(&self.query, t * emb), self.gpu.read(&self.cb_q, ncode * emb))
+    }
+
+    /// One forward pass over the installed batch; returns the scalar
     ///
     /// ```text
-    /// L = mean |G(z + sub0) - target|  +  w_cb*||sg[z] - q||^2/n  +  w_com*||z - sg[q]||^2/n
+    /// L = L_rec(G(z + sub0), target) + perceptual_weight * LPIPS(G(z + sub0), target)
+    ///     + w_cb*||sg[z] - q||^2/n  +  w_com*||z - sg[q]||^2/n  +  entropy_loss_ratio * L_ent
     /// ```
     ///
     /// with `beta` on the term [`VqganConfig::beta_on`] names and 1 on the
-    /// other (see the module docs).
+    /// other (see the module docs). The adversarial term is not in it: it is a
+    /// function of the discriminator too, and [`Self::train_step`] adds it.
+    /// The terms as they entered are kept for [`Self::train_step`]'s report.
     ///
     /// At the latch point this equals the real VQ-VAE objective (`z + sub0` IS
     /// the quantised latent, `sg[z]` IS `z`, `sg[q]` IS `q`) — and unlike the
@@ -588,11 +884,46 @@ impl VqganTrainer {
         let sum = |b: &DeviceBuffer, n: usize| -> f64 {
             self.gpu.read(b, n).iter().map(|&v| v as f64).sum()
         };
-        let rec = sum(&self.l1_val, n_out) / n_out as f64;
+        let rec = match self.obj.reconstruction {
+            ReconstructionLoss::L1 => sum(&self.rec_val, n_out) / n_out as f64,
+            ReconstructionLoss::L2 => sum(&self.rec_val, n_out),
+        };
         let cb = sum(&self.cb_val, te);
         let com = sum(&self.com_val, te);
         let (w_cb, w_com) = term_weights(&self.cfg);
-        (rec + w_cb as f64 * cb + w_com as f64 * com) as f32
+        let terms = Terms {
+            reconstruction: rec,
+            perceptual: self.perceptual_term(),
+            codebook: w_cb as f64 * cb,
+            commitment: w_com as f64 * com,
+            entropy: self.entropy_term(),
+        };
+        *self.last.borrow_mut() = terms;
+        terms.total() as f32
+    }
+
+    /// `perceptual_weight * LPIPS(out, target)` of the last forward, and `d_image` set to its gradient wrt `out`
+    /// (unweighted); zero and untouched without a perceptual term.
+    fn perceptual_term(&self) -> f64 {
+        let Some(p) = &self.perceptual else { return 0.0 };
+        let bytes = 4 * (self.cfg.out_channels * self.hw.0 * self.hw.1) as u64;
+        let mut lp = p.lpips.borrow_mut();
+        self.gpu.copy_to(&self.out, 0, &p.gpu, &p.pair, 0, bytes);
+        self.gpu.copy_to(&self.target, 0, &p.gpu, &p.pair, bytes, bytes);
+        let (dist, grad) = lp.distance_grad(&p.pair, self.hw.1, self.hw.0).unwrap_or_else(|e| panic!("vqgan: {e}"));
+        // The gradient of the pair; image 0 (the reconstruction) is its first half.
+        p.gpu.copy_to(grad, 0, &self.gpu, &p.d_image, 0, bytes);
+        self.obj.perceptual_weight as f64 * dist.total
+    }
+
+    /// `entropy_loss_ratio * L_ent` of the last forward: the mean of the per-token entropies minus the sum of the
+    /// per-code average-entropy terms, both reduced on the host from the device's per-element values; zero without
+    /// an entropy term. The gradients are the reverse's kernels, not computed here.
+    fn entropy_term(&self) -> f64 {
+        let Some(e) = &self.entropy else { return 0.0 };
+        let (t, ncode) = ((self.lhw.0 * self.lhw.1) as usize, self.cfg.codebook_size as usize);
+        let total = |b: &DeviceBuffer, n: usize| -> f64 { self.gpu.read(b, n).iter().map(|&v| v as f64).sum() };
+        self.obj.entropy_loss_ratio as f64 * (total(&e.h, t) / t as f64 - total(&e.term, ncode))
     }
 
     /// The reconstruction `[out_channels·H·W]` from the last [`Self::loss`].
@@ -612,11 +943,116 @@ impl VqganTrainer {
         self.gpu.submit(&all, &[]);
     }
 
-    /// One reverse pass. Requires a preceding [`Self::loss`] (the forward
+    /// `d_out` = the gradient of the reconstruction and perceptual terms wrt the output image.
+    fn submit_seed(&self) {
+        self.gpu.submit(&[], &self.seed_steps);
+        if let Some(p) = &self.perceptual {
+            let n = (self.cfg.out_channels * self.hw.0 * self.hw.1) as u32;
+            let add = self.gpu.step(K_AXPY, &[&self.d_out, &p.d_image], &[n, f(self.obj.perceptual_weight)], n);
+            self.gpu.submit(&[], &[add]);
+        }
+    }
+
+    /// The reverse from the seed in `d_out` through the generator, the quantiser and the encoder.
+    fn submit_rest(&self) {
+        let clears: Vec<&DeviceBuffer> = self.bwd_clears.iter().collect();
+        self.gpu.submit(&clears, &self.rest_steps);
+    }
+
+    /// One reverse pass of [`Self::loss`]'s objective. Requires a preceding [`Self::loss`] (the forward
     /// buffers ARE the activation cache).
     pub fn backward(&self) {
-        let clears: Vec<&DeviceBuffer> = self.bwd_clears.iter().collect();
-        self.gpu.submit(&clears, &self.bwd_steps);
+        self.submit_seed();
+        self.submit_rest();
+    }
+
+    /// One whole training step at global step `step`: re-latch the assignment, the generator's forward, the
+    /// reverse of the full objective (the adversarial term from `disc_start` on, weighted by the adaptive `lambda`),
+    /// one AdamW update of the encoder, generator and codebook, and then, when the discriminator is live, one of its
+    /// own ([`Self::discriminator_step`]). Needs the batch installed ([`Self::set_batch`]).
+    pub fn train_step(&self, step: u32, opts: &StepOptions) -> Losses {
+        self.latch_assignment();
+        self.zero_grads();
+        self.loss();
+        let terms = *self.last.borrow();
+        let live = self.obj.adversarial_at(step);
+        let (mut adversarial, mut adaptive) = (None, None);
+        self.submit_seed();
+        if live {
+            let (g_loss, lambda) = self.adversarial_seed();
+            adversarial = Some(self.obj.disc_weight as f64 * lambda.unwrap_or(1.0) as f64 * g_loss);
+            adaptive = lambda;
+        }
+        self.submit_rest();
+        self.adamw_step(opts);
+        let discriminator = live.then(|| self.discriminator_step(opts));
+        Losses {
+            reconstruction: terms.reconstruction,
+            perceptual: terms.perceptual,
+            codebook: terms.codebook,
+            commitment: terms.commitment,
+            entropy: terms.entropy,
+            adversarial,
+            adaptive_weight: adaptive,
+            discriminator,
+        }
+    }
+
+    /// The adversarial term of one step, after [`Self::submit_seed`]: the discriminator's verdict on the
+    /// reconstruction, `-mean D(x_hat)` differentiated to the image, and `d_out += disc_weight * lambda *
+    /// d(-mean D)/dx_hat`, where `lambda` is taming's adaptive weight from the last layer's two gradient norms
+    /// ([`Objective::adaptive_weight`]) or 1. Returns the raw generator loss and the `lambda` applied, if adaptive.
+    fn adversarial_seed(&self) -> (f64, Option<f32>) {
+        let adv = self.adversarial.as_ref().expect("live implies a discriminator");
+        let n = (self.cfg.out_channels * self.hw.0 * self.hw.1) as u32;
+        adv.d.stage(true, &self.gpu, &self.out);
+        let (g_loss, d_logits) = patchgan::generator_loss(&adv.d.forward(true));
+        adv.d.zero_grads();
+        adv.d.backward(true, &d_logits, true);
+        adv.d.gpu().copy_to(adv.d.input_grad(), 0, &self.gpu, &adv.d_adv, 0, 4 * n as u64);
+
+        let lambda = self.tail.as_ref().map(|tail| {
+            // The last layer's weight gradient of the nll seed (now in `d_out`) and of the adversarial seed.
+            let (nll, adv_g) = (tail.nll_grads.all(), tail.adv_grads.all());
+            self.gpu.submit(&nll, &tail.nll_steps);
+            self.gpu.submit(&adv_g, &tail.adv_steps);
+            let len = self.numel(&self.last_weight);
+            let norm = |grads: &Grads| -> f64 { self.gpu.read(grads.g(&self.last_weight), len).iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt() };
+            (norm(&tail.nll_grads) / (norm(&tail.adv_grads) + 1e-4)).clamp(0.0, self.obj.adaptive_weight_max as f64) as f32
+        });
+        let add = self.gpu.step(K_AXPY, &[&self.d_out, &adv.d_adv], &[n, f(self.obj.disc_weight * lambda.unwrap_or(1.0))], n);
+        self.gpu.submit(&[], &[add]);
+        (g_loss, lambda)
+    }
+
+    /// One AdamW step of the generator's parameters from the gradients the last backward left.
+    fn adamw_step(&self, opts: &StepOptions) {
+        let t = self.gen_updates.get() + 1;
+        self.gen_updates.set(t);
+        self.gen_opt.step(&self.gpu, &self.gen_ps, t, opts.lr_generator, opts.weight_decay, opts.adam, opts.clip, 1.0);
+    }
+
+    /// One update of the discriminator alone on the hinge loss, `real` the installed target and `fake` the last
+    /// forward's reconstruction (what the reference calls `recons.detach()`): returns the loss as optimised
+    /// ([`Objective::scale_disc_loss`]). The generator does not
+    /// move, so repeated calls on one batch are the discriminator training against a fixed pair. Needs a discriminator
+    /// ([`Objective::disc_weight`] above zero) and a preceding [`Self::loss`].
+    pub fn discriminator_step(&self, opts: &StepOptions) -> f64 {
+        let adv = self.adversarial.as_ref().expect("vqgan: discriminator_step needs an objective with disc_weight > 0");
+        adv.d.stage(false, &self.gpu, &self.target);
+        adv.d.stage(true, &self.gpu, &self.out);
+        let (real, fake) = (adv.d.forward(false), adv.d.forward(true));
+        let hinge = patchgan::hinge_d_loss(&real, &fake);
+        // LlamaGen optimises `disc_weight * hinge`: the logit gradients and the reported loss carry the factor.
+        let scale = if self.obj.scale_disc_loss { self.obj.disc_weight } else { 1.0 };
+        let scaled = |g: &[f32]| -> Vec<f32> { g.iter().map(|v| v * scale).collect() };
+        adv.d.zero_grads();
+        adv.d.backward(false, &scaled(&hinge.d_real), false);
+        adv.d.backward(true, &scaled(&hinge.d_fake), false);
+        let t = adv.updates.get() + 1;
+        adv.updates.set(t);
+        adv.d.adamw_step(t, opts.lr_discriminator, opts.weight_decay, opts.adam, None);
+        scale as f64 * hinge.loss
     }
 
     /// Every trainable tensor, `(name, length)`, in graph order. GroupNorm
