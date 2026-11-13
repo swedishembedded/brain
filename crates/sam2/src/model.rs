@@ -875,7 +875,7 @@ impl Sam2 {
                 self.gpu.submit(
                     &[],
                     &[
-                        self.gpu.step(self.ids.resize_nearest, &[prev_buf, &up], &[1, d, ps, ps, side, side], total),
+                        self.gpu.step(self.ids.resize_nearest, &[prev_buf, &up], &[1, d, ps, ps, side, side, 0], total),
                         self.gpu.step(self.ids.add2, &[&lateral[i], &up, &fused], &[total], total),
                     ],
                 );
