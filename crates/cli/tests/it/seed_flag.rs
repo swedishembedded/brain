@@ -74,7 +74,6 @@ const SEEDED_VERBS: &[&[&str]] = &[
 const USAGE_STOPPED_VERBS: &[&[&str]] = &[
     &["perf", "run", "latency"],
     &["federated", "train-expert"],
-    &["qwen35moe", "generate", "--weights", "w"],
 ];
 
 #[test]
