@@ -22,6 +22,10 @@
 //!    improvement on another - this closes that hole for a caller who can
 //!    name its anchor blocks.
 //!
+//! The numbering follows the bars' meaning, not the order [`gate`] tests
+//! them in: it checks the per-block bar (5) before degeneracy (4), so a
+//! candidate that fails both is reported as a block regression.
+//!
 //! [`gate`] itself is a pure function over already-scored pairs - it does
 //! not decode anything. The caller is responsible for producing
 //! [`GateInput`]'s scores by decoding BOTH arms greedily, on the same
