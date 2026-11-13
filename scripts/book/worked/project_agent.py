@@ -56,7 +56,7 @@ SPLIT = "project_agent.split"
 DEMO = "project_agent.demo"
 STEP_DEMO = "project_agent.step"
 BUG = "project_agent.bug"
-SEEDS = 5
+RUNS = 5
 BUG_STEPS, BUG_AT = 20, 100             # the faulty-generator candidate: steps trained, and the snapshot it is trained from
 VARIANTS = vl.VARIANTS                  # the run itself, then four copies with the first stored number nudged
 CONFIGS = ("spec", "weak", "train", "fixed")
@@ -765,7 +765,7 @@ def _adv_cells(rs, which, nd=2):
 
 def weak_verifier():
     rows = []
-    for seed in range(SEEDS):
+    for seed in range(RUNS):
         sp, wk = runs("spec", seed), runs("weak", seed)
         rows.append([seed, _int_cell([_final_level(r) for r in sp]), _cell([probe_success(r.theta, PROBE_IN, 5) for r in sp], 3),
                      _int_cell([_final_level(r) for r in wk]), _cell([_last_mean(r.train) for r in wk], 3),
@@ -774,7 +774,7 @@ def weak_verifier():
     return (
         f"Mistake 1: the weak verifier. The system of milestones 1 to 7 with one change, the reward of every sampled answer is the weak verifier of milestone 1 "
         f"(every output digit has the parity of the target digit); the curriculum still reads the exact probe bank. Five seeds, run names "
-        f"{', '.join('`' + _run_name(s) + '`' for s in range(SEEDS))}, the same generators for both systems. 'Level of step 300' is the level the trainer used in "
+        f"{', '.join('`' + _run_name(s) + '`' for s in range(RUNS))}, the same generators for both systems. 'Level of step 300' is the level the trainer used in "
         f"step {STEPS}; 'weak reward' is the mean reward the trainer was paid over steps {STEPS - 9} to {STEPS}; 'exact probe success' is the mean success of "
         f"the exact probe bank at the trainer's level, with the final policy.\n\n"
         + _table(["seed", "specified: level of step 300", "specified: probe level 5", "weak: level of step 300", "weak: weak reward, last 10 steps",
@@ -783,7 +783,7 @@ def weak_verifier():
 
 def train_reward_curriculum():
     rows, rows2 = [], []
-    for seed in range(SEEDS):
+    for seed in range(RUNS):
         sp, tr = runs("spec", seed), runs("train", seed)
         rows.append([seed, "probe success", _advance_text(sp, 4), _adv_cells(sp, 2), "-"])
         rows.append(["", "training success", _advance_text(tr, 4), _adv_cells(tr, 2), _adv_cells(tr, 3)])
@@ -805,7 +805,7 @@ def train_reward_curriculum():
 
 def unpaired_gate():
     rows = []
-    for seed in range(SEEDS):
+    for seed in range(RUNS):
         rs = runs("spec", seed)
         pa_ = _decisions(rs, paired_lower)
         un_ = _decisions(rs, unpaired_lower)
@@ -825,7 +825,7 @@ def unpaired_gate():
 
 def fixed_level_control():
     rows = []
-    for seed in range(SEEDS):
+    for seed in range(RUNS):
         fx, sp = runs("fixed", seed), runs("spec", seed)
         rows.append([seed, _int_cell([sum(r.flat) for r in sp]), _int_cell([sum(r.flat) for r in fx]),
                      _cell([probe_success(r.theta, PROBE_IN, 5) for r in sp], 3), _cell([probe_success(r.theta, PROBE_IN, 5) for r in fx], 3)])
