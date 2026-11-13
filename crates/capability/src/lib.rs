@@ -281,6 +281,11 @@ pub struct ActionSpec {
     /// train (`brain serve --training`), so a client that can merely infer -
     /// or one that was compromised - cannot occupy the cards with it.
     pub training: bool,
+    /// The action runs without the model's checkpoint (training a fresh
+    /// model from initialized weights): a caller with no checkpoint in its
+    /// store can still run it, and one that names or holds a checkpoint
+    /// starts from it.
+    pub from_scratch: bool,
 }
 
 impl ActionSpec {
@@ -295,6 +300,7 @@ impl ActionSpec {
             presentation: ActionPresentation::default(),
             video: None,
             training: false,
+            from_scratch: false,
         }
     }
     /// Builder setter for [`Self::video`].
@@ -328,6 +334,11 @@ impl ActionSpec {
         self.training = true;
         self
     }
+    /// Builder setter for [`Self::from_scratch`].
+    pub fn from_scratch(mut self) -> ActionSpec {
+        self.from_scratch = true;
+        self
+    }
     /// Builder setter for [`Self::presentation`].
     pub fn with_presentation(mut self, presentation: ActionPresentation) -> ActionSpec {
         self.presentation = presentation;
@@ -349,6 +360,9 @@ impl ActionSpec {
         }
         if self.training {
             v["training"] = json!(true);
+        }
+        if self.from_scratch {
+            v["from_scratch"] = json!(true);
         }
         v
     }

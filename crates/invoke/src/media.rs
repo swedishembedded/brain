@@ -15,7 +15,7 @@ use serde_json::json;
 /// declares. A video input is one of:
 ///
 /// - a mask-sequence directory (`imaging::maskseq`), as that sequence;
-/// - a directory of numbered frames (PNG/JPEG/PPM, in name order), with no
+/// - a directory of numbered frames (PNG/JPEG/PPM/BMP/TIFF, in name order), with no
 ///   frame rate of its own - the action takes it from a param;
 /// - a container file, demuxed whole and at its own rate when the action
 ///   works on the clip ([`ActionSpec::is_clip_input`]), otherwise sampled at
@@ -49,11 +49,11 @@ fn frames_dir_blob(dir: &Path) -> Result<Blob, String> {
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| ["png", "jpg", "jpeg", "ppm"].contains(&x.to_string_lossy().to_lowercase().as_str())))
+        .filter(|p| p.extension().is_some_and(|x| ["png", "jpg", "jpeg", "ppm", "bmp", "tif", "tiff"].contains(&x.to_string_lossy().to_lowercase().as_str())))
         .collect();
     paths.sort();
     if paths.is_empty() {
-        return Err(format!("{} holds no .png/.jpg/.ppm frames", dir.display()));
+        return Err(format!("{} holds no .png/.jpg/.ppm/.bmp/.tif frames", dir.display()));
     }
     let frames = paths.iter().map(|p| imaging::load(p).map(|img| (img.to_hwc_unit(), img.w, img.h))).collect::<Result<Vec<_>, String>>()?;
     capability::blob::video_blob(&frames)

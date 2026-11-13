@@ -49,6 +49,10 @@ pub struct WorkflowCall<'a> {
     /// `<program> <workflow>`, for messages.
     pub program: &'a str,
     pub provider: Arc<dyn Provider>,
+    /// The checkpoints the provider was built from, for a workflow that
+    /// drives the model directly (a live camera loop, say) rather than
+    /// through one action call per step.
+    pub assembly: &'a Assembly,
     /// Its arguments, the weight-role flags already taken out.
     pub args: &'a [String],
 }
@@ -156,7 +160,7 @@ fn run_workflow(program: &str, model: &Model, wf: &Workflow, args: &[String], he
             return 1;
         }
     };
-    match (wf.run)(&WorkflowCall { program: &name, provider, args: &rest }) {
+    match (wf.run)(&WorkflowCall { program: &name, provider, assembly: &assembly, args: &rest }) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("{name}: {e}");
@@ -170,7 +174,16 @@ fn run_workflow(program: &str, model: &Model, wf: &Workflow, args: &[String], he
 /// `variant`: the one given on the command line, else the param's default -
 /// only a checkpoint of that variant assembles, so the choice is the user's
 /// stated one, never a guess.
-fn resolve_for(arch: &str, spec: &dyn ArchSpec, mut overrides: BTreeMap<String, String>, action: &capability::ActionSpec, flags: &[String]) -> Result<Assembly, ResolveFailure> {
+fn resolve_for(arch: &str, spec: &dyn ArchSpec, overrides: BTreeMap<String, String>, action: &capability::ActionSpec, flags: &[String]) -> Result<Assembly, ResolveFailure> {
+    let named = !overrides.is_empty();
+    match resolve_in_store(arch, spec, overrides, action, flags) {
+        // A fresh model needs no checkpoint; one the caller named must exist.
+        Err(ResolveFailure::Missing(_) | ResolveFailure::NoModelsDir(_)) if action.from_scratch && !named => Ok(crate::resolve::empty_assembly()),
+        other => other,
+    }
+}
+
+fn resolve_in_store(arch: &str, spec: &dyn ArchSpec, mut overrides: BTreeMap<String, String>, action: &capability::ActionSpec, flags: &[String]) -> Result<Assembly, ResolveFailure> {
     let dir = loader::model_dir::resolve(None);
     let variant_param = action.params.iter().find(|p| p.name == "variant" && matches!(p.ty, ParamType::Enum(_) | ParamType::Str));
     let given = flags.iter().position(|f| f == "--variant").and_then(|i| flags.get(i + 1)).cloned();
