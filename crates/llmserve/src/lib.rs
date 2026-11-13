@@ -148,12 +148,14 @@ struct Job {
     capture: Capture,
     /// The base checkpoint's digest when the request was admitted, if known.
     base_digest: Option<String>,
+    /// The adapter the request runs under, which a policy trace is scored in.
+    adapter: Option<model::serve::AdapterId>,
 }
 
 impl Job {
     /// A job slot that holds nothing: numbering filler, and the stand-in while a job's request is being submitted.
     fn placeholder() -> Job {
-        Job { invocation: Invocation::new(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: None }
+        Job { invocation: Invocation::new(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: None, adapter: None }
     }
 }
 
@@ -166,6 +168,8 @@ struct Capture {
     token_ids: bool,
     /// `return_raw`: also return the generated text exactly as decoded (see [`Capture::attach`]).
     raw: bool,
+    /// `policy_trace`: the temperature the full-distribution log-probabilities are taken at (see [`PolicyTrace`]).
+    trace: Option<f32>,
     prompt: Vec<u32>,
 }
 
@@ -175,6 +179,11 @@ struct Capture {
 pub fn with_token_capture(spec: ActionSpec) -> ActionSpec {
     spec.param(ParamSpec::new("logprobs", ParamType::Bool, "return the log-probability of each sampled token (completion_logprobs, with completion_token_ids)"))
         .param(ParamSpec::new("return_token_ids", ParamType::Bool, "return the prompt's and the completion's token ids (prompt_token_ids, completion_token_ids)"))
+        .param(ParamSpec::new(
+            "policy_trace",
+            ParamType::Bool,
+            "return the training-grade policy trace (policy_trace): prompt ids, generated ids (the stop token included) and their log-probabilities under the model's full, untruncated distribution at the request temperature, with the base and adapter that served them; refused where the decoder cannot score its own generation or the request reshapes the distribution (penalties, DRY, no-repeat, thinking budget)",
+        ))
         .param(ParamSpec::new(
             "return_raw",
             ParamType::Bool,
@@ -217,7 +226,26 @@ impl Capture {
         let logprobs = inv.get_bool("logprobs").unwrap_or(false);
         let token_ids = inv.get_bool("return_token_ids").unwrap_or(false);
         let raw = inv.get_bool("return_raw").unwrap_or(false);
-        Capture { logprobs, token_ids, raw, prompt: if token_ids { prompt.to_vec() } else { Vec::new() } }
+        let trace = inv.get_bool("policy_trace").unwrap_or(false);
+        Capture { logprobs, token_ids, raw, trace: None, prompt: if token_ids || trace { prompt.to_vec() } else { Vec::new() } }
+    }
+
+    /// Why this request's policy trace cannot be the sampling policy's, when it asked for one.
+    fn trace_refusal(inv: &Invocation, sampler: &model::serve::SampleParams, scores: bool) -> Option<String> {
+        if !inv.get_bool("policy_trace").unwrap_or(false) {
+            return None;
+        }
+        if !scores {
+            return Some(capability::failure::tag(capability::failure::FailureClass::UnsupportedCapability, "policy_trace: this model cannot score its own generation, so it cannot return full-distribution log-probabilities"));
+        }
+        let reshaped = if sampler.has_processors() {
+            "penalties, DRY or no-repeat bans"
+        } else if sampler.thinking.is_some() {
+            "a thinking budget"
+        } else {
+            return None;
+        };
+        Some(capability::failure::tag(capability::failure::FailureClass::InvalidRequest, format!("policy_trace: the request sets {reshaped}, which reshape the distribution the tokens are drawn from; the trace would not be the sampling policy's")))
     }
 
     /// `outcome` with what the scheduler knows of the request added: how many prompt tokens its prefix cache
@@ -290,7 +318,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         let bi = self.jobs.len();
         // The job remembers the request's parameters and cancellation, not its payload: a page's pixels are tens of
         // megabytes, copied here on the thread that is decoding other requests.
-        let mut job = Job { invocation: inv.without_blobs(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: self.front.base_digest() };
+        let mut job = Job { invocation: inv.without_blobs(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: self.front.base_digest(), adapter: None };
         // A name the bank no longer holds is the caller's "no model", never
         // the base's answer under another name.
         let adapter = match self.front.route(inv) {
@@ -331,6 +359,12 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 let sample = req.sampler;
                 let seed = req.seed;
                 job.capture = Capture::of(&inv, &req.ids);
+                if let Some(why) = Capture::trace_refusal(&inv, &sample, self.sched.scores_continuations()) {
+                    self.set_job(bi, job);
+                    return (bi, Some(Err(why)));
+                }
+                job.capture.trace = inv.get_bool("policy_trace").unwrap_or(false).then_some(if sample.temp > 0.0 { sample.temp } else { 1.0 });
+                job.adapter = adapter;
                 let seq = SeqState::new(&req, inv.cancel.clone());
                 // `ignore_eos` generates to the token budget: the end-of-sequence ids are not stop tokens for this request.
                 let stop = if inv.get_bool("ignore_eos").unwrap_or(false) { Vec::new() } else { self.front.stop().to_vec() };
@@ -447,6 +481,25 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         job.capture.attach(outcome, tok, tokens, logprobs, completion)
     }
 
+    /// [`Self::conclude`] for job `bi`, plus the policy trace when the request asked for one: its prompt and
+    /// generated ids (the stop token that ended the sequence included, so a trainer can train the stop) with
+    /// their log-probabilities under the model's full distribution at the request temperature, scored by the
+    /// serving decoder under the adapter the request ran with ([`Scheduler::score_continuation`]). A request
+    /// whose trace cannot be scored fails as a whole: a rollout without its trace is no rollout.
+    fn conclude_scored(&mut self, bi: usize, seq: SeqState, toks: &[u32], logprobs: &[f32], completion: model::serve::Completion, progress: &mut dyn FnMut(usize, Progress)) -> ActionResult {
+        let tok = self.front.tok();
+        let outcome = Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, toks, logprobs, completion, &mut |p| progress(bi, p));
+        let Some(temperature) = self.jobs[bi].capture.trace else { return Ok(outcome) };
+        let prompt = self.jobs[bi].capture.prompt.clone();
+        let mut generated = toks.to_vec();
+        generated.extend(completion.stop_token);
+        let mut all = prompt.clone();
+        all.extend(&generated);
+        let scored = self.sched.score_continuation(self.jobs[bi].adapter, &all, prompt.len(), temperature).map_err(|e| capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("{}: policy_trace: {e}", self.front.label())))?;
+        let trace = serde_json::json!({ "prompt_token_ids": prompt, "generation_token_ids": generated, "generation_log_probs": scored, "log_prob_temperature": temperature });
+        Ok(outcome.set("policy_trace", trace))
+    }
+
     /// One iteration: stream each open job's new suffix and check its stop
     /// strings and cancellation (a triggered job is cancelled and finished at
     /// once - `Scheduler::cancel` returns its tokens so far and reclaims its
@@ -478,9 +531,9 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             let completion = self.sched.completion_of(id);
             let (toks, logprobs) = self.sched.cancel_detailed(id).unwrap_or_default();
             let seq = self.jobs[bi].seq.take().expect("checked above");
-            let outcome = Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, &toks, &logprobs, completion, &mut |p| progress(bi, p));
+            let result = self.conclude_scored(bi, seq, &toks, &logprobs, completion, progress);
             self.open.remove(&bi);
-            finished.push((bi, Ok(outcome)));
+            finished.push((bi, result));
         }
         if self.open.is_empty() {
             return finished;
@@ -517,8 +570,8 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             let logprobs = logprobs_of.remove(&id).unwrap_or_default();
             if let Some(seq) = self.jobs[bi].seq.take() {
                 let completion = meta_of.remove(&id).unwrap_or_default();
-                let outcome = Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, &toks, &logprobs, completion, &mut |p| progress(bi, p));
-                finished.push((bi, Ok(outcome)));
+                let result = self.conclude_scored(bi, seq, &toks, &logprobs, completion, progress);
+                finished.push((bi, result));
             }
             self.open.remove(&bi);
         }

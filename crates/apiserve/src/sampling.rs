@@ -106,12 +106,16 @@ fn apply_extended(provider: Provider, body: &Value, mut inv: Invocation) -> Resu
 }
 
 /// Ask the model for the sampled tokens' ids and log-probabilities when the
-/// client sent `logprobs: true` (the log-probability of each sampled token) or
-/// `return_token_ids: true` (the prompt's and the completion's token ids; the
-/// extension vLLM names the same way). Neither is forwarded unless sent, so a
-/// request that does not read them pays nothing.
+/// client sent `logprobs: true` (the log-probability of each sampled token
+/// under the truncated, temperature-scaled distribution the sampler drew from,
+/// and `0.0` for greedy), `return_token_ids: true` (the prompt's and the
+/// completion's token ids; the extension vLLM names the same way) or
+/// `policy_trace: true` (the training-grade trace: the ids and their
+/// log-probabilities under the model's full, untruncated distribution, with
+/// the policy that served them). None is forwarded unless sent, so a request
+/// that does not read them pays nothing.
 pub fn apply_token_capture(provider: Provider, body: &Value, mut inv: Invocation) -> Result<Invocation, ApiError> {
-    for name in ["logprobs", "return_token_ids"] {
+    for name in ["logprobs", "return_token_ids", "policy_trace"] {
         match present(body, name) {
             None => {}
             Some(v) => {

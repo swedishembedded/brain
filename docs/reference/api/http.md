@@ -168,6 +168,28 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   temperature-scaled, top-k and top-p truncated softmax), `0.0` for greedy
   decoding where the choice is deterministic; it is not the untruncated model
   distribution. A request that sets neither flag pays for neither.
+- **Policy trace (chat, for training).** `policy_trace: true` (a boolean; anything
+  else is a 400) makes the reply carry a top-level `policy_trace` object (a
+  streamed reply: on the terminal chunk) holding `prompt_token_ids`,
+  `generation_token_ids` (the stop token that ended the generation included, so a
+  trainer can train the stop) and `generation_log_probs`: for each generated token,
+  `log softmax(logits / log_prob_temperature)` over the WHOLE vocabulary, with no
+  top-k, top-p or min-p, however the token was drawn. `log_prob_temperature` is the
+  request's temperature (1.0 for a greedy request). The log-probabilities are
+  scored after the generation by the serving model itself, as one
+  teacher-forced pass under the adapter the request ran with (the same weights,
+  quantisation and KV precision that served it), so they are what a trainer's
+  teacher-forced forward computes for those tokens, up to the serve/train numeric
+  gap a numerics gate measures. The object also names the `policy` that generated
+  it (`base_digest`, and `adapter: {id, digest}` or null), `finish_reason`, and
+  `truncated` (the token budget ended the generation, which a trainer masks).
+  The request is refused (400, `invalid-request`) when it sets penalties, DRY,
+  no-repeat bans or a thinking budget, which reshape the distribution the tokens
+  are drawn from, and fails with `unsupported-capability` on a model that cannot
+  score its own generation. The cost is one extra prefill of prompt plus
+  generation on the serving thread. Train rollouts at temperature 1.0 without
+  top-k or top-p so the sampler's distribution and the trace's coincide; `logprobs`
+  (above) is the sampler's own, truncated figure and is a different quantity.
 - **Seed and served identity.** An OpenAI or OpenRouter chat or completions
   reply (and the terminal chunk of a stream) carries a non-standard
   `brain: {"seed": <int>, "adapter": {"id", "digest"}, "base_digest", "backend",

@@ -4180,6 +4180,37 @@ impl model::serve::PagedDecoder for Engine {
         positions.iter().map(|&t| hidden[t * d..(t + 1) * d].to_vec()).collect()
     }
 
+    fn scores_continuations(&self) -> bool {
+        true
+    }
+    /// One whole-sequence pass ([`Engine::score_positions`]) in the sequence's namespace, then the device head on
+    /// each scored position: the same final norm and head projection decode samples from.
+    fn score_continuation(&mut self, namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+        if tokens.len() > self.max_seq_len() {
+            return Err(format!("qwen3: {} tokens exceed the engine's per-sequence capacity of {}", tokens.len(), self.max_seq_len()));
+        }
+        if let Some(&bad) = tokens.iter().find(|&&t| t >= self.cfg.vocab) {
+            return Err(format!("qwen3: token {bad} is outside the model vocabulary ({})", self.cfg.vocab));
+        }
+        let need = self.blocks_for(tokens.len() as u32);
+        if self.free_blocks() < need {
+            self.reclaim_prefix(need - self.free_blocks());
+        }
+        if self.free_blocks() < need {
+            return Err(format!("qwen3: scoring {} tokens needs {need} KV blocks and {} are free", tokens.len(), self.free_blocks()));
+        }
+        let mut table = BlockTable::with_namespace(namespace);
+        let hidden = self.score_positions(&mut table, tokens);
+        self.release_table(&mut table);
+        let d = self.cfg.d_model as usize;
+        Ok((from..tokens.len())
+            .map(|p| {
+                let row = self.logits(&hidden[(p - 1) * d..p * d]);
+                model::logprobs::row_logprob_at(&row, tokens[p] as usize, temperature)
+            })
+            .collect())
+    }
+
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
         Engine::prefill(self, table, prompt)
     }

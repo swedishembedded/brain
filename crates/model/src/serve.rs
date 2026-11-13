@@ -20,7 +20,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use crate::paged::{BlockAllocator, BlockTable, KvNamespace};
+use crate::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
 
 mod budget;
 mod embeds;
@@ -154,6 +154,26 @@ pub trait PagedDecoder {
                 hidden
             })
             .collect()
+    }
+
+    /// Whether [`Self::score_continuation`] is implemented. A request for a policy trace is refused up front
+    /// by a decoder that cannot score, instead of after its whole generation.
+    fn scores_continuations(&self) -> bool {
+        false
+    }
+
+    /// The log-probability of `tokens[p]` for every `p` in `from..tokens.len()` under the FULL vocabulary
+    /// distribution `softmax(logits / temperature)` the serving forward computes at position `p - 1`: one
+    /// teacher-forced pass over `tokens` as a fresh sequence in `namespace` (the adapter the tokens were
+    /// generated under), so the figure comes from the same weights, quantisation, adapter and KV precision that
+    /// served the request. Nothing is truncated (no top-k, top-p or min-p): this is the model's distribution, not
+    /// the sampler's. `1 <= from <= tokens.len()`; `temperature` is finite and positive. The sequence is released
+    /// before the call returns, and the prefix cache is neither read nor written.
+    ///
+    /// The default is an error naming the gap ([`Self::scores_continuations`] is `false`).
+    fn score_continuation(&mut self, namespace: KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+        let _ = (namespace, tokens, from, temperature);
+        Err("this decoder cannot score a continuation: it has no teacher-forced scoring pass".to_string())
     }
 
     /// `logits = hidden @ head^T` for [`prefill`](Self::prefill)'s hidden
@@ -1765,6 +1785,25 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// KV pool token capacity — see [`PagedDecoder::kv_pool_capacity_tokens`].
     pub fn kv_pool_capacity_tokens(&self) -> u64 {
         self.dec.kv_pool_capacity_tokens()
+    }
+
+    /// Whether the decoder can return a policy trace ([`Self::score_continuation`]).
+    pub fn scores_continuations(&self) -> bool {
+        self.dec.scores_continuations()
+    }
+
+    /// The full-distribution log-probabilities of the last `tokens.len() - from` tokens of `tokens` under the
+    /// serving forward ([`PagedDecoder::score_continuation`]), for a sequence that ran under `adapter`. Run
+    /// between steps, on the scheduling thread: it holds the decoder for one prefill of `tokens`.
+    pub fn score_continuation(&mut self, adapter: Option<AdapterId>, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+        if from == 0 || from > tokens.len() {
+            return Err(format!("score_continuation: `from` is {from} for {} tokens; it must lie in 1..={}", tokens.len(), tokens.len()));
+        }
+        if !(temperature.is_finite() && temperature > 0.0) {
+            return Err(format!("score_continuation: the temperature is {temperature}; it must be finite and positive"));
+        }
+        let namespace = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
+        self.dec.score_continuation(namespace, tokens, from, temperature)
     }
 
     /// The most context one sequence may hold, prompt and reply together:

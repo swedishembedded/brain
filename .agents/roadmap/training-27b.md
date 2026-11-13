@@ -97,7 +97,9 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
 Done (HTTP chat, `docs/reference/api/http.md`): `logprobs: true` and `return_token_ids: true`
 return the sampled token ids, each token's log-probability under its decoding
 distribution and the prompt ids; the seed used, the answering adapter, the base
-digest, backend and engine are echoed in the reply's `brain` object. Still needed,
+digest, backend and engine are echoed in the reply's `brain` object. `policy_trace: true`
+adds the training-grade trace (ids and full-distribution, untruncated log-probabilities scored by the serving
+model, with the policy that served them; knowledge #442). Still needed,
 with tests in the api-conformance e2e:
 - accept token-id prompts; `system_fingerprint` as a digest of {base, adapter,
   tokenizer, template}; `base_digest`, `tokenizer_digest`, `template_digest` in

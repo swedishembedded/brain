@@ -22,15 +22,32 @@ pub const EMBED_WIDTH: usize = 4;
 pub struct Toy {
     alloc: BlockAllocator,
     cached: u32,
+    scoring: bool,
 }
 
 impl Toy {
     pub fn new(alloc: BlockAllocator, cached: u32) -> Toy {
-        Toy { alloc, cached }
+        Toy { alloc, cached, scoring: false }
+    }
+
+    /// The same decoder, able to score a continuation: the log-probability of token `t` is `-t / 100`, whatever
+    /// precedes it, so a test reads which tokens were scored from the numbers.
+    pub fn scoring(mut self) -> Toy {
+        self.scoring = true;
+        self
     }
 }
 
 impl PagedDecoder for Toy {
+    fn scores_continuations(&self) -> bool {
+        self.scoring
+    }
+    fn score_continuation(&mut self, _namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, _temperature: f32) -> Result<Vec<f32>, String> {
+        if !self.scoring {
+            return Err("the toy cannot score".to_string());
+        }
+        Ok(tokens[from..].iter().map(|&t| -(t as f32) / 100.0).collect())
+    }
     fn alloc_mut(&mut self) -> &mut BlockAllocator {
         &mut self.alloc
     }

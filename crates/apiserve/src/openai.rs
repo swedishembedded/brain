@@ -857,8 +857,12 @@ fn non_stream_body(model: &str, co: &bridge::ChatOutcome, native: bool) -> Value
 /// terminal chunk `frame`: `choices[0].logprobs.content` (OpenAI's shape, each
 /// token named `token_id:<id>` because the server relays ids, not text pieces),
 /// `choices[0].token_ids` and the top-level `prompt_token_ids` (vLLM's
-/// extension names). Nothing is added for what was not asked.
+/// extension names), and the top-level `policy_trace` ([`bridge::ChatOutcome::policy_trace`]).
+/// Nothing is added for what was not asked.
 fn attach_token_capture(frame: &mut Value, co: &bridge::ChatOutcome) {
+    if let Some(trace) = co.policy_trace() {
+        frame["policy_trace"] = trace;
+    }
     if let Some(prompt) = &co.prompt_token_ids {
         frame["prompt_token_ids"] = json!(prompt);
     }
@@ -1470,8 +1474,10 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
             last["brain"] = served;
         }
         if let Some(capture) = captured {
-            if let Some(v) = capture.get("prompt_token_ids") {
-                last["prompt_token_ids"] = v.clone();
+            for key in ["prompt_token_ids", "policy_trace"] {
+                if let Some(v) = capture.get(key) {
+                    last[key] = v.clone();
+                }
             }
             for key in ["token_ids", "logprobs"] {
                 if let Some(v) = capture["choices"][0].get(key) {

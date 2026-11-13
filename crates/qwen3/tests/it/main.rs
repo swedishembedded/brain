@@ -22,6 +22,7 @@ mod engine_adapter_bank;
 mod engine_half_weights;
 mod engine_prefill_mixed;
 mod engine_rollout;
+mod engine_score_continuation;
 mod engine_variants;
 mod external_head;
 mod fim_request;

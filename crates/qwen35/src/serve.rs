@@ -191,6 +191,8 @@ const TOPK_CAPACITY: usize = 32;
 /// is that kernel, but its tiles cap `head_dim` at 128 and this model's is
 /// 256 - see the M25 roadmap entry).
 const MAX_PREFILL_TOKENS: u32 = 256;
+/// Rows of the head projected at once when a continuation is scored: bounds the `[rows, vocab]` logits block on the host and card.
+const SCORE_HEAD_ROWS: usize = 16;
 
 /// One admitted sequence's persistent Gated-DeltaNet resources: recurrent
 /// `state` + causal-conv `hist`, one pair per layer (a size-1 dummy at
@@ -626,6 +628,48 @@ impl Engine {
         self.model.gpu.read(&logits, rows as usize * self.model.cfg.vocab as usize)
     }
 
+    /// The log-probability of `tokens[p]`, `p` in `from..tokens.len()`, under the full distribution
+    /// `softmax(logits / temperature)` of position `p - 1` ([`PagedDecoder::score_continuation`]): one chunked
+    /// prefill of `tokens` as a fresh sequence in `namespace`, keeping the final-normed hidden state of every
+    /// round row, then the resident head over the scored rows. The sequence's block and recurrent state are
+    /// released before returning.
+    pub fn score_continuation(&mut self, namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+        if tokens.len() > self.max_seq_len() {
+            return Err(format!("qwen35: {} tokens exceed this engine's per-sequence capacity of {}", tokens.len(), self.max_seq_len()));
+        }
+        if let Some(&bad) = tokens.iter().find(|&&t| t >= self.model.cfg.vocab) {
+            return Err(format!("qwen35: token {bad} is outside the model vocabulary ({})", self.model.cfg.vocab));
+        }
+        if self.free_blocks() < self.blocks_for(tokens.len() as u32) {
+            return Err(format!("qwen35: scoring {} tokens needs a free KV block and none is free", tokens.len()));
+        }
+        let mut table = BlockTable::with_namespace(namespace);
+        table.reserve(tokens.len() as u32, &mut self.alloc).map_err(|e| format!("qwen35: scoring {} tokens: {e:?}", tokens.len()))?;
+        let phys = table.blocks()[0];
+        let adapter_slot = adapters::slot_of(std::iter::once(&self.model), table.kv_namespace());
+        self.gdn_slots.entry(phys).or_insert_with(|| GdnSlot::new(&self.model.gpu, &gdn_slot_shape(&self.model.cfg)));
+        let (d, v) = (self.model.cfg.d_model as usize, self.model.cfg.vocab as usize);
+        let mut hidden: Vec<f32> = Vec::with_capacity(tokens.len() * d);
+        let mut pos = 0u32;
+        for round in tokens.chunks(MAX_PREFILL_TOKENS as usize) {
+            let caches = self.caches_for(phys);
+            adapters::set_rows(std::iter::once(&self.model), &vec![adapter_slot; round.len()]);
+            let rows = self.model.run_prefill_chunk_stage(round, pos, &caches, None);
+            adapters::set_rows(std::iter::once(&self.model), &[]);
+            hidden.extend(self.model.gpu.read(&rows, round.len() * d));
+            pos += round.len() as u32;
+        }
+        self.release_table(&mut table);
+        let mut out = Vec::with_capacity(tokens.len() - from);
+        for first in (from - 1..tokens.len() - 1).step_by(SCORE_HEAD_ROWS) {
+            let rows = SCORE_HEAD_ROWS.min(tokens.len() - 1 - first);
+            let x = self.model.gpu.storage_init("qwen35.serve.score.hidden", &hidden[first * d..(first + rows) * d]);
+            let logits = self.model.gpu.read(&self.model.head_logits_rows_dev(&x, rows as u32), rows * v);
+            out.extend(logits.chunks(v).enumerate().map(|(i, row)| model::logprobs::row_logprob_at(row, tokens[first + i + 1] as usize, temperature)));
+        }
+        Ok(out)
+    }
+
     /// The prefill body: `prompt` gives the length (and, without `input`, the
     /// ids); `input` supplies the rows instead of the token gather.
     fn prefill_rows(&mut self, table: &mut BlockTable, prompt: &[u32], input: Option<&[f32]>) -> Vec<f32> {
@@ -784,6 +828,12 @@ impl PagedDecoder for Engine {
     }
     fn admit_greedy(&self, hidden: &[f32]) -> u32 {
         Engine::admit_greedy(self, hidden)
+    }
+    fn scores_continuations(&self) -> bool {
+        true
+    }
+    fn score_continuation(&mut self, namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+        Engine::score_continuation(self, namespace, tokens, from, temperature)
     }
     fn admit_topk(&self, hidden: &[f32], k: usize) -> Vec<(u32, f32)> {
         Engine::admit_topk(self, hidden, k)

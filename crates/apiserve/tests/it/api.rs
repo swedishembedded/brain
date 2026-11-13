@@ -3822,6 +3822,11 @@ impl Instance for SiblingChatInst {
         if inv.get_bool("return_token_ids") == Some(true) {
             out = out.set("prompt_token_ids", json!([1, 2, 3, 4, 5]));
         }
+        if inv.get_bool("policy_trace") == Some(true) {
+            // The scored sequence: the sampled ids and the stop token that ended them, under the full distribution.
+            out = out.set("policy_trace", json!({"prompt_token_ids": [1, 2, 3, 4, 5], "generation_token_ids": [11, 12, 99], "generation_log_probs": [-1.5, -0.75, -0.125], "log_prob_temperature": 1.0}));
+            out = out.set("base_digest", json!(format!("sha256:{}", "b".repeat(64))));
+        }
         let answer = match requested {
             Some(seed) => format!("answered by {who} with seed {seed}"),
             None => format!("answered by {who}"),
@@ -4068,6 +4073,44 @@ async fn a_reply_names_the_adapter_that_answered_by_digest() {
     assert_eq!(with_brain.len(), 1, "exactly the terminal chunk carries the extension: {sse}");
     assert_eq!(with_brain[0]["brain"], json!({"seed": 5, "adapter": {"id": ADAPTER_ID, "digest": adapter_identity().digest}}));
     assert_eq!(with_brain[0]["choices"][0]["finish_reason"], json!("stop"));
+}
+
+/// `policy_trace: true` returns the training-grade trace in the reply (streamed: on the terminal chunk): the prompt
+/// ids, the generated ids with their full-distribution log-probabilities, and the policy that served them (base
+/// digest, adapter id and digest); a request that does not ask gets none of it, and a non-boolean is refused by name.
+#[tokio::test]
+async fn a_chat_reply_returns_a_policy_trace_only_when_asked() {
+    let (app, _exec, key) = adapter_app(Provider::OpenAI);
+    let mut asked = chat_body(ADAPTER_BASE);
+    asked["policy_trace"] = json!(true);
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &asked).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let trace = &v["policy_trace"];
+    assert_eq!(trace["prompt_token_ids"], json!([1, 2, 3, 4, 5]));
+    assert_eq!(trace["generation_token_ids"], json!([11, 12, 99]));
+    assert_eq!(trace["generation_log_probs"], json!([-1.5, -0.75, -0.125]));
+    assert_eq!(trace["log_prob_distribution"], json!("full_softmax_at_temperature"));
+    assert_eq!(trace["log_prob_temperature"], json!(1.0));
+    assert_eq!(trace["finish_reason"], json!("stop"));
+    assert_eq!(trace["truncated"], json!(false));
+    assert_eq!(trace["policy"]["base_digest"], json!(format!("sha256:{}", "b".repeat(64))));
+    assert_eq!(trace["policy"]["adapter"], Value::Null, "the base answered");
+
+    let (_, plain) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &chat_body(ADAPTER_BASE)).await;
+    assert!(plain.get("policy_trace").is_none(), "{plain}");
+
+    asked["stream"] = json!(true);
+    let (_, sse) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &asked).await;
+    let frames: Vec<Value> = sse_data(&sse).iter().filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
+    let terminal: Vec<&Value> = frames.iter().filter(|f| f["choices"][0]["finish_reason"].is_string()).collect();
+    assert_eq!(terminal.len(), 1, "{sse}");
+    assert_eq!(terminal[0]["policy_trace"]["generation_token_ids"], json!([11, 12, 99]));
+
+    let mut bad = chat_body(ADAPTER_BASE);
+    bad["policy_trace"] = json!("yes");
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &bad).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(v.to_string().contains("'policy_trace' must be a boolean"), "{v}");
 }
 
 /// A chat request that asks for them gets the sampled token ids and each

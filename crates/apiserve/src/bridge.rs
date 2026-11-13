@@ -205,9 +205,33 @@ pub struct ChatOutcome {
     /// The log-probability of each sampled token under the distribution it was
     /// drawn from, when the request asked.
     pub logprobs: Option<Vec<f64>>,
+    /// The model's policy trace (prompt ids, generated ids and their full-distribution log-probabilities), when the
+    /// request asked ([`Self::policy_trace`] adds the policy that served it).
+    pub trace: Option<serde_json::Value>,
 }
 
 impl ChatOutcome {
+    /// The reply's `policy_trace` object: what the model scored, plus the policy that generated it (the base
+    /// checkpoint's digest and the adapter's id and digest, each only when the model reported it), why the
+    /// generation ended, and whether it was cut short by the token budget (`truncated`), which a trainer masks.
+    /// `None` when the request did not ask.
+    ///
+    /// `generation_log_probs[i]` is `log softmax(logits / log_prob_temperature)[generation_token_ids[i]]` over the
+    /// whole vocabulary: no top-k, top-p or min-p, however the token was drawn. The sampler's own figure is the
+    /// `logprobs` choice field and is a different quantity (the truncated, temperature-scaled distribution).
+    pub fn policy_trace(&self) -> Option<serde_json::Value> {
+        let mut trace = self.trace.clone()?;
+        let policy = serde_json::json!({
+            "base_digest": self.base_digest,
+            "adapter": self.adapter.as_ref().map(|(id, digest)| serde_json::json!({ "id": id, "digest": digest })),
+        });
+        trace["policy"] = policy;
+        trace["finish_reason"] = serde_json::json!(self.finish);
+        trace["truncated"] = serde_json::json!(self.finish == "length");
+        trace["log_prob_distribution"] = serde_json::json!("full_softmax_at_temperature");
+        Some(trace)
+    }
+
     /// The reply's `brain` extension object: the seed that reproduces the
     /// decode and the adapter that answered, each present only when the model
     /// reported it. `None` when it reported neither, so no empty object is sent.
@@ -245,7 +269,7 @@ pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
     let numbers = |key: &str| o.outputs.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_i64()).collect::<Vec<_>>());
     let logprobs = o.outputs.get("completion_logprobs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_f64()).collect::<Vec<_>>());
     let text_of = |key: &str| o.outputs.get(key).and_then(|v| v.as_str()).map(str::to_string);
-    ChatOutcome { text, prompt_tokens, completion_tokens, reasoning_tokens: o.outputs.get("reasoning_tokens").and_then(|v| v.as_i64()).unwrap_or_default(), cached_tokens: o.outputs.get("cached_tokens").and_then(|v| v.as_i64()), finish, reasoning, tool_calls, seed, adapter, base_digest: text_of("base_digest"), backend: text_of("backend"), engine: text_of("engine"), prompt_token_ids: numbers("prompt_token_ids"), completion_token_ids: numbers("completion_token_ids"), logprobs }
+    ChatOutcome { text, prompt_tokens, completion_tokens, reasoning_tokens: o.outputs.get("reasoning_tokens").and_then(|v| v.as_i64()).unwrap_or_default(), cached_tokens: o.outputs.get("cached_tokens").and_then(|v| v.as_i64()), finish, reasoning, tool_calls, seed, adapter, base_digest: text_of("base_digest"), backend: text_of("backend"), engine: text_of("engine"), prompt_token_ids: numbers("prompt_token_ids"), completion_token_ids: numbers("completion_token_ids"), logprobs, trace: o.outputs.get("policy_trace").cloned() }
 }
 
 /// Map an executor reply error string to a provider-shaped [`ApiError`], through

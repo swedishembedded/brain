@@ -23,6 +23,17 @@ pub fn row_logprob(row: &[f32], idx: usize) -> f32 {
     row[idx] - max - sum_exp.ln()
 }
 
+/// `log(softmax(row / temperature))[idx]`: the log-probability the model's full vocabulary distribution gives `idx`
+/// at `temperature`, untruncated (no top-k, top-p or min-p). The one definition of the "full distribution" figure a
+/// policy trace reports, so a trainer scoring the same tokens with `1 / temperature` as its logit scale
+/// ([`token_logprobs_scaled`]) and the server agree by construction. `temperature` must be finite and positive.
+pub fn row_logprob_at(row: &[f32], idx: usize, temperature: f32) -> f32 {
+    assert!(temperature.is_finite() && temperature > 0.0, "the temperature must be finite and positive, got {temperature}");
+    let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let sum_exp: f32 = row.iter().map(|&v| ((v - max) / temperature).exp()).sum();
+    (row[idx] - max) / temperature - sum_exp.ln()
+}
+
 /// The `k` largest entries of `row`'s log-softmax as `(index, logprob)`, most likely first (ties toward the lower
 /// index). O(vocab) for the normaliser plus O(vocab log k) for the selection.
 pub fn row_top_logprobs(row: &[f32], k: usize) -> Vec<(u32, f32)> {
@@ -109,7 +120,19 @@ pub fn token_logprobs_scaled<M: Model>(m: &M, tokens: &[u32], targets: &[u32], l
 
 #[cfg(test)]
 mod tests {
-    use super::{row_logprob, row_top_logprobs};
+    use super::{row_logprob, row_logprob_at, row_top_logprobs};
+
+    #[test]
+    fn row_logprob_at_is_the_log_softmax_of_the_scaled_row_and_row_logprob_at_one() {
+        let row = [1.0f32, 3.0, 2.0, -1.0, 0.25];
+        for idx in 0..row.len() {
+            assert!((row_logprob_at(&row, idx, 1.0) - row_logprob(&row, idx)).abs() < 1e-6);
+            let scaled: Vec<f32> = row.iter().map(|v| v / 0.7).collect();
+            assert!((row_logprob_at(&row, idx, 0.7) - row_logprob(&scaled, idx)).abs() < 1e-5, "temperature 0.7, index {idx}");
+        }
+        let total: f32 = (0..row.len()).map(|i| row_logprob_at(&row, i, 2.5).exp()).sum();
+        assert!((total - 1.0).abs() < 1e-5, "a distribution sums to one, got {total}");
+    }
 
     #[test]
     fn row_top_logprobs_are_the_k_largest_log_softmax_entries_most_likely_first() {

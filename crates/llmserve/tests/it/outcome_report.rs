@@ -103,3 +103,34 @@ fn a_request_without_a_budget_runs_to_the_end_of_the_context() {
 }
 
 const _: () = assert!(VOCAB > 8);
+
+/// A policy trace is the prompt, the generated ids with the stop token that ended them, and a log-probability for
+/// each of those generated ids, scored by the decoder; the plain outputs are unchanged by asking.
+#[test]
+fn a_policy_trace_scores_the_generation_with_its_stop_token() {
+    let front = Front { tok: tokenizer() };
+    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(128, 8), 0).scoring(), 4);
+    let asked = Invocation::new().set("policy_trace", json!(true));
+    let results = run_batch_scheduled(&mut sched, &front, &[asked, Invocation::new()], &mut |_, _| {});
+    let asked = results[0].clone().expect("served").outputs;
+    let plain = results[1].clone().expect("served").outputs;
+    assert!(plain.get("policy_trace").is_none());
+    assert_eq!(asked["completion_tokens"], plain["completion_tokens"]);
+    let trace = &asked["policy_trace"];
+    // The toy counts up from the prompt's last token 4: 5, 6, then the stop token 7.
+    assert_eq!(trace["prompt_token_ids"], json!([1, 2, 3, 4]));
+    assert_eq!(trace["generation_token_ids"], json!([5, 6, 7]));
+    let scored: Vec<f64> = serde_json::from_value(trace["generation_log_probs"].clone()).unwrap();
+    assert!(scored.iter().zip([-0.05, -0.06, -0.07]).all(|(got, want)| (got - want).abs() < 1e-6), "{scored:?}");
+    assert_eq!(trace["log_prob_temperature"], json!(1.0), "a greedy request is scored at temperature 1");
+}
+
+/// A decoder that cannot score its own generation refuses the request before decoding, by class and name.
+#[test]
+fn a_policy_trace_is_refused_by_a_decoder_that_cannot_score() {
+    let front = Front { tok: tokenizer() };
+    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(128, 8), 0), 4);
+    let results = run_batch_scheduled(&mut sched, &front, &[Invocation::new().set("policy_trace", json!(true))], &mut |_, _| {});
+    let error = results[0].clone().expect_err("no scoring pass");
+    assert!(error.starts_with("[unsupported-capability]") && error.contains("policy_trace"), "{error}");
+}

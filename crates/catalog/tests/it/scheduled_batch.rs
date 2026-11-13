@@ -272,6 +272,75 @@ fn token_ids_and_logprobs_come_back_only_when_asked_for() {
     assert!(asked["engine"].as_str().is_some_and(|e| e.starts_with("brain ")), "{asked:?}");
 }
 
+/// The trainer's teacher-forced log-probability of `ids[from..]` (each given `ids[..p]`) at `temperature`: the
+/// training forward of the same weights the scheduler's engine serves, through the objective's own readout.
+fn trainer_logprobs(ids: &[u32], from: usize, temperature: f32) -> Vec<f32> {
+    use model::{training, Batch, Model};
+    const BLOCK: usize = 24;
+    let cfg = cfg();
+    let init = qwen35::init::init_weights(&cfg, 11);
+    let mut trainer = qwen35::model::Qwen35::new_train_on(gpu_core::Gpu::new_cpu(qwen35::model::pipelines()), cfg, 1, BLOCK as u32, &init);
+    let (mut tokens, mut targets) = (vec![0u32; BLOCK], vec![model::IGNORE; BLOCK]);
+    tokens[..ids.len()].copy_from_slice(ids);
+    targets[from - 1..ids.len() - 1].copy_from_slice(&ids[from..]);
+    Model::set_batch(&trainer, Batch::Lm { tokens: &tokens, targets: &targets });
+    training::require_token_objectives(&mut trainer).expect("qwen35 trains on token objectives").set_logit_scale(1.0 / temperature);
+    let _ = trainer.forward();
+    let lp = training::objectives(&trainer).batch_token_logprobs();
+    (from - 1..ids.len() - 1).map(|p| lp[p]).collect()
+}
+
+/// A request for `policy_trace` returns the prompt ids, the generated ids and, per generated token, the log-probability
+/// the model's FULL distribution at the request temperature gives it: the same number the trainer's teacher-forced
+/// forward computes for those tokens (within `TOLERANCE`, fp32 on both sides), whatever top-k truncated the sampler's
+/// own draw. The sampler's log-probability (`logprobs`) is a different, renormalised quantity and is not that number.
+#[test]
+fn a_policy_trace_equals_the_trainers_teacher_forced_log_probs() {
+    /// Absolute log-probability tolerance: two fp32 forwards (a chunked prefill with a paged cache, a whole-batch
+    /// training forward) of one model on the CPU.
+    const TOLERANCE: f32 = 2e-3;
+    let front = front();
+    let spec = catalog::resident_llm::generate_spec("trace", true);
+    let temperature = 0.8f32;
+    let asked = spec.validate(inv("policy trace", 7, f64::from(temperature), 23).set("top_k", json!(4)).set("policy_trace", json!(true)).set("logprobs", json!(true))).expect("the generate spec declares policy_trace");
+    let plain = inv("policy trace", 7, f64::from(temperature), 23).set("top_k", json!(4));
+    let results = run_batch_scheduled(&mut scheduler(2), &front, &[asked, plain], &mut |_, _| {});
+    let asked = results[0].clone().expect("request succeeds").outputs;
+    let plain = results[1].clone().expect("request succeeds").outputs;
+    assert!(plain.get("policy_trace").is_none(), "not asked for");
+    assert_eq!(plain["text"], asked["text"], "tracing changes nothing about the decode");
+
+    let trace = &asked["policy_trace"];
+    let prompt: Vec<u32> = serde_json::from_value(trace["prompt_token_ids"].clone()).unwrap();
+    let generated: Vec<u32> = serde_json::from_value(trace["generation_token_ids"].clone()).unwrap();
+    let full: Vec<f32> = serde_json::from_value(trace["generation_log_probs"].clone()).unwrap();
+    assert_eq!(prompt, "policy trace".bytes().map(u32::from).collect::<Vec<_>>());
+    assert_eq!(generated.len(), 7);
+    assert_eq!(full.len(), generated.len());
+    assert_eq!(trace["log_prob_temperature"].as_f64(), Some(f64::from(temperature)));
+
+    let ids: Vec<u32> = prompt.iter().chain(&generated).copied().collect();
+    let want = trainer_logprobs(&ids, prompt.len(), temperature);
+    for (i, (got, want)) in full.iter().zip(&want).enumerate() {
+        assert!((got - want).abs() < TOLERANCE, "token {i}: served {got}, trainer {want}");
+    }
+
+    // The sampler drew from the top 4 renormalised, so its own figure is higher than the full distribution's.
+    let sampler: Vec<f32> = serde_json::from_value(asked["completion_logprobs"].clone()).unwrap();
+    assert!(sampler.iter().zip(&full).all(|(s, f)| s >= &(f - TOLERANCE)) && sampler.iter().zip(&full).any(|(s, f)| s > &(f + 0.01)), "sampler {sampler:?} vs full {full:?}");
+}
+
+/// A policy trace is refused by name where it would not be the sampling policy's, and never silently without one.
+#[test]
+fn a_policy_trace_is_refused_when_the_request_reshapes_the_distribution() {
+    let front = front();
+    let spec = catalog::resident_llm::generate_spec("trace", true);
+    let reshaped = spec.validate(inv("x", 3, 0.8, 1).set("policy_trace", json!(true)).set("repetition_penalty", json!(1.3))).expect("valid request");
+    let results = run_batch_scheduled(&mut scheduler(1), &front, &[reshaped], &mut |_, _| {});
+    let error = results[0].clone().expect_err("a penalty reshapes the distribution");
+    assert!(error.contains("invalid-request") && error.contains("policy_trace") && error.contains("penalties"), "{error}");
+}
+
 /// A feed whose waiting jobs sit behind a full group: `take` hands one over only when the
 /// group asks for room, `screen` lets the group turn away what can never run. Records the
 /// order of what happened to each.
