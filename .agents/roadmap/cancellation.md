@@ -76,7 +76,7 @@ loops or a batch engine.
 | M | kronos (forecast) | forecast | no | `generate.rs` `forecast*` `for step in 0..pred_len` | several entry points |
 | M | nemotronasr | transcribe | yes | model `transcribe`/`transcribe_with_encoder` chunk loop | `transcribe_stream` is one bounded window, N/A |
 | M | qwen3asr | transcribe | yes | `transcribe`/`transcribe_with_head` decode loop | fixed window |
-| M | rrdbnet | upscale | no | `caps.rs` `upscale_with_halo` tile loop behind the `Upscaler` trait | trait signature changes |
+| M | rrdbnet | upscale | no | `caps.rs` `upscale_tiled` window loop behind the `Upscaler` trait | trait signature changes |
 | M/L | minimaxmusic3 | generate | yes | pipeline: LLM decode, DiT denoise, vocoder | multi-minute; three phases |
 | L | qwen3omnimoe | generate, speak, converse | yes | `caps.rs` `generate_greedy`, `generate_multimodal`, `speak` (thinker, talker/MTP, code2wav), `converse`; `int8_thinker_resident.rs` `generate_with_embeds` | several decode loops plus the multi-device int8 path; `generate` emits only start and end progress |
 | S (entry check only) | one-shot | lfm2 embed/fill_mask, sam2 segment, yolov8 detect, scrfd detect, arcface embed, clip embed_text/embed_image, zipdepth infer, codeformer restore_face, t5encoder encode, vqgan encode/decode, worldmirror2 reconstruct, horizon predict, qwen3 embed, chronos2/fincast/timesfm3 forecast, splat render, imageops, demo echo | no | single forward | C1's entry check plus size-bounded inputs |

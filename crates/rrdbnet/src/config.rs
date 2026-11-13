@@ -79,6 +79,26 @@ impl RrdbConfig {
         Ok(RrdbConfig { in_channels, out_channels, num_feat, num_grow_ch, num_block, scale })
     }
 
+    /// Receptive radius in INPUT pixels: every output pixel is a function of
+    /// the input pixels within this many (Chebyshev) pixels of the one it
+    /// upsamples from, so a window with this much context around a pixel
+    /// computes it exactly.
+    ///
+    /// Counted along the longest conv chain, walking back from the output (the
+    /// residual skips are shorter and add nothing). Each 3x3 conv adds 1 at its
+    /// own resolution; a nearest-2x upsample maps output pixel `o` to input
+    /// pixel `o / 2`, which turns a radius `r` into `ceil(r / 2)`. The layers
+    /// are `conv_first`, 15 convs per RRDB block, `conv_body`, then per
+    /// doubling an upsample followed by `conv_up<i>`, then `conv_hr` and
+    /// `conv_last` at the output resolution.
+    pub fn receptive_radius(&self) -> u32 {
+        let mut r: u32 = 2; // conv_last, conv_hr
+        for _ in 0..self.scale.trailing_zeros() {
+            r = (r + 1).div_ceil(2); // conv_up<i>, then the upsample before it
+        }
+        r + 1 + 15 * self.num_block + 1 // conv_body, the trunk, conv_first
+    }
+
     /// Every tensor the forward reads, in graph order. `import::validate` checks
     /// the checkpoint against exactly this list, so a missing or mis-shaped
     /// weight is named at load rather than mis-bound at dispatch.
@@ -141,6 +161,24 @@ mod tests {
             scale: 4,
         };
         assert_eq!(RrdbConfig::from_tensors(&x4plus_shapes()).unwrap(), want);
+    }
+
+    /// Hand count of the longest conv chain, in input pixels. Walking back from
+    /// an output pixel, each 3x3 conv adds 1 at its own resolution and each
+    /// nearest-2x upsample halves the radius, rounding up.
+    ///
+    /// Tiny (2 blocks, x4): conv_last,conv_hr,conv_up2 = 3 at 4x; up2 -> 2 at
+    /// 2x; conv_up1 -> 3; up1 -> 2 at 1x; conv_body -> 3; 30 trunk convs -> 33;
+    /// conv_first -> 34. x4plus: 349 (3 + 345 + 1). x2 has one upsample:
+    /// conv_last,conv_hr,conv_up1 = 3 at 2x; up1 -> 2; conv_body -> 3;
+    /// trunk -> 15N + 3; conv_first -> 15N + 4.
+    #[test]
+    fn the_receptive_radius_matches_a_hand_count() {
+        let base = RrdbConfig::from_tensors(&x4plus_shapes()).unwrap();
+        assert_eq!(base.receptive_radius(), 349);
+        assert_eq!(RrdbConfig { num_block: 2, ..base.clone() }.receptive_radius(), 34);
+        assert_eq!(RrdbConfig { num_block: 2, scale: 2, ..base.clone() }.receptive_radius(), 34);
+        assert_eq!(RrdbConfig { num_block: 6, scale: 2, ..base }.receptive_radius(), 94);
     }
 
     /// The anime variant differs ONLY in num_block, and the x2 variant only in

@@ -24,6 +24,7 @@
 use std::collections::HashMap;
 
 use rrdbnet::config::RrdbConfig;
+use rrdbnet::caps::Upscaler;
 use rrdbnet::model::{Rrdb, KERNELS};
 use vae::blocks::Tensors;
 
@@ -165,62 +166,58 @@ fn x4plus_forward_matches_the_reference() {
     assert_eq!(ladder(&m, &g, "x4plus_"), 0, "x4plus ladder");
 }
 
-/// How the tile seam responds to the halo - the measurement that makes
-/// `TILE_HALO` a number rather than a guess.
-///
-/// The comparison is tiled-vs-**one-tile-covering-everything**, not
-/// tiled-vs-whole-image. Those two differ for a reason that has nothing to do
-/// with seams: the whole-image path lets the convolutions zero-pad at the image
-/// border, while any tiled path replicate-pads it. Comparing against the
-/// single-tile result holds the border regime fixed, so what is left IS the
-/// seam.
-#[test]
-fn the_tile_seam_shrinks_with_the_halo() {
-    let Some(g) = goldens() else { return };
-    let mut w: Tensors = HashMap::new();
-    let mut shapes: HashMap<String, Vec<usize>> = HashMap::new();
-    for t in &g {
-        if let Some(name) = t.name.strip_prefix("tiny_w_") {
-            shapes.insert(name.to_string(), t.shape.clone());
-            w.insert(name.to_string(), (t.shape.clone(), t.data.clone()));
-        }
-    }
-    let cfg = RrdbConfig::from_tensors(&shapes).expect("derive");
-    let scale = cfg.scale;
-    let w = rrdbnet::import::validate(w, &cfg).expect("validate");
-    let input = g.iter().find(|t| t.name == "tiny_input").expect("tiny_input");
-    let (h, wd) = (input.shape[2] as u32, input.shape[3] as u32);
-
-    let gpu = gpu_core::testgpu::dev(&KERNELS);
-    let s = rrdbnet::caps::Session::new(gpu, cfg, w);
-
-    // Reference: ONE tile covering the whole image, at the halo under test -
-    // same border regime, no interior seam.
-    let mut prev = f32::INFINITY;
-    for halo in [4u32, 8, 16, 32] {
-        let (whole, ow, oh) = s.upscale_with_halo(&input.data, wd, h, wd, halo).expect("one tile");
-        let (tiled, _, _) = s.upscale_with_halo(&input.data, wd, h, 12, halo).expect("tiled");
-        let max = whole.iter().zip(&tiled).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        let over = whole.iter().zip(&tiled).filter(|(a, b)| (*a - *b).abs() > 1.0 / 255.0).count();
-        eprintln!("  halo={halo:3} max|seam| = {max:.3e}  ({over} of {} px above 1/255)", ow * oh * 3);
-        assert!(max <= prev * 1.05 + 1e-6, "halo {halo} made the seam WORSE ({max:.3e} vs {prev:.3e})");
-        prev = max;
-        assert_eq!((ow, oh), (wd * scale, h * scale));
-    }
-    eprintln!("tiny seam at halo=32: {prev:.3e}");
-    // On the 2-block toy a large halo DOES clear an 8-bit step. That is a fact
-    // about this fixture, not about the released net - see
-    // `the_tile_seam_on_the_released_net`, where the same halo does not.
-    assert!(prev < 1.0 / 255.0, "seam {prev:.3e} exceeds an 8-bit step at the largest halo tried");
+/// Deterministic stand-in weights for `cfg` (no checkpoint, no goldens): the
+/// tiling contract is about geometry, so any weights that make every layer
+/// matter will do, and these keep activations O(1) through the trunk.
+fn synthetic_weights(cfg: &RrdbConfig) -> Tensors {
+    let mut rng = data::rng::Lcg::new(0x5eed);
+    cfg.param_list()
+        .into_iter()
+        .map(|(name, shape)| {
+            let n: usize = shape.iter().product();
+            let fan_in = (n / shape[0]).max(1) as f32;
+            let a = 1.0 / fan_in.sqrt();
+            let data = (0..n).map(|_| rng.scaled(a)).collect();
+            (name, (shape, data))
+        })
+        .collect()
 }
 
-/// The same seam measurement on the RELEASED net, whose 23 blocks give a far
-/// larger receptive field than the 2-block tiny config - so a halo that is
-/// ample there can be far too small here. Measuring only the toy would be
-/// exactly the degenerate-fixture mistake of measuring only a toy config.
+/// Tiled output must equal the whole-image output, not approximate it.
+///
+/// Spec: with `tile > 0` every output pixel is computed from a window holding
+/// its whole receptive field (or ending at the image edge, where the convs
+/// zero-pad exactly as the whole-image pass does), so the two paths agree to
+/// the last bit. Sizes are chosen so the tile divides neither side, the sides
+/// are odd, one case tiles both axes and one tiles only x (the image is
+/// shorter than a window in y, so y runs whole), and both scales are covered.
 #[test]
-fn the_tile_seam_on_the_released_net() {
-    let Some(g) = goldens() else { return };
+fn tiled_upscale_equals_the_whole_image_pass() {
+    for (scale, num_block, w, h, tile) in [(4u32, 2u32, 91u32, 85u32, 8u32), (4, 2, 83, 71, 8), (2, 2, 77, 79, 5)] {
+        let cfg = RrdbConfig { in_channels: 3, out_channels: 3, num_feat: 8, num_grow_ch: 4, num_block, scale };
+        let r = cfg.receptive_radius();
+        assert!(w > tile + 2 * r || h > tile + 2 * r, "case {w}x{h} never tiles: window {}", tile + 2 * r);
+        let weights = synthetic_weights(&cfg);
+        let mut rng = data::rng::Lcg::new(7);
+        let chw: Vec<f32> = (0..3 * (w * h) as usize).map(|_| rng.unit()).collect();
+
+        let s = rrdbnet::caps::Session::new(gpu_core::testgpu::dev(&KERNELS), cfg, weights);
+        let (whole, ow, oh) = s.upscale(&chw, w, h, 0).expect("whole");
+        let (tiled, tw, th) = s.upscale(&chw, w, h, tile).expect("tiled");
+        assert_eq!((tw, th), (ow, oh));
+        assert_eq!((ow, oh), (w * scale, h * scale));
+        let max = max_abs(&whole, &tiled);
+        let differing = whole.iter().zip(&tiled).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        eprintln!("  x{scale} {w}x{h} tile {tile} R={r}: max|tiled-whole| = {max:.3e}, {differing} px not bitwise equal");
+        assert_eq!(differing, 0, "x{scale} {w}x{h} tile {tile}: tiled differs from whole by up to {max:.3e}");
+    }
+}
+
+/// The same contract on the RELEASED net (R = 349), skipped when the checkpoint
+/// is absent. An image smaller than a window runs whole, so this needs one
+/// larger than `tile + 2R`.
+#[test]
+fn tiled_upscale_equals_the_whole_image_pass_on_the_released_net() {
     let Ok(ckpt) = std::env::var("BRAIN_ESRGAN") else {
         brain_testutil::skip("BRAIN_ESRGAN unset");
         return;
@@ -229,25 +226,18 @@ fn the_tile_seam_on_the_released_net() {
         brain_testutil::skip(&format!("{ckpt} does not exist"));
         return;
     }
-    let Some(input) = g.iter().find(|t| t.name == "x4plus_input") else {
-        brain_testutil::skip("no x4plus goldens");
-        return;
-    };
     let (tensors, shapes, _) = rrdbnet::import::read(&ckpt).expect("read");
     let cfg = RrdbConfig::from_tensors(&shapes).expect("derive");
     let w = rrdbnet::import::validate(tensors, &cfg).expect("validate");
-    let (h, wd) = (input.shape[2] as u32, input.shape[3] as u32);
+    let tile = 16u32;
+    let side = tile + 2 * cfg.receptive_radius() + 5;
+    let mut rng = data::rng::Lcg::new(11);
+    let chw: Vec<f32> = (0..3 * (side * side) as usize).map(|_| rng.unit()).collect();
 
-    let gpu = gpu_core::testgpu::dev(&KERNELS);
-    let s = rrdbnet::caps::Session::new(gpu, cfg, w);
-    let mut best = f32::INFINITY;
-    for halo in [16u32, 32, 48] {
-        let (whole, _, _) = s.upscale_with_halo(&input.data, wd, h, wd, halo).expect("one tile");
-        let (tiled, _, _) = s.upscale_with_halo(&input.data, wd, h, 12, halo).expect("tiled");
-        let max = whole.iter().zip(&tiled).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        let over = whole.iter().zip(&tiled).filter(|(a, b)| (*a - *b).abs() > 1.0 / 255.0).count();
-        eprintln!("  x4plus halo={halo:3} max|seam| = {max:.3e}  ({over} px above 1/255)");
-        best = best.min(max);
-    }
-    eprintln!("x4plus best seam: {best:.3e}");
+    let s = rrdbnet::caps::Session::new(gpu_core::testgpu::dev(&KERNELS), cfg, w);
+    let (whole, _, _) = s.upscale(&chw, side, side, 0).expect("whole");
+    let (tiled, _, _) = s.upscale(&chw, side, side, tile).expect("tiled");
+    let max = max_abs(&whole, &tiled);
+    eprintln!("x4plus {side}x{side} tile {tile}: max|tiled-whole| = {max:.3e}");
+    assert_eq!(max, 0.0, "tiled differs from whole");
 }

@@ -14,6 +14,26 @@
 //! the serving contract asks for a genuine batching decision, not
 //! necessarily a genuine batch.
 //!
+//! **Tiling is exact.** `tile > 0` sweeps ONE fixed-size graph over windows of
+//! `tile + 2R` input pixels a side, where `R` is the network's receptive radius
+//! ([`RrdbConfig::receptive_radius`], 349 for `x4plus`'s 23 blocks). Each window
+//! lies entirely inside the image (it is shifted inward at a border, never
+//! padded past it) and keeps only the `tile`-pixel output core it owns; the
+//! cores partition the output. Every kept pixel therefore sees its whole
+//! receptive field, or a window edge that is the image edge, where the convs
+//! zero-pad exactly as the whole-image pass does. The result equals the
+//! whole-image output (`tile = 0`) bit for bit, which the parity tests assert.
+//! An image no longer than a window in one dimension runs whole in that
+//! dimension.
+//!
+//! The price is memory and work, not quality. A window holds `(tile + 2R)^2`
+//! input pixels, so on `x4plus` a tile is worth cutting only for images larger
+//! than about `2R + tile` per side (698 + tile); a smaller image is one window
+//! anyway. The work grows by the overlap factor `((tile + 2R) / tile)^2`
+//! relative to the whole image: tile 512 on `x4plus` computes about 2.4x the
+//! pixels, tile 64 about 40x. Peak memory is set by `tile + 2R`, so shrinking
+//! `tile` below `2R` saves almost nothing and multiplies the work.
+//!
 //! **Value range and geometry.** The reference feeds RGB in `[0,1]` (unlike the
 //! VQGAN stack's `[-1,1]`), which is also brain's wire format, so there is no
 //! affine here - only the HWC-blob to CHW-model layout permutation. The graph is
@@ -51,8 +71,10 @@ pub fn upscale_spec() -> ActionSpec {
             ParamSpec::new(
                 "tile",
                 ParamType::Int,
-                "process in tiles of this many input pixels a side (0 = whole image); \
-                 peak VRAM is quadratic in the tile, so a large image needs this",
+                "process in windows of this many input pixels a side plus the network's \
+                 receptive radius on each side (0 = whole image); output is identical to \
+                 the whole-image pass, peak VRAM follows the window and work grows by \
+                 ((tile + 2R) / tile)^2, so it pays only for images larger than 2R + tile",
             )
             .min(0.0)
             .max(capability::bounds::SIZE_PX)
@@ -143,44 +165,6 @@ impl<T: Upscaler + 'static> Provider for UpscaleProvider<T> {
 
 // ===================== the built model =====================
 
-/// Halo, in INPUT pixels, added around every tile and cropped from its output.
-///
-/// **Tiling is an APPROXIMATION, and on the released net a visible one.**
-/// RRDBNet is fully convolutional with 3x3 convs, so a pixel depends on a
-/// neighbourhood whose radius grows with depth: roughly `1 + 15*num_block + 1`
-/// input pixels, which is ~347 at `x4plus`'s 23 blocks. A halo that made hard-
-/// cropped tiling exact would be larger than any tile worth cutting, so the
-/// halo trades seam against memory rather than removing the seam.
-///
-/// Measured (`the_tile_seam_shrinks_with_the_halo`,
-/// `the_tile_seam_on_the_released_net`), tile 12, max |delta| against a single
-/// tile covering the whole image at the same halo:
-///
-/// | halo | tiny, 2 blocks | x4plus, 23 blocks |
-/// |---|---|---|
-/// | 4  | 1.0e0   | - |
-/// | 8  | 2.0e-1  | - |
-/// | 16 | 9.2e-4  | **7.3e-1** |
-/// | 32 | 3.3e-6  | 1.6e-1 |
-/// | 48 | -       | 5.9e-2 |
-///
-/// The first draft of this constant was 16, justified on the 2-block toy where
-/// it sits comfortably below an 8-bit step. On the model anyone actually runs it is off by
-/// nearly three orders of magnitude. 32 is the current
-/// cost/quality point, and `tile` defaults to 0 so callers who can afford the
-/// memory never meet the trade-off at all.
-///
-/// **A blended tiler was tried and is WORSE - do not re-try it without new
-/// evidence.** Feathering the overlap instead of hard-cropping it measured
-/// 2.1e-2 on the tiny config where cropping measures 3.3e-6, and 2.0e-1 vs
-/// 1.6e-1 on x4plus. The reason is structural: blending mixes each tile's HALO
-/// pixels - the least accurate ones it computed, precisely because they had the
-/// least context - back into the output, while cropping discards them and keeps
-/// only the well-conditioned interior. Blending buys continuity of the error at
-/// the cost of its magnitude, and here the magnitude is what was wrong. The
-/// real fix is a bigger halo, i.e. memory.
-pub const TILE_HALO: u32 = 32;
-
 /// A built RRDBNet, rebuilt when the requested input size changes.
 ///
 /// The graph is recorded for one `(h, w)`, so serving arbitrary sizes means
@@ -217,98 +201,95 @@ impl Session {
     }
 }
 
-/// Replicate-pad `[3,h,w]` by `pad` on every side.
+/// One axis of a tiled sweep: the window cut from the input and the output core
+/// it owns.
+#[derive(Debug, PartialEq, Eq)]
+struct Span {
+    /// First input pixel of the window.
+    start: u32,
+    /// The part of the axis this window is responsible for, `[core_start, core_end)`.
+    core_start: u32,
+    core_end: u32,
+}
+
+/// Plan one axis: cores of `tile` pixels partition `[0, extent)`, and each core
+/// gets a window of `len = min(extent, tile + 2*radius)` pixels that lies
+/// inside `[0, extent)`.
 ///
-/// Replication, not zeros: a zero border is a hard black edge the net would
-/// happily sharpen into the output.
-fn pad_replicate(chw: &[f32], w: u32, h: u32, pad: u32) -> (Vec<f32>, u32, u32) {
-    let (pw, ph) = (w + 2 * pad, h + 2 * pad);
-    let mut out = vec![0.0f32; 3 * (pw * ph) as usize];
-    for c in 0..3usize {
-        for y in 0..ph as usize {
-            let sy = (y as i64 - pad as i64).clamp(0, h as i64 - 1) as usize;
-            for x in 0..pw as usize {
-                let sx = (x as i64 - pad as i64).clamp(0, w as i64 - 1) as usize;
-                out[(c * ph as usize + y) * pw as usize + x] = chw[(c * h as usize + sy) * w as usize + sx];
-            }
-        }
-    }
-    (out, pw, ph)
+/// The window starts `radius` before its core, shifted inward at the borders
+/// instead of padded past them. So either the core has `radius` pixels of
+/// context on a side, or that side of the window IS the image edge, where the
+/// network's convs zero-pad exactly as they do on the whole image. When the
+/// image is not longer than a window (`len == extent`) there is one window and
+/// the axis runs whole.
+fn plan_axis(extent: u32, tile: u32, radius: u32) -> (u32, Vec<Span>) {
+    let len = extent.min(tile.saturating_add(radius.saturating_mul(2)));
+    let spans = (0..extent)
+        .step_by(tile as usize)
+        .map(|core_start| Span {
+            start: core_start.saturating_sub(radius).min(extent - len),
+            core_start,
+            core_end: (core_start + tile).min(extent),
+        })
+        .collect();
+    (len, spans)
 }
 
 impl Session {
-    /// [`Upscaler::upscale`] with the halo as a parameter, so a test can measure
-    /// how the seam responds to it instead of trusting [`TILE_HALO`].
-    pub fn upscale_with_halo(
-        &self,
-        chw: &[f32],
-        w: u32,
-        h: u32,
-        tile: u32,
-        halo: u32,
-    ) -> Result<(Vec<f32>, u32, u32), String> {
-        let s = self.cfg.scale;
-        let (ow, oh) = (w * s, h * s);
-        if chw.len() != 3 * (w as usize) * (h as usize) {
-            return Err(format!("upscale: input is {} floats, expected {}", chw.len(), 3 * w * h));
-        }
-
-        if tile == 0 {
-            return Ok((self.run_exact(chw, w, h), ow, oh));
-        }
-
-        // One graph at (tile + 2*halo) square, swept over the image. Every tile
-        // is the SAME size - including the edge ones, which are replicate-padded
-        // - so the graph is built once.
-        let side = tile + 2 * halo;
-        let mut out = vec![0.0f32; 3 * (ow as usize) * (oh as usize)];
-        let (padded, pw, ph) = pad_replicate(chw, w, h, halo);
-        let mut ty = 0u32;
-        while ty < h {
-            let mut tx = 0u32;
-            while tx < w {
-                // Cut `side` pixels starting `halo` before the tile origin.
-                let mut cut = vec![0.0f32; 3 * (side * side) as usize];
-                for c in 0..3usize {
-                    for y in 0..side as usize {
-                        let sy = ((ty + y as u32) as usize).min(ph as usize - 1);
-                        for x in 0..side as usize {
-                            let sx = ((tx + x as u32) as usize).min(pw as usize - 1);
-                            cut[(c * side as usize + y) * side as usize + x] =
-                                padded[(c * ph as usize + sy) * pw as usize + sx];
-                        }
-                    }
-                }
-                let up = self.run_exact(&cut, side, side);
-                // Crop the scaled halo and write the interior.
-                let (hs, us) = ((halo * s) as usize, (side * s) as usize);
-                for c in 0..3usize {
-                    for y in 0..(tile * s) as usize {
-                        let dy = (ty * s) as usize + y;
-                        if dy >= oh as usize {
-                            break;
-                        }
-                        for x in 0..(tile * s) as usize {
-                            let dx = (tx * s) as usize + x;
-                            if dx >= ow as usize {
-                                break;
-                            }
-                            out[(c * oh as usize + dy) * ow as usize + dx] =
-                                up[(c * us + hs + y) * us + hs + x];
-                        }
-                    }
-                }
-                tx += tile;
+    /// Copy window `(wx, wy)` of size `(ww, wh)` out of a `[3,h,w]` image.
+    fn cut(chw: &[f32], w: u32, h: u32, (wx, wy): (u32, u32), (ww, wh): (u32, u32)) -> Vec<f32> {
+        let (w, h, wx, wy, ww, wh) = (w as usize, h as usize, wx as usize, wy as usize, ww as usize, wh as usize);
+        let mut cut = Vec::with_capacity(3 * ww * wh);
+        for c in 0..3 {
+            for y in 0..wh {
+                let row = (c * h + wy + y) * w + wx;
+                cut.extend_from_slice(&chw[row..row + ww]);
             }
-            ty += tile;
         }
-        Ok((out, ow, oh))
+        cut
+    }
+
+    /// Exact tiled upscale: see the module docs. One fixed-size graph is swept
+    /// over windows of `tile + 2R` pixels a side (`R` =
+    /// [`RrdbConfig::receptive_radius`]), and each window contributes only the
+    /// output core it owns.
+    fn upscale_tiled(&self, chw: &[f32], w: u32, h: u32, tile: u32) -> Vec<f32> {
+        let s = self.cfg.scale as usize;
+        let r = self.cfg.receptive_radius();
+        let (win_w, xs) = plan_axis(w, tile, r);
+        let (win_h, ys) = plan_axis(h, tile, r);
+        let (ow, oh) = (w as usize * s, h as usize * s);
+        let (uw, uh) = (win_w as usize * s, win_h as usize * s);
+        let mut out = vec![0.0f32; 3 * ow * oh];
+        for y in &ys {
+            for x in &xs {
+                let up = self.run_exact(&Self::cut(chw, w, h, (x.start, y.start), (win_w, win_h)), win_w, win_h);
+                for c in 0..3 {
+                    for oy in y.core_start as usize * s..y.core_end as usize * s {
+                        let src_y = oy - y.start as usize * s;
+                        let src = (c * uh + src_y) * uw + (x.core_start - x.start) as usize * s;
+                        let dst = (c * oh + oy) * ow + x.core_start as usize * s;
+                        let n = (x.core_end - x.core_start) as usize * s;
+                        out[dst..dst + n].copy_from_slice(&up[src..src + n]);
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
 impl Upscaler for Session {
     fn upscale(&self, chw: &[f32], w: u32, h: u32, tile: u32) -> Result<(Vec<f32>, u32, u32), String> {
-        self.upscale_with_halo(chw, w, h, tile, TILE_HALO)
+        let s = self.cfg.scale;
+        if chw.len() != 3 * (w as usize) * (h as usize) {
+            return Err(format!("upscale: input is {} floats, expected {}", chw.len(), 3 * w * h));
+        }
+        if w == 0 || h == 0 {
+            return Err(format!("upscale: empty image {w}x{h}"));
+        }
+        let out = if tile == 0 { self.run_exact(chw, w, h) } else { self.upscale_tiled(chw, w, h, tile) };
+        Ok((out, w * s, h * s))
     }
 }
 
@@ -396,5 +377,34 @@ mod tests {
         let inv = Invocation::new().blob("image", capability::blob::image_blob(&hwc, 2, 2, 3));
         let e = run_upscale(&Short, &inv).unwrap_err();
         assert!(e.contains("expected"), "{e}");
+    }
+
+    /// The plan is a partition of the axis into cores, every window has the
+    /// same length, lies inside the axis, and holds its core with `radius`
+    /// pixels of context on each side unless that side is the axis edge.
+    #[test]
+    fn an_axis_plan_partitions_with_full_context_or_the_image_edge() {
+        for (extent, tile, radius) in [(91u32, 8u32, 34u32), (85, 8, 34), (300, 64, 10), (50, 7, 3), (10, 4, 0)] {
+            let (len, spans) = plan_axis(extent, tile, radius);
+            assert_eq!(len, extent.min(tile + 2 * radius));
+            let mut next = 0;
+            for sp in &spans {
+                assert_eq!(sp.core_start, next, "cores must tile the axis without gaps or overlap");
+                next = sp.core_end;
+                assert!(sp.start + len <= extent, "window must lie inside the image: {sp:?}");
+                assert!(sp.core_start >= sp.start && sp.core_end <= sp.start + len, "core inside window: {sp:?}");
+                assert!(sp.core_start - sp.start >= radius || sp.start == 0, "left context: {sp:?}");
+                assert!(sp.start + len - sp.core_end >= radius || sp.start + len == extent, "right context: {sp:?}");
+            }
+            assert_eq!(next, extent);
+        }
+    }
+
+    /// An axis not longer than one window is a single whole-axis window.
+    #[test]
+    fn a_short_axis_runs_whole() {
+        let (len, spans) = plan_axis(40, 8, 34);
+        assert_eq!((len, spans.len(), spans[0].start), (40, 5, 0));
+        assert!(spans.iter().all(|s| s.start == 0), "every window is the whole axis");
     }
 }

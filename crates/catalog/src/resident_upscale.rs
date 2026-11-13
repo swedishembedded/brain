@@ -7,10 +7,12 @@
 //! `RealESRGAN_x4plus.pth` or any RRDBNet checkpoint - the shape is derived,
 //! so the anime and x2 variants work here too.
 //!
-//! **The instance key carries the input size**, because the graph is recorded
-//! for one `(h, w)`: two different image sizes are two different builds, and
-//! pretending otherwise would silently hand the second one a graph shaped for
-//! the first. `rrdbnet::caps::Session` also caches its most recent build
+//! **The instance key carries the build size**, because the graph is recorded
+//! for one `(h, w)`: the input size for a whole-image request (two different
+//! image sizes are two different builds, and pretending otherwise would
+//! silently hand the second one a graph shaped for the first), and the tile for
+//! a tiled request, whose one build is a `tile + 2R` window whatever the image
+//! size. `rrdbnet::caps::Session` also caches its most recent build
 //! internally, so a run of same-sized images does not rebuild even within one
 //! instance — the key exists so the SCHEDULER's memory accounting is right, not
 //! to force a rebuild.
@@ -25,6 +27,9 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 pub struct UpscaleResident {
     path: String,
+    /// The checkpoint's receptive radius, derived on first tiled request: a
+    /// tiled build is `tile + 2R` pixels a side and `R` depends on the net.
+    radius: std::sync::OnceLock<u32>,
 }
 
 impl UpscaleResident {
@@ -39,7 +44,7 @@ impl UpscaleResident {
     /// perf`'s `upscale:<weights>` target).
     pub fn new(path: impl Into<String>) -> Option<UpscaleResident> {
         let path = path.into();
-        std::path::Path::new(&path).exists().then_some(UpscaleResident { path })
+        std::path::Path::new(&path).exists().then_some(UpscaleResident { path, radius: std::sync::OnceLock::new() })
     }
 }
 
@@ -55,6 +60,18 @@ fn request_size(inv: &Invocation) -> (u32, u32) {
         .unwrap_or((0, 0))
 }
 
+impl UpscaleResident {
+    /// [`rrdbnet::RrdbConfig::receptive_radius`] of the served checkpoint; `0`
+    /// when it cannot be read (the load itself then fails with the real error).
+    fn radius(&self) -> u32 {
+        *self.radius.get_or_init(|| {
+            rrdbnet::import::read(&self.path)
+                .and_then(|(_, shapes, _)| rrdbnet::RrdbConfig::from_tensors(&shapes))
+                .map_or(0, |cfg| cfg.receptive_radius())
+        })
+    }
+}
+
 impl ResidentModel for UpscaleResident {
     fn manifest(&self) -> Manifest {
         rrdbnet::caps::manifest()
@@ -62,13 +79,12 @@ impl ResidentModel for UpscaleResident {
 
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
         let (w, h) = request_size(inv);
-        // A tiled request builds at the TILE size, not the image size, so every
-        // tiled call of the same tile shares one instance regardless of how big
-        // the pictures are.
+        // A tiled request builds at the window size (tile + 2R), not the image
+        // size, so every tiled call of the same tile shares one instance
+        // regardless of how big the pictures are.
         let tile = inv.get_i64("tile").unwrap_or(0).max(0) as u32;
         let key = if tile > 0 {
-            let side = tile + 2 * rrdbnet::caps::TILE_HALO;
-            format!("tile{side}")
+            format!("tile{tile}")
         } else {
             format!("{w}x{h}")
         };
@@ -82,7 +98,7 @@ impl ResidentModel for UpscaleResident {
         let file = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         let cfg = key.config.as_str();
         let px: u64 = match cfg.strip_prefix("tile") {
-            Some(side) => side.parse::<u64>().map(|s| s * s).unwrap_or(0),
+            Some(tile) => tile.parse::<u64>().map(|t| (t + 2 * u64::from(self.radius())).pow(2)).unwrap_or(0),
             None => cfg
                 .split_once('x')
                 .and_then(|(w, h)| Some(w.parse::<u64>().ok()? * h.parse::<u64>().ok()?))
