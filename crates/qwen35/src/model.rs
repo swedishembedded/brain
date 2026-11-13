@@ -8918,10 +8918,11 @@ mod tests {
 
     /// The same rounds over recurrent-state and conv-history pools stored as bf16 (`--gdn-state bf16`): the rows the
     /// second round reads were rounded to bf16 between the rounds, so its hidden states agree with the f32 pool's to
-    /// bf16 resolution (relative 2^-8 of the state, a few 1e-3 of the hidden state here), not bitwise.
+    /// bf16 resolution (relative 2^-8 of the state, about 2e-5 of the hidden state here), not bitwise. A state dropped between
+    /// the rounds moves the hidden state by 1e-2, so the tolerance still separates the two.
     #[test]
     fn a_multi_sequence_prefill_round_over_bf16_pools_agrees_to_bf16_resolution() {
-        multi_sequence_prefill_round_against_alone(true, 5e-2);
+        multi_sequence_prefill_round_against_alone(true, 1e-3);
     }
 
     fn multi_sequence_prefill_round_against_alone(bf16_pools: bool, tolerance: f32) {
@@ -8937,6 +8938,12 @@ mod tests {
                 init.insert(name, vec![0.05f32.ln(); numel]);
             } else if name.ends_with(".dt_bias") {
                 init.insert(name, vec![-1.0f32; numel]);
+            } else if name.ends_with("linear_attn.in_proj_qkv.weight") || name.ends_with("linear_attn.out_proj.weight") {
+                // At the fresh-weight scale the mixer's contribution to the residual stream sits below f32
+                // resolution of the hidden state, so a state dropped or rounded between rounds would not show.
+                for w in init.get_mut(&name).expect("param_list names are initialised") {
+                    *w *= 20.0;
+                }
             }
         }
         let a: Vec<u32> = (0..14).map(|i| (i * 5 + 3) % cfg.vocab).collect();
