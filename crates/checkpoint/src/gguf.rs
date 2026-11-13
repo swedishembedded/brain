@@ -3016,7 +3016,7 @@ mod tests {
     /// step ever produces, so `BRAIN_REQUIRE_FIXTURES=1` could not be satisfied
     /// on any machine - a fixture nobody can provide is a skip that never
     /// becomes a check. The mmproj is 427 MiB, is what several other suites
-    /// already resolve, and `brain fetch ggml-org/DeepSeek-OCR-GGUF` produces
+    /// already resolve, and `brain pull ggml-org/DeepSeek-OCR-GGUF` produces
     /// it, so the demand is one a box can actually meet.
     ///
     /// Deliberately NOT "whatever `.gguf` is lying around": `load_gguf`
@@ -3036,7 +3036,7 @@ mod tests {
         let Some(path) = std::env::var("BRAIN_GGUF_TESTFILE").ok().filter(|p| !p.is_empty()).or_else(from_store)
         else {
             return brain_testutil::skip(&format!(
-                "no real GGUF: set BRAIN_GGUF_TESTFILE, or `brain fetch {REPO}` so {MMPROJ} is in the store"
+                "no real GGUF: set BRAIN_GGUF_TESTFILE, or `brain pull {REPO}` so {MMPROJ} is in the store"
             ));
         };
         let m = load_gguf(&path).unwrap();

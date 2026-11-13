@@ -20,7 +20,7 @@
 //! `BRAIN_WAN_GGUF` is a fixture, so absent it skips via
 //! [`brain_testutil::skip`] and `BRAIN_REQUIRE_FIXTURES=1` turns that into a
 //! failure. It falls back to whatever `*.gguf` the model store already holds
-//! for `city96/Wan2.1-T2V-14B-gguf`, so a box that ran `brain fetch` needs
+//! for `city96/Wan2.1-T2V-14B-gguf`, so a box that ran `brain pull` needs
 //! nothing exported.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -30,7 +30,7 @@ use wan::config::WanConfig;
 use wan::import::{dit_config_from_shapes, dit_diffusers_to_native, dit_manifest, dit_native_to_diffusers, GGUF_ARCHITECTURE};
 
 /// The upstream repo the fallback scans, so a box that already ran
-/// `brain fetch` does not also need the variable exported.
+/// `brain pull` does not also need the variable exported.
 const REPO: &str = "city96/Wan2.1-T2V-14B-gguf";
 
 /// The first `*.gguf` in the model store's copy of [`REPO`], if there is one -

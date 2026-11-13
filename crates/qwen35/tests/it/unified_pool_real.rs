@@ -16,7 +16,7 @@
 //!   the geometry says (3 for the first f32 row, 5 for two, 9 for four: neighbouring rows share a granule), and an idle server
 //!   holds none.
 //!
-//! Self-skips when the checkpoint is not in the model store (`brain fetch Qwen/Qwen3.8-27B-FP8`) or the card has no sparse
+//! Self-skips when the checkpoint is not in the model store (`brain pull Qwen/Qwen3.8-27B-FP8`) or the card has no sparse
 //! buffers.
 
 use model::kv_tier::KvTier;
@@ -54,7 +54,7 @@ fn engine(r: &(Qwen35GgufResident, residency::Device)) -> Qwen35GgufEngine {
 fn checkpoint() -> Option<String> {
     let found = brain_testutil::model_dir(STORE).filter(|d| std::path::Path::new(d).join("config.json").exists());
     if found.is_none() {
-        brain_testutil::skip(&format!("{STORE} is not in the model store (brain fetch {STORE})"));
+        brain_testutil::skip(&format!("{STORE} is not in the model store (brain pull {STORE})"));
     }
     found
 }

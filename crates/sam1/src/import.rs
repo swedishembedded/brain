@@ -85,7 +85,7 @@ mod tests {
         };
         let path = std::path::Path::new(&dir).join("mmproj-DeepSeek-OCR-Q8_0.gguf");
         if !path.exists() {
-            brain_testutil::skip(&format!("{} not present (brain fetch {REPO})", path.display()));
+            brain_testutil::skip(&format!("{} not present (brain pull {REPO})", path.display()));
             return;
         }
         let mg = MmapGguf::open(path.to_str().expect("utf-8 path")).expect("open mmproj");

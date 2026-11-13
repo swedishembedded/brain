@@ -24,7 +24,7 @@ const THINK_EMPTY: &str = "<think>\n\n</think>\n\n";
 fn qwen3() -> Option<(QwenBpe, ChatTemplate)> {
     let dir = std::path::PathBuf::from(brain_testutil::model_dir("Qwen/Qwen3-0.6B")?);
     if !dir.join("tokenizer_config.json").exists() || !dir.join("tokenizer.json").exists() {
-        brain_testutil::skip("Qwen/Qwen3-0.6B tokenizer files are not in the model store (`brain fetch Qwen/Qwen3-0.6B`)");
+        brain_testutil::skip("Qwen/Qwen3-0.6B tokenizer files are not in the model store (`brain pull Qwen/Qwen3-0.6B`)");
         return None;
     }
     let tok = QwenBpe::from_file(dir.join("tokenizer.json").to_str().unwrap()).expect("load tokenizer");

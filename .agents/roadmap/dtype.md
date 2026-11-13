@@ -13,7 +13,7 @@ excepted it with an inline comment.
 
 Phased: A1 builds the gate and proves it fires (RED) on the current tree. A2
 (separate task) drives the violation count to zero - rephrasing each claim to
-point at `brain perf run`/`brain flops` instead of a fixed figure, or marking
+point at `brain perf run`/`brain perf flops` instead of a fixed figure, or marking
 a genuinely-illustrative number as a reviewed exception.
 
 ## A1 - perf-number gate
@@ -187,14 +187,14 @@ numbers found"). Full program from the approved plan, not just the gate:
 
 - **`docs/concepts/execution/performance.md`** (872 → 93 lines, 209 → 0 violations).
   Kept the number-free methodology sections (profiling/roofline probe,
-  runtime kernel selector, INT8 inference, `brain flops`). Deleted the
+  runtime kernel selector, INT8 inference, `brain perf flops`). Deleted the
   ~800-line DeepSeek-OCR case-study / "a real example" section entirely
   (verified first that `.agents/roadmap/deepseek2ocr.md`'s Phase 8 entries
   already carry the same content in full, including the retracted
   `llama.cpp` 1.8x comparison - git history is the only archive for the
   deleted prose, nothing was moved). Line ~55's citation to
   `docs/performance/flops.md` was dead (the file never existed, confirmed via
-  `ls docs/performance/`); repointed to `brain flops --help` rather than
+  `ls docs/performance/`); repointed to `brain perf flops --help` rather than
   writing a stub, since the CLI help is the thing that can't go stale. Added
   a closing "Where the numbers are" section pointing at `make perf`,
   `make perf/compare`, `results/*.json`, and the committed perf gates under

@@ -50,20 +50,19 @@ mod serve_daemon;
 mod supply;
 mod tree;
 const HELP: &str = "\
-brain - train and evaluate neural nets from scratch on the GPU (Rust + WGSL).
+brain - run, serve, train and evaluate models on the CPU, GPU and NPU.
 
-USAGE: brain <verb> <architecture> [options]   OR   brain <architecture> <verb> [options]
-Both orders are the SAME command - `brain train gpt2 ...` and `brain gpt2
-train ...` dispatch identically. `brain caps` lists every architecture brain
-knows about, along with its actions (its \"verbs\"). An architecture with its
-own dedicated flags (gpt2, qwen3, qwen35, glmdsa, lfm2,
-yolov8, zipdepth, flux2, wan, worldmirror2, splat, qwen3omnimoe,
-toypid, toymoe)
-is documented below; every other one (`brain caps` shows the full list -
-s3dit, fastvlm, qwen3vl, sam2, scrfd, arcface, vqgan, codeformer, rrdbnet,
-clip, deepseek2ocr, nemotronasr, qwen3asr, chronos2, fincast, kronos, ...) is
-reached the same way, its verb being the exact action name `brain caps <id>`
-prints (e.g. `brain scrfd detect --in image=photo.ppm`).
+USAGE: brain <model> <action> [options]      a model's own actions
+       brain <verb> [options]                generic tools (listed below)
+
+Every model brain serves is a set of typed actions: `brain caps` lists the
+models and their actions, `brain caps <model>` one model's manifest, and
+`brain <model> <action> --help` every parameter of one action with its default
+and bounds (e.g. `brain flux2 text2image --help`). The same actions are what
+`brain serve` offers over HTTP and D-Bus. Weights come from the model store;
+`--<role> PATH` names a checkpoint for one run (`brain caps <model>` lists the
+roles). Applications built on a model (interactive windows, NPU exports,
+multi-step workflows) are its Rust sample under samples/models/<model>.
 
 --device selects WHICH COMPUTE IS SCHEDULABLE. Omit it and brain uses every
 device on the machine - all GPUs, the CPU, and an NPU if present - scheduling
@@ -219,68 +218,11 @@ DECIDE (decision-model training on outcome-labelled examples)
       Validates the file (schema, leakage across splits) and prints its summary.
       `brain caps decide` lists the served `decide` action.
 
-GPT2 (brain/gpt2: the dense baseline; samples/models/gpt2)
-  brain gpt2 train --data <dir> --save F [--steps N --layers L --d-model D --mask =]
-                   [--job-plan FILE --job-rank N --job-secret FILE --profile-collectives FILE]
-  brain gpt2 eval --weights F --data <dir>
-  brain gpt2 generate --weights F --prompt \"...\" [--max-new N --temperature X --top-k K]
-      every parameter: brain gpt2 <action> --help
-
-FLUX.2 Klein (text-to-image + image editing; 4-step distilled flow matching)
-  brain flux2 text2image --prompt \"...\" --seed S --out image=out.png [--width W --height H]
-  brain flux2 edit --image in.png [--image0 ref.png]... [--mask m.png | --strength S] --prompt \"...\" --seed S --out image=out.png
-  brain flux2 lora_train --data <dir> --save adapter.brain --seed S
-      every parameter: brain flux2 <action> --help; --dit/--vae/--text-encoder/--tokenizer name a role
-      9B variants need BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)
-
-WAN 2.1 (text-to-video; 81 frames at 16 fps, 480p on the 1.3B variant)
-  brain --device gpu0 wan t2v --prompt \"...\" --out video=out.mp4 [--seed S --dit-dtype int8 --te-device gpu1]
-  brain wan lora_train --data <dir> --save adapter.brain --seed S [--report <dir>]
-      every parameter: brain wan <action> --help; --dit/--vae/--text-encoder/--tokenizer name a role
-
-DIAMOND world model (brain/diamond; the interactive window and the ONNX/NPU export are samples/models/diamond)
-  brain diamond import --source agent.pt --dest diamond.safetensors [--actions_count N]
-  brain diamond rollout [--model diamond|fake] --action_seq 1,2,0 --seed S --out clip=rollout.mp4 [--record DIR --dump_ppm DIR --hashes]
-  brain diamond replay --episode DIR [--verify --model diamond|fake --seed S --tolerance T --context N]
-  brain diamond bench [--model diamond|fake] [--frames N --profile]       # ms/frame + fps
-  brain diamond finetune --data <episode-dir> --save tuned.safetensors --seed S [--steps N --lr X --wd X --clip X]
-      every parameter: brain diamond <action> --help; --weights names the checkpoint
-
-WorldMirror-2 (brain/worldmirror2: multi-view images to a 3D Gaussian Splatting scene; samples/models/worldmirror2)
-  brain worldmirror2 import --source <model.safetensors|hf_dir> --dest mirror.safetensors
-  brain worldmirror2 reconstruct --images <dir|clip.mp4> --out scene=scene.ply --out cameras=cameras.json
-      every parameter: brain worldmirror2 <action> --help
-
-3D GAUSSIAN SPLATTING (brain/splat; the fly-through window is samples/models/splat)
-  brain splat render --scene s.ply --out image=view.png [--width W --height H --eye x,y,z --target x,y,z]
-  brain splat fit --scene s.ply --cameras cams.json --images <dir> --out scene=fitted.ply
-  brain splat train --images <dir> --out scene=s.ply --out cameras=cams.json
-      also info, orient, merge, prune, sfm; every parameter: brain splat <action> --help
-
-YOLOv8 (brain/yolov8: detection, training, evaluation; NPU export and run in samples/models/yolov8)
-  brain yolov8 detect --image photo.png --json [--conf X --iou X]
-  brain yolov8 train --data <dir> --save yolo.safetensors --seed S
-  brain yolov8 finetune --data <dir> --save ft.safetensors [--nc C --freeze-backbone ...]
-  brain yolov8 eval --data <dir> [--split val]          # mAP@0.5, mAP@0.5:0.95, per-class AP, P/R
-      every parameter: brain yolov8 <action> --help
-
 INTEL NPU (OpenVINO)
   brain npu check    --onnx M [--ov-device NPU]              # ONNX op histogram + compile/coverage
   brain npu bench    --onnx M [--input S --ov-device NPU --iters N --hint latency|throughput]
       --ov-device selects the OpenVINO target device (NPU|CPU|GPU|AUTO), unrelated to
       brain's own --device; check without OpenVINO decodes the graph only.
-
-TOY ARCHITECTURES (brain's own, no upstream reference; samples/models/toymoe, toypid)
-  brain toymoe train --save F [--steps N --batch B --block T --lr X]
-  brain toymoe generate --weights F [--prompt 1,2,3,4 --max-new N --temperature X --top-k K]
-  brain toymoe eval --weights F [--samples N]
-  brain toypid <train|rollout|profile> ...   # the WebGPU browser demo's model
-
-FEDERATED MoE (train experts separately, then assemble: actions of samples/models/toymoe)
-  sample-models-toymoe split --weights base.safetensors --dest shards/
-  sample-models-toymoe train_expert --weights base.safetensors --expert 0 --dest exp0/ [--steps N]
-  sample-models-toymoe assemble --base shards/ --overlays exp0/,exp1/ --dest final.safetensors
-  sample-models-toymoe <merge|verify> ...
 
 BENCHMARK SUITE (architecture evaluation)
   brain bench [<name>] [--seed S]          # run all benchmarks, or one by name
@@ -352,7 +294,7 @@ PERFORMANCE BENCHMARKING (how fast, at what cost)
       goodput (output meeting the SLO) is the comparison metric, not peak rate.
 
 FLOP/OPS ACCOUNTING
-  brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T]
+  brain perf flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T]
               [--train] [--i8] [--stages N] [--run]
       OFFLINE per-kernel FLOP/int-OPS/bytes for the recorded forward (and
       backward with --train) - no execution. --run also executes one pass and
@@ -362,90 +304,10 @@ FLOP/OPS ACCOUNTING
       pricing cache `brain models list`/`brain models profile` read - see
       MODELS below.
 
-QWEN3 (dense decoder; paged continuous-batching serving through `brain serve`)
-  brain qwen3 generate --prompt \"...\" [--weights F --tokenizer T --chat --max-new N --temp X --top-k K --seed $RANDOM]
-  brain qwen3 train --data <dir> --save F [--steps N --layers N --d-model N --heads N --seed $RANDOM]
-  brain qwen3 finetune --data <dir> --save F [--weights BASE --steps N --lr X --train-precision SPEC]
-  brain qwen3 lora_train --dataset train.jsonl [--validation val.jsonl --rank N --adapter-name OWNER/NAME[:TAG]
-                    --steps N --lr X --patience N --base-format f32|bf16|int8|nf4|fp8 --job-plan F --job-rank N --job-secret F]
-  brain qwen3 eval --samples val.jsonl [--adapter-name OWNER/NAME[:TAG] --block T --kv fp32,int8,int8-calib]
-  brain qwen3 calib --samples prompts.jsonl --out report=R.json --out clip=kv_calib.json
-  brain qwen3 toolcall_gen --out <dir> | toolcall_eval [--n N --tools K --seq S]
-  brain qwen3 import --source <hf_dir> --dest F | export --out <dir|f.gguf> [--format hf|gguf] | export_peft --adapter A --out <dir>
-  brain qwen3 lora_gate --adapter A --probes P.jsonl [--anchor ANCHOR.jsonl]
-      # the ONNX export and the OpenVINO decode are actions of samples/models/qwen3
-
-GLM-5.2 (MLA + sigmoid noaux_tc MoE)
-  brain glmdsa train --data <dir> [--save F --size tiny|small|base --steps N --seed $RANDOM]
-  brain glmdsa finetune --data <dir> --save F [--weights BASE --steps N --lr X]
-  brain glmdsa eval --data <dir> [--weights F --batches N]
-  brain glmdsa generate --prompt \"...\" [--weights F --max-new N --temp X --top-k K]
-  brain glmdsa import --source <hf_dir> --dest glm.safetensors
-      # the OpenVINO export and NPU decode are actions of samples/models/glmdsa
-
-QWEN3.8-27B (brain/qwen35: dense hybrid Gated-DeltaNet/GQA decoder; paged serving through `brain serve`)
-  brain import-gguf Qwen3.8-27B-Q8_0.gguf             # a brain checkpoint the store finds, MTP head included
-  brain qwen35 generate --prompt \"...\" [--adapter A --chat true --precision int8 --seed $RANDOM]
-  brain qwen35 finetune --data <dir> --save F [--mode lora --rank N --base-format f32|bf16|nf4|fp8 --activations keep|recompute
-                    --adapter-name NAME --train-precision SPEC --steps N --lr X --seed $RANDOM]
-  brain qwen35 sample_adapter --adapter A --prompt \"...\" [--mode adapter|base|compare --base-format nf4|bf16|fp8|f32]
-  brain qwen35 import --source <hf_dir|f.gguf> --dest F [--weight-format nf4]
-      every parameter: brain qwen35 <action> --help; --weights/--tokenizer name a role
-
-QWEN3.5-35B-A3B (brain/qwen35moe: hybrid Gated-DeltaNet/GQA sparse-MoE decoder)
-  brain import-gguf Qwen3.5-35B-A3B-Q8_0.gguf             # a brain checkpoint the store finds
-  brain qwen35moe generate --prompt \"...\" --out text=out.txt [--chat true --precision int8 --seed $RANDOM]
-      every parameter: brain qwen35moe generate --help; --weights/--tokenizer name a role
-      # the ONNX export is an action of samples/models/qwen35moe
-
-QWEN3-OMNI (brain/qwen3omnimoe: text/audio/image/video in, text + speech out)
-  brain qwen3omnimoe generate --prompt \"...\" --out text=out.txt     # the store's published checkpoint
-  brain qwen3omnimoe speak --prompt \"...\" --out audio=reply.wav
-  brain qwen3omnimoe import --source <hf_dir> --dest Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors [--id VENDOR/REPO]
-      # brain serve serves the published directory and, GPU-sharded, the int8 Thinker over
-      # the checkpoint import wrote; every parameter: brain qwen3omnimoe <action> --help
-      # the NPU graph export: samples/models/qwen3omnimoe (npu-export)
-
-LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
-  brain lfm2 fill_mask --text \"… <|mask|> …\" [--topk K]
-  brain lfm2 embed --text \"…\" --out embeddings=emb.f32
-  brain lfm2 tokenize --corpus corpus.txt --dest data/lfm
-  brain lfm2 finetune --data data/lfm --save ft.safetensors [--steps N --batch B --seq T]
-  brain lfm2 eval --data data/lfm                       # pseudo-ppl + masked-acc
-  brain lfm2 import --source <hf_dir> --dest lfm.safetensors
-      every parameter: brain lfm2 <action> --help; --weights/--tokenizer name a role
-      # the NPU export and benchmark: samples/models/lfm2 (npu-export, npu-bench)
-  make perf/model/lfm                      # standalone concurrency benchmark (scheduler+residency)
-
-QWEN3-TTS (brain/qwen3tts: Talker + MTP + neural codec; NPU actions are samples/models/qwen3tts)
-  brain qwen3tts synth --text \"Hello.\" --out audio=hello.wav
-  brain qwen3tts clone --ref ref.wav --ref-text \"...\" --text \"...\" --out audio=me.wav
-  brain qwen3tts design --instruct \"a calm low voice\" --text \"...\" --out audio=d.wav
-  brain qwen3tts finetune --data data/tts --save talker.safetensors [--steps N --full true]
-  brain qwen3tts <batch|sim|import> ...
-      every parameter: brain qwen3tts <action> --help
-
-MONOCULAR DEPTH (brain/zipdepth; image and camera windows are samples/models/zipdepth)
-  brain zipdepth infer --image photo.png --out depth=depth.png [--view side --out view=side.png]
-  brain zipdepth train --save zipdepth.safetensors [--steps N --fresh true]
-  brain zipdepth calib --images <dir>
-      every parameter: brain zipdepth <action> --help
-
-TIME-SERIES FORECASTING (brain/chronos2, brain/fincast, brain/kronos, brain/timesfm3; NPU exports,
-the scenario battery and the JSONL server are samples/models/<model>)
-  brain kronos forecast --in context=bars.f32 --horizon 48 --out forecast=out.f32
-  brain kronos predict --in csv=ohlcv.csv --horizon 48 --samples 30 --origins 5 --seed $RANDOM [--chart true --out chart=chart.png]
-  brain kronos finetune --data <csv-dir> --save kronos-ft.safetensors [--holdout-data <csv-dir>] --seed $RANDOM
-  brain chronos2 forecast|predict|import      brain fincast forecast|predict|import
-  brain timesfm3 forecast|predict|finetune|import
-      the checkpoint is resolved from the model store; name one with --weights (kronos: --tokenizer, --decoder)
-      every parameter: brain <model> <action> --help
-
-CAPABILITIES (typed actions; one dispatch path for the CLI, D-Bus and HTTP)
-  brain caps                               # every architecture's action manifest
-  brain <architecture> <action> [--param v ...] [--in name=path ...] [--out name=path ...]
-      Any architecture without its own dedicated flags above (`brain caps`
-      lists them all) dispatches this way - the action name IS the verb.
+MODEL ACTIONS (one dispatch path for the CLI, D-Bus and HTTP)
+  brain caps [<model>]                     # every model's action manifest, or one
+  brain <model> <action> [--param v ...] [--<role> PATH ...] [--in name=path ...] [--out name=path ...]
+  brain <model> <action> --help            # every parameter, default and bound
       Example: brain scrfd detect --in image=photo.ppm --json
 
 PULL MODEL WEIGHTS (fetch a model's official weights into the store)
@@ -458,9 +320,11 @@ PULL MODEL WEIGHTS (fetch a model's official weights into the store)
       Progress goes to STDOUT: an in-place bar with throughput and ETA on a
       terminal, ten plain lines for the whole pull when piped. Re-running is
       cheap - files already in the store are skipped, so an interrupted pull
-      resumes by repeating the command. `brain fetch` is an accepted alias.
+      resumes by repeating the command. `brain pull` is an accepted alias.
 
 MODELS (the store's own view of itself: what's local, what isn't, what it costs)
+  brain models inspect PATH.gguf [--json]   # a .gguf FILE's metadata and tensors,
+                                            # before it is pulled or imported
   brain models list [--arch ID] [--local] [--plain|--tui] [--json] [--reprofile]
       Architecture -> provider repo -> quantization. A terminal gets an
       interactive tree (arrow/j/k/pgup/pgdn move, enter/space expand-collapse
@@ -478,14 +342,14 @@ MODELS (the store's own view of itself: what's local, what isn't, what it costs)
       tensors merged in and marked with a leading '+'.
   brain models profile <model> [--measure [--reps N]]
       Price ONE already-pulled model now and cache the result. Errors, never
-      fetches, if it is not pulled. `brain flops --weights <path>` writes into
+      fetches, if it is not pulled. `brain perf flops --weights <path>` writes into
       the same cache - see FLOP/OPS ACCOUNTING above. --measure instead
       builds the model for real and TIMES it (load time, cold pass, best of
       --reps (default 5) hot passes, achieved FLOP/s, per-layer FLOPs) -
       real execution, never cached.
 
 ROOFLINE (measured, cross-accelerator hardware compute capacity)
-  brain roofline [gpu|npu|cpu] [--reprofile] [--json]
+  brain perf roofline [gpu|npu|cpu] [--reprofile] [--json]
       What can this box actually DO - raw, model-independent GFLOP/s, GOP/s
       and GB/s for every GPU (not just the ambient one), the NPU, and the
       CPU, each dtype it supports. Streamed as each accelerator's
@@ -495,16 +359,10 @@ ROOFLINE (measured, cross-accelerator hardware compute capacity)
       to just that section. --reprofile forces a fresh measurement instead
       of GPU's own cache-first path (NPU's probe has no cache to bypass, so
       it is always fresh already; CPU always measures fresh, it is fast).
-      Distinct from `brain flops` (one model's cost, see FLOP/OPS ACCOUNTING
+      Distinct from `brain perf flops` (one model's cost, see FLOP/OPS ACCOUNTING
       above) and `brain perf` (empirical serving load, see PERFORMANCE
       BENCHMARKING above). Plain rows are self-contained
-      (`brain roofline | grep gpu0`); --json emits the same rows as an array.
-
-GGUF INSPECT (look at a downloaded .gguf FILE before importing/pulling it)
-  brain gguf inspect PATH [--json]
-      PATH is a real filesystem path, opened directly - never a model-store
-      reference. Prints the KV metadata plus a name/dtype/shape/size tensor
-      tree; --json emits the same information as data instead.
+      (`brain perf roofline | grep gpu0`); --json emits the same rows as an array.
 
 GGUF IMPORT (one-time conversion; dispatches on general.architecture)
   brain import FILE [--out PATH] [--id VENDOR/REPO]
@@ -548,10 +406,9 @@ OTHER
 EXAMPLES
   brain data gen calculator --out data/calculator --n 100000
   brain gpt2 train --data data/calculator --save out/gpt2.safetensors --steps 2000 --mask =
-  brain gpt2 eval --weights out/gpt2.safetensors --data data/calculator
   brain gpt2 generate --weights out/gpt2.safetensors --prompt \"12+7=\" --max-new 8
-  brain toymoe train --steps 2000 --save moe.safetensors
-  brain toymoe generate --weights moe.safetensors --prompt 1,2,3,4 --max-new 64
+  brain pull Qwen/Qwen3-0.6B && brain qwen3 generate --prompt \"hello\"
+  brain serve --openai
 
 Or drive everything via the Makefile:  make gpt/calculator/data gpt/calculator/train gpt/calculator/eval
 ";
@@ -1695,20 +1552,14 @@ fn main() {
         Some("devices") => devices_cli::run_devices(&argv[2..]),
         Some("doctor") => std::process::exit(doctor_cli::run_doctor(&argv[2..])),
         Some("npu") => npu_cli::run_npu(&argv[2..]),
-        Some("flops") => flops_cli::run_flops(&argv[2..]),
         Some("bench") => run_bench(&argv[2..]),
         Some("perf") => perf_cli::run_perf(&argv[2..]),
         Some("label") => label_cli::run_label(&argv[2..]),
         Some("decide") if decide_cli::handles(argv.get(2).map(String::as_str)) => std::process::exit(decide_cli::run_decide(&argv[2..])),
         Some("caps") => std::process::exit(caps_cli::run_caps(&argv[2..])),
-        // `fetch` is an accepted alias, not a second verb: it is the spelling
-        // several of this workspace's test-fixture instructions already tell a
-        // reader to run, and honouring it costs one arm.
-        Some("pull") | Some("fetch") => std::process::exit(pull_cli::run_pull(&argv[2..])),
+        Some("pull") => std::process::exit(pull_cli::run_pull(&argv[2..])),
         Some("models") => std::process::exit(models_cli::run_models(&argv[2..])),
         Some("plan") => std::process::exit(plan_cli::run_plan(&argv[2..])),
-        Some("gguf") => std::process::exit(gguf_cli::run_gguf(&argv[2..])),
-        Some("roofline") => std::process::exit(roofline_cli::run_roofline(&argv[2..])),
         Some("serve") => run_cli::run_serve(&argv[2..]),
         Some("help") | Some("-h") | Some("--help") | None => print!("{HELP}"),
         Some(_) => resolve::dispatch(&argv[1..], HELP),
@@ -1968,7 +1819,6 @@ mod tests {
     fn the_pull_verb_is_documented_with_both_argument_spellings() {
         assert!(HELP.contains("brain pull <model>"), "`brain pull` missing from `brain help`");
         assert!(HELP.contains("https://huggingface.co/"), "`brain help` does not show that a URL is accepted");
-        assert!(HELP.contains("brain fetch"), "the accepted `fetch` alias is undocumented");
     }
 
     /// `-v` is repeatable and additive; the flag itself is stripped from the

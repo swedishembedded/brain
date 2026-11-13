@@ -315,7 +315,7 @@ if [ "$fail" -ne 0 ]; then
   echo "without a reviewed exception. Fix each by either:"
   echo "  1. Rephrasing to drop the specific bare number - keep the claim and"
   echo "     its reasoning, and point at what reproduces it ('brain perf run',"
-  echo "     'brain flops', the crate's own bench binary) instead of a fixed"
+  echo "     'brain perf flops', the crate's own bench binary) instead of a fixed"
   echo "     figure, or"
   echo "  2. Marking it a deliberate, reviewed exception with"
   echo "     'perf-number: <reason>' on the same line or the line immediately"

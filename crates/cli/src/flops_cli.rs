@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain flops` — FLOP/OPS accounting for a model, OFFLINE (calculated from
+//! `brain perf flops` - FLOP/OPS accounting for a model, OFFLINE (calculated from
 //! the recorded dispatch lists, nothing executes) and optionally ONLINE
 //! (accumulated at `Gpu::submit` while one forward/backward actually runs).
 //!
-//!   brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T]
+//!   brain perf flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T]
 //!               [--train] [--i8] [--stages N] [--run]
-//!   brain flops --model flux2 [--variant V] [--width W] [--height H]
+//!   brain perf flops --model flux2 [--variant V] [--width W] [--height H]
 //!               [--steps N] [--refs "HxW,..."] [--batch B] [--i8] [--run]
-//!   brain flops --model ltxv  [--variant V] [--width W] [--height H]
+//!   brain perf flops --model ltxv  [--variant V] [--width W] [--height H]
 //!               [--frames F] [--fps R] [--steps N] [--run]
 //!
 //! Without `--weights` the model's tiny test config is built (synthetic init).
@@ -39,11 +39,11 @@ use crate::args::Args;
 /// The one spelling of this command's grammar - printed on `--help` (to
 /// stdout, exit 0) and on a bad invocation (to stderr, exit 2). One string,
 /// so the two can never drift apart.
-const USAGE: &str = "usage: brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T] \
+const USAGE: &str = "usage: brain perf flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T] \
                      [--train] [--i8] [--stages N] [--run]\n\
-       brain flops --model flux2 [--variant klein-4b|klein-9b|base-4b|base-9b|tiny] \
+       brain perf flops --model flux2 [--variant klein-4b|klein-9b|base-4b|base-9b|tiny] \
                      [--width W] [--height H] [--steps N] [--refs HxW,...] [--batch B] [--i8] [--run] [--vae DIR] [--per-kernel]\n\
-       brain flops --model ltxv [--variant ltx25-22b|tiny] [--width W] [--height H] \
+       brain perf flops --model ltxv [--variant ltx25-22b|tiny] [--width W] [--height H] \
                      [--frames F] [--fps R] [--steps N] [--run] [--per-kernel]";
 
 pub fn run_flops(argv: &[String]) {
@@ -138,10 +138,10 @@ fn synthetic_tokens(n: usize, vocab: u32) -> Vec<u32> {
     (0..n).map(|i| i as u32 % vocab.max(1)).collect()
 }
 
-/// `brain flops` is the first version of the pricing engine `modelcost` now
+/// `brain perf flops` is the first version of the pricing engine `modelcost` now
 /// owns (see that crate's module doc); this is the one place a REAL priced
 /// model feeds back into the cache `brain models list`/`brain models profile`
-/// read, so running `brain flops` on a checkpoint is not throwaway work.
+/// read, so running `brain perf flops` on a checkpoint is not throwaway work.
 ///
 /// Deliberately narrow: only `--weights` naming a checkpoint whose own card
 /// carries `vendor`/`repo` (a servable, discoverable model - a bare `tiny()`
@@ -171,7 +171,7 @@ fn qwen_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, i8
         Some(path) => {
             let c = checkpoint::load(path);
             let cfg = QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| {
-                eprintln!("brain flops --model qwen --weights {path}: {e}");
+                eprintln!("brain perf flops --model qwen --weights {path}: {e}");
                 std::process::exit(2);
             });
             (cfg, c.by_role(""))
@@ -226,7 +226,7 @@ fn gpt_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, sta
     use gpt2::{init_weights, Gpt, GptConfig};
     let (cfg, init) = match weights {
         Some(_path) => {
-            eprintln!("brain flops --model gpt --weights: use the tiny config (checkpoint costing not wired)");
+            eprintln!("brain perf flops --model gpt --weights: use the tiny config (checkpoint costing not wired)");
             std::process::exit(2);
         }
         None => {
@@ -617,7 +617,7 @@ fn flux2_flops(
     let cfg = match variant {
         "tiny" => flux2_tiny(),
         v => flux2::Flux2Config::from_name(v).unwrap_or_else(|e| {
-            eprintln!("brain flops --model flux2: {e}");
+            eprintln!("brain perf flops --model flux2: {e}");
             std::process::exit(2);
         }),
     };
@@ -880,7 +880,7 @@ fn ltxv_flops(
         "ltx25-22b" | "ltx25_22b" => LtxDitConfig::ltx25_22b(),
         "tiny" => LtxDitConfig::tiny(),
         v => {
-            eprintln!("brain flops --model ltxv: unknown --variant {v} (ltx25-22b|tiny)");
+            eprintln!("brain perf flops --model ltxv: unknown --variant {v} (ltx25-22b|tiny)");
             std::process::exit(2);
         }
     };
@@ -1099,7 +1099,7 @@ fn flux2_vae_stage(lh: usize, lw: usize, real: Option<&str>) -> Stage {
         };
         let mut map = vae::blocks::Tensors::new();
         for t in checkpoint::safetensors::read(file.to_str().expect("vae path")).unwrap_or_else(|e| {
-            eprintln!("brain flops --vae {path}: {e}");
+            eprintln!("brain perf flops --vae {path}: {e}");
             std::process::exit(2);
         }) {
             map.insert(t.name, (t.shape, t.data));

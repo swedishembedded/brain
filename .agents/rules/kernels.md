@@ -2,7 +2,7 @@
 
 Every rule here was paid for with a real defect in this engine. This page is
 the pre-flight; `docs/concepts/execution/performance.md` is number-free methodology
-only (profiling, the runtime selector, INT8, `brain flops`) - the "why"
+only (profiling, the runtime selector, INT8, `brain perf flops`) - the "why"
 behind a specific case study, with real measured numbers, lives in that
 model's own `.agents/roadmap/<model>.md`.
 

@@ -18,7 +18,7 @@
 //! `BRAIN_S3DIT_GGUF` is a fixture, so absent it skips via
 //! [`brain_testutil::skip`] and `BRAIN_REQUIRE_FIXTURES=1` turns that into a
 //! failure. It falls back to whatever `*.gguf` the model store already holds
-//! for `unsloth/Z-Image-Turbo-GGUF`, so a box that ran `brain fetch` needs
+//! for `unsloth/Z-Image-Turbo-GGUF`, so a box that ran `brain pull` needs
 //! nothing exported.
 
 use std::collections::{BTreeMap, HashMap, HashSet};

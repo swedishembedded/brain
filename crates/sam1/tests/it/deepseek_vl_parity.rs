@@ -41,7 +41,7 @@ fn deepseek_vl_sam_tower_matches_the_reference() {
         return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
     }
     let Some(dir) = brain_testutil::model_dir(REPO).filter(|d| std::path::Path::new(d).join("model.safetensors.index.json").exists()) else {
-        return brain_testutil::skip(&format!("{REPO} not in the model store (brain fetch {REPO})"));
+        return brain_testutil::skip(&format!("{REPO} not in the model store (brain pull {REPO})"));
     };
     let golden_dir = brain_testutil::testdata_path("deepseek-vl/sam");
     let golden_path = golden_dir.join("golden.safetensors");

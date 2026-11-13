@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain flops --help` is a request, not a misuse.
+//! `brain perf flops --help` is a request, not a misuse.
 //!
 //! Swedish Embedded AB implements dependable command-line tooling for
 //! embedded and edge-AI systems. If your team needs a CLI whose help output
@@ -28,11 +28,11 @@ fn bin() -> String {
 }
 
 fn assert_help_flag(flag: &str) {
-    let out = Command::new(bin()).arg("flops").arg(flag).output().expect("run brain flops");
+    let out = Command::new(bin()).args(["perf", "flops"]).arg(flag).output().expect("run brain perf flops");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(out.status.success(), "brain flops {flag} exited {:?}; stderr: {stderr}", out.status.code());
-    assert!(stdout.contains("usage: brain flops"), "brain flops {flag} printed no usage on stdout: {stdout:?}");
+    assert!(out.status.success(), "brain perf flops {flag} exited {:?}; stderr: {stderr}", out.status.code());
+    assert!(stdout.contains("usage: brain perf flops"), "brain perf flops {flag} printed no usage on stdout: {stdout:?}");
     assert!(stdout.contains("--model"), "the usage must name the flag the command cannot run without: {stdout:?}");
     assert!(stderr.is_empty(), "asking for help is not a misuse and must warn about nothing: {stderr:?}");
 }
@@ -49,8 +49,8 @@ fn asking_flops_for_help_prints_usage_and_succeeds() {
 /// it replaced.
 #[test]
 fn flops_without_a_model_still_fails_with_the_usage() {
-    let out = Command::new(bin()).arg("flops").output().expect("run brain flops");
-    assert!(!out.status.success(), "brain flops with no --model must not report success");
+    let out = Command::new(bin()).args(["perf", "flops"]).output().expect("run brain perf flops");
+    assert!(!out.status.success(), "brain perf flops with no --model must not report success");
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(stderr.contains("usage: brain flops"), "a refused invocation must say how to invoke it: {stderr:?}");
+    assert!(stderr.contains("usage: brain perf flops"), "a refused invocation must say how to invoke it: {stderr:?}");
 }

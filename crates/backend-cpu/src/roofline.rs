@@ -16,7 +16,7 @@
 //! CPU roofline directly, lifting the exact GFLOP/s methodology already
 //! proven in `fast_conv::tests::bench_conv_gflops` (min-of-N wall time over a
 //! representative NCHW conv2d mix, contention-robust) into a small, real,
-//! non-`#[ignore]`d API - fast enough to be one rung of `brain roofline`'s
+//! non-`#[ignore]`d API - fast enough to be one rung of `brain perf roofline`'s
 //! "first result within 10 seconds" multi-accelerator report.
 //!
 //! Swedish Embedded AB implements fast, honest hardware-capacity reporting
@@ -31,7 +31,7 @@ use std::time::Instant;
 /// Measured CPU compute roofline. Mirrors the vocabulary of
 /// `gpu_core::roof::Roofs` and the NPU roofline module at CPU-appropriate
 /// fidelity: one real fp32 GFLOP/s number, cheap enough to probe on every
-/// `brain roofline` run.
+/// `brain perf roofline` run.
 #[derive(Clone, Copy, Debug)]
 pub struct CpuRoofline {
     /// Peak fp32 arithmetic rate observed over a representative conv2d mix,

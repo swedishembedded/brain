@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain roofline` - one comprehensive, cross-accelerator hardware
+//! `brain perf roofline` - one comprehensive, cross-accelerator hardware
 //! compute-capacity report: what can this machine's GPU(s), NPU and CPU
 //! actually do, measured, never a datasheet guess.
 //!
 //! This is the raw-capacity answer, distinct from every other command that
-//! sounds similar: `brain flops` prices ONE model's forward/backward pass;
+//! sounds similar: `brain perf flops` prices ONE model's forward/backward pass;
 //! `brain perf` measures empirical serving latency/throughput; `brain bench`
 //! asks whether an architecture learns at all, no hardware axis; `brain
 //! devices` just enumerates GPUs, with no timing. `roofline` is what all of
@@ -36,7 +36,7 @@ use serde_json::Value;
 use crate::args::Args;
 
 const USAGE: &str = "\
-usage: brain roofline [gpu|npu|cpu] [--reprofile] [--kernels] [--json]
+usage: brain perf roofline [gpu|npu|cpu] [--reprofile] [--kernels] [--json]
 
   Prints every accelerator's MEASURED raw hardware compute capacity - what
   this machine can do, model-independent. Streamed as each accelerator's
@@ -76,7 +76,7 @@ pub fn run_roofline(args: &[String]) -> i32 {
     let scope = a.positional();
     if let Some(s) = &scope {
         if !matches!(s.as_str(), "gpu" | "npu" | "cpu") {
-            eprintln!("brain roofline: unknown scope {s:?}\n{USAGE}");
+            eprintln!("brain perf roofline: unknown scope {s:?}\n{USAGE}");
             return 2;
         }
     }

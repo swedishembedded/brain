@@ -9,7 +9,7 @@
 //! hardware you do not own yet, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 //!
-//! `brain flops --model flux2|ltxv` prices a whole generation offline. A
+//! `brain perf flops --model flux2|ltxv` prices a whole generation offline. A
 //! kernel with no formula is reported as UNCOVERED and left out of the totals,
 //! which is honest but useless: the point of the number is that it is
 //! complete. Each crate's `KERNELS` const is the exhaustive set of pipelines a
@@ -44,7 +44,7 @@ fn wan_kernels_are_all_costed() {
     assert_all_covered("wan::block::KERNELS", &wan::block::KERNELS);
 }
 
-// The decoder LMs (`brain flops --model qwen|gpt|lfm`, and `crates/modelcost`'s
+// The decoder LMs (`brain perf flops --model qwen|gpt|lfm`, and `crates/modelcost`'s
 // exact-tier pricers behind `brain models list`/`profile`) already gate this
 // at the crate level (`pipelines_fully_costed`, one test per crate) - these
 // three are the CLI-integration-level mirror of that, closing the one gap

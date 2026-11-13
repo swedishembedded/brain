@@ -9,7 +9,7 @@
 #   * Idempotent - only ever fetches files that are NOT already present.
 #   * Offline-first - reads a local mirror directory (fast, no network). Most
 #     groups have no URL fallback at all: a missing mirror is reported and
-#     skipped (see the `missing` counter at the end of a run). `brain fetch`
+#     skipped (see the `missing` counter at the end of a run). `brain pull`
 #     (`crates/cli/src/fetch.rs`) is the network-download path for actual model
 #     weights - this script is test-fixture plumbing, not a general fetcher.
 #
@@ -31,7 +31,7 @@
 #     source/notebooks/docs a test doesn't read (see each tree's extra-exclude),
 #     and, with two named exceptions below, never a model checkpoint - those go
 #     to the model store, addressed by fully-qualified `<vendor>/<repo>` name,
-#     the same place `brain fetch` writes and `brain_testutil::model_dir`
+#     the same place `brain pull` writes and `brain_testutil::model_dir`
 #     resolves - this separation is what an earlier testdata-layout audit
 #     of this script recommended. The exceptions are the antelopev2 ONNX pair
 #     and the Qwen3-TTS checkpoint, whose tests resolve them through
@@ -49,7 +49,7 @@
 # reported present-or-absent in the model store (`<models-dir>/<vendor>/<repo>`,
 # resolved like brain_modelstore::default_root: BRAIN_MODELS_DIR, else
 # $XDG_DATA_HOME/brain/models, else $HOME/.local/share/brain/models) and
-# `brain fetch <vendor>/<repo>` is what puts one there.
+# `brain pull <vendor>/<repo>` is what puts one there.
 #
 # Usage:
 #   make testdata/fetch                      # populate everything missing
@@ -76,7 +76,7 @@ fi
 #
 #   * CHECKPOINTS - `$MODEL_MIRROR`. A populated model store IS the checkpoint
 #     mirror: it is laid out as `<vendor>/<repo>` (`crates/modelstore`), so every
-#     checkpoint below is addressed by exactly the reference `brain fetch` takes,
+#     checkpoint below is addressed by exactly the reference `brain pull` takes,
 #     and one variable covers all of them. This replaces a per-domain
 #     `<root>/<domain>/weights/…` arrangement that predates the store and no
 #     longer exists on any box. It resolves through `$BRAIN_MODELS_DIR`
@@ -253,8 +253,8 @@ echo "       fixture mirrors: asr=${ASR_MIRROR:-<unset BRAIN_ASR_MIRROR>} vl=${V
 
 # --- Checkpoints the parity tests import ------------------------------------
 # REPORTED, never fetched. Each is an upstream HF repo the model crates read out
-# of the model store under exactly the reference `brain fetch` takes, and
-# `brain fetch` is the thing that puts it there - this script is test-fixture
+# of the model store under exactly the reference `brain pull` takes, and
+# `brain pull` is the thing that puts it there - this script is test-fixture
 # plumbing, not a general fetcher (see the header). Copying them here would also
 # be the one operation in this script that is NOT nearly free: `$MODELS_DIR` is
 # very often on a different filesystem from any mirror, where the hard link
@@ -276,7 +276,7 @@ do
     echo "  ✓ $ref (model store)"
   else
     echo "  · $ref: absent from the model store - skipping"
-    ORIGIN="\`brain fetch $ref\` (network), which writes it to $MODELS_DIR/$ref"
+    ORIGIN="\`brain pull $ref\` (network), which writes it to $MODELS_DIR/$ref"
     _origin
     missing=$((missing + 1))
   fi
@@ -340,7 +340,7 @@ golden_tree "timesfm3"     "golden/timesfm3"
 # These two graphs are a checkpoint, but the tests resolve them through
 # `brain_testutil::testdata`, so the store copy is linked INTO testdata rather
 # than read where it lies.
-ORIGIN="the insightface antelopev2 release, in the store as DIAMONIK7777/antelopev2 (\`brain fetch\` it)"
+ORIGIN="the insightface antelopev2 release, in the store as DIAMONIK7777/antelopev2 (\`brain pull\` it)"
 _link_files "$MODEL_MIRROR" "DIAMONIK7777/antelopev2" "face/antelopev2" \
   glintr100.onnx scrfd_10g_bnkps.onnx
 
@@ -350,7 +350,7 @@ _link_files "$MODEL_MIRROR" "DIAMONIK7777/antelopev2" "face/antelopev2" \
 # `pad_token`), so one copy is linked and the test builds both tokenizers from
 # it. The id golden `clip/tokenizer/ids.safetensors` comes from
 # `tools/clip_dump_reference.py`, not from here.
-ORIGIN="the SDXL base repo's tokenizer/ - \`brain fetch stabilityai/stable-diffusion-xl-base-1.0\`"
+ORIGIN="the SDXL base repo's tokenizer/ - \`brain pull stabilityai/stable-diffusion-xl-base-1.0\`"
 _link_files "$MODEL_MIRROR" "stabilityai/stable-diffusion-xl-base-1.0/tokenizer" "clip/tokenizer" \
   vocab.json merges.txt
 
@@ -370,10 +370,10 @@ vl_tree  "parity"          "vl/parity"
 # tests import their weights to `out/tts/` instead - and `speech_tokenizer/` is
 # excluded from the root copy because it is linked separately, under the name
 # the mimi tests use.
-ORIGIN="\`brain fetch Qwen/Qwen3-TTS-12Hz-0.6B-Base\`"
+ORIGIN="\`brain pull Qwen/Qwen3-TTS-12Hz-0.6B-Base\`"
 ckpt_tree "Qwen/Qwen3-TTS-12Hz-0.6B-Base" "tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base" \
   '^(brain_tts|speech_tokenizer)/'
-ORIGIN="\`brain fetch Qwen/Qwen3-TTS-12Hz-0.6B-Base\` (its speech_tokenizer/ subdir)"
+ORIGIN="\`brain pull Qwen/Qwen3-TTS-12Hz-0.6B-Base\` (its speech_tokenizer/ subdir)"
 ckpt_tree "Qwen/Qwen3-TTS-12Hz-0.6B-Base/speech_tokenizer" "tts/ckpt/Qwen3-TTS-Tokenizer-12Hz"
 ORIGIN="tools/goldens/qwen3tts_{codec,speaker}_dump_reference.py (they fetch the upstream reference themselves)"
 tts_tree "dumps"           "tts/dumps"

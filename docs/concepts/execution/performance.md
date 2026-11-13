@@ -48,14 +48,14 @@ throughput than full-precision - check the specific model's own page under
 to see whether it's supported and how to enable it, since support and the
 exact accuracy trade-off are model-specific.
 
-## Cost accounting: `brain flops`
+## Cost accounting: `brain perf flops`
 
-`brain flops <model> <shape>` reports how many floating-point (or, for INT8
+`brain perf flops <model> <shape>` reports how many floating-point (or, for INT8
 paths, integer) operations a forward or backward pass actually costs, without
 running it. It's a coverage-honest cost registry: every kernel brain dispatches
 has either a registered cost formula or is explicitly listed as **not
 measured** - the tool never rounds an unmodeled cost down to zero and folds
-it into a total that looks complete. Run `brain flops --help` for the full
+it into a total that looks complete. Run `brain perf flops --help` for the full
 set of flags and the accounting model.
 
 ### A whole generation, by stage
@@ -67,8 +67,8 @@ question the number exists to answer. A video is reported per second of output
 as well as per clip.
 
 ```
-brain flops --model flux2 --variant klein-4b --width 1024 --height 1024 [--i8] [--per-kernel]
-brain flops --model ltxv --variant ltx25-22b --width 768 --height 512 --frames 121 --fps 24
+brain perf flops --model flux2 --variant klein-4b --width 1024 --height 1024 [--i8] [--per-kernel]
+brain perf flops --model ltxv --variant ltx25-22b --width 768 --height 512 --frames 121 --fps 24
 ```
 
 Nothing runs, and no checkpoint is needed. The denoise cost is derived from

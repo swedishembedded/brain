@@ -284,7 +284,7 @@ fn skip_gpu() -> bool {
 /// (`qwen3::init_weights`), not a hand-picked subset. `write_base` above is
 /// deliberately lighter (one tensor) because every OTHER test in this file
 /// only reads a config/card/tensor header, never builds a real `Model` - this
-/// one does (`brain flops --weights` does), so it needs the real thing.
+/// one does (`brain perf flops --weights` does), so it needs the real thing.
 fn write_real_qwen3_base(store: &Store, vendor: &str, repo: &str) -> PathBuf {
     use qwen3::{init_weights, QwenConfig};
     let dir = store.repo_dir(&brain_modelref::ModelRef::new(vendor, repo, None));
@@ -298,7 +298,7 @@ fn write_real_qwen3_base(store: &Store, vendor: &str, repo: &str) -> PathBuf {
     file
 }
 
-/// The concrete proof `modelcost` is one engine, not two: `brain flops`
+/// The concrete proof `modelcost` is one engine, not two: `brain perf flops`
 /// pricing a REAL on-disk model must write into the SAME cache `brain models
 /// list` reads, with no `--reprofile` in between.
 #[test]
@@ -312,11 +312,11 @@ fn brain_flops_on_a_real_checkpoint_populates_the_cache_brain_models_list_reads(
     let path = write_real_qwen3_base(&store, "Qwen", "Qwen3-0.6B");
 
     let flops_out = Command::new(bin())
-        .args(["flops", "--model", "qwen", "--weights", path.to_str().unwrap(), "--batch", "1", "--cache-dir"])
+        .args(["perf", "flops", "--model", "qwen", "--weights", path.to_str().unwrap(), "--batch", "1", "--cache-dir"])
         .arg(&cache)
         .output()
-        .expect("run brain flops");
-    assert!(flops_out.status.success(), "brain flops --weights failed: {}", String::from_utf8_lossy(&flops_out.stderr));
+        .expect("run brain perf flops");
+    assert!(flops_out.status.success(), "brain perf flops --weights failed: {}", String::from_utf8_lossy(&flops_out.stderr));
 
     let list_out = Command::new(bin())
         .args(["models", "list", "--arch", "qwen3", "--plain", "--cache-dir"])
@@ -327,7 +327,7 @@ fn brain_flops_on_a_real_checkpoint_populates_the_cache_brain_models_list_reads(
     assert!(list_out.status.success());
     let stdout = String::from_utf8_lossy(&list_out.stdout);
     let base_line = stdout.lines().find(|l| l.contains("qwen3 Qwen/Qwen3-0.6B ")).expect("the base leaf row must be present");
-    assert!(base_line.contains("exact"), "brain flops just priced this exact model - brain models list must read that back without --reprofile: {base_line:?}");
+    assert!(base_line.contains("exact"), "brain perf flops just priced this exact model - brain models list must read that back without --reprofile: {base_line:?}");
 
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_dir_all(&cache).ok();

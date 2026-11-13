@@ -6,9 +6,9 @@
 //!
 //! Every `price_*` builds a WHOLE, single-shard, batch-1, inference-fp32
 //! model at zero-init weights (never real weight bytes - `Model::cost_fwd`'s
-//! cost is a function of shape alone, the same fact that lets `brain flops`
+//! cost is a function of shape alone, the same fact that lets `brain perf flops`
 //! price a 4B model without holding it) and reports one forward pass. This is
-//! deliberately narrower than `brain flops`'s own CLI flags (no `--train`,
+//! deliberately narrower than `brain perf flops`'s own CLI flags (no `--train`,
 //! `--i8`, `--stages`, `--weights`) - `models list`/`models profile` want ONE
 //! representative number per model, not the full sweep a human driving `brain
 //! flops` by hand might want.

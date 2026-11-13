@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain gguf inspect PATH [--json]` - a local, pre-import look at a real
+//! `brain models inspect PATH [--json]` - a local, pre-import look at a real
 //! `.gguf` file on disk: its full KV metadata plus a per-tensor name/dtype/
 //! shape/size listing.
 //!
@@ -32,39 +32,20 @@ use crate::args::Args;
 use crate::tree::{self, Node};
 
 const USAGE: &str = "\
-usage: brain gguf inspect PATH [--json]
+usage: brain models inspect PATH [--json]
 
-  inspect   render PATH's KV metadata and tensor list as a tree (or, with
-            --json, as data). PATH is a real filesystem path to a .gguf
-            file, opened directly - NOT a model-store reference; use this
-            to look at a checkpoint before `brain pull`/`brain import` ever
-            put it in the store.
-
-  --json    emit the same information as JSON instead of the plain tree.
+  Render a .gguf file's KV metadata and tensor list as a tree (or, with
+  --json, as data). PATH is a real filesystem path, opened directly - NOT a
+  model-store reference; use this to look at a checkpoint before
+  `brain pull`/`brain import` ever put it in the store.
 ";
 
-/// Dispatch for `brain gguf <subcommand>`. Only `inspect` is implemented;
-/// `kv`/`tensors` were mentioned as possible future sub-verbs but are not
-/// needed yet - `inspect` alone covers both (metadata tree + tensor tree).
-pub fn run_gguf(argv: &[String]) -> i32 {
-    if argv.iter().any(|a| a == "--help" || a == "-h") {
+/// `brain models inspect PATH [--json]`.
+pub fn run_inspect(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{USAGE}");
         return 0;
     }
-    match argv.first().map(String::as_str) {
-        Some("inspect") => run_inspect(&argv[1..]),
-        Some(other) => {
-            eprintln!("brain gguf: unknown subcommand {other:?}\n{USAGE}");
-            2
-        }
-        None => {
-            eprintln!("{USAGE}");
-            2
-        }
-    }
-}
-
-fn run_inspect(args: &[String]) -> i32 {
     let mut a = Args::new(args);
     let json = a.take_flag("--json");
     let Some(path) = a.positional() else {
@@ -76,7 +57,7 @@ fn run_inspect(args: &[String]) -> i32 {
     let mg = match MmapGguf::open(&path) {
         Ok(mg) => mg,
         Err(e) => {
-            eprintln!("brain gguf inspect: {e}");
+            eprintln!("brain models inspect: {e}");
             return 1;
         }
     };
@@ -186,7 +167,7 @@ mod tests {
     /// not an attempt to open an empty path.
     #[test]
     fn a_missing_path_is_a_usage_error() {
-        assert_eq!(run_gguf(&s(&["inspect"])), 2);
+        assert_eq!(run_inspect(&s(&[])), 2);
     }
 
     /// `--json` is recognized and does not get mistaken for the positional
@@ -194,7 +175,7 @@ mod tests {
     /// flag itself was consumed rather than treated as the file name.
     #[test]
     fn json_flag_is_recognized_and_does_not_consume_the_path() {
-        let code = run_gguf(&s(&["inspect", "--json", "/nonexistent/does-not-exist.gguf"]));
+        let code = run_inspect(&s(&["--json", "/nonexistent/does-not-exist.gguf"]));
         assert_eq!(code, 1);
     }
 
@@ -202,20 +183,14 @@ mod tests {
     /// matter, matching `Args`'s own take-and-remove contract.
     #[test]
     fn json_flag_before_the_path_is_also_recognized() {
-        let code = run_gguf(&s(&["inspect", "/nonexistent/does-not-exist.gguf", "--json"]));
+        let code = run_inspect(&s(&["/nonexistent/does-not-exist.gguf", "--json"]));
         assert_eq!(code, 1);
-    }
-
-    /// An unrecognized `gguf` sub-verb is a usage error, not a silent no-op.
-    #[test]
-    fn unknown_subcommand_is_a_usage_error() {
-        assert_eq!(run_gguf(&s(&["bogus"])), 2);
     }
 
     /// A nonexistent path is a clean error (exit 1), never a panic.
     #[test]
     fn a_missing_file_is_an_error_not_a_panic() {
-        assert_eq!(run_gguf(&s(&["inspect", "/nonexistent/does-not-exist.gguf"])), 1);
+        assert_eq!(run_inspect(&s(&["/nonexistent/does-not-exist.gguf"])), 1);
     }
 
     fn fixture(dir: &std::path::Path) -> String {
@@ -253,8 +228,8 @@ mod tests {
         assert!(joined.contains("20 items"), "a large KV array must be elided with its length: {joined}");
         assert!(!joined.contains("tok19"), "an elided array must not print every entry: {joined}");
 
-        assert_eq!(run_gguf(&s(&["inspect", &path])), 0);
-        assert_eq!(run_gguf(&s(&["inspect", &path, "--json"])), 0);
+        assert_eq!(run_inspect(&s(&[&path])), 0);
+        assert_eq!(run_inspect(&s(&[&path, "--json"])), 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

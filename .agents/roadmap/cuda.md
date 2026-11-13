@@ -1341,7 +1341,7 @@ again at the point it is used.
 The int8 decode linear (`matmul_i8_gemv`) is a candidate set chosen per device by measurement
 (`gpu_core::native_tune`, knowledge 368): the dp4a GEMV, the wide tensor-core GEMV (up to 32 rows of x per
 weight pass) and the 16- and 32-row tiled tensor-core GEMMs. Done: the mechanism, the per-device read roof and
-launch floor probe, the oracle check, the store, `brain roofline gpu --kernels`, `--kernel`, `--no-autotune`, the
+launch floor probe, the oracle check, the store, `brain perf roofline gpu --kernels`, `--kernel`, `--no-autotune`, the
 candidate-coverage unit test and the forced-candidate-versus-WGSL gate (`i8_gemv_native.rs`). Measured on a GH200,
 12/20/32 streams of the 27B: no end-to-end change (the tuner confirms the previous hand choice), 53 of 56 classes
 under 60 % of the memory roof.

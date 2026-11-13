@@ -2013,7 +2013,7 @@ pub fn flash_gate(caps: &gpu_core::DeviceCaps, extra: bool) -> bool {
 /// traffic because a workgroup owns twice the query rows.
 ///
 /// Measured at Wan 1.3B's self-attention (T=14040, 12 heads, head_dim 128)
-/// against the device's own measured fp32 roof (`brain flops`): `bidir` is off
+/// against the device's own measured fp32 roof (`brain perf flops`): `bidir` is off
 /// the scale, `split` reaches a fifth of the roof, `reg` a little more, and
 /// `reg2` close to what the register-tiled GEMM `matmul_reg3` itself reaches
 /// on the same card - which is the point, since these ARE GEMMs. `reg2` wins

@@ -70,19 +70,19 @@ them all - `s3dit`, `fastvlm`, `qwen3vl`, `sam1`, `sam2`, `scrfd`, `arcface`,
 `kronos`, `minimaxmusic3`, `genieredux`, ...) is reached the same uniform
 way.
 
-## Infrastructure verbs (unchanged, not per-architecture)
+## Generic verbs (not about one model)
 
 | Command | Purpose |
 |---|---|
 | `brain devices` | canonical GPU table (index, PCI bus, UUID, VRAM) + ambient device selection + how each pair of cards reaches the other (direct peer link or host memory, measured GB/s) - see [Hardware](../guides/hardware/choosing-hardware.md) |
 | `brain doctor [--model <vendor>/<repo>]` | can a model be served here? checks the model store, the free disk, each GPU's free memory and, with `--model`, that model's weights, tokenizer and whether some card has room for it; loads nothing, exits 1 when a check fails, `--json` for scripts - see [Quickstart](../getting-started/quickstart.md) |
-| `brain roofline` | measured, cross-accelerator hardware compute-capacity report: every GPU `--device` selects (a card outside the selection is never opened), the NPU, and the CPU, each dtype it supports, streamed as each finishes; `--kernels` adds the measured kernel selection and each choice's fraction of the roofline |
+| `brain perf roofline` | measured, cross-accelerator hardware compute-capacity report: every GPU `--device` selects (a card outside the selection is never opened), the NPU, and the CPU, each dtype it supports, streamed as each finishes; `--kernels` adds the measured kernel selection and each choice's fraction of the roofline |
 | `brain data` | dataset generation and tokenizers |
 | `brain label` | caption a dataset with any vision-language model - see [Labeling a dataset](../guides/training/labeling.md) |
 | `brain caps` | every architecture's action manifest - see above |
 | `brain serve` | serve models over HTTP/D-Bus, or (with `--stdio`) run the event-driven stdio controller - see below |
-| `brain perf` | performance benchmarking: latency/throughput/serve/sweep, vs. a baseline |
-| `brain flops` | offline/online FLOP and int-OPS accounting for a forward/backward pass, or for a whole image/video generation stage by stage (`--model flux2\|ltxv`) |
+| `brain perf` | performance: latency/throughput/serve/sweep runs vs. a baseline, `perf flops` (FLOP/OPS accounting) and `perf roofline` (measured hardware capacity) |
+| `brain perf flops` | offline/online FLOP and int-OPS accounting for a forward/backward pass, or for a whole image/video generation stage by stage (`--model flux2\|ltxv`) |
 | `brain npu` | the generic ONNX tools for OpenVINO/NPU: `check` (op histogram and compile) and `bench` (latency); each model's own export, quantization and run are actions of its sample |
 | `brain bench` | cross-architecture evaluation harness: `eval`, `scale`, `advise`, `compare` |
 | `brain pull <model>` | fetch a model's official weights into the model store, by canonical id or HuggingFace URL - see below |
@@ -131,6 +131,25 @@ per-model-port shape:
 - The bare `brain train|eval|generate` (which meant the sparse-MoE toy task)
   is now namespaced: `brain train toymoe`, `brain toymoe eval`, etc.
 
+In this release every model-specific command became its model's served
+actions (`brain <model> <action>`, the same actions `brain serve` offers), and
+applications built on one model became its Rust sample under
+`samples/models/<model>`:
+
+- `brain forecast predict|compare|serve|import|finetune` is `brain chronos2|fincast|kronos|timesfm3
+  <action>`; the scenario battery and the JSONL server are actions of those samples.
+- `brain federated ...` is the `split`/`train_expert`/`merge`/`assemble`/`verify`
+  actions of `samples/models/toymoe`; `brain gradcheck` is `make test/gradcheck`.
+- `brain npu chronos2|kronos|fincast|lfm|lfm-bench|deepseekocr2|omni` are the
+  `npu-*` actions of the matching samples; `brain npu` keeps `check` and `bench`.
+- `brain flops` is `brain perf flops`, `brain roofline` is `brain perf roofline`,
+  `brain gguf inspect` is `brain models inspect`, and the `brain fetch` alias is gone.
+- Per-model `BRAIN_*` weight and tuning variables are gone: a checkpoint is a
+  `--<role> PATH` flag for one run or `brain serve --pin ARCH.ROLE=PATH` for a
+  server, and a tuning knob is the action's own parameter or a generic serve
+  flag (`--ctx`, `--max-batch`, `--sched-*`). A config file that still sets one
+  is refused with its replacement.
+
 ## Pulling weights
 
 `brain pull <model>` fetches a model's official weights into the model store
@@ -152,7 +171,7 @@ brain pull https://huggingface.co/Qwen/Qwen3-0.6B/tree/main
 
 Anything that is not a model reference - a dataset or space URL, a link to
 another site, a name with no vendor - is refused by name rather than sent to
-the hub as a repo id. `brain fetch` is an accepted alias for the same verb.
+the hub as a repo id. `brain pull` is an accepted alias for the same verb.
 
 ### Pulling one file
 

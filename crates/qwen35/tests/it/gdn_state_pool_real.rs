@@ -22,7 +22,7 @@
 //! 3. the bf16 pool is also served free-running, and the length of the identical prefix of each sequence is reported.
 //!
 //! Reported: top-1 agreement of bf16 against f32 over all positions, the mean KL(f32 || bf16) in nats, and the worst
-//! sequence. Self-skips when the checkpoint is not in the model store (`brain fetch Qwen/Qwen3.8-27B-FP8`).
+//! sequence. Self-skips when the checkpoint is not in the model store (`brain pull Qwen/Qwen3.8-27B-FP8`).
 
 use model::kv_tier::KvTier;
 use model::policy::GdnState;
@@ -115,7 +115,7 @@ fn kl(p: &[f32], q: &[f32]) -> f64 {
 #[test]
 fn a_bf16_state_pool_serves_long_generations_like_the_f32_pool() {
     let Some(path) = brain_testutil::model_dir(STORE).filter(|d| std::path::Path::new(d).join("config.json").exists()) else {
-        brain_testutil::skip(&format!("{STORE} is not in the model store (brain fetch {STORE})"));
+        brain_testutil::skip(&format!("{STORE} is not in the model store (brain pull {STORE})"));
         return;
     };
     let Some(f32_engine) = engine(&path, GdnState::F32) else { return };

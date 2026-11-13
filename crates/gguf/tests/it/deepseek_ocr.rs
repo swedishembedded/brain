@@ -10,7 +10,7 @@
 //! decoded header, so a mapping that drifts fails here rather than silently
 //! producing a checkpoint with a hole in it.
 //!
-//! Both files live in the model store (`brain fetch ggml-org/DeepSeek-OCR-GGUF`);
+//! Both files live in the model store (`brain pull ggml-org/DeepSeek-OCR-GGUF`);
 //! a box without them skips, loudly, rather than failing.
 
 use checkpoint::gguf::MmapGguf;
@@ -30,7 +30,7 @@ fn open(file: &str) -> Option<MmapGguf> {
     };
     let path = format!("{dir}/{file}");
     if !std::path::Path::new(&path).exists() {
-        brain_testutil::skip(&format!("{path} absent (brain fetch {REPO})"));
+        brain_testutil::skip(&format!("{path} absent (brain pull {REPO})"));
         return None;
     }
     Some(MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")))

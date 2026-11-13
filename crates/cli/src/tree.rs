@@ -68,7 +68,7 @@ pub fn stdout_is_terminal() -> bool {
 /// The `--json` twin of [`render_plain`]: the SAME [`Node`] tree, as data
 /// instead of box-drawing text. One shape (`{"line": ..., "children": [...]}`,
 /// recursive), shared by every caller that offers `--json` next to a plain
-/// tree render (`brain models {list,list-adapters,info}`, `brain gguf
+/// tree render (`brain models {list,list-adapters,info}`, `brain models
 /// inspect`) so a second JSON shape never has to be invented per command.
 pub fn node_to_json(nodes: &[Node]) -> serde_json::Value {
     serde_json::Value::Array(nodes.iter().map(|n| serde_json::json!({"line": n.line, "children": node_to_json(&n.children)})).collect())

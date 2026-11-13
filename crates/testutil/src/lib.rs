@@ -226,7 +226,7 @@ pub fn testdata_path(rel: &str) -> std::path::PathBuf {
 
 /// The on-disk store directory for a fully-qualified upstream model
 /// reference (e.g. `"nvidia/nemotron-3.5-asr-streaming-0.6b"`) - the same
-/// `<models-dir>/<vendor>/<repo>/` directory `brain fetch` writes and
+/// `<models-dir>/<vendor>/<repo>/` directory `brain pull` writes and
 /// [`brain_modelstore::Store`] scans, resolved via
 /// [`brain_modelstore::default_root`]. Import/parity tests that need a real
 /// upstream HF checkpoint (raw `model.safetensors`, `config.json`,

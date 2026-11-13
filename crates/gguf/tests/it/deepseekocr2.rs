@@ -10,7 +10,7 @@
 //! and shape are byte-identical to the predecessor's, so `deepseek_ocr.rs`'s
 //! own tests already cover it.
 //!
-//! Lives in the model store (`brain fetch deepseek-ai/DeepSeek-OCR-2`); a box
+//! Lives in the model store (`brain pull deepseek-ai/DeepSeek-OCR-2`); a box
 //! without it skips, loudly, rather than failing.
 
 use checkpoint::gguf::MmapGguf;
@@ -27,7 +27,7 @@ fn open(file: &str) -> Option<MmapGguf> {
     };
     let path = format!("{dir}/{file}");
     if !std::path::Path::new(&path).exists() {
-        brain_testutil::skip(&format!("{path} absent (brain fetch {REPO})"));
+        brain_testutil::skip(&format!("{path} absent (brain pull {REPO})"));
         return None;
     }
     Some(MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")))

@@ -8,7 +8,7 @@
 //! Steady-state step time of the fp32-moment AdamW against the fused
 //! int8-moment AdamW (`adamw_q8`), on one large tensor set, with the bytes
 //! each moves per element so the result can be read against the device's
-//! memory bandwidth (`brain roofline gpu`).
+//! memory bandwidth (`brain perf roofline gpu`).
 //!
 //! ```text
 //! BRAIN_BACKEND=cuda BRAIN_DEVICE=gpu0 cargo test --release -p brain-optim --test bench_q8 -- --ignored --nocapture

@@ -870,7 +870,7 @@ it against the scan+sort reference at `max|d| == 0`.
   neuron shape and got the same treatment.
 
   **The cord belongs on the CPU on this machine, and that is a measurement,
-  not a preference.** `brain roofline` says 23 GB/s streaming for the iGPU
+  not a preference.** `brain perf roofline` says 23 GB/s streaming for the iGPU
   against 68 GB/s for the CPU, and this kernel is pure streaming: 11 MB of
   edge list per tick, ~0 arithmetic intensity. The iGPU also charges ~3 ms per
   spike readback that the CPU backend does not charge at all. So

@@ -3,12 +3,12 @@
 
 //! The one shared model-pricing registry and on-disk cache.
 //!
-//! `brain flops` was the first version of this: real dry-recorded pricing
+//! `brain perf flops` was the first version of this: real dry-recorded pricing
 //! (`gpu_core::cost::Recording`), just private to `crates/cli/src/flops_cli.rs`
 //! and wired for a handful of architectures by hand, with nothing else able to
 //! reuse it. This crate pulls the pricing itself out from under that CLI
 //! module - mirroring how `crates/catalog` already centralises per-model
-//! constructors above `capability` - so `brain flops` and `brain models
+//! constructors above `capability` - so `brain perf flops` and `brain models
 //! list`/`brain models profile` become front ends over ONE engine and ONE
 //! cache, instead of two independent implementations that could disagree.
 //!
@@ -19,7 +19,7 @@
 //! architecture's OWN config and reports its forward-pass [`CostReport`] via
 //! `Model::cost_fwd`. Needs that architecture to have wired a `Recording`
 //! through its forward pass; today that is qwen3/gpt2/lfm2, the three
-//! `brain flops` already covered without a generation-shape parameter
+//! `brain perf flops` already covered without a generation-shape parameter
 //! (width/height/steps) a bare model config cannot supply.
 //!
 //! **Bandwidth** ([`CostEntry::tensor_manifest`]): sums tensor byte sizes from
@@ -151,7 +151,7 @@ pub fn by_arch(id: &str) -> Option<&'static CostEntry> {
 
 /// A cached pricing result's numeric core - deliberately NOT the full
 /// [`CostReport`] (its per-kernel `by_kernel`/`uncovered` maps are a `--
-/// per-kernel` presentation detail `brain flops` still computes fresh; a
+/// per-kernel` presentation detail `brain perf flops` still computes fresh; a
 /// `models list` row only ever renders the totals).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CostSummary {
@@ -250,7 +250,7 @@ pub fn price_and_cache(arch: &str, variant_ref: &str, config: &Value) -> Result<
 /// tier's `price` materializes a real zero-init weight set at the config's
 /// own shape (no data is read, but the buffer itself is real host memory),
 /// which is a bounded, deliberate cost for ONE model a human explicitly named
-/// (`brain flops`, `brain models profile <ref>`) and an unbounded, surprising
+/// (`brain perf flops`, `brain models profile <ref>`) and an unbounded, surprising
 /// one multiplied across however many multi-billion-parameter checkpoints
 /// happen to be sitting in the store - exactly the "surprising use of
 /// memory/time during an unattended scan" this workspace's own conventions
@@ -265,7 +265,7 @@ pub fn price_and_cache_bandwidth_only(arch: &str, variant_ref: &str, config: &Va
 }
 
 /// Cache an ALREADY-COMPUTED exact-tier report, without recomputing it -
-/// what `brain flops` calls after pricing a real on-disk model itself (it has
+/// what `brain perf flops` calls after pricing a real on-disk model itself (it has
 /// its own richer flag surface - `--train`/`--i8`/`--stages` - that this
 /// crate's own [`CostEntry::price`] deliberately does not replicate; see the
 /// module doc), so the two commands share ONE cache without a second, slower
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn cache_report_stores_an_already_computed_report_without_recomputing() {
-        // `brain flops` calls this with a report it already built under its
+        // `brain perf flops` calls this with a report it already built under its
         // own richer flags (--stages/--weights/...) - `cached()` must read it
         // back exactly, keyed the same way `price_and_cache` keys its own
         // writes.

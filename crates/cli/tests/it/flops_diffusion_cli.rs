@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain flops --model flux2|ltxv` prices a whole generation, and says so
+//! `brain perf flops --model flux2|ltxv` prices a whole generation, and says so
 //! honestly.
 //!
 //! Swedish Embedded AB implements analytic performance models for GPU
@@ -34,10 +34,10 @@ fn bin() -> String {
 }
 
 fn flops(args: &[&str]) -> String {
-    let out = Command::new(bin()).arg("flops").args(args).output().expect("run brain flops");
+    let out = Command::new(bin()).args(["perf", "flops"]).args(args).output().expect("run brain perf flops");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(out.status.success(), "brain flops {args:?} exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}", out.status.code());
+    assert!(out.status.success(), "brain perf flops {args:?} exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}", out.status.code());
     stdout
 }
 

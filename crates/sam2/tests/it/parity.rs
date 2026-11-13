@@ -77,7 +77,7 @@ fn check_block_table(base: &Path, cfg: &Sam2Config) {
 }
 
 /// The released `.pt`, from the goldens directory if `make testdata/fetch`
-/// hard-linked one in, else straight out of the model store where `brain fetch
+/// hard-linked one in, else straight out of the model store where `brain pull
 /// facebook/sam2.1-<variant>` leaves it. The second is what actually holds it on
 /// a box that has the checkpoint but no `sam2/` testdata mirror, and the import
 /// half of this test needs the raw archive, not the converted weights.

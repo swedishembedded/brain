@@ -15,7 +15,7 @@
 //!
 //! Field names deliberately mirror `gpu_core::roof::Roofs` (`gflops`,
 //! `int8_gops`) so a caller assembling a unified GPU+NPU+CPU roofline report
-//! (the `brain roofline` command this module feeds) does not have to
+//! (the `brain perf roofline` command this module feeds) does not have to
 //! translate vocabulary between backends.
 //!
 //! Every entry point here is infallible in the "no NPU / no OpenVINO" sense:

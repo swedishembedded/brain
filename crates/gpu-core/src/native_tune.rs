@@ -1305,7 +1305,7 @@ pub fn offered() -> Vec<(String, String)> {
 }
 
 /// The selection table of the process's default device, built by opening a handle that registers the kernel slots
-/// the native candidate sets cover (the int8 decode linear and prefill GEMM): what `brain roofline --kernels` prints, with no model
+/// the native candidate sets cover (the int8 decode linear and prefill GEMM): what `brain perf roofline --kernels` prints, with no model
 /// loaded.
 pub fn report_for_default_device() -> String {
     let _gpu = Gpu::new(&[("matmul_i8_gemv", kernels::MATMUL_I8_GEMV), ("matmul_i8_dyn", kernels::MATMUL_I8_DYN)]);

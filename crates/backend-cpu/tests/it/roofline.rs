@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! `backend_cpu::roofline::measure` must produce a real, fast, sane fp32
-//! GFLOP/s number for `brain roofline`'s CPU rung.
+//! GFLOP/s number for `brain perf roofline`'s CPU rung.
 //!
 //! `gpu_core::roof::ensure` skips the CPU device class by default (a
 //! known-bad interaction between its calibration loop and this crate's own
@@ -79,7 +79,7 @@ fn measure_returns_a_real_dram_bandwidth() {
     assert!(gbs < 1000.0, "suspiciously high DRAM GB/s - the working set fit in cache? {gbs}");
 }
 
-/// Requirement 4: fast enough to be one rung of `brain roofline`'s "first
+/// Requirement 4: fast enough to be one rung of `brain perf roofline`'s "first
 /// result within 10 seconds" budget across every accelerator class - well
 /// under a second on its own, generously bounded (see the assertion) so a loaded CI runner
 /// doesn't flake.

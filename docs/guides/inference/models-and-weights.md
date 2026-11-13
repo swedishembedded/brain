@@ -132,9 +132,9 @@ reads `not profiled`, not a guess. Three ways to fill it in:
 - `brain models profile <model>` prices **one** already-pulled model now, at
   the exact tier if its architecture has one registered, and errors (never
   fetches) if it is not pulled.
-- `brain flops --model ... --weights <path>` (see [The
+- `brain perf flops --model ... --weights <path>` (see [The
   CLI](../../reference/cli.md#infrastructure-verbs-unchanged-not-per-architecture)) writes
-  into this SAME cache when it prices a real on-disk model - `brain flops`
+  into this SAME cache when it prices a real on-disk model - `brain perf flops`
   and `brain models list` share one pricing engine (`crates/modelcost`), so
   running one primes the other.
 

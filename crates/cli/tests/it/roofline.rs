@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain roofline` - one comprehensive, fast, cross-accelerator hardware
+//! `brain perf roofline` - one comprehensive, fast, cross-accelerator hardware
 //! compute-capacity report (GPU + NPU + CPU). These tests run against the
 //! REAL machine (no mocks for GPU/NPU/CPU presence - whatever this sandbox
 //! has is what gets exercised), so assertions are on STRUCTURE (every row
@@ -28,7 +28,7 @@ fn bin() -> String {
 
 fn run(args: &[&str]) -> (bool, String, String, Duration) {
     let t0 = Instant::now();
-    let out = Command::new(bin()).arg("roofline").args(args).output().expect("run brain roofline");
+    let out = Command::new(bin()).args(["perf", "roofline"]).args(args).output().expect("run brain perf roofline");
     (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), t0.elapsed())
 }
 
@@ -40,8 +40,8 @@ fn run(args: &[&str]) -> (bool, String, String, Duration) {
 #[test]
 fn plain_mode_every_data_line_is_self_contained_and_greppable() {
     let (ok, stdout, stderr, elapsed) = run(&[]);
-    assert!(ok, "brain roofline failed: {stderr}");
-    assert!(elapsed < Duration::from_secs(60), "brain roofline took {elapsed:?}, expected well under a minute even on a cold cache");
+    assert!(ok, "brain perf roofline failed: {stderr}");
+    assert!(elapsed < Duration::from_secs(60), "brain perf roofline took {elapsed:?}, expected well under a minute even on a cold cache");
 
     let data_lines: Vec<&str> = stdout.lines().filter(|l| l.starts_with("gpu") || l.starts_with("npu") || l.starts_with("cpu")).collect();
     assert!(!data_lines.is_empty(), "expected at least one accelerator row in:\n{stdout}");
@@ -70,7 +70,7 @@ fn plain_mode_every_data_line_is_self_contained_and_greppable() {
 #[test]
 fn json_output_round_trips_the_plain_rows() {
     let (ok, stdout, stderr, _) = run(&["--json"]);
-    assert!(ok, "brain roofline --json failed: {stderr}");
+    assert!(ok, "brain perf roofline --json failed: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("--json output did not parse: {e}\n{stdout}"));
     let arr = v.as_array().expect("--json must emit a JSON array of rows");
     assert!(!arr.is_empty(), "expected at least one row");
@@ -93,7 +93,7 @@ fn json_output_round_trips_the_plain_rows() {
     // silently dropping or duplicating a section would show up here).
     let json_accels: Vec<&str> = arr.iter().filter_map(|r| r.get("accelerator").and_then(|x| x.as_str())).collect();
     let (ok2, plain_stdout, stderr2, _) = run(&[]);
-    assert!(ok2, "brain roofline failed: {stderr2}");
+    assert!(ok2, "brain perf roofline failed: {stderr2}");
     let plain_accels: Vec<&str> = plain_stdout
         .lines()
         .filter(|l| l.starts_with("gpu") || l.starts_with("npu") || l.starts_with("cpu"))
@@ -103,30 +103,30 @@ fn json_output_round_trips_the_plain_rows() {
 }
 
 /// The NPU probe must never hang and must never turn a missing/unusable NPU
-/// into a non-zero exit: `brain roofline npu` alone must degrade cleanly and
+/// into a non-zero exit: `brain perf roofline npu` alone must degrade cleanly and
 /// finish fast, whatever this sandbox's real NPU state is (device node
 /// absent, node present but no OpenVINO runtime, or genuinely usable).
 #[test]
 fn npu_scope_degrades_cleanly_and_finishes_within_a_bounded_time() {
     let (ok, stdout, stderr, elapsed) = run(&["npu"]);
-    assert!(ok, "brain roofline npu must exit cleanly even with no usable NPU: {stderr}");
-    assert!(elapsed < Duration::from_secs(30), "brain roofline npu took {elapsed:?} - the probe must be bounded, never hang");
+    assert!(ok, "brain perf roofline npu must exit cleanly even with no usable NPU: {stderr}");
+    assert!(elapsed < Duration::from_secs(30), "brain perf roofline npu took {elapsed:?} - the probe must be bounded, never hang");
     assert!(stdout.lines().any(|l| l.starts_with("npu")), "expected an npu row in:\n{stdout}");
-    assert!(!stdout.lines().any(|l| l.starts_with("gpu") || l.starts_with("cpu")), "brain roofline npu must print ONLY its own section:\n{stdout}");
+    assert!(!stdout.lines().any(|l| l.starts_with("gpu") || l.starts_with("cpu")), "brain perf roofline npu must print ONLY its own section:\n{stdout}");
 }
 
-/// `brain roofline gpu` / `cpu` each run standalone and print only their own
+/// `brain perf roofline gpu` / `cpu` each run standalone and print only their own
 /// section - never the other two.
 #[test]
 fn gpu_and_cpu_scopes_each_print_only_their_own_section() {
     let (ok, stdout, stderr, _) = run(&["cpu"]);
-    assert!(ok, "brain roofline cpu failed: {stderr}");
+    assert!(ok, "brain perf roofline cpu failed: {stderr}");
     assert!(stdout.lines().any(|l| l.starts_with("cpu")), "expected a cpu row in:\n{stdout}");
-    assert!(!stdout.lines().any(|l| l.starts_with("gpu") || l.starts_with("npu")), "brain roofline cpu must print ONLY its own section:\n{stdout}");
+    assert!(!stdout.lines().any(|l| l.starts_with("gpu") || l.starts_with("npu")), "brain perf roofline cpu must print ONLY its own section:\n{stdout}");
 
     let (ok, stdout, stderr, _) = run(&["gpu"]);
-    assert!(ok, "brain roofline gpu failed: {stderr}");
-    assert!(!stdout.lines().any(|l| l.starts_with("npu") || l.starts_with("cpu")), "brain roofline gpu must print ONLY its own section:\n{stdout}");
+    assert!(ok, "brain perf roofline gpu failed: {stderr}");
+    assert!(!stdout.lines().any(|l| l.starts_with("npu") || l.starts_with("cpu")), "brain perf roofline gpu must print ONLY its own section:\n{stdout}");
 }
 
 /// `--device` bounds what the command opens: a selection with no GPU (`cpu`)
@@ -135,7 +135,7 @@ fn gpu_and_cpu_scopes_each_print_only_their_own_section() {
 #[test]
 fn device_selection_without_a_gpu_opens_no_card() {
     let (ok, stdout, stderr, _) = run(&["gpu", "--device", "cpu"]);
-    assert!(ok, "brain roofline gpu --device cpu failed: {stderr}");
+    assert!(ok, "brain perf roofline gpu --device cpu failed: {stderr}");
     let gpu_lines: Vec<&str> = stdout.lines().filter(|l| l.starts_with("gpu")).collect();
     assert_eq!(gpu_lines.len(), 1, "one placeholder row, no per-card rows:\n{stdout}");
     assert!(gpu_lines[0].contains("no hardware") && gpu_lines[0].contains("no GPU selected"), "{}", gpu_lines[0]);

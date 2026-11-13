@@ -86,7 +86,7 @@ brain-scrfd.workspace = true
 brain-florence2.workspace = true
 brain-arcface.workspace = true
 brain-vqgan.workspace = true
-# `brain flops --model flux2|ltxv`: the VAE decode stage of a generation is
+# `brain perf flops --model flux2|ltxv`: the VAE decode stage of a generation is
 # priced from the decoder's own recorded step list, so the cost model needs the
 # crate that builds it.
 brain-vae.workspace = true
@@ -166,7 +166,7 @@ brain-deepseek2ocr.workspace = true
 # DeepSeek-OCR-2: `deepseekocr2::caps` and `deepseekocr2::import`, same shape.
 brain-deepseekocr2.workspace = true
 brain-imgpipe.workspace = true
-# `brain fetch`: a blocking, streaming HTTP client (rustls, no system OpenSSL)
+# `brain pull`: a blocking, streaming HTTP client (rustls, no system OpenSSL)
 # is enough for a one-shot CLI download; no need to pull tokio in for this.
 ureq.workspace = true
 

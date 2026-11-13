@@ -40,6 +40,7 @@ usage: brain models list [--arch ID] [--local] [--plain|--tui] [--json]
        brain models list-adapters [--arch ID] [--plain|--tui] [--json] [--models-dir DIR]
        brain models info <model-ref-or-url> [--json] [--models-dir DIR]
        brain models profile <model-ref-or-url> [--measure [--reps N]] [--models-dir DIR]
+       brain models inspect PATH.gguf [--json]
 
   list             architecture -> provider repo -> quantization, local +
                    declared-but-not-pulled, with size/fit/cost from the
@@ -57,6 +58,8 @@ usage: brain models list [--arch ID] [--local] [--plain|--tui] [--json]
                     exactly for a uniform stack (qwen3, gpt2), averaged for a
                     hybrid one (lfm2's per-layer conv/attention mix). Not
                     cached - a timing describes this machine right now.
+  inspect          a .gguf FILE's KV metadata and tensor list, read before it
+                    is pulled or imported (a path, not a model reference).
 
   --arch ID        only this architecture (brain_arch id, e.g. qwen3)
   --local          declared-but-not-pulled rows are omitted
@@ -78,6 +81,7 @@ pub fn run_models(args: &[String]) -> i32 {
         Some("list-adapters") => run_list_adapters(&args[1..]),
         Some("info") => run_info(&args[1..]),
         Some("profile") => run_profile(&args[1..]),
+        Some("inspect") => crate::gguf_cli::run_inspect(&args[1..]),
         Some(other) => {
             eprintln!("brain models: unknown subcommand {other:?}\n{USAGE}");
             2
@@ -331,13 +335,13 @@ fn run_list(args: &[String]) -> i32 {
 fn run_reprofile(locals: &[LocalModel]) {
     // Still does the real remeasure - every local model's price below needs
     // fresh roofline numbers - but no longer prints its OWN GFLOP/s+GB/s
-    // summary of it: `brain roofline` is now the canonical place to see the
+    // summary of it: `brain perf roofline` is now the canonical place to see the
     // full hardware picture (every accelerator, every dtype), so a second,
     // differently-formatted dump of the same GPU numbers here would just be
     // a duplicate that can drift out of sync with it.
     let gpu = gpu_core::Gpu::new(&[]);
     match gpu_core::roof::reprofile(&gpu) {
-        Some(_) => println!("hardware roofline refreshed - see 'brain roofline' for the full picture"),
+        Some(_) => println!("hardware roofline refreshed - see 'brain perf roofline' for the full picture"),
         None => println!("hardware roofline: unavailable on this device/backend (--roof-probe off, or an unprobeable backend)"),
     }
     let mut priced = 0;
@@ -359,7 +363,7 @@ fn run_reprofile(locals: &[LocalModel]) {
             Err(e) => eprintln!("brain models list --reprofile: {} not priced: {e}", l.reference),
         }
     }
-    println!("priced {priced} local model(s) (bandwidth tier; `brain flops`/`brain models profile <ref>` for an exact number on one model)");
+    println!("priced {priced} local model(s) (bandwidth tier; `brain perf flops`/`brain models profile <ref>` for an exact number on one model)");
 }
 
 fn build_list_tree(locals: &[LocalModel], arch_filter: Option<&str>, local_only: bool) -> Vec<Node> {

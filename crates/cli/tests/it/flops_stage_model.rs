@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The two structural facts `brain flops --model flux2|ltxv` rests on.
+//! The two structural facts `brain perf flops --model flux2|ltxv` rests on.
 //!
 //! Swedish Embedded AB implements analytic performance models for GPU
 //! inference pipelines. If your team needs to know what a generation will cost

@@ -13,7 +13,7 @@ all the way to the GPU.
 
 This ledger tracks that workstream plus the container-completeness gaps found
 alongside it (split GGUF, missing ggml dtypes, embedded chat templates, a
-`brain gguf inspect` command). Full design rationale, the corrected premises,
+`brain models inspect` command). Full design rationale, the corrected premises,
 and the milestone-by-milestone plan live in the session that authored this
 ledger; this file is the terse, load-bearing status record per `AGENTS.md`'s
 own rule that this is where "work still outstanding on ONE model [or
@@ -1280,7 +1280,7 @@ this box yet.
       (proving the tokenizer fallback ran and succeeded) rather than the
       tokenizer-missing error path. `make test -p brain-cli --bins`: green
       (277 tests, 2 new).
-- [x] M22: `brain gguf inspect PATH [--json]`, in a new `crates/cli/src/
+- [x] M22: `brain models inspect PATH [--json]`, in a new `crates/cli/src/
       gguf_cli.rs` (`mod gguf_cli;` in `main.rs`, dispatched under a new
       `"gguf"` verb next to `"models"`). `PATH` is a real filesystem path
       opened directly via `checkpoint::gguf::MmapGguf::open` - deliberately

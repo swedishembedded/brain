@@ -72,7 +72,7 @@ Populate `testdata/` with `make testdata/fetch` (hard-links goldens and media fr
 a local mirror - `BRAIN_*_MIRROR` env vars, the ONE place a machine-specific path
 may appear in this repo). It does **not** download or copy the
 store's checkpoints: it reports each one present or absent and names the
-`brain fetch <vendor>/<repo>` that fetches it, because `$BRAIN_MODELS_DIR` is
+`brain pull <vendor>/<repo>` that fetches it, because `$BRAIN_MODELS_DIR` is
 usually on a different filesystem from any mirror, where the hard link fails and
 a fallback copy would silently duplicate tens of gigabytes.
 A test whose fixture is still absent **skips

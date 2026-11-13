@@ -21,6 +21,14 @@ USAGE
   brain perf run <scenario> [options]
       scenarios: latency | throughput | serve | sweep | longctx (see below)
 
+  brain perf flops --model <arch> [options]
+      Offline/online FLOP and int-OPS accounting for one forward/backward
+      pass, or a whole generation stage by stage (`brain perf flops --help`).
+
+  brain perf roofline [--kernels]
+      Measured compute capacity of every selected device and dtype, the
+      ceiling the other numbers are graded against (`brain perf roofline --help`).
+
   brain perf compare <a.json> <b.json> ...
       Leaderboard across result artifacts. Refuses to rank across artifact
       units, excludes runs whose correctness gate failed, and warns on every
@@ -236,6 +244,8 @@ pub fn run_perf(args: &[String]) {
         Some("run") => run(&args[1..]),
         Some("compare") => compare(&args[1..]),
         Some("gate") => gate(&args[1..]),
+        Some("flops") => crate::flops_cli::run_flops(&args[1..]),
+        Some("roofline") => std::process::exit(crate::roofline_cli::run_roofline(&args[1..])),
         Some("placement") => match crate::perf_engine::run_placement(&args[1..]) {
             Ok(art) => emit(&art, None, 0),
             Err(e) => {

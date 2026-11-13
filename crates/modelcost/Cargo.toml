@@ -3,7 +3,7 @@ name = "brain-modelcost"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The one shared model-pricing registry and on-disk cache: `brain flops` (a real device build, per architecture) and `brain models list`/`profile` (a fast cache read) are two front ends over this ONE engine, so pricing a model happens in exactly one place in the workspace instead of drifting two independent implementations."
+description = "The one shared model-pricing registry and on-disk cache: `brain perf flops` (a real device build, per architecture) and `brain models list`/`profile` (a fast cache read) are two front ends over this ONE engine, so pricing a model happens in exactly one place in the workspace instead of drifting two independent implementations."
 
 [lib]
 name = "modelcost"
