@@ -14,10 +14,11 @@ environment that wrote it.
 
 Run under a private session bus (weights via env):
 
-    BRAIN_FLUX1_DIR=/path/to/FLUX.1-dev tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus --pin flux1.root=/path/to/FLUX.1-dev" -- \
       python3 samples/python/imagegen/flux1/flux1_generate.py --prompt "a red fox in the snow"
 
-`BRAIN_FLUX1_DIR` is a released diffusers FLUX.1 checkpoint root
+The `flux1.root` pin (or a checkout in the model store) is a released
+diffusers FLUX.1 checkpoint root
 (`transformer/`, `vae/`, `text_encoder/`+`tokenizer/` for CLIP-L,
 `text_encoder_2/`+`tokenizer_2/` for T5-XXL).
 
@@ -68,7 +69,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():
-            skip(f"{MODEL!r} not served (set BRAIN_FLUX1_DIR)")
+            skip(f"{MODEL!r} not served (no FLUX.1 checkpoint in the model store; pin one with --pin flux1.root=DIR)")
 
         print(f"text2image {args.width}x{args.height} ({args.variant}):")
         t0 = time.monotonic()

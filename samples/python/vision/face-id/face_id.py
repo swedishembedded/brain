@@ -16,9 +16,9 @@ and then prints the full cosine similarity matrix over the embeddings. Because
 the vectors are already unit-norm, the cosine is a plain dot product - same
 faces land near 1.0, different faces near 0.
 
-    BRAIN_SCRFD_DIR=$BRAIN_TESTDATA/face/antelopev2 \\
-    BRAIN_ARCFACE_DIR=$BRAIN_TESTDATA/face/antelopev2 \\
-      tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus \\
+        --pin scrfd.weights=$BRAIN_TESTDATA/face/antelopev2/scrfd_10g_bnkps.onnx \\
+        --pin arcface.weights=$BRAIN_TESTDATA/face/antelopev2/glintr100.onnx" -- \
         python3 samples/python/vision/face-id/face_id.py a.ppm b.ppm c.ppm
 """
 from __future__ import annotations
@@ -60,7 +60,7 @@ def main() -> int:
         served = brain.models()
         missing = [m for m in ("brain/scrfd", "brain/arcface") if m not in served]
         if missing:
-            print(f"FATAL: {missing} not served (set BRAIN_SCRFD_DIR / BRAIN_ARCFACE_DIR)", file=sys.stderr)
+            print(f"FATAL: {missing} not served (put the antelopev2 release in the model store, or pin scrfd.weights / arcface.weights)", file=sys.stderr)
             return 2
 
         embeddings: list[list[float]] = []

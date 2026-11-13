@@ -9,8 +9,7 @@ convenience. `embed_image` runs the EVA-CLIP-L/336 vision tower on one image
 at a time.
 
 ```bash
-BRAIN_CLIP_DIR=/path/to/stable-diffusion-xl-base-1.0 \
-  tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --pin clip.towers=/path/to/stable-diffusion-xl-base-1.0" -- \
   python3 samples/python/embedding/clip-embed/clip_embed.py --text "a photo of a cat" \
     --text "a photo of a dog" --image photo.ppm
 ```
@@ -32,7 +31,8 @@ BRAIN_CLIP_DIR=/path/to/stable-diffusion-xl-base-1.0 \
 
 ## What it needs
 
-- `BRAIN_CLIP_DIR` pointed at a checkpoint root holding `text_encoder/`
+- A checkpoint root in the model store (or pinned with `--pin clip.towers=DIR`)
+  holding `text_encoder/`
   and/or `text_encoder_2/` (SDXL layout), `tokenizer/` and/or `tokenizer_2/`,
   and `EVA02_CLIP_L_336_psz14_s6B.pt` at the root (for `--image`).
 - `jeepney` - `pip install -e brain-py`.

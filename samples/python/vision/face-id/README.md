@@ -10,9 +10,8 @@ the embeddings - since the vectors are already unit-norm, cosine is a
 plain dot product.
 
 ```bash
-BRAIN_SCRFD_DIR=$BRAIN_TESTDATA/face/antelopev2 \
-BRAIN_ARCFACE_DIR=$BRAIN_TESTDATA/face/antelopev2 \
-tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --pin scrfd.weights=$BRAIN_TESTDATA/face/antelopev2 \
+    --pin arcface.weights=$BRAIN_TESTDATA/face/antelopev2" -- \
   python3 samples/python/vision/face-id/face_id.py a.ppm b.ppm c.ppm
 ```
 
@@ -33,8 +32,8 @@ goldens). Both face graphs are built for a single image, so their
 
 ## What it needs
 
-`BRAIN_SCRFD_DIR` and `BRAIN_ARCFACE_DIR`, both pointing at the antelopev2
-checkpoint directory. Inputs are binary PPM (P6) - brain's image
+The antelopev2 release in the model store (or both `scrfd.weights` and
+`arcface.weights` pinned to its directory). Inputs are binary PPM (P6) - brain's image
 convention; `brain_py.image.load_ppm`/`save_ppm` handle the conversion.
 
 ## Options
@@ -47,7 +46,7 @@ convention; `brain_py.image.load_ppm`/`save_ppm` handle the conversion.
 ## The CLI, for comparison
 
 ```bash
-BRAIN_SCRFD_DIR=… brain scrfd detect --in image=photo.ppm --json
-BRAIN_ARCFACE_DIR=… brain arcface embed --align false \
+brain scrfd detect --in image=photo.ppm --json
+brain arcface embed --align false \
     --in image=aligned112.ppm --out embedding=id.bin
 ```

@@ -4,8 +4,8 @@ Is the generated face actually THEIR face? Answer as a number, not an
 opinion. A direct CLI wrapper (no server) around `brain arcface embed`.
 
 ```bash
-BRAIN_ARCFACE_DIR=/path/to/antelopev2 \
-  samples/shell/imagegen/identity-score/identity_score.sh <ref-dir> <generated-dir>...
+samples/shell/imagegen/identity-score/identity_score.sh [--weights /path/to/antelopev2] \
+  <ref-dir> <generated-dir>...
 ```
 
 Prints, per generated folder, the mean ArcFace cosine between every image in
@@ -36,9 +36,9 @@ recognition itself is built on, so the number means what it says.
 
 ## What it needs
 
-`BRAIN_ARCFACE_DIR` and `BRAIN_SCRFD_DIR` (defaults to `BRAIN_ARCFACE_DIR`),
-both the directory holding the insightface antelopev2 `glintr100.onnx` and
-`scrfd_10g_bnkps.onnx`.
+The insightface antelopev2 release (`glintr100.onnx` beside
+`scrfd_10g_bnkps.onnx`) in the model store, or its directory named with
+`--weights DIR`.
 
 ## Notes
 

@@ -10,17 +10,19 @@ composes what, including the one real preprocessing gap (a plain resize
 where the reference uses face-parsing alignment brain does not have).
 
 ```bash
-export BRAIN_FLUX1_DIR=/path/to/FLUX.1-dev \
-       BRAIN_PULID_DIR=/path/to/pulid_flux_v0.9.1.safetensors \
-       BRAIN_ARCFACE_DIR=/path/to/antelopev2 \
-       BRAIN_CLIP_DIR=/path/to/eva-clip-dir
+# Each role resolves from the model store; these name them outright.
+ROLES="--flux1 /path/to/FLUX.1-dev --pulid /path/to/pulid_flux_v0.9.1.safetensors \
+  --arcface /path/to/antelopev2 --clip /path/to/eva-clip-dir --bisenet /path/to/bisenet-dir"
 
 # directly over the CLI (any image format brain decodes, not just PPM):
-brain pulid text2image --prompt "a photo of a person hiking in the mountains" \
+brain pulid text2image $ROLES --prompt "a photo of a person hiking in the mountains" \
   --in face_image=portrait.jpg --out image=out.png --precision int8
 
-# or over D-Bus, the same action:
-tools/dbus-session.sh --serve "--dbus" -- \
+# or over D-Bus, the same action (pins are the server-side spelling):
+tools/dbus-session.sh --serve "--dbus --pin pulid.flux1=/path/to/FLUX.1-dev \
+    --pin pulid.pulid=/path/to/pulid_flux_v0.9.1.safetensors \
+    --pin pulid.arcface=/path/to/antelopev2 --pin pulid.clip=/path/to/eva-clip-dir \
+    --pin pulid.bisenet=/path/to/bisenet-dir" -- \
   python3 samples/python/imagegen/pulid/pulid_generate.py \
     --prompt "a photo of a person hiking in the mountains" --face portrait.ppm
 ```
@@ -37,9 +39,10 @@ tools/dbus-session.sh --serve "--dbus" -- \
 
 ## What it needs
 
-`BRAIN_FLUX1_DIR`, plus `BRAIN_PULID_DIR` (the PuLID adapter
-`.safetensors`), `BRAIN_ARCFACE_DIR` (antelopev2 directory), and
-`BRAIN_CLIP_DIR` (only needs to hold the EVA-CLIP-L/336 file,
+Five roles, each from the model store or named outright: `flux1` (the FLUX.1
+root), `pulid` (the PuLID adapter `.safetensors`), `arcface` (the antelopev2
+directory), `bisenet` (a directory holding `parsing_bisenet.safetensors`) and
+`clip` (only needs to hold the EVA-CLIP-L/336 file,
 `EVA02_CLIP_L_336_psz14_s6B.pt`, at its root - the same convention
 `clip::caps` uses, not the CLIP-L/OpenCLIP-bigG text towers).
 

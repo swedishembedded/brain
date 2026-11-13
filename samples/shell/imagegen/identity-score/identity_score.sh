@@ -5,7 +5,7 @@
 #
 # Is the generated face actually THEIR face? Answer as a number.
 #
-#   samples/shell/imagegen/identity-score/identity_score.sh <ref-dir> <generated-dir>...
+#   samples/shell/imagegen/identity-score/identity_score.sh [--weights DIR] <ref-dir> <generated-dir>...
 #
 # Prints, per generated folder, the mean ArcFace cosine between every image in
 # it and the reference photographs -- the same 512-d identity embedding face
@@ -32,23 +32,27 @@
 # context around the head -- so generate head-and-shoulders framing if you
 # intend to measure it. Undetectable images are reported, never scored as 0.
 #
-# Weights: BRAIN_ARCFACE_DIR and BRAIN_SCRFD_DIR, both the directory holding
-# the insightface antelopev2 `glintr100.onnx` and `scrfd_10g_bnkps.onnx`.
+# Weights: the insightface antelopev2 release (`glintr100.onnx` beside
+# `scrfd_10g_bnkps.onnx`), from the model store, or the directory holding both
+# named with --weights DIR.
 #
-# Optional, all env: BRAIN.
+# Optional, all env: BRAIN (the brain binary).
 
 set -euo pipefail
 
-[ "$#" -ge 2 ] || { echo "usage: identity_score.sh <ref-dir> <generated-dir>..." >&2; exit 2; }
-: "${BRAIN_ARCFACE_DIR:?set BRAIN_ARCFACE_DIR to the antelopev2 directory}"
-: "${BRAIN_SCRFD_DIR:=$BRAIN_ARCFACE_DIR}"
-export BRAIN_SCRFD_DIR
+WEIGHTS=""
+if [ "${1:-}" = "--weights" ]; then
+    WEIGHTS="${2:?--weights needs the antelopev2 directory}"
+    shift 2
+fi
+[ "$#" -ge 2 ] || { echo "usage: identity_score.sh [--weights DIR] <ref-dir> <generated-dir>..." >&2; exit 2; }
 
-BRAIN="${BRAIN:-./target/release/brain}" python3 - "$@" <<'PY'
+BRAIN="${BRAIN:-./target/release/brain}" WEIGHTS="$WEIGHTS" python3 - "$@" <<'PY'
 import glob, os, subprocess, sys, tempfile
 import numpy as np
 
 BRAIN = os.environ["BRAIN"]
+WEIGHTS = ["--weights", os.environ["WEIGHTS"]] if os.environ["WEIGHTS"] else []
 IMG = (".jpg", ".jpeg", ".png", ".ppm", ".webp", ".bmp")
 
 
@@ -60,7 +64,7 @@ def embed(path, tmp):
     """One L2-normalised 512-d ArcFace vector, or None if no face is found."""
     out = os.path.join(tmp, os.path.abspath(path).replace(os.sep, "_") + ".bin")
     subprocess.run(
-        [BRAIN, "arcface", "embed", "--in", f"image={path}", "--out", f"embedding={out}"],
+        [BRAIN, "arcface", "embed", *WEIGHTS, "--in", f"image={path}", "--out", f"embedding={out}"],
         capture_output=True, text=True,
     )
     if not os.path.exists(out):

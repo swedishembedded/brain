@@ -10,9 +10,10 @@ text tower (`clip::caps::Session::embed_text_batch`) - the point of
 several strings for convenience. `embed_image` runs the EVA-CLIP-L/336
 vision tower on one image at a time.
 
-Run under a private session bus (weights via env):
+Run under a private session bus (the checkpoint resolves from the model store,
+or is pinned as below):
 
-    BRAIN_CLIP_DIR=<ckpt-root> tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus --pin clip.towers=<ckpt-root>" -- \
       python3 samples/python/embedding/clip-embed/clip_embed.py --text "a photo of a cat" \\
         --text "a photo of a dog" --image photo.ppm
 
@@ -93,7 +94,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():
-            skip(f"{MODEL!r} not served (set BRAIN_CLIP_DIR)")
+            skip(f"{MODEL!r} not served (no CLIP checkpoint in the model store; pin one with --pin clip.towers=DIR)")
 
         if args.text:
             embed_text(brain, args.text, args.tower)

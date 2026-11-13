@@ -11,17 +11,18 @@ image stream at `id_weight` strength. See
 the one real, documented preprocessing gap (a plain resize stands in for the
 reference's RetinaFace+BiSeNet face crop ahead of EVA-CLIP).
 
-Run under a private session bus (weights via env):
+Run under a private session bus (each role resolves from the model store, or
+is pinned as below):
 
-    BRAIN_FLUX1_DIR=/path/to/FLUX.1-dev \\
-    BRAIN_PULID_DIR=/path/to/pulid_flux_v0.9.1.safetensors \\
-    BRAIN_ARCFACE_DIR=/path/to/antelopev2 \\
-    BRAIN_CLIP_DIR=/path/to/eva-clip-dir \\
-    tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus --pin pulid.flux1=/path/to/FLUX.1-dev \\
+        --pin pulid.pulid=/path/to/pulid_flux_v0.9.1.safetensors \\
+        --pin pulid.arcface=/path/to/antelopev2/glintr100.onnx \\
+        --pin pulid.clip=/path/to/eva-clip-dir \\
+        --pin pulid.bisenet=/path/to/bisenet-dir" -- \
       python3 samples/python/imagegen/pulid/pulid_generate.py \\
         --prompt "a photo of a person hiking in the mountains" --face portrait.ppm
 
-`BRAIN_CLIP_DIR` only needs to hold the EVA-CLIP-L/336 file
+The `clip` role only needs to hold the EVA-CLIP-L/336 file
 (`EVA02_CLIP_L_336_psz14_s6B.pt`) at its root - the same convention
 `clip::caps` uses - not the CLIP-L/OpenCLIP-bigG text towers, which this
 action does not need.
@@ -78,7 +79,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():
-            skip(f"{MODEL!r} not served (set BRAIN_FLUX1_DIR + BRAIN_PULID_DIR + BRAIN_ARCFACE_DIR + BRAIN_CLIP_DIR)")
+            skip(f"{MODEL!r} not served (pin its flux1, pulid, arcface, clip and bisenet roles with --pin pulid.ROLE=PATH)")
 
         print(f"text2image {args.width}x{args.height} ({args.variant}), face {fw}x{fh}, id_weight={args.id_weight}:")
         t0 = time.monotonic()

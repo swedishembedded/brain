@@ -10,8 +10,7 @@ ignores it. Like SDXL, `text2image` here is a plain `Run` call - no per-step
 progress hook yet.
 
 ```bash
-BRAIN_FLUX1_DIR=/path/to/FLUX.1-dev \
-tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --pin flux1.root=/path/to/FLUX.1-dev" -- \
   python3 samples/python/imagegen/flux1/flux1_generate.py --prompt "a red fox in the snow"
 ```
 
@@ -25,7 +24,8 @@ tools/dbus-session.sh --serve "--dbus" -- \
 
 ## What it needs
 
-`BRAIN_FLUX1_DIR` is a released diffusers FLUX.1 checkpoint root
+A released diffusers FLUX.1 checkpoint root in the model store (or pinned with
+`--pin flux1.root=DIR`)
 (`transformer/`, `vae/`, `text_encoder/`+`tokenizer/` for CLIP-L,
 `text_encoder_2/`+`tokenizer_2/` for T5-XXL).
 
