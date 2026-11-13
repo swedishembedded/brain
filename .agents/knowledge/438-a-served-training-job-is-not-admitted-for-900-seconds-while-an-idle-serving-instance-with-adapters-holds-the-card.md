@@ -36,3 +36,9 @@ passed), green after. The fix extracts the read-only victim planning of `evict_m
 named. A pinned resident (a lane running on it) still blocks the job, and a busy card is not offered.
 
 Workaround before the fix: restart the server before a training job, or train on a card that serves no adapters.
+
+Verified live 2026-11-13 (lane rollout): on a Qwen3.8-27B-FP8 server on one GH200 with `--training --serve-adapters` (three rank-32
+adapters on all linears hot-loaded, about 600 requests answered across them, then idle) a `brain/train` job (2 steps, rank 16,
+bf16 base) was admitted at once (stage frames within 20 s, the card handed over by evicting the idle instance), trained and
+succeeded in 137 s; the next request rebuilt the serving instance (31 s). The stall does not reproduce.
+

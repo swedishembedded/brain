@@ -130,3 +130,7 @@ token, the same prompts and sampler on both paths, the card to itself (`qwen_ben
 The serving path is 153 times faster for the same group. The own sampler's per-token cost is the whole-sequence
 forward plus reading every position's logits back and sorting the full vocabulary on the host.
 
+Sampled decode on the serving path is itself launch- and top-k-bound: the card is busy 31 % of the time and 31 % of the
+kernel time is the top-64 extraction (64 rounds of three launches a step); greedy is 1005 tok/s against 615 sampled.
+Knowledge 443. Open: a single-pass device top-k kernel.
+
