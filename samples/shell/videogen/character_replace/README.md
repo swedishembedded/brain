@@ -23,9 +23,13 @@ beside it in `out/character_replace/street-replaced.mp4.work/`.
 1. **Track** - SAM 2.1 follows the clicked person through the clip.
 2. **Paint stills** - FLUX.2 repaints the person's silhouette with the
    character from the sheet on frame 0 and on guide frames (every 40th and
-   the last), keeping the rest of each frame. An edit whose figure does not
-   overlap the person enough is retried with another seed; a guide that
-   never does is dropped and reported.
+   the last), keeping the rest of each frame. Frame 0 is painted against
+   the sheet; every guide is painted against the sheet *and* frame 0's
+   accepted still, cut to the head, hair and clothes, so the character keeps the
+   same face, hair and clothes from the start of the clip to its end
+   instead of drifting into another depiction. An edit whose figure does
+   not overlap the person enough is retried with another seed; a guide
+   that never does is dropped and reported.
 3. **Regenerate** - LTX-2.5 masked video-to-video redraws only the person's
    region, grown to whole latent tokens, with frame 0's figure held and the
    other stills as keyframe guides at half strength.
@@ -225,6 +229,7 @@ parameter here. For `run`, from `brain ltxv replace --help`:
 | `<out>.json` | the run record: every input, setting and seed |
 | `<out>.work/actor/` | the person's track (a mask sequence) |
 | `<out>.work/still_<k>.png` | the painted stills; `edit_<k>_<seed>.png` every attempt, `canvas_<k>.png` / `repaint_<k>.png` what each edit was given |
+| `<out>.work/appearance.png` | frame 0's character, cut to the head, hair and clothes: the appearance reference every guide still is painted against |
 | `<out>.work/region/` | the regenerated region per frame (a mask sequence) |
 | `<out>.work/input.mp4` | the clip the video pass sees: conformed, with the painted frame 0 |
 | `<out>.work/generated.mp4` | the video pass before compositing |

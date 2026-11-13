@@ -20,10 +20,14 @@
 //!    take the actor's place, size and pose instead of being staged somewhere
 //!    else. Where the frame cuts the actor off, the canvas extends below it,
 //!    so the model can draw a whole body at the actor's scale rather than
-//!    shrinking it to fit. SAM 2 segments the new figure on the edit,
-//!    and the edit is composited back over the source inside the union of
-//!    the two silhouettes. Frame 0 is always one of them; the others are the
-//!    guide frames.
+//!    shrinking it to fit. Frame 0 is painted against the sheet alone; every
+//!    guide frame is painted against the sheet AND frame 0's accepted still,
+//!    cut to the head, hair and clothes, so the character's face, hair and clothes
+//!    are the same at the clip's last frame as at its first instead of
+//!    drifting into another depiction (a different outfit, or none). SAM 2
+//!    segments the new figure on the edit, and the edit is composited back
+//!    over the source inside the union of the two silhouettes. Frame 0 is
+//!    always one of them; the others are the guide frames.
 //! 3. **Regenerate the actor's region.** LTX-2.5 masked video-to-video
 //!    ([`ltxv::pipeline::generate_masked`]) holds every latent token outside
 //!    the region and gets the edited stills after frame 0 as keyframe
@@ -101,7 +105,10 @@ USAGE:
 
 Guides:
   --guide-frames <list>   the frames, besides frame 0, painted as keyframe
-                          guides: comma-separated, or 'none'
+                          guides: comma-separated, or 'none'. Each guide is
+                          painted against the character as frame 0 shows
+                          them, so the face, hair and clothes stay the same
+                          to the last frame
   --guide-every <n>       without --guide-frames: a guide every n frames, and
                           the last frame (default 40)
   --guide-strength <s>    how hard the video pass holds each guide, 0..1
@@ -497,12 +504,19 @@ pub(crate) fn replace(args: &[String]) -> Result<(), String> {
     let identity = Identity::load(&req, &tracker.gpu)?;
     let editor = Editor { req: &req, resume: &resume, tracker: &tracker, identity, ctx: &ctx, w, h };
     let mut stills: Vec<Still> = Vec::new();
+    // Frame 0's character, carried into every guide as an appearance
+    // reference: without it a guide's edit can come back in different
+    // clothes, and the video pass then dissolves the character into them.
+    let mut appearance: Option<Appearance> = None;
     for &k in std::iter::once(&0).chain(&guides) {
         if k > 0 && !actor[k].contains(&true) {
             eprintln!("ltxv replace: frame {k} dropped as a guide: the actor is not visible on it");
             continue;
         }
-        let still = editor.best_still(k, &source.frames[k], &actor[k])?;
+        let still = editor.best_still(k, &source.frames[k], &actor[k], appearance.as_ref())?;
+        if k == 0 {
+            appearance = Some(editor.appearance_reference(&still, &actor[0])?);
+        }
         let iou = still.iou;
         let (attempts, min) = (req.tuning.edit_attempts, req.tuning.min_overlap);
         if k == 0 || iou >= min {
@@ -697,6 +711,20 @@ fn guide_frames(asked: Option<&[usize]>, every: usize, n: usize) -> Result<Vec<u
     Ok(sorted)
 }
 
+/// The still recipe: how a still is shaped outside the inputs its key records
+/// (the composite's blend, the figure's segmentation). Bump it whenever that
+/// recipe changes, so a resumed run repaints instead of reusing a still the
+/// old recipe made.
+const STILL_RECIPE: u32 = 2;
+
+/// Frame 0's character as this clip shows them: the head, hair and clothes
+/// crop every guide still is painted against, and that crop's digest - what a
+/// resumed run keys the guides by.
+struct Appearance {
+    path: PathBuf,
+    digest: u64,
+}
+
 /// A source frame with the character painted in over the actor.
 struct Still {
     frame: usize,
@@ -786,8 +814,14 @@ impl Editor<'_> {
     /// kept by [`pick_still`]: with an identity model, every attempt is made
     /// and the covering edit whose face is closest to the sheet's wins;
     /// without one, the first covering edit. The winner is `still_<k>.png`.
-    fn best_still(&self, k: usize, src: &[u8], actor: &[bool]) -> Result<Still, String> {
-        let (step, key) = (format!("still_{k}"), self.still_key(k, src, actor));
+    ///
+    /// `appearance` is frame 0's accepted still, cut to the character's head
+    /// and torso ([`appearance_box`]), and given to every later edit as an
+    /// extra reference; it carries who the character is as this clip already
+    /// shows them, so a guide cannot come back in different clothes from the
+    /// frame the video starts on.
+    fn best_still(&self, k: usize, src: &[u8], actor: &[bool], appearance: Option<&Appearance>) -> Result<Still, String> {
+        let (step, key) = (format!("still_{k}"), self.still_key(k, src, actor, appearance.map(|a| a.digest)));
         if self.resume.holds(&step, &key) {
             if let Ok(still) = self.load_still(k, actor) {
                 eprintln!("ltxv replace: frame {k} reused from {}, figure/actor overlap {:.2}", self.req.work.display(), still.iou);
@@ -798,7 +832,7 @@ impl Editor<'_> {
         let mut stills: Vec<(Still, Option<f32>)> = Vec::new();
         for attempt in 0..t.edit_attempts {
             let seed = self.req.seed.wrapping_add(k as u64 * t.edit_attempts + attempt);
-            let still = self.edit(k, src, actor, seed)?;
+            let still = self.edit(k, src, actor, seed, appearance)?;
             let face = self.identity.as_ref().map(|id| id.similarity(&still)).transpose()?.flatten();
             let face_note = match (&self.identity, face) {
                 (None, _) => String::new(),
@@ -826,11 +860,13 @@ impl Editor<'_> {
     /// Everything the winning still of frame `k` depends on. The source
     /// frame and the actor's mask are named by their pixels, so a changed
     /// clip, click or track gives another key without the key knowing how
-    /// the track was made.
-    fn still_key(&self, k: usize, src: &[u8], actor: &[bool]) -> String {
+    /// the track was made. A guide also names the appearance reference it
+    /// was painted against, so repainting frame 0 repaints the guides.
+    fn still_key(&self, k: usize, src: &[u8], actor: &[bool], appearance: Option<u64>) -> String {
         let r = self.req;
         serde_json::json!({
-            "frame": k, "source": digest(src.iter().copied()), "actor": digest_mask(actor), "character": stamp(&r.character),
+            "frame": k, "recipe": STILL_RECIPE, "source": digest(src.iter().copied()), "actor": digest_mask(actor), "character": stamp(&r.character),
+            "appearance": appearance,
             "edit_prompt": r.edit_prompt, "seed": r.seed, "editor": r.flux2_roles, "edit_adapters": r.edit_adapter_flags,
             "no_identity": r.no_identity, "identity": r.arcface_overrides, "tuning": r.tuning.edit_record(),
         })
@@ -847,7 +883,7 @@ impl Editor<'_> {
         Ok(Still { frame: k, iou: iou(&figure, actor), image, figure })
     }
 
-    fn edit(&self, k: usize, src: &[u8], actor: &[bool], seed: u64) -> Result<Still, String> {
+    fn edit(&self, k: usize, src: &[u8], actor: &[bool], seed: u64, appearance: Option<&Appearance>) -> Result<Still, String> {
         let (w, h, ctx, work) = (self.w, self.h, self.ctx, &self.req.work);
         let bbox = bounding_box(actor, w, h).ok_or_else(|| format!("the actor is not visible on frame {k}: nothing to paint the character over (click them on a frame they are in: --prompt-frame)"))?;
         let canvas = canvas_around(bbox, body_below_frame(actor, bbox, w, h, self.req.tuning.body_ratio), w, h);
@@ -868,9 +904,9 @@ impl Editor<'_> {
         imaging::save_png(&repaint_path, &Rgb8::new(ew, eh, resample(ctx, &repaint_px, cw, ch, ew as usize, eh as usize, Filter::Nearest))?)?;
         let edit_path = work.join(format!("edit_{k}_{seed}.png"));
         let mut argv: Vec<String> = [self.req.flux2_roles.clone(), self.req.edit_adapter_flags.clone()].concat();
+        argv.extend(edit_refs(&canvas_path, &self.req.character, appearance.map(|a| a.path.as_path()), self.req.tuning.edit_long_side));
         argv.extend(
             [
-                "--ref", &canvas_path.to_string_lossy(), "--ref", &self.req.character, "--ref-size", &self.req.tuning.edit_long_side.to_string(),
                 "--mask", &repaint_path.to_string_lossy(), "--width", &ew.to_string(), "--height", &eh.to_string(),
                 "--seed", &seed.to_string(), "--prompt", &self.req.edit_prompt, "--out", &edit_path.to_string_lossy(),
             ]
@@ -881,24 +917,49 @@ impl Editor<'_> {
         let mut painted = src.to_vec();
         paste(&mut painted, w, Box2 { h: visible, ..canvas }, &edited[..visible * cw * 3]);
 
-        // The new figure: SAM 2 clicked at spots spread over the actor's
-        // silhouette - the character was asked to stand there. A click that
-        // lands on background picks the street, not the figure, so a pick
-        // much larger than the actor is dropped.
+        // The new figure: SAM 2 asked at spots spread over the actor's
+        // silhouette - the character was asked to stand there - in ONE
+        // multi-point call. Ten single-point calls unioned let the clicks that
+        // land on the bed each come back as a large mask under the size guard,
+        // and their union then covered the frame (a 2x-the-actor figure whose
+        // low IoU drops an otherwise good still). The same clicks asked
+        // together segment the character coherently. A mask much larger than
+        // the actor is still dropped: that is a click that picked the set
+        // instead of the character.
         let painted_unit: Vec<f32> = painted.iter().map(|&v| v as f32 / 255.0).collect();
         let actor_px = count(actor);
-        let mut figure = vec![false; w * h];
-        for p in spread_points(actor, w, h) {
-            let t = crate::sam2_cli::track_frames(self.tracker, std::slice::from_ref(&painted_unit), w as u32, h as u32, 0, &[(p.0, p.1, 1.0)], 0)?;
+        let points: Vec<(f32, f32, f32)> = spread_points(actor, w, h).into_iter().map(|(x, y)| (x, y, 1.0)).collect();
+        let figure: Vec<bool> = if points.is_empty() {
+            vec![false; w * h]
+        } else {
+            let t = crate::sam2_cli::track_frames(self.tracker, std::slice::from_ref(&painted_unit), w as u32, h as u32, 0, &points, 0)?;
             let pick: Vec<bool> = t[0].logits.iter().map(|&l| l > 0.0).collect();
             if t[0].object_score > 0.0 && count(&pick) <= 2 * actor_px {
-                figure.iter_mut().zip(&pick).for_each(|(f, &p)| *f |= p);
+                pick
+            } else {
+                vec![false; w * h]
             }
-        }
+        };
         let joined: Vec<bool> = actor.iter().zip(&figure).map(|(&a, &f)| a || f).collect();
         let alpha = feather(ctx, &grow(ctx, &joined, w, h, self.req.tuning.paste_grow_px), w, h, self.req.tuning.feather_px);
         let image = Rgb8::new(w as u32, h as u32, blend(&painted, src, &alpha))?;
         Ok(Still { frame: k, image, iou: iou(&figure, actor), figure })
+    }
+
+    /// The appearance reference every guide still after frame 0 is painted
+    /// against: frame 0's accepted still, cut to the character's head, hair
+    /// and clothes ([`appearance_box`]). Saved in the work directory because
+    /// the edit command names it as a file; keyed by the crop's own pixels,
+    /// not the file it lands in, so re-saving the same crop does not
+    /// invalidate the guides a resumed run would reuse, while a changed crop
+    /// or a changed frame 0 does.
+    fn appearance_reference(&self, first: &Still, actor0: &[bool]) -> Result<Appearance, String> {
+        let b = appearance_box(actor0, self.w, self.h)
+            .ok_or("the actor is not visible on frame 0: there is no appearance to carry into the guides")?;
+        let crop = cut(&first.image.px, self.w, self.h, b);
+        let path = self.req.work.join("appearance.png");
+        imaging::save_png(&path, &Rgb8::new(b.w as u32, b.h as u32, crop.clone())?)?;
+        Ok(Appearance { path, digest: digest(crop.iter().copied()) })
     }
 }
 
@@ -979,7 +1040,41 @@ fn bounding_box(m: &[bool], w: usize, h: usize) -> Option<Box2> {
         let (x, y) = (i % w, i / w);
         (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
     }
-    (x1 > x0).then_some(Box2 { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+    // Lazy: an empty mask leaves y0 at `h` and y1 at 0, and `then_some`
+    // would still evaluate the subtraction that overflows.
+    (x1 > x0).then(|| Box2 { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+}
+
+/// The part of a still that carries who the character is rather than where
+/// they are: the top of the actor's silhouette (head, hair and the shoulders
+/// of their clothes), tightened to the mask in that band and with a tenth of
+/// its size as margin, inside the frame. Every guide still is painted with
+/// this beside the character sheet, so the face, hair and clothes are the
+/// frame's own from the first still to the last. The band stays near the head
+/// ON PURPOSE: a crop that reaches down the body carries the first frame's
+/// pose with it, and the guide then takes that pose instead of its source
+/// frame's, which moves its figure off the actor. An actor who spans
+/// the whole frame gives the whole frame, which is still an appearance
+/// reference.
+fn appearance_box(actor: &[bool], w: usize, h: usize) -> Option<Box2> {
+    let b = bounding_box(actor, w, h)?;
+    let band_end = (b.y + ((b.h as f32 * 0.35).round() as usize).max(1)).min(h);
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for y in b.y..band_end {
+        for (dx, &on) in actor[y * w + b.x..y * w + b.x + b.w].iter().enumerate() {
+            if on {
+                let x = b.x + dx;
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+    }
+    if x1 <= x0 {
+        return None;
+    }
+    let margin = (x1 - x0).max(y1 - y0) / 10;
+    let (x0, y0) = (x0.saturating_sub(margin), y0.saturating_sub(margin));
+    let (x1, y1) = ((x1 + margin).min(w), (y1 + margin).min(h));
+    Some(Box2 { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
 }
 
 /// How many rows of body the bottom edge of the frame cuts off `actor`
@@ -1019,6 +1114,22 @@ fn edit_size(cw: usize, ch: usize, long_side: u32) -> (u32, u32) {
     let long = cw.max(ch) as f32;
     let side = |s: usize| ((s as f32 * long_side as f32 / long / 16.0).round().max(1.0) * 16.0) as u32;
     (side(cw), side(ch))
+}
+
+/// The references an edit gives FLUX.2, in order: the canvas it repaints, the
+/// character sheet, and - for a guide - the character as frame 0 shows them
+/// ([`Appearance`]). The appearance comes last so the sheet stays the second
+/// image the default edit prompt names.
+fn edit_refs(canvas: &Path, character: &str, appearance: Option<&Path>, long_side: u32) -> Vec<String> {
+    let mut refs = vec![
+        "--ref".to_string(), canvas.to_string_lossy().into_owned(),
+        "--ref".to_string(), character.to_string(),
+    ];
+    if let Some(appearance) = appearance {
+        refs.extend(["--ref".to_string(), appearance.to_string_lossy().into_owned()]);
+    }
+    refs.extend(["--ref-size".to_string(), long_side.to_string()]);
+    refs
 }
 
 /// The pixels of `b`; rows below the `h`-row frame are mid grey.
@@ -1166,6 +1277,44 @@ mod tests {
             }
         }
         assert_eq!(edit_size(300, 400, 768), (576, 768));
+    }
+
+    /// The appearance reference is the top of the actor's silhouette - head,
+    /// hair and clothes, with a tenth of its size as margin - and not the
+    /// legs, whose pose changes from guide to guide. It stays inside the
+    /// frame, and an actor who is not there has no appearance to carry.
+    #[test]
+    fn the_appearance_reference_is_the_head_hair_and_clothes_band() {
+        let (w, h) = (100usize, 100usize);
+        let actor: Vec<bool> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                ((20..40).contains(&y) && (40..60).contains(&x)) || ((40..95).contains(&y) && (10..90).contains(&x))
+            })
+            .collect();
+        let b = appearance_box(&actor, w, h).unwrap();
+        let full = bounding_box(&actor, w, h).unwrap();
+        assert!(b.y <= 20 && b.y + b.h < full.y + full.h, "the head and clothes, not the legs: {b:?} of {full:?}");
+        assert!(b.w >= 20 && b.h >= 20, "the band is the character's own: {b:?}");
+        assert!(b.x + b.w <= w && b.y + b.h <= h, "{b:?} leaves the frame");
+        let edge = appearance_box(&vec![true; w * h], w, h).unwrap();
+        assert_eq!((edge.x, edge.y, edge.x + edge.w), (0, 0, w), "an actor on every edge clamps to the frame: {edge:?}");
+        assert_eq!(appearance_box(&vec![false; w * h], w, h), None, "no actor, no appearance");
+    }
+
+    /// An edit names the canvas first and the sheet second; a guide adds frame
+    /// 0's character as a third reference, so the whole clip keeps that face,
+    /// hair and clothes.
+    #[test]
+    fn a_guide_edit_is_given_frame_0s_appearance_as_a_third_reference() {
+        let canvas = Path::new("canvas_112.png");
+        let refs = |appearance| edit_refs(canvas, "sheet.png", appearance, 768).join(" ");
+        assert_eq!(refs(None), "--ref canvas_112.png --ref sheet.png --ref-size 768");
+        assert_eq!(
+            refs(Some(Path::new("appearance.png"))),
+            "--ref canvas_112.png --ref sheet.png --ref appearance.png --ref-size 768",
+            "frame 0's accepted still is the third reference, after the sheet the prompt names"
+        );
     }
 
     /// How much body the bottom edge cuts off is the silhouette's expected
