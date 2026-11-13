@@ -1845,8 +1845,10 @@ dependencies = [
 name = "brain-invoke"
 version = "5.1.0"
 dependencies = [
+ "brain-appopts",
  "brain-audio",
  "brain-capability",
+ "brain-gpu-core",
  "brain-imaging",
  "brain-loader",
  "brain-modelstore",

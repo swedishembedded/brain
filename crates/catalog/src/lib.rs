@@ -974,13 +974,13 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: resident_forecast::kronos_manifest,
             provider: |_assembly: &Assembly| Err("kronos has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER set".to_string()),
-            spec: None,
+            spec: Some(("kronos", &kronos::spec::KronosSpec)),
             resident: resident!(resident_forecast::KronosResident::from_env),
         },
         ModelEntry {
             manifest: resident_forecast::timesfm3_manifest,
             provider: |_assembly: &Assembly| Err("timesfm3 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_TIMESFM3 set, or the resolver (`brain timesfm3 predict ...`)".to_string()),
-            spec: None,
+            spec: Some(("timesfm3", &timesfm3::spec::Timesfm3Spec)),
             resident: resident!(resident_forecast::Timesfm3Resident::from_env),
         },
         // 3D Gaussian Splatting (render/fit): needs no weights at all, the scene

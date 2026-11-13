@@ -20,10 +20,13 @@
 //!   files (PNG/PPM, WAV, a video container carrying the clip's own sound).
 //! - [`resolve`] finds the weights in the model store, taking a `--<role>
 //!   PATH` override per checkpoint role.
-//! - [`run`] does all of it for one action and reports the outcome.
+//! - [`run_model`] does all of it for one model: help from the static
+//!   manifest, weights from the store, then the action; [`run_with`] runs one
+//!   action on a provider already built and hands its outcome back, for a
+//!   program that chains actions.
 //!
-//! `brain do <model> <action>` is [`run`] over the served catalog; a
-//! per-model sample is [`run`] over one model's provider, plus whatever typed
+//! `brain <model> <action>` is [`run_model`] over the served catalog; a
+//! per-model sample is [`run_model`] over one model's provider, plus whatever
 //! workflow it builds on top.
 //!
 //! Swedish Embedded AB implements front ends that expose a model's whole
@@ -33,7 +36,9 @@
 
 pub mod args;
 pub mod media;
+mod model;
 pub mod resolve;
 mod run;
 
-pub use run::{run, run_with, Program};
+pub use model::{main, run_model, Model, GLOBAL_HELP};
+pub use run::{run_with, Program};

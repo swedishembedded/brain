@@ -33,13 +33,6 @@ pub fn role_overrides(spec: &dyn ArchSpec, args: &[String]) -> (BTreeMap<String,
     (overrides, remaining)
 }
 
-/// Resolve `arch`'s weights from the model store, under `overrides`. The
-/// error is the resolver's own report (what is missing, or which candidates
-/// tie) with the exit code it asks for.
-pub fn assembly(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Assembly, (String, i32)> {
-    loader::resolver::try_resolve(loader::model_dir::resolve(None).as_deref(), arch, spec, overrides).map_err(|e| (e.message().to_string(), e.exit_code()))
-}
-
 /// The assembly of a model that reads no weights through the resolver.
 pub fn empty_assembly() -> Assembly {
     Assembly { id: String::new(), arch: String::new(), variant: None, roles: Default::default(), provenance: Vec::new() }

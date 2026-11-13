@@ -10,8 +10,10 @@ name = "invoke"
 path = "src/lib.rs"
 
 [dependencies]
+brain-appopts.workspace = true
 brain-audio.workspace = true
 brain-capability.workspace = true
+brain-gpu-core.workspace = true
 brain-imaging.workspace = true
 brain-loader.workspace = true
 brain-modelstore.workspace = true

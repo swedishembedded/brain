@@ -15,25 +15,11 @@ pub struct Program<'a> {
     pub name: &'a str,
 }
 
-/// Run the action `argv[0]` of `provider` with the flags after it, write the
-/// outputs it was asked for and print its scalar outputs. Returns the
-/// process exit code: 0 on success, 2 for a malformed command line, 1 for a
-/// failed run. `-h`/`--help` (or no action) lists the actions.
-pub fn run(program: &Program, provider: Arc<dyn Provider>, argv: &[String]) -> i32 {
-    let manifest = provider.manifest();
-    let Some(action) = argv.first().filter(|a| !a.starts_with('-')) else {
-        print!("{}", usage(program, &manifest));
-        return if argv.iter().any(|a| a == "-h" || a == "--help") { 0 } else { 2 };
-    };
-    match run_with(program, provider, action, &argv[1..]) {
-        Ok(_) => 0,
-        Err(code) => code,
-    }
-}
-
-/// [`run`] for a named `action`, returning its [`Outcome`] to a caller that
-/// goes on to use it (a sample chaining actions). The error is the exit code;
-/// its message is already on stderr.
+/// Run `action` of `provider` with `flags`, write the outputs they ask for and
+/// print the scalar outputs; the [`Outcome`] comes back for a caller that goes
+/// on to use it (a sample chaining actions). The error is the exit code (2 for
+/// a malformed command line, 1 for a failed run); its message is already on
+/// stderr.
 pub fn run_with(program: &Program, provider: Arc<dyn Provider>, action: &str, flags: &[String]) -> Result<Outcome, i32> {
     let manifest = provider.manifest();
     let Some(act) = provider.action(action) else {
@@ -41,19 +27,7 @@ pub fn run_with(program: &Program, provider: Arc<dyn Provider>, action: &str, fl
         return Err(2);
     };
     let spec = act.spec();
-    let cmd = args::command(&format!("{} {action}", program.name), &spec);
-    let matches = match cmd.try_get_matches_from(flags) {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = e.print();
-            let help = matches!(e.kind(), clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion);
-            return Err(if help { 0 } else { 2 });
-        }
-    };
-    let parsed = args::parse(&spec, &matches).map_err(|e| {
-        eprintln!("{}: {e}", program.name);
-        2
-    })?;
+    let parsed = args::check(&format!("{} {action}", program.name), &spec, flags)?;
     let mut inv = parsed.invocation;
     for (name, path) in &parsed.inputs {
         let blob = media::load_blob(&spec, name, path).map_err(|e| {

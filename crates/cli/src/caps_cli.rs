@@ -22,9 +22,8 @@
 //! cannot drift apart (see that module's docs).
 
 use std::io::IsTerminal;
-use std::sync::Arc;
 
-use capability::{Manifest, ParamType, Provider};
+use capability::{Manifest, ParamType};
 use serde_json::Value;
 
 // ---------------------------------------------------------------- brain caps
@@ -136,38 +135,9 @@ fn render_listing(mans: &[Manifest], style: Style) -> String {
 
 // -------------------------------------------------------- generic dispatch
 
-/// `argv` is `[model id, action, ...flags]` - what `crate::resolve` builds
-/// from `brain <architecture> <action> ...` (the arch id translated to its
-/// model id first) before calling this.
+/// `brain <model> <action> [flags]`: one served action run on this machine,
+/// through the catalog entry of `argv[0]` (`invoke::run_model`).
 pub fn run_do(argv: &[String]) -> i32 {
-    run_do_impl(argv, None)
-}
-
-/// [`run_do`], from an already-resolved [`capability::Assembly`] instead of
-/// the placeholder empty one every other model's provider still ignores -
-/// what `crate::resolver_cli::run_generic_migrated` calls once it has
-/// resolved a migrated architecture's weights.
-pub fn run_do_with_assembly(argv: &[String], assembly: &capability::Assembly) -> i32 {
-    run_do_impl(argv, Some(assembly))
-}
-
-/// [`catalog::provider`], resolving through the CLI's own flagless answer for
-/// the model store (`--brain-data-dir`, then `BRAIN_MODELS_DIR`, then XDG/HOME),
-/// where the library's version consults only an explicitly configured one. An
-/// `Ambiguous` or `Missing` outcome, or no store at all, is this function's own
-/// `Err`, never an "unknown model": a listed model may legitimately fail for
-/// want of weights.
-fn provider_from_store(model: &str) -> Result<Arc<dyn Provider>, String> {
-    let assembly = match catalog::resolver_spec_for(model) {
-        Some((arch, spec)) => {
-            loader::resolver::try_resolve(loader::model_dir::resolve(None).as_deref(), arch, spec, &Default::default()).map_err(|e| e.message().to_string())?
-        }
-        None => capability::Assembly { id: String::new(), arch: String::new(), variant: None, roles: Default::default(), provenance: Vec::new() },
-    };
-    catalog::provider_from_assembly(model, &assembly)
-}
-
-fn run_do_impl(argv: &[String], assembly: Option<&capability::Assembly>) -> i32 {
     let Some(model) = argv.first().filter(|m| !m.starts_with("--")) else {
         eprintln!("usage: brain <architecture> <action> [--param value]… [--<input> PATH]… [--out name=PATH]…");
         return 2;
@@ -176,17 +146,14 @@ fn run_do_impl(argv: &[String], assembly: Option<&capability::Assembly>) -> i32 
     // resolves to the canonical `brain/<name>` before dispatch, but is never
     // itself what gets registered or listed (see modelref::alias's module docs).
     let model = brain_modelref::alias::canonical(model).map(str::to_string).unwrap_or_else(|| model.clone());
-    let built = match assembly {
-        Some(a) => catalog::provider_from_assembly(&model, a),
-        None => provider_from_store(&model),
+    let Some(manifest) = catalog::manifests().into_iter().find(|m| m.model == model) else {
+        eprintln!("brain: unknown model '{model}' (see `brain caps`)");
+        return 1;
     };
-    match built {
-        Ok(provider) => invoke::run(&invoke::Program { name: &format!("brain {model}") }, provider, &argv[1..]),
-        Err(e) => {
-            eprintln!("brain: {e}");
-            1
-        }
-    }
+    let build = |assembly: &capability::Assembly| catalog::provider_from_assembly(&model, assembly);
+    let entry = invoke::Model { manifest, weights: catalog::resolver_spec_for(&model), build: &build };
+    let shown = crate::resolve::arch_for_model(&model).unwrap_or(&model);
+    invoke::run_model(&format!("brain {shown}"), &entry, &argv[1..])
 }
 
 // ---------------------------------------------------------------- built-in demo provider

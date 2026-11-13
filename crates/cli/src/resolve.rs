@@ -298,6 +298,12 @@ pub(crate) fn model_for_arch(arch: &str) -> Option<&'static str> {
     ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch).map(|(_, model)| *model)
 }
 
+/// The architecture id a user types for the served `model`, if it has one -
+/// what `brain <arch> <action>` shows as its own name.
+pub(crate) fn arch_for_model(model: &str) -> Option<&'static str> {
+    ARCH_TO_MODEL.iter().find(|(_, m)| *m == model).map(|(id, _)| *id)
+}
+
 /// The closed verb vocabulary of an [`ARCH_HANDLERS`] entry, in the form
 /// [`crate::args::canon_verb`] normalizes an input verb to -- checked
 /// BEFORE [`dispatch_arch`] acquires any weights, so a mistyped verb (`brain
@@ -423,6 +429,8 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "minimaxh3",
     "ouro",
     "huginn",
+    "edgerock",
+    "ricursive",
 ];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {

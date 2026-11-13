@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 /// The command line of `action` on `model`, named `program` in its help.
 pub fn command(program: &str, spec: &ActionSpec) -> Command {
-    let mut cmd = Command::new(program.to_string()).no_binary_name(true).about(spec.summary.clone());
+    let mut cmd = Command::new(program.to_string()).no_binary_name(true).about(spec.summary.clone()).override_usage(format!("{program} [OPTIONS]"));
     for p in &spec.params {
         let mut help = p.help.clone();
         if let Some(d) = &p.default {
@@ -97,6 +97,20 @@ pub fn parse(spec: &ActionSpec, matches: &ArgMatches) -> Result<Parsed, String> 
         }
     }
     Ok(parsed)
+}
+
+/// Check `flags` against `spec` without running anything: clap's own errors
+/// (a missing required flag, an unknown value) are printed, then this
+/// layer's. The error is the exit code: 0 after `--help`, else 2.
+pub fn check(program: &str, spec: &ActionSpec, flags: &[String]) -> Result<Parsed, i32> {
+    let matches = command(program, spec).try_get_matches_from(flags).map_err(|e| {
+        let _ = e.print();
+        if matches!(e.kind(), clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion) { 0 } else { 2 }
+    })?;
+    parse(spec, &matches).map_err(|e| {
+        eprintln!("{program}: {e}");
+        2
+    })
 }
 
 fn name_path(flag: &str, v: &str) -> Result<(String, String), String> {
