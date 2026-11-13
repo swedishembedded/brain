@@ -75,7 +75,9 @@ A slow subscriber's frames are dropped rather than stalling inference for everyo
 else. A `progress` frame carries the action's structured frame in `event`: the training
 job (`brain/train`, see [Training as a served job](../../guides/training/served-training.md))
 reports each optimiser step there, takes its datasets as input descriptors and returns
-the adapter as an output descriptor.
+the adapter as an output descriptor. Its other actions (`full_train`, `merge`, `check_dataset`)
+are reached the same way and take their inputs as descriptors; a checkpoint they produce leaves
+by manifest digest in the artifact store, never as a descriptor.
 
 ### `Cancel` — cooperative cancellation
 
