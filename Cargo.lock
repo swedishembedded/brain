@@ -1219,6 +1219,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+ "sha2",
  "tempfile",
  "unicode-general-category",
  "unicode-normalization",
@@ -1945,6 +1946,7 @@ dependencies = [
  "brain-qwen3",
  "brain-residency",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

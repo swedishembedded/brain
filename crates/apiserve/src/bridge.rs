@@ -225,6 +225,9 @@ impl ChatOutcome {
         let policy = serde_json::json!({
             "base_digest": self.base_digest,
             "adapter": self.adapter.as_ref().map(|(id, digest, version)| serde_json::json!({ "id": id, "digest": digest, "version": version })),
+            "policy_version": self.policy_version(),
+            "tokenizer_digest": trace.get("tokenizer_digest"),
+            "chat_template_digest": trace.get("chat_template_digest"),
         });
         trace["policy"] = policy;
         trace["finish_reason"] = serde_json::json!(self.finish);
@@ -233,9 +236,20 @@ impl ChatOutcome {
         Some(trace)
     }
 
+    /// The policy version this reply was generated under: the version of the adapter release that answered under its id
+    /// (1 for the first, +1 for each release with different weights), 0 for the base model.
+    pub fn policy_version(&self) -> u64 {
+        self.adapter.as_ref().map_or(0, |(_, _, version)| *version)
+    }
+
     /// The reply's `brain` extension object: the seed that reproduces the
-    /// decode and the adapter that answered, each present only when the model
-    /// reported it. `None` when it reported neither, so no empty object is sent.
+    /// decode, the adapter that answered, the `policy_version` and, when the
+    /// request asked for log-probabilities, their `logprob_kind` (`policy`: the
+    /// full distribution of a policy trace; `sampler`: the sampler's truncated
+    /// figure) and, for a policy trace, the `tokenizer_digest` and
+    /// `chat_template_digest` of the prompt path; each present only when the
+    /// model reported it. `None` when it reported none, so no empty object is
+    /// sent.
     pub fn served(&self) -> Option<serde_json::Value> {
         let mut served = serde_json::Map::new();
         if let Some(seed) = self.seed {
@@ -247,6 +261,17 @@ impl ChatOutcome {
         for (key, value) in [("base_digest", &self.base_digest), ("backend", &self.backend), ("engine", &self.engine)] {
             if let Some(value) = value {
                 served.insert(key.into(), serde_json::json!(value));
+            }
+        }
+        if !served.is_empty() {
+            served.insert("policy_version".into(), serde_json::json!(self.policy_version()));
+        }
+        if self.trace.is_some() || self.logprobs.is_some() {
+            served.insert("logprob_kind".into(), serde_json::json!(if self.trace.is_some() { "policy" } else { "sampler" }));
+        }
+        for key in ["tokenizer_digest", "chat_template_digest"] {
+            if let Some(v) = self.trace.as_ref().and_then(|t| t.get(key)).filter(|v| !v.is_null()) {
+                served.insert(key.into(), v.clone());
             }
         }
         (!served.is_empty()).then_some(serde_json::Value::Object(served))

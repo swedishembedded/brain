@@ -123,6 +123,7 @@ fn a_policy_trace_scores_the_generation_with_its_stop_token() {
     let scored: Vec<f64> = serde_json::from_value(trace["generation_log_probs"].clone()).unwrap();
     assert!(scored.iter().zip([-0.05, -0.06, -0.07]).all(|(got, want)| (got - want).abs() < 1e-6), "{scored:?}");
     assert_eq!(trace["log_prob_temperature"], json!(1.0), "a greedy request is scored at temperature 1");
+    assert!(trace["chat_template_digest"].as_str().is_some_and(|d| d.starts_with("sha256:") && d.len() == 71), "the probe conversation renders: {trace}");
 }
 
 /// A decoder that cannot score its own generation refuses the request before decoding, by class and name.

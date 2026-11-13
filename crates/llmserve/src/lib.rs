@@ -85,6 +85,25 @@ pub trait Frontend {
     fn base_digest(&self) -> Option<String> {
         None
     }
+    /// `sha256:<hex>` of the tokenizer file this front end encodes with, when it was read from one: which vocabulary and
+    /// merges the token ids of a policy trace belong to.
+    fn tokenizer_digest(&self) -> Option<String> {
+        self.tok().digest().map(str::to_string)
+    }
+    /// `sha256:<hex>` of the token ids this front end renders for a fixed probe conversation (system, user, assistant,
+    /// user, and one tool definition): the identity of the whole prompt path, template and tokenizer together, by what
+    /// it does and not by a file name. Two front ends that render a conversation differently cannot share it, so a
+    /// trainer that holds a trace's digest against its own can tell a changed template from a changed model. `None`
+    /// when the front end cannot render the probe.
+    fn chat_template_digest(&self) -> Option<String> {
+        use sha2::{Digest as _, Sha256};
+        const MESSAGES: &str = r#"[{"role":"system","content":"probe system"},{"role":"user","content":"probe question"},{"role":"assistant","content":"probe answer"},{"role":"user","content":"probe follow-up"}]"#;
+        const TOOLS: &str = r#"[{"type":"function","function":{"name":"probe_tool","description":"a probe","parameters":{"type":"object","properties":{"x":{"type":"string"}}}}}]"#;
+        let probe = Invocation::new().set("messages", serde_json::json!(MESSAGES));
+        let ids = self.parse(&probe.clone().set("tools", serde_json::json!(TOOLS))).or_else(|_| self.parse(&probe)).ok()?.ids;
+        let bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
+        Some(format!("sha256:{:x}", Sha256::digest(&bytes)))
+    }
     /// The caller-facing message for a request the scheduler refused.
     fn rejection(&self, _inv: &Invocation, reason: &RejectReason) -> String {
         match reason {
@@ -128,6 +147,12 @@ impl<F: Frontend + ?Sized> Frontend for std::sync::Arc<F> {
     }
     fn base_digest(&self) -> Option<String> {
         (**self).base_digest()
+    }
+    fn tokenizer_digest(&self) -> Option<String> {
+        (**self).tokenizer_digest()
+    }
+    fn chat_template_digest(&self) -> Option<String> {
+        (**self).chat_template_digest()
     }
     fn rejection(&self, inv: &Invocation, reason: &RejectReason) -> String {
         (**self).rejection(inv, reason)
@@ -496,7 +521,14 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         let mut all = prompt.clone();
         all.extend(&generated);
         let scored = self.sched.score_continuation(self.jobs[bi].adapter, &all, prompt.len(), temperature).map_err(|e| capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("{}: policy_trace: {e}", self.front.label())))?;
-        let trace = serde_json::json!({ "prompt_token_ids": prompt, "generation_token_ids": generated, "generation_log_probs": scored, "log_prob_temperature": temperature });
+        let trace = serde_json::json!({
+            "prompt_token_ids": prompt,
+            "generation_token_ids": generated,
+            "generation_log_probs": scored,
+            "log_prob_temperature": temperature,
+            "tokenizer_digest": self.front.tokenizer_digest(),
+            "chat_template_digest": self.front.chat_template_digest(),
+        });
         Ok(outcome.set("policy_trace", trace))
     }
 

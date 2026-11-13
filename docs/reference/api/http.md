@@ -200,7 +200,17 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   `base_digest` is the `sha256:<hex>` of the base checkpoint (hashed in the
   background after load, so absent on the first replies of a large model),
   `backend` the compute backend that ran the decode (`cuda`, `cpu`, ...) and
-  `engine` the build (`brain <version>`). Each key is absent when the model does
+  `engine` the build (`brain <version>`). `policy_version` is the version of the
+  adapter release that answered (1 for the first release under its id, one more
+  for each release with different weights; 0 for the base). `logprob_kind` says
+  what the reply's log-probabilities are: `policy` (the full distribution of a
+  `policy_trace`) or `sampler` (the truncated figure of `logprobs`); it is
+  present when either was asked. A policy trace also names the
+  `tokenizer_digest` (`sha256:<hex>` of the tokenizer file, when the model has
+  one) and the `chat_template_digest` (`sha256:<hex>` of the token ids the
+  server renders for a fixed probe conversation, so it changes when the template
+  or the tokenizer does), here and under `policy_trace.policy`. Each key is
+  absent when the model does
   not report it. Over D-Bus the same values are keys of the `result` JSON of `Run`.
 - **Admission / backpressure:** a request that can't start on a lane within
   `--admit-deadline-ms` gets **429** (`Retry-After`) - unless the request's own

@@ -50,9 +50,18 @@ pub struct QwenBpe {
     /// Special-token ids a `TemplateProcessing` post-processor prepends to a
     /// single-sequence encoding (empty when the file declares none).
     template_prefix: Vec<u32>,
+    /// `sha256:<hex>` of the `tokenizer.json` bytes it was built from; `None` for a tokenizer built from a GGUF's
+    /// vocabulary, which has no such file.
+    digest: Option<String>,
 }
 
 impl QwenBpe {
+    /// `sha256:<hex>` of the `tokenizer.json` this tokenizer was read from, when it was: what a trace of sampled tokens
+    /// names to say which vocabulary and merges its ids belong to.
+    pub fn digest(&self) -> Option<&str> {
+        self.digest.as_deref()
+    }
+
     /// Build from a `tokenizer.json` file path.
     pub fn from_file(path: &str) -> Result<QwenBpe, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
@@ -225,6 +234,7 @@ impl QwenBpe {
             ignore_merges,
             // Qwen declares no single-sequence template prefix.
             template_prefix: Vec::new(),
+            digest: None,
         })
     }
 
@@ -308,6 +318,10 @@ impl QwenBpe {
             pre,
             ignore_merges,
             template_prefix,
+            digest: {
+                use sha2::{Digest as _, Sha256};
+                Some(format!("sha256:{:x}", Sha256::digest(bytes)))
+            },
         })
     }
 

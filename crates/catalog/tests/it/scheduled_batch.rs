@@ -318,6 +318,7 @@ fn a_policy_trace_equals_the_trainers_teacher_forced_log_probs() {
     assert_eq!(generated.len(), 7);
     assert_eq!(full.len(), generated.len());
     assert_eq!(trace["log_prob_temperature"].as_f64(), Some(f64::from(temperature)));
+    assert!(trace["tokenizer_digest"].as_str().is_some_and(|d| d.starts_with("sha256:")), "a tokenizer read from a file is named by its digest: {trace}");
 
     let ids: Vec<u32> = prompt.iter().chain(&generated).copied().collect();
     let want = trainer_logprobs(&ids, prompt.len(), temperature);

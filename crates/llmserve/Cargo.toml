@@ -10,6 +10,7 @@ name = "llmserve"
 path = "src/lib.rs"
 
 [dependencies]
+sha2.workspace = true
 brain-capability.workspace = true
 brain-data.workspace = true
 brain-gpu-core.workspace = true

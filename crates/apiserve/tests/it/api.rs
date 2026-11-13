@@ -3825,7 +3825,7 @@ impl Instance for SiblingChatInst {
         }
         if inv.get_bool("policy_trace") == Some(true) {
             // The scored sequence: the sampled ids and the stop token that ended them, under the full distribution.
-            out = out.set("policy_trace", json!({"prompt_token_ids": [1, 2, 3, 4, 5], "generation_token_ids": [11, 12, 99], "generation_log_probs": [-1.5, -0.75, -0.125], "log_prob_temperature": 1.0}));
+            out = out.set("policy_trace", json!({"prompt_token_ids": [1, 2, 3, 4, 5], "generation_token_ids": [11, 12, 99], "generation_log_probs": [-1.5, -0.75, -0.125], "log_prob_temperature": 1.0, "tokenizer_digest": format!("sha256:{}", "d".repeat(64)), "chat_template_digest": format!("sha256:{}", "e".repeat(64))}));
             out = out.set("base_digest", json!(format!("sha256:{}", "b".repeat(64))));
         }
         let answer = match requested {
@@ -4072,7 +4072,7 @@ async fn a_reply_names_the_adapter_that_answered_by_digest() {
     let frames: Vec<Value> = sse_data(&sse).iter().filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
     let with_brain: Vec<&Value> = frames.iter().filter(|f| f.get("brain").is_some()).collect();
     assert_eq!(with_brain.len(), 1, "exactly the terminal chunk carries the extension: {sse}");
-    assert_eq!(with_brain[0]["brain"], json!({"seed": 5, "adapter": {"id": ADAPTER_ID, "digest": adapter_identity().digest, "version": adapter_identity().version}}));
+    assert_eq!(with_brain[0]["brain"], json!({"seed": 5, "policy_version": adapter_identity().version, "adapter": {"id": ADAPTER_ID, "digest": adapter_identity().digest, "version": adapter_identity().version}}));
     assert_eq!(with_brain[0]["choices"][0]["finish_reason"], json!("stop"));
 }
 
@@ -4096,9 +4096,16 @@ async fn a_chat_reply_returns_a_policy_trace_only_when_asked() {
     assert_eq!(trace["truncated"], json!(false));
     assert_eq!(trace["policy"]["base_digest"], json!(format!("sha256:{}", "b".repeat(64))));
     assert_eq!(trace["policy"]["adapter"], Value::Null, "the base answered");
+    assert_eq!(trace["policy"]["policy_version"], json!(0), "the base is version 0");
+    assert_eq!(trace["policy"]["tokenizer_digest"], json!(format!("sha256:{}", "d".repeat(64))));
+    // What a trainer reads to accept the trace as on-policy sits in the reply's `brain` object.
+    let brain = &v["brain"];
+    assert_eq!((brain["policy_version"].clone(), brain["logprob_kind"].clone()), (json!(0), json!("policy")));
+    assert_eq!(brain["tokenizer_digest"], json!(format!("sha256:{}", "d".repeat(64))));
+    assert_eq!(brain["chat_template_digest"], json!(format!("sha256:{}", "e".repeat(64))));
 
     let (_, plain) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &chat_body(ADAPTER_BASE)).await;
-    assert!(plain.get("policy_trace").is_none(), "{plain}");
+    assert!(plain.get("policy_trace").is_none() && plain["brain"].get("logprob_kind").is_none(), "{plain}");
 
     asked["stream"] = json!(true);
     let (_, sse) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &asked).await;
@@ -4132,6 +4139,7 @@ async fn a_chat_reply_returns_token_ids_and_logprobs_only_when_asked() {
     let logprobs: Vec<f64> = content.iter().map(|t| t["logprob"].as_f64().unwrap()).collect();
     assert_eq!(logprobs, vec![-0.5, -0.25]);
     assert_eq!(content[0]["token"], json!("token_id:11"));
+    assert_eq!(v["brain"]["logprob_kind"], json!("sampler"), "logprobs alone are the sampler's figure");
 
     let (_, plain) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &chat_body(ADAPTER_BASE)).await;
     assert!(plain["choices"][0]["logprobs"].is_null() && plain["choices"][0].get("token_ids").is_none() && plain.get("prompt_token_ids").is_none(), "{plain}");

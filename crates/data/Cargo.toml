@@ -10,6 +10,7 @@ name = "data"
 path = "src/lib.rs"
 
 [dependencies]
+sha2.workspace = true
 # `data::rng::random_seed` is re-exported from here; the leaf crate exists so
 # crates that cannot depend on `brain-data` can draw a seed the same way.
 brain-seed.workspace = true
