@@ -166,6 +166,13 @@ pub trait PagedDecoder {
         false
     }
 
+    /// Whether [`Self::score_continuation`] may run now. A decoder whose scoring pass shares device state with a prompt
+    /// being read in the background answers `false` while one is, and the caller asks again after a scheduler step; the
+    /// default is always ready.
+    fn scoring_ready(&self) -> bool {
+        true
+    }
+
     /// The log-probability of `tokens[p]` for every `p` in `from..tokens.len()` under the FULL vocabulary
     /// distribution `softmax(logits / temperature)` the serving forward computes at position `p - 1`: one
     /// teacher-forced pass over `tokens` as a fresh sequence in `namespace` (the adapter the tokens were
@@ -1912,6 +1919,11 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// Whether the decoder can return a policy trace ([`Self::score_continuation`]).
     pub fn scores_continuations(&self) -> bool {
         self.dec.scores_continuations()
+    }
+
+    /// Whether the decoder can run a scoring pass now ([`PagedDecoder::scoring_ready`]).
+    pub fn scoring_ready(&self) -> bool {
+        self.dec.scoring_ready()
     }
 
     /// The full-distribution log-probabilities of the last `tokens.len() - from` tokens of `tokens` under the

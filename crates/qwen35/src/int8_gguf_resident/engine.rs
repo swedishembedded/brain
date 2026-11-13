@@ -106,6 +106,9 @@ use crate::decode_tape::HeadKind;
 /// sampling can reach (the same bound `crate::serve::Engine` uses).
 const TOPK_CAPACITY: usize = 32;
 
+/// Rows of the head projected at once when a continuation is scored: bounds the `[rows, vocab]` logits block.
+const SCORE_HEAD_ROWS: usize = 8;
+
 /// The most prompt tokens one background task reads in before the engine chooses again which prompt goes next.
 /// A prompt longer than this is read in slices, with every shorter one (a conversation's next turn, whose history
 /// is cached) started between them instead of after the whole of it. A multiple of the prefill round and of the
@@ -542,6 +545,62 @@ impl Qwen35GgufEngine {
         // The scoring prefill resets the instance's KV rows and recurrent state, as in `score_supervised`.
         self.clear_prefix_cache();
         self.inst.teacher_forced_top(ids, k, LORA_SLOT_NONE)
+    }
+
+    /// The log-probability of `tokens[p]`, `p` in `from..tokens.len()`, under the full distribution
+    /// `softmax(logits / temperature)` of position `p - 1` ([`PagedDecoder::score_continuation`]): one chunked prefill of
+    /// `tokens` as a sequence of its own, in `namespace`, then the head over the scored rows.
+    ///
+    /// Unlike [`Self::score_supervised`] it does not reset the instance: the sequence takes a state row and KV blocks as a
+    /// prompt being admitted does (and gives them back), and its recurrent state runs in the working copy and ends in that
+    /// row, so no running sequence's pool row is touched. A prompt being read in the background owns the working copy and
+    /// the prefill arena, so the call is refused while one is ([`PagedDecoder::scoring_ready`]).
+    fn score_tokens(&mut self, namespace: KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+        if self.background.is_some() {
+            return Err(format!("{MODEL}: a prompt is being read in; scoring waits for it"));
+        }
+        if tokens.len() > self.inst.cap as usize {
+            return Err(format!("{MODEL}: {} tokens exceed the per-sequence capacity of {}", tokens.len(), self.inst.cap));
+        }
+        if let Some(&bad) = tokens.iter().find(|&&t| t >= self.inst.cfg.vocab) {
+            return Err(format!("{MODEL}: token {bad} is outside the model vocabulary ({})", self.inst.cfg.vocab));
+        }
+        let adapter_slot = adapters::slot_of(self.inst.stage_models(), namespace);
+        if namespace != BASE_KV_NAMESPACE && adapter_slot == LORA_SLOT_NONE {
+            return Err(format!("{MODEL}: the adapter the trace was generated under is no longer resident, so its tokens cannot be scored under it"));
+        }
+        let need = self.blocks_for(tokens.len() as u32) + self.sequence_state_blocks();
+        if self.alloc.free_blocks() < need {
+            self.reclaim_state_rows(need - self.alloc.free_blocks());
+        }
+        if self.alloc.free_blocks() < need {
+            self.reclaim_prefix(need - self.alloc.free_blocks());
+        }
+        if self.alloc.free_blocks() < need {
+            return Err(format!("{MODEL}: scoring {} tokens needs {need} KV blocks and {} are free", tokens.len(), self.alloc.free_blocks()));
+        }
+        if matches!(self.inst.kv_layout, KvLayout::Paged { .. }) && self.free_rows.is_empty() {
+            return Err(format!("{MODEL}: every recurrent-state row is in use"));
+        }
+        let mut table = BlockTable::with_namespace(namespace);
+        table.reserve(tokens.len() as u32, &mut self.alloc).map_err(|e| format!("{MODEL}: KV pool exhausted: {e}"))?;
+        let slot = self.assign_state_row(&mut table);
+        self.inst.set_blocks(slot, table.blocks());
+        self.inst.set_rope(slot, None);
+        let mut hidden = Vec::with_capacity(tokens.len() * self.inst.cfg.d_model as usize);
+        self.inst.prefill_adapter_slot.set(adapter_slot);
+        let prefilled = self.inst.prefill_hidden(tokens, 0, tokens.len(), slot, false, Some(&mut hidden));
+        self.inst.prefill_adapter_slot.set(LORA_SLOT_NONE);
+        PagedDecoder::release_table(self, &mut table);
+        prefilled?;
+        let (d, v) = (self.inst.cfg.d_model as usize, self.inst.cfg.vocab as usize);
+        let mut out = Vec::with_capacity(tokens.len() - from);
+        for first in (from - 1..tokens.len() - 1).step_by(SCORE_HEAD_ROWS) {
+            let rows = SCORE_HEAD_ROWS.min(tokens.len() - 1 - first);
+            let logits = self.inst.head_logits_rows(&hidden[first * d..(first + rows) * d], rows as u32);
+            out.extend(logits.chunks(v).enumerate().map(|(i, row)| model::logprobs::row_logprob_at(row, tokens[first + i + 1] as usize, temperature)));
+        }
+        Ok(out)
     }
 
     /// Drop every cached prompt and give its retained block back to the allocator.
@@ -1370,6 +1429,15 @@ impl PagedDecoder for Qwen35GgufEngine {
     /// prompt to the prefix cache instead of freeing them (the rows decoding
     /// appended past the prompt are dropped); any other sequence frees all its
     /// blocks. Its recurrent-state row goes back to the pool either way.
+    fn scores_continuations(&self) -> bool {
+        true
+    }
+    fn scoring_ready(&self) -> bool {
+        self.background.is_none()
+    }
+    fn score_continuation(&mut self, namespace: KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+        self.score_tokens(namespace, tokens, from, temperature)
+    }
     fn release_table(&mut self, t: &mut BlockTable) {
         let row = t.take_state_row();
         if let Some(slot) = row {

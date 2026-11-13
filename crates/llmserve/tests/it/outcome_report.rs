@@ -135,3 +135,15 @@ fn a_policy_trace_is_refused_by_a_decoder_that_cannot_score() {
     let error = results[0].clone().expect_err("no scoring pass");
     assert!(error.starts_with("[unsupported-capability]") && error.contains("policy_trace"), "{error}");
 }
+
+/// A decoder that is busy when a request finishes (a prompt is being read in) scores its trace once it is ready: the
+/// request is answered then, with its whole trace, and a request without a trace is not held up by it.
+#[test]
+fn a_policy_trace_waits_for_a_decoder_that_is_not_ready_to_score() {
+    let front = Front { tok: tokenizer() };
+    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(128, 8), 0).scoring_after(5), 4);
+    let results = run_batch_scheduled(&mut sched, &front, &[Invocation::new().set("policy_trace", json!(true)), Invocation::new()], &mut |_, _| {});
+    let traced = results[0].clone().expect("served after the wait").outputs;
+    assert_eq!(traced["policy_trace"]["generation_token_ids"], json!([5, 6, 7]));
+    assert!(results[1].clone().expect("served").outputs.get("policy_trace").is_none());
+}

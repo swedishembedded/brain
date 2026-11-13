@@ -321,7 +321,21 @@ struct Group<'a, D: PagedDecoder> {
     open: std::collections::HashSet<usize>,
     /// Jobs whose request is still being built in the background, in arrival order, with the adapter each runs under.
     encoding: Vec<(usize, Encoding, Option<model::serve::AdapterId>)>,
+    /// Finished jobs whose policy trace waits for the decoder to be ready to score ([`PagedDecoder::scoring_ready`]).
+    awaiting: Vec<AwaitingTrace>,
 }
+
+/// A finished job whose policy trace is not scored yet.
+struct AwaitingTrace {
+    bi: usize,
+    outcome: capability::Outcome,
+    generated: Vec<u32>,
+    since: std::time::Instant,
+}
+
+/// The longest a finished request waits for its policy trace to be scored (a prompt being read in holds the decoder's
+/// scoring pass off), before it fails as unavailable instead of waiting on.
+const TRACE_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// How [`run_open_scheduled`] ended.
 #[derive(Debug, PartialEq, Eq)]
@@ -341,7 +355,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
     }
 
     fn new(sched: &'a mut Scheduler<D>, front: &'a dyn Frontend) -> Self {
-        Group { sched, front, jobs: Vec::new(), open: std::collections::HashSet::new(), encoding: Vec::new() }
+        Group { sched, front, jobs: Vec::new(), open: std::collections::HashSet::new(), encoding: Vec::new(), awaiting: Vec::new() }
     }
 
     /// Admit one request. A request that cannot even be parsed or routed has
@@ -491,7 +505,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
 
     /// Jobs still running.
     fn live(&self) -> usize {
-        self.open.len() + self.encoding.len()
+        self.open.len() + self.encoding.len() + self.awaiting.len()
     }
 
     /// What served the reply: the adapter that answered and, when known, the
@@ -519,30 +533,63 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         Ok(job.capture.attach(outcome, tok, tokens, logprobs, completion))
     }
 
-    /// [`Self::conclude`] for job `bi`, plus the policy trace when the request asked for one: its prompt and
-    /// generated ids (the stop token that ended the sequence included, so a trainer can train the stop) with
-    /// their log-probabilities under the model's full distribution at the request temperature, scored by the
-    /// serving decoder under the adapter the request ran with ([`Scheduler::score_continuation`]). A request
-    /// whose trace cannot be scored fails as a whole: a rollout without its trace is no rollout.
-    fn conclude_scored(&mut self, bi: usize, seq: SeqState, toks: &[u32], logprobs: &[f32], completion: model::serve::Completion, progress: &mut dyn FnMut(usize, Progress)) -> ActionResult {
+    /// [`Self::conclude`] for job `bi`. A request that asked for a policy trace is not final yet: it waits in
+    /// [`Self::awaiting`] until [`Self::score_awaiting`] has scored its prompt and generation (`None`).
+    fn conclude_scored(&mut self, bi: usize, seq: SeqState, toks: &[u32], logprobs: &[f32], completion: model::serve::Completion, progress: &mut dyn FnMut(usize, Progress)) -> Option<ActionResult> {
         let tok = self.front.tok();
-        let outcome = Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, toks, logprobs, completion, &mut |p| progress(bi, p))?;
-        let Some(temperature) = self.jobs[bi].capture.trace else { return Ok(outcome) };
-        let prompt = self.jobs[bi].capture.prompt.clone();
+        let outcome = match Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, toks, logprobs, completion, &mut |p| progress(bi, p)) {
+            Ok(outcome) => outcome,
+            Err(e) => return Some(Err(e)),
+        };
+        if self.jobs[bi].capture.trace.is_none() {
+            return Some(Ok(outcome));
+        }
+        // The stop token that ended the sequence is part of what a trainer trains, so it is scored with the tokens.
         let mut generated = toks.to_vec();
         generated.extend(completion.stop_token);
-        let mut all = prompt.clone();
-        all.extend(&generated);
-        let scored = self.sched.score_continuation(self.jobs[bi].adapter, &all, prompt.len(), temperature).map_err(|e| capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("{}: policy_trace: {e}", self.front.label())))?;
-        let trace = serde_json::json!({
-            "prompt_token_ids": prompt,
-            "generation_token_ids": generated,
-            "generation_log_probs": scored,
-            "log_prob_temperature": temperature,
-            "tokenizer_digest": self.front.tokenizer_digest(),
-            "chat_template_digest": self.front.chat_template_digest(),
-        });
-        Ok(outcome.set("policy_trace", trace))
+        self.awaiting.push(AwaitingTrace { bi, outcome, generated, since: std::time::Instant::now() });
+        None
+    }
+
+    /// Score the policy trace of every finished request that waits for one, as far as the decoder is ready: the full
+    /// distribution at the request temperature of its prompt and generated ids, under the adapter it ran with
+    /// ([`Scheduler::score_continuation`]), with the identity of the tokenizer and prompt path. A request whose trace cannot
+    /// be scored fails as a whole: a rollout without its trace is no rollout.
+    fn score_awaiting(&mut self, finished: &mut Vec<(usize, ActionResult)>) {
+        let mut waiting = Vec::new();
+        for pending in std::mem::take(&mut self.awaiting) {
+            if !self.sched.scoring_ready() {
+                if pending.since.elapsed() > TRACE_WAIT {
+                    let why = format!("{}: policy_trace: the decoder stayed busy reading prompts in for {} s", self.front.label(), TRACE_WAIT.as_secs());
+                    finished.push((pending.bi, Err(capability::failure::tag(capability::failure::FailureClass::Unavailable, why))));
+                } else {
+                    waiting.push(pending);
+                }
+                continue;
+            }
+            let AwaitingTrace { bi, outcome, generated, .. } = pending;
+            let temperature = self.jobs[bi].capture.trace.expect("only a traced request waits");
+            let prompt = self.jobs[bi].capture.prompt.clone();
+            let mut all = prompt.clone();
+            all.extend(&generated);
+            let result = self
+                .sched
+                .score_continuation(self.jobs[bi].adapter, &all, prompt.len(), temperature)
+                .map_err(|e| capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("{}: policy_trace: {e}", self.front.label())))
+                .map(|scored| {
+                    let trace = serde_json::json!({
+                        "prompt_token_ids": prompt,
+                        "generation_token_ids": generated,
+                        "generation_log_probs": scored,
+                        "log_prob_temperature": temperature,
+                        "tokenizer_digest": self.front.tokenizer_digest(),
+                        "chat_template_digest": self.front.chat_template_digest(),
+                    });
+                    outcome.set("policy_trace", trace)
+                });
+            finished.push((bi, result));
+        }
+        self.awaiting = waiting;
     }
 
     /// One iteration: stream each open job's new suffix and check its stop
@@ -555,6 +602,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
     fn pump(&mut self, progress: &mut dyn FnMut(usize, Progress)) -> Vec<(usize, ActionResult)> {
         let tok = self.front.tok();
         let mut finished: Vec<(usize, ActionResult)> = Vec::new();
+        self.score_awaiting(&mut finished);
         let mut order: Vec<usize> = self.open.iter().copied().collect();
         order.sort_unstable();
         // Stream every open job from one pass over the scheduler's sequences (O(open jobs), not a find
@@ -578,7 +626,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             let seq = self.jobs[bi].seq.take().expect("checked above");
             let result = self.conclude_scored(bi, seq, &toks, &logprobs, completion, progress);
             self.open.remove(&bi);
-            finished.push((bi, result));
+            finished.extend(result.map(|r| (bi, r)));
         }
         if self.open.is_empty() {
             return finished;
@@ -616,7 +664,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             if let Some(seq) = self.jobs[bi].seq.take() {
                 let completion = meta_of.remove(&id).unwrap_or_default();
                 let result = self.conclude_scored(bi, seq, &toks, &logprobs, completion, progress);
-                finished.push((bi, result));
+                finished.extend(result.map(|r| (bi, r)));
             }
             self.open.remove(&bi);
         }

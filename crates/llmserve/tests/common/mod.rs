@@ -23,11 +23,13 @@ pub struct Toy {
     alloc: BlockAllocator,
     cached: u32,
     scoring: bool,
+    /// Scoring answers "not ready" this many times before it answers "ready" (a prompt being read in).
+    busy_polls: std::cell::Cell<u32>,
 }
 
 impl Toy {
     pub fn new(alloc: BlockAllocator, cached: u32) -> Toy {
-        Toy { alloc, cached, scoring: false }
+        Toy { alloc, cached, scoring: false, busy_polls: std::cell::Cell::new(0) }
     }
 
     /// The same decoder, able to score a continuation: the log-probability of token `t` is `-t / 100`, whatever
@@ -36,11 +38,22 @@ impl Toy {
         self.scoring = true;
         self
     }
+
+    /// The same, refusing to be ready for the first `polls` times it is asked.
+    pub fn scoring_after(self, polls: u32) -> Toy {
+        self.busy_polls.set(polls);
+        self.scoring()
+    }
 }
 
 impl PagedDecoder for Toy {
     fn scores_continuations(&self) -> bool {
         self.scoring
+    }
+    fn scoring_ready(&self) -> bool {
+        let left = self.busy_polls.get();
+        self.busy_polls.set(left.saturating_sub(1));
+        left == 0
     }
     fn score_continuation(&mut self, _namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, _temperature: f32) -> Result<Vec<f32>, String> {
         if !self.scoring {
