@@ -43,6 +43,42 @@ mod tests {
         dot(out, dy)
     }
 
+    /// `sum |a_i b_i|` in f64: the magnitude a rounded dot product's error scales with.
+    fn abs_dot(a: &[f32], b: &[f32]) -> f64 {
+        a.iter().zip(b).map(|(x, y)| f64::from(*x).abs() * f64::from(*y).abs()).sum()
+    }
+
+    /// Assert an analytic directional derivative `an = <d, v>` of `L = <op(x), dy>` against the central difference
+    /// `(l_plus - l_minus) / (2 eps)`, for an `op` LINEAR in the perturbed argument.
+    ///
+    /// Linearity means the central difference has no truncation term at any `eps`, so the comparison's whole error is
+    /// rounding, bounded by the sum of
+    ///
+    /// * the analytic side: `k` rounded operations from an input to one term of `d`, then the host dot over `n`
+    ///   terms, `gamma_{k+n} * S_d` with `S_d = sum |d_i v_i|` (`rounding::accumulation_bound`);
+    /// * the numeric side: two evaluations of `L`, each within `gamma_{k+n} * S_L` of the exact value
+    ///   (`S_L = sum |out_i dy_i|`, the larger of the two), divided by `2 eps`;
+    /// * the rounded perturbation `x + eps v`: each input is off by at most `u |x|`, which moves `L` by at most
+    ///   `u max|x| S_d`, again over the two evaluations divided by `2 eps`.
+    ///
+    /// A tolerance relative to `|an|` (the old `rel < 1e-2` against `max(|d|, 1e-3)`) collapses below the second
+    /// term whenever the terms of `<d, v>` cancel, so it failed a random draw now and then; this one does not
+    /// depend on the cancellation.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_linear_directional(what: &str, an: f32, s_d: f64, l_plus: f32, l_minus: f32, s_l: f64, max_x: f64, eps: f32, k: usize, n: usize) {
+        use brain_testutil::rounding::{accumulation_bound, U};
+        let num = (l_plus - l_minus) / (2.0 * eps);
+        let eps = f64::from(eps);
+        let tol = accumulation_bound(k + n, s_d) + accumulation_bound(k + n, s_l) / eps + U * max_x * s_d / eps;
+        let err = f64::from((an - num).abs());
+        assert!(err <= tol, "{what}: analytic {an} vs numeric {num} differ by {err:e}, derived bound {tol:e}");
+    }
+
+    /// `max |x_i + s eps v_i|` over both signs: the largest perturbed input.
+    fn max_perturbed(x: &[f32], v: &[f32], eps: f32) -> f64 {
+        x.iter().zip(v).map(|(b, d)| f64::from(b.abs() + eps * d.abs())).fold(0.0, f64::max)
+    }
+
     #[test]
     fn rope_partial_inverse_and_grad() {
         use gpu_core::f;
@@ -72,12 +108,13 @@ mod tests {
         let v: Vec<f32> = (0..n).map(|_| if rng.next_f32() < 0.5 { -1.0 } else { 1.0 }).collect();
         let dx = rope(&dy, true);
         let an = dot(&dx, &v);
-        let eps = 1e-3f32;
-        let l = |y: &[f32]| dot(y, &dy);
+        // The rotation is linear in x, so a large step costs no truncation and divides the rounding of L by less.
+        let eps = 0.5f32;
         let px = |sg: f32| x.iter().zip(&v).map(|(b, d)| b + sg * eps * d).collect::<Vec<f32>>();
-        let num = (l(&rope(&px(1.0), false)) - l(&rope(&px(-1.0), false))) / (2.0 * eps);
-        let rel = (an - num).abs() / an.abs().max(num.abs()).max(1e-3);
-        assert!(rel < 1e-2, "rope_partial grad: analytic {an} vs numeric {num} (rel {rel})");
+        let (yp, ym) = (rope(&px(1.0), false), rope(&px(-1.0), false));
+        let s_l = abs_dot(&yp, &dy).max(abs_dot(&ym, &dy));
+        // k = 3: a rotated output is `x0 c - x1 s` (two products, one sum), the same for the adjoint.
+        assert_linear_directional("rope_partial grad", an, abs_dot(&dx, &v), loss(&yp, &dy), loss(&ym, &dy), s_l, max_perturbed(&x, &v, eps), eps, 3, n);
     }
 
     #[test]
@@ -127,12 +164,13 @@ mod tests {
 
         let dx = pool_dx(&dy);
         let an = dot(&dx, &v);
-        let eps = 1e-3f32;
-        let l = |y: &[f32]| dot(y, &dy);
+        let eps = 0.5f32;
         let px = |sg: f32| x.iter().zip(&v).map(|(b, d)| b + sg * eps * d).collect::<Vec<f32>>();
-        let num = (l(&pool(&px(1.0))) - l(&pool(&px(-1.0)))) / (2.0 * eps);
-        let rel = (an - num).abs() / an.abs().max(num.abs()).max(1e-3);
-        assert!(rel < 1e-2, "adaptive_avgpool2d dx: analytic {an} vs numeric {num} (rel {rel})");
+        let (yp, ym) = (pool(&px(1.0)), pool(&px(-1.0)));
+        let s_l = abs_dot(&yp, &dy).max(abs_dot(&ym, &dy));
+        // k = 8: a 4 -> 3 bin spans at most 2x2 inputs (three sums and a division), and an input of dx gathers from
+        // at most 2x2 overlapping bins (a division each and three sums).
+        assert_linear_directional("adaptive_avgpool2d dx", an, abs_dot(&dx, &v), loss(&yp, &dy), loss(&ym, &dy), s_l, max_perturbed(&x, &v, eps), eps, 8, nx.max(ny));
     }
 
     #[test]
@@ -165,16 +203,37 @@ mod tests {
         let an_in = dot(&d_in, &vin);
         let an_s = dot(&d_s, &vs);
 
-        let eps = 1e-3f32;
-        let l = |o: &[f32]| dot(o, &dy);
+        // `out = in * s` is linear in each argument separately, which is what each directional check perturbs.
+        let eps = 0.5f32;
         let pin = |sg: f32| inp.iter().zip(&vin).map(|(b, d)| b + sg * eps * d).collect::<Vec<f32>>();
         let ps = |sg: f32| s.iter().zip(&vs).map(|(b, d)| b + sg * eps * d).collect::<Vec<f32>>();
-        let num_in = (l(&scale(&pin(1.0), &s)) - l(&scale(&pin(-1.0), &s))) / (2.0 * eps);
-        let num_s = (l(&scale(&inp, &ps(1.0))) - l(&scale(&inp, &ps(-1.0)))) / (2.0 * eps);
-        for (name, a, nn) in [("d_in", an_in, num_in), ("d_s", an_s, num_s)] {
-            let rel = (a - nn).abs() / a.abs().max(nn.abs()).max(1e-3);
-            assert!(rel < 1e-2, "tau_scale {name}: analytic {a} vs numeric {nn} (rel {rel})");
-        }
+        let (in_p, in_m) = (scale(&pin(1.0), &s), scale(&pin(-1.0), &s));
+        let (s_p, s_m) = (scale(&inp, &ps(1.0)), scale(&inp, &ps(-1.0)));
+        // k = 1 for d_in (one product per element); k = hd + 1 for d_s (a sum over the head's `hd` products).
+        assert_linear_directional(
+            "tau_scale d_in",
+            an_in,
+            abs_dot(&d_in, &vin),
+            loss(&in_p, &dy),
+            loss(&in_m, &dy),
+            abs_dot(&in_p, &dy).max(abs_dot(&in_m, &dy)),
+            max_perturbed(&inp, &vin, eps),
+            eps,
+            1,
+            n,
+        );
+        assert_linear_directional(
+            "tau_scale d_s",
+            an_s,
+            abs_dot(&d_s, &vs),
+            loss(&s_p, &dy),
+            loss(&s_m, &dy),
+            abs_dot(&s_p, &dy).max(abs_dot(&s_m, &dy)),
+            max_perturbed(&s, &vs, eps),
+            eps,
+            hd as usize + 1,
+            n,
+        );
     }
 
     /// Analytic directional derivatives of `L = <geglu(h, g), dy>` against central differences of the kernel's own
@@ -229,8 +288,7 @@ mod tests {
         // d/dg
         let num_g = (loss(&geglu(&g, &h, &perturb(&gg, &vg, 1.0)), &dy) - loss(&geglu(&g, &h, &perturb(&gg, &vg, -1.0)), &dy)) / (2.0 * eps);
 
-        let abs_sum = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| f64::from(*x).abs() * f64::from(*y).abs()).sum::<f64>();
-        let s_out = abs_sum(&geglu(&g, &h, &gg), &dy);
+        let s_out = abs_dot(&geglu(&g, &h, &gg), &dy);
         let s_dy_g1: f64 = dy.iter().zip(&gg).map(|(d, g1)| f64::from(*d).abs() * (f64::from(*g1) + 1.0)).sum();
         let eps = f64::from(eps);
         // `s_trunc` is the sum the central-difference truncation and the erf-approximation mismatch scale with (zero
