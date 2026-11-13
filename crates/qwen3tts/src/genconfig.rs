@@ -333,17 +333,6 @@ impl GenerationPlan {
             self.subtalker.top_p,
         )
     }
-
-    /// Print [`Self::trace_line`] once, when tracing is enabled.
-    ///
-    /// Gated on `TTS_PLAN`, and also emitted under the crate's existing
-    /// `TTS_PROFILE` switch - anyone already asking "what did this run do"
-    /// wants the plan in the same output as the stage timings.
-    pub fn trace(&self, max_frames: usize) {
-        if std::env::var("TTS_PLAN").is_ok() || std::env::var("TTS_PROFILE").is_ok() {
-            eprintln!("{}", self.trace_line(max_frames));
-        }
-    }
 }
 
 impl Default for GenerationPlan {

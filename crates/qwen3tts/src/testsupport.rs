@@ -140,3 +140,18 @@ impl Drop for Scratch {
         std::fs::remove_dir_all(&self.0).ok();
     }
 }
+
+/// The Qwen3-TTS checkpoint the model store resolves, for the tests that need
+/// real weights; `None` (the test then skips) when the store holds none that
+/// resolves unambiguously with a talker, MTP and codec.
+pub fn store_paths() -> Option<crate::TtsPaths> {
+    use brain_modelstore::resolve::{resolve, ArchSpec, Resolution};
+    let records = brain_modelstore::inventory::scan(&brain_modelstore::default_root()?);
+    let spec = crate::spec::Qwen3TtsSpec;
+    let specs: Vec<&dyn ArchSpec> = vec![&spec];
+    let Resolution::Resolved(assembly) = resolve("qwen3tts", &records, &specs, &Default::default()) else {
+        return None;
+    };
+    let paths = crate::TtsPaths::from_assembly(&assembly).ok()?;
+    paths.require(false).is_ok().then_some(paths)
+}

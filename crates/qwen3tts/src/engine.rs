@@ -50,6 +50,7 @@ use crate::gen_kv_mtp::CpuMtp;
 use crate::mtp::MtpModel;
 use crate::pipeline::{self, Cancelled, GenOpts, TtsPaths};
 use crate::prompt::{self, Prompt, TtsSpecials};
+use crate::reference::Reference;
 use capability::CancelToken;
 use data::tokenizer::Tokenizer;
 use mimi::decode_stream::StreamingCodecDecoder;
@@ -58,15 +59,9 @@ use mimi::decode_stream::StreamingCodecDecoder;
 pub const SAMPLE_RATE: u32 = 24_000;
 
 /// Codec frames decoded per streamed audio chunk. 16 frames at 12.5 Hz is
-/// ~1.28 s of audio - the same default `crate::serve`'s NPU server uses, and
-/// overridable with the same `BRAIN_QWEN3TTS_STREAM_CHUNK` variable so the two
-/// serving paths cannot drift apart on the one knob a listener actually hears.
+/// ~1.28 s of audio - the default of `crate::serve`'s NPU server too, so the
+/// two serving paths agree on the one knob a listener actually hears.
 pub const DEFAULT_CHUNK_FRAMES: usize = 16;
-
-/// Read the shared streaming-chunk knob.
-pub fn chunk_frames_from_env() -> usize {
-    std::env::var("BRAIN_QWEN3TTS_STREAM_CHUNK").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(DEFAULT_CHUNK_FRAMES).max(1)
-}
 
 /// Where the Talker and the MTP run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,13 +244,12 @@ pub struct ResidentEngine {
     chunk_frames: usize,
 }
 
-/// One reference voice's conditioning: what it was computed FROM (so a
-/// different `(wav, transcript)` pair invalidates it) and the two expensive
-/// results - the ECAPA x-vector and, for the in-context path, the reference
-/// clip's own codec codes.
+/// One reference voice's conditioning, keyed by the digest of the audio it was
+/// computed FROM (so a different recording invalidates it): the ECAPA x-vector
+/// and, once an in-context clone has asked for them, the reference clip's own
+/// codec codes. Neither depends on the transcript.
 struct RefVoice {
-    wav_path: String,
-    text: String,
+    digest: String,
     xvec: Vec<f32>,
     codes: Option<Vec<u32>>,
 }
@@ -284,7 +278,7 @@ impl ResidentEngine {
             speaker_path: paths.speaker.clone(),
             speaker: None,
             ref_cache: None,
-            chunk_frames: chunk_frames_from_env(),
+            chunk_frames: DEFAULT_CHUNK_FRAMES,
         })
     }
 
@@ -366,24 +360,25 @@ impl ResidentEngine {
 
     /// [`Self::clone_voice`] with the sound handed out as it is made, as
     /// [`Self::speak_streaming`] does: the same reference conditioning, cached
-    /// per `(ref_wav, ref_text)`, so a voice is fixed and only the sampling
-    /// varies between takes.
+    /// per recording, so a voice is fixed and only the sampling varies between
+    /// takes.
     #[allow(clippy::too_many_arguments)]
     pub fn clone_voice_streaming(
         &mut self,
         text: &str,
-        ref_wav: &str,
+        reference: &Reference,
         ref_text: &str,
+        ref_codes: Option<&[u32]>,
         lang: &str,
         opts: &GenOpts,
         cancel: &CancelToken,
         on_audio: &mut dyn FnMut(&[f32], u32),
     ) -> Result<Vec<f32>, String> {
         if !matches!(self.codec, CodecPath::Device(_)) {
-            return self.clone_voice(text, ref_wav, ref_text, lang, opts, cancel, on_audio);
+            return self.clone_voice(text, reference, ref_text, ref_codes, lang, opts, cancel, on_audio);
         }
         let began = std::time::Instant::now();
-        let prompt = self.clone_prompt(text, ref_wav, ref_text, lang)?;
+        let prompt = self.clone_prompt(text, reference, ref_text, ref_codes, lang)?;
         self.stream_prompt(&prompt, opts, cancel, on_audio, began)
     }
 
@@ -436,12 +431,12 @@ impl ResidentEngine {
     /// Sample one utterance and keep what it was generated from, so it can be
     /// scored, trained on or compared under other weights. Device engines only.
     /// `voice` pins the speaker as [`Self::clone_voice`] does.
-    pub fn rollout(&mut self, text: &str, lang: &str, voice: Option<(&str, &str)>, opts: &GenOpts, cancel: &CancelToken) -> Result<Rollout, String> {
+    pub fn rollout(&mut self, text: &str, lang: &str, voice: Option<(&Reference, &str)>, opts: &GenOpts, cancel: &CancelToken) -> Result<Rollout, String> {
         if !matches!(self.core, Core::Device { .. }) {
             return Err("a rollout needs the engine on the device".to_string());
         }
         let prompt = match voice {
-            Some((wav, words)) => self.clone_prompt(text, wav, words, lang)?,
+            Some((reference, words)) => self.clone_prompt(text, reference, words, None, lang)?,
             None => {
                 let language_id = self.sp.language_id(lang);
                 let (role_ids, text_ids) = self.text_ids(text)?;
@@ -530,33 +525,38 @@ impl ResidentEngine {
 
     /// **Voice cloning** - the resident mirror of [`crate::pipeline::clone`].
     /// The reference conditioning (x-vector, and the ICL codec codes when
-    /// `ref_text` is non-empty) is computed once per `(ref_wav, ref_text)`
-    /// pair and reused, which is the whole point of a resident clone server:
-    /// only the target text changes between requests.
+    /// `ref_text` is non-empty and `ref_codes` is not given) is computed once
+    /// per recording and reused, which is the whole point of a resident clone
+    /// server: only the target text changes between requests. `ref_codes`
+    /// hands over the reference's codes encoded elsewhere and runs the ICL
+    /// path with them.
     #[allow(clippy::too_many_arguments)]
     pub fn clone_voice(
         &mut self,
         text: &str,
-        ref_wav: &str,
+        reference: &Reference,
         ref_text: &str,
+        ref_codes: Option<&[u32]>,
         lang: &str,
         opts: &GenOpts,
         cancel: &CancelToken,
         on_audio: &mut dyn FnMut(&[f32], u32),
     ) -> Result<Vec<f32>, String> {
-        let prompt = self.clone_prompt(text, ref_wav, ref_text, lang)?;
+        let prompt = self.clone_prompt(text, reference, ref_text, ref_codes, lang)?;
         self.run_prompt(&prompt, opts, cancel, on_audio)
     }
 
-    /// The prompt that speaks `text` in the voice of `(ref_wav, ref_text)`:
-    /// the speaker's x-vector alone when `ref_text` is empty, an in-context
-    /// prompt with the reference's own codes otherwise.
-    fn clone_prompt(&mut self, text: &str, ref_wav: &str, ref_text: &str, lang: &str) -> Result<Prompt, String> {
+    /// The prompt that speaks `text` in the voice of `reference`: the
+    /// speaker's x-vector alone when there is neither `ref_text` nor
+    /// `ref_codes`, an in-context prompt with the reference's own codes
+    /// otherwise.
+    fn clone_prompt(&mut self, text: &str, reference: &Reference, ref_text: &str, ref_codes: Option<&[u32]>, lang: &str) -> Result<Prompt, String> {
         let language_id = self.sp.language_id(lang);
-        self.ensure_ref(ref_wav, ref_text)?;
+        let encode_codes = ref_codes.is_none() && !ref_text.trim().is_empty();
+        self.ensure_ref(reference, encode_codes)?;
         let cached = self.ref_cache.as_ref().expect("ensure_ref populated the cache");
         let xvec = cached.xvec.clone();
-        let ref_code = cached.codes.clone();
+        let ref_code: Option<Vec<u32>> = ref_codes.map(<[u32]>::to_vec).or_else(|| if encode_codes { cached.codes.clone() } else { None });
         let (role_ids, text_ids) = self.text_ids(text)?;
 
         let prompt = match &ref_code {
@@ -573,28 +573,27 @@ impl ResidentEngine {
         Ok(prompt)
     }
 
-    /// Populate [`Self::ref_cache`] for `(ref_wav, ref_text)` if it does not
-    /// already hold exactly that pair.
-    fn ensure_ref(&mut self, ref_wav: &str, ref_text: &str) -> Result<(), String> {
-        if matches!(&self.ref_cache, Some(r) if r.wav_path == ref_wav && r.text == ref_text) {
-            return Ok(());
+    /// Populate [`Self::ref_cache`] for `reference`, with its codec codes when
+    /// `need_codes`; a cache already holding that is left alone.
+    fn ensure_ref(&mut self, reference: &Reference, need_codes: bool) -> Result<(), String> {
+        let wav = &reference.wav;
+        let fresh = !matches!(&self.ref_cache, Some(r) if r.digest == reference.digest());
+        if fresh {
+            if !std::path::Path::new(&self.speaker_path).exists() {
+                return Err(format!("tts clone: speaker encoder not found at '{}'", self.speaker_path));
+            }
+            if self.speaker.is_none() {
+                self.speaker = Some(ecapatdnn::SpeakerEncoder::load_inference(&self.speaker_path));
+            }
+            let xvec = self.speaker.as_ref().expect("just loaded").embed_wav(&wav.samples, wav.sample_rate);
+            self.ref_cache = Some(RefVoice { digest: reference.digest().to_string(), xvec, codes: None });
         }
-        if !std::path::Path::new(&self.speaker_path).exists() {
-            return Err(format!("tts clone: speaker encoder not found at '{}'", self.speaker_path));
-        }
-        let wav = audio::wav::read(ref_wav).map_err(|e| format!("read {ref_wav}: {e}"))?;
-        if self.speaker.is_none() {
-            self.speaker = Some(ecapatdnn::SpeakerEncoder::load_inference(&self.speaker_path));
-        }
-        let xvec = self.speaker.as_ref().expect("just loaded").embed_wav(&wav.samples, wav.sample_rate);
-        let ref_code = if ref_text.trim().is_empty() {
-            None
-        } else {
+        let cached = self.ref_cache.as_mut().expect("populated above");
+        if need_codes && cached.codes.is_none() {
             let codec = mimi::Codec::load_inference(&self.codec_path);
             let sr = codec.cfg.input_sample_rate;
-            Some(codec.encode(&audio::resample_linear(&wav.samples, wav.sample_rate, sr)))
-        };
-        self.ref_cache = Some(RefVoice { wav_path: ref_wav.to_string(), text: ref_text.to_string(), xvec, codes: ref_code });
+            cached.codes = Some(codec.encode(&audio::resample_linear(&wav.samples, wav.sample_rate, sr)));
+        }
         Ok(())
     }
 
@@ -648,13 +647,7 @@ impl ResidentEngine {
 mod tests {
     use super::*;
 
-    fn real_paths() -> Option<TtsPaths> {
-        let (Ok(w), Ok(c)) = (std::env::var("BRAIN_QWEN3TTS_WEIGHTS"), std::env::var("BRAIN_QWEN3TTS_CKPT")) else {
-            return None;
-        };
-        let paths = TtsPaths::new(&w, c);
-        paths.require(false).is_ok().then_some(paths)
-    }
+    use crate::testsupport::store_paths as real_paths;
 
     /// A missing checkpoint must come back as a clean error, not a panic
     /// inside `CpuTalker::load` - a served model reports a bad config, it
@@ -680,12 +673,12 @@ mod tests {
     /// waveform, and (2) a SECOND request on the same engine reuses the
     /// loaded weights - so it must be markedly faster than the first,
     /// load-inclusive call, and still produce audio.
-    /// Gated on `BRAIN_QWEN3TTS_WEIGHTS`/`_CKPT` like every other
-    /// real-checkpoint test in this crate.
+    /// Skips when the model store holds no Qwen3-TTS checkpoint, like every
+    /// other real-checkpoint test in this crate.
     #[test]
     fn resident_engine_streams_chunks_and_stays_hot_between_requests() {
         let Some(paths) = real_paths() else {
-            brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT not set");
+            brain_testutil::skip("no Qwen3-TTS checkpoint in the model store");
             return;
         };
         let t_load = std::time::Instant::now();

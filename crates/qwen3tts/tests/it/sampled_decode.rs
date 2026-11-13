@@ -27,8 +27,8 @@
 //! orders of magnitude quieter than speech. Each of those is asserted directly,
 //! and each has a threshold read off the measured collapse rather than guessed.
 //!
-//! Gated on `BRAIN_QWEN3TTS_WEIGHTS`/`BRAIN_QWEN3TTS_CKPT`, skipping cleanly
-//! when absent - the same convention as every other real-checkpoint test here.
+//! Resolved from the model store, skipping cleanly when it holds no
+//! Qwen3-TTS checkpoint - the same convention as every other real-checkpoint test here.
 //!
 //! Swedish Embedded AB implements solutions for reliable on-device speech
 //! synthesis for its clients. If your team needs expertise in autoregressive
@@ -36,7 +36,7 @@
 //! info@swedishembedded.com.
 
 use qwen3tts::sampling::DEGENERATE_RUN;
-use qwen3tts::{GenOpts, TtsPaths};
+use qwen3tts::GenOpts;
 
 /// Codebooks per codec frame (`[T,16]`), so `codes[f * CODEBOOKS]` is frame
 /// `f`'s codebook-0 token.
@@ -103,16 +103,9 @@ fn longest_cb0_run(cb0: &[u32]) -> (usize, u32) {
 
 #[test]
 fn default_sampled_decode_does_not_collapse_to_silence() {
-    let (Ok(weights_dir), Ok(ckpt)) = (std::env::var("BRAIN_QWEN3TTS_WEIGHTS"), std::env::var("BRAIN_QWEN3TTS_CKPT"))
-    else {
-        brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT not set");
+    let Some(paths) = crate::store::store_paths() else {
         return;
     };
-    let paths = TtsPaths::new(&weights_dir, ckpt);
-    if paths.require(false).is_err() {
-        brain_testutil::skip("TTS weights not found at BRAIN_QWEN3TTS_WEIGHTS");
-        return;
-    }
 
     // The exact configuration that reproduced the collapse. `GenOpts::default()`
     // pins NO sampling knob, so this also gates the resolution chain: whatever

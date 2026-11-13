@@ -24,8 +24,12 @@ pub mod import;
 pub mod mtp;
 pub mod npu_gen;
 pub mod pipeline;
+pub mod placement;
 pub mod sampling;
+pub mod reference;
 pub mod serve;
+#[cfg(unix)]
+pub mod socket;
 pub mod prompt;
 pub mod sft;
 pub mod train;

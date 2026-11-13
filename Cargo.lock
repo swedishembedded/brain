@@ -6900,6 +6900,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-models-qwen3tts"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-gpu-core",
+ "brain-invoke",
+ "brain-npu",
+ "brain-qwen3tts",
+ "serde_json",
+]
+
+[[package]]
 name = "sample-models-sam2"
 version = "5.1.0"
 dependencies = [

@@ -27,7 +27,7 @@ device. Pass `--out clone.wav` to write a file instead.
 
 Real weights, plus a reference voice clip (any WAV `brain::TtsPipeline` can
 read). The default model is `Qwen/Qwen3-TTS-12Hz-0.6B-Base`; if it is not in
-the local store the sample prints the `brain pull`/`brain tts import`
+the local store the sample prints the `brain pull`
 command to run and exits non-zero rather than downloading several gigabytes
 behind your back.
 

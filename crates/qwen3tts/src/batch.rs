@@ -231,7 +231,7 @@ pub struct BatchRequest {
 /// through the pure-CPU streaming decoder. That matches what [`run_batch`]
 /// itself can actually schedule (see the module doc: this is not a batched
 /// GPU matmul), rather than mixing in a device the scheduler cannot use.
-pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest]) -> Result<Vec<Vec<f32>>, String> {
+pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest], cancel: &CancelToken) -> Result<Vec<Vec<f32>>, String> {
     if reqs.is_empty() {
         return Err("tts batch: needs at least one request".to_string());
     }
@@ -243,10 +243,8 @@ pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest]) -> Result<Vec<Vec<f3
     // gives each session its own decoder copy - the weight-sharing limitation
     // its module doc already states - so this one is dropped before the batch
     // runs rather than held alongside them.
-    // No per-request cancellation here: `synth_batch`'s `BatchRequest` carries
-    // no token (unlike `caps::synth`/`clone`/`design`), so every session gets
-    // an unarmed one, the same "must never be interrupted" convention
-    // `tts_cli.rs` uses for its own foreground one-shot calls.
+    // One token for the whole batch: every session shares it, so a caller that
+    // hangs up stops all of them at the next round.
     let sessions: Vec<(Prompt, GenOpts, CancelToken)> = {
         let talker = CpuTalker::load(&paths.talker);
         let mut out = Vec::with_capacity(reqs.len());
@@ -263,13 +261,16 @@ pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest]) -> Result<Vec<Vec<f3
                 // outermost layer that knows the checkpoint dir, the same place
                 // `pipeline::synth` resolves for a single request.
                 r.opts.clone().resolved_for(&paths.ckpt_dir),
-                CancelToken::default(),
+                cancel.clone(),
             ));
         }
         out
     };
 
     let coded = run_batch(&paths.talker, &paths.mtp, &sp, sessions);
+    if cancel.is_cancelled() {
+        return Err("cancelled".to_string());
+    }
     let codec = mimi::decode_stream::StreamingCodecDecoder::load(&paths.codec);
     let mut wavs = Vec::with_capacity(coded.len());
     for (i, codes) in coded.iter().enumerate() {
@@ -368,22 +369,17 @@ mod tests {
     /// than the synthetic ones the codes-level test above uses.
     #[test]
     fn synth_batch_returns_one_ragged_waveform_per_request() {
-        let (Ok(w), Ok(ckpt)) = (std::env::var("BRAIN_QWEN3TTS_WEIGHTS"), std::env::var("BRAIN_QWEN3TTS_CKPT")) else {
-            brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT not set");
+        let Some(paths) = crate::testsupport::store_paths() else {
+            brain_testutil::skip("no Qwen3-TTS checkpoint in the model store");
             return;
         };
-        let paths = TtsPaths::new(&w, ckpt);
-        if paths.require(false).is_err() {
-            brain_testutil::skip("weights not found at BRAIN_QWEN3TTS_WEIGHTS");
-            return;
-        }
         let req = |text: &str, max_frames: usize, seed: u64| BatchRequest {
             text: text.to_string(),
             lang: "english".to_string(),
             opts: GenOpts { max_frames, seed, ..GenOpts::default() },
         };
         let t0 = std::time::Instant::now();
-        let wavs = synth_batch(&paths, &[req("Streaming the first request.", 40, 7), req("The second one runs quite a bit longer than the first one does.", 32, 2)])
+        let wavs = synth_batch(&paths, &[req("Streaming the first request.", 40, 7), req("The second one runs quite a bit longer than the first one does.", 32, 2)], &CancelToken::default())
             .expect("batch synthesis");
         assert_eq!(wavs.len(), 2);
         for (i, wav) in wavs.iter().enumerate() {
@@ -405,7 +401,7 @@ mod tests {
     #[test]
     fn an_empty_batch_is_rejected() {
         let paths = TtsPaths { talker: String::new(), mtp: String::new(), codec: String::new(), speaker: String::new(), ckpt_dir: String::new() };
-        assert!(synth_batch(&paths, &[]).unwrap_err().contains("at least one"));
+        assert!(synth_batch(&paths, &[], &CancelToken::default()).unwrap_err().contains("at least one"));
     }
 
     /// A short request must actually stop consuming rounds once it finishes,

@@ -102,7 +102,7 @@ $ brain --device gpu wan t2v \
 ## Text to speech and back
 
 ```bash
-$ brain qwen3tts synth --text "Brain trains and runs neural networks from scratch, in Rust." --out spoken.wav
+$ brain qwen3tts synth --text "Brain trains and runs neural networks from scratch, in Rust." --out audio=spoken.wav
 $ brain nemotronasr transcribe --in audio=spoken.wav --json
 {"text":"Brain trains and runs neural networks from scratch in rust. ",...}
 ```

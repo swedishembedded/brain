@@ -1,0 +1,25 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/qwen3tts` -> `sample-models-qwen3tts`.
+name = "sample-models-qwen3tts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: Qwen3-TTS speech from the command line - synth, clone, design, batch, import, finetune and sim with every parameter - plus the same synthesis on the Intel NPU and its resident Unix-socket server."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-qwen3tts.workspace = true
+brain-invoke.workspace = true
+brain-capability.workspace = true
+# The NPU route: the OpenVINO device the compiled graphs target, and the CPU
+# backend the speaker encoder runs on beside them.
+brain-npu.workspace = true
+brain-gpu-core.workspace = true
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 76

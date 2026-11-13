@@ -8,21 +8,24 @@
 //! sessions (cached per code-length bucket) all resident; each request resets the
 //! cache, builds its prompt, generates, and streams PCM via a callback.
 //!
-//! Used by `brain tts serve` (one engine per voice/mode, owned by a dedicated
-//! executor thread — OpenVINO infer requests are not shared across threads).
+//! Driven by [`crate::socket`]'s server (one engine per voice/mode, owned by a
+//! dedicated executor thread - OpenVINO infer requests are not shared across
+//! threads).
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use mimi::decode_stream::StreamingCodecDecoder;
 use data::tokenizer::Tokenizer;
-use npu::openvino::{CodecSession, NpuDevice};
+use npu::openvino::CodecSession;
 
 use crate::gen_kv_mtp::CpuMtp;
 use crate::npu_gen::{
     codec_bucket, decode_with_session, generate_codes_kv, generate_codes_kv_streaming, open_codec_session, KvTalker,
-    NpuStreamCodec, TalkerTables,
+    NpuStreamCodec, TalkerTables, Target,
 };
+use crate::placement::{CodecMode, MtpMode};
+use crate::reference::Reference;
 use crate::pipeline::{self, GenOpts};
 use crate::prompt::{self, TtsSpecials};
 
@@ -38,12 +41,13 @@ pub enum Kind {
 }
 
 /// Engine configuration (resident model + NPU placement).
+#[derive(Clone, Debug)]
 pub struct EngineCfg {
     pub kind: Kind,
     pub weights_dir: String,
     pub ckpt_dir: String,
     pub npu_cache: String,
-    pub device: NpuDevice,
+    pub device: Target,
     /// Fixed compiled KV context length (prefix + frames). Requests are clamped
     /// to fit; pick generously for the mode (e.g. clone ~384, design ~256).
     pub cap: usize,
@@ -57,6 +61,18 @@ pub struct EngineCfg {
     /// Clone only: the reference voice and its transcript (encoded once at load).
     pub ref_wav: Option<String>,
     pub ref_text: Option<String>,
+    /// The residual-codebook engine; `None` follows the checkpoint's size
+    /// ([`MtpMode::default_for`]).
+    pub mtp: Option<MtpMode>,
+    /// How generated codes become audio.
+    pub codec: CodecMode,
+    /// Codec frames per streamed audio chunk.
+    pub stream_chunk: usize,
+    /// Codec frames in the sliding window of [`CodecMode::Windowed`]
+    /// (warmup plus chunk); never below `stream_chunk`.
+    pub stream_window: usize,
+    /// Report the resolved sampling plan and stage timings per request.
+    pub profile: bool,
 }
 
 impl EngineCfg {
@@ -66,6 +82,7 @@ impl EngineCfg {
 }
 
 /// A single synthesis request handed to a resident engine.
+#[derive(Debug)]
 pub struct Req {
     pub text: String,
     pub instruct: String,
@@ -89,13 +106,14 @@ pub struct TtsEngine {
     // Resident NPU MTP (INT8 KV-cache decode graph). When present it replaces the
     // host `CpuMtp` in the generation loop, measured several times faster per
     // frame on the large 1.7B (the host MTP re-streams its ~300MB fp32 weights
-    // 16 times per frame and is memory-bandwidth bound). Loaded for d_model>=2048 unless `BRAIN_QWEN3TTS_MTP=cpu`.
+    // 16 times per frame and is memory-bandwidth bound). Loaded by default for
+    // d_model>=2048 (see `MtpMode::default_for`).
     mtp_npu: Option<crate::npu_gen::KvMtp>,
     kv: KvTalker,
     codec_sessions: HashMap<usize, CodecSession>,
-    // Pure-CPU stateful streaming codec (BRAIN_QWEN3TTS_CODEC=cpu-stream); lazily loaded.
+    // Pure-CPU stateful streaming codec (`CodecMode::CpuStream`); lazily loaded.
     cpu_codec: Option<StreamingCodecDecoder>,
-    // NPU stateful streaming codec (BRAIN_QWEN3TTS_CODEC=npu-stream); lazily loaded.
+    // NPU stateful streaming codec (`CodecMode::NpuStream`); lazily loaded.
     npu_codec: Option<NpuStreamCodec>,
     // Clone-mode, encoded once at load:
     ref_code: Option<Vec<u32>>,
@@ -116,7 +134,7 @@ impl TtsEngine {
         let cache = Path::new(&cfg.npu_cache);
         // Print the resolved hardware path (device + weight precision + native vs
         // weight-compression) so `brain tts serve` startup logs what it actually uses.
-        eprintln!("{}", crate::npu_gen::describe_talker_path(cfg.device, true, cfg.quant, cfg.int4));
+        eprintln!("{}", crate::npu_gen::describe_talker_path(cfg.device.device, true, cfg.quant, cfg.int4));
         // Only clone (long reference prefix) benefits from the prefill graph;
         // design/cv/synth have short prefixes, so skip its ~1.4 GB compile. Unlike the
         // one-shot CLI (which skips INT4 prefill to bound peak RAM in a process that also
@@ -128,12 +146,12 @@ impl TtsEngine {
         let kv = KvTalker::load(&talker, cfg.cap, cfg.device, true, Some(cache), &tables.cfg, cfg.quant, cfg.int4, with_prefill)?;
 
         // MTP placement (mirrors `pipeline::run_npu`): the resident INT8 NPU decode
-        // graph beats the host CpuMtp on the large model. Default on for d_model>=2048;
-        // `BRAIN_QWEN3TTS_MTP=cpu` forces the host path, `=npu` forces it on.
-        let want_npu_mtp = match std::env::var("BRAIN_QWEN3TTS_MTP").ok().as_deref() {
-            Some("cpu") => false,
-            Some("npu") => true,
-            _ => tables.cfg.d_model >= 2048,
+        // graph beats the host CpuMtp on the large model, so that is the default there;
+        // `MtpMode::Cpu` forces the host path, `MtpMode::Npu` forces the device on.
+        let want_npu_mtp = match cfg.mtp.unwrap_or_else(|| MtpMode::default_for(tables.cfg.d_model)) {
+            MtpMode::Cpu => false,
+            MtpMode::Npu => true,
+            MtpMode::Fused => return Err("the fused MTP graph runs only in the one-shot NPU route; a resident engine takes cpu or npu".to_string()),
         };
         let mtp_npu = if want_npu_mtp {
             match crate::npu_gen::KvMtp::load(&mtp_path, cfg.device, true, Some(cache), tables.cfg.d_model >= 2048) {
@@ -160,10 +178,10 @@ impl TtsEngine {
         } else {
             "host CpuMtp"
         };
-        let codec_place = match std::env::var("BRAIN_QWEN3TTS_CODEC").ok().as_deref() {
-            Some("windowed") => "NPU windowed",
-            Some("cpu-stream") => "CPU streaming (reference)",
-            _ => "NPU streaming (stateful)",
+        let codec_place = match cfg.codec {
+            CodecMode::Windowed => "NPU windowed",
+            CodecMode::CpuStream => "CPU streaming (reference)",
+            CodecMode::NpuStream => "NPU streaming (stateful)",
         };
         eprintln!(
             "tts serve: engine[{:?}] READY on {} | talker={talker_prec} (prefill={with_prefill}) | \
@@ -176,12 +194,13 @@ impl TtsEngine {
         let (ref_code, ref_ids, xvec) = if cfg.kind == Kind::Clone {
             let rw = cfg.ref_wav.as_ref().ok_or("clone engine needs a reference wav")?;
             let rt = cfg.ref_text.clone().unwrap_or_default();
-            let wav = audio::wav::read(rw).map_err(|e| format!("read {rw}: {e}"))?;
+            let reference = Reference::from_path(rw)?;
+            let wav = &reference.wav;
             paths.require(true)?;
             let speaker = ecapatdnn::SpeakerEncoder::load_inference(&paths.speaker);
             let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
             let codec_path = paths.codec.clone();
-            let ref_code = pipeline::ref_codes_cached(&codec_path, &wav, rw, Some(&cfg.npu_cache));
+            let ref_code = pipeline::ref_codes_cached(&codec_path, &reference, Some(&cfg.npu_cache));
             let ref_ids_full = tok.encode(&format!("<|im_start|>assistant\n{rt}<|im_end|>\n"));
             if ref_ids_full.len() < 6 {
                 return Err("clone reference transcript tokenized too short".into());
@@ -267,12 +286,13 @@ impl TtsEngine {
         // capacity clamp, so the traced plan reports the `max_frames` that will
         // actually run. Skipping this is how a resident caller would silently
         // miss the checkpoint layer a one-shot `brain tts synth` honours.
+        opts.profile = self.cfg.profile;
         opts.resolve_with(self.gencfg);
 
         // Codec backend `cpu-stream`: the pure-CPU *stateful* streaming decoder —
         // each chunk decodes ONLY its new frames (no warmup re-decode), emitting
         // audio progressively. Generate the full codes, then stream-decode.
-        if std::env::var("BRAIN_QWEN3TTS_CODEC").map(|v| v == "cpu-stream").unwrap_or(false) {
+        if self.cfg.codec == CodecMode::CpuStream {
             let mtp_eng: &mut dyn crate::npu_gen::MtpEngine =
                 match self.mtp_npu.as_mut() { Some(k) => k, None => &mut self.mtp };
             let codes = generate_codes_kv(&mut self.kv, &self.tables, mtp_eng, &self.sp, &prompt, &opts)?;
@@ -283,7 +303,7 @@ impl TtsEngine {
                 let codec_path = self.cfg.paths().codec;
                 self.cpu_codec = Some(StreamingCodecDecoder::load(&codec_path));
             }
-            let chunk = std::env::var("BRAIN_QWEN3TTS_STREAM_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize).max(1);
+            let chunk = self.cfg.stream_chunk.max(1);
             let dec = self.cpu_codec.as_ref().unwrap();
             let mut total = 0usize;
             dec.decode_streaming_cb(&codes, chunk, &mut |pcm, seq| {
@@ -299,9 +319,8 @@ impl TtsEngine {
         // Codec backend `npu-stream` (DEFAULT): the NPU *stateful* streaming
         // decoder — front graph once, then the streaming-back graph per chunk
         // carrying per-conv state (no warmup re-decode). Exact and ~faster than the
-        // windowed path. `BRAIN_QWEN3TTS_CODEC=windowed` forces the old sliding-window
-        // path below.
-        if std::env::var("BRAIN_QWEN3TTS_CODEC").map(|v| v != "windowed").unwrap_or(true) {
+        // windowed path. `CodecMode::Windowed` selects the sliding-window path below.
+        if self.cfg.codec == CodecMode::NpuStream {
             let mtp_eng: &mut dyn crate::npu_gen::MtpEngine =
                 match self.mtp_npu.as_mut() { Some(k) => k, None => &mut self.mtp };
             let codes = generate_codes_kv(&mut self.kv, &self.tables, mtp_eng, &self.sp, &prompt, &opts)?;
@@ -311,7 +330,7 @@ impl TtsEngine {
             if self.npu_codec.is_none() {
                 let codec_path = self.cfg.paths().codec;
                 let front_t = self.kv.cap();
-                let chunk = std::env::var("BRAIN_QWEN3TTS_STREAM_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize).max(1);
+                let chunk = self.cfg.stream_chunk.max(1);
                 self.npu_codec = Some(NpuStreamCodec::load(
                     &codec_path,
                     front_t,
@@ -332,9 +351,8 @@ impl TtsEngine {
         // chunk) — its leading frames give the causal codec context; only the
         // newest `chunk` frames' audio is emitted. Gaps between chunks are fine
         // (fast hardware keeps up). One resident codec session at length `win`.
-        let envn = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-        let chunk = envn("BRAIN_QWEN3TTS_STREAM_CHUNK", 16).max(1);
-        let win = codec_bucket(envn("BRAIN_QWEN3TTS_STREAM_WIN", 32).max(chunk));
+        let chunk = self.cfg.stream_chunk.max(1);
+        let win = codec_bucket(self.cfg.stream_window.max(chunk));
         if !self.codec_sessions.contains_key(&win) {
             let codec_path = self.cfg.paths().codec;
             let s = open_codec_session(&codec_path, win, self.cfg.device, true, Some(Path::new(&self.cfg.npu_cache)))?;

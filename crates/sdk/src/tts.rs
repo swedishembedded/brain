@@ -352,8 +352,9 @@ impl TtsPipeline {
         match &self.backend {
             Backend::Qwen3Tts(paths) => {
                 let gen_opts = opts.to_gen_opts();
+                let reference = qwen3tts::reference::Reference::from_path(reference.as_ref()).map_err(Error::Backend)?;
                 let samples =
-                    qwen3tts::pipeline::clone(paths, &gen_opts, text, &refw, ref_text.unwrap_or(""), &opts.lang, None, &CancelToken::default()).map_err(Error::Backend)?;
+                    qwen3tts::pipeline::clone(paths, &gen_opts, text, &reference, ref_text.unwrap_or(""), &opts.lang, None, &CancelToken::default()).map_err(Error::Backend)?;
                 Ok(Audio { samples, sample_rate: SAMPLE_RATE })
             }
             Backend::CosyVoice(paths) => {
@@ -455,7 +456,7 @@ impl TtsPipelineBuilder {
         // `brain.manifest.json`, or a bare `model.brain.safetensors`"
         // shapes - and CosyVoice has neither. Real gap this order fixes:
         // `brain_modelstore` has no `FilesRecipe` entry for cosyvoice (no
-        // conversion step either, unlike qwen3tts's `brain tts import`), so
+        // conversion step either, unlike qwen3tts's `import` action), so
         // `Store::local` never recognizes even a real, already-downloaded
         // `FunAudioLLM/CosyVoice2-0.5B` repo (`hf download ... --local-dir
         // $BRAIN_MODELS_DIR/FunAudioLLM/CosyVoice2-0.5B`, the same layout

@@ -43,7 +43,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("qwen35moe", crate::qwen35moe_cli::run_qwen35moe),
     ("qwen3omnimoe", crate::omni_cli::run_omni),
     ("glmdsa", crate::glm_cli::run_glm),
-    ("qwen3tts", crate::tts_cli::run_tts),
     // wm_cli's own `--arch`/`--model` flags (not this resolver) pick
     // fake-vs-diamond within `play`/`import`/`export` -- diamond is its one
     // real served architecture, so that's the id this dispatches from.
@@ -132,6 +131,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("toymoe", "brain/toymoe"),
     ("huginn", "brain/huginn"),
     ("ouro", "brain/ouro"),
+    ("qwen3tts", "brain/qwen3tts"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
@@ -384,11 +384,8 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
     // Unconditional (past the gates above) and first: covers BOTH halves of
     // this resolver. `ARCH_TO_MODEL` architectures have no `--weights` flag
     // at all (`run_do`'s params are the action's own schema) and always
-    // need this; a handful of `ARCH_HANDLERS` architectures (`qwen3tts`)
-    // ALSO read `BRAIN_*` env vars as their own flags' defaults (`--ckpt`
-    // defaults to `$BRAIN_QWEN3TTS_CKPT`) rather than taking `--weights` the
-    // way `maybe_inject_default_weights` below expects, so this can't be
-    // scoped to just the `ARCH_TO_MODEL` branch. No-ops instantly for every
+    // need this, and `ARCH_HANDLERS` architectures reach it too, so this
+    // can't be scoped to just the `ARCH_TO_MODEL` branch. No-ops instantly for every
     // architecture with an empty `weights_env` (everything else today).
     let attempt_fetch = !resolver_migrated && wants_weight_acquisition(arch, &rest);
     if attempt_fetch && !weights_already_named(arch, &rest) {
@@ -432,37 +429,13 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
     std::process::exit(1);
 }
 
-/// A `(variable, real CLI flag)` override for the handful of `weights_env`
-/// variables whose flag genuinely doesn't follow the `BRAIN_<ARCH>_<ROLE>` ->
-/// `--<role>` naming rule [`flag_twin`] otherwise derives. The `weights_env`
-/// tuple's own second field ("role") is NOT a safe substitute here: it names
-/// a shared semantic role used elsewhere (`crate::supply`'s `FilesRecipe`
-/// layout) that several architectures deliberately spell differently on
-/// their own dedicated CLI -- e.g. `wan`'s `role="text_encoder"` is reached
-/// as `--t5`, not `--text_encoder`. Only list a variable here once its real
-/// flag is confirmed to actually diverge from the derived guess; anything
-/// absent keeps falling through to the derivation below.
-const FLAG_TWIN_OVERRIDES: &[(&str, &str)] = &[
-    // qwen3tts's dedicated CLI (`tts_cli.rs::parse_common`) reaches
-    // `BRAIN_QWEN3TTS_WEIGHTS` as `--weights-dir`; the derived guess
-    // (`--weights`, the variable's own suffix) never appears on a real
-    // command line, so `weights_already_named` could never see an explicit
-    // `--weights-dir --ckpt` pair and always fell through to the auto-fetch
-    // gate even when both paths were named.
-    ("BRAIN_QWEN3TTS_WEIGHTS", "--weights-dir"),
-];
-
 /// The flag twin of a `weights_env` variable, under the naming rule a
 /// multi-role architecture's own CLI follows: `BRAIN_<ARCH>_<ROLE>` is
-/// reachable as `--<role>`, so `BRAIN_WAN_DIT` is `--dit`. [`FLAG_TWIN_OVERRIDES`]
-/// wins first for the variables known to diverge from that rule. A variable
+/// reachable as `--<role>`, so `BRAIN_WAN_DIT` is `--dit`. A variable
 /// that follows neither (`rrdbnet`'s `BRAIN_ESRGAN_WEIGHTS`) yields a name no
 /// command line will contain, which is the safe direction: it simply never
 /// suppresses the fetch.
 fn flag_twin(arch: &str, var: &str) -> String {
-    if let Some((_, flag)) = FLAG_TWIN_OVERRIDES.iter().find(|(v, _)| *v == var) {
-        return flag.to_string();
-    }
     let prefix = format!("BRAIN_{}_", arch.to_ascii_uppercase());
     format!("--{}", var.strip_prefix(&prefix).unwrap_or(var).to_ascii_lowercase())
 }
@@ -497,7 +470,7 @@ fn weights_already_named_with(arch: &str, a: Option<&brain_arch::Arch>, rest: &[
         // Both spellings count. A dedicated CLI writes the flag with hyphens
         // (`--weights-dir`); the GENERIC capability dispatcher derives its
         // flags from param NAMES, which are underscored (`--weights_dir`) - so
-        // an architecture that has both entry points (qwen3tts) would
+        // an architecture that has both entry points would
         // otherwise have its generic invocations fall through to the
         // auto-fetch gate while its dedicated ones suppress it, for the same
         // path named the same way.
@@ -963,11 +936,6 @@ mod tests {
         // A variable that does not follow the pattern yields a flag nothing
         // will match, so it never suppresses the fetch by accident.
         assert_eq!(flag_twin("rrdbnet", "BRAIN_ESRGAN_WEIGHTS"), "--brain_esrgan_weights");
-        // qwen3tts's `BRAIN_QWEN3TTS_WEIGHTS` is a listed override: its real
-        // flag (`--weights-dir`) doesn't follow the derivation rule either,
-        // but unlike rrdbnet's case this one DOES have a real dedicated CLI
-        // flag that must be recognized, not silently missed.
-        assert_eq!(flag_twin("qwen3tts", "BRAIN_QWEN3TTS_WEIGHTS"), "--weights-dir");
 
         let fixture = multi_role_fixture();
         let roles = fixture.weights_env;
@@ -995,9 +963,9 @@ mod tests {
     /// `flux2_no_longer_wants_env_based_weight_acquisition`): its
     /// `weights_env` is empty, so `weights_already_named` has nothing to
     /// name (its own documented "nothing to name; `ensure_env_weights`
-    /// no-ops anyway" early return) - `tts_cli.rs`'s own `--weights-dir`/
-    /// `--ckpt` flags are the resolver's role overrides now, not a pair this
-    /// legacy env-var gate needs to recognize at all.
+    /// no-ops anyway" early return) - its `--weights-dir`/`--ckpt` role
+    /// overrides are the resolver's, not a pair this legacy env-var gate
+    /// needs to recognize at all.
     #[test]
     fn qwen3tts_no_longer_wants_env_based_weight_acquisition() {
         let _serial = env_lock();

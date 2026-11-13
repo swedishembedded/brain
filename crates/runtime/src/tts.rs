@@ -125,8 +125,7 @@ impl Qwen3TtsSynthModel {
         let language = req.language.clone().unwrap_or_else(|| self.language.clone());
         // The `SynthModel` seam has no cancellation channel (see the module
         // doc's note on the missing error channel), so every call runs to
-        // completion - the same unarmed-token convention `tts_cli.rs` uses
-        // for its own foreground one-shot calls.
+        // completion, so the token is never armed.
         let cancel = CancelToken::default();
         match &req.ref_audio {
             // Voice clone: x-vector timbre from the reference wav, and the ICL
@@ -135,7 +134,7 @@ impl Qwen3TtsSynthModel {
                 &self.paths,
                 &self.opts,
                 &req.text,
-                wav,
+                &qwen3tts::reference::Reference::from_path(wav)?,
                 req.ref_text.as_deref().unwrap_or(""),
                 &language,
                 None,

@@ -59,10 +59,8 @@ mod run_record;
 mod serve_daemon;
 mod supply;
 mod tree;
-mod tts_cli;
 /// `brain tts serve`: a Unix domain socket server, so Unix only.
 #[cfg(unix)]
-mod tts_serve;
 mod wm_cli;
 
 /// Whether `--device`/`BRAIN_DEVICE` EXPLICITLY named the NPU. The NPU is a
@@ -87,7 +85,7 @@ USAGE: brain <verb> <architecture> [options]   OR   brain <architecture> <verb> 
 Both orders are the SAME command - `brain train gpt2 ...` and `brain gpt2
 train ...` dispatch identically. `brain caps` lists every architecture brain
 knows about, along with its actions (its \"verbs\"). An architecture with its
-own dedicated flags (gpt2, qwen3, qwen35, qwen35moe, glmdsa, lfm2, qwen3tts,
+own dedicated flags (gpt2, qwen3, qwen35, qwen35moe, glmdsa, lfm2,
 yolov8, zipdepth, flux2, wan, worldmirror2, splat, qwen3omnimoe, diamond,
 toypid, toymoe)
 is documented below; every other one (`brain caps` shows the full list -
@@ -418,8 +416,13 @@ LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
   brain npu lfm        --weights F --seq S --out model.onnx [--int8]   # OpenVINO export
   make perf/model/lfm                      # standalone concurrency benchmark (scheduler+residency)
 
-QWEN3-TTS (Talker + MTP + neural codec; voice cloning)
-  brain qwen3tts <import|clone|synth|design|serve|sim|finetune> ...
+QWEN3-TTS (brain/qwen3tts: Talker + MTP + neural codec; NPU actions are samples/models/qwen3tts)
+  brain qwen3tts synth --text \"Hello.\" --out audio=hello.wav
+  brain qwen3tts clone --ref ref.wav --ref-text \"...\" --text \"...\" --out audio=me.wav
+  brain qwen3tts design --instruct \"a calm low voice\" --text \"...\" --out audio=d.wav
+  brain qwen3tts finetune --data data/tts --save talker.safetensors [--steps N --full true]
+  brain qwen3tts <batch|sim|import> ...
+      every parameter: brain qwen3tts <action> --help
 
 MONOCULAR DEPTH (brain/zipdepth; image and camera windows are samples/models/zipdepth)
   brain zipdepth infer --image photo.png --out depth=depth.png [--view side --out view=side.png]
@@ -1658,8 +1661,7 @@ fn main() {
     }
     // Every arm above either already called `drain_before_exit` itself (in
     // which case this line is unreachable, which is fine - see the matching
-    // call sites in `resolve::dispatch`/`caps_cli::run_do` and
-    // `tts_cli::run_tts`) or returned normally, about to fall off `main` - in
+    // call sites in `resolve::dispatch`/`caps_cli::run_do`) or returned normally, about to fall off `main` - in
     // which case THIS is what actually terminates the process (`main`
     // returning normally never reaches `drain_before_exit`'s `hard_exit`
     // unless something calls it, so falling through to a bare return here

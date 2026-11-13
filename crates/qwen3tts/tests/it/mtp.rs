@@ -200,9 +200,10 @@ fn every_mtp_parameter_family_receives_gradient() {
 
 #[test]
 fn mtp_real_import_and_forward() {
-    let Ok(dir) = std::env::var("BRAIN_QWEN3TTS_CKPT") else {
-        return brain_testutil::skip("set BRAIN_QWEN3TTS_CKPT to a real Qwen3-TTS checkpoint dir");
+    let Some(paths) = crate::store::store_paths() else {
+        return;
     };
+    let dir = paths.ckpt_dir;
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
     }

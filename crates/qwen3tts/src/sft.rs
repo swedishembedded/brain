@@ -232,7 +232,7 @@ impl FinetuneOpts {
 ///
 /// Native-only (reads `.bin` datasets, writes a checkpoint).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn finetune_lora(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> std::io::Result<(f32, f32)> {
+pub fn finetune_lora(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts, on_step: &mut dyn FnMut(&model::StepReport) -> bool) -> std::io::Result<(f32, f32)> {
     use qwen3::{LoraCfg, QwenConfig};
 
     // Load the base config + weights, then re-key under a LoRA config so the
@@ -248,7 +248,7 @@ pub fn finetune_lora(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
     for (k, v) in base_weights {
         init.insert(k, v);
     }
-    run_finetune(cfg, init, dir, out, opts)
+    run_finetune(cfg, init, dir, out, opts, on_step)
 }
 
 /// Full (non-LoRA) single-speaker SFT: every Talker weight trains, matching
@@ -264,7 +264,7 @@ pub fn finetune_lora(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
 ///
 /// Native-only (reads `.bin` datasets, writes a checkpoint).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn finetune_full(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> std::io::Result<(f32, f32)> {
+pub fn finetune_full(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts, on_step: &mut dyn FnMut(&model::StepReport) -> bool) -> std::io::Result<(f32, f32)> {
     use qwen3::QwenConfig;
 
     let ckpt = crate::import::load_talker(base);
@@ -280,7 +280,7 @@ pub fn finetune_full(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
         init.insert(k, v);
     }
 
-    model::offload::with_adam_offloaded(true, || run_finetune(cfg, init, dir, out, opts))
+    model::offload::with_adam_offloaded(true, || run_finetune(cfg, init, dir, out, opts, on_step))
 }
 
 /// The training loop shared by [`finetune_lora`]/[`finetune_full`]: the only
@@ -296,7 +296,10 @@ pub fn finetune_full(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
 /// is built by hand here with masking off, exactly as this loop already did
 /// before the collapse onto `fit_with`.
 ///
-/// Returns `model::fit_with`'s own `(initial_train, last_train)` - the
+/// `on_step` sees every optimizer step and stops the run by returning `false`
+/// (the checkpoint written so far is kept).
+///
+/// Returns the run's `(initial_train, last_train)` - the
 /// 5-micro-step train-split estimate and the final step's train loss, NOT
 /// the previous `(initial_val_eval, min(final_val_eval, last_train))` this
 /// loop used to compute by hand. Callers reading the returned pair (the CLI's
@@ -308,6 +311,7 @@ fn run_finetune(
     dir: &Path,
     out: &str,
     opts: &FinetuneOpts,
+    on_step: &mut dyn FnMut(&model::StepReport) -> bool,
 ) -> std::io::Result<(f32, f32)> {
     use data::loader::{BatchConfig, TokenDataset};
     use qwen3::Qwen;
@@ -327,7 +331,9 @@ fn run_finetune(
     let train_ds = TokenDataset::new(train, &bcfg);
     let val_ds = TokenDataset::new(val, &bcfg);
     let obj = model::causal_lm::<Qwen>(train_ds, val_ds, bcfg, None);
-    model::fit_with(model, obj, &opts.to_fit_opts(), Some(Path::new(out)))
+    let control = model::FitControl { on_step: Some(on_step), ..Default::default() };
+    let (report, _) = model::fit_controlled(model, obj, &opts.to_fit_opts(), Some(Path::new(out)), control)?;
+    Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
 }
 
 #[cfg(test)]
@@ -462,6 +468,24 @@ mod tests {
         (dir, base_path)
     }
 
+    /// A caller that stops the run (a cancelled served action) ends it at that
+    /// step boundary: the hook sees every step it was given, in order, and the
+    /// run reports fewer steps than asked for.
+    #[test]
+    fn the_step_hook_sees_every_step_and_can_stop_the_run() {
+        let (dir, base_path) = setup("step-hook");
+        let opts = FinetuneOpts { steps: 6, batch: 2, block: 4, lr: 1e-2, rank: 2, alpha: 4.0, ..Default::default() };
+        let out = dir.join("stopped.safetensors").to_str().unwrap().to_string();
+        let mut seen = Vec::new();
+        finetune_lora(&base_path, &dir, &out, &opts, &mut |r| {
+            seen.push((r.step, r.steps));
+            r.step < 2
+        })
+        .expect("stopped finetune");
+        assert_eq!(seen, [(1, 6), (2, 6)], "the hook is called per step and its `false` ends the run");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The whole point of having two fine-tune modes: `finetune_full` must
     /// actually move the base decoder weights (that's what "full" means),
     /// while `finetune_lora` must leave them bit-for-bit untouched (the base
@@ -478,13 +502,13 @@ mod tests {
         let original = init[key].clone();
 
         let full_out = dir.join("full.safetensors").to_str().unwrap().to_string();
-        finetune_full(&base_path, &dir, &full_out, &opts).expect("full finetune");
+        finetune_full(&base_path, &dir, &full_out, &opts, &mut |_| true).expect("full finetune");
         let full_w = checkpoint::load(&full_out).by_role("");
         let full_diff: f32 = full_w[key].iter().zip(&original).map(|(a, b)| (a - b).abs()).sum();
         assert!(full_diff > 1e-6, "full finetune must move base weights (diff={full_diff})");
 
         let lora_out = dir.join("lora.safetensors").to_str().unwrap().to_string();
-        finetune_lora(&base_path, &dir, &lora_out, &opts).expect("lora finetune");
+        finetune_lora(&base_path, &dir, &lora_out, &opts, &mut |_| true).expect("lora finetune");
         let lora_w = checkpoint::load(&lora_out).by_role("");
         let lora_diff: f32 = lora_w[key].iter().zip(&original).map(|(a, b)| (a - b).abs()).sum();
         assert_eq!(lora_diff, 0.0, "LoRA finetune must leave base weights untouched (diff={lora_diff})");
@@ -520,11 +544,12 @@ mod tests {
             ..Default::default()
         };
         let out_a = dir.join("no_warmup.safetensors").to_str().unwrap().to_string();
-        finetune_lora(&base_path, &dir, &out_a, &no_warmup).expect("finetune (no warmup)");
+        finetune_lora(&base_path, &dir, &out_a, &no_warmup, &mut |_| true).expect("finetune (no warmup)");
 
-        let long_warmup = FinetuneOpts { warmup: 1000, ..no_warmup };
+        // The decay horizon must cover the warmup, or the schedule is refused.
+        let long_warmup = FinetuneOpts { warmup: 1000, decay_iters: 1000, ..no_warmup };
         let out_b = dir.join("long_warmup.safetensors").to_str().unwrap().to_string();
-        finetune_lora(&base_path, &dir, &out_b, &long_warmup).expect("finetune (warmup=1000)");
+        finetune_lora(&base_path, &dir, &out_b, &long_warmup, &mut |_| true).expect("finetune (warmup=1000)");
 
         let key = "blocks.0.attn.wq.weight.lora_b"; // zero-init - any nonzero value is training-induced movement
         let move_a: f32 = checkpoint::load(&out_a).by_role("")[key].iter().map(|v| v.abs()).sum();
@@ -569,11 +594,11 @@ mod tests {
             ..Default::default()
         };
         let out_1 = dir.join("accum1.safetensors").to_str().unwrap().to_string();
-        let (_, last_1) = finetune_lora(&base_path, &dir, &out_1, &single).expect("finetune (grad_accum=1)");
+        let (_, last_1) = finetune_lora(&base_path, &dir, &out_1, &single, &mut |_| true).expect("finetune (grad_accum=1)");
 
         let accumulated = FinetuneOpts { grad_accum: 4, ..single };
         let out_4 = dir.join("accum4.safetensors").to_str().unwrap().to_string();
-        let (_, last_4) = finetune_lora(&base_path, &dir, &out_4, &accumulated).expect("finetune (grad_accum=4)");
+        let (_, last_4) = finetune_lora(&base_path, &dir, &out_4, &accumulated, &mut |_| true).expect("finetune (grad_accum=4)");
 
         assert!(
             (last_1 - last_4).abs() > 1e-4,
@@ -633,7 +658,7 @@ mod tests {
             alpha: 4.0,
             ..Default::default()
         };
-        finetune_lora(&base_path, &dir, out.to_str().unwrap(), &opts).expect("finetune");
+        finetune_lora(&base_path, &dir, out.to_str().unwrap(), &opts, &mut |_| true).expect("finetune");
 
         stop.store(true, Ordering::Relaxed);
         watcher.join().unwrap();

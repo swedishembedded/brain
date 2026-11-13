@@ -253,6 +253,57 @@ pub fn import_mtp(hf_dir: &str, out_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The four brain files [`import_all`] writes into its destination directory.
+pub const TALKER_FILE: &str = "talker.safetensors";
+pub const MTP_FILE: &str = "mtp.safetensors";
+pub const CODEC_FILE: &str = "codec.safetensors";
+pub const SPEAKER_FILE: &str = "speaker.safetensors";
+
+/// Where the components of one Qwen3-TTS release are read from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sources {
+    /// The HF checkpoint dir: the Talker, the MTP and (unless named apart) the
+    /// speaker encoder.
+    pub release: String,
+    /// The speech tokenizer; its own directory when it ships separately.
+    pub codec: String,
+    /// The speaker encoder; absent from CustomVoice and VoiceDesign releases.
+    pub speaker: String,
+}
+
+impl Sources {
+    /// A release read from `release`, with the codec in its `speech_tokenizer`
+    /// subdirectory and the speaker encoder inside the release itself unless
+    /// `codec`/`speaker` name them apart.
+    pub fn new(release: &str, codec: Option<&str>, speaker: Option<&str>) -> Sources {
+        Sources {
+            release: release.to_string(),
+            codec: codec.map_or_else(|| format!("{release}/speech_tokenizer"), str::to_string),
+            speaker: speaker.map_or_else(|| release.to_string(), str::to_string),
+        }
+    }
+}
+
+/// What [`import_all`] wrote.
+#[derive(Debug)]
+pub struct Imported {
+    /// Why no speaker encoder was written (a CustomVoice/VoiceDesign release
+    /// has none and cannot clone from reference audio); `None` when it was.
+    pub speaker_skipped: Option<String>,
+}
+
+/// Import every component of `sources` as brain checkpoints into `dest`
+/// ([`TALKER_FILE`], [`MTP_FILE`], [`CODEC_FILE`], [`SPEAKER_FILE`]).
+pub fn import_all(sources: &Sources, dest: &str) -> Result<Imported, String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("create {dest}: {e}"))?;
+    let at = |file: &str| format!("{dest}/{file}");
+    import_talker(&sources.release, &at(TALKER_FILE)).map_err(|e| format!("import talker: {e}"))?;
+    import_mtp(&sources.release, &at(MTP_FILE)).map_err(|e| format!("import mtp: {e}"))?;
+    mimi::import::import(&sources.codec, &at(CODEC_FILE)).map_err(|e| format!("import codec: {e}"))?;
+    let speaker_skipped = ecapatdnn::import::import(&sources.speaker, &at(SPEAKER_FILE)).err();
+    Ok(Imported { speaker_skipped })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,5 +526,21 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_file(&talker_out).ok();
         std::fs::remove_file(&mtp_out).ok();
+    }
+
+    #[test]
+    fn sources_default_the_codec_and_speaker_inside_the_release() {
+        let s = Sources::new("/r", None, None);
+        assert_eq!((s.codec.as_str(), s.speaker.as_str()), ("/r/speech_tokenizer", "/r"));
+        let s = Sources::new("/r", Some("/c"), Some("/s"));
+        assert_eq!((s.codec.as_str(), s.speaker.as_str()), ("/c", "/s"));
+    }
+
+    #[test]
+    fn importing_a_missing_release_names_the_failing_component() {
+        let dest = std::env::temp_dir().join(format!("tts-import-missing-{}", std::process::id()));
+        let err = import_all(&Sources::new("/nonexistent/release", None, None), dest.to_str().unwrap()).unwrap_err();
+        assert!(err.starts_with("import talker"), "got: {err}");
+        std::fs::remove_dir_all(&dest).ok();
     }
 }

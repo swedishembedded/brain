@@ -30,6 +30,21 @@ use crate::prompt::{Prompt, TalkerHost, TtsSpecials};
 use crate::sampling::{DegenerationWatch, SamplerCfg};
 use crate::talker::TextProjection;
 
+/// The OpenVINO device a graph compiles for, and whether it asks for the
+/// NPU's turbo clock (off by default: it raises power and heat, which can
+/// throttle sooner under sustained load).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub device: NpuDevice,
+    pub turbo: bool,
+}
+
+impl Target {
+    pub fn new(device: NpuDevice, turbo: bool) -> Target {
+        Target { device, turbo }
+    }
+}
+
 /// Human-readable summary of the resolved Talker hardware path, printed at startup
 /// so it is always clear which device + weight precision is ACTUALLY used. Crucially
 /// distinguishes a *native* INT4 device from one that only lists INT8: on the latter
@@ -196,7 +211,7 @@ impl TalkerNpu {
     pub fn load(
         talker_path: &str,
         cap: usize,
-        device: NpuDevice,
+        device: Target,
         allow_fallback: bool,
         cache_dir: Option<&Path>,
         max_pos: usize,
@@ -278,7 +293,7 @@ pub fn generate_codes_npu(
     let plan = opts.plan();
     let (cfg, sub) = (plan.cb0, plan.subtalker);
     let mut watch = DegenerationWatch::new();
-    let profile = std::env::var("TTS_PROFILE").is_ok();
+    let profile = opts.profile;
     let (mut t_step, mut t_mtp) = (0.0f64, 0.0f64);
     use std::time::Instant;
 
@@ -348,7 +363,7 @@ pub fn generate_npu(
     sp: &TtsSpecials,
     prompt: &Prompt,
     opts: &GenOpts,
-    device: NpuDevice,
+    device: Target,
     allow_fallback: bool,
     cache_dir: Option<&Path>,
     quant: bool,
@@ -403,7 +418,7 @@ impl KvTalker {
     pub fn load(
         talker_path: &str,
         cap: usize,
-        device: NpuDevice,
+        device: Target,
         allow_fallback: bool,
         cache_dir: Option<&Path>,
         cfg: &TalkerConfig,
@@ -586,7 +601,7 @@ pub struct KvMtp {
 impl KvMtp {
     pub fn load(
         mtp_path: &str,
-        device: NpuDevice,
+        device: Target,
         allow_fallback: bool,
         cache_dir: Option<&Path>,
         quant: bool,
@@ -753,7 +768,7 @@ pub struct FusedMtp {
 impl FusedMtp {
     pub fn load(
         mtp_path: &str,
-        device: NpuDevice,
+        device: Target,
         allow_fallback: bool,
         cache_dir: Option<&Path>,
     ) -> Result<FusedMtp, String> {
@@ -816,7 +831,7 @@ pub fn talker_prefix_parity(
     tables: &TalkerTables,
     prompt: &Prompt,
     cache_dir: Option<&Path>,
-    device: NpuDevice,
+    device: Target,
     quant: bool,
 ) -> Result<f32, String> {
     let d = tables.d();
@@ -848,7 +863,7 @@ pub fn talker_prefix_parity(
 pub fn decode_codes_npu(
     codec_path: &str,
     codes: &[u32],
-    device: NpuDevice,
+    device: Target,
     allow_fallback: bool,
     cache_dir: Option<&Path>,
 ) -> Result<(Vec<f32>, String), String> {
@@ -871,7 +886,7 @@ pub fn codec_bucket(frames: usize) -> usize {
 pub fn open_codec_session(
     codec_path: &str,
     code_len: usize,
-    device: NpuDevice,
+    device: Target,
     allow_fallback: bool,
     cache_dir: Option<&Path>,
 ) -> Result<CodecSession, String> {
@@ -914,16 +929,12 @@ pub fn decode_with_session(sess: &mut CodecSession, codes: &[u32]) -> Result<Vec
 
 /// OpenVINO config: target `device`, optional CPU/GPU fallback, and the cache dir
 /// (reuses both the ONNX file and OpenVINO's compiled-blob cache).
-fn npu_config(device: NpuDevice, allow_fallback: bool, cache_dir: Option<&Path>) -> NpuConfig {
-    // `BRAIN_NPU_TURBO=1` requests the NPU's turbo clock (NPU_TURBO=YES). Off by
-    // default (it raises power/heat, which can throttle sooner under sustained
-    // load) — A/B it against the thermal envelope before making it the default.
-    let turbo = std::env::var("BRAIN_NPU_TURBO").map(|v| v == "1" || v == "yes").unwrap_or(false);
+fn npu_config(device: Target, allow_fallback: bool, cache_dir: Option<&Path>) -> NpuConfig {
     NpuConfig {
-        device,
+        device: device.device,
         allow_fallback,
         cache_dir: cache_dir.map(|p| p.to_path_buf()),
-        turbo,
+        turbo: device.turbo,
         ..Default::default()
     }
 }
@@ -1071,7 +1082,7 @@ pub fn generate_codes_kv(
     let plan = opts.plan();
     let (cfg, sub) = (plan.cb0, plan.subtalker);
     let mut watch = DegenerationWatch::new();
-    let profile = std::env::var("TTS_PROFILE").is_ok();
+    let profile = opts.profile;
 
     kv.reset();
     let tp0 = Instant::now();
@@ -1210,7 +1221,7 @@ pub fn generate_kv(
     sp: &TtsSpecials,
     prompt: &Prompt,
     opts: &GenOpts,
-    device: NpuDevice,
+    device: Target,
     allow_fallback: bool,
     cache_dir: Option<&Path>,
     quant: bool,
@@ -1242,7 +1253,7 @@ pub fn kv_prefix_parity(
     tables: &TalkerTables,
     prompt: &Prompt,
     cache_dir: Option<&Path>,
-    device: NpuDevice,
+    device: Target,
     quant: bool,
 ) -> Result<f32, String> {
     let d = tables.d();
@@ -1309,7 +1320,7 @@ impl NpuStreamCodec {
         codec_path: &str,
         front_t: usize,
         chunk: usize,
-        device: NpuDevice,
+        device: Target,
         allow_fallback: bool,
         cache_dir: Option<&Path>,
     ) -> Result<NpuStreamCodec, String> {
@@ -1389,18 +1400,19 @@ impl NpuStreamCodec {
 mod stream_codec_tests {
     use super::*;
 
-    /// NPU stateful streaming codec vs the bit-exact CPU reference. Run (CPU dev):
-    ///   BRAIN_MIMI_WEIGHTS=.../codec.safetensors BRAIN_QWEN3TTS_NPU_DEVICE=cpu \
-    ///   cargo test --release -p brain-tts npu_stream_matches_cpu -- --ignored --nocapture
+    /// NPU stateful streaming codec vs the bit-exact CPU reference, on the
+    /// OpenVINO CPU device, over the codec of the model store's Qwen3-TTS:
+    ///   cargo test --release -p brain-qwen3tts npu_stream_matches_cpu -- --ignored --nocapture
     #[test]
     #[ignore]
     fn npu_stream_matches_cpu() {
-        let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
-        let device = std::env::var("BRAIN_QWEN3TTS_NPU_DEVICE")
-            .ok()
-            .and_then(|s| NpuDevice::parse(&s))
-            .unwrap_or(NpuDevice::Cpu);
-        let cache = std::path::Path::new("out/tts-1b7/npu-cache");
+        let Some(paths) = crate::testsupport::store_paths() else {
+            return brain_testutil::skip("no Qwen3-TTS checkpoint in the model store");
+        };
+        let path = paths.codec;
+        let device = Target::new(NpuDevice::Cpu, false);
+        let cache = std::env::temp_dir().join(format!("qwen3tts-stream-codec-{}", std::process::id()));
+        let cache = cache.as_path();
         let (front_t, chunk) = (32usize, 16usize);
         let mut npu = NpuStreamCodec::load(&path, front_t, chunk, device, true, Some(cache)).unwrap();
 

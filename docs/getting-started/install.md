@@ -62,7 +62,7 @@ cargo build --release -p brain-cli --target x86_64-pc-windows-gnu \
 
 The result imports only Windows system DLLs. What Windows lacks is refused
 with a message rather than left out: the D-Bus surface, the Unix-socket
-servers (`brain tts serve`, the event socket) and detached serving
+servers (`sample-models-qwen3tts npu-serve`, the event socket) and detached serving
 (`brain serve -d`); plain `brain serve` runs in the foreground. Opening a
 window needs `SDL2.dll` beside `brain.exe`.
 

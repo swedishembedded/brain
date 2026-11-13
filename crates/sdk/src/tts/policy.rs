@@ -125,13 +125,13 @@ impl TtsPolicy {
     pub fn rollout(&mut self, text: &str, opts: &TtsOptions) -> Result<Take> {
         let gen_opts = opts.to_gen_opts();
         let voice = match &opts.voice {
-            Some((reference, words)) => Some((reference.to_str().ok_or_else(|| backend(format!("{} is not UTF-8", reference.display())))?.to_string(), words.clone())),
+            Some((reference, words)) => Some((qwen3tts::reference::Reference::from_path(reference).map_err(backend)?, words.clone())),
             None => None,
         };
         let never = CancelToken::default();
         let rollout = self
             .engine
-            .rollout(text, &opts.lang, voice.as_ref().map(|(r, w)| (r.as_str(), w.as_str())), &gen_opts, &never)
+            .rollout(text, &opts.lang, voice.as_ref().map(|(r, w)| (r, w.as_str())), &gen_opts, &never)
             .map_err(backend)?;
         let samples = self.engine.decode(&rollout.codes, &mut |_, _| {}).map_err(backend)?;
         Ok(Take { rollout, audio: Audio::new(samples, SAMPLE_RATE) })

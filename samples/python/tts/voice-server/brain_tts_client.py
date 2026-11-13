@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Client for the brain TTS server (`brain tts serve`).
+"""Client for the brain TTS server (`sample-models-qwen3tts npu-serve`).
 
 Connects to the Unix socket, sends one JSONL request, and streams back the
 generated 24 kHz f32 PCM `audio_chunk`s - playing them straight to the speakers

@@ -11,7 +11,7 @@
 
 use data::rng::Lcg;
 use npu::openvino::NpuDevice;
-use qwen3tts::npu_gen::{FusedMtp, MtpEngine};
+use qwen3tts::npu_gen::{FusedMtp, MtpEngine, Target};
 use qwen3tts::{CpuMtp, SamplerCfg};
 
 
@@ -24,7 +24,7 @@ fn main() {
     let mut cpu = CpuMtp::load(&mtp_path);
     let emb = cpu.cfg.embedding_dim as usize;
     eprintln!("loading fused graph on OV-CPU (exact fp32) …");
-    let mut fused = FusedMtp::load(&mtp_path, NpuDevice::Cpu, true, Some(std::path::Path::new(&cache)))
+    let mut fused = FusedMtp::load(&mtp_path, Target::new(NpuDevice::Cpu, false), true, Some(std::path::Path::new(&cache)))
         .expect("FusedMtp load");
 
     let th = Lcg::new(1).vec_scaled(emb, 0.5);

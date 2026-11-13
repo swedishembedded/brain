@@ -57,8 +57,7 @@ const DEDICATED_VERBS: &[&str] = &[
 /// Folding it into this module's `infer` meant `brain qwen3 generate
 /// --precision int8` silently ran a different implementation and printed
 /// "ignoring unknown flag" for every caps-only parameter - the CLI
-/// contradicting the manifest `brain caps qwen3` prints, exactly the defect
-/// `tts_cli::run_tts`'s own fallback was added to fix.
+/// contradicting the manifest `brain caps qwen3` prints.
 ///
 /// So the RAW verb decides first: a caps action name goes to caps, and only
 /// what is left is canonicalized for this module's own match.

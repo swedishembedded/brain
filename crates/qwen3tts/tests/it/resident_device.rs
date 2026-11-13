@@ -7,7 +7,7 @@
 //! fp32 but a different reduction order, so a long clip may part ways at a
 //! near-tie; what is asserted is that they agree on the start of the clip,
 //! stop at about the same length, and that the device engine is the fast one.
-//! Gated on `BRAIN_QWEN3TTS_WEIGHTS`/`BRAIN_QWEN3TTS_CKPT` like the other
+//! Skipped when the model store holds no Qwen3-TTS checkpoint, like the other
 //! real-checkpoint tests.
 
 use std::time::Instant;
@@ -19,16 +19,7 @@ use qwen3tts::{GenOpts, SamplingRequest, TtsPaths};
 const TEXT: &str = "The people must be taught to value their liberty above their ease.";
 
 fn paths() -> Option<TtsPaths> {
-    let (Ok(weights), Ok(ckpt)) = (std::env::var("BRAIN_QWEN3TTS_WEIGHTS"), std::env::var("BRAIN_QWEN3TTS_CKPT")) else {
-        brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT not set");
-        return None;
-    };
-    let paths = TtsPaths::new(&weights, ckpt);
-    if paths.require(false).is_err() {
-        brain_testutil::skip("TTS weights not found");
-        return None;
-    }
-    Some(paths)
+    crate::store::store_paths()
 }
 
 fn greedy(max_frames: usize) -> GenOpts {
@@ -160,6 +151,7 @@ fn a_pinned_voice_holds_the_speaker_tighter_than_the_free_voice_which_already_va
     std::fs::create_dir_all(&dir).unwrap();
     let wav = dir.join("reference.wav").to_string_lossy().into_owned();
     audio::wav::write(&wav, &reference, 24_000).unwrap();
+    let reference_voice = qwen3tts::reference::Reference::from_path(&wav).unwrap();
 
     let encoder = ecapatdnn::SpeakerEncoder::load_inference(&paths.speaker);
     let embed = |pcm: &[f32]| encoder.embed_wav(pcm, 24_000);
@@ -167,7 +159,7 @@ fn a_pinned_voice_holds_the_speaker_tighter_than_the_free_voice_which_already_va
     let mut free = Vec::new();
     // seed: the pinned-over-free similarity margin and the 0.95 floor were measured on these four takes
     for seed in 2..=5u64 {
-        let take = engine.clone_voice_streaming(TEXT, &wav, "", "english", &sampled(seed), &never, &mut |_, _| {}).unwrap();
+        let take = engine.clone_voice_streaming(TEXT, &reference_voice, "", None, "english", &sampled(seed), &never, &mut |_, _| {}).unwrap();
         pinned.push(embed(&take));
         free.push(embed(&engine.speak(TEXT, "english", &sampled(seed), &never, &mut |_, _| {}).unwrap()));
     }

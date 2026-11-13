@@ -27,43 +27,50 @@ Talker, MTP, codec and speaker encoder are read from its safetensors, bf16
 converted to f32 in memory as they load, and nothing is written beside it.
 
 A CustomVoice or VoiceDesign checkpoint, or one you already have locally, is
-used the same way: point `--weights-dir` (CLI flag, defaults to
-`$BRAIN_QWEN3TTS_WEIGHTS` else `out/tts`) or `BRAIN_QWEN3TTS_WEIGHTS` (D-Bus
-serving) and `--ckpt` or `BRAIN_QWEN3TTS_CKPT` at the checkpoint directory.
+resolved from the model store the same way; the standard role flags name one
+outright: `--weights-dir` (the checkpoint, or a directory of brain-format
+files) and `--ckpt` (the Hugging Face checkpoint directory, for `config.json`
+and the tokenizer). The checkpoint is the provider's, never a per-call param.
 Voice cloning needs the speaker encoder, which only the Base checkpoints
 ship.
 
-`--weights-dir` may instead name a directory of brain-format files, which
-`brain qwen3tts import` writes from a checkpoint:
+`--weights-dir` may instead name a directory of brain-format files, which the
+`import` action writes from a checkpoint:
 
 ```bash
-brain qwen3tts import --ckpt /path/to/Qwen3-TTS-12Hz-0.6B-Base \
-  [--codec-ckpt <dir>] [--speaker-ckpt <dir>] \
-  --out-dir out/tts
+brain qwen3tts import --source /path/to/Qwen3-TTS-12Hz-0.6B-Base \
+  [--codec-source <dir>] [--speaker-source <dir>] \
+  --dest out/tts
 ```
 
 That writes `talker.safetensors`, `mtp.safetensors`, `codec.safetensors` and
 (for a Base checkpoint) `speaker.safetensors`, the same tensors the
-checkpoint is read as. A directory holding `talker.safetensors` is read as
-these files; any other is read as the checkpoint itself.
+checkpoint is read as; a release with no speaker encoder (CustomVoice,
+VoiceDesign) skips it and says so. A directory holding `talker.safetensors`
+is read as these files; any other is read as the checkpoint itself.
 
 ## Running it
+
+`brain qwen3tts <action> ...` runs a served action, and so does the
+standalone `sample-models-qwen3tts` program (`samples/models/qwen3tts`), which
+adds the NPU route. Every flag below is the action's served param; the reference
+recording and the output are blobs: `--ref voice.wav` names an input,
+`--out audio=out.wav` an output.
 
 Speaker-free synthesis:
 
 ```bash
-brain qwen3tts synth --text "Hello from brain." --out out.wav \
-  --weights-dir out/tts --ckpt /path/to/Qwen3-TTS-12Hz-0.6B-Base
+brain qwen3tts synth --text "Hello from brain." --out audio=out.wav --seed $RANDOM
 ```
 
-Voice cloning from a reference clip:
+Voice cloning from a reference clip (with `--ref-text`, the in-context path;
+without, x-vector-only):
 
 ```bash
 brain qwen3tts clone \
   --text "This sentence is spoken in the reference speaker's voice." \
   --ref voice.wav --ref-text "transcript of voice.wav" \
-  --out demo.wav \
-  --weights-dir out/tts --ckpt /path/to/Qwen3-TTS-12Hz-0.6B-Base
+  --out audio=demo.wav --seed $RANDOM
 ```
 
 Instructed voice design / preset speakers (CustomVoice/VoiceDesign
@@ -71,24 +78,33 @@ checkpoints only):
 
 ```bash
 brain qwen3tts design --text "..." --instruct "a calm, low voice" \
-  [--speaker NAME] --out out.wav
+  [--speaker NAME] --out audio=out.wav
 ```
 
-The same `synth` action is also in the capability manifest (`brain caps
-brain/qwen3tts` lists it, and it's reachable over D-Bus/HTTP) - the `brain
-qwen3tts synth` form above is what reaches it from the CLI specifically,
-same as every other architecture with its own dedicated CLI module.
+`batch` decodes several texts interleaved in one call (`--requests` takes a
+JSON array; request `i` is the output `audio_<i>`), and `sim --a A.wav --b
+B.wav` prints the speaker-embedding cosine similarity of two utterances (the
+timbre-preservation metric, e.g. a quantized Talker's clone against its
+reference). The actions are in the capability manifest too (`brain caps
+brain/qwen3tts`), reachable over D-Bus/HTTP.
 
-Resident server for repeated calls without reloading weights each time:
+Resident serving for repeated calls without reloading weights each time:
 
 ```bash
-BRAIN_QWEN3TTS_WEIGHTS=out/tts BRAIN_QWEN3TTS_CKPT=/path/to/Qwen3-TTS-12Hz-0.6B-Base \
-  brain serve --dbus
+brain serve --dbus
 ```
 
-The resident exposes one action, `speak` (text in, 24 kHz PCM out); set
-`BRAIN_QWEN3TTS_REF` (+ `BRAIN_QWEN3TTS_REF_TEXT`) to have every `speak` call clone that
-reference voice instead of running speaker-free.
+`brain serve` serves the checkpoint the model store resolves. Its `synth`,
+`clone` and `design` actions run on a hot engine and are streaming: each
+decoded codec chunk (`stream_chunk` codec frames, 16 by default)
+arrives as an `audio` chunk of raw mono f32 little-endian PCM at 24 kHz while
+the rest is still generating, and the terminal `audio` blob is the whole clip
+as a WAV. A reference voice's conditioning is computed once per recording and
+kept, so repeat clones of one timbre skip the speaker encoder and the codec
+encode. The other actions (`batch`, `import`, `finetune`, `sim`) are the
+provider's own, run on the device the scheduler assigned. This replaces the
+old `speak` action and the `BRAIN_QWEN3TTS_REF` environment variable: clone
+is its own action with the reference as an input.
 
 The event-driven stdio controller (`brain serve --stdio`, the JSONL protocol)
 can also synthesize, answering a `user_synth_request` with a stream of
@@ -102,34 +118,69 @@ BRAIN_QWEN3TTS_WEIGHTS=out/tts BRAIN_QWEN3TTS_CKPT=[path/to/Qwen3-TTS-12Hz-0.6B-
   brain serve --stdio
 ```
 
-It reads the same `BRAIN_QWEN3TTS_*` variables as the resident above (including
-`BRAIN_QWEN3TTS_REF`/`_REF_TEXT` for cloning). Without the feature, or with
-`BRAIN_QWEN3TTS_WEIGHTS` unset, a `user_synth_request` is still answered - with
-an empty terminal `audio_chunk`.
+It reads `BRAIN_QWEN3TTS_WEIGHTS`, `BRAIN_QWEN3TTS_CKPT` and
+`BRAIN_QWEN3TTS_LANG`. Without the feature, or with `BRAIN_QWEN3TTS_WEIGHTS`
+unset, a `user_synth_request` is still answered - with an empty terminal
+`audio_chunk`.
 
-There is also a dedicated low-latency server, `brain qwen3tts serve`, which keeps
-compiled NPU graphs resident and streams synthesized audio back over a
-line-delimited JSON protocol on a Unix socket - see `brain qwen3tts serve --help`
-for its engine/socket flags. `samples/python/tts/voice-server/voice-clone.py` and
-`samples/python/tts/voice-server/voice-design.py` are example clients that speak
-to it and play the result.
+### On the NPU
+
+`sample-models-qwen3tts` compiles the Talker and the codec to OpenVINO graphs
+(the Intel NPU by default; the first run exports and compiles them, later
+runs reuse the cache):
+
+```bash
+L=target/release/sample-models-qwen3tts
+$L npu-synth --text "Hello from the NPU." --out audio=out.wav
+$L npu-clone --text "..." --ref voice.wav --ref-text "..." --out audio=demo.wav
+$L npu-design --text "..." --instruct "a calm, low voice" --out audio=out.wav
+```
+
+They take every flag of `synth`/`clone`/`design`, plus `--ov-device
+npu|cpu|gpu|auto` (`cpu` validates the fp32 graph, which the NPU runs in
+fp16), `--turbo` (the NPU's turbo clock), `--talker` (`cpu`, `npu`,
+`npu-int8`, `npu-kv`, `npu-kv-fp32`, `npu-kv-int4`; unset follows the
+checkpoint's size: the INT8 KV-cache graph for the large model, fp32 for the
+small), `--mtp` (`cpu`, `npu`, `fused`) and `--parity` (report the Talker
+prefix's difference to the CPU decoder). The NPU loops do not poll for
+cancellation.
+
+`npu-serve` is the low-latency load-once form: it keeps the compiled graphs
+resident and streams synthesized audio back over a line-delimited JSON
+protocol on a Unix socket (documented in `qwen3tts::socket`):
+
+```bash
+$L npu-serve --socket /tmp/brain-tts.sock --talker-quant int4 \
+  --clone-ref voice.wav --clone-ref-text voice.txt
+```
+
+Its engines are `synth` (always), `clone` (with `--clone-ref`), and
+`design`/`customvoice` (with `--design-weights`/`--design-ckpt`,
+`--cv-weights`/`--cv-ckpt`); `--enable` names exactly which to host. An
+engine without its own checkpoint flags uses the one the store resolves.
+`--cap`, `--talker-quant int8|int4|fp32`, `--mtp`, `--codec
+npu-stream|windowed|cpu-stream`, `--stream-chunk`, `--stream-window`,
+`--npu-device`, `--turbo` and `--profile` shape the engines.
+`samples/python/tts/voice-server/` holds example clients.
 
 LoRA fine-tuning (single-speaker) of the Talker on a `text -> codes` dataset:
 
 ```bash
-brain qwen3tts finetune --base out/tts/talker.safetensors --data data/tts \
-  --out out/tts/talker_lora.safetensors \
-  [--steps N --lr X --rank R --alpha A --batch B --block T --seed S --activations keep|recompute]
+brain qwen3tts finetune --data data/tts --save out/tts/talker_lora.safetensors \
+  [--full] [--steps N --lr X --rank R --alpha A --batch B --block T --seed S --activations keep|recompute]
 ```
 
-This freezes the base Talker and trains attention adapters only. The Talker
-rebuilds each layer in the backward whatever is asked, so `--activations
-recompute` is accepted and `--activations keep` is refused by name before the
-first step.
+This freezes the resolved checkpoint's Talker and trains attention adapters
+only; `--full` trains every Talker weight instead (Qwen's own documented
+single-speaker fine-tuning workflow). The adapters are attention-only, so the
+shared LoRA parameter set's `targets` and `base_format` do not apply and are
+not declared. The Talker rebuilds each layer in the backward whatever is
+asked, so `--activations recompute` is accepted and `--activations keep` is
+refused by name before the first step. Cancelling stops at a step boundary.
 
 ## Options
 
-- `--lang` / `--language` - synthesis language (default `english`).
+- `--lang` - synthesis language (default `english`).
 - `--max-frames` - max codec frames, i.e. an upper bound on clip length
   (default `256`).
 - `--temp`, `--top-k`, `--top-p`, `--seed` - sampling controls for the Talker.
@@ -147,14 +198,13 @@ first step.
   default**, matching the reference. `--residual-temp 0` pins them back to a
   greedy argmax, which is quieter and flatter: these 15 codebooks carry most
   of the acoustic detail.
-- `--ref-codes` - an external `[T,16]` codec-codes file (8-byte little-endian
-  count header + u32 data) for the in-context (ICL) cloning path, used
-  instead of the default x-vector-only cloning when you already have codes
-  for the reference clip.
-- `--device npu` - run on an NPU (OpenVINO) if present; `BRAIN_QWEN3TTS_TALKER=cpu`
-  falls the Talker back to CPU while keeping the codec on NPU.
-- `BRAIN_QWEN3TTS_LANG`, `BRAIN_QWEN3TTS_REF`, `BRAIN_QWEN3TTS_REF_TEXT` - resident-server
-  defaults for language and voice-clone reference.
+- `--ref-codes` (`clone`) - an input: an external `[T,16]` codec-codes file
+  (8-byte little-endian count header + u32 data) for the in-context (ICL)
+  cloning path, used instead of encoding the reference in-tree when you
+  already have codes for the reference clip.
+- `--profile` - print the resolved sampling plan and each stage's wall time on
+  stderr.
+- On the NPU: the placement flags of the `npu-*` actions above.
 
 Output is always mono 24 kHz f32 PCM WAV.
 
@@ -164,10 +214,10 @@ Output is always mono 24 kHz f32 PCM WAV.
 `--residual-*` flags have no hardcoded default. A flag you do not pass is
 resolved, once per generation call, as:
 
-1. the value you passed (a CLI flag, a `brain do` / D-Bus param, a `GenOpts`
+1. the value you passed (a CLI flag, a D-Bus param, a `GenOpts`
    field you set) - always wins, including a deliberate `--repetition-penalty
    1.0`;
-2. the checkpoint's own `generation_config.json`, read from `--ckpt`. The
+2. the checkpoint's own `generation_config.json`, read from the checkpoint (`--ckpt`). The
    12 Hz 0.6B Base checkpoint ships `do_sample=true, temperature=0.9,
    top_k=50, top_p=1.0, repetition_penalty=1.05`;
 3. the reference implementation's hard defaults, which for this model are the
@@ -179,7 +229,7 @@ from the checkpoint that owns it, which is exactly how `repetition_penalty`
 shipped at `1.0` (disabled) while the checkpoint said `1.05`, and how a
 default `synth` could decode to silence.
 
-Set `TTS_PLAN=1` (or `TTS_PROFILE=1`) to print the resolved plan for a run:
+Pass `--profile` to print the resolved plan for a run:
 
 ```
 qwen3tts: resolved plan: sample=true temp=0.9 top_k=50 top_p=1 rep_penalty=1.05
@@ -205,11 +255,14 @@ exactly the clip the resolved plan produced.
   GPU (Vulkan) forward passes exist for correctness checks but are not the
   path used for practical synthesis speed. The NPU path uses a resident,
   KV-cached decode graph and a streaming codec, which is substantially faster
-  than a cold, cache-free run - pass `--device npu` to use it.
-- The in-context (ICL) cloning path needs externally-supplied reference codes
-  (`--ref-codes`) for some flows - brain's own codec encoder can also produce
+  than a cold, cache-free run - use the `npu-*` actions or `npu-serve` of
+  `sample-models-qwen3tts` (`--device npu` places the served actions
+  themselves on the NPU only where the scheduler has an NPU budget).
+- The in-context (ICL) cloning path takes externally-supplied reference codes
+  (`--ref-codes`) for some flows - brain's own codec encoder also produces
   them in-tree when you pass `--ref-text` without `--ref-codes`.
-- No HTTP endpoint: TTS is reachable from the CLI and D-Bus/`brain do`, not
+- No HTTP endpoint for the speech actions' raw PCM stream beyond the generic
+  capability surface: TTS is reachable from the CLI and D-Bus/`brain do`, not
   from the OpenAI/Anthropic-compatible chat APIs.
 - LoRA fine-tuning covers the Talker only, for single-speaker adaptation; it
   does not retrain the codec or the speaker encoder.

@@ -59,14 +59,14 @@ brain infer scrfd --in image=photo.ppm --json     # identical, verb-first order
 ```
 
 Architectures with their own dedicated flags and a longer verb vocabulary
-(`gpt2`, `qwen3`, `qwen35moe`, `glmdsa`, `lfm2`, `qwen3tts`, `yolov8`,
+(`gpt2`, `qwen3`, `qwen35moe`, `glmdsa`, `lfm2`, `yolov8`,
 `zipdepth`, `flux2`, `worldmirror2`, `splat`, `qwen3omnimoe`, `diamond`,
 `toypid`, `toymoe`) are documented in full by `brain help` and
 `brain <architecture> --help`; every other architecture (`brain caps` lists
 them all - `s3dit`, `fastvlm`, `qwen3vl`, `sam1`, `sam2`, `scrfd`, `arcface`,
 `vqgan`, `codeformer`, `rrdbnet`, `clip`, `t5encoder`, `sdxlunet`,
 `controlnet`, `pulid`, `instantid`, `autoencoderkl`, `deepseek2ocr`,
-`nemotronasr`, `qwen3asr`, `mimi`, `ecapatdnn`, `chronos2`, `fincast`,
+`nemotronasr`, `qwen3asr`, `qwen3tts`, `mimi`, `ecapatdnn`, `chronos2`, `fincast`,
 `kronos`, `minimaxmusic3`, `genieredux`, ...) is reached the same uniform
 way.
 

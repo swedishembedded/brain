@@ -222,7 +222,7 @@ fi
 step "7. text -> speech -> text -> text (qwen3tts synth, auto-fetches Qwen/Qwen3-TTS-12Hz-0.6B-Base; nemotronasr + qwen3asr transcribe, two independent ASR models on the same audio; qwen3 infer)"
 if ! need "$IMG_DIR/roundtrip.txt"; then
   SENTENCE="Brain trains and runs neural networks from scratch, in Rust."
-  "$BRAIN" qwen3tts synth --text "$SENTENCE" --out "$IMG_DIR/.spoken.wav"
+  "$BRAIN" qwen3tts synth --text "$SENTENCE" --out audio="$IMG_DIR/.spoken.wav"
   TRANSCRIPT="$("$BRAIN" nemotronasr transcribe --in audio="$IMG_DIR/.spoken.wav" --json 2>/dev/null \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["text"].strip())')"
   TRANSCRIPT2="$("$BRAIN" qwen3asr transcribe --in audio="$IMG_DIR/.spoken.wav" --json 2>/dev/null \
@@ -296,9 +296,8 @@ if ! need "$IMG_DIR/qwen3tts-lora.txt"; then
   # seed: reproduces the training data behind the loss line the README quotes
   "$BRAIN" data gen tts --out "$BRAIN_MODELS_DIR/.quickstart-tts-data" --n 4000 --seed 1337
   "$BRAIN" qwen3tts finetune \
-    --base "$BRAIN_MODELS_DIR/Qwen/Qwen3-TTS-12Hz-0.6B-Base/brain_tts/talker.safetensors" \
     --data "$BRAIN_MODELS_DIR/.quickstart-tts-data" \
-    --out "$BRAIN_MODELS_DIR/.quickstart-talker-lora.safetensors" --steps 200 \
+    --save "$BRAIN_MODELS_DIR/.quickstart-talker-lora.safetensors" --steps 200 \
     2>&1 | tail -2 > "$IMG_DIR/qwen3tts-lora.txt"
 fi
 

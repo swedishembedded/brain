@@ -1,6 +1,6 @@
 # sample: tts/voice-server
 
-Two clients for `brain qwen3tts serve`, the dedicated low-latency TTS server:
+Two clients for `sample-models-qwen3tts npu-serve`, the dedicated low-latency TTS server:
 a Unix-socket, line-delimited-JSON protocol (not D-Bus) that keeps compiled
 NPU graphs resident and streams synthesized 24 kHz f32 PCM back as it's
 generated, playing it live via `sounddevice` (or writing a WAV with `--out`).
@@ -8,7 +8,9 @@ generated, playing it live via `sounddevice` (or writing a WAV with `--out`).
 independent entry point.
 
 ```bash
-brain qwen3tts serve --weights out/tts &
+L=target/release/sample-models-qwen3tts
+$L npu-serve --clone-ref voice.wav --clone-ref-text voice.txt \
+  --design-weights out/tts-vd --design-ckpt /path/to/Qwen3-TTS-12Hz-1.7B-VoiceDesign &
 
 python3 samples/python/tts/voice-server/voice-clone.py "hi, this is my voice clone"
 python3 samples/python/tts/voice-server/voice-design.py \
@@ -21,10 +23,10 @@ python3 samples/python/tts/voice-server/voice-design.py \
 python3 samples/python/tts/voice-server/voice-clone.py "..." --out clone.wav
 ```
 
-Uses the `clone` engine: the reference voice the server loaded via
-`BRAIN_QWEN3TTS_REF`/`BRAIN_QWEN3TTS_REF_TEXT` (see the server's own docs for
-how those are set). No `--speaker`/`--instruct` - one script, one voice, the
-one the server was started with.
+Uses the `clone` engine: the reference voice the server was started with
+(`--clone-ref WAV`, and `--clone-ref-text FILE` for its transcript). No
+`--speaker`/`--instruct` - one script, one voice, the one the server was
+started with.
 
 ## `voice-design.py` - describe a voice, or pick a preset
 
@@ -41,10 +43,10 @@ description (`--instruct`); `--engine customvoice` picks a preset speaker
 
 ## What it needs
 
-`brain qwen3tts serve` running and reachable at `--socket` (default: the OS
+`npu-serve` running and reachable at `--socket` (default: the OS
 temp dir's `brain-tts.sock`, override with `BRAIN_TTS_SOCK` or `--socket` on
-either script - see `brain qwen3tts serve --help` for the server's own env
-vars). `pip install sounddevice soundfile numpy` for live playback; `--out
+either script - `npu-serve --help` lists the server's own flags, including
+`--socket`). `pip install sounddevice soundfile numpy` for live playback; `--out
 FILE.wav` works without `sounddevice` (no speakers needed).
 
 ## Options

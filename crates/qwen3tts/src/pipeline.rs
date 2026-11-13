@@ -23,12 +23,15 @@ use crate::gen::TalkerGen;
 use crate::genconfig::{GenerationConfig, GenerationPlan, SamplingRequest};
 use crate::mtp::MtpModel;
 use crate::prompt::{self, Prompt, TtsSpecials};
+use crate::placement::{MtpMode, NpuOpts, TalkerMode};
+use crate::reference::Reference;
 use crate::sampling::DegenerationWatch;
 
 /// Where each component's weights are read from, plus the HF checkpoint dir
 /// (for `config.json`, tokenizer). A component path is a brain checkpoint
 /// file (`brain qwen3tts import`) or the HF checkpoint dir itself, which its
 /// loader reads as downloaded (see [`crate::import`]).
+#[derive(Clone, Debug)]
 pub struct TtsPaths {
     pub talker: String,
     pub mtp: String,
@@ -142,6 +145,8 @@ pub struct GenOpts {
     /// RNG seed for the sampled streams; [`GenOpts::default`] draws a fresh one.
     pub seed: u64,
     pub min_new: usize,
+    /// Report the resolved sampling plan and each stage's wall time on stderr.
+    pub profile: bool,
     /// The caller's explicit sampling choices for BOTH streams - codebook 0 and,
     /// through [`SamplingRequest::subtalker`], the MTP's residual codebooks
     /// (1..15). Unset fields resolve from the checkpoint and then from the
@@ -182,7 +187,9 @@ impl GenOpts {
     /// than once per request.
     pub fn resolve_with(&mut self, file: GenerationConfig) {
         let plan = GenerationPlan::resolve_with(&self.sampling, file);
-        plan.trace(self.max_frames);
+        if self.profile {
+            eprintln!("{}", plan.trace_line(self.max_frames));
+        }
         self.resolved = Some(plan);
     }
 
@@ -230,7 +237,7 @@ impl Default for GenOpts {
         // `max_frames` is a caller knob, not a config-resolved one: it sizes the
         // Talker KV cache and the NPU graph bucket, so it does not inherit the
         // reference's 8192-token budget. See [`GenerationPlan::max_new_tokens`].
-        GenOpts { max_frames: 256, seed: data::rng::random_seed(), min_new: 2, sampling: SamplingRequest::default(), resolved: None }
+        GenOpts { max_frames: 256, seed: data::rng::random_seed(), min_new: 2, profile: false, sampling: SamplingRequest::default(), resolved: None }
     }
 }
 
@@ -306,12 +313,12 @@ pub fn generate_codes_hooked(
     on_frames: &mut dyn FnMut(&[u32]),
 ) -> Result<Vec<u32>, Cancelled> {
     use std::time::Instant;
-    // Coarse per-stage profiling, gated on `TTS_PROFILE`, matching
+    // Coarse per-stage profiling, gated on `GenOpts::profile`, matching
     // `generate_codes_cached`'s. This is the path every default
     // `synth`/`clone`/`design` command runs, and it is the only one whose
     // stage split answers "where does a `--device gpu` run spend its time",
     // so it needs the same instrument the CPU-only mirror already had.
-    let profile = std::env::var("TTS_PROFILE").is_ok();
+    let profile = opts.profile;
     let (mut t_step, mut t_mtp, mut t_head) = (0.0f64, 0.0f64, 0.0f64);
 
     // Cancelled before we started: skip the prefix stream too (it is the one
@@ -434,8 +441,8 @@ pub fn generate_codes_cached(
     cancel: &CancelToken,
 ) -> Result<Vec<u32>, Cancelled> {
     use std::time::Instant;
-    // Coarse per-stage profiling, gated on `TTS_PROFILE` so normal runs are silent.
-    let profile = std::env::var("TTS_PROFILE").is_ok();
+    // Coarse per-stage profiling, gated on `GenOpts::profile` so normal runs are silent.
+    let profile = opts.profile;
     let (mut t_step, mut t_mtp) = (0.0f64, 0.0f64);
 
     if cancel.is_cancelled() {
@@ -516,11 +523,18 @@ pub fn generate_codes_cached(
 /// Split the assistant chat-template ids into the 3-token role header and the
 /// target text content (`input_id[3..len-5]`).
 pub(crate) fn split_input_ids(ids: &[u32]) -> Result<(Vec<u32>, Vec<u32>), String> {
-    if ids.len() < 3 + 5 + 1 {
-        return Err(format!("tokenized prompt too short ({} ids)", ids.len()));
+    // The prompt builders feed the first text token beside the codec rows and
+    // the rest as the trailing text, so a text of fewer than two tokens has
+    // nothing to trail: refuse it here rather than panic in a builder.
+    let min = MIN_TEXT_TOKENS + 3 + 5;
+    if ids.len() < min {
+        return Err(format!("the text is too short: it tokenizes to {} tokens, at least {MIN_TEXT_TOKENS} are needed", ids.len().saturating_sub(3 + 5)));
     }
     Ok((ids[..3].to_vec(), ids[3..ids.len() - 5].to_vec()))
 }
+
+/// Fewest target-text tokens a prompt can be built from.
+const MIN_TEXT_TOKENS: usize = 2;
 
 pub(crate) fn assistant_text(text: &str) -> String {
     format!("<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n")
@@ -550,57 +564,34 @@ fn max_ctx(opts: &GenOpts, ref_frames: usize) -> u32 {
     (opts.max_frames + ref_frames + 32) as u32
 }
 
-/// ICL reference codes for `ref_wav_path`, encoded once and cached under
-/// `cache_dir` (keyed by the wav's name + mtime). Encoding the reference is the
-/// slow CPU step of a clone; caching it makes repeated clones of the same voice
-/// skip straight to generation. Returns the `[T,16]` codes.
-pub(crate) fn ref_codes_cached(codec_path: &str, wav: &audio::wav::Wav, ref_wav_path: &str, cache_dir: Option<&str>) -> Vec<u32> {
-    let cache_file = cache_dir.map(|d| {
-        let stem = std::path::Path::new(ref_wav_path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("ref");
-        let mt = std::fs::metadata(ref_wav_path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        std::path::PathBuf::from(d).join(format!("refcodes-{stem}-{mt}.bin"))
-    });
+/// ICL reference codes of `reference`, encoded once and cached under
+/// `cache_dir` keyed by the audio's content digest. Encoding the reference is
+/// the slow CPU step of a clone; caching it makes repeated clones of the same
+/// voice skip straight to generation. Returns the `[T,16]` codes.
+pub(crate) fn ref_codes_cached(codec_path: &str, reference: &Reference, cache_dir: Option<&str>) -> Vec<u32> {
+    let cache_file = cache_dir.map(|d| std::path::PathBuf::from(d).join(format!("refcodes-{}.bin", reference.digest())));
     if let Some(cf) = &cache_file {
-        if let Ok(bytes) = std::fs::read(cf) {
-            if bytes.len() >= 8 {
-                let n = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
-                if bytes.len() >= 8 + n * 4 {
-                    eprintln!("tts: reusing cached reference codes ({n} values) from {}", cf.display());
-                    return (0..n)
-                        .map(|k| u32::from_le_bytes(bytes[8 + k * 4..12 + k * 4].try_into().unwrap()))
-                        .collect();
-                }
-            }
+        if let Some(codes) = std::fs::read(cf).ok().and_then(|b| crate::reference::parse_codes(&b).ok()) {
+            eprintln!("tts: reusing cached reference codes ({} values) from {}", codes.len(), cf.display());
+            return codes;
         }
     }
     let codec = mimi::Codec::load_inference(codec_path);
     let sr = codec.cfg.input_sample_rate;
-    let wav24 = audio::resample_linear(&wav.samples, wav.sample_rate, sr);
-    let codes = codec.encode(&wav24);
+    let wav = &reference.wav;
+    let codes = codec.encode(&audio::resample_linear(&wav.samples, wav.sample_rate, sr));
     if let Some(cf) = &cache_file {
         if let Some(p) = cf.parent() {
             std::fs::create_dir_all(p).ok();
         }
-        let mut bytes = (codes.len() as u64).to_le_bytes().to_vec();
-        for c in &codes {
-            bytes.extend_from_slice(&c.to_le_bytes());
-        }
-        if std::fs::write(cf, &bytes).is_ok() {
+        if std::fs::write(cf, crate::reference::encode_codes(&codes)).is_ok() {
             eprintln!("tts: cached reference codes -> {}", cf.display());
         }
     }
     codes
 }
 
-/// **Voice clone** — synthesize `target_text` in the timbre of `ref_wav_path`.
+/// **Voice clone**: synthesize `target_text` in the timbre of `reference`.
 ///
 /// When `ref_text` is non-empty, this uses the **ICL** path: the reference wav is
 /// encoded to `[T,16]` codec codes in-tree ([`mimi::Codec::encode`]) and the
@@ -617,7 +608,7 @@ pub fn clone(
     paths: &TtsPaths,
     opts: &GenOpts,
     target_text: &str,
-    ref_wav_path: &str,
+    reference: &Reference,
     ref_text: &str,
     language: &str,
     ref_code: Option<Vec<u32>>,
@@ -636,12 +627,12 @@ pub fn clone(
     let language_id = sp.language_id(language);
 
     // speaker x-vector from the reference audio.
-    let wav = audio::wav::read(ref_wav_path).map_err(|e| format!("read {ref_wav_path}: {e}"))?;
+    let wav = &reference.wav;
     let speaker = ecapatdnn::SpeakerEncoder::load_inference(&paths.speaker);
     let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
 
     // ICL reference codes: an explicit dump wins; otherwise, when `ref_text` is
-    // given, encode the reference wav in-tree (no external `--ref-codes` needed).
+    // given, encode the reference wav in-tree (no external codes needed).
     let ref_code = match ref_code {
         Some(c) => Some(c),
         None if !ref_text.trim().is_empty() => {
@@ -762,11 +753,12 @@ pub fn clone_npu(
     paths: &TtsPaths,
     opts: &GenOpts,
     target_text: &str,
-    ref_wav_path: &str,
+    reference: &Reference,
     ref_text: &str,
     language: &str,
     ref_code: Option<Vec<u32>>,
     npu_cache: Option<&str>,
+    npu: &NpuOpts,
 ) -> Result<Vec<f32>, String> {
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
     // Resolve the sampling plan ONCE per generation call, here, because this is
@@ -776,14 +768,14 @@ pub fn clone_npu(
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
     let language_id = sp.language_id(language);
 
-    let wav = audio::wav::read(ref_wav_path).map_err(|e| format!("read {ref_wav_path}: {e}"))?;
+    let wav = &reference.wav;
     let speaker = ecapatdnn::SpeakerEncoder::load_inference(&paths.speaker);
     let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
 
     let ref_code = match ref_code {
         Some(c) => Some(c),
         None if !ref_text.trim().is_empty() => {
-            Some(ref_codes_cached(&paths.codec, &wav, ref_wav_path, npu_cache))
+            Some(ref_codes_cached(&paths.codec, reference, npu_cache))
         }
         None => None,
     };
@@ -807,7 +799,7 @@ pub fn clone_npu(
         prompt::build_xvector_prompt(&tables, &sp, &role_ids, &text_ids, Some(&xvec), language_id)
     };
 
-    run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache)
+    run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache, npu)
 }
 
 /// **Synth on the Intel NPU** — speaker-free text-to-speech (no reference voice).
@@ -817,6 +809,7 @@ pub fn synth_npu(
     target_text: &str,
     language: &str,
     npu_cache: Option<&str>,
+    npu: &NpuOpts,
 ) -> Result<Vec<f32>, String> {
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
     // Resolve the sampling plan ONCE per generation call, here, because this is
@@ -833,7 +826,7 @@ pub fn synth_npu(
     let mut mtp = crate::gen_kv_mtp::CpuMtp::load(&paths.mtp);
     let prompt = prompt::build_xvector_prompt(&tables, &sp, &role_ids, &text_ids, None, language_id);
 
-    run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache)
+    run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache, npu)
 }
 
 /// Shared NPU path: run the Talker generation loop on the NPU, then decode the
@@ -855,83 +848,41 @@ fn run_npu(
     prompt: &Prompt,
     opts: &GenOpts,
     npu_cache: Option<&str>,
+    npu: &NpuOpts,
 ) -> Result<Vec<f32>, String> {
     let cache = npu_cache.map(std::path::Path::new);
-    // OpenVINO target device; override with BRAIN_QWEN3TTS_NPU_DEVICE=cpu|gpu|npu|auto
-    // (e.g. `cpu` to validate the fp32 graph, since the NPU runs the graph in fp16).
-    let device = std::env::var("BRAIN_QWEN3TTS_NPU_DEVICE")
-        .ok()
-        .and_then(|s| npu::openvino::NpuDevice::parse(&s))
-        .unwrap_or(npu::openvino::NpuDevice::Npu);
+    // OpenVINO target device; `cpu` validates the fp32 graph, since the NPU
+    // runs it in fp16. Falls back to CPU/GPU within OpenVINO when absent.
+    let device = crate::npu_gen::Target::new(npu.device, npu.turbo);
     let allow_fallback = true;
 
-    // Talker placement (`BRAIN_QWEN3TTS_TALKER`):
-    //   cpu          -> CPU KV-cache decoder (codec still on NPU),
-    //   npu          -> fp32 cache-free NPU graph,
-    //   npu-int8     -> weight-only INT8 cache-free NPU graph,
-    //   npu-kv       -> INT8 resident KV-cache decode graph (O(1) proj/frame),
-    //   npu-kv-fp32  -> fp32 resident KV-cache decode graph.
-    // A large Talker (d_model>=2048) defaults to INT8 cache-free; the KV-cache
-    // decode path (the per-frame speed win) is opt-in until it's the proven default.
-    #[derive(PartialEq, Clone, Copy)]
-    enum Mode {
-        Cpu,
-        NpuF32,
-        NpuI8,
-        NpuKvI8,
-        NpuKvF32,
-        NpuKvI4,
-    }
-    let mode = match std::env::var("BRAIN_QWEN3TTS_TALKER").ok().as_deref() {
-        Some("cpu") => Mode::Cpu,
-        Some("npu") | Some("npu-fp32") => Mode::NpuF32,
-        Some("npu-int8") | Some("int8") => Mode::NpuI8,
-        Some("npu-kv") | Some("kv") | Some("npu-kv-int8") => Mode::NpuKvI8,
-        Some("npu-kv-int4") | Some("int4") => Mode::NpuKvI4,
-        Some("npu-kv-fp32") => Mode::NpuKvF32,
-        // Default: the resident KV-cache decode graph (talker measured an order
-        // of magnitude faster per frame than cache-free). INT8 for the large
-        // 1.7B Talker, fp32 for the 0.6B.
-        _ if tables.cfg.d_model >= 2048 => Mode::NpuKvI8,
-        _ => Mode::NpuKvF32,
-    };
+    let mode = npu.talker.unwrap_or_else(|| TalkerMode::default_for(tables.cfg.d_model));
     // Print the resolved hardware path up front (device + weight precision + whether
     // an INT4 request is native or weight-compression on this device).
-    if mode != Mode::Cpu {
-        let (q, i4) = (matches!(mode, Mode::NpuI8 | Mode::NpuKvI8), matches!(mode, Mode::NpuKvI4));
-        eprintln!("{}", crate::npu_gen::describe_talker_path(device, allow_fallback, q, i4));
+    if mode != TalkerMode::Cpu {
+        let (q, i4) = (matches!(mode, TalkerMode::NpuI8 | TalkerMode::NpuKvI8), matches!(mode, TalkerMode::NpuKvI4));
+        eprintln!("{}", crate::npu_gen::describe_talker_path(npu.device, allow_fallback, q, i4));
     }
 
     // MTP placement: the residual code-predictor re-runs its 5-layer decoder 16
     // times per frame. On the host that re-streams the MTP's ~300MB fp32 weights every
-    // substep and is memory-bandwidth bound, and it got worse as the decoder
-    // grew. The resident INT8 NPU decode graph (`KvMtp`) streams a quarter of
-    // the weight bytes from device memory and measured more than twice as fast
-    // per frame on the 1.7B - so it is now the DEFAULT for the large
-    // (d_model>=2048) model. `BRAIN_QWEN3TTS_MTP=cpu` forces the host path (still the
-    // default on the small 0.6B, whose CPU MTP is cheap); `=npu` forces it on.
+    // substep and is memory-bandwidth bound; the resident INT8 NPU decode graph
+    // (`KvMtp`) streams a quarter of the bytes and measured more than twice as
+    // fast per frame on the 1.7B. `Fused` runs all 15 substeps in one inference.
     // Not used for the CPU-Talker mode (which already uses the host MTP).
-    // `BRAIN_QWEN3TTS_MTP`: `fused` = the single-infer fused graph (all 15 substeps in one
-    // NPU inference — kills the per-substep dispatch overhead); `npu` = the per-substep
-    // KvMtp; `cpu` = the host CpuMtp. Default for the large model is `npu` (KvMtp).
-    let mut npu_mtp: Option<Box<dyn crate::npu_gen::MtpEngine>> = if mode == Mode::Cpu {
+    let large = tables.cfg.d_model >= 2048;
+    let mut npu_mtp: Option<Box<dyn crate::npu_gen::MtpEngine>> = if mode == TalkerMode::Cpu {
         None
     } else {
-        match std::env::var("BRAIN_QWEN3TTS_MTP").ok().as_deref() {
-            Some("cpu") => None,
-            Some("fused") => Some(Box::new(crate::npu_gen::FusedMtp::load(&paths.mtp, device, allow_fallback, cache)?)),
-            Some("npu") => Some(Box::new(crate::npu_gen::KvMtp::load(
-                &paths.mtp, device, allow_fallback, cache, tables.cfg.d_model >= 2048,
-            )?)),
-            _ if tables.cfg.d_model >= 2048 => Some(Box::new(crate::npu_gen::KvMtp::load(
-                &paths.mtp, device, allow_fallback, cache, true,
-            )?)),
-            _ => None,
+        match npu.mtp.unwrap_or_else(|| MtpMode::default_for(tables.cfg.d_model)) {
+            MtpMode::Cpu => None,
+            MtpMode::Fused => Some(Box::new(crate::npu_gen::FusedMtp::load(&paths.mtp, device, allow_fallback, cache)?)),
+            MtpMode::Npu => Some(Box::new(crate::npu_gen::KvMtp::load(&paths.mtp, device, allow_fallback, cache, large)?)),
         }
     };
 
     let codes = match mode {
-        Mode::Cpu => {
+        TalkerMode::Cpu => {
             eprintln!("tts npu: Talker on CPU KV-cache (d_model={}); codec on NPU", tables.cfg.d_model);
             let mut cpu = crate::gen_kv::CpuTalker::load(&paths.talker);
             // Unarmed: this path has no token to honor (see `run_npu`'s doc),
@@ -939,14 +890,14 @@ fn run_npu(
             generate_codes_cached(&mut cpu, mtp, sp, prompt, opts, &CancelToken::default())
                 .expect("an unarmed cancel token never fires")
         }
-        Mode::NpuKvI8 | Mode::NpuKvF32 | Mode::NpuKvI4 => {
-            let int4 = mode == Mode::NpuKvI4;
-            let quant = mode == Mode::NpuKvI8;
-            if std::env::var("TTS_NPU_PARITY").is_ok() {
+        TalkerMode::NpuKvI8 | TalkerMode::NpuKvF32 | TalkerMode::NpuKvI4 => {
+            let int4 = mode == TalkerMode::NpuKvI4;
+            let quant = mode == TalkerMode::NpuKvI8;
+            if npu.parity {
                 match crate::npu_gen::kv_prefix_parity(&paths.talker, tables, prompt, cache, device, quant) {
                     Ok(m) => eprintln!(
                         "tts npu parity: KV-cache prefix hidden max-abs ({}, {} vs CPU) = {m:.3e}",
-                        device.ov_str(),
+                        npu.device.ov_str(),
                         if quant { "INT8" } else { "fp32" }
                     ),
                     Err(e) => eprintln!("tts npu parity check failed: {e}"),
@@ -960,14 +911,14 @@ fn run_npu(
                 &paths.talker, tables, eng, sp, prompt, opts, device, allow_fallback, cache, quant, int4,
             )?
         }
-        Mode::NpuF32 | Mode::NpuI8 => {
-            let quant = mode == Mode::NpuI8;
+        TalkerMode::NpuF32 | TalkerMode::NpuI8 => {
+            let quant = mode == TalkerMode::NpuI8;
             // Optional deterministic parity gate (NPU/OV-device vs CPU Talker hidden state).
-            if std::env::var("TTS_NPU_PARITY").is_ok() {
+            if npu.parity {
                 match crate::npu_gen::talker_prefix_parity(&paths.talker, tables, prompt, cache, device, quant) {
                     Ok(m) => eprintln!(
                         "tts npu parity: Talker prefix hidden max-abs ({}, {} vs CPU) = {m:.3e}",
-                        device.ov_str(),
+                        npu.device.ov_str(),
                         if quant { "INT8" } else { "fp32" }
                     ),
                     Err(e) => eprintln!("tts npu parity check failed: {e}"),
@@ -988,7 +939,7 @@ fn run_npu(
     eprintln!("tts npu: generated {} frames; decoding on NPU codec graph…", codes.len() / 16);
     let tc = std::time::Instant::now();
     let (wav, codec_dev) = crate::npu_gen::decode_codes_npu(&paths.codec, &codes, device, allow_fallback, cache)?;
-    if std::env::var("TTS_PROFILE").is_ok() {
+    if opts.profile {
         eprintln!(
             "[tts-npu-profile] codec compile+decode ({} frames) on {codec_dev} = {:.0}ms",
             codes.len() / 16,
@@ -1059,6 +1010,7 @@ pub fn design_npu(
     instruct: &str,
     speaker: Option<&str>,
     npu_cache: Option<&str>,
+    npu: &NpuOpts,
 ) -> Result<Vec<f32>, String> {
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
     // Resolve the sampling plan ONCE per generation call, here, because this is
@@ -1082,7 +1034,7 @@ pub fn design_npu(
     let prompt =
         prompt::build_instruct_prompt(&tables, &sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id);
 
-    run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache)
+    run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache, npu)
 }
 
 /// Decode `[T,16]` codes to a 24 kHz waveform (empty -> error).
@@ -1098,18 +1050,24 @@ pub fn decode_codes(codec_path: &str, codes: &[u32]) -> Result<Vec<f32>, String>
         return Err("no codec frames were generated".to_string());
     }
     let codec = mimi::Codec::load_inference_on(gpu_core::Gpu::new(mimi::PIPELINES), codec_path);
-    if std::env::var("TTS_PROFILE").is_ok() {
-        let t0 = std::time::Instant::now();
-        let wav = codec.decode(codes);
-        eprintln!(
-            "[tts-profile] codec.decode({} frames)={:.1}ms -> {} samples",
-            codes.len() / 16,
-            t0.elapsed().as_secs_f64() * 1e3,
-            wav.len()
-        );
-        return Ok(wav);
-    }
     Ok(codec.decode(codes))
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    #[test]
+    fn a_text_of_fewer_than_two_tokens_is_refused_not_panicked_on() {
+        // 3 role ids + text + the 5-id chat suffix.
+        let ids = |text_len: usize| (0..(3 + text_len + 5) as u32).collect::<Vec<_>>();
+        for n in [0, 1] {
+            let err = split_input_ids(&ids(n)).unwrap_err();
+            assert!(err.contains("too short"), "{n} tokens: {err}");
+        }
+        let (role, text) = split_input_ids(&ids(2)).unwrap();
+        assert_eq!((role.len(), text.len()), (3, 2));
+    }
 }
 
 #[cfg(test)]

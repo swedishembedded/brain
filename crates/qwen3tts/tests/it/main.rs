@@ -17,5 +17,6 @@ mod resident_device;
 mod sampled_decode;
 mod served_as_downloaded;
 mod sft_train;
+mod store;
 mod talker;
 mod talker_policy;

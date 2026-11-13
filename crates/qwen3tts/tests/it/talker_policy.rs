@@ -6,7 +6,7 @@
 //! advantage says, and folding the trained adapter into the inference Talker
 //! gives the weights the trainer computed with.
 //!
-//! Gated on `BRAIN_QWEN3TTS_WEIGHTS`/`BRAIN_QWEN3TTS_CKPT` like the other
+//! Skipped when the model store holds no Qwen3-TTS checkpoint, like the other
 //! real-checkpoint tests.
 
 use capability::CancelToken;
@@ -18,12 +18,7 @@ const TEXT: &str = "The people must be taught to value their liberty above their
 const BLOCK: u32 = 160;
 
 fn paths() -> Option<TtsPaths> {
-    let (Ok(weights), Ok(ckpt)) = (std::env::var("BRAIN_QWEN3TTS_WEIGHTS"), std::env::var("BRAIN_QWEN3TTS_CKPT")) else {
-        brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT not set");
-        return None;
-    };
-    let paths = TtsPaths::new(&weights, ckpt);
-    paths.require(false).is_ok().then_some(paths)
+    crate::store::store_paths()
 }
 
 fn sampled(seed: u64) -> GenOpts {

@@ -9,28 +9,23 @@
 //! run, without needing a PyTorch reference at all - both models are already
 //! in-tree, gradcheck-verified against their own oracles independently.
 //!
-//! Gated on `BRAIN_QWEN3TTS_WEIGHTS`/`BRAIN_QWEN3TTS_CKPT` (the TTS
-//! checkpoint) and `BRAIN_NEMOTRONASR` (the ASR checkpoint dir, matching
-//! `crates/arch`'s own env var for this architecture) all being set and
-//! present; skips cleanly otherwise, the same convention as every other
-//! real-checkpoint test in this crate.
+//! The TTS checkpoint comes from the model store and the ASR one from
+//! `BRAIN_NEMOTRONASR` (the ASR checkpoint dir, matching `crates/arch`'s own
+//! env var for this architecture); skips cleanly when either is absent, the
+//! same convention as every other real-checkpoint test in this crate.
 
 use eval::asr::{normalize, word_error_rate};
-use qwen3tts::{GenOpts, TtsPaths};
+use qwen3tts::GenOpts;
 
 #[test]
 fn synth_then_transcribe_recovers_the_text() {
-    let (Ok(weights_dir), Ok(ckpt), Ok(asr_ckpt)) =
-        (std::env::var("BRAIN_QWEN3TTS_WEIGHTS"), std::env::var("BRAIN_QWEN3TTS_CKPT"), std::env::var("BRAIN_NEMOTRONASR"))
-    else {
-        brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT/BRAIN_NEMOTRONASR not all set");
+    let Ok(asr_ckpt) = std::env::var("BRAIN_NEMOTRONASR") else {
+        brain_testutil::skip("BRAIN_NEMOTRONASR not set");
         return;
     };
-    let paths = TtsPaths::new(&weights_dir, ckpt);
-    if paths.require(false).is_err() {
-        brain_testutil::skip("TTS weights not found at BRAIN_QWEN3TTS_WEIGHTS");
+    let Some(paths) = crate::store::store_paths() else {
         return;
-    }
+    };
     if !std::path::Path::new(&format!("{asr_ckpt}/model.safetensors")).exists() {
         brain_testutil::skip("ASR weights not found at BRAIN_NEMOTRONASR");
         return;

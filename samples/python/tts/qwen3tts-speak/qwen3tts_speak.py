@@ -4,51 +4,42 @@
 
 """Qwen3-TTS speech synthesis over brain's D-Bus interface, streamed.
 
-`brain/qwen3tts`'s resident `speak`/`design` actions are `.streaming()`: the
-server vocodes in chunks and sends each one as an out-of-band blob frame on
-the `Subscribe` stream while it is still generating, then sends the complete
-waveform as the terminal blob. This example consumes BOTH:
+`brain/qwen3tts`'s resident `synth`/`clone`/`design` actions are `.streaming()`:
+the server vocodes in chunks and sends each one as an out-of-band blob frame
+on the `Subscribe` stream while it is still generating, then sends the
+complete clip as the terminal blob. This example consumes BOTH:
 
   * ``on_chunk`` prints each segment as it lands and reports the real
     time-to-first-audio - the number that decides whether playback can start
     before generation finishes;
-  * the terminal `audio` blob is written to a WAV file.
+  * the terminal `audio` blob, a WAV file, is written out as it is.
 
-That is the same capability the private `brain tts serve` Unix socket used to
-provide through its own `audio_chunk` JSON protocol, reached here with no
-TTS-specific client code - just `Subscribe` and the manifest.
+That is the same capability the private NPU Unix-socket server provides
+through its own `audio_chunk` JSON protocol, reached here with no TTS-specific
+client code - just `Subscribe` and the manifest.
 
-Unlike `cosyvoice synth` (whose blob is already a WAV byte stream), this
-action's `audio` blob is RAW mono f32 little-endian PCM at 24 kHz, exactly as
-`speak_spec` declares - so the example wraps it in a WAV container itself,
-with the stdlib `wave` module and no extra dependency.
+The mid-run chunks are RAW mono f32 little-endian PCM at 24 kHz (their
+metadata says so); the terminal blob is the whole clip as a WAV.
 
-The served voice is configured by the ENVIRONMENT, not per call: with
-`BRAIN_QWEN3TTS_REF` set to a reference clip, `speak` voice-clones that timbre
-(in-context when `BRAIN_QWEN3TTS_REF_TEXT` also gives its transcript);
-without it, `speak` is speaker-free synthesis. `design` takes its
-`instruct`/`speaker` per call instead, and needs a CustomVoice/VoiceDesign
-checkpoint.
+The voice is chosen per call: `synth` is speaker-free, `clone` takes a
+reference recording (`--ref`, with `--ref-text` for the in-context path) and
+`design` takes `instruct`/`speaker` and needs a CustomVoice/VoiceDesign
+checkpoint. The checkpoint is the one the model store resolves.
 
-Run under a private session bus (weights via env - the imported brain
-checkpoints and the HF checkpoint dir for `config.json` + tokenizer):
+Run under a private session bus:
 
-    BRAIN_QWEN3TTS_WEIGHTS=out/tts-base06 \\
-    BRAIN_QWEN3TTS_CKPT=/path/to/Qwen3-TTS-12Hz-0.6B-Base \\
     tools/dbus-session.sh --serve "--dbus" -- \\
       python3 samples/python/tts/qwen3tts-speak/qwen3tts_speak.py \\
           --text "Hello from a resident text to speech model." \\
-          --max-frames 40 --out speak.wav
+          --max-frames 40 --stream-chunk 4 --out speak.wav
 
 Requires: jeepney -- `pip install -e brain-py`.
 """
 from __future__ import annotations
 
 import argparse
-import struct
 import sys
 import time
-import wave
 from pathlib import Path
 
 try:
@@ -61,30 +52,16 @@ from brain_py.dbus import BrainDBus  # noqa: E402
 MODEL = "brain/qwen3tts"
 
 
-def write_wav(path: str, pcm_f32: bytes, sample_rate: int) -> int:
-    """Write raw mono f32-LE PCM as a 16-bit WAV. Returns the frame count.
-
-    `speak`'s blob is raw PCM by design (it is also what the mid-run chunks
-    carry, so a client can append chunks and get exactly the terminal blob);
-    the container is the client's business."""
-    n = len(pcm_f32) // 4
-    samples = struct.unpack(f"<{n}f", pcm_f32[: n * 4])
-    pcm16 = struct.pack(f"<{n}h", *(max(-32768, min(32767, int(s * 32767))) for s in samples))
-    with wave.open(path, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(sample_rate)
-        w.writeframes(pcm16)
-    return n
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--text", required=True, help="the text to speak")
-    ap.add_argument("--action", default="speak", choices=["speak", "design"], help="speak (env-configured voice) or design (instruct/preset voice)")
+    ap.add_argument("--action", default="synth", choices=["synth", "clone", "design"], help="synth (speaker-free), clone (a reference voice) or design (instruct/preset voice)")
+    ap.add_argument("--ref", default="", help="clone only: reference recording (WAV)")
+    ap.add_argument("--ref-text", default="", help="clone only: transcript of the reference (enables the in-context path)")
     ap.add_argument("--instruct", default="", help="design only: natural-language voice/emotion/prosody description")
     ap.add_argument("--speaker", default="", help="design only: CustomVoice preset speaker name")
-    ap.add_argument("--lang", default="", help="synthesis language (default: the server's own)")
+    ap.add_argument("--lang", default="", help="synthesis language (default: english)")
+    ap.add_argument("--stream-chunk", type=int, default=0, help="codec frames per streamed chunk (0 = the engine's own default)")
     ap.add_argument("--max-frames", type=int, default=0, help="codec frame cap (0 = the action's own default)")
     ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: the server draws a random one and reports it)")
     ap.add_argument("--model", default=MODEL)
@@ -99,8 +76,17 @@ def main() -> int:
         params["lang"] = args.lang
     if args.max_frames > 0:
         params["max_frames"] = args.max_frames
+    if args.stream_chunk > 0:
+        params["stream_chunk"] = args.stream_chunk
     if args.seed is not None:
         params["seed"] = args.seed
+    blobs = None
+    if args.action == "clone":
+        if not args.ref:
+            ap.error("--action clone needs --ref")
+        blobs = {"ref": Path(args.ref).read_bytes()}
+        if args.ref_text:
+            params["ref_text"] = args.ref_text
     if args.action == "design":
         params["instruct"] = args.instruct
         params["speaker"] = args.speaker
@@ -108,7 +94,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            skip(f"{args.model!r} not served (models: {models}); set BRAIN_QWEN3TTS_WEIGHTS and BRAIN_QWEN3TTS_CKPT")
+            skip(f"{args.model!r} not served (models: {models}); pull a Qwen3-TTS checkpoint into the model store")
         spec = next((a for m in brain.manifests() if m["model"] == args.model for a in m["actions"] if a["name"] == args.action), None)
         if spec is None:
             skip(f"{args.model} does not serve {args.action!r}")
@@ -130,27 +116,28 @@ def main() -> int:
             print(f"  chunk {index}: {len(data) // 4} samples at {time.monotonic() - t0:.1f}s", flush=True)
 
         try:
-            outcome = brain.subscribe(args.model, args.action, params, on_chunk=on_chunk, timeout=1800.0)
+            outcome = brain.subscribe(args.model, args.action, params, blobs=blobs, on_chunk=on_chunk, timeout=1800.0)
         except BrainError as e:
             print(f"  ERROR: {e}", file=sys.stderr)
             return 1
 
-        pcm = outcome.blobs.get("audio")
-        if not pcm:
+        clip = outcome.blobs.get("audio")
+        if not clip:
             print("  no audio blob arrived", file=sys.stderr)
             return 1
         rate = int(outcome.outputs.get("sample_rate", 24000))
+        n = int(outcome.outputs.get("samples", 0))
         seed = outcome.outputs.get("seed")
         if seed is not None:
             print(f"  seed: {seed} (pass --seed {seed} to reproduce)")
-        n = write_wav(args.out, pcm, rate)
+        Path(args.out).write_bytes(clip)
         total = time.monotonic() - t0
         if first_audio:
             print(f"  time to first audio: {first_audio[0]:.1f}s of {total:.1f}s total")
             # The chunks are the same signal as the terminal artifact, so a
             # player that consumed them live has already heard the whole clip.
-            same = "matches" if bytes(streamed) == pcm else "DIFFERS FROM"
-            print(f"  streamed {len(streamed) // 4} samples - {same} the terminal blob")
+            same = "matches" if len(streamed) // 4 == n else "DIFFERS FROM"
+            print(f"  streamed {len(streamed) // 4} samples - {same} the terminal clip's {n}")
         print(f"wrote {args.out} ({n} samples, {n / rate:.2f}s, {rate} Hz) in {total:.1f}s")
         return 0
 

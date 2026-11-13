@@ -45,7 +45,17 @@ the flag that replaced it, and has no effect in the environment.
 | `BRAIN_WM_RENDERER` | `software` or `accelerated`, forcing the world-model window's SDL renderer instead of letting it choose | chosen from the driver |
 | `BRAIN_SPLAT_PROFILE` | set (any value) to print `splat fit`'s per-stage timing breakdown | off |
 | `BRAIN_GPU_NO_READ_STAGING_REUSE` | `1` makes every device-to-host readback allocate its own staging buffer instead of reusing the device's, trading throughput for a smaller resident host footprint | off (the buffer is reused) |
-| `BRAIN_NPU_TURBO` | `1`/`yes` requests the Intel NPU's turbo clock during inference | off |
+
+The Qwen3-TTS placement, streaming and diagnostics variables (`BRAIN_QWEN3TTS_TALKER`,
+`BRAIN_QWEN3TTS_MTP`, `BRAIN_QWEN3TTS_CODEC`, `BRAIN_QWEN3TTS_STREAM_CHUNK`,
+`BRAIN_QWEN3TTS_STREAM_WIN`, `BRAIN_QWEN3TTS_NPU_DEVICE`, `BRAIN_QWEN3TTS_REF`,
+`BRAIN_QWEN3TTS_REF_TEXT`, `BRAIN_QWEN3TTS_RES`, `BRAIN_NPU_TURBO`, `TTS_PLAN`,
+`TTS_PROFILE`, `TTS_NPU_PARITY`) are no longer read.
+They are parameters now: `ov_device`, `turbo`, `talker`, `mtp`, `parity` and `profile` on
+`sample-models-qwen3tts`'s `npu-synth`/`npu-clone`/`npu-design` actions, `--npu-device`,
+`--turbo`, `--mtp`, `--codec`, `--stream-chunk`, `--stream-window` and `--profile` on its
+`npu-serve` workflow, `ref` and `ref_text` on the `clone` action, and `stream_chunk` and
+`profile` on the served ones.
 
 `BRAIN_GPU_INDEX` is no longer read. Pin one card with `--device gpu<i>`, or with
 `BRAIN_DEVICE=gpu<i>` in a program that has no CLI.
@@ -127,7 +137,7 @@ served, with no error.
 | `BRAIN_TIMESFM3` | TimesFM-3 forecasting (natively multivariate; target-only over this served path). `brain pull google/timesfm-3.0-pytorch` fetches the checkpoint, but no caller sets this variable for you yet - point it at the fetched directory (or an imported `.safetensors`) yourself | weights |
 | `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | Kronos OHLCV forecasting (the served path, `brain serve`, and `brain forecast compare`/`finetune`). `brain forecast predict` instead resolves both roles from the models directory (`NeoQuasar/Kronos-Tokenizer-base` + `NeoQuasar/Kronos-base`, told apart by their own `config.json` content) via `--tokenizer-dir`/`--decoder-dir` or automatically when the store holds exactly one candidate each | the two checkpoint dirs (the decoder also accepts a `.safetensors` fine-tune file) |
 | `BRAIN_KRONOS_ARGMAX` | force Kronos's deterministic modal rollout (argmax over the token distribution) instead of nucleus sampling: one reproducible path, N times cheaper. Set by `brain forecast predict --samples 1` | `0` (sample) |
-| `BRAIN_QWEN3TTS_WEIGHTS` (+ `BRAIN_QWEN3TTS_CKPT`) | Qwen3-TTS `speak` | the checkpoint dir, or a dir of files from `brain qwen3tts import` (+ HF checkpoint dir for config/tokenizer) |
+| `BRAIN_QWEN3TTS_WEIGHTS` (+ `BRAIN_QWEN3TTS_CKPT`) | Qwen3-TTS in the `qwen3tts-synth` stdio controller only; `brain serve` and `brain qwen3tts` resolve the checkpoint from the model store (`--weights-dir`/`--ckpt` name one outright) | the checkpoint dir, or a dir of files from `brain qwen3tts import` (+ HF checkpoint dir for config/tokenizer) |
 | `BRAIN_NEMOTRONASR` | Nemotron 3.5 streaming ASR | HF checkpoint dir |
 | `BRAIN_QWEN3ASR` | Qwen3-ASR offline ASR | HF checkpoint dir |
 | `BRAIN_QWEN3OMNIMOE_HF_DIR` | Qwen3-Omni Thinker, validation tier - full chat + audio/image/video + `speak`, but weights re-stream from the checkpoint per generated token | HF checkpoint dir |
@@ -179,17 +189,10 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_WAN_ATTN` | `flash`/`chunked` forces the Wan DiT's self-attention implementation | `flash` where the device supports it |
 | `BRAIN_WAN_T5_DEVICE` | where the umT5-XXL text encoder runs (`cpu`/`gpu`); it is 22.72 GB in fp32 and does not fit a 24 GB card | `cpu` |
 | `BRAIN_FLUX1_VAE_DEVICE` | where the FLUX.1 VAE decode runs (`cpu`/`gpu<i>`) | `cpu` |
-| `BRAIN_QWEN3TTS_LANG` / `BRAIN_QWEN3TTS_REF` / `BRAIN_QWEN3TTS_REF_TEXT` | TTS language / reference voice `.wav` / its transcript | `english` / none / none |
+| `BRAIN_QWEN3TTS_LANG` | the `qwen3tts-synth` stdio controller's default TTS language (the `lang` param of the served actions) | `english` |
 | `BRAIN_MIMI_WEIGHTS` | TTS codec weights override | derived from the resolved qwen3tts `weights_dir` role |
-| `BRAIN_QWEN3TTS_TALKER` | TTS talker placement (`cpu`, `npu`/`npu-fp32`, or an NPU int4 KV mode) | model-size default |
-| `BRAIN_QWEN3TTS_MTP` | TTS next-token-prediction placement (`cpu`, `npu`, `fused`) | model-size default |
-| `BRAIN_QWEN3TTS_CODEC` | TTS codec placement (`windowed`, `cpu-stream`, `npu-stream`) | default engine path |
-| `BRAIN_QWEN3TTS_STREAM_CHUNK` | frames per chunk in `cpu-stream` codec mode | 16 |
-| `BRAIN_QWEN3TTS_STREAM_WIN` | frames kept resident in the streaming decode window (rounds up to a multiple of the chunk size) | 32 |
 | `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from the resolved qwen3tts `weights_dir` role |
-| `BRAIN_QWEN3TTS_NPU_DEVICE` | OpenVINO device for the TTS NPU talker | auto |
 | `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |
-| `BRAIN_QWEN3TTS_RES` | resources base for `brain qwen3tts serve`'s default engine paths | unset (flags supply paths) |
 | `BRAIN_QWEN3ASR_WINDOW` / `BRAIN_QWEN3ASR_MAXNEW` | Qwen3-ASR window (s) / max tokens | 30 / 200 |
 | `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` | forecast horizon / sample count | 64 / 1 |
 | `BRAIN_MOCK_DELAY_MS` | mock model artificial latency | 0 |
@@ -212,7 +215,6 @@ page under `docs/reference/models/`.
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup | `$XDG_DATA_HOME/brain/models` |
 | `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |
-| `BRAIN_QWEN3TTS_RES` | resources base for `brain qwen3tts serve`'s default paths | unset |
 | `BRAIN_HUB_ENDPOINT` | additional allowed host for model downloads (checked before the standard `HF_ENDPOINT`), both as a base URL and as a redirect target - never a blanket "trust any redirect" | the standard hub host only |
 
 ### Which models directory wins

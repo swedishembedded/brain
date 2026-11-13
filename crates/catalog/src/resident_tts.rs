@@ -1,175 +1,138 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Resident-model adapter putting brain's Qwen3-TTS voice synthesis behind the
-//! residency [`Executor`], mirroring the yolo adapter in [`crate::resident_yolo`].
+//! Qwen3-TTS voice synthesis behind the residency [`Executor`].
 //!
-//! The instance owns a hot [`qwen3tts::ResidentEngine`]: the Talker, MTP,
-//! codec and tokenizer are loaded ONCE in `activate` and reused by every
-//! subsequent call, and each call's waveform is streamed back chunk-by-chunk
-//! as the codec decodes it (`capability::Progress::chunk`, which the D-Bus
-//! `Subscribe` transport turns into real mid-stream `blob` frames). Those two
-//! properties - resident weights and progressive audio - are exactly what the
-//! private `brain tts serve` Unix-socket protocol existed to provide; they now
-//! live on the standard capability surface, so a D-Bus/HTTP client gets them
-//! with no TTS-specific protocol.
+//! The speech actions (`synth`, `clone`, `design`) run on a hot
+//! [`qwen3tts::ResidentEngine`]: the Talker, MTP, codec and tokenizer load ONCE
+//! in `activate` and are reused by every subsequent call, and each call's
+//! waveform is streamed back chunk by chunk as the codec decodes it
+//! (`capability::Progress::chunk`, which the D-Bus `Subscribe` transport turns
+//! into real mid-stream `blob` frames). A reference voice's conditioning is
+//! computed once per recording and kept, so repeat clones of one timbre skip
+//! the speaker encoder and the codec encode.
+//!
+//! The other actions (`batch`, `import`, `finetune`, `sim`) are the provider's
+//! own ([`qwen3tts::caps::provider`]'s), run on the device the scheduler
+//! assigned.
 //!
 //! Decode is CPU-side by construction (`CpuTalker`/`CpuMtp` + the pure-CPU
-//! streaming codec back), so the instance's Hot footprint is RAM, not VRAM,
+//! streaming codec back), so the hot instance's footprint is RAM, not VRAM,
 //! and `activate` ignores the assigned `device` - which is what makes
 //! [`TtsResident::estimate`]'s zero-VRAM cost honest.
 //!
-//! Config is env-only (no hardcoded paths), mirroring `brain tts synth`'s
-//! `--weights-dir` / `--ckpt` flags:
-//!   * `BRAIN_QWEN3TTS_WEIGHTS` - the Qwen3-TTS checkpoint dir as downloaded, or a
-//!     dir holding `talker.safetensors`, `mtp.safetensors`, `codec.safetensors`,
-//!     `speaker.safetensors` (the primary gate; unset ⇒ not served).
-//!   * `BRAIN_QWEN3TTS_CKPT`     - HF checkpoint dir (for `config.json` + tokenizer).
-//!   * `BRAIN_QWEN3TTS_LANG`     - default synthesis language (default `english`).
-//!   * `BRAIN_QWEN3TTS_REF`      - optional reference `.wav`: when set, `speak` voice
-//!     -clones this timbre instead of the speaker-free synth.
-//!   * `BRAIN_QWEN3TTS_REF_TEXT` - optional transcript of `BRAIN_QWEN3TTS_REF`; enables the
-//!     in-context (ICL) clone path (the reference wav is codec-encoded in-tree).
+//! The checkpoint is the model store's (`qwen3tts::spec::Qwen3TtsSpec`), under
+//! the same `weights_dir` and `ckpt` roles the command line names; nothing is
+//! read from the environment.
+//!
+//! Swedish Embedded AB implements low-latency, load-once speech-synthesis
+//! services for its clients. If your team needs expertise in serving neural
+//! speech with the weights kept hot and audio streamed as it is made then you
+//! can procure our services by sending an email to info@swedishembedded.com.
 
-use capability::{
-    ActionResult, Blob, Invocation, Manifest, Media, Outcome, Progress,
-};
+use capability::{ActionResult, Invocation, Manifest, Progress, Provider};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
-use qwen3tts::{GenOpts, TtsPaths};
+use qwen3tts::TtsPaths;
 
-/// Qwen3-TTS 24 kHz output sample rate (see `qwen3tts::pipeline` / `brain tts synth`).
-const SAMPLE_RATE: u32 = 24_000;
+/// Instance key of the hot engine: the speech actions.
+const ENGINE_KEY: &str = "default";
+/// Instance key of `finetune`, which trains the Talker on the device.
+const TRAIN_KEY: &str = "train";
+/// Instance key of the provider's host-side actions (`batch`, `import`, `sim`).
+const HOST_KEY: &str = "host";
 
-/// Text-to-speech behind the scheduler. Loads a Qwen3-TTS checkpoint
-/// (`BRAIN_QWEN3TTS_WEIGHTS`); the resident instance decodes on the CPU (brain's
-/// `CpuTalker` default) - dropping it frees the RAM. One action, `speak`.
+/// Text-to-speech behind the scheduler, over one Qwen3-TTS checkpoint.
 pub struct TtsResident {
-    weights_dir: String,
-    ckpt_dir: String,
-    lang: String,
-    ref_wav: Option<String>,
-    ref_text: String,
+    paths: TtsPaths,
 }
 
 impl TtsResident {
-    /// Configure from the environment, mirroring `brain tts synth`'s flags. Returns
-    /// `None` (not served) when `BRAIN_QWEN3TTS_WEIGHTS` is unset/empty, like
-    /// [`crate::resident_yolo::YoloResident::from_store`].
-    pub fn from_env() -> Option<TtsResident> {
-        let weights_dir = std::env::var("BRAIN_QWEN3TTS_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        let ckpt_dir = std::env::var("BRAIN_QWEN3TTS_CKPT").ok().unwrap_or_default();
-        let lang = std::env::var("BRAIN_QWEN3TTS_LANG").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "english".to_string());
-        let ref_wav = std::env::var("BRAIN_QWEN3TTS_REF").ok().filter(|p| !p.is_empty());
-        let ref_text = std::env::var("BRAIN_QWEN3TTS_REF_TEXT").ok().unwrap_or_default();
-        Some(TtsResident { weights_dir, ckpt_dir, lang, ref_wav, ref_text })
+    /// The checkpoint the model store resolves for Qwen3-TTS, or `None` (not
+    /// served) when it holds none or several that cannot be told apart.
+    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<TtsResident> {
+        let assembly = loader::served::served_assembly(models_dir, "qwen3tts", &qwen3tts::spec::Qwen3TtsSpec, &[])?;
+        Some(TtsResident { paths: TtsPaths::from_assembly(&assembly).ok()? })
     }
 
     /// Direct constructor for callers that already hold the two paths (e.g.
-    /// `brain perf`'s `tts:<weights-dir>:<hf-ckpt-dir>` target) - no env
-    /// round-trip; see `crate::resident_scrfd::ScrfdResident::new`.
-    /// Default English, no reference voice - the synthesis-tuning knobs
-    /// (`BRAIN_QWEN3TTS_LANG`/`_REF`/`_REF_TEXT`) remain `from_env`-only.
+    /// `brain perf`'s `tts:<weights-dir>:<hf-ckpt-dir>` target).
     pub fn new(weights_dir: impl Into<String>, ckpt_dir: impl Into<String>) -> TtsResident {
-        TtsResident {
-            weights_dir: weights_dir.into(),
-            ckpt_dir: ckpt_dir.into(),
-            lang: "english".to_string(),
-            ref_wav: None,
-            ref_text: String::new(),
-        }
+        TtsResident { paths: TtsPaths::new(weights_dir.into(), ckpt_dir) }
     }
 
-    fn paths(&self) -> TtsPaths {
-        TtsPaths::new(&self.weights_dir, self.ckpt_dir.clone())
+    /// Host RAM the f32 weights of every component occupy, with a third on top
+    /// for the working set; a conservative 4 GiB when they cannot be read yet.
+    fn ram(&self) -> u64 {
+        let sum = self.paths.f32_weight_bytes();
+        if sum > 0 { sum + sum / 3 } else { 4 << 30 }
     }
-
 }
 
 impl ResidentModel for TtsResident {
     fn manifest(&self) -> Manifest {
-        // The spec lives in qwen3tts::caps, next to the catalog's `synth` spec,
-        // so the two surfaces cannot silently diverge.
+        // The spec lives in qwen3tts::caps, next to the provider's, so the two
+        // surfaces cannot silently diverge.
         qwen3tts::caps::resident_manifest()
     }
 
-    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(qwen3tts::caps::MODEL, "default")
+    fn instance_key(&self, action: &str, _inv: &Invocation) -> InstanceKey {
+        let config = match action {
+            a if qwen3tts::caps::RESIDENT_ACTIONS.contains(&a) => ENGINE_KEY,
+            "finetune" => TRAIN_KEY,
+            _ => HOST_KEY,
+        };
+        InstanceKey::new(qwen3tts::caps::MODEL, config)
     }
 
-    fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        // CPU-side decode (CpuTalker/CpuMtp) → the footprint is RAM. Budget ≈ 1.3×
-        // the f32 weights it loads (talker + mtp + codec + speaker); fall back
-        // to a conservative 4 GiB if they can't be read yet.
-        let sum = self.paths().f32_weight_bytes();
-        let ram = if sum > 0 { sum + sum / 3 } else { 4u64 << 30 };
-        MemCost::new(0, ram)
+    fn estimate(&self, key: &InstanceKey) -> MemCost {
+        match key.config.as_str() {
+            // Fine-tuning holds the Talker's weights, their gradients and
+            // AdamW's two moments: four copies, the dominant term at any batch.
+            TRAIN_KEY => MemCost::new(self.paths.f32_weight_bytes().max(1 << 30) * 4, self.ram()),
+            // `batch` gives each request its own host decoder copy.
+            HOST_KEY => MemCost::new(0, self.ram() * 2),
+            _ => MemCost::new(0, self.ram()),
+        }
     }
 
-    fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+    fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        if key.config != ENGINE_KEY {
+            let provider = qwen3tts::caps::TtsProvider::new(Some(self.paths.clone()));
+            return Ok(Box::new(ProviderInstance { provider, device }));
+        }
         // Activation IS the load: `ResidentEngine::load` reads the Talker, MTP,
         // codec and tokenizer once and the instance keeps them hot for every
         // subsequent action, so a served request never re-reads 3 GB of Talker
         // weights from disk. A missing/unreadable checkpoint fails here, at
         // activation, rather than on the first request.
-        let paths = self.paths();
-        paths.require(false).map_err(|e| format!("tts: {e} (set BRAIN_QWEN3TTS_WEIGHTS)"))?;
-        Ok(Box::new(TtsInstance {
-            engine: qwen3tts::ResidentEngine::load(&paths)?,
-            lang: self.lang.clone(),
-            ref_wav: self.ref_wav.clone(),
-            ref_text: self.ref_text.clone(),
-        }))
+        self.paths.require(false).map_err(|e| format!("tts: {e} (pull a Qwen3-TTS checkpoint, or name it with --weights-dir and --ckpt)"))?;
+        Ok(Box::new(TtsInstance { engine: qwen3tts::ResidentEngine::load(&self.paths)? }))
+    }
+}
+
+/// The provider's own actions, run on the device the scheduler assigned.
+struct ProviderInstance {
+    provider: qwen3tts::caps::TtsProvider,
+    device: Device,
+}
+
+impl Instance for ProviderInstance {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let act = self.provider.action(action).ok_or_else(|| format!("tts: unknown action '{action}'"))?;
+        crate::resident_llm::on_device(self.device, || act.run(inv, progress))?
     }
 }
 
 struct TtsInstance {
     engine: qwen3tts::ResidentEngine,
-    lang: String,
-    ref_wav: Option<String>,
-    ref_text: String,
 }
 
-impl TtsInstance {
-    /// Generation knobs shared by every action → `GenOpts`.
-    ///
-    /// A sampling knob the invocation does not carry stays `None`: the
-    /// invocation is only the "explicit caller override" layer, and the
-    /// checkpoint's `generation_config.json` (then the reference's defaults)
-    /// answers for the rest - see `qwen3tts::genconfig`.
-    ///
-    /// A `seed` that is not a non-negative integer is refused; an absent one is
-    /// drawn, so the opts carry the seed the run uses and the outcome echoes it.
-    fn opts_from(inv: &Invocation) -> Result<GenOpts, String> {
-        let mut opts = GenOpts::default();
-        opts.sampling.temperature = inv.get_f64("temp").map(|t| t as f32);
-        opts.sampling.top_k = inv.get_i64("top_k").map(|k| k.max(0) as usize);
-        opts.sampling.top_p = inv.get_f64("top_p").map(|p| p as f32);
-        opts.sampling.repetition_penalty = inv.get_f64("repetition_penalty").map(|r| r as f32);
-        opts.seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
-        if let Some(f) = inv.get_i64("max_frames") {
-            opts.max_frames = f.max(1) as usize;
-        }
-        Ok(opts)
-    }
-
-    /// Emit raw little-endian f32 PCM (mono, 24 kHz) - the same wire shape the
-    /// mid-run chunks below carry, so a client can append chunks and get
-    /// exactly this. No external WAV encoder dependency.
-    fn pcm_outcome(wav: Vec<f32>, seed: u64) -> ActionResult {
-        Ok(Outcome::new()
-            .set("seed", json!(seed))
-            .set("samples", json!(wav.len()))
-            .set("sample_rate", json!(SAMPLE_RATE))
-            .blob("audio", pcm_blob(&wav)))
-    }
-}
-
-/// Raw mono f32 little-endian PCM as a capability [`Blob`] - one encoder for
-/// both the mid-run chunks and the terminal artifact.
-fn pcm_blob(pcm: &[f32]) -> Blob {
+/// Raw mono f32 little-endian PCM as a capability [`Blob`]: what a mid-run
+/// chunk carries (the terminal artifact is the whole clip as a WAV).
+fn pcm_blob(pcm: &[f32], index: u32) -> capability::Blob {
     let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
-    Blob::new(Media::Audio, bytes).with_meta(json!({"sample_rate": SAMPLE_RATE, "format": "pcm_f32", "channels": 1}))
+    capability::Blob::new(capability::Media::Audio, bytes).with_meta(json!({"sample_rate": qwen3tts::engine::SAMPLE_RATE, "format": "pcm_f32", "channels": 1, "index": index}))
 }
 
 impl Instance for TtsInstance {
@@ -178,8 +141,10 @@ impl Instance for TtsInstance {
         if text.trim().is_empty() {
             return Err(format!("tts {action}: 'text' must be non-empty"));
         }
-        let lang = inv.get_str("lang").unwrap_or_else(|| self.lang.clone());
-        let opts = Self::opts_from(inv)?;
+        let lang = inv.get_str("lang").unwrap_or_else(|| "english".to_string());
+        let opts = qwen3tts::caps::gen_opts_from(inv).map_err(|e| format!("tts {action}: {e}"))?;
+        // The chunk size is per request: one request's must not carry into the next.
+        self.engine.set_chunk_frames(inv.get_i64("stream_chunk").map_or(qwen3tts::engine::DEFAULT_CHUNK_FRAMES, |n| n.max(1) as usize));
 
         // Every action streams its audio the same way: each decoded codec
         // chunk becomes a `Progress::chunk` named "audio", which `Subscribe`
@@ -189,44 +154,32 @@ impl Instance for TtsInstance {
         let mut n = 0u32;
         let mut on_audio = |pcm: &[f32], _seq: u32| {
             n += 1;
-            progress(Progress::chunk(n, 0, format!("audio chunk {n}"), "audio", pcm_blob(pcm).with_meta(json!({"sample_rate": SAMPLE_RATE, "format": "pcm_f32", "channels": 1, "index": n}))));
+            progress(Progress::chunk(n, 0, format!("audio chunk {n}"), "audio", pcm_blob(pcm, n)));
         };
 
         let wav = match action {
-            // Speaker-free synth by default; voice-clone the configured reference
-            // when `BRAIN_QWEN3TTS_REF` is set (ICL when a transcript is also given).
-            "speak" => match self.ref_wav.clone() {
-                Some(refw) => self.engine.clone_voice(&text, &refw, &self.ref_text.clone(), &lang, &opts, &inv.cancel, &mut on_audio)?,
-                None => self.engine.speak(&text, &lang, &opts, &inv.cancel, &mut on_audio)?,
-            },
-            // VoiceDesign/CustomVoice: instruct/speaker are per-call params, not
-            // fixed at instance configuration (unlike `speak`'s ref voice).
+            "synth" => self.engine.speak(&text, &lang, &opts, &inv.cancel, &mut on_audio)?,
+            "clone" => {
+                let (reference, ref_codes) = qwen3tts::caps::reference_from(inv, action)?;
+                let ref_text = inv.get_str("ref_text").unwrap_or_default();
+                self.engine.clone_voice(&text, &reference, &ref_text, ref_codes.as_deref(), &lang, &opts, &inv.cancel, &mut on_audio)?
+            }
+            // VoiceDesign/CustomVoice: instruct/speaker are per-call params.
             "design" => {
                 let instruct = inv.get_str("instruct").unwrap_or_default();
                 let speaker = inv.get_str("speaker").filter(|s| !s.is_empty());
                 self.engine.design(&text, &lang, &instruct, speaker.as_deref(), &opts, &inv.cancel, &mut on_audio)?
             }
-            other => return Err(format!("tts: unsupported action '{other}' (this resident declares: speak, design)")),
+            other => return Err(format!("tts: unsupported action '{other}' (the hot engine runs: {})", qwen3tts::caps::RESIDENT_ACTIONS.join(", "))),
         };
-        Self::pcm_outcome(wav, opts.seed)
+        qwen3tts::caps::audio_outcome(wav, opts.seed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_seed_that_is_not_a_non_negative_integer_is_refused_and_an_absent_one_is_drawn() {
-        for bad in [json!(-1), json!(1.5), json!("7")] {
-            let err = TtsInstance::opts_from(&Invocation::new().set("seed", bad.clone())).expect_err("a malformed seed is refused");
-            assert!(err.contains("seed"), "seed {bad} must be refused as a seed, got: {err}");
-        }
-        assert_eq!(TtsInstance::opts_from(&Invocation::new().set("seed", json!(5))).unwrap().seed, 5);
-        let draw = || TtsInstance::opts_from(&Invocation::new()).unwrap().seed;
-        assert_ne!(draw(), draw(), "an absent seed is drawn per request");
-        assert_eq!(TtsInstance::pcm_outcome(vec![0.0; 2], 5).unwrap().outputs["seed"], json!(5));
-    }
+    use capability::Media;
 
     /// Activation IS the load now, so a missing checkpoint must surface as a
     /// clean activation error rather than a panic inside a loader or a
@@ -234,83 +187,91 @@ mod tests {
     #[test]
     fn activating_without_weights_is_a_clean_error() {
         let r = TtsResident::new("/nonexistent/tts", "/nonexistent/ckpt");
-        let Err(err) = r.activate(&InstanceKey::new(qwen3tts::caps::MODEL, "default"), Device::Cpu) else {
+        let Err(err) = r.activate(&InstanceKey::new(qwen3tts::caps::MODEL, ENGINE_KEY), Device::Cpu) else {
             panic!("activating without weights must fail");
         };
         assert!(err.contains("not found"), "got: {err}");
     }
 
-    /// The consolidation contract at the spec level: both served actions must
-    /// declare themselves streaming, because they now emit real mid-run audio
-    /// chunks. A client discovers that from the manifest - which is the whole
-    /// difference between this and the private socket protocol, where the
-    /// streaming shape was documented only in a Rust comment.
+    /// The speech actions share one hot engine; the provider's own actions
+    /// (training above all, which holds the weights four times over on a
+    /// card) are costed and keyed apart.
     #[test]
-    fn the_resident_manifest_declares_streaming_actions() {
-        let m = qwen3tts::caps::resident_manifest();
-        let names: Vec<&str> = m.actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["speak", "design"]);
-        for a in &m.actions {
+    fn the_speech_actions_share_one_hot_engine_and_the_rest_are_costed_apart() {
+        let r = TtsResident::new("/nonexistent/tts", "/nonexistent/ckpt");
+        let key = |a: &str| r.instance_key(a, &Invocation::new());
+        assert_eq!(key("synth"), key("clone"));
+        assert_eq!(key("synth"), key("design"));
+        assert_ne!(key("synth"), key("finetune"));
+        assert_ne!(key("synth"), key("batch"));
+        let cost = |a: &str| r.estimate(&key(a));
+        assert!(cost("finetune").vram > 0 && cost("synth").vram == 0, "only training needs card memory");
+        assert!(cost("batch").ram > cost("synth").ram, "a batch holds one host decoder per request");
+    }
+
+    /// The resident manifest is the provider's, with the hot actions streaming.
+    #[test]
+    fn the_resident_manifest_declares_streaming_speech_actions() {
+        let r = TtsResident::new("/nonexistent/tts", "/nonexistent/ckpt");
+        let m = r.manifest();
+        assert_eq!(m.model, qwen3tts::caps::MODEL);
+        for a in m.actions.iter().filter(|a| qwen3tts::caps::RESIDENT_ACTIONS.contains(&a.name.as_str())) {
             assert!(a.streaming, "{}: must declare streaming - it emits Progress::chunk audio", a.name);
             assert!(a.outputs.iter().any(|o| o.media == Media::Audio), "{}: must declare an audio output", a.name);
         }
     }
 
     /// End-to-end against real weights: one activation, TWO requests, and the
-    /// mid-run chunks must reassemble byte-for-byte into the terminal `audio`
-    /// blob. This is the property that makes the D-Bus surface a genuine
-    /// replacement for the socket server's `audio_chunk` stream - a subscriber
-    /// that concatenates the chunks holds exactly the clip a `Run` caller gets.
-    /// Skips cleanly without `BRAIN_QWEN3TTS_WEIGHTS`/`_CKPT`.
+    /// mid-run chunks must reassemble into the terminal `audio` blob. This is
+    /// the property that makes the D-Bus surface a genuine streaming surface -
+    /// a subscriber that concatenates the chunks holds exactly the clip a
+    /// `Run` caller gets (the same samples, the terminal one as a WAV).
+    /// Skips cleanly when the model store holds no Qwen3-TTS checkpoint.
     #[test]
-    fn speak_streams_chunks_that_reassemble_into_the_terminal_blob() {
-        let (Ok(weights), Ok(ckpt)) = (std::env::var("BRAIN_QWEN3TTS_WEIGHTS"), std::env::var("BRAIN_QWEN3TTS_CKPT")) else {
-            brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT not set");
+    fn synth_streams_chunks_that_reassemble_into_the_terminal_blob() {
+        let Some(r) = TtsResident::from_store(brain_modelstore::default_root().as_deref()) else {
+            brain_testutil::skip("no Qwen3-TTS checkpoint in the model store");
             return;
         };
-        if TtsPaths::new(&weights, ckpt.clone()).require(false).is_err() {
-            brain_testutil::skip("weights not found at BRAIN_QWEN3TTS_WEIGHTS");
-            return;
-        }
-        let r = TtsResident::new(weights, ckpt);
+        let key = InstanceKey::new(qwen3tts::caps::MODEL, ENGINE_KEY);
         let t_load = std::time::Instant::now();
-        let mut inst = r.activate(&InstanceKey::new(qwen3tts::caps::MODEL, "default"), Device::Cpu).expect("activate");
+        let mut inst = r.activate(&key, Device::Cpu).expect("activate");
         let load_s = t_load.elapsed().as_secs_f64();
 
         let inv = |t: &str| Invocation::new().set("text", json!(t)).set("max_frames", json!(24)).set("seed", json!(3));
-        let mut streamed: Vec<u8> = Vec::new();
+        let mut streamed: Vec<f32> = Vec::new();
         let mut n_chunks = 0usize;
         let t0 = std::time::Instant::now();
         let out = inst
-            .run("speak", &inv("Chunks reassemble into the clip."), &mut |p: Progress| {
+            .run("synth", &inv("Chunks reassemble into the clip."), &mut |p: Progress| {
                 if let Some((name, blob)) = &p.chunk {
                     assert_eq!(name, "audio", "chunk blobs must be named 'audio'");
                     assert_eq!(blob.media, Media::Audio);
                     n_chunks += 1;
-                    streamed.extend_from_slice(&blob.bytes);
+                    streamed.extend(blob.bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
                 }
             })
-            .expect("speak");
+            .expect("synth");
         let first_s = t0.elapsed().as_secs_f64();
-        assert!(n_chunks >= 1, "speak emitted no audio chunks");
-        assert_eq!(streamed, out.blobs["audio"].bytes, "streamed chunks must equal the terminal audio blob");
+        assert!(n_chunks >= 1, "synth emitted no audio chunks");
+        assert_eq!(audio::wav::encode(&streamed, 24_000), out.blobs["audio"].bytes, "streamed chunks must equal the terminal audio blob");
 
         // Same request again on the same hot instance: bit-identical, or
         // resident state (the Talker KV cache, the RNG) leaked between calls.
         let t1 = std::time::Instant::now();
-        let out2 = inst.run("speak", &inv("Chunks reassemble into the clip."), &mut |_| {}).expect("second speak");
+        let out2 = inst.run("synth", &inv("Chunks reassemble into the clip."), &mut |_| {}).expect("second synth");
         let second_s = t1.elapsed().as_secs_f64();
         assert_eq!(out2.blobs["audio"].bytes, out.blobs["audio"].bytes, "a repeated request must be bit-identical - resident state leaked");
         eprintln!("resident tts: activate={load_s:.1}s first={first_s:.1}s repeat={second_s:.1}s ({n_chunks} chunks)");
     }
 
     /// Cheap guard that survives without weights: the dispatcher's own
-    /// argument validation. Uses the raw `Invocation` path (no engine needed
-    /// for the rejection, which happens before any generation).
+    /// argument validation, which happens before any generation.
     #[test]
     fn empty_text_is_rejected_before_any_generation() {
-        let spec = qwen3tts::caps::speak_spec();
+        let m = qwen3tts::caps::resident_manifest();
+        let spec = m.actions.iter().find(|a| a.name == "synth").unwrap();
         let err = spec.validate(Invocation::new()).unwrap_err();
-        assert!(err.contains("text"), "speak must require 'text': {err}");
+        assert!(err.contains("text"), "synth must require 'text': {err}");
     }
 }
