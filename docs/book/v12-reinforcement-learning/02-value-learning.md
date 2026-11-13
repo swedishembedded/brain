@@ -69,7 +69,7 @@ Each day of the `episode` is the triple `(s, r, s')` of the state, the reward an
 Monte Carlo is unbiased: every return it averages has the value as its mean, by definition. What it pays is spread. A return adds up a hundred days of random demand, and one return of one visit is a single draw from that distribution. The previous chapter could see it in the sampled standard deviation of $2.962$ for a return from the empty shelf; the exact spread follows from the same Bellman recursion that gave the exact mean. Squaring $G = r + \gamma G'$ and taking expectations gives $E[G^2] = E[r^2] + 2\gamma E[r\,V(s')] + \gamma^2 E[G'^2]$ (the cross term uses that $G'$ depends on the past only through $s'$), which is a linear system with the matrix $\mathbf{I} - \gamma^2\mathbf{P}_\pi$, solved as before, and the variance is $E[G^2] - V(s)^2$.
 
 <!-- worked: value_learning.target_spread -->
-Policy (1, 0, 0, 0), gamma = 0.9; every number is computed exactly from the tables of the previous chapter, none is sampled. The Monte Carlo target of a state is the whole return G; its mean is V(s) and its standard deviation sd(G) comes from E[G^2] = E[r^2] + 2 gamma E[r V(s')] + gamma^2 E[G'^2], a linear system with the matrix I - gamma^2 P_pi, minus V(s)^2. The one-day target is y = r + gamma W(s') for an estimate W of the next state, with the three outcomes d = 0, 1, 2 of the day as its only randomness; sd(y) is taken for W = V and for W = 0 (all values zero). The three last columns are E[y] - V(s) for W = V, for W = V + 1 (every estimate one too high) and for W = 0.
+Policy (1, 0, 0, 0), gamma = 0.9; every number is computed exactly from the tables of the previous chapter, none is sampled. The Monte Carlo target of a state is the whole return G; its mean is V(s) and its standard deviation sd(G) comes from E[G^2] = E[r^2] + 2 gamma E[r V(s')] + gamma^2 E[G'^2], a linear system with the matrix I - gamma^2 P_pi, minus V(s)^2. The one-day target is y = r + gamma W(s') for an estimate W of the next state, with the three outcomes d = 0, 1, 2 of the day as its only randomness; sd(y) is taken for W = V and for W = 0 (all values zero). The three last columns are E[y] - V(s) for W = V, for W = V + 1 (every estimate one too high) and for W = 0; a number that rounds to zero is printed 0.000 whatever its sign.
 
 | s | V(s) | sd(G) | sd(y), W = V | sd(y), W = 0 | bias, W = V | bias, W = V + 1 | bias, W = 0 |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -79,7 +79,7 @@ Policy (1, 0, 0, 0), gamma = 0.9; every number is computed exactly from the tabl
 | 3 | 11.668 | 4.550 | 3.046 | 3.873 | 0.000 | 0.900 | -9.668 |
 <!-- /worked -->
 
-The first column of spreads is the one of Monte Carlo. A return from the empty shelf has an exact standard deviation of $2.891$ (the $2.962$ of the previous chapter's $2000$ truncated draws is $1.6$ standard errors above it, which is ordinary sampling noise), and from a full shelf $4.550$, against values of $6.750$ and $11.668$. To pin a value down to $\pm 0.1$ by averaging independent returns takes about $(2.891/0.1)^2 \approx 836$ of them for state $0$, and $2070$ for state $3$.
+The first column of spreads is the one of Monte Carlo. A return from the empty shelf has an exact standard deviation of $2.891$ (the $2.962$ of the previous chapter's $2000$ truncated draws is $1.6$ standard errors above it, where the standard error of a sample standard deviation is about $\sigma/\sqrt{2 \times 1999} = 0.046$, not the $0.066$ of the mean in that chapter, which is ordinary sampling noise), and from a full shelf $4.550$, against values of $6.750$ and $11.668$. To pin a value down to $\pm 0.1$ by averaging independent returns takes about $(2.891/0.1)^2 \approx 836$ of them for state $0$, and about $2071$ for state $3$ (the unrounded spread $4.5505$ gives $2070.7$, the printed $4.550$ gives $2070$).
 
 ## A target made of an estimate
 
@@ -147,7 +147,7 @@ Policy (1, 0, 0, 0), gamma = 0.9. A run is 200 episodes of 100 days with its own
 | 100 | 10000 | 0.524 | 3.628 | 0.490 | 1.507 | 0.687 |
 | 200 | 20000 | 0.358 | 3.251 | 0.307 | 2.019 | 0.790 |
 
-Every number learned from samples is printed with the digits that the run and four copies of it share: the copies start with the first stored value (V(0), Q(0, 0), the first weight or Q(A, left), as the example has it) changed by +1e-12, -1e-12, +3e-12 and -3e-12 (the nudges of stable.py), and a digit is printed only if all five agree on it ('about x' keeps the leading digits that survive, 'unstable' means that none does). The copies of an evaluation learn from the same episodes, because the data do not depend on the estimates; the copies of a learner that chooses its own actions use the same generator, so their draws are the same and they differ only if a nudge flips a comparison. A run is a deterministic computation, so another implementation reproduces the printed digits.
+Every number learned from samples is printed with the digits that the run and four copies of it share: the copies start with the first stored value (V(0), Q(0, 0), the first weight or Q(A, left), as the example has it) changed by +1e-12, -1e-12, +3e-12 and -3e-12 (a stability check applied to every trained number), and a digit is printed only if all five agree on it ('about x' keeps the leading digits that survive, 'unstable' means that none does). The copies of an evaluation learn from the same episodes, because the data do not depend on the estimates; the copies of a learner that chooses its own actions use the same generator, so their draws are the same and they differ only if a nudge flips a comparison. A run is a deterministic computation, so another implementation reproduces the printed digits.
 
 | run | generator name | seed |
 |---:|---|---:|
@@ -240,7 +240,7 @@ $$Q(s, a) \leftarrow Q(s, a) + \alpha\,\big(\,r + \gamma\max_{b} Q(s', b) - Q(s,
 
 This is **Q-learning**. Its target does not mention the action that was taken in the next state, or even the policy that chose the action $a$: it estimates the value of acting greedily from $s'$ onward whatever was actually done, and under the step-size conditions of the previous section it converges to $Q^\ast$ as long as every pair keeps being tried (Watkins and Dayan proved it, and the two 1994 papers cited above give the general proof). Learning the values of one policy, the greedy one, from days generated by another, the one that explores, is called **off-policy** learning. The variant that learns the value of the policy that is actually generating the days replaces the maximum by the next action $a'$ the agent will take, the one it has already chosen: $Q(s, a) \leftarrow Q(s, a) + \alpha\,(r + \gamma Q(s', a') - Q(s, a))$. It is called **SARSA**, for the quintuple $(s, a, r, s', a')$ that one update uses, and it is **on-policy**: what it estimates is $Q^\pi$ for the policy $\pi$ that behaves, including its exploration.
 
-The two differ only in one term of the target, and the difference is easy to state exactly when the behaviour is epsilon-greedy with a fixed $\epsilon_{\mathrm{ex}}$ (next section): the mean of SARSA's target, over the demand and over the behaviour's next action, is the right-hand side of the equation below, so a table that satisfies it no longer moves on average, and it is the fixed point of
+The two differ only in one term of the target, and the difference is easy to state exactly when the behaviour is epsilon-greedy, that is, with a fixed probability $\epsilon_{\mathrm{ex}}$ it takes an action drawn uniformly from the legal ones and otherwise the greedy one (next section): the mean of SARSA's target, over the demand and over the behaviour's next action, is the right-hand side of the equation below, so a table that satisfies it no longer moves on average, and it is the fixed point of
 
 $$Q_{\mathrm{ex}}(s, a) = R(s, a) + \gamma\sum_j P(j \mid s, a)\,\Big[(1 - \epsilon_{\mathrm{ex}})\max_b Q_{\mathrm{ex}}(j, b) + \epsilon_{\mathrm{ex}}\,\tfrac{1}{m_j}\sum_b Q_{\mathrm{ex}}(j, b)\Big],$$
 
@@ -268,7 +268,7 @@ function td_control(n_act: list<int>, gamma: real, sarsa: bool, q0: real,
     require 0 <= gamma and gamma < 1
     Q = []
     count = []
-    for s in 0 .. n:
+    for s in 0 .. len(n_act):
         append [q0 for a in 0 .. n_act[s]] to Q
         append [0 for a in 0 .. n_act[s]] to count
     s = s0
@@ -330,7 +330,18 @@ The second row is the standard repair, **epsilon-greedy** exploration: with prob
 
 The third row draws no random number after the start. Every value starts at $15$, above the largest value in the problem ($11.668$ for a full shelf), so every untried action looks better than anything that can be observed. The first update of a pair sets it to a reward plus $0.9$ times a value of at most $15$ (the first step is $\alpha_1 = 1$), which is below $15$, so a tried action drops below the untried ones and the greedy choice moves on to an action that has not been tried. The learner works through the actions of a state until their estimates have come down to what they are worth, and then the greedy rule is right: **optimistic initial values** turn the lack of evidence into a reason to explore. All ten runs find $(1, 0, 0, 0)$.
 
-The start is a choice with consequences. Any start above $0$ breaks the lock of the first row. That row is stable because the target of the tried action, $0.9$ times the largest value of the state, is again the $0$ it started with; from a start above $0$ the same target is lower than the start, the tried action falls below the untried ones and the learner moves on. But the length of the exploring depends on the start. With the start values $5$, $11.7$, $15$ and $100$ the same ten runs end on the optimal $(1, 0, 0, 0)$ in $5$, $7$, $10$ and $4$ runs (Exercise 12); the others settle on a policy that orders two units on an empty shelf, whose lookahead at the optimum is only $0.082$ below the best ($6.668$ against $6.750$), a gap that $20\,000$ days do not always resolve, and a start of $100$ is still coming down at the end of the run. The price of optimism is a bound on the values that the learner must know, and time spent coming down from it that grows with the bound.
+The start is a choice with consequences. Any start above $0$ breaks the lock of the first row. That row is stable because the target of the tried action, $0.9$ times the largest value of the state, is again the $0$ it started with; from a start above $0$ the same target is lower than the start, the tried action falls below the untried ones and the learner moves on. But the length of the exploring depends on the start. With the start values $5$, $11.7$, $15$ and $100$ the same ten runs end on the optimal $(1, 0, 0, 0)$ in $5$, $7$, $10$ and $4$ runs (Exercise 12); the others end on another policy, in most runs one that orders two units on an empty shelf (the table lists them all; at $11.7$ one run differs from the optimum only at a shelf of two), whose lookahead at the optimum is only $0.082$ below the best ($6.668$ against $6.750$), a gap that $20\,000$ days do not always resolve, and a start of $100$ is still coming down at the end of the run. The price of optimism is a bound on the values that the learner must know, and time spent coming down from it that grows with the bound.
+
+<!-- worked: value_learning.optimistic_starts -->
+The third variant of the lock-in table (greedy, no random action, Q starting at the stated value for every pair) with four starting values; every start uses the same 10 generators, run i the one named value_learning.exploration.v2.run<i> (i = 0 .. 9), so the rows differ only in the starting value, and everything else (days 20000, s_0 = 2, the draw order, the tie rule, the step n^-0.7) is as there. The row of 15 is the third row of that table. The last column is the mean over the runs of the largest Q(0, .) after the last day, to be read against V*(0) = 6.750.
+
+| start value | final greedy policies of the runs | days at s = 0, a = 1 | largest Q(0, .) |
+|---:|---|---:|---:|
+| 5 | (1, 0, 0, 0) x 5; (2, 0, 0, 0) x 4; (2, 1, 0, 0) x 1 | 6992.6 | 6.34 |
+| 11.7 | (1, 0, 0, 0) x 7; (1, 0, 1, 0) x 1; (2, 0, 0, 0) x 2 | 9794.4 | 6.69 |
+| 15 | (1, 0, 0, 0) x 10 | 12029.9 | 6.79 |
+| 100 | (1, 0, 0, 0) x 4; (2, 0, 0, 0) x 6 | 4226.8 | 8.85 |
+<!-- /worked -->
 
 These are two answers to one tension, the **exploration-exploitation** trade-off: every day spent on an action that looks worse than the best known is a day not earning the best known value, and every day spent on the best known is a day not learning whether a better one exists. Exploring costs the amount that Q-learning and SARSA disagree about in the previous section; not exploring costs, as the first row shows, the whole of the optimum. Neither extreme is right, and the schedules above are two of many ways to spend one on the other.
 
@@ -385,6 +396,33 @@ function double_q_update(T: inout list<list<list<real>>>, s: int, a: int, r: rea
     T[k][s][a] = T[k][s][a] + alpha * (y - T[k][s][a])
 ```
 
+One episode of the small problem, for both learners, is the routine below; `T[0]` is the single table of Q-learning and the sum of `T[0]` and `T[1]` chooses for double Q-learning. A state is `0` for A and `1` for B, the actions of A are `0` (right) and `1` (left), and `bias_update(T, double, s, a, r, next, gamma, alpha, rng)` is `double_q_update` when `double` is true (a `next` of `-1` standing for the end of the episode, `absent` there) and otherwise the update of `T[0]` alone with the target `r + gamma * max(T[0][next])`, or `r` at the end, drawing no number.
+
+```text
+function bias_choose(T: list<list<list<real>>>, double: bool, s: int,
+                     eps: real, rng: Generator) -> int:
+    q = T[0][s] + T[1][s] if double else T[0][s]
+    u = rng.uniform()
+    if u < eps:
+        return rng.integer(len(q))
+    return greedy_action(q, 1e-9)
+
+function bias_episode(T: inout list<list<list<real>>>, double: bool, gamma: real,
+                      alpha: real, eps: real, mu: real, sd: real,
+                      rng: Generator) -> int:
+    a = bias_choose(T, double, 0, eps, rng)
+    if a == 0:
+        bias_update(T, double, 0, 0, 0.0, -1, gamma, alpha, rng)
+        return 0
+    bias_update(T, double, 0, 1, 0.0, 1, gamma, alpha, rng)
+    b = bias_choose(T, double, 1, eps, rng)
+    r = mu + sd * rng.normal()
+    bias_update(T, double, 1, b, r, -1, gamma, alpha, rng)
+    return 1
+```
+
+The routine returns `1` when the episode went left, the quantity of the first table below, and the draws are in the order written: the choice at A, then the table draw of the update of A (double only), then the choice at B, the reward and the table draw of the update of B.
+
 In the table the second column is the same runs with the same generator names. Double Q-learning goes left in $5.8\%$ of the first ten episodes, $9.7\%$ of episodes $11$ to $50$, $12.0\%$ of $51$ to $100$ and $8.6\%$ of $101$ to $300$, and its estimate of $Q(A, \text{left})$ is $0.000$ after $50$ episodes, $-0.005$ after $100$ and $-0.030$ after $300$, never clearly above $0$ and on its way to the truth of $-0.09$ (left is tried rarely, so it moves slowly). It is not unbiased: the estimate of the maximising action's value by an independent table is an underestimate in expectation, $E[Q_{1-k}(s', \arg\max_b Q_k(s', b))] \le \max_b E[Q_{1-k}(s', b)]$, and the bias is small and of the opposite sign. The cost is two tables and a coin, and an update that has half as many samples per table.
 
 ## Values that share weights
@@ -422,7 +460,7 @@ The policy of the table is (3, 0, 0, 0), order three units on an empty shelf, wh
 | 2 | 0, 0, 1, 0 | 1, 2 | 1, 2, 4 |
 | 3 | 0, 0, 0, 1 | 1, 3 | 1, 3, 9 |
 
-For each table: the TD fixed point, the weights at which the average of the semi-gradient update over the days, sum_s mu(s) x(s) (r(s) + gamma x(s')^T w - x(s)^T w) with r(s) = R(s, pi(s)) and the average over s' taken with P, is zero (one linear system); the weights that minimise the mu-weighted squared error sum_s mu(s) (x(s)^T w - V(s))^2 (the normal equations); and the weights that semi-gradient TD(0) reaches. 'weighted error' is sum_s mu(s) (V_hat(s) - V(s))^2. Sampled runs: 3 runs of 60000 days from the shelf 0, run i of table f with the generator named value_learning.linear.<f>.run<i> (for example one-hot run 0 has seed 0x8d77fc02f0ec56de), one uniform() per day for the demand; weights start at 0 and change every day in the order of the days, delta = r + gamma x(s')^T w - x(s)^T w computed from the weights before the update, then w <- w + alpha_t delta x(s) with alpha_t = 0.02 / (1 + t / 1000)^0.75 for the day t counted from 0; the weights shown are those after the last day, averaged over the runs (divisor 3).
+For each table: the TD fixed point, the weights at which the average of the semi-gradient update over the days, sum_s mu(s) x(s) (r(s) + gamma x(s')^T w - x(s)^T w) with r(s) = R(s, pi(s)) and the average over s' taken with P, is zero (one linear system); the weights that minimise the mu-weighted squared error sum_s mu(s) (x(s)^T w - V(s))^2 (the normal equations); and the weights that semi-gradient TD(0) reaches. 'weighted error' is sum_s mu(s) (V_hat(s) - V(s))^2. Sampled runs: 3 runs of 60000 days from the shelf 0, run i of table f with the generator named value_learning.linear.<f>.run<i> with f one-hot, linear or quadratic (for example one-hot run 0 has seed 0x8d77fc02f0ec56de, linear run 0 0x986df8ff59d62547, quadratic run 0 0x34af634a8b7c0b92), one uniform() per day for the demand; weights start at 0 and change every day in the order of the days, delta = r + gamma x(s')^T w - x(s)^T w computed from the weights before the update, then w <- w + alpha_t delta x(s) with alpha_t = 0.02 / (1 + t / 1000)^0.75 for the day t counted from 0; the weights shown are those after the last day, averaged over the runs (divisor 3).
 
 | features | weights from | w | V_hat(0 .. 3) | weighted error |
 |---|---|---|---|---:|
@@ -482,9 +520,9 @@ One operation is a multiply, an add, a subtract or a divide; a power and a compa
 | tabular TD(0) | target r + gamma V(s'): 1 multiply, 1 add; delta: 1 subtract; alpha_n: 1; alpha * delta and the add: 2 | 6 |
 | tabular SARSA | the same, Q(s', a') read in place of V(s') | 6 |
 | tabular Q-learning | the same, with the maximum over the m actions (comparisons are not counted) | 6 |
-| linear TD(0), d = 2 (linear table) | two dot products of 2d - 1, target 2, delta 1, alpha and alpha * delta 2, d multiplies and d adds for the weights | 15 |
-| linear TD(0), d = 3 (quadratic table) | the same with d = 3 | 21 |
-| linear TD(0), d = 4 (one-hot table) | the same with d = 4 (against 6 for a table lookup) | 27 |
+| linear TD(0), d = 2 (linear table) | two dot products of 2d - 1, target 2, delta 1, alpha_t = 0.02 / (1 + t / 1000)^0.75 4 (divide, add, power, divide), alpha * delta 1, d multiplies and d adds for the weights | 18 |
+| linear TD(0), d = 3 (quadratic table) | the same with d = 3 | 24 |
+| linear TD(0), d = 4 (one-hot table) | the same with d = 4 (against 6 for a table lookup, whose schedule n^-0.7 is one power) | 30 |
 
 Per episode of 100 days Monte Carlo spends 2 operations a day on the backward return G <- r + gamma G (200) and at most 3 per state on the update (G - V)/n added to V (12); TD(0) spends 6 a day (600). The first episode after which the mean error of the table of learning curves is at most 1.0 (the mean over the 10 runs of the root-mean-square error, as there), with the days and the operations of the updates that it took:
 
@@ -494,7 +532,7 @@ Per episode of 100 days Monte Carlo spends 2 operations a day on the backward re
 | TD(0), alpha_n = n^-0.7 | 45 | 4,500 | 27,000 |
 <!-- /worked -->
 
-A tabular update is $6$ operations whatever the number of states: the cost is in the data, not the arithmetic. A linear update costs $6d + 3$, which for a one-hot table of four features is $27$ against the $6$ of a table lookup, the price of treating a table as a dense vector. On the shop the two estimators need about the same amount of experience to reach a mean error of $1.0$, $42$ episodes for Monte Carlo and $45$ for TD with $n^{-0.7}$, but Monte Carlo spends at most $8\,904$ operations on updates over those episodes and TD spends $27\,000$: TD updates every day, Monte Carlo only the first visit of each state. Counted in operations the tabular estimators are both a tiny cost beside the simulation that produces the days, and what separates them is the number of days they need and what each does with a day it has seen.
+A tabular update is $6$ operations whatever the number of states: the cost is in the data, not the arithmetic. A linear update costs $6d + 6$, which for a one-hot table of four features is $30$ against the $6$ of a table lookup, the price of treating a table as a dense vector. On the shop the two estimators need about the same amount of experience to reach a mean error of $1.0$, $42$ episodes for Monte Carlo and $45$ for TD with $n^{-0.7}$, but Monte Carlo spends at most $8\,904$ operations on updates over those episodes and TD spends $27\,000$: TD updates every day, Monte Carlo only the first visit of each state. Counted in operations the tabular estimators are both a tiny cost beside the simulation that produces the days, and what separates them is the number of days they need and what each does with a day it has seen.
 
 ## Where brain keeps a value and where a policy learns nothing
 

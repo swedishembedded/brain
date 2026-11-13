@@ -227,14 +227,16 @@ def _sweep_flops(pairs=PAIRS, n=N_STATES):
     return pairs * (2 * n + 1)
 
 
+def _elimination_parts(n):
+    """The operations of _solve for an n by n system, without pivoting swaps: the same loops, as
+    (forward elimination, back substitution)."""
+    forward = sum((n - 1 - k) * (1 + 2 * (n - k)) for k in range(n - 1))
+    back = sum(2 * (n - 1 - i) + 1 for i in range(n))
+    return forward, back
+
+
 def _elimination_flops(n):
-    """The operations of _solve for an n by n system, without pivoting swaps: the same loops."""
-    total = 0
-    for k in range(n - 1):
-        total += (n - 1 - k) * (1 + 2 * (n - k))
-    for i in range(n - 1, -1, -1):
-        total += 2 * (n - 1 - i) + 1
-    return total
+    return sum(_elimination_parts(n))
 
 
 def _policy_chain(pi):
@@ -329,7 +331,8 @@ def evaluate_by_solving():
     out = [
         f"gamma = {g}. The system for the policy (1, 0, 0, 0): row s of A = I - gamma P_pi holds the row P(. | s, pi(s)) times "
         f"-gamma, plus 1 on the diagonal; the right side is r(s) = R(s, pi(s)); the solution is found by Gaussian elimination with partial "
-        f"pivoting. The largest entry of |A V - r| is {resid:.1e} (below 1e-12).",
+        f"pivoting. The largest entry of |A V - r| is {resid:.1e} (below 1e-12). "
+        f"Every table of the chapter prints a number that rounds to zero as 0.000, whatever its sign.",
         "",
         _table(["row", "A[s,0]", "A[s,1]", "A[s,2]", "A[s,3]", "r(s)", "V(s)"], [[i] + sysrows[i] for i in range(N_STATES)]),
         "",
@@ -562,6 +565,7 @@ def work_per_sweep():
     n = N_STATES
     sweep = _sweep_flops()
     elim = _elimination_flops(n)
+    fwd, back = _elimination_parts(n)
     A, r = _policy_system((1, 0, 0, 0), GAMMA)
     _, counted = _solve(A, r)
     assert counted == elim
@@ -592,7 +596,13 @@ def work_per_sweep():
     out = [
         f"Counts for the inventory problem (n = {n} states, {PAIRS} legal pairs), gamma = {g}, from the stopping rule "
         f"change_k < {TOL:g}. One operation is a multiply, an add, a subtract or a divide; comparisons are not counted. A pair costs "
-        f"{n} multiplies and {n - 1} adds for the sum over j, one multiply by gamma and one add of R, that is {2 * n + 1}.",
+        f"{n} multiplies and {n - 1} adds for the sum over j, one multiply by gamma and one add of R, that is {2 * n + 1}. "
+        f"The elimination is counted as the routine that made the other tables runs it: below the pivot of column k each of the "
+        f"n - 1 - k rows costs one divide for its factor and then a multiply and a subtract (2 operations) for each of the n - k "
+        f"columns after the pivot column, the right-hand side included, the entry that becomes zero being set and not computed; "
+        f"back substitution costs 2 operations per already known unknown in a row and one divide per row. For n = {n} that is "
+        f"{fwd} forward and {back} back, {fwd + back} in all. Volume I counts a multiply-add as one operation and leaves divisions "
+        f"out, so its elimination counts are not comparable with these.",
         "",
         _table(["what", "count", "FLOPs"], rows, align="llr"),
         "",

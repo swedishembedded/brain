@@ -65,7 +65,7 @@ FA_RUNS, FA_DAYS = 3, 60000
 
 RULE_TEXT = ("Every number learned from samples is printed with the digits that the run and four copies of it share: the copies "
              "start with the first stored value (V(0), Q(0, 0), the first weight or Q(A, left), as the example has it) changed by "
-             "+1e-12, -1e-12, +3e-12 and -3e-12 (the nudges of stable.py), and a digit is printed only if all five agree on it "
+             "+1e-12, -1e-12, +3e-12 and -3e-12 (a stability check applied to every trained number), and a digit is printed only if all five agree on it "
              "('about x' keeps the leading digits that survive, 'unstable' means that none does). The copies of an evaluation learn "
              "from the same episodes, because the data do not depend on the estimates; the copies of a learner that chooses its own "
              "actions use the same generator, so their draws are the same and they differ only if a nudge flips a comparison. "
@@ -278,7 +278,7 @@ def target_spread():
         f"from E[G^2] = E[r^2] + 2 gamma E[r V(s')] + gamma^2 E[G'^2], a linear system with the matrix I - gamma^2 P_pi, minus V(s)^2. "
         f"The one-day target is y = r + gamma W(s') for an estimate W of the next state, with the three outcomes d = 0, 1, 2 of "
         f"the day as its only randomness; sd(y) is taken for W = V and for W = 0 (all values zero). The three last columns are "
-        f"E[y] - V(s) for W = V, for W = V + 1 (every estimate one too high) and for W = 0.",
+        f"E[y] - V(s) for W = V, for W = V + 1 (every estimate one too high) and for W = 0; a number that rounds to zero is printed 0.000 whatever its sign.",
         "",
         _table(["s", "V(s)", "sd(G)", "sd(y), W = V", "sd(y), W = 0", "bias, W = V", "bias, W = V + 1", "bias, W = 0"], rows),
     ]
@@ -871,8 +871,9 @@ def linear_td():
         f"(one linear system); the weights that minimise the mu-weighted squared error sum_s mu(s) (x(s)^T w - V(s))^2 (the normal "
         f"equations); and the weights that semi-gradient TD(0) reaches. 'weighted error' is sum_s mu(s) (V_hat(s) - V(s))^2. "
         f"Sampled runs: {FA_RUNS} runs of {FA_DAYS} days from the shelf 0, run i of table f with the generator named "
-        f"value_learning.linear.<f>.run<i> (for example one-hot run 0 has seed "
-        f"{bookrng.seed_of('value_learning.linear.one-hot.run0'):#018x}), one uniform() per day for the demand; weights start at 0 and "
+        f"value_learning.linear.<f>.run<i> with f one-hot, linear or quadratic (for example one-hot run 0 has seed "
+        f"{bookrng.seed_of('value_learning.linear.one-hot.run0'):#018x}, linear run 0 {bookrng.seed_of('value_learning.linear.linear.run0'):#018x}, "
+        f"quadratic run 0 {bookrng.seed_of('value_learning.linear.quadratic.run0'):#018x}), one uniform() per day for the demand; weights start at 0 and "
         f"change every day in the order of the days, delta = r + gamma x(s')^T w - x(s)^T w computed from the weights before the "
         f"update, then w <- w + alpha_t delta x(s) with alpha_t = 0.02 / (1 + t / 1000)^0.75 for the day t counted from 0; "
         f"the weights shown are those after the last day, averaged over the runs (divisor {FA_RUNS}).",
@@ -944,16 +945,17 @@ def _divergence_curves(updates=100):
 
 def work_of_updates():
     def linear_flops(d):
-        return 2 * (2 * d - 1) + 2 + 1 + 1 + 2 * d + 1   # two dot products, target, delta, alpha*delta, d mult, d add, schedule
+        # two dot products, target, delta, the schedule (divide, add, power, divide), alpha*delta, d multiplies, d adds
+        return 2 * (2 * d - 1) + 2 + 1 + 4 + 1 + 2 * d
 
     rows = [
         ["tabular TD(0)", "target r + gamma V(s'): 1 multiply, 1 add; delta: 1 subtract; alpha_n: 1; alpha * delta and the add: 2", 6],
         ["tabular SARSA", "the same, Q(s', a') read in place of V(s')", 6],
         ["tabular Q-learning", "the same, with the maximum over the m actions (comparisons are not counted)", 6],
-        ["linear TD(0), d = 2 (linear table)", "two dot products of 2d - 1, target 2, delta 1, alpha and alpha * delta 2, d multiplies and "
-                                               "d adds for the weights", linear_flops(2)],
+        ["linear TD(0), d = 2 (linear table)", "two dot products of 2d - 1, target 2, delta 1, alpha_t = 0.02 / (1 + t / 1000)^0.75 4 "
+                                               "(divide, add, power, divide), alpha * delta 1, d multiplies and d adds for the weights", linear_flops(2)],
         ["linear TD(0), d = 3 (quadratic table)", "the same with d = 3", linear_flops(3)],
-        ["linear TD(0), d = 4 (one-hot table)", "the same with d = 4 (against 6 for a table lookup)", linear_flops(4)],
+        ["linear TD(0), d = 4 (one-hot table)", "the same with d = 4 (against 6 for a table lookup, whose schedule n^-0.7 is one power)", linear_flops(4)],
     ]
     day_mc, visit_mc = 2 * EVAL_DAYS, 3 * N
     variants, _first = _mean_curves()

@@ -102,7 +102,7 @@ def _dot(a, b):
 
 RULE_TEXT = ("Every number learned from samples is printed with the digits that the run and four copies of it share: the copies "
              "start with the first preference (theta[0][0] of the shop, theta_B[0] of the bandit) changed by +1e-12, -1e-12, +3e-12 "
-             "and -3e-12 (the nudges of stable.py), and a digit is printed only if all five agree on it ('about x' keeps the "
+             "and -3e-12 (a stability check applied to every trained number), and a digit is printed only if all five agree on it ('about x' keeps the "
              "leading digits that survive, 'unstable' means that none does). The copies use the same generator and so draw the "
              "same numbers; they differ only if a nudge flips a comparison. A run is a deterministic computation, so another "
              "implementation reproduces the printed digits.")
@@ -899,9 +899,14 @@ def work_of_updates():
             total += softmax_ops + PPO_BATCH * 3 + live * (1 + 3 * m)
         return total
 
+    clipped_total = sum(rec["clipped"] for rec in clipped_run[:PPO_EPOCHS])
     top = (
         "One operation is an addition, subtraction, multiplication, division, exponential or logarithm; comparisons, min, max, "
-        "clamps and indexing are not counted. m is the number of actions of a state (m = 4 on the empty shelf)."
+        "clamps and indexing are not counted. m is the number of actions of a state (m = 4 on the empty shelf). The PPO rows "
+        f"count the batch of {PPO_BATCH} samples over the epochs 1 to {PPO_EPOCHS} of the unnudged run of the epoch table: the clipped "
+        f"run has {clipped_total} clipped sample-epochs (samples with no gradient, summed over the {PPO_EPOCHS} epochs, the "
+        f"'clipped' column of the epoch table at every epoch, not only the printed ones) and {PPO_BATCH * PPO_EPOCHS - clipped_total} "
+        f"live ones; the unclipped run has {PPO_BATCH * PPO_EPOCHS} live ones."
     )
     run_rows = [
         [f"PPO, {PPO_EPOCHS} epochs, clipped (eps = {PPO_EPS})",
