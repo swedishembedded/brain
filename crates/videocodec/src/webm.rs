@@ -177,7 +177,9 @@ impl<R: Read + Seek> SampleSource for Reader<R> {
                 return Ok(None);
             }
             if self.frame.track == self.track {
-                return Ok(Some(Sample { time: self.frame.timestamp as f64 * self.scale_ns / 1e9, data: std::mem::take(&mut self.frame.data) }));
+                // A block without the key flag (a BlockGroup) is not a known random-access point.
+                let key = self.frame.is_keyframe.unwrap_or(false);
+                return Ok(Some(Sample { time: self.frame.timestamp as f64 * self.scale_ns / 1e9, data: std::mem::take(&mut self.frame.data), key }));
             }
         }
     }

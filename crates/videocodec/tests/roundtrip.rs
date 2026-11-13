@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use videocodec::{decode, probe, Audio, EncodeSettings, Error, VideoWriter};
+use videocodec::{decode, decode_from, probe, Audio, EncodeSettings, Error, VideoWriter};
 
 const FPS: f64 = 24.0;
 const FRAMES: usize = 30;
@@ -136,6 +136,35 @@ fn stopping_early_decodes_no_further() {
     })
     .expect("decode");
     assert_eq!(seen, 5);
+}
+
+/// A read that starts at frame `first` decodes from the key frame at or before it, not from the start: its frames
+/// are bit for bit the frames a whole decode gives from `first` on, and the decoder handles at most one key-frame
+/// interval of units before `first` (SETTINGS forces a key frame at least every 12 frames).
+#[test]
+fn a_late_start_decodes_from_the_preceding_key_frame() {
+    for name in ["seek.webm", "seek.mp4"] {
+        let path = scratch(name);
+        write(&path, 64, 48, None);
+        let mut all = Vec::new();
+        decode(&path, &mut |f| {
+            all.push(f.rgb);
+            true
+        })
+        .expect("decode");
+        for first in [0u64, 5, 12, 13, 25, FRAMES as u64 - 1] {
+            let mut got = Vec::new();
+            let done = decode_from(&path, first, &mut |f| {
+                got.push((f.index, f.rgb));
+                true
+            })
+            .expect("decode_from");
+            let want: Vec<(u64, Vec<u8>)> = all.iter().enumerate().skip(first as usize).map(|(i, px)| (i as u64, px.clone())).collect();
+            assert!(got == want, "{name}: frames from {first} differ from the whole decode's");
+            let extra = done.units_decoded - (FRAMES as u64 - first);
+            assert!(extra < SETTINGS.key_frame_interval, "{name}: from {first} the decoder handled {extra} units before it");
+        }
+    }
 }
 
 #[test]

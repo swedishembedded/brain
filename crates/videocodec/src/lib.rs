@@ -216,10 +216,12 @@ pub struct StreamInfo {
     pub codec: String,
 }
 
-/// One coded unit and its presentation time in seconds.
+/// One coded unit, its presentation time in seconds, and whether the container marks it a random-access point (a
+/// key frame a decoder may start from: Matroska's key-frame block flag, MP4's sync-sample table).
 pub(crate) struct Sample {
     pub time: f64,
     pub data: Vec<u8>,
+    pub key: bool,
 }
 
 pub(crate) trait SampleSource {
@@ -289,30 +291,89 @@ pub const MAX_FRAME_PIXELS: u64 = 36_000_000;
 /// whether to go on; decoding stops at the first `false`. Returns the
 /// stream's description.
 pub fn decode(path: &Path, on_frame: &mut dyn FnMut(Frame) -> bool) -> Result<StreamInfo, Error> {
+    decode_from(path, 0, on_frame).map(|d| d.info)
+}
+
+/// What a [`decode_from`] read: the stream's description and how many coded units the decoder handled.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Decoded {
+    pub info: StreamInfo,
+    /// Units sent to the decoder: the frames from `first` on that were read, plus those between the key frame the
+    /// read started from and `first`.
+    pub units_decoded: u64,
+}
+
+/// Decode the frames of `path` from index `first` on (0-based, in decode order), calling `on_frame` for each until it
+/// returns `false`. The read starts at the last key frame at or before `first`, the random-access point the
+/// container marks, so the units before it are read from the file but never decoded; the frames between it and
+/// `first` are decoded (the later ones depend on them) and not handed out. A key unit that carries no AV1 sequence
+/// header gets the stream's first one prepended, so a decoder started there knows the stream's parameters.
+pub fn decode_from(path: &Path, first: u64, on_frame: &mut dyn FnMut(Frame) -> bool) -> Result<Decoded, Error> {
     let (info, mut source) = open(path)?;
     let mut decoder = av1::Decoder::new()?;
     // Times of units sent and not yet output: AV1 shows each unit's frame in order.
     let mut times = std::collections::VecDeque::new();
+    // The index of the next frame the decoder will output.
     let mut index = 0u64;
-    let mut emit = |pics: Vec<av1::Picture>, times: &mut std::collections::VecDeque<f64>| -> bool {
+    let mut emit = |pics: Vec<av1::Picture>, times: &mut std::collections::VecDeque<f64>, index: &mut u64| -> bool {
         for p in pics {
             let time = times.pop_front().unwrap_or(0.0);
-            let go = on_frame(Frame { index, time, w: p.w as u32, h: p.h as u32, rgb: p.rgb });
-            index += 1;
-            if !go {
+            let i = *index;
+            *index += 1;
+            if i >= first && !on_frame(Frame { index: i, time, w: p.w as u32, h: p.h as u32, rgb: p.rgb }) {
                 return false;
             }
         }
         true
     };
+    let mut sequence_header: Option<Vec<u8>> = None;
+    // Units since the last key frame, held until the read reaches `first`; their first is that key frame.
+    let mut pending: Vec<Sample> = Vec::new();
+    let (mut started, mut decoded) = (first == 0, 0u64);
+    let mut unit = 0u64;
+    let mut done = false;
     while let Some(s) = source.next_sample()? {
+        if sequence_header.is_none() {
+            sequence_header = av1::sequence_header_obu(&s.data);
+        }
+        if !started {
+            if s.key || pending.is_empty() {
+                pending.clear();
+                index = unit;
+            }
+            pending.push(s);
+            unit += 1;
+            if unit <= first {
+                continue;
+            }
+            started = true;
+            for (k, p) in pending.drain(..).enumerate() {
+                let data = match (&sequence_header, k == 0 && av1::sequence_header_obu(&p.data).is_none()) {
+                    (Some(header), true) => [header.as_slice(), &p.data].concat(),
+                    _ => p.data,
+                };
+                times.push_back(p.time);
+                decoded += 1;
+                let pics = decoder.push(&data)?;
+                if !emit(pics, &mut times, &mut index) {
+                    done = true;
+                    break;
+                }
+            }
+            if done {
+                return Ok(Decoded { info, units_decoded: decoded });
+            }
+            continue;
+        }
+        unit += 1;
         times.push_back(s.time);
+        decoded += 1;
         let pics = decoder.push(&s.data)?;
-        if !emit(pics, &mut times) {
-            return Ok(info);
+        if !emit(pics, &mut times, &mut index) {
+            return Ok(Decoded { info, units_decoded: decoded });
         }
     }
     let pics = decoder.finish()?;
-    emit(pics, &mut times);
-    Ok(info)
+    emit(pics, &mut times, &mut index);
+    Ok(Decoded { info, units_decoded: decoded })
 }

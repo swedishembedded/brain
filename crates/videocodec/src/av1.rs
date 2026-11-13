@@ -141,10 +141,11 @@ impl Encoder {
     }
 }
 
-/// `tu` without its temporal-delimiter OBUs (type 2). Every OBU rav1e writes
-/// carries its size field, which is what lets the walk find the next one.
-fn strip_temporal_delimiters(tu: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(tu.len());
+/// The OBUs of a temporal unit, as (type, byte range of the whole OBU). Every OBU rav1e writes carries its size
+/// field, which is what lets the walk find the next one; an OBU without one runs to the end of the unit, and a size
+/// field that does not parse ends the walk.
+fn obus(tu: &[u8]) -> Vec<(u8, std::ops::Range<usize>)> {
+    let mut out = Vec::new();
     let mut at = 0;
     while at < tu.len() {
         let header = tu[at];
@@ -153,21 +154,27 @@ fn strip_temporal_delimiters(tu: &[u8]) -> Vec<u8> {
         let has_size = header & 0x2 != 0;
         let mut pos = at + 1 + has_ext as usize;
         if !has_size {
-            // An OBU without a size runs to the end of the unit.
-            if obu_type != 2 {
-                out.extend_from_slice(&tu[at..]);
-            }
+            out.push((obu_type, at..tu.len()));
             break;
         }
-        let Some((size, len)) = leb128(&tu[pos..]) else { break };
+        let Some((size, len)) = tu.get(pos..).and_then(leb128) else { break };
         pos += len;
-        let end = (pos + size as usize).min(tu.len());
-        if obu_type != 2 {
-            out.extend_from_slice(&tu[at..end]);
-        }
+        let end = (pos.saturating_add(size as usize)).min(tu.len());
+        out.push((obu_type, at..end));
         at = end;
     }
     out
+}
+
+/// `tu` without its temporal-delimiter OBUs (type 2).
+fn strip_temporal_delimiters(tu: &[u8]) -> Vec<u8> {
+    obus(tu).into_iter().filter(|(t, _)| *t != 2).flat_map(|(_, r)| tu[r].to_vec()).collect()
+}
+
+/// The first sequence-header OBU (type 1) of `tu`, whole, if it has one: the stream parameters a decoder must see
+/// before the first frame it decodes.
+pub(crate) fn sequence_header_obu(tu: &[u8]) -> Option<Vec<u8>> {
+    obus(tu).into_iter().find(|(t, _)| *t == 1).map(|(_, r)| tu[r].to_vec())
 }
 
 /// An unsigned LEB128 value and the bytes it took (at most 8).
@@ -372,6 +379,14 @@ unsafe fn to_rgb(pic: &rav1d::include::dav1d::picture::Dav1dPicture) -> Result<P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sequence_header_is_found_among_the_obus() {
+        // TD (type 2, size 0), a sequence header (type 1) of 3 bytes, a frame OBU (type 6) of 1 byte.
+        let tu = [0x12, 0, 0x0a, 3, 7, 8, 9, 0x32, 1, 5];
+        assert_eq!(sequence_header_obu(&tu), Some(vec![0x0a, 3, 7, 8, 9]));
+        assert_eq!(sequence_header_obu(&[0x32, 1, 5]), None);
+    }
 
     #[test]
     fn temporal_delimiters_are_removed_and_other_obus_kept() {

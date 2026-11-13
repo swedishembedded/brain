@@ -267,8 +267,8 @@ fn be64(b: &[u8], at: usize) -> Result<u64, Error> {
     b.get(at..at + 8).map(|s| u64::from_be_bytes(s.try_into().expect("8 bytes"))).ok_or_else(|| Error::Malformed("mp4: a table is truncated".into()))
 }
 
-/// Where one sample lies and when it is shown: (file offset, size, time in seconds).
-type SampleRef = (u64, u32, f64);
+/// Where one sample lies, when it is shown and whether it is a sync sample: (file offset, size, time in seconds, key).
+type SampleRef = (u64, u32, f64, bool);
 
 /// The AV1 video track of an MP4 file, sample by sample.
 pub(crate) struct Reader {
@@ -376,7 +376,24 @@ fn video_track(f: &mut (impl Read + Seek), len: u64) -> Result<(StreamInfo, Vec<
         let duration = t as f64 / timescale as f64;
         let fps = (duration > 0.0).then(|| crate::snap_fps(count as f64 / duration));
         let info = StreamInfo { w, h, fps, duration: Some(duration), frames: Some(count as u64), codec: "av1".into() };
-        let samples = offsets.into_iter().zip(times).map(|((o, s), t)| (o, s, t)).collect();
+        // The sync-sample table lists the 1-based numbers of the random-access samples; without one, every sample is
+        // a sync sample (ISO/IEC 14496-12, 8.6.2).
+        let keys: Option<std::collections::HashSet<u32>> = match table(f, b"stss")? {
+            None => None,
+            Some(t) => {
+                let n = be32(&t, 4)? as usize;
+                if n > count {
+                    return Err(Error::Malformed(format!("mp4: {n} sync samples among {count}")));
+                }
+                Some((0..n).map(|i| be32(&t, 8 + 4 * i)).collect::<Result<_, _>>()?)
+            }
+        };
+        let samples = offsets
+            .into_iter()
+            .zip(times)
+            .enumerate()
+            .map(|(i, ((o, s), t))| (o, s, t, keys.as_ref().is_none_or(|k| k.contains(&(i as u32 + 1)))))
+            .collect();
         return Ok((info, samples));
     }
     Err(Error::Unsupported("no video track".into()))
@@ -384,7 +401,7 @@ fn video_track(f: &mut (impl Read + Seek), len: u64) -> Result<(StreamInfo, Vec<
 
 impl SampleSource for Reader {
     fn next_sample(&mut self) -> Result<Option<Sample>, Error> {
-        let Some((offset, size, time)) = self.samples.next() else { return Ok(None) };
+        let Some((offset, size, time, key)) = self.samples.next() else { return Ok(None) };
         // A coded frame is far below this; a size past it is a corrupt table, not an allocation to attempt.
         if size > 256 << 20 {
             return Err(Error::Malformed(format!("mp4: a sample of {size} bytes")));
@@ -392,7 +409,7 @@ impl SampleSource for Reader {
         self.file.seek(SeekFrom::Start(offset)).map_err(io)?;
         let mut data = vec![0u8; size as usize];
         self.file.read_exact(&mut data).map_err(io)?;
-        Ok(Some(Sample { time, data }))
+        Ok(Some(Sample { time, data, key }))
     }
 }
 
