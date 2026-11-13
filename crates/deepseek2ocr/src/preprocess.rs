@@ -55,11 +55,10 @@
 //! what makes the range match the reference's; it is a fidelity step, not
 //! defensive tidiness.
 //!
-//! ## Why the pad is a `pad_zero`
+//! ## Why the pad is a zero fill
 //!
-//! `imaging::Ctx::pad_zero` can only fill with zero - a deliberate limit, since
-//! `pad2d.wgsl` has no `pad_value` word. That is not a constraint here, it is the
-//! whole trick: **normalize first, then pad**, and zero *is* the mean-grey
+//! The pad is `imaging::Ctx::pad` with `Fill::Constant(0.0)`. The trick is
+//! **normalize first, then pad**, and zero *is* the mean-grey
 //! border, exactly. (The reference quantises its border to `127/255 = 0.498039`
 //! before normalizing, so its padded pixels land at `-0.00392` rather than at
 //! `0.0`. A tiny offset confined to the letterbox bars; ours is the exact
@@ -75,7 +74,7 @@
 //! Batch is 1, like everything else in this crate.
 
 use gpu_core::{DeviceBuffer, Gpu};
-use imaging::{AlignCorners, Border, Ctx, Filter, Normalization, Shape};
+use imaging::{AlignCorners, Border, Ctx, Fill, Filter, Normalization, Shape};
 
 use crate::config::DeepseekOcrConfig;
 
@@ -197,13 +196,13 @@ pub fn preprocess_to(gpu: &Gpu, hwc: &[f32], w: u32, h: u32, out_w: u32, out_h: 
     let clamped = clamp01(&ctx, &resized, shape);
 
     // Normalize BEFORE padding: the reference's border colour is its own
-    // `mean`, so after the affine it is exactly zero -- which is the only fill
-    // `pad_zero` can produce. See this module's header.
+    // `mean`, so after the affine it is exactly zero, hence `Fill::Constant(0.0)`.
+    // See this module's header.
     let norm = ctx.normalize(&clamped, shape, &NORMALIZATION);
     let (out, out_shape) = if border == Border::default() {
         (norm, shape)
     } else {
-        ctx.pad_zero(&norm, shape, border)
+        ctx.pad(&norm, shape, border, Fill::Constant(0.0))
     };
     assert_eq!(out_shape, Shape::new(1, 3, out_h, out_w), "preprocess produced {out_shape:?}");
     ctx.download(&out, out_shape.numel())

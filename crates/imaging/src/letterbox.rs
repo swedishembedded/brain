@@ -3,52 +3,46 @@
 
 //! Aspect-preserving fit onto a square input, with centre padding.
 //!
-//! **This is the workspace's only letterbox.** It was `yolov8::boxmath`'s until
-//! this crate existed; `boxmath` now re-exports these items, so
-//! `yolov8::boxmath::{Letterbox, letterbox_rgb}` still name them and no detection
-//! call site moved. The code was not *copied* here — it was moved, because the
-//! pad fill, the `pad_y as usize` truncation and the half-pixel nearest rule
-//! below are baked into the trained yolo weights and into every reported
-//! `map50`, and a second definition free to drift from this one is precisely the
-//! `rmsnorm`-was-seven-times failure `AGENTS.md` forbids.
+//! This is the workspace's only letterbox; `yolov8::boxmath` re-exports it, so
+//! `yolov8::boxmath::{Letterbox, letterbox_rgb}` name these items. A second
+//! definition free to drift from this one is the `rmsnorm`-was-seven-times
+//! failure `AGENTS.md` forbids.
 //!
-//! The ZipDepth INT8 calibration no longer letterboxes: it preprocesses with
-//! `zipdepth::predict::preprocess_chw`, the same function inference uses, so
-//! calibration and inference see the same inputs.
+//! ## One integral pad, shared by pixels and boxes
 //!
-//! This is the one **host** resampler in the crate, and it is host for a reason
-//! that is worth reading before "fixing" it.
+//! The content is `round(w0*scale) x round(h0*scale)` with
+//! `scale = min(size/w0, size/h0)`. The pad is whole pixels: the left and top
+//! margins are `floor(slack / 2)` and the extra pixel of an odd slack goes to
+//! the right and bottom, exactly [`crate::device::Border::centre`]. For a
+//! 640x479 image on a 640 square the slack is 161 rows and the top margin is 80.
+//! [`Letterbox::apply_box`], [`Letterbox::invert_box`], [`Letterbox::content_rect`]
+//! and the pixels all use that one pad, so an image and its coordinate frame
+//! agree at every size. It is also the upstream detectors' convention
+//! (`top = round(dh - 0.1)`, which is 80 for `dh = 80.5`).
 //!
-//! ## Why this cannot be dispatched today
+//! ## The resampling rule
 //!
-//! Its nearest-neighbour rule is *half-pixel*:
-//! `src = round((dst + 0.5) / scale - 0.5)`, with `f32::round`
-//! (half-away-from-zero). `crates/kernels/wgsl/resize_nearest.wgsl` implements
-//! torch's `nearest`, which is ONNX `asymmetric` + `nearest_mode = floor`:
-//! `src = floor(dst * in / out)`. Those two select **different source pixels for
-//! most ratios**. Retargeting this function at that kernel would change every
-//! YOLO detection, so it would have to be gated on `map50`, not waved through as
-//! a refactor.
+//! Nearest neighbour, half-pixel: each output pixel takes the source pixel whose
+//! centre is nearest its own,
+//! `src = round_half_up((o + 0.5) * in / out - 0.5)` clamped to `[0, in - 1]`,
+//! where `in` is the source extent and `out` the resized content extent
+//! (`new_w` / `new_h`), not `1/scale`. In exact integer arithmetic this is
+//! `min(((2*o + 1) * in) / (2 * out), in - 1)`, which [`nearest_tap`] computes
+//! and `resize_nearest.wgsl` mode 1 computes identically.
 //!
-//! The clean fix is a *mode* on `resize_nearest` (one extra `Params` word,
-//! selecting half-pixel vs asymmetric) rather than a second nearest kernel.
-//! The pad half is also blocked: `pad2d.wgsl` is
-//! zero-fill only and cannot express the grey `114/255` fill, which likewise
-//! wants a `pad_value` word rather than a new kernel.
+//! ## Device path and host path
 //!
-//! ## The half-pixel disagreement between pixels and boxes — LOAD-BEARING
+//! [`crate::device::Ctx::letterbox`] is the device path: one half-pixel nearest
+//! resize and one constant-fill pad, both kernel dispatches, so the work runs
+//! where `--device` says. [`letterbox_rgb`] is the same rule on the host, for
+//! callers whose input and consumer both live in host memory, where a device
+//! round trip would only add copies: the NPU paths (`crates/npu`,
+//! `crates/cli/src/npu_cli.rs`), the board path in `yolov5`'s `npu.rs`, and
+//! detectors fed host images. A test (`device_ops.rs`) proves the two bitwise
+//! equal, so neither can drift from the other.
 //!
-//! [`letterbox_rgb`] places content at `yi + lb.pad_y as usize`, an f32 -> usize
-//! **truncation**, while [`Letterbox::apply_box`] / [`Letterbox::invert_box`]
-//! use the *float* `pad_x` / `pad_y`. When `size - new_w` is odd (640 vs 479 =>
-//! pad 80.5) pixels land at +80 and boxes map at +80.5: a systematic half-pixel
-//! bias between an image and its own coordinate frame.
-//!
-//! That is preserved here **deliberately and bit-for-bit**. It is a real defect
-//! (survey §6.3) but it is baked into the trained YOLO weights and into every
-//! reported `map50`; correcting it silently shifts every detection. Fix it as
-//! its own gated change, with the metric measured before and after — not as a
-//! side effect of moving the function.
+//! The ZipDepth INT8 calibration does not letterbox: it preprocesses with
+//! `zipdepth::predict::preprocess_chw`, the function inference uses.
 
 use crate::pixels::Rect;
 
@@ -62,7 +56,9 @@ pub use crate::nms::Xyxy;
 ///
 /// Forward map (original px -> input px): `xi = x0 * scale + pad_x`,
 /// `yi = y0 * scale + pad_y`, with `scale = min(size/w0, size/h0)` — the longer
-/// side fills the square and the shorter side is centre-padded.
+/// side fills the square and the shorter side is centre-padded. `pad_x` and
+/// `pad_y` are whole pixels (stored as `f32` so the box maps stay one
+/// multiply-add).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Letterbox {
     pub scale: f32,
@@ -82,8 +78,8 @@ impl Letterbox {
         let s = (size as f32 / w0 as f32).min(size as f32 / h0 as f32);
         let new_w = (w0 as f32 * s).round() as u32;
         let new_h = (h0 as f32 * s).round() as u32;
-        let pad_x = (size as f32 - new_w as f32) * 0.5;
-        let pad_y = (size as f32 - new_h as f32) * 0.5;
+        let pad_x = ((size - new_w) / 2) as f32;
+        let pad_y = ((size - new_h) / 2) as f32;
         Letterbox { scale: s, pad_x, pad_y, new_w, new_h, size }
     }
 
@@ -110,16 +106,22 @@ impl Letterbox {
         ]
     }
 
-    /// Where the content actually lands in the padded square, in **pixels** —
-    /// i.e. using the truncated offsets [`letterbox_rgb`] writes to, not the
-    /// float ones [`Letterbox::apply_box`] uses.
-    ///
-    /// Exposed so a caller can see the half-pixel disagreement described in this
-    /// module's header instead of rediscovering it: on an odd pad this rect's
-    /// origin is half a pixel from `(pad_x, pad_y)`.
+    /// Where the content lands in the padded square, in pixels. Its origin is
+    /// exactly `(pad_x, pad_y)`, the offset [`Letterbox::apply_box`] adds.
     pub fn content_rect(&self) -> Rect {
         Rect::new(self.pad_x as u32, self.pad_y as u32, self.new_w, self.new_h)
     }
+}
+
+/// The source index half-pixel nearest neighbour selects for output index `o`
+/// when `in_len` source samples are resampled to `out_len`:
+/// `min(((2*o + 1) * in_len) / (2 * out_len), in_len - 1)`, the integer form of
+/// `round_half_up((o + 0.5) * in/out - 0.5)` clamped to the source. The same
+/// arithmetic as `resize_nearest.wgsl` mode 1, in `u64` so no extent overflows.
+pub fn nearest_tap(o: u32, in_len: u32, out_len: u32) -> u32 {
+    assert!(in_len > 0 && out_len > 0, "nearest_tap: extents must be non-empty");
+    let tap = (2 * o as u64 + 1) * in_len as u64 / (2 * out_len as u64);
+    tap.min(in_len as u64 - 1) as u32
 }
 
 /// Resize an interleaved-RGB HWC `src` (`[h0*w0*3]`) into a letterboxed **CHW**
@@ -129,24 +131,20 @@ impl Letterbox {
 /// (ultralytics' grey), and a detector trained on another fill must be able to
 /// pass its own without changing theirs.
 ///
-/// Resampling is half-pixel nearest neighbour — see the module header for why it
-/// is not a kernel dispatch, and why the `as usize` truncation on the paste
-/// offsets must not be "corrected" here.
+/// The host twin of [`crate::device::Ctx::letterbox`]: the same [`nearest_tap`]
+/// and the same [`Letterbox`] pad, bitwise equal to it. See the module header.
 pub fn letterbox_rgb(src: &[f32], w0: u32, h0: u32, size: u32, pad: f32) -> (Vec<f32>, Letterbox) {
     assert_eq!(src.len(), (w0 * h0 * 3) as usize, "src must be HWC RGB [h0*w0*3]");
     let lb = Letterbox::compute(w0, h0, size);
     let sz = size as usize;
     let mut chw = vec![pad; 3 * sz * sz];
-    let inv = 1.0 / lb.scale;
-    for yi in 0..lb.new_h as usize {
-        let sy = ((yi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, h0 as f32 - 1.0) as usize;
-        // TRUNCATION, not rounding: see the module header. `apply_box` uses the
-        // float pad, so on an odd pad the image and its coordinate frame differ
-        // by half a pixel. Unchanged by the move out of `yolov8::boxmath`.
-        let dy = yi + lb.pad_y as usize;
-        for xi in 0..lb.new_w as usize {
-            let sx = ((xi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, w0 as f32 - 1.0) as usize;
-            let dx = xi + lb.pad_x as usize;
+    let (pad_x, pad_y) = (lb.pad_x as usize, lb.pad_y as usize);
+    for yi in 0..lb.new_h {
+        let sy = nearest_tap(yi, h0, lb.new_h) as usize;
+        let dy = yi as usize + pad_y;
+        for xi in 0..lb.new_w {
+            let sx = nearest_tap(xi, w0, lb.new_w) as usize;
+            let dx = xi as usize + pad_x;
             let s_base = (sy * w0 as usize + sx) * 3;
             for c in 0..3 {
                 chw[c * sz * sz + dy * sz + dx] = src[s_base + c];
@@ -180,18 +178,26 @@ mod tests {
         }
     }
 
-    /// The documented, deliberately-preserved defect. If this test starts
-    /// failing, someone "fixed" the truncation — which moves every detection and
-    /// must be gated on `map50`, not on a unit test passing.
+    /// Pixels and boxes share one pad: the pad is whole pixels (the left and
+    /// top margins take the floor of half the slack, the right and bottom
+    /// margins the rest), so the rectangle the content lands in starts exactly
+    /// where `apply_box` maps the original origin, at every size and aspect.
     #[test]
-    fn odd_pad_puts_pixels_half_a_pixel_from_where_boxes_go() {
+    fn pixels_and_boxes_share_one_integral_pad() {
         let lb = Letterbox::compute(640, 479, 640);
         assert_eq!(lb.new_h, 479);
-        assert!((lb.pad_y - 80.5).abs() < 1e-6, "pad_y is {}", lb.pad_y);
-        // Boxes map with the float pad ...
-        assert!((lb.apply_box([0.0, 0.0, 1.0, 1.0])[1] - 80.5).abs() < 1e-6);
-        // ... pixels land at the truncated one.
+        assert_eq!(lb.pad_y, 80.0, "161 slack rows: 81 above would be the ceil, 80 the floor");
+        assert_eq!(lb.apply_box([0.0, 0.0, 1.0, 1.0])[1], 80.0);
         assert_eq!(lb.content_rect().y, 80);
+
+        for (w0, h0, size) in [(640, 479, 640), (641, 480, 640), (1920, 1080, 640), (333, 777, 416), (7, 3, 32), (1, 9, 32)] {
+            let lb = Letterbox::compute(w0, h0, size);
+            let r = lb.content_rect();
+            let b = lb.apply_box([0.0, 0.0, w0 as f32, h0 as f32]);
+            assert_eq!((r.x as f32, r.y as f32), (b[0], b[1]), "{w0}x{h0}->{size}: content origin vs mapped origin");
+            assert_eq!(lb.pad_x.fract(), 0.0);
+            assert_eq!(lb.pad_y.fract(), 0.0);
+        }
     }
 
     #[test]
@@ -215,26 +221,33 @@ mod tests {
         let (chw, lb) = letterbox_rgb(&src, 2, 1, 2, 0.0);
         assert_eq!((lb.new_w, lb.new_h), (2, 1));
         let plane = 4usize;
-        let row = lb.content_rect().y as usize; // 0 (pad_y = 0.5 truncates)
+        let row = lb.content_rect().y as usize; // 0 (a slack of one row puts it below)
         let at = |c: usize, x: usize| chw[c * plane + row * 2 + x];
         assert_eq!((at(0, 0), at(1, 0), at(2, 0)), (1.0, 2.0, 3.0));
         assert_eq!((at(0, 1), at(1, 1), at(2, 1)), (4.0, 5.0, 6.0));
     }
 
-    /// Nearest-neighbour source selection must stay half-pixel. The literal
-    /// expectations here are what a dispatch of `resize_nearest.wgsl` would
-    /// have to reproduce before this function may move to the device.
+    /// Nearest-neighbour source selection is half-pixel, not torch's floor.
     #[test]
     fn nearest_rule_is_half_pixel_not_asymmetric_floor() {
-        // 3 -> 2 downscale, scale = 2/3, inv = 1.5.
-        // half-pixel: round((0+0.5)*1.5 - 0.5) = round(0.25) = 0
-        //             round((1+0.5)*1.5 - 0.5) = round(1.75) = 2
-        // asymmetric floor (the kernel): floor(0*3/2)=0, floor(1*3/2)=1
+        // 3 -> 2 downscale. half-pixel: taps 0 and 2; the floor rule: 0 and 1.
+        assert_eq!((nearest_tap(0, 3, 2), nearest_tap(1, 3, 2)), (0, 2));
         let src: Vec<f32> = (0..9).map(|i| i as f32).collect(); // 3x1 RGB
         let (chw, _) = letterbox_rgb(&src, 3, 1, 2, 0.0);
         let plane = 4usize;
         assert_eq!(chw[0], 0.0, "dst x=0 -> src x=0");
         assert_eq!(chw[1], 6.0, "dst x=1 -> src x=2 (half-pixel), NOT src x=1 (floor)");
         assert_eq!(chw[plane + 1], 7.0);
+    }
+
+    #[test]
+    fn nearest_tap_is_the_integer_form_and_stays_in_range() {
+        // Upscaling a single sample clamps; the tie 0.5 of a 2 -> 1 resize rounds up.
+        assert_eq!(nearest_tap(0, 2, 1), 1);
+        assert_eq!((0..5).map(|o| nearest_tap(o, 1, 5)).collect::<Vec<_>>(), vec![0; 5]);
+        assert_eq!((0..4).map(|o| nearest_tap(o, 2, 4)).collect::<Vec<_>>(), vec![0, 0, 1, 1]);
+        for (i, o) in [(479, 640), (640, 479), (4000, 7), (7, 4000)] {
+            assert!((0..o).all(|k| nearest_tap(k, i, o) < i));
+        }
     }
 }

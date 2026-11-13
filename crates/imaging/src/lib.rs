@@ -51,8 +51,8 @@
 //! Still owed, each blocked on a numeric gate rather than on effort:
 //! `s3dit::pipeline::{feather_mask, downsample_mask}` (no in-tree inpaint
 //! metric to gate the ramp against - see [`mask`]),
-//! `s3dit::caps::build_outpaint_canvas` (needs `pad2d.wgsl` to grow a
-//! `pad_mode` word before edge-replication can be expressed), and
+//! `s3dit::caps::build_outpaint_canvas` (edge replication is now
+//! [`Fill::Edge`]; the caller has not moved onto it), and
 //! the fused `[0,1] -> [-1,1]` maps in `flux2::finetune` / `s3dit::finetune` /
 //! `s3dit::pipeline` (host per-pixel arithmetic, which this crate deliberately
 //! does not offer a host entry point for - see the table above).
@@ -74,12 +74,12 @@
 //! | layout permutation, geometry, IO, codecs, policy | **host glue, here** |
 //! | a reduction to a handful of scalars (mask IoU) | host, here - the readback dominates |
 //!
-//! Nothing in this crate re-implements a kernel on the host. The one host
-//! resampler, [`letterbox::letterbox_rgb`], is here *because* it cannot be
-//! dispatched: its nearest-neighbour rule is half-pixel
-//! (`round((i+0.5)/scale - 0.5)`) and `resize_nearest.wgsl` is ONNX-asymmetric
-//! (`floor(o*in/out)`). Those pick different source pixels for most ratios, so
-//! retargeting it would move every YOLO detection. See that module.
+//! Nothing in this crate re-implements a kernel on the host except one rule,
+//! stated once. [`letterbox::letterbox_rgb`] is the host twin of
+//! [`Ctx::letterbox`] for callers whose input and consumer both live in host
+//! memory; both use the half-pixel nearest tap ([`letterbox::nearest_tap`], the
+//! kernel's `resize_nearest` mode 1) and are proven bitwise equal by a test.
+//! See that module.
 //!
 //! ## Subtly-different variants are typed parameters, never a silent choice
 //!
@@ -89,7 +89,7 @@
 //! * [`AlignCorners`] - half-pixel vs corner-aligned resampling. Both are
 //!   plausible, they differ by half a pixel, and a gradient check cannot tell
 //!   them apart.
-//! * [`Filter`] - nearest / bilinear / bicubic, each naming the exact reference
+//! * [`Filter`] - nearest / half-pixel nearest / bilinear / bicubic, each naming the exact reference
 //!   function it reproduces. Note in particular that `Filter::Bicubic` is
 //!   PyTorch's non-antialiased `a = -0.75` cubic and is **not** the same function
 //!   as [`host::resize_bicubic_pil`] (PIL fixed-point, antialiased, `a = -0.5`)
@@ -146,9 +146,9 @@ pub mod viz;
 
 pub use codec::{decode, dimensions, load, save, save_jpeg, save_png, save_ppm, JPEG_QUALITY};
 pub use color::{Normalization, IMAGENET_MEAN, IMAGENET_STD};
-pub use device::{AlignCorners, Border, Ctx, Filter, ImagingKernelIds, PIPELINES};
+pub use device::{AlignCorners, Border, Ctx, Fill, Filter, ImagingKernelIds, PIPELINES};
 pub use host::resize_bilinear_hwc;
-pub use letterbox::{letterbox_rgb, Letterbox};
+pub use letterbox::{letterbox_rgb, nearest_tap, Letterbox};
 pub use photo::{load_photo, Exif, Photo};
 pub use pixels::{ChannelPolicy, Rect, Rgb8};
 pub use tiling::{BlendPlan, BlendSpec, BlendTile, Tile, TilePlan, TileSpec};

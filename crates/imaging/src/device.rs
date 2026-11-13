@@ -44,6 +44,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 use vision::Shape;
 
 use crate::color::Normalization;
+use crate::letterbox::Letterbox;
 use crate::pixels::Rect;
 
 /// A kernel this handle did not register. Re-exported from `vision` — one
@@ -164,13 +165,19 @@ impl ImagingKernelIds {
 /// produces different numbers under another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Filter {
-    /// `resize_nearest.wgsl` — torch `nearest`, i.e. ONNX `asymmetric` +
+    /// `resize_nearest.wgsl` mode 0, torch `nearest`, i.e. ONNX `asymmetric` +
     /// `nearest_mode = floor`, `src = floor(dst*in/out)`. Integer arithmetic;
     /// [`AlignCorners`] does not apply and is ignored.
     ///
-    /// This is **not** the half-pixel nearest that
-    /// [`crate::letterbox::letterbox_rgb`] uses. See that module.
+    /// This is **not** the rule the letterbox uses: that is
+    /// [`Filter::NearestHalfPixel`].
     Nearest,
+    /// `resize_nearest.wgsl` mode 1, half-pixel nearest, the tap whose centre
+    /// is nearest the output pixel's centre,
+    /// `src = floor((2*dst + 1) * in / (2*out))` clamped to the source
+    /// ([`crate::letterbox::nearest_tap`], the same rule on the host). The
+    /// letterbox's resampler. [`AlignCorners`] does not apply and is ignored.
+    NearestHalfPixel,
     /// `resize_bilinear.wgsl`. The default; under [`AlignCorners::HalfPixel`]
     /// it computes the formula of the one host resampler ([`crate::host`]),
     /// within 1e-5 of it (`device_ops.rs`).
@@ -236,6 +243,16 @@ impl Border {
     }
 }
 
+/// What a pad writes into the border.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Fill {
+    /// Every border pixel is this value (`pad2d.wgsl` mode 0).
+    Constant(f32),
+    /// Every border pixel replicates the nearest edge pixel (`pad2d.wgsl`
+    /// mode 1).
+    Edge,
+}
+
 /// The device-side image context: a `&Gpu` plus the resolved kernel indices.
 ///
 /// Cheap to construct (one name lookup per kernel) but not free — hold one per
@@ -269,8 +286,9 @@ impl<'g> Ctx<'g> {
     /// Resample `x` (NCHW) to `ho x wo`.
     ///
     /// `resize_{nearest,bilinear,bicubic}` Params — bilinear and bicubic:
-    /// `[N, C, H, W, Ho, Wo, align_corners]`; nearest: the same list **without**
-    /// `align_corners` (6 words). One thread per OUTPUT element.
+    /// `[N, C, H, W, Ho, Wo, align_corners]`; nearest:
+    /// `[N, C, H, W, Ho, Wo, mode]` with `mode` 0 for [`Filter::Nearest`] and 1
+    /// for [`Filter::NearestHalfPixel`]. One thread per OUTPUT element.
     pub fn resize(
         &self,
         x: &DeviceBuffer,
@@ -285,10 +303,10 @@ impl<'g> Ctx<'g> {
         let out = self.buf(out_shape.numel());
         let threads = out_shape.numel();
         let step = match filter {
-            Filter::Nearest => self.gpu.step(
+            Filter::Nearest | Filter::NearestHalfPixel => self.gpu.step(
                 self.ids.need(self.ids.resize_nearest, "resize_nearest"),
                 &[x, &out],
-                &[s.n, s.c, s.h, s.w, ho, wo],
+                &[s.n, s.c, s.h, s.w, ho, wo, u32::from(filter == Filter::NearestHalfPixel)],
                 threads,
             ),
             Filter::Bilinear => self.gpu.step(
@@ -308,30 +326,44 @@ impl<'g> Ctx<'g> {
         (out, out_shape)
     }
 
-    /// Zero-pad `x` by `b`.
+    /// Pad `x` by `b`, filling the border per `fill`.
     ///
-    /// `pad2d` Params `[total, h, w, l, r, t, b]` where `h`/`w` are the
-    /// **unpadded** dims and `total` counts the **padded** output
+    /// `pad2d` Params `[total, h, w, l, r, t, b, mode, value]` where `h`/`w`
+    /// are the **unpadded** dims and `total` counts the **padded** output
     /// (`N*C*(h+t+b)*(w+l+r)`). N and C are folded into one image index by the
-    /// kernel, so this works for any batch/channel count.
-    ///
-    /// Zero is the only fill this kernel can produce. A grey letterbox border or
-    /// an edge-replicated outpaint canvas (`s3dit::caps::build_outpaint_canvas`)
-    /// needs a `pad_value` / `pad_mode` word added to `pad2d.wgsl` — one uniform
-    /// word, not a second kernel. Until then, do not pretend: pad with zero and
-    /// composite the fill, or stay on the host.
-    pub fn pad_zero(&self, x: &DeviceBuffer, s: Shape, b: Border) -> (DeviceBuffer, Shape) {
+    /// kernel, so this works for any batch/channel count. `mode` is 0 for
+    /// [`Fill::Constant`] (with `value` its f32 bits) and 1 for [`Fill::Edge`].
+    pub fn pad(&self, x: &DeviceBuffer, s: Shape, b: Border, fill: Fill) -> (DeviceBuffer, Shape) {
         let out_shape = Shape::new(s.n, s.c, s.h + b.top + b.bottom, s.w + b.left + b.right);
         let out = self.buf(out_shape.numel());
         let total = out_shape.numel();
+        let (mode, value) = match fill {
+            Fill::Constant(v) => (0, v.to_bits()),
+            Fill::Edge => (1, 0),
+        };
         let step = self.gpu.step(
             self.ids.need(self.ids.pad2d, "pad2d"),
             &[x, &out],
-            &[total, s.h, s.w, b.left, b.right, b.top, b.bottom],
+            &[total, s.h, s.w, b.left, b.right, b.top, b.bottom, mode, value],
             total,
         );
         self.gpu.submit(&[], &[step]);
         (out, out_shape)
+    }
+
+    /// Letterbox `x` (NCHW, any batch and channel count) onto a `size x size`
+    /// square: one half-pixel-nearest [`Ctx::resize`] to the content size, then
+    /// one [`Ctx::pad`] with `fill` at [`Border::centre`]. Returns the padded
+    /// buffer and the [`Letterbox`] mapping boxes between the two frames.
+    ///
+    /// The host twin is [`crate::letterbox::letterbox_rgb`], bitwise equal.
+    pub fn letterbox(&self, x: &DeviceBuffer, s: Shape, size: u32, fill: f32) -> (DeviceBuffer, Letterbox) {
+        let lb = Letterbox::compute(s.w, s.h, size);
+        let (content, cs) = self.resize(x, s, lb.new_h, lb.new_w, Filter::NearestHalfPixel, AlignCorners::HalfPixel);
+        let border = Border::centre(lb.new_w, lb.new_h, size, size);
+        debug_assert_eq!((border.left as f32, border.top as f32), (lb.pad_x, lb.pad_y));
+        let (padded, _) = self.pad(&content, cs, border, Fill::Constant(fill));
+        (padded, lb)
     }
 
     /// Crop `rect` out of `x`.
@@ -390,7 +422,7 @@ impl<'g> Ctx<'g> {
             top: at.y,
             bottom: dst_shape.h - at.bottom(),
         };
-        let (grown, grown_shape) = self.pad_zero(src, src_shape, border);
+        let (grown, grown_shape) = self.pad(src, src_shape, border, Fill::Constant(0.0));
         debug_assert_eq!(grown_shape.numel(), dst_shape.numel());
         let total = dst_shape.numel();
         let step = self.gpu.step(
@@ -443,7 +475,7 @@ impl<'g> Ctx<'g> {
 
         let border =
             Border { left: at.x, right: acc_shape.w - at.right(), top: at.y, bottom: acc_shape.h - at.bottom() };
-        let (grown, grown_shape) = self.pad_zero(&weighted, src_shape, border);
+        let (grown, grown_shape) = self.pad(&weighted, src_shape, border, Fill::Constant(0.0));
         debug_assert_eq!(grown_shape.numel(), acc_shape.numel());
         let total2 = acc_shape.numel();
         let step2 = self.gpu.step(

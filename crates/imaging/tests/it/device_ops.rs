@@ -13,7 +13,8 @@
 //! per-crate fixture.
 
 use gpu_core::testgpu;
-use imaging::device::{AlignCorners, Border, Ctx, Filter};
+use imaging::device::{AlignCorners, Border, Ctx, Fill, Filter};
+use imaging::letterbox::Letterbox;
 use imaging::{mask, pixels, Rect, Shape, TilePlan, TileSpec, PIPELINES};
 
 fn ctx() -> (gpu_core::Gpu, Shape) {
@@ -129,7 +130,7 @@ fn pad_then_crop_is_the_identity_bitwise() {
     let src = ramp(s.numel());
     let x = c.upload("src", &src);
     let b = Border { left: 2, right: 3, top: 1, bottom: 4 };
-    let (padded, ps) = c.pad_zero(&x, s, b);
+    let (padded, ps) = c.pad(&x, s, b, Fill::Constant(0.0));
     assert_eq!((ps.h, ps.w), (s.h + 5, s.w + 5));
     // The border really is zero, and the content sits at (left, top).
     let p = c.download(&padded, ps.numel());
@@ -138,6 +139,105 @@ fn pad_then_crop_is_the_identity_bitwise() {
     let (back, bs) = c.crop(&padded, ps, Rect::new(b.left, b.top, s.w, s.h));
     assert_eq!(bs.numel(), s.numel());
     assert_eq!(c.download(&back, bs.numel()), src, "crop2d is pad2d's exact adjoint");
+}
+
+/// The half-pixel nearest mode is `round((o + 0.5) * in / out - 0.5)` clamped to
+/// the source: the tap whose centre is nearest the output pixel's centre.
+#[test]
+fn nearest_half_pixel_selects_the_nearest_centre_tap() {
+    let gpu = testgpu::dev(PIPELINES);
+    let c = Ctx::new(&gpu);
+    let s = Shape::new(1, 1, 1, 3);
+    let x = c.upload("src", &[0.0, 10.0, 20.0]);
+    let (y, ys) = c.resize(&x, s, 1, 2, Filter::NearestHalfPixel, AlignCorners::HalfPixel);
+    // round(0.25) = 0, round(1.75) = 2  ->  [0, 20] (the floor rule gives [0, 10]).
+    assert_eq!(c.download(&y, ys.numel()), vec![0.0, 20.0]);
+
+    // The tap rule over a sweep of ratios, against the float formula.
+    for (w0, wo) in [(3u32, 2u32), (7, 3), (5, 11), (479, 640), (640, 479), (1, 5), (9, 9)] {
+        let src = ramp(w0);
+        let x = c.upload("src", &src);
+        let (y, ys) = c.resize(&x, Shape::new(1, 1, 1, w0), 1, wo, Filter::NearestHalfPixel, AlignCorners::HalfPixel);
+        let got = c.download(&y, ys.numel());
+        for o in 0..wo {
+            let t = ((o as f64 + 0.5) * w0 as f64 / wo as f64 - 0.5).round().clamp(0.0, w0 as f64 - 1.0);
+            assert_eq!(got[o as usize], t as f32, "{w0}->{wo} at {o}");
+        }
+    }
+}
+
+/// `pad2d` writes the caller's fill, or replicates the nearest edge pixel.
+#[test]
+fn pad_fills_with_a_value_or_replicates_the_edge() {
+    let gpu = testgpu::dev(PIPELINES);
+    let c = Ctx::new(&gpu);
+    let s = Shape::new(1, 2, 2, 2);
+    let x = c.upload("src", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    let b = Border { left: 1, right: 0, top: 0, bottom: 1 };
+    let (y, ys) = c.pad(&x, s, b, Fill::Constant(0.25));
+    assert_eq!(
+        c.download(&y, ys.numel()),
+        vec![0.25, 1.0, 2.0, 0.25, 3.0, 4.0, 0.25, 0.25, 0.25, 0.25, 5.0, 6.0, 0.25, 7.0, 8.0, 0.25, 0.25, 0.25]
+    );
+    let (y, ys) = c.pad(&x, s, b, Fill::Edge);
+    assert_eq!(
+        c.download(&y, ys.numel()),
+        vec![1.0, 1.0, 2.0, 3.0, 3.0, 4.0, 3.0, 3.0, 4.0, 5.0, 5.0, 6.0, 7.0, 7.0, 8.0, 7.0, 7.0, 8.0]
+    );
+}
+
+/// The device letterbox against an independent per-pixel statement of the rule:
+/// the content tile is the half-pixel nearest resize to `new_w x new_h`, pasted
+/// at the integral pad, the rest the fill, in every channel. The sizes include
+/// odd pads (640x479) and both orientations.
+#[test]
+fn letterbox_on_device_matches_the_per_pixel_reference() {
+    let gpu = testgpu::dev(PIPELINES);
+    let c = Ctx::new(&gpu);
+    for (w0, h0, size) in [(640u32, 479u32, 640u32), (479, 640, 640), (100, 100, 50), (37, 11, 32), (5, 29, 32), (333, 777, 96)] {
+        let src: Vec<f32> = (0..3 * w0 * h0).map(|i| ((u64::from(i) * 7919) % 251) as f32).collect();
+        let s = Shape::new(1, 3, h0, w0);
+        let x = c.upload("src", &src);
+        let (y, lb) = c.letterbox(&x, s, size, 0.4375);
+        let got = c.download(&y, 3 * size * size);
+        let want = Letterbox::compute(w0, h0, size);
+        assert_eq!(lb, want);
+        let r = lb.content_rect();
+        for ch in 0..3u32 {
+            for py in 0..size {
+                for px in 0..size {
+                    let g = got[(ch * size * size + py * size + px) as usize];
+                    let inside = px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
+                    let e = if inside {
+                        let tap = |d: u32, i: u32, o: u32| ((d as f64 + 0.5) * i as f64 / o as f64 - 0.5).round().clamp(0.0, i as f64 - 1.0) as u32;
+                        let (sx, sy) = (tap(px - r.x, w0, lb.new_w), tap(py - r.y, h0, lb.new_h));
+                        src[(ch * h0 * w0 + sy * w0 + sx) as usize]
+                    } else {
+                        0.4375
+                    };
+                    assert_eq!(g, e, "{w0}x{h0}->{size} c{ch} ({px},{py})");
+                }
+            }
+        }
+    }
+}
+
+/// The host `letterbox_rgb` (HWC) is the device `Ctx::letterbox` (CHW) bitwise:
+/// one rule, two homes. Odd pads and both orientations.
+#[test]
+fn host_letterbox_equals_the_device_letterbox_bitwise() {
+    let gpu = testgpu::dev(PIPELINES);
+    let c = Ctx::new(&gpu);
+    for (w0, h0, size) in [(640u32, 479u32, 640u32), (479, 640, 640), (37, 11, 32), (5, 29, 32), (333, 777, 96), (7, 3, 32), (100, 100, 50)] {
+        let hwc: Vec<f32> = (0..3 * w0 * h0).map(|i| ((u64::from(i) * 7919) % 251) as f32 / 251.0).collect();
+        let chw = pixels::hwc_to_chw(&hwc, 3, h0 as usize, w0 as usize);
+        let fill = 114.0 / 255.0;
+        let (host, host_lb) = imaging::letterbox_rgb(&hwc, w0, h0, size, fill);
+        let x = c.upload("src", &chw);
+        let (y, dev_lb) = c.letterbox(&x, Shape::new(1, 3, h0, w0), size, fill);
+        assert_eq!(host_lb, dev_lb, "{w0}x{h0}->{size}: transform");
+        assert_eq!(host, c.download(&y, 3 * size * size), "{w0}x{h0}->{size}: pixels");
+    }
 }
 
 #[test]

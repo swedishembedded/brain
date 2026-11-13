@@ -21,7 +21,7 @@
 //! DeepSeek-OCR-family preprocessor this repo has captured so far.
 
 use gpu_core::Gpu;
-use imaging::{AlignCorners, Border, Ctx, Filter, Normalization, Shape};
+use imaging::{AlignCorners, Border, Ctx, Fill, Filter, Normalization, Shape};
 
 use crate::config::DeepseekOcr2VisionConfig;
 
@@ -100,10 +100,10 @@ pub fn preprocess_to(gpu: &Gpu, hwc: &[f32], w: u32, h: u32, side: u32, fit: Fit
     let clamped = clamp01(&ctx, &resized, shape);
     let norm = ctx.normalize(&clamped, shape, &NORMALIZATION);
 
-    // The border is filled AFTER normalizing: `pad_zero` can only fill zero,
-    // and this checkpoint's mean IS zero post-affine, so the two coincide by
-    // construction rather than by a special-cased pad value.
-    let (out, out_shape) = if border == Border::default() { (norm, shape) } else { ctx.pad_zero(&norm, shape, border) };
+    // The border is filled AFTER normalizing: this checkpoint's mean IS zero
+    // post-affine, so a zero fill is the mean-grey border by construction
+    // rather than by a special-cased pad value.
+    let (out, out_shape) = if border == Border::default() { (norm, shape) } else { ctx.pad(&norm, shape, border, Fill::Constant(0.0)) };
     assert_eq!(out_shape, Shape::new(1, 3, side, side), "preprocess produced {out_shape:?}");
     ctx.download(&out, out_shape.numel())
 }

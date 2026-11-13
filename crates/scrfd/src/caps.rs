@@ -34,7 +34,7 @@ use capability::{
     Progress, Provider,
 };
 use gpu_core::Gpu;
-use imaging::{AlignCorners, Border, Ctx, Filter, Shape};
+use imaging::{AlignCorners, Border, Ctx, Fill, Filter, Shape};
 use serde_json::json;
 
 use crate::config::{Preprocess, ScrfdConfig};
@@ -146,7 +146,7 @@ impl ScrfdSession {
         let src = ctx.upload("scrfd.caps.src", chw);
         let (small, sshape) = ctx.resize(&src, Shape::new(1, 3, h, w), new_h, new_w, Filter::Bilinear, AlignCorners::HalfPixel);
         let border = Border { left: 0, top: 0, right: size - new_w, bottom: size - new_h };
-        let (canvas, cshape) = ctx.pad_zero(&small, sshape, border);
+        let (canvas, cshape) = ctx.pad(&small, sshape, border, Fill::Constant(0.0));
         let norm = ctx.normalize(&canvas, cshape, &unit_norm(&self.cfg.pre));
         (ctx.download(&norm, cshape.numel()), det_scale)
     }
