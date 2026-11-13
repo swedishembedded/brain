@@ -369,6 +369,9 @@ A runnable example, `crates/cosyvoice/examples/synth.rs`
 (`cargo run -p brain-cosyvoice --release --example synth -- <text> <ref.wav>
 <ref transcript> [out.wav] [seed]`) - no `brain caps`/CLI-verb/D-Bus surface
 yet, that is Phase 11's job.
+The example has since been removed: the served `synth` action covers it, and
+all six roles (including `s3tokenizer` and `campplus`) resolve through
+`CosyVoiceSpec` with no `weights_env` rows left.
 
 `crates/arch/src/lib.rs` gained two new registrations this phase needed:
 `campplus`'s row had NO `weights_env` at all despite its own parity test

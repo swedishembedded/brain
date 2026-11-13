@@ -261,9 +261,7 @@ clip (`resources/cosyvoice/source/asset/zero_shot_prompt.wav`) with this
 port's OWN sampling, gated structurally (finite, bounded, non-silent, a
 plausible duration, deterministic given the same seed) rather than against a
 golden waveform - see the crate's own "RNG-crossing gaps" note below for why.
-A runnable example exists at `crates/cosyvoice/examples/synth.rs`
-(`cargo run -p brain-cosyvoice --release --example synth -- ...`); see
-"Serving" below for the served `synth` action this pipeline now backs.
+See "Serving" below for the served `synth` action this pipeline backs.
 
 **Honest, deliberately-scoped gaps in this milestone**:
 
@@ -387,18 +385,19 @@ silently skipped. The export is validated structurally rather than against a
 running NPU or its CPU/GPU OpenVINO fallback, because no OpenVINO runtime was
 available where it was checked.
 
-Weights env vars:
+Roles, all resolved from the model store by `cosyvoice::spec::CosyVoiceSpec`
+(content-classified) or pinned with `brain serve --pin cosyvoice.ROLE=PATH`:
 
-| Variable | Role |
+| Role | File |
 |---|---|
-| `BRAIN_COSYVOICE_LLM` | speech-token LM (`llm.pt`) |
-| `BRAIN_COSYVOICE_FLOW` | flow decoder (`flow.pt`) |
-| `BRAIN_COSYVOICE_HIFT` | HiFT vocoder (`hift.pt`) |
-| `BRAIN_COSYVOICE_TOKENIZER` | `CosyVoice-BlankEN`'s Qwen BPE identity (`vocab.json`/`merges.txt`) - tokenizer + config identity only, never weights (see `crate::llm_import`) |
-| `BRAIN_COSYVOICE3_LLM` | CosyVoice 3 speech-token LM (`llm.pt`) |
-| `BRAIN_COSYVOICE3_FLOW` | CosyVoice 3 DiT flow decoder (`flow.pt`) |
-| `BRAIN_COSYVOICE3_HIFT` | CosyVoice 3 causal HiFT vocoder (`hift.pt`) |
-| `BRAIN_S3TOKENIZER_V2` | S3Tokenizer (`speech_tokenizer_v2.onnx`), read by [S3Tokenizer](s3tokenizer.md) |
-| `BRAIN_CAMPPLUS_DIR` | CAM++ (`campplus.onnx`), read by [CAM++](campplus.md) |
+| `llm` | speech-token LM (`llm.pt`, either generation) |
+| `flow` | flow decoder (`flow.pt`) |
+| `hift` | HiFT vocoder (`hift.pt`) |
+| `tokenizer` | `CosyVoice-BlankEN`'s Qwen BPE identity (`tokenizer.json`) - tokenizer + config identity only, never weights (see `crate::llm_import`) |
+| `s3tokenizer` | [S3Tokenizer](s3tokenizer.md) (`speech_tokenizer_v2.onnx`) |
+| `campplus` | [CAM++](campplus.md) (`campplus.onnx`) |
+
+The parity suites read their fixture locations from their own test variables
+(`BRAIN_COSYVOICE_LLM` and the others named in each suite above).
 
 Package: `brain-cosyvoice`.

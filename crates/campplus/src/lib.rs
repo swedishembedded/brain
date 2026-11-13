@@ -30,4 +30,3 @@
 pub mod config;
 pub mod import;
 pub mod model;
-pub mod spec;

@@ -119,7 +119,7 @@
 //! call that turns text + a reference audio clip into a real, playable
 //! 24 kHz waveform (non-streaming, zero-shot voice cloning). Real weights on
 //! this box produce a real WAV file end to end (`crates/cosyvoice/tests/
-//! pipeline_e2e.rs`, `crates/cosyvoice/examples/synth.rs`); a composed
+//! pipeline_e2e.rs`); a composed
 //! regression check splices the golden's own captured prompt/generated
 //! tokens and x-vector through this crate's flow+HiFT glue and still hits
 //! their already-proven real-weight parity numbers. Streaming (chunked

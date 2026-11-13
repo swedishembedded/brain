@@ -246,7 +246,7 @@ pub fn import_campplus(g: &GraphProto, cfg: &CampplusConfig) -> Result<Tensors, 
                     let (kh, kw) = (plan.shape[2] as i64, plan.shape[3] as i64);
                     let pad = if kh == 1 { 0 } else { 1 };
                     check_conv2d(n, at, kh, kw, plan.stride.0, plan.stride.1, pad, pad)?;
-                    let (cw, cb) = (n.input[1].clone(), n.input[2].clone());
+                    let (cw, cb) = (onnx::input(n, 1)?.to_string(), onnx::input(n, 2)?.to_string());
                     let cout = plan.shape[0];
                     w.bind(&format!("{}.weight", plan.prefix), &cw, plan.shape.to_vec())?;
                     w.bind(&format!("{}.bias", plan.prefix), &cb, vec![cout])?;
@@ -255,10 +255,10 @@ pub fn import_campplus(g: &GraphProto, cfg: &CampplusConfig) -> Result<Tensors, 
                     let k = plan.shape[2] as i64;
                     let pad = (k / 2) * plan.dilation;
                     check_conv1d(n, at, k, plan.stride, pad, plan.dilation)?;
-                    let cw = n.input[1].clone();
+                    let cw = onnx::input(n, 1)?.to_string();
                     w.bind(&format!("{}.weight", plan.prefix), &cw, plan.shape.to_vec())?;
                     if plan.bias {
-                        let cb = n.input[2].clone();
+                        let cb = onnx::input(n, 2)?.to_string();
                         w.bind(&format!("{}.bias", plan.prefix), &cb, vec![plan.shape[0]])?;
                     }
                 }
@@ -269,7 +269,7 @@ pub fn import_campplus(g: &GraphProto, cfg: &CampplusConfig) -> Result<Tensors, 
                 check_bn(n, w.at() - 1, cfg.bn_eps)?;
                 if bn_i < bns.len() {
                     let plan = &bns[bn_i];
-                    let ins: Vec<String> = n.input[1..5].to_vec();
+                    let ins: Vec<String> = (1..5).map(|i| onnx::input(n, i).map(str::to_string)).collect::<Result<_, _>>()?;
                     for (dst, src) in bn_names(&plan.prefix).iter().zip(&ins) {
                         w.bind(dst, src, vec![plan.c])?;
                     }
@@ -278,8 +278,8 @@ pub fn import_campplus(g: &GraphProto, cfg: &CampplusConfig) -> Result<Tensors, 
                     // 1,2) are exporter Constants, not initializers - only
                     // mean/var are real checkpoint tensors.
                     let e = cfg.embedding_size as usize;
-                    w.bind("xvector.dense.nonlinear.running_mean", &n.input[3], vec![e])?;
-                    w.bind("xvector.dense.nonlinear.running_var", &n.input[4], vec![e])?;
+                    w.bind("xvector.dense.nonlinear.running_mean", onnx::input(n, 3)?, vec![e])?;
+                    w.bind("xvector.dense.nonlinear.running_var", onnx::input(n, 4)?, vec![e])?;
                 }
                 bn_i += 1;
             }
@@ -293,10 +293,40 @@ pub fn import_campplus(g: &GraphProto, cfg: &CampplusConfig) -> Result<Tensors, 
     w.finish(&manifest, "campplus")
 }
 
+/// Whether `g` is the released CAM++ graph [`import_campplus`] binds: the
+/// exact Conv and BatchNormalization node counts the `campplus_v2` schedule
+/// expects. Reads graph structure only, never a weight value - the model
+/// store's classifier for a `campplus.onnx` found on disk.
+pub fn is_release_graph(g: &GraphProto) -> bool {
+    let cfg = CampplusConfig::campplus_v2();
+    let count = |op: &str| g.node.iter().filter(|n| n.op_type == op).count();
+    count("Conv") == fcm_schedule(&cfg).len() + tdnn_schedule(&cfg).len() && count("BatchNormalization") == bn_schedule(&cfg).len() + 1
+}
+
+/// [`is_release_graph`] for the ONNX file at `path`; `false` for anything that
+/// does not parse as an ONNX graph.
+pub fn is_release_file(path: &std::path::Path) -> bool {
+    let Ok(m) = onnx::read_file(path) else { return false };
+    read::graph(&m).is_ok_and(is_release_graph)
+}
+
+/// A weightless ONNX graph with exactly the release's Conv/BatchNormalization
+/// structure - what [`is_release_graph`] keys on - for classifier tests in
+/// crates that resolve a `campplus.onnx` from the model store.
+pub fn structural_fixture() -> Vec<u8> {
+    let cfg = CampplusConfig::campplus_v2();
+    let mut b = onnx::GraphBuilder::new("campplus-structure");
+    let n_conv = fcm_schedule(&cfg).len() + tdnn_schedule(&cfg).len();
+    for i in 0..n_conv {
+        b.add(onnx::Node::new("Conv", &[], &[&format!("conv{i}")]));
+    }
+    for i in 0..bn_schedule(&cfg).len() + 1 {
+        b.add(onnx::Node::new("BatchNormalization", &[], &[&format!("bn{i}")]));
+    }
+    b.finish()
+}
+
 /// Read the encoder from `dir` and return its imported tensors.
-///
-/// `dir` comes from a CLI flag, `BRAIN_CAMPPLUS_DIR` or `$BRAIN_TESTDATA` -
-/// never a baked-in path.
 pub fn import_dir(dir: &std::path::Path) -> Result<Tensors, String> {
     let m = onnx::read_file(dir.join(RELEASE_FILE))?;
     import_campplus(read::graph(&m)?, &CampplusConfig::campplus_v2())
@@ -305,6 +335,26 @@ pub fn import_dir(dir: &std::path::Path) -> Result<Tensors, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The classifier accepts the release structure and nothing else.
+    #[test]
+    fn is_release_graph_keys_on_the_release_structure() {
+        let m = onnx::decode_model(&structural_fixture()).unwrap();
+        let g = read::graph(&m).unwrap();
+        assert!(is_release_graph(g));
+        let mut short = g.clone();
+        short.node.pop();
+        assert!(!is_release_graph(&short));
+    }
+
+    /// A graph with the release structure but no weights is untrusted input
+    /// the importer must refuse with an error, never index out of bounds.
+    #[test]
+    fn importing_a_weightless_graph_is_an_error_not_a_panic() {
+        let m = onnx::decode_model(&structural_fixture()).unwrap();
+        let err = import_campplus(read::graph(&m).unwrap(), &CampplusConfig::campplus_v2()).unwrap_err();
+        assert!(err.contains("Conv"), "{err}");
+    }
 
     /// The two independently-derived Conv/BN schedules must have the counts
     /// [`import_campplus`] asserts against the real graph at runtime.

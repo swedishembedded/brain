@@ -42,7 +42,7 @@ pub use conv::{conv_transpose1d_ref, conv_transpose_node, ConvTranspose1d};
 pub use graph::{Attr, AttrVal, Elem, Graph, Node, Tensor, TensorData, ValueInfo};
 pub use header::{has_initializer, read_initializers, InitializerHeader};
 pub use read::{initializers, read_file, OnnxTensor};
-pub use walk::{check_conv, Manifest, Tensors, Walk};
+pub use walk::{check_conv, input, Manifest, Tensors, Walk};
 
 /// Decode serialized ONNX bytes back into a [`onnx::ModelProto`] (for inspection
 /// / tests). Keeps `prost` an implementation detail of this crate.

@@ -15,12 +15,6 @@ residency executor --instance key--> resident cosyvoice (load-per-call)
 ```
 
 ```bash
-BRAIN_COSYVOICE_LLM=/path/to/cosyvoice2 \
-BRAIN_COSYVOICE_FLOW=/path/to/cosyvoice2 \
-BRAIN_COSYVOICE_HIFT=/path/to/cosyvoice2 \
-BRAIN_S3TOKENIZER_V2=/path/to/speech_tokenizer_v2.onnx-dir \
-BRAIN_CAMPPLUS_DIR=/path/to/campplus.onnx-dir \
-BRAIN_COSYVOICE_TOKENIZER=/path/to/cosyvoice2/CosyVoice-BlankEN \
 tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/tts/cosyvoice-synth/cosyvoice_synth.py \
       --text "Hello, this is a cloned voice." \
@@ -45,12 +39,12 @@ tools/dbus-session.sh --serve "--dbus" -- \
 
 ## What it needs
 
-Six env vars, all weights-related: `BRAIN_COSYVOICE_{LLM,FLOW,HIFT}`, the
-speech tokenizer (`BRAIN_S3TOKENIZER_V2`), the speaker encoder
-(`BRAIN_CAMPPLUS_DIR`), and the text BPE tokenizer identity
-(`BRAIN_COSYVOICE_TOKENIZER`). Every `BRAIN_COSYVOICE_*` variable can
-instead point at ONE directory holding all three CosyVoice 2 checkpoints
-(`llm.pt`/`flow.pt`/`hift.pt`).
+A CosyVoice 2 checkout in the model store: `FunAudioLLM/CosyVoice2-0.5B`
+(`llm.pt`/`flow.pt`/`hift.pt` plus the `speech_tokenizer_v2.onnx` and
+`campplus.onnx` front end it ships) and `FunAudioLLM/CosyVoice-BlankEN` for
+the text tokenizer. Every role is recognized by content; pin any of them in
+the `--serve` arguments (`--pin cosyvoice.llm=FILE`, ...) to choose one
+outright.
 
 Only `--variant cosyvoice2` (the default) actually runs today -
 `--variant cosyvoice3` reaches the server and gets a clear, typed error
@@ -71,8 +65,6 @@ back, never a silent fallback to CosyVoice 2's weights.
 ## The CLI, for comparison
 
 ```bash
-BRAIN_COSYVOICE_LLM=… BRAIN_COSYVOICE_FLOW=… BRAIN_COSYVOICE_HIFT=… \
-BRAIN_S3TOKENIZER_V2=… BRAIN_CAMPPLUS_DIR=… BRAIN_COSYVOICE_TOKENIZER=… \
 brain cosyvoice synth \
     --text "..." --ref_text "..." \
     --in ref_audio=reference.wav --out audio=clone.wav

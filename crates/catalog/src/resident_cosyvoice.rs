@@ -6,16 +6,10 @@
 //! [`crate::resident_minimaxmusic3::MinimaxMusic3Resident`] - the "load per
 //! call, nothing kept warm" shape, not `wan`'s hot-DiT cache.
 //!
-//! Config is env-only, matching `crates/arch`'s own `weights_env`
-//! registration for the `cosyvoice`/`s3tokenizer`/`campplus` architectures
-//! and `cosyvoice::pipeline::CosyVoicePaths::from_env`'s own six roles:
-//!   * `BRAIN_COSYVOICE_LLM` - speech-token LM (`llm.pt`)
-//!   * `BRAIN_COSYVOICE_FLOW` - flow decoder (`flow.pt`)
-//!   * `BRAIN_COSYVOICE_HIFT` - HiFT vocoder (`hift.pt`)
-//!   * `BRAIN_S3TOKENIZER_V2` - S3Tokenizer FSQ speech tokenizer
-//!   * `BRAIN_CAMPPLUS_DIR` - CAM++ speaker encoder
-//!   * `BRAIN_COSYVOICE_TOKENIZER` - text BPE tokenizer identity
-//!     (`CosyVoice-BlankEN`)
+//! Every checkpoint comes from the six roles `cosyvoice::spec::CosyVoiceSpec`
+//! resolves (store or `brain serve --pin cosyvoice.ROLE=PATH`): `llm`,
+//! `flow`, `hift`, `tokenizer`, and the reference-audio front end's
+//! `s3tokenizer` and `campplus` graphs.
 //!
 //! One action, `synth`, dispatched straight through
 //! `cosyvoice::caps::synth_action` - the SAME param-decode + generation +
@@ -93,8 +87,7 @@ impl CosyVoiceResident {
     /// The size of ONE named checkpoint file inside `dir` - not the whole
     /// directory's total, because `CosyVoicePaths`' six roles may all point
     /// at the SAME directory (the released "one folder holds everything"
-    /// layout `cosyvoice::pipeline`'s own module doc and
-    /// `crates/cosyvoice/examples/synth.rs`'s fallback both support): summing
+    /// layout the upstream repo ships): summing
     /// whole-directory sizes across roles that alias one directory would
     /// count `llm.pt`/`flow.pt`/`hift.pt` five times over.
     fn file_bytes(dir: &str, filename: &str) -> u64 {
@@ -141,7 +134,7 @@ impl ResidentModel for CosyVoiceResident {
             (&self.paths.tokenizer, "text tokenizer"),
         ] {
             if !std::path::Path::new(dir).exists() {
-                return Err(format!("cosyvoice: {role} weights not found at {dir} (set the matching BRAIN_COSYVOICE_*/BRAIN_S3TOKENIZER_V2/BRAIN_CAMPPLUS_DIR var)"));
+                return Err(format!("cosyvoice: {role} weights not found at {dir} (pin it with --pin cosyvoice.ROLE=PATH)"));
             }
         }
         Ok(Box::new(CosyVoiceInstance { paths: self.paths.clone() }))

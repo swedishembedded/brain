@@ -179,13 +179,13 @@ pub fn import_s3tokenizer(g: &GraphProto, cfg: &S3TokenizerConfig) -> Result<Ten
                 match n.name.as_str() {
                     "/conv1/Conv" => {
                         check_conv1d(n, at, 3, 2, 1, 1)?;
-                        let (cw, cb) = (n.input[1].clone(), n.input[2].clone());
+                        let (cw, cb) = (onnx::input(n, 1)?.to_string(), onnx::input(n, 2)?.to_string());
                         w.bind("conv1.weight", &cw, manifest_shape(&manifest, "conv1.weight").to_vec())?;
                         w.bind("conv1.bias", &cb, manifest_shape(&manifest, "conv1.bias").to_vec())?;
                     }
                     "/conv2/Conv" => {
                         check_conv1d(n, at, 3, 2, 1, 1)?;
-                        let (cw, cb) = (n.input[1].clone(), n.input[2].clone());
+                        let (cw, cb) = (onnx::input(n, 1)?.to_string(), onnx::input(n, 2)?.to_string());
                         w.bind("conv2.weight", &cw, manifest_shape(&manifest, "conv2.weight").to_vec())?;
                         w.bind("conv2.bias", &cb, manifest_shape(&manifest, "conv2.bias").to_vec())?;
                     }
@@ -196,7 +196,7 @@ pub fn import_s3tokenizer(g: &GraphProto, cfg: &S3TokenizerConfig) -> Result<Ten
                         // is applied by the graph's own `Pad` node (left=right=15),
                         // not by the Conv itself.
                         check_conv1d(n, at, 31, 1, 0, d)?;
-                        let cw = n.input[1].clone();
+                        let cw = onnx::input(n, 1)?.to_string();
                         let dst = format!("blocks.{b}.attn.fsmn_block.weight");
                         let shape = manifest_shape(&manifest, &dst).to_vec();
                         w.bind(&dst, &cw, shape)?;
@@ -210,7 +210,7 @@ pub fn import_s3tokenizer(g: &GraphProto, cfg: &S3TokenizerConfig) -> Result<Ten
                 let n = w.next("MatMul")?;
                 match matmul_dst(&n.name) {
                     Some(dst) => {
-                        let src = n.input[1].clone();
+                        let src = onnx::input(n, 1)?.to_string();
                         let shape = manifest_shape(&manifest, &dst).to_vec();
                         w.bind(&dst, &src, shape)?;
                     }
@@ -229,7 +229,7 @@ pub fn import_s3tokenizer(g: &GraphProto, cfg: &S3TokenizerConfig) -> Result<Ten
                 };
                 let b = block_of(&n.name)
                     .ok_or_else(|| format!("import(s3tokenizer): LayerNormalization {:?} has no block index", n.name))?;
-                let (gw, gb) = (n.input[1].clone(), n.input[2].clone());
+                let (gw, gb) = (onnx::input(n, 1)?.to_string(), onnx::input(n, 2)?.to_string());
                 let (dw, db) = (format!("blocks.{b}.{which}.weight"), format!("blocks.{b}.{which}.bias"));
                 let (sw, sb) = (manifest_shape(&manifest, &dw).to_vec(), manifest_shape(&manifest, &db).to_vec());
                 w.bind(&dw, &gw, sw)?;
@@ -238,7 +238,7 @@ pub fn import_s3tokenizer(g: &GraphProto, cfg: &S3TokenizerConfig) -> Result<Ten
             Some("Add") => {
                 let n = w.next("Add")?;
                 if let Some(dst) = add_dst(&n.name) {
-                    let src = n.input[0].clone();
+                    let src = onnx::input(n, 0)?.to_string();
                     let shape = manifest_shape(&manifest, &dst).to_vec();
                     w.bind(&dst, &src, shape)?;
                 } else {
@@ -255,10 +255,44 @@ pub fn import_s3tokenizer(g: &GraphProto, cfg: &S3TokenizerConfig) -> Result<Ten
     w.finish(&manifest, "s3tokenizer")
 }
 
+/// The FSQ projection head's bias tensor and its shape (`log3(6561)` = 8
+/// dims), shared by both upstream releases.
+const FSQ_BIAS_TENSOR: &str = "quantizer.project_down.bias";
+const FSQ_DIMS: i64 = 8;
+
+/// Whether `g` is the `speech_tokenizer_v2.onnx` graph [`import_s3tokenizer`]
+/// binds with [`S3TokenizerConfig::v2`]: the FSQ head's declared bias shape
+/// plus exactly the v2 encoder's block count (the 12-block v3 release shares
+/// the head but not the body). Reads graph structure and initializer dims
+/// only, never a weight value - the model store's classifier for a codebook
+/// found on disk.
+pub fn is_v2_graph(g: &GraphProto) -> bool {
+    let has_fsq_head = g.initializer.iter().any(|t| t.name == FSQ_BIAS_TENSOR && t.dims == [FSQ_DIMS]);
+    let blocks = g.node.iter().filter_map(|n| block_of(&n.name)).max().map_or(0, |b| b + 1);
+    has_fsq_head && blocks == S3TokenizerConfig::v2().n_audio_layer as usize
+}
+
+/// [`is_v2_graph`] for the ONNX file at `path`; `false` for anything that
+/// does not parse as an ONNX graph.
+pub fn is_v2_file(path: &std::path::Path) -> bool {
+    let Ok(m) = onnx::read_file(path) else { return false };
+    read::graph(&m).is_ok_and(is_v2_graph)
+}
+
+/// A weightless ONNX graph with exactly the v2 release's FSQ head and block
+/// structure - what [`is_v2_graph`] keys on - for classifier tests in crates
+/// that resolve a `speech_tokenizer_v2.onnx` from the model store. `blocks`
+/// other than the v2 count builds the shape of a different release.
+pub fn structural_fixture(blocks: usize) -> Vec<u8> {
+    let mut b = onnx::GraphBuilder::new("s3tokenizer-structure");
+    b.init_f32(FSQ_BIAS_TENSOR, &[FSQ_DIMS], vec![0.0; FSQ_DIMS as usize]);
+    for i in 0..blocks {
+        b.add(onnx::Node::new("Add", &[], &[&format!("b{i}")]).name(&format!("/blocks.{i}/Add")));
+    }
+    b.finish()
+}
+
 /// Read the tokenizer from `dir` and return its imported tensors.
-///
-/// `dir` comes from a CLI flag, `BRAIN_S3TOKENIZER_V2` or `$BRAIN_TESTDATA` -
-/// never a baked-in path.
 pub fn import_dir(dir: &std::path::Path) -> Result<Tensors, String> {
     let m = onnx::read_file(dir.join(RELEASE_FILE))?;
     import_s3tokenizer(read::graph(&m)?, &S3TokenizerConfig::v2())
@@ -267,6 +301,17 @@ pub fn import_dir(dir: &std::path::Path) -> Result<Tensors, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The classifier accepts the v2 shape and rejects the same head over a
+    /// different body.
+    #[test]
+    fn is_v2_graph_needs_the_head_and_the_v2_block_count() {
+        let graph_of = |blocks| onnx::decode_model(&structural_fixture(blocks)).unwrap();
+        let v2 = graph_of(S3TokenizerConfig::v2().n_audio_layer as usize);
+        assert!(is_v2_graph(read::graph(&v2).unwrap()));
+        let v3 = graph_of(12);
+        assert!(!is_v2_graph(read::graph(&v3).unwrap()));
+    }
 
     #[test]
     fn block_of_reads_the_index_out_of_a_node_name() {

@@ -517,6 +517,7 @@ dependencies = [
  "brain-arch",
  "brain-audio",
  "brain-audit",
+ "brain-campplus",
  "brain-capability",
  "brain-catalog",
  "brain-checkpoint",
@@ -563,6 +564,7 @@ dependencies = [
  "brain-rlcd",
  "brain-rrdbnet",
  "brain-s3dit",
+ "brain-s3tokenizer",
  "brain-sam2",
  "brain-search",
  "brain-seed",
@@ -811,15 +813,12 @@ version = "5.1.0"
 dependencies = [
  "brain-audio",
  "brain-backend-cpu",
- "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
  "brain-kernels",
- "brain-modelstore",
  "brain-onnx",
  "brain-testutil",
- "serde_json",
 ]
 
 [[package]]
@@ -2808,9 +2807,7 @@ name = "brain-s3tokenizer"
 version = "5.1.0"
 dependencies = [
  "brain-audio",
- "brain-capability",
  "brain-model",
- "brain-modelstore",
  "brain-onnx",
  "brain-testutil",
 ]

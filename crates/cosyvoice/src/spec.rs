@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! CosyVoice's [`ArchSpec`]: which on-disk artifacts satisfy which role
-//! (`llm`, `flow`, `hift`, `tokenizer`), and the one compatibility gate a
+//! (`llm`, `flow`, `hift`, `tokenizer`, plus the reference-audio front end's
+//! `s3tokenizer` and `campplus` ONNX graphs), and the one compatibility gate a
 //! chosen assembly must pass - `llm`/`flow`/`hift` must all be the SAME
 //! generation (CosyVoice 2 or CosyVoice 3), never a silent mix of the two.
 //!
@@ -13,6 +14,11 @@
 //! never decodes a single storage byte (see that function's own doc) - the
 //! same "header/config only, no tensor bytes decoded" discipline
 //! `crate::spec`'s reference, `flux2::spec`, holds for GGUF/safetensors.
+//!
+//! `s3tokenizer`/`campplus` are released ONNX graphs, classified by their
+//! own graph structure through `s3tokenizer::import::is_v2_file` and
+//! `campplus::import::is_release_file` - a release file name alone is never
+//! enough.
 //!
 //! CosyVoice 2 and CosyVoice 3 ship the exact same FOUR role names
 //! (`llm`/`flow`/`hift`/`tokenizer`) with entirely different weights: if a
@@ -33,7 +39,7 @@ use crate::pipeline::Variant;
 
 pub struct CosyVoiceSpec;
 
-const ROLES: &[&str] = &["llm", "flow", "hift", "tokenizer"];
+const ROLES: &[&str] = &["llm", "flow", "hift", "tokenizer", "s3tokenizer", "campplus"];
 
 /// Every (name, shape) `path` declares, or `None` if it cannot be read as a
 /// torch checkpoint at all - never a classification on its own, matching
@@ -129,6 +135,19 @@ fn classify_torch(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String
     }
 }
 
+/// Pass 1, ONNX half: the reference-audio front end's two released graphs.
+/// The content decides the role; the release file name is required on top
+/// because `crate::pipeline::generate` loads each graph by that name from
+/// the resolved file's directory.
+fn classify_onnx(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
+    let named = |release: &str| rec.path.file_name().and_then(|n| n.to_str()) == Some(release);
+    if named(s3tokenizer::import::RELEASE_FILE) && s3tokenizer::import::is_v2_file(&rec.path) {
+        out.push((idx, "s3tokenizer".to_string(), Confidence::Declared));
+    } else if named(campplus::import::RELEASE_FILE) && campplus::import::is_release_file(&rec.path) {
+        out.push((idx, "campplus".to_string(), Confidence::Declared));
+    }
+}
+
 /// Pass 2: `tokenizer` - a stock Qwen BPE identity (`CosyVoice-BlankEN`) from
 /// a genuinely different upstream repo than `llm`/`flow`/`hift`, so it needs
 /// the same real signal `brain_modelstore::resolve::classify_tokenizer_role`
@@ -173,10 +192,14 @@ impl ArchSpec for CosyVoiceSpec {
     fn classify(&self, records: &[ArtifactRecord], inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
         for (idx, rec) in records.iter().enumerate() {
-            if !rec.usable() || rec.kind != ArtifactKind::Torch {
+            if !rec.usable() {
                 continue;
             }
-            classify_torch(idx, rec, &mut out);
+            match rec.kind {
+                ArtifactKind::Torch => classify_torch(idx, rec, &mut out),
+                ArtifactKind::Onnx => classify_onnx(idx, rec, &mut out),
+                _ => {}
+            }
         }
         let llm_candidates: Vec<&Path> = out.iter().filter(|(_, role, _)| role == "llm").map(|(idx, ..)| records[*idx].path.as_path()).collect();
         classify_tokenizer(records, inventory_root, &llm_candidates, &mut out);
@@ -321,6 +344,16 @@ mod tests {
         write_tokenizer_json(&tok_path, TOY_TEXT_VOCAB);
         records.push(complete(tok_path, ArtifactKind::TokenizerJson));
 
+        // The released front-end graphs, beside the generation's own
+        // checkpoints exactly as the upstream repo ships them.
+        let repo = dir.join("FunAudioLLM").join(format!("{}-0.5B", generation.as_str()));
+        let s3 = repo.join("speech_tokenizer_v2.onnx");
+        std::fs::write(&s3, s3tokenizer::import::structural_fixture(s3tokenizer::config::S3TokenizerConfig::v2().n_audio_layer as usize)).unwrap();
+        records.push(complete(s3, ArtifactKind::Onnx));
+        let cam = repo.join("campplus.onnx");
+        std::fs::write(&cam, campplus::import::structural_fixture()).unwrap();
+        records.push(complete(cam, ArtifactKind::Onnx));
+
         // A second, unrelated vendor - without one, `resolve`'s own root
         // inference (the deepest common ancestor of every record) would
         // collapse onto this fixture's single top-level dir instead of
@@ -343,7 +376,11 @@ mod tests {
         let unreadable = dir.join("flow.pt");
         std::fs::write(&unreadable, b"not a torch checkpoint").unwrap();
 
-        let records = vec![complete(suggestive.clone(), ArtifactKind::Torch), complete(unreadable, ArtifactKind::Torch)];
+        // A release-named ONNX file whose graph is not the release's.
+        let decoy_onnx = dir.join(campplus::import::RELEASE_FILE);
+        std::fs::write(&decoy_onnx, s3tokenizer::import::structural_fixture(6)).unwrap();
+
+        let records = vec![complete(suggestive.clone(), ArtifactKind::Torch), complete(unreadable, ArtifactKind::Torch), complete(decoy_onnx, ArtifactKind::Onnx)];
         let out = CosyVoiceSpec.classify(&records, dir.as_path());
         assert_eq!(out, vec![(0, "flow".to_string(), Confidence::Declared)], "{out:?}");
     }
@@ -425,7 +462,7 @@ mod tests {
         match out {
             Resolution::Resolved(a) => {
                 assert_eq!(a.variant.as_deref(), Some("cosyvoice2"));
-                assert!(a.roles.contains_key("llm") && a.roles.contains_key("flow") && a.roles.contains_key("hift") && a.roles.contains_key("tokenizer"), "{a:?}");
+                assert!(ROLES.iter().all(|r| a.roles.contains_key(*r)), "every role resolves, the ONNX front end included: {a:?}");
             }
             other => panic!("expected Resolved, got {other:?}"),
         }

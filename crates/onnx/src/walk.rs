@@ -180,6 +180,14 @@ impl<'g> Walk<'g> {
     }
 }
 
+/// Input `i` of `n` - the source-tensor name a positional bind reads - or an
+/// error naming the node when the graph does not carry it. A file is
+/// untrusted input: a node with fewer inputs than the release's must fail the
+/// import, never index out of bounds.
+pub fn input(n: &NodeProto, i: usize) -> Result<&str, String> {
+    n.input.get(i).map(String::as_str).ok_or_else(|| format!("{} node {:?} has {} input(s), expected at least {}", n.op_type, n.name, n.input.len(), i + 1))
+}
+
 /// Assert an ONNX `Conv` node's hyperparameters against what the importing model
 /// will dispatch.
 ///

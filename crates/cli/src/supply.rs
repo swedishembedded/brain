@@ -569,43 +569,6 @@ pub(crate) mod tests {
         assert!(err.contains("unknown"), "{err}");
     }
 
-    /// campplus/s3tokenizer both declare `weights_env` but no
-    /// `default_ref` (no confirmed small upstream repo to auto-fetch) --
-    /// with the variable unset this must name it and explain there is
-    /// nothing to fetch, never silently return Ok and leave the caller with
-    /// no explanation at all.
-    #[test]
-    fn ensure_env_weights_with_names_the_var_when_no_default_checkpoint_is_known() {
-        let _serial = env_lock();
-        let store = store("supply-test-env-weights-no-default-ref");
-        for (arch, vars) in [
-            ("campplus", &["BRAIN_CAMPPLUS_DIR"][..]),
-            ("s3tokenizer", &["BRAIN_S3TOKENIZER_V2", "BRAIN_S3TOKENIZER_V3"][..]),
-        ] {
-            for v in vars {
-                std::env::remove_var(v);
-            }
-            let err = ensure_env_weights_with(arch, &store, &FakeHub::new()).unwrap_err();
-            for v in vars {
-                assert!(err.contains(v), "{arch}: {err:?} must name {v}");
-            }
-            assert!(err.contains("no default checkpoint known"), "{arch}: {err:?} must not claim there is something to auto-fetch");
-        }
-    }
-
-    /// The flag-twin escape hatch (`resolve.rs`'s `weights_already_named`)
-    /// never even calls this function when `--weights`/its twin flag was
-    /// given -- but the variable being set directly (what that flag ends up
-    /// mapping to) must keep resolving exactly as before the fix above.
-    #[test]
-    fn ensure_env_weights_with_still_succeeds_when_the_var_is_already_set_with_no_default_ref() {
-        let _serial = env_lock();
-        let store = store("supply-test-env-weights-no-default-ref-set");
-        std::env::set_var("BRAIN_CAMPPLUS_DIR", "already-set-campplus");
-        ensure_env_weights_with("campplus", &store, &FakeHub::new()).unwrap();
-        std::env::remove_var("BRAIN_CAMPPLUS_DIR");
-    }
-
     /// `qwen3tts` declares two roles (`weights_dir`, `ckpt`) from its
     /// `default_ref` fetch, and its own dedicated `FilesRecipe` only claims a
     /// repo that actually has a `speech_tokenizer/config.json` sibling (see

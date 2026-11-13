@@ -571,21 +571,12 @@ pub const ARCHS: &[Arch] = &[
         variants: &[Variant { reference: "Qwen/Qwen3-TTS-12Hz-0.6B-Base", params: 914_643_008, quants: &[], license: None }]),
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
     arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
-    // `weights_env` names the directory containing the released
-    // `campplus.onnx` - `crates/campplus/tests/parity.rs` and
-    // `crates/cosyvoice`'s pipeline glue both already treat
-    // `BRAIN_CAMPPLUS_DIR` as this row's canonical variable; registering it
-    // here keeps that convention in one place instead of two ad-hoc copies.
-    arch!("campplus", "CAM++ D-TDNN speaker encoder (192-d x-vector)", Audio, Brain, "brain-campplus",
-          weights_env: &[("BRAIN_CAMPPLUS_DIR", "dir")]),
-    // No official llama.cpp/GGUF architecture entry exists for either
-    // component; upstream ships the ONNX-only `speech_tokenizer_v2.onnx`
-    // (CosyVoice 2) / `speech_tokenizer_v3.onnx` (CosyVoice 3). No single
-    // `default_ref` names a whole repo carrying just this one file, so
-    // `weights_env` is the only resolution path for now, one role per
-    // codebook version - both variants share one 6561-entry FSQ codebook.
-    arch!("s3tokenizer", "S3Tokenizer FSQ supervised-semantic speech tokenizer", Audio, Brain, "brain-s3tokenizer",
-          weights_env: &[("BRAIN_S3TOKENIZER_V2", "v2"), ("BRAIN_S3TOKENIZER_V3", "v3")]),
+    // CAM++ and S3Tokenizer are CosyVoice's reference-audio front end: their
+    // released ONNX graphs resolve as `cosyvoice`'s own `campplus` and
+    // `s3tokenizer` roles (`cosyvoice::spec::CosyVoiceSpec`), classified by
+    // graph structure. Upstream ships them only inside the CosyVoice repos.
+    arch!("campplus", "CAM++ D-TDNN speaker encoder (192-d x-vector)", Audio, Brain, "brain-campplus"),
+    arch!("s3tokenizer", "S3Tokenizer FSQ supervised-semantic speech tokenizer", Audio, Brain, "brain-s3tokenizer"),
     // The id names the FAMILY, not the release - CosyVoice 2 and CosyVoice 3
     // share one upstream product name and one LM backbone (a stock
     // Qwen2.5-0.5B), differing only in the flow decoder's estimator (UNet vs

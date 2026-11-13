@@ -273,6 +273,9 @@ tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 brain-checkpoint.workspace = true
+# Weightless CAM++/S3Tokenizer graphs for the CosyVoice resolution fixture.
+brain-campplus.workspace = true
+brain-s3tokenizer.workspace = true
 brain-testutil.workspace = true
 # `data::rng::Lcg`, the one deterministic test filler (the YOLOv5 fixture weights).
 brain-data.workspace = true

@@ -909,12 +909,9 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("minimaxmusic3", &minimaxmusic3::spec::MinimaxMusic3Spec)),
             resident: crate::resident_in_store!(crate::resident_minimaxmusic3::MinimaxMusic3Resident::from_store),
         },
-        // CosyVoice 2/3 zero-shot voice cloning TTS. `llm`/`flow`/`hift`/
-        // `tokenizer` come from `cosyvoice::spec::CosyVoiceSpec` via the
-        // resolved Assembly this entry is called with (`s3tokenizer`/
-        // `campplus` are still separate, not-yet-migrated architectures -
-        // `CosyVoicePaths::from_assembly` reads those two from their own env
-        // vars). `cosyvoice::pipeline::generate` still loads and drops all
+        // CosyVoice 2/3 zero-shot voice cloning TTS. All six roles come from
+        // `cosyvoice::spec::CosyVoiceSpec` via the resolved Assembly this
+        // entry is called with. `cosyvoice::pipeline::generate` still loads and drops all
         // five checkpoints per call (see its own module doc), so the bound
         // `paths` this provider holds cost nothing to keep between calls.
         ModelEntry {

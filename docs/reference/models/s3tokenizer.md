@@ -26,8 +26,9 @@ backbone. It has not been read, imported, or config-modeled. Adding it is a
 follow-up milestone (new `S3TokenizerConfig` variant + import schedule), not
 a flag on `S3TokenizerConfig::v2()`.
 
-Weights env vars, one per codebook version: `BRAIN_S3TOKENIZER_V2` (read by
-the parity test today), `BRAIN_S3TOKENIZER_V3` (reserved, unused until v3
-lands).
+Served as [CosyVoice](cosyvoice.md)'s `s3tokenizer` role: a
+`speech_tokenizer_v2.onnx` in the model store is recognized by its FSQ head
+and v2 block count (`s3tokenizer::import::is_v2_graph`). The parity test
+reads its fixture from `BRAIN_S3TOKENIZER_V2`.
 
 Package: `brain-s3tokenizer`.

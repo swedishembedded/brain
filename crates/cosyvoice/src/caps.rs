@@ -38,18 +38,17 @@
 //! whose NSF noise is drawn once per instance and reused across calls rather
 //! than redrawn per utterance.
 //!
-//! **The weights are the caller's to point at.** `BRAIN_COSYVOICE_LLM`/`_FLOW`/
-//! `_HIFT` name directories, and a CosyVoice 3 request needs them pointing at a
-//! CosyVoice 3 checkpoint - the two generations' `llm.pt`/`flow.pt`/`hift.pt`
-//! are different files with the same names. A CosyVoice 2 checkpoint under a
-//! `variant="cosyvoice3"` request fails in the importer with a shape or
-//! missing-tensor error; it does not silently produce noise.
+//! **The resolved checkpoints decide the generation.** `llm`/`flow`/`hift`
+//! must be the generation a `variant` request names - the two generations'
+//! `llm.pt`/`flow.pt`/`hift.pt` are different files with the same names. A
+//! CosyVoice 2 checkpoint under a `variant="cosyvoice3"` request fails in the
+//! importer with a shape or missing-tensor error; it does not silently
+//! produce noise.
 //!
 //! # Reference audio: a blob, not a server-side path
 //!
 //! `crate::pipeline::generate` takes a filesystem path for the reference
-//! clip (`ref_wav_path`), because it is driven directly from
-//! `crates/cosyvoice/examples/synth.rs` today. A served action cannot take a
+//! clip (`ref_wav_path`). A served action cannot take a
 //! path - a D-Bus/HTTP caller's reference clip lives on THEIR disk, not
 //! this process's - so [`synth_action`] instead takes it as an `Media::Audio`
 //! input blob (matching `qwen3omnimoe`'s speech-input convention) and
@@ -105,7 +104,7 @@ fn synth_spec() -> ActionSpec {
     .streaming()
     .param(ParamSpec::new("text", ParamType::Str, "the target text to synthesize").required())
     .param(ParamSpec::new("ref_text", ParamType::Str, "the reference clip's own transcript").required())
-    .param(ParamSpec::new("variant", ParamType::Str, "cosyvoice2 or cosyvoice3 (the BRAIN_COSYVOICE_* dirs must hold that generation's checkpoint)").default(json!("cosyvoice2")))
+    .param(ParamSpec::new("variant", ParamType::Str, "cosyvoice2 or cosyvoice3 (the resolved checkpoints must be that generation's)").default(json!("cosyvoice2")))
     .param(ParamSpec::new("seed", ParamType::Int, "RNG seed for the LM sampler and HiFT NSF noise (reproducible on this port, not bit-exact vs the python reference; omit for random)"))
     .param(
         ParamSpec::new("n_timesteps", ParamType::Int, "Euler steps the flow decoder's CFM solver takes")
@@ -188,8 +187,8 @@ fn decode_ref_audio(blob: &Blob) -> Result<(Vec<f32>, u32), String> {
 /// Run one `synth` call and wrap the result as an audio-output [`Outcome`] -
 /// ONE implementation, shared by [`CosyVoiceProvider`] and the residency
 /// adapter. `paths` is resolved by the caller (direct vs. resident differ
-/// only in error framing, not in how paths resolve - both ultimately read
-/// [`CosyVoicePaths::from_env`]).
+/// only in error framing, not in how paths resolve - both come from
+/// [`CosyVoicePaths::from_assembly`]).
 pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let text = inv.get_str("text").ok_or("cosyvoice synth: missing required param 'text'")?;
     let ref_text = inv.get_str("ref_text").ok_or("cosyvoice synth: missing required param 'ref_text'")?;

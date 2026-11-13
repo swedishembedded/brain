@@ -101,9 +101,8 @@ use crate::hift_import::import_hift_pt;
 use crate::llm::CosyVoiceLm;
 use crate::profile;
 
-/// One role per checkpoint/resource directory, resolved from the SAME six
-/// env vars `crates/arch`'s `cosyvoice`/`s3tokenizer`/`campplus` registry
-/// rows name in their own `weights_env` tables.
+/// One directory per role, each the parent of the file
+/// `crate::spec::CosyVoiceSpec` resolved for it.
 #[derive(Clone, Debug)]
 pub struct CosyVoicePaths {
     /// Directory containing `llm.pt`.
@@ -121,39 +120,12 @@ pub struct CosyVoicePaths {
     pub tokenizer: String,
 }
 
-/// `(variable, human role name)`, in the order [`CosyVoicePaths`] declares
-/// them - one table so the env reader and its own error messages cannot
-/// disagree about the spelling (matches `minimaxmusic3::generate::PATH_VARS`'s
-/// own shape).
-pub const PATH_VARS: [(&str, &str); 6] = [
-    ("BRAIN_COSYVOICE_LLM", "speech-token LM"),
-    ("BRAIN_COSYVOICE_FLOW", "flow decoder"),
-    ("BRAIN_COSYVOICE_HIFT", "HiFT vocoder"),
-    ("BRAIN_S3TOKENIZER_V2", "S3Tokenizer FSQ speech tokenizer"),
-    ("BRAIN_CAMPPLUS_DIR", "CAM++ speaker encoder"),
-    ("BRAIN_COSYVOICE_TOKENIZER", "text BPE tokenizer (CosyVoice-BlankEN)"),
-];
-
 impl CosyVoicePaths {
-    /// Every role from its environment variable; `Err` names the first
-    /// missing one.
-    pub fn from_env() -> Result<CosyVoicePaths, String> {
-        let get = |i: usize| -> Result<String, String> {
-            let (var, role) = PATH_VARS[i];
-            std::env::var(var).ok().filter(|v| !v.is_empty()).ok_or_else(|| format!("no {role} weights: set {var}"))
-        };
-        Ok(CosyVoicePaths { llm: get(0)?, flow: get(1)?, hift: get(2)?, s3tokenizer: get(3)?, campplus: get(4)?, tokenizer: get(5)? })
-    }
-
-    /// Build `llm`/`flow`/`hift`/`tokenizer` from an already-resolved
-    /// [`capability::Assembly`] (`crate::spec::CosyVoiceSpec`'s own four
-    /// roles) - `s3tokenizer`/`campplus` still come from their own env vars,
-    /// since those are separate architectures
-    /// (`crates/arch`'s own `s3tokenizer`/`campplus` rows) not yet migrated
-    /// onto the resolver themselves.
+    /// Every role from an already-resolved [`capability::Assembly`]
+    /// (`crate::spec::CosyVoiceSpec`'s six roles).
     ///
-    /// Every resolved role is a FILE (`llm.pt`/`flow.pt`/`hift.pt`, or a
-    /// `tokenizer.json`), never the directory this struct's fields actually
+    /// Every resolved role is a FILE (`llm.pt`/`flow.pt`/`hift.pt`, the two
+    /// `.onnx` graphs, or a `tokenizer.json`), never the directory this struct's fields actually
     /// want - `crate::pipeline::generate` joins `"{dir}/llm.pt"` etc. itself,
     /// exactly as `Paths::vae`'s own bare-file case does in `flux2::pipeline`
     /// - so this takes each resolved path's own parent directory.
@@ -163,13 +135,12 @@ impl CosyVoicePaths {
             let d = p.parent().ok_or_else(|| format!("cosyvoice: {role} path {} has no parent directory", p.display()))?;
             Ok(d.to_string_lossy().into_owned())
         };
-        let env_role = |var: &str, role: &str| -> Result<String, String> { std::env::var(var).ok().filter(|v| !v.is_empty()).ok_or_else(|| format!("cosyvoice: no {role} weights: set {var} ({role} is not yet resolver-migrated)")) };
         Ok(CosyVoicePaths {
             llm: dir_of("llm")?,
             flow: dir_of("flow")?,
             hift: dir_of("hift")?,
-            s3tokenizer: env_role("BRAIN_S3TOKENIZER_V2", "S3Tokenizer FSQ speech tokenizer")?,
-            campplus: env_role("BRAIN_CAMPPLUS_DIR", "CAM++ speaker encoder")?,
+            s3tokenizer: dir_of("s3tokenizer")?,
+            campplus: dir_of("campplus")?,
             tokenizer: dir_of("tokenizer")?,
         })
     }
@@ -569,37 +540,6 @@ mod tests {
     #[test]
     fn default_gen_opts_draw_a_fresh_seed_each_time() {
         assert_ne!(GenOpts::default().seed, GenOpts::default().seed);
-    }
-
-    #[test]
-    fn path_vars_role_names_match_the_cosyvoice_archspecs_own_roles() {
-        // `cosyvoice`'s OWN four roles now come from `crate::spec::
-        // CosyVoiceSpec::roles()` (the resolver), not `crates/arch`'s
-        // `weights_env` table (empty for this arch's row now) - the other
-        // two `PATH_VARS` entries (`s3tokenizer`/`campplus`) are still
-        // separate, not-yet-migrated architectures with their own
-        // `weights_env` rows, unaffected by this arch's own migration.
-        use brain_modelstore::resolve::ArchSpec;
-        let spec = crate::spec::CosyVoiceSpec;
-        assert_eq!(spec.roles(), ["llm", "flow", "hift", "tokenizer"]);
-
-        let vars: Vec<&str> = PATH_VARS.iter().map(|(v, _)| *v).collect();
-        assert_eq!(
-            vars,
-            ["BRAIN_COSYVOICE_LLM", "BRAIN_COSYVOICE_FLOW", "BRAIN_COSYVOICE_HIFT", "BRAIN_S3TOKENIZER_V2", "BRAIN_CAMPPLUS_DIR", "BRAIN_COSYVOICE_TOKENIZER"]
-        );
-    }
-
-    #[test]
-    fn from_env_names_the_first_missing_var() {
-        // Serial by construction, same caveat as `minimaxmusic3::generate`'s
-        // own version of this test: env vars are process-global, but this
-        // test only ever asserts on the `Err` path.
-        for (var, _) in PATH_VARS {
-            std::env::remove_var(var);
-        }
-        let err = CosyVoicePaths::from_env().unwrap_err();
-        assert!(err.contains("BRAIN_COSYVOICE_LLM"), "unexpected error: {err}");
     }
 
     #[test]

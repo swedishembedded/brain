@@ -15,5 +15,8 @@ initializers) and forward are implemented (`crates/campplus/src/{config,import,m
 Forward parity vs the real ONNX checkpoint, replayed through `onnxruntime`:
 cosine 1.0000000000, `rel_l2` 2.3e-6, `max_abs` 5.3e-6
 (`crates/campplus/tests/parity.rs`, gated on `BRAIN_CAMPPLUS_DIR`/`testdata/golden/cosyvoice`).
+Served as [CosyVoice](cosyvoice.md)'s `campplus` role: a `campplus.onnx` in
+the model store is recognized by its Conv/BatchNormalization structure
+(`campplus::import::is_release_graph`).
 No training/gradcheck path yet - this component is inference-only until a
 future milestone adds one.

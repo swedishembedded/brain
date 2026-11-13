@@ -1,7 +1,4 @@
 crates/arcface/src/caps.rs	BRAIN_ARCFACE_DIR
-crates/arch/src/lib.rs	BRAIN_CAMPPLUS_DIR
-crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V2
-crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V3
 crates/backend-api/src/lib.rs	HOME
 crates/backend-api/src/lib.rs	XDG_CACHE_HOME
 crates/backend-cpu/src/fast_conv.rs	BRAIN_WINOGRAD
@@ -150,14 +147,7 @@ crates/connectome/tests/it/retinotopy.rs	BRAIN_CONNECTOME_DIR
 crates/controlnet/src/caps.rs	BRAIN_SDXL_VAE_DEVICE
 crates/controlnet/tests/it/parity.rs	BRAIN_CONTROLNET
 crates/controlnet/tests/it/parity.rs	BRAIN_TESTDATA
-crates/cosyvoice/src/pipeline.rs	<var>
-crates/cosyvoice/src/pipeline.rs	BRAIN_CAMPPLUS_DIR
-crates/cosyvoice/src/pipeline.rs	BRAIN_COSYVOICE_FLOW
-crates/cosyvoice/src/pipeline.rs	BRAIN_COSYVOICE_HIFT
-crates/cosyvoice/src/pipeline.rs	BRAIN_COSYVOICE_LLM
 crates/cosyvoice/src/pipeline.rs	BRAIN_COSYVOICE_PROFILE
-crates/cosyvoice/src/pipeline.rs	BRAIN_COSYVOICE_TOKENIZER
-crates/cosyvoice/src/pipeline.rs	BRAIN_S3TOKENIZER_V2
 crates/cosyvoice/tests/it/cv3_flow_parity.rs	BRAIN_COSYVOICE3_FLOW
 crates/cosyvoice/tests/it/cv3_hift_parity.rs	BRAIN_COSYVOICE3_HIFT
 crates/cosyvoice/tests/it/flow_parity.rs	BRAIN_COSYVOICE_FLOW
@@ -895,10 +885,8 @@ crates/sdk/tests/text_pipeline_variants.rs	BRAIN_MODELS_DIR
 crates/sdk/tests/it/timeline.rs	MOE_SKIP_GPU_TESTS
 crates/sdk/tests/transcribe_pipeline.rs	BRAIN_HUB_ENDPOINT
 crates/sdk/tests/transcribe_pipeline.rs	BRAIN_MODELS_DIR
-crates/sdk/tests/tts_pipeline.rs	BRAIN_CAMPPLUS_DIR
 crates/sdk/tests/tts_pipeline.rs	BRAIN_HUB_ENDPOINT
 crates/sdk/tests/tts_pipeline.rs	BRAIN_MODELS_DIR
-crates/sdk/tests/tts_pipeline.rs	BRAIN_S3TOKENIZER_V2
 crates/sdk/tests/upscale_pipeline.rs	BRAIN_HUB_ENDPOINT
 crates/sdk/tests/upscale_pipeline.rs	BRAIN_MODELS_DIR
 crates/sdk/tests/video_pipeline.rs	BRAIN_HUB_ENDPOINT
