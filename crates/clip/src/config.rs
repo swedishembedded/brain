@@ -359,11 +359,10 @@ impl EvaVisionConfig {
 /// [`gguf::deepseek_ocr_vision::DeepseekOcrVisionConfig`]) because it is shared
 /// with the SAM branch.
 ///
-/// **`use_gelu == false` means quick-GELU**, not "no activation" - the flag
-/// names the *exact-erf* variant, so the DeepSeek-OCR checkpoint (which sets it
-/// false) runs `quick_gelu`. See that module's `DeepseekOcrVisionConfig`
-/// documentation; [`ClipVisionConfig::from_gguf`] is the one place that
-/// inversion is written down.
+/// **This tower runs quick-GELU** (`x * sigmoid(1.702 x)`), the activation of
+/// upstream's `NoTPFeedForward`. The mmproj's `clip.use_gelu` key is not read
+/// for it: see [`ClipVisionConfig::from_gguf`], the one place that is written
+/// down.
 ///
 /// Unlike [`EvaVisionConfig`] this is an ordinary pre-LN ViT - no LayerScale, no
 /// QK-norm, no RoPE, no subln, one GELU-activated MLP pair - which is exactly
@@ -439,34 +438,19 @@ impl ClipVisionConfig {
     /// `clip.vision.feed_forward_length = 64` (a converter bug - see the
     /// `gguf::deepseek_ocr_vision` module doc).
     ///
-    /// **Two fields were wrong here until the real header was read**, both
-    /// recorded below because each was a plausible-looking guess:
+    /// `act` is [`TextAct::QuickGelu`]: upstream `deepencoder.py` defines
+    /// `quick_gelu(x) = x * sigmoid(1.702 * x)` and applies it in
+    /// `NoTPFeedForward::forward` (`self.fc2(quick_gelu(self.fc1(x)))`), the MLP
+    /// of `NoTPTransformerBlock`, which `NoTPTransformer` stacks for `VitModel`,
+    /// i.e. exactly this tower. The reference ladder
+    /// (`tools/goldens/deepseek_ocr_dump_reference.py`) uses the same function
+    /// and `deepseek2ocr::DeepseekOcrConfig::tiny` the same variant, so the
+    /// tiny gate and the real-weight path agree. (The SAM tower is a different
+    /// module: `ImageEncoderViT`'s `Block` takes `nn.GELU`, the exact-erf form,
+    /// which is what `crates/sam1` runs.)
     ///
-    ///  * `act` was `QuickGelu`, on the belief that this file sets
-    ///    `clip.use_gelu = false`. It does not: the shipped mmproj carries
-    ///    `clip.use_gelu = true`, so the inversion in [`Self::from_gguf`]
-    ///    selects the exact-erf form. (What the ORIGINAL CLIP-L uses is
-    ///    quick-GELU, and llama.cpp's own reading of `use_gelu = true` is its
-    ///    `FFN_GELU`, the tanh approximation - so all three candidates are in
-    ///    play. This tracks the file's own flag.)
-    ///
-    ///    **The upstream source has since settled it, and it disagrees with
-    ///    this value.** `deepseek-ai/DeepSeek-OCR`'s own `deepencoder.py`
-    ///    defines `quick_gelu(x) = x * sigmoid(1.702 * x)` and applies it in
-    ///    `NoTPFeedForward::forward` (`self.fc2(quick_gelu(self.fc1(x)))`),
-    ///    which is the MLP of `NoTPTransformerBlock`, the block
-    ///    `NoTPTransformer` stacks for `VitModel` - i.e. exactly this tower.
-    ///    (The SAM tower is unaffected: `ImageEncoderViT`'s `Block` takes
-    ///    `act_layer: Type[nn.Module] = nn.GELU`, the exact-erf form, which
-    ///    is what `crates/sam1` already uses.) So this tower should be
-    ///    `TextAct::QuickGelu` and both import paths currently run it at
-    ///    `GeluErf`. Changing it is a real numerics change to an already-
-    ///    shipped path, so it is recorded here rather than applied in
-    ///    passing: it needs its own re-gate against the real-weight parity
-    ///    tests, which are skip-if-absent and did not run when this was
-    ///    found.
-    ///  * `layer_norm_eps` is 1e-5 and that is NOT the file's key - see
-    ///    [`Self::from_gguf`].
+    /// `layer_norm_eps` is 1e-5 and that is NOT the file's key - see
+    /// [`Self::from_gguf`].
     pub fn deepseek_ocr() -> ClipVisionConfig {
         ClipVisionConfig {
             shape: gguf::deepseek_ocr_vision::ClipConfig {
@@ -479,14 +463,19 @@ impl ClipVisionConfig {
                 n_positions: 257,
                 layer_norm_eps: DEEPSEEK_OCR_CLIP_EPS,
             },
-            act: TextAct::GeluErf,
+            act: TextAct::QuickGelu,
             stem: VisionStem::Clip,
         }
     }
 
-    /// Adopt an imported mmproj config. **The activation inversion lives here**:
-    /// `use_gelu == false` selects quick-GELU (this file sets it *true*, so it
-    /// gets the exact-erf form).
+    /// Adopt an imported mmproj config.
+    ///
+    /// **The activation is quick-GELU whatever `clip.use_gelu` says.** The
+    /// shipped file sets that key `true`, a converter's choice that names a GELU
+    /// variant, while the upstream model's CLIP MLP is `quick_gelu` (see
+    /// [`Self::deepseek_ocr`]). The source code of the model is the authority
+    /// here, so the key is not read for this tower; reading it would run the
+    /// wrong function in every one of its MLPs.
     ///
     /// **The LayerNorm epsilon is deliberately NOT the file's key.** The shipped
     /// mmproj carries `clip.vision.attention.layer_norm_epsilon = 1e-6`, but
@@ -504,7 +493,7 @@ impl ClipVisionConfig {
         shape.layer_norm_eps = DEEPSEEK_OCR_CLIP_EPS;
         ClipVisionConfig {
             shape,
-            act: if cfg.use_gelu { TextAct::GeluErf } else { TextAct::QuickGelu },
+            act: TextAct::QuickGelu,
             stem: VisionStem::Clip,
         }
     }
@@ -753,11 +742,14 @@ mod tests {
         assert_eq!(got.len(), 5 + 24 * 12);
     }
 
-    /// `use_gelu` is INVERTED relative to what its name suggests, and the
-    /// DeepSeek-OCR mmproj sets it false. A future flip would silently change
-    /// every MLP in the tower, so it is asserted rather than commented.
+    /// DeepSeek-OCR's CLIP tower runs `quick_gelu` (`NoTPFeedForward` in the
+    /// upstream `deepencoder.py`), whatever the mmproj's `clip.use_gelu` says
+    /// (the shipped file says `true`). A future return to the key would
+    /// silently change every MLP in the tower, so it is asserted. The tiny
+    /// fixture config (`deepseek2ocr::DeepseekOcrConfig::tiny`), which the
+    /// reference ladder gates against `quick_gelu`, must agree.
     #[test]
-    fn use_gelu_false_selects_quick_gelu() {
+    fn deepseek_ocr_tower_is_quick_gelu_on_every_path() {
         use gguf::deepseek_ocr_vision::{DeepseekOcrVisionConfig, SamConfig};
         let sam = SamConfig {
             d_model: 8,
@@ -783,12 +775,9 @@ mod tests {
             use_gelu,
             scale_factor: 1,
         };
+        assert_eq!(base.act, TextAct::QuickGelu);
+        assert_eq!(ClipVisionConfig::from_gguf(&mk(true)).act, TextAct::QuickGelu, "the shipped header sets use_gelu = true");
         assert_eq!(ClipVisionConfig::from_gguf(&mk(false)).act, TextAct::QuickGelu);
-        assert_eq!(ClipVisionConfig::from_gguf(&mk(true)).act, TextAct::GeluErf);
-        // The SHIPPED mmproj sets `clip.use_gelu = true` (read off the real
-        // header, not assumed), so the documented preset must be the erf arm.
-        // `tests/deepseek_ocr_real.rs` asserts the preset against the real file.
-        assert_eq!(ClipVisionConfig::deepseek_ocr().act, TextAct::GeluErf);
     }
 
     /// The file's `layer_norm_epsilon` is the SAM tower's 1e-6 and the reference

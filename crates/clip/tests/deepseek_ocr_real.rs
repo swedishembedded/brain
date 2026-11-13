@@ -20,20 +20,21 @@
 //!    it against. This test reports what it observes and asserts only what it
 //!    can actually justify.
 //!
-//! ## What the real header changed
+//! ## What the real header settled
 //!
-//! Reading the shipped `mmproj-DeepSeek-OCR-Q8_0.gguf`'s KV settled two things
-//! that had been carried as beliefs, and both were wrong in
-//! `ClipVisionConfig::deepseek_ocr()`:
-//!
-//!  * `clip.use_gelu = **true**`, not false. The preset said quick-GELU. See
-//!    that constructor's doc for the three-way ambiguity this leaves open
-//!    (original CLIP-L uses quick-GELU; llama.cpp reads `true` as its tanh
-//!    `FFN_GELU`; brain follows the file's flag into the exact-erf form).
+//!  * `clip.use_gelu = true` in the shipped file, a converter's choice of GELU
+//!    variant that the upstream model does not use: its CLIP tower runs
+//!    `quick_gelu(x) = x * sigmoid(1.702 x)` (`NoTPFeedForward`), so both
+//!    `ClipVisionConfig::deepseek_ocr()` and `from_gguf` select quick-GELU and
+//!    the preset equality below holds with the file's key ignored. The same
+//!    activation is what the checkpoint-free reference ladder gates.
 //!  * `clip.vision.attention.layer_norm_epsilon = 1e-6`, which is the SAM
 //!    tower's number and **is not what the reference runs for CLIP** - it
 //!    overwrites `hparams.eps` with 1e-5 in its DeepSeek-OCR branch. So the key
 //!    is deliberately not adopted; see `ClipVisionConfig::from_gguf`.
+//!
+//! The forward below asserts finiteness only; it is not a parity gate against
+//! the real weights.
 //!
 //! Skips itself when the checkpoint or the fixture is absent.
 
