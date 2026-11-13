@@ -33,8 +33,9 @@
 //! the one training loop; scoring is `qwen3::eval::score_chat`. Nothing here
 //! is a second implementation of any of them.
 //!
-//! **The mix.** Training draws rows uniformly with replacement from the
-//! dataset and every replay file. [`ChatFineTune::replay`] files join the
+//! **The mix.** Training draws rows in shuffled epochs (every listed row once
+//! before any again, `model::train`'s epoch order) from the dataset and every
+//! replay file. [`ChatFineTune::replay`] files join the
 //! dataset as a plain union, or at [`ChatFineTune::replay_share`] of the
 //! draws together; [`ChatFineTune::replay_at`] gives one file a share of its
 //! own. A share is kept by listing each group of records as many times as
@@ -701,7 +702,7 @@ impl ChatFineTune {
 
     /// The share of training draws that come from the [`Self::replay`] files
     /// in all (0 < share < 1), however large they are next to the dataset.
-    /// Examples are drawn uniformly with replacement, so a replay set many
+    /// Examples are drawn in shuffled epochs over the listed rows, so a replay set many
     /// times the dataset's size would otherwise take almost every step, and
     /// one much smaller would hardly be drawn; the dataset's records and the
     /// replay's are each listed as many times as puts the replay at this
@@ -2260,9 +2261,9 @@ const MIX_MAX_SCALE: usize = 16;
 /// before the mix is listed at a larger scale.
 const MIX_TOLERANCE: f64 = 0.01;
 
-/// How many times each group of records is listed so that, drawn uniformly
-/// with replacement from all the rows, a group's records come up its share
-/// of the time. `groups` is `(records, share)`, the dataset first: its share
+/// How many times each group of records is listed so that, drawn in shuffled
+/// epochs over all the listed rows, a group's records come up its share of
+/// every epoch. `groups` is `(records, share)`, the dataset first: its share
 /// is whatever the others leave. Each group's weight per record is its share
 /// over its records; the repeats are those weights over the smallest, scaled
 /// by the smallest whole factor up to [`MIX_MAX_SCALE`] that puts every
