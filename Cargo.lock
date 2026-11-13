@@ -921,6 +921,7 @@ dependencies = [
  "brain-qwen3omnimoe",
  "brain-qwen3tts",
  "brain-qwen3vl",
+ "brain-recon",
  "brain-residency",
  "brain-ricursive",
  "brain-rrdbnet",
@@ -1060,7 +1061,6 @@ dependencies = [
  "brain-qwen3omnimoe",
  "brain-qwen3tts",
  "brain-qwen3vl",
- "brain-recon",
  "brain-residency",
  "brain-ricursive",
  "brain-rl",
@@ -1072,7 +1072,6 @@ dependencies = [
  "brain-sdxlunet",
  "brain-server",
  "brain-serving",
- "brain-sfm",
  "brain-shutdown",
  "brain-splat",
  "brain-supir",
@@ -2660,6 +2659,7 @@ version = "5.1.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-camera",
+ "brain-capability",
  "brain-data",
  "brain-gpu-core",
  "brain-imaging",
@@ -2670,6 +2670,7 @@ dependencies = [
  "brain-sfm",
  "brain-splat",
  "brain-testutil",
+ "serde_json",
 ]
 
 [[package]]
@@ -6873,6 +6874,18 @@ version = "5.1.0"
 dependencies = [
  "brain-invoke",
  "brain-sam2",
+]
+
+[[package]]
+name = "sample-models-splat"
+version = "5.1.0"
+dependencies = [
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-invoke",
+ "brain-recon",
+ "brain-splat",
+ "brain-wm-display",
 ]
 
 [[package]]

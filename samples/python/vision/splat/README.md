@@ -69,6 +69,6 @@ implementation of that packing.
 
 ## Not served
 
-The interactive WASD/mouse fly-through (`brain splat view`) is
+The interactive WASD/mouse fly-through (`sample-models-splat view`) is
 deliberately NOT served: it's human-in-the-loop with no request/response
 shape.

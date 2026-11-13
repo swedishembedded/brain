@@ -9,13 +9,13 @@ public `brain` SDK. No camera poses, no EXIF and no model weights are needed.
 ```bash
 make samples/reconstruction/splat/build
 make samples/reconstruction/splat/run ARGS="--photos ~/captures/scene --out out/scene.ply"
-brain splat view out/scene.ply
+make samples/models/splat/run ARGS="view out/scene.ply"
 ```
 
 ## What it demonstrates
 
 * `brain::Reconstruction::builder().photos(..).run()` is the whole
-  photogrammetry pipeline in one call, the same one `brain splat train` runs:
+  photogrammetry pipeline in one call, the same one the served `brain/splat` `train` action runs:
   * **Structure from motion** recovers every photograph's camera and
     calibrates its real lens (pinhole, Brown-Conrady or fisheye, chosen by
     the photographs themselves).

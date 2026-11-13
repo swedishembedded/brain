@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! 3D Gaussian Splatting (`splat::caps`) behind the residency scheduler.
+//! 3D Gaussian Splatting (`splat::caps`, with `recon::caps`'s structure from
+//! motion and photograph-to-scene fit) behind the residency scheduler.
 //!
 //! Unlike every other resident adapter in this file's siblings, splat has NO
 //! fixed checkpoint: the scene arrives as request bytes (`render`'s `scene`
@@ -20,6 +21,8 @@
 
 use capability::{ActionResult, Invocation, Manifest, Progress, Provider};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
+use std::sync::Arc;
+
 use splat::caps::SplatProvider;
 
 /// Splat's render/fit behind the scheduler. Always available - it needs no
@@ -34,7 +37,7 @@ impl SplatResident {
 
 impl ResidentModel for SplatResident {
     fn manifest(&self) -> Manifest {
-        splat::caps::manifest()
+        recon::caps::manifest()
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
@@ -54,12 +57,12 @@ impl ResidentModel for SplatResident {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        Ok(Box::new(SplatInstance { provider: SplatProvider::new(), device }))
+        Ok(Box::new(SplatInstance { provider: recon::caps::Photogrammetry::new(Arc::new(SplatProvider::new())), device }))
     }
 }
 
 struct SplatInstance {
-    provider: SplatProvider,
+    provider: recon::caps::Photogrammetry,
     /// The scheduler-assigned device - `render`'s lazy per-request GPU build
     /// happens inside `run`, not `activate` (the scene isn't known yet), so
     /// this is threaded through instead of scoping the device once up front.

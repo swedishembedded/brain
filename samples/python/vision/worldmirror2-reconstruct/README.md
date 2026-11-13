@@ -11,7 +11,7 @@ tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py \
       --images a.ppm,b.ppm,c.ppm --out scene.ply
 
-brain splat view scene.ply
+make samples/models/splat/run ARGS="view scene.ply"
 ```
 
 ## What it demonstrates
@@ -23,7 +23,7 @@ must also land on a whole number of the model's 14px patches).
 `min_opacity`/`max_depth`/`prune_voxel` mirror `brain worldmirror2 infer`'s
 own flags exactly; `--maps` additionally fetches a per-frame depth-map
 video, written out as `..._depth_NN.ppm`. Render the result with
-`brain splat view scene.ply` or `samples/python/vision/splat/splat_render.py`.
+`sample-models-splat view scene.ply` or `samples/python/vision/splat/splat_render.py`.
 
 ## What it needs
 

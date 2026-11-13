@@ -32,11 +32,11 @@ same photos, using the poses the first stage recovered.
 ```bash
 brain worldmirror2 infer --weights mirror.safetensors --images photos/ \
     --prune 0.002 --out scene
-brain splat fit scene/scene.ply --cameras scene/cameras.json --images photos/ \
-    --iters 280 --out fitted.ply
-brain splat view fitted.ply
+brain splat fit --scene scene/scene.ply --cameras scene/cameras.json --images photos/ \
+    --iters 280 --out scene=fitted.ply
+sample-models-splat view fitted.ply   # make samples/models/splat/build
 ```
 
-`--images` for `fit` must be the SAME frames, at the size the recovered
-cameras were written for (`width`/`height` in `cameras.json`) - `fit` asserts
-on a mismatch rather than fitting against a rescaled target.
+`--images` for `fit` must be the SAME frames the cameras were recovered from:
+each is resampled to its camera's size, and one whose aspect differs from its
+camera's by more than 5% is refused rather than stretched.

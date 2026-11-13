@@ -971,12 +971,12 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("timesfm3", &timesfm3::spec::Timesfm3Spec)),
             resident: resident!(resident_forecast::Timesfm3Resident::from_env),
         },
-        // 3D Gaussian Splatting (render/fit): needs no weights at all, the scene
+        // 3D Gaussian Splatting (render, fit and the scene tools): needs no weights at all, the scene
         // arrives as request bytes, yet it has a resident because render and fit
         // allocate GPU buffers per request, which is worth scheduling.
         ModelEntry {
-            manifest: splat::caps::manifest,
-            provider: always!(splat::caps::SplatProvider::new()),
+            manifest: recon::caps::manifest,
+            provider: recon::caps::provider,
             spec: None,
             resident: resident!(resident_splat::SplatResident::from_env),
         },

@@ -13,6 +13,10 @@ path = "src/lib.rs"
 # Splats, cameras, the Sim3 registration primitives, voxel fusion and the
 # upright re-framing. Everything here is scene geometry, not model weights.
 brain-splat.workspace = true
+# `caps` - brain/splat's served actions with structure from motion and the
+# photograph-to-scene fit beside them.
+brain-capability.workspace = true
+serde_json.workspace = true
 # Decoding a folder of photographs and a clip into one frame set.
 brain-imaging.workspace = true
 # Cameras and a sparse point cloud from photographs, for a training set that

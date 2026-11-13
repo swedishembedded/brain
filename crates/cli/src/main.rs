@@ -68,7 +68,6 @@ mod roofline_cli;
 mod run_cli;
 mod run_record;
 mod serve_daemon;
-mod splat_cli;
 mod supply;
 mod tree;
 mod tts_cli;
@@ -300,19 +299,11 @@ WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/reference
       Images → navigable 3DGS scene (scene.ply + cameras.json + depth/normal
       maps). Any aspect ratio; --prune 0.002 voxel-merges multi-view duplicates.
 
-3D GAUSSIAN SPLATTING (scene viewer/renderer; crates/splat)
-  brain splat info   <scene.ply>
-  brain splat render <scene.ply> --out img.ppm [--width N --height N]
-        [--eye x,y,z --target x,y,z --up x,y,z --fov D] [--depth] [--bg r,g,b]
-  brain splat fit    <scene.ply> --cameras <cams.json> --images <dir> --out F
-      [--iters N --lr R] [--position-budget R --scale-budget R]
-      refine a scene against its own photographs. The budgets bound how far
-      geometry may move, in units of a gaussian's own radius - set them when
-      the scene is already metric, as a feed-forward reconstruction's is.
-  brain splat view   <scene.ply> [--width N --height N --fov D --bg r,g,b]
-        Interactive fly-through: WASD move, Space/C up/down, Shift sprint,
-        m mouse-look, arrows look, [ ] quality, v depth view, p screenshot,
-        Enter reset, Esc quit.
+3D GAUSSIAN SPLATTING (brain/splat; the fly-through window is samples/models/splat)
+  brain splat render --scene s.ply --out image=view.png [--width W --height H --eye x,y,z --target x,y,z]
+  brain splat fit --scene s.ply --cameras cams.json --images <dir> --out scene=fitted.ply
+  brain splat train --images <dir> --out scene=s.ply --out cameras=cams.json
+      also info, orient, merge, prune, sfm; every parameter: brain splat <action> --help
 
 YOLOv8 (from-scratch anchor-free object detector)
   brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C

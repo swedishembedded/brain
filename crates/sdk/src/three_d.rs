@@ -92,7 +92,7 @@ impl Reconstruction {
     }
 
     /// Write the scene as a standard 3D Gaussian Splatting PLY, which splat
-    /// viewers and `brain splat view` open; a fitted environment is baked in
+    /// viewers and `sample-models-splat view` open; a fitted environment is baked in
     /// as a distant shell of gaussians.
     pub fn save_ply(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
         let path = path.as_ref().to_str().ok_or_else(|| Error::Backend(format!("{}: not a UTF-8 path", path.as_ref().display())))?;

@@ -60,6 +60,7 @@ use std::fmt;
 
 use splat::types::{Camera, Splats};
 
+pub mod caps;
 pub mod eval;
 pub mod ingest;
 pub mod photogrammetry;

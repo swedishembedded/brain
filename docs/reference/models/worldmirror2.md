@@ -36,7 +36,7 @@ brain worldmirror2 import <model.safetensors|hf_dir> --out out/mirror.safetensor
 brain worldmirror2 infer --weights out/mirror.safetensors --images photos/ --maps
 
 # Fly through the result (WASD + mouse)
-brain splat view out/mirror/scene.ply
+sample-models-splat view out/mirror/scene.ply   # make samples/models/splat/build
 ```
 
 ## Turntable captures need a mask
@@ -81,7 +81,7 @@ running WorldMirror-2 on 4 frame(s) at 518x392 ...
 forward + assembly: 99.2s, 812224 gaussians <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 wrote scene/scene.ply (812224 gaussians) + scene/cameras.json
 
-$ brain splat render scene/scene.ply --width 640 --height 480 --eye 0.53,-0.28,0.12 --target 0.02,-0.03,1.02 --out view.ppm
+$ brain splat render --scene scene/scene.ply --width 640 --height 480 --eye 0.53,-0.28,0.12 --target 0.02,-0.03,1.02 --out image=view.ppm
 scene/scene.ply: 812224 gaussians -> view.ppm (640x480, tiled, 1496463 isects, 195 ms) <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 ```
 

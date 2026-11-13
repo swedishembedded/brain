@@ -17,7 +17,7 @@ report progress about.
         python3 samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py \\
             --images a.ppm,b.ppm,c.ppm --out scene.ply
 
-    brain splat view scene.ply
+    sample-models-splat view scene.ply
 """
 from __future__ import annotations
 

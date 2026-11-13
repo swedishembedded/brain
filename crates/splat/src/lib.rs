@@ -15,6 +15,8 @@
 
 pub mod align;
 pub mod caps;
+mod caps_fit;
+mod caps_tools;
 pub mod carve;
 pub mod density;
 pub mod env;
@@ -32,6 +34,7 @@ pub mod quality;
 pub mod reference;
 pub mod renderer;
 pub mod sh;
+pub mod tools;
 pub(crate) mod train;
 pub mod types;
 

@@ -195,6 +195,8 @@ navigation:
         path: examples/models/ltxv.md
       - source: samples/models/sam2/README.md
         path: examples/models/sam2.md
+      - source: samples/models/splat/README.md
+        path: examples/models/splat.md
       - source: samples/models/wan/README.md
         path: examples/models/wan.md
       - source: samples/npu/rockchip/README.md

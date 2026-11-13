@@ -407,7 +407,7 @@ fn write_frames(frames: &[f32], s: usize, w: u32, h: u32, dir: &str) {
                 rgb.push((frames[(fr * 3 + c) * hw + i].clamp(0.0, 1.0) * 255.0).round() as u8);
             }
         }
-        crate::splat_cli::write_ppm_rgb(&format!("{dir}/frame_{fr:03}.ppm"), &rgb, w as usize, h as usize);
+        save_rgb(&format!("{dir}/frame_{fr:03}.ppm"), &rgb, w, h);
     }
 }
 
@@ -426,14 +426,14 @@ fn write_maps(gpu: &Gpu, model: &Mirror, fi: usize, w: u32, h: u32, out_dir: &st
         let v = (((d - lo) / span) * 255.0) as u8;
         rgb.extend_from_slice(&[v, v, v]);
     }
-    crate::splat_cli::write_ppm_rgb(&format!("{out_dir}/depth_{fi:02}.ppm"), &rgb, w as usize, h as usize);
+    save_rgb(&format!("{out_dir}/depth_{fi:02}.ppm"), &rgb, w, h);
     let mut nrgb = Vec::with_capacity(hw * 3);
     for i in 0..hw {
         for c in 0..3 {
             nrgb.push(((m.normals[c * hw + i] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8);
         }
     }
-    crate::splat_cli::write_ppm_rgb(&format!("{out_dir}/normal_{fi:02}.ppm"), &nrgb, w as usize, h as usize);
+    save_rgb(&format!("{out_dir}/normal_{fi:02}.ppm"), &nrgb, w, h);
 }
 
 /// Re-express a scene and its cameras in the frame the cameras describe: the
@@ -645,14 +645,14 @@ fn infer(argv: &[String]) {
             eprintln!("PLY write failed: {e}");
             std::process::exit(1);
         });
-        crate::splat_cli::write_cameras(&format!("{out_dir}/cameras.json"), cams);
+        save_text(&format!("{out_dir}/cameras.json"), &splat::types::cameras_to_json(cams));
         println!("wrote {ply_path} ({} gaussians) + {out_dir}/cameras.json", splats.len());
         if maps {
             for fi in 0..s {
                 write_maps(gpu, model, fi, w, h, &out_dir);
             }
         }
-        println!("view: brain splat view {ply_path}");
+        println!("view: sample-models-splat view {ply_path}");
     });
 }
 
@@ -752,4 +752,16 @@ mod tests {
         assert_eq!(super::select_frames(&frames, 100, 0).len(), 1);
         assert_eq!(super::select_frames(&frames, 1, 99).len(), 20);
     }
+}
+
+fn save_rgb(path: &str, rgb: &[u8], w: u32, h: u32) {
+    let img = imaging::Rgb8::new(w, h, rgb.to_vec()).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
+    imaging::save(path, &img).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
+}
+
+fn save_text(path: &str, text: &str) {
+    std::fs::write(path, text).unwrap_or_else(|e| {
+        eprintln!("cannot write {path}: {e}");
+        std::process::exit(1);
+    });
 }

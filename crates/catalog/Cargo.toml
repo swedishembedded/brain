@@ -86,6 +86,7 @@ brain-npu.workspace = true
 brain-onnx.workspace = true
 brain-paramstore.workspace = true
 brain-qwen3omnimoe.workspace = true
+brain-recon.workspace = true
 brain-splat.workspace = true
 brain-timesfm3.workspace = true
 brain-worldmirror2.workspace = true

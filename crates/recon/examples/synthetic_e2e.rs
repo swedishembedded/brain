@@ -14,7 +14,7 @@
 //!   sphere without a single starting point, as structure from motion leaves
 //!   a textureless object: the fit has to grow it.
 //! * **B - the whole pipeline**: the rendered images alone -> structure from
-//!   motion -> training set -> fit, exactly what `brain splat train` runs; the
+//!   motion -> training set -> fit, exactly what `brain/splat`'s `train` action runs; the
 //!   result is compared in the truth's frame through the similarity the
 //!   recovered cameras imply.
 //!

@@ -1269,18 +1269,6 @@ mirror/demo: build/release
 	@test -n "$(MIRROR_IMAGES)" || (echo "set MIRROR_IMAGES=<dir|a.ppm,b.ppm>"; exit 2)
 	$(BRAIN) worldmirror2 demo --weights $(MIRROR_WEIGHTS) --images $(MIRROR_IMAGES) $(MIRROR_ARGS)
 
-# 3DGS scene viewer (interactive fly-through; WASD + mouse, see --help).
-SPLAT_SCENE ?=
-
-## splat - lists the 3D Gaussian splat targets; does nothing
-splat:
-	$(LIST_CHILDREN)
-
-## splat/view - interactive 3DGS fly-through (SPLAT_SCENE=<scene.ply>, SPLAT_ARGS=...)
-splat/view: build/release
-	@test -n "$(SPLAT_SCENE)" || (echo "set SPLAT_SCENE=<scene.ply>"; exit 2)
-	$(BRAIN) splat view $(SPLAT_SCENE) $(SPLAT_ARGS)
-
 ## tts - lists the text-to-speech targets; does nothing
 tts:
 	$(LIST_CHILDREN)
@@ -2281,7 +2269,7 @@ help:
         yolo yolo/data yolo/train yolo/eval yolo/detect \
         yolo/npu yolo/npu/export yolo/npu/quantize yolo/npu/sim-int8 yolo/npu/run yolo/npu/bench \
         qwen qwen/finetune depth depth/demo depth/smoke depth/camera depth/train \
-        mirror mirror/import mirror/infer mirror/demo splat splat/view tts tts/data \
+        mirror mirror/import mirror/infer mirror/demo tts tts/data \
         flux2 flux2/generate flux2/edit wan wan/t2v forecast forecast/compare forecast/serve \
         wm wm/play wm/fixtures federated federated/demo web web/dev web/build \
         bench bench/run $(BENCH_RUN_TARGETS) bench/scaling bench/distributed bench/eval bench/scale bench/advise \

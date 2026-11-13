@@ -1,0 +1,25 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/splat` -> `sample-models-splat`.
+name = "sample-models-splat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: 3D Gaussian Splatting from the command line - render, fit, info, orient, merge, prune, sfm and train, every parameter - plus an interactive fly-through window."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-splat.workspace = true
+brain-invoke.workspace = true
+brain-gpu-core.workspace = true
+brain-imaging.workspace = true
+# `brain/splat`'s full provider: splat's actions with `sfm` and `train`.
+brain-recon.workspace = true
+# The fly-through window.
+brain-wm-display.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 60

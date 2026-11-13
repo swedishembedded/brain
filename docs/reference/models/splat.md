@@ -15,9 +15,9 @@ a discrete graphics card.
 |---|---|
 | Inference             | [x] |
 | Training from scratch | [x] |
-| CLI (`brain <arch> <action>`)       | [ ] (has its own `brain splat …` subcommand instead - see "Running it" below) |
+| CLI (`brain <arch> <action>`)       | [x] `brain splat <action>`; the interactive viewer is [`samples/models/splat`](../../../samples/models/splat/README.md) |
 | HTTP API               | [ ] `render`/`fit` both take a REQUIRED `scene` input blob, so neither is a text-to-image/chat action |
-| D-Bus                  | [x] `render` (one-shot) and `fit` (streaming); `view` is human-in-the-loop and is not served |
+| D-Bus                  | [x] every action: `render`, `info`, `orient`, `merge`, `prune`, `sfm` (one-shot), `fit`, `train` (streaming); the viewer is human-in-the-loop and is not served |
 | Batched serving        | [ ] |
 
 ## Getting the weights
@@ -29,15 +29,18 @@ scene files, whether produced by `brain worldmirror2 infer`, brain's own `fit`
 ## Running it
 
 ```bash
-brain splat info   scene.ply
-brain splat render scene.ply --out img.ppm [--eye x,y,z --target x,y,z]
-brain splat view   scene.ply         # interactive fly-through (WASD + mouse)
-brain splat fit     scene.ply --images photos/ --cameras cameras.json --out out/fitted.ply
-brain splat sfm     --images photos/ --out out/sfm.ply          # cameras + sparse points only
-brain splat train   --images photos/ --out out/scene.ply        # photographs -> finished scene
+brain splat info   --scene scene.ply
+brain splat render --scene scene.ply --out image=view.png [--eye x,y,z --target x,y,z]
+brain splat fit    --scene scene.ply --images photos/ --cameras cameras.json --out scene=fitted.ply
+brain splat sfm    --images photos/ --out scene=sfm.ply --out cameras=cameras.json   # cameras + sparse points only
+brain splat train  --images photos/ --out scene=scene.ply --out cameras=cameras.json # photographs -> finished scene
+sample-models-splat view scene.ply   # interactive fly-through (WASD + mouse)
 ```
 
-`view` opens an interactive window. With no `--eye`, the camera auto-frames
+`brain splat <action> --help` lists every parameter with its default. The
+same actions are what `brain serve` serves, and `sample-models-splat` (built
+with `make samples/models/splat/build`) runs them too, plus `view`, which
+opens an interactive window. With no `--eye`, the camera auto-frames
 the scene from its bounds. Viewer controls:
 
 | Key | Action |
@@ -72,31 +75,32 @@ into a scene that actually reproduces your photos.
 
 | Flag | Command | Effect |
 |---|---|---|
-| `--out <path>` | `render`, `fit` | output file (`img.ppm` / `fitted.ply`) |
+| `--out name=PATH` | every action | where an output goes: `image` (`render`), `scene` (`fit`, `orient`, `merge`, `prune`, `sfm`, `train`), `cameras` (`orient`, `merge`, `sfm`, `train`, and `fit` with `--pose-lr`) |
 | `--width` / `--height` | `render`, `view` | output resolution |
 | `--eye x,y,z --target x,y,z [--up x,y,z]` | `render`, `view` | explicit camera; omit both for auto-framing |
 | `--cameras <path> --view I` | `render` | render camera `I` of a `cameras.json` (e.g. the one `train` writes), at its own size |
 | `--fov D` | `render`, `view` | vertical field of view in degrees |
 | `--depth` | `render` | render the depth view instead of color |
 | `--bg r,g,b` | `render`, `view` | background color |
-| `--aa` | `render` | opacity compensation for the dilation below |
+| `--antialiased` | `render` | opacity compensation for the dilation below |
 | `--eps2d X` | `render` | anti-alias dilation in px^2 (default `0.3`). **This is a blur** - see below |
 | `--naive` | `render` | use the reference (non-tiled) rasterizer instead of the tiled pipeline |
 | `--bench N` | `render` | print steady-state per-frame timing over N warm re-renders |
 | `--isect-cap N` | `render` | tile-instance budget (default: 8 per gaussian). A frame that exceeds it drops its depth-latest splats and says `CLAMPED` |
 | `--frames N` | `view` | exit the viewer after N frames (scripted/headless runs) |
-| `--cameras <path>` | `fit` | camera poses/intrinsics (default `out/mirror/cameras.json`) |
+| `--shots DIR` | `view` | where `p` writes its PNG screenshots (default the current directory) |
+| `--cameras <path>` | `fit` | camera poses/intrinsics; a remote caller passes them as the `views` JSON param instead |
 | `--images <dir\|list>` | `fit` | target photos, one per camera, in order |
 | `--iters N` | `fit` | optimization steps (default `200`) |
 | `--eps2d X` | `fit` | the dilation to optimize UNDER (default `0.3`); render the result with the same value |
-| `--lr X` | `fit` | learning rate (default `5e-3`) |
+| `--lr-position X` | `fit` | position learning rate (default `5e-3`) |
 | `--densify N` | `fit` | run density control every N iterations (default off) |
 | `--densify-frac F` | `fit` | fraction of gaussians treated as under-reconstructed per step (default `0.05`) |
 | `--max-gaussians N` | `fit` | refuse to grow past N |
 | `--densify-strategy S` | `fit` | `heuristic` (the default), `mcmc` or `hybrid` (what `train` runs) - see below |
 | `--loss L` | `fit` | `mse` (default) or `l1-ssim`, the objective 3DGS is defined with |
 | `--camera-model` | `fit` | fit the photometric camera alongside the scene: per-photo exposure and white balance, the lens's vignetting, the sensor's colour matrix and response curve (default off) |
-| `--no-camera-model` | `train` | do not fit the photometric camera, which `train` fits by default: it starts each photo's exposure from its EXIF, and fits linear, 16-bit or exposure-bracketed photographs in linear light |
+| `--camera-model false` | `train` | do not fit the photometric camera, which `train` fits by default: it starts each photo's exposure from its EXIF, and fits linear, 16-bit or exposure-bracketed photographs in linear light |
 | `--batch N` | `fit` | photographs per optimizer step (default all of them) |
 | `--distortion W` / `--normal-consistency W` | `fit` | surface regularizers (default off) - see below |
 | `--geometry-after F` | `fit` | fraction of the fit after which the surface regularizers start |
@@ -110,7 +114,6 @@ into a scene that actually reproduces your photos.
 | `--transients` | `train` | the photographs hold people, traffic or other things not in all of them: stop supervising each photograph's large coherent regions the scene cannot explain (off by default; on a static capture it only withholds supervision from hard regions) |
 | `--environment D` | `train` | fit the sky and distant scenery as radiance by direction (a degree-`D` spherical-harmonic environment, `D` up to 8) instead of leaving it to gaussians; the written PLY carries it as a distant shell of gaussians |
 | `--init-opacity O` | `sfm` | opacity of the starting gaussians (default `0.1`) |
-| `--cameras-out <path>` | `sfm`, `train` | where to write the recovered cameras (default next to `--out`) |
 
 ## From photographs: `sfm` and `train`
 
@@ -163,14 +166,14 @@ pipeline as the SDK's `brain::Reconstruction`, in four steps:
    balance changes it is what keeps the scene consistent.
 
 ```bash
-brain splat train --images ~/captures/scene --out scene.ply
-brain splat view scene.ply
+brain splat train --images ~/captures/scene --out scene=scene.ply --out cameras=scene.cameras.json
+sample-models-splat view scene.ply
 ```
 
 Render a training camera next to its photograph to judge the result:
 
 ```bash
-brain splat render scene.ply --cameras scene.ply.cameras.json --view 0 --out view0.png
+brain splat render --scene scene.ply --cameras scene.cameras.json --view 0 --out image=view0.png
 ```
 
 Photograph the subject from all around with generous overlap between
@@ -464,7 +467,9 @@ concatenated interleaved-HWC f32 RGB frames - the same convention every other
 video input uses) and a `views` param (the camera array as JSON, the shape
 `cameras.json` uses), returns the optimized `scene` and reports the
 per-iteration MSE as progress; cancellable mid-run like any other long-running
-served action. `view` is deliberately not served - it is an interactive
+served action. `info`, `orient` and `prune` take the scene as a blob too;
+`merge`, `sfm` and `train` read files on the serving machine (`images`,
+`scenes`), so only a local caller can name them. The viewer is deliberately not served - it is an interactive
 WASD/mouse loop with no request/response shape. See
 [`samples/python/vision/splat/splat_render.py`](../../../samples/python/vision/splat/splat_render.py) and
 [`splat_fit.py`](../../../samples/python/vision/splat/splat_fit.py).

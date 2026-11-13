@@ -54,7 +54,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("yolov8", crate::yolo_cli::run_yolo),
     ("zipdepth", crate::depth_cli::run_depth),
     ("worldmirror2", crate::mirror_cli::run_mirror),
-    ("splat", crate::splat_cli::run_splat),
     // wm_cli's own `--arch`/`--model` flags (not this resolver) pick
     // fake-vs-diamond within `play`/`import`/`export` -- diamond is its one
     // real served architecture, so that's the id this dispatches from.
@@ -149,6 +148,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("flux2", "brain/flux2-klein"),
     ("wan", "brain/wan"),
     ("ltxv", "brain/ltxv"),
+    ("splat", "brain/splat"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
