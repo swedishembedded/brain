@@ -231,6 +231,9 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // `gradnorm_sq` gives each tensor ONE thread to sum its elements, which for 118 M
         // adapter parameters is seconds of a single thread's time per step.
         v.extend(model::dispatch::LORA_BANK_PIPELINES);
+        // The KV cache's encodings, applied to the training attention's keys and values on request.
+        v.push(("kv_roundtrip_i8", kernels::KV_ROUNDTRIP_I8));
+        v.push(("kv_roundtrip_fp8", kernels::KV_ROUNDTRIP_FP8));
         // EdgeRock: the anchor memory's kernels and the windowed attention scores, resolved by name.
         v.extend(model::anchor_memory::anchor_memory_pipelines());
         // The Gated-DeltaNet pool staging for a pool stored as bf16: the gather decodes, the scatter rounds.
@@ -749,6 +752,7 @@ fn gqa_mixer_ids() -> model::gqa_mixer::GqaMixerIds {
         sigmoid_bwd: SIGMOID_BWD,
         mul: MUL,
         rope2d_partial: ROPE2D_PARTIAL,
+        kv_roundtrip: None,
     }
 }
 
@@ -1223,6 +1227,9 @@ pub struct Qwen35 {
     /// `new_on` path) keeps inference-only behaviour byte-for-byte with the
     /// model's original, training-free forward implementation.
     is_train: bool,
+    /// The KV cache encoding the training attention's keys and values are round-tripped through, when asked
+    /// ([`Qwen35::set_kv_roundtrip`]).
+    kv_roundtrip: std::cell::Cell<Option<model::kv_tier::KvElement>>,
     opt: Optim,
 
     tokens: DeviceBuffer,
@@ -2373,6 +2380,7 @@ impl Qwen35 {
             t_run: Cell::new(t),
             chunk,
             is_train: train,
+            kv_roundtrip: std::cell::Cell::new(None),
             opt,
             tokens,
             tok_uniq,
@@ -3679,7 +3687,7 @@ impl Qwen35 {
                     let scores_kernel = g.kernel_index("gqa_scores_win").unwrap_or_else(|| panic!("qwen35: gqa_scores_win is not registered on this Gpu"));
                     model::gqa_mixer::gqa_mixer_fwd_windowed(g, &gqa_mixer_ids(), model::gqa_mixer::SlidingWindow { scores_kernel, window }, &shape, &weights, &q_full, &k, &v, n, self.is_train)
                 }
-                None => model::gqa_mixer::gqa_mixer_fwd_tc(g, &gqa_mixer_ids(), self.training_flash(), Some(self.ops.tensor_gemm()), &shape, &weights, &q_full, &k, &v, n, self.is_train),
+                None => model::gqa_mixer::gqa_mixer_fwd_tc(g, &self.gqa_mixer_ids_train(), self.training_flash(), Some(self.ops.tensor_gemm()), &shape, &weights, &q_full, &k, &v, n, self.is_train),
             },
             Some(GqaCached::Ring(rc)) => (
                 model::gqa_mixer::gqa_mixer_ring_chunk_fwd(
@@ -4960,6 +4968,32 @@ impl Qwen35 {
             }
         }
         self.gpu.submit(&clears, &[]);
+    }
+
+    /// Round-trip the keys and values the training attention reads through a KV cache's encoding (`Some(Int8)` or
+    /// `Some(Fp8E4m3)`), applied to the rotated key and the value of every full-attention layer, per (token, kv head),
+    /// with the cache's own scale and rounding: the teacher-forced forward then scores tokens with the numerics a server
+    /// using that cache sampled them with. `None` reads them as they are. The backward reads the rounded values and passes
+    /// the gradient straight through. The linear-attention layers have no KV cache and are not touched.
+    pub fn set_kv_roundtrip(&self, element: Option<model::kv_tier::KvElement>) -> Result<(), String> {
+        use model::kv_tier::KvElement;
+        match element {
+            None | Some(KvElement::Int8) | Some(KvElement::Fp8E4m3) => {
+                self.kv_roundtrip.set(element);
+                Ok(())
+            }
+            Some(other) => Err(format!("qwen35: a {other:?} KV cache cannot be round-tripped (int8 and fp8 are the lossy tiers)")),
+        }
+    }
+
+    /// The mixer's kernel ids for the training forward, with the KV round trip when one is set.
+    fn gqa_mixer_ids_train(&self) -> model::gqa_mixer::GqaMixerIds {
+        let mut ids = gqa_mixer_ids();
+        ids.kv_roundtrip = self.kv_roundtrip.get().map(|e| {
+            let name = if e == model::kv_tier::KvElement::Int8 { "kv_roundtrip_i8" } else { "kv_roundtrip_fp8" };
+            self.gpu.kernel_index(name).unwrap_or_else(|| panic!("qwen35: {name} is not registered on this Gpu"))
+        });
+        ids
     }
 
     /// The flash-attention trio a TRAINING forward over this instance's `t`

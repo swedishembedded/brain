@@ -908,6 +908,15 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, ho, hd) = (p(0)?, p(1)?, p(3)?);
             f(0, 8 * rows * ho * hd)
         }
+        // params [rows, kv_stride, head_dim]: a K or V buffer round-tripped in
+        // place through the int8 / fp8 KV cache's encoding. Each element is read
+        // twice (the head's absmax pass, then the encode pass) and written once;
+        // abs+max, then divide, round (or the E4M3 code search's compares),
+        // clamp and rescale.
+        "kv_roundtrip_i8" | "kv_roundtrip_fp8" => {
+            let n = p(0)? * p(1)?;
+            f(5 * n, 12 * n)
+        }
         "kv_expand_bwd" => {
             let (rows, ho, g, hd) = (p(0)?, p(1)?, p(2)?, p(3)?);
             f(rows * ho * hd, 4 * (rows * ho * hd + rows * ho * hd / g.max(1)))

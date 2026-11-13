@@ -31,6 +31,7 @@ use model::adapter::exec::AdapterRuntime;
 use model::adapter::sites::LoraSites;
 use model::block::{self, Gqa, KernelIds};
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
+use model::kv_tier::KvElement;
 use gpu_core::provider::library::GemmPrecision;
 use model::ops::{Act, Ops, TierPolicy, Weight};
 use model::saved::{BoundaryStore, SavedFormat, SavedPolicy};
@@ -167,6 +168,10 @@ const PAGED_DECODE_SCORES_BATCHED: usize = 64;
 const DECODE_SOFTMAX_BATCHED: usize = 65;
 const PAGED_DECODE_APPLY_BATCHED: usize = 66;
 const PAGED_FLASH_PREFILL: usize = 67;
+/// `kv_roundtrip_i8` / `kv_roundtrip_fp8`: keys and values through a KV cache's encoding (see
+/// [`Qwen::set_kv_roundtrip`]).
+const KV_ROUNDTRIP_I8: usize = 68;
+const KV_ROUNDTRIP_FP8: usize = 69;
 
 /// Prompt rows one [`Qwen::prefill`] chunk runs through the batched layer
 /// forward on a decode-only build - the row count its activations are sized
@@ -265,6 +270,8 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
     ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
     ("paged_flash_prefill", kernels::PAGED_FLASH_PREFILL),
+    ("kv_roundtrip_i8", kernels::KV_ROUNDTRIP_I8),
+    ("kv_roundtrip_fp8", kernels::KV_ROUNDTRIP_FP8),
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -727,6 +734,9 @@ pub struct Qwen {
     // with these host-precomputed per-token cos/sin tables `[b·t, head_dim/2]`
     // (write via `write_mrope_tables`) instead of the analytic rope_base.
     mrope: Cell<bool>,
+    /// The KV cache encoding the attention's keys and values are round-tripped through, when asked
+    /// ([`Qwen::set_kv_roundtrip`]).
+    kv_roundtrip: Cell<Option<KvElement>>,
     mrope_cos: DeviceBuffer,
     mrope_sin: DeviceBuffer,
 
@@ -1709,6 +1719,7 @@ impl Qwen {
             splice: model::vlm::SpliceRuns::none(),
             external_head: Cell::new(false),
             mrope: Cell::new(false),
+            kv_roundtrip: Cell::new(None),
             mrope_cos: st(1),
             mrope_sin: st(1),
             weighted_ce: None,
@@ -1986,6 +1997,31 @@ impl Qwen {
             softmax,
             self.gpu.step(GQA_APPLY, &[probs, v, ctx], &p, rows * a.head_dim),
         ]
+    }
+
+    /// Round-trip the keys and values the training attention reads through a KV cache's encoding (`Some(Int8)` or
+    /// `Some(Fp8E4m3)`), so the teacher-forced forward scores tokens with the numerics a server using that cache sampled
+    /// them with; `None` reads them as they are. Applied in place after the rotary embedding, per (token, kv head) with
+    /// the cache's own scale and rounding (`kv_roundtrip_i8`, `kv_roundtrip_fp8`, bit-identical to what the paged append
+    /// stores); the backward reads the rounded values and passes the gradient straight through. The f32 and bf16 tiers
+    /// are refused: the first is the identity, and the second is a precision this trainer's own compute already has.
+    pub fn set_kv_roundtrip(&mut self, element: Option<KvElement>) -> Result<(), String> {
+        match element {
+            None | Some(KvElement::Int8) | Some(KvElement::Fp8E4m3) => {}
+            Some(other) => return Err(format!("qwen3: a {other:?} KV cache cannot be round-tripped (int8 and fp8 are the lossy tiers)")),
+        }
+        if self.kv_roundtrip.replace(element) != element && !self.decode_only {
+            // The batched forward and the backward's recompute are recorded graphs: they are built again with the round trip in.
+            self.fwd_steps = self.forward_steps(self.b, self.t);
+            if !self.bwd_steps.steps.is_empty() {
+                self.bwd_steps = self.build_backward_steps();
+            }
+        }
+        Ok(())
+    }
+
+    fn kv_roundtrip_kernel(&self) -> Option<usize> {
+        self.kv_roundtrip.get().map(|e| if e == KvElement::Int8 { KV_ROUNDTRIP_I8 } else { KV_ROUNDTRIP_FP8 })
     }
 
     /// GQA shape for `b`×`t` (the buffers are sized for the max `b`/`t`).
@@ -2496,6 +2532,11 @@ impl Qwen {
                 } else {
                     None
                 };
+                // A server's int8 or fp8 KV cache holds each row at its tier's precision: the attention reads these.
+                if let Some(kernel) = self.kv_roundtrip_kernel() {
+                    s.push(block::kv_roundtrip(&self.gpu, kernel, k_buf, n, nkv, hd));
+                    s.push(block::kv_roundtrip(&self.gpu, kernel, &lb.v, n, nkv, hd));
+                }
                 match (self.flash, self.kmask_on.get()) {
                     _ if fused.is_some() => s.extend(fused),
                     // Native sparse attention: each query attends its own
@@ -4370,6 +4411,9 @@ impl model::training::TokenObjectives for Qwen {
     }
     fn head_chunk_rows(&self) -> Option<u32> {
         Some(self.head_rows)
+    }
+    fn set_kv_roundtrip(&mut self, element: Option<KvElement>) -> Result<(), String> {
+        Qwen::set_kv_roundtrip(self, element)
     }
     fn set_loss_denominator(&self, tokens: f32) {
         Qwen::set_loss_denominator(self, tokens)

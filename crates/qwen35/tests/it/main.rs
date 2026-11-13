@@ -11,6 +11,7 @@
 mod common;
 
 mod adapter_bank;
+mod kv_roundtrip_train;
 mod adapter_sample;
 mod adapter_variants;
 mod arena_drain;

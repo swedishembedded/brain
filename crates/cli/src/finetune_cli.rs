@@ -58,6 +58,10 @@ brain finetune BASE --dataset FILE --out DIR [options]
   --max-step-kl X --max-step-grad-norm X
                      with --policy-gradient: skip, and log, an optimiser step whose KL to the reference, or whose gradient
                      norm, is over the bound (a run that skips 8 steps in a row stops).
+  --kv-roundtrip TIER
+                     with --policy-gradient: read the trainer's attention keys and values through the encoding of the
+                     KV cache the rollouts were sampled with (int8 or fp8, as the server's --kv-cache; the trace's
+                     brain.kv_cache names it), so the teacher-forced forward has the server's numerics.
   --numerics-gate    with --policy-gradient: take no optimiser step; measure, over the records the run draws (raise --steps
                      until it covers them), how far the trainer's own log-probabilities of the recorded tokens are from the
                      recorded behaviour ones (mean and largest gap, mismatch KL, the step-0 ratio, effective sample size) and
@@ -121,6 +125,7 @@ struct Args {
     max_step_grad_norm: Option<f32>,
     numerics_gate: bool,
     gate: brain::NumericsBounds,
+    kv_roundtrip: Option<brain::KvElement>,
 }
 
 /// The exit status of a numerics gate whose bounds were broken (1 is a failed run, 2 a usage error).
@@ -180,6 +185,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--max-step-kl" => a.max_step_kl = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--max-step-grad-norm" => a.max_step_grad_norm = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--numerics-gate" => a.numerics_gate = true,
+            "--kv-roundtrip" => a.kv_roundtrip = Some(brain::KvTier::parse(&need(&mut i, &flag)?).map_err(|e| format!("brain finetune: {flag}: {e}"))?.element()),
             "--gate-max-mean-gap" => a.gate.max_mean_abs_gap = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--gate-max-gap" => a.gate.max_abs_gap = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--gate-max-mismatch-kl" => a.gate.max_mismatch_kl = Some(number(&need(&mut i, &flag)?, &flag)?),
@@ -204,7 +210,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         }
     }
     if !a.policy_gradient {
-        for (flag, given) in [("--ratio-clip", a.clip_eps.is_some()), ("--kl-beta", a.kl_beta.is_some()), ("--behaviour", a.behaviour.is_some()), ("--ratio-clip-high", a.clip_eps_high.is_some()), ("--importance", a.importance.is_some()), ("--max-step-kl", a.max_step_kl.is_some()), ("--max-step-grad-norm", a.max_step_grad_norm.is_some())] {
+        for (flag, given) in [("--ratio-clip", a.clip_eps.is_some()), ("--kl-beta", a.kl_beta.is_some()), ("--behaviour", a.behaviour.is_some()), ("--ratio-clip-high", a.clip_eps_high.is_some()), ("--importance", a.importance.is_some()), ("--max-step-kl", a.max_step_kl.is_some()), ("--max-step-grad-norm", a.max_step_grad_norm.is_some()), ("--kv-roundtrip", a.kv_roundtrip.is_some())] {
             if given {
                 return Err(format!("brain finetune: {flag} shapes the policy gradient; give --policy-gradient"));
             }
@@ -298,7 +304,7 @@ fn lora(a: &Args, rank: u32) -> brain::ChatFineTune {
     }
     if a.policy_gradient {
         let d = brain::PolicyGradientConfig::default();
-        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), behaviour: a.behaviour.unwrap_or(d.behaviour), numerics: a.numerics_gate.then_some(a.gate), clip_eps_high: a.clip_eps_high, importance: a.importance.unwrap_or(d.importance), max_step_kl: a.max_step_kl, max_step_grad_norm: a.max_step_grad_norm, ..d });
+        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), behaviour: a.behaviour.unwrap_or(d.behaviour), numerics: a.numerics_gate.then_some(a.gate), kv_roundtrip: a.kv_roundtrip, clip_eps_high: a.clip_eps_high, importance: a.importance.unwrap_or(d.importance), max_step_kl: a.max_step_kl, max_step_grad_norm: a.max_step_grad_norm, ..d });
     }
     t
 }
@@ -513,7 +519,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta", "--behaviour", "--ratio-clip-high", "--importance", "--max-step-kl", "--max-step-grad-norm", "--numerics-gate", "--gate-max-mean-gap", "--gate-max-gap", "--gate-max-mismatch-kl", "--gate-min-sequence-ess", "--gate-max-grad-norm"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta", "--behaviour", "--ratio-clip-high", "--importance", "--max-step-kl", "--max-step-grad-norm", "--numerics-gate", "--gate-max-mean-gap", "--gate-max-gap", "--gate-max-mismatch-kl", "--gate-min-sequence-ess", "--gate-max-grad-norm", "--kv-roundtrip"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }

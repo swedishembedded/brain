@@ -249,6 +249,8 @@ impl ArchEntry {
             Capability::TokenObjectives => self.token_objectives,
             Capability::ChatFineTune => self.chat_fine_tune,
             Capability::ChatLoraFineTune => self.chat_lora_fine_tune,
+            // Whether the trainer applies it is the model's answer when the run is prepared; the registry holds no row for it.
+            Capability::KvRoundtrip => true,
         };
         if provided {
             Ok(())

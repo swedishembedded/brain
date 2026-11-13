@@ -205,6 +205,10 @@ impl TokenObjectives for Qwen35 {
         self.count.set(tokens);
     }
 
+    fn set_kv_roundtrip(&mut self, element: Option<model::kv_tier::KvElement>) -> Result<(), String> {
+        Qwen35::set_kv_roundtrip(self, element)
+    }
+
     fn set_logit_scale(&mut self, scale: f32) {
         assert!(scale.is_finite() && scale > 0.0, "the logit scale must be finite and positive, got {scale}");
         if self.objectives.scale.is_none() {

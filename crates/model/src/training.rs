@@ -38,6 +38,9 @@ pub enum Capability {
     /// An implementation of the supervised chat LoRA fine-tuner for the
     /// architecture.
     ChatLoraFineTune,
+    /// A trainer whose attention can read its keys and values through an int8 or fp8 KV cache's encoding
+    /// ([`TokenObjectives::set_kv_roundtrip`]).
+    KvRoundtrip,
 }
 
 impl Capability {
@@ -47,6 +50,7 @@ impl Capability {
             Capability::TokenObjectives => "token objectives",
             Capability::ChatFineTune => "chat fine-tuning",
             Capability::ChatLoraFineTune => "chat LoRA fine-tuning",
+            Capability::KvRoundtrip => "a KV-cache round trip in its attention",
         }
     }
 }
@@ -132,6 +136,17 @@ pub trait TokenObjectives {
     /// positive. `Model::logits_all` returns the scaled logits while a scale
     /// is set, so reset it to `1.0` before scoring raw logits.
     fn set_logit_scale(&mut self, scale: f32);
+
+    /// Round-trip the keys and values the attention reads through the encoding of a KV cache (`Some`), so that the
+    /// teacher-forced forward and its backward see the numerics a server with that cache sampled with; `None` (the
+    /// default state) reads them as they are. The gradient passes straight through the round trip. The default is a
+    /// refusal naming the gap: a model that cannot apply it must not be asked to score a rollout as if it did.
+    fn set_kv_roundtrip(&mut self, element: Option<crate::kv_tier::KvElement>) -> Result<(), String> {
+        match element {
+            None => Ok(()),
+            Some(e) => Err(format!("this model's trainer cannot round-trip its keys and values through a {e:?} KV cache")),
+        }
+    }
 
     /// Tokens whose logits the LM head keeps alive at once ([`crate::head_ce`]),
     /// `None` for a model that does not report it. What lets the conformance

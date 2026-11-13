@@ -192,6 +192,10 @@ pub use model::StepWork;
 /// outside brain.
 #[cfg(feature = "study")]
 pub use rl::objective::external::{BehaviourSource, ImportanceCorrection, PolicyGradientConfig, PolicyGradientStats, PolicyGradientStep, ReferencePolicy};
+/// The KV-cache encodings a trainer can round-trip its attention through ([`PolicyGradientConfig::kv_roundtrip`]); the
+/// same names the serving `--kv-cache` flag takes, via [`KvTier::parse`].
+#[cfg(feature = "study")]
+pub use model::kv_tier::{KvElement, KvTier};
 /// The numerics gate's bounds and report ([`PolicyGradientConfig::numerics`]).
 #[cfg(feature = "study")]
 pub use rl::objective::numerics::{NumericsBounds, NumericsReport};

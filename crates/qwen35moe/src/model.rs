@@ -743,6 +743,7 @@ fn gqa_mixer_ids() -> model::gqa_mixer::GqaMixerIds {
         sigmoid_bwd: SIGMOID_BWD,
         mul: MUL,
         rope2d_partial: ROPE2D_PARTIAL,
+        kv_roundtrip: None,
     }
 }
 

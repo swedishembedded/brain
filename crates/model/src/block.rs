@@ -291,6 +291,14 @@ pub fn rope2d_partial_bwd(
     )
 }
 
+/// Round-trip `buf` (`[rows, n_kv * head_dim]` f32, keys or values) in place through a KV cache's encoding with
+/// `kernel` (`kv_roundtrip_i8` or `kv_roundtrip_fp8`): what the cache would hold for each (row, kv head). The training
+/// attention then reads the cache's values, forward and backward; nothing in the backward reads the unquantised row, so the
+/// gradient passes straight through.
+pub fn kv_roundtrip(g: &Gpu, kernel: usize, buf: &DeviceBuffer, rows: u32, n_kv: u32, head_dim: u32) -> Step {
+    g.step(kernel, &[buf], &[rows, n_kv * head_dim, head_dim, 0], rows * n_kv)
+}
+
 /// Half-split RoPE backward (in place on the grad buffer).
 pub fn rope_bwd(g: &Gpu, k: &KernelIds, buf: &DeviceBuffer, n: u32, n_heads: u32, head_dim: u32, row_stride: u32, t: u32, theta: f32) -> Step {
     let half = head_dim / 2;

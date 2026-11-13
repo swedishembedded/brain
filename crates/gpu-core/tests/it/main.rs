@@ -78,6 +78,7 @@ mod kq_gemv_reg_upgrade;
 mod kq_native;
 mod kv_append_bf16_native;
 mod kv_append_i8_native;
+mod kv_roundtrip;
 mod matmul_tile16;
 mod memory_limit;
 mod memory_usage;

@@ -716,6 +716,10 @@ pub const KV_EXPAND: &str = include_str!("../wgsl/kv_expand.wgsl");
 pub const KV_EXPAND_BWD: &str = include_str!("../wgsl/kv_expand_bwd.wgsl");
 /// `wgsl/kv_k_headt.wgsl`
 pub const KV_K_HEADT: &str = include_str!("../wgsl/kv_k_headt.wgsl");
+/// `wgsl/kv_roundtrip_fp8.wgsl`
+pub const KV_ROUNDTRIP_FP8: &str = include_str!("../wgsl/kv_roundtrip_fp8.wgsl");
+/// `wgsl/kv_roundtrip_i8.wgsl`
+pub const KV_ROUNDTRIP_I8: &str = include_str!("../wgsl/kv_roundtrip_i8.wgsl");
 /// `wgsl/l1ssim_grad_v.wgsl`
 pub const L1SSIM_GRAD_V: &str = include_str!("../wgsl/l1ssim_grad_v.wgsl");
 /// `wgsl/l1ssim_map_v.wgsl`
@@ -2050,6 +2054,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("kv_expand", KV_EXPAND),
     ("kv_expand_bwd", KV_EXPAND_BWD),
     ("kv_k_headt", KV_K_HEADT),
+    ("kv_roundtrip_fp8", KV_ROUNDTRIP_FP8),
+    ("kv_roundtrip_i8", KV_ROUNDTRIP_I8),
     ("l1ssim_grad_v", L1SSIM_GRAD_V),
     ("l1ssim_map_v", L1SSIM_MAP_V),
     ("l1ssim_moments_h", L1SSIM_MOMENTS_H),

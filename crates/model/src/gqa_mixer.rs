@@ -44,6 +44,9 @@ pub struct GqaMixerIds {
     pub mul: usize,
     /// Partial M-RoPE (`rope2d_partial.wgsl`) - see [`rope2d_partial_fwd`]'s doc.
     pub rope2d_partial: usize,
+    /// A KV cache's encoding to round-trip the attention's keys and values through in the training forward
+    /// (`kv_roundtrip_i8` or `kv_roundtrip_fp8`, [`crate::block::kv_roundtrip`]); `None` reads them as they are.
+    pub kv_roundtrip: Option<usize>,
 }
 
 /// The mixer's shape.
@@ -220,6 +223,11 @@ fn gqa_mixer_fwd_core(
     let qd = shape.qd();
 
     let prep = qkv_prepare(g, ids, shape, w, q_full, k, n);
+    // A server's int8 or fp8 KV cache holds the rotated key and the value at its tier's precision: the attention reads
+    // these, forward and backward (the gradient passes straight through; nothing in the backward reads the unrounded rows).
+    if let Some(kernel) = ids.kv_roundtrip {
+        g.submit(&[], &[crate::block::kv_roundtrip(g, kernel, &prep.k_normed, n, nkv, hd), crate::block::kv_roundtrip(g, kernel, v, n, nkv, hd)]);
+    }
 
     let ctx = g.storage((n * qd) as u64);
     let ga = Gqa { b: shape.b, t: shape.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };

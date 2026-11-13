@@ -196,6 +196,7 @@ fn gqa_mixer_ids(g: &Gpu) -> GqaMixerIds {
         sigmoid_bwd: idx(g, "sigmoid_bwd"),
         mul: idx(g, "mul"),
         rope2d_partial: idx(g, "rope2d_partial"),
+        kv_roundtrip: None,
     }
 }
 

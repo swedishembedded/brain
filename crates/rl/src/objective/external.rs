@@ -246,6 +246,12 @@ pub struct PolicyGradientConfig {
     /// the batches it draws, judged against these bounds (`NumericsBounds::default()` reports and enforces nothing).
     /// Needs recorded behaviour log-probabilities and no importance correction.
     pub numerics: Option<NumericsBounds>,
+    /// Read the keys and values the trainer's attention uses through the encoding of the KV cache the rollouts were
+    /// sampled with (`Some(Int8)` or `Some(Fp8E4m3)`), so the teacher-forced forward has the server's numerics: its
+    /// quantisation of the cache is the larger part of the serve/train gap where the weights are not themselves
+    /// the noise (knowledge #446). `None`: the trainer's own precision. A trace names the cache it was served with
+    /// (`brain.kv_cache`); a model whose trainer cannot apply it refuses the run.
+    pub kv_roundtrip: Option<model::kv_tier::KvElement>,
     /// Skip, and log, the optimiser step of a step whose global gradient norm (after averaging over the step's
     /// micro-batches, before the optimiser's clip) exceeds this. `None`: no bound.
     pub max_step_grad_norm: Option<f32>,
@@ -276,7 +282,7 @@ pub struct PolicyGradientConfig {
 
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
-        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None }
+        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None }
     }
 }
 
@@ -308,6 +314,11 @@ impl PolicyGradientConfig {
             }
             if self.behaviour != BehaviourSource::Recorded {
                 return Err("an importance correction weighs the trainer against the recorded behaviour log-probabilities; it needs behaviour \"recorded\"".to_string());
+            }
+        }
+        if let Some(e) = self.kv_roundtrip {
+            if !matches!(e, model::kv_tier::KvElement::Int8 | model::kv_tier::KvElement::Fp8E4m3) {
+                return Err(format!("kv_roundtrip is {e:?}; only the lossy tiers (int8, fp8) change what the attention reads"));
             }
         }
         if let Some(bounds) = &self.numerics {
@@ -1045,6 +1056,9 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         let objectives = training::require_token_objectives(model)?;
         objectives.enable_weighted_loss();
         objectives.set_logit_scale(1.0 / self.cfg.temperature);
+        if self.cfg.kv_roundtrip.is_some() {
+            objectives.set_kv_roundtrip(self.cfg.kv_roundtrip).map_err(|_| Unsupported::of::<M>(Capability::KvRoundtrip))?;
+        }
         let wants_reference = self.cfg.wants_reference() && self.stats.sequences_with_advantage > 0;
         let start = if adapters_are_zero(model) { StartPolicy::Base } else { StartPolicy::Frozen(AdapterState::capture(model)) };
         // A frozen base is read by switching adapters off, which needs adapters to switch off.
