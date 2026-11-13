@@ -84,7 +84,7 @@
 //! out-of-memory abort. Note that ceiling is a TOTAL across all cards, not
 //! a per-card one, so a concurrent pair charges it twice: an operator who
 //! sized `--limit-vram-total` for one card should either raise it or set
-//! `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0`. A [`crate::dit::Resident`] at
+//! `cfg_parallel: false`. A [`crate::dit::Resident`] at
 //! `DitConfig::real()` dims is ~9.7 GB, so the pair is ~19.4 GB across two
 //! cards, not on one.
 
@@ -138,17 +138,6 @@ impl Placement {
     }
 }
 
-/// Opt out of concurrent CFG dispatch without changing any code path:
-/// `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0` forces [`DevicePlan::Auto`] to
-/// resolve `Single`. Deliberately an opt-OUT: the concurrent path is gated
-/// bit-identical, so the two-card shape is the right default on hardware
-/// that has two cards, and the escape hatch exists for bisecting a
-/// suspected driver problem or for an operator whose
-/// `--limit-vram-total` was sized for one card, not for routine use.
-pub fn cfg_parallel_enabled() -> bool {
-    !matches!(std::env::var("BRAIN_MINIMAXMUSIC3_CFG_PARALLEL").as_deref(), Ok("0") | Ok("false") | Ok("off"))
-}
-
 impl DevicePlan {
     /// Resolve against this machine's schedulable set and this thread's
     /// current selection.
@@ -175,9 +164,6 @@ impl DevicePlan {
     /// `Single`. See this module's doc for why the base card is the CURRENT
     /// selection rather than a hardcoded 0.
     fn auto() -> Placement {
-        if !cfg_parallel_enabled() {
-            return Placement::single();
-        }
         let set = devices::ambient_compute_set();
         if set.backend == devices::Backend::Cpu || set.gpus.len() < 2 {
             return Placement::single();
@@ -243,7 +229,7 @@ mod tests {
     fn auto_stays_inside_the_schedulable_set() {
         let p = DevicePlan::Auto.resolve(None);
         let set = devices::ambient_compute_set();
-        if set.backend == devices::Backend::Cpu || set.gpus.len() < 2 || !cfg_parallel_enabled() {
+        if set.backend == devices::Backend::Cpu || set.gpus.len() < 2 {
             assert_eq!(p, Placement::single(), "fewer than two schedulable cards must resolve Single");
             return;
         }

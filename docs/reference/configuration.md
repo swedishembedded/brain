@@ -55,6 +55,20 @@ They are parameters now: `ov_device`, `turbo`, `talker`, `mtp`, `parity` and `pr
 `npu-serve` workflow, `ref` and `ref_text` on the `clone` action, and `stream_chunk` and
 `profile` on the served ones.
 
+The Z-Image, FLUX.2, VAE-tiling and MiniMax Music 3 tuning variables
+(`BRAIN_S3DIT_ENCODER_GPU`, `BRAIN_S3DIT_ENCODER_RESIDENT`, `BRAIN_S3DIT_ENCODER_FP32SPLIT`,
+`BRAIN_S3DIT_ENCODER_CUT`, `BRAIN_S3DIT_WINDOW_BLOCKS`, `BRAIN_S3DIT_FLASH`,
+`BRAIN_S3DIT_RETAIN_INT8_CACHE`, `BRAIN_FLUX2_TE_DEVICE`, `BRAIN_FLUX2_NO_STREAM`,
+`BRAIN_FLUX2_TE_NO_STREAM`, `BRAIN_FLUX2_LORA_FOLD`, `BRAIN_VAE_TILE`,
+`BRAIN_MINIMAXMUSIC3_CFG_PARALLEL`) are no longer read; a config file naming one is refused,
+naming its replacement. They are parameters now: `encoder_gpu`, `encoder_resident`,
+`encoder_fp32_split`, `encoder_cut`, `retain_int8_cache`, `window_blocks` and `attention`
+on Z-Image's `text2image` (the last two on its other generating actions too, and
+`encoder_gpu` on `lora_train`); `te_device`, `no_stream`, `te_no_stream`, `lora_fold` and
+`vae_tiling` on FLUX.2's `text2image` and `edit`; `cfg_parallel` on MiniMax Music 3's
+`generate`. The Rust entry points take the same values as `s3dit::pipeline::Tuning`,
+`flux2::pipeline::Tuning` and `minimaxmusic3::generate::GenOpts::cfg_parallel`.
+
 `BRAIN_GPU_INDEX` is no longer read. Pin one card with `--device gpu<i>`, or with
 `BRAIN_DEVICE=gpu<i>` in a program that has no CLI.
 
@@ -140,19 +154,7 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `BRAIN_FLUX2_TE_DEVICE` | **Override** for FLUX.2 text-encoder placement (`gpu<i>[:i8]` for a truncated shard on that card). Unset, placement is automatic: the pipeline declares the DiT, encoder and VAE with their costs and the engine places them on cards that can hold them (`residency::plan`, reached through `gpu_core::devices::place`), printing what it chose | automatic |
-| `BRAIN_FLUX2_NO_STREAM` | `1` forces a non-GGUF FLUX.2 DiT to build from a whole fp32 tensor map. It is rejected for a `.gguf` DiT: decoding a quantized GGUF into a whole fp32 map is not an allowed implicit conversion | off |
-| `BRAIN_FLUX2_TE_NO_STREAM` | `1` forces the FLUX.2 text encoder to be imported as one whole fp32 map instead of streamed per tensor from a mapping. Same character as `BRAIN_FLUX2_NO_STREAM`: identical weights either way, kept as an A/B instrument and a fallback | off (streamed) |
-| `BRAIN_FLUX2_LORA_FOLD` | `1` puts an INT8 FLUX.2 build back on the old LoRA deployment: the adapter is baked into the weights and the result requantized, instead of being applied beside the base matmul in fp32. Unlike `BRAIN_FLUX2_NO_STREAM` the two are NOT the same bytes - folding into a 256-level grid discards most of a trained delta (measured: 94.8% of adapted weights round back to their base code at a delta 0.5% of the weight magnitude). An A/B instrument, not a tier to ship | off (runtime correction) | <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 | `BRAIN_FLUX1_I8_KEEP_F32` / `BRAIN_FLUX2_I8_KEEP_F32` | keeps a specific sub-layer at fp32 under INT8 inference, trading a little memory for accuracy | off |
-| `BRAIN_S3DIT_RETAIN_INT8_CACHE` | `1` retains the int8 DiT cache across demote/promote (trades multi-GB host RAM for faster reactivation) | off |
-| `BRAIN_S3DIT_ENCODER_GPU` | which GPU card hosts the Z-Image text encoder | shares the DiT's card |
-| `BRAIN_S3DIT_ENCODER_CUT` | fp32 2-card encoder split point (layer index) | ~2/3 of layers |
-| `BRAIN_S3DIT_ENCODER_FP32SPLIT` | `1` enables the fp32 2-card encoder split | off |
-| `BRAIN_S3DIT_ENCODER_RESIDENT` | `1` keeps the encoder resident even when it shares the DiT's card | off (build on demand) |
-| `BRAIN_S3DIT_WINDOW_BLOCKS` | blocks kept resident in the fp32 single-GPU decode window | 2 |
-| `BRAIN_S3DIT_FLASH` | `1`/`0` forces flash attention on/off for Z-Image | automatic |
-| `BRAIN_WAN_ATTN` | `flash`/`chunked` forces the Wan DiT's self-attention implementation | `flash` where the device supports it |
 | `BRAIN_MIMI_WEIGHTS` | TTS codec weights override | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |

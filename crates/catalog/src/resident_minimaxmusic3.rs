@@ -162,7 +162,7 @@ impl ResidentModel for MinimaxMusic3Resident {
         // multi-device resident disappears from `braintop`. Closing it
         // properly means changing those three things first. Until then
         // what bounds the borrowed card is `memauth`'s
-        // `--limit-vram-total` and `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0`,
+        // `--limit-vram-total` and `cfg_parallel: false`,
         // as `minimaxmusic3::devplan`'s module doc records.
         //
         // # RAM

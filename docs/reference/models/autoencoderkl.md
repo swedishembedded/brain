@@ -43,6 +43,8 @@ and the number is measured rather than assumed - at 1024x1024 in nine tiles,
 accuracy. Getting there needs the GroupNorm statistics synchronised across
 tiles (a first pass that only measures them); without that the same cover is
 26.5 dB, the per-tile brightness stepping naively tiled VAEs are known for.
-`BRAIN_VAE_TILE=1`/`0` forces the decision either way.
+FLUX.2's `vae_tiling` param (`true`/`false`) forces the decision either way;
+in Rust it is the `forced` argument of `vae::tiled::should_tile_decode` and
+`should_tile_encode`.
 
 Package: `brain-vae`.

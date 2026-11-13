@@ -272,13 +272,13 @@ impl<'a> ArBranches<'a> {
     /// The two branches as `crate::generate::ar_branch_devices` placed them.
     ///
     /// Concurrent only when the placement really does name two different
-    /// cards AND `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL` has not been used to opt
-    /// out (`crate::devplan::cfg_parallel_enabled`, the same knob the DiT's
-    /// pair honours). One card, the CPU backend, or an explicitly pinned
+    /// cards AND the caller has not opted out (`cfg_parallel`, the same knob
+    /// [`crate::generate::GenOpts::cfg_parallel`] gives the DiT's pair).
+    /// One card, the CPU backend, or an explicitly pinned
     /// device all keep the sequential path - byte-for-byte what this loop
     /// did before, with no thread spawned.
-    pub fn new(cond: &'a Qwen, uncond: &'a mut Qwen, place: Placement) -> ArBranches<'a> {
-        let parallel = place.cfg_is_parallel() && devplan::cfg_parallel_enabled();
+    pub fn new(cond: &'a Qwen, uncond: &'a mut Qwen, place: Placement, cfg_parallel: bool) -> ArBranches<'a> {
+        let parallel = place.cfg_is_parallel() && cfg_parallel;
         ArBranches { cond, uncond, place, parallel }
     }
 
@@ -681,7 +681,7 @@ mod tests {
         let unconditional_ids = conditional_ids.clone();
 
         let frame_hiddens = generate_frames(
-            ArBranches::new(&lm_cond, &mut lm_uncond, Placement::single()),
+            ArBranches::new(&lm_cond, &mut lm_uncond, Placement::single(), true),
             &mut depth_decoder::Decoder::host(&dd_cfg, 2),
             &dd_w,
             &dd_cfg,
@@ -767,8 +767,8 @@ mod tests {
             let lm_cond = devplan::on_gpu(place.cond, build).expect("the conditional card is in the schedulable set");
             let mut lm_uncond = devplan::on_gpu(place.uncond, build).expect("the unconditional card is in the schedulable set");
             let head = lm_cond.read_weight(qcfg.head_weight());
-            let branches = ArBranches::new(&lm_cond, &mut lm_uncond, place);
-            assert_eq!(branches.is_parallel(), place.cfg_is_parallel() && devplan::cfg_parallel_enabled(), "the branches must be concurrent exactly when the placement says so");
+            let branches = ArBranches::new(&lm_cond, &mut lm_uncond, place, true);
+            assert_eq!(branches.is_parallel(), place.cfg_is_parallel(), "the branches must be concurrent exactly when the placement says so");
             generate_frames(
                 branches,
                 &mut depth_decoder::Decoder::host(&dd_cfg, 2),

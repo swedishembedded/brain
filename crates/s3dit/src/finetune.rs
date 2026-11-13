@@ -148,7 +148,7 @@ pub fn encode_samples(
     samples: &[crate::dataset::Sample],
     size: u32,
     cap_len: u32,
-    enc_gpu: &str,
+    enc_gpu: u32,
     cancel: &capability::CancelToken,
     mut progress: impl FnMut(usize, usize, &str),
 ) -> Result<Vec<Encoded>, String> {
@@ -162,10 +162,7 @@ pub fn encode_samples(
         let qinit = qwen3::import::brain_init_from_hf(qtensors, &qcfg)?;
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
         let nl = qcfg.n_layers as usize;
-        // `enc_gpu` is user input; the canonical index in the shard is what
-        // places the build (device registry), not env mutation.
-        let bi = enc_gpu.parse().unwrap_or(1);
-        let enc = Qwen::new_shard_i8(qcfg, 1, cap_len, &qinit, Shard { start: 0, end: nl - 1, embed: true, head: false, gpu_index: bi });
+        let enc = Qwen::new_shard_i8(qcfg, 1, cap_len, &qinit, Shard { start: 0, end: nl - 1, embed: true, head: false, gpu_index: enc_gpu as usize });
         let mut out = Vec::with_capacity(n);
         for (i, s) in samples.iter().enumerate() {
             if cancel.is_cancelled() {
@@ -228,6 +225,8 @@ pub struct TrainOpts {
     pub size: u32,
     pub cap_len: u32,
     pub seed: u64,
+    /// The card that hosts the int8 Qwen encoder while the captions are encoded.
+    pub encoder_gpu: u32,
     /// Split the DiT across both GPUs (needed for the real 6B fp32 fwd+bwd).
     pub two_gpu: bool,
     /// Where to write the adapter (final + every `ckpt_every` steps, 0 = only final).
@@ -274,9 +273,8 @@ pub fn run(
     progress(0, opts.steps + 1, format!("loaded {} images from {}", samples.len(), dir.display()));
 
     // 2. encode (encoders dropped before the trainer is built)
-    let enc_gpu = std::env::var("BRAIN_S3DIT_ENCODER_GPU").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "1".to_string());
     let n_samples = samples.len();
-    let encoded = encode_samples(paths, &samples, opts.size, opts.cap_len, &enc_gpu, cancel, |i, tot, stage| {
+    let encoded = encode_samples(paths, &samples, opts.size, opts.cap_len, opts.encoder_gpu, cancel, |i, tot, stage| {
         progress(0, opts.steps + 1, format!("{stage} {}/{tot}", i + 1))
     })?;
     drop(samples);
@@ -403,7 +401,7 @@ mod tests {
     }
 
     fn opts_with(size: u32, cap_len: u32) -> TrainOpts {
-        TrainOpts { steps: 1, rank: 4, lr: 1e-4, size, cap_len, seed: data::rng::random_seed(), two_gpu: false, save_path: "unused.brain".into(), ckpt_every: 0, saved: None }
+        TrainOpts { steps: 1, rank: 4, lr: 1e-4, size, cap_len, seed: data::rng::random_seed(), encoder_gpu: 1, two_gpu: false, save_path: "unused.brain".into(), ckpt_every: 0, saved: None }
     }
 
     /// `lora_train` had no ceiling on `cap_len` anywhere: the capability

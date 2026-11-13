@@ -148,7 +148,7 @@ fn check_shapes(name: &str, fc: &Flux2Config, c: &Cfg) -> Result<usize, String> 
     }
 
     // The conditioning width is three concatenated Qwen3 hidden states, and
-    // `pipeline::build_text_encoder` picks WHICH Qwen from exactly this
+    // `pipeline::build_text_encoder_on` picks WHICH Qwen from exactly this
     // number. That branch is the one magic constant on the path, so gate its
     // premise rather than trusting it.
     let te = if c.context_in_dim == 12288 { qwen3::QwenConfig::qwen3_8b() } else { qwen3::QwenConfig::qwen3_4b() };

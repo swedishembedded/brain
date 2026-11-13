@@ -4,7 +4,7 @@
 //! FLUX.2 declares its parts; the engine places them. This gates the
 //! declaration - that the costs are architecture-derived and that the
 //! automatic text-encoder decision reproduces the layout that used to have to
-//! be typed by hand as `BRAIN_FLUX2_TE_DEVICE=gpu1:i8`.
+//! be pinned by hand as `te_device: gpu1:i8`.
 //!
 //! Swedish Embedded AB implements automatic multi-device model placement for
 //! its clients. If your team needs expertise in fitting a diffusion pipeline
@@ -230,12 +230,12 @@ fn gguf_plan_uses_the_header_cost_and_the_int8_build_precision() {
         tokenizer: "unused".to_string(),
     };
     let vae = vae::VaeConfig::flux2();
-    let (homes, te) = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1).unwrap();
+    let (homes, te) = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1, None).unwrap();
     assert_eq!(homes.of("dit"), Some(gpu_core::devices::Home::Gpu(0)));
     assert_eq!(te.gpu_index, Some(1));
     let needs = recorded.0.lock().unwrap().take().unwrap();
     assert_eq!(needs[0].vram, expected);
-    assert_eq!(needs[2].vram, vae_decoder_bytes(&vae, 32));
+    assert_eq!(needs[2].vram, vae_decoder_bytes(&vae, 32, None));
     assert_eq!(effective_dit_precision(&path, Precision::F32, false).unwrap(), Precision::Int8);
     let _ = std::fs::remove_file(path);
 }
@@ -269,7 +269,7 @@ fn an_encoder_that_cannot_stay_beside_the_denoiser_is_planned_to_go_before_it() 
     install_placer(recorded.clone());
     let paths = flux2::Paths { dit: path.clone(), vae: "unused".to_string(), te: "unused".to_string(), tokenizer: "unused".to_string() };
     let vae = vae::VaeConfig::flux2();
-    let (homes, te) = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1).expect("the phased plan fits");
+    let (homes, te) = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1, None).expect("the phased plan fits");
     assert_eq!(homes.of("dit"), Some(gpu_core::devices::Home::Gpu(0)));
     assert_eq!(te.gpu_index, Some(0));
     assert!(te.before_denoiser, "the encoder shares the denoiser's card in an earlier phase, so the pipeline must evict it");
@@ -286,7 +286,7 @@ fn an_encoder_that_cannot_stay_beside_the_denoiser_is_planned_to_go_before_it() 
         }
     }
     install_placer(Arc::new(Roomy));
-    let (_, te) = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1).unwrap();
+    let (_, te) = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1, None).unwrap();
     assert!(!te.before_denoiser, "with room for both the encoder stays resident");
     let _ = std::fs::remove_file(path);
 }
@@ -391,14 +391,14 @@ fn the_vae_reservation_covers_a_full_frame_decode() {
     // 768x1024 out = 48 x 64 latent tokens - the size that failed.
     let full_frame = 48 * 64;
     gpu_core::capacity::with_available(Some(vae::tiled::WHOLE_GRAPH_MAX_BYTES), || {
-        let got = flux2::pipeline::vae_decoder_bytes(&vc, full_frame);
+        let got = flux2::pipeline::vae_decoder_bytes(&vc, full_frame, None);
         assert!(
             gib(got) > 6.0,
             "a full-frame decode needs far more than the flat 2 GiB this used to reserve: {:.2} GiB",
             gib(got)
         );
         // ...and it has to be the IMAGE that drives it, not a bigger constant.
-        let quarter = flux2::pipeline::vae_decoder_bytes(&vc, full_frame / 4);
+        let quarter = flux2::pipeline::vae_decoder_bytes(&vc, full_frame / 4, None);
         assert!(
             got > quarter + (got - quarter) / 2,
             "the reservation must grow with the output: {:.2} GiB at a quarter frame vs {:.2} GiB full",
@@ -432,8 +432,8 @@ fn references_grow_the_dit_but_not_the_decode_within() {
     let n_ref = 5 * 432; // five references at --ref-size 384
     let txt = c.txt_len as u64;
 
-    let bare = part_needs(&c, &vc, Precision::Int8, txt + n_out, n_out, 1);
-    let with_refs = part_needs(&c, &vc, Precision::Int8, txt + n_out + n_ref, n_out, 1);
+    let bare = part_needs(&c, &vc, Precision::Int8, txt + n_out, n_out, 1, None);
+    let with_refs = part_needs(&c, &vc, Precision::Int8, txt + n_out + n_ref, n_out, 1, None);
 
     let find = |v: &[gpu_core::devices::Need], n: &str| v.iter().find(|p| p.name == n).expect("part").vram;
     assert!(
@@ -450,11 +450,11 @@ fn references_grow_the_dit_but_not_the_decode_within() {
     // before the decode builds).
     assert!(bare.iter().all(|p| p.name != "vae_enc"), "no reference, no encoder declared");
     let enc = with_refs.iter().find(|p| p.name == "vae_enc").expect("references declare an encoder");
-    assert_eq!(enc.vram, vae_encoder_bytes(&vc, n_out));
+    assert_eq!(enc.vram, vae_encoder_bytes(&vc, n_out, None));
     assert_eq!(enc.phase, Some(1));
     assert_eq!(enc.affinity, gpu_core::devices::Affinity::With("vae_dec".to_string()));
     // The mistake is worth GiBs, which is why it is worth a gate.
-    let wrong = flux2::pipeline::vae_decoder_bytes(&vc, n_out + n_ref);
+    let wrong = flux2::pipeline::vae_decoder_bytes(&vc, n_out + n_ref, None);
     assert!(
         wrong > find(&bare, "vae_dec") + (1u64 << 31),
         "the confusion this pins costs {:.2} GiB, not a rounding error",
@@ -470,7 +470,7 @@ fn references_grow_the_dit_but_not_the_decode_within() {
 fn the_declared_shape_is_phased_and_the_encoder_is_apart() {
     let c = flux2::Flux2Config::klein_9b();
     let vc = vae::VaeConfig::flux2();
-    let needs = part_needs(&c, &vc, Precision::Int8, 512 + 3072, 3072, 1);
+    let needs = part_needs(&c, &vc, Precision::Int8, 512 + 3072, 3072, 1, None);
     let names: Vec<&str> = needs.iter().map(|n| n.name.as_str()).collect();
     assert_eq!(names, vec!["dit", "te", "vae_dec"]);
     assert_eq!(needs[0].affinity, gpu_core::devices::Affinity::Apart);
@@ -483,7 +483,7 @@ fn the_declared_shape_is_phased_and_the_encoder_is_apart() {
     // The text encoder is declared at the DiT's own numeric tier. An int8 run
     // that reserved for an f32 encoder would plan a two-card layout it does
     // not need - or refuse a one-card one that would have worked.
-    let f32_needs = part_needs(&c, &vc, Precision::F32, 512 + 3072, 3072, 1);
+    let f32_needs = part_needs(&c, &vc, Precision::F32, 512 + 3072, 3072, 1, None);
     assert!(
         needs[1].vram * 2 < f32_needs[1].vram,
         "an int8 run must reserve a much smaller encoder than an f32 one: {:.2} vs {:.2} GiB",
@@ -537,7 +537,7 @@ fn int8_that_fits_nowhere_is_a_placement_error_not_a_doomed_cpu_fallback() {
     let _ = &g;
     let paths = flux2::Paths { dit: path.clone(), vae: "unused".to_string(), te: "unused".to_string(), tokenizer: "unused".to_string() };
     let vae = vae::VaeConfig::flux2();
-    let err = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1)
+    let err = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1, None)
         .expect_err("no device fits and int8 cannot run on the host tier - this must be a reported error, not a silent Cpu placement");
     assert!(err.contains("int8") && err.contains("GPU"), "error should say why the host-tier fallback was refused: {err}");
     let _ = std::fs::remove_file(path);

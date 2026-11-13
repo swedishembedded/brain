@@ -441,6 +441,14 @@ form instead of the fused kernel - the losing arm of a bit-identical A/B, kept
 reachable so the comparison can still be run),
 `BRAIN_WAN_T5_FORCE_GPU` (run the umT5-XXL parity test on a GPU anyway - it
 skips by default because 22.72 GB of fp32 weights exceed a 24 GB card),
+`BRAIN_FLUX2_I8_KEEP_F32` (comma-separated substrings: keep every FLUX.2
+linear whose name contains one at fp32, to bisect where an int8 build diverges
+from the golden; it is read inside the model constructor, below every build
+option, and only `tests/int8_parity.rs` sets it), `BRAIN_WAN_ATTN`
+(`flash`|`chunked`: force one of the Wan DiT's two attention implementations,
+which compute the same result, to A/B them on one device; `flash` needs
+workgroup barriers, so it is a kernel-selection instrument and not a request
+option),
 `BRAIN_FLUX2_DUMP_LATENT` (the same shape for FLUX.2:
 write the latent the decoder is about to consume, so `flux2_latent stats`/`op`
 can inspect a *generated* latent instead of only ones fed back in; a write

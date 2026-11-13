@@ -123,11 +123,18 @@ pub struct GenOpts {
     /// `--device`/`BRAIN_DEVICE` selection like every other stage. Passed
     /// verbatim to [`Gpu::open`].
     pub device: Option<String>,
+    /// Step the two CFG branches concurrently, one per card, when the machine
+    /// has two (the AR stage's two LMs and the DiT's pair). The concurrent
+    /// path is gated bit-identical, so `true` is the right default on
+    /// hardware with two cards; `false` keeps both branches sequential, for
+    /// bisecting a suspected driver problem or for an operator whose
+    /// `--limit-vram-total` was sized for one card, not for routine use.
+    pub cfg_parallel: bool,
 }
 
 impl Default for GenOpts {
     fn default() -> GenOpts {
-        GenOpts { duration_seconds: 10.0, num_inference_steps: denoise::DEFAULT_NUM_INFERENCE_STEPS, seed: data::rng::random_seed(), device: None }
+        GenOpts { duration_seconds: 10.0, num_inference_steps: denoise::DEFAULT_NUM_INFERENCE_STEPS, seed: data::rng::random_seed(), device: None, cfg_parallel: true }
     }
 }
 
@@ -272,7 +279,7 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
             None => depth_decoder::Decoder::host(&dd_cfg, 2),
         };
 
-        let branches = pipeline::ArBranches::new(&lm_cond, &mut lm_uncond, place);
+        let branches = pipeline::ArBranches::new(&lm_cond, &mut lm_uncond, place, opts.cfg_parallel);
         pipeline::generate_frames(branches, &mut dec, &dd_w, &dd_cfg, &head, cfg.vocab as usize, cfg.d_model as usize, &conditional_ids, &unconditional_ids, max_frames, opts.seed, progress)
     };
 
@@ -299,7 +306,7 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
         // run concurrently, one per card (`denoise::CfgDevices`,
         // `crate::devplan`), which is the only place in this pipeline where
         // the second card is not simply idle for the whole denoise stage.
-        let devices = denoise::CfgDevices::open(denoise_dev.as_deref(), opts.device.as_deref());
+        let devices = denoise::CfgDevices::open(denoise_dev.as_deref(), opts.device.as_deref(), if opts.cfg_parallel { crate::devplan::DevicePlan::Auto } else { crate::devplan::DevicePlan::Single });
         let starts = denoise::chunk_starts(num_frames);
         let length_of = |start: usize| condition_encoder::latent_length(&cond_cfg, (start + denoise::CHUNK_FRAMES).min(num_frames) - start);
         // The DiT's ~9.7 GB of weights per card, uploaded ONCE for the whole

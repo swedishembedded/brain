@@ -91,11 +91,45 @@ pub struct BlockDims {
     pub cdim: u32,
     /// SwiGLU hidden width = `dim*8/3`.
     pub hidden: u32,
+    /// How the self-attention is computed (see [`AttentionMode`]).
+    pub attention: AttentionMode,
 }
 
 impl BlockDims {
     pub fn new(dim: u32, n_heads: u32) -> BlockDims {
-        BlockDims { dim, n_heads, head_dim: dim / n_heads, cdim: dim.min(256), hidden: dim * 8 / 3 }
+        BlockDims { dim, n_heads, head_dim: dim / n_heads, cdim: dim.min(256), hidden: dim * 8 / 3, attention: AttentionMode::Auto }
+    }
+}
+
+/// Which self-attention implementation a block records.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AttentionMode {
+    /// Materialised scores while they fit the device's per-binding limit,
+    /// flash once they would not (see [`use_flash`]).
+    #[default]
+    Auto,
+    /// Flash at any size (to benchmark or verify the fused kernel).
+    Flash,
+    /// Materialised at any size (to prove the out-of-memory it avoids).
+    Materialized,
+}
+
+impl AttentionMode {
+    pub fn parse(s: &str) -> Result<AttentionMode, String> {
+        match s {
+            "auto" => Ok(AttentionMode::Auto),
+            "flash" => Ok(AttentionMode::Flash),
+            "materialized" => Ok(AttentionMode::Materialized),
+            other => Err(format!("attention must be auto, flash or materialized (got {other:?})")),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AttentionMode::Auto => "auto",
+            AttentionMode::Flash => "flash",
+            AttentionMode::Materialized => "materialized",
+        }
     }
 }
 
@@ -454,7 +488,7 @@ pub(crate) struct Scratch {
 
 impl Scratch {
     pub fn new(gpu: &Gpu, d: BlockDims, t: u32) -> Scratch {
-        Scratch::new_maybe_flash(gpu, d, t, use_flash(gpu, d.n_heads, t))
+        Scratch::new_maybe_flash(gpu, d, t, use_flash(gpu, d, t))
     }
 
     /// Allocate block scratch. Under `flash`, the materialised `scores`/`probs`
@@ -540,14 +574,16 @@ fn dispatch_threads(n: u64, what: &str) -> Result<u32, String> {
 /// approach **this device's** per-binding limit (queried, not hard-coded — so it
 /// scales from a 2 GiB-binding card up to a large-binding one). Below that,
 /// materialised stays; above it, flash is the only thing that runs at all.
-/// `BRAIN_S3DIT_FLASH=1|0` forces it (1 to benchmark/verify flash at any size;
-/// 0 to prove the OOM).
-pub(crate) fn use_flash(gpu: &Gpu, nh: u32, t: u32) -> bool {
-    match std::env::var("BRAIN_S3DIT_FLASH").ok().as_deref() {
-        Some("1") => return true,
-        Some("0") => return false,
-        _ => {}
+/// `d.attention` can force either path ([`AttentionMode::Flash`] to
+/// benchmark/verify flash at any size, [`AttentionMode::Materialized`] to
+/// prove the OOM).
+pub(crate) fn use_flash(gpu: &Gpu, d: BlockDims, t: u32) -> bool {
+    match d.attention {
+        AttentionMode::Flash => return true,
+        AttentionMode::Materialized => return false,
+        AttentionMode::Auto => {}
     }
+    let nh = d.n_heads;
     // Switch before the scores buffer reaches the binding ceiling (90% margin
     // leaves room for `probs` + allocator overhead).
     let scores = (nh as u64) * (t as u64) * (t as u64) * 4;
@@ -560,7 +596,7 @@ pub(crate) fn use_flash(gpu: &Gpu, nh: u32, t: u32) -> bool {
 /// Flash only on the GPU (`reg_gemm` ⇒ GPU; the CPU JIT cannot compile the
 /// barrier), which is why the flag is part of the decision and not just `t`.
 pub(crate) fn shared_scratch(gpu: &Gpu, d: BlockDims, ts: &[u32], reg_gemm: bool) -> Scratch {
-    let stages: Vec<(u32, bool)> = ts.iter().map(|&t| (t, reg_gemm && use_flash(gpu, d.n_heads, t))).collect();
+    let stages: Vec<(u32, bool)> = ts.iter().map(|&t| (t, reg_gemm && use_flash(gpu, d, t))).collect();
     Scratch::shared(gpu, d, &stages)
 }
 
@@ -636,7 +672,7 @@ pub(crate) fn build_block_steps(
     s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_ROPE, &[&scr.kn, cos, sin, &scr.kr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[t, dim], t * 3 * dim));
-    push_attention(gpu, s, scr, nh, t, hd, dim, reg_gemm && use_flash(gpu, nh, t));
+    push_attention(gpu, s, scr, nh, t, hd, dim, reg_gemm && use_flash(gpu, d, t));
     s.push(mm(&scr.ctx, &w.wo, &scr.attn_out, t, dim, dim));
     s.push(gpu.step(K_RMSNORM, &[&scr.attn_out, &nb.an2, &scr.n2], &[dim, t, f(EPS)], t));
     s.push(gpu.step(K_ADD2, &[x_in, &scr.n2, &scr.x1], &[t * dim], t * dim));
@@ -836,7 +872,7 @@ pub(crate) fn build_block_steps_i8(
     s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_ROPE, &[&scr.kn, cos, sin, &scr.kr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[t, dim], t * 3 * dim));
-    push_attention(gpu, s, scr, nh, t, hd, dim, use_flash(gpu, nh, t)); // int8 path is GPU-only
+    push_attention(gpu, s, scr, nh, t, hd, dim, use_flash(gpu, d, t)); // int8 path is GPU-only
     quant(s, &scr.ctx, &i8.xq_dim, dim);
     mm8(s, &i8.xq_dim, &w.wo, &scr.attn_out, dim, dim);
     s.push(gpu.step(K_RMSNORM, &[&scr.attn_out, &nb.an2, &scr.n2], &[dim, t, f(EPS)], t));

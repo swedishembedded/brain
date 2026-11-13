@@ -93,7 +93,7 @@ fn gaussian_vec(seed: u64, n: usize) -> Vec<f32> {
 ///
 /// `uncond` is `Some` only for a genuinely split [`Placement`] - one card
 /// per branch. On every other machine (one schedulable card, the CPU
-/// backend, an explicitly pinned device, `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0`)
+/// backend, an explicitly pinned device, `cfg_parallel: false`)
 /// it is `None` and both forwards run on `cond`, one after the other, which
 /// is byte-for-byte what this stage did before.
 ///
@@ -114,8 +114,9 @@ impl CfgDevices {
         CfgDevices { cond: gpu, cond_card: None, uncond: None }
     }
 
-    /// Resolve [`DevicePlan::Auto`] against this machine and open one handle
-    /// per card it names.
+    /// Resolve `plan` ([`DevicePlan::Auto`] unless the caller opted out of
+    /// concurrent CFG with [`DevicePlan::Single`]) against this machine and
+    /// open one handle per card it names.
     ///
     /// `stage_device` is the `--device`-shaped token
     /// `crate::generate::stage_devices` picked for the denoise stage, used
@@ -123,8 +124,8 @@ impl CfgDevices {
     /// `GenOpts::device`, which forces that decline (see
     /// [`DevicePlan::resolve`]). When the plan DOES split it names both
     /// cards itself, from the same schedulable set `stage_devices` reads.
-    pub fn open(stage_device: Option<&str>, explicit: Option<&str>) -> CfgDevices {
-        let place = DevicePlan::Auto.resolve(explicit);
+    pub fn open(stage_device: Option<&str>, explicit: Option<&str>, plan: DevicePlan) -> CfgDevices {
+        let place = plan.resolve(explicit);
         Self::open_placed(place, stage_device)
     }
 

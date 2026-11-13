@@ -26,7 +26,7 @@ use capability::Assembly;
 
 use crate::caps::{bind_variant, check_license};
 use crate::config::Flux2Config;
-use crate::pipeline::{effective_dit_precision, AdapterSpec, Paths, Pipeline};
+use crate::pipeline::{effective_dit_precision, AdapterSpec, Paths, Pipeline, Sizing, Tuning};
 use crate::Precision;
 
 /// The three legitimate ways a caller already knows - or has to determine -
@@ -90,28 +90,32 @@ pub fn resolve(request: VariantRequest, paths: &Paths, requested_precision: Prec
     Ok((cfg, precision, variant))
 }
 
+/// What one [`build_resolved`] call builds: the variant (with its licence
+/// acceptance), its size, adapters, precision and tuning.
+pub struct BuildRequest<'a> {
+    pub variant: VariantRequest<'a>,
+    pub sizing: Sizing,
+    pub adapters: &'a [AdapterSpec],
+    pub precision: Precision,
+    /// Whether `precision` was asked for rather than defaulted - see
+    /// [`resolve`].
+    pub precision_was_explicit: bool,
+    pub tuning: &'a Tuning,
+}
+
 /// [`resolve`] plus the actual [`Pipeline`] build - the shape every call
 /// site that does NOT keep its own pre-build cache wants directly (the CLI,
 /// the SDK, a resident's `activate`, which is only ever called once the
 /// residency layer has already decided a fresh build is needed).
 ///
-/// `n_fwd`/`n_gen`/`adapters`/`max_batch` are call-site-computed - see this
+/// `n_fwd`/`n_gen`/`adapters`/`max_batch`/`tuning` are call-site-computed - see this
 /// module's doc for why they aren't resolved here too. Returns the built
 /// pipeline alongside the config/precision/variant a caller needs to hold
 /// onto afterward (a resident's own bookkeeping, a rebuild-with-an-adapter
 /// call).
-pub fn build_resolved(
-    request: VariantRequest,
-    paths: &Paths,
-    n_fwd: u32,
-    n_gen: u32,
-    adapters: &[AdapterSpec],
-    requested_precision: Precision,
-    precision_was_explicit: bool,
-    max_batch: u32,
-) -> Result<(Pipeline, Flux2Config, Precision, String), String> {
-    let (cfg, precision, variant) = resolve(request, paths, requested_precision, precision_was_explicit)?;
-    let pipe = Pipeline::build_sized(&cfg, paths, n_fwd, n_gen, adapters, precision, max_batch)?;
+pub fn build_resolved(paths: &Paths, request: BuildRequest) -> Result<(Pipeline, Flux2Config, Precision, String), String> {
+    let (cfg, precision, variant) = resolve(request.variant, paths, request.precision, request.precision_was_explicit)?;
+    let pipe = Pipeline::build_sized(&cfg, paths, request.sizing, request.adapters, precision, request.tuning)?;
     Ok((pipe, cfg, precision, variant))
 }
 
@@ -133,7 +137,7 @@ mod tests {
     fn assembly_with_no_variant_fails_before_any_real_work() {
         let assembly = Assembly { id: "x".to_string(), arch: "flux2".to_string(), variant: None, roles: BTreeMap::new(), provenance: Vec::new() };
         let paths = paths_with_dit("model.safetensors");
-        let Err(err) = build_resolved(VariantRequest::new(VariantSource::Assembly(&assembly), false), &paths, 1, 1, &[], Precision::F32, false, 1) else { panic!("expected an error") };
+        let Err(err) = build_resolved(&paths, BuildRequest { variant: VariantRequest::new(VariantSource::Assembly(&assembly), false), sizing: Sizing { n_img_max: 1, n_out_max: 1, max_batch: 1 }, adapters: &[], precision: Precision::F32, precision_was_explicit: false, tuning: &Tuning::default() }) else { panic!("expected an error") };
         assert_eq!(err, "flux2: assemble: no dit chosen");
     }
 
@@ -143,9 +147,9 @@ mod tests {
     #[test]
     fn bound_variant_still_runs_the_license_gate() {
         let paths = paths_with_dit("model.safetensors");
-        let Err(err) = build_resolved(VariantRequest::new(VariantSource::Bound("klein-9b"), false), &paths, 1, 1, &[], Precision::F32, false, 1) else { panic!("expected an error") };
+        let Err(err) = build_resolved(&paths, BuildRequest { variant: VariantRequest::new(VariantSource::Bound("klein-9b"), false), sizing: Sizing { n_img_max: 1, n_out_max: 1, max_batch: 1 }, adapters: &[], precision: Precision::F32, precision_was_explicit: false, tuning: &Tuning::default() }) else { panic!("expected an error") };
         assert!(err.contains("Non-Commercial"), "{err}");
-        let Err(accepted) = build_resolved(VariantRequest::new(VariantSource::Bound("klein-9b"), true), &paths, 1, 1, &[], Precision::F32, false, 1) else { panic!("expected an error") };
+        let Err(accepted) = build_resolved(&paths, BuildRequest { variant: VariantRequest::new(VariantSource::Bound("klein-9b"), true), sizing: Sizing { n_img_max: 1, n_out_max: 1, max_batch: 1 }, adapters: &[], precision: Precision::F32, precision_was_explicit: false, tuning: &Tuning::default() }) else { panic!("expected an error") };
         assert!(!accepted.contains("Non-Commercial"), "an accepted 9B request must pass the gate: {accepted}");
     }
 
@@ -165,7 +169,7 @@ mod tests {
         // enough that variant/license/config/precision all already ran,
         // since neither a missing-variant nor a license-gate message is
         // what comes back.
-        let Err(err) = build_resolved(VariantRequest::new(VariantSource::Bound("klein-4b"), false), &paths, 1, 1, &[], Precision::F32, false, 1) else { panic!("expected an error") };
+        let Err(err) = build_resolved(&paths, BuildRequest { variant: VariantRequest::new(VariantSource::Bound("klein-4b"), false), sizing: Sizing { n_img_max: 1, n_out_max: 1, max_batch: 1 }, adapters: &[], precision: Precision::F32, precision_was_explicit: false, tuning: &Tuning::default() }) else { panic!("expected an error") };
         assert!(!err.contains("Non-Commercial"), "{err}");
         assert!(!err.contains("incompatible"), "{err}");
     }
@@ -178,7 +182,7 @@ mod tests {
     #[test]
     fn an_explicit_fp32_request_against_a_gguf_dit_is_refused() {
         let paths = paths_with_dit("model.gguf");
-        let Err(err) = build_resolved(VariantRequest::new(VariantSource::Bound("klein-4b"), false), &paths, 1, 1, &[], Precision::F32, true, 1) else { panic!("expected an error") };
+        let Err(err) = build_resolved(&paths, BuildRequest { variant: VariantRequest::new(VariantSource::Bound("klein-4b"), false), sizing: Sizing { n_img_max: 1, n_out_max: 1, max_batch: 1 }, adapters: &[], precision: Precision::F32, precision_was_explicit: true, tuning: &Tuning::default() }) else { panic!("expected an error") };
         assert!(err.contains("incompatible"), "{err}");
     }
 }

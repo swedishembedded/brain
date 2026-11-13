@@ -42,11 +42,11 @@ setup_file() {
 }
 
 @test "scheduler e2e: generate + detect (samples/python/dbus/detect-pipeline/detect_pipeline.py) + batching + eviction" {
-  # CPU encoder (unset ENCODER_GPU) so each z-image instance is DiT-on-one-GPU +
+  # CPU encoder (no encoder_gpu param) so each z-image instance is DiT-on-one-GPU +
   # encoder-in-RAM — several sizes then fit across the GPUs and the extra one is
   # evicted, with no single-card overcommit. --reserve-gb keeps headroom for
   # activations.
-  run env -u BRAIN_S3DIT_ENCODER_GPU OUT="${OUT:-/tmp/brain_e2e}" SIZE="${SIZE:-256}" STEPS="${STEPS:-8}" BATCH_N="${BATCH_N:-4}" \
+  run env OUT="${OUT:-/tmp/brain_e2e}" SIZE="${SIZE:-256}" STEPS="${STEPS:-8}" BATCH_N="${BATCH_N:-4}" \
     timeout 1800 dbus-run-session -- bash -c "
       '$BIN' serve --dbus --reserve-gb 4 2>/tmp/brain_e2e_srv.log &
       SRV=\$!

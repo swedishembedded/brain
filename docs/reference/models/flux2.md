@@ -40,6 +40,23 @@ brain flux2 text2image --prompt "…" --seed $RANDOM --out image=fox.png \
     --tokenizer …/FLUX.2-klein-4B/tokenizer/tokenizer.json
 ```
 
+### Build parameters
+
+`text2image` and `edit` take placement and load-route parameters; unset is the
+automatic behaviour, and each one changes what is built, so it keys the
+resident instance:
+
+| Parameter | Meaning |
+| --- | --- |
+| `te_device` | pin the text encoder to a card: `gpu<i>` builds a truncated f32 shard there, `gpu<i>:i8` the int8 one. Unset, the pipeline declares the DiT, encoder and VAE with their costs and the engine places them on cards that can hold them (`residency::plan`, through `gpu_core::devices::place`), printing what it chose |
+| `no_stream` | build a non-GGUF DiT from a whole fp32 tensor map instead of streaming each tensor (same bytes; refused for a `.gguf` DiT, whose quantized tensors would be decoded into that map) |
+| `te_no_stream` | import the text encoder as one whole fp32 map instead of streaming it per tensor (same bytes; an A/B instrument and a fallback) |
+| `lora_fold` | int8 only: bake an adapter into the weights and requantize, instead of applying it beside the base matmul in fp32. Not the same bytes: folding into a 256-level grid discards most of a trained delta, so this exists to see the difference, not to ship |
+| `vae_tiling` | force the VAE encode and decode onto the tiled path (`true`) or the whole-image path (`false`); unset, the device's free memory decides |
+
+`BRAIN_FLUX2_I8_KEEP_F32` (parity bisection) and `BRAIN_FLUX2_DUMP_LATENT`
+remain developer variables, documented in `.agents/rules/testing.md`.
+
 ### Serving more than one checkpoint at once
 
 With the model dir holding one or more real `dit` checkpoints (a diffusers-layout

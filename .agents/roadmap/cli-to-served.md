@@ -56,4 +56,4 @@ Each row is one or more self-contained commits: the served action gains what the
 | arch | CLI-only work to move | into |
 |---|---|---|
 | top level | `decide` lifecycle: `train`, `eval`, `promote`, `rollback`, `inspect` | actions of `brain/decision` (the catalog entry already links `brain::decision_run`) |
-| env | Z-Image placement knobs (`BRAIN_S3DIT_ENCODER_*`, `_WINDOW_BLOCKS`, `_FLASH`, `_RETAIN_INT8_CACHE`), device-placement knobs (`BRAIN_WAN_T5_DEVICE`, `BRAIN_FLUX2_TE_DEVICE`, `BRAIN_SDXL_VAE_DEVICE`, ...), the global ones (`BRAIN_DEVICE`, `BRAIN_AUTO_FETCH`, `BRAIN_VERBOSE`, `BRAIN_LIMIT_*`), debug and kernel switches, samples still exporting retired variables, tests that find checkpoints through variables | the model's action params or generic flags; tests through the store |
+| env | device-placement knobs (`BRAIN_WAN_T5_DEVICE`, `BRAIN_SDXL_VAE_DEVICE`, ...), the global ones (`BRAIN_DEVICE`, `BRAIN_AUTO_FETCH`, `BRAIN_VERBOSE`, `BRAIN_LIMIT_*`), debug and kernel switches, samples still exporting retired variables, tests that find checkpoints through variables | the model's action params or generic flags; tests through the store |

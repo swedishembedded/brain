@@ -231,6 +231,9 @@ struct Flux2Backend {
     /// same class of bug [`S3ditBackend::width`]/`height` already guards
     /// against on the other backend.
     forward_tokens: u32,
+    /// The build knobs ([`ImagePipelineBuilder::flux2_tuning`]), read back by
+    /// [`ImagePipeline::load_lora`]'s rebuild like `forward_tokens`.
+    tuning: flux2::pipeline::Tuning,
     /// The one adapter folded in, if any -- flux2's `Pipeline` only takes
     /// adapters at BUILD time (`Pipeline::build_sized`'s `adapters:
     /// &[AdapterSpec]`; there is no post-construction "add an adapter" call
@@ -257,6 +260,10 @@ struct S3ditBackend {
     /// [`S3ditBackend::width`]/`height` are: folding an adapter in must not
     /// silently drop a caller-requested capacity back to the default.
     cap_len: u32,
+    /// The placement and kernel knobs this pipeline was BUILT with
+    /// ([`ImagePipelineBuilder::s3dit_tuning`]) -- read back by
+    /// [`ImagePipeline::load_lora`]'s rebuild, like `cap_len`.
+    tuning: s3dit::pipeline::Tuning,
     /// The one adapter folded in, if any -- same reason as
     /// [`Flux2Backend::adapter`]: `HotPipeline::build_adapted`'s `adapter:
     /// Option<&str>` only takes one at BUILD time.
@@ -298,6 +305,7 @@ impl std::fmt::Debug for ImagePipeline {
                 .field("height", &b.height)
                 .field("cap_len", &b.cap_len)
                 .field("hifi", &b.hifi)
+                .field("tuning", &b.tuning)
                 .field("adapter", &b.adapter)
                 .finish(),
         }
@@ -318,6 +326,8 @@ impl ImagePipeline {
             size: None,
             cap_len: s3dit::pipeline::DEFAULT_CAP_LEN,
             hifi: None,
+            s3dit_tuning: s3dit::pipeline::Tuning::default(),
+            flux2_tuning: flux2::pipeline::Tuning::default(),
             download_policy: loader::DownloadPolicy::default(),
             accept_non_commercial: false,
         }
@@ -366,11 +376,12 @@ impl ImagePipeline {
                 b.adapter = Some(spec);
                 let adapters: Vec<flux2::AdapterSpec> = b.adapter.iter().cloned().collect();
                 let n = b.forward_tokens;
-                b.pipe = flux2::Pipeline::build_sized(&b.cfg, &b.paths, n, n, &adapters, b.precision, 1).map_err(Error::Backend)?;
+                b.pipe = flux2::Pipeline::build_sized(&b.cfg, &b.paths, flux2::Sizing { n_img_max: n, n_out_max: n, max_batch: 1 }, &adapters, b.precision, &b.tuning).map_err(Error::Backend)?;
             }
             Backend::S3dit(b) => {
                 b.adapter = Some(spec.path);
-                b.pipe = s3dit::pipeline::HotPipeline::build_adapted(&b.paths, b.width, b.height, b.cap_len, b.hifi, b.adapter.as_deref(), |_| {}).map_err(Error::Backend)?;
+                let spec = s3dit::pipeline::BuildSpec { width: b.width, height: b.height, cap_len: b.cap_len, hifi: b.hifi, adapter: b.adapter.as_deref(), tuning: b.tuning.clone() };
+                b.pipe = s3dit::pipeline::HotPipeline::build_adapted(&b.paths, &spec, |_| {}).map_err(Error::Backend)?;
             }
         }
         Ok(())
@@ -497,6 +508,8 @@ pub struct ImagePipelineBuilder {
     size: Option<(u32, u32)>,
     cap_len: u32,
     hifi: Option<bool>,
+    s3dit_tuning: s3dit::pipeline::Tuning,
+    flux2_tuning: flux2::pipeline::Tuning,
     download_policy: loader::DownloadPolicy,
     accept_non_commercial: bool,
 }
@@ -582,6 +595,25 @@ impl ImagePipelineBuilder {
         self
     }
 
+    /// How an s3dit-backed pipeline is placed and which kernels it records
+    /// (text-encoder card, resident encoder, fp32 encoder split, decode window,
+    /// attention kernel): a BUILD-time property like [`ImagePipelineBuilder::size`].
+    /// Defaults to [`s3dit::pipeline::Tuning::default`], the automatic
+    /// behaviour; a flux2-backed pipeline ignores it.
+    pub fn s3dit_tuning(mut self, tuning: s3dit::pipeline::Tuning) -> Self {
+        self.s3dit_tuning = tuning;
+        self
+    }
+
+    /// How a flux2-backed pipeline is built beyond its placement plan
+    /// (text-encoder card pin, load-route valves, LoRA fold route): a
+    /// BUILD-time property. Defaults to [`flux2::pipeline::Tuning::default`],
+    /// the automatic behaviour; an s3dit-backed pipeline ignores it.
+    pub fn flux2_tuning(mut self, tuning: flux2::pipeline::Tuning) -> Self {
+        self.flux2_tuning = tuning;
+        self
+    }
+
     /// Resolve `model_id` and build a real [`ImagePipeline`].
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]).
@@ -650,7 +682,7 @@ impl ImagePipelineBuilder {
     /// crate does not otherwise require, for a capability every caller here
     /// already gets for free by supplying one only where it is used.
     pub fn load_with_progress(self, on_download: &mut dyn FnMut(&str, u64, Option<u64>), on_build: &mut dyn FnMut(&str)) -> Result<ImagePipeline> {
-        let ImagePipelineBuilder { model_id, device, dtype, size, cap_len, hifi, download_policy, accept_non_commercial } = self;
+        let ImagePipelineBuilder { model_id, device, dtype, size, cap_len, hifi, s3dit_tuning, flux2_tuning, download_policy, accept_non_commercial } = self;
 
         crate::device::apply(&device)?;
 
@@ -704,18 +736,29 @@ impl ImagePipelineBuilder {
                 flux2::caps::check_license(&variant_name, accept_non_commercial).map_err(Error::LicenseRequired)?;
 
                 let n = size.map(|(w, h)| forward_tokens_for(w, h)).unwrap_or_else(default_forward_tokens);
-                let (pipe, cfg, precision, _variant) = flux2::build_resolved(flux2::VariantRequest::new(flux2::VariantSource::Assembly(&assembly), accept_non_commercial), &paths, n, n, &[], dtype, false, 1).map_err(Error::Backend)?;
+                let (pipe, cfg, precision, _variant) = flux2::build_resolved(
+                    &paths,
+                    flux2::BuildRequest {
+                        variant: flux2::VariantRequest::new(flux2::VariantSource::Assembly(&assembly), accept_non_commercial),
+                        sizing: flux2::Sizing { n_img_max: n, n_out_max: n, max_batch: 1 },
+                        adapters: &[],
+                        precision: dtype,
+                        precision_was_explicit: false,
+                        tuning: &flux2_tuning,
+                    },
+                ).map_err(Error::Backend)?;
 
-                Ok(ImagePipeline { backend: Backend::Flux2(Box::new(Flux2Backend { pipe, cfg, paths, precision, forward_tokens: n, adapter: None })) })
+                Ok(ImagePipeline { backend: Backend::Flux2(Box::new(Flux2Backend { pipe, cfg, paths, precision, forward_tokens: n, tuning: flux2_tuning, adapter: None })) })
             }
             ResolvedArch::S3dit(assembly) => {
                 let paths = s3dit::pipeline::Paths::from_assembly(&assembly).map_err(Error::Backend)?;
                 let (width, height) = size.unwrap_or(S3DIT_DEFAULT_SIZE);
                 let hifi = hifi.unwrap_or(dtype == DType::F32);
 
-                let pipe = s3dit::pipeline::HotPipeline::build_adapted(&paths, width, height, cap_len, hifi, None, on_build).map_err(Error::Backend)?;
+                let spec = s3dit::pipeline::BuildSpec { width, height, cap_len, hifi, adapter: None, tuning: s3dit_tuning.clone() };
+                let pipe = s3dit::pipeline::HotPipeline::build_adapted(&paths, &spec, on_build).map_err(Error::Backend)?;
 
-                Ok(ImagePipeline { backend: Backend::S3dit(Box::new(S3ditBackend { pipe, paths, width, height, cap_len, hifi, adapter: None })) })
+                Ok(ImagePipeline { backend: Backend::S3dit(Box::new(S3ditBackend { pipe, paths, width, height, cap_len, hifi, tuning: s3dit_tuning, adapter: None })) })
             }
         }
     }

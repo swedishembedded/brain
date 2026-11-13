@@ -57,6 +57,7 @@ pub fn generate_spec() -> ActionSpec {
         .param(ParamSpec::new("duration_seconds", ParamType::Float, "target song length in seconds (the AR stage may stop earlier)").min(0.0).max(capability::bounds::SECONDS).default(json!(d.duration_seconds)))
         .param(ParamSpec::new("num_inference_steps", ParamType::Int, "Euler steps per denoise chunk").min(0.0).max(capability::bounds::DENOISE_STEPS).default(json!(d.num_inference_steps as i64)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run; omit for random)"))
+        .param(ParamSpec::new("cfg_parallel", ParamType::Bool, "step the two CFG branches concurrently, one per card, on a two-card machine (bit-identical to sequential; false for a box whose --limit-vram-total was sized for one card, or to bisect a driver problem)").default(json!(true)))
         .output(BlobSpec::new("audio", Media::Audio, "the generated song: a complete 44.1 kHz stereo WAV").required())
 }
 
@@ -93,6 +94,7 @@ fn opts_from(inv: &Invocation) -> Result<GenOpts, String> {
         // the ambient selection. `GenOpts::device` exists for in-process
         // callers that place stages explicitly (a two-card split).
         device: None,
+        cfg_parallel: inv.get_bool("cfg_parallel").unwrap_or(d.cfg_parallel),
     })
 }
 

@@ -24,8 +24,8 @@
 //! 2. **denoise** (the DiT, `GenOpts::device`) and drop it;
 //! 3. **decode** (the VAE) into frames.
 //!
-//! That is the same staging `flux2::pipeline` reaches with
-//! `BRAIN_FLUX2_TE_DEVICE`, for the same reason. The text encoding survives
+//! That is the same staging `flux2::pipeline` reaches with its `te_device`
+//! param, for the same reason. The text encoding survives
 //! phase 1 as two `[512, 4096]` f32 blocks (16 MB), which is the whole point of
 //! doing it first.
 //!

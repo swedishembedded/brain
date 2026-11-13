@@ -73,7 +73,7 @@ fn real_short_generation_produces_a_playable_wav() {
     // run draws its seed; it is echoed so a failure can be replayed.
     let seed = data::rng::random_seed();
     eprintln!("e2e: seed {seed}");
-    let opts = GenOpts { duration_seconds: 1.0, num_inference_steps: 8, seed, device: None };
+    let opts = GenOpts { duration_seconds: 1.0, num_inference_steps: 8, seed, device: None, cfg_parallel: true };
     let song = generate(
         &paths,
         &opts,

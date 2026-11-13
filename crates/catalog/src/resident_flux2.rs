@@ -197,8 +197,9 @@ impl ResidentModel for Flux2Resident {
         if action == "lora_train" {
             return InstanceKey::new(&self.id, format!("train:{}", self.variant));
         }
-        // "{variant}:{accepted}:{precision}:{forward tokens}:{canvas tokens}:{lora_scale}:{adapters}"
-        // fixes the built graphs; `accepted` (1/0) is the request's
+        // "{variant}:{accepted}:{precision}:{forward tokens}:{canvas tokens}:{tuning}:{lora_scale}:{adapters}"
+        // fixes the built graphs (`tuning` is `flux2::pipeline::Tuning::key`: the
+        // text-encoder pin and load-route valves each change what is built); `accepted` (1/0) is the request's
         // `allow_non_commercial`, keyed so an instance is only ever built
         // for, and shared among, requests that gave the same answer - a 9B
         // request that did not confirm is refused at `activate`, before any
@@ -210,11 +211,12 @@ impl ResidentModel for Flux2Resident {
         let variant = &self.variant;
         let config = match flux2::request::plan(inv, action == "edit") {
             Ok(plan) => format!(
-                "{variant}:{}:{}:{}:{}:{}:{}",
+                "{variant}:{}:{}:{}:{}:{}:{}:{}",
                 u8::from(flux2::caps::non_commercial_accepted(inv)),
                 plan.precision.name(),
                 plan.forward_tokens(),
                 plan.canvas_tokens(),
+                plan.tuning.key(),
                 inv.get_f64("lora_scale").unwrap_or(1.0),
                 inv.get_str("adapter").unwrap_or_default()
             ),
@@ -241,7 +243,7 @@ impl ResidentModel for Flux2Resident {
             // 4B fp32: ~15.5 GB DiT + encoder/VAE working set ≈ 18 GiB.
             (false, false) => 18u64 << 30,
             // 4B int8 DiT ≈ 3.9 GiB weights (~6 GiB resident with scratch/VAE;
-            // the TE is placed separately via BRAIN_FLUX2_TE_DEVICE).
+            // the TE is placed separately via the `te_device` param).
             (false, true) => 6u64 << 30,
         };
         // A batched instance holds one activation slab per batch slot; the
@@ -269,7 +271,7 @@ impl ResidentModel for Flux2Resident {
         }
         // Parsing back what `instance_key` wrote; the variant field is
         // always `self.variant`.
-        let mut it = key.config.splitn(7, ':');
+        let mut it = key.config.splitn(8, ':');
         let bad = || format!("flux2: this request could not be planned (instance key {})", key.config);
         let variant = it.next().ok_or_else(bad)?;
         let accepted = match it.next().ok_or_else(bad)? {
@@ -280,6 +282,7 @@ impl ResidentModel for Flux2Resident {
         let precision = flux2::Precision::from_name(it.next().ok_or_else(bad)?).map_err(|_| bad())?;
         let n_fwd: u32 = it.next().and_then(|s| s.parse().ok()).ok_or_else(bad)?;
         let n_gen: u32 = it.next().and_then(|s| s.parse().ok()).ok_or_else(bad)?;
+        let tuning = flux2::pipeline::Tuning::from_key(it.next().ok_or_else(bad)?).ok_or_else(bad)?;
         let lora_scale: f32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
         let adapters = flux2::AdapterSpec::parse_list(it.next().unwrap_or_default(), lora_scale)?;
         // `flux2::build_resolved` runs the license/config/precision decision
@@ -294,9 +297,19 @@ impl ResidentModel for Flux2Resident {
         // can only coerce (`precision_was_explicit: false`), never reject an
         // explicit misuse the way the CLI/SDK paths do. Place the pipeline on
         // the assigned card (scoped registry selection; the TE card is
-        // flux2's own BRAIN_FLUX2_TE_DEVICE and left as configured).
+        // the tuning's own `te_device` and left as configured).
         let (pipe, ..) = crate::resident_llm::on_device(device, || {
-            flux2::build_resolved(flux2::VariantRequest::new(flux2::VariantSource::Bound(variant), accepted), &self.paths, n_fwd, n_gen, &adapters, precision, false, self.max_batch)
+            flux2::build_resolved(
+                &self.paths,
+                flux2::BuildRequest {
+                    variant: flux2::VariantRequest::new(flux2::VariantSource::Bound(variant), accepted),
+                    sizing: flux2::Sizing { n_img_max: n_fwd, n_out_max: n_gen, max_batch: self.max_batch },
+                    adapters: &adapters,
+                    precision,
+                    precision_was_explicit: false,
+                    tuning: &tuning,
+                },
+            )
         })??;
         Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths), variant: self.variant.clone() }))
     }
@@ -464,6 +477,23 @@ mod tests {
 
         std::fs::remove_file(&p4).ok();
         std::fs::remove_file(&p9).ok();
+    }
+
+    /// Every build knob changes what `activate` builds, so each keys a distinct
+    /// instance, and the tuning reaches `activate` through the key (a key it
+    /// cannot read back is refused, never defaulted).
+    #[test]
+    fn build_tuning_is_part_of_the_generation_instance_identity() {
+        let p4 = write_fake_dit(&flux2::Flux2Config::klein_4b(), "tuning-key");
+        let r = Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths_with_dit(p4.to_str().unwrap().to_string()), "klein").unwrap();
+        let plain = Invocation::new().set("prompt", json!("a")).set("seed", json!(1));
+        let base = r.instance_key("text2image", &plain).config;
+        for (name, value) in [("te_device", json!("gpu1:i8")), ("no_stream", json!(true)), ("te_no_stream", json!(true)), ("lora_fold", json!(true))] {
+            let key = r.instance_key("text2image", &plain.clone().set(name, value.clone())).config;
+            assert_ne!(key, base, "{name} must key a distinct instance");
+            assert!(flux2::pipeline::Tuning::from_key(key.split(':').nth(5).unwrap()).is_some(), "{key}");
+        }
+        std::fs::remove_file(&p4).ok();
     }
 
     /// A 9B resident serves a request only when that request itself confirmed

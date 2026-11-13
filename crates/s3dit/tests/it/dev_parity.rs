@@ -28,6 +28,7 @@ fn small_cfg() -> ZImageConfig {
         rope_theta: 256.0,
         t_scale: 1000.0,
         norm_eps: 1e-5,
+        attention: s3dit::block::AttentionMode::Auto,
     }
 }
 

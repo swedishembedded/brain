@@ -765,7 +765,7 @@ pub fn read_dit_tensors(path: &str, cfg: &Flux2Config) -> Result<crate::Tensors,
 // `gpu_core::devices::place` seam. This module therefore DECLARES what the
 // parts cost and lets the engine place them; it never names a card.
 //
-// What it used to do instead - and what `BRAIN_FLUX2_TE_DEVICE` still
+// What it used to do instead - and what `Tuning::te_device` still
 // overrides - was require the operator to know that an int8 9B DiT and its
 // text encoder do not co-reside on one 24 GiB P40, and to say so by hand on
 // every run.
@@ -957,8 +957,8 @@ pub fn te_bytes(te_cfg: &qwen3::QwenConfig, layers: usize, seq: u64, int8: bool)
 /// the same config and the same threshold the decode itself will). Declaring
 /// the whole-image cost for a run that will be tiled would refuse, on a busy
 /// machine, a generation the hardware can do.
-pub fn vae_decoder_bytes(vae_cfg: &vae::VaeConfig, n_out_max: u64) -> u64 {
-    vae::decoder_device_bytes_for_pixels_planned(vae_cfg, 256 * n_out_max)
+pub fn vae_decoder_bytes(vae_cfg: &vae::VaeConfig, n_out_max: u64, vae_tiling: Option<bool>) -> u64 {
+    vae::decoder_device_bytes_for_pixels_planned(vae_cfg, 256 * n_out_max, vae_tiling)
 }
 
 /// The VAE ENCODE graph's device footprint, priced at the output size: a
@@ -973,9 +973,10 @@ pub fn vae_decoder_bytes(vae_cfg: &vae::VaeConfig, n_out_max: u64) -> u64 {
 /// [`evict_denoiser_before_decode`] frees the space the decode needs.
 ///
 /// Tiled past the same threshold, for the same reason - see
-/// [`vae_decoder_bytes`].
-pub fn vae_encoder_bytes(vae_cfg: &vae::VaeConfig, n_out_max: u64) -> u64 {
-    vae::encoder_device_bytes_for_pixels_planned(vae_cfg, 256 * n_out_max)
+/// [`vae_decoder_bytes`]. `vae_tiling` is [`Tuning::vae_tiling`]: `Some` forces
+/// the tiled (`true`) or whole-image (`false`) path in both directions.
+pub fn vae_encoder_bytes(vae_cfg: &vae::VaeConfig, n_out_max: u64, vae_tiling: Option<bool>) -> u64 {
+    vae::encoder_device_bytes_for_pixels_planned(vae_cfg, 256 * n_out_max, vae_tiling)
 }
 
 /// Whether the decode graph can only be built in the denoiser's PLACE: the
@@ -1029,19 +1030,96 @@ pub fn te_tier_int8(precision: crate::Precision) -> bool {
     precision == crate::Precision::Int8
 }
 
-/// `BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8]`, if set. Kept as an OVERRIDE of the
-/// automatic decision below, not as the way to express it: an operator who
-/// has already pinned a layout keeps it, and everybody else stops needing to
-/// know the layout exists.
-fn te_device_override() -> Result<Option<TePlacement>, String> {
-    let Some(s) = std::env::var("BRAIN_FLUX2_TE_DEVICE").ok() else { return Ok(None) };
-    let Some(rest) = s.strip_prefix("gpu") else { return Ok(None) };
-    let (idx_s, int8) = match rest.strip_suffix(":i8") {
-        Some(p) => (p, true),
+/// How a FLUX.2 [`Pipeline`] is built beyond what its placement plan decides:
+/// the per-request knobs of the generating actions, threaded from the action
+/// to every build site. [`Default`] is the automatic behaviour. Every field
+/// changes what gets built, so a resident keys its instance on [`Tuning::key`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tuning {
+    /// Pin the text encoder to a card (`gpu<i>[:i8]`, see [`parse_te_device`])
+    /// instead of taking the automatic placement. An operator who has already
+    /// settled a layout keeps it, and everybody else stops needing to know the
+    /// layout exists.
+    pub te_device: Option<TeDevice>,
+    /// Force a non-GGUF DiT to build from a whole fp32 tensor map instead of
+    /// streaming each tensor. Not a correctness switch - both produce the same
+    /// bytes - but how the two are A/B'd on a real checkpoint, and a valve if a
+    /// checkpoint ever trips the streamed path. Refused for a `.gguf` DiT:
+    /// decoding a quantized GGUF into a whole fp32 map would precede construction.
+    pub dit_whole_map: bool,
+    /// The same valve for the text encoder: import it as one whole fp32 map
+    /// instead of streaming it per tensor from a mapping.
+    pub te_whole_map: bool,
+    /// Put an int8 build back on the fold route: the adapter is baked into the
+    /// weights and the result requantized, instead of applied as a runtime
+    /// low-rank correction. Unlike the valves above this is NOT two ways to the
+    /// same bytes - it reproduces the lossy deployment, so the difference can be
+    /// seen on a real checkpoint, and it serves a stack that cannot be applied
+    /// at runtime. It is not a tier to ship.
+    pub lora_fold: bool,
+    /// Force the VAE encode and decode onto the tiled (`Some(true)`) or the
+    /// whole-image (`Some(false)`) path, in the placement estimate and in the
+    /// run alike; `None` takes the budget policy (`vae::tiled::whole_graph_budget`).
+    /// Forcing tiling ON at a size that already fits is the supported way to
+    /// compare the two paths; forcing it OFF overrides the probe for a caller
+    /// who knows better.
+    pub vae_tiling: Option<bool>,
+}
+
+/// A text-encoder card pin: the canonical card index, and whether the int8
+/// (DP4A) shard is built there instead of the f32 one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TeDevice {
+    pub gpu_index: usize,
+    pub int8: bool,
+}
+
+/// `gpu<i>[:i8]`: the encoder's truncated shard on card `i`, int8 with the
+/// suffix, f32 without.
+pub fn parse_te_device(s: &str) -> Result<TeDevice, String> {
+    let bad = || format!("flux2: bad te_device {s:?} (gpu<i>[:i8])");
+    let rest = s.strip_prefix("gpu").ok_or_else(bad)?;
+    let (index, int8) = match rest.strip_suffix(":i8") {
+        Some(index) => (index, true),
         None => (rest, false),
     };
-    let idx: usize = idx_s.parse().map_err(|_| format!("bad BRAIN_FLUX2_TE_DEVICE {s} (gpu<i>[:i8])"))?;
-    Ok(Some(TePlacement { gpu_index: Some(idx), int8, before_denoiser: false }))
+    Ok(TeDevice { gpu_index: index.parse().map_err(|_| bad())?, int8 })
+}
+
+impl Tuning {
+    /// A string with no `:` that names exactly this tuning, for a resident's
+    /// instance key; [`Tuning::from_key`] is its inverse.
+    pub fn key(&self) -> String {
+        let te = self.te_device.map_or("-".to_string(), |d| format!("{}{}", d.gpu_index, if d.int8 { "i8" } else { "" }));
+        let tiling = self.vae_tiling.map_or("auto", |on| if on { "on" } else { "off" });
+        format!("te={te},dit={},tew={},fold={},vae={tiling}", u8::from(self.dit_whole_map), u8::from(self.te_whole_map), u8::from(self.lora_fold))
+    }
+
+    /// The tuning [`Tuning::key`] named, or `None` for a string that is not one.
+    pub fn from_key(key: &str) -> Option<Tuning> {
+        let mut t = Tuning::default();
+        for part in key.split(',') {
+            let (name, value) = part.split_once('=')?;
+            match name {
+                "te" if value == "-" => t.te_device = None,
+                "te" => {
+                    let (index, int8) = value.strip_suffix("i8").map_or((value, false), |index| (index, true));
+                    t.te_device = Some(TeDevice { gpu_index: index.parse().ok()?, int8 });
+                }
+                "dit" => t.dit_whole_map = value == "1",
+                "tew" => t.te_whole_map = value == "1",
+                "fold" => t.lora_fold = value == "1",
+                "vae" => t.vae_tiling = match value {
+                    "auto" => None,
+                    "on" => Some(true),
+                    "off" => Some(false),
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        }
+        Some(t)
+    }
 }
 
 /// The parts this pipeline is made of, as the engine sees them: `[dit, te,
@@ -1069,6 +1147,7 @@ pub fn part_needs(
     n_joint: u64,
     n_out_max: u64,
     max_batch: u64,
+    vae_tiling: Option<bool>,
 ) -> Vec<gpu_core::devices::Need> {
     let te_cfg = te_config(cfg);
     let layers = *TAP_LAYERS.iter().max().unwrap();
@@ -1077,11 +1156,11 @@ pub fn part_needs(
     let mut needs = vec![
         gpu_core::devices::Need::sized("dit", dit_bytes(cfg, precision, n_joint, max_batch), 0).apart().phase(1),
         gpu_core::devices::Need::sized("te", te_bytes(&te_cfg, layers, cfg.txt_len as u64, te_int8), 0).apart(),
-        gpu_core::devices::Need::sized("vae_dec", vae_decoder_bytes(vae_cfg, n_out_max), 0).with("dit").phase(2),
+        gpu_core::devices::Need::sized("vae_dec", vae_decoder_bytes(vae_cfg, n_out_max, vae_tiling), 0).with("dit").phase(2),
     ];
     if n_ref > 0 {
         needs.push(
-            gpu_core::devices::Need::sized("vae_enc", vae_encoder_bytes(vae_cfg, n_out_max), 0)
+            gpu_core::devices::Need::sized("vae_enc", vae_encoder_bytes(vae_cfg, n_out_max, vae_tiling), 0)
                 .with("vae_dec")
                 .phase(1),
         );
@@ -1113,10 +1192,10 @@ const TE_PHASE: u32 = 0;
 /// `Shard::owns` is `l < end` and the deepest tap is layer 27, so the layers
 /// past it are never read and a truncated shard's conditioning is
 /// bit-identical to a whole encoder's at the same width.
-pub fn plan_parts(cfg: &Flux2Config, paths: &Paths, vae_cfg: &vae::VaeConfig, precision: crate::Precision, n_joint: u64, n_out_max: u64, max_batch: u64) -> Result<(gpu_core::devices::Homes, TePlacement), String> {
+pub fn plan_parts(cfg: &Flux2Config, paths: &Paths, vae_cfg: &vae::VaeConfig, precision: crate::Precision, n_joint: u64, n_out_max: u64, max_batch: u64, vae_tiling: Option<bool>) -> Result<(gpu_core::devices::Homes, TePlacement), String> {
     let te_cfg = te_config(cfg);
     let layers = *TAP_LAYERS.iter().max().unwrap();
-    let mut needs = part_needs(cfg, vae_cfg, precision, n_joint, n_out_max, max_batch);
+    let mut needs = part_needs(cfg, vae_cfg, precision, n_joint, n_out_max, max_batch, vae_tiling);
     if paths.dit.ends_with(".gguf") {
         let g = checkpoint::gguf::MmapGguf::open(&paths.dit)?;
         crate::import::validate_manifest(&|n| g.shape(n).map(<[usize]>::to_vec), g.names(), cfg)?;
@@ -1239,22 +1318,16 @@ fn te_config(cfg: &Flux2Config) -> qwen3::QwenConfig {
 /// ever reads. `Role::Frozen` allocates the weights only, and the forward is
 /// bit-identical (`qwen3`'s `frozen_and_trainable_builds_agree_on_the_forward`).
 ///
-/// `BRAIN_FLUX2_TE_NO_STREAM=1` forces the old whole-map route. Not a
+/// `whole_map` ([`Tuning::te_whole_map`]) forces the old whole-map route. Not a
 /// correctness switch - both produce the same bytes, pinned per tensor in
 /// `qwen3` - but it is how the two are A/B'd on a real checkpoint, and a valve
 /// if a configuration ever needs the map route back.
-pub fn build_text_encoder(cfg: &Flux2Config, paths: &Paths) -> Result<qwen3::Qwen, String> {
-    // No plan in hand (the finetune path, a direct library caller): honour an
-    // explicit override, else build here - exactly the historical behaviour.
-    let te = te_device_override()?.unwrap_or_else(TePlacement::here);
-    build_text_encoder_on(cfg, paths, te)
-}
-
-/// [`build_text_encoder`] with the placement already decided.
-pub fn build_text_encoder_on(cfg: &Flux2Config, paths: &Paths, te: TePlacement) -> Result<qwen3::Qwen, String> {
+///
+/// The placement is already decided: a plan's, a pin's ([`Tuning::te_device`])
+/// or [`TePlacement::here`] for a caller with none in hand.
+pub fn build_text_encoder_on(cfg: &Flux2Config, paths: &Paths, te: TePlacement, whole_map: bool) -> Result<qwen3::Qwen, String> {
     let te_cfg = te_config(cfg);
-    let te_no_stream = std::env::var("BRAIN_FLUX2_TE_NO_STREAM").is_ok_and(|v| v != "0");
-    let te_eager: Option<std::collections::HashMap<String, Vec<f32>>> = if te_no_stream {
+    let te_eager: Option<std::collections::HashMap<String, Vec<f32>>> = if whole_map {
         let ts = checkpoint::safetensors::read_model_dir(std::path::Path::new(&paths.te))?;
         Some(qwen3::import::brain_init_from_hf(ts, &te_cfg)?)
     } else {
@@ -1262,7 +1335,7 @@ pub fn build_text_encoder_on(cfg: &Flux2Config, paths: &Paths, te: TePlacement) 
     };
     let te_reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(&paths.te))
         .map_err(|e| format!("flux2: open text encoder {}: {e}", paths.te))?;
-    // TE placement: default = ambient device; `BRAIN_FLUX2_TE_DEVICE=gpu<i>`
+    // TE placement: default = ambient device; a `gpu<i>` placement
     // builds a truncated fp32 shard on that card, so the DiT can own the
     // other card whole. `Shard::owns` is `l < end`, so the shard keeps
     // layers `[0, deepest)` - the residual stream the deepest tap reads has
@@ -1280,8 +1353,8 @@ pub fn build_text_encoder_on(cfg: &Flux2Config, paths: &Paths, te: TePlacement) 
     // raw device out-of-memory rather than a refusal naming the two
     // budgets, which is a known gap recorded there.
     let deepest = *TAP_LAYERS.iter().max().unwrap();
-    // `BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8]` is user input, parsed to a
-    // canonical card index at this edge; the shard's gpu_index is what
+    // `Tuning::te_device` is user input, parsed to a canonical card index at
+    // the action's edge; the shard's gpu_index is what
     // places the build (device registry) - later device creation (VAE)
     // stays on the ambient card beside the DiT.
     Ok(match te.gpu_index {
@@ -1364,6 +1437,9 @@ pub struct Pipeline {
     reload_te: Box<dyn Fn() -> Result<qwen3::Qwen, String> + Send + Sync>,
     te_before_denoiser: bool,
     vae_cfg: vae::VaeConfig,
+    /// [`Tuning::vae_tiling`]: the caller's forced choice between the tiled and
+    /// whole-image VAE paths, `None` for the budget policy.
+    vae_tiling: Option<bool>,
     vae_tensors: std::collections::HashMap<String, (Vec<usize>, Vec<f32>)>,
     /// Where this pipeline's parts were placed. Held because the VAE is built
     /// lazily, per generation, from host tensors: without it a graph would
@@ -1385,6 +1461,20 @@ pub struct Pipeline {
     enc_cache: std::sync::Mutex<Option<((u32, u32), vae::VaeEncoder)>>,
     bn_mean: Vec<f32>,
     bn_var: Vec<f32>,
+}
+
+/// How large one pipeline build is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sizing {
+    /// The joint sequence's image ceiling - generated tokens PLUS
+    /// reference-conditioning tokens - sizing the DiT's scratch.
+    pub n_img_max: u32,
+    /// The generated tokens alone, sizing the VAE: a reference is encoded,
+    /// never decoded, so pricing the decode from the joint ceiling reserves
+    /// for an image the pipeline will never produce.
+    pub n_out_max: u32,
+    /// Concurrent generations sharing one denoise loop.
+    pub max_batch: u32,
 }
 
 impl Pipeline {
@@ -1418,28 +1508,13 @@ impl Pipeline {
         Pipeline::build_batched(cfg, paths, n_img_max, adapters, precision, 1)
     }
 
-    /// [`Pipeline::build_batched`] told the OUTPUT size separately.
-    ///
-    /// `n_img_max` is the joint sequence's image ceiling - generated tokens
-    /// PLUS reference-conditioning tokens - and sizes the DiT's scratch.
-    /// `n_out_max` is the generated tokens alone, and sizes the VAE: a
-    /// reference is encoded, never decoded, so pricing the decode from the
-    /// joint ceiling reserves for an image the pipeline will never produce.
-    /// On a five-reference run that is most of a card's worth of nothing.
-    ///
-    /// The wrappers above pass `n_out_max = n_img_max`, which is the safe
-    /// direction (a pipeline with no references decodes exactly that many
-    /// tokens) - callers that know the two apart should use this.
-    pub fn build_sized(
-        cfg: &Flux2Config,
-        paths: &Paths,
-        n_img_max: u32,
-        n_out_max: u32,
-        adapters: &[AdapterSpec],
-        precision: crate::Precision,
-        max_batch: u32,
-    ) -> Result<Pipeline, String> {
-        Pipeline::build_inner(cfg, paths, n_img_max, n_out_max, adapters, precision, max_batch)
+    /// [`Pipeline::build_batched`] told the OUTPUT size separately (see
+    /// [`Sizing`]) and the build's [`Tuning`]. The wrappers above pass
+    /// `n_out_max = n_img_max`, which is the safe direction (a pipeline with no
+    /// references decodes exactly that many tokens) - callers that know the
+    /// two apart should use this.
+    pub fn build_sized(cfg: &Flux2Config, paths: &Paths, sizing: Sizing, adapters: &[AdapterSpec], precision: crate::Precision, tuning: &Tuning) -> Result<Pipeline, String> {
+        Pipeline::build_inner(cfg, paths, sizing, adapters, precision, tuning)
     }
 
     /// The DiT half of a build: the weight source decision, any LoRA fold,
@@ -1485,25 +1560,21 @@ impl Pipeline {
         precision: crate::Precision,
         max_batch: u32,
         gpu: gpu_core::Gpu,
+        tuning: &Tuning,
     ) -> Result<Flux2Model, String> {
         // Read the adapters as runtime corrections, which is the only way a
         // quantized build may carry them. `None` means either no adapter at
         // all or a family with no low-rank form (LoKr), and the fold below
         // then runs exactly as it always has.
-        // `BRAIN_FLUX2_LORA_FOLD=1` puts an int8 build back on the fold route.
-        // Unlike `BRAIN_FLUX2_NO_STREAM` this is NOT two ways to the same
-        // bytes: it reproduces the pre-fix deployment, in which the adapter is
-        // baked into the weights and then requantized. It exists so the
-        // difference can be seen on a real checkpoint - run a generation with
-        // and without it and compare the images - and for a stack that somehow
-        // cannot be served at runtime. It is not a tier a user should ship.
-        let fold_i8 = std::env::var("BRAIN_FLUX2_LORA_FOLD").is_ok_and(|v| v != "0");
+        // `Tuning::lora_fold` puts an int8 build back on the fold route (see
+        // its doc for why it is not a tier to ship).
+        let fold_i8 = tuning.lora_fold;
         let runtime = match precision == crate::Precision::Int8 && !fold_i8 {
             true => crate::lora::runtime_adapters(cfg, adapters)?,
             false => None,
         };
         if fold_i8 && !adapters.is_empty() {
-            eprintln!("flux2: BRAIN_FLUX2_LORA_FOLD is set - folding adapters into the weights before quantization, which is the LOSSY deployment this build otherwise avoids");
+            eprintln!("flux2: lora_fold is set - folding adapters into the weights before quantization, which is the LOSSY deployment this build otherwise avoids");
         }
         let (runtime, rt_reports) = match runtime {
             Some((rt, reports)) => (Some(rt), reports),
@@ -1518,14 +1589,13 @@ impl Pipeline {
             );
         }
         let all_external = adapters.iter().all(|a| a.path.ends_with(".safetensors"));
-        // `BRAIN_FLUX2_NO_STREAM=1` forces the fp32-map route. Both produce
+        // `Tuning::dit_whole_map` forces the fp32-map route. Both produce
         // the same bytes, so this is not a correctness switch - it is what
         // lets the two be A/B'd on a real checkpoint (which is how the
         // byte-identity of a real 9B generation was checked, adapter and
         // all), and a valve if a checkpoint ever trips the streamed path.
-        let no_stream = std::env::var("BRAIN_FLUX2_NO_STREAM").is_ok_and(|v| v != "0");
-        if no_stream && paths.dit.ends_with(".gguf") {
-            return Err("flux2: BRAIN_FLUX2_NO_STREAM is incompatible with a .gguf DiT; whole-map loading would decode its quantized tensors before construction".to_string());
+        if tuning.dit_whole_map && paths.dit.ends_with(".gguf") {
+            return Err("flux2: no_stream is incompatible with a .gguf DiT; whole-map loading would decode its quantized tensors before construction".to_string());
         }
         let streamable = precision == crate::Precision::Int8 && paths.dit.ends_with(".gguf") && (runtime.is_some() || all_external);
         if streamable {
@@ -1582,10 +1652,11 @@ impl Pipeline {
     /// Only the DiT activation scratch grows; the text encoder and VAE stay
     /// single-stream.
     pub fn build_batched(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapters: &[AdapterSpec], precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
-        Pipeline::build_inner(cfg, paths, n_img_max, n_img_max, adapters, precision, max_batch)
+        Pipeline::build_inner(cfg, paths, Sizing { n_img_max, n_out_max: n_img_max, max_batch }, adapters, precision, &Tuning::default())
     }
 
-    fn build_inner(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, n_out_max: u32, adapters: &[AdapterSpec], precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
+    fn build_inner(cfg: &Flux2Config, paths: &Paths, sizing: Sizing, adapters: &[AdapterSpec], precision: crate::Precision, tuning: &Tuning) -> Result<Pipeline, String> {
+        let Sizing { n_img_max, n_out_max, max_batch } = sizing;
         let n_max = cfg.txt_len as u32 + n_img_max;
         // Resolve the source's executable representation before placement.
         // Planning and construction must receive this same value; otherwise a
@@ -1606,11 +1677,11 @@ impl Pipeline {
         };
         // Ask the engine where this pipeline's three parts go, then build
         // each one there. Nothing below names a card.
-        let (homes, auto_te) = plan_parts(cfg, paths, &vae_cfg, precision, n_max as u64, n_out_max as u64, max_batch.max(1) as u64)?;
+        let (homes, auto_te) = plan_parts(cfg, paths, &vae_cfg, precision, n_max as u64, n_out_max as u64, max_batch.max(1) as u64, tuning.vae_tiling)?;
         // An operator who pinned a layout keeps it; everyone else gets the
         // automatic one. Either way the run says what it did, in the same
         // place it reports reference sizes and token counts.
-        let te_place = te_device_override()?.unwrap_or(auto_te);
+        let te_place = tuning.te_device.map_or(auto_te, |d| TePlacement { gpu_index: Some(d.gpu_index), int8: d.int8, before_denoiser: false });
         eprintln!(
             "flux2: placement {} (text encoder: {})",
             homes.describe(),
@@ -1627,7 +1698,7 @@ impl Pipeline {
             true => None,
             false => {
                 let gpu = homes.run("dit", || gpu_core::Gpu::new(crate::model::KERNELS))?;
-                Some(homes.run("dit", || Self::build_dit(cfg, paths, n_max, adapters, precision, max_batch, gpu))??)
+                Some(homes.run("dit", || Self::build_dit(cfg, paths, n_max, adapters, precision, max_batch, gpu, tuning))??)
             }
         };
         let dit_max_batch = model.as_ref().map_or(max_batch, Flux2Model::max_batch);
@@ -1639,18 +1710,20 @@ impl Pipeline {
             let paths = paths.clone();
             let homes = homes.clone();
             let adapters = adapters.to_vec();
+            let tuning = *tuning;
             Box::new(move || {
                 let gpu = homes.run("dit", || gpu_core::Gpu::new(crate::model::KERNELS))?;
-                Self::build_dit(&cfg, &paths, n_max, &adapters, precision, max_batch, gpu)
+                Self::build_dit(&cfg, &paths, n_max, &adapters, precision, max_batch, gpu, &tuning)
             }) as Box<dyn Fn() -> Result<Flux2Model, String> + Send + Sync>
         };
 
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&paths.tokenizer)?;
-        let te = build_text_encoder_on(cfg, paths, te_place)?;
+        let te = build_text_encoder_on(cfg, paths, te_place, tuning.te_whole_map)?;
         let reload_te = {
             let cfg = cfg.clone();
             let paths = paths.clone();
-            Box::new(move || build_text_encoder_on(&cfg, &paths, te_place)) as Box<dyn Fn() -> Result<qwen3::Qwen, String> + Send + Sync>
+            let whole_map = tuning.te_whole_map;
+            Box::new(move || build_text_encoder_on(&cfg, &paths, te_place, whole_map)) as Box<dyn Fn() -> Result<qwen3::Qwen, String> + Send + Sync>
         };
         // ONE device for every VAE graph this pipeline will ever build. Each
         // encode/decode used to stand up its own - recompiling every kernel,
@@ -1687,6 +1760,7 @@ impl Pipeline {
             reload_te,
             te_before_denoiser: te_place.before_denoiser,
             vae_cfg,
+            vae_tiling: tuning.vae_tiling,
             vae_tensors: map,
             bn_mean,
             bn_var,
@@ -1744,7 +1818,7 @@ impl Pipeline {
         // fit goes through the tiled path, which holds one tile at a time.
         // Nothing is cached for it: the tiled encoder owns no device graph
         // between calls, which is exactly what makes it cheap to build.
-        let mean = if vae::tiled::should_tile_encode(&self.vae_cfg, h as u64 * w as u64) {
+        let mean = if vae::tiled::should_tile_encode(&self.vae_cfg, h as u64 * w as u64, self.vae_tiling) {
             let enc = vae::VaeTiledEncoder::auto(&self.vae_gpu, self.vae_cfg.clone(), &self.vae_tensors, h, w);
             eprintln!("flux2: VAE encode tiled - {h}x{w} over {} tiles", enc.plan().tiles().len());
             self.homes.run("vae_dec", || enc.encode_mean(chw))?
@@ -1834,7 +1908,7 @@ impl Pipeline {
         // one graph resident at a time, so peak VRAM is the tile's. Below it
         // this is the identical whole-image call it has always been, and
         // `vae_decoder_bytes` reserved for whichever of the two this is.
-        let chw = if vae::tiled::should_tile_decode(&self.vae_cfg, h as u64 * w as u64) {
+        let chw = if vae::tiled::should_tile_decode(&self.vae_cfg, h as u64 * w as u64, self.vae_tiling) {
             let dec =
                 vae::VaeTiledDecoder::auto(&self.vae_gpu, self.vae_cfg.clone(), &self.vae_tensors, (lh * 2) as u32, (lw * 2) as u32);
             let total = dec.plan().tiles().len();

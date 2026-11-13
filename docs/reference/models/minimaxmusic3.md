@@ -89,7 +89,7 @@ share no intermediate value and are combined on the host exactly as before.
 Each card holds its own copy of the DiT's weights (~9.7 GB) while denoising.
 Two things turn the concurrent dispatch off, and the run falls back to the
 single-card path unchanged: restricting the schedulable set to one card
-(`--device gpu0`), and `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0`. Note that
+(`--device gpu0`), and the `cfg_parallel: false` param of `generate`. Note that
 `--limit-vram-total` is a process-wide total across all cards rather than a
 per-card ceiling, so a concurrent pair charges it twice; a value sized for
 one card should either be raised or paired with that opt-out.

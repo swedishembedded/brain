@@ -971,7 +971,7 @@ Ported from `crates/ltxv`'s own solution rather than invented.
 `DevicePlan::{Single,Split,Auto}`, `Placement::cfg_is_parallel`, `on_gpu`,
 the base card read from `current_gpu()` so a run scoped by the residency
 executor keeps its assigned card as `cond` and borrows only the other one,
-and a `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0` opt-out matching
+and a `cfg_parallel: false` opt-out matching
 `BRAIN_LTXV_CFG_PARALLEL`'s spelling.
 
 ### Landed in this phase
@@ -1082,7 +1082,7 @@ it is the same gap, and `devplan`'s module doc states it rather than taking
 the card quietly. What bounds it is `memauth`'s `--limit-vram-total`, which
 is a process-wide TOTAL across all cards rather than a per-card ceiling, so a
 concurrent pair charges it twice: a value sized for one card should be raised
-or paired with `BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0`.
+or paired with `cfg_parallel: false`.
 
 ## Phase 17: the depth decoder was 77% of a generation, on the host, at 0.5 FLOP/byte
 

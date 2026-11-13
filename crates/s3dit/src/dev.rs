@@ -777,6 +777,7 @@ mod tests {
             rope_theta: 256.0,
             t_scale: 1000.0,
             norm_eps: 1e-5,
+            attention: crate::block::AttentionMode::Auto,
         }
     }
 

@@ -56,6 +56,23 @@ fn gen_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("experimental_steps", ParamType::Bool, "let `steps` override a distilled variant's fixed 4-step sampler (off: a distilled variant ignores `steps`)").default(json!(false)))
         .param(ParamSpec::new("tile_size", ParamType::Int, "denoise a large canvas in windows of this many px (multiple of 16; 0 or unset: one forward over the whole canvas). The DiT is built for one window, the VAE decodes the whole canvas").min(0.0).max(capability::bounds::SIDE_PX))
         .param(ParamSpec::new("tile_overlap", ParamType::Int, "px two neighbouring windows share; needs tile_size (default: the tiling's own)").min(0.0).max(capability::bounds::SIDE_PX))
+        .param(ParamSpec::new("te_device", ParamType::Str, "pin the text encoder to a card: gpu<i> builds a truncated f32 shard there, gpu<i>:i8 the int8 one (unset: the automatic placement plan)"))
+        .param(ParamSpec::new("no_stream", ParamType::Bool, "build a non-GGUF DiT from a whole fp32 tensor map instead of streaming each tensor (same bytes; refused for a .gguf DiT)").default(json!(false)))
+        .param(ParamSpec::new("te_no_stream", ParamType::Bool, "import the text encoder as one whole fp32 map instead of streaming it per tensor (same bytes)").default(json!(false)))
+        .param(ParamSpec::new("lora_fold", ParamType::Bool, "int8 only: bake an adapter into the weights and requantize instead of applying it as a runtime correction (the lossy deployment, for comparison)").default(json!(false)))
+        .param(ParamSpec::new("vae_tiling", ParamType::Bool, "force the VAE encode/decode onto the tiled path (true) or the whole-image path (false); unset, the device's free memory decides"))
+}
+
+/// The build [`Tuning`] a generating request asks for; each unset param is the
+/// automatic behaviour. A malformed `te_device` is refused by name.
+pub fn tuning_of(inv: &Invocation) -> Result<crate::pipeline::Tuning, String> {
+    Ok(crate::pipeline::Tuning {
+        te_device: inv.get_str("te_device").filter(|s| !s.is_empty()).map(|s| crate::pipeline::parse_te_device(&s)).transpose()?,
+        dit_whole_map: inv.get_bool("no_stream").unwrap_or(false),
+        te_whole_map: inv.get_bool("te_no_stream").unwrap_or(false),
+        lora_fold: inv.get_bool("lora_fold").unwrap_or(false),
+        vae_tiling: inv.get_bool("vae_tiling"),
+    })
 }
 
 /// The reference-image knobs `edit` adds.
@@ -308,8 +325,8 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
 // ===================== execution (hot-pipeline provider) =====================
 
 /// What a built pipeline is fixed to: (variant, precision, tokens per
-/// forward, canvas tokens, the adapters folded in).
-type HotKey = (String, &'static str, u32, u32, Vec<crate::AdapterSpec>);
+/// forward, canvas tokens, the adapters folded in, the build tuning).
+type HotKey = (String, &'static str, u32, u32, Vec<crate::AdapterSpec>, crate::pipeline::Tuning);
 
 /// The executable FLUX.2 model behind the manifest. Holds a **hot pipeline
 /// cache** so a long-lived process (`brain run` / the event server) loads the
@@ -373,7 +390,7 @@ impl Action for Flux2Action {
                     tracing::info!(target: "flux2", "{note}");
                 }
                 let (fwd, canvas) = (plan.forward_tokens(), plan.canvas_tokens());
-                let key: HotKey = (variant, precision.name(), fwd, canvas, plan.adapters.clone());
+                let key: HotKey = (variant, precision.name(), fwd, canvas, plan.adapters.clone(), plan.tuning);
                 // Both closures report through the same sink, so it is shared
                 // rather than borrowed twice.
                 let sink = std::cell::RefCell::new(progress);
@@ -381,7 +398,7 @@ impl Action for Flux2Action {
                     key,
                     || {
                         (**sink.borrow_mut())(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
-                        Pipeline::build_sized(&cfg, paths, fwd, canvas, &plan.adapters, precision, 1)
+                        Pipeline::build_sized(&cfg, paths, crate::pipeline::Sizing { n_img_max: fwd, n_out_max: canvas, max_batch: 1 }, &plan.adapters, precision, &plan.tuning)
                     },
                     |pipe| generate_on(pipe, inv, &plan, &mut **sink.borrow_mut()),
                 )
@@ -395,6 +412,27 @@ impl Action for Flux2Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The build knobs that used to be environment variables are params: unset
+    /// is the automatic behaviour, a set one reaches the build [`Tuning`], and a
+    /// malformed card pin is refused by name instead of silently ignored.
+    #[test]
+    fn build_params_reach_the_tuning() {
+        use crate::pipeline::{parse_te_device, TeDevice, Tuning};
+        assert_eq!(tuning_of(&Invocation::new()).unwrap(), Tuning::default());
+        let inv = Invocation::new().set("te_device", json!("gpu1:i8")).set("no_stream", json!(true)).set("te_no_stream", json!(true)).set("lora_fold", json!(true)).set("vae_tiling", json!(false));
+        let want = Tuning { te_device: Some(TeDevice { gpu_index: 1, int8: true }), dit_whole_map: true, te_whole_map: true, lora_fold: true, vae_tiling: Some(false) };
+        assert_eq!(tuning_of(&inv).unwrap(), want);
+        assert_eq!(parse_te_device("gpu0").unwrap(), TeDevice { gpu_index: 0, int8: false });
+        for bad in ["cpu", "gpu", "gpux", "gpu1:i4"] {
+            assert!(tuning_of(&Invocation::new().set("te_device", json!(bad))).unwrap_err().contains("te_device"), "{bad}");
+        }
+        // The key a resident names an instance by round-trips every field and has no ':'.
+        for t in [Tuning::default(), want] {
+            assert!(!t.key().contains(':'));
+            assert_eq!(Tuning::from_key(&t.key()), Some(t));
+        }
+    }
 
     #[test]
     fn lora_train_declares_activations_and_routes_the_choice_to_the_trainer() {

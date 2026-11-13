@@ -12,6 +12,8 @@
 //! inpainting, outpainting, and LoRA personalisation.
 
 use capability::{ActionSpec, BlobSpec, Manifest, Media, ParamSpec, ParamType};
+
+use crate::block::AttentionMode;
 use serde_json::json;
 
 /// The model id used on the CLI (`brain do z-image …`) and the event API.
@@ -34,10 +36,45 @@ fn cap_len_param() -> ParamSpec {
     .step(1.0)
 }
 
+/// The highest card index a placement param may name: well past any machine's
+/// GPU count, so it bounds the number without pretending to know the machine.
+const MAX_GPU_INDEX: f64 = 63.0;
+
+/// The placement and kernel knobs every DiT build takes (see
+/// [`crate::pipeline::Tuning`]); changing one rebuilds a resident pipeline.
+fn tuning_params(spec: ActionSpec) -> ActionSpec {
+    spec.param(
+        ParamSpec::new("attention", ParamType::Enum(vec!["auto".into(), "flash".into(), "materialized".into()]), "DiT self-attention kernel: auto switches to flash once the scores matrix would reach the device's binding limit; flash/materialized force one (to benchmark flash, or to prove the out-of-memory it avoids)")
+            .default(json!("auto")),
+    )
+    .param(
+        ParamSpec::new("window_blocks", ParamType::Int, "main-stack blocks the fp32 single-GPU decode window keeps resident (more is faster and larger; every other block reloads once per step)")
+            .default(json!(crate::pipeline::DEFAULT_WINDOW_BLOCKS))
+            .min(1.0)
+            .max(crate::ZImageConfig::turbo().n_layers as f64)
+            .step(1.0),
+    )
+}
+
+/// The text encoder's placement knobs, for the one action that keeps the
+/// encoder resident (the editing actions encode on the CPU, once per call).
+fn encoder_params(spec: ActionSpec) -> ActionSpec {
+    spec.param(ParamSpec::new("encoder_gpu", ParamType::Int, "card that hosts the Qwen-4B text encoder (unset: the placement plan chooses, falling back to the CPU encoder)").min(0.0).max(MAX_GPU_INDEX).step(1.0))
+        .param(ParamSpec::new("encoder_resident", ParamType::Bool, "keep the int8 encoder resident even when it shares the DiT's card (a card with room for both) instead of building it per call").default(json!(false)))
+        .param(ParamSpec::new("encoder_fp32_split", ParamType::Bool, "split the fp32 encoder across `encoder_gpu` and the DiT's card (needs a large-binding / ReBAR card; ignored for the fp32 DiT)").default(json!(false)))
+        .param(
+            ParamSpec::new("encoder_cut", ParamType::Int, "layer at which the fp32 encoder split cuts (default: about two thirds of the layers)")
+                .min(0.0)
+                .max(qwen3::QwenConfig::qwen3_4b().n_layers as f64)
+                .step(1.0),
+        )
+        .param(ParamSpec::new("retain_int8_cache", ParamType::Bool, "served residency only: keep the quantised int8 DiT on the host across demote/promote (trades multi-GB host RAM for a faster reactivation; plain int8 without an adapter)").default(json!(false)))
+}
+
 /// Shared generation params (steps / seed / size / precision). There is no
 /// guidance scale: the sampler makes one conditional DiT pass a step.
 fn gen_params(spec: ActionSpec) -> ActionSpec {
-    spec.param(ParamSpec::new("steps", ParamType::Int, "denoising steps (Turbo≈8)").default(json!(8)).min(1.0).max(crate::pipeline::MAX_STEPS as f64).step(1.0))
+    tuning_params(spec).param(ParamSpec::new("steps", ParamType::Int, "denoising steps (Turbo≈8)").default(json!(8)).min(1.0).max(crate::pipeline::MAX_STEPS as f64).step(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(ParamSpec::new("width", ParamType::Int, "output width, px").default(json!(1024)).min(64.0).max(2048.0).step(8.0))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px").default(json!(1024)).min(64.0).max(2048.0).step(8.0))
@@ -49,7 +86,7 @@ pub fn manifest() -> Manifest {
     let prompt = || ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required();
     let image_out = || BlobSpec::new("image", Media::Image, "the generated image");
 
-    let text2image = gen_params(ActionSpec::new("text2image", "generate an image from a text prompt (posters, photos, art; strong at English/Chinese typography)").streaming())
+    let text2image = encoder_params(gen_params(ActionSpec::new("text2image", "generate an image from a text prompt (posters, photos, art; strong at English/Chinese typography)").streaming()))
         .param(prompt())
         .param(cap_len_param())
         .param(ParamSpec::new("adapter", ParamType::Str, "path to a trained LoRA adapter (from lora_train) to apply").host_resolved())
@@ -89,6 +126,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("size", ParamType::Int, "training square size, px").min(0.0).max(capability::bounds::SIZE_PX).default(json!(512)))
         .param(ParamSpec::new("lr", ParamType::Float, "learning rate").default(json!(1e-4)))
         .param(cap_len_param())
+        .param(ParamSpec::new("encoder_gpu", ParamType::Int, "card that hosts the int8 Qwen-4B encoder while the captions are encoded").default(json!(1)).min(0.0).max(MAX_GPU_INDEX).step(1.0))
         .param(ParamSpec::new("one_gpu", ParamType::Bool, "train on a single GPU (default: shard the 6B across both)").default(json!(false)))
         .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()), "what the backward keeps of the forward: the trainer rebuilds every block from its input, so only 'recompute' runs and 'keep' is refused by name before training starts; default: recompute"))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"));
@@ -106,12 +144,14 @@ use std::sync::Arc;
 
 use capability::{hot::Hot, Action, ActionResult, Invocation, Outcome, Progress, Provider};
 
+use crate::pipeline::{BuildSpec, Tuning};
+
 /// Cache key for a resident text-to-image pipeline: everything that fixes the
 /// built graphs. The caption CAPACITY is one of them - prompts are masked-padded
 /// up to it (and refused past it, never truncated), so any prompt that fits
 /// reuses the same hot weights, but a caller asking for a different capacity is
 /// asking for different graphs.
-type HotKey = (u32, u32, bool, Option<String>, u32); // (width, height, hifi, adapter path, cap_len)
+type HotKey = (u32, u32, bool, Option<String>, u32, Tuning); // (width, height, hifi, adapter path, cap_len, tuning)
 
 /// The executable Z-Image model behind the manifest. Holds a **hot pipeline
 /// cache** so a long-lived process (`brain run` / the event server) loads the
@@ -177,7 +217,7 @@ impl Action for ZAction {
                 let key = text2image_key(paths, inv)?;
                 let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
 
-                let (width, height, hifi, adapter, cap_len) = key.clone();
+                let (width, height, hifi, adapter, cap_len, tuning) = key.clone();
                 // Both closures report through the same sink, so it is shared
                 // rather than borrowed twice.
                 let sink = std::cell::RefCell::new(&mut on);
@@ -187,7 +227,7 @@ impl Action for ZAction {
                         (sink.borrow_mut())(0, 1, "loading weights (first call for this size)");
                         // A fixed caption CAPACITY so any prompt that fits reuses the
                         // built graphs; one that does not is refused, not cropped.
-                        crate::pipeline::HotPipeline::build_adapted(paths, width, height, cap_len, hifi, adapter.as_deref(), |m| (sink.borrow_mut())(0, 1, m))
+                        crate::pipeline::HotPipeline::build_adapted(paths, &BuildSpec { width, height, cap_len, hifi, adapter: adapter.as_deref(), tuning }, |m| (sink.borrow_mut())(0, 1, m))
                     },
                     |pipe| {
                         let mut on = sink.borrow_mut();
@@ -197,7 +237,7 @@ impl Action for ZAction {
             }
             "image2image" => {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
-                let opts = opts_from(inv, w, h, seed); // output matches the input image
+                let opts = opts_from(inv, w, h, seed)?; // output matches the input image
                 let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.55) as f32, mask: None, feather: 0 };
                 emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?, seed)
             }
@@ -207,7 +247,7 @@ impl Action for ZAction {
                 if (mw, mh) != (w, h) {
                     return Err(format!("mask is {mw}×{mh} but image is {w}×{h}; they must match"));
                 }
-                let opts = opts_from(inv, w, h, seed);
+                let opts = opts_from(inv, w, h, seed)?;
                 let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.85) as f32, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(2).max(0) as u32 };
                 emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?, seed)
             }
@@ -215,7 +255,7 @@ impl Action for ZAction {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
                 let g = |k: &str| inv.get_i64(k).unwrap_or(0).max(0) as usize;
                 let (canvas, mask, nw, nh) = build_outpaint_canvas(&image, w as usize, h as usize, g("left"), g("right"), g("top"), g("bottom"));
-                let opts = opts_from(inv, nw as u32, nh as u32, seed);
+                let opts = opts_from(inv, nw as u32, nh as u32, seed)?;
                 // The new border regenerates from scratch (strength 1); the mask
                 // re-anchors the original region every step so it is preserved.
                 let init = crate::pipeline::Init { image: &canvas, strength: 1.0, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(3).max(0) as u32 };
@@ -234,6 +274,7 @@ impl Action for ZAction {
                     size: u32_param(inv, "size", 512)?,
                     cap_len: u32_param(inv, "cap_len", crate::pipeline::DEFAULT_CAP_LEN)?,
                     seed,
+                    encoder_gpu: u32_param(inv, "encoder_gpu", 1)?,
                     two_gpu: !inv.get_bool("one_gpu").unwrap_or(false),
                     save_path: save.clone(),
                     ckpt_every: 100,
@@ -289,7 +330,25 @@ fn text2image_key(paths: &crate::pipeline::Paths, inv: &Invocation) -> Result<Ho
     let hifi = inv.get_str("precision").as_deref() == Some("fp32");
     let adapter = inv.get_str("adapter").filter(|s| !s.is_empty());
     crate::pipeline::check_build_shape(&paths.dit, width, height, cap_len)?;
-    Ok((width, height, hifi, adapter, cap_len))
+    Ok((width, height, hifi, adapter, cap_len, tuning_of(inv)?))
+}
+
+/// The [`Tuning`] an invocation asks for; each unset param is the automatic
+/// behaviour. Out-of-range numbers are refused by name rather than wrapped.
+pub fn tuning_of(inv: &Invocation) -> Result<Tuning, String> {
+    let optional_u32 = |name: &str| inv.get_i64(name).map(|_| u32_param(inv, name, 0)).transpose();
+    let window_blocks = u32_param(inv, "window_blocks", crate::pipeline::DEFAULT_WINDOW_BLOCKS)?;
+    if window_blocks == 0 {
+        return Err("z-image: 'window_blocks' must be at least 1".to_string());
+    }
+    Ok(Tuning {
+        encoder_gpu: optional_u32("encoder_gpu")?,
+        encoder_resident: inv.get_bool("encoder_resident").unwrap_or(false),
+        encoder_fp32_split: inv.get_bool("encoder_fp32_split").unwrap_or(false),
+        encoder_cut: optional_u32("encoder_cut")?,
+        window_blocks,
+        attention: inv.get_str("attention").map(|v| AttentionMode::parse(&v)).transpose()?.unwrap_or_default(),
+    })
 }
 
 /// The request's seed, or a freshly drawn one when it names none. A `seed`
@@ -301,14 +360,15 @@ fn seed_of(inv: &Invocation) -> Result<u64, String> {
 
 /// Build [`crate::pipeline::Opts`] from an invocation, with an explicit output
 /// size and the request's already-resolved `seed`.
-fn opts_from(inv: &Invocation, width: u32, height: u32, seed: u64) -> crate::pipeline::Opts {
-    crate::pipeline::Opts {
+fn opts_from(inv: &Invocation, width: u32, height: u32, seed: u64) -> Result<crate::pipeline::Opts, String> {
+    Ok(crate::pipeline::Opts {
         steps: inv.get_i64("steps").unwrap_or(8).max(1) as u32,
         seed,
         width,
         height,
         hifi: inv.get_str("precision").as_deref() == Some("fp32"),
-    }
+        tuning: tuning_of(inv)?,
+    })
 }
 
 /// Wrap a generated [`crate::pipeline::Image`] as an image-output [`Outcome`]
@@ -459,6 +519,37 @@ mod tests {
         assert!(e.contains("cap_len"), "{e}");
     }
 
+    /// The knobs that used to be environment variables are params: unset is
+    /// the automatic behaviour, a set one reaches the [`Tuning`], and one that
+    /// cannot be honoured is refused by name.
+    #[test]
+    fn tuning_params_reach_the_tuning() {
+        assert_eq!(tuning_of(&Invocation::new()).unwrap(), Tuning::default());
+        let inv = Invocation::new()
+            .set("encoder_gpu", json!(1))
+            .set("encoder_resident", json!(true))
+            .set("encoder_fp32_split", json!(true))
+            .set("encoder_cut", json!(20))
+            .set("window_blocks", json!(4))
+            .set("attention", json!("materialized"));
+        assert_eq!(
+            tuning_of(&inv).unwrap(),
+            Tuning { encoder_gpu: Some(1), encoder_resident: true, encoder_fp32_split: true, encoder_cut: Some(20), window_blocks: 4, attention: AttentionMode::Materialized }
+        );
+        assert!(tuning_of(&Invocation::new().set("window_blocks", json!(0))).unwrap_err().contains("window_blocks"));
+        assert!(tuning_of(&Invocation::new().set("encoder_gpu", json!(-1))).unwrap_err().contains("encoder_gpu"));
+        assert!(tuning_of(&Invocation::new().set("attention", json!("fast"))).unwrap_err().contains("attention"));
+    }
+
+    /// A different tuning is a different build, so the hot cache must key on it.
+    #[test]
+    fn tuning_is_part_of_the_text2image_cache_key() {
+        let paths = unresolvable_paths();
+        let key = |inv: Invocation| text2image_key(&paths, &inv).unwrap();
+        assert_ne!(key(Invocation::new()), key(Invocation::new().set("attention", json!("flash"))));
+        assert_ne!(key(Invocation::new()), key(Invocation::new().set("encoder_gpu", json!(1))));
+    }
+
     /// The build shape is validated BEFORE the hot cache is consulted. The
     /// eviction that precedes a rebuild is unconditional (two ~20 GB residents
     /// do not fit one card), so a request this pipeline can never serve has to
@@ -475,7 +566,7 @@ mod tests {
         assert!(e.contains("8208") || e.contains("8192"), "{e}");
         // A buildable shape yields the key it will be cached under.
         let k = text2image_key(&paths, &Invocation::new().set("cap_len", json!(1024))).unwrap();
-        assert_eq!(k, (1024, 1024, false, None, 1024));
+        assert_eq!(k, (1024, 1024, false, None, 1024, Tuning::default()));
     }
 
     /// The resident's cache: a matching key must not rebuild (that is the

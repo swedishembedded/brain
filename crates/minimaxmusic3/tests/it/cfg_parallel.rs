@@ -144,7 +144,7 @@ fn concurrent_two_card_cfg_is_bit_identical_to_sequential_one_card() {
     let place = DevicePlan::Auto.resolve(None);
     eprintln!("cfg placement: cond={:?} uncond={:?} genuinely concurrent={}", place.cond, place.uncond, place.cfg_is_parallel());
     if !place.cfg_is_parallel() {
-        brain_testutil::skip_unavailable("fewer than two schedulable GPUs (or BRAIN_MINIMAXMUSIC3_CFG_PARALLEL=0): there is no concurrent arm to compare");
+        brain_testutil::skip_unavailable("fewer than two schedulable GPUs: there is no concurrent arm to compare");
         return;
     }
 

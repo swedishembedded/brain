@@ -229,7 +229,7 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
         whose return drops the encoder before the DiT allocates anything, and
         the DiT is dropped before the VAE builds. Placement is
         `--t5-device` / `BRAIN_WAN_T5_DEVICE`, defaulting to CPU - the
-        `BRAIN_FLUX2_TE_DEVICE` precedent.
+        `te_device` precedent.
       * **Both prompts ride ONE `B = 2` text forward**, and both are embedded
         through `text_embedding` ONCE (`WanDitDev::set_context_embed`, added
         here). The MLP is ~9 GFLOP of host work per call at 1.3B widths and the

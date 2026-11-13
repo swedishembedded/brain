@@ -475,7 +475,7 @@ pub fn encode_samples(
     let n = samples.len();
 
     // --- captions → Qwen taps (layers 9/18/27 concatenated per token) ---
-    // The SAME encoder generation builds (`pipeline::build_text_encoder`),
+    // The SAME encoder generation builds (`pipeline::build_text_encoder_on`),
     // built here directly because `Pipeline::encode_prompt` needs the whole
     // built Pipeline, DiT included, which finetune must NOT keep resident
     // while training. Conditioning an adapter on features the generation path
@@ -515,7 +515,7 @@ pub fn encode_samples(
     }
     if samples.iter().any(|s| !contexts.contains_key(s.prompt.as_str())) {
         let tok = QwenBpe::from_file(&paths.tokenizer)?;
-        let te = crate::pipeline::build_text_encoder_on(fc, paths, spec.te)?;
+        let te = crate::pipeline::build_text_encoder_on(fc, paths, spec.te, false)?;
         for (i, s) in samples.iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err("cancelled".into());

@@ -43,11 +43,11 @@ pub mod request;
 pub mod spec;
 pub mod weights;
 
-pub use build::{build_resolved, resolve, VariantRequest, VariantSource};
+pub use build::{build_resolved, resolve, BuildRequest, VariantRequest, VariantSource};
 pub use config::Flux2Config;
 pub use import::{dit_config_from_shapes, import_bfl, import_diffusers, sniff_dit_size, DitSize, Tensors};
 pub use mask::Mask;
 pub use model::{position_ids, position_ids_tile, Flux2Model, Precision, Sample, KERNELS};
 pub use refcond::JointLayout;
-pub use pipeline::{AdapterSpec, Anchor, BatchRequest, GenOpts, Paths, Pipeline, Tile, Tiling};
+pub use pipeline::{AdapterSpec, Anchor, BatchRequest, GenOpts, Paths, Pipeline, Sizing, Tile, Tiling};
 pub use weights::{DitWeights, PendingLora};

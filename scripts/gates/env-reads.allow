@@ -49,7 +49,6 @@ crates/catalog/src/resident_horizon.rs	MOE_SKIP_GPU_TESTS
 crates/catalog/src/resident_llm.rs	BRAIN_DEVICE
 crates/catalog/src/resident_llm.rs	QWEN_TOKENIZER
 crates/catalog/src/resident_qwen35.rs	QWEN_TOKENIZER
-crates/catalog/src/resident_zimage.rs	BRAIN_S3DIT_RETAIN_INT8_CACHE
 crates/checkpoint/src/gguf.rs	BRAIN_GGUF_TESTFILE
 crates/checkpoint/tests/it/torchpt.rs	TORCHPT_REAL_PT
 crates/chronos2/src/forecaster.rs	MOE_SKIP_GPU_TESTS
@@ -207,10 +206,6 @@ crates/flux2/src/model.rs	BRAIN_FLUX2_I8_KEEP_F32
 crates/flux2/src/model.rs	BRAIN_FLUX2_TIME_FORWARD
 crates/flux2/src/model.rs	SMOKE_STEPS
 crates/flux2/src/pipeline.rs	BRAIN_FLUX2_DUMP_LATENT
-crates/flux2/src/pipeline.rs	BRAIN_FLUX2_LORA_FOLD
-crates/flux2/src/pipeline.rs	BRAIN_FLUX2_NO_STREAM
-crates/flux2/src/pipeline.rs	BRAIN_FLUX2_TE_DEVICE
-crates/flux2/src/pipeline.rs	BRAIN_FLUX2_TE_NO_STREAM
 crates/flux2/tests/it/batch_time.rs	BRAIN_FLUX2_BATCH_LADDER
 crates/flux2/tests/it/batch_time.rs	BRAIN_FLUX2_BATCH_PRECISION
 crates/flux2/tests/it/batch_time.rs	BRAIN_FLUX2_BATCH_REPS
@@ -501,7 +496,6 @@ crates/minimaxmusic3/src/bin/mm3_bench.rs	BRAIN_MINIMAXMUSIC3_DEPTH
 crates/minimaxmusic3/src/bin/mm3_bench.rs	BRAIN_MINIMAXMUSIC3_DIT
 crates/minimaxmusic3/src/bin/mm3_bench.rs	BRAIN_MINIMAXMUSIC3_VOCODER
 crates/minimaxmusic3/src/depth_decoder.rs	BRAIN_MINIMAXMUSIC3_DEPTH
-crates/minimaxmusic3/src/devplan.rs	BRAIN_MINIMAXMUSIC3_CFG_PARALLEL
 crates/minimaxmusic3/src/dit_train.rs	MOE_SKIP_GPU_TESTS
 crates/minimaxmusic3/tests/it/cfg_parallel.rs	BRAIN_MINIMAXMUSIC3_DIT
 crates/minimaxmusic3/tests/it/condition_encoder_parity.rs	BRAIN_MINIMAXMUSIC3_CONDITION
@@ -765,13 +759,6 @@ crates/runtime/tests/it/controller.rs	MOE_SKIP_GPU_TESTS
 crates/runtime/tests/it/yolo_detect.rs	MOE_SKIP_GPU_TESTS
 crates/s3dit/src/bin/zimage_bench.rs	BRAIN_S3DIT_DIT
 crates/s3dit/src/bin/zimage_bench.rs	BRAIN_S3DIT_LAYERS
-crates/s3dit/src/block.rs	BRAIN_S3DIT_FLASH
-crates/s3dit/src/finetune.rs	BRAIN_S3DIT_ENCODER_GPU
-crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_ENCODER_CUT
-crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_ENCODER_FP32SPLIT
-crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_ENCODER_GPU
-crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_ENCODER_RESIDENT
-crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_WINDOW_BLOCKS
 crates/s3dit/tests/it/dev_grad.rs	BRAIN_DEV_GPU
 crates/s3dit/tests/it/dev_parity.rs	BRAIN_DEV_GPU
 crates/s3dit/tests/it/device_train.rs	BRAIN_DEV_GPU
@@ -890,7 +877,6 @@ crates/trace/src/cli.rs	<BRAIN_TRACE_ENV>
 crates/vae/src/blocks3d.rs	BRAIN_VAE3D_NOPOOL
 crates/vae/src/blocks3d.rs	BRAIN_VAE3D_SPLIT_NORM
 crates/vae/src/decoder.rs	BRAIN_VAE_TAPS
-crates/vae/src/tiled.rs	BRAIN_VAE_TILE
 crates/vae/tests/it/decode_parity.rs	BRAIN_S3DIT_VAE
 crates/vae/tests/it/decode_parity.rs	BRAIN_VAE_DEVICE
 crates/vae/tests/it/encode_parity.rs	BRAIN_S3DIT_VAE

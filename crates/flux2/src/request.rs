@@ -45,6 +45,8 @@ pub struct Plan {
     pub precision_explicit: bool,
     pub opts: GenOpts,
     pub adapters: Vec<AdapterSpec>,
+    /// How the pipeline is built beyond its placement plan.
+    pub tuning: crate::pipeline::Tuning,
     /// Each reference: its input name and the long-edge bound it is encoded
     /// at (`None`: its own size).
     pub inputs: Vec<(String, Option<u32>)>,
@@ -178,7 +180,7 @@ pub fn plan(inv: &Invocation, editing: bool) -> Result<Plan, String> {
         notes.push(format!("tiled: {} window(s) of {}x{} px, overlap {}", tiles.len(), tiles[0].tw * 16, tiles[0].th * 16, t.overlap));
     }
     let adapters = AdapterSpec::parse_list(&inv.get_str("adapter").unwrap_or_default(), inv.get_f64("lora_scale").unwrap_or(1.0) as f32)?;
-    Ok(Plan { prompt, variant, precision, precision_explicit, opts, adapters, inputs, sizes, notes })
+    Ok(Plan { prompt, variant, precision, precision_explicit, opts, adapters, tuning: crate::caps::tuning_of(inv)?, inputs, sizes, notes })
 }
 
 /// The tile plan `tile_size`/`tile_overlap` ask for; `None` (or a size of 0)

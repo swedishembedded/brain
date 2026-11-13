@@ -91,6 +91,9 @@ pub struct ZImageConfig {
     pub rope_theta: f64,
     pub t_scale: f32,
     pub norm_eps: f32,
+    /// Which self-attention the built blocks record; a runtime choice, not
+    /// part of the checkpoint's shape.
+    pub attention: crate::block::AttentionMode,
 }
 
 impl ZImageConfig {
@@ -110,10 +113,11 @@ impl ZImageConfig {
             rope_theta: 256.0,
             t_scale: 1000.0,
             norm_eps: 1e-5,
+            attention: crate::block::AttentionMode::Auto,
         }
     }
     pub(crate) fn block_dims(&self) -> BlockDims {
-        BlockDims::new(self.dim, self.n_heads)
+        BlockDims { attention: self.attention, ..BlockDims::new(self.dim, self.n_heads) }
     }
     pub(crate) fn rope(&self) -> RopeConfig {
         RopeConfig {

@@ -262,7 +262,7 @@ before. Sharing one parallel decoder took the streamed import from 15.0 s to
 hypothesis was plausible and the right one was one measurement away.
 
 Still eager, deliberately: the UNPLACED text-encoder branch (no
-`BRAIN_FLUX2_TE_DEVICE`) streams but still builds a whole encoder, because
+`te_device`) streams but still builds a whole encoder, because
 truncating it would change what gets built rather than only where the bytes
 live.
 
@@ -274,7 +274,7 @@ write a residency bound against. Measured on 2x Tesla P40, klein-9b int8,
 1024x768, 4 steps, DiT on one card and the truncated int8 encoder alone on the
 other, so each card's peak is attributable:
 
-| | streamed | mapped (`BRAIN_FLUX2_TE_NO_STREAM=1`) |
+| | streamed | mapped (`te_no_stream: true`) |
 |---|---|---|
 | text encoder, device peak | 14097 MiB | 14101 MiB |
 | DiT + VAE, device peak | 24431 MiB | 23397 MiB |
@@ -310,7 +310,7 @@ instead of 43.3 GB. Every big tensor needs a float domain for the fold, so
 the decode work remains and only the residency improves. A klein-9b adapter
 touches 112 of 201 tensors and 96% of the parameters, which is why "fold only
 what the adapter touches" is not by itself a saving - handling them ONE AT A
-TIME is. `BRAIN_FLUX2_NO_STREAM=1` forces the map route for A/B.
+TIME is. `no_stream: true` forces the map route for A/B.
 
 ## A LoRA is never folded into an int8 weight grid (2026-09-12)
 
@@ -352,8 +352,8 @@ not - takes the bit-exact `try_i8_rect` route. Measured on klein-9b with a
 directly, and denoise costs **21.9 s against 19.9 s folded** (+10%) for the
 two extra dispatches per adapted linear. Adapter factors add ~210 MB resident.
 
-`BRAIN_FLUX2_LORA_FOLD=1` puts a build back on the fold route. Unlike
-`BRAIN_FLUX2_NO_STREAM` it is NOT two ways to the same bytes - it reproduces
+`lora_fold: true` puts a build back on the fold route. Unlike
+`no_stream` it is NOT two ways to the same bytes - it reproduces
 the lossy deployment, for A/B on a real checkpoint.
 
 **Negative result, and it matters**: this does NOT remove the ~4-pixel
@@ -617,7 +617,7 @@ point - the old output was produced without the model seeing the reference.
 `--strength 1.0` is unchanged and is fenced by byte equality, below.
 
 Measured on **2x Tesla P40**, `klein-9b` Q8_0 int8 DiT on gpu0 + truncated
-int8 Qwen3-8B text encoder on gpu1 (`BRAIN_FLUX2_TE_DEVICE=gpu1:i8`),
+int8 Qwen3-8B text encoder on gpu1 (`te_device: gpu1:i8`),
 1024x768 out, seed 7, 12 steps, the rank-32 staging LoRA at scale 1.0, the
 model card's verbatim prompt tier wording. "pipeline" is the CLI's own total,
 "wall" includes weight load; peak is `nvidia-smi` sampled at 2 Hz.

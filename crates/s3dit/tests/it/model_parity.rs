@@ -61,6 +61,7 @@ fn zimage_full_model_matches_diffusers() {
         rope_theta: 256.0,
         t_scale: 1000.0,
         norm_eps: 1e-5,
+        attention: s3dit::block::AttentionMode::Auto,
     };
     let (f, h, w, cap_len) = (1u32, 16u32, 8u32, 32u32);
     let model = ZImageModel::new(cfg, weights, Some("cpu"));

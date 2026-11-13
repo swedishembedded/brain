@@ -26,6 +26,7 @@ use diffusion::{default_z_image_sigmas, FlowMatchConfig, FlowMatchEulerScheduler
 use qwen3::{Qwen, QwenConfig, Shard, IGNORE};
 use vae::{VaeConfig, VaeDecoder, VaeEncoder};
 
+use crate::block::AttentionMode;
 use crate::import::import_comfy;
 use crate::{ZImageConfig, ZImageDitI8, ZImageDitShard, ZImageDitWindowed};
 
@@ -37,6 +38,98 @@ const PAD_TOKEN: u32 = 151643;
 /// own doc measures it at ~9.5 GB resident; rounded up here for the placement
 /// seam's headroom, which already reserves 1 GiB per card on top of this.
 const ENCODER_GPU8_BYTES: u64 = 10 << 30;
+
+/// Blocks of the main stack the fp32 single-GPU window keeps resident unless a
+/// caller asks for more (see [`Tuning::window_blocks`]).
+pub const DEFAULT_WINDOW_BLOCKS: u32 = 2;
+
+/// How a Z-Image pipeline is placed and which kernels it records: the
+/// per-request knobs of `crate::caps`' generating actions, threaded from the
+/// action down to every build site. [`Default`] is the automatic behaviour.
+///
+/// Every field changes what gets built, so a resident keys its instance on
+/// [`Tuning::key`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tuning {
+    /// The card that hosts the Qwen-4B encoder. `None` lets the placement plan
+    /// choose (and, on a box without room, falls back to the CPU encoder).
+    pub encoder_gpu: Option<u32>,
+    /// Keep the int8 encoder resident even when it shares the DiT's card (a
+    /// box with room for both), instead of building it per call.
+    pub encoder_resident: bool,
+    /// Opt-in fp32 encoder split across the encoder card and the DiT's card
+    /// (needs a large-binding / ReBAR card; it does not fit two P40s). Ignored
+    /// for the fp32 DiT.
+    pub encoder_fp32_split: bool,
+    /// Layer at which the fp32 encoder split cuts; `None` is about two thirds
+    /// of the layers.
+    pub encoder_cut: Option<u32>,
+    /// Main-stack blocks the fp32 single-GPU decode window keeps resident
+    /// (>= 1). The default keeps the window's own device footprint small
+    /// (~1.4 GB at Z-Image-Turbo's real shape - dim 3840, hidden 10240)
+    /// regardless of model size, at the cost of reloading every other block
+    /// once per denoise step.
+    pub window_blocks: u32,
+    /// Which self-attention the DiT records.
+    pub attention: AttentionMode,
+}
+
+impl Default for Tuning {
+    fn default() -> Tuning {
+        Tuning { encoder_gpu: None, encoder_resident: false, encoder_fp32_split: false, encoder_cut: None, window_blocks: DEFAULT_WINDOW_BLOCKS, attention: AttentionMode::Auto }
+    }
+}
+
+impl Tuning {
+    /// A string with no `:` that names exactly this tuning, for a resident's
+    /// instance key; [`Tuning::from_key`] is its inverse.
+    pub fn key(&self) -> String {
+        let opt = |v: Option<u32>| v.map_or("-".to_string(), |v| v.to_string());
+        format!(
+            "enc={},res={},split={},cut={},win={},attn={}",
+            opt(self.encoder_gpu),
+            u8::from(self.encoder_resident),
+            u8::from(self.encoder_fp32_split),
+            opt(self.encoder_cut),
+            self.window_blocks,
+            self.attention.as_str()
+        )
+    }
+
+    /// The tuning [`Tuning::key`] named, or `None` for a string that is not one.
+    pub fn from_key(key: &str) -> Option<Tuning> {
+        let mut t = Tuning::default();
+        for part in key.split(',') {
+            let (name, value) = part.split_once('=')?;
+            let opt = |v: &str| if v == "-" { Some(None) } else { v.parse().ok().map(Some) };
+            match name {
+                "enc" => t.encoder_gpu = opt(value)?,
+                "res" => t.encoder_resident = value == "1",
+                "split" => t.encoder_fp32_split = value == "1",
+                "cut" => t.encoder_cut = opt(value)?,
+                "win" => t.window_blocks = value.parse().ok()?,
+                "attn" => t.attention = AttentionMode::parse(value).ok()?,
+                _ => return None,
+            }
+        }
+        Some(t)
+    }
+}
+
+/// What a [`HotPipeline`] is built for: the shape that fixes its graphs, the
+/// precision, an optional LoRA adapter, and the [`Tuning`].
+#[derive(Clone, Debug)]
+pub struct BuildSpec<'a> {
+    pub width: u32,
+    pub height: u32,
+    /// Caption-token capacity (see [`DEFAULT_CAP_LEN`]).
+    pub cap_len: u32,
+    /// fp32 DiT instead of int8 (see [`Opts::hifi`]).
+    pub hifi: bool,
+    /// A saved LoRA adapter folded into the DiT weights before it is built.
+    pub adapter: Option<&'a str>,
+    pub tuning: Tuning,
+}
 
 /// The caption-token **capacity** a Z-Image pipeline is built for when a caller
 /// names none (the `cap_len` param of `crate::caps`'s `text2image` /
@@ -133,7 +226,7 @@ pub fn check_image_size(cfg: &ZImageConfig, width: u32, height: u32) -> Result<(
 /// refused before that point, or one bad `cap_len` costs every caller after it
 /// a full reload.
 pub fn check_build_shape(dit_path: &str, width: u32, height: u32, cap_len: u32) -> Result<(), String> {
-    let cfg = dit_config(dit_path);
+    let cfg = dit_config(dit_path, &Tuning::default());
     check_image_size(&cfg, width, height)?;
     check_cap_len(&cfg, cap_len, 1)
 }
@@ -255,6 +348,8 @@ pub struct Opts {
     /// `true` = full-precision fp32 sharded across both P40s (higher fidelity, no
     /// quantisation error, needs 2 GPUs).
     pub hifi: bool,
+    /// Placement and kernel choices for the per-call DiT/encoder builds.
+    pub tuning: Tuning,
 }
 
 /// The sampler's starting state: `(latent, first scheduler step, inpaint mask
@@ -286,15 +381,6 @@ pub fn hifi_needs_window(gpu_count: usize) -> bool {
     gpu_count < 2
 }
 
-/// How many of the main stack's blocks stay resident in the fp32 single-GPU
-/// window. `BRAIN_S3DIT_WINDOW_BLOCKS` overrides; the default (2) keeps the
-/// window's own device footprint small (~1.4 GB at Z-Image-Turbo's real
-/// shape — dim 3840, hidden 10240) regardless of model size, at the cost of
-/// reloading every other block once per denoise step.
-pub fn window_blocks_from_env() -> u32 {
-    std::env::var("BRAIN_S3DIT_WINDOW_BLOCKS").ok().and_then(|s| s.parse().ok()).filter(|&n| n > 0).unwrap_or(2)
-}
-
 /// The real fp32 ("hifi") cost the residency layer should budget against —
 /// `(vram_bytes, ram_bytes)` — computed from the SAME machine-shape decision
 /// (`hifi_needs_window`) and the SAME per-block shape `ZImageDitWindowed`
@@ -309,12 +395,12 @@ pub fn window_blocks_from_env() -> u32 {
 /// encoder on CPU regardless of GPU count (a separate, narrower gap from
 /// the one `hifi_needs_window` closes — the int8 path's analogous default
 /// was fixed by `default_bulk_gpu`, hifi's was not, in this session).
-pub fn hifi_cost_bytes(gpu_count: usize) -> (u64, u64) {
+pub fn hifi_cost_bytes(gpu_count: usize, window_blocks: u32) -> (u64, u64) {
     const ENCODER_RAM: u64 = 16 << 30;
     if !hifi_needs_window(gpu_count) {
         return (24 << 30, ENCODER_RAM); // unchanged: ZImageDitShard, 2 GPUs
     }
-    (windowed_dit_vram_bytes(&ZImageConfig::turbo(), window_blocks_from_env()), ENCODER_RAM)
+    (windowed_dit_vram_bytes(&ZImageConfig::turbo(), window_blocks), ENCODER_RAM)
 }
 
 /// VRAM for `window` main-stack blocks plus the fully-resident refiners, at
@@ -389,7 +475,7 @@ pub fn int8_dit_device_bytes(cfg: &ZImageConfig, width: u32, height: u32, cap_le
 /// consume, backed by `crates/cli/src/placement.rs::BudgetPlacer`, which plans
 /// against ACTUALLY MEASURED free VRAM (`residency::plan::plan`), never a bare
 /// GPU count the way the superseded `default_bulk_gpu`/`encoder_on_demand`
-/// pair (still used by the opt-in `BRAIN_S3DIT_ENCODER_FP32SPLIT` path only,
+/// pair (still used by the opt-in [`Tuning::encoder_fp32_split`] path only,
 /// whose own fp32 sizing this seam does not model) did.
 ///
 /// All three parts are declared in ONE joint call rather than `vae` following
@@ -458,12 +544,11 @@ impl DitEngine {
     /// checkpoint on the host. `dit_path` is only used by the `Windowed`
     /// case (hifi, fewer than 2 GPUs) to reopen the checkpoint fresh on
     /// every later `forward` call.
-    fn build_from_source(hifi: bool, cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, dit_path: &str, lh: u32, lw: u32, cap_len: u32) -> DitEngine {
+    fn build_from_source(hifi: bool, cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, dit_path: &str, lh: u32, lw: u32, cap_len: u32, window: u32) -> DitEngine {
         if !hifi {
             return DitEngine::I8(Box::new(ZImageDitI8::build_from_source(cfg, src, 1, lh, lw, cap_len)));
         }
         if hifi_needs_window(gpu_core::devices::schedulable_gpu_count()) {
-            let window = window_blocks_from_env();
             let dit = ZImageDitWindowed::build_from_source(cfg.clone(), src, window, 1, lh, lw, cap_len, Some("gpu"));
             DitEngine::Windowed { dit: Box::new(dit), dit_path: dit_path.to_string(), cfg }
         } else {
@@ -508,13 +593,16 @@ impl DitEngine {
 /// verified in-repo, so deriving field values here would be guesswork.
 /// When a second checkpoint (or the verified key map) lands, teach THIS
 /// function to read `<dit_dir>/config.json`; no build site needs touching.
-fn dit_config(_dit_dir: &str) -> ZImageConfig {
-    ZImageConfig::turbo()
+fn dit_config(_dit_dir: &str, tuning: &Tuning) -> ZImageConfig {
+    ZImageConfig { attention: tuning.attention, ..ZImageConfig::turbo() }
 }
 
-fn build_dit_engine(paths: &Paths, hifi: bool, adapter: Option<&str>, dit_gpu: u32, lh: u32, lw: u32, cap_len: u32, progress: &mut dyn FnMut(&str)) -> Result<DitEngine, String> {
+fn build_dit_engine(paths: &Paths, spec: &BuildSpec, dit_gpu: u32, progress: &mut dyn FnMut(&str)) -> Result<DitEngine, String> {
+    let BuildSpec { width, height, cap_len, hifi, adapter, tuning } = spec;
+    let (cap_len, hifi, adapter) = (*cap_len, *hifi, *adapter);
+    let (lh, lw) = (height / 8, width / 8);
     progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });
-    let zcfg = dit_config(&paths.dit);
+    let zcfg = dit_config(&paths.dit, tuning);
     if let Some(ap) = adapter {
         // LoRA folding mutates weights element-wise in place, so it needs an
         // owned, complete map regardless of how the checkpoint is read --
@@ -537,7 +625,7 @@ fn build_dit_engine(paths: &Paths, hifi: bool, adapter: Option<&str>, dit_gpu: u
         // materializing the entire checkpoint up front).
         let dreader = open_component(&paths.dit).map_err(|e| format!("open dit: {e}"))?;
         let dsrc = crate::import::comfy_source(&dreader, &zcfg);
-        gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build_from_source(hifi, zcfg.clone(), &dsrc, &paths.dit, lh, lw, cap_len))
+        gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build_from_source(hifi, zcfg.clone(), &dsrc, &paths.dit, lh, lw, cap_len, tuning.window_blocks))
     }
 }
 
@@ -552,13 +640,6 @@ fn build_dit_engine(paths: &Paths, hifi: bool, adapter: Option<&str>, dit_gpu: u
 /// than `cap_len` is refused by name ([`fit_caption`]), never cropped to fit,
 /// because conditioning on a prefix of the prompt silently produces an image
 /// of a fragment of what was asked for.
-/// `BRAIN_S3DIT_ENCODER_RESIDENT=1`: opt back into a resident encoder even
-/// when it shares the DiT's card (a box with room for both). Pure function
-/// of the environment so [`encoder_on_demand`]'s decision stays testable.
-fn resident_override() -> bool {
-    std::env::var("BRAIN_S3DIT_ENCODER_RESIDENT").ok().as_deref() == Some("1")
-}
-
 /// Whether the int8 GPU encoder should be built on-demand (never resident
 /// alongside the DiT) rather than resident for the pipeline's whole life.
 /// True exactly when the encoder was asked to share the DiT's own card --
@@ -570,7 +651,7 @@ fn encoder_on_demand(bulk: u32, dit_gpu: u32, resident_override: bool) -> bool {
 }
 
 /// The encoder's GPU card, defaulted when the caller gave no explicit
-/// `BRAIN_S3DIT_ENCODER_GPU`.
+/// [`Tuning::encoder_gpu`].
 ///
 /// - **One GPU total**: no second card to choose, so CPU-by-default would
 ///   only be trading a smaller, on-demand int8 encoder for a larger,
@@ -583,7 +664,7 @@ fn encoder_on_demand(bulk: u32, dit_gpu: u32, resident_override: bool) -> bool {
 ///   of the CPU path's multi-minute Qwen-4B forward, see [`Encoder`]'s own
 ///   doc) instead of silently falling back to CPU while a second card sits
 ///   idle. A caller who wants that card free for something else still
-///   overrides with an explicit `BRAIN_S3DIT_ENCODER_GPU`/`--device`.
+///   overrides with an explicit [`Tuning::encoder_gpu`]/`--device`.
 /// - **Three or more GPUs**: genuinely ambiguous (which of the N-1 remaining
 ///   cards), so CPU stays the conservative default.
 fn default_bulk_gpu(explicit: Option<u32>, dit_gpu: u32, gpus: &[u32]) -> Option<u32> {
@@ -624,7 +705,7 @@ enum Encoder {
     /// DiT sampling loop). Costs a rebuild (open + int8 quantize + upload)
     /// every `generate()` call instead of once at `build()` time - the
     /// deliberate trade for never holding both models on the card together.
-    /// `BRAIN_S3DIT_ENCODER_RESIDENT=1` opts back into [`Encoder::Gpu8`] on a
+    /// [`Tuning::encoder_resident`] opts back into [`Encoder::Gpu8`] on a
     /// box with enough VRAM to hold both (a 24 GB+ discrete card).
     OnDemand { qreader_path: String, qcfg: QwenConfig, cap_len: u32, gpu: u32 },
 }
@@ -704,25 +785,23 @@ impl HotPipeline {
         self.dit.metrics()
     }
 
-    /// Build the resident models for `width×height`, `cap_len` caption tokens, and
-    /// the chosen precision. This is the slow one-time step (~weights load + int8
+    /// Build the resident models `spec` names: its `width×height`, `cap_len`
+    /// caption tokens, precision, optional saved LoRA adapter (folded into the
+    /// DiT weights before the int8/fp32 engine is built, so the resident
+    /// pipeline generates adapter-conditioned images with no other change) and
+    /// [`Tuning`]. This is the slow one-time step (~weights load + int8
     /// quantise / shard build); `generate` afterwards is fast. `progress(msg)`
     /// streams the build stages.
-    pub fn build(paths: &Paths, width: u32, height: u32, cap_len: u32, hifi: bool, progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
-        Self::build_adapted(paths, width, height, cap_len, hifi, None, progress)
-    }
-
-    /// Like [`build`](Self::build), optionally folding a saved LoRA adapter into
-    /// the DiT weights before the (int8/fp32) engine is built — so the resident
-    /// pipeline generates adapter-conditioned images with no other change.
-    pub fn build_adapted(paths: &Paths, width: u32, height: u32, cap_len: u32, hifi: bool, adapter: Option<&str>, mut progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
+    pub fn build_adapted(paths: &Paths, spec: &BuildSpec, mut progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
+        let BuildSpec { width, height, cap_len, hifi, tuning, .. } = spec;
+        let (width, height, cap_len, hifi) = (*width, *height, *cap_len, *hifi);
         check_build_shape(&paths.dit, width, height, cap_len)?;
         let (lh, lw) = (height / 8, width / 8);
 
         progress("loading tokenizer");
         let tok = QwenBpe::from_file(&paths.tokenizer)?;
 
-        // Where the Qwen-4B encoder runs. `BRAIN_S3DIT_ENCODER_GPU=<i>` (when NOT
+        // Where the Qwen-4B encoder runs. `tuning.encoder_gpu = i` (when NOT
         // hifi — hifi already uses both cards for the DiT) shards it across two
         // cards: the bulk (embedding + first ~¾ of the layers) on GPU `i` (the
         // otherwise-empty card) and the thin tail on the DiT's card. The whole fp32
@@ -739,27 +818,22 @@ impl HotPipeline {
         // the renamed map) before a single device byte was ever allocated.
         let qreader = open_component(&paths.qwen).map_err(|e| format!("open qwen: {e}"))?;
         let qsrc = qwen3::import::hf_source(&qreader, &qcfg)?;
-        // User env input, parsed to canonical card indices at this edge; all
-        // placement below goes through the device registry (explicit Shard
-        // indices / scoped `with_gpu`), never env mutation.
-        let enc_gpu_explicit: Option<u32> = std::env::var("BRAIN_S3DIT_ENCODER_GPU")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_S3DIT_ENCODER_GPU {s:?}")))
-            .transpose()?;
-        // dit/encoder/VAE card placement. `BRAIN_S3DIT_ENCODER_FP32SPLIT` keeps
+        // All placement below goes through the device registry (explicit Shard
+        // indices / scoped `with_gpu`).
+        let enc_gpu_explicit = tuning.encoder_gpu;
+        // dit/encoder/VAE card placement. `tuning.encoder_fp32_split` keeps
         // its own index-based math untouched below (its ~16 GB fp32 sizing is
         // not what `place_pipeline_parts`'s int8-shaped `Need`s model); every
         // other path goes through the real, budget-aware seam.
-        let fp32split = !hifi && std::env::var("BRAIN_S3DIT_ENCODER_FP32SPLIT").ok().as_deref() == Some("1");
+        let fp32split = !hifi && tuning.encoder_fp32_split;
         let (dit_gpu, enc_gpu, vae_gpu): (u32, Option<u32>, u32) = if fp32split {
             let dit_gpu = gpu_core::devices::current_gpu().unwrap_or(0);
             let enc_gpu = default_bulk_gpu(enc_gpu_explicit, dit_gpu, &gpu_core::devices::ambient_compute_set().gpus);
             (dit_gpu, enc_gpu, dit_gpu)
         } else {
-            let dit_cfg = dit_config(&paths.dit);
+            let dit_cfg = dit_config(&paths.dit, tuning);
             let dit_bytes = if hifi {
-                hifi_cost_bytes(gpu_core::devices::ambient_compute_set().gpus.len()).0
+                hifi_cost_bytes(gpu_core::devices::ambient_compute_set().gpus.len(), tuning.window_blocks).0
             } else {
                 int8_dit_device_bytes(&dit_cfg, width, height, cap_len)
             };
@@ -782,8 +856,8 @@ impl HotPipeline {
                 // the bulk card, cut..n-1 on the DiT's card. The fp32 encoder is
                 // ~16 GB and each card's usable budget (weights × ~2 alloc overhead
                 // on non-ReBAR Pascal) is < 24 GB, so the bulk must NOT exceed ~11 GB
-                // (≈ embed + ⅔ of the layers). `BRAIN_S3DIT_ENCODER_CUT` overrides.
-                let cut = std::env::var("BRAIN_S3DIT_ENCODER_CUT").ok().and_then(|s| s.parse().ok()).unwrap_or((n * 2) / 3).min(n - 1);
+                // (≈ embed + ⅔ of the layers). `tuning.encoder_cut` overrides.
+                let cut = tuning.encoder_cut.map_or((n * 2) / 3, |c| c as usize).min(n - 1);
                 progress(&format!("building Qwen-4B encoder bulk (fp32 split @{cut}: GPU {bulk} + GPU {dit_gpu})"));
                 // Bulk shard: embedding + layers 0..cut on the (empty) bulk card.
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
@@ -791,7 +865,7 @@ impl HotPipeline {
                 split = Some((s0, cut, n, dit_gpu));
                 None // tail (and thus Encoder::Split) assembled after the DiT below
             }
-            (Some(bulk), false) if encoder_on_demand(bulk, dit_gpu, resident_override()) => {
+            (Some(bulk), false) if encoder_on_demand(bulk, dit_gpu, tuning.encoder_resident) => {
                 // Same card as the DiT: the int8 encoder (~9.5 GB) and the
                 // int8 DiT (~13 GB) together would exceed most single cards'
                 // usable budget (and comfortably exceed a unified-memory
@@ -800,14 +874,14 @@ impl HotPipeline {
                 // `generate()` call instead, so it and the DiT are never
                 // resident at once. Opt back into the
                 // old both-resident behaviour with
-                // `BRAIN_S3DIT_ENCODER_RESIDENT=1` on a card with room for
+                // `tuning.encoder_resident` on a card with room for
                 // both (a real 24 GB+ discrete GPU).
                 progress(&format!("using on-demand Qwen-4B encoder (int8 DP4A, GPU {bulk} shared with the DiT)"));
                 Some(Encoder::OnDemand { qreader_path: paths.qwen.clone(), qcfg: qcfg.clone(), cap_len, gpu: bulk })
             }
             (Some(bulk), false) => {
                 // A genuinely separate card from the DiT's (or
-                // BRAIN_S3DIT_ENCODER_RESIDENT=1 opting back in): whole
+                // `tuning.encoder_resident` opting back in): whole
                 // Qwen-4B in int8 (DP4A), built once, resident for the
                 // pipeline's whole life. ~9.5 GB resident. `end: n-1` skips
                 // the unused last layer (encode reads the penultimate hidden).
@@ -827,7 +901,7 @@ impl HotPipeline {
         };
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
 
-        let dit = build_dit_engine(paths, hifi, adapter, dit_gpu, lh, lw, cap_len, &mut progress)?;
+        let dit = build_dit_engine(paths, spec, dit_gpu, &mut progress)?;
 
         // Now the DiT is resident and its staging is reclaimed — pack the thin
         // encoder tail on top of it (GPU `dit_gpu`), then assemble Encoder::Split.
@@ -871,7 +945,9 @@ impl HotPipeline {
     /// that. Left OUT of `build_adapted` itself deliberately: that
     /// function's adapter/hifi generality needs its own, unmodified path,
     /// never sharing code with a promote-only feature.
-    fn assemble_int8_pipeline(paths: &Paths, width: u32, height: u32, cap_len: u32, build_dit: impl FnOnce(u32, u32, u32) -> Result<DitEngine, String>, mut progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
+    fn assemble_int8_pipeline(paths: &Paths, spec: &BuildSpec, build_dit: impl FnOnce(u32, u32, u32) -> Result<DitEngine, String>, mut progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
+        let BuildSpec { width, height, cap_len, tuning, .. } = spec;
+        let (width, height, cap_len) = (*width, *height, *cap_len);
         check_build_shape(&paths.dit, width, height, cap_len)?;
         let (lh, lw) = (height / 8, width / 8);
 
@@ -881,20 +957,15 @@ impl HotPipeline {
         let qcfg = QwenConfig::qwen3_4b();
         let qreader = open_component(&paths.qwen).map_err(|e| format!("open qwen: {e}"))?;
         let qsrc = qwen3::import::hf_source(&qreader, &qcfg)?;
-        let enc_gpu_explicit: Option<u32> = std::env::var("BRAIN_S3DIT_ENCODER_GPU")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_S3DIT_ENCODER_GPU {s:?}")))
-            .transpose()?;
-        let dit_bytes = int8_dit_device_bytes(&dit_config(&paths.dit), width, height, cap_len);
+        let dit_bytes = int8_dit_device_bytes(&dit_config(&paths.dit, tuning), width, height, cap_len);
         let vae_bytes = vae::decoder_device_bytes_for_pixels(&zimage_vae_config(), width as u64 * height as u64);
-        let (dit_gpu, enc_gpu, vae_gpu) = place_pipeline_parts(dit_bytes, ENCODER_GPU8_BYTES, vae_bytes, enc_gpu_explicit)?;
+        let (dit_gpu, enc_gpu, vae_gpu) = place_pipeline_parts(dit_bytes, ENCODER_GPU8_BYTES, vae_bytes, tuning.encoder_gpu)?;
 
         // Same three arms as build_adapted's !hifi cases (no fp32-split arm
         // -- that one only ever applies when hifi, which these entry points
         // never are).
         let enc = match enc_gpu {
-            Some(bulk) if encoder_on_demand(bulk, dit_gpu, resident_override()) => {
+            Some(bulk) if encoder_on_demand(bulk, dit_gpu, tuning.encoder_resident) => {
                 progress(&format!("using on-demand Qwen-4B encoder (int8 DP4A, GPU {bulk} shared with the DiT)"));
                 Encoder::OnDemand { qreader_path: paths.qwen.clone(), qcfg: qcfg.clone(), cap_len, gpu: bulk }
             }
@@ -933,19 +1004,22 @@ impl HotPipeline {
     /// RAM for as long as the cache lives (see
     /// `ZImageDitI8::build_from_source_with_cache`'s doc); an explicit
     /// choice by the caller (`crates/serving/src/executor.rs`'s
-    /// `ZImageInstance`), never the default [`Self::build`] path.
-    pub fn build_adapted_with_cache(paths: &Paths, width: u32, height: u32, cap_len: u32, progress: impl FnMut(&str)) -> Result<(HotPipeline, crate::DitI8Cache), String> {
+    /// `ZImageInstance`), never the default [`Self::build_adapted`] path.
+    pub fn build_adapted_with_cache(paths: &Paths, spec: &BuildSpec, progress: impl FnMut(&str)) -> Result<(HotPipeline, crate::DitI8Cache), String> {
+        if spec.hifi || spec.adapter.is_some() {
+            return Err("s3dit: a demote cache exists only for a plain int8 build (no fp32, no adapter)".to_string());
+        }
+        let cap_len = spec.cap_len;
         let paths = paths.clone();
         let cache_slot: std::rc::Rc<std::cell::RefCell<Option<crate::DitI8Cache>>> = Default::default();
         let slot = cache_slot.clone();
         let dit_paths = paths.clone();
+        let tuning = spec.tuning.clone();
         let pipe = Self::assemble_int8_pipeline(
             &paths,
-            width,
-            height,
-            cap_len,
+            spec,
             move |dit_gpu, lh, lw| {
-                let zcfg = dit_config(&dit_paths.dit);
+                let zcfg = dit_config(&dit_paths.dit, &tuning);
                 let dreader = open_component(&dit_paths.dit).map_err(|e| format!("open dit: {e}"))?;
                 let dsrc = crate::import::comfy_source(&dreader, &zcfg);
                 let (dit, cache) = gpu_core::devices::with_gpu(dit_gpu, || crate::ZImageDitI8::build_from_source_with_cache(zcfg, &dsrc, 1, lh, lw, cap_len))?;
@@ -962,12 +1036,11 @@ impl HotPipeline {
     /// int8 pipeline WITHOUT touching the DiT checkpoint at all, using
     /// `cache` instead. `crates/serving/src/executor.rs`'s
     /// `ZImageInstance::promote` is the caller.
-    pub fn build_from_dit_cache(paths: &Paths, width: u32, height: u32, cap_len: u32, cache: &crate::DitI8Cache, progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
+    pub fn build_from_dit_cache(paths: &Paths, spec: &BuildSpec, cache: &crate::DitI8Cache, progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
+        let cap_len = spec.cap_len;
         Self::assemble_int8_pipeline(
             paths,
-            width,
-            height,
-            cap_len,
+            spec,
             |dit_gpu, lh, lw| Ok(DitEngine::I8(Box::new(gpu_core::devices::with_gpu(dit_gpu, || crate::ZImageDitI8::rebuild_from_cache(cache, 1, lh, lw, cap_len))?))),
             progress,
         )
@@ -1185,7 +1258,7 @@ pub fn generate_img(prompt: &str, opts: &Opts, paths: &Paths, init: Init, progre
 /// step.
 fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, mut progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
     let total = opts.steps + 2; // encode + N sampling + decode
-    let zcfg = dit_config(&paths.dit);
+    let zcfg = dit_config(&paths.dit, &opts.tuning);
     check_image_size(&zcfg, opts.width, opts.height)?;
     let (lh, lw) = (opts.height / 8, opts.width / 8); // VAE downscale 8
 
@@ -1308,7 +1381,7 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     let dreader = open_component(&paths.dit).map_err(|e| format!("open dit: {e}"))?;
     let dsrc = crate::import::comfy_source(&dreader, &zcfg);
     {
-        let dit = DitEngine::build_from_source(opts.hifi, zcfg, &dsrc, &paths.dit, lh, lw, cap_len);
+        let dit = DitEngine::build_from_source(opts.hifi, zcfg, &dsrc, &paths.dit, lh, lw, cap_len, opts.tuning.window_blocks);
         for i in start_step..opts.steps as usize {
             progress(2 + i as u32, total, if opts.hifi { "sampling (fp32, 2×GPU)" } else { "sampling" });
             let t_dit = (1000.0 - ts[i]) / 1000.0;
@@ -1449,6 +1522,21 @@ mod from_assembly_tests {
 mod encoder_scheduling_tests {
     use super::*;
 
+    /// A resident keys its instance on the tuning and reads it back at
+    /// activation, so the key must round-trip every field and, living inside a
+    /// `:`-separated instance key, contain no `:`.
+    #[test]
+    fn tuning_key_round_trips_every_field() {
+        let tuned = Tuning { encoder_gpu: Some(1), encoder_resident: true, encoder_fp32_split: true, encoder_cut: Some(20), window_blocks: 5, attention: AttentionMode::Flash };
+        for t in [Tuning::default(), tuned.clone()] {
+            assert!(!t.key().contains(':'), "{}", t.key());
+            assert_eq!(Tuning::from_key(&t.key()), Some(t));
+        }
+        assert_ne!(Tuning::default().key(), tuned.key(), "two tunings are two builds");
+        assert_eq!(Tuning::from_key("enc=x"), None);
+        assert_eq!(Tuning::from_key("bogus=1"), None);
+    }
+
     /// The scheduling decision the OOM fix hinges on: on-demand exactly when
     /// the encoder shares the DiT's own card, never when it has a card of
     /// its own, and never when the caller explicitly opted back into the
@@ -1457,11 +1545,11 @@ mod encoder_scheduling_tests {
     fn on_demand_exactly_when_sharing_the_dits_card() {
         assert!(encoder_on_demand(0, 0, false), "same card as the DiT -> on-demand");
         assert!(!encoder_on_demand(1, 0, false), "a separate card -> resident (no conflict to avoid)");
-        assert!(!encoder_on_demand(0, 0, true), "BRAIN_S3DIT_ENCODER_RESIDENT=1 -> resident even on the same card");
+        assert!(!encoder_on_demand(0, 0, true), "an opted-in resident encoder stays resident even on the same card");
         assert!(!encoder_on_demand(1, 0, true), "override + separate card -> still resident");
     }
 
-    /// With no explicit `BRAIN_S3DIT_ENCODER_GPU`, the encoder must not
+    /// With no explicit encoder card, the encoder must not
     /// default to a CPU-resident fp32 build (~16 GB, never dropped) on a box
     /// with exactly one GPU: there is no "separate bulk card" for CPU to be
     /// conserving VRAM against, so CPU-by-default is strictly worse than
@@ -1563,7 +1651,7 @@ mod encoder_scheduling_tests {
         }
     }
 
-    /// An explicit `BRAIN_S3DIT_ENCODER_GPU` always wins outright, without
+    /// An explicit encoder card always wins outright, without
     /// even asking the placer to consider the encoder - `enc_gpu` echoes it
     /// back verbatim regardless of cost or a `BudgetPlacer`'s own opinion.
     #[test]
@@ -1583,9 +1671,9 @@ mod encoder_scheduling_tests {
     /// CPU-resident regardless of GPU count today).
     #[test]
     fn hifi_cost_bytes_switches_on_gpu_count_and_keeps_the_shard_estimate_unchanged() {
-        let (vram_1gpu, ram_1gpu) = hifi_cost_bytes(1);
-        let (vram_2gpu, ram_2gpu) = hifi_cost_bytes(2);
-        assert_eq!(vram_1gpu, windowed_dit_vram_bytes(&ZImageConfig::turbo(), window_blocks_from_env()));
+        let (vram_1gpu, ram_1gpu) = hifi_cost_bytes(1, DEFAULT_WINDOW_BLOCKS);
+        let (vram_2gpu, ram_2gpu) = hifi_cost_bytes(2, DEFAULT_WINDOW_BLOCKS);
+        assert_eq!(vram_1gpu, windowed_dit_vram_bytes(&ZImageConfig::turbo(), DEFAULT_WINDOW_BLOCKS));
         assert_eq!(vram_2gpu, 24 << 30);
         assert_eq!(ram_1gpu, ram_2gpu);
         assert!(vram_1gpu < vram_2gpu, "the windowed estimate must be dramatically smaller, or the whole fix is pointless");

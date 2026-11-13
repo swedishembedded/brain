@@ -210,7 +210,7 @@ fn a_tiled_decode_runs_at_a_size_no_whole_graph_could_hold() {
     let (lh, lw) = (256u32, 256u32);
     assert!(
         gpu_core::capacity::with_available(Some(vae::tiled::WHOLE_GRAPH_MAX_BYTES), || {
-            vae::tiled::should_tile_decode(&c, (lh as u64 * 8) * (lw as u64 * 8))
+            vae::tiled::should_tile_decode(&c, (lh as u64 * 8) * (lw as u64 * 8), None)
         }),
         "2048x2048 must be past the whole-graph threshold, or this test proves nothing"
     );

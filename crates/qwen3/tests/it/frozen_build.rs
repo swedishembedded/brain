@@ -8,7 +8,7 @@
 //! `paramstore::Role::Trainable` - a gradient buffer and two Adam moments
 //! allocated beside each weight, four times the model. A caller that only ever
 //! runs the encoder forward (FLUX.2's text conditioning is the case this test
-//! exists for: `flux2::pipeline::build_text_encoder`) wants
+//! exists for: `flux2::pipeline::build_text_encoder_on`) wants
 //! `new_shard(.., train = false, ..)`, which allocates the weights only. That
 //! is a memory decision and it must not be a numerical one, so this pins it:
 //! same source tensors, same tokens, identical hidden states.

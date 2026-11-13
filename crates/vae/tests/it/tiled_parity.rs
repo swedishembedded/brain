@@ -279,7 +279,7 @@ fn the_planned_estimate_is_bounded_by_the_tile_not_the_image() {
         for mp in [1u64, 2, 4, 8, 16, 32, 64] {
             let px = mp * 1_000_000;
             let untiled = vae::decoder_device_bytes_for_pixels(&cfg, px);
-            let plan = vae::decoder_device_bytes_for_pixels_planned(&cfg, px);
+            let plan = vae::decoder_device_bytes_for_pixels_planned(&cfg, px, None);
             println!("{mp:>3} MP: untiled {:>9.0} MiB  planned {:>9.0} MiB", untiled as f64 / MIB, plan as f64 / MIB);
             assert!(untiled > prev_untiled, "the untiled formula is the thing that grows");
             prev_untiled = untiled;
@@ -296,8 +296,8 @@ fn the_planned_estimate_is_bounded_by_the_tile_not_the_image() {
         // the same tile however large the image gets.
         assert_eq!(planned[4], planned[6], "16 MP and 64 MP must cost the same tiled decode");
         assert!(
-            vae::encoder_device_bytes_for_pixels_planned(&cfg, 16_000_000)
-                == vae::encoder_device_bytes_for_pixels_planned(&cfg, 64_000_000),
+            vae::encoder_device_bytes_for_pixels_planned(&cfg, 16_000_000, None)
+                == vae::encoder_device_bytes_for_pixels_planned(&cfg, 64_000_000, None),
             "the encode estimate must be bounded the same way"
         );
     });
@@ -318,22 +318,37 @@ fn a_normal_resolution_run_is_untouched() {
     gpu_core::capacity::with_available(Some(vae::tiled::WHOLE_GRAPH_MAX_BYTES), || {
         for (h, w) in [(512u64, 512u64), (768, 1024), (1024, 1024), (1024, 1536)] {
             let px = h * w;
-            assert!(!vae::tiled::should_tile_decode(&cfg, px), "{h}x{w} must stay on the whole-image decode");
-            assert!(!vae::tiled::should_tile_encode(&cfg, px), "{h}x{w} must stay on the whole-image encode");
+            assert!(!vae::tiled::should_tile_decode(&cfg, px, None), "{h}x{w} must stay on the whole-image decode");
+            assert!(!vae::tiled::should_tile_encode(&cfg, px, None), "{h}x{w} must stay on the whole-image encode");
             assert_eq!(
-                vae::decoder_device_bytes_for_pixels_planned(&cfg, px),
+                vae::decoder_device_bytes_for_pixels_planned(&cfg, px, None),
                 vae::decoder_device_bytes_for_pixels(&cfg, px),
                 "{h}x{w}: the reservation must be the untiled one"
             );
             assert_eq!(
-                vae::encoder_device_bytes_for_pixels_planned(&cfg, px),
+                vae::encoder_device_bytes_for_pixels_planned(&cfg, px, None),
                 vae::encoder_device_bytes_for_pixels(&cfg, px)
             );
         }
         // ...and the sizes that motivated tiling do engage it.
         for (h, w) in [(2048u64, 2048u64), (1536, 2048), (4096, 4096)] {
-            assert!(vae::tiled::should_tile_decode(&cfg, h * w), "{h}x{w} must tile");
+            assert!(vae::tiled::should_tile_decode(&cfg, h * w, None), "{h}x{w} must tile");
         }
+    });
+}
+
+/// A caller's forced choice beats the budget policy in both directions and in
+/// the reservation: tiling ON at a size that fits (to compare the two paths),
+/// OFF at a size that does not (a caller who knows better than the probe).
+#[test]
+fn a_forced_choice_overrides_the_budget_policy() {
+    let cfg = VaeConfig::flux2();
+    gpu_core::capacity::with_available(Some(vae::tiled::WHOLE_GRAPH_MAX_BYTES), || {
+        let (small, large) = (512u64 * 512, 4096u64 * 4096);
+        assert!(vae::tiled::should_tile_decode(&cfg, small, Some(true)) && vae::tiled::should_tile_encode(&cfg, small, Some(true)));
+        assert!(!vae::tiled::should_tile_decode(&cfg, large, Some(false)) && !vae::tiled::should_tile_encode(&cfg, large, Some(false)));
+        assert_eq!(vae::decoder_device_bytes_for_pixels_planned(&cfg, large, Some(false)), vae::decoder_device_bytes_for_pixels(&cfg, large));
+        assert!(vae::decoder_device_bytes_for_pixels_planned(&cfg, small, Some(true)) <= vae::decoder_device_bytes_for_pixels(&cfg, small));
     });
 }
 
@@ -361,12 +376,12 @@ fn a_graph_the_constant_allows_is_tiled_when_the_card_is_already_full() {
     assert!(budget < want, "the reproduction needs a card with less room than the graph wants");
     gpu_core::capacity::with_available(Some(budget), || {
         assert!(
-            vae::tiled::should_tile_encode(&cfg, px),
+            vae::tiled::should_tile_encode(&cfg, px, None),
             "a graph bigger than the device has left must tile, whatever the constant says"
         );
-        assert!(vae::tiled::should_tile_decode(&cfg, px), "the decode direction has the same bug");
+        assert!(vae::tiled::should_tile_decode(&cfg, px, None), "the decode direction has the same bug");
         assert!(
-            vae::encoder_device_bytes_for_pixels_planned(&cfg, px) <= budget,
+            vae::encoder_device_bytes_for_pixels_planned(&cfg, px, None) <= budget,
             "and the reservation must be the one the tiled path will really spend"
         );
     });
@@ -384,14 +399,14 @@ fn a_card_with_more_room_than_the_constant_keeps_the_exact_path() {
     let want = vae::decoder_device_bytes_for_pixels(&cfg, px);
     assert!(want > vae::tiled::WHOLE_GRAPH_MAX_BYTES, "2048x2048 is the size the constant refuses");
     gpu_core::capacity::with_available(Some(want), || {
-        assert!(!vae::tiled::should_tile_decode(&cfg, px), "a budget that fits the graph must run the graph");
+        assert!(!vae::tiled::should_tile_decode(&cfg, px, None), "a budget that fits the graph must run the graph");
     });
     gpu_core::capacity::with_available(Some(want - 1), || {
-        assert!(vae::tiled::should_tile_decode(&cfg, px), "one byte short is not a fit");
+        assert!(vae::tiled::should_tile_decode(&cfg, px, None), "one byte short is not a fit");
     });
     // A device nothing can measure is the one case the constant still answers.
     gpu_core::capacity::with_available(None, || {
-        assert!(vae::tiled::should_tile_decode(&cfg, px), "with no measurement, the documented fallback decides");
+        assert!(vae::tiled::should_tile_decode(&cfg, px, None), "with no measurement, the documented fallback decides");
     });
 }
 

@@ -89,6 +89,19 @@ image), `width` / `height` (default 1024), `precision` -
 
 Actions: `text2image`, `image2image`, `inpaint`, `outpaint`, `lora_train`.
 
+Placement and kernel parameters (unset is the automatic behaviour; each one
+that changes what is built keys the resident instance, so a changed value
+rebuilds it):
+
+| Parameter | Actions | Meaning |
+| --- | --- | --- |
+| `attention` | all generating actions | `auto` (flash once the scores matrix would reach the device's binding limit), `flash` or `materialized` to force one |
+| `window_blocks` | all generating actions | main-stack blocks the fp32 single-GPU decode window keeps resident (default 2) |
+| `encoder_gpu` | `text2image`, `lora_train` | the card that hosts the Qwen-4B encoder; for `text2image` unset lets the placement plan choose, for `lora_train` the default is card 1 |
+| `encoder_resident` | `text2image` | keep the int8 encoder resident even when it shares the DiT's card |
+| `encoder_fp32_split`, `encoder_cut` | `text2image` | the opt-in fp32 encoder split across two cards, and the layer it cuts at (default about two thirds) |
+| `retain_int8_cache` | `text2image` | served residency only: keep the quantised int8 DiT on the host across demote/promote, trading multi-GB host RAM for a faster reactivation |
+
 ## Hardware and limits
 
 The default `int8` precision keeps the resident weight footprint small enough

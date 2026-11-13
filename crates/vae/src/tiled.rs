@@ -167,18 +167,6 @@ impl Tiling {
 /// this number is what is left when there is nothing to read.
 pub const WHOLE_GRAPH_MAX_BYTES: u64 = 18 << 30;
 
-/// `BRAIN_VAE_TILE=1`/`0` forces tiling on/off; anything else (or unset) is
-/// the [`whole_graph_budget`] policy below. Forcing it ON at a size that
-/// already fits is the supported way to compare the two paths, and forcing it
-/// OFF is how a caller who knows better than the probe overrides it.
-fn forced() -> Option<bool> {
-    match std::env::var("BRAIN_VAE_TILE").ok().as_deref() {
-        Some("1") | Some("on") | Some("true") => Some(true),
-        Some("0") | Some("off") | Some("false") => Some(false),
-        _ => None,
-    }
-}
-
 /// The bytes a whole-image VAE graph may claim on the device this thread would
 /// build it on, right now: what that card has FREE less the headroom between a
 /// byte estimate and a real allocation, or [`WHOLE_GRAPH_MAX_BYTES`] when
@@ -203,20 +191,23 @@ pub fn whole_graph_budget() -> u64 {
 }
 
 /// Whether a decode producing `px` output pixels should take the tiled path:
-/// `BRAIN_VAE_TILE` if it says so, else the graph's own size against what the
-/// device has left ([`whole_graph_budget`]).
+/// `forced` if the caller gave one (`Some(true)` tiles, `Some(false)` runs the
+/// whole image), else the graph's own size against what the device has left
+/// ([`whole_graph_budget`]). Forcing tiling ON at a size that already fits is
+/// the supported way to compare the two paths, and forcing it OFF is how a
+/// caller who knows better than the probe overrides it.
 ///
 /// To decide against a stated budget rather than the live one - a test, or a
 /// caller already holding a grant - wrap the call in
 /// `gpu_core::capacity::with_available`.
-pub fn should_tile_decode(cfg: &VaeConfig, px: u64) -> bool {
-    forced().unwrap_or_else(|| crate::decoder_device_bytes_for_pixels(cfg, px) > whole_graph_budget())
+pub fn should_tile_decode(cfg: &VaeConfig, px: u64, forced: Option<bool>) -> bool {
+    forced.unwrap_or_else(|| crate::decoder_device_bytes_for_pixels(cfg, px) > whole_graph_budget())
 }
 
 /// Whether an encode reading `px` input pixels should take the tiled path -
 /// see [`should_tile_decode`].
-pub fn should_tile_encode(cfg: &VaeConfig, px: u64) -> bool {
-    forced().unwrap_or_else(|| crate::encoder_device_bytes_for_pixels(cfg, px) > whole_graph_budget())
+pub fn should_tile_encode(cfg: &VaeConfig, px: u64, forced: Option<bool>) -> bool {
+    forced.unwrap_or_else(|| crate::encoder_device_bytes_for_pixels(cfg, px) > whole_graph_budget())
 }
 
 /// Output pixels one [`Tiling::AUTO`] tile covers - the cap a tiled estimate
@@ -255,14 +246,14 @@ pub fn encoder_device_bytes_tiled(cfg: &VaeConfig, h: u32, w: u32, tiling: Tilin
 /// run with [`crate::decoder_device_bytes_for_pixels`] once tiling is engaged
 /// over-reserves by the ratio of the image to the tile - which on a busy
 /// machine turns a run the hardware can do into a refusal.
-pub fn decoder_device_bytes_for_pixels_planned(cfg: &VaeConfig, px: u64) -> u64 {
-    let px = if should_tile_decode(cfg, px) { px.min(auto_tile_pixels(cfg)) } else { px };
+pub fn decoder_device_bytes_for_pixels_planned(cfg: &VaeConfig, px: u64, forced: Option<bool>) -> u64 {
+    let px = if should_tile_decode(cfg, px, forced) { px.min(auto_tile_pixels(cfg)) } else { px };
     crate::decoder_device_bytes_for_pixels(cfg, px)
 }
 
 /// [`decoder_device_bytes_for_pixels_planned`] for the encode direction.
-pub fn encoder_device_bytes_for_pixels_planned(cfg: &VaeConfig, px: u64) -> u64 {
-    let px = if should_tile_encode(cfg, px) { px.min(auto_tile_pixels(cfg)) } else { px };
+pub fn encoder_device_bytes_for_pixels_planned(cfg: &VaeConfig, px: u64, forced: Option<bool>) -> u64 {
+    let px = if should_tile_encode(cfg, px, forced) { px.min(auto_tile_pixels(cfg)) } else { px };
     crate::encoder_device_bytes_for_pixels(cfg, px)
 }
 

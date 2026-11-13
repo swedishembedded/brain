@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 use capability::{ActionResult, Invocation, Manifest, Outcome, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
-use s3dit::pipeline::{HotPipeline, Image, Paths};
+use s3dit::pipeline::{BuildSpec, HotPipeline, Image, Paths, Tuning};
 use serde_json::{json, Value};
 
 
 /// z-image behind the scheduler. A resident instance is a built [`HotPipeline`] for a
-/// `(width, height, precision, adapter)` key - the DiT (and its encoder) on the GPU;
+/// `(width, height, precision, cap_len, tuning, adapter)` key - the DiT (and its encoder) on the GPU;
 /// dropping it frees the VRAM. `text2image` runs on the resident pipeline; the
 /// image-editing actions build fresh per call (they take a variable-size input) via a
 /// held provider, so the full manifest still works over the bus.
@@ -107,7 +107,14 @@ impl ResidentModel for ZImageResident {
             // 512", with no sign the param had been dropped. Same rule
             // `resident_qwen3vl` follows for `max_pixels`/`precision`.
             let cap_len = Self::cap_len_of(inv);
-            InstanceKey::new(&self.id, format!("{w}x{h}:{prec}:{cap_len}:{adapter}"))
+            // The tuning (encoder placement, window, attention kernel) and the
+            // demote cache each change what `activate` builds, so each is part
+            // of the identity for the same reason. A tuning this request
+            // cannot parse falls back to the default here, as `cap_len` does,
+            // and `run` refuses it by name.
+            let tuning = s3dit::caps::tuning_of(inv).unwrap_or_default();
+            let retain = u8::from(inv.get_bool("retain_int8_cache").unwrap_or(false));
+            InstanceKey::new(&self.id, format!("{w}x{h}:{prec}:{cap_len}:{}:{retain}:{adapter}", tuning.key()))
         } else {
             // Editing/training actions build fresh per call - one transient instance.
             InstanceKey::new(&self.id, format!("edit:{action}"))
@@ -124,8 +131,8 @@ impl ResidentModel for ZImageResident {
         // here and the number the code actually allocates must be the same
         // expression, or this estimate silently outlives whichever engine
         // it was written for.
-        if key.config.contains(":fp32:") {
-            let (vram, ram) = s3dit::pipeline::hifi_cost_bytes(gpu_core::devices::schedulable_gpu_count());
+        if let Some(shape) = parse_key(&key.config).filter(|shape| shape.hifi) {
+            let (vram, ram) = s3dit::pipeline::hifi_cost_bytes(gpu_core::devices::schedulable_gpu_count(), shape.tuning.window_blocks);
             return MemCost::new(vram, ram);
         }
         let vram = if key.config.starts_with("edit:") { 2u64 << 30 } else { 14u64 << 30 };
@@ -148,9 +155,7 @@ impl ResidentModel for ZImageResident {
             // keep the plain estimate.
             Tier::Hot => {
                 let mut cost = self.estimate(key);
-                let (_, _, hifi, _, adapter) = parse_key(&key.config);
-                let adapter = if adapter.is_empty() { None } else { Some(adapter.as_str()) };
-                if !key.config.starts_with("edit:") && retains_int8_cache(hifi, adapter) {
+                if parse_key(&key.config).is_some_and(|shape| shape.retains_int8_cache()) {
                     cost.ram += cache_ram();
                 }
                 cost
@@ -169,53 +174,41 @@ impl ResidentModel for ZImageResident {
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         if key.config.starts_with("edit:") {
             // No persistent pipeline - the provider builds fresh per call.
-            return Ok(Box::new(ZImageInstance { pipe: None, dit_cache: None, provider: self.provider.clone(), paths: self.paths.clone(), width: 0, height: 0, cap_len: 0 }));
+            return Ok(Box::new(ZImageInstance { pipe: None, dit_cache: None, provider: self.provider.clone(), paths: self.paths.clone(), shape: None }));
         }
-        let (w, h, hifi, cap_len, adapter) = parse_key(&key.config);
-        let adapter = if adapter.is_empty() { None } else { Some(adapter.as_str()) };
+        let shape = parse_key(&key.config).ok_or_else(|| format!("z-image: unreadable instance key {:?}", key.config))?;
         // Place the DiT on the assigned card (scoped registry selection); the
-        // encoder card is z-image's own (BRAIN_S3DIT_ENCODER_GPU) and left as
+        // encoder card is the tuning's own (`encoder_gpu`) and left as
         // configured.
-        let (pipe, dit_cache) = if retains_int8_cache(hifi, adapter) {
-            let (pipe, cache) = crate::resident_llm::on_device(device, || HotPipeline::build_adapted_with_cache(&self.paths, w, h, cap_len, |_| {}))??;
+        let (pipe, dit_cache) = if shape.retains_int8_cache() {
+            let (pipe, cache) = crate::resident_llm::on_device(device, || HotPipeline::build_adapted_with_cache(&self.paths, &shape.build_spec(), |_| {}))??;
             (pipe, Some(cache))
         } else {
-            let pipe = crate::resident_llm::on_device(device, || HotPipeline::build_adapted(&self.paths, w, h, cap_len, hifi, adapter, |_| {}))??;
+            let pipe = crate::resident_llm::on_device(device, || HotPipeline::build_adapted(&self.paths, &shape.build_spec(), |_| {}))??;
             (pipe, None)
         };
-        Ok(Box::new(ZImageInstance { pipe: Some(pipe), dit_cache, provider: self.provider.clone(), paths: self.paths.clone(), width: w, height: h, cap_len }))
+        Ok(Box::new(ZImageInstance { pipe: Some(pipe), dit_cache, provider: self.provider.clone(), paths: self.paths.clone(), shape: Some(shape) }))
     }
-}
-
-/// Whether an `activate` for `(hifi, adapter)` should retain a
-/// [`s3dit::DitI8Cache`] alongside the built pipeline - real, permanent
-/// extra host RAM (see [`ZImageDitI8::build_from_source_with_cache`]'s
-/// doc), so opt-in only (`BRAIN_S3DIT_RETAIN_INT8_CACHE=1`) and only for
-/// the one shape a cache can even be built for: plain int8, no adapter.
-/// fp32 and LoRA-folded builds always return `false` regardless of the env
-/// var - `demote` for those stays the manager's unmodified default
-/// (`Err("unsupported")`, today's full drop-and-rebuild), not a silent lie.
-fn retains_int8_cache(hifi: bool, adapter: Option<&str>) -> bool {
-    !hifi && adapter.is_none() && std::env::var("BRAIN_S3DIT_RETAIN_INT8_CACHE").ok().as_deref() == Some("1")
 }
 
 /// A resident z-image instance: `pipe` when a text2image pipeline is built; the
 /// `provider` handles the fresh-build editing/training actions. `dit_cache`
-/// is `Some` only for an instance that opted into [`retains_int8_cache`] -
+/// is `Some` only for an instance whose key opted into
+/// [`ShapeKey::retains_int8_cache`] -
 /// what makes `demote`/`promote` real instead of the default `Err`.
 struct ZImageInstance {
     pipe: Option<HotPipeline>,
     dit_cache: Option<s3dit::DitI8Cache>,
     provider: Arc<s3dit::caps::ZImageProvider>,
     paths: Paths,
-    width: u32,
-    height: u32,
-    cap_len: u32,
+    /// The build this instance was keyed on; `None` for an edit instance.
+    shape: Option<ShapeKey>,
 }
 
 impl Instance for ZImageInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         if action == "text2image" {
+            s3dit::caps::tuning_of(inv)?;
             let pipe = self.pipe.as_ref().ok_or("z-image: text2image instance has no pipeline")?;
             let prompt = inv.get_str("prompt").unwrap_or_default();
             let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
@@ -235,7 +228,7 @@ impl Instance for ZImageInstance {
     }
 
     /// Real only when `activate` retained a `dit_cache` (plain int8, no
-    /// adapter, `BRAIN_S3DIT_RETAIN_INT8_CACHE=1`): drops the whole
+    /// adapter, `retain_int8_cache`): drops the whole
     /// resident pipeline - encoder, DiT, VAE, every device buffer - while
     /// the cache (already held separately) survives, ready for `promote`.
     /// Refuses for everything else (fp32, an adapter build, or a plain
@@ -259,22 +252,66 @@ impl Instance for ZImageInstance {
     /// after a successful `demote`, so `dit_cache` is always `Some` here.
     fn promote(&mut self, device: Device) -> Result<(), String> {
         let cache = self.dit_cache.as_ref().ok_or("z-image: promote called on an instance with no retained cache")?;
-        let pipe = crate::resident_llm::on_device(device, || HotPipeline::build_from_dit_cache(&self.paths, self.width, self.height, self.cap_len, cache, |_| {}))??;
+        let shape = self.shape.as_ref().ok_or("z-image: promote called on an instance with no build shape")?;
+        let pipe = crate::resident_llm::on_device(device, || HotPipeline::build_from_dit_cache(&self.paths, &shape.build_spec(), cache, |_| {}))??;
         self.pipe = Some(pipe);
         Ok(())
     }
 }
 
-/// Parse a `"WxH:precision:cap_len:adapter"` instance key. The adapter is last
-/// because it is a filesystem path and may itself contain a ':'.
-fn parse_key(config: &str) -> (u32, u32, bool, u32, String) {
-    let mut parts = config.splitn(4, ':');
+/// What a text2image instance key names: the build `activate` makes.
+#[derive(Debug, PartialEq, Eq)]
+struct ShapeKey {
+    width: u32,
+    height: u32,
+    hifi: bool,
+    cap_len: u32,
+    tuning: Tuning,
+    /// Retain a [`s3dit::DitI8Cache`] alongside the built pipeline: real,
+    /// permanent extra host RAM (see `ZImageDitI8::build_from_source_with_cache`),
+    /// so opt-in only, and only for the one shape a cache can be built for.
+    retain_int8_cache: bool,
+    /// A saved LoRA adapter path, empty for none.
+    adapter: String,
+}
+
+impl ShapeKey {
+    /// Whether `activate` retains a demote/promote cache: only for plain int8
+    /// without an adapter. fp32 and LoRA-folded builds never do - `demote` for
+    /// those stays the manager's unmodified default (`Err("unsupported")`,
+    /// today's full drop-and-rebuild), not a silent lie.
+    fn retains_int8_cache(&self) -> bool {
+        self.retain_int8_cache && !self.hifi && self.adapter.is_empty()
+    }
+
+    fn build_spec(&self) -> BuildSpec<'_> {
+        BuildSpec {
+            width: self.width,
+            height: self.height,
+            cap_len: self.cap_len,
+            hifi: self.hifi,
+            adapter: (!self.adapter.is_empty()).then_some(self.adapter.as_str()),
+            tuning: self.tuning.clone(),
+        }
+    }
+}
+
+/// Parse a `"WxH:precision:cap_len:tuning:retain:adapter"` instance key (an edit
+/// key, which names no build, is `None`). The adapter is last because it is a
+/// filesystem path and may itself contain a ':'.
+fn parse_key(config: &str) -> Option<ShapeKey> {
+    if config.starts_with("edit:") {
+        return None;
+    }
+    let mut parts = config.splitn(6, ':');
     let wh = parts.next().unwrap_or("1024x1024");
     let prec = parts.next().unwrap_or("int8");
     let cap_len = parts.next().and_then(|s| s.parse().ok()).unwrap_or(s3dit::pipeline::DEFAULT_CAP_LEN);
+    let tuning = parts.next().and_then(Tuning::from_key).unwrap_or_default();
+    let retain_int8_cache = parts.next() == Some("1");
     let adapter = parts.next().unwrap_or("").to_string();
     let (w, h) = wh.split_once('x').unwrap_or(("1024", "1024"));
-    (w.parse().unwrap_or(1024), h.parse().unwrap_or(1024), prec == "fp32", cap_len, adapter)
+    Some(ShapeKey { width: w.parse().unwrap_or(1024), height: h.parse().unwrap_or(1024), hifi: prec == "fp32", cap_len, tuning, retain_int8_cache, adapter })
 }
 
 /// Wrap a generated [`Image`] as an image-output [`Outcome`] (the shared
@@ -305,8 +342,8 @@ mod tests {
         let k_default = key(Invocation::new());
         let k_big = key(Invocation::new().set("cap_len", json!(1024)));
         assert_ne!(k_default, k_big, "two capacities are two different builds");
-        assert_eq!(parse_key(&k_default.config).3, s3dit::pipeline::DEFAULT_CAP_LEN);
-        assert_eq!(parse_key(&k_big.config).3, 1024, "activate must build for what the caller asked, not a constant");
+        assert_eq!(parse_key(&k_default.config).unwrap().cap_len, s3dit::pipeline::DEFAULT_CAP_LEN);
+        assert_eq!(parse_key(&k_big.config).unwrap().cap_len, 1024, "activate must build for what the caller asked, not a constant");
         // An out-of-range value falls back to the default rather than wrapping,
         // so `instance_key` and `activate` can never disagree about the build.
         assert_eq!(key(Invocation::new().set("cap_len", json!(1i64 << 40))), k_default);
@@ -316,7 +353,36 @@ mod tests {
         assert_ne!(key(Invocation::new().set("width", json!(512))), k_default);
         assert_ne!(key(Invocation::new().set("precision", json!("fp32"))), k_default);
         let k_ad = key(Invocation::new().set("adapter", json!("a:b/c.brain")));
-        assert_eq!(parse_key(&k_ad.config), (1024, 1024, false, s3dit::pipeline::DEFAULT_CAP_LEN, "a:b/c.brain".to_string()));
+        assert_eq!(
+            parse_key(&k_ad.config),
+            Some(ShapeKey { width: 1024, height: 1024, hifi: false, cap_len: s3dit::pipeline::DEFAULT_CAP_LEN, tuning: Tuning::default(), retain_int8_cache: false, adapter: "a:b/c.brain".to_string() })
+        );
+    }
+
+    /// Every placement knob and the demote cache change what `activate` builds,
+    /// so each keys a distinct instance and reaches `activate` through the key.
+    #[test]
+    fn tuning_and_the_demote_cache_are_part_of_the_text2image_instance_identity() {
+        let r = ZImageResident::from_paths(s3dit::caps::MODEL, unresolvable_paths()).expect("no weights are read to build a resident");
+        let key = |inv: Invocation| r.instance_key("text2image", &inv);
+        let k_default = key(Invocation::new());
+        for (name, value) in [
+            ("encoder_gpu", json!(1)),
+            ("encoder_resident", json!(true)),
+            ("encoder_fp32_split", json!(true)),
+            ("encoder_cut", json!(12)),
+            ("window_blocks", json!(6)),
+            ("attention", json!("flash")),
+            ("retain_int8_cache", json!(true)),
+        ] {
+            assert_ne!(key(Invocation::new().set(name, value.clone())), k_default, "{name} must key a distinct instance");
+        }
+        let k = key(Invocation::new().set("window_blocks", json!(6)).set("attention", json!("flash")).set("retain_int8_cache", json!(true)).set("adapter", json!("a:b.brain")));
+        let shape = parse_key(&k.config).unwrap();
+        assert_eq!((shape.tuning.window_blocks, shape.tuning.attention), (6, s3dit::block::AttentionMode::Flash));
+        assert!(shape.retain_int8_cache && !shape.retains_int8_cache(), "an adapter build never retains a cache");
+        assert_eq!(shape.adapter, "a:b.brain");
+        assert!(parse_key(&r.instance_key("image2image", &Invocation::new()).config).is_none(), "an edit key names no build");
     }
 
     fn unresolvable_paths() -> Paths {
@@ -462,7 +528,7 @@ mod tests {
             .set("seed", json!(42));
 
         let key = model.instance_key("text2image", &inv);
-        assert_eq!(parse_key(&key.config).3, 1024, "the request's capacity must reach activate through the key");
+        assert_eq!(parse_key(&key.config).unwrap().cap_len, 1024, "the request's capacity must reach activate through the key");
         let mut inst = model.activate(&key, Device::Gpu(0)).expect("activate at the requested capacity");
         let out = inst.run("text2image", &inv, &mut |_| {}).expect("a prompt past the DEFAULT capacity must generate at the capacity that was asked for");
         assert!(out.blobs.contains_key("image"));
@@ -479,7 +545,6 @@ mod tests {
     #[test]
     #[ignore = "slow: real checkpoint + GPU; needs Z-Image in the model store, run with --ignored"]
     fn zimage_demote_then_promote_produces_a_real_image_and_promote_is_faster() {
-        std::env::set_var("BRAIN_S3DIT_RETAIN_INT8_CACHE", "1");
         // Two different failures used to share one skip: "the checkpoint paths
         // are not on this box" (a fixture that is legitimately absent) and
         // "the paths resolved but the provider would not load" (a real
@@ -490,7 +555,7 @@ mod tests {
         };
         let paths = Paths::from_assembly(&assembly).expect("a resolved assembly carries every role");
         let model = ZImageResident::from_paths(s3dit::caps::MODEL, paths).expect("every role resolved, so the Z-Image provider must load");
-        let key = InstanceKey::new(s3dit::caps::MODEL, "256x256:int8:");
+        let key = model.instance_key("text2image", &Invocation::new().set("width", json!(256)).set("height", json!(256)).set("retain_int8_cache", json!(true)));
 
         let t0 = std::time::Instant::now();
         let mut inst = model.activate(&key, Device::Gpu(0)).expect("activate");
