@@ -566,11 +566,12 @@ mod tests {
         let mut by_position = |_: &str, _: &str, options: &[String]| -> Result<Vec<f32>, String> {
             Ok((0..options.len()).map(|i| if i == 0 { 0.7 } else { 0.1 }).collect())
         };
-        let r = evaluate(&mut by_position, &d, &request(Split::Test)).unwrap();
+        let req = request(Split::Test);
+        let r = evaluate(&mut by_position, &d, &req).unwrap();
         // The first option's id is the winner when asked in order; after a random
         // shuffle it wins again with probability 1/4, so about 3/4 change.
         assert!(r.order_instability > 0.5 && r.order_instability < 0.95, "{}", r.order_instability);
-        let again = evaluate(&mut by_position, &d, &request(Split::Test)).unwrap();
+        let again = evaluate(&mut by_position, &d, &req).unwrap();
         assert_eq!(r.order_instability, again.order_instability, "a seed fixes the permutations");
     }
 
