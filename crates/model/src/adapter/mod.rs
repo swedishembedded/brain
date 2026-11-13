@@ -290,7 +290,10 @@ pub struct LowRank<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BaseStorage {
     /// The base weights reach the device as the floats they already are
-    /// (f32/f16). A fold is exact here: nothing re-rounds the sum.
+    /// (f32/f16). The fold adds the delta to the f32 host weights, so it is
+    /// exact for an f32 device copy; a 16-bit device copy rounds the folded
+    /// weight as it rounds any weight, to its own spacing, not to a quantizer
+    /// grid.
     Dense,
     /// The base weights are re-quantized on the way to the device (INT8,
     /// INT4, ...). A fold would put the delta on the weight grid, so there

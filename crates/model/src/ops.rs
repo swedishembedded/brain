@@ -2220,10 +2220,10 @@ impl Ops {
                     self.second_level(s, w, act, &quant, fine, y, yoff);
                 }
             }
-            // NF4 is float-read (QLoRA): the kernel decodes each weight load
-            // and multiplies it with the raw f32 activation, so this arm never
-            // touches `act.quant` and bypasses the W4A8 selector arms. It binds
-            // the variant itself, like the int8 frozen-base GEMM of `qwen3`.
+            // NF4 (and FP8, micro-scaled) weights are float-read: `matmul_rows`
+            // takes the shared tile-decode route ([`Weight::NF4`]), decoding
+            // weight tiles and multiplying them with the f32 activation, so this
+            // arm never touches `act.quant` and bypasses the W4A8 selector arms.
             Weight::NF4 { .. } | Weight::FP8 { .. } | Weight::Micro { .. } => self.matmul_rows(s, w, (0, n), act, y, yoff),
             Weight::Cq { .. } => self.cq_product(s, w, act, y, yoff),
             // M12: affine K-quant (`Weight::KQuant { affine: true, .. }` -
