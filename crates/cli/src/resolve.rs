@@ -32,11 +32,6 @@ use crate::{caps_cli, optimize_cli, prune_cli, quantize_cli};
 /// One row per architecture, each naming its own served model: the face pair
 /// (`scrfd` detection, `arcface` identity embedding) are two crates and two
 /// models, and `arcface embed`'s default path reaches the detector itself.
-/// `ARCH_TO_MODEL` ids with no `brain_arch::Arch` row: no-weights utility
-/// models (`imgpipe` composes OTHER architectures' own weights) with no
-/// crate-with-a-port story of their own, so no row makes sense for them.
-pub(crate) const NO_ARCH_ROW: &[&str] = &["imageops", "demo", "imgpipe"];
-
 const ARCH_TO_MODEL: &[(&str, &str)] = &[
     // The decision family (`decide` and Laya, which has no arch row of its
     // own): `brain decide decide --state ... --questions ...` answers typed
@@ -347,7 +342,6 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brain_testutil::env_lock;
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
@@ -518,6 +512,11 @@ mod tests {
             .collect();
         assert!(unreachable.is_empty(), "served with a resolver spec but unreachable as `brain <arch> <verb>`: {unreachable:?}");
     }
+
+    /// `ARCH_TO_MODEL` ids with no `brain_arch::Arch` row: no-weights utility
+    /// models (`imgpipe` composes OTHER architectures' own weights) with no
+    /// crate-with-a-port story of their own, so no row makes sense for them.
+    const NO_ARCH_ROW: &[&str] = &["imageops", "demo", "imgpipe"];
 
     #[test]
     fn every_arch_to_model_id_is_a_real_registry_entry() {

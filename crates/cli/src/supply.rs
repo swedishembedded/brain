@@ -29,7 +29,7 @@
 //! (`StoreSupplier::ensure` calling `serving::model_dir::resident_for_local`),
 //! plus the `BRAIN_AUTO_FETCH` environment gate itself.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 
