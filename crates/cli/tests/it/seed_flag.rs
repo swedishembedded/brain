@@ -34,7 +34,6 @@ const SEEDED_VERBS: &[&[&str]] = &[
     &["bench", "scale"],
     &["data", "gen", "calculator"],
     &["data", "gen", "pong"],
-    &["federated", "train-expert"],
     &["chronos2", "predict"],
     &["fincast", "predict"],
     &["kronos", "predict"],
@@ -77,7 +76,6 @@ const SEEDED_VERBS: &[&[&str]] = &[
 /// loading a model, opening a device or writing anything.
 const USAGE_STOPPED_VERBS: &[&[&str]] = &[
     &["perf", "run", "latency"],
-    &["federated", "train-expert"],
 ];
 
 #[test]
