@@ -126,6 +126,8 @@ pub struct GrpoConfig {
     /// Lower clip-band half-width (`eps` in `clip(r, 1-eps, 1+eps_high)`).
     pub clip_eps: f32,
     /// k3 KL-to-reference coefficient. `0.0` puts no KL term in the loss.
+    /// The reported value estimates `KL(pi || ref)`, but the sample is held fixed, so the term's expected gradient
+    /// is that of `KL(ref || pi)` (`grpo_term::k3_kl`).
     pub kl_beta: f32,
     /// Packed row length (`t`): prompt length + completion, at least.
     pub seq_len: usize,

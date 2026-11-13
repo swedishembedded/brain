@@ -95,6 +95,13 @@ pub fn token_term(old_lp: f32, new_lp: f32, advantage: f32, clip_eps: f32, ref_l
 /// `A*r`. When the clipped term is strictly smaller, the surrogate is locally
 /// constant in `r` (the clamp has saturated), so the weight is exactly `0.0`.
 ///
+/// KL penalty direction: `kl_beta * k3` is added to the loss with the sample
+/// held fixed, so its expected gradient under `pi` samples is the gradient of
+/// `KL(ref || pi)` (see [`k3_kl`]), even though the reported value estimates
+/// `KL(pi || ref)`. Descending `KL(pi || ref)` itself would need the penalty
+/// folded into the reward (`-kl_beta * (new_lp - ref_lp)` per token) so the
+/// policy gradient differentiates through the sampling distribution.
+///
 /// The ratio `exp(new_lp - old_lp)` is evaluated by [`bounded_exp`], and so is the
 /// k3 exponent: past [`MAX_LOG_RATIO`] both continue along their tangent, and `weight`
 /// is the derivative of the `loss` reported with it.
@@ -139,7 +146,12 @@ pub fn token_term_weighted(old_lp: f32, new_lp: f32, advantage: f32, band: ClipB
 
 /// The k3 estimator of `KL(policy || reference)` at one sampled token,
 /// `e^u - u - 1` with `u = ref_lp - new_lp`; non-negative, zero iff the two
-/// log-probabilities agree. Its gradient weight is `e^u - 1`: with
+/// log-probabilities agree. Its *value* estimates `KL(pi || ref)` for samples
+/// drawn from `pi`, but descending it with the sample held fixed does not
+/// descend that KL: `grad k3 = (1 - ref/pi) grad ln pi`, so
+/// `E_pi[grad k3] = sum_a (pi_a - ref_a) grad ln pi_a = grad KL(ref || pi)`
+/// (using `sum_a grad pi_a = 0`). The penalty therefore pulls `pi` toward
+/// covering `ref` (forward KL), not toward seeking one of its modes. Its gradient weight is `e^u - 1`: with
 /// `d(new_lp)/dz = onehot - softmax` the KL gradient is `(e^u - 1)` more weight
 /// on the ordinary cross-entropy direction. The exponential is continued
 /// linearly past [`MAX_LOG_RATIO`] ([`bounded_exp`]) so a reference far more
@@ -362,5 +374,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Which divergence the k3 penalty descends, by exact enumeration. With samples drawn from `pi` and held
+    /// fixed, `E_pi[grad_z kl_beta * k3] = kl_beta * (pi - ref)` for logits `z` (`pi = softmax z`), which is the
+    /// gradient of `KL(ref || pi)`, not of `KL(pi || ref)`, `kl_beta * pi_j * (ln(pi_j / ref_j) - KL(pi || ref))`.
+    /// A token's logit gradient is `weight * (softmax - onehot)` ([`TokenTerm`]).
+    #[test]
+    fn k3_penalty_expected_gradient_is_that_of_forward_kl_ref_to_policy() {
+        let beta = 0.7f32;
+        let pi = [0.5f64, 0.3, 0.15, 0.05];
+        let reference = [0.1f64, 0.2, 0.3, 0.4];
+        // The kernel sees f32 log-probabilities; the analytic side uses the same rounded values.
+        let pi_lp: Vec<f32> = pi.iter().map(|p| p.ln() as f32).collect();
+        let ref_lp: Vec<f32> = reference.iter().map(|p| p.ln() as f32).collect();
+        let pi: Vec<f64> = pi_lp.iter().map(|l| f64::from(*l).exp()).collect();
+        let reference: Vec<f64> = ref_lp.iter().map(|l| f64::from(*l).exp()).collect();
+
+        let mut expected = vec![0.0f64; pi.len()];
+        for a in 0..pi.len() {
+            let t = token_term(0.0, pi_lp[a], 0.0, 0.2, Some(ref_lp[a]), beta);
+            for (j, g) in expected.iter_mut().enumerate() {
+                *g += pi[a] * f64::from(t.weight) * (pi[j] - f64::from(a == j));
+            }
+        }
+
+        let forward: Vec<f64> = (0..pi.len()).map(|j| f64::from(beta) * (pi[j] - reference[j])).collect();
+        let kl_reverse: f64 = pi.iter().zip(&reference).map(|(p, r)| p * (p / r).ln()).sum();
+        let reverse: Vec<f64> = (0..pi.len()).map(|j| f64::from(beta) * pi[j] * ((pi[j] / reference[j]).ln() - kl_reverse)).collect();
+
+        // Error budget: each weight is rounded once to f32 (relative 2^-24) and |weight| <= beta * max(ref/pi) < 10 here;
+        // the sum has 4 terms of magnitude <= 1, so 4 * 10 * beta * 2^-24 < 2e-6, plus the f32 weight's own exp error.
+        let bound = 1e-5;
+        for j in 0..pi.len() {
+            assert!((expected[j] - forward[j]).abs() <= bound, "z{j}: expected {} vs grad KL(ref||pi) {}", expected[j], forward[j]);
+        }
+        let gap = expected.iter().zip(&reverse).map(|(e, r)| (e - r).abs()).fold(0.0, f64::max);
+        assert!(gap > 0.05, "the penalty must differ from grad KL(pi||ref); gap {gap}");
     }
 }

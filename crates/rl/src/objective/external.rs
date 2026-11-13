@@ -250,6 +250,8 @@ pub struct PolicyGradientConfig {
     /// micro-batches, before the optimiser's clip) exceeds this. `None`: no bound.
     pub max_step_grad_norm: Option<f32>,
     /// Coefficient of the k3 KL to the reference policy; `0.0` puts no KL term in the loss.
+    /// The reported value estimates `KL(pi || ref)`, but the sample is held fixed, so the term's expected gradient
+    /// is that of `KL(ref || pi)` (`grpo_term::k3_kl`).
     pub kl_beta: f32,
     pub reference: ReferencePolicy,
     /// Where the behaviour log-probabilities come from: the sampler's recorded ones ([`BehaviourSource::Recorded`],

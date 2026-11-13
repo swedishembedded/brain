@@ -28,9 +28,10 @@
 //!   template's tools block is what the agent was shown.
 //! - Trajectory-level reward only (the producer's stamp on
 //!   `Trajectory.final_metrics.extra.reward`), broadcast across every token
-//!   the trajectory contributes - matching lecture 3's finding (cited in
-//!   the roadmap doc) that outcome-level reward is the right place to
-//!   start, before process-level (per-step) reward.
+//!   the trajectory contributes. Outcome-level reward is the place to
+//!   start, before process-level (per-step) reward: a producer's verifier
+//!   scores the finished trajectory, and per-step credit has no such
+//!   programmatic source here yet.
 //! - A trajectory with NO reward stamp is skipped, not defaulted to weight
 //!   `1.0` - training on a trajectory whose outcome is unknown would be
 //!   silently indistinguishable from training on a known-good one, exactly
