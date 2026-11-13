@@ -238,6 +238,35 @@ mod tests {
         assert!((a - b).abs() <= 1e-5, "the floor did not bind: {a} vs {b}");
     }
 
+    /// The trade the module header states, run on the reward itself. With a
+    /// soft target `(1 - p, p)` the reward IS the expected reward of the report
+    /// `(1 - q, q)` (both the log and the spherical terms are linear in the
+    /// target), so this compares expectations exactly. Below the floor a report
+    /// of zero earns more than the truth; above the crossing the truth wins; the
+    /// crossing solves `(1-p) ln(1-p) + p ln p = p * floor`, near
+    /// `e^(floor + 1) = 2.72e-4` for the default floor.
+    #[test]
+    fn below_the_log_floor_a_report_of_zero_beats_the_truth() {
+        let with_sph = ProperScore::default();
+        let log_only = ProperScore { w_sph: 0.0, w_rps: 0.0, ..with_sph };
+        let reward = |q: f32, p: f32, cfg: &ProperScore| proper_reward(&[1.0 - q, q], &[1.0 - p, p], false, cfg);
+        for cfg in [&log_only, &with_sph] {
+            let (zero, truth) = (reward(0.0, 5e-5, cfg), reward(5e-5, 5e-5, cfg));
+            assert!(zero > truth, "w_sph {}: report 0 scored {zero}, the truth 5e-5 scored {truth}", cfg.w_sph);
+        }
+        assert!(reward(1e-3, 1e-3, &log_only) > reward(0.0, 1e-3, &log_only), "above the crossing the truth wins");
+        let (mut lo, mut hi) = (1e-4f32, 1e-3f32);
+        for _ in 0..40 {
+            let mid = 0.5 * (lo + hi);
+            if reward(0.0, mid, &log_only) > reward(mid, mid, &log_only) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        assert!((2.70e-4..2.75e-4).contains(&lo), "the crossing is at {lo}, not near 2.72e-4");
+    }
+
     /// Strict propriety, empirically: reporting the true distribution must
     /// beat every perturbation of it. This is the whole reason the reward is
     /// built out of these three terms, and it is checked rather than asserted
