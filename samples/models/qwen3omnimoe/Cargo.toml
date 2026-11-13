@@ -1,0 +1,24 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/qwen3omnimoe` -> `sample-models-qwen3omnimoe`.
+name = "sample-models-qwen3omnimoe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: Qwen3-Omni from the command line - generate, speak and converse with every parameter, plus the export of its audio tower, vision tower and Code2Wav vocoder as ONNX graphs for OpenVINO and the Intel NPU."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-qwen3omnimoe.workspace = true
+brain-invoke.workspace = true
+brain-capability.workspace = true
+brain-checkpoint.workspace = true
+# The NPU route: the structural check of each exported graph.
+brain-npu.workspace = true
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 75

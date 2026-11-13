@@ -173,6 +173,16 @@ with BrainDBus() as brain:
 [`samples/python/qwen3omnimoe/omni/omni.py`](../../../../samples/python/qwen3omnimoe/omni/omni.py) exercises text,
 speech, image and video input over both the D-Bus and HTTP transports.
 
+## Intel NPU export
+
+`samples/models/qwen3omnimoe` adds `npu-export`: the audio tower, the vision
+tower and the Code2Wav vocoder as fp32 ONNX graphs (not the MoE Thinker, which
+is not an NPU target), each followed by the structural and compile check of
+`brain npu check`. `--n-audio`, `--grid-h`, `--grid-w` and `--code-len` set the
+exported shapes, `--out-dir` the destination, and the OpenVINO options
+(`--ov-device`, `--hint`, `--cache-dir`, `--turbo`, `--allow-fallback`,
+`--profile`) the compile.
+
 ## Options
 
 - `messages` / `prompt` - chat input, same shape as brain's other chat

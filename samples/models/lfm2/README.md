@@ -5,7 +5,7 @@
 
 LFM2.5-Encoder as a standalone program: fill masked words, embed documents of
 up to 8k tokens, and continue the encoder's masked-language training on your
-own text.
+own text, or export it and time it on the Intel NPU.
 
 Every action is the model's served one, with a command line built from its
 manifest, so everything `brain serve` exposes for the model is here with the
@@ -40,6 +40,14 @@ $L embed --text "a document to embed" --normalize true --out embeddings=doc.f32
 $L tokenize --corpus notes.txt --dest data/notes
 $L finetune --data data/notes --save notes.safetensors --steps 200 --seed $RANDOM
 $L eval --data data/notes --weights notes.safetensors --seed $RANDOM
+```
+
+The encoder on the Intel NPU (OpenVINO and an NPU are needed to compile and
+time it; the export alone runs anywhere):
+
+```bash
+$L npu-export --seq 1024 --quant int8 --out out/lfm.onnx
+$L npu-bench --seq 8192 --quant f16 --iters 20 --compare true --ov-device npu
 ```
 
 `$L <action> --help` lists every parameter with its default; `--device`

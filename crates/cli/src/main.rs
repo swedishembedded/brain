@@ -404,6 +404,7 @@ QWEN3-OMNI (brain/qwen3omnimoe: text/audio/image/video in, text + speech out)
   brain qwen3omnimoe import --source <hf_dir> --dest Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors [--id VENDOR/REPO]
       # brain serve serves the published directory and, GPU-sharded, the int8 Thinker over
       # the checkpoint import wrote; every parameter: brain qwen3omnimoe <action> --help
+      # the NPU graph export: samples/models/qwen3omnimoe (npu-export)
 
 LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
   brain lfm2 fill_mask --text \"… <|mask|> …\" [--topk K]
@@ -413,7 +414,7 @@ LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
   brain lfm2 eval --data data/lfm                       # pseudo-ppl + masked-acc
   brain lfm2 import --source <hf_dir> --dest lfm.safetensors
       every parameter: brain lfm2 <action> --help; --weights/--tokenizer name a role
-  brain npu lfm        --weights F --seq S --out model.onnx [--int8]   # OpenVINO export
+      # the NPU export and benchmark: samples/models/lfm2 (npu-export, npu-bench)
   make perf/model/lfm                      # standalone concurrency benchmark (scheduler+residency)
 
 QWEN3-TTS (brain/qwen3tts: Talker + MTP + neural codec; NPU actions are samples/models/qwen3tts)

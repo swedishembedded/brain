@@ -623,8 +623,8 @@ directed) done for the resampler, honestly incomplete for the decoder:
   GGUF's own absent `scoring_func`/`topk_method` keys), and the shared
   expert is unweighted (`model::moe::shared_expert_fwd`'s `None` arm) rather
   than qwen35moe's sigmoid-gated one.
-- `crates/npu/src/deepseekocr2_export.rs` + `brain npu deepseekocr2
-  --weights DIR --seq S --out-dir out` wire both into the CLI, reusing
+- `crates/npu/src/deepseekocr2_export.rs` + `deepseekocr2 npu-export
+  --seq S --out-dir out` (`samples/models/deepseekocr2`) wire both into a sample, reusing
   `deepseekocr2::import`'s existing real-checkpoint expansion so this export
   reads the same tensors every other real-weight test in this campaign does.
 - `crates/npu/tests/it/deepseekocr2_onnx.rs`: structural tests (tiny fixture,

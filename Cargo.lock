@@ -6894,6 +6894,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-models-deepseekocr2"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-deepseekocr2",
+ "brain-invoke",
+ "brain-npu",
+ "brain-ocrserve",
+ "serde_json",
+]
+
+[[package]]
 name = "sample-models-diamond"
 version = "5.1.0"
 dependencies = [
@@ -6963,8 +6975,13 @@ dependencies = [
 name = "sample-models-lfm2"
 version = "5.1.0"
 dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
  "brain-invoke",
  "brain-lfm2",
+ "brain-model",
+ "brain-npu",
+ "serde_json",
 ]
 
 [[package]]
@@ -7010,6 +7027,18 @@ dependencies = [
  "brain-invoke",
  "brain-npu",
  "brain-qwen35moe",
+ "serde_json",
+]
+
+[[package]]
+name = "sample-models-qwen3omnimoe"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-invoke",
+ "brain-npu",
+ "brain-qwen3omnimoe",
  "serde_json",
 ]
 

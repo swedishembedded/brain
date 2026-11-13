@@ -21,6 +21,7 @@
 
 // Pure-Rust core (always compiled, hardware-free).
 pub mod calib;
+pub mod check;
 pub mod run_options;
 pub mod codec_export;
 pub mod topo;

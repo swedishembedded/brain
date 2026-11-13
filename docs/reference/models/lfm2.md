@@ -69,6 +69,18 @@ other actions as they are.
 - `--normalize true` - L2-normalize the mean-pooled embedding.
 - `brain serve --max-batch N` - batched-forward slots per serving instance (default 2).
 
+## Intel NPU
+
+`samples/models/lfm2` adds two actions beside the served ones. `npu-export`
+writes the encoder as a fixed-shape ONNX graph for one sequence-length bucket
+(`--seq`, `--out`, `--quant f16|int8|int4`). `npu-bench` exports, compiles on
+the accelerator and times the one-shot forward (`--iters`, `--warmup`, compile
+time reported apart); `--compare true` also gates the NPU output against
+brain's own forward at cosine 0.999. The OpenVINO options are the shared ones
+(`--ov-device`, `--hint`, `--cache-dir`, `--turbo`, `--allow-fallback`,
+`--profile`). They need OpenVINO and an Intel NPU; a compile that lands on
+another device is refused.
+
 ## Hardware and limits
 
 Usable context is 8,192 tokens. Attention is bidirectional (non-causal),

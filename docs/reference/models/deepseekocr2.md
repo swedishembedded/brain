@@ -90,6 +90,14 @@ The `<|grounding|>` marker and the `<|ref|>`/`<|det|>`/table-tag markers are
 reserved tokens in this vocabulary, the same as v1's (the tokenizer is
 byte-identical, since the decoder is unchanged).
 
+## Intel NPU export
+
+`samples/models/deepseekocr2` adds `npu-export`: the resampler (one graph per
+view size) and the decoder as ONNX graphs (`resampler_local.onnx`,
+`resampler_global.onnx`, `decoder.onnx`) for a best-effort OpenVINO compile,
+with `--seq` for the decoder's export length and `--out-dir`. The SAM backbone
+is not exported. The checkpoint is the store's, or `--dir DIR`.
+
 ## Hardware and limits
 
 The vision encoder (SAM and the resampler) builds on one card and the

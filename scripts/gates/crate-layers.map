@@ -218,6 +218,7 @@ sample-fly-interactive	6
 sample-imagegen-batch	6
 sample-imagegen-generate	6
 sample-models-chronos2	6
+sample-models-deepseekocr2	6
 sample-models-diamond	6
 sample-models-fincast	6
 sample-models-flux2	6
@@ -227,6 +228,7 @@ sample-models-kronos	6
 sample-models-lfm2	6
 sample-models-ltxv	6
 sample-models-qwen3	6
+sample-models-qwen3omnimoe	6
 sample-models-qwen3tts	6
 sample-models-sam2	6
 sample-models-splat	6

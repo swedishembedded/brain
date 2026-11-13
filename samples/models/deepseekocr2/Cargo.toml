@@ -1,0 +1,24 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/deepseekocr2` -> `sample-models-deepseekocr2`.
+name = "sample-models-deepseekocr2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: DeepSeek-OCR-2 document OCR from the command line - generate with every parameter, plus the export of its resampler and decoder as ONNX graphs for OpenVINO and the Intel NPU."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-deepseekocr2.workspace = true
+brain-ocrserve.workspace = true
+brain-invoke.workspace = true
+brain-capability.workspace = true
+# The NPU route: the ONNX writer.
+brain-npu.workspace = true
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 72

@@ -5,7 +5,7 @@ name = "sample-models-lfm2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Sample application: LFM2.5-Encoder from the command line - fill-mask, long-context embeddings and masked-language fine-tuning, every served action with every parameter."
+description = "Sample application: LFM2.5-Encoder from the command line - fill-mask, long-context embeddings and masked-language fine-tuning with every parameter, plus the encoder's export and benchmark on the Intel NPU."
 publish = false
 
 [dependencies]
@@ -13,7 +13,13 @@ publish = false
 # directly (samples/README.md rule 1).
 brain-lfm2.workspace = true
 brain-invoke.workspace = true
+brain-capability.workspace = true
+brain-checkpoint.workspace = true
+brain-model.workspace = true
+# The NPU route: the ONNX writer and the OpenVINO sessions.
+brain-npu.workspace = true
+serde_json.workspace = true
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
-max-brain-crates = 40
+max-brain-crates = 72
