@@ -553,6 +553,11 @@ navigation:
           - docs/book/v12-reinforcement-learning/01-mdps.md
           - docs/book/v12-reinforcement-learning/02-value-learning.md
           - docs/book/v12-reinforcement-learning/03-policy-gradients.md
+          - docs/book/v12-reinforcement-learning/04-llm-alignment.md
+          - docs/book/v12-reinforcement-learning/05-search.md
+          - docs/book/v12-reinforcement-learning/06-decision-models.md
+          - docs/book/v12-reinforcement-learning/07-continual-learning.md
+          - docs/book/v12-reinforcement-learning/08-project-agent.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

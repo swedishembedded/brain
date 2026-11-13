@@ -22,4 +22,4 @@ You can write a small decision problem as states, actions, transition probabilit
 5. [Search, Planning and Discovery](05-search.md): when should an agent search instead of learn, and how do the two help each other?
 6. [Decision Models in Practice](06-decision-models.md): how is a small learned model used to make fast, auditable decisions inside an application?
 7. [Continual Learning and Promotion](07-continual-learning.md): how can a model keep learning from new experience without forgetting, and how do we decide a new version is better?
-8. Project: An Agent That Improves from Verified Feedback: can you train an agent that solves progressively harder tasks from verified rewards, and decide when a new version is better?
+8. [Project: An Agent That Improves from Verified Feedback](08-project-agent.md): can you train an agent that solves progressively harder tasks from verified rewards, and decide when a new version is better?

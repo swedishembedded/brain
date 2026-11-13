@@ -1,0 +1,56 @@
+<!-- source-sha256: 5bc3f519ea9c2a254a4a65bdd7fba5ed2b71f4854426dfb53cebd76d5f9f35b1 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 907 356" width="907" height="356"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="907" height="356" fill="#ffffff"/>
+<rect x="24" y="24" width="143" height="92" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="95.5" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">task generator:</text>
+<text x="95.5" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">24 pool inputs,</text>
+<text x="95.5" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a level from 1 to 5</text>
+<rect x="267" y="24" width="149" height="92" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="341.5" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">policy: 240 numbers,</text>
+<text x="341.5" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 answers for each</text>
+<text x="341.5" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">of 4 tasks per step</text>
+<rect x="516" y="24" width="136" height="92" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="584" y="50.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">exact verifier:</text>
+<text x="584" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reward 1 for an</text>
+<text x="584" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">answer that is right,</text>
+<text x="584" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">else 0</text>
+<rect x="752" y="24" width="131" height="92" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="817.5" y="50.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">group advantages,</text>
+<text x="817.5" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">clipped update,</text>
+<text x="817.5" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 epochs of the</text>
+<text x="817.5" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">same batch</text>
+<rect x="24" y="200" width="143" height="92" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="95.5" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">curriculum: raise the</text>
+<text x="95.5" y="242.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">level when the probe</text>
+<text x="95.5" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">success at it is</text>
+<text x="95.5" y="274.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">at least 0.6</text>
+<rect x="267" y="200" width="149" height="92" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="341.5" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">probe bank: 48 inputs</text>
+<text x="341.5" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">at each of 5 levels,</text>
+<text x="341.5" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">never trained on</text>
+<rect x="516" y="200" width="136" height="92" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="584" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gate: paired lower</text>
+<text x="584" y="250.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bounds against the</text>
+<text x="584" y="266.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">served version</text>
+<rect x="752" y="200" width="131" height="92" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="817.5" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">registry: promote,</text>
+<text x="817.5" y="242.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">audit bank, and</text>
+<text x="817.5" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rollback to the</text>
+<text x="817.5" y="274.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">previous version</text>
+<line x1="170" y1="70" x2="264" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="419" y1="70" x2="513" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="655" y1="70" x2="749" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="341.5" y1="119" x2="341.5" y2="197" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="350.5" y="162.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">the policy</text>
+<line x1="264" y1="246" x2="170" y2="246" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="217" y="237.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">every step</text>
+<line x1="95.5" y1="197" x2="95.5" y2="119" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="104.5" y="162.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">level + 1</text>
+<line x1="419" y1="246" x2="513" y2="246" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="466" y="237.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">every 10 steps</text>
+<line x1="655" y1="246" x2="749" y2="246" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="702" y="237.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">promote</text>
+<text x="584" y="138.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">mistake 1: a weak verifier</text>
+<text x="95.5" y="312.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">mistake 2: the curriculum</text>
+<text x="95.5" y="328.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">reads the training reward</text>
+<text x="584" y="314.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">mistake 3: unpaired standard error</text>
+</svg>

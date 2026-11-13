@@ -172,6 +172,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **catastrophic cancellation**: the loss of leading digits when two nearly equal numbers that carry rounding errors are subtracted; the subtraction is exact but promotes the earlier errors to the leading digits of a much smaller result, losing about $\log_{10}$ of the ratio of the operands to the result. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
+**catastrophic forgetting**: the loss, abrupt and nearly complete, of what a model had learned of an earlier task when it is trained on a new one whose data no longer contains the old. *([Continual Learning and Promotion](v12-reinforcement-learning/07-continual-learning.md))*
+
 **categorical distribution**: a table of $K$ non-negative probabilities summing to $1$, one per outcome of a choice among $K$ possibilities such as the next word; the case $K = 2$ is the Bernoulli distribution. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **causal 3D convolution**: a convolution over height, width and time whose output at one time uses only that time and earlier ones, the missing earlier frames at the start of a clip being copies of the first. *([Video as Data](v10-video-and-3d/01-video.md))*
@@ -244,6 +246,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **context vector**: the vector that carries what an encoder has read to the decoder; in the first design a single vector, the encoder's last state, and in attention a vector of its own at every output step, a weighted average of the encoder states. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
 
+**continual reader**: a process that takes in an unbounded stream of new experience episode by episode, trains a candidate on each, promotes it only through the gate, and can report what it is still able to do. *([Continual Learning and Promotion](v12-reinforcement-learning/07-continual-learning.md))*
+
 **continuous ranked probability score**: the integral of the squared gap between a forecast's distribution function and the step at the outcome, in the units of the outcome, which equals the absolute error for a point forecast and twice the pinball loss averaged over all levels. *([Probabilistic Forecasts](v11-forecasting/02-probabilistic-forecasting.md))*
 
 **contrastive loss**: a loss that trains vectors by comparison: for each anchor it is the softmax cross-entropy, at a temperature, over the cosines of the anchor to its partner and to the partners of the other pairs of the batch (the in-batch negatives), which raises the cosine of the pair and lowers the others. *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
@@ -304,6 +308,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **decision boundary**: the set of inputs where the model switches its decision, for a linear logit the line, plane or flat sheet $\mathbf{w}\cdot\mathbf{x} = 0$ (at threshold $1/2$), which separates the two predicted classes. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
 
+**decision head**: a small trained map from the state vector to a score for each action of a set, whose softmax is the probability of each, so that it is a policy over a fixed (or, in brain, a supplied) set of actions. *([Decision Models in Practice](v12-reinforcement-learning/06-decision-models.md))*
+
 **decision threshold**: the probability above which one action has a lower expected cost than another, the point where the two expected costs cross; for a false alarm costing $c_{\mathrm{FP}}$ and a miss $c_{\mathrm{FN}}$ it is $c_{\mathrm{FP}}/(c_{\mathrm{FP}} + c_{\mathrm{FN}})$ and it belongs to the costs, not to the model. *([Scoring Rules and Calibrated Decisions](v11-forecasting/06-calibrated-decisions.md))*
 
 **decision tree**: a model that asks a sequence of yes-or-no questions, each a threshold on one feature chosen to make the answers as informative about the class as possible, and predicts the class held at the leaf reached. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
@@ -341,6 +347,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **diffusion transformer**: a denoiser made of transformer blocks over the patch tokens of a latent, with the noise level entering through adaptive layer normalization, and a last layer that maps the tokens back to patches. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
 
 **diffusion world model**: a world model that produces the next frame by denoising noise, given the last frames and the action. *([World Models](v10-video-and-3d/07-world-models.md))*
+
+**direct preference optimisation**: training a policy on preference pairs with the loss $-\ln\mathrm{sigmoid}(u)$ of the reward difference whose reward is the policy's own log-ratio to a frozen reference, which is the closed-form optimum of the KL-penalised objective written as a reward model. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
 
 **directional derivative**: the rate of change of a function per unit distance in a chosen unit direction $\mathbf{u}$, equal to $\nabla L\cdot\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
@@ -409,6 +417,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **expectation**: the probability-weighted average $\sum_x x\,p(x)$ (or $\int x f(x)\,dx$) of a random variable, the value its long-run average approaches; it is linear, $\mathbb{E}[X + Y] = \mathbb{E}[X] + \mathbb{E}[Y]$. *([Probability: Reasoning Under Uncertainty](v01-mathematics/10-probability.md))*
 
 **expectation-maximization**: the procedure that fits a latent-variable model by repeating one pass in two halves: compute, for every training example, the posterior probability of each value of the latent under the current parameters (the expectation), then replace the parameters by the posterior-weighted averages that the counting formulas would give if the latent had been observed (the maximization); the training likelihood never falls from one pass to the next. *([What It Means to Generate](v08-image-generation/01-generative-modeling.md))*
+
+**experience replay**: mixing stored examples of what was learned before into the training of the new task, at a stated ratio of old rows to new and by a stated rule for which old rows are kept. *([Continual Learning and Promotion](v12-reinforcement-learning/07-continual-learning.md))*
 
 **expert**: one of several feed-forward networks of the same shape inside a layer, each used only by the tokens that are routed to it; the word does not say what it knows. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
 
@@ -504,6 +514,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **global gradient norm**: the Euclidean norm of the gradient of every parameter of the model, all tensors taken together as one vector, the number a clip compares with its threshold. *([Learning-Rate Schedules and Gradient Clipping](v03-neural-networks/08-schedules-and-clipping.md))*
 
+**goal-conditioned policy**: a policy that takes the goal as an input beside the state, so that one function serves every goal. *([Search, Planning and Discovery](v12-reinforcement-learning/05-search.md))*
+
 **GPT architecture**: a decoder-only transformer language model: token embeddings plus positions, a stack of pre-norm blocks, a final normalization and a head (tied to the embedding table in GPT-2) that gives one row of logits per position, trained to predict the next token. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
 
 **GPU architecture**: the organization of a graphics processor used for computing: many compute units, each with lanes, a large register file, a small on-chip memory and a scheduler, over a memory of high bandwidth and high latency, built for throughput and not for the speed of one thread. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
@@ -530,6 +542,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **grouped-query attention**: attention in which each key-value head is read by a group of neighbouring query heads, so a layer stores $h_{\mathrm{kv}}$ key-value heads for $H$ query heads, the cache is $h_{\mathrm{kv}} / H$ of the multi-head cache, and the attention FLOPs are unchanged. *([Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md))*
 
+**GRPO**: group relative policy optimisation, which samples several answers to a prompt and uses the group's mean reward (and optionally its standard deviation) in place of a learned critic to form each answer's advantage. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
+
 **gru**: gated recurrent unit, a recurrent cell with one state, an update gate that sets how far the state moves toward a new candidate and a reset gate that sets how much of the old state the candidate may read, so that the old state reaches the new one through a gate and not through a matrix. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
 
 **guidance distillation**: training a student network by regression on the guided prediction of a teacher, optionally with the guidance scale as an input, so that one pass of the student gives what two passes of the teacher gave. *([Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md))*
@@ -547,6 +561,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **hidden layer**: a layer of units between the input and the output whose values are not given by the data; it computes a new description of the input from which the next layer can compute the answer with a simpler rule. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
 **hierarchical vision transformer**: a vision transformer arranged as a pyramid of stages, in which merging neighbouring patches between stages reduces the number of tokens and widens the channels, like the stages of a convolutional network. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
+
+**hindsight relabelling**: replacing the goal of a stored transition by a state that its episode actually reached and recomputing the reward, so that an episode that missed its goal becomes a rewarded example for the goal it did reach. *([Search, Planning and Discovery](v12-reinforcement-learning/05-search.md))*
 
 **homogeneous coordinates**: a representation of a point by one more number than it has coordinates, defined up to a nonzero factor, in which a division by depth, a translation and a point at infinity become matrix products. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
 
@@ -590,6 +606,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **integral**: the limit of the Riemann sums $\sum f(t_i)\,\Delta t$ as the width goes to zero, written $\int_a^b f(t)\,dt$; the signed area between the graph of $f$ and the axis. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
 
+**intent classification**: choosing which of a closed list of intents a message expresses, the canonical use of a decision model, trained on messages whose intent has been supplied. *([Decision Models in Practice](v12-reinforcement-learning/06-decision-models.md))*
+
 **interactive generation**: generation in which each output is produced within a frame budget from the user's latest input and the model's own previous output. *([World Models](v10-video-and-3d/07-world-models.md))*
 
 **intersection over union**: the area two boxes share divided by the area they cover together, a number from 0 to 1 that is unchanged by scaling or shifting both boxes and is 0 for boxes that do not meet. *([Object Detection](v07-vision/04-detection.md))*
@@ -629,6 +647,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **kernel size, stride and padding**: the side of the window, the number of pixels it moves between neighbouring outputs, and the border of zeros added around the image; with the dilation, which spaces the taps, they fix the output size $\lfloor (H + 2p - d(k-1) - 1)/s \rfloor + 1$. *([Convolution](v07-vision/02-convolution.md))*
 
 **KL divergence**: the excess of the cross-entropy over the entropy, $D_{\mathrm{KL}}(p \,\Vert\, q) = \sum_k p_k \log(p_k/q_k)$; it is never negative, zero only when $q = p$, and not symmetric in its arguments. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
+
+**KL penalty**: the term $\beta\,\mathrm{KL}(\pi \,\|\, \pi_{\mathrm{ref}})$ subtracted from the expected reward to keep the policy near a frozen reference, whose maximiser is $\pi_{\mathrm{ref}} e^{r/\beta}/Z$. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
 
 **KV cache**: for every layer, the key and the value of every token already seen, stored once and read by every later token, so that the past is never run through the model again; its size is two rows of $h_{\mathrm{kv}} d_h$ numbers per token and layer. *([The KV Cache](v05-sequences/12-kv-cache.md))*
 
@@ -930,6 +950,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **prediction**: the value $\hat{y} = f_\theta(\mathbf{x})$ a model returns for an example. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
+**preference data**: pairs of answers to the same prompt with a label saying which one people chose, which says that one is better than the other and nothing about how good either is. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
+
 **prefill phase**: processing the whole prompt in one call, with every matrix seeing all the prompt's rows at once and the keys and values of every prompt position written into the cache; limited by the arithmetic once the prompt is long. *([The KV Cache](v05-sequences/12-kv-cache.md))*
 
 **prefix sum**: the list of running totals of an array, either inclusive (including the element at each position) or exclusive (stopping just before it), used to turn probabilities into a cumulative distribution and lengths into offsets. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
@@ -944,9 +966,13 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **probability path**: a family of densities $p_\sigma$, one for each noise fraction, that runs from the data's density at $\sigma = 0$ to the standard normal at $\sigma = 1$; here the density of $x_\sigma = (1 - \sigma)x_0 + \sigma\varepsilon$. *([Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md))*
 
+**probe bank**: a fixed, versioned set of evaluation items grouped by capability, each with a checkable answer, frozen before any candidate is trained and never used as training data, that every candidate and the incumbent are scored on. *([Continual Learning and Promotion](v12-reinforcement-learning/07-continual-learning.md))*
+
 **product notation**: the symbol $\prod_{i=a}^{b} x_i$ for the product of the terms $x_i$ as the index $i$ runs from $a$ to $b$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **projection**: the closest point to a vector $\mathbf{v}$ on the line through $\mathbf{u}$, namely $\frac{\mathbf{v}\cdot\mathbf{u}}{\mathbf{u}\cdot\mathbf{u}}\mathbf{u}$; what is left over is orthogonal to $\mathbf{u}$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
+
+**promotion gate**: the rule that decides whether a candidate may replace the model in use, by comparing the two on frozen probes with a paired test and requiring the gain to be significant, large enough and bought without a regression of what the incumbent could already do. *([Continual Learning and Promotion](v12-reinforcement-learning/07-continual-learning.md))*
 
 **prompt embedding sequence**: the array of rows, one vector per position of the fixed window, that an encoder produces for a prompt, including the rows of the padding; the denoiser reads it by cross-attention or by joint attention. *([Conditioning on Text](v08-image-generation/09-text-conditioning.md))*
 
@@ -965,6 +991,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **Q-learning**: learning the values of state-action pairs by moving each toward the day's reward plus the discounted largest value of the next state, whatever action was taken there, so that it estimates the best policy from days generated by another. *([Learning Values from Experience](v12-reinforcement-learning/02-value-learning.md))*
 
 **QK-normalization**: the RMS normalization of every query and every key over its own head width, with a learned gain per channel and applied before the rotary rotation, which bounds attention logits by $\sqrt{d_h}$ times the gains. *([Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md))*
+
+**quality-diversity archive**: a store that keeps, for every cell of a space of behaviour descriptors, the best candidate found so far, so that many different good solutions are kept and a candidate that scores low but does something new survives as a starting point for further search. *([Search, Planning and Discovery](v12-reinforcement-learning/05-search.md))*
 
 **quantile forecast**: a forecast stated as the values at which the outcome is claimed to fall at or below with a list of stated probabilities, one column per level and one row per bar. *([Probabilistic Forecasts](v11-forecasting/02-probabilistic-forecasting.md))*
 
@@ -1037,6 +1065,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **return**: the discounted sum of the rewards that follow a day, $G_t = r_t + \gamma r_{t+1} + \gamma^2 r_{t+2} + \dots$, which obeys $G_t = r_t + \gamma G_{t+1}$. *([Markov Decision Processes](v12-reinforcement-learning/01-mdps.md))*
 
 **reverse-mode differentiation**: computing derivatives by carrying a row vector from the single output back through the chain of Jacobians, so one sweep gives the gradient with respect to every input. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
+
+**reward model**: a model that reads a prompt and an answer and returns one number, fitted by logistic regression on the difference of the scores of chosen and rejected answers, so that it is defined only up to a constant. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
 
 **rms-normalization**: layer normalization without the subtraction of the mean: dividing each example's features by their root mean square and applying a learned gain. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
@@ -1154,7 +1184,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **standard error**: the standard deviation of an estimator over repeated samples, the typical size of its error; for the sample mean it is $\sigma/\sqrt{n}$, estimated by $s/\sqrt{n}$. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
 
+**state encoder**: the frozen function that turns an application's situation, free text through a sentence embedding and structured fields through scaling, into the vector a decision head reads. *([Decision Models in Practice](v12-reinforcement-learning/06-decision-models.md))*
+
 **state-space model**: a layer whose state evolves under a linear system in continuous time, $\mathbf{h}' = \mathbf{A}\mathbf{h} + \mathbf{B}x$, discretized into a recurrence $\mathbf{h}_t = \bar{\mathbf{A}}\mathbf{h}_{t-1} + \bar{\mathbf{B}}x_t$ with a step size that may depend on the input. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
+
+**state-space search**: finding a path from a start to a goal by keeping a frontier of states that have been reached and repeatedly expanding one of them, with the order of the frontier (fewest moves, lowest cost so far, nearest by a heuristic, or the sum of cost so far and heuristic) deciding which method it is and how many expansions it spends. *([Search, Planning and Discovery](v12-reinforcement-learning/05-search.md))*
 
 **stationarity**: the property that a series has the same mean and variance at every bar and a covariance between two bars that depends only on how far apart they are. *([Time Series Fundamentals](v11-forecasting/01-time-series.md))*
 
@@ -1173,6 +1207,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **summation notation**: the symbol $\sum_{i=a}^{b} x_i$ for the sum of the terms $x_i$ as the index $i$ runs from $a$ to $b$. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
 
 **super-resolution**: producing a picture with more pixels than the one in hand, by estimating the detail that the downsampling removed; because many pictures share one downsampling, the output is a choice among them. *([Restoration and Super-Resolution](v08-image-generation/12-restoration.md))*
+
+**supervised fine-tuning**: continuing next-token training of a pretrained language model on demonstrations written in the chat template, with the loss mask on the assistant's tokens and the closing marker only. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
 
 **supervised learning**: learning from examples that all carry labels, in order to predict the label of a new example. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
@@ -1311,6 +1347,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **vector-Jacobian product**: the product of a row vector with a Jacobian, computed by a per-operation rule without ever building the Jacobian as a matrix. *([Backpropagation Derived from Scratch](v03-neural-networks/04-backpropagation.md))*
 
 **velocity field**: the average velocity $u(x, \sigma) = \mathbb{E}[\varepsilon - x_0 \mid x_\sigma = x]$ of all the straight lines through a point; following it as an ordinary differential equation carries the standard normal onto the data. *([Flow Matching and Rectified Flow](v08-image-generation/06-flow-matching.md))*
+
+**verifiable reward**: a reward computed by an exact, deterministic program, such as comparing a final answer with the expected one or running tests, that needs no labeller and no learned scorer. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
 
 **video autoencoder**: an encoder that turns a clip into a short grid of numbers, smaller in space and in time, and a decoder that turns the grid back into frames. *([Video as Data](v10-video-and-3d/01-video.md))*
 

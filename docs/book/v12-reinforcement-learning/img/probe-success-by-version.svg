@@ -1,0 +1,48 @@
+<!-- source-sha256: f3f208a85e72925e861f868b2a5f9ae0aa7b84cb7fbad412b55b72b6f4f0fe5e -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 340" width="620" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="340" fill="#ffffff"/>
+<line x1="58" y1="294" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="148.67" y1="294" x2="148.67" y2="30" stroke="#edf2f7"/>
+<text x="148.67" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">50</text>
+<line x1="239.33" y1="294" x2="239.33" y2="30" stroke="#edf2f7"/>
+<text x="239.33" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="330" y1="294" x2="330" y2="30" stroke="#edf2f7"/>
+<text x="330" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">150</text>
+<line x1="420.67" y1="294" x2="420.67" y2="30" stroke="#edf2f7"/>
+<text x="420.67" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">200</text>
+<line x1="511.33" y1="294" x2="511.33" y2="30" stroke="#edf2f7"/>
+<text x="511.33" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">250</text>
+<line x1="602" y1="294" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">300</text>
+<line x1="58" y1="294" x2="602" y2="294" stroke="#edf2f7"/>
+<text x="52" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="241.2" x2="602" y2="241.2" stroke="#edf2f7"/>
+<text x="52" y="245.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="188.4" x2="602" y2="188.4" stroke="#edf2f7"/>
+<text x="52" y="192.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="135.6" x2="602" y2="135.6" stroke="#edf2f7"/>
+<text x="52" y="139.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="82.8" x2="602" y2="82.8" stroke="#edf2f7"/>
+<text x="52" y="86.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="544" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,206 76.13,115.64 94.27,97.87 112.4,73.69 130.53,71.04 148.67,65.18 166.8,61.22 184.93,60.11 203.07,54.22 221.2,53.47 239.33,52.12 257.47,53.6 275.6,52.67 293.73,51.38 311.87,49.19 330,48.96 348.13,45.98 366.27,45.29 384.4,44.91 402.53,42.35 420.67,42.43 438.8,41.95 456.93,42 475.07,40.07 493.2,39.94 511.33,39.94 529.47,38.89 547.6,39.15 565.73,38.61 583.87,38.61 602,38.46"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,264.67 76.13,227.37 94.27,178.5 112.4,138.16 130.53,122.97 148.67,122.14 166.8,107.15 184.93,97.37 203.07,90.84 221.2,88.31 239.33,84.97 257.47,86.03 275.6,79.53 293.73,78.11 311.87,74.58 330,73.99 348.13,70.18 366.27,70 384.4,66.81 402.53,66.54 420.67,62.64 438.8,61.35 456.93,61.07 475.07,58.27 493.2,57.76 511.33,57.76 529.47,56.42 547.6,57.37 565.73,54.6 583.87,54.6 602,54.09"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,284.22 76.13,271.79 94.27,255.5 112.4,242.05 130.53,217.79 148.67,202.34 166.8,161.52 184.93,150.67 203.07,130.19 221.2,124.82 239.33,119.96 257.47,114.8 275.6,109.49 293.73,103.34 311.87,99.66 330,96.6 348.13,93.31 366.27,92.82 384.4,87.19 402.53,86.53 420.67,82.31 438.8,80.69 456.93,80.55 475.07,78.11 493.2,76.45 511.33,76.45 529.47,71.83 547.6,70.93 565.73,66.73 583.87,66.73 602,66.37"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="58,290.74 76.13,286.6 94.27,281.17 112.4,276.68 130.53,268.6 148.67,263.45 166.8,249.84 184.93,246.22 203.07,238.27 221.2,207.93 239.33,187.14 257.47,163.05 275.6,147.67 293.73,134.34 311.87,127.9 330,121.28 348.13,114.38 366.27,110.7 384.4,104.94 402.53,101.83 420.67,96.03 438.8,93.24 456.93,92.21 475.07,89.94 493.2,86.35 511.33,86.35 529.47,80.97 547.6,80.31 565.73,76.1 583.87,76.1 602,74.28"/><polyline fill="none" stroke="#6b46c1" stroke-width="2.0" points="58,292.91 76.13,291.53 94.27,289.72 112.4,288.23 130.53,285.53 148.67,283.82 166.8,279.28 184.93,278.07 203.07,275.42 221.2,265.31 239.33,258.38 257.47,250.35 275.6,245.22 293.73,240.78 311.87,219.08 330,202.12 348.13,188.82 366.27,171.82 384.4,157.84 402.53,150.86 420.67,138.39 438.8,130.68 456.93,124.02 475.07,118.97 493.2,110.8 511.33,110.8 529.47,104.97 547.6,101.56 565.73,96.66 583.87,96.66 602,93.09"/><line x1="68.88" y1="294" x2="68.88" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="116.03" y1="294" x2="116.03" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="201.25" y1="294" x2="201.25" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><line x1="293.73" y1="294" x2="293.73" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/></g>
+<text x="330" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">training steps</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">mean probe success of the served version</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">The served agent, level by level</text>
+<rect x="511.46" y="191" width="82.54" height="95" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="519.46" y1="206" x2="539.46" y2="206" stroke="#2b6cb0" stroke-width="2"/>
+<text x="545.46" y="210" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">level 1</text>
+<line x1="519.46" y1="223" x2="539.46" y2="223" stroke="#c05621" stroke-width="2"/>
+<text x="545.46" y="227" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">level 2</text>
+<line x1="519.46" y1="240" x2="539.46" y2="240" stroke="#2f855a" stroke-width="2"/>
+<text x="545.46" y="244" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">level 3</text>
+<line x1="519.46" y1="257" x2="539.46" y2="257" stroke="#9b2c2c" stroke-width="2"/>
+<text x="545.46" y="261" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">level 4</text>
+<line x1="519.46" y1="274" x2="539.46" y2="274" stroke="#6b46c1" stroke-width="2"/>
+<text x="545.46" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">level 5</text>
+</svg>

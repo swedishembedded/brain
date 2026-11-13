@@ -194,4 +194,9 @@ historical sections draw on in the [Chronology](history/chronology.md).
 1. [Markov Decision Processes](v12-reinforcement-learning/01-mdps.md): How do we describe an agent that acts, sees consequences and wants long-term reward?
 2. [Learning Values from Experience](v12-reinforcement-learning/02-value-learning.md): How can an agent learn what states are worth without a model of the world?
 3. [Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md): How do we directly adjust a policy so that good actions become more likely?
+4. [Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md): How is a pretrained language model taught to follow instructions and prefer good answers?
+5. [Search, Planning and Discovery](v12-reinforcement-learning/05-search.md): When should an agent search instead of learn, and how do the two help each other?
+6. [Decision Models in Practice](v12-reinforcement-learning/06-decision-models.md): How is a small learned model used to make fast, auditable decisions inside an application?
+7. [Continual Learning and Promotion](v12-reinforcement-learning/07-continual-learning.md): How can a model keep learning from new experience without forgetting, and how do we decide a new version is better?
+8. [Project: An Agent That Improves from Verified Feedback](v12-reinforcement-learning/08-project-agent.md): Can you train an agent that solves progressively harder tasks from verified rewards, and decide when a new version is better?
 <!-- /contents -->

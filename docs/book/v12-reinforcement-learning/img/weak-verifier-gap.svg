@@ -1,0 +1,44 @@
+<!-- source-sha256: b315922d4f194e201f1e546ee93ec41bdd72940aeb028d8d16298968a7f4e052 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 340" width="620" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="340" fill="#ffffff"/>
+<line x1="58" y1="294" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="148.67" y1="294" x2="148.67" y2="30" stroke="#edf2f7"/>
+<text x="148.67" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">50</text>
+<line x1="239.33" y1="294" x2="239.33" y2="30" stroke="#edf2f7"/>
+<text x="239.33" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="330" y1="294" x2="330" y2="30" stroke="#edf2f7"/>
+<text x="330" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">150</text>
+<line x1="420.67" y1="294" x2="420.67" y2="30" stroke="#edf2f7"/>
+<text x="420.67" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">200</text>
+<line x1="511.33" y1="294" x2="511.33" y2="30" stroke="#edf2f7"/>
+<text x="511.33" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">250</text>
+<line x1="602" y1="294" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">300</text>
+<line x1="58" y1="294" x2="602" y2="294" stroke="#edf2f7"/>
+<text x="52" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="243.71" x2="602" y2="243.71" stroke="#edf2f7"/>
+<text x="52" y="247.71" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="193.43" x2="602" y2="193.43" stroke="#edf2f7"/>
+<text x="52" y="197.43" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="143.14" x2="602" y2="143.14" stroke="#edf2f7"/>
+<text x="52" y="147.14" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="92.86" x2="602" y2="92.86" stroke="#edf2f7"/>
+<text x="52" y="96.86" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="42.57" x2="602" y2="42.57" stroke="#edf2f7"/>
+<text x="52" y="46.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="544" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="76.13,121.14 94.27,88.93 112.4,102.29 130.53,80.29 148.67,99.93 166.8,78.71 184.93,108.57 203.07,67.71 221.2,56.71 239.33,82.64 257.47,89.71 275.6,90.5 293.73,65.36 311.87,70.07 330,68.5 348.13,55.93 366.27,56.71 384.4,54.36 402.53,53.57 420.67,47.29 438.8,47.29 456.93,48.07 475.07,49.64 493.2,47.29 511.33,44.93 529.47,48.07 547.6,47.29 565.73,48.07 583.87,48.07 602,45.71"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="76.13,246.81 94.27,247.68 112.4,243.48 130.53,244.37 148.67,244.57 166.8,241.05 184.93,243.56 203.07,243.64 221.2,241.84 239.33,241.9 257.47,239.64 275.6,229.78 293.73,222.03 311.87,202.18 330,197.9 348.13,193.87 366.27,187.97 384.4,190.66 402.53,183.86 420.67,182.52 438.8,179.77 456.93,179.09 475.07,182.63 493.2,180.17 511.33,178.67 529.47,177.24 547.6,178.7 565.73,177.46 583.87,178.17 602,176.7"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="76.13,230.54 94.27,184 112.4,145.58 130.53,131.11 148.67,130.32 166.8,116.04 184.93,106.73 203.07,100.52 221.2,98.1 239.33,94.93 257.47,95.93 275.6,89.74 293.73,88.39 311.87,85.03 330,84.47 348.13,80.83 366.27,80.66 384.4,77.63 402.53,77.37 420.67,73.66 438.8,72.43 456.93,72.17 475.07,69.5 493.2,69.01 511.33,67.99 529.47,67.74 547.6,68.63 565.73,66 583.87,66.69 602,65.51"/></g>
+<text x="330" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">training steps</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">mean over 10 steps, or on the 48 probes</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Paid by the weak verifier, judged by the exact one</text>
+<rect x="301.8" y="225" width="292.2" height="61" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="309.8" y1="240" x2="329.8" y2="240" stroke="#2b6cb0" stroke-width="2"/>
+<text x="335.8" y="244" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">reward paid by the weak verifier (weak build)</text>
+<line x1="309.8" y1="257" x2="329.8" y2="257" stroke="#c05621" stroke-width="2"/>
+<text x="335.8" y="261" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">exact probe success at level 2 (weak build)</text>
+<line x1="309.8" y1="274" x2="329.8" y2="274" stroke="#2f855a" stroke-width="2"/>
+<text x="335.8" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">exact probe success at level 2 (specified build)</text>
+</svg>
