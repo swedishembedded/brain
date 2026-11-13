@@ -49,36 +49,39 @@ SplitResidualVectorQuantizer dequant -> pre-conv -> 8-layer GQA transformer
 (SnakeBeta) -> 24 kHz waveform. Parity vs the fp32 PyTorch golden dump (T=24,
 CPU backend): max-abs 5.7e-4, log-mel L1 7.7e-4 (see `tests/it/decode.rs`).
 
-## Reconstruction trainer (`src/recon.rs`, Track C — scope-limited)
+## Codec trainer (`src/recon.rs`, `src/disc.rs`)
 
-The **non-GAN** half of a neural-codec training objective, gradchecked end to
-end:
+A toy-sized neural-codec training objective, gradchecked end to end:
 
 ```
 wav -> conv encoder -> straight-through VQ -> conv decoder -> wav'
-loss = waveform L1+L2  (+ multi-scale log-mel L1, reported)
+generator loss = waveform L1+L2 + commitment
+               + mel_weight  * multi-scale log-mel L1
+               + adv_weight  * LSGAN generator loss          (with a GanConfig,
+               + feat_weight * feature matching               from start_step on)
+discriminator loss = LSGAN over multi-period + multi-scale waveform discriminators, own AdamW
 ```
 
-- `waveform_recon` — exact analytic gradient (gradchecked vs finite diff).
-- `StraightThroughVq` — nearest-codebook quantize + commitment `β·‖z−sg(q)‖²`;
+- `waveform_recon` - exact analytic gradient (gradchecked vs finite diff).
+- `StraightThroughVq` - nearest-codebook quantize + commitment `beta ||z - sg(q)||^2`;
   the straight-through estimator passes the decoder gradient `q -> z`.
-- `ConvReconAE` — tiny causal-conv encoder/decoder over the shared WGSL engine
-  (`audio::conv` fwd + `conv1d_dx`/`conv1d_dw` bwd). `gradcheck()` verifies the
-  **whole reconstruction path** against central finite differences of the
-  straight-through surrogate (frozen VQ assignment, the decoder fed
-  `z + (q0 - z0)` with the offset latched, so it decodes `q` at the latch):
-  **max rel err ≈ 3.8e-3** (measured before the decoder was moved from `z` to
-  `q`; the test bound is 2e-2).
-  `train_step` overfits a toy waveform (loss 0.62 → 0.24).
+- `multiscale_mel_l1` - log-mel L1 averaged over STFT scales, returning the loss and its gradient
+  w.r.t. the waveform (`audio::mel::log_mel_backward`: log with floor, mel filterbank transpose, power,
+  one-sided DFT adjoint, window overlap-add, reflect-pad fold; gradchecked against an f64 oracle).
+- `disc::WaveDiscriminators` - HiFi-GAN's multi-period (periods 2, 3, 5, 7, 11) and multi-scale
+  waveform discriminators on `conv1d` forward and backward, with LSGAN and feature-matching losses
+  and their own AdamW; every weight and the input gradient are gradchecked against an f64 oracle.
+- `ConvReconAE` - tiny causal-conv encoder/decoder over the shared WGSL engine
+  (`audio::conv` fwd + `conv1d_dx`/`conv1d_dw` bwd). `gradcheck()` verifies the reconstruction
+  path against central differences of the straight-through surrogate (frozen VQ assignment, the
+  decoder fed `z + (q0 - z0)` with the offset latched, so it decodes `q` at the latch).
+  `train_step_report` takes one step and returns every term.
 
-### Remaining research piece (documented, NOT implemented — no faked results)
+Weights are `ReconObjective` and `GanConfig` fields. The defaults (mel 45, adversarial 1, feature
+matching 2) are HiFi-GAN's; the mel scales (FFT 512, 1024, 2048 at 24 kHz) are this crate's choice.
+The discriminators are HiFi-GAN's waveform set: multi-period (2, 3, 5, 7, 11) and multi-scale.
 
-The production codec also trains with, on top of the reconstruction loss:
+### Scope: semantic distillation
 
-- **Raw-waveform GAN** — multi-period + multi-scale discriminators, adversarial
-  + feature-matching losses. *Not implemented* (`// TODO(gan)` in `recon.rs`).
-- **WavLM semantic distillation** — *not implemented*.
-- **Multi-scale log-mel L1 backward** — `multiscale_mel_l1` is wired as a forward
-  *metric* only; its STFT/mel backward is a `// TODO`.
-
-No discriminator metrics are reported because none are computed.
+The published codec recipe also distils a WavLM teacher into the first quantizer's output. That
+needs a teacher model, which is not part of brain, so the trainer does not include it.

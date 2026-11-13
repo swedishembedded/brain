@@ -3,7 +3,7 @@ name = "brain-mimi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Qwen3-TTS 12Hz neural audio codec (Mimi-style): SEANet encoder, split RVQ, transformer and conv-transpose decoder; encode, decode, import and a toy reconstruction trainer, in WGSL."
+description = "Qwen3-TTS 12Hz neural audio codec (Mimi-style): SEANet encoder, split RVQ, transformer and conv-transpose decoder; encode, decode, import and a toy codec trainer (reconstruction, mel, adversarial), in WGSL."
 
 [lib]
 name = "mimi"
@@ -16,6 +16,7 @@ brain-kernels.workspace = true
 brain-audio.workspace = true
 brain-model.workspace = true
 brain-paramstore.workspace = true
+brain-optim.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true
 serde_json.workspace = true

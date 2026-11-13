@@ -638,38 +638,19 @@ impl Codec {
             let scores = self.st((nh * t * t) as usize);
             let probs = self.st((nh * t * t) as usize);
             let ctx = self.st((t * hq) as usize);
-            // Sliding-window causal, not plain causal: the real reference
-            // (`Qwen3OmniMoeCode2WavAttention`/`MimiAttention`, both built on
+            // Sliding-window causal attention, as the reference's
             // `create_sliding_window_causal_mask(sliding_window=config.
-            // sliding_window)`) masks key `j` out once `i-j >= sliding_window`
-            // on EVERY forward call, not only a chunked/streaming one -- this
-            // pre_transformer is Mimi-derived and both `decode` (standalone
-            // Qwen3-TTS) and `decode_omni` (Qwen3-Omni's Code2Wav) share this
-            // one `transformer()` body and this one `sliding_window` config
-            // field (`CodecConfig::sliding_window`, real value 72 for both
-            // released checkpoints). `gqa_fwd_win` degenerates to `gqa_fwd`'s
-            // plain causal mask exactly when `sliding_window >= t`, so this is
-            // the correct dispatch unconditionally, not a `decode_omni`-only
-            // special case. NOTE: `enc_transformer` below still has the
-            // identical gap (its own `EncoderConfig::sliding_window`, 250, is
-            // likewise parsed and never applied, so an encode of more than
-            // 250 encoder frames -- 10 s of audio at the pre-downsample 25 Hz
-            // rate -- over-attends the same way this used to). Left unfixed
-            // deliberately: the encode path's only correctness witness is a
-            // reference code-match golden that is far shorter than 250 frames,
-            // so the fix cannot currently be shown red-then-green the way this
-            // one was, and shipping it blind would put an unverified change
-            // under an existing 100%-code-match parity claim.
+            // sliding_window)`: key `j` is masked out of query `i` once
+            // `i - j >= sliding_window`, on every forward call (value 72 for
+            // both released checkpoints). `decode` and `decode_omni` share this
+            // body; `gqa_fwd_win` equals plain causal attention when the window
+            // is at least `t`.
             //
-            // `0` means "unset" (a hand-built `CodecConfig::default()`, never
-            // a parsed one - `CodecConfig::from_json` defaults the field to
-            // 72) and is normalized to `t` (unbounded). Passing a literal 0
-            // to the kernel masks EVERY key (`i-j >= 0` always holds), which
-            // `attn_softmax` then turns into a uniform distribution over the
-            // whole row, future keys included - a non-causal result from a
-            // config that simply never set the field. `decode_stream::front`
-            // applies the same normalization, so the two implementations of
-            // this transformer agree on every config, not just parsed ones.
+            // `0` means "unset" (a hand-built `CodecConfig::default()`; the
+            // parser defaults the field to 72) and is normalized to `t`
+            // (unbounded): a literal 0 would mask every key and turn the
+            // softmax uniform over the whole row, future keys included.
+            // `decode_stream::front` applies the same normalization.
             let window = if self.cfg.sliding_window == 0 { t } else { self.cfg.sliding_window };
             self.gpu.submit(&[], &block::gqa_fwd_win(&self.gpu, GQA_SCORES_WIN, &ids, &ga, window, &q, &k, &v, &scores, &probs, &ctx));
             let attn = self.matmul(&ctx, &p("self_attn.o_proj.weight"), t, hq, d);
@@ -826,7 +807,8 @@ impl Codec {
 
     /// Mimi encoder transformer over token-major `[T, hidden]`: 8 pre-LN layers
     /// (LayerNorm **with bias**, RoPE GQA attention with scaling `1/√head_dim`,
-    /// gelu MLP `fc2(gelu(fc1))`, per-channel LayerScale on each residual). No
+    /// gelu MLP `fc2(gelu(fc1))`, per-channel LayerScale on each residual), with
+    /// sliding-window causal attention. No
     /// input/output projection and no final norm (unlike the decoder).
     fn enc_transformer(&self, x0: &DeviceBuffer, t: u32) -> DeviceBuffer {
         let e = self.cfg.enc.clone();
@@ -854,7 +836,10 @@ impl Codec {
             let scores = self.st((nh * t * t) as usize);
             let probs = self.st((nh * t * t) as usize);
             let ctx = self.st((t * hq) as usize);
-            self.gpu.submit(&[], &block::gqa_fwd(&self.gpu, &ids, &ga, &q, &k, &v, &scores, &probs, &ctx));
+            // Sliding window `EncoderConfig::sliding_window` (250), with the same
+            // 0 = unbounded normalization as the decoder's `transformer`.
+            let window = if e.sliding_window == 0 { t } else { e.sliding_window };
+            self.gpu.submit(&[], &block::gqa_fwd_win(&self.gpu, GQA_SCORES_WIN, &ids, &ga, window, &q, &k, &v, &scores, &probs, &ctx));
             let attn = self.matmul(&ctx, &p("self_attn.o_proj.weight"), t, hq, d);
             let attn = self.scale_chan(&attn, &p("self_attn_layer_scale.scale"), t * d, d, 1);
             x = self.add2(&x, &attn, t * d);
@@ -1016,3 +1001,93 @@ fn par_gelu(buf: &mut [f32]) {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::EncoderConfig;
+    use data::rng::Lcg;
+
+    /// One-layer tiny encoder transformer with random weights and the given
+    /// attention window; every weight `enc_transformer` reads.
+    fn tiny_encoder(window: u32) -> Codec {
+        let (d, heads, hd, ff) = (8u32, 2u32, 4u32, 16u32);
+        let enc = EncoderConfig {
+            hidden_size: d,
+            num_hidden_layers: 1,
+            num_attention_heads: heads,
+            num_key_value_heads: heads,
+            head_dim: hd,
+            intermediate_size: ff,
+            rope_theta: 10000.0,
+            norm_eps: 1e-5,
+            sliding_window: window,
+            ..Default::default()
+        };
+        let cfg = CodecConfig { enc, ..Default::default() };
+        let mut rng = Lcg::new(0x5eed_0001);
+        let (du, hq, ffu) = (d as usize, (heads * hd) as usize, ff as usize);
+        let p = |leaf: &str| format!("encoder.encoder_transformer.layers.0.{leaf}");
+        let mut w: HashMap<String, Vec<f32>> = HashMap::new();
+        for (name, n) in [
+            ("input_layernorm.weight", du),
+            ("input_layernorm.bias", du),
+            ("post_attention_layernorm.weight", du),
+            ("post_attention_layernorm.bias", du),
+            ("self_attn.q_proj.weight", hq * du),
+            ("self_attn.k_proj.weight", hq * du),
+            ("self_attn.v_proj.weight", hq * du),
+            ("self_attn.o_proj.weight", du * hq),
+            ("mlp.fc1.weight", ffu * du),
+            ("mlp.fc2.weight", du * ffu),
+        ] {
+            w.insert(p(name), rng.vec(n));
+        }
+        // Unit layer scales so a far frame's leak is not damped below visibility.
+        w.insert(p("self_attn_layer_scale.scale"), vec![1.0; du]);
+        w.insert(p("mlp_layer_scale.scale"), vec![1.0; du]);
+        Codec::from_weights(cfg, w)
+    }
+
+    /// Encoder transformer output for `x` (`[t, hidden]` token-major).
+    fn run_enc(codec: &Codec, x: &[f32], t: u32) -> Vec<f32> {
+        let d = codec.cfg.enc.hidden_size as usize;
+        let out = codec.enc_transformer(&codec.upload(x), t);
+        codec.gpu.read(&out, t as usize * d)
+    }
+
+    /// The reference masks key `j` out of query `i` once `i - j >= sliding_window`
+    /// (`create_sliding_window_causal_mask`): a frame at or beyond the window
+    /// must not reach output frame `i`, a frame inside it must.
+    #[test]
+    fn encoder_attention_is_windowed() {
+        let (t, window, d) = (10u32, 4u32, 8usize);
+        let codec = tiny_encoder(window);
+        let x = Lcg::new(7).vec(t as usize * d);
+        let base = run_enc(&codec, &x, t);
+        let i = t as usize - 1;
+        let row = |v: &[f32]| v[i * d..(i + 1) * d].to_vec();
+        let perturbed = |j: usize| {
+            let mut y = x.clone();
+            y[j * d] += 1.0;
+            run_enc(&codec, &y, t)
+        };
+        for j in 0..=(i - window as usize) {
+            assert_eq!(row(&perturbed(j)), row(&base), "frame {j} is outside the window of frame {i} but leaked");
+        }
+        for j in (i - window as usize + 1)..=i {
+            assert_ne!(row(&perturbed(j)), row(&base), "frame {j} is inside the window of frame {i} but had no effect");
+        }
+    }
+
+    /// `0` means unset (a hand-built config) and must mean unbounded, as on the
+    /// decoder path, not "mask every key".
+    #[test]
+    fn encoder_window_zero_is_causal_unbounded() {
+        let t = 10u32;
+        let x = Lcg::new(7).vec(t as usize * 8);
+        let zero = run_enc(&tiny_encoder(0), &x, t);
+        let wide = run_enc(&tiny_encoder(t), &x, t);
+        assert_eq!(zero, wide);
+    }
+}
