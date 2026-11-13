@@ -285,14 +285,9 @@ fn vision_from_shapes(shapes: &BTreeMap<String, Vec<usize>>, config: &Value) -> 
         // shipped values so this struct never claims something untrue.
         image_mean: vec![0.5; 3],
         image_std: vec![0.5; 3],
-        // Selects the exact-erf form in `ClipVisionConfig::from_gguf`, the
-        // same activation the shipped mmproj's `clip.use_gelu = true`
-        // selects. Both import paths must agree, so this tracks that flag
-        // rather than making a second, independent choice -- including where
-        // that flag is WRONG: this checkpoint's own `deepencoder.py` runs
-        // this tower on quick-GELU, which `ClipVisionConfig::deepseek_ocr`'s
-        // docs now record. Fixing it there fixes it here; diverging here
-        // would only make the two paths disagree.
+        // The shipped mmproj's `clip.use_gelu = true`, kept so this struct
+        // never claims something untrue. `ClipVisionConfig::from_gguf` does not
+        // read it: the CLIP tower is quick-GELU on both import paths.
         use_gelu: true,
         scale_factor: 1,
     })

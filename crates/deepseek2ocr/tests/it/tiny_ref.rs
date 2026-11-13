@@ -270,10 +270,10 @@ fn tiny_reference_stage_parity() {
         "the placeholders must be one contiguous run"
     );
 
-    // Forward parity only: build the INFERENCE composite, so this gate also
-    // proves the frozen build records the same forward graph as the trainable
-    // one (the backward gate below is the other half).
-    let m = DeepseekOcr::new(&|p| gpu_core::testgpu::dev(p), cfg.clone(), &init, 7, seq, row0, false);
+    // Forward parity only (the backward gate below is the other half). Built
+    // trainable: the per-block CLIP taps read below exist only on that build,
+    // the frozen one serves through the fused attention and keeps none.
+    let m = DeepseekOcr::new(&|p| gpu_core::testgpu::dev(p), cfg.clone(), &init, 7, seq, row0, true);
     assert_eq!(m.image_run(), (row0, cfg.image_tokens()));
     m.set_tokens_unsupervised(&ids);
     let loss = m.forward(&g["image"].data);
@@ -361,6 +361,16 @@ fn tiny_reference_stage_parity() {
     assert!(m_renorm > 1e-3, "raw and renormalized gates are indistinguishable here -- the probe proves nothing");
     let (_, m_raw) = compare(&got, &want_raw);
     assert!(m_raw < 1e-4, "the decoder did not use the RAW gate (max_abs {m_raw:e} vs the renormalized control's {m_renorm:e})");
+
+    // ---- the frozen (serving) build: the same forward through the fused attention ----
+    // It keeps no per-block taps, so the stage ladder above runs on the trainable
+    // build; the serving build is held to the same reference at every output it has.
+    drop(m);
+    let served = DeepseekOcr::new(&|p| gpu_core::testgpu::dev(p), cfg.clone(), &init, 7, seq, row0, false);
+    served.set_tokens_unsupervised(&ids);
+    assert_eq!(served.forward(&g["image"].data), 0.0);
+    r.check("served:projector_out", &served.encoder().read_projector_out(), &g["projector_out"].data);
+    r.check("served:logits", &served.read_logits(), &g["logits"].data);
 
     r.finish("deepseek-ocr/tiny");
 }
