@@ -1101,14 +1101,7 @@ impl HotPipeline {
         let dec_in: Vec<f32> = lat.iter().map(|&x| x / VAE_SCALE + VAE_SHIFT).collect();
         let chw = self.vae.decode(&dec_in);
         let (h, w) = (self.height as usize, self.width as usize);
-        let mut hwc = vec![0f32; h * w * 3];
-        for c in 0..3 {
-            for y in 0..h {
-                for x in 0..w {
-                    hwc[(y * w + x) * 3 + c] = (chw[(c * h + y) * w + x] * 0.5 + 0.5).clamp(0.0, 1.0);
-                }
-            }
-        }
+        let hwc = imaging::pixels::chw_signed_to_hwc_unit(&chw, 3, h, w);
         Ok(Image { hwc, w, h })
     }
 }
@@ -1137,6 +1130,19 @@ pub struct Init<'a> {
     /// edge; larger blurs the mask boundary so the regenerated region blends
     /// smoothly into the kept pixels instead of showing a seam.
     pub feather: u32,
+    /// Outpaint: when set, `image` is the UN-padded source (`src_w x src_h`)
+    /// and `mask` must be `None`; the pipeline builds the edge-replicated canvas
+    /// (`opts.width x opts.height`, which must equal [`outpaint_size`]) and the
+    /// keep/regenerate mask itself, on the VAE's device.
+    pub outpaint: Option<Outpaint>,
+}
+
+/// The source extent and added border of an outpaint; see [`Init::outpaint`].
+#[derive(Clone, Copy, Debug)]
+pub struct Outpaint {
+    pub src_w: usize,
+    pub src_h: usize,
+    pub border: imaging::device::Border,
 }
 
 /// Deterministic standard-normal samples via xorshift64* + paired uniform-to-normal transform - a fixed
@@ -1186,58 +1192,72 @@ pub(crate) fn zimage_vae_config() -> VaeConfig {
 const VAE_SCALE: f32 = 0.3611;
 const VAE_SHIFT: f32 = 0.1159;
 
-/// Area-average-pool a full-res mask `[h·w]` down to latent resolution `[lh·lw]`
-/// (the VAE downscales by 8), keeping soft values in `[0,1]`.
-fn downsample_mask(mask: &[f32], w: usize, h: usize, lw: usize, lh: usize) -> Vec<f32> {
-    let (sx, sy) = (w / lw, h / lh);
-    let mut out = vec![0f32; lw * lh];
-    for ly in 0..lh {
-        for lx in 0..lw {
-            let mut s = 0.0;
-            for yy in 0..sy {
-                for xx in 0..sx {
-                    s += mask[(ly * sy + yy) * w + (lx * sx + xx)];
-                }
-            }
-            out[ly * lw + lx] = s / (sx * sy) as f32;
-        }
+/// Canvas size of an outpaint: the source plus `border`, each total rounded up
+/// to a multiple of 16 (VAE/patch constraint), the extra falling on the
+/// right/bottom. Refuses an overflowing or device-unaddressable canvas.
+pub fn outpaint_size(w: usize, h: usize, border: imaging::device::Border) -> Result<(usize, usize), String> {
+    let total = |n: usize, lo: u32, hi: u32| n.checked_add(lo as usize).and_then(|v| v.checked_add(hi as usize)).map(|v| v.next_multiple_of(16));
+    let (nw, nh) = total(w, border.left, border.right).zip(total(h, border.top, border.bottom)).ok_or("outpaint: borders overflow")?;
+    if nw.checked_mul(nh).and_then(|n| n.checked_mul(3)).is_none_or(|n| n > u32::MAX as usize) {
+        return Err(format!("outpaint: a {nw}x{nh} canvas exceeds the device's addressable range"));
     }
-    out
+    Ok((nw, nh))
 }
 
-/// Separable box blur of a latent-resolution mask `[lh·lw]`, `radius` cells each
-/// side, clamped at the borders — feathers a hard mask into a smooth ramp so the
-/// inpaint/outpaint boundary blends. `radius = 0` returns the mask unchanged.
-fn feather_mask(mask: &[f32], lw: usize, lh: usize, radius: usize) -> Vec<f32> {
-    if radius == 0 {
-        return mask.to_vec();
+/// Assemble an outpaint canvas: the input placed with `border` px added
+/// (edge-replicated so the VAE encode sees plausible content), padded to
+/// [`outpaint_size`]. Returns the canvas (HWC `[0,1]`), a mask (`1` = new
+/// border to regenerate, `0` = keep the original), and the canvas `nw,nh`.
+///
+/// Two [`imaging::Ctx::pad`] dispatches on `ctx`: the image with
+/// [`imaging::device::Fill::Edge`], and an all-zero plane with
+/// `Fill::Constant(1.0)` for the mask. The image crosses the device as NLC
+/// (`to_chw` / `to_hwc`), so the host does no per-pixel work.
+fn build_outpaint_canvas(
+    ctx: &imaging::Ctx,
+    img: &[f32],
+    w: usize,
+    h: usize,
+    border: imaging::device::Border,
+) -> Result<(Vec<f32>, Vec<f32>, usize, usize), String> {
+    use imaging::device::{Border, Fill};
+    if img.len() != w * h * 3 {
+        return Err(format!("outpaint: image is {} floats, expected {} (HWC {w}x{h}x3)", img.len(), w * h * 3));
     }
-    let win = (2 * radius + 1) as f32;
-    // horizontal
-    let mut h = vec![0f32; lw * lh];
-    for y in 0..lh {
-        for x in 0..lw {
-            let mut s = 0.0;
-            for d in 0..=2 * radius {
-                let xx = (x + d).saturating_sub(radius).min(lw - 1);
-                s += mask[y * lw + xx];
-            }
-            h[y * lw + x] = s / win;
-        }
+    let (nw, nh) = outpaint_size(w, h, border)?;
+    // `outpaint_size` bounded every extent below `u32::MAX`.
+    let dim = |n: usize| n as u32;
+    let full = Border { right: dim(nw - w) - border.left, bottom: dim(nh - h) - border.top, ..border };
+    let rgb = imaging::Shape::new(1, 3, dim(h), dim(w));
+    let plane = imaging::Shape::new(1, 1, rgb.h, rgb.w);
+
+    let chw = ctx.to_chw(&ctx.upload("s3dit.outpaint.image", img), rgb);
+    let (canvas, canvas_shape) = ctx.pad(&chw, rgb, full, Fill::Edge);
+    let canvas = ctx.download(&ctx.to_hwc(&canvas, canvas_shape), canvas_shape.numel());
+
+    let keep = ctx.upload("s3dit.outpaint.keep", &vec![0f32; plane.numel() as usize]);
+    let (mask, mask_shape) = ctx.pad(&keep, plane, full, Fill::Constant(1.0));
+    let mask = ctx.download(&mask, mask_shape.numel());
+    Ok((canvas, mask, nw, nh))
+}
+
+/// The inpaint mask at latent resolution: the full-res `[h·w]` mask
+/// area-averaged down to `[lh·lw]` (the VAE downscales by 8), keeping soft
+/// values in `[0,1]`, then feathered by `radius` latent cells each side so the
+/// hard edge becomes a ramp the inpaint/outpaint boundary blends across.
+///
+/// The ramp is border-clamped ([`imaging::mask::FeatherEdge::Replicate`]): a
+/// zero border would fade the mask towards the image edge, which is not what
+/// "regenerate this region" means there. `radius = 0` skips the blur.
+fn latent_mask(ctx: &imaging::Ctx, mask: &[f32], w: usize, h: usize, lw: usize, lh: usize, radius: u32) -> Result<Vec<f32>, String> {
+    if mask.len() != w * h {
+        return Err(format!("mask is {} floats, expected {} ({w}x{h})", mask.len(), w * h));
     }
-    // vertical
-    let mut out = vec![0f32; lw * lh];
-    for y in 0..lh {
-        for x in 0..lw {
-            let mut s = 0.0;
-            for d in 0..=2 * radius {
-                let yy = (y + d).saturating_sub(radius).min(lh - 1);
-                s += h[yy * lw + x];
-            }
-            out[y * lw + x] = s / win;
-        }
-    }
-    out
+    let dim = |n: usize| u32::try_from(n).map_err(|_| format!("{n} does not fit a device dimension"));
+    let s = imaging::Shape::new(1, 1, dim(h)?, dim(w)?);
+    let (ds, ds_shape) = imaging::mask::downsample(ctx, &ctx.upload("s3dit.mask", mask), s, dim(lh)?, dim(lw)?);
+    let out = imaging::mask::feather(ctx, &ds, ds_shape, radius, imaging::mask::FeatherEdge::Replicate);
+    Ok(ctx.download(&out, ds_shape.numel()))
 }
 
 /// Generate an image from `prompt` (text-to-image). `progress(step, total, msg)`
@@ -1318,23 +1338,30 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
         Some(init) => {
             progress(1, total, "encoding image (VAE)");
             let (h, w) = (opts.height as usize, opts.width as usize);
-            if init.image.len() != 3 * h * w {
-                return Err(format!("init image is {} floats, expected {} (HWC {w}×{h}×3)", init.image.len(), 3 * h * w));
+            let vtensors = tensors_map(read_component_tensors(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
+            let enc = VaeEncoder::from_diffusers(zimage_vae_config(), &vtensors, opts.height, opts.width, Some("gpu"));
+            // The imaging kernels share the encoder's device: one device per process.
+            let imaging_gpu = enc.gpu().new_like(imaging::PIPELINES);
+            let ictx = imaging::Ctx::new(&imaging_gpu);
+            let (image, mask): (std::borrow::Cow<[f32]>, Option<std::borrow::Cow<[f32]>>) = match init.outpaint {
+                Some(o) => {
+                    if init.mask.is_some() {
+                        return Err("outpaint builds its own mask; Init::mask must be None".into());
+                    }
+                    let (canvas, mask, nw, nh) = build_outpaint_canvas(&ictx, init.image, o.src_w, o.src_h, o.border)?;
+                    if (nw, nh) != (w, h) {
+                        return Err(format!("outpaint canvas is {nw}x{nh} but the options say {w}x{h}"));
+                    }
+                    (canvas.into(), Some(mask.into()))
+                }
+                None => (init.image.into(), init.mask.map(Into::into)),
+            };
+            if image.len() != 3 * h * w {
+                return Err(format!("init image is {} floats, expected {} (HWC {w}×{h}×3)", image.len(), 3 * h * w));
             }
             // HWC [0,1] → CHW [-1,1] (VAE-native).
-            let mut chw_in = vec![0f32; 3 * h * w];
-            for c in 0..3 {
-                for y in 0..h {
-                    for x in 0..w {
-                        chw_in[(c * h + y) * w + x] = init.image[(y * w + x) * 3 + c] * 2.0 - 1.0;
-                    }
-                }
-            }
-            let vtensors = tensors_map(read_component_tensors(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
-            let mean = {
-                let enc = VaeEncoder::from_diffusers(zimage_vae_config(), &vtensors, opts.height, opts.width, Some("gpu"));
-                enc.encode_mean(&chw_in, lh, lw)
-            };
+            let chw_in = imaging::pixels::hwc_unit_to_chw_signed(&image, 3, h, w);
+            let mean = enc.encode_mean(&chw_in, lh, lw);
             let lat0: Vec<f32> = mean.iter().map(|&z| (z - VAE_SHIFT) * VAE_SCALE).collect();
 
             let strength = init.strength.clamp(0.0, 1.0);
@@ -1342,10 +1369,10 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
             let start = (opts.steps as usize).saturating_sub(init_t);
             let sig = sig_full[start];
 
-            let mask_lat = init.mask.map(|m| {
-                let ds = downsample_mask(m, w, h, lw as usize, lh as usize);
-                feather_mask(&ds, lw as usize, lh as usize, init.feather as usize)
-            });
+            let mask_lat = mask.map(|m| latent_mask(&ictx, &m, w, h, lw as usize, lh as usize, init.feather)).transpose()?;
+            drop(ictx);
+            drop(imaging_gpu);
+            drop(enc);
 
             // The masked (`mask=1`, "regenerate") region starts from PURE noise,
             // not the strength-blended `(1-sigma)*lat0 + sigma*noise` used for
@@ -1423,14 +1450,7 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
 
     // 7. postprocess: [-1,1] → [0,1], CHW → HWC ------------------------------
     let (h, w) = (opts.height as usize, opts.width as usize);
-    let mut hwc = vec![0f32; h * w * 3];
-    for c in 0..3 {
-        for y in 0..h {
-            for x in 0..w {
-                hwc[(y * w + x) * 3 + c] = (chw[(c * h + y) * w + x] * 0.5 + 0.5).clamp(0.0, 1.0);
-            }
-        }
-    }
+    let hwc = imaging::pixels::chw_signed_to_hwc_unit(&chw, 3, h, w);
     Ok(Image { hwc, w, h })
 }
 
@@ -1815,5 +1835,111 @@ mod caption_capacity_tests {
         assert!(check_image_size(&cfg, 1000, 1024).is_err());
         assert!(check_image_size(&cfg, 1024, 0).is_err());
         assert!(check_image_size(&cfg, 1024, 1024).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod latent_mask_tests {
+    use super::*;
+
+    /// The outpaint canvas is the input placed at `(l, t)`, every border pixel
+    /// replicating the nearest edge pixel, the total rounded up to a multiple of
+    /// 16 on the right/bottom; the mask is 0 over the original and 1 elsewhere.
+    /// Pinned on an odd-sized image against a per-pixel clamp, with borders on
+    /// every side and a non-multiple-of-16 total so the round-up is exercised.
+    #[test]
+    fn outpaint_canvas_replicates_the_edge_and_masks_the_border() {
+        let gpu = gpu_core::testgpu::private(imaging::PIPELINES);
+        let ctx = imaging::Ctx::new(&gpu);
+        let (w, h) = (5usize, 3usize);
+        let border = imaging::device::Border { left: 4, right: 2, top: 3, bottom: 1 };
+        let (l, t) = (border.left as usize, border.top as usize);
+        let img: Vec<f32> = (0..w * h * 3).map(|i| (i as f32 * 0.37).fract()).collect();
+        assert_eq!(outpaint_size(w, h, border).unwrap(), (16, 16), "11 -> 16 wide, 7 -> 16 tall");
+        let (canvas, mask, nw, nh) = build_outpaint_canvas(&ctx, &img, w, h, border).unwrap();
+        assert_eq!((nw, nh), (16, 16));
+        assert_eq!((canvas.len(), mask.len()), (nw * nh * 3, nw * nh));
+        for y in 0..nh {
+            for x in 0..nw {
+                let sx = (x as i64 - l as i64).clamp(0, w as i64 - 1) as usize;
+                let sy = (y as i64 - t as i64).clamp(0, h as i64 - 1) as usize;
+                for c in 0..3 {
+                    assert_eq!(canvas[(y * nw + x) * 3 + c], img[(sy * w + sx) * 3 + c], "canvas ({x},{y}) c{c}");
+                }
+                let inside = x >= l && x < l + w && y >= t && y < t + h;
+                assert_eq!(mask[y * nw + x], if inside { 0.0 } else { 1.0 }, "mask ({x},{y})");
+            }
+        }
+    }
+
+    /// The pipeline's guard against a border that would overflow or exceed the
+    /// device's addressable range.
+    #[test]
+    fn an_unaddressable_outpaint_canvas_is_refused() {
+        let huge = imaging::device::Border { left: u32::MAX, right: u32::MAX, top: 0, bottom: 0 };
+        assert!(outpaint_size(8, 8, huge).is_err());
+    }
+
+    /// The host pair this replaced, kept as the oracle: integer-window mean
+    /// down to the latent grid, then a separable box clamped at the border.
+    fn host_latent_mask(mask: &[f32], w: usize, h: usize, lw: usize, lh: usize, radius: usize) -> Vec<f32> {
+        let (sx, sy) = (w / lw, h / lh);
+        let mut ds = vec![0f32; lw * lh];
+        for ly in 0..lh {
+            for lx in 0..lw {
+                let mut s = 0.0;
+                for yy in 0..sy {
+                    for xx in 0..sx {
+                        s += mask[(ly * sy + yy) * w + (lx * sx + xx)];
+                    }
+                }
+                ds[ly * lw + lx] = s / (sx * sy) as f32;
+            }
+        }
+        if radius == 0 {
+            return ds;
+        }
+        let win = (2 * radius + 1) as f32;
+        let tap = |i: usize, d: usize, n: usize| (i + d).saturating_sub(radius).min(n - 1);
+        let mut rows = vec![0f32; lw * lh];
+        for y in 0..lh {
+            for x in 0..lw {
+                rows[y * lw + x] = (0..=2 * radius).map(|d| ds[y * lw + tap(x, d, lw)]).sum::<f32>() / win;
+            }
+        }
+        let mut out = vec![0f32; lw * lh];
+        for y in 0..lh {
+            for x in 0..lw {
+                out[y * lw + x] = (0..=2 * radius).map(|d| rows[tap(y, d, lh) * lw + x]).sum::<f32>() / win;
+            }
+        }
+        out
+    }
+
+    /// `latent_mask` is the old host downsample-then-feather: the VAE's exact
+    /// 8x ratio and the border-clamped ramp, within the round-off of the
+    /// longest summation chain (an 8x8 window, then two `2r+1` box passes; the
+    /// device does the box as one `(2r+1)^2` sum with a rounded weight).
+    #[test]
+    fn latent_mask_matches_the_host_downsample_and_clamped_feather() {
+        let gpu = gpu_core::testgpu::private(imaging::PIPELINES);
+        let ctx = imaging::Ctx::new(&gpu);
+        let (lw, lh) = (6usize, 5usize);
+        let (w, h) = (lw * 8, lh * 8);
+        let mut st = 7u32;
+        let m: Vec<f32> = (0..w * h)
+            .map(|_| {
+                st = st.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (st >> 8) as f32 / (1u32 << 24) as f32
+            })
+            .collect();
+        for radius in [0usize, 1, 3] {
+            let got = latent_mask(&ctx, &m, w, h, lw, lh, radius as u32).unwrap();
+            let want = host_latent_mask(&m, w, h, lw, lh, radius);
+            let k = 2 * radius + 1;
+            let bound = brain_testutil::rounding::agreement_bound(64 + 1 + k * k + 2 * k + 2, 1.0);
+            let worst = got.iter().zip(&want).map(|(a, b)| f64::from((a - b).abs())).fold(0.0, f64::max);
+            assert!(worst <= bound, "radius {radius}: max abs diff {worst:e} exceeds {bound:e}");
+        }
     }
 }

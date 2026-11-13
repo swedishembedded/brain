@@ -24,6 +24,9 @@ brain-capability.workspace = true
 brain-qwen3.workspace = true
 brain-vae.workspace = true
 brain-diffusion.workspace = true
+# `imaging::{mask, Ctx}`: the inpaint mask's downsample/feather and the outpaint canvas
+# are device dispatches, and the HWC -> signed CHW map is `imaging::pixels`.
+brain-imaging.workspace = true
 brain-data.workspace = true
 brain-weightset.workspace = true
 serde_json.workspace = true

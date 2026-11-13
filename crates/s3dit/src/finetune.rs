@@ -186,15 +186,7 @@ pub fn encode_samples(
         }
         progress(i, n, "encoding images (VAE)");
         // HWC [0,1] → CHW [-1,1] (the VAE encoder's expected input range).
-        let (h, w) = (size as usize, size as usize);
-        let mut chw = vec![0f32; 3 * h * w];
-        for c in 0..3 {
-            for y in 0..h {
-                for x in 0..w {
-                    chw[(c * h + y) * w + x] = s.hwc[(y * w + x) * 3 + c] * 2.0 - 1.0;
-                }
-            }
-        }
+        let chw = imaging::pixels::hwc_unit_to_chw_signed(&s.hwc, 3, size as usize, size as usize);
         let mean = venc.encode_mean(&chw, lh, lw);
         encoded.push(Encoded { latent: latent_to_dit(&mean), cap });
     }

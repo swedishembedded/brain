@@ -238,7 +238,7 @@ impl Action for ZAction {
             "image2image" => {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
                 let opts = opts_from(inv, w, h, seed)?; // output matches the input image
-                let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.55) as f32, mask: None, feather: 0 };
+                let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.55) as f32, mask: None, feather: 0, outpaint: None };
                 emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?, seed)
             }
             "inpaint" => {
@@ -248,17 +248,24 @@ impl Action for ZAction {
                     return Err(format!("mask is {mw}×{mh} but image is {w}×{h}; they must match"));
                 }
                 let opts = opts_from(inv, w, h, seed)?;
-                let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.85) as f32, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(2).max(0) as u32 };
+                let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.85) as f32, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(2).max(0) as u32, outpaint: None };
                 emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?, seed)
             }
             "outpaint" => {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
-                let g = |k: &str| inv.get_i64(k).unwrap_or(0).max(0) as usize;
-                let (canvas, mask, nw, nh) = build_outpaint_canvas(&image, w as usize, h as usize, g("left"), g("right"), g("top"), g("bottom"));
+                let border = imaging::device::Border {
+                    left: u32_param(inv, "left", 0)?,
+                    right: u32_param(inv, "right", 0)?,
+                    top: u32_param(inv, "top", 0)?,
+                    bottom: u32_param(inv, "bottom", 0)?,
+                };
+                let (nw, nh) = crate::pipeline::outpaint_size(w as usize, h as usize, border)?;
                 let opts = opts_from(inv, nw as u32, nh as u32, seed)?;
-                // The new border regenerates from scratch (strength 1); the mask
-                // re-anchors the original region every step so it is preserved.
-                let init = crate::pipeline::Init { image: &canvas, strength: 1.0, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(3).max(0) as u32 };
+                // The new border regenerates from scratch (strength 1); the
+                // pipeline builds the canvas and the keep/regenerate mask on
+                // its VAE device and re-anchors the original region every step.
+                let outpaint = crate::pipeline::Outpaint { src_w: w as usize, src_h: h as usize, border };
+                let init = crate::pipeline::Init { image: &image, strength: 1.0, mask: None, feather: inv.get_i64("feather").unwrap_or(3).max(0) as u32, outpaint: Some(outpaint) };
                 emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?, seed)
             }
             "lora_train" => {
@@ -380,33 +387,6 @@ fn emit(img: crate::pipeline::Image, seed: u64) -> ActionResult {
         .set("height", json!(img.h))
         .set("seed", json!(seed))
         .blob("image", capability::blob::image_blob(&img.hwc, img.w as u32, img.h as u32, 3)))
-}
-
-/// Assemble an outpaint canvas: the input placed with `l/r/t/b` px borders
-/// (edge-replicated so the VAE encode sees plausible content), the total size
-/// rounded up to a multiple of 16 (extra added to right/bottom). Returns the
-/// canvas (HWC `[0,1]`), a mask (`1` = new border to regenerate, `0` = keep the
-/// original), and the canvas `nw,nh`.
-fn build_outpaint_canvas(img: &[f32], w: usize, h: usize, l: usize, r: usize, t: usize, b: usize) -> (Vec<f32>, Vec<f32>, usize, usize) {
-    // Round the total up to a multiple of 16 (VAE/patch constraint); the extra
-    // falls on the right/bottom and is treated as more border to regenerate.
-    let nw = (w + l + r).next_multiple_of(16);
-    let nh = (h + t + b).next_multiple_of(16);
-    let mut canvas = vec![0f32; nw * nh * 3];
-    let mut mask = vec![1f32; nw * nh]; // default: regenerate
-    for y in 0..nh {
-        for x in 0..nw {
-            let sx = (x as i64 - l as i64).clamp(0, w as i64 - 1) as usize;
-            let sy = (y as i64 - t as i64).clamp(0, h as i64 - 1) as usize;
-            for c in 0..3 {
-                canvas[(y * nw + x) * 3 + c] = img[(sy * w + sx) * 3 + c];
-            }
-            if x >= l && x < l + w && y >= t && y < t + h {
-                mask[y * nw + x] = 0.0; // original region: keep
-            }
-        }
-    }
-    (canvas, mask, nw, nh)
 }
 
 #[cfg(test)]
