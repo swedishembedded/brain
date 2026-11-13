@@ -53,7 +53,8 @@ it as `local/<name>` with a manifest of family `horizon`, and the server then se
 `check_dataset` reads a dataset with the base's own tokenizer and chat template, as the trainer would, and reports
 without training or claiming a card. Params: `base`, `kind` (`chat` for `generic-messages-v2` records, `preference`
 for `generic-preference-v1` pairs), the dataset as the input blob `dataset` or as `dataset_digest` (exactly one),
-`thinking` and `pack_answers` (rendered as a run with those settings would), and `max_block`. The result:
+`thinking` and `pack_answers` (rendered as a run with those settings would), `max_block`, and `per_record` (with
+`offset` and `limit`) to also list each valid record's length. The result:
 
 | field | meaning |
 |---|---|
@@ -63,6 +64,7 @@ for `generic-preference-v1` pairs), the dataset as the input blob `dataset` or a
 | `examples_without_supervision` | examples that would train on nothing |
 | `over_max_block`, `over_max_block_lines` | examples longer than `max_block` (a run refuses them rather than cutting them) and the first lines holding one |
 | `invalid_total`, `invalid` | records the trainer refuses, and the first 20 as `{line, error}` |
+| `per_record`, `per_record_next` | with `per_record` only: `[line, tokens]` for each valid record of the page, `tokens` being its longest example (what the training row has to hold, a teacher's rendering included); `per_record_next` is the `offset` of the next page, `null` after the last. A page holds at most `limit` records (default 50000, at most 200000); the whole file is read for every page, so the totals above are the same on each. |
 
 ## Serving it
 

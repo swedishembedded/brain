@@ -46,7 +46,21 @@ pub struct DatasetCheck {
     pub pack_answers: bool,
     /// The training row: an example longer than this would be refused by the trainer.
     pub max_block: u32,
+    /// Which records to list the length of in [`DatasetReport::record_lengths`]; `None` lists none.
+    pub list_records: Option<RecordWindow>,
 }
+
+/// A page of the per-record lengths: the valid records after the first `offset` of them, at most `limit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordWindow {
+    /// Valid records to skip.
+    pub offset: usize,
+    /// Records to list at most (the caller bounds it; see [`MAX_RECORD_WINDOW`]).
+    pub limit: usize,
+}
+
+/// The most records one page of [`DatasetReport::record_lengths`] can hold.
+pub const MAX_RECORD_WINDOW: usize = 200_000;
 
 /// The distribution of one per-example count.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -80,6 +94,15 @@ pub struct Refusal {
     pub error: String,
 }
 
+/// The length of one valid record, by its 1-based line in the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordLength {
+    /// The line the record is on.
+    pub line: usize,
+    /// Tokens of its longest example, as [`crate::ExampleMeter::tokens`] counts: what the training row has to hold.
+    pub tokens: usize,
+}
+
 /// What [`check_dataset`] found.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DatasetReport {
@@ -102,6 +125,10 @@ pub struct DatasetReport {
     /// Records the trainer refuses (the first [`MAX_LISTED`]; see `invalid_total`).
     pub invalid: Vec<Refusal>,
     pub invalid_total: usize,
+    /// The page of valid records [`DatasetCheck::list_records`] asked for, in file order.
+    pub record_lengths: Vec<RecordLength>,
+    /// Where the next page starts (its `offset`) when valid records remain after this one.
+    pub record_lengths_next: Option<usize>,
 }
 
 /// Dry-runs the dataset `path` against the checkpoint in `model_dir`. Nothing is loaded but the tokenizer and the
@@ -130,6 +157,8 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
         over_max_block_lines: Vec::new(),
         invalid: Vec::new(),
         invalid_total: 0,
+        record_lengths: Vec::new(),
+        record_lengths_next: None,
     };
     let (mut lengths, mut supervised) = (Vec::new(), Vec::new());
     for (index, line) in std::io::BufReader::new(file).lines().enumerate() {
@@ -139,37 +168,51 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
             continue;
         }
         report.records += 1;
-        // Each example of the record as (tokens, supervised tokens).
-        let examples: std::result::Result<Vec<(usize, usize)>, String> = match check.kind {
+        // Each example of the record as (tokens, supervised tokens, the row it needs: a teacher's rendering is scored
+        // in a row of its own, so the row has to hold it too).
+        let examples: std::result::Result<Vec<(usize, usize, usize)>, String> = match check.kind {
             DatasetKind::Chat => ChatSample::from_json_line_with(line, &*images).and_then(|record| {
                 let mut out = Vec::new();
                 for example in asked.examples_of(&record)? {
                     let encoded = example.encode_rollout(&tok, &tmpl, render).map_err(|e| e.to_string())?;
-                    out.push((encoded.ids.len(), encoded.mask.iter().filter(|m| **m).count()));
+                    let row = encoded.ids.len().max(encoded.teacher.as_ref().map_or(0, |(ids, _)| ids.len()));
+                    out.push((encoded.ids.len(), encoded.mask.iter().filter(|m| **m).count(), row));
                 }
                 Ok(out)
             }),
             DatasetKind::Preference => PreferenceSample::from_json_line(line).and_then(|pair| {
                 let (chosen, rejected) = pair.encode_with(&tok, &tmpl, render).map_err(|e| e.to_string())?;
-                Ok(vec![(chosen.ids.len(), chosen.mask.iter().filter(|m| **m).count()), (rejected.ids.len(), rejected.mask.iter().filter(|m| **m).count())])
+                Ok(vec![(chosen.ids.len(), chosen.mask.iter().filter(|m| **m).count(), chosen.ids.len()), (rejected.ids.len(), rejected.mask.iter().filter(|m| **m).count(), rejected.ids.len())])
             }),
         };
         match examples {
             Ok(examples) => {
+                let valid_index = report.valid_records;
                 report.valid_records += 1;
                 let mut over = false;
-                for (tokens, supervised_tokens) in examples {
+                let mut longest = 0;
+                for (tokens, supervised_tokens, row) in examples {
+                    longest = longest.max(row);
                     report.examples += 1;
                     lengths.push(tokens as u64);
                     supervised.push(supervised_tokens as u64);
                     report.examples_without_supervision += usize::from(supervised_tokens == 0);
-                    if tokens > check.max_block as usize {
+                    if row > check.max_block as usize {
                         report.over_max_block += 1;
                         over = true;
                     }
                 }
                 if over && report.over_max_block_lines.len() < MAX_LISTED {
                     report.over_max_block_lines.push(index + 1);
+                }
+                if let Some(window) = check.list_records {
+                    if valid_index >= window.offset {
+                        if report.record_lengths.len() < window.limit {
+                            report.record_lengths.push(RecordLength { line: index + 1, tokens: longest });
+                        } else if report.record_lengths_next.is_none() {
+                            report.record_lengths_next = Some(valid_index);
+                        }
+                    }
                 }
             }
             Err(error) => {

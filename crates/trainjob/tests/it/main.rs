@@ -15,6 +15,7 @@ mod fixture;
 #[cfg(target_os = "linux")]
 mod dbus;
 mod consolidate;
+mod dryrun;
 mod door;
 mod http;
 mod run;

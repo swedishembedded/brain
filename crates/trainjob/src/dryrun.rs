@@ -34,6 +34,9 @@ pub fn spec() -> ActionSpec {
         .param(ParamSpec::new("thinking", ParamType::Bool, "render as a run with this `thinking` setting would (chat only)").default(json!(true)))
         .param(ParamSpec::new("pack_answers", ParamType::Bool, "render as a run with this `pack_answers` setting would (chat only)").default(json!(false)))
         .param(ParamSpec::new("max_block", ParamType::Int, "the training row in tokens: examples longer than it are counted (a run refuses them)").default(json!(8192)).min(64.0).max(1_048_576.0).step(1.0))
+        .param(ParamSpec::new("per_record", ParamType::Bool, "also list the length of each valid record (its line and the tokens of its longest example: what the row has to hold), one page at a time").default(json!(false)))
+        .param(ParamSpec::new("offset", ParamType::Int, "with `per_record`: the valid records to skip, the first page is 0, then `per_record_next` of the previous page").default(json!(0)).min(0.0).max(1.0e12).step(1.0))
+        .param(ParamSpec::new("limit", ParamType::Int, "with `per_record`: the most records one page lists").default(json!(50_000)).min(1.0).max(brain::dataset_report::MAX_RECORD_WINDOW as f64).step(1.0))
         .input(BlobSpec::new("dataset", Media::Bytes, "the dataset (JSONL), instead of `dataset_digest`"))
 }
 
@@ -47,6 +50,9 @@ pub struct Params {
     pub thinking: bool,
     pub pack_answers: bool,
     pub max_block: u32,
+    pub per_record: bool,
+    pub offset: usize,
+    pub limit: usize,
 }
 
 /// A request that passed the spec and every check that needs no file and no device.
@@ -78,7 +84,7 @@ fn distribution(d: &brain::dataset_report::Distribution) -> Value {
 
 /// The report as the action returns it.
 pub fn report_json(report: &brain::dataset_report::DatasetReport, kind: &str, max_block: u32) -> Value {
-    json!({
+    let mut out = json!({
         "kind": kind,
         "records": report.records,
         "valid_records": report.valid_records,
@@ -92,7 +98,13 @@ pub fn report_json(report: &brain::dataset_report::DatasetReport, kind: &str, ma
         "invalid_total": report.invalid_total,
         "invalid": report.invalid.iter().map(|r| json!({"line": r.line, "error": r.error})).collect::<Vec<_>>(),
         "listed_at_most": brain::dataset_report::MAX_LISTED,
-    })
+    });
+    // One `[line, tokens]` pair per record of the page: compact, because a dataset has many records.
+    if !report.record_lengths.is_empty() || report.record_lengths_next.is_some() {
+        out["per_record"] = report.record_lengths.iter().map(|r| json!([r.line, r.tokens])).collect();
+        out["per_record_next"] = json!(report.record_lengths_next);
+    }
+    out
 }
 
 /// Runs the dry run `inv` describes. It is host work and takes no card.
@@ -107,7 +119,7 @@ pub fn run(env: &JobEnv, inv: &Invocation) -> ActionResult {
         return Err("cancelled".into());
     }
     let kind = if p.kind == "preference" { brain::dataset_report::DatasetKind::Preference } else { brain::dataset_report::DatasetKind::Chat };
-    let check = brain::dataset_report::DatasetCheck { kind, thinking: p.thinking, pack_answers: p.pack_answers, max_block: p.max_block };
+    let check = brain::dataset_report::DatasetCheck { kind, thinking: p.thinking, pack_answers: p.pack_answers, max_block: p.max_block, list_records: p.per_record.then_some(brain::dataset_report::RecordWindow { offset: p.offset, limit: p.limit }) };
     let report = brain::dataset_report::check_dataset(&base_dir, &dataset, &check).map_err(job::trainer_failure)?;
     let mut outcome = Outcome::new();
     outcome.outputs = report_json(&report, &p.kind, p.max_block);
