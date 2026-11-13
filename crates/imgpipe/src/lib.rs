@@ -314,7 +314,7 @@ impl<'a> Pipeline<'a> {
                     let out = match st {
                         Stage::Dilate { .. } => imaging::mask::dilate(&ctx, &m, m_shape, *radius),
                         Stage::Erode { .. } => imaging::mask::erode(&ctx, &m, m_shape, *radius),
-                        _ => imaging::mask::feather(&ctx, &m, m_shape, *radius),
+                        _ => imaging::mask::feather(&ctx, &m, m_shape, *radius, imaging::mask::FeatherEdge::Zero),
                     };
                     mask_host = ctx.download(&out, m_shape.numel());
                 }

@@ -48,14 +48,18 @@
 //! inference uses, so calibration no longer preprocesses differently from
 //! inference.
 //!
-//! Still owed, each blocked on a numeric gate rather than on effort:
-//! `s3dit::pipeline::{feather_mask, downsample_mask}` (no in-tree inpaint
-//! metric to gate the ramp against - see [`mask`]),
-//! `s3dit::caps::build_outpaint_canvas` (edge replication is now
-//! [`Fill::Edge`]; the caller has not moved onto it), and
-//! the fused `[0,1] -> [-1,1]` maps in `flux2::finetune` / `s3dit::finetune` /
-//! `s3dit::pipeline` (host per-pixel arithmetic, which this crate deliberately
-//! does not offer a host entry point for - see the table above).
+//! `s3dit` (inpaint/outpaint) runs on these functions: its latent mask is
+//! [`mask::downsample`] then [`mask::feather`] with
+//! [`mask::FeatherEdge::Replicate`], its outpaint canvas is two [`Ctx::pad`]
+//! dispatches ([`Fill::Edge`] for the image, [`Fill::Constant`] for the mask),
+//! and its VAE input (as `flux2`'s reference image, `flux2::finetune` and
+//! `s3dit::finetune`) is [`pixels::hwc_unit_to_chw_signed`], with the decode side
+//! (also `flux1`, `sdxlunet`, `supir`, `controlnet`) [`pixels::chw_signed_to_hwc_unit`]. Both are
+//! host functions on purpose: their consumers (`VaeEncoder::encode_mean`, image writers) take host
+//! slices, so a device round trip would only add an upload and a readback
+//! around two trivial dispatches. The first equals [`Ctx::to_chw`] then
+//! [`Ctx::affine`] (scale 2, shift -1) bit for bit, and the inverse equals
+//! `affine(0.5, 0.5)` then [`Ctx::to_hwc`] plus a clamp to `[0, 1]`; tests pin both.
 //!
 //! `data::{imageset, gen_detect}` cannot migrate at all: `imaging` -> `vision`
 //! -> `model` -> `data`, so `data` depending on `imaging` is a dependency cycle.

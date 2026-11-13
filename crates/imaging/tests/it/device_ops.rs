@@ -15,6 +15,7 @@
 use gpu_core::testgpu;
 use imaging::device::{AlignCorners, Border, Ctx, Fill, Filter};
 use imaging::letterbox::Letterbox;
+use imaging::mask::FeatherEdge;
 use imaging::{mask, pixels, Rect, Shape, TilePlan, TileSpec, PIPELINES};
 
 fn ctx() -> (gpu_core::Gpu, Shape) {
@@ -287,6 +288,36 @@ fn device_layout_matches_the_host_permutation_and_round_trips() {
 
 // ---- affine / normalisation ------------------------------------------------
 
+/// The host helper for callers whose consumer is a host slice is the device
+/// composition (`to_chw` then `affine(2, -1)`), bit for bit: `x * 2` is exact,
+/// so a fused multiply-add and a multiply then subtract round identically.
+#[test]
+fn host_unit_to_signed_chw_equals_the_device_composition() {
+    let gpu = testgpu::private(PIPELINES);
+    let c = Ctx::new(&gpu);
+    let (w, h) = (5usize, 3usize);
+    let hwc: Vec<f32> = (0..w * h * 3).map(|i| (i as f32 * 0.137).fract()).collect();
+    let s = Shape::new(1, 3, h as u32, w as u32);
+    let dev = c.affine(&c.to_chw(&c.upload("hwc", &hwc), s), s, &[2.0; 3], &[-1.0; 3]);
+    assert_eq!(pixels::hwc_unit_to_chw_signed(&hwc, 3, h, w), c.download(&dev, s.numel()));
+}
+
+/// The inverse host helper equals `affine(0.5, 0.5)` then `to_hwc` bit for bit
+/// on `[-1, 1]` input (`x * 0.5` is exact, so fused and unfused agree), and,
+/// unlike the device composition, CLAMPS to `[0, 1]`: decoder output is
+/// unbounded and its consumers are image writers.
+#[test]
+fn host_signed_chw_to_unit_hwc_equals_the_device_composition_and_clamps() {
+    let gpu = testgpu::private(PIPELINES);
+    let c = Ctx::new(&gpu);
+    let (w, h) = (5usize, 3usize);
+    let chw: Vec<f32> = (0..w * h * 3).map(|i| (i as f32 * 0.291).fract() * 2.0 - 1.0).collect();
+    let s = Shape::new(1, 3, h as u32, w as u32);
+    let dev = c.to_hwc(&c.affine(&c.upload("chw", &chw), s, &[0.5; 3], &[0.5; 3]), s);
+    assert_eq!(pixels::chw_signed_to_hwc_unit(&chw, 3, h, w), c.download(&dev, s.numel()));
+    assert_eq!(pixels::chw_signed_to_hwc_unit(&[-3.0, 0.0, 7.0], 1, 1, 3), vec![0.0, 0.5, 1.0]);
+}
+
 #[test]
 fn normalize_then_denormalize_recovers_the_input() {
     let gpu = testgpu::dev(PIPELINES);
@@ -373,7 +404,7 @@ fn feather_box_blur_averages_over_the_window() {
     let mut m = vec![0f32; 25];
     m[2 * 5 + 2] = 9.0;
     let x = c.upload("m", &m);
-    let b = c.download(&mask::feather(&c, &x, s, 1), s.numel());
+    let b = c.download(&mask::feather(&c, &x, s, 1, FeatherEdge::Zero), s.numel());
     // A single 9.0 spread over a 3x3 box: every neighbour gets 1.0.
     assert!((b[2 * 5 + 2] - 1.0).abs() < 1e-6);
     assert!((b[5 + 1] - 1.0).abs() < 1e-6);
@@ -381,6 +412,90 @@ fn feather_box_blur_averages_over_the_window() {
     // Zero-padded border: mass is conserved because the source is interior.
     let total: f32 = b.iter().sum();
     assert!((total - 9.0).abs() < 1e-4, "box blur must conserve interior mass, got {total}");
+}
+
+/// A deterministic soft mask in `[0, 1]` (an LCG, so no RNG dependency).
+fn soft_mask(n: usize) -> Vec<f32> {
+    let mut st = 0x2545_f491_u32;
+    (0..n)
+        .map(|_| {
+            st = st.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (st >> 8) as f32 / (1u32 << 24) as f32
+        })
+        .collect()
+}
+
+/// The clamped separable box blur an inpaint pipeline applies on the host:
+/// `radius` cells each side, indices clamped at the border (replicate).
+fn clamped_box_blur(mask: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+    let win = (2 * radius + 1) as f32;
+    let tap = |i: usize, d: usize, n: usize| (i + d).saturating_sub(radius).min(n - 1);
+    let mut rows = vec![0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            rows[y * w + x] = (0..=2 * radius).map(|d| mask[y * w + tap(x, d, w)]).sum::<f32>() / win;
+        }
+    }
+    let mut out = vec![0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            out[y * w + x] = (0..=2 * radius).map(|d| rows[tap(y, d, h) * w + x]).sum::<f32>() / win;
+        }
+    }
+    out
+}
+
+/// `FeatherEdge::Replicate` is the clamped separable box, on an odd-sized soft
+/// mask whose window overhangs every side. The two differ only in summation
+/// order: the device sums `K^2` terms each scaled by `1/K^2` (one extra
+/// rounding on the weight), the host two chains of `K` terms and a divide, so
+/// each is within `gamma_k` of the exact value (every term is in `[0, 1]`, so
+/// `S <= 1`) and they are within twice that of each other.
+#[test]
+fn feather_replicate_is_the_clamped_separable_box() {
+    let gpu = testgpu::private(PIPELINES);
+    let c = Ctx::new(&gpu);
+    let (w, h) = (13usize, 7usize);
+    let s = Shape::new(1, 1, h as u32, w as u32);
+    let m = soft_mask(w * h);
+    let x = c.upload("m", &m);
+    for radius in 1..=3usize {
+        let k = 2 * radius + 1;
+        let got = c.download(&mask::feather(&c, &x, s, radius as u32, FeatherEdge::Replicate), s.numel());
+        let want = clamped_box_blur(&m, w, h, radius);
+        let bound = brain_testutil::rounding::agreement_bound(k * k + 2 * k + 2, 1.0);
+        let worst = got.iter().zip(&want).map(|(a, b)| f64::from((a - b).abs())).fold(0.0, f64::max);
+        assert!(worst <= bound, "radius {radius}: max abs diff {worst:e} exceeds the derived bound {bound:e}");
+    }
+    // The border is where the two conventions differ: a constant mask stays
+    // constant under replicate and darkens under zero.
+    let ones = c.upload("ones", &vec![1f32; w * h]);
+    let rep = c.download(&mask::feather(&c, &ones, s, 2, FeatherEdge::Replicate), s.numel());
+    let zero = c.download(&mask::feather(&c, &ones, s, 2, FeatherEdge::Zero), s.numel());
+    assert!(rep.iter().all(|v| (v - 1.0).abs() < 1e-6), "replicate keeps a constant mask constant");
+    assert!(zero[0] < 0.7, "zero padding darkens the corner, got {}", zero[0]);
+}
+
+/// The exact 8x ratios the VAE latent grid uses: `avgpool2d` is the host
+/// integer-window mean `sum / (sx*sy)`, within the round-off of a 64-term sum.
+#[test]
+fn downsample_matches_the_host_window_mean_on_exact_ratios() {
+    let gpu = testgpu::private(PIPELINES);
+    let c = Ctx::new(&gpu);
+    let (w, h, f) = (48usize, 32usize, 8usize);
+    let m = soft_mask(w * h);
+    let s = Shape::new(1, 1, h as u32, w as u32);
+    let x = c.upload("m", &m);
+    let (y, ys) = mask::downsample(&c, &x, s, (h / f) as u32, (w / f) as u32);
+    let got = c.download(&y, ys.numel());
+    let bound = brain_testutil::rounding::agreement_bound(f * f + 1, 1.0);
+    for ly in 0..h / f {
+        for lx in 0..w / f {
+            let want: f32 = (0..f * f).map(|i| m[(ly * f + i / f) * w + lx * f + i % f]).sum::<f32>() / (f * f) as f32;
+            let d = f64::from((got[ly * (w / f) + lx] - want).abs());
+            assert!(d <= bound, "cell ({ly},{lx}): diff {d:e} exceeds {bound:e}");
+        }
+    }
 }
 
 #[test]

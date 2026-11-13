@@ -19,7 +19,7 @@
 //! | [`threshold`] | `film_chan` (shift by `-t`) -> `bsq_quantize` (`sign`) -> `film_chan` (`0.5x + 0.5`) |
 //! | [`dilate`] | `maxpool2d`, `K = 2r+1`, stride 1, pad `r` — a max over a square window IS grey dilation |
 //! | [`erode`] | `-dilate(-x)`, the standard duality; the negations are `film_chan` |
-//! | [`feather`] | depthwise `conv2d_gd` with a `1/K²` box weight |
+//! | [`feather`] | depthwise `conv2d_gd` with a `1/K²` box weight; [`FeatherEdge::Replicate`] first [`Ctx::pad`]s with [`Fill::Edge`] |
 //! | [`union`] | `add2` then `axpy(-1)` of the product: `a + b - a·b` |
 //! | [`intersect`] | `mul` |
 //! | [`difference`] | `a · (1 - b)`: `film_chan` then `mul` |
@@ -36,23 +36,23 @@
 //!   *foreground* — a border pixel does not erode from the image edge. SciPy's
 //!   `binary_erosion(border_value=0)` would erode it. Neither is wrong; they are
 //!   different conventions, and this is the one you get.
-//! * [`feather`]: `conv2d_gd` zero-pads, so the ramp darkens towards the border.
-//!   `s3dit::pipeline::feather_mask` clamps at the border (replicate) instead.
-//!   **Those are different functions** — migrating that call site here changes
-//!   the inpaint boundary ramp. It needs a `pad_mode` word on the conv, or the
-//!   caller must accept the change deliberately.
+//! * [`feather`]: the border is the caller's choice, a [`FeatherEdge`].
+//!   `Zero` is `conv2d_gd`'s own zero padding, so the ramp darkens towards the
+//!   image edge. `Replicate` pads by the radius with [`Fill::Edge`] and then
+//!   convolves unpadded, which is the box blur with indices clamped at the
+//!   border (a constant mask stays constant): the convention an inpaint
+//!   boundary ramp wants, and `s3dit`'s. A 2-D replicate pad followed by a box
+//!   window is exactly the separable clamped blur, differing from a host
+//!   evaluation only in float summation order.
 //! * [`downsample`]: `avgpool2d` implements torch's *adaptive* rule, which
-//!   reduces to a plain box pool bit-for-bit when the ratio divides exactly.
-//!   That strictly generalises `s3dit::pipeline::downsample_mask`, whose
-//!   integer `w/lw` silently drops the remainder and is only correct for exact
-//!   ratios (survey §6.9). Migrating that call site is safe and fixes a latent
-//!   bug; the VAE's downscale-by-8 sizes it uses today divide exactly, so the numbers do not
-//!   move.
+//!   reduces to a plain box pool when the ratio divides exactly, and stays
+//!   correct (every source pixel covered) when it does not, where an integer
+//!   `w / lw` window would drop the remainder.
 
 use gpu_core::{f, DeviceBuffer};
 use vision::Shape;
 
-use crate::device::Ctx;
+use crate::device::{Border, Ctx, Fill};
 
 /// Hard threshold: `1` where `x > t`, `0` elsewhere (ties go to `0`, matching
 /// `torch.where(x > t, 1, 0)`).
@@ -112,6 +112,19 @@ pub fn erode(ctx: &Ctx, x: &DeviceBuffer, s: Shape, radius: u32) -> DeviceBuffer
     negate(ctx, &d, s)
 }
 
+/// How [`feather`] treats the window where it overhangs the image.
+///
+/// The default is [`FeatherEdge::Zero`], the behaviour `feather` had before the
+/// choice was explicit; callers state theirs anyway.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FeatherEdge {
+    /// Out-of-image taps read `0`: the ramp darkens towards the border.
+    #[default]
+    Zero,
+    /// Out-of-image taps read the nearest edge pixel (clamped indices).
+    Replicate,
+}
+
 /// Box blur by a `(2r+1)²` window — the feather that turns a hard mask edge into
 /// a ramp. `radius = 0` is a copy.
 ///
@@ -119,8 +132,10 @@ pub fn erode(ctx: &Ctx, x: &DeviceBuffer, s: Shape, radius: u32) -> DeviceBuffer
 /// `[N, Cin, H, W, Cout, K, stride, pad, dilation, groups, Ho, Wo]`, bindings
 /// `[x, w, y]`, weight laid out `[Cout, Cin/G, K, K]`. Depthwise is the
 /// `G == Cin == Cout` case, so the weight is `[C, 1, K, K]` filled with `1/K²`.
-/// Zero-padded at the border — see this module's header.
-pub fn feather(ctx: &Ctx, x: &DeviceBuffer, s: Shape, radius: u32) -> DeviceBuffer {
+/// `edge` selects the border: [`FeatherEdge::Zero`] lets the kernel zero-pad
+/// (`pad = r`); [`FeatherEdge::Replicate`] pads the input by `r` with
+/// [`Fill::Edge`] and runs the kernel with `pad = 0` over the larger extent.
+pub fn feather(ctx: &Ctx, x: &DeviceBuffer, s: Shape, radius: u32, edge: FeatherEdge) -> DeviceBuffer {
     if radius == 0 {
         return copy(ctx, x, s);
     }
@@ -131,13 +146,22 @@ pub fn feather(ctx: &Ctx, x: &DeviceBuffer, s: Shape, radius: u32) -> DeviceBuff
     );
     let out = ctx.buf(s.numel());
     let total = s.numel();
-    let step = ctx.gpu.step(
-        ctx.ids.need(ctx.ids.conv2d_gd, "conv2d_gd"),
-        &[x, &w, &out],
-        &[s.n, s.c, s.h, s.w, s.c, k, 1, radius, 1, s.c, s.h, s.w],
-        total,
-    );
-    ctx.gpu.submit(&[], &[step]);
+    let run = |src: &DeviceBuffer, in_shape: Shape, pad: u32| {
+        let step = ctx.gpu.step(
+            ctx.ids.need(ctx.ids.conv2d_gd, "conv2d_gd"),
+            &[src, &w, &out],
+            &[in_shape.n, s.c, in_shape.h, in_shape.w, s.c, k, 1, pad, 1, s.c, s.h, s.w],
+            total,
+        );
+        ctx.gpu.submit(&[], &[step]);
+    };
+    match edge {
+        FeatherEdge::Zero => run(x, s, radius),
+        FeatherEdge::Replicate => {
+            let (padded, ps) = ctx.pad(x, s, Border::uniform(radius), Fill::Edge);
+            run(&padded, ps, 0);
+        }
+    }
     out
 }
 

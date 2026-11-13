@@ -147,6 +147,34 @@ pub fn hwc_to_chw<T: Copy + Default>(hwc: &[T], c: usize, h: usize, w: usize) ->
     out
 }
 
+/// Interleaved HWC in `[0, 1]` -> planar CHW in `[-1, 1]` (`2x - 1`), the input
+/// range of the VAE encoders.
+///
+/// For a consumer that takes a host slice (`VaeEncoder::encode_mean`), where a
+/// device round trip would only add an upload and a readback around two
+/// trivial dispatches. When the data is already on the device use
+/// [`crate::Ctx::to_chw`] then [`crate::Ctx::affine`] with scale 2, shift -1,
+/// which this equals bit for bit.
+pub fn hwc_unit_to_chw_signed(hwc: &[f32], c: usize, h: usize, w: usize) -> Vec<f32> {
+    let mut chw = hwc_to_chw(hwc, c, h, w);
+    chw.iter_mut().for_each(|v| *v = *v * 2.0 - 1.0);
+    chw
+}
+
+/// Planar CHW in `[-1, 1]` -> interleaved HWC in `[0, 1]` (`x/2 + 1/2`), the
+/// range of a diffusion decoder's output mapped to what image writers take.
+///
+/// **Clamps** to `[0, 1]`, because decoder output is not bounded to `[-1, 1]`;
+/// the device composition ([`crate::Ctx::affine`] with scale 0.5, shift 0.5,
+/// then [`crate::Ctx::to_hwc`]) does not, and agrees with this bit for bit
+/// wherever the input is in range. Host function for the same reason as
+/// [`hwc_unit_to_chw_signed`]: its consumers take host slices.
+pub fn chw_signed_to_hwc_unit(chw: &[f32], c: usize, h: usize, w: usize) -> Vec<f32> {
+    let mut hwc = chw_to_hwc(chw, c, h, w);
+    hwc.iter_mut().for_each(|v| *v = (*v * 0.5 + 0.5).clamp(0.0, 1.0));
+    hwc
+}
+
 /// `u8` -> f32 in `[0, 1]`. Layout-agnostic (it is a per-element cast).
 pub fn u8_to_unit(px: &[u8]) -> Vec<f32> {
     px.iter().map(|&b| b as f32 / 255.0).collect()
