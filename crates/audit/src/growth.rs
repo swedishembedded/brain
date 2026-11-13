@@ -22,8 +22,8 @@
 //!
 //! | joint | sequential | diagnosis | action |
 //! |---|---|---|---|
-//! | passes | fails | the capacity is there and the schedule lost it | raise rehearsal |
-//! | fails | fails | the capacity is not there | add an adapter |
+//! | passes | fails | the capacity is there and the schedule lost it | raise rehearsal (the reader applies it) |
+//! | fails | fails | the capacity is not there | add an adapter (a recommendation, see [`Action::Grow`]) |
 //! | passes | passes | nothing is wrong | nothing |
 //! | fails | passes | the oracle is not an upper bound | nothing, and say so |
 //!
@@ -62,13 +62,23 @@ pub struct GrowthConfig {
     /// cannot add capacity every episode while the new adapter is still
     /// earning its place.
     pub cooldown: u64,
-    /// What a rehearsal cap is multiplied by when interference is diagnosed.
+    /// What the rehearsal ratio is multiplied by when interference is
+    /// diagnosed.
     pub rehearsal_step: f64,
+    /// The rehearsal ratio is never raised past this. Rehearsal rows are
+    /// trained beside the episode's own, so without a ceiling a run that
+    /// stays stalled would crowd the new material out of its own training.
+    #[serde(default = "default_rehearsal_ceiling")]
+    pub rehearsal_ceiling: f64,
+}
+
+fn default_rehearsal_ceiling() -> f64 {
+    4.0
 }
 
 impl Default for GrowthConfig {
     fn default() -> Self {
-        GrowthConfig { promote_rate_floor: 0.25, window: 64, pass_at: 0.60, cooldown: 128, rehearsal_step: 1.5 }
+        GrowthConfig { promote_rate_floor: 0.25, window: 64, pass_at: 0.60, cooldown: 128, rehearsal_step: 1.5, rehearsal_ceiling: default_rehearsal_ceiling() }
     }
 }
 
@@ -86,10 +96,24 @@ pub enum Diagnosis {
 }
 
 /// What to do about it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Who acts differs by variant, and the split follows what each remedy
+/// touches. Rehearsal is a mechanism of the reader's own loop, so
+/// [`crate::reader::Reader`] applies [`Action::RaiseRehearsal`] itself and
+/// the next episode trains on the larger mix. Capacity is the learner's
+/// shape (a rank, an adapter slot), which the reader reaches only through
+/// [`crate::reader::Learner`], and whether to spend the memory is the
+/// caller's decision: [`Action::Grow`] is a RECOMMENDATION that the reader
+/// records and does not act on. It is on the ledger row and on
+/// [`crate::reader::Row::action`] for the caller to read.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
     Nothing,
-    RaiseRehearsal { from: usize, to: usize },
+    /// Rehearsal rows per row of the episode itself, before and after. The
+    /// reader has already applied `to` when it reports this.
+    RaiseRehearsal { from: f64, to: f64 },
+    /// More capacity is needed. Recommended to the caller, not applied: see
+    /// the type's doc. The cooldown counts from this recommendation.
     Grow,
     /// A diagnosis that would have acted, but must not. Carries why, so a
     /// ledger row says "capacity, but inside the cooldown" rather than
@@ -156,7 +180,8 @@ impl Growth {
     }
 
     /// Turn a diagnosis into an action, applying the growth cooldown.
-    pub fn act(&mut self, diagnosis: Diagnosis, rehearsal_cap: usize) -> Action {
+    /// `rehearsal_ratio` is the mix the reader trains on now.
+    pub fn act(&mut self, diagnosis: Diagnosis, rehearsal_ratio: f64) -> Action {
         match diagnosis {
             Diagnosis::Healthy => Action::Nothing,
             Diagnosis::Inconclusive => Action::Hold { diagnosis, reason: "the oracle scored below the run it is supposed to bound, so neither remedy is safe" },
@@ -166,8 +191,11 @@ impl Growth {
             // untreated for the length of a cooldown it has nothing to do
             // with.
             Diagnosis::Interference => {
-                let to = ((rehearsal_cap as f64) * self.cfg.rehearsal_step).round() as usize;
-                Action::RaiseRehearsal { from: rehearsal_cap, to: to.max(rehearsal_cap + 1) }
+                let to = (rehearsal_ratio * self.cfg.rehearsal_step).min(self.cfg.rehearsal_ceiling);
+                if to <= rehearsal_ratio {
+                    return Action::Hold { diagnosis, reason: "rehearsal is already at its ceiling, and a larger mix would crowd out the episode itself" };
+                }
+                Action::RaiseRehearsal { from: rehearsal_ratio, to }
             }
             Diagnosis::Saturation => {
                 let cooling = self.last_grew.is_some_and(|t| self.now.saturating_sub(t) < self.cfg.cooldown);
@@ -186,7 +214,7 @@ mod tests {
     use super::*;
 
     fn cfg() -> GrowthConfig {
-        GrowthConfig { promote_rate_floor: 0.25, window: 10, pass_at: 0.60, cooldown: 20, rehearsal_step: 2.0 }
+        GrowthConfig { promote_rate_floor: 0.25, window: 10, pass_at: 0.60, cooldown: 20, rehearsal_step: 2.0, rehearsal_ceiling: 3.0 }
     }
 
     fn after(outcomes: &[bool]) -> Growth {
@@ -243,11 +271,11 @@ mod tests {
 
         // Joint training holds it, the sequential schedule does not.
         assert_eq!(g.diagnose(0.85, 0.30), Diagnosis::Interference);
-        assert_eq!(g.act(Diagnosis::Interference, 100), Action::RaiseRehearsal { from: 100, to: 200 });
+        assert_eq!(g.act(Diagnosis::Interference, 1.0), Action::RaiseRehearsal { from: 1.0, to: 2.0 });
 
         // Neither holds it.
         assert_eq!(g.diagnose(0.30, 0.25), Diagnosis::Saturation);
-        assert_eq!(g.act(Diagnosis::Saturation, 100), Action::Grow);
+        assert_eq!(g.act(Diagnosis::Saturation, 1.0), Action::Grow);
     }
 
     /// The stay-silent row.
@@ -255,7 +283,7 @@ mod tests {
     fn both_arms_passing_is_healthy_and_does_nothing() {
         let mut g = after(&[false; 10]);
         assert_eq!(g.diagnose(0.90, 0.80), Diagnosis::Healthy);
-        assert_eq!(g.act(Diagnosis::Healthy, 100), Action::Nothing);
+        assert_eq!(g.act(Diagnosis::Healthy, 1.0), Action::Nothing);
     }
 
     /// The row the design did not have. An oracle scoring below the run it
@@ -265,7 +293,7 @@ mod tests {
     fn an_oracle_below_the_run_it_bounds_is_inconclusive_and_nothing_is_done() {
         let mut g = after(&[false; 10]);
         assert_eq!(g.diagnose(0.20, 0.75), Diagnosis::Inconclusive);
-        match g.act(Diagnosis::Inconclusive, 100) {
+        match g.act(Diagnosis::Inconclusive, 1.0) {
             Action::Hold { diagnosis, reason } => {
                 assert_eq!(diagnosis, Diagnosis::Inconclusive);
                 assert!(!reason.is_empty(), "a hold must say why, or a ledger row cannot explain itself");
@@ -293,17 +321,17 @@ mod tests {
     #[test]
     fn growth_does_not_fire_again_inside_its_cooldown() {
         let mut g = after(&[false; 10]);
-        assert_eq!(g.act(Diagnosis::Saturation, 100), Action::Grow);
+        assert_eq!(g.act(Diagnosis::Saturation, 1.0), Action::Grow);
 
         for _ in 0..19 {
             g.record(false);
-            match g.act(Diagnosis::Saturation, 100) {
+            match g.act(Diagnosis::Saturation, 1.0) {
                 Action::Hold { diagnosis: Diagnosis::Saturation, .. } => {}
                 other => panic!("expected a Hold inside the cooldown, got {other:?}"),
             }
         }
         g.record(false);
-        assert_eq!(g.act(Diagnosis::Saturation, 100), Action::Grow, "past the cooldown it must be able to grow again");
+        assert_eq!(g.act(Diagnosis::Saturation, 1.0), Action::Grow, "past the cooldown it must be able to grow again");
     }
 
     /// Interference is not under the growth cooldown: raising rehearsal
@@ -312,7 +340,20 @@ mod tests {
     #[test]
     fn the_cooldown_governs_growth_only_and_not_rehearsal() {
         let mut g = after(&[false; 10]);
-        assert_eq!(g.act(Diagnosis::Saturation, 100), Action::Grow);
-        assert_eq!(g.act(Diagnosis::Interference, 64), Action::RaiseRehearsal { from: 64, to: 128 });
+        assert_eq!(g.act(Diagnosis::Saturation, 1.0), Action::Grow);
+        assert_eq!(g.act(Diagnosis::Interference, 1.0), Action::RaiseRehearsal { from: 1.0, to: 2.0 });
+    }
+
+    /// Raising forever would crowd the episode out of its own training run,
+    /// so the ratio stops at the ceiling and the diagnosis says why it did
+    /// not act.
+    #[test]
+    fn rehearsal_is_raised_up_to_its_ceiling_and_no_further() {
+        let mut g = after(&[false; 10]);
+        assert_eq!(g.act(Diagnosis::Interference, 2.0), Action::RaiseRehearsal { from: 2.0, to: 3.0 }, "the step is clipped to the ceiling");
+        match g.act(Diagnosis::Interference, 3.0) {
+            Action::Hold { diagnosis: Diagnosis::Interference, reason } => assert!(reason.contains("ceiling"), "{reason}"),
+            other => panic!("expected a Hold at the ceiling, got {other:?}"),
+        }
     }
 }

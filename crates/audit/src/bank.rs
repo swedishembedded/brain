@@ -282,9 +282,7 @@ impl ProbeSet {
             // on no evidence at all.
             return Err(BankError::EveryProbeInTrainedRows(ep.id.as_str().to_string()));
         }
-        let selected: BTreeSet<usize> = selected.intersection(&held).copied().collect();
         let blind: BTreeSet<usize> = blind.intersection(&held).copied().collect();
-        let _ = &selected;
         let trained: Vec<String> = (0..lines.len()).filter(|i| !held.contains(i)).map(|i| lines[i].to_string()).collect();
 
         let prompt_for = |i: usize| -> String {

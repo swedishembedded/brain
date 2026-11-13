@@ -28,14 +28,24 @@
 //! than refusing the whole file, because the alternative is losing a run's
 //! entire history to one interrupted write.
 //!
-//! **There is no best-versus-latest distinction here, and that is not an
-//! omission.** A design where training can silently degrade needs to keep
-//! the best state it ever reached and roll back to it. Nothing ungated ever
-//! lands in this directory: an adapter is written only after the gate
-//! promoted it against frozen probes and the earlier episodes' own blocks.
-//! The latest state IS the best one the reader has evidence for, and adding
-//! a rollback mechanism would be adding a remedy for a failure this design
-//! does not have.
+//! **There is no rollback here, and where it would go is not here.** What
+//! lands in this directory has passed the gate: against frozen probes, and
+//! against a SAMPLE of the earlier episodes' blocks. That sample is the
+//! point. A promotion can still cost an episode the audit did not draw that
+//! step, and the loss shows only when rotation reaches it, within
+//! [`crate::schedule::Schedule::detection_latency`] episodes. By then the
+//! adapter is promoted, and later promotions were gated against an incumbent
+//! that already carried the loss.
+//!
+//! The reader REPORTS that regression ([`crate::retention::Retention::worst_drop`],
+//! the acceptance clauses) and does not undo it. Undoing it means withdrawing
+//! an adapter from what is served, and that is not something this crate
+//! holds: the incumbent is the [`crate::reader::Learner`]'s, not the
+//! reader's, the learner has no revert method, and the choice between
+//! withdrawing the adapter, retraining it or accepting the drop is the
+//! application's release policy, which is out of brain's scope. A caller that
+//! wants a rollback reads `worst_drop` and the ledger row of the promotion
+//! that caused it, and acts through the learner it owns.
 //!
 //! **The ledger's shape is deliberate, not a dump of internal types.** It is
 //! the artefact a person reads and a script greps months later, so it is
@@ -86,6 +96,11 @@ pub struct ReaderState {
     /// about the part of it since the last restart.
     #[serde(default)]
     pub retention: crate::retention::Retention,
+    /// The rehearsal ratio in force, which the growth diagnosis may have
+    /// raised above the configured one. Additive: `None` on a state written
+    /// before it existed, which resumes at the configured ratio.
+    #[serde(default)]
+    pub rehearsal_ratio: Option<f64>,
     pub episode: u64,
     /// Where the stream had got to, so reading resumes rather than restarts.
     pub cursor: Option<Cursor>,
@@ -117,6 +132,8 @@ pub struct LedgerRow {
     pub audited: usize,
     pub audit_decodes: usize,
     pub diagnosis: Option<String>,
+    /// What the diagnosis called for: `raise_rehearsal` was applied by the
+    /// reader, `grow` is a recommendation to the caller and was not.
     pub action: Option<String>,
 }
 
@@ -348,6 +365,7 @@ mod tests {
             reservoir: Reservoir::new(ReservoirConfig::default()),
             growth: Growth::new(Default::default()),
             retention: Default::default(),
+            rehearsal_ratio: None,
             episode,
             cursor: None,
         }

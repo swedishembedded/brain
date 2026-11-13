@@ -4,7 +4,7 @@
 //! The unit of reading, and the order it arrives in.
 //!
 //! An **episode** is one bounded stretch of one document. Everything else in
-//! this crate keys on it, so four properties are decided here and nowhere
+//! this crate keys on it, so five properties are decided here and nowhere
 //! else:
 //!
 //! 1. **A document is read start to end, and an episode never spans two of
@@ -21,14 +21,13 @@
 //! 3. **Binary is decided by content, never by extension.** Extensions lie in
 //!    both directions, and a reader pointed at a real directory meets both: a
 //!    `.txt` holding a core dump, a `.bin` holding a manual page.
-//! 5. **Dot-prefixed names are not content.** A reader is pointed at a real
+//! 4. **Dot-prefixed names are not content.** A reader is pointed at a real
 //!    directory, and real directories hold `.git/`, editor swap files, and
 //!    `.env`. Reading those is not merely wasteful: a reader that trained on
 //!    a `.env` would absorb its secrets into weights nobody can grep. It is
 //!    a test on the NAME, so the file is never opened, and every skip is
 //!    reported as [`Skipped::Hidden`] rather than silently dropped.
-//!
-//! 4. **An episode's identity is the digest of its own bytes.** Not of
+//! 5. **An episode's identity is the digest of its own bytes.** Not of
 //!    `(path, ordinal)`: the questions that identity has to answer later are
 //!    "have I read this content before" (so a re-stated document costs one
 //!    forward pass instead of a training run) and "is this row already in the

@@ -39,6 +39,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use data::rng::Rng;
 use sha2::{Digest, Sha256};
 
 use crate::stream::EpisodeId;
@@ -139,12 +140,12 @@ impl Reservoir {
         if self.cfg.cap == 0 {
             return Offered::Passed;
         }
-        let k = draw_u64(self.cfg.seed, self.seen) % self.seen;
-        if (k as usize) < self.cfg.cap {
-            let victim = self.items[k as usize].episode.clone();
+        let k = Rng::new(draw_u64(self.cfg.seed, self.seen)).gen_range_inclusive(0, self.seen as i64 - 1) as usize;
+        if k < self.cfg.cap {
+            let victim = self.items[k].episode.clone();
             self.held.remove(&victim);
             self.held.insert(episode.clone());
-            self.items[k as usize] = entry;
+            self.items[k] = entry;
             Offered::Replaced
         } else {
             Offered::Passed
@@ -161,12 +162,15 @@ impl Reservoir {
             return Vec::new();
         }
         let mut all: Vec<&str> = self.items.iter().flat_map(|e| e.rows.iter().map(String::as_str)).collect();
-        // Partial unbiased in-place from a seed of the caller's choosing, so the
-        // draw neither consumes nor depends on the reservoir's own generator
-        // and asking twice gives the same answer.
+        // Partial Fisher-Yates from a generator seeded by the caller, so the
+        // draw neither consumes nor depends on the reservoir's own state and
+        // asking twice gives the same answer. `gen_range_inclusive` redraws
+        // the raw values a plain `%` would favour, so every row is equally
+        // likely to be taken.
+        let mut rng = Rng::new(seed);
         let take = rows.min(all.len());
         for i in 0..take {
-            let j = i + (draw_u64(seed, i as u64) % (all.len() - i) as u64) as usize;
+            let j = rng.gen_range_inclusive(i as i64, all.len() as i64 - 1) as usize;
             all.swap(i, j);
         }
         all.truncate(take);
@@ -197,8 +201,10 @@ impl Reservoir {
     }
 }
 
-/// A uniform draw derived from a seed and a counter rather than from a
-/// generator's position. Stateless on purpose: see [`Reservoir`].
+/// A generator seed derived from a seed and a counter rather than from a
+/// generator's position. Stateless on purpose: see [`Reservoir`]. The
+/// bounded, unbiased draw itself is `data::rng::Rng`'s, the workspace's one
+/// rejection sampler.
 fn draw_u64(seed: u64, counter: u64) -> u64 {
     let mut h = Sha256::new();
     h.update(seed.to_le_bytes());

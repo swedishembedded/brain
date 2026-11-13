@@ -123,6 +123,11 @@ impl Schedule {
         self.priority.insert(id.clone(), priority.clamp(0.0, 1.0));
     }
 
+    /// The priority last set for this episode; `0.0` when none was.
+    pub fn priority(&self, id: &EpisodeId) -> f64 {
+        self.priority.get(id).copied().unwrap_or(0.0)
+    }
+
     pub fn len(&self) -> usize {
         self.order.len()
     }

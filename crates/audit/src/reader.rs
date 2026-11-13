@@ -179,7 +179,9 @@ pub struct Row {
     pub train_loss: Option<(f64, f64)>,
     /// What the oracle said, when it was asked.
     pub diagnosis: Option<Diagnosis>,
-    /// What was done about it.
+    /// What the diagnosis called for. A rehearsal raise has already been
+    /// applied by the reader; [`Action::Grow`] is a recommendation for the
+    /// caller and is not acted on here.
     pub action: Option<Action>,
 }
 
@@ -257,6 +259,9 @@ pub struct Reader<L: Learner> {
     /// step already decodes, so the retention matrix costs no extra decode.
     retention: Retention,
     selector: Box<dyn SpanSelector>,
+    /// The rehearsal mix in force. Starts at the configured ratio and is the
+    /// one thing the growth diagnosis changes while the run is going.
+    rehearsal_ratio: f64,
     episode: u64,
 }
 
@@ -272,6 +277,7 @@ impl<L: Learner> Reader<L> {
             reservoir: Reservoir::new(cfg.reservoir),
             growth: Growth::new(cfg.growth),
             selector: Box::new(UniformSelector),
+            rehearsal_ratio: cfg.rehearsal_ratio,
             cfg,
             episode: 0,
         }
@@ -292,13 +298,20 @@ impl<L: Learner> Reader<L> {
         &self.reservoir
     }
 
-    /// Episodes in the audit bank.
     /// What earlier episodes still score, and the backward transfer over
     /// it. Sparse by construction - see [`crate::retention`].
     pub fn retention(&self) -> &Retention {
         &self.retention
     }
 
+    /// Rehearsal rows per row of the episode itself, as of now. Starts at
+    /// [`ReaderConfig::rehearsal_ratio`] and is raised by the growth
+    /// diagnosis, see [`crate::growth::Action::RaiseRehearsal`].
+    pub fn rehearsal_ratio(&self) -> f64 {
+        self.rehearsal_ratio
+    }
+
+    /// Episodes in the audit bank.
     pub fn bank_size(&self) -> usize {
         self.schedule.len()
     }
@@ -342,6 +355,7 @@ impl<L: Learner> Reader<L> {
             reservoir: self.reservoir.clone(),
             growth: self.growth.clone(),
             retention: self.retention.clone(),
+            rehearsal_ratio: Some(self.rehearsal_ratio),
             episode: self.episode,
             cursor,
         }
@@ -371,6 +385,7 @@ impl<L: Learner> Reader<L> {
             growth: state.growth,
             retention: state.retention,
             selector: Box::new(UniformSelector),
+            rehearsal_ratio: state.rehearsal_ratio.unwrap_or(cfg.rehearsal_ratio),
             cfg,
             episode: state.episode,
         }
@@ -475,7 +490,7 @@ impl<L: Learner> Reader<L> {
         // D. Train, then score both arms on exactly the same probes in the
         // same order.
         let mut rows: Vec<&str> = probes.trained_rows().iter().map(String::as_str).collect();
-        let rehearsal = (rows.len() as f64 * self.cfg.rehearsal_ratio).round() as usize;
+        let rehearsal = (rows.len() as f64 * self.rehearsal_ratio).round() as usize;
         rows.extend(self.reservoir.draw(rehearsal, self.cfg.seed ^ self.episode));
         let adapter = self.learner.train(&rows, self.cfg.seed ^ self.episode);
 
@@ -496,6 +511,9 @@ impl<L: Learner> Reader<L> {
             // matrix built from scores that were then thrown away would
             // describe a model nobody ever ran.
             self.retention.observed(self.episode, id, i);
+            // The canary is where priority is spent, and this is the only
+            // place that knows how each block just scored.
+            self.schedule.set_priority(id, boundary_priority(i, self.cfg.growth.pass_at));
             at = end;
         }
 
@@ -531,22 +549,34 @@ impl<L: Learner> Reader<L> {
             }
             _ => decided,
         };
+        let mut admitted: Option<AdapterId> = None;
         if promoted {
             let id = AdapterId(ep.id.as_str().to_string());
             // A duplicate id can only mean the same CONTENT was promoted
             // twice, which triage should have caught as already known. Not
             // fatal, and not silently overwritten either.
-            if self.pool.admit(&id, &adapter).is_ok() {
-                let demand: BTreeMap<AdapterId, f64> = self.pool.live().iter().map(|e| (e.id.clone(), 1.0)).collect();
-                self.pool.select(&demand);
-            }
+            // A duplicate id is not fatal, and its adapter is not wanted by
+            // this episode either.
+            admitted = self.pool.admit(&id, &adapter).is_ok().then_some(id);
             self.reservoir.offer(&ep.id, probes.trained_rows(), &verdict);
             self.schedule.admit(ep.id.clone());
             self.bank.insert(ep.id.clone(), probes);
             // `R[j][j]`: what it scored on its own probes under the arm that
             // was actually promoted, at the moment it was promoted.
             self.retention.learned(&ep.id, mean(&candidate[..n]));
+            self.schedule.set_priority(&ep.id, boundary_priority(mean(&candidate[..n]), self.cfg.growth.pass_at));
         }
+
+        // Demand is what asked for an adapter this episode: each re-checked
+        // block decodes under its own, and the episode that has just been
+        // promoted wants the adapter it made. Everything else is not wanted
+        // now, which does not evict it (see `Pool::select`).
+        let mut demand: BTreeMap<AdapterId, f64> = self.pool.live().iter().map(|e| (e.id.clone(), 0.0)).collect();
+        for (id, _) in &audit_blocks {
+            demand.insert(AdapterId(id.as_str().to_string()), 1.0);
+        }
+        demand.extend(admitted.map(|id| (id, 1.0)));
+        self.pool.select(&demand);
 
         // The growth question is asked of the promote rate, and only paid
         // for when that rate has fallen.
@@ -557,7 +587,13 @@ impl<L: Learner> Reader<L> {
             let joint = self.learner.joint_oracle(&bank_rows, &bank_probes);
             let sequential = mean(&self.learner.score(Arm::Incumbent, &bank_probes).scores);
             let d = self.growth.diagnose(joint, sequential);
-            let a = self.growth.act(d, self.cfg.reservoir.cap);
+            let a = self.growth.act(d, self.rehearsal_ratio);
+            // Interference is the one diagnosis whose remedy is this loop's
+            // own: the next episode trains on the larger mix. `Grow` is
+            // reported, not applied: see [`Action`].
+            if let Action::RaiseRehearsal { to, .. } = a {
+                self.rehearsal_ratio = to;
+            }
             (Some(d), Some(a))
         } else {
             (None, None)
@@ -575,6 +611,14 @@ impl<L: Learner> Reader<L> {
             action,
         }
     }
+}
+
+/// How worth watching a block that scored `score` is, in `[0, 1]`: highest at
+/// the pass boundary, where a small move flips the verdict, and falling off
+/// linearly to the far end of the score range.
+fn boundary_priority(score: f64, pass_at: f64) -> f64 {
+    let reach = pass_at.max(1.0 - pass_at);
+    (1.0 - (score - pass_at).abs() / reach).clamp(0.0, 1.0)
 }
 
 fn mean(v: &[f64]) -> f64 {
@@ -628,6 +672,8 @@ mod tests {
         /// one does. `0` means it never stalls.
         stall_after: usize,
         oracle: f64,
+        /// What the incumbent scores on every probe.
+        incumbent_level: f64,
         forwards: usize,
         trainings: usize,
         oracles: usize,
@@ -659,7 +705,7 @@ mod tests {
                     match arm {
                         Arm::Candidate if i < self.wins && !stalled => 1.0,
                         Arm::Candidate => 0.0,
-                        Arm::Incumbent => 0.0,
+                        Arm::Incumbent => self.incumbent_level,
                     }
                 })
                 .collect();
@@ -981,5 +1027,93 @@ mod tests {
             !borrowed.is_empty(),
             "the second episode must be gated against the first's probes; scored {scored_for_second:?} against own {own_of_first:?}"
         );
+    }
+
+    /// The growth diagnosis is not a note for the ledger: when the oracle
+    /// says the capacity is there and the schedule lost it, the loop that
+    /// owns the decision raises the rehearsal share, and the next episode
+    /// trains on a bigger mix.
+    #[test]
+    fn a_rehearsal_raise_changes_what_the_next_episode_trains_on() {
+        let d = Dir::new();
+        let mut r = reader(&d, Fake { loss: 1.5, wins: 64, stall_after: 6, oracle: 0.9, ..Default::default() });
+        let mut trained = Vec::new();
+        let mut raised_at = None;
+        for i in 0..20 {
+            let row = r.step(&episode(&format!("g{i}"), 60));
+            trained.push(r.learner().last_train_rows);
+            if raised_at.is_none() && matches!(row.action, Some(Action::RaiseRehearsal { .. })) {
+                raised_at = Some(i);
+            }
+        }
+        let k = raised_at.expect("a stalled run with a capable oracle diagnoses interference");
+        assert!(trained[k + 1] > trained[k], "the episode after a rehearsal raise must train on more rows: {} then {}", trained[k], trained[k + 1]);
+    }
+
+    /// The canary is where priority is spent, and the loop is the caller
+    /// that has the scores: every block it re-checks gets a priority from
+    /// how near that score sits to the pass boundary.
+    #[test]
+    fn the_reader_prioritises_audited_blocks_by_nearness_to_the_pass_boundary() {
+        let d = Dir::new();
+        let mut r = reader(&d, Fake { loss: 1.5, wins: 64, incumbent_level: 0.5, ..Default::default() });
+        let pass_at = cfg().growth.pass_at;
+        let mut checked = 0;
+        for i in 0..8 {
+            let planned: Vec<EpisodeId> = r.schedule.clone().plan().blocks().into_iter().cloned().collect();
+            r.step(&episode(&format!("p{i}"), 60));
+            for id in &planned {
+                let want = 1.0 - (0.5f64 - pass_at).abs() / pass_at.max(1.0 - pass_at);
+                let got = r.schedule.priority(id);
+                assert!((got - want).abs() < 1e-9, "block {id:?} audited at 0.5 against a {pass_at} boundary: priority {got}, want {want}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no block was audited, so nothing was checked");
+    }
+
+    /// Pool demand is what is asking for an adapter. In the loop that is the
+    /// audit: a block being re-checked decodes under its adapter, and the
+    /// one just trained is wanted by the episode that made it. Uniform
+    /// demand would leave the first adapters in the working set forever.
+    #[test]
+    fn the_working_set_follows_what_the_step_addressed() {
+        let d = Dir::new();
+        let mut c = cfg();
+        c.audit = AuditConfig { budget: 16, probes_per_block: 8, canary_blocks: 1, canary_refresh: 8 };
+        c.pool = PoolConfig { resident: 4, margin: 0.1, dwell: 0, survival: 1000 };
+        let pool = Pool::create(&d.0, c.pool).expect("pool");
+        let mut r = Reader::new(c, Fake { loss: 1.5, wins: 64, ..Default::default() }, pool);
+        let mut checked = 0;
+        for i in 0..14 {
+            let ep = episode(&format!("w{i}"), 60);
+            let mut addressed: Vec<AdapterId> = r.schedule.clone().plan().blocks().into_iter().map(|b| AdapterId(b.as_str().to_string())).collect();
+            let row = r.step(&ep);
+            if row.outcome.promoted() {
+                addressed.push(AdapterId(ep.id.as_str().to_string()));
+            }
+            for a in &addressed {
+                assert!(r.pool().slots().iter().flatten().any(|s| s == a), "step {i}: {a:?} was addressed but is not in the working set {:?}", r.pool().slots());
+                checked += 1;
+            }
+        }
+        assert!(checked > 14, "the audit must have addressed blocks as well as the new adapters");
+    }
+
+    /// A raised rehearsal mix is part of what the run has learned about
+    /// itself, so a stop and a resume must not quietly drop it back.
+    #[test]
+    fn a_raised_rehearsal_ratio_survives_a_stop() {
+        let d = Dir::new();
+        let mut r = reader(&d, Fake { loss: 1.5, wins: 64, stall_after: 6, oracle: 0.9, ..Default::default() });
+        for i in 0..14 {
+            r.step(&episode(&format!("k{i}"), 60));
+        }
+        assert!(r.rehearsal_ratio() > cfg().rehearsal_ratio, "the fixture must have raised it");
+        let state = r.state(None);
+        let d2 = Dir::new();
+        let pool = Pool::create(&d2.0, cfg().pool).expect("pool");
+        let resumed = Reader::restore(cfg(), Fake::default(), pool, state);
+        assert_eq!(resumed.rehearsal_ratio(), r.rehearsal_ratio());
     }
 }

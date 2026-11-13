@@ -770,13 +770,21 @@ operator's problem. Fixed by making `threads`/`fixed_threads` return a
 `crates/audit`'s `run` module: manifest, state, an append-only ledger, and
 the pool. Seven tests, red before green.
 
-**Correction: there is no best-versus-latest distinction, and that is not an
-omission.** This file inherited "best state rather than latest" from a
-design where training can silently degrade and a run must be able to fall
-back. Nothing ungated ever lands here: an adapter is written only after the
-gate promoted it against frozen probes and the earlier episodes' own blocks.
-The latest state IS the best one the reader has evidence for, and adding a
-rollback would be adding a remedy for a failure this design does not have.
+**Correction: there is no best-versus-latest distinction, and no rollback
+here.** Nothing ungated lands in this directory, but the gate audits a
+SAMPLE of earlier episodes, so a promotion can cost one the audit did not
+draw, visible only within the detection latency. The reader reports that
+(`Retention::worst_drop`, the acceptance clauses) and does not undo it:
+withdrawing an adapter acts on the served model, which the `Learner` owns and
+has no revert for, and whether to withdraw, retrain or accept is the
+application's release policy, outside brain's scope.
+
+**2026-11-13, review of the loop.** The growth action is now applied where it
+is the loop's own: `RaiseRehearsal` raises the reader's rehearsal ratio (up
+to `rehearsal_ceiling`, persisted in `state.json`), `Grow` stays a
+recommendation on the ledger row for the caller. The loop sets canary
+priorities from the audit scores and supplies pool demand from the audit
+(blocks re-checked this episode plus the adapter just made).
 
 **A refactor persistence forced, and it improved the design.** The reservoir
 held a stateful generator, which cannot be round-tripped exactly. Its

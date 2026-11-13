@@ -138,17 +138,21 @@ impl Retention {
 /// fixed-task-sequence study rather than a sampling reader. The reader's own
 /// sparse path is [`Retention::bwt`]; this is the same quantity computed
 /// from a different shape, and lives beside it so the two cannot drift.
-pub fn bwt_dense(r: &[Vec<f64>]) -> f64 {
+///
+/// `None` below two tasks: with no earlier task there is nothing that could
+/// have been forgotten, and an unmeasured quantity is not a zero (the same
+/// rule as [`Retention::bwt`]).
+pub fn bwt_dense(r: &[Vec<f64>]) -> Option<f64> {
     let t = r.len();
     if t < 2 {
-        return 0.0;
+        return None;
     }
     let last = &r[t - 1];
     let mut total = 0.0;
     for (j, row) in r.iter().enumerate().take(t - 1) {
         total += last[j] - row[j];
     }
-    total / (t - 1) as f64
+    Some(total / (t - 1) as f64)
 }
 
 #[cfg(test)]
@@ -226,8 +230,9 @@ mod tests {
     #[test]
     fn the_dense_form_matches_the_classical_definition() {
         let r = vec![vec![0.9, 0.0], vec![0.7, 0.8]];
-        assert!((bwt_dense(&r) - -0.2).abs() < 1e-12, "{}", bwt_dense(&r));
-        assert_eq!(bwt_dense(&[vec![0.9]]), 0.0, "one task has no earlier task to transfer to");
-        assert_eq!(bwt_dense(&[]), 0.0);
+        let got = bwt_dense(&r).expect("two tasks have one earlier task");
+        assert!((got - -0.2).abs() < 1e-12, "{got}");
+        assert_eq!(bwt_dense(&[vec![0.9]]), None, "one task has no earlier task to transfer to: unmeasured, not zero");
+        assert_eq!(bwt_dense(&[]), None);
     }
 }
