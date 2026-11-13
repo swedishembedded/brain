@@ -353,18 +353,23 @@ impl Request {
                 return refused(&format!("adapter_id must be 1 to {MAX_ADAPTER_ID_LEN} characters of letters, digits and / : . _ -"));
             }
         }
-        // Every blob the document names is in the call, and every blob the call carries is used.
-        let named = data.blob_names();
-        for name in &named {
-            if !inv.blobs.contains_key(*name) {
-                return Err(format!("data: the input blob \"{name}\" is named but not attached"));
-            }
-        }
-        if let Some(extra) = inv.blobs.keys().find(|k| !named.contains(&k.as_str())) {
-            return Err(format!("data: the input blob \"{extra}\" is attached but the document does not use it"));
-        }
+        check_attached(&data, inv)?;
         Ok(Request { params, data })
     }
+}
+
+/// Every blob `data` names is in the call, and every blob the call carries is used.
+pub(crate) fn check_attached(data: &DataRefs, inv: &Invocation) -> Result<(), String> {
+    let named = data.blob_names();
+    for name in &named {
+        if !inv.blobs.contains_key(*name) {
+            return Err(format!("data: the input blob \"{name}\" is named but not attached"));
+        }
+    }
+    if let Some(extra) = inv.blobs.keys().find(|k| !named.contains(&k.as_str())) {
+        return Err(format!("data: the input blob \"{extra}\" is attached but the document does not use it"));
+    }
+    Ok(())
 }
 
 /// What a preference run does not take: every setting of the other objectives is refused by name rather than

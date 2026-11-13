@@ -105,7 +105,7 @@ pub struct Staged {
     pub weighted_replay: Vec<(PathBuf, f32)>,
 }
 
-fn store_failure(e: &StoreError) -> String {
+pub(crate) fn store_failure(e: &StoreError) -> String {
     // The operator's log keeps the cause; the caller is told what it may know.
     if let StoreError::Io(_) = e {
         eprintln!("brain train: {e}");
@@ -113,36 +113,42 @@ fn store_failure(e: &StoreError) -> String {
     format!("train: {}", e.client_message())
 }
 
+/// Puts the input `source` at the new file `dest`: an input blob is copied, a digest is fetched from `store` and
+/// verified as it is copied.
+pub fn bring(source: &Source, blobs: &BTreeMap<String, Blob>, store: Option<&ArtifactStore>, dest: &Path) -> Result<(), String> {
+    match source {
+        Source::Blob(name) => {
+            let blob = blobs.get(name).ok_or_else(|| format!("train: the input blob \"{name}\" is not attached"))?;
+            if blob.bytes.len() as u64 > MAX_INPUT_BYTES {
+                return Err(format!("train: the input blob \"{name}\" is larger than {MAX_INPUT_BYTES} bytes"));
+            }
+            std::fs::write(dest, &blob.bytes).map_err(|e| format!("train: staging \"{name}\": {e}"))
+        }
+        Source::Digest(digest) => {
+            let store = store.ok_or_else(|| "train: this server has no artifact store (--artifact-store), so a dataset cannot be named by digest".to_string())?;
+            store.fetch(digest, dest, MAX_INPUT_BYTES).map(drop).map_err(|e| store_failure(&e))
+        }
+    }
+}
+
 /// Puts every dataset of `data` into `dir` as a file of its own: input blobs are copied, digests are
 /// fetched from `store` and verified as they are copied.
 pub fn stage(data: &DataRefs, blobs: &BTreeMap<String, Blob>, store: Option<&ArtifactStore>, dir: &Path) -> Result<Staged, String> {
     let mut count = 0usize;
-    let mut bring = |source: &Source| -> Result<PathBuf, String> {
+    let mut stage_one = |source: &Source| -> Result<PathBuf, String> {
         count += 1;
         let dest = dir.join(format!("input-{count}"));
-        match source {
-            Source::Blob(name) => {
-                let blob = blobs.get(name).ok_or_else(|| format!("train: the input blob \"{name}\" is not attached"))?;
-                if blob.bytes.len() as u64 > MAX_INPUT_BYTES {
-                    return Err(format!("train: the input blob \"{name}\" is larger than {MAX_INPUT_BYTES} bytes"));
-                }
-                std::fs::write(&dest, &blob.bytes).map_err(|e| format!("train: staging \"{name}\": {e}"))?;
-            }
-            Source::Digest(digest) => {
-                let store = store.ok_or_else(|| "train: this server has no artifact store (--artifact-store), so a dataset cannot be named by digest".to_string())?;
-                store.fetch(digest, &dest, MAX_INPUT_BYTES).map_err(|e| store_failure(&e))?;
-            }
-        }
+        bring(source, blobs, store, &dest)?;
         Ok(dest)
     };
     Ok(Staged {
-        train: bring(&data.train)?,
-        held_out: data.held_out.as_ref().map(&mut bring).transpose()?,
-        held_out_text: data.held_out_text.as_ref().map(&mut bring).transpose()?,
-        monitor: data.monitor.as_ref().map(&mut bring).transpose()?,
-        start_adapter: data.start_adapter.as_ref().map(&mut bring).transpose()?,
-        replay: data.replay.iter().map(&mut bring).collect::<Result<_, _>>()?,
-        weighted_replay: data.weighted_replay.iter().map(|(s, share)| bring(s).map(|p| (p, *share))).collect::<Result<_, _>>()?,
+        train: stage_one(&data.train)?,
+        held_out: data.held_out.as_ref().map(&mut stage_one).transpose()?,
+        held_out_text: data.held_out_text.as_ref().map(&mut stage_one).transpose()?,
+        monitor: data.monitor.as_ref().map(&mut stage_one).transpose()?,
+        start_adapter: data.start_adapter.as_ref().map(&mut stage_one).transpose()?,
+        replay: data.replay.iter().map(&mut stage_one).collect::<Result<_, _>>()?,
+        weighted_replay: data.weighted_replay.iter().map(|(s, share)| stage_one(s).map(|p| (p, *share))).collect::<Result<_, _>>()?,
     })
 }
 
@@ -193,7 +199,16 @@ impl FootprintCache {
     }
 }
 
-fn utf8(path: &Path) -> Result<&str, String> {
+/// The bytes of the files under `dir` (one level of subdirectories deep): what reading a checkpoint costs.
+pub(crate) fn tree_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok().map(|m| if m.is_dir() { tree_bytes(&entry.path()) } else { m.len() }))
+        .sum()
+}
+
+pub(crate) fn utf8(path: &Path) -> Result<&str, String> {
     path.to_str().ok_or_else(|| format!("train: {} is not valid UTF-8", path.display()))
 }
 
@@ -491,7 +506,7 @@ fn preference_summary(outcome: &brain::PreferenceFineTuneOutcome) -> Value {
 }
 
 /// Maps the SDK's error to the job's: a full card is a condition the caller can act on, with nothing wrong in the request.
-fn trainer_failure(e: brain::Error) -> String {
+pub(crate) fn trainer_failure(e: brain::Error) -> String {
     match e {
         brain::Error::DeviceOutOfMemory { .. } => capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("train: {e}")),
         e => format!("train: {e}"),

@@ -20,6 +20,26 @@ The job is the model `brain/train` with one action, `train`. It trains
   reference is the policy the run starts from (the base, or the `start_adapter`
   continued), frozen, so no second model is held.
 
+## Full-parameter tuning and merging
+
+Two more actions of `brain/train` produce a checkpoint instead of an adapter.
+
+- **`full_train`** trains every weight of the base (fp32, the AdamW moments and master weights in host memory, the
+  card holding the weights, their gradients and one step's activations; a Qwen3 or Qwen3.5 base). `data` takes
+  `train`, `replay` and `weighted_replay` only; held-out sets, a monitor and a starting adapter are refused by name.
+  Params: `base`, `data`, `steps`, `lr`, `weight_decay`, `grad_accum`, `strict_updates`, `seed`, `max_block`,
+  `thinking`, `arch`, `replay_share`, `install_as`.
+- **`merge`** folds a LoRA adapter into the weights it targets (`W + alpha/r B A`). The adapter is the input blob
+  `adapter` or `adapter_digest` (exactly one); the work is host-side and takes no card.
+
+A checkpoint is a directory and an artifact is one file, so a checkpoint leaves as a **manifest**: each file is
+published to the artifact store by digest, and the manifest, `{"format": "brain-checkpoint-manifest-v1", "files":
+[{"name", "digest", "bytes"}]}`, is published too. The result carries `checkpoint_digest` (the manifest's) and `files`.
+`install_as` additionally installs the checkpoint in the server's model store as `local/<install_as>` (letters,
+digits, `.`, `_`, `-`; a name that exists is refused), where a later job names it as its `base`. A server with no
+artifact store can only install. The files of an installed checkpoint are as large as the model: the operator owns
+the model store's disk.
+
 ## Serving it
 
 ```

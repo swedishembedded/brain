@@ -36,6 +36,11 @@ pub fn rig_with(tag: &str, memory: u64, store: bool, card: Option<u64>, extra: V
     rig_over(tag, memory, store, card, extra, qwen35_model_dir(&format!("{tag}-base")))
 }
 
+/// [`rig_qwen3`] with or without an artifact store.
+pub fn rig_with_store_flag(tag: &str, store: bool) -> Rig {
+    rig_over(tag, 16 << 30, store, None, Vec::new(), qwen3_model_dir_of(&format!("{tag}-base"), qwen3::QwenConfig::tiny()))
+}
+
 /// [`rig`] holding a toy `qwen3` base as `local/toy`.
 pub fn rig_qwen3(tag: &str, memory: u64) -> Rig {
     rig_over(tag, memory, true, None, Vec::new(), qwen3_model_dir_of(&format!("{tag}-base"), qwen3::QwenConfig::tiny()))
@@ -130,6 +135,17 @@ pub fn data_digest(rig: &Rig, bytes: &[u8]) -> Digest {
 pub fn run(rig: &Rig, params: Value, blobs: &[(&str, Vec<u8>)], frames: &Frames) -> Result<capability::Outcome, String> {
     let inv = invocation(params, blobs)?;
     rig.exec.run_blocking(trainjob::MODEL, trainjob::ACTION, inv, frames.sink())
+}
+
+/// Runs `action` of the service (validated against its spec as a remote caller sees it) to its end on the rig.
+pub fn run_action(rig: &Rig, action: &str, spec: &capability::ActionSpec, params: Value, blobs: &[(&str, Vec<u8>)], frames: &Frames) -> Result<capability::Outcome, String> {
+    let mut inv = Invocation::new();
+    inv.params = params;
+    for (name, bytes) in blobs {
+        inv.blobs.insert((*name).to_string(), Blob::new(Media::Bytes, bytes.clone()));
+    }
+    let inv = spec.validate_served(inv)?;
+    rig.exec.run_blocking(trainjob::MODEL, action, inv, frames.sink())
 }
 
 /// Nothing of any job is left in the work directory.

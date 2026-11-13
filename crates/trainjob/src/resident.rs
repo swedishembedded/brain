@@ -39,6 +39,7 @@ use std::sync::Arc;
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
+use crate::consolidate::{self, FullRequest, MergeRequest};
 use crate::job::{self, FootprintCache, JobEnv};
 use crate::request::{self, Request};
 use crate::store::{ArtifactStore, StoreError};
@@ -66,8 +67,9 @@ pub struct TrainResident {
     footprints: FootprintCache,
 }
 
-/// The key config prefix: the footprint in bytes follows.
-const KEY_PREFIX: &str = "train:";
+/// The key config prefixes: the bytes of a run that holds a card, and of one that works in host memory.
+const CARD_PREFIX: &str = "train:";
+const HOST_PREFIX: &str = "host:";
 
 impl TrainResident {
     pub fn new(config: TrainConfig) -> TrainResident {
@@ -75,11 +77,17 @@ impl TrainResident {
     }
 
     /// Everything about `inv` that can be known without a device: the request, the base, the artifact store it
-    /// needs, and the bytes it will reserve.
-    fn admit(&self, action: &str, inv: &Invocation) -> Result<u64, String> {
-        if action != request::ACTION {
-            return Err(format!("{} has no action '{action}'", request::MODEL));
+    /// needs, and what it will reserve.
+    fn admit(&self, action: &str, inv: &Invocation) -> Result<Reservation, String> {
+        match action {
+            request::ACTION => self.admit_train(inv),
+            consolidate::FULL_ACTION => self.admit_full(inv),
+            consolidate::MERGE_ACTION => self.admit_merge(inv),
+            other => Err(format!("{} has no action '{other}'", request::MODEL)),
         }
+    }
+
+    fn admit_train(&self, inv: &Invocation) -> Result<Reservation, String> {
         let request = Request::from_invocation(inv)?;
         if self.env.store.is_none() {
             if !request.data.digests().is_empty() {
@@ -92,44 +100,101 @@ impl TrainResident {
                 return Err("train: keep_evaluations publishes to the artifact store, and this server has none (--artifact-store)".to_string());
             }
         }
-        if let Some(store) = &self.env.store {
-            if let Some(missing) = request.data.digests().into_iter().find(|d| !store.contains(d)) {
-                return Err(format!("train: {}", StoreError::Missing(missing).client_message()));
-            }
-        }
+        self.check_digests(&request.data.digests())?;
         let base_dir = job::resolve_base(self.env.models_dir.as_deref(), &request.params.base)?;
         let footprint = self.footprints.of(&base_dir, &request, self.largest_card_bytes)?;
-        if let Some(card) = self.largest_card_bytes {
-            if footprint.device_bytes > card {
-                let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
-                return Err(format!(
-                    "train: this run needs about {:.0} GiB ({}; rows of up to {} tokens) and the largest card has {:.0} GiB; lower max_block or hold the base narrower (base_format)",
-                    gib(footprint.device_bytes),
-                    footprint.reason,
-                    request.params.max_block,
-                    gib(card)
-                ));
+        self.fits_a_card("train", footprint.device_bytes, &footprint.reason, request.params.max_block)?;
+        Ok(Reservation::Card(footprint.device_bytes))
+    }
+
+    fn admit_full(&self, inv: &Invocation) -> Result<Reservation, String> {
+        let request = FullRequest::from_invocation(inv)?;
+        let p = &request.params;
+        if self.env.store.is_none() && p.install_as.is_none() {
+            return Err("full_train: this server has no artifact store (--artifact-store) to publish the checkpoint to: set install_as to keep it in the model store".to_string());
+        }
+        self.check_digests(&request.data.digests())?;
+        let base_dir = job::resolve_base(self.env.models_dir.as_deref(), &p.base)?;
+        let mut ft = brain::ChatFullFineTune::from_pretrained(job::utf8(&base_dir)?);
+        if let Some(arch) = &p.arch {
+            ft = ft.arch(arch.as_str());
+        }
+        let footprint = ft.footprint(p.max_block).map_err(|e| format!("full_train: {e}"))?;
+        self.fits_a_card("full_train", footprint.device_bytes, &footprint.reason, p.max_block)?;
+        Ok(Reservation::Card(footprint.device_bytes))
+    }
+
+    fn admit_merge(&self, inv: &Invocation) -> Result<Reservation, String> {
+        let request = MergeRequest::from_invocation(inv)?;
+        if self.env.store.is_none() && request.params.install_as.is_none() {
+            return Err("merge: this server has no artifact store (--artifact-store) to publish the checkpoint to: set install_as to keep it in the model store".to_string());
+        }
+        if let (None, crate::request::Source::Digest(_)) = (&self.env.store, &request.adapter) {
+            return Err("merge: this server has no artifact store (--artifact-store), so an adapter cannot be named by digest".to_string());
+        }
+        if let crate::request::Source::Digest(digest) = &request.adapter {
+            self.check_digests(&[*digest])?;
+        }
+        let base_dir = job::resolve_base(self.env.models_dir.as_deref(), &request.params.base)?;
+        // Folding is host work: the base is read and a merged copy written, so about twice the base's own size in memory.
+        Ok(Reservation::Host(2 * job::tree_bytes(&base_dir)))
+    }
+
+    fn check_digests(&self, digests: &[crate::store::Digest]) -> Result<(), String> {
+        if let Some(store) = &self.env.store {
+            if let Some(missing) = digests.iter().find(|d| !store.contains(d)) {
+                return Err(format!("train: {}", StoreError::Missing(*missing).client_message()));
             }
         }
-        Ok(footprint.device_bytes)
+        Ok(())
     }
+
+    /// Refuses a run that needs more than the largest card holds.
+    fn fits_a_card(&self, action: &str, bytes: u64, reason: &str, max_block: u32) -> Result<(), String> {
+        let Some(card) = self.largest_card_bytes else { return Ok(()) };
+        if bytes > card {
+            let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+            return Err(format!(
+                "{action}: this run needs about {:.0} GiB ({reason}; rows of up to {max_block} tokens) and the largest card has {:.0} GiB; lower max_block or hold the base narrower",
+                gib(bytes),
+                gib(card)
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// What a run reserves: bytes on a card, or bytes of host memory for work that takes no card.
+#[derive(Clone, Copy)]
+enum Reservation {
+    Card(u64),
+    Host(u64),
 }
 
 impl ResidentModel for TrainResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(request::MODEL, "fine-tune a chat model's LoRA adapter on the devices serving shares: supervised or by policy gradient, datasets and adapter by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec()])
+        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec()])
     }
 
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
         // `check_job` has already refused a job this cannot size; a model that vanished since reads as no room needed
         // and the run fails by name when it starts.
-        let bytes = self.admit(action, inv).unwrap_or(0);
-        InstanceKey::new(request::MODEL, format!("{KEY_PREFIX}{bytes}"))
+        let key = match self.admit(action, inv) {
+            Ok(Reservation::Card(bytes)) => format!("{CARD_PREFIX}{bytes}"),
+            Ok(Reservation::Host(bytes)) => format!("{HOST_PREFIX}{bytes}"),
+            Err(_) => format!("{CARD_PREFIX}0"),
+        };
+        InstanceKey::new(request::MODEL, key)
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        let bytes = key.base().config.strip_prefix(KEY_PREFIX).and_then(|b| b.parse().ok()).unwrap_or(0);
-        MemCost::new(bytes, 0)
+        let config = &key.base().config;
+        let bytes = |prefix: &str| config.strip_prefix(prefix).and_then(|b| b.parse().ok());
+        match (bytes(CARD_PREFIX), bytes(HOST_PREFIX)) {
+            (_, Some(host)) => MemCost::new(0, host),
+            (Some(card), None) => MemCost::new(card, 0),
+            (None, None) => MemCost::new(0, 0),
+        }
     }
 
     fn replicas(&self) -> usize {
@@ -137,7 +202,7 @@ impl ResidentModel for TrainResident {
     }
 
     fn check_job(&self, action: &str, inv: &Invocation) -> Result<(), String> {
-        self.admit(action, inv).map(|_| ())
+        self.admit(action, inv).map(drop)
     }
 
     fn transient(&self) -> bool {
@@ -158,13 +223,16 @@ struct TrainInstance {
 
 impl Instance for TrainInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        if action != request::ACTION {
-            return Err(format!("{} has no action '{action}'", request::MODEL));
-        }
         let env = &self.env;
+        let work: &mut dyn FnMut() -> ActionResult = match action {
+            request::ACTION => &mut || job::run(env, inv, progress),
+            consolidate::FULL_ACTION => &mut || consolidate::run_full(env, inv, progress),
+            consolidate::MERGE_ACTION => &mut || consolidate::run_merge(env, inv),
+            other => return Err(format!("{} has no action '{other}'", request::MODEL)),
+        };
         // The trainer reports a device failure (an allocation the card cannot hold) as a panic. One run's failure is
         // that run's error, not the server's.
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| catalog::resident_llm::on_device(self.device, || job::run(env, inv, progress))));
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| catalog::resident_llm::on_device(self.device, work)));
         match run {
             Ok(placed) => placed?,
             Err(panic) => {

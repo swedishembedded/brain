@@ -70,7 +70,8 @@ const FULL_WEIGHT_DECAY: f32 = 0.0;
 #[derive(Clone, Debug)]
 pub struct ChatFullFineTune {
     base: String,
-    arch: String,
+    /// The architecture named by [`Self::arch`]; unnamed, the base's own config tells it (`qwen3` where it does not).
+    arch: Option<String>,
     models_dir: Option<String>,
     dataset: Option<PathBuf>,
     replay: Vec<PathBuf>,
@@ -87,6 +88,8 @@ pub struct ChatFullFineTune {
     seed: Option<u64>,
     max_block: Option<u32>,
     device: Device,
+    /// The caller has scoped this thread to its device ([`ChatFullFineTune::placed`]).
+    placed: bool,
     thinking: bool,
     precision: model::TrainPrecision,
 }
@@ -99,7 +102,7 @@ impl ChatFullFineTune {
     pub fn from_pretrained(base: impl Into<String>) -> ChatFullFineTune {
         ChatFullFineTune {
             base: base.into(),
-            arch: "qwen3".to_string(),
+            arch: None,
             models_dir: None,
             dataset: None,
             replay: Vec::new(),
@@ -116,6 +119,7 @@ impl ChatFullFineTune {
             seed: None,
             max_block: None,
             device: Device::default(),
+            placed: false,
             thinking: true,
             precision: model::TrainPrecision::default(),
         }
@@ -130,11 +134,12 @@ impl ChatFullFineTune {
         self
     }
 
-    /// The architecture of the base (a `brain_arch` id; default `qwen3`).
+    /// The architecture of the base (a `brain_arch` id). Unnamed, the base's own `config.json` tells it, as
+    /// [`crate::ChatFineTune`]'s does, and `qwen3` is the architecture of a checkpoint with none.
     /// Looked up in the same registry as [`crate::study::DocumentStudy`]; an
     /// architecture without a chat fine-tuner is refused before anything is read.
     pub fn arch(mut self, id: impl Into<String>) -> Self {
-        self.arch = id.into();
+        self.arch = Some(id.into());
         self
     }
 
@@ -248,12 +253,50 @@ impl ChatFullFineTune {
         self
     }
 
+    /// Run on the device this thread is already scoped to (`gpu_core::devices::with_gpu`, or the host tier), the
+    /// way a residency-managed workload is: the process owns the device selection and other models are being
+    /// served from it, so the run neither resolves [`Self::device`] nor publishes a selection of its own.
+    pub fn placed(mut self, on: bool) -> Self {
+        self.placed = on;
+        self
+    }
+
     /// Whether the model is trained to reason before it answers (default
     /// true); `false` trains it for no-think mode, as
     /// [`crate::ChatFineTune::thinking`] does.
     pub fn thinking(mut self, on: bool) -> Self {
         self.thinking = on;
         self
+    }
+
+    /// What this run asks of a card when its training rows are at most `block` tokens: the figure a scheduler
+    /// reserves before the run is placed. Every parameter trains in fp32 with the AdamW moments and the master
+    /// weights in host memory, so the card holds the weights and their gradients (8 bytes a parameter) and one
+    /// step's activations, with the margin of [`crate::ChatFineTune::footprint`]. It reads the checkpoint's headers
+    /// only; like that figure it is a model, not a measurement, and the run's own planner refuses what does not fit.
+    ///
+    /// # Errors
+    /// The base is not found or is of an architecture without a chat trainer.
+    pub fn footprint(&self, block: u32) -> Result<crate::TrainFootprint> {
+        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
+        let (weights, model_dir, _) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let chat = chat_entry(self.arch_of(&model_dir))?;
+        let open = (chat.checkpoint_path)(&weights, &model_dir);
+        let (footprint, numel) = full_footprint(&open, block, true)?;
+        let modelled = 8 * numel + footprint.activation_bytes;
+        Ok(crate::TrainFootprint {
+            device_bytes: modelled + modelled / 10 + (2 << 30),
+            base_tier: "f32".to_string(),
+            reason: "full fine-tune: fp32 weights and gradients on the card, AdamW moments and master weights in host memory".to_string(),
+        })
+    }
+
+    /// The architecture of the base in `model_dir`: the one named, else the checkpoint's own, else `qwen3`.
+    fn arch_of<'a>(&'a self, model_dir: &Path) -> &'a str {
+        match self.arch.as_deref() {
+            Some(named) => named,
+            None => crate::study::arch_of_checkpoint(model_dir).map_or("qwen3", |a| a.id),
+        }
     }
 
     /// Run to completion.
@@ -266,7 +309,9 @@ impl ChatFullFineTune {
     /// checkpoint.
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFullFineTuneOutcome> {
         let run_clock = std::time::Instant::now();
-        let chat = chat_entry(&self.arch)?;
+        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
+        let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let chat = chat_entry(self.arch_of(&model_dir))?;
         if self.native_sparse.is_some() && !chat.native_sparse {
             return Err(Error::Backend("ChatFullFineTune: native sparse attention training is not available for this architecture".to_string()));
         }
@@ -278,8 +323,6 @@ impl ChatFullFineTune {
         if self.grad_accum == 0 {
             return Err(Error::Backend("ChatFullFineTune: grad_accum must be at least 1".to_string()));
         }
-        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
-        let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         let open = (chat.checkpoint_path)(&weights, &model_dir);
 
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
@@ -305,7 +348,12 @@ impl ChatFullFineTune {
         let prepared = data::chat::prepare_chat_samples(&rows, &rows, &tok, &tmpl, render, vocab, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
         model::finetune::stage_time("sdk: read dataset and prepare it", run_clock);
         let block = block_for(prepared.longest_example, self.max_block)?;
-        let set = crate::device::resolve(&self.device)?;
+        let set = if self.placed {
+            // The process owns the selection: the run is confined to the card this thread is scoped to.
+            gpu_core::devices::ComputeSet { gpus: gpu_core::devices::current_gpu().into_iter().collect(), ..gpu_core::devices::ambient_compute_set().clone() }
+        } else {
+            crate::device::resolve(&self.device)?
+        };
         plan_before_load(&open, block, &set)?;
 
         let seed = resolve_seed(self.seed, None)?;
@@ -535,8 +583,9 @@ fn export_trained(chat: &crate::chat_trainer::ChatEntry, trained: &Path, tokeniz
 pub fn merge_adapter(base: &str, adapter: &Path, out_dir: &Path) -> Result<MergedCheckpoint> {
     let store_root = loader::model_dir::resolve(None);
     let (weights, model_dir, _) = loader::model_dir::resolve_base(base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
-    // Folding is a qwen3 export: the architecture that has one.
-    let chat = chat_entry("qwen3")?;
+    // The base's own architecture folds it (`qwen3` for a checkpoint that does not say); one without an export
+    // that takes an adapter refuses by name.
+    let chat = chat_entry(crate::study::arch_of_checkpoint(&model_dir).map_or("qwen3", |a| a.id))?;
     let open = (chat.checkpoint_path)(&weights, &model_dir);
     export_trained(&chat, &open, &model_dir, out_dir, Some(adapter))?;
     let weights = out_dir.join(WEIGHTS_FILE);
