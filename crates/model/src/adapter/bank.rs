@@ -1114,10 +1114,10 @@ mod tests {
     #[test]
     fn a_bank_config_takes_the_models_defaults_and_budgets_only_targeted_sites() {
         let cfg = AdapterBankConfig::for_model(&Hybrid, &AdapterTargets::parse("up").unwrap()).unwrap();
-        assert_eq!((cfg.slots, cfg.r_max, cfg.targets.as_slice()), (2, 16, ["up".to_string()].as_slice()));
-        // Two `up` sites of (5 + 8) values per rank row, 2 slots, rank 16, f32,
+        assert_eq!((cfg.slots, cfg.r_max, cfg.targets.as_slice()), (2, 32, ["up".to_string()].as_slice()));
+        // Two `up` sites of (5 + 8) values per rank row, 2 slots, rank 32, f32,
         // plus each site's per-slot rank word, plus the row vectors.
-        let per_site = 2 * 16 * 13 * 4 + 2 * 4;
-        assert_eq!(cfg.device_bytes(&Hybrid, 3), 2 * per_site + 3 * 4 + 3 * 16 * 4);
+        let per_site = 2 * 32 * 13 * 4 + 2 * 4;
+        assert_eq!(cfg.device_bytes(&Hybrid, 3), 2 * per_site + 3 * 4 + 3 * 32 * 4);
     }
 }
