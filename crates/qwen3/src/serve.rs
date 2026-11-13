@@ -3275,44 +3275,20 @@ impl Engine {
             .collect()
     }
 
-    /// Record + submit `k` iterations of (argmax pair, `topk_extract_step`)
-    /// in ONE submission: each iteration finds the current row maximum over
-    /// `logits_dev` (the same two-stage reduction [`Self::submit_greedy_head`]
-    /// uses) via the shared `argmax_dev` scratch, records it into column `col`
-    /// of `topk_vals_dev`/`topk_idx_dev`, and masks it out of `logits_dev` so
-    /// the next iteration finds the row's next-best value. This is what turns
-    /// a `[bsz, vocab]` row into a `[bsz, k]` candidate list with only ONE
-    /// host round-trip (the final readback in [`Self::topk_from_hidden`]) -
-    /// the design point of the whole seam: real (non-greedy) sampling must
-    /// never ship the full vocab back to the host.
+    /// Record + submit the head and the extraction of each row's top `k` candidates into
+    /// `topk_vals_dev`/`topk_idx_dev` in ONE submission, through the one implementation every
+    /// engine shares ([`model::readout::topk_rows_steps`]): a single launch where the device is
+    /// offered the kernel and all [`TOPK_CAPACITY`] columns are wanted, else `k` rounds of (argmax,
+    /// mask the winner) - this is what turns a `[bsz, vocab]` row into a `[bsz, k]` candidate list
+    /// with only ONE host round-trip (the final readback in [`Self::topk_from_hidden`]) - the
+    /// design point of the whole seam: real (non-greedy) sampling must never ship the full vocab
+    /// back to the host. `logits_dev` is masked in place by the extraction.
     fn submit_topk_head(&self, bsz: u32, k: u32) {
-        let g = &self.gpu;
-        let v = self.cfg.vocab;
         let mut steps: Vec<Step> = Vec::new();
         self.head_steps(&mut steps, bsz);
-        let argmax_shape = OpShape { m: bsz, n: v, k: 0, dtype: Dtype::F32 };
-        let split = self.selector.select(Op::ArgMaxRow, argmax_shape, &self.caps) == KernelVariant::SplitReduction;
-        let chunk = v.div_ceil(ARGMAX_CHUNKS);
-        for col in 0..k {
-            if split {
-                steps.push(g.step(
-                    ARGMAX_PART,
-                    &[&self.logits_dev, &self.argmax_part_dev],
-                    &[bsz, v, ARGMAX_CHUNKS, chunk],
-                    bsz * ARGMAX_CHUNKS,
-                ));
-                steps.push(g.step(ARGMAX_FINAL, &[&self.argmax_part_dev, &self.argmax_dev], &[bsz, ARGMAX_CHUNKS], bsz));
-            } else {
-                steps.push(g.step(ARGMAX_ROW, &[&self.logits_dev, &self.argmax_dev], &[bsz, v], bsz));
-            }
-            steps.push(g.step(
-                TOPK_EXTRACT_STEP,
-                &[&self.argmax_dev, &self.logits_dev, &self.topk_vals_dev, &self.topk_idx_dev],
-                &[bsz, v, TOPK_CAPACITY, col],
-                bsz,
-            ));
-        }
-        g.submit(&[], &steps);
+        let kernels = model::readout::ReadoutKernels { part: ARGMAX_PART, fin: ARGMAX_FINAL, extract: TOPK_EXTRACT_STEP };
+        steps.extend(model::readout::topk_rows_steps(&self.gpu, kernels, &self.logits_dev, &self.topk_vals_dev, &self.topk_idx_dev, bsz, self.cfg.vocab, TOPK_CAPACITY, k));
+        self.gpu.submit(&[], &steps);
     }
 
     /// Advance every sequence by one token, returning the row's top-`k`

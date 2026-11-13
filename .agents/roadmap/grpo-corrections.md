@@ -144,5 +144,5 @@ forward plus reading every position's logits back and sorting the full vocabular
 
 Sampled decode on the serving path is itself launch- and top-k-bound: the card is busy 31 % of the time and 31 % of the
 kernel time is the top-64 extraction (64 rounds of three launches a step); greedy is 1005 tok/s against 615 sampled.
-Knowledge 443. Open: a single-pass device top-k kernel.
+Knowledge 443. The Qwen3 engine now records the shared single-launch top-k (`model::readout::topk_rows_steps`): sampled 729 tok/s, greedy 1075 on the same group.
 

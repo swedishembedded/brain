@@ -38,3 +38,10 @@ its 256 prompt tokens (the last block is always recomputed).
 Sample groups through `SchedulerRollout` (the SDK's improve cycle does by default, `ImproveOptions::model_rollouts`
 selects the old sampler as an oracle); a LoRA refit publishes the adapters to the engine's bank and does not rebuild it.
 Open: the fused top-k kernel; sampled decode is the dominant cost of a served rollout.
+
+Update 2026-11-13 (lane rollout): the single-launch top-k kernel this entry called unbuilt existed
+(`model::readout::topk_rows_steps`, the native `topk_rows_f32` on CUDA devices) and the 27B's engine used it; the Qwen3
+engine kept its own copy of the 64-round chain. It now records the shared steps, and on Qwen3-4B (same group, bf16, one
+GH200) sampled decode goes from 615 to 729 tok/s (greedy 1005 -> 1075, run to run); the sampled path is still 32 %
+below greedy, which is the candidates' read-back and the host sampler, not the extraction.
+

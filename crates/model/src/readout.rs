@@ -108,22 +108,33 @@ pub fn topk_rows_issue(g: &Gpu, k: ReadoutKernels, logits: &DeviceBuffer, rows: 
     assert!(cap > 0, "topk_rows: cap must be > 0");
     let vals = g.storage((rows * cap) as u64);
     let idx = g.storage((rows * cap) as u64);
-    let mut steps: Vec<Step> = Vec::new();
-    // One launch for all candidates where the device is offered the kernel; else a round of three launches a candidate.
-    if let Some(step) = native_topk(g, logits, &vals, &idx, rows, vocab, cap) {
-        steps.push(step);
-    } else {
-        let chunk = vocab.div_ceil(ARGMAX_CHUNKS);
-        let part = g.storage(rows as u64 * ARGMAX_CHUNKS as u64 * 2);
-        let arg = g.storage(rows as u64);
-        for col in 0..cap {
-            steps.push(g.step(k.part, &[logits, &part], &[rows, vocab, ARGMAX_CHUNKS, chunk], rows * ARGMAX_CHUNKS));
-            steps.push(g.step(k.fin, &[&part, &arg], &[rows, ARGMAX_CHUNKS], rows));
-            steps.push(g.step(k.extract, &[&arg, logits, &vals, &idx], &[rows, vocab, cap, col], rows));
-        }
-    }
+    let steps = topk_rows_steps(g, k, logits, &vals, &idx, rows, vocab, cap, cap);
     g.submit(&[], &steps);
     TopkOut { vals, idx, rows, cap }
+}
+
+/// The steps that write each row's best `count` candidates, best first, into the first `count` columns of
+/// `[rows, stride]` buffers `vals` and `idx` the caller owns (`count <= stride`), for a caller that records them beside
+/// its own steps. One launch for all candidates where the device is offered the kernel and `count == stride`, else a
+/// round of three launches a candidate. Destroys `logits` (the winners are masked in place).
+#[allow(clippy::too_many_arguments)]
+pub fn topk_rows_steps(g: &Gpu, k: ReadoutKernels, logits: &DeviceBuffer, vals: &DeviceBuffer, idx: &DeviceBuffer, rows: u32, vocab: u32, stride: u32, count: u32) -> Vec<Step> {
+    assert!(count > 0 && count <= stride, "topk_rows: {count} candidates in {stride} columns");
+    if count == stride {
+        if let Some(step) = native_topk(g, logits, vals, idx, rows, vocab, stride) {
+            return vec![step];
+        }
+    }
+    let chunk = vocab.div_ceil(ARGMAX_CHUNKS);
+    let part = g.storage(rows as u64 * ARGMAX_CHUNKS as u64 * 2);
+    let arg = g.storage(rows as u64);
+    let mut steps: Vec<Step> = Vec::with_capacity(3 * count as usize);
+    for col in 0..count {
+        steps.push(g.step(k.part, &[logits, &part], &[rows, vocab, ARGMAX_CHUNKS, chunk], rows * ARGMAX_CHUNKS));
+        steps.push(g.step(k.fin, &[&part, &arg], &[rows, ARGMAX_CHUNKS], rows));
+        steps.push(g.step(k.extract, &[&arg, logits, vals, idx], &[rows, vocab, stride, col], rows));
+    }
+    steps
 }
 
 #[cfg(not(target_arch = "wasm32"))]

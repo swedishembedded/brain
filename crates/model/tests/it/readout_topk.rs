@@ -40,3 +40,31 @@ fn the_candidates_are_the_rows_best_in_order_with_ties_to_the_lower_column() {
         }
     }
 }
+
+/// `topk_rows_steps` writes into buffers the caller owns, so a decoder can record the extraction beside its own steps and
+/// keep its candidate block: all columns of a `[rows, stride]` block when `count == stride` (the one-launch kernel where the
+/// device offers it) and the first `count` columns when fewer are wanted (the chain of rounds), the rest untouched.
+#[test]
+fn the_steps_fill_the_callers_candidate_block_whole_or_in_its_first_columns() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    let idx = |n: &str| g.kernel_index(n).unwrap_or_else(|| panic!("kernel '{n}' not registered"));
+    let k = ReadoutKernels { part: idx("argmax_part"), fin: idx("argmax_final"), extract: idx("topk_extract_step") };
+    let mut rng = Lcg::new(23); // seed: fixed fixture so a failure reproduces on the same values
+    let (rows, vocab, stride) = (6u32, 20_000u32, 16u32);
+    for count in [stride, 5, 1] {
+        let host: Vec<f32> = (0..rows * vocab).map(|_| (rng.next_u32() % 3000) as f32 / 100.0 - 15.0).collect();
+        let logits = g.storage_init("logits", &host);
+        let sentinel = -777.0f32;
+        let vals = g.storage_init("vals", &vec![sentinel; (rows * stride) as usize]);
+        let ids = g.storage_init("ids", &vec![sentinel; (rows * stride) as usize]);
+        let steps = model::readout::topk_rows_steps(&g, k, &logits, &vals, &ids, rows, vocab, stride, count);
+        g.submit(&[], &steps);
+        let (vals, ids) = (g.read(&vals, (rows * stride) as usize), g.read(&ids, (rows * stride) as usize));
+        for r in 0..rows as usize {
+            let want = host_topk(&host[r * vocab as usize..(r + 1) * vocab as usize], count as usize);
+            let got: Vec<(u32, f32)> = (0..count as usize).map(|c| (ids[r * stride as usize + c] as u32, vals[r * stride as usize + c])).collect();
+            assert_eq!(got, want, "row {r}, {count} of {stride} columns");
+            assert!(vals[r * stride as usize + count as usize..(r + 1) * stride as usize].iter().all(|&v| v == sentinel), "row {r}: columns past the {count} wanted stay as they were");
+        }
+    }
+}
