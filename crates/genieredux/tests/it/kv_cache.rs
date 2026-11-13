@@ -116,3 +116,49 @@ fn flop_counts_add_up_and_the_cache_saves_the_context() {
     assert!(cached_forward_flops(&dc, HW, 5, 1) * 3 < full(6));
     assert!(cached_forward_flops(&dc, HW, 5, 1) < cached_forward_flops(&dc, HW, 9, 1));
 }
+
+/// Host-to-device bytes of each single-frame extension of a fresh cache. The
+/// per-frame cost (this frame's activations, the layer weights) is the same
+/// for every frame; what would make it grow is re-uploading the cache.
+fn upload_bytes_per_frame(frames: usize, step: impl Fn(&Gpu, &mut StCache, usize)) -> Vec<u64> {
+    let gpu = Gpu::new_cpu(&kernel_sources());
+    let mut cache = StCache::new();
+    (0..frames)
+        .map(|f| {
+            let before = gpu.uploaded_bytes();
+            step(&gpu, &mut cache, f);
+            gpu.uploaded_bytes() - before
+        })
+        .collect()
+}
+
+/// A frame whose cache already holds its full PEG history (two frames).
+const WARM: usize = 2;
+
+#[test]
+fn extending_the_dynamics_cache_uploads_no_more_per_frame_as_it_grows() {
+    let dw = tiny::dynamics(&tiny::tokenizer());
+    let dc = tiny::dynamics_config();
+    let sb = dynamics_spatial_bias(&dw, &dc, 2, 2);
+    let (all_ids, all_acts) = (ids(10), acts(10));
+    let bytes = upload_bytes_per_frame(10, |gpu, cache, f| {
+        dynamics_forward_extend(
+            gpu, cache, &all_ids[f * HW..(f + 1) * HW], &all_acts[f * 3..(f + 1) * 3], &dw, &dc, 2, 2, &sb,
+        );
+    });
+    assert!(bytes[WARM] > 0, "an extension uploads its own activations");
+    assert!(bytes[WARM..].iter().all(|&b| b == bytes[WARM]), "per-frame upload grows with the cache: {bytes:?}");
+}
+
+#[test]
+fn extending_the_decoder_cache_uploads_no_more_per_frame_as_it_grows() {
+    let tw = tiny::tokenizer();
+    let tc = tiny::tokenizer_config();
+    let sb = genieredux::bias::cpb_bias(&tw.cpb_net, 2, 2, tc.heads as usize);
+    let all = ids(10);
+    let bytes = upload_bytes_per_frame(10, |gpu, cache, f| {
+        decode_extend(gpu, cache, &all[f * HW..(f + 1) * HW], &tw, &tc, 2, 2, &sb);
+    });
+    assert!(bytes[WARM] > 0);
+    assert!(bytes[WARM..].iter().all(|&b| b == bytes[WARM]), "per-frame upload grows with the cache: {bytes:?}");
+}

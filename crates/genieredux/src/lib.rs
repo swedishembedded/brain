@@ -53,6 +53,7 @@ pub mod k {
     pub const EMBED: usize = 20;
     pub const VQ_ARGMAX_DOT: usize = 21;
     pub const GELU_ERF: usize = 22;
+    pub const COPY_COLS: usize = 23;
 }
 
 /// `(name, source)` for `Gpu::new*`, in the index order `k` / [`biased_attn`].
@@ -71,6 +72,7 @@ pub fn kernel_sources() -> Vec<(&'static str, &'static str)> {
     v.push(("embed", kernels::EMBED));
     v.push(("vq_argmax_dot", kernels::VQ_ARGMAX_DOT));
     v.push(("gelu_erf", kernels::GELU_ERF));
+    v.push(("copy_cols", kernels::COPY_COLS));
     v
 }
 
