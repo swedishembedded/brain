@@ -683,7 +683,7 @@ fn print_verdict(report: &StudyReport, oracle: Option<f64>, args: &Args, targets
              192-probe, {t}-task aggregate) sits below b_base {:.3} - the untrained base's zero-shot score on ONLY\n\
              probe T1's 16 probes (its score on the other {} probe sets was never separately measured, so this is a\n\
              same-task-scale comparison, not an apples-to-apples 192-probe baseline) - and a last-task-only model's {};\n\
-             BWT {:+.3}; the cycle-1 canary went {r_1_1:.3} -> {r_n_1:.3}. rho(N) and its OLS slope over cycle index are\n\
+             BWT {}; the cycle-1 canary went {r_1_1:.3} -> {r_n_1:.3}. rho(N) and its OLS slope over cycle index are\n\
              NOT reliable plasticity summary statistics here: rho is a ratio whose denominator (the fresh-adapter\n\
              control) is sometimes itself near zero, so a large or small ratio can say more about the denominator than\n\
              the numerator. This does NOT mean the fresh control sat near the floor throughout - read the per-cycle\n\
@@ -692,7 +692,7 @@ fn print_verdict(report: &StudyReport, oracle: Option<f64>, args: &Args, targets
             report.b_base,
             t - 1,
             last_only.map(|v| format!("{v:.3}")).unwrap_or_else(|| "n/a".to_string()),
-            report.bwt,
+            report.bwt.map_or("unmeasured".to_string(), |v| format!("{v:+.3}")),
             report
                 .plasticity_slope
                 .map(|s| format!("{:+.4}/cycle, 95% CI [{:+.4}, {:+.4}] - one seed times {t} points is a diagnostic, not a test", s.slope, s.ci_lo, s.ci_hi))

@@ -520,7 +520,7 @@ fn twelve_cycles_run_end_to_end_but_capability_does_not_accumulate_at_this_scale
     }
     // H2 - the reported aggregates really are computed from that matrix.
     assert!((report.acc - continual::acc(r)).abs() < 1e-12);
-    assert!((report.bwt - continual::bwt(r)).abs() < 1e-12);
+    assert_eq!(report.bwt, continual::bwt(r));
 
     // H3 - both structural properties held, over a non-trivial amount.
     // `assert_trained_spans_were_sampled` already ran in-harness on EVERY
@@ -599,7 +599,7 @@ fn twelve_cycles_run_end_to_end_but_capability_does_not_accumulate_at_this_scale
          {CYCLES}-task aggregate) sits BELOW b_base {:.3} - the untrained base's zero-shot score on ONLY probe T1's 16 \
          probes, since the base's score on the other {} probe sets was never separately measured, so this is a \
          same-task-scale comparison, not an apples-to-apples 192-probe baseline - and only barely above a last-task-only \
-         model's {last_only:.3}; BWT {:+.3}; the cycle-1 canary fell {r_1_1:.3} -> {r_n_1:.3}; only {learned} of {CYCLES} \
+         model's {last_only:.3}; BWT {}; the cycle-1 canary fell {r_1_1:.3} -> {r_n_1:.3}; only {learned} of {CYCLES} \
          cycles reached R[k][k] >= {PREREG_MIN_DIAGONAL:.2}. rho(N) = {rho_n:.3} and its OLS slope over cycle index are \
          NOT reliable plasticity summary statistics here: rho is a ratio whose denominator (the fresh-adapter control) \
          is sometimes itself near zero, which can produce large or small ratios that say more about the denominator than \
@@ -618,7 +618,7 @@ fn twelve_cycles_run_end_to_end_but_capability_does_not_accumulate_at_this_scale
         report.acc,
         report.b_base,
         CYCLES - 1,
-        report.bwt,
+        report.bwt.map_or("unmeasured".to_string(), |v| format!("{v:+.3}")),
         report.plasticity_slope.map(|s| (s.ci_lo, s.ci_hi)),
     );
 }

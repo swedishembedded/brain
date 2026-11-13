@@ -555,7 +555,8 @@ pub struct StudyReport {
     pub joint_oracle_acc: Option<f64>,
     pub promotions: usize,
     pub acc: f64,
-    pub bwt: f64,
+    /// `None` below two cycles: nothing earlier to have forgotten.
+    pub bwt: Option<f64>,
     /// See [`xfer_vs_fresh_control`] - NOT the literature's FWT metric.
     pub xfer_vs_fresh: Option<f64>,
     pub plasticity_slope: Option<bench::metrics::Slope>,
@@ -609,6 +610,7 @@ impl StudyReport {
 
     pub fn summary(&self) -> String {
         let t = self.r_matrix.len();
+        let bwt = self.bwt.map_or("unmeasured".to_string(), |v| format!("{v:+.3}"));
         let xvf = self.xfer_vs_fresh.map(|v| format!("{v:+.3}")).unwrap_or_else(|| "n/a".to_string());
         let rho_n = self.records.last().and_then(|r| r.plasticity_ratio).map(|v| format!("{v:.3}")).unwrap_or_else(|| "n/a".to_string());
         let slope = match self.plasticity_slope {
@@ -635,13 +637,13 @@ impl StudyReport {
             format!("{}   mean {:.3}", self.b_fresh.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>().join(" "), mean(&self.b_fresh))
         };
         format!(
-            "ACC {:.3}   BWT {:+.3}   xfer_vs_fresh {xvf}   promotions {}/{t}   rejects: {causes}\n\
+            "ACC {:.3}   BWT {bwt}   xfer_vs_fresh {xvf}   promotions {}/{t}   rejects: {causes}\n\
              chance baseline b_base (untrained base on probe T1) {:.3}\n\
              b_fresh (Arm 2, a fresh adapter per cycle on that cycle's own probe): {fresh}\n\
              plasticity rho(N) {rho_n}   {slope}\n\
              joint-training oracle ACC {oracle}   last-task-only ACC {last_only}\n\
              split integrity: {} frozen probe ids checked disjoint from {} explore ids and {} rehearsal ids\n",
-            self.acc, self.bwt, self.promotions, self.b_base, self.probe_ids_checked, self.explore_ids_checked, self.rehearsal_ids_checked
+            self.acc, self.promotions, self.b_base, self.probe_ids_checked, self.explore_ids_checked, self.rehearsal_ids_checked
         )
     }
 }
@@ -658,12 +660,13 @@ pub fn acc(r: &[Vec<f64>]) -> f64 {
 
 /// `BWT = (1/(T-1)) Σ_{j<T} (R[T][j] - R[j][j])` - how much every earlier
 /// task moved, on average, between the moment it was learned and the end of
-/// the run. Negative is forgetting.
+/// the run. Negative is forgetting. `None` for fewer than two cycles: there
+/// is no earlier task to have forgotten, which is unmeasured rather than zero.
 ///
 /// The one implementation lives in `audit::retention`, beside the SPARSE
 /// form a sampling reader needs. Two copies of a definition this short are
 /// how two arms of one claim quietly stop meaning the same thing.
-pub fn bwt(r: &[Vec<f64>]) -> f64 {
+pub fn bwt(r: &[Vec<f64>]) -> Option<f64> {
     audit::retention::bwt_dense(r)
 }
 
@@ -1486,17 +1489,19 @@ mod tests {
     fn bwt_is_negative_when_earlier_tasks_decayed() {
         let r = forgetting_matrix();
         // ((0.60 - 0.90) + (0.70 - 0.80)) / 2 = -0.20
-        assert!((bwt(&r) - -0.20).abs() < 1e-12, "{}", bwt(&r));
-        assert!(bwt(&r) < 0.0, "a matrix whose earlier tasks decayed must report negative BWT");
+        let got = bwt(&r).expect("three cycles measure a BWT");
+        assert!((got - -0.20).abs() < 1e-12, "{got}");
+        assert!(got < 0.0, "a matrix whose earlier tasks decayed must report negative BWT");
     }
 
     #[test]
     fn bwt_is_positive_when_later_training_helped_earlier_tasks() {
         let r = vec![vec![0.50], vec![0.55, 0.60], vec![0.70, 0.75, 0.65]];
         // ((0.70 - 0.50) + (0.75 - 0.60)) / 2 = 0.175
-        assert!((bwt(&r) - 0.175).abs() < 1e-12, "{}", bwt(&r));
-        // A single-cycle study has nothing to have forgotten.
-        assert_eq!(bwt(&[vec![0.9]]), 0.0);
+        let got = bwt(&r).expect("three cycles measure a BWT");
+        assert!((got - 0.175).abs() < 1e-12, "{got}");
+        // A single-cycle study has nothing to have forgotten: unmeasured, not zero.
+        assert_eq!(bwt(&[vec![0.9]]), None);
     }
 
     #[test]
