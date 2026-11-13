@@ -64,9 +64,9 @@
 //! FD check on every adapter, and a training demonstration with the base
 //! weights provably frozen) for all three, including the DiT
 //! (`dit_lora`, fold-then-run through a fresh `dit_train::Trainer` per
-//! step). The vocoder also has a from-scratch STFT-magnitude adversarial
-//! discriminator (gradchecked end to end, including through the STFT, and
-//! shown to learn). The DiT also has an INT8 STORAGE tier (`dit_int8`,
+//! step). The vocoder also has a from-scratch multi-resolution
+//! STFT-magnitude adversarial fine-tune (`discriminator`, `adversarial::GanTrainer`: LSGAN and
+//! feature-matching losses, the generator gradient gradchecked end to end through the STFT and the vocoder). The DiT also has an INT8 STORAGE tier (`dit_int8`,
 //! smaller checkpoint only - no compute-path change) and `model::Shardable`
 //! pipeline-parallel sharding (`dit_shard::DitStage` - inference-time
 //! layer-range splitting across devices, no backward through the pipeline;
@@ -98,6 +98,7 @@
 //! caps single buffers below the embedding/head tensors) cannot run it -
 //! see this crate's roadmap ledger.
 
+pub mod adversarial;
 pub mod caps;
 pub mod condition_encoder;
 pub mod config;

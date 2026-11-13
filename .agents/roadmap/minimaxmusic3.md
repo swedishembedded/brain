@@ -164,9 +164,10 @@ an order of magnitude inside the workspace's `(4e-3, 8e-2)` gate. Wired
 into `make test/gradcheck` via `crates/gradcheck/tests/it/imaging_models.rs`'s
 `check!` macro, same as every other model's gate.
 
-The loss used to gradcheck is a plain MSE reconstruction loss - enough to
+The loss used to gradcheck is a plain MSE reconstruction loss, enough to
 prove every gradient is analytically correct, which is what gradcheck
-exists to do. It is NOT the loss a real training run would use.
+exists to do. The adversarial terms join it at the output waveform through
+`Trainer::backward_joint` (Phase 6).
 
 `overfits_a_single_batch` closes the other half of this workspace's
 training bar (gradcheck proves the gradients; only actually training
@@ -206,42 +207,59 @@ trainable parameters.
 `crates/mimi::recon`'s module doc lists as absent workspace-wide (a GAN
 discriminator + adversarial + feature-matching training stack), closed
 here scoped to what this vocoder needs, not generalized into `crates/mimi`.
-A single-resolution STFT-magnitude PatchGAN discriminator (`|STFT| ->
+An STFT-magnitude PatchGAN discriminator (`|STFT| ->
 Conv2d -> LeakyReLU -> Conv2d -> LeakyReLU -> Conv2d -> patch logits`),
-LSGAN adversarial loss, and an L1 feature-matching loss. Every conv reuses
-the workspace's EXISTING `conv2d`/`conv2d_dx`/`conv2d_dw` kernels (2D conv
-already had full forward+backward, from an earlier, unrelated port) plus
-`leaky_relu`/`leaky_relu_bwd` (its own doc comment already named GAN
-vocoder discriminators as the anticipated use) and the
-`add_chan_inplace`/`bias_grad_ncl` bias pair from Phase 4 - both already
-layout-generic over `[rows, C, inner]`, and NCHW's `inner = H*W` fits that
-unchanged. No new WGSL kernel was needed for the discriminator itself.
+LSGAN adversarial loss, and an L1 feature-matching loss on the first
+layer's post-activation (`a1`), run at a list of STFT resolutions
+(`MrdConfig`: one discriminator per `(n_fft, hop)`; a single resolution is
+a list of one, one implementation). Every conv reuses the workspace's
+EXISTING `conv2d`/`conv2d_dx`/`conv2d_dw` kernels plus `leaky_relu`/
+`leaky_relu_bwd`, the `add_chan_inplace`/`bias_grad_ncl` bias pair from
+Phase 4 and `add2` (which joins the feature-matching gradient to the
+adversarial one at `a1`). No new WGSL kernel.
 
-The one new piece is the STFT: a direct DFT-matrix formulation
-(`O(n_fft^2)` per frame, not an FFT butterfly) - deliberately, since a
-windowed matmul against a fixed, precomputed cos/sin basis is trivially
-differentiable (backward is the same matmul against the transposed basis),
-where backpropagating through an FFT algorithm's butterfly network would
-be real additional work for no benefit at the frame sizes a short training
-clip needs.
+The STFT is a direct DFT-matrix formulation (`O(n_fft^2)` per frame, not an
+FFT butterfly), deliberately: a windowed product with a fixed cos/sin basis
+is trivially differentiable (backward is the same product against the
+transposed basis), where an FFT's butterfly network would be additional
+backward work for no benefit at the frame sizes a short training clip needs.
 
-Every gradient is checked, including through the STFT: a
-`full_chain_waveform_gradient_matches_finite_differences` test perturbs
-the FAKE waveform directly and confirms the LSGAN generator loss moves the
-way `stft_mag_bwd(discriminator_backward(...).d_mag)` predicts - the exact
-seam a joint generator+discriminator training loop would use. The
-discriminator's own conv backward is FD-gated the same way as the vocoder
-itself (Phase 4's `directional`-style check), and
-`discriminator_learns_to_separate_real_and_fake` trains a discriminator
-from scratch on two different waveform populations and measures its LSGAN
-loss more than halve.
+The joint loop is `adversarial::GanTrainer`, in the HiFi-GAN order per step:
+generator forward; discriminator LSGAN step (own AdamW, `disc_lr`) once
+`disc_start_step` steps have passed; the generator objective
+`rec_weight * MSE + adv_weight * LSGAN-G + fm_weight * FM` differentiated
+against the UPDATED discriminators (`generator_adversarial`, through
+`stft_mag_bwd` to the waveform), that gradient added to the MSE gradient at
+the vocoder's output (`Trainer::backward_joint`) and the vocoder backward
+run on from there; generator AdamW step (`gen_lr`). Both optimisers are
+`model::hostopt::HostAdam`. Losses are per-row (one mono waveform per
+batch x channel row), averaged over rows, summed over resolutions.
 
-Scope, stated honestly: this proves the mechanism and wires every piece a
-real adversarial fine-tune of the vocoder would need, but does not run
-that joint generator+discriminator loop against the actual vocoder
-weights, and is single-resolution (multi-resolution - running the same
-discriminator at several `(n_fft, hop)` settings and summing the losses -
-is a straightforward parameterization of what exists, not yet exercised).
+Defaults are the published BigVGAN/HiFi-GAN recipe's, NOT MiniMax's:
+MiniMax publishes no vocoder training code and the checkpoint's config names
+no discriminator. Three resolutions with `hop = n_fft / 4` at `n_fft` 512,
+1024, 2048; feature-matching weight 2 (HiFi-GAN), adversarial and
+reconstruction weight 1, both learning rates 2e-4, `disc_start_step` 0
+(HiFi-GAN trains both from step 0; set it to the MSE-only phase's length to
+start the discriminator against a converged generator). All are
+`GanConfig` fields; the discriminator seed is random unless `disc_seed` is set.
+
+Gates (all on tiny configs, CPU): `the_joint_generator_gradient_matches_
+central_differences` (every one of the vocoder's named parameters, through
+the discriminators' STFT and convolutions, tolerance derived from
+`brain_testutil::rounding::agreement_bound`) with
+`the_gradient_check_rejects_a_backward_that_drops_the_adversarial_terms` proving the tolerance
+discriminates; `the_generator_adversarial_gradient_matches_central_
+differences` (waveform gradient, two resolutions);
+`the_multi_resolution_step_sums_the_single_resolution_steps`;
+`the_discriminator_loss_falls_when_only_it_trains`;
+`the_joint_objective_falls_over_a_short_overfit` (fixed seeds: objective
+2.13 -> 1.54, reconstruction 0.047 -> 0.018 in 400 steps);
+`the_discriminator_waits_for_its_start_step`.
+
+Not exercised: a run against the real 54M vocoder weights (the direct-DFT
+STFT at `n_fft` 2048 over multi-second audio is slow on the CPU path, and
+no real-audio dataset is wired in).
 
 ## Phase 7: RVQ depth decoder
 
@@ -1923,13 +1941,10 @@ obvious next target.
       `mm3_bench` already computes % of roof per kernel; what is missing is
       a live counter on the serving path, emitted through `Instance::
       metrics` into the executor's `extra` map, never a hardcoded count.
-- [ ] Joint generator+discriminator training against the real vocoder
-      weights (composing `train::Trainer` and `discriminator::` into one
-      loop) - the mechanism exists in both directions, the composition
-      does not
-- [ ] Multi-resolution discriminator (several `(n_fft, hop)` STFT
-      settings, summed) - the single-resolution version generalizes
-      directly but this has not been exercised
+- [ ] The joint GAN loop on the real vocoder weights and real audio
+      (`adversarial::GanTrainer` is gradchecked and overfits on tiny
+      configs; a real-weight run needs a faster STFT than the direct DFT
+      and a dataset)
 - [ ] The real short end-to-end WAV gate itself (`tests/
       e2e_short_generation.rs` exists and is correct; blocked on THIS
       machine by the int8-promotion/buffer-size limits Phase 10 records)

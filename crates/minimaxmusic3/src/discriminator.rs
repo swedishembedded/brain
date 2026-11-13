@@ -1,48 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! A single-resolution STFT-magnitude discriminator, LSGAN adversarial
-//! loss, and a feature-matching loss - the actual new-capability item
-//! `crates/mimi::recon`'s module doc lists as absent workspace-wide
-//! (a GAN discriminator + adversarial + feature-matching training stack),
-//! closed here scoped to what this vocoder needs, not generalized into
-//! `crates/mimi`.
+//! The STFT-magnitude discriminator of the vocoder's adversarial fine-tune: a PatchGAN over `|STFT(waveform)|`, the
+//! LSGAN adversarial losses and an L1 feature-matching loss, run at a list of STFT resolutions ([`MrdConfig`], one
+//! discriminator per `(n_fft, hop)`; a single resolution is a list of one).
 //!
-//! Architecture: `|STFT(waveform)| -> Conv2d -> LeakyReLU -> Conv2d ->
-//! LeakyReLU -> Conv2d -> patch logits` (PatchGAN-style: one real/fake
-//! score per time-frequency patch, not a single scalar - the standard
-//! BigVGAN/HiFi-GAN discriminator shape). Every conv reuses the existing
-//! `conv2d`/`conv2d_dx`/`conv2d_dw` device kernels (2D conv already had
-//! full forward+backward in this workspace, from an earlier, unrelated
-//! port) plus `leaky_relu`/`leaky_relu_bwd` (added anticipating exactly
-//! this use, per that kernel's own doc comment) and the
-//! `add_chan_inplace`/`bias_grad_ncl` bias pair - both already
-//! layout-generic over `[rows, C, inner]`, and NCHW's `inner = H*W` fits
-//! that without any change.
+//! Architecture, per resolution: `|STFT(waveform)| -> Conv2d -> LeakyReLU -> Conv2d -> LeakyReLU -> Conv2d -> patch
+//! logits` (one real/fake score per time-frequency patch, not a single scalar: the BigVGAN/HiFi-GAN discriminator
+//! shape). Every conv reuses the `conv2d`/`conv2d_dx`/`conv2d_dw` device kernels, `leaky_relu`/`leaky_relu_bwd`, and
+//! the `add_chan_inplace`/`bias_grad_ncl` bias pair (layout-generic over `[rows, C, inner]`; NCHW's `inner = H*W`
+//! fits it unchanged). The feature-matching gradient joins the adversarial one at the first layer's post-activation
+//! (`a1`) with one `add2`.
 //!
-//! The STFT itself is the one new piece: a direct DFT-matrix formulation
-//! (`O(n_fft^2)` per frame, not an FFT butterfly), deliberately - a
-//! windowed matmul against a FIXED cos/sin basis (evaluated in the loops,
-//! not stored) is trivially
-//! differentiable (backward is the same matmul against the transposed
-//! basis), where backpropagating through an FFT algorithm's butterfly
-//! network would be real additional work for no benefit at the frame
-//! sizes a short training clip needs.
+//! The STFT is a direct DFT-matrix formulation (`O(n_fft^2)` per frame, not an FFT butterfly), deliberately: a
+//! windowed product with a FIXED cos/sin basis (evaluated in the loops, not stored) has a backward that is the same
+//! product against the transposed basis ([`stft_mag_bwd`]), where an FFT's butterfly network would be additional
+//! backward work for no benefit at the frame sizes a short training clip needs.
 //!
-//! Scope: this proves the mechanism (a discriminator that learns to tell
-//! two populations apart, with every gradient - including through the
-//! STFT, back to the waveform - checked against finite differences) and
-//! wires every piece an end-to-end adversarial fine-tune of the vocoder
-//! would need. It does NOT run that joint generator+discriminator training
-//! loop against the real vocoder - that composition is tracked separately
-//! as further work, not landed here.
+//! Entry points: [`mrd_discriminator_step`] (discriminator loss and weight gradients on real vs generated audio) and
+//! [`generator_adversarial`] (the generator's adversarial and feature-matching losses and their gradient on the
+//! generated waveform, which the vocoder's backward continues from; [`crate::adversarial`] composes both with the
+//! vocoder trainer). MiniMax publishes no vocoder training code, so the resolutions and weights this crate defaults
+//! to are the published BigVGAN/HiFi-GAN recipe's ([`crate::adversarial::GanConfig`]), not MiniMax's.
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use std::f32::consts::PI;
 
-/// `PIPELINES` this module's forward/backward needs, over and above
-/// `train::PIPELINES` (which already registers `add_chan_inplace`/
-/// `bias_grad_ncl`) - conv2d's own family plus leaky ReLU.
+/// `PIPELINES` this module's forward/backward needs: conv2d's family, the bias pair, leaky ReLU and `add2`.
 pub const PIPELINES: &[(&str, &str)] = &[
     ("conv2d", kernels::CONV2D),
     ("conv2d_dx", kernels::CONV2D_DX),
@@ -51,6 +35,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("bias_grad_ncl", kernels::BIAS_GRAD_NCL),
     ("leaky_relu", kernels::LEAKY_RELU),
     ("leaky_relu_bwd", kernels::LEAKY_RELU_BWD),
+    ("add2", kernels::ADD2),
 ];
 const CONV2D: usize = 0;
 const CONV2D_DX: usize = 1;
@@ -59,11 +44,12 @@ const BIAS_ADD: usize = 3;
 const BIAS_GRAD: usize = 4;
 const LEAKY_RELU: usize = 5;
 const LEAKY_RELU_BWD: usize = 6;
+const ADD2: usize = 7;
 const SLOPE: f32 = 0.1;
 
 /// One frame's magnitude STFT config: `n_fft`-point direct DFT, `hop`-size
 /// stride, a Hann analysis window.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StftConfig {
     pub n_fft: usize,
     pub hop: usize,
@@ -158,6 +144,7 @@ pub struct DiscWeights {
     pub conv_out: Conv2dW, // c2 -> 1
 }
 
+#[derive(Clone, Debug)]
 pub struct DiscConfig {
     pub c1: usize,
     pub c2: usize,
@@ -207,23 +194,24 @@ fn forward(gpu: &Gpu, w: &DiscWeights, cfg: &DiscConfig, mag: &[f32], f_bins: us
     (got, Cache { mag_in, h1, a1, h2, a2, dims: [(1, f_bins, frames), (cfg.c1, h1o, w1o), (cfg.c2, h2o, w2o), (1, h3o, w3o)] })
 }
 
-/// `dW`/`db` for each of the 3 convs, `d_a1` and `d_mag` (so a real joint
-/// generator+discriminator training loop could combine `d_a1` with
-/// `feature_matching_loss`'s own gradient, then continue backprop through
-/// `conv1` and into `stft_mag_bwd`) from `d_logits`. `d_mag` is exercised
-/// by `full_chain_waveform_gradient_matches_finite_differences`; `d_a1`
-/// is real output of this same backward pass but has no caller yet - the
-/// joint loop this crate does not (yet) run.
-#[allow(dead_code)]
+/// The first layer's post-activation (`a1`), the feature map the feature-matching loss compares.
+fn features(gpu: &Gpu, cache: &Cache) -> Vec<f32> {
+    let (c, h, w) = cache.dims[1];
+    gpu.read(&cache.a1, c * h * w)
+}
+
+/// `dW`/`db` for each of the 3 convs and the gradient on the input magnitudes (`d_mag`, which [`stft_mag_bwd`]
+/// carries on to the waveform).
 struct Grads {
     d_conv1: Conv2dW,
     d_conv2: Conv2dW,
     d_conv_out: Conv2dW,
-    d_a1: Vec<f32>,
     d_mag: Vec<f32>,
 }
 
-fn backward(gpu: &Gpu, w: &DiscWeights, cfg: &DiscConfig, cache: &Cache, d_logits: &[f32]) -> Grads {
+/// Backward from `d_logits`; `d_feat`, when given, is a gradient on the first layer's post-activation `a1` (the
+/// feature-matching loss) added to the one flowing back from the logits before the first layer's backward.
+fn backward(gpu: &Gpu, w: &DiscWeights, cfg: &DiscConfig, cache: &Cache, d_logits: &[f32], d_feat: Option<&[f32]>) -> Grads {
     let [(_, f_bins, frames), (_, h1o, w1o), (_, h2o, w2o), (_, h3o, w3o)] = cache.dims;
     let mut steps: Vec<Step> = Vec::new();
     let d_logits_b = gpu.storage_init("d_logits", d_logits);
@@ -235,7 +223,17 @@ fn backward(gpu: &Gpu, w: &DiscWeights, cfg: &DiscConfig, cache: &Cache, d_logit
     let d_h2 = leaky_relu_bwd(gpu, &mut steps, &cache.h2, &d_a2, cfg.c2 * h2o * w2o);
     let dw2 = gpu.storage(w.conv2.weight.len() as u64);
     let db2 = gpu.storage(w.conv2.bias.len() as u64);
-    let d_a1 = conv2d_bias_bwd(gpu, &mut steps, &w.conv2, cfg.c1, h1o, w1o, cfg.c2, cfg.k, 1, h2o, w2o, &cache.a1, &d_h2, &dw2, &db2);
+    let d_a1_logits = conv2d_bias_bwd(gpu, &mut steps, &w.conv2, cfg.c1, h1o, w1o, cfg.c2, cfg.k, 1, h2o, w2o, &cache.a1, &d_h2, &dw2, &db2);
+    let a1_len = cfg.c1 * h1o * w1o;
+    let d_a1 = match d_feat {
+        Some(feat) => {
+            assert_eq!(feat.len(), a1_len, "feature gradient must match the first layer's activation");
+            let sum = gpu.storage(a1_len as u64);
+            steps.push(gpu.step(ADD2, &[&d_a1_logits, &gpu.storage_init("d_feat", feat), &sum], &[a1_len as u32], a1_len as u32));
+            sum
+        }
+        None => d_a1_logits,
+    };
 
     let d_h1 = leaky_relu_bwd(gpu, &mut steps, &cache.h1, &d_a1, cfg.c1 * h1o * w1o);
     let dw1 = gpu.storage(w.conv1.weight.len() as u64);
@@ -247,7 +245,6 @@ fn backward(gpu: &Gpu, w: &DiscWeights, cfg: &DiscConfig, cache: &Cache, d_logit
         d_conv1: Conv2dW { weight: gpu.read(&dw1, w.conv1.weight.len()), bias: gpu.read(&db1, w.conv1.bias.len()) },
         d_conv2: Conv2dW { weight: gpu.read(&dw2, w.conv2.weight.len()), bias: gpu.read(&db2, w.conv2.bias.len()) },
         d_conv_out: Conv2dW { weight: gpu.read(&dw_out, w.conv_out.weight.len()), bias: gpu.read(&db_out, w.conv_out.bias.len()) },
-        d_a1: gpu.read(&d_a1, cfg.c1 * h1o * w1o),
         d_mag: gpu.read(&d_mag, f_bins * frames),
     }
 }
@@ -314,11 +311,7 @@ pub fn feature_matching_loss(feat_real: &[f32], feat_fake: &[f32]) -> (f32, Vec<
     (loss, grad)
 }
 
-/// One discriminator update: forward on `real`/`fake` waveforms, the LSGAN
-/// D loss, backward into `(d_conv1, d_conv2, d_conv_out)`. It returns only
-/// the loss and those three weight gradients; a joint G+D loop would also
-/// need the gradient on the fake magnitudes to continue into the generator
-/// through [`stft_mag_bwd`].
+/// One discriminator update's result: the LSGAN D loss and the gradient of each of its three convolutions.
 pub struct DStep {
     pub loss: f32,
     pub d_conv1: Conv2dW,
@@ -336,13 +329,99 @@ pub fn discriminator_step(gpu: &Gpu, w: &DiscWeights, disc_cfg: &DiscConfig, stf
     let (fake_logits, fake_cache) = forward(gpu, w, disc_cfg, &fake_stft.mag, f_bins, frames);
     let (loss, d_real, d_fake) = lsgan_d_loss(&real_logits, &fake_logits);
 
-    let gr = backward(gpu, w, disc_cfg, &real_cache, &d_real);
-    let gf = backward(gpu, w, disc_cfg, &fake_cache, &d_fake);
+    let gr = backward(gpu, w, disc_cfg, &real_cache, &d_real, None);
+    let gf = backward(gpu, w, disc_cfg, &fake_cache, &d_fake, None);
     let sum = |a: &Conv2dW, b: &Conv2dW| Conv2dW {
         weight: a.weight.iter().zip(&b.weight).map(|(x, y)| x + y).collect(),
         bias: a.bias.iter().zip(&b.bias).map(|(x, y)| x + y).collect(),
     };
     DStep { loss, d_conv1: sum(&gr.d_conv1, &gf.d_conv1), d_conv2: sum(&gr.d_conv2, &gf.d_conv2), d_conv_out: sum(&gr.d_conv_out, &gf.d_conv_out) }
+}
+
+impl DiscWeights {
+    /// Every tensor in the fixed order `conv1.weight, conv1.bias, conv2.weight, conv2.bias, conv_out.weight,
+    /// conv_out.bias`, for an optimiser that updates them in place.
+    pub fn tensors_mut(&mut self) -> [&mut [f32]; 6] {
+        [&mut self.conv1.weight, &mut self.conv1.bias, &mut self.conv2.weight, &mut self.conv2.bias, &mut self.conv_out.weight, &mut self.conv_out.bias]
+    }
+}
+
+impl DStep {
+    /// The gradients in [`DiscWeights::tensors_mut`]'s order.
+    pub fn tensors(&self) -> [&[f32]; 6] {
+        [&self.d_conv1.weight, &self.d_conv1.bias, &self.d_conv2.weight, &self.d_conv2.bias, &self.d_conv_out.weight, &self.d_conv_out.bias]
+    }
+}
+
+/// A multi-resolution discriminator: one [`DiscWeights`] per STFT resolution, all of the architecture `disc`.
+#[derive(Clone, Debug)]
+pub struct MrdConfig {
+    pub resolutions: Vec<StftConfig>,
+    pub disc: DiscConfig,
+}
+
+/// One discriminator's weights per resolution of `cfg`, deterministic from `seed` (resolution `i` draws from
+/// `seed + i`, so the resolutions do not start identical).
+pub fn random_mrd_weights(cfg: &MrdConfig, seed: u64) -> Vec<DiscWeights> {
+    (0..cfg.resolutions.len()).map(|i| random_weights(&cfg.disc, seed.wrapping_add(i as u64))).collect()
+}
+
+/// [`discriminator_step`] at every resolution: the summed loss and each resolution's weight gradients.
+pub struct MrdDStep {
+    pub loss: f32,
+    pub steps: Vec<DStep>,
+}
+
+fn check_resolutions(cfg: &MrdConfig, ws: &[DiscWeights], len: usize) {
+    assert_eq!(cfg.resolutions.len(), ws.len(), "one set of discriminator weights per resolution");
+    for r in &cfg.resolutions {
+        assert!(r.num_frames(len) > 0, "a {len}-sample waveform is shorter than n_fft={}", r.n_fft);
+    }
+}
+
+pub fn mrd_discriminator_step(gpu: &Gpu, ws: &[DiscWeights], cfg: &MrdConfig, real: &[f32], fake: &[f32]) -> MrdDStep {
+    check_resolutions(cfg, ws, real.len());
+    let steps: Vec<DStep> = cfg.resolutions.iter().zip(ws).map(|(sc, w)| discriminator_step(gpu, w, &cfg.disc, sc, real, fake)).collect();
+    MrdDStep { loss: steps.iter().map(|s| s.loss).sum(), steps }
+}
+
+/// The generator's side of the adversarial game on one generated waveform.
+pub struct GenAdv {
+    /// LSGAN generator loss, summed over resolutions (unweighted).
+    pub adv_loss: f32,
+    /// Feature-matching loss, summed over resolutions (unweighted).
+    pub fm_loss: f32,
+    /// Gradient of `adv_weight * adv_loss + fm_weight * fm_loss` on the generated waveform: through the logits and,
+    /// for feature matching, the first-layer features, then each resolution's [`stft_mag_bwd`].
+    pub d_fake: Vec<f32>,
+}
+
+/// The generator's adversarial and feature-matching losses on `fake` against `real`, and their gradient on `fake`,
+/// with the discriminators held fixed. The feature-matching target is the discriminator's own `a1` on `real`.
+pub fn generator_adversarial(gpu: &Gpu, ws: &[DiscWeights], cfg: &MrdConfig, real: &[f32], fake: &[f32], adv_weight: f32, fm_weight: f32) -> GenAdv {
+    assert_eq!(real.len(), fake.len(), "real/fake must have the same length");
+    check_resolutions(cfg, ws, real.len());
+    let mut out = GenAdv { adv_loss: 0.0, fm_loss: 0.0, d_fake: vec![0.0; fake.len()] };
+    for (sc, w) in cfg.resolutions.iter().zip(ws) {
+        let (f_bins, frames) = (sc.freq_bins(), sc.num_frames(fake.len()));
+        let real_stft = stft_mag_fwd(real, sc);
+        let fake_stft = stft_mag_fwd(fake, sc);
+        let (_, real_cache) = forward(gpu, w, &cfg.disc, &real_stft.mag, f_bins, frames);
+        let (fake_logits, fake_cache) = forward(gpu, w, &cfg.disc, &fake_stft.mag, f_bins, frames);
+
+        let (adv, d_logits) = lsgan_g_loss(&fake_logits);
+        let (fm, d_feat) = feature_matching_loss(&features(gpu, &real_cache), &features(gpu, &fake_cache));
+        let d_logits: Vec<f32> = d_logits.iter().map(|g| g * adv_weight).collect();
+        let d_feat: Vec<f32> = d_feat.iter().map(|g| g * fm_weight).collect();
+        let grads = backward(gpu, w, &cfg.disc, &fake_cache, &d_logits, Some(&d_feat));
+
+        out.adv_loss += adv;
+        out.fm_loss += fm;
+        for (acc, g) in out.d_fake.iter_mut().zip(stft_mag_bwd(&fake_stft, &grads.d_mag)) {
+            *acc += g;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -384,7 +463,11 @@ mod tests {
             let o = stft_mag_fwd(x, &cfg);
             o.mag.iter().zip(&dmag).map(|(m, d)| m * d).sum()
         };
+        // Round-off allowance from `rounding::agreement_bound`: `S = sum |mag * dmag|`, and a chain is under 64
+        // binary32 roundings (an 8-term windowed DFT sum, its square root, then the accumulation over bins).
+        let s_abs: f64 = stft_mag_fwd(&x, &cfg).mag.iter().zip(&dmag).map(|(m, d)| f64::from((m * d).abs())).sum();
         let eps = 1e-3f32;
+        let abs_tol = (brain_testutil::rounding::agreement_bound(64, s_abs) / (2.0 * f64::from(eps))) as f32;
         for i in (0..x.len()).step_by(3) {
             let mut p = x.to_vec();
             p[i] = x[i] + eps;
@@ -392,7 +475,15 @@ mod tests {
             p[i] = x[i] - eps;
             let lm = loss(&p);
             let num = (lp - lm) / (2.0 * eps);
-            assert!((num - dx[i]).abs() < 1e-2 + 1e-2 * num.abs().max(dx[i].abs()), "dx[{i}]: numeric={num} analytic={}", dx[i]);
+            // A bin whose magnitude is near zero bends within a step (the magnitude is a norm): the two one-sided
+            // differences then disagree and the sample measures no gradient, as in `brain_testutil::fd::Directional`.
+            let l0 = loss(&x);
+            let (ahead, behind) = ((lp - l0) / eps, (l0 - lm) / eps);
+            let tol = abs_tol + 1e-2 * num.abs().max(dx[i].abs());
+            if (ahead - behind).abs() > tol {
+                continue;
+            }
+            assert!((num - dx[i]).abs() < tol, "dx[{i}]: numeric={num} analytic={}", dx[i]);
         }
     }
 
@@ -419,8 +510,7 @@ mod tests {
 
     /// Full-chain gradcheck: perturbing the FAKE waveform must move the
     /// LSGAN generator loss the way `stft_mag_bwd(backward(...).d_mag)`
-    /// predicts - the seam a real joint generator+discriminator training
-    /// loop would backprop the adversarial signal through.
+    /// predicts - the seam [`generator_adversarial`] hands the vocoder's backward.
     #[test]
     fn full_chain_waveform_gradient_matches_finite_differences() {
         let gpu = Gpu::new_cpu(PIPELINES);
@@ -440,7 +530,7 @@ mod tests {
         let stft = stft_mag_fwd(&fake, &stft_cfg);
         let (logits, cache) = forward(&gpu, &w, &disc_cfg, &stft.mag, f_bins, frames);
         let (_, d_logits) = lsgan_g_loss(&logits);
-        let grads = backward(&gpu, &w, &disc_cfg, &cache, &d_logits);
+        let grads = backward(&gpu, &w, &disc_cfg, &cache, &d_logits, None);
         let dx = stft_mag_bwd(&stft, &grads.d_mag);
 
         let eps = 2e-3f32;
@@ -556,5 +646,61 @@ mod tests {
             upd(&mut w.conv_out, &step.d_conv_out);
         }
         assert!(loss < loss0 * 0.5, "discriminator did not learn to separate real/fake: start={loss0} end={loss}");
+    }
+
+    /// Spec: the multi-resolution discriminator is the single-resolution one run per `(n_fft, hop)`, losses summed:
+    /// one implementation, parameterised, no second copy.
+    #[test]
+    fn the_multi_resolution_step_sums_the_single_resolution_steps() {
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let mrd = MrdConfig { resolutions: vec![StftConfig { n_fft: 8, hop: 4 }, StftConfig { n_fft: 16, hop: 8 }], disc: tiny_disc() };
+        let ws = random_mrd_weights(&mrd, 9);
+        let mut r = Lcg::new(data::rng::random_seed());
+        let (real, fake) = (r.vec_scaled(32, 0.5), r.vec_scaled(32, 0.5));
+        let multi = mrd_discriminator_step(&gpu, &ws, &mrd, &real, &fake);
+        assert_eq!(multi.steps.len(), 2);
+        let mut sum = 0.0f32;
+        for (i, sc) in mrd.resolutions.iter().enumerate() {
+            let one = discriminator_step(&gpu, &ws[i], &mrd.disc, sc, &real, &fake);
+            assert_eq!(multi.steps[i].d_conv1.weight, one.d_conv1.weight);
+            sum += one.loss;
+        }
+        assert!((multi.loss - sum).abs() <= 1e-6 * sum.abs().max(1.0), "{} vs {sum}", multi.loss);
+    }
+
+    /// Spec: `generator_adversarial`'s waveform gradient is the derivative of `adv_weight * sum LSGAN-G +
+    /// fm_weight * sum FM` over every resolution, through the STFT back to the waveform. Central differences, the
+    /// round-off allowance derived from `rounding::agreement_bound` (the loss is a sum of non-negative terms; a
+    /// chain is under 512 binary32 roundings: three 3x3 convolutions of at most 18 terms and a 16-point DFT).
+    #[test]
+    fn the_generator_adversarial_gradient_matches_central_differences() {
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let mrd = MrdConfig { resolutions: vec![StftConfig { n_fft: 8, hop: 4 }, StftConfig { n_fft: 16, hop: 8 }], disc: tiny_disc() };
+        let ws = random_mrd_weights(&mrd, 13);
+        let mut r = Lcg::new(data::rng::random_seed());
+        let (real, fake) = (r.vec_scaled(32, 0.5), r.vec_scaled(32, 0.5));
+        let (adv_w, fm_w) = (1.0f32, 2.0f32);
+        let total = |f: &[f32]| {
+            let g = generator_adversarial(&gpu, &ws, &mrd, &real, f, adv_w, fm_w);
+            adv_w * g.adv_loss + fm_w * g.fm_loss
+        };
+        let analytic = generator_adversarial(&gpu, &ws, &mrd, &real, &fake, adv_w, fm_w).d_fake;
+        let eps = 5e-3f32;
+        let abs_tol = (brain_testutil::rounding::agreement_bound(512, f64::from(total(&fake))) / (2.0 * f64::from(eps))) as f32;
+        for i in 0..fake.len() {
+            let mut p = fake.clone();
+            p[i] = fake[i] + eps;
+            let lp = total(&p);
+            p[i] = fake[i] - eps;
+            let lm = total(&p);
+            let num = (lp - lm) / (2.0 * eps);
+            // The L1 feature-matching term has kinks; a step straddling one measures nothing, so a sample whose two
+            // one-sided differences disagree is skipped (as `brain_testutil::fd::Directional` does).
+            let (ahead, behind) = ((lp - total(&fake)) / eps, (total(&fake) - lm) / eps);
+            if (ahead - behind).abs() > abs_tol + 2e-2 * ahead.abs().max(behind.abs()) {
+                continue;
+            }
+            assert!((num - analytic[i]).abs() <= abs_tol + 2e-2 * num.abs().max(analytic[i].abs()), "d_fake[{i}]: numeric={num} analytic={}", analytic[i]);
+        }
     }
 }

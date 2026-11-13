@@ -15,14 +15,11 @@
 //! discipline the host-f64 training paths elsewhere in this workspace use
 //! against their own served device forward.
 //!
-//! This lands backward/gradcheck for the vocoder's own conv/snake stack.
-//! A single-resolution STFT discriminator with the LSGAN and
-//! feature-matching losses lives in [`crate::discriminator`]; the
-//! multi-scale discriminator and the joint generator-discriminator loop are
-//! still open in the roadmap - an MSE reconstruction loss is
-//! enough to prove every gradient here is analytically correct, which is
-//! what gradcheck exists to do; it is not the loss a real training run
-//! would use.
+//! The loss is a plain MSE reconstruction against a fixed target, which is what gradcheck and the overfit test
+//! need. A real run adds an adversarial term: [`Trainer::backward_joint`] takes the gradient of any further loss on
+//! the output waveform (the STFT discriminators' LSGAN and feature-matching terms,
+//! [`crate::discriminator::generator_adversarial`]) and continues the same backward from it;
+//! [`crate::adversarial::GanTrainer`] owns that joint generator-discriminator loop.
 
 use audio::conv::{conv1d_bwd, conv1d_fwd, convtr1d_bwd, convtr1d_fwd, Conv1d, ConvKernels};
 use audio::snake::{snake1d_bwd_dalpha, snake1d_bwd_dx, snake1d_fwd, Snake1d, SnakeKernels};
@@ -335,9 +332,9 @@ fn block_fwd(gpu: &Gpu, steps: &mut Vec<Step>, block: &VocoderBlockD, stride: u3
     (BlockCache { x: input.x.clone(), s1, in_dim, in_len, out_dim, out_len, stride, res }, cur)
 }
 
-/// Vocoder trainer: persistent device weights/gradients, a fixed
-/// (latents, target) pair, and an MSE reconstruction loss - enough to
-/// gradient-check every backward pass here, not a real training loss.
+/// Vocoder trainer: persistent device weights/gradients, a fixed (latents, target) pair, and an MSE reconstruction
+/// loss whose backward can be joined by the gradient of a further loss on the output waveform
+/// ([`Trainer::backward_joint`]).
 pub struct Trainer {
     gpu: Gpu,
     cfg: VocoderConfig,
@@ -404,7 +401,9 @@ impl Trainer {
         loss
     }
 
-    fn run_backward(&self) {
+    /// Backward from `rec_scale * d(MSE)/d(output) + extra`, `extra` being the gradient of some further loss on the
+    /// output waveform (`[batch * 2, out_len]`, the layout of [`Trainer::output`]).
+    fn run_backward(&self, rec_scale: f32, extra: Option<&[f32]>) {
         let cache_ref = self.cache.borrow();
         let cache = cache_ref.as_ref().expect("Trainer::backward called before a forward (loss()) ran");
         let gpu = &self.gpu;
@@ -412,10 +411,14 @@ impl Trainer {
         let rows = cache.rows;
         let n = (rows * cache.out_len) as usize;
 
-        // d(MSE)/d(output) = (output - target) / n.
+        // d(MSE)/d(output) = (output - target) / n, plus the gradient of any further loss on the output.
         let got = gpu.read(&cache.output, n);
         let want = &self.target;
-        let d_loss: Vec<f32> = got.iter().zip(want).map(|(a, b)| (a - b) / n as f32).collect();
+        let mut d_loss: Vec<f32> = got.iter().zip(want).map(|(a, b)| rec_scale * (a - b) / n as f32).collect();
+        if let Some(extra) = extra {
+            assert_eq!(extra.len(), n, "Trainer::backward_joint: the extra gradient must cover every output sample");
+            d_loss.iter_mut().zip(extra).for_each(|(d, e)| *d += e);
+        }
         let d_output = gpu.storage_init("d_output", &d_loss);
 
         let mut steps: Vec<Step> = Vec::new();
@@ -511,11 +514,27 @@ impl Trainer {
         l
     }
     pub fn backward(&self) {
-        self.run_backward();
+        self.run_backward(1.0, None);
     }
 
-    /// The last forward's output waveform - test-only, to check this
-    /// module's own forward against `vocoder::forward`'s served path.
+    /// [`Trainer::backward`] of `rec_scale * MSE + L`, where `d_output_extra` is `dL/d(output)` on the last
+    /// forward's output (the adversarial terms, already weighted).
+    pub fn backward_joint(&self, rec_scale: f32, d_output_extra: &[f32]) {
+        self.run_backward(rec_scale, Some(d_output_extra));
+    }
+
+    /// The reconstruction target, `[batch * 2, out_len]`.
+    pub fn target(&self) -> &[f32] {
+        &self.target
+    }
+
+    /// Samples per output channel row.
+    pub fn out_len(&self) -> usize {
+        self.length * self.cfg.upsampling_ratios.iter().product::<u32>() as usize
+    }
+
+    /// The last forward's output waveform, `[batch * 2, out_len]`: what the discriminators score, and what the
+    /// serving-forward parity test checks against `vocoder::forward`.
     pub fn output(&self) -> Vec<f32> {
         let cache_ref = self.cache.borrow();
         let cache = cache_ref.as_ref().expect("Trainer::output called before a forward (loss()) ran");
