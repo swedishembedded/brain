@@ -77,11 +77,15 @@ fn world() -> World {
     std::fs::write(root.join("truth.jsonl"), synthetic_jsonl(&SyntheticTask::new(320, 0, 60))).unwrap();
     std::fs::write(root.join("control.jsonl"), synthetic_jsonl(&control)).unwrap();
     // The same desks test split plus a second family whose desks are rotated by
-    // one place: a model that learned the first mapping is wrong on it.
+    // one place: a model that learned the first mapping is wrong on it. Its
+    // tickets are numbered right after the desks examples, so the two families
+    // differ only in the rotated labels; numbered from far outside the range the
+    // model trained on, the head's answer on them was close to arbitrary and the
+    // rotated family sometimes passed its lift gate.
     let mut other = SyntheticTask::new(0, 0, 60);
     other.family = "other";
     other.label_shift = 1;
-    other.first_id = 10_000;
+    other.first_id = 381;
     other.seed = brain::random_seed();
     std::fs::write(root.join("mixed.jsonl"), synthetic_jsonl(&SyntheticTask::new(320, 0, 60)) + &synthetic_jsonl(&other)).unwrap();
     std::fs::write(root.join("policy.json"), policy(r#", "required_families": ["desks"]"#)).unwrap();
@@ -117,7 +121,7 @@ fn only_a_model_that_beats_its_baseline_is_promoted_and_a_failed_gate_changes_no
     // With the second family in the test split the model is measured on it, and fails there.
     let mixed = w.promote("good", "mixed.jsonl", "policy-both.json");
     let failed: Vec<&str> = mixed.verdict.failures().map(|g| g.name.as_str()).collect();
-    assert!(failed.contains(&"required_family:other:min_accuracy_lift"), "{failed:?}");
+    assert!(failed.contains(&"required_family:other:min_accuracy_lift"), "{failed:?}\n{}", mixed.verdict);
     assert_untouched(&w, "good");
 
     // The same checkpoint meets the policy it was trained for.
