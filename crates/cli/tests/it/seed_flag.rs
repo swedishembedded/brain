@@ -58,7 +58,7 @@ const SEEDED_VERBS: &[&[&str]] = &[
     &["flux2", "lora_train", "--data", "d", "--save", "s"],
     &["wan", "t2v", "--prompt", "p"],
     &["wan", "lora_train", "--data", "d", "--save", "s"],
-    &["ltxv", "t2v"],
+    &["ltxv", "t2v", "--prompt", "p"],
     &["qwen3tts", "finetune"],
     &["yolov8", "train"],
     &["zipdepth", "train"],

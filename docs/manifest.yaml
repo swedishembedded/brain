@@ -191,6 +191,8 @@ navigation:
         path: examples/learning/visualclick.md
       - source: samples/models/flux2/README.md
         path: examples/models/flux2.md
+      - source: samples/models/ltxv/README.md
+        path: examples/models/ltxv.md
       - source: samples/models/sam2/README.md
         path: examples/models/sam2.md
       - source: samples/models/wan/README.md
@@ -305,10 +307,6 @@ navigation:
         path: examples/shell/timeline/lifecycle.md
       - source: samples/shell/timeline/predict/README.md
         path: examples/shell/timeline/predict.md
-      - source: samples/shell/videogen/character_replace/README.md
-        path: examples/shell/videogen/character_replace.md
-      - source: samples/shell/videogen/ltxv/README.md
-        path: examples/shell/videogen/ltxv.md
       - source: samples/study/chat/README.md
         path: examples/study/chat.md
       - source: samples/study/document/README.md

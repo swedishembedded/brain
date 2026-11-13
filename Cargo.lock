@@ -2004,6 +2004,7 @@ dependencies = [
 name = "brain-ltxv"
 version = "5.1.0"
 dependencies = [
+ "brain-arcface",
  "brain-audio",
  "brain-backend-cpu",
  "brain-capability",
@@ -2011,6 +2012,7 @@ dependencies = [
  "brain-data",
  "brain-diffusion",
  "brain-dit",
+ "brain-flux2",
  "brain-gemma4",
  "brain-gpu-core",
  "brain-imaging",
@@ -2019,6 +2021,7 @@ dependencies = [
  "brain-model",
  "brain-modelstore",
  "brain-residency",
+ "brain-sam2",
  "brain-testutil",
  "brain-vae",
  "brain-weightset",
@@ -6850,6 +6853,18 @@ version = "5.1.0"
 dependencies = [
  "brain-flux2",
  "brain-invoke",
+]
+
+[[package]]
+name = "sample-models-ltxv"
+version = "5.1.0"
+dependencies = [
+ "brain-audio",
+ "brain-capability",
+ "brain-invoke",
+ "brain-loader",
+ "brain-ltxv",
+ "serde_json",
 ]
 
 [[package]]

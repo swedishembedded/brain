@@ -35,6 +35,7 @@
 //! by sending an email to info@swedishembedded.com.
 
 pub mod doctor;
+pub mod components;
 pub mod model_dir;
 pub mod placement;
 pub mod progress;

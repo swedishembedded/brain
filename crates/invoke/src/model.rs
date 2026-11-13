@@ -31,12 +31,48 @@ pub struct Model<'a> {
     pub build: &'a BuildProvider<'a>,
 }
 
+/// A step a program builds on a model's actions (chaining clips, say),
+/// offered beside the actions themselves.
+pub struct Workflow<'a> {
+    pub name: &'a str,
+    pub summary: &'a str,
+    /// The action it runs: its weights are resolved as for that action, and
+    /// `--help` lists that action's flags after the workflow's own.
+    pub action: &'a str,
+    /// The workflow's own arguments, for `--help`.
+    pub usage: &'a str,
+    pub run: &'a dyn Fn(&WorkflowCall) -> Result<(), String>,
+}
+
+/// What a running workflow is handed.
+pub struct WorkflowCall<'a> {
+    /// `<program> <workflow>`, for messages.
+    pub program: &'a str,
+    pub provider: Arc<dyn Provider>,
+    /// Its arguments, the weight-role flags already taken out.
+    pub args: &'a [String],
+}
+
 /// Run `argv` (`<action> [flags]`) against `model`. Returns the exit code.
 pub fn run_model(program: &str, model: &Model, argv: &[String]) -> i32 {
+    run_model_with(program, model, &[], argv)
+}
+
+/// [`run_model`], with `workflows` offered beside the actions.
+pub fn run_model_with(program: &str, model: &Model, workflows: &[Workflow], argv: &[String]) -> i32 {
     let p = Program { name: program };
     let help = argv.iter().any(|a| a == "-h" || a == "--help");
+    if let Some(wf) = argv.first().and_then(|a| workflows.iter().find(|w| w.name == a)) {
+        return run_workflow(program, model, wf, &argv[1..], help);
+    }
     let Some(action) = argv.first().filter(|a| !a.starts_with('-')) else {
         print!("{}", usage(&p, &model.manifest));
+        if !workflows.is_empty() {
+            println!("\nWORKFLOWS:");
+            for w in workflows {
+                println!("  {:<18} {}", w.name, w.summary);
+            }
+        }
         if let Some((_, spec)) = model.weights {
             print!("\nWEIGHTS (resolved from the model store unless named):\n{}", crate::resolve::role_help(spec));
         }
@@ -89,6 +125,46 @@ pub fn run_model(program: &str, model: &Model, argv: &[String]) -> i32 {
     }
 }
 
+fn run_workflow(program: &str, model: &Model, wf: &Workflow, args: &[String], help: bool) -> i32 {
+    let name = format!("{program} {}", wf.name);
+    let Some(spec) = model.manifest.actions.iter().find(|a| a.name == wf.action) else {
+        eprintln!("{name}: the model has no action '{}'", wf.action);
+        return 2;
+    };
+    if help {
+        println!("{name} - {}\n\nUSAGE: {name} {}\n\nEvery flag of `{program} {}` is taken too:", wf.summary, wf.usage, wf.action);
+        let _ = crate::args::command(&format!("{program} {}", wf.action), spec).print_long_help();
+        return 0;
+    }
+    let (assembly, rest) = match model.weights {
+        None => (crate::resolve::empty_assembly(), args.to_vec()),
+        Some((arch, arch_spec)) => {
+            let (overrides, rest) = crate::resolve::role_overrides(arch_spec, args);
+            match resolve_for(arch, arch_spec, overrides, spec, &rest) {
+                Ok(a) => (a, rest),
+                Err(e) => {
+                    eprint!("{}", e.message());
+                    return e.exit_code();
+                }
+            }
+        }
+    };
+    let provider = match (model.build)(&assembly) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{name}: {e}");
+            return 1;
+        }
+    };
+    match (wf.run)(&WorkflowCall { program: &name, provider, args: &rest }) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{name}: {e}");
+            1
+        }
+    }
+}
+
 /// Resolve the weights for one action. Two checkpoints of one model that tie
 /// (a tiny and a large release side by side) are settled by the action's
 /// `variant`: the one given on the command line, else the param's default -
@@ -120,9 +196,14 @@ fn resolve_for(arch: &str, spec: &dyn ArchSpec, mut overrides: BTreeMap<String, 
 /// program takes (`--device`, `--backend`, `--brain-data-dir`), then
 /// [`run_model`], then a clean exit that lets the devices drain first.
 pub fn main(program: &str, model: &Model) -> ! {
+    main_with(program, model, &[])
+}
+
+/// [`main`], with `workflows` offered beside the actions.
+pub fn main_with(program: &str, model: &Model, workflows: &[Workflow]) -> ! {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let code = match global_options(&argv) {
-        Ok(rest) => run_model(program, model, &rest),
+        Ok(rest) => run_model_with(program, model, workflows, &rest),
         Err(e) => {
             eprintln!("{program}: {e}");
             2

@@ -216,6 +216,7 @@ sample-fly-interactive	6
 sample-imagegen-batch	6
 sample-imagegen-generate	6
 sample-models-flux2	6
+sample-models-ltxv	6
 sample-models-sam2	6
 sample-models-wan	6
 sample-npu-rockchip	6

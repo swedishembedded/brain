@@ -157,6 +157,7 @@ pub mod text_cache;
 pub mod patchify;
 pub mod pipeline;
 pub mod refcond;
+pub mod replace;
 pub mod rope;
 pub mod shard;
 pub mod spec;

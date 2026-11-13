@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! What `brain ltxv replace` may reuse from an earlier run in its work
-//! directory.
+//! What `replace` may reuse from an earlier run in its work directory.
 //!
 //! Swedish Embedded AB implements resumable generative video pipelines for
 //! its clients, so that a run which fails late does not pay for the early
@@ -19,14 +18,14 @@
 
 use std::path::{Path, PathBuf};
 
-pub(crate) struct Resume {
+pub(super) struct Resume {
     dir: PathBuf,
-    /// `--fresh`: reuse nothing.
+    /// `fresh`: reuse nothing.
     fresh: bool,
 }
 
 impl Resume {
-    pub(crate) fn new(dir: &Path, fresh: bool) -> Resume {
+    pub(super) fn new(dir: &Path, fresh: bool) -> Resume {
         Resume { dir: dir.to_path_buf(), fresh }
     }
 
@@ -35,32 +34,24 @@ impl Resume {
     }
 
     /// Whether `step`'s output in the work directory was produced under `key`.
-    pub(crate) fn holds(&self, step: &str, key: &str) -> bool {
+    pub(super) fn holds(&self, step: &str, key: &str) -> bool {
         !self.fresh && std::fs::read_to_string(self.key_path(step)).is_ok_and(|recorded| recorded == key)
     }
 
     /// Record that `step`'s output, complete on disk, was produced under
     /// `key`. Call it after the output is written, never before.
-    pub(crate) fn record(&self, step: &str, key: &str) -> Result<(), String> {
+    pub(super) fn record(&self, step: &str, key: &str) -> Result<(), String> {
         std::fs::write(self.key_path(step), key).map_err(|e| format!("{}: {e}", self.key_path(step).display()))
     }
 }
 
-/// A file as a key names it: where it is, how big and when last changed. A
-/// file replaced by another of the same name changes the key.
-pub(crate) fn stamp(path: &str) -> serde_json::Value {
-    let meta = std::fs::metadata(path).ok();
-    let modified = meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos().to_string());
-    serde_json::json!({ "path": path, "len": meta.map(|m| m.len()), "modified": modified })
-}
-
 /// FNV-1a of `bytes`, for keys that name pixels or masks without holding
 /// them. Fixed by definition, so keys stay comparable across builds.
-pub(crate) fn digest(bytes: impl IntoIterator<Item = u8>) -> u64 {
+pub(super) fn digest(bytes: impl IntoIterator<Item = u8>) -> u64 {
     bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3))
 }
 
-pub(crate) fn digest_mask(mask: &[bool]) -> u64 {
+pub(super) fn digest_mask(mask: &[bool]) -> u64 {
     digest(mask.iter().map(|&m| m as u8))
 }
 
@@ -115,15 +106,5 @@ mod tests {
         assert_eq!(digest_mask(&[true, false, true]), digest_mask(&[true, false, true]));
         assert_ne!(digest_mask(&[true, false, true]), digest_mask(&[true, true, false]));
         assert_ne!(digest_mask(&[true, false]), digest_mask(&[true, false, false]));
-    }
-
-    #[test]
-    fn a_replaced_file_changes_its_stamp() {
-        let dir = Work::new("stamp");
-        let path = dir.path().join("f").to_string_lossy().into_owned();
-        std::fs::write(&path, b"one").unwrap();
-        let before = stamp(&path);
-        std::fs::write(&path, b"three").unwrap();
-        assert_ne!(before, stamp(&path));
     }
 }

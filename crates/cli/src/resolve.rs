@@ -53,7 +53,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("qwen3tts", crate::tts_cli::run_tts),
     ("yolov8", crate::yolo_cli::run_yolo),
     ("zipdepth", crate::depth_cli::run_depth),
-    ("ltxv", crate::ltxv_cli::run_ltxv),
     ("worldmirror2", crate::mirror_cli::run_mirror),
     ("splat", crate::splat_cli::run_splat),
     // wm_cli's own `--arch`/`--model` flags (not this resolver) pick
@@ -149,6 +148,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("flux1", "brain/flux1"),
     ("flux2", "brain/flux2-klein"),
     ("wan", "brain/wan"),
+    ("ltxv", "brain/ltxv"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
@@ -286,44 +286,19 @@ pub(crate) fn arch_for_model(model: &str) -> Option<&'static str> {
     ARCH_TO_MODEL.iter().find(|(_, m)| *m == model).map(|(id, _)| *id)
 }
 
-/// The closed verb vocabulary of an [`ARCH_HANDLERS`] entry, in the form
-/// [`crate::args::canon_verb`] normalizes an input verb to -- checked
-/// BEFORE [`dispatch_arch`] acquires any weights, so a mistyped verb (`brain
-/// flux2 t2i`: "t2i" is not a real flux2 verb, the real one is
-/// `generate`/`infer`) reports "unknown subcommand" instead of first trying
-/// to pull a multi-GB default checkpoint for a command that could never run.
-///
-/// Populated only for the handlers whose `weights_env` makes that fetch
-/// real (non-empty, per `brain_arch::by_id`): for every other
-/// `ARCH_HANDLERS` entry `ensure_env_weights` is already a guaranteed
-/// instant no-op, so there is nothing expensive to guard and adding a row
-/// here would just be a second verb list to keep in sync with each
-/// handler's own match arms for no behavioral gain. `qwen3tts` is the
-/// exception among THOSE: it forwards any verb its own match arm does not
-/// recognize to the generic capability dispatcher
-/// (`crate::caps_cli::run_do`) instead of rejecting it outright, so there is
-/// no fixed vocabulary to check it against here either.
-const ARCH_HANDLER_VERBS: &[(&str, &[&str])] = &[
-    ("ltxv", &["t2v", "text2video", "upscale", "v2v", "dfr", "t2a", "extend"]),
-];
-
 /// Architectures without a dedicated CLI module that `brain finetune` trains through the SDK's generic trainers.
 const GENERIC_FINETUNE_ARCHS: &[&str] = &["ricursive"];
 
 /// Whether `verb` is one `arch` is known to accept, checked before any
 /// weight acquisition is attempted.
 ///
-/// `Some(true)`/`Some(false)` for an architecture this gate has an opinion
-/// about ([`ARCH_HANDLER_VERBS`], or an [`ARCH_TO_MODEL`] architecture
+/// `Some(true)`/`Some(false)` for an [`ARCH_TO_MODEL`] architecture,
 /// checked against its own static capability manifest -- no weights loaded,
 /// the same manifest `brain caps` prints and `run_do` itself validates the
 /// action name against, just consulted earlier). `None` for everything
 /// else: no opinion, so the caller must treat the verb as fine and proceed
 /// exactly as it did before this gate existed.
 fn verb_is_known(arch: &str, verb: &str) -> Option<bool> {
-    if let Some((_, verbs)) = ARCH_HANDLER_VERBS.iter().find(|(id, _)| *id == arch) {
-        return Some(verbs.contains(&crate::args::canon_verb(verb)));
-    }
     if let Some(model) = model_for_arch(arch) {
         return Some(catalog::manifests().iter().any(|m| m.model == model && m.actions.iter().any(|a| a.name == verb)));
     }
@@ -340,8 +315,7 @@ fn verb_is_known(arch: &str, verb: &str) -> Option<bool> {
 /// no verb at all (bare `brain flux2` is exactly as help-shaped), and now
 /// also for a verb [`verb_is_known`] says the handler will reject -- the
 /// real bug this closes: `brain flux2 t2i` used to fetch flux2's default
-/// checkpoint before `flux2_cli::run_flux2`'s own dispatch ever got a
-/// chance to say "unknown subcommand t2i".
+/// checkpoint before anything said "no action t2i".
 fn wants_weight_acquisition(arch: &str, rest: &[String]) -> bool {
     if rest.iter().any(|a| a == "-h" || a == "--help") {
         return false;

@@ -99,9 +99,8 @@ use crate::vae3d::{LtxVaeConfig, LtxVaeDecoder, LtxVaeEncoder};
 use diffusion::scheduler::{euler_ancestral_step, ltx2_sigmas, LTX2_DISTILLED_SIGMAS, LTX2_STAGE2_DISTILLED_SIGMAS};
 
 /// The real distilled schedule's own step count (`LTX2_DISTILLED_SIGMAS.len() -
-/// 1`), exposed so a caller (e.g. `crates/cli/src/ltxv_cli.rs`'s own
-/// progress line) can report it without hardcoding a number that would drift
-/// from the table itself.
+/// 1`), exposed so a caller can report it without hardcoding a number that
+/// would drift from the table itself.
 pub const LTX2_DISTILLED_STEPS: usize = LTX2_DISTILLED_SIGMAS.len() - 1;
 
 /// The refinement stage's own step count - `STAGE_2_DISTILLED_SIGMAS`'s
@@ -625,9 +624,7 @@ impl Default for GenOpts {
 }
 
 /// A generated clip: `frames` interleaved RGB8 images, each `width * height *
-/// 3` bytes - the same shape `wan::pipeline::Video` uses (this crate has no
-/// imaging dependency; the CLI turns frames into a container, see
-/// `crates/cli/src/ltxv_cli.rs`).
+/// 3` bytes - the same shape `wan::pipeline::Video` uses.
 #[derive(Clone)]
 pub struct Video {
     pub width: u32,
@@ -5331,7 +5328,7 @@ pub fn upscale(paths: &Paths, prompt: &str, clip: &Video, o: &UpscaleOpts, cance
             Refine {
                 // A refinement reads its content from a video FILE, which
                 // carries no audio latent to refine and whose own sound stays
-                // in the input file (see `ltxv_cli::upscale`).
+                // in the input file.
                 audio: None,
                 upsampler: &upsampler,
                 upsampler_path,
@@ -7462,7 +7459,7 @@ mod tests {
 
     /// Pins the real distilled schedule's step count so a future edit to
     /// `LTX2_DISTILLED_SIGMAS` (or to this constant) cannot silently drift
-    /// the two apart - `ltxv_cli`'s progress line and `generate`'s own
+    /// the two apart - a caller's progress line and `generate`'s own
     /// `total` computation both depend on this staying in sync with the
     /// table's real length.
     #[test]

@@ -41,11 +41,6 @@ samples/python/tts/cosyvoice-synth/cosyvoice_synth.py	skip	hardcodes brain/cosyv
 samples/python/tts/qwen3tts-speak/qwen3tts_speak.py	skip	hardcodes brain/qwen3tts (no --model override); needs BRAIN_QWEN3TTS_WEIGHTS + BRAIN_QWEN3TTS_CKPT
 samples/python/videogen/wan/cancel_generation.py	skip	needs real Wan weights (BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER); the mock model has no t2v action
 samples/python/videogen/wan/generate_video.py	skip	needs real Wan weights; the mock model has no t2v action, and a real run is tens of minutes
-samples/shell/videogen/ltxv/chain_images_to_video.sh	skip	direct-CLI (no D-Bus); LTX_TINY=1 gives a real wiring test with random weights, but this harness doesn't exercise the ltxv CLI path yet
-samples/shell/videogen/ltxv/character_swap.sh	skip	direct-CLI (no D-Bus); needs a source clip + SAM2 mask sequence plus BRAIN_LTXV_VAE unconditionally
-samples/shell/videogen/ltxv/images_to_video.sh	skip	direct-CLI (no D-Bus); LTX_TINY=1 gives a real wiring test with random weights, but this harness doesn't exercise the ltxv CLI path yet
-samples/shell/videogen/ltxv/_resolve_ltxv_weights.sh	skip	sourced, not run directly - internal plumbing shared by the other ltxv scripts, not an independent entry point
-samples/shell/videogen/ltxv/text_to_video.sh	skip	direct-CLI (no D-Bus); needs real BRAIN_LTXV_{DIT,TEXT_ENCODER,VAE,AUDIO_VAE} weights (no LTX_TINY path on this one)
 samples/python/vision/deepseek-ocr/ocr_document.py	skip	needs BRAIN_DEEPSEEK_OCR_DIR (both shipped GGUFs); the mock model serves no deepseek-ai/DeepSeek-OCR generate, and a real run is minutes per token (see this sample's README)
 samples/python/vision/face-id/face_id.py	skip	needs BRAIN_SCRFD_DIR + BRAIN_ARCFACE_DIR (antelopev2 scrfd + glintr100); the mock model serves no detect/embed
 samples/python/vision/deepseek-multimodal/deepseek_multimodal.py	run	--model brain/mock exercises chat with an image and images.generations at 384x384 against the shared harness server

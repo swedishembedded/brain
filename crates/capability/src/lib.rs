@@ -1125,6 +1125,32 @@ pub struct Assembly {
     pub provenance: Vec<String>,
 }
 
+/// Finds another model's weights for an action that runs several models (a
+/// video pass that also tracks and edits stills, say). The host implements it
+/// over its model store, so a model crate names the architecture it needs and
+/// never a path or a resolver of its own.
+pub trait Components: Send + Sync {
+    /// Resolve `arch`'s weights, with `overrides` naming roles outright
+    /// (`{"dit": "/path"}`) as a `--<role>` flag would.
+    fn resolve(&self, arch: &str, overrides: &BTreeMap<String, String>) -> Result<Assembly, String>;
+}
+
+/// `<model>.<role>=<path>` pairs, comma-separated, grouped by model: how a
+/// multi-model action's caller names a component's checkpoint outright.
+pub fn component_overrides(list: &str) -> Result<BTreeMap<String, BTreeMap<String, String>>, String> {
+    let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for entry in list.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let bad = || format!("component '{entry}' is not <model>.<role>=<path>");
+        let (key, path) = entry.split_once('=').ok_or_else(bad)?;
+        let (model, role) = key.split_once('.').ok_or_else(bad)?;
+        if model.is_empty() || role.is_empty() || path.is_empty() {
+            return Err(bad());
+        }
+        out.entry(model.to_string()).or_default().insert(role.replace('-', "_"), path.to_string());
+    }
+    Ok(out)
+}
+
 impl Assembly {
     /// One role's resolved path, as a loader-ready `String` - the single-role
     /// counterpart of a multi-role architecture's own `Paths::from_assembly`
@@ -1465,6 +1491,22 @@ mod tests {
         for bad in [json!(-1), json!(1.5), json!("7"), json!(true)] {
             let err = Invocation::new().set("seed", bad.clone()).seed().expect_err(&bad.to_string());
             assert!(err.starts_with("seed: "), "{err}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod component_tests {
+    /// Overrides group by model, roles take underscores, malformed entries
+    /// are refused.
+    #[test]
+    fn component_overrides_group_by_model() {
+        let o = super::component_overrides("flux2.dit=/a, flux2.text-encoder=/b,sam2.weights=/c").unwrap();
+        assert_eq!(o["flux2"]["dit"], "/a");
+        assert_eq!(o["flux2"]["text_encoder"], "/b");
+        assert_eq!(o["sam2"]["weights"], "/c");
+        for bad in ["flux2.dit", "dit=/a", ".dit=/a", "flux2.=/a", "flux2.dit="] {
+            assert!(super::component_overrides(bad).is_err(), "{bad}");
         }
     }
 }

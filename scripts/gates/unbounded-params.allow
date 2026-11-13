@@ -80,6 +80,7 @@ brain/ltxv	t2v	guidance
 brain/ltxv	t2v	max_shift
 brain/ltxv	t2v	modality_guidance
 brain/ltxv	t2v	rescale
+brain/ltxv	replace	seed
 brain/ltxv	t2v	seed
 brain/ltxv	t2v	stg
 brain/ltxv	t2v	terminal
@@ -102,7 +103,6 @@ brain/ltxv	v2v	guidance
 brain/ltxv	v2v	modality_guidance
 brain/ltxv	v2v	rescale
 brain/ltxv	v2v	seed
-brain/ltxv	v2v	start
 brain/ltxv	v2v	stg
 brain/minicpmv	generate	seed
 brain/minicpmv	generate	temp

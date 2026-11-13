@@ -40,5 +40,5 @@ mod model;
 pub mod resolve;
 mod run;
 
-pub use model::{main, run_model, Model, GLOBAL_HELP};
+pub use model::{main, main_with, run_model, run_model_with, Model, Workflow, WorkflowCall, GLOBAL_HELP};
 pub use run::{run_with, Program};

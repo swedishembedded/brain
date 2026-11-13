@@ -86,6 +86,12 @@ brain-weightset.workspace = true
 # cache's size (`crate::weightcache::budget_from_limits`).
 brain-memauth.workspace = true
 
+# `replace`: SAM 2.1 tracks the actor, FLUX.2 paints the stills, ArcFace keeps
+# the one whose face matches the sheet.
+brain-sam2.workspace = true
+brain-flux2.workspace = true
+brain-arcface.workspace = true
+
 [dev-dependencies]
 brain-testutil.workspace = true
 # `half::f16` - the independent from-spec Q8_0 dequant in

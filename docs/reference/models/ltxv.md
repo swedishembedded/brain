@@ -29,8 +29,8 @@ per component and the open gaps.
 | Text to video + audio | [x] `--audio` / `audio: true`: both streams denoised jointly, 48 kHz stereo through the vocoder's bandwidth extension, any length (see "Generating sound") |
 | Text to audio | [x] `brain ltxv t2a` / the `t2a` action: the audio stream alone, the video half never read |
 | Audio to video | [x] `--audio-source <wav>`: the soundtrack held frozen while the picture denoises against it, any length (each window holds its own slice) |
-| Retake, video to audio | [x] `brain ltxv v2v --window S:E` / the `v2v` action: regenerate a time window of the picture, the sound or both; `--hold-video --audio` generates sound for a picture |
-| Masked video to video | [x] `brain ltxv v2v --mask <maskseq>`: regenerate a tracked region, hold the rest token-exactly; `--keyframe F:<image>` guides it with edited stills (see "Replacing a person") |
+| Retake, video to audio | [x] `brain ltxv v2v --start S --end E` / the `v2v` action: regenerate a time window of the picture, the sound or both; `--hold-video --audio` generates sound for a picture |
+| Masked video to video | [x] `brain ltxv v2v --mask <maskseq>`: regenerate a tracked region, hold the rest token-exactly; `--keyframes F:<image>,...` guides it with edited stills (see "Replacing a person") |
 | Character replacement | [x] `brain ltxv replace`: a clip, a character sheet and a click on a person in; the clip with the person replaced out (see "Replacing a person") |
 | Extension | [x] `brain ltxv extend` / the `extend` action: continue a clip from its last 57 frames, with its soundtrack |
 | Image / keyframe conditioning | [x] `--start-frame`, `--keyframe` (any number), `--mid-frame`, `--end-frame` (see "Anchoring a clip on real images") |
@@ -39,7 +39,7 @@ per component and the open gaps.
 | Samplers | [x] ancestral Euler (the distilled pipeline's) and res_2s (the reference's high-quality pipeline's), `--sampler` |
 | Post-hoc upscale | [x] `brain ltxv upscale` / the `upscale` action |
 | DFR | [x] `brain ltxv dfr` on the real checkpoint: keyframe-segment canvas, stage 1 with generated keyframe slots, spatial upscale, the detailing pass under the Refine-Details IC-LoRA, 0-2 temporal rounds and the spatial epilogue (`--spatial-upscalings 2`) |
-| LoRA inference | [x] `--adapter <path>` (repeatable): ComfyUI/PEFT `.safetensors` from the official trainer, published IC-LoRAs (with `--reference-video`), or brain-trained adapters, applied beside the int8 weights |
+| LoRA inference | [x] `--adapter <path>[@strength],...`: ComfyUI/PEFT `.safetensors` from the official trainer, published IC-LoRAs (with `--reference`), or brain-trained adapters, applied beside the int8 weights |
 | LoRA / full fine-tune | [~] video-only DiT; the audio-visual DiT has no training support |
 | CLI | [x] `brain ltxv {t2v,t2a,v2v,replace,extend,upscale,dfr}` |
 | Capability actions (D-Bus, `brain do`) | [x] `t2v`, `t2a`, `v2v`, `extend`, `upscale`, `dfr`; the clip actions take the source as a `video` input blob and its sound as a `soundtrack` WAV blob |
@@ -110,7 +110,7 @@ from the repository above.
 ## Running it
 
 ```bash
-brain ltxv t2v --prompt "a cat walking along the shoreline at dusk" --output-path cat.mp4
+brain ltxv t2v --prompt "a cat walking along the shoreline at dusk" --out video=cat.mp4
 ```
 
 Every weight comes from the model store. Settings the command leaves unnamed
@@ -168,8 +168,8 @@ cutting to it.
 ```bash
 brain -v --device gpu0 ltxv t2v \
   --prompt "a fishing boat crosses the harbour mouth, camera tracking left" \
-  --frames 121 --width 768 --height 448 --fps 24 --output-path boat.mp4 \
-  --start-frame dawn.png --keyframe 40:turning.png --keyframe 80:midway.png \
+  --frames 121 --width 768 --height 448 --fps 24 --out video=boat.mp4 \
+  --start-frame dawn.png --keyframes "40:turning.png,80:midway.png" \
   --end-frame open-sea.png
 ```
 
@@ -234,7 +234,7 @@ frame 0, over N latent frames instead of one.
 ```bash
 brain -v --device gpu0 ltxv t2v \
   --prompt "..." --frames 481 --width 1280 --height 704 --fps 24 \
-  --output-path long.mp4
+  --out video=long.mp4
 ```
 
 * **Why not just chain clips on their last frame.** Decoding a clip, taking its
@@ -285,15 +285,13 @@ t2v`), with the default context and no new action parameter.
 Everything above keeps **one shot** continuous, which is the wrong answer if the
 clip is supposed to become something else part way through: every window shares
 the prompt, and every continuation window is hard-conditioned on the real
-content before it. Repeat `--scene <frames>:<prompt>` to write a clip that
-changes.
+content before it. `--scenes "<frames>:<prompt>|<frames>:<prompt>|..."`
+writes a clip that changes.
 
 ```bash
 brain --device gpu0 ltxv t2v \
-  --width 768 --height 448 --fps 24 --output-path story.mp4 \
-  --scene 121:"a fishing boat leaves a harbour at dawn, camera tracking" \
-  --scene 121:"the open sea under heavy rain, waves breaking over the bow" \
-  --scene 57:"a close-up of a gull on a wet railing"
+  --width 768 --height 448 --fps 24 --out video=story.mp4 \
+  --scenes "121:a fishing boat leaves a harbour at dawn, camera tracking|121:the open sea under heavy rain, waves breaking over the bow|57:a close-up of a gull on a wet railing"
 ```
 
 One command, one file, 299 frames.
@@ -336,7 +334,7 @@ strength set by the `--lora-scale` that follows it (default 1.0, ComfyUI's
 
 ```bash
 brain -v --device gpu0 ltxv t2v \
-  --prompt "..." --frames 121 --width 768 --height 448 --output-path out.mp4 \
+  --prompt "..." --frames 121 --width 768 --height 448 --out video=out.mp4 \
   --adapter my-style.safetensors --lora-scale 0.8
 ```
 
@@ -359,7 +357,7 @@ brain -v --device gpu0 ltxv t2v \
 
 **IC-LoRA reference videos.** An IC-LoRA (the published control, restoration
 and transformation adapters) reads a *reference clip* beside the clip it
-generates. `--reference-video <path>` supplies it: its first `--frames` frames
+generates. `--reference <video>` supplies it: its first `--frames` frames
 are VAE-encoded at the geometry the adapter declares in its own metadata
 (`reference_downscale_factor`, `reference_temporal_scale_factor`) and appended
 as clean tokens at their own positions, which the adapter learned to attend
@@ -371,8 +369,8 @@ a grayscale video (white attends, black does not), scaled by the strength.
 
 ```bash
 brain --device gpu0 ltxv t2v \
-  --prompt "..." --frames 121 --width 1280 --height 704 --output-path out.mp4 \
-  --adapter ltx-2.5-22b-ic-lora-depth.safetensors --reference-video depth.mp4
+  --prompt "..." --frames 121 --width 1280 --height 704 --out video=out.mp4 \
+  --adapter ltx-2.5-22b-ic-lora-depth.safetensors --reference depth.mp4
 ```
 
 * It needs the IC-LoRA: the base checkpoint has no use for reference tokens,
@@ -394,7 +392,7 @@ two-stage generation already runs (see the Stages section of
 
 ```bash
 brain -v --device gpu0 ltxv upscale \
-  --input clip.mp4 --output-path clip_upscaled.mp4 \
+  --video clip.mp4 --out video=clip_upscaled.mp4 \
   --prompt "the prompt the clip was generated from"
 ```
 
@@ -472,7 +470,7 @@ every step on a side longer than that. The size must then be a multiple of
 ```bash
 brain pull https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details/blob/main/ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors
 brain -v --device gpu0 ltxv dfr --audio --prompt "a cat walking on a beach" \
-  --frames 49 --output-path out.mp4
+  --frames 49 --out video=out.mp4
 ```
 
 ### Generating sound
@@ -484,7 +482,7 @@ both; without it only the model's video half runs and the clip is silent.
 ```bash
 brain -v --device gpu0 ltxv t2v --audio \
   --prompt "a blacksmith hammers glowing steel on an anvil, rhythmic clangs" \
-  --frames 57 --width 1280 --height 704 --fps 24 --output-path forge.mp4
+  --frames 57 --width 1280 --height 704 --fps 24 --out video=forge.mp4
 ```
 
 Every weight, the audio VAE and the text encoder included, comes from the model
@@ -575,7 +573,7 @@ D-Bus/served surface returns the sound too rather than only the CLI.
 ### Text to audio
 
 ```bash
-brain ltxv t2a --prompt "rain on a tin roof, distant thunder" --output-path rain.wav
+brain ltxv t2a --prompt "rain on a tin roof, distant thunder" --out audio=rain.wav
 ```
 
 The audio stream runs alone, as the reference's `t2a_one_stage` builds it:
@@ -586,9 +584,9 @@ guide against.
 
 ### Retakes, sound for a picture, and a picture for a sound
 
-`brain ltxv v2v --window S:E` regenerates the seconds between `S` and `E` of
-an existing clip against `--prompt` and holds the rest. With `--audio` and the
-clip's soundtrack as `--audio-source`, the sound in the window is regenerated
+`brain ltxv v2v --start S --end E` regenerates the seconds between `S` and
+`E` of an existing clip against `--prompt` and holds the rest. With `--audio`
+and the clip's soundtrack as `--soundtrack`, the sound in the window is regenerated
 with the picture; `--hold-video` keeps every frame and generates sound for
 them (video to audio), `--hold-audio` keeps the soundtrack. `t2v --audio
 --audio-source <wav>` goes the other way: the soundtrack is held frozen and
@@ -597,9 +595,9 @@ the picture denoises against it.
 ### Replacing a person
 
 ```bash
-brain ltxv replace --input street.mp4 --character sheet.png --point 405,195 \
+brain ltxv replace --video street.mp4 --character sheet.png --points 405,195 \
   --prompt "a woman with short copper-red hair in a mustard raincoat walks toward the camera" \
-  --output-path replaced.mp4
+  --out video=replaced.mp4
 ```
 
 The person clicked on is replaced by the character on the sheet; their
@@ -639,21 +637,23 @@ path, their timing and the background stay the source's. In order:
 Any clip brain decodes is accepted: one that is not 1 + 8k frames at
 multiples of 32 is trimmed at its end and centre-cropped onto that grid,
 the clicks moving with the crop, and the run says what it did
-(`--no-conform` refuses instead). `--actor-mask <dir>` gives the person's
+(`--conform false` refuses instead). `--actor-mask <dir>` gives the person's
 track as a mask sequence instead of clicks. brain reads no sound out of a
 container, so the result is silent unless `--soundtrack <wav>` carries one.
-`--adapter`/`--lora-scale` apply LoRAs to the video pass and
-`--edit-adapter`/`--edit-lora-scale` to the still edits; every threshold
-and margin above is a flag (`brain ltxv replace --help`).
+`--adapter` applies LoRAs to the video pass and `--edit-adapter` to the
+still edits (each a `path@strength` list); SAM 2, FLUX.2 and ArcFace come
+from the model store, `--components flux2.dit=<file>,sam2.weights=<file>`
+names one outright; every threshold and margin above is a flag (`brain ltxv
+replace --help`).
 
 Every intermediate - the track, each edit attempt, the stills, the region
 mask sequence, the clip the video pass sees and the generated clip - is
-kept in `--work-dir` (default `<output>.work`).
-`samples/shell/videogen/character_replace` runs this, or one step of it,
-with every model and setting as a flag, and lists the pull commands for
-each model it can use.
+kept in `--work-dir` (default: a directory under the system's temporary
+directory named by the clip and the sheet), and a repeated run resumes from
+it. `samples/models/ltxv` walks through the whole process, lists the pull
+commands for each model it uses, and shows how to rerun only the video pass.
 
-`brain ltxv v2v --mask <maskseq> --keyframe F:<image>` is the video step on
+`brain ltxv v2v --mask <maskseq> --keyframes F:<image>,...` is the video step on
 its own: guides append clean blocks at their frames' instants and compose
 with the mask; a start, mid or end still would overwrite the tokens the
 mask holds and is refused.
@@ -661,8 +661,8 @@ mask holds and is refused.
 ### Extending a clip
 
 ```bash
-brain ltxv extend --input clip.mp4 --seconds 3 --prompt "the cat turns and walks away" \
-  --output-path longer.mp4
+brain ltxv extend --video clip.mp4 --seconds 3 --prompt "the cat turns and walks away" \
+  --out video=longer.mp4
 ```
 
 The clip's last 57 frames (the reference extension recipe's 8 latent frames)
@@ -682,7 +682,7 @@ re-quantized:
 
 ```bash
 brain --trace-ltxv 4 ltxv t2v --prompt "a cat" --frames 9 --width 64 \
-  --height 64 --steps 4 --output-path out.mp4
+  --height 64 --steps 4 --out video=out.mp4
 brain --trace-ltxv 5 --trace-format json --trace-output run.jsonl ltxv t2v …
 ```
 

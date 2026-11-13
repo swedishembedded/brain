@@ -32,7 +32,7 @@
 # `max_storage_buffer_binding_size` is too small for even this target's
 # smallest real-VAE decode buffer - a residency/wgpu infrastructure gap
 # unrelated to ltxv's own kernels (the SAME shape runs cleanly through the
-# bespoke `brain ltxv t2v` CLI, which opens the device directly rather than
+# one-shot `brain ltxv t2v`, which opens the device directly rather than
 # through a residency lane), tracked in this crate's roadmap rather than
 # fixed here. `--device cpu` sidesteps it entirely; the tiny random-weight
 # DiT's own denoise cost is trivial on CPU, so the gate's wall time is

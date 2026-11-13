@@ -429,10 +429,7 @@ pub fn models() -> Vec<ModelEntry> {
         // registered directly by `serving::build_executor`, not from here.
         ModelEntry {
             manifest: ltxv::caps::manifest,
-            provider: |assembly: &Assembly| {
-                let paths = ltxv::pipeline::Paths::from_assembly(assembly, None)?;
-                Ok(Arc::new(ltxv::caps::LtxvProvider::from_paths(paths)) as Arc<dyn Provider>)
-            },
+            provider: |assembly: &Assembly| ltxv::caps::provider(assembly, components()),
             spec: Some(("ltxv", &ltxv::spec::LtxvSpec)),
             resident: None,
         },
@@ -1207,6 +1204,13 @@ pub fn provider_from_assembly(model: &str, assembly: &Assembly) -> Result<Arc<dy
 /// instead of keeping a second one that can drift from it.
 pub fn resolver_spec_for(model: &str) -> Option<ArchRef> {
     models().into_iter().find(|e| (e.manifest)().model == model).and_then(|e| e.spec)
+}
+
+/// The model store as a [`capability::Components`]: an action that runs
+/// several models (LTX-2.5's `replace`) resolves the others through every
+/// spec this catalog names.
+pub fn components() -> Arc<dyn capability::Components> {
+    Arc::new(loader::components::StoreComponents::new(models().into_iter().filter_map(|e| e.spec).collect()))
 }
 
 #[cfg(test)]

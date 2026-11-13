@@ -369,6 +369,9 @@ impl LtxvInstance {
                 };
                 crate::resident_llm::on_device(device, || ltxv::caps::clip_action_on(action, paths, inv, &place, progress))?
             }
+            // The other models it runs (SAM 2, FLUX.2, ArcFace) are loaded
+            // for the call and dropped before the video pass.
+            "replace" => crate::resident_llm::on_device(device, || ltxv::caps::replace_on(paths, crate::components().as_ref(), inv, progress))?,
             "t2a" => {
                 let mut opts = ltxv::caps::t2a_params_from(inv)?;
                 opts.base.device = device_name(device);

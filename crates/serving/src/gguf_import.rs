@@ -891,7 +891,7 @@ mod tests {
     /// a COMPOUND model (DiT + two VAEs + text encoder + tokenizer, like
     /// `wan`'s own `zimage`/`wan` arms in `resident_for_compound`), and
     /// wiring a compound residency arm for it is a distinct, later concern
-    /// from this converter (this crate's `ltxv_cli`/`crate::pipeline`
+    /// from this converter (`ltxv::pipeline`
     /// already resolves real+random weights through the model store's
     /// `ltxv::spec::LtxvSpec`, independent of `model_dir`'s residency registry).
     #[test]
