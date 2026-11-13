@@ -49,6 +49,8 @@ use serde::{Deserialize, Serialize};
 use crate::bank::{Probe, ProbeConfig, ProbeSet, SpanSelector, UniformSelector};
 use crate::growth::{Action, Diagnosis, Growth, GrowthConfig};
 use crate::pool::{AdapterId, Pool, PoolConfig};
+#[cfg(test)]
+use crate::pool::State;
 use crate::reservoir::{Reservoir, ReservoirConfig};
 use crate::retention::Retention;
 use crate::schedule::{block_drop_bar, AuditConfig, Schedule};
@@ -453,7 +455,7 @@ impl<L: Learner> Reader<L> {
         // held back rather than promoted on evidence it never had. Checked
         // before training, because training it would be spending a run on a
         // decision that cannot be made.
-        if probes.probes().len() < self.cfg.triage.min_probes {
+        if probes.probes().len() < self.cfg.triage.min_probes.max(1) {
             return row(Outcome::Decided(Verdict::TooSmallToGate { probes: probes.probes().len(), floor: self.cfg.triage.min_probes }));
         }
 
@@ -503,7 +505,11 @@ impl<L: Learner> Reader<L> {
         let mut at = n;
         for (id, block) in &audit_blocks {
             let end = at + block.len();
-            let (c, i) = (mean(&candidate[at..end]), mean(&incumbent[at..end]));
+            let at_block = at;
+            at = end;
+            // A block with nothing scored has no mean, and is not a block
+            // that scored zero: it takes no part in the anchor at all.
+            let (Some(c), Some(i)) = (mean(&candidate[at_block..end]), mean(&incumbent[at_block..end])) else { continue };
             blocks.push((c, i));
             // `R[k][j]`, taken from the INCUMBENT arm: what this earlier
             // episode scores against what is currently served. The candidate
@@ -514,7 +520,6 @@ impl<L: Learner> Reader<L> {
             // The canary is where priority is spent, and this is the only
             // place that knows how each block just scored.
             self.schedule.set_priority(id, boundary_priority(i, self.cfg.growth.pass_at));
-            at = end;
         }
 
         let mut gate_cfg = reader_gate_config();
@@ -523,13 +528,20 @@ impl<L: Learner> Reader<L> {
         // what was actually sampled. It can only loosen.
         gate_cfg.max_block_drop = block_drop_bar(plan.probes_per_block);
 
+        // With no block re-checked (the first episodes of a run) there is no
+        // anchor evidence, and the gate must neither hold the episode for it
+        // nor read it as a score of zero. The pooled anchor is then tied, so
+        // it constrains nothing, and the decision rests on the candidate's
+        // own probes alone (significance, effect size, entropy). Once blocks
+        // exist, every later episode is held to them.
+        let (anchor_candidate, anchor_incumbent) = anchor_means(&blocks).unwrap_or(TIED_ANCHOR);
         let verdict = adjudicate(
             n,
             &GateInput {
                 candidate_scores: &candidate[..n],
                 incumbent_scores: &incumbent[..n],
-                anchor_candidate: mean_of_pairs(&blocks, |(c, _)| *c),
-                anchor_incumbent: mean_of_pairs(&blocks, |(_, i)| *i),
+                anchor_candidate,
+                anchor_incumbent,
                 entropy_candidate: candidate_entropy,
                 entropy_incumbent: incumbent_entropy,
                 anchor_blocks: &blocks,
@@ -563,8 +575,12 @@ impl<L: Learner> Reader<L> {
             self.bank.insert(ep.id.clone(), probes);
             // `R[j][j]`: what it scored on its own probes under the arm that
             // was actually promoted, at the moment it was promoted.
-            self.retention.learned(&ep.id, mean(&candidate[..n]));
-            self.schedule.set_priority(&ep.id, boundary_priority(mean(&candidate[..n]), self.cfg.growth.pass_at));
+            // Promotion needs a gate over at least one probe (see C above), so
+            // the own mean exists; if it somehow did not, nothing is recorded.
+            if let Some(own_mean) = mean(&candidate[..n]) {
+                self.retention.learned(&ep.id, own_mean);
+                self.schedule.set_priority(&ep.id, boundary_priority(own_mean, self.cfg.growth.pass_at));
+            }
         }
 
         // Demand is what asked for an adapter this episode: each re-checked
@@ -577,6 +593,15 @@ impl<L: Learner> Reader<L> {
         }
         demand.extend(admitted.map(|id| (id, 1.0)));
         self.pool.select(&demand);
+        // Staleness is measured from the last episode an adapter was in the
+        // working set, which is exactly what `select` just decided, so this
+        // is the step that knows who has gone unaddressed. Archived, never
+        // deleted: a retired adapter can be resurrected byte for byte.
+        // Retiring is housekeeping and a failure to rename a file does not
+        // change this episode's verdict, but it must not vanish either.
+        if let Err(e) = self.pool.retire_stale() {
+            eprintln!("audit: retiring stale adapters failed: {e}");
+        }
 
         // The growth question is asked of the promote rate, and only paid
         // for when that rate has fallen.
@@ -585,16 +610,21 @@ impl<L: Learner> Reader<L> {
             let bank_probes: Vec<&Probe> = self.bank.values().flat_map(|s| s.probes().iter()).collect();
             let bank_rows: Vec<&str> = self.bank.values().flat_map(|s| s.trained_rows().iter().map(String::as_str)).collect();
             let joint = self.learner.joint_oracle(&bank_rows, &bank_probes);
-            let sequential = mean(&self.learner.score(Arm::Incumbent, &bank_probes).scores);
-            let d = self.growth.diagnose(joint, sequential);
-            let a = self.growth.act(d, self.rehearsal_ratio);
-            // Interference is the one diagnosis whose remedy is this loop's
-            // own: the next episode trains on the larger mix. `Grow` is
-            // reported, not applied: see [`Action`].
-            if let Action::RaiseRehearsal { to, .. } = a {
-                self.rehearsal_ratio = to;
+            // No banked probe means nothing to compare the oracle against.
+            match mean(&self.learner.score(Arm::Incumbent, &bank_probes).scores) {
+                None => (None, None),
+                Some(sequential) => {
+                    let d = self.growth.diagnose(joint, sequential);
+                    let a = self.growth.act(d, self.rehearsal_ratio);
+                    // Interference is the one diagnosis whose remedy is this
+                    // loop's own: the next episode trains on the larger mix.
+                    // `Grow` is reported, not applied: see [`Action`].
+                    if let Action::RaiseRehearsal { to, .. } = a {
+                        self.rehearsal_ratio = to;
+                    }
+                    (Some(d), Some(a))
+                }
             }
-            (Some(d), Some(a))
         } else {
             (None, None)
         };
@@ -621,20 +651,22 @@ fn boundary_priority(score: f64, pass_at: f64) -> f64 {
     (1.0 - (score - pass_at).abs() / reach).clamp(0.0, 1.0)
 }
 
-fn mean(v: &[f64]) -> f64 {
-    if v.is_empty() {
-        0.0
-    } else {
-        v.iter().sum::<f64>() / v.len() as f64
-    }
+/// Mean of `v`, or `None` when nothing was measured: an empty set has no
+/// mean, and reading it as zero would report "unmeasured" as "scored zero".
+fn mean(v: &[f64]) -> Option<f64> {
+    (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
 }
 
-fn mean_of_pairs(blocks: &[(f64, f64)], pick: impl Fn(&(f64, f64)) -> f64) -> f64 {
-    if blocks.is_empty() {
-        0.0
-    } else {
-        blocks.iter().map(pick).sum::<f64>() / blocks.len() as f64
-    }
+/// The pooled anchor handed to the gate when nothing was re-checked: equal
+/// arms, so `anchor_delta` is zero and the pooled anchor check cannot fire.
+const TIED_ANCHOR: (f64, f64) = (0.0, 0.0);
+
+/// Pooled `(candidate, incumbent)` anchor over per-block means, or `None`
+/// when no block was re-checked.
+fn anchor_means(blocks: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let c: Vec<f64> = blocks.iter().map(|(c, _)| *c).collect();
+    let i: Vec<f64> = blocks.iter().map(|(_, i)| *i).collect();
+    mean(&c).zip(mean(&i))
 }
 
 #[cfg(test)]
@@ -1098,6 +1130,56 @@ mod tests {
             }
         }
         assert!(checked > 14, "the audit must have addressed blocks as well as the new adapters");
+    }
+
+    /// Retirement is the pool's answer to an adapter nothing asks for. The
+    /// reader's step is what asks, so it is the step that must retire: one
+    /// unaddressed over the whole `survival` horizon is archived, one still
+    /// being asked for is kept.
+    #[test]
+    fn an_adapter_nothing_asked_for_over_the_horizon_is_retired_and_a_wanted_one_kept() {
+        let d = Dir::new();
+        let mut c = cfg();
+        c.audit = AuditConfig { budget: 16, probes_per_block: 8, canary_blocks: 1, canary_refresh: 8 };
+        c.pool = PoolConfig { resident: 2, margin: 0.1, dwell: 0, survival: 3 };
+        let pool = Pool::create(&d.0, c.pool).expect("pool");
+        let mut r = Reader::new(c, Fake { loss: 1.5, wins: 64, ..Default::default() }, pool);
+        let mut last_addressed: Vec<AdapterId> = Vec::new();
+        let mut made: Vec<AdapterId> = Vec::new();
+        for i in 0..16 {
+            let ep = episode(&format!("r{i}"), 60);
+            let mut addressed: Vec<AdapterId> = r.schedule.clone().plan().blocks().into_iter().map(|b| AdapterId(b.as_str().to_string())).collect();
+            if r.step(&ep).outcome.promoted() {
+                addressed.push(AdapterId(ep.id.as_str().to_string()));
+                made.push(AdapterId(ep.id.as_str().to_string()));
+            }
+            last_addressed = addressed;
+        }
+        let pool = r.pool();
+        let archived = made.iter().filter(|a| pool.entry(a).map(|x| x.state) == Some(State::Archived)).count();
+        assert!(archived > 0, "sixteen episodes over a horizon of 3 must have retired something");
+        for e in &last_addressed {
+            assert_eq!(pool.entry(e).map(|x| x.state), Some(State::Live), "{e:?} was just asked for and must be kept");
+        }
+        for e in pool.live() {
+            let idle = pool.now().saturating_sub(e.last_seen);
+            assert!(idle < 3 || pool.slots().iter().flatten().any(|s| *s == e.id), "{:?} idle for {idle} episodes and still live", e.id);
+        }
+    }
+
+    /// No block re-checked is no anchor evidence: not a regression, and not a
+    /// score of zero either. The first episode of a run decides on its own
+    /// probes.
+    #[test]
+    fn the_first_episode_is_gated_on_its_own_probes_with_no_anchor() {
+        let d = Dir::new();
+        let mut r = reader(&d, Fake { loss: 1.5, wins: 64, ..Default::default() });
+        let row = r.step(&episode("f0", 60));
+        assert_eq!(row.audited, 0, "the fixture must have nothing to re-check yet");
+        assert!(row.outcome.promoted(), "with no anchor the candidate's own probes decide: {:?}", row.outcome);
+        assert_eq!(mean(&[]), None, "nothing measured has no mean");
+        assert_eq!(anchor_means(&[]), None);
+        assert_eq!(anchor_means(&[(0.5, 1.0), (1.0, 1.0)]), Some((0.75, 1.0)));
     }
 
     /// A raised rehearsal mix is part of what the run has learned about
