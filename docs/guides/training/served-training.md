@@ -51,8 +51,8 @@ it as `local/<name>` with a manifest of family `horizon`, and the server then se
 ## Checking a dataset first
 
 `check_dataset` reads a dataset with the base's own tokenizer and chat template, as the trainer would, and reports
-without training or claiming a card. Params: `base`, `kind` (`chat` for `generic-messages-v2` records, `preference`
-for `generic-preference-v1` pairs), the dataset as the input blob `dataset` or as `dataset_digest` (exactly one),
+without training or claiming a card. Params: `base` (not for a `timeline` dataset), `kind` (`chat` for `generic-messages-v2` records, `preference`
+for `generic-preference-v1` pairs, `timeline` for `timeline-v1` subjects, each line validated and no token counted), the dataset as the input blob `dataset` or as `dataset_digest` (exactly one),
 `thinking` and `pack_answers` (rendered as a run with those settings would), `max_block`, and `per_record` (with
 `offset` and `limit`) to also list each valid record's length. The result:
 

@@ -62,3 +62,16 @@ fn a_dry_run_names_the_records_the_trainer_refuses_and_the_examples_longer_than_
     assert_eq!(report["per_record"].as_array().unwrap().len(), 4, "a refused record has no length");
     assert!(work_is_clean(&rig.work_root));
 }
+
+#[test]
+fn a_timeline_dataset_is_checked_line_by_line_without_a_base() {
+    let rig = rig_qwen3("dryrun-timeline", 16 << 30);
+    let (subjects, _) = horizon::synthetic::population(5, 1);
+    let mut text: String = subjects.iter().map(|s| serde_json::to_string(s).unwrap() + "\n").collect();
+    text.push_str("{\"not\": \"a subject\"}\n");
+    let report = check(&rig, json!({"kind": "timeline"}), text.into_bytes()).expect("the report");
+    assert_eq!((report["records"].as_u64(), report["valid_records"].as_u64(), report["invalid_total"].as_u64()), (Some(6), Some(5), Some(1)));
+    assert_eq!(report["invalid"][0]["line"], 6);
+    let no_base = check(&rig, json!({}), plain()).unwrap_err();
+    assert!(no_base.contains("`base` is needed"), "{no_base}");
+}

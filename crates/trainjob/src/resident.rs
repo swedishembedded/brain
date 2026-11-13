@@ -166,7 +166,12 @@ impl TrainResident {
             (_, crate::request::Source::Digest(digest)) => self.check_digests(&[*digest])?,
             _ => {}
         }
-        job::resolve_base(self.env.models_dir.as_deref(), &request.params.base)?;
+        // A timeline dataset has no base; any other is read with one, so a missing or unknown base is refused here,
+        // before a slot is held.
+        if request.params.kind != "timeline" {
+            let base = request.params.base.as_deref().ok_or("check_dataset: `base` is needed to read a chat or preference dataset")?;
+            job::resolve_base(self.env.models_dir.as_deref(), base)?;
+        }
         // The tokenizer and the template are read, and the dataset is held while it is measured: host memory only.
         let dataset_bytes = match (&request.dataset, &self.env.store) {
             (crate::request::Source::Blob(name), _) => inv.blobs.get(name).map_or(0, |b| b.bytes.len() as u64),

@@ -28,8 +28,8 @@ pub const ACTION: &str = "check_dataset";
 pub fn spec() -> ActionSpec {
     ActionSpec::new(ACTION, "dry-run a training dataset against a base's tokenizer and chat template: records, examples, tokens and supervised tokens per example, examples longer than the training row, every refused record by line; nothing is trained")
         .training()
-        .param(ParamSpec::new("base", ParamType::Str, "the base model whose tokenizer and chat template read the dataset, `<vendor>/<repo>` in the server's model store").required())
-        .param(ParamSpec::new("kind", ParamType::Enum(vec!["chat".into(), "preference".into()]), "`chat` (`generic-messages-v2` records, for sft, policy_gradient and full_train) or `preference` (`generic-preference-v1` pairs, for dpo)").default(json!("chat")))
+        .param(ParamSpec::new("base", ParamType::Str, "the base model whose tokenizer and chat template read the dataset, `<vendor>/<repo>` in the server's model store (needed for `chat` and `preference`; a `timeline` dataset has no base)"))
+        .param(ParamSpec::new("kind", ParamType::Enum(vec!["chat".into(), "preference".into(), "timeline".into()]), "`chat` (`generic-messages-v2` records, for sft, policy_gradient and full_train), `preference` (`generic-preference-v1` pairs, for dpo) or `timeline` (`timeline-v1` subjects, for timeline_train: each line validated, no tokens counted)").default(json!("chat")))
         .param(ParamSpec::new("dataset_digest", ParamType::Str, "the dataset, as a blake3 digest of the server's artifact store (or attach it as the input blob `dataset`; exactly one of the two)"))
         .param(ParamSpec::new("thinking", ParamType::Bool, "render as a run with this `thinking` setting would (chat only)").default(json!(true)))
         .param(ParamSpec::new("pack_answers", ParamType::Bool, "render as a run with this `pack_answers` setting would (chat only)").default(json!(false)))
@@ -44,7 +44,7 @@ pub fn spec() -> ActionSpec {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Params {
-    pub base: String,
+    pub base: Option<String>,
     pub kind: String,
     pub dataset_digest: Option<String>,
     pub thinking: bool,
@@ -111,17 +111,59 @@ pub fn report_json(report: &brain::dataset_report::DatasetReport, kind: &str, ma
 pub fn run(env: &JobEnv, inv: &Invocation) -> ActionResult {
     let request = Request::from_invocation(inv)?;
     let p = &request.params;
-    let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;
     let work = Workdir::create(&env.work_root)?;
     let dataset = work.path().join("dataset.jsonl");
     bring(&request.dataset, &inv.blobs, env.store.as_ref(), &dataset)?;
     if inv.cancel.is_cancelled() {
         return Err("cancelled".into());
     }
+    if p.kind == "timeline" {
+        let text = std::fs::read_to_string(&dataset).map_err(|e| format!("check_dataset: the dataset: {e}"))?;
+        let mut outcome = Outcome::new();
+        outcome.outputs = timeline_report(&text, p.max_block);
+        return Ok(outcome);
+    }
+    let base = p.base.as_deref().ok_or("check_dataset: `base` is needed to read a chat or preference dataset")?;
+    let base_dir = job::resolve_base(env.models_dir.as_deref(), base)?;
     let kind = if p.kind == "preference" { brain::dataset_report::DatasetKind::Preference } else { brain::dataset_report::DatasetKind::Chat };
     let check = brain::dataset_report::DatasetCheck { kind, thinking: p.thinking, pack_answers: p.pack_answers, max_block: p.max_block, list_records: p.per_record.then_some(brain::dataset_report::RecordWindow { offset: p.offset, limit: p.limit }) };
     let report = brain::dataset_report::check_dataset(&base_dir, &dataset, &check).map_err(job::trainer_failure)?;
     let mut outcome = Outcome::new();
     outcome.outputs = report_json(&report, &p.kind, p.max_block);
     Ok(outcome)
+}
+
+/// The report of a `timeline-v1` dataset: each non-blank line is a subject or is refused, by its line. No token is
+/// counted, so the token distributions are empty.
+pub fn timeline_report(text: &str, max_block: u32) -> Value {
+    let (mut records, mut valid, mut invalid_total) = (0usize, 0usize, 0usize);
+    let mut invalid = Vec::new();
+    for (index, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+        records += 1;
+        match horizon::timeline::Subject::from_json_line(line) {
+            Ok(_) => valid += 1,
+            Err(error) => {
+                invalid_total += 1;
+                if invalid.len() < brain::dataset_report::MAX_LISTED {
+                    invalid.push(json!({"line": index + 1, "error": error.to_string()}));
+                }
+            }
+        }
+    }
+    let empty = distribution(&brain::dataset_report::Distribution::default());
+    json!({
+        "kind": "timeline",
+        "records": records,
+        "valid_records": valid,
+        "examples": valid,
+        "tokens": empty,
+        "supervised_tokens": empty,
+        "examples_without_supervision": 0,
+        "max_block": max_block,
+        "over_max_block": 0,
+        "over_max_block_lines": [],
+        "invalid_total": invalid_total,
+        "invalid": invalid,
+        "listed_at_most": brain::dataset_report::MAX_LISTED,
+    })
 }
