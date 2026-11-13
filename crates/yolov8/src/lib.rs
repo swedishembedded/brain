@@ -15,6 +15,9 @@ pub mod blocks;
 pub mod boxmath;
 pub mod caps;
 pub mod config;
+pub mod detection;
+pub mod detection_report;
+pub mod evaluate;
 pub mod finetune;
 pub mod head;
 pub mod identity;
@@ -26,6 +29,7 @@ pub mod model;
 pub mod net;
 pub mod nms;
 pub mod spec;
+pub mod train;
 
 pub use boxmath::Letterbox;
 pub use config::YoloConfig;

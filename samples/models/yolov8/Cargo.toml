@@ -1,0 +1,32 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/yolov8` -> `sample-models-yolov8`.
+name = "sample-models-yolov8"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: YOLOv8 object detection from the command line - detect (with SCRFD + ArcFace identity verification), train, finetune and eval with every parameter, plus export, INT8 quantization, simulation and detection on the Intel NPU."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-yolov8.workspace = true
+brain-yolov8-faces.workspace = true
+brain-invoke.workspace = true
+brain-capability.workspace = true
+brain-loader.workspace = true
+brain-imaging.workspace = true
+# The NPU route: the ONNX writer, INT8 calibration and the OpenVINO session.
+brain-npu.workspace = true
+brain-onnx.workspace = true
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 76
+
+[dev-dependencies]
+brain-checkpoint.workspace = true
+brain-model.workspace = true
+brain-data.workspace = true

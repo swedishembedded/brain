@@ -107,19 +107,26 @@ pub use model::hostmath::cosine;
 
 /// Mean-absolute fp32-vs-INT8-sim mAP@0.5 over a brain detection dataset. Returns
 /// `(map_fp32, map_int8_sim)`. Reuses the shared decode tail + `eval::detection`.
+///
+/// Panics on an unreadable checkpoint or dataset; [`try_simulate_map`] reports them.
 pub fn simulate_map(weights_path: &str, dataset_dir: &str, quant: &Quant, conf: f32, iou: f32) -> (f32, f32) {
+    try_simulate_map(weights_path, dataset_dir, quant, conf, iou).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// [`simulate_map`] reporting an unreadable checkpoint or dataset as an error.
+pub fn try_simulate_map(weights_path: &str, dataset_dir: &str, quant: &Quant, conf: f32, iou: f32) -> Result<(f32, f32), String> {
     use yolov8::boxmath::{letterbox_rgb, xywhn_to_xyxy};
 
-    let ds = data::gen_detect::load_dataset(std::path::Path::new(dataset_dir)).expect("load dataset");
-    let cfg = checkpoint_cfg(weights_path);
+    let ds = data::gen_detect::load_dataset(std::path::Path::new(dataset_dir)).map_err(|e| format!("loading {dataset_dir}: {e}"))?;
+    let cfg = crate::export::try_config_of(weights_path)?;
     let nc = cfg.nc;
     let input = cfg.input;
     let stride = ds.image_stride();
 
     // Reference (fp32) and INT8-sim models, built once.
-    let ref_model = Yolo::load(weights_path, 1);
+    let ref_model = Yolo::try_load_at(weights_path, 1, 0)?;
     ref_model.set_eval(true);
-    let sim_model = Yolo::load(weights_path, 1);
+    let sim_model = Yolo::try_load_at(weights_path, 1, 0)?;
     install_fake_quant_weights(&sim_model);
     sim_model.set_eval(true);
     let tap = FakeQuantTap::new(quant);
@@ -149,7 +156,7 @@ pub fn simulate_map(weights_path: &str, dataset_dir: &str, quant: &Quant, conf: 
     }
     let m_fp32 = eval::detection::map50(&preds_fp32, &gts, nc);
     let m_int8 = eval::detection::map50(&preds_int8, &gts, nc);
-    (m_fp32, m_int8)
+    Ok((m_fp32, m_int8))
 }
 
 fn push_dets(out: &mut Vec<yolov8::nms::Detection>, x_off: f32, dets: &[yolov8::nms::Detection]) {
@@ -183,8 +190,4 @@ fn decode_one(
         &cls, &dist, &anchors, 1, a, cfg.nc as usize, &[*lb], &[(w0, h0)], conf, iou, 300,
     );
     out.pop().unwrap_or_default()
-}
-
-fn checkpoint_cfg(weights_path: &str) -> yolov8::YoloConfig {
-    crate::export::config_of(weights_path)
 }

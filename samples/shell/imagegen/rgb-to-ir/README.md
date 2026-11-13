@@ -67,8 +67,8 @@ $R validate --check-files           # every manifest against the contract
 $R splits                           # splits.json + leaks.json
 $R arms --limit 64                  # sensor-model.json + arms/<arm>/ for 64 frames of S
 $R pack a2 --size 512               # packed/a2/{images.f32,boxes.bin,meta.json}
-brain yolov8 fine-tune "$WORK/packed/a2" --nc 3 --input 512 \
-  --weights <yolov8 checkpoint> --out ft-a2.safetensors
+brain yolov8 finetune --data "$WORK/packed/a2" --nc 3 --input 512 \
+  --weights <yolov8 checkpoint> --save ft-a2.safetensors
 $R tiles --limit 1100               # lora-set/: aligned RGB / IR tiles of split T + pairs.yaml
 $R measure                          # lora-set/regions/*.json (needs a resident SAM 2, see below)
 $R captions                         # lora-set/captions.yaml + captions-report.json

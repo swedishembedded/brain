@@ -281,15 +281,15 @@ def cmd_person_box(argv):
     """<weights> <image> <conf> [class=0] -> 'x1 y1 x2 y2 conf' (best match) or NONE."""
     weights, img, conf = argv[0], argv[1], argv[2]
     cls_id = int(argv[3]) if len(argv) > 3 else 0
-    r = subprocess.run([BRAIN, "yolov8", "detect", "--weights", weights, "--image", img, "--conf", conf, "--iou", "0.45"],
+    r = subprocess.run([BRAIN, "yolov8", "detect", "--weights", weights, "--image", img, "--conf", conf, "--iou", "0.45", "--json"],
                         capture_output=True, text=True, timeout=300)
     dets = []
     for line in r.stdout.splitlines():
         line = line.strip()
-        if line.startswith("["):
-            x1, y1, x2, y2, conf_v, cls = json.loads(line)
-            if int(cls) == cls_id:
-                dets.append((x1, y1, x2, y2, conf_v))
+        if line.startswith("{"):
+            for d in json.loads(line)["detections"]:
+                if int(d["class"]) == cls_id:
+                    dets.append((*d["bbox"], d["conf"]))
     if not dets:
         print("NONE")
         return
@@ -301,7 +301,7 @@ def cmd_detect_verify(argv):
     """<weights> <image> <conf> <input> <ref-embed> <name> <threshold> <boxes-out.json>
 
     Runs the composed two-stage detector (`brain yolov8 detect --identity-ref`)
-    and writes its `detections:` line - already in `imageops draw_boxes`' own
+    and writes its `detections` array - already in `imageops draw_boxes`' own
     box schema, `label` and all - to <boxes-out.json>. All the work is brain's;
     this only moves one JSON line to a file and summarises it for the shell.
 
@@ -309,12 +309,12 @@ def cmd_detect_verify(argv):
     weights, img, conf, inp, ref, name, thr, out_json = argv[:8]
     r = subprocess.run([BRAIN, "yolov8", "detect", "--weights", weights, "--image", img,
                         "--conf", conf, "--iou", "0.45", "--input", inp,
-                        "--identity-ref", ref, "--identity-name", name, "--identity-threshold", thr],
+                        "--identity-ref", ref, "--identity-name", name, "--identity-threshold", thr, "--json"],
                        capture_output=True, text=True, timeout=600)
     dets = []
     for line in r.stdout.splitlines():
-        if line.startswith("detections:"):
-            dets = json.loads(line[len("detections:"):])
+        if line.startswith("{"):
+            dets = json.loads(line)["detections"]
     with open(out_json, "w") as f:
         json.dump(dets, f)
     named = [d for d in dets if d.get("label") == name]
@@ -617,7 +617,7 @@ TRAIN_CLASSES="${TRAIN_CLASSES:-$TARGET_CLASS}"
 
 WEIGHTS="$OUT_DIR/$TARGET_NAME-detector.safetensors"
 echo "fine-tune seed $TRAIN_SEED (TRAIN_SEED=$TRAIN_SEED reproduces it)" >&2
-"$BRAIN" yolov8 fine-tune "$POOL_DIR" --weights "$YOLO_COCO_WEIGHTS" --out "$WEIGHTS" --device gpu \
+"$BRAIN" yolov8 finetune --data "$POOL_DIR" --weights "$YOLO_COCO_WEIGHTS" --save "$WEIGHTS" --device gpu \
   --steps "$TRAIN_STEPS" --batch "$TRAIN_BATCH" --lr "$TRAIN_LR" --wd 0 \
   --nc "$NUM_CLASSES" --input "$TRAIN_SIZE" --seed "$TRAIN_SEED" \
   --freeze-backbone --freeze-reg-head $CLS_HIDDEN_FLAG --train-classes "$TRAIN_CLASSES"
@@ -663,7 +663,7 @@ log "Stage 8: end-to-end validation (two-stage detect-then-verify)"
 # each face is attributed to the person box its centre falls inside, and
 # ArcFace's cosine against $REF_EMBED decides who it is. Both stages are ONE
 # command (`brain yolov8 detect --identity-ref`); the shell only reads its
-# `detections:` JSON.
+# `detections` JSON.
 #
 # Why not the class-$TARGET_CLASS head stage 6 trained: those features were
 # trained to separate CATEGORIES, so a frozen head on top of them is a linear

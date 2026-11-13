@@ -64,14 +64,26 @@ pub fn calibrate(model: &Yolo, inputs: &[Vec<f32>]) -> Quant {
 }
 
 /// Load the model from a checkpoint and calibrate over `inputs`.
+/// Panics on an unreadable checkpoint or no inputs; [`try_calibrate_from_weights`]
+/// reports them.
 pub fn calibrate_from_weights(weights_path: &str, inputs: &[Vec<f32>]) -> Quant {
-    let model = Yolo::load(weights_path, 1);
-    calibrate(&model, inputs)
+    try_calibrate_from_weights(weights_path, inputs).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// [`calibrate_from_weights`] reporting an unreadable checkpoint or an empty
+/// calibration set as an error.
+pub fn try_calibrate_from_weights(weights_path: &str, inputs: &[Vec<f32>]) -> Result<Quant, String> {
+    if inputs.is_empty() {
+        return Err("calibration needs at least one image".into());
+    }
+    let model = Yolo::try_load_at(weights_path, 1, 0)?;
+    Ok(calibrate(&model, inputs))
 }
 
 /// Load up to `max_n` calibration images from `dir`, each letterboxed to
 /// `input×input` CHW (the model input layout). `dir` may be a brain detection
-/// dataset (has `meta.json`) or a directory of binary PPM (P6) images.
+/// dataset (has `meta.json`) or a directory of images (PPM, PNG, JPEG), read in
+/// name order; files that are not images are skipped.
 pub fn load_calib_images(dir: &str, input: u32, max_n: usize) -> std::io::Result<Vec<Vec<f32>>> {
     let p = std::path::Path::new(dir);
     let mut out = Vec::new();
@@ -86,20 +98,48 @@ pub fn load_calib_images(dir: &str, input: u32, max_n: usize) -> std::io::Result
             out.push(lbchw);
         }
     } else {
-        // Directory of P6 PPM images.
-        let mut files: Vec<_> = std::fs::read_dir(p)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().map(|e| e == "ppm" || e == "p6").unwrap_or(false))
-            .collect();
+        let mut files: Vec<_> = std::fs::read_dir(p)?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_file()).collect();
         files.sort();
-        for f in files.into_iter().take(max_n) {
-            let bytes = std::fs::read(&f)?;
-            if let Ok((px, w, h)) = events::ppm::decode_p6(&bytes) {
-                let hwc: Vec<f32> = px.iter().map(|&b| b as f32 / 255.0).collect();
-                let (lbchw, _) = yolov8::boxmath::letterbox_rgb(&hwc, w, h, input, 114.0 / 255.0);
-                out.push(lbchw);
+        for f in files {
+            if out.len() >= max_n {
+                break;
             }
+            let Ok(img) = imaging::load(&f) else { continue };
+            let (lbchw, _) = yolov8::boxmath::letterbox_rgb(&img.to_hwc_unit(), img.w, img.h, input, 114.0 / 255.0);
+            out.push(lbchw);
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(w: u32, h: u32) -> imaging::Rgb8 {
+        imaging::Rgb8 { w, h, px: vec![120; (w * h * 3) as usize] }
+    }
+
+    /// A folder of mixed image formats is read in name order, a file that is no
+    /// image is skipped, and every image comes out letterboxed to the model's
+    /// input side.
+    #[test]
+    fn a_folder_of_images_is_letterboxed_to_the_model_input() {
+        let dir = std::env::temp_dir().join(format!("npu-calib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        imaging::save_png(dir.join("a.png"), &image(40, 20)).unwrap();
+        imaging::save_ppm(dir.join("b.ppm"), &image(16, 16)).unwrap();
+        std::fs::write(dir.join("c.txt"), b"not an image").unwrap();
+        let all = load_calib_images(dir.to_str().unwrap(), 32, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|c| c.len() == 3 * 32 * 32));
+        assert_eq!(load_calib_images(dir.to_str().unwrap(), 32, 1).unwrap().len(), 1, "max_n caps the set");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn calibration_without_images_or_a_checkpoint_is_an_error() {
+        assert!(try_calibrate_from_weights("/nonexistent/w.safetensors", &[vec![0.0; 3]]).unwrap_err().contains("w.safetensors"));
+        assert!(try_calibrate_from_weights("/nonexistent/w.safetensors", &[]).unwrap_err().contains("at least one"));
+    }
 }

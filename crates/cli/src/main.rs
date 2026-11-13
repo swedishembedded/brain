@@ -69,7 +69,6 @@ mod tts_cli;
 #[cfg(unix)]
 mod tts_serve;
 mod wm_cli;
-mod yolo_cli;
 
 /// Whether `--device`/`BRAIN_DEVICE` EXPLICITLY named the NPU. The NPU is a
 /// whole-graph (OpenVINO) path, not a `gpu_core` backend, so the commands that
@@ -295,27 +294,18 @@ WorldMirror-2 (brain/worldmirror2: multi-view images to a 3D Gaussian Splatting 
   brain splat train --images <dir> --out scene=s.ply --out cameras=cams.json
       also info, orient, merge, prune, sfm; every parameter: brain splat <action> --help
 
-YOLOv8 (from-scratch anchor-free object detector)
-  brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C
-                                       --input S --seed S --activations keep|recompute]
-  brain yolov8 eval  --weights F --data <dir> [--split all|val --conf X --iou X --dump-preds F.jsonl]   # mAP@0.5, mAP@0.5:0.95, per-class AP, P/R
-  brain yolov8 detect --weights F --image <P6.ppm | dataset_dir> [--conf X --iou X]
-                                                                # prints [x1,y1,x2,y2,conf,class] JSON lines
-  brain yolov8 fine-tune <data_dir> --weights <pretrained> --out F [--freeze-backbone ... --activations keep|recompute]
-      Trains the tiny YOLOv8 graph on a `data gen detect` dataset (CPU backend).
-  brain yolov8 detect --weights F --image <...> --device npu     # run on the Intel NPU
+YOLOv8 (brain/yolov8: detection, training, evaluation; NPU export and run in samples/models/yolov8)
+  brain yolov8 detect --image photo.png --json [--conf X --iou X]
+  brain yolov8 train --data <dir> --save yolo.safetensors --seed S
+  brain yolov8 finetune --data <dir> --save ft.safetensors [--nc C --freeze-backbone ...]
+  brain yolov8 eval --data <dir> [--split val]          # mAP@0.5, mAP@0.5:0.95, per-class AP, P/R
+      every parameter: brain yolov8 <action> --help
 
-INTEL NPU (OpenVINO: quantize + compile YOLO to a real NPU graph)
-  brain npu export   --weights F --out model.onnx [--input S --opset N]    # fp32 ONNX
-  brain npu quantize --weights F --calib <dir> --out model.int8.onnx [--input S --num-calib N]
+INTEL NPU (OpenVINO)
   brain npu check    --onnx M [--ov-device NPU]              # ONNX op histogram + compile/coverage
-  brain npu run      --onnx M --image <P6|dir> [--ov-device NPU --conf X --iou X --nc C --reg-max R]
   brain npu bench    --onnx M [--input S --ov-device NPU --iters N --hint latency|throughput]
-  brain npu sim      --weights F --data <dir> [--calib <dir>]   # fp32 vs INT8 mAP, no NPU
-      export/quantize/sim are pure Rust (any machine); run/bench/check-compile need
-      OpenVINO + an Intel NPU. --ov-device selects the OpenVINO target device
-      (NPU|CPU|GPU|AUTO) - unrelated to brain's own --device cpu|gpu grammar
-      (--device is still accepted here as a deprecated alias for --ov-device).
+      --ov-device selects the OpenVINO target device (NPU|CPU|GPU|AUTO), unrelated to
+      brain's own --device; check without OpenVINO decodes the graph only.
 
 TOY ARCHITECTURES (brain's own, no upstream reference - toy tasks, not served)
   brain toymoe train [--steps N --batch-size B --block-size T --lr X --out F --activations keep|recompute]
@@ -379,8 +369,8 @@ CAPACITY (will this run here, and what will it cost me)
 EVENT/STDIO CONTROLLER
   brain serve --stdio [--gpt <ckpt>] [--yolo <ckpt>] [--conf X] [--max-new N --temp X --top-k K --seed S]
       Event-driven HFSM controller: read JSONL events on stdin, emit JSONL events
-      on stdout (text streaming + object detection). With no --gpt (or BRAIN_GPT2),
-      a fake echo model runs; with no --yolo (or BRAIN_YOLOV8), a fake detector runs,
+      on stdout (text streaming + object detection). With no --gpt, a fake echo
+      model runs; with no --yolo, a fake detector runs,
       so the loop is usable without a trained checkpoint.
       Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain serve --stdio
 

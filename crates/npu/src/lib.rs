@@ -53,6 +53,7 @@ pub mod kronos_export;
 pub mod fincast_topology;
 pub mod fincast_export;
 pub mod sim;
+pub mod yolo_session;
 pub mod topology;
 pub mod wm_topology;
 pub mod mirror_topology;
@@ -71,15 +72,16 @@ pub mod openvino;
 // alone, so it compiles against both the real and stub backends unchanged.
 pub mod roofline;
 
-pub use calib::{calibrate, calibrate_from_weights, load_calib_images, RangeCollector};
+pub use calib::{calibrate, calibrate_from_weights, load_calib_images, try_calibrate_from_weights, RangeCollector};
 pub use codec_export::{
     build_codec_fp32_bytes, build_codec_graph_bytes, export_codec_back_stream_fp32, export_codec_front_fp32,
     export_codec_fp32,
 };
 pub use decode::{decode_npu_outputs, detect_image, detect_weights_on_npu};
-pub use export::{build_fp32_bytes, config_of, export_fp32, export_int8};
+pub use export::{build_fp32_bytes, config_of, export_fp32, export_int8, try_build_fp32_bytes, try_build_int8_bytes, try_config_of};
 pub use quant::Quant;
-pub use sim::{reference_logits, simulate_logits, simulate_map, FakeQuantTap};
+pub use sim::{reference_logits, simulate_logits, simulate_map, try_simulate_map, FakeQuantTap};
+pub use yolo_session::YoloSession;
 pub use topology::{build_graph, WeightSource};
 pub mod depth_topology;
 pub use depth_topology::{build_depth_graph, build_depth_graph_hw, DepthSession};

@@ -34,33 +34,59 @@ brain serve --dbus
 then call `Ultralytics/YOLOv8`'s `detect` action with an RGB image blob.
 
 `brain do` does not auto-fetch - it only reaches models already registered
-locally by name. To use a checkpoint you've already converted (or to import a
-YOLOv8-compatible checkpoint of your own), point `BRAIN_YOLOV8` at its
-`.safetensors` file to register it directly, bypassing auto-fetch entirely.
-Auto-fetch only pulls the `n` variant; larger YOLOv8 sizes need this manual
-path.
+locally by name. A checkpoint you've already converted (or a YOLOv8-compatible
+one of your own) is found once it is in the model store, or named outright with
+`--weights PATH`. Auto-fetch only pulls the `n` variant; larger YOLOv8 sizes
+need this manual path.
 
 ## Running it
 
+Every action is `brain yolov8 <action>` (the generic runner, flags built from
+the model's manifest) or the same action in the standalone program
+`sample-models-yolov8 <action>` (`samples/models/yolov8`), which adds the NPU
+actions below. `<action> --help` lists every flag with its default.
+
 ```bash
-# train a detector from scratch
-brain yolov8 train --weights out/yolo.safetensors
+# train a detector from scratch on a detection dataset (`make yolo/data`)
+brain yolov8 train --data data/detect --save out/yolo.safetensors --seed $RANDOM
 
-# fine-tune an existing checkpoint
-brain yolov8 fine-tune --weights out/yolo.safetensors
+# fine-tune a checkpoint; a larger --nc appends classes
+brain yolov8 finetune --data mine/ --save out/tuned.safetensors --nc 81 \
+    --freeze-backbone --freeze-reg-head --freeze-cls-hidden --train-classes 80 --wd 0
 
-# evaluate: reports precision, recall, mAP@0.5
-brain yolov8 eval --weights out/yolo.safetensors --data data/detect
+# evaluate: mAP@0.5, mAP@0.5:0.95, precision, recall, per-class AP
+brain yolov8 eval --data data/detect --split val --conf 0.001 --dump-preds out/preds.jsonl
 
 # run detection on an image
-brain yolov8 detect --weights out/yolo.safetensors --image photo.ppm --conf 0.25 --iou 0.45
+brain yolov8 detect --image photo.png --conf 0.25 --iou 0.45 --out detections=boxes.json
 ```
 
-`brain yolov8 train`'s defaults are 200 steps, batch size 4, learning rate
-1e-3, weight decay 1e-2 - override as needed. `train` and `fine-tune` take
-`--activations keep|recompute`: `recompute` keeps only each normed conv unit's
-input and rebuilds its intermediates in the backward, for the same gradients at
-lower memory.
+The checkpoint is resolved from the model store unless named with
+`--weights <file>`. `train` and `finetune` take `--activations keep|recompute`:
+`recompute` keeps only each normed conv unit's input and rebuilds its
+intermediates in the backward, for the same gradients at lower memory. Their
+defaults are 200 steps, batch size 4, learning rate 1e-3, weight decay 1e-2.
+
+### Telling which person it is
+
+`detect` becomes a two-stage detect-then-verify recognizer when it is given a
+reference embedding. The detector finds every `--identity-class` box (COCO
+`person`), SCRFD finds every face in the original full-resolution frame, each
+face is attributed to the person box its centre falls inside, and ArcFace
+embeds it. A box whose cosine against the reference clears
+`--identity-threshold` is labelled `--identity-name`; every other person box
+keeps `--identity-class-name`.
+
+```bash
+brain arcface embed --image reference.png --out embedding=ref.bin
+brain yolov8 detect --image group.png --identity-ref ref.bin --identity-name alice \
+    --identity-threshold 0.35 --identity-margin 0.05 --json
+```
+
+SCRFD and ArcFace come from the model store (`glintr100.onnx` with
+`scrfd_10g_bnkps.onnx` beside it); `--components arcface.weights=<dir>/glintr100.onnx`
+names them outright. Detections gain `label` and `similarity` fields. The
+identity stage runs on the engine, not the NPU.
 
 ### The training data
 
@@ -92,25 +118,41 @@ brain run --yolo out/yolo.safetensors
 
 ## Options
 
+`detect`:
+
 - `--conf` - confidence threshold below which a candidate box is dropped
   (default `0.25`).
 - `--iou` - IoU threshold used by NMS to suppress overlapping boxes of the
   same class; detection keeps at most 300 boxes per image.
-- `--weights` - path to a `.safetensors` checkpoint.
+- `--input` - the side the image is letterboxed to (default: the checkpoint's
+  own). A fine-tune's cheap training side need not be the pretrained classes'
+  inference side.
+- `--identity-ref`, `--identity-ref-path`, `--identity-name`,
+  `--identity-class-name`, `--identity-threshold`, `--identity-class`,
+  `--identity-margin`, `--components` - the identity stage above.
 - Input images are letterboxed (aspect-preserving resize + grey pad) onto the
   model's square input - 640x640 for the pretrained `Ultralytics/YOLOv8n`
   graph.
-- `--data` - a dataset directory of images with normalized center-xywh box
-  labels, used for training and evaluation.
-- `BRAIN_YOLOV8` - registers a local checkpoint directly, bypassing auto-fetch.
+
+`train` / `finetune`: `--data`, `--save`, `--steps`, `--batch`, `--lr`, `--wd`,
+`--nc`, `--input`, `--seed`, `--arch auto|tiny|yolov8n`, `--freeze-backbone`,
+`--freeze-reg-head`, `--freeze-cls-hidden`, `--train-classes`, `--activations`.
+`train` always starts from fresh weights; `finetune` builds on the resolved
+checkpoint's own architecture. `--train-classes` gates every other class's
+gradient off; AdamW's weight decay is not a gradient, so also pass `--wd 0` to
+keep those classes bit-exact.
+
+`eval`: `--data`, `--split val|all` (`val` is the last 10%), `--conf`, `--iou`,
+`--dump-preds`; the mAP numbers are scalar outputs and `--out report=table.txt`
+writes the table.
 
 ## Intel NPU export
 
 brain can quantize the detector to INT8 and run it on an Intel NPU (Meteor
-Lake and newer) via OpenVINO, through a separate export -> quantize -> run ->
-bench pipeline (`brain npu export/quantize/run/bench`, or
-`brain yolov8 detect --device npu` as a shortcut). See
-[the NPU export page](npu.md) for the full command reference, and
+Lake and newer) via OpenVINO, through a separate export -> quantize -> run
+pipeline: the `npu-export`, `npu-quantize`, `npu-sim` and `npu-run` actions of
+`sample-models-yolov8` (`brain npu bench` and `check` stay the generic ONNX
+tools). See [the NPU export page](npu.md) for the full command reference, and
 [the configuration reference](../../configuration.md) and the NPU note
 in [the hardware page](../../../guides/hardware/choosing-hardware.md) for setup.
 
@@ -119,9 +161,8 @@ in [the hardware page](../../../guides/hardware/choosing-hardware.md) for setup.
 - Runs on CPU and any wgpu-supported GPU; the NPU path is a separate
   compiled-graph pipeline, not a third live backend, and always finishes box
   decoding and NMS on the host CPU.
-- Batch size is fixed at model-configuration time - no dynamic per-request
-  batching.
+- Serving batches nothing across requests: each request is one forward.
 - Auto-fetch only provides the `n` (nano) variant; larger YOLOv8 sizes must
-  be imported manually via `BRAIN_YOLOV8`.
-- Detection is not exposed over HTTP - only D-Bus, `brain do`, and the `brain
-  yolo`/`brain run` CLI paths.
+  be converted and placed in the model store.
+- Detection is not exposed over HTTP - only D-Bus, `brain do`, and the
+  `brain yolov8` / `brain run` CLI paths.

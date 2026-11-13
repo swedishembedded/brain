@@ -95,8 +95,6 @@ crates/catalog/src/resident_tts.rs	BRAIN_QWEN3TTS_REF
 crates/catalog/src/resident_tts.rs	BRAIN_QWEN3TTS_REF_TEXT
 crates/catalog/src/resident_tts.rs	BRAIN_QWEN3TTS_WEIGHTS
 crates/catalog/src/resident_upscale.rs	BRAIN_ESRGAN_WEIGHTS
-crates/catalog/src/resident_yolo.rs	BRAIN_YOLOV8
-crates/catalog/src/resident_yolo.rs	BRAIN_YOLOV8_BATCH
 crates/catalog/src/resident_zimage.rs	BRAIN_S3DIT_RETAIN_INT8_CACHE
 crates/catalog/tests/served.rs	BRAIN_ESRGAN_WEIGHTS
 crates/checkpoint/src/gguf.rs	BRAIN_GGUF_TESTFILE
@@ -151,7 +149,6 @@ crates/cli/src/resolve.rs	BRAIN_RESOLVETESTARCH_VAE
 crates/cli/src/run_cli.rs	BRAIN_AUTO_FETCH
 crates/cli/src/run_cli.rs	BRAIN_CONF
 crates/cli/src/run_cli.rs	BRAIN_GPT2
-crates/cli/src/run_cli.rs	BRAIN_YOLOV8
 crates/cli/src/serve_daemon.rs	XDG_RUNTIME_DIR
 crates/cli/src/supply.rs	<var>
 crates/cli/src/supply.rs	BRAIN_AUTO_FETCH
@@ -1147,7 +1144,6 @@ crates/worldmirror2/tests/it/t17_resize_parity.rs	WM_RESIZE_GOLDEN
 crates/worldmirror2/tests/it/t1_t2_encode.rs	MIRROR_CKPT
 crates/worldmirror2/tests/it/t3_dpt_tiny.rs	MIRROR_DPT_TINY
 crates/worldmirror2/tests/it/t6_pos_interp.rs	MIRROR_BICUBIC_REFS
-crates/yolov8/src/caps.rs	BRAIN_YOLOV8
 crates/yolov8/tests/bench_forward_p40.rs	BRAIN_CONV_GEMM
 crates/yolov8/tests/bench_forward_p40.rs	MOE_SKIP_GPU_TESTS
 crates/yolov8/tests/common/p7.rs	MOE_SKIP_GPU_TESTS

@@ -18,10 +18,11 @@
 /// than owned here, so a sample can use them without this crate's own
 /// heavier dependency closure.
 pub use rlcd::metrics as calibration;
+// The detection metrics live with the detector they score (`yolov8` serves its own
+// `eval` action), so they cannot depend on this crate; the paths stay valid here.
+pub use yolov8::{detection, detection_report};
 
 pub mod asr;
-pub mod detection;
-pub mod detection_report;
 pub mod tts;
 
 use std::path::Path;

@@ -585,8 +585,8 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: yolov8::caps::manifest,
-            provider: always!(yolov8::caps::YoloProvider::new()),
-            spec: None,
+            provider: |assembly: &Assembly| yolov8::caps::provider(assembly, Arc::new(yolov8_faces::StoreFaces::new(components()))),
+            spec: Some(("yolov8", &yolov8::spec::YoloSpec)),
             resident: None,
         },
         // Two weights roles (`trunk`, `heads`), both resolved from the model

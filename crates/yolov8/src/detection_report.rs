@@ -23,9 +23,9 @@
 use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
-use yolov8::Detection;
 
 use crate::detection::{ap_for_class, map_at, precision_recall, GtBox};
+use crate::Detection;
 
 /// Number of COCO IoU thresholds (0.50 to 0.95 in steps of 0.05).
 const COCO_IOU_STEPS: usize = 10;

@@ -1,26 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain npu …` - deploy the YOLO detector to the Intel NPU via OpenVINO.
+//! `brain npu …` - ONNX graphs on the Intel NPU via OpenVINO.
 //!
-//!   brain npu export   --weights F --out model.onnx [--input S --opset N]
-//!   brain npu quantize --weights F --calib <dir> --out model.int8.onnx [--input S --num-calib N]
 //!   brain npu check    --onnx M [--ov-device NPU]
-//!   brain npu run      --onnx M --image <P6|dir> [--ov-device NPU --conf X --iou X --cache-dir D ...]
 //!   brain npu bench    --onnx M [--input S --ov-device NPU --iters N --warmup W --hint latency|throughput ...]
-//!   brain npu sim      --weights F --calib <dir> --data <dir>   # fp32 vs INT8 mAP, no NPU
 //!   brain npu omni     --hf-dir DIR [--out-dir out/omni] [--n-audio N --grid-h H --grid-w W --code-len T]
 //!   brain npu deepseekocr2 --weights DIR [--seq S --out-dir out]  # resampler (2 views) + decoder ONNX
 //!
-//! `export`/`quantize`/`sim` are pure Rust and run anywhere. `run`/`bench`/`check`
-//! (compile) need OpenVINO + an Intel NPU at run time; on a machine without them
-//! they print a clear diagnostic.
+//! `check` decodes a graph and, where OpenVINO and an NPU are present,
+//! compiles it; `bench` times one. YOLO's export, INT8 quantization, NPU
+//! detection and INT8 simulation are actions of `samples/models/yolov8`.
 //!
 //! `omni` exports omni's three NPU-eligible pieces (audio tower, vision tower,
 //! Code2Wav vocoder - NOT the 30B-parameter MoE Thinker decoder, not an NPU
 //! target) as fp32 ONNX and runs the same structural + (where available)
 //! OpenVINO-compile check `check` does on each. See `qwen3omnimoe::npu_export`'s
-//! module doc for the exact scope (single-merger vision path, no DeepStack). Output of `run` matches `brain yolo detect`.
+//! module doc for the exact scope (single-merger vision path, no DeepStack).
 
 use std::path::Path;
 use std::time::Instant;
@@ -32,12 +28,8 @@ use npu::openvino::{
 
 pub fn run_npu(args: &[String]) {
     match args.first().map(|s| s.as_str()) {
-        Some("export") => export(&args[1..]),
-        Some("quantize") => quantize(&args[1..]),
         Some("check") => check(&args[1..]),
-        Some("run") => run(&args[1..]),
         Some("bench") => bench(&args[1..]),
-        Some("sim") => sim(&args[1..]),
         Some("lfm") => lfm(&args[1..]),
         Some("deepseekocr2") => deepseekocr2(&args[1..]),
         Some("lfm-bench") => lfm_bench(&args[1..]),
@@ -46,7 +38,7 @@ pub fn run_npu(args: &[String]) {
         Some("fincast") => fincast(&args[1..]),
         Some("omni") => omni(&args[1..]),
         other => eprintln!(
-            "usage: brain npu <export|quantize|check|run|bench|sim|lfm|lfm-bench|chronos2|kronos|fincast|omni|deepseekocr2> ...  (got {other:?})"
+            "usage: brain npu <check|bench|lfm|lfm-bench|chronos2|kronos|fincast|omni|deepseekocr2> ...  (got {other:?})"
         ),
     }
 }
@@ -612,10 +604,6 @@ fn fincast(args: &[String]) {
     }
 }
 
-fn parse_opt_u32(args: &[String], i: &mut usize, flag: &str) -> Option<u32> {
-    val(args, i, flag).parse().ok()
-}
-
 fn argmax(x: &[f32]) -> u32 {
     (0..x.len()).max_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap()).unwrap_or(0) as u32
 }
@@ -885,86 +873,6 @@ fn die(e: NpuError) -> ! {
     std::process::exit(1);
 }
 
-// ---- export (pure Rust) ----
-fn export(args: &[String]) {
-    let mut weights = String::new();
-    let mut out = String::new();
-    let mut input: Option<u32> = None;
-    let mut opset = onnx::DEFAULT_OPSET;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--weights" => weights = val(args, &mut i, "--weights"),
-            "--out" => out = val(args, &mut i, "--out"),
-            "--input" => input = parse_opt_u32(args, &mut i, "--input"),
-            "--opset" => opset = val(args, &mut i, "--opset").parse().unwrap_or(opset),
-            other => eprintln!("ignoring unknown flag {other:?}"),
-        }
-        i += 1;
-    }
-    if weights.is_empty() || out.is_empty() {
-        eprintln!("usage: brain npu export --weights F --out model.onnx [--input S --opset N]");
-        return;
-    }
-    if let Err(e) = npu::export_fp32(&weights, &out, input, opset) {
-        eprintln!("brain npu export: writing {out}: {e}");
-        std::process::exit(1);
-    }
-    eprintln!("brain npu export: wrote fp32 ONNX {out}");
-}
-
-// ---- quantize (pure Rust) ----
-fn quantize(args: &[String]) {
-    let mut weights = String::new();
-    let mut calib = String::new();
-    let mut out = String::new();
-    let mut input: Option<u32> = None;
-    let mut num_calib = 300usize;
-    let mut opset = onnx::DEFAULT_OPSET;
-    let mut scales_out: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--weights" => weights = val(args, &mut i, "--weights"),
-            "--calib" => calib = val(args, &mut i, "--calib"),
-            "--out" => out = val(args, &mut i, "--out"),
-            "--input" => input = parse_opt_u32(args, &mut i, "--input"),
-            "--num-calib" => num_calib = val(args, &mut i, "--num-calib").parse().unwrap_or(num_calib),
-            "--opset" => opset = val(args, &mut i, "--opset").parse().unwrap_or(opset),
-            "--scales-out" => scales_out = Some(val(args, &mut i, "--scales-out")),
-            other => eprintln!("ignoring unknown flag {other:?}"),
-        }
-        i += 1;
-    }
-    if weights.is_empty() || calib.is_empty() || out.is_empty() {
-        eprintln!("usage: brain npu quantize --weights F --calib <dir> --out model.int8.onnx [--input S --num-calib N]");
-        return;
-    }
-    let cfg = npu::config_of(&weights);
-    let input_size = input.unwrap_or(cfg.input);
-    let images = match npu::load_calib_images(&calib, input_size, num_calib) {
-        Ok(v) if !v.is_empty() => v,
-        Ok(_) => {
-            eprintln!("brain npu quantize: no calibration images found in {calib}");
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("brain npu quantize: loading calibration images from {calib}: {e}");
-            std::process::exit(1);
-        }
-    };
-    eprintln!("brain npu quantize: calibrating on {} images at {input_size}px…", images.len());
-    let quant = npu::calibrate_from_weights(&weights, &images);
-    if let Some(p) = &scales_out {
-        let _ = std::fs::write(p, serde_json::to_vec_pretty(&quant.to_json()).unwrap());
-    }
-    if let Err(e) = npu::export_int8(&weights, &quant, &out, input, opset) {
-        eprintln!("brain npu quantize: writing {out}: {e}");
-        std::process::exit(1);
-    }
-    eprintln!("brain npu quantize: {} conv activations calibrated; wrote INT8 ONNX {out}", quant.len());
-}
-
 // ---- check ----
 fn check(args: &[String]) {
     let mut onnx_path = String::new();
@@ -1034,62 +942,6 @@ fn structural_check(onnx_path: &str, opts: &NpuOpts) {
         }
         Err(e) => println!("openvino unavailable: {e}"),
     }
-}
-
-// ---- run (needs NPU) ----
-fn run(args: &[String]) {
-    let mut onnx_path = String::new();
-    let mut image = String::new();
-    let mut conf = 0.25f32;
-    let mut iou = 0.45f32;
-    let mut nc: Option<u32> = None;
-    let mut reg_max: Option<u32> = None;
-    let mut input: Option<u32> = None;
-    let mut opts = NpuOpts::default();
-    let mut i = 0;
-    while i < args.len() {
-        if opts.parse_flag(args, &mut i) {
-            i += 1;
-            continue;
-        }
-        match args[i].as_str() {
-            "--onnx" => onnx_path = val(args, &mut i, "--onnx"),
-            "--image" => image = val(args, &mut i, "--image"),
-            "--conf" => conf = val(args, &mut i, "--conf").parse().unwrap_or(conf),
-            "--iou" => iou = val(args, &mut i, "--iou").parse().unwrap_or(iou),
-            "--nc" => nc = parse_opt_u32(args, &mut i, "--nc"),
-            "--reg-max" => reg_max = parse_opt_u32(args, &mut i, "--reg-max"),
-            "--input" => input = parse_opt_u32(args, &mut i, "--input"),
-            other => eprintln!("ignoring unknown flag {other:?}"),
-        }
-        i += 1;
-    }
-    if onnx_path.is_empty() || image.is_empty() {
-        eprintln!("usage: brain npu run --onnx M --image <P6|dir> [--ov-device NPU --conf X --iou X --nc C --reg-max R --input S]");
-        return;
-    }
-    let (hwc, w, h) = match crate::image_io::load_image(&image) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("brain npu run: {e}");
-            std::process::exit(1);
-        }
-    };
-    let mut session = match NpuSession::load(Path::new(&onnx_path), &opts.to_config()) {
-        Ok(s) => s,
-        Err(e) => die(e),
-    };
-    // The decode needs nc + reg_max + input. They are not in the ONNX, so the
-    // caller supplies them (defaults match yolov8n) or they are inferred.
-    let cfg = infer_cfg(&session, nc, reg_max, input);
-    let dets = match npu::detect_image(&mut session, &hwc, w, h, &cfg, conf, iou) {
-        Ok(d) => d,
-        Err(e) => die(e),
-    };
-    for d in &dets {
-        println!("[{:.2},{:.2},{:.2},{:.2},{:.4},{}]", d[0], d[1], d[2], d[3], d[4], d[5] as u32);
-    }
-    eprintln!("brain npu run: {} detection(s) on {w}x{h} via {}", dets.len(), session.device());
 }
 
 /// Build a `YoloConfig` for decode from explicit flags (the ONNX doesn't carry
@@ -1170,43 +1022,3 @@ fn bench(args: &[String]) {
     }
 }
 
-// ---- sim (pure Rust: fp32 vs INT8 mAP, no NPU) ----
-fn sim(args: &[String]) {
-    let mut weights = String::new();
-    let mut calib = String::new();
-    let mut data = String::new();
-    let mut conf = 0.25f32;
-    let mut iou = 0.45f32;
-    let mut num_calib = 300usize;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--weights" => weights = val(args, &mut i, "--weights"),
-            "--calib" => calib = val(args, &mut i, "--calib"),
-            "--data" => data = val(args, &mut i, "--data"),
-            "--conf" => conf = val(args, &mut i, "--conf").parse().unwrap_or(conf),
-            "--iou" => iou = val(args, &mut i, "--iou").parse().unwrap_or(iou),
-            "--num-calib" => num_calib = val(args, &mut i, "--num-calib").parse().unwrap_or(num_calib),
-            other => eprintln!("ignoring unknown flag {other:?}"),
-        }
-        i += 1;
-    }
-    if weights.is_empty() || data.is_empty() {
-        eprintln!("usage: brain npu sim --weights F --data <dir> [--calib <dir> --num-calib N --conf X --iou X]");
-        return;
-    }
-    let cfg = npu::config_of(&weights);
-    // Calibrate on --calib if given, else reuse the eval dataset's images.
-    let calib_dir = if calib.is_empty() { data.clone() } else { calib };
-    let images = npu::load_calib_images(&calib_dir, cfg.input, num_calib).unwrap_or_default();
-    if images.is_empty() {
-        eprintln!("brain npu sim: no calibration images in {calib_dir}");
-        std::process::exit(1);
-    }
-    let quant = npu::calibrate_from_weights(&weights, &images);
-    let (m_fp32, m_int8) = npu::simulate_map(&weights, &data, &quant, conf, iou);
-    println!("metric            value");
-    println!("mAP@0.5 fp32      {m_fp32:.4}");
-    println!("mAP@0.5 int8(sim) {m_int8:.4}");
-    println!("delta             {:.4}", m_fp32 - m_int8);
-}

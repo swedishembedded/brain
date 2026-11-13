@@ -217,13 +217,16 @@ impl Yolo {
     /// 10/10 at 640 to 3/10 at 256 on weights that are bit-for-bit identical),
     /// so the two are separable here rather than fused in the checkpoint.
     pub fn load_at(path: &str, b: u32, input: u32) -> Yolo {
-        let c = crate::import::open(path).and_then(|r| checkpoint::load_reader(&r)).unwrap_or_else(|e| panic!("{e}"));
-        let mut cfg = YoloConfig::from_json(&c.header["config"]);
-        let init = c.into_by_role("");
+        Yolo::try_load_at(path, b, input).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// [`Yolo::load_at`] reporting an unreadable or foreign checkpoint as an error.
+    pub fn try_load_at(path: &str, b: u32, input: u32) -> Result<Yolo, String> {
+        let (mut cfg, init) = read_checkpoint(path)?;
         if input > 0 {
             cfg.input = input;
         }
-        Yolo::new(cfg, b, 0, &init)
+        Ok(Yolo::new(cfg, b, 0, &init))
     }
 
     pub fn new(cfg: YoloConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> Yolo {
@@ -1077,19 +1080,31 @@ impl Yolo {
     }
 
     pub fn save(&self, path: &str) {
+        self.try_save(path).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// [`Yolo::save`] reporting a write failure as an error.
+    pub fn try_save(&self, path: &str) -> Result<(), String> {
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = self
             .ps
             .params
             .iter()
             .map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name)))
             .collect();
-        // "brain/yolov8" matches the reserved-vendor
-        // fallback -- the same id crates/serving/src/executor.rs::YoloResident::
-        // from_env synthesizes for an env-loaded checkpoint -- so a
-        // checkpoint saved here is auto-discoverable by
-        // crates/serving/src/model_dir.rs without requiring BRAIN_YOLOV8 to be set.
-        checkpoint::save_carded(path, self.cfg.to_json(), &tensors, &checkpoint::st::ModelCard::new("brain/yolov8", "yolo"));
+        // "brain/yolov8" is the id the model store files a YOLOv8 checkpoint
+        // under (`YoloSpec`, `YoloResident::from_store`), so a checkpoint saved here
+        // is found like a pulled one.
+        let card = checkpoint::st::ModelCard::new(crate::caps::MODEL, "yolo");
+        checkpoint::st::save_safetensors(path, &tensors, &self.cfg.to_json(), Some(&card)).map_err(|e| format!("writing {path}: {e}"))
     }
+}
+
+/// A checkpoint's own config and every tensor by name: a brain `.safetensors`,
+/// or an Ultralytics YOLOv8n `.pt` read in place.
+pub fn read_checkpoint(path: &str) -> Result<(YoloConfig, HashMap<String, Vec<f32>>), String> {
+    let c = crate::import::open(path).and_then(|r| checkpoint::load_reader(&r))?;
+    let cfg = YoloConfig::from_json(&c.header["config"]);
+    Ok((cfg, c.into_by_role("")))
 }
 
 /// The two BatchNorm mode toggles every backbone/neck block shares, so [`Yolo`]

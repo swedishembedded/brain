@@ -67,7 +67,7 @@ layer 4 - models
     qwen35moe, qwen3asr, qwen3omnimoe, qwen3tts, qwen3vl, qwen3vlmoe, recon, ricursive, rrdbnet,
     s3dit, s3tokenizer, sam1, sam2, scrfd, sdxlunet, sfm, spectrallm, splat, supir, t5encoder,
     timesfm3, toyautoencoder, toymoe, toypid, toyseq2seq, viewport, vqgan, wan, wm-core, wm-
-    display, worldmirror2, yolov5, yolov8, zipdepth
+    display, worldmirror2, yolov5, yolov8, yolov8-faces, zipdepth
 layer 5 - cross-cutting evaluation and tooling
     bench, capture, fcbench, federated, gradcheck, modelcost, modelopt, rl
 layer 6 - serving, front ends, SDK, samples
@@ -78,11 +78,11 @@ layer 6 - serving, front ends, SDK, samples
     imagegen-generate, sample-learning-reader, sample-learning-rlcd, sample-learning-
     visualclick, sample-models-flux2, sample-models-lfm2, sample-models-ltxv, sample-models-
     sam2, sample-models-splat, sample-models-wan, sample-models-worldmirror2, sample-models-
-    zipdepth, sample-npu-rockchip, sample-reconstruction-splat, sample-study-chat, sample-study-
-    document, sample-study-timeline, sample-text-chat-full-finetune, sample-text-embed, sample-
-    text-embed-train, sample-text-encoder-finetune, sample-text-retrieve, sample-text-retrieve-
-    json, sample-text-spectral-lm, sample-tts-clone, sample-vision-perception, server, serving,
-    trainjob, web
+    yolov8, sample-models-zipdepth, sample-npu-rockchip, sample-reconstruction-splat, sample-
+    study-chat, sample-study-document, sample-study-timeline, sample-text-chat-full-finetune,
+    sample-text-embed, sample-text-embed-train, sample-text-encoder-finetune, sample-text-
+    retrieve, sample-text-retrieve-json, sample-text-spectral-lm, sample-tts-clone, sample-
+    vision-perception, server, serving, trainjob, web
 ```
 <!-- crate-layers:end -->
 

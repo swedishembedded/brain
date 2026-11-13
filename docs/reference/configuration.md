@@ -109,7 +109,6 @@ served, with no error.
 | `BRAIN_GLMDSA_WEIGHTS` | GLM decoder | checkpoint (char-level) |
 | `BRAIN_FLUX2_DIT`, `BRAIN_FLUX2_VAE`, `BRAIN_FLUX2_TE`, `BRAIN_FLUX2_TOKENIZER` | FLUX.2 Klein text2image/edit/finetune | optional overrides, one per component -- unset, each is resolved from the model store instead (`flux2::spec::Flux2Spec`); set, it pins that exact file. `BRAIN_FLUX2_TE` takes either an HF text-encoder directory or a Qwen3 `.gguf` file -- sniffed, not declared |
 | `BRAIN_S3DIT_DIT`, `BRAIN_S3DIT_VAE`, `BRAIN_S3DIT_QWEN`, `BRAIN_S3DIT_TOKENIZER` | Z-Image text2image/edit | optional overrides, one per component -- unset, each is resolved from the model store instead (`s3dit::spec::S3ditSpec`); set, it pins that exact file |
-| `BRAIN_YOLOV8` | YOLOv8 detection | checkpoint |
 | `BRAIN_SCRFD_DIR` | antelopev2 face detection | dir holding `scrfd_10g_bnkps.onnx` |
 | `BRAIN_ARCFACE_DIR` | antelopev2 face identity embedding | dir holding `glintr100.onnx` (plus `scrfd_10g_bnkps.onnx` for the default `align=true` path) |
 | `BRAIN_ESRGAN_WEIGHTS` | Real-ESRGAN upscale | `RealESRGAN_x4plus.pth` (or any RRDBNet) |
@@ -172,7 +171,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_FLUX2_ALLOW_NC` | `1` opts in to the FLUX Non-Commercial-licensed 9B variants | required, not set |
 | `BRAIN_FLUX2_LORA_FOLD` | `1` puts an INT8 FLUX.2 build back on the old LoRA deployment: the adapter is baked into the weights and the result requantized, instead of being applied beside the base matmul in fp32. Unlike `BRAIN_FLUX2_NO_STREAM` the two are NOT the same bytes - folding into a 256-level grid discards most of a trained delta (measured: 94.8% of adapted weights round back to their base code at a delta 0.5% of the weight magnitude). An A/B instrument, not a tier to ship | off (runtime correction) | <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 | `BRAIN_FLUX1_I8_KEEP_F32` / `BRAIN_FLUX2_I8_KEEP_F32` | keeps a specific sub-layer at fp32 under INT8 inference, trading a little memory for accuracy | off |
-| `BRAIN_YOLOV8_BATCH` | YOLO true-batch forward width | 1 |
 | `BRAIN_S3DIT_RETAIN_INT8_CACHE` | `1` retains the int8 DiT cache across demote/promote (trades multi-GB host RAM for faster reactivation) | off |
 | `BRAIN_S3DIT_ENCODER_GPU` | which GPU card hosts the Z-Image text encoder | shares the DiT's card |
 | `BRAIN_S3DIT_ENCODER_CUT` | fp32 2-card encoder split point (layer index) | ~2/3 of layers |

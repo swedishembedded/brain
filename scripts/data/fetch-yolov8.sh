@@ -11,9 +11,8 @@
 # Defaults: variant yolov8n (nano, 80 COCO classes, 640px); out is $OUT if set,
 # else scratchpad/yolo under the repo root (override with --out or $OUT).
 # Produces  <out>/<variant>.pt  (the source) and  <out>/<variant>.brain.weights
-# (the brain checkpoint). Point brain at the latter:
-#
-#   export BRAIN_YOLOV8=<out>/<variant>.brain.weights
+# (the brain checkpoint). Name the latter with --weights, or keep it in the
+# model store where brain finds it.
 #
 # Needs Python with torch + ultralytics to READ the .pt (the export writer is pure
 # Python). This installs them (CPU torch) if missing — a large one-time download.
@@ -65,5 +64,5 @@ echo "== exporting -> $WEIGHTS =="
 python3 "$EXPORTER" --weights "$PT" --out "$WEIGHTS"
 
 echo
-echo "done. serve it with:"
-echo "  export BRAIN_YOLOV8=$WEIGHTS"
+echo "done. run it with:"
+echo "  brain yolov8 detect --weights $WEIGHTS --image photo.png --json"

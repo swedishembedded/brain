@@ -939,6 +939,7 @@ dependencies = [
  "brain-wan",
  "brain-worldmirror2",
  "brain-yolov8",
+ "brain-yolov8-faces",
  "brain-zipdepth",
  "serde",
  "serde_json",
@@ -3424,6 +3425,17 @@ dependencies = [
  "brain-vision",
  "bytemuck",
  "serde_json",
+]
+
+[[package]]
+name = "brain-yolov8-faces"
+version = "5.1.0"
+dependencies = [
+ "brain-arcface",
+ "brain-capability",
+ "brain-modelstore",
+ "brain-scrfd",
+ "brain-yolov8",
 ]
 
 [[package]]
@@ -6910,6 +6922,24 @@ dependencies = [
  "brain-npu",
  "brain-onnx",
  "brain-worldmirror2",
+]
+
+[[package]]
+name = "sample-models-yolov8"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-imaging",
+ "brain-invoke",
+ "brain-loader",
+ "brain-model",
+ "brain-npu",
+ "brain-onnx",
+ "brain-yolov8",
+ "brain-yolov8-faces",
+ "serde_json",
 ]
 
 [[package]]

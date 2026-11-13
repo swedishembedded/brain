@@ -14,8 +14,7 @@ $ brain --device gpu s3dit text2image \
 A detector finds what the prompt asked for: an apple, a dog and a dining table.
 
 ```bash
-$ brain yolov8 detect --weights <models>/Ultralytics/YOLOv8/model.brain.safetensors --image seed.ppm
-brain yolov8 detect: 3 detection(s) on 512x512
+$ brain yolov8 detect --image seed.png --json
 ```
 
 ![the image with yolov8's detection boxes drawn on it](img/detected.png)

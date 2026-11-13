@@ -18,37 +18,41 @@ do NMS).
    └──quantize(calib)─▶ yolo.int8.onnx ──┘
 ```
 
-`export`, `quantize`, and `sim` are pure Rust and run on any machine — no NPU
-or OpenVINO install required. `run`, `bench`, and `check`'s compile step need
+`npu-export`, `npu-quantize`, and `npu-sim` are pure Rust and run on any machine - no NPU
+or OpenVINO install required. `npu-run`, `bench`, and `check`'s compile step need
 OpenVINO plus an Intel NPU.
 
 ## Commands
 
+The four YOLO actions live in `sample-models-yolov8` (`samples/models/yolov8`,
+`make samples/models/yolov8/build`); `Y` below is that binary. ONNX files are
+named outputs (`--out onnx=PATH`).
+
 ```bash
 # fp32 ONNX (pure Rust)
-brain npu export   --weights out/yolo.safetensors --out out/yolo.onnx [--input S --opset 13]
+$Y npu-export   --weights out/yolo.safetensors --out onnx=out/yolo.onnx [--input S --opset 13]
 
 # INT8 Q/DQ ONNX via brain-native post-training quantization (pure Rust):
 # calibrate over representative images, compute activation + weight scales
-brain npu quantize --weights out/yolo.safetensors --calib calib/ --out out/yolo.int8.onnx \
-                   [--input S --num-calib 300 --scales-out out/scales.json]
+$Y npu-quantize --weights out/yolo.safetensors --calib calib/ --out onnx=out/yolo.int8.onnx \
+                [--input S --num-calib 300 --out scales=out/scales.json]
 
 # structural ONNX check (always) + compile/op-coverage check on a device (needs OpenVINO)
-brain npu check    --onnx out/yolo.int8.onnx [--ov-device NPU]
+brain npu check --onnx out/yolo.int8.onnx [--ov-device NPU]
 
-# run on the NPU; output format identical to `brain yolov8 detect`
-brain npu run      --onnx out/yolo.int8.onnx --image sample.ppm --ov-device NPU \
-                   [--conf 0.25 --iou 0.45 --nc 80 --reg-max 16 --cache-dir out/npu-cache \
-                    --hint latency|throughput --turbo --allow-fallback]
+# run on the NPU; the detections have the shape `yolov8 detect` returns
+$Y npu-run      --onnx out/yolo.int8.onnx --image sample.png --ov-device npu \
+                [--conf 0.25 --iou 0.45 --nc 80 --reg-max 16 --cache-dir out/npu-cache \
+                 --hint latency|throughput --turbo --allow-fallback --profile]
 
 # latency p50/p99 + throughput
-brain npu bench    --onnx out/yolo.int8.onnx --ov-device NPU --hint throughput [--iters 200 --warmup 20]
+brain npu bench --onnx out/yolo.int8.onnx --ov-device NPU --hint throughput [--iters 200 --warmup 20]
 
-# fp32 vs INT8 mAP@0.5 with no NPU present (fake-quant simulation) — the accuracy gate
-brain npu sim      --weights out/yolo.safetensors --data data/detect [--calib calib/ --num-calib 300]
+# fp32 vs INT8 mAP@0.5 with no NPU present (fake-quant simulation) - the accuracy gate
+$Y npu-sim      --weights out/yolo.safetensors --data data/detect [--calib calib/ --num-calib 300]
 
-# convenience: route `yolo detect` through the NPU (auto-exports fp32)
-brain yolov8 detect  --weights out/yolo.safetensors --image sample.ppm --device npu
+# detect straight from the checkpoint on the NPU (exports fp32 in memory)
+$Y npu-run      --weights out/yolo.safetensors --image sample.png
 ```
 
 ## Install (Meteor Lake / NPU 3720)
@@ -84,7 +88,7 @@ engine as an fp32 "fake-quant" simulation, so INT8 accuracy can be measured
 without any NPU present:
 
 ```bash
-brain npu sim --weights out/yolo.safetensors --data data/detect
+$Y npu-sim --weights out/yolo.safetensors --data data/detect
 ```
 
 This reports fp32 vs INT8-simulated mAP@0.5 on a dataset, and closely tracks
@@ -92,13 +96,13 @@ what you'll see running the same graph on-device.
 
 ## Performance knobs
 
-`--hint latency|throughput` picks OpenVINO's performance hint, `--cache-dir`
+`--hint latency|throughput` (on `npu-run`) picks OpenVINO's performance hint, `--cache-dir`
 enables warm recompiles, `--turbo` enables NPU turbo mode, and `--profile`
 enables per-op timing.
 
 ## Calibration data
 
 For the 640px pretrained model, use roughly 300 representative 640px images
-(a directory of binary PPM/P6 files, or a brain detection-dataset directory)
+(a directory of PPM, PNG or JPEG files, or a brain detection-dataset directory)
 for `--calib`. A small synthetic dataset is fine for quick smoke-testing but
 isn't representative of real-world calibration for the 640px model.

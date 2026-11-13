@@ -14,8 +14,8 @@ brain/edgerock	generate	repetition_penalty
 brain/edgerock	generate	seed
 brain/edgerock	generate	temp
 brain/edgerock	generate	top_p
-brain/flux1-pulid	text2image	seed
 brain/flux1	text2image	seed
+brain/flux1-pulid	text2image	seed
 brain/flux2-klein	edit	seed
 brain/flux2-klein	lora_train	lr
 brain/flux2-klein	lora_train	min_lr
@@ -64,6 +64,7 @@ brain/ltxv	extend	modality_guidance
 brain/ltxv	extend	rescale
 brain/ltxv	extend	seed
 brain/ltxv	extend	stg
+brain/ltxv	replace	seed
 brain/ltxv	t2a	audio_guidance
 brain/ltxv	t2a	audio_modality_guidance
 brain/ltxv	t2a	audio_rescale
@@ -84,7 +85,6 @@ brain/ltxv	t2v	guidance
 brain/ltxv	t2v	max_shift
 brain/ltxv	t2v	modality_guidance
 brain/ltxv	t2v	rescale
-brain/ltxv	replace	seed
 brain/ltxv	t2v	seed
 brain/ltxv	t2v	stg
 brain/ltxv	t2v	terminal
@@ -125,6 +125,9 @@ brain/ouro	generate	repetition_penalty
 brain/ouro	generate	seed
 brain/ouro	generate	temp
 brain/ouro	generate	top_p
+brain/qwen3	generate	eos
+brain/qwen3	generate	seed
+brain/qwen3	lora_train	seed
 brain/qwen35	generate	eos
 brain/qwen35	generate	seed
 brain/qwen35	generate	temp
@@ -133,9 +136,6 @@ brain/qwen35moe	generate	eos
 brain/qwen35moe	generate	seed
 brain/qwen35moe	generate	temp
 brain/qwen35moe	generate	top_p
-brain/qwen3	generate	eos
-brain/qwen3	generate	seed
-brain/qwen3	lora_train	seed
 brain/qwen3tts	batch	repetition_penalty
 brain/qwen3tts	batch	seed
 brain/qwen3tts	batch	temp
@@ -160,8 +160,8 @@ brain/s3dit	inpaint	seed
 brain/s3dit	lora_train	lr
 brain/s3dit	outpaint	seed
 brain/s3dit	text2image	seed
-brain/sdxl-controlnet	text2image	seed
 brain/sdxl	text2image	seed
+brain/sdxl-controlnet	text2image	seed
 brain/splat	fit	lr_position
 brain/supir	restore	restore_cfg
 brain/supir	restore	seed
@@ -170,4 +170,6 @@ brain/wan	lora_train	seed
 brain/wan	t2v	guidance
 brain/wan	t2v	seed
 brain/wan	t2v	shift
+brain/yolov8	finetune	seed
+brain/yolov8	train	seed
 brain/zipdepth	train	seed

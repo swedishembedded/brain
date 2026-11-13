@@ -9,7 +9,7 @@ descriptor. Both models are served and scheduled by the same residency
 Executor.
 
 ```bash
-BRAIN_S3DIT_DIT=... BRAIN_YOLOV8=... \
+BRAIN_S3DIT_DIT=... \
   tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/dbus/detect-pipeline/detect_pipeline.py
 ```
@@ -26,8 +26,8 @@ BRAIN_S3DIT_DIT=... BRAIN_YOLOV8=... \
 
 ## What it needs
 
-- `BRAIN_S3DIT_*` (z-image) and `BRAIN_YOLOV8` (detection weights) exported
-  before `brain serve --dbus`. Without both, the script prints which model is
+- `BRAIN_S3DIT_*` (z-image) exported before `brain serve --dbus`, and the
+  YOLOv8 detection weights in the model store. Without both, the script prints which model is
   missing and skips rather than failing.
 - `pip install -e brain-py` (jeepney with fd passing) and Pillow (`PIL`, for
   drawing the labeled boxes).

@@ -235,13 +235,15 @@ class RustParity(unittest.TestCase):
             return done.stdout
 
         brain("data", "gen", "detect", "--out", data, "--n", "24", "--seed", "7")
-        brain("yolov8", "train", data, "--out", weights, "--steps", PARITY_STEPS, "--batch", "4", "--seed", "7")
+        brain("yolov8", "train", "--data", data, "--save", weights, "--steps", PARITY_STEPS, "--batch", "4", "--seed", "7")
         cls.dumps = {}
         for conf in ("0.001", "0.05"):
             dump = os.path.join(cls.tmp, f"preds-{conf}.jsonl")
-            printed = brain("yolov8", "eval", "--weights", weights, "--data", data, "--split", "all",
-                            "--conf", conf, "--dump-preds", dump)
-            cls.dumps[conf] = (dump, printed)
+            report = os.path.join(cls.tmp, f"report-{conf}.txt")
+            brain("yolov8", "eval", "--weights", weights, "--data", data, "--split", "all",
+                  "--conf", conf, "--dump-preds", dump, "--out", f"report={report}")
+            with open(report) as fh:
+                cls.dumps[conf] = (dump, fh.read())
 
     def parse(self, printed):
         num = lambda label: float(re.search(rf"^{re.escape(label)}\s+([0-9.]+)", printed, re.M).group(1))

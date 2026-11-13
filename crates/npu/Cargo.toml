@@ -39,7 +39,6 @@ brain-imaging.workspace = true
 brain-worldmirror2.workspace = true
 brain-data.workspace = true
 brain-eval.workspace = true
-brain-events.workspace = true
 # Shared latency-percentile math (`stats::latency::Dist`) so the KV-cache and
 # OpenVINO bench paths report the same p50/p99/mean definition the rest of the
 # performance suite does, instead of a locally reimplemented one.
@@ -62,6 +61,7 @@ openvino.workspace = true
 # dependency direction stays brain-wm-diamond -> brain-npu.
 [dev-dependencies]
 brain-testutil.workspace = true
+brain-events.workspace = true
 brain-diamond.workspace = true
 brain-gpu-core.workspace = true
 brain-paramstore.workspace = true

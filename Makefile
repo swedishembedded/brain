@@ -1112,8 +1112,7 @@ $(GPT_EVAL_TARGETS): gpt/%/eval: build/release
 # `make yolo/data` generates a synthetic object-detection dataset (RGB shapes
 # + exact GT boxes) at the tiny YOLO's native 128px geometry. `yolo/train`
 # trains the tiny detector on it; `yolo/eval` reports mAP@0.5/precision/recall;
-# `yolo/detect` runs inference on a sample image (dataset image 0) and prints the
-# boxes as JSON lines. All CPU-friendly (the YOLO model runs on the CPU backend).
+# `yolo/detect` runs inference on an image (YOLO_IMG) and prints the boxes as JSON. All CPU-friendly (the YOLO model runs on the CPU backend).
 ## yolo - lists the YOLO detector targets; does nothing
 yolo:
 	$(LIST_CHILDREN)
@@ -1125,7 +1124,7 @@ yolo/data: build/release
 ## yolo/train - train the tiny YOLO on it -> out/yolo.safetensors
 yolo/train: build/release
 	@mkdir -p $(OUT)
-	$(BRAIN) yolov8 train $(DATA)/detect --out $(OUT)/yolo.safetensors \
+	$(BRAIN) yolov8 train --data $(DATA)/detect --save $(OUT)/yolo.safetensors \
 		--steps $(YOLO_STEPS) --batch $(YOLO_BATCH) --lr $(YOLO_LR) $(SEED_FLAG)
 
 ## yolo/eval - mAP@0.5 + precision/recall of the trained YOLO
@@ -1133,10 +1132,11 @@ yolo/eval: build/release
 	$(BRAIN) yolov8 eval --weights $(OUT)/yolo.safetensors --data $(DATA)/detect \
 		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
 
-## yolo/detect - run detection on a sample image (JSON boxes)
+## yolo/detect - run detection on an image (JSON boxes; YOLO_IMG=<image>)
 yolo/detect: build/release
-	$(BRAIN) yolov8 detect --weights $(OUT)/yolo.safetensors --image $(DATA)/detect \
-		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
+	@test -n "$(YOLO_IMG)" || (echo "set YOLO_IMG=<image>"; exit 2)
+	$(BRAIN) yolov8 detect --weights $(OUT)/yolo.safetensors --image $(YOLO_IMG) \
+		--conf $(YOLO_CONF) --iou $(YOLO_IOU) --json
 
 # ---- Intel NPU deployment (OpenVINO) --------------------------------------
 # Quantize the trained YOLO to INT8 and compile it to a real NPU graph.
@@ -1144,7 +1144,9 @@ yolo/detect: build/release
 # `yolo/npu/sim-int8` measures fp32-vs-INT8 mAP with NO NPU. `yolo/npu/run` and
 # `yolo/npu/bench` REQUIRE OpenVINO 2024.x + an Intel NPU (3720 / Meteor Lake) at
 # run time - they are NOT part of `make build/debug`/`make test`. The NPU is a
-# whole-graph compiler, separate from --device cpu|gpu; see docs/yolo/NPU.md.
+# whole-graph compiler, separate from --device cpu|gpu. export, quantize, sim and
+# run are actions of the yolov8 sample (samples/models/yolov8); bench is the
+# generic ONNX tool `brain npu bench`.
 ONNX        ?= $(OUT)/yolo.onnx
 ONNX_INT8   ?= $(OUT)/yolo.int8.onnx
 NPU_DEVICE  ?= NPU
@@ -1157,25 +1159,23 @@ yolo/npu:
 	$(LIST_CHILDREN)
 
 ## yolo/npu/export - export the trained YOLO to ONNX (pure Rust, any machine)
-yolo/npu/export: build/release
+yolo/npu/export: samples/models/yolov8/build
 	@mkdir -p $(OUT)
-	$(BRAIN) npu export --weights $(OUT)/yolo.safetensors --out $(ONNX)
+	$(MAKE) samples/models/yolov8/run ARGS="npu-export --weights $(OUT)/yolo.safetensors --out onnx=$(ONNX)"
 
 ## yolo/npu/quantize - quantize the trained YOLO to INT8 ONNX (pure Rust, any machine)
-yolo/npu/quantize: build/release
+yolo/npu/quantize: samples/models/yolov8/build
 	@mkdir -p $(OUT)
-	$(BRAIN) npu quantize --weights $(OUT)/yolo.safetensors --calib $(NPU_CALIB) \
-		--out $(ONNX_INT8) --num-calib $(NPU_NCALIB) --scales-out $(OUT)/yolo.scales.json
+	$(MAKE) samples/models/yolov8/run ARGS="npu-quantize --weights $(OUT)/yolo.safetensors --calib $(NPU_CALIB) --num-calib $(NPU_NCALIB) --out onnx=$(ONNX_INT8) --out scales=$(OUT)/yolo.scales.json"
 
 ## yolo/npu/sim-int8 - measure fp32-vs-INT8 mAP with no NPU
-yolo/npu/sim-int8: build/release
-	$(BRAIN) npu sim --weights $(OUT)/yolo.safetensors --data $(DATA)/detect \
-		--calib $(NPU_CALIB) --num-calib $(NPU_NCALIB) --conf $(YOLO_CONF) --iou $(YOLO_IOU)
+yolo/npu/sim-int8: samples/models/yolov8/build
+	$(MAKE) samples/models/yolov8/run ARGS="npu-sim --weights $(OUT)/yolo.safetensors --data $(DATA)/detect --calib $(NPU_CALIB) --num-calib $(NPU_NCALIB) --conf $(YOLO_CONF) --iou $(YOLO_IOU)"
 
-## yolo/npu/run - run the INT8 graph on the NPU (needs OpenVINO + an Intel NPU)
-yolo/npu/run: build/release
-	$(BRAIN) npu run --onnx $(ONNX_INT8) --image $(DATA)/detect --device $(NPU_DEVICE) \
-		--cache-dir $(NPU_CACHE) --conf $(YOLO_CONF) --iou $(YOLO_IOU)
+## yolo/npu/run - run the INT8 graph on the NPU (needs OpenVINO + an Intel NPU; YOLO_IMG=<image>)
+yolo/npu/run: samples/models/yolov8/build
+	@test -n "$(YOLO_IMG)" || (echo "set YOLO_IMG=<image>"; exit 2)
+	$(MAKE) samples/models/yolov8/run ARGS="npu-run --onnx $(ONNX_INT8) --image $(YOLO_IMG) --ov-device $(NPU_DEVICE) --cache-dir $(NPU_CACHE) --conf $(YOLO_CONF) --iou $(YOLO_IOU)"
 
 ## yolo/npu/bench - benchmark the INT8 graph on the NPU (needs OpenVINO + an Intel NPU)
 yolo/npu/bench: build/release

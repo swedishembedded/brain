@@ -191,11 +191,11 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
         Some(z) => models.push(Arc::new(z)),
         None => residency::log::not_served("brain: z-image not served over the scheduler (set BRAIN_S3DIT_DIT/_VAE/_QWEN/_TOKENIZER, or place a checkpoint under the model dir)"),
     }
-    // yolo object detection if a checkpoint is configured (BRAIN_YOLOV8).
-    if let Some(y) = YoloResident::from_env() {
+    // YOLO object detection, over the checkpoint the model store holds.
+    if let Some(y) = YoloResident::from_store(models_dir) {
         models.push(Arc::new(y));
     } else {
-        residency::log::not_served("brain: yolo not served over the scheduler (set BRAIN_YOLOV8 to a checkpoint)");
+        residency::log::not_served("brain: yolo not served over the scheduler (pull Ultralytics/YOLOv8 into the model dir)");
     }
     // Text-generation LLMs (each gated on its own weights env var).
     if let Some(g) = catalog::resident_llm::GptResident::from_env() {

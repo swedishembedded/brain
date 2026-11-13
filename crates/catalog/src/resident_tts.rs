@@ -55,7 +55,7 @@ pub struct TtsResident {
 impl TtsResident {
     /// Configure from the environment, mirroring `brain tts synth`'s flags. Returns
     /// `None` (not served) when `BRAIN_QWEN3TTS_WEIGHTS` is unset/empty, like
-    /// [`crate::resident_yolo::YoloResident::from_env`].
+    /// [`crate::resident_yolo::YoloResident::from_store`].
     pub fn from_env() -> Option<TtsResident> {
         let weights_dir = std::env::var("BRAIN_QWEN3TTS_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         let ckpt_dir = std::env::var("BRAIN_QWEN3TTS_CKPT").ok().unwrap_or_default();

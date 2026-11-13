@@ -1,0 +1,17 @@
+[package]
+name = "brain-yolov8-faces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The face models (SCRFD + ArcFace) behind YOLOv8's identity verification, resolved through capability::Components."
+
+[lib]
+name = "yolov8_faces"
+path = "src/lib.rs"
+
+[dependencies]
+brain-yolov8.workspace = true
+brain-arcface.workspace = true
+brain-scrfd.workspace = true
+brain-capability.workspace = true
+brain-modelstore.workspace = true

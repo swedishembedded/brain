@@ -200,7 +200,7 @@ tells you which applies (look for the **⤓** marker):
   already on disk.
 - **A local checkpoint** - everything else needs you to point brain at a
   checkpoint on disk, via a `BRAIN_*_WEIGHTS`/`_CKPT`/`_DIR` environment
-  variable named on that model's own page (e.g. `BRAIN_YOLOV8`,
+  variable named on that model's own page (e.g.
   `BRAIN_QWEN3TTS_WEIGHTS` + `BRAIN_QWEN3TTS_CKPT`). Unset ⇒ the
   model simply isn't served, with no error. The full list of these variables
   is in [Configuration](../../reference/configuration.md#model-weights--gating).

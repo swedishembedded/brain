@@ -9,7 +9,7 @@
 //! reverse of the direct form (`brain <arch> <verb> …`, where `a` itself is
 //! the id). Both land on identical `(arch, rest)`, where `rest[0]` is always
 //! the verb -- the exact shape every existing per-architecture `_cli.rs`
-//! handler (`gpt_cli::run_gpt`, `yolo_cli::run_yolo`, …) already expects, so
+//! handler (`gpt_cli::run_gpt`, …) already expects, so
 //! nothing about their own verb parsing changes.
 //!
 //! An architecture reaches the CLI one of two ways:
@@ -47,7 +47,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("ouro", crate::ouro_cli::run_ouro),
     ("huginn", crate::huginn_cli::run_huginn),
     ("qwen3tts", crate::tts_cli::run_tts),
-    ("yolov8", crate::yolo_cli::run_yolo),
     // wm_cli's own `--arch`/`--model` flags (not this resolver) pick
     // fake-vs-diamond within `play`/`import`/`export` -- diamond is its one
     // real served architecture, so that's the id this dispatches from.
@@ -149,6 +148,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("deepseekvl", "brain/deepseekvl"),
     ("januspro", "brain/januspro"),
     ("minicpmv", "brain/minicpmv"),
+    ("yolov8", "brain/yolov8"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
@@ -361,6 +361,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "zipdepth",
     "worldmirror2",
     "lfm2",
+    "yolov8",
     "lpips",
     "rrdbnet",
     "timesfm3",

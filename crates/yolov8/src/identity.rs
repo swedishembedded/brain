@@ -117,6 +117,39 @@ impl IdentityGate {
     }
 }
 
+/// Everything a [`FaceVerifier`] needs to attribute faces to the boxes of one
+/// frame.
+pub struct VerifyRequest<'a> {
+    pub gate: &'a IdentityGate,
+    /// File overrides for the face models, `role -> path` (the `arcface` entry
+    /// of the caller's `components`).
+    pub arcface_roles: &'a std::collections::BTreeMap<String, String>,
+    /// The detector's device, which the face models ride on.
+    pub gpu: &'a gpu_core::Gpu,
+    pub dets: &'a [Detection],
+    /// The frame, interleaved RGB `w x h` in `[0,1]`, at its own resolution.
+    pub hwc: &'a [f32],
+    pub w: u32,
+    pub h: u32,
+}
+
+/// The face models behind the identity stage (SCRFD + ArcFace). They live
+/// outside this crate so a detector-only consumer does not link them; the host
+/// that serves identity verification supplies an implementation.
+pub trait FaceVerifier: Send + Sync {
+    fn verify(&self, request: &VerifyRequest) -> Result<Vec<Labeled>, String>;
+}
+
+/// A reference embedding from the little-endian f32 bytes `arcface embed`
+/// writes as its `embedding` output, so a reference identity is produced by
+/// the embedder itself rather than by a bespoke serializer.
+pub fn parse_embedding(bytes: &[u8], what: &str) -> Result<Vec<f32>, String> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return Err(format!("{what}: {} bytes is not a little-endian f32 vector", bytes.len()));
+    }
+    Ok(bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes(*q)).collect())
+}
+
 /// One detection after the gate has run.
 pub struct Labeled {
     /// The detection, unchanged - `[x1,y1,x2,y2,conf,class]` in original-image
@@ -212,6 +245,14 @@ pub fn to_json(labeled: &[Labeled]) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_embedding_is_little_endian_f32() {
+        let bytes: Vec<u8> = [0.5f32, -2.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert_eq!(parse_embedding(&bytes, "ref").unwrap(), vec![0.5, -2.0]);
+        assert!(parse_embedding(&[], "ref").is_err());
+        assert!(parse_embedding(&[1, 2, 3], "ref").unwrap_err().contains("3 bytes"));
+    }
 
     /// A weights-free stand-in for the SCRFD + ArcFace path: it reports the
     /// box it was asked about and answers with a vector chosen by the mean

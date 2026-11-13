@@ -11,7 +11,7 @@
 //!   * `--gpt <path>` (or env `BRAIN_GPT2`) - load a GPT checkpoint as the text
 //!     model. With none, a fake echo model is used so the loop is testable
 //!     without a trained model.
-//!   * `--yolo <path>` (or env `BRAIN_YOLOV8`) - load a YOLO checkpoint as the
+//!   * `--yolo <path>` - load a YOLO checkpoint as the
 //!     object detector. With none, a `FakeDetectModel` returns a fixed box so the
 //!     loop runs without a trained detector.
 //!   * `--conf <f32>` (or env `BRAIN_CONF`) - detection confidence threshold for
@@ -399,7 +399,7 @@ DECISION MODELS  (decide + Laya; every servable one in the model store is
 
 STDIO CONTROLLER  (--stdio)
   --gpt PATH             GPT checkpoint (else $BRAIN_GPT2; else a fake echo model)
-  --yolo PATH             YOLO checkpoint (else $BRAIN_YOLOV8; else a fake detector)
+  --yolo PATH             YOLO checkpoint (else a fake detector)
   --conf X                detection confidence threshold (else $BRAIN_CONF, 0.25)
   --max-new N  --temp X  --top-k K  --seed S      generation config
   Reads JSONL events on stdin, writes JSONL events on stdout, one per line.
@@ -684,7 +684,7 @@ pub fn run_serve(args: &[String]) {
     // names one without `--stdio` is refused instead of ignoring it.
     let mut stdio = false;
     let mut stdio_only: Option<&'static str> = None;
-    let mut yolo_path = std::env::var("BRAIN_YOLOV8").ok();
+    let mut yolo_path: Option<String> = None;
     let mut cfg = GenConfig { max_new: 256, temperature: 0.0, top_k: 0, eos: None, seed };
     // Optional detection confidence threshold for the YOLO detector. A tiny model
     // trained for only a few hundred steps emits low-confidence boxes that the
