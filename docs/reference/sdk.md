@@ -481,7 +481,9 @@ raises it.
   without one is an imitation example (plain cross-entropy), so rollouts and supervised records mix.
 - `"behavior_logprobs"` (supervised assistant message, optional, needs an `"advantage"`): the log-probability the sampler
   gave each token of the answer, one per token of the answer as the chat template renders it after its prompt: the
-  answer's text and the end-of-turn marker that closes it (the generation prompt is context, not sampled). Values are
+  answer's text and the end-of-turn marker that closes it (the generation prompt is context, not sampled, and so is the
+  whitespace the template writes after the marker, such as the newline after Qwen's `<|im_end|>`: a policy-gradient
+  record never supervises a token the sampler did not choose). Values are
   finite and at most 0. A count that does not match the answer's tokens is refused naming the file, the record and both
   counts. The log-probabilities are those of `softmax(logits / temperature)`; give the sampling temperature as
   `PolicyGradientConfig::temperature`.
@@ -576,6 +578,18 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   (`steps_skipped_guard`, `skipped` on the step) and the run goes on; 8 skipped steps in a row end it. Each step also
   reports `entropy_estimate` (the mean `-log p` of the sampled tokens, an entropy estimate while the rollouts are
   on-policy), `mean_response_tokens`, `grad_norm` and the importance weight statistics.
+- **Numerics gate** (`PolicyGradientConfig::numerics: Some(NumericsBounds { .. })`; CLI `brain finetune BASE --dataset
+  RECORDS --lora RANK --policy-gradient --numerics-gate [--gate-max-mean-gap X] [--gate-max-gap X] [--gate-max-mismatch-kl X]
+  [--gate-min-sequence-ess X] [--gate-max-grad-norm X] --steps N`). Run it before an RL arm on records collected through a
+  serving endpoint with `policy_trace` (see the HTTP reference): no optimiser step is taken, the run draws records as a
+  training run would (raise `steps` until it covers them) and reports, in `stats.numerics` and as JSON on the CLI, the gap
+  between the recorded behaviour log-probabilities and the trainer's own on the same tokens (mean absolute, largest, mean,
+  and where the largest sat), the k3 mismatch KL, the step-0 ratio (mean, smallest, largest, share outside the clip band),
+  the effective sample size per token and per sequence, and the gradient norms of the batches (largest, median, how many were
+  not finite). It needs `behaviour: Recorded` and no importance correction. The CLI exits 3 when a bound that was given is
+  broken, naming it on stderr; a non-finite gradient or no measured token fails whatever the bounds. Set the bounds before
+  the run, from the clip band and the policy's tolerance (a mean gap of 0.02 or a sequence ESS under 0.5 means the band is
+  spent on the engine before the first update).
 - **Reference policy.** `Base` (the adapter disabled) or `StartOfRun` (the adapter being continued); the same for a
   fresh adapter. Measured by a forward pass over each record the first time a step draws it (a second pass when a
   continued adapter is compared with the base).

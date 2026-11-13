@@ -69,14 +69,26 @@ its definition, the on-policy first step and the supervised parity of a record w
       teacher's top-K log-probabilities stored per position (K ids and values) in the sidecar instead of one scalar.
 - [ ] Self-distillation on a real 27B (bf16 base, rank-16 adapter): confirm teacher advantages are sane (mean near 0,
       few tokens at the bound), that the sequence cap rarely binds, and that held-out pass rates do not collapse.
-- [ ] A real-weight check, on a card, which has not run: Qwen3.8-27B-FP8 as a bf16 base with a rank-16 adapter, the
+- [x] The numerics gate (2026-11-13; `brain finetune --policy-gradient --numerics-gate`, `PolicyGradientConfig::numerics`,
+      `rl::objective::numerics`): no optimiser step; over the records the run draws it reports the gap between the recorded
+      behaviour log-probabilities and the trainer's (mean absolute, largest, bias and where the largest sat), the k3 mismatch KL,
+      the step-0 ratio statistics and share outside the band, the effective sample size per token and per sequence, and the
+      gradient norms of the batches (finite count, largest, median, spike ratio), and exits 3 when a bound given by
+      `--gate-max-mean-gap`, `--gate-max-gap`, `--gate-max-mismatch-kl`, `--gate-min-sequence-ess` or `--gate-max-grad-norm` is
+      broken. Gated on the CPU: the statistics against hand arithmetic (`numerics.rs`), a run on a tiny qwen35 whose recorded
+      values equal the trainer's (passes, ESS 1, no weight moved) and are shifted by a known gap (that gap, the k3 KL of it, the
+      broken bound named) in `policy_gradient_stability.rs`. On real weights: Qwen3-4B on a GH200, records from the served
+      engine's `policy_trace` at temperature 1.0: mean |gap| 0.023-0.025, mismatch KL 0.004, 3% of tokens outside the 0.2 band,
+      sequence ESS 0.52-0.58 at the default serving (int8 KV), 0.0099, 0.27% and 0.96 with an f32 KV cache; table and method in
+      knowledge #446. Qwen3.8-27B-FP8 is not gated: its resident engine has no `score_continuation` yet.
+- [ ] A real-weight check on Qwen3.8-27B-FP8 (the Qwen3-4B part of it ran, #446), which has not run: as a bf16 base with a rank-16 adapter, the
       records of a few rollout groups with and without images and with the sampler's log-probabilities. It should
       (1) confirm that the first step's ratios are 1 within bf16 noise when no log-probabilities were recorded and that
       recorded ones from the serving engine give ratios near 1 at step 0 (the size of the serve/train log-probability gap
       is what decides whether `clip_eps` 0.2 is loose enough for them), (2) show the mean log-probability of positive-
       and negative-advantage actions moving apart over 20-40 steps on `score_tokens_qwen35`, and (3) record the
       peak device memory and the seconds of the start-of-run pass per 1000 tokens.
-- [ ] `brain qwen35 finetune` (the CLI) reads no advantage sidecar; the SDK is the one entry point.
+- [x] `brain finetune --lora RANK --policy-gradient` reads the advantage and behaviour log-probabilities of the records (CLI and SDK are one entry point).
 - [x] Every trainer that declares `ChatTrainer::POLICY_GRADIENT` takes it: `qwen35`, `qwen3` (95c1a48d4) and `ricursive`; an architecture that does not is refused by name. Held-out and monitoring selection are refused for these runs.
 - [x] Lazy, cached preparation: the start-of-run pass, the reference (KL) pass and the teacher pass used to be one
       forward per example over the whole dataset before step 1 (a 5890-record, 265 MB agent-call set sat over an hour

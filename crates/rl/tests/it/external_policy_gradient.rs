@@ -25,6 +25,7 @@ use rl::objective::grpo_term::k3_kl;
 pub(crate) const T: usize = 8;
 
 /// One sequence of the dataset: its tokens, where its supervised answer starts, and what its rollout recorded.
+#[derive(Clone)]
 pub(crate) struct Row {
     pub(crate) ids: Vec<u32>,
     pub(crate) answer_from: usize,

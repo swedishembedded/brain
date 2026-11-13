@@ -95,4 +95,6 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
   in the learning rate. No objective defect found. The one silent factor was the number of records read: a run draws
   `steps * grad_accum * batch` records, 100 by default, so 2400 rollouts at default steps train on 4% of them; the run
   now says so when it opens.
+- [x] T061 P0 - crates/rl/src/objective/numerics.rs, external.rs - serve-versus-train numerics gate before an RL arm (step-0 ratio, gap, mismatch KL, ESS, gradient norms; bounds by flag; non-zero exit); `grpo-corrections.md`, knowledge #446
+- [x] T062 P0 - crates/rl/src/objective/external.rs (rule) - per-step guard on KL and gradient norm that skips and logs an update (knowledge #440 is the evidence); entropy estimate, response length, clip fraction per edge per step; clip-higher; truncated importance sampling and mask; truncated rollouts and observation tokens masked
 - [x] T063 P1 - crates/sdk/src/finetune.rs, crates/backend-cuda/src/backend.rs - a device out-of-memory in a chat fine-tune is `Error::DeviceOutOfMemory` (and `[unavailable]` through `brain/train`), not an unwind; a graph launch that runs out of memory after its first graph unwinds with the allocator's typed payload so the scheduler backs off (knowledge #445)

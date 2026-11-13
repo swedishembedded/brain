@@ -69,7 +69,8 @@ use model::{Batch, FitOpts, Model, ModelConfig, Objective, Split, StepVerdict, I
 use super::grpo::LossAgg;
 use super::grpo_stats::{NonFiniteSteps, MAX_CONSECUTIVE_NONFINITE};
 use super::grpo_term::ClipBand;
-use super::pg_batch::{adapters_are_zero, adapters_can_be_disabled, backward_weighted, weigh, with_adapters_disabled, AdapterState, BatchTerms, PgBatch, PgSpec};
+use super::numerics::{NumericsAccumulator, NumericsBounds, NumericsReport};
+use super::pg_batch::{adapters_are_zero, adapters_can_be_disabled, backward_weighted_lp, weigh, with_adapters_disabled, AdapterState, BatchTerms, PgBatch, PgSpec};
 use super::score_cache::{ExampleScores, ScoreCache, TokenAdvantages};
 
 /// Consecutive optimiser steps the step guard may skip before the run is aborted.
@@ -240,6 +241,11 @@ pub struct PolicyGradientConfig {
     /// few extreme log-ratios (KL 0.50 among neighbours of 0.003) must not reach the weights. Needs a reference
     /// measurement ([`Self::log_kl`] or a KL weight). `None`: no bound.
     pub max_step_kl: Option<f32>,
+    /// Run as the numerics gate ([`super::numerics`]): no optimiser step is taken, and the run measures the gap between
+    /// the recorded behaviour log-probabilities and the trainer's own, the effective sample size and the gradient norms of
+    /// the batches it draws, judged against these bounds (`NumericsBounds::default()` reports and enforces nothing).
+    /// Needs recorded behaviour log-probabilities and no importance correction.
+    pub numerics: Option<NumericsBounds>,
     /// Skip, and log, the optimiser step of a step whose global gradient norm (after averaging over the step's
     /// micro-batches, before the optimiser's clip) exceeds this. `None`: no bound.
     pub max_step_grad_norm: Option<f32>,
@@ -268,7 +274,7 @@ pub struct PolicyGradientConfig {
 
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
-        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None }
+        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None }
     }
 }
 
@@ -300,6 +306,15 @@ impl PolicyGradientConfig {
             }
             if self.behaviour != BehaviourSource::Recorded {
                 return Err("an importance correction weighs the trainer against the recorded behaviour log-probabilities; it needs behaviour \"recorded\"".to_string());
+            }
+        }
+        if let Some(bounds) = &self.numerics {
+            bounds.validate()?;
+            if self.behaviour != BehaviourSource::Recorded || self.importance.is_on() {
+                return Err("the numerics gate compares the trainer with the recorded behaviour log-probabilities; it needs behaviour \"recorded\" and no importance correction".to_string());
+            }
+            if self.max_step_kl.is_some() || self.max_step_grad_norm.is_some() {
+                return Err("the numerics gate takes no optimiser step, so a step guard has nothing to guard; set the gate's own bounds".to_string());
             }
         }
         for (name, value) in [("max_step_kl", self.max_step_kl), ("max_step_grad_norm", self.max_step_grad_norm)] {
@@ -388,6 +403,8 @@ pub struct PolicyGradientStats {
     /// Optimiser steps not taken because the step's KL or gradient norm was over its bound
     /// ([`PolicyGradientConfig::max_step_kl`], [`PolicyGradientConfig::max_step_grad_norm`]).
     pub steps_skipped_guard: usize,
+    /// The numerics gate's measurements and verdict, for a run that was one ([`PolicyGradientConfig::numerics`]).
+    pub numerics: Option<NumericsReport>,
     /// Truncated rollouts of the dataset: never drawn, scored or trained on (`"truncated": true` on the record).
     pub sequences_truncated: usize,
     /// Sequences of the dataset with an advantage, and without (imitation).
@@ -563,6 +580,7 @@ pub struct ExternalPolicyGradient {
     stats: PolicyGradientStats,
     consecutive_nonfinite: u32,
     consecutive_guard: u32,
+    gate: NumericsAccumulator,
     verdict: Option<StepVerdict>,
 }
 
@@ -652,7 +670,7 @@ impl ExternalPolicyGradient {
         let rows = Rows { starts, ends, advantage, eligible, behavior, teacher };
         let cache = ScoreCache::create(dir, rows.starts.len())?;
         let max_token = tokens.iter().copied().chain(rows.teacher.iter().flat_map(|t| (0..rows.starts.len()).filter_map(|e| t.example(e)).flat_map(|(ids, _)| ids.iter().copied()))).max().unwrap_or(0);
-        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, consecutive_guard: 0, verdict: None })
+        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, consecutive_guard: 0, gate: NumericsAccumulator::default(), verdict: None })
     }
 
     /// What the run has measured so far.
@@ -947,11 +965,33 @@ impl ExternalPolicyGradient {
         });
     }
 
+    /// Feed the numerics gate with the sequences of one micro-batch: for each policy sequence (a row with an advantage)
+    /// the recorded behaviour log-probabilities against the trainer's, over its supervised tokens.
+    fn measure_numerics(&mut self, laid: &Laid, new_lp: &[f32], band: ClipBand) {
+        let bl = self.batch_cfg.block_size;
+        for (b, pick) in laid.picks.iter().enumerate() {
+            if pick.is_none_or(|e| !self.is_policy_example(e)) {
+                continue;
+            }
+            let (mut old, mut new) = (Vec::new(), Vec::new());
+            for t in (0..bl).filter(|&t| laid.targets[b * bl + t] != IGNORE) {
+                old.push(laid.old_lp[b * bl + t]);
+                new.push(new_lp[b * bl + t]);
+            }
+            self.gate.add_sequence(&old, &new, band);
+        }
+    }
+
     /// The verdict on the step just closed: a non-finite loss or gradient skips it (the run aborts after
     /// [`MAX_CONSECUTIVE_NONFINITE`] in a row), and so does a KL or gradient norm over the configured bound, logged
     /// with the values and counted (the run aborts after [`MAX_CONSECUTIVE_GUARD_SKIPS`] in a row: a bound that
     /// skips every step is wrong, or the policy has left the region it can be trained in).
     fn rule(&mut self, finite: bool) -> StepVerdict {
+        if self.cfg.numerics.is_some() {
+            // A measurement: the weights never move, and a batch that does not differentiate is a finding the report
+            // carries (`grad_nonfinite`), not a reason to stop measuring.
+            return StepVerdict::Skip("numerics gate: measuring, no optimiser step is taken".to_string());
+        }
         if !finite {
             self.consecutive_guard = 0;
             self.consecutive_nonfinite += 1;
@@ -1054,7 +1094,10 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
             self.upload(model, &l.tokens, &l.targets, &l.picks);
             let _ = model.forward();
             let batch = PgBatch { targets: &l.targets, old_lp: &l.old_lp, ref_lp: l.has_ref.then_some(&l.ref_lp[..]), advantage: &l.advantage, is_weight: l.is_weight.as_deref() };
-            let terms = backward_weighted(model, &batch, &spec, denominator);
+            let (terms, new_lp) = backward_weighted_lp(model, &batch, &spec, denominator);
+            if self.cfg.numerics.is_some() {
+                self.measure_numerics(l, &new_lp, spec.band);
+            }
             finite &= terms.finite;
             loss += terms.loss / denominator.unwrap_or(terms.supervised.max(1) as f32);
             for e in l.picks.iter().flatten() {
@@ -1077,6 +1120,10 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         let (grads_finite, grad_sq) = gradient_scan(model);
         finite &= grads_finite;
         let grad_norm = (grad_sq.sqrt() / f64::from(k.max(1))) as f32;
+        if let Some(bounds) = &self.cfg.numerics {
+            self.gate.add_grad_norm((grads_finite && grad_norm.is_finite()).then_some(grad_norm));
+            self.stats.numerics = Some(self.gate.report(bounds));
+        }
         self.close_step(grad_norm);
         self.verdict = Some(self.rule(finite));
         loss

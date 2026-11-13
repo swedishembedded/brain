@@ -202,3 +202,58 @@ fn a_truncated_rollout_is_never_drawn_and_a_dataset_of_only_those_is_refused() {
     let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), no_kl()).err().expect("nothing to train on");
     assert!(err.to_string().contains("truncated"), "{err}");
 }
+
+/// The numerics gate: with the recorded log-probabilities equal to the trainer's own, the gap is zero, the effective
+/// sample size one and the gate passes; recorded values a fixed shift below them give exactly that gap, a mismatch KL
+/// of the k3 definition and a broken bound that names itself. No update is ever taken.
+#[test]
+fn the_numerics_gate_measures_the_serve_train_gap_takes_no_step_and_names_the_bound_it_broke() {
+    use rl::objective::numerics::NumericsBounds;
+    let gate = |bounds: NumericsBounds| PolicyGradientConfig { numerics: Some(bounds), behaviour: BehaviourSource::Recorded, kl_beta: 0.0, log_kl: false, ..Default::default() };
+    let strict = NumericsBounds { max_mean_abs_gap: Some(1e-4), max_abs_gap: Some(1e-3), max_mismatch_kl: Some(1e-6), min_sequence_ess_fraction: Some(0.99), max_grad_norm: Some(1e6) };
+    let run = |shift: f32| {
+        let mut m = lora_model(31);
+        let before: Vec<Vec<f32>> = m.param_names().iter().map(|n| m.read_weight(n)).collect();
+        let other = [2u32, 3, 4, 5, 6, 7];
+        let other_now = answer_logprobs(&m, &Row::new(&other, 3, None));
+        let rows = [shifted(&m, 1.0, shift), Row { behavior: Some(other_now.iter().map(|lp| (lp - shift).min(0.0)).collect()), ..Row::new(&other, 3, Some(-1.0)) }];
+        let (mut obj, _dir) = started(&rows, gate(strict), &mut m);
+        for _ in 0..4 {
+            m.zero_grads();
+            Objective::<Qwen35>::micro_steps(&mut obj, &m, &mut data::rng::Rng::new(1), 1);
+            m.poll_wait();
+            assert!(matches!(Objective::<Qwen35>::step_verdict(&mut obj), StepVerdict::Skip(_)), "a measurement takes no optimiser step");
+        }
+        let after: Vec<Vec<f32>> = m.param_names().iter().map(|n| m.read_weight(n)).collect();
+        assert_eq!(before, after);
+        obj.stats().numerics.clone().expect("a gate run reports")
+    };
+
+    let exact = run(0.0);
+    assert!(exact.passed(), "{:?}", exact.violations);
+    assert!(exact.gap_max_abs < 1e-3 && (exact.ess_fraction_sequence - 1.0).abs() < 1e-3, "{exact:?}");
+    assert_eq!(exact.grad_batches, 4);
+
+    let off = run(0.3);
+    assert!((off.gap_mean_abs - 0.3).abs() < 1e-3 && (off.gap_mean - 0.3).abs() < 1e-3, "a 0.3 shift: {off:?}");
+    let kl = (0.3f32.exp() - 1.0 - 0.3).abs();
+    assert!((off.mismatch_kl - kl).abs() < 1e-3, "k3 of a 0.3 gap is {kl}: {off:?}");
+    assert!(!off.passed() && off.violations.iter().any(|v| v.contains("mean |log-prob gap|")) && off.violations.iter().any(|v| v.contains("mismatch KL")), "{:?}", off.violations);
+}
+
+#[test]
+fn the_numerics_gate_refuses_what_would_make_it_meaningless() {
+    use rl::objective::numerics::NumericsBounds;
+    let dir = tempfile::tempdir().unwrap();
+    super::external_policy_gradient::write_dataset(dir.path(), &[Row::new(&IDS, 3, Some(1.0))]);
+    let run = super::external_policy_gradient::opts(1, 1, 1e-2);
+    let gate = Some(NumericsBounds::default());
+    for (bad, named) in [
+        (PolicyGradientConfig { numerics: gate, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }, "recorded"),
+        (PolicyGradientConfig { numerics: gate, importance: ImportanceCorrection::Truncate { cap: 2.0 }, ..Default::default() }, "importance"),
+        (PolicyGradientConfig { numerics: gate, max_step_kl: Some(0.1), ..Default::default() }, "guard"),
+    ] {
+        let err = ExternalPolicyGradient::open(dir.path(), &run, bad).err().unwrap_or_else(|| panic!("{named} accepted"));
+        assert!(err.to_string().contains(named), "{named}: {err}");
+    }
+}

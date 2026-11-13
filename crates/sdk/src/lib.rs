@@ -188,6 +188,9 @@ pub use model::StepWork;
 /// outside brain.
 #[cfg(feature = "study")]
 pub use rl::objective::external::{BehaviourSource, ImportanceCorrection, PolicyGradientConfig, PolicyGradientStats, PolicyGradientStep, ReferencePolicy};
+/// The numerics gate's bounds and report ([`PolicyGradientConfig::numerics`]).
+#[cfg(feature = "study")]
+pub use rl::objective::numerics::{NumericsBounds, NumericsReport};
 #[cfg(feature = "study")]
 pub use rl::objective::grpo::LossAgg;
 #[cfg(feature = "study")]

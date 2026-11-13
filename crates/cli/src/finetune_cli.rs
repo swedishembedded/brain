@@ -58,6 +58,12 @@ brain finetune BASE --dataset FILE --out DIR [options]
   --max-step-kl X --max-step-grad-norm X
                      with --policy-gradient: skip, and log, an optimiser step whose KL to the reference, or whose gradient
                      norm, is over the bound (a run that skips 8 steps in a row stops).
+  --numerics-gate    with --policy-gradient: take no optimiser step; measure, over the records the run draws (raise --steps
+                     until it covers them), how far the trainer's own log-probabilities of the recorded tokens are from the
+                     recorded behaviour ones (mean and largest gap, mismatch KL, the step-0 ratio, effective sample size) and
+                     the gradient norms of the batches, print the report as JSON and exit 3 when a bound below is broken.
+  --gate-max-mean-gap X --gate-max-gap X --gate-max-mismatch-kl X --gate-min-sequence-ess X --gate-max-grad-norm X
+                     the gate's bounds (each optional: an unset one is reported and not enforced).
   --behaviour B      with --policy-gradient: where the behaviour log-probabilities of the ratio come from.
                      recorded (default): the sampler's own, on every supervised token of every record; start_of_run_proxy:
                      where none was recorded, the start-of-run policy's (exact only if the rollouts were sampled from it).
@@ -113,7 +119,12 @@ struct Args {
     importance: Option<brain::ImportanceCorrection>,
     max_step_kl: Option<f32>,
     max_step_grad_norm: Option<f32>,
+    numerics_gate: bool,
+    gate: brain::NumericsBounds,
 }
+
+/// The exit status of a numerics gate whose bounds were broken (1 is a failed run, 2 a usage error).
+const NUMERICS_GATE_FAILED: i32 = 3;
 
 fn parse(argv: &[String]) -> Result<Args, String> {
     let mut a = Args::default();
@@ -168,6 +179,12 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--importance" => a.importance = Some(need(&mut i, &flag)?.parse().map_err(|e| format!("brain finetune: {flag}: {e}"))?),
             "--max-step-kl" => a.max_step_kl = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--max-step-grad-norm" => a.max_step_grad_norm = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--numerics-gate" => a.numerics_gate = true,
+            "--gate-max-mean-gap" => a.gate.max_mean_abs_gap = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--gate-max-gap" => a.gate.max_abs_gap = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--gate-max-mismatch-kl" => a.gate.max_mismatch_kl = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--gate-min-sequence-ess" => a.gate.min_sequence_ess_fraction = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--gate-max-grad-norm" => a.gate.max_grad_norm = Some(number(&need(&mut i, &flag)?, &flag)?),
             "-h" | "--help" => return Err(String::new()),
             other if other.starts_with('-') => return Err(format!("brain finetune: unknown option '{other}'")),
             other if a.base.is_empty() => a.base = other.to_string(),
@@ -192,6 +209,15 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 return Err(format!("brain finetune: {flag} shapes the policy gradient; give --policy-gradient"));
             }
         }
+    }
+    if !a.numerics_gate && a.gate != brain::NumericsBounds::default() {
+        return Err("brain finetune: the --gate-* bounds belong to the numerics gate; give --numerics-gate".to_string());
+    }
+    if a.numerics_gate {
+        if !a.policy_gradient {
+            return Err("brain finetune: --numerics-gate measures a policy gradient's step 0; give --policy-gradient".to_string());
+        }
+        a.gate.validate().map_err(|e| format!("brain finetune: {e}"))?;
     }
     if a.lora.is_some() && a.train_precision.is_some() {
         return Err("brain finetune: --train-precision stores a full fine-tune's weights and optimizer state; an adapter run takes --base-format".to_string());
@@ -272,7 +298,7 @@ fn lora(a: &Args, rank: u32) -> brain::ChatFineTune {
     }
     if a.policy_gradient {
         let d = brain::PolicyGradientConfig::default();
-        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), behaviour: a.behaviour.unwrap_or(d.behaviour), clip_eps_high: a.clip_eps_high, importance: a.importance.unwrap_or(d.importance), max_step_kl: a.max_step_kl, max_step_grad_norm: a.max_step_grad_norm, ..d });
+        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), behaviour: a.behaviour.unwrap_or(d.behaviour), numerics: a.numerics_gate.then_some(a.gate), clip_eps_high: a.clip_eps_high, importance: a.importance.unwrap_or(d.importance), max_step_kl: a.max_step_kl, max_step_grad_norm: a.max_step_grad_norm, ..d });
     }
     t
 }
@@ -366,6 +392,14 @@ pub fn run_finetune(argv: &[String]) -> ! {
                     let show = |v: Option<f32>| v.map_or("-".to_string(), |v| format!("{v:.4}"));
                     println!("held-out: {} records, {} positions, loss {} -> {}", base.records, base.positions, show(base.loss), show(tuned.loss));
                 }
+                let mut gate_failed = false;
+                if let Some(report) = o.policy_gradient.as_ref().and_then(|pg| pg.stats.numerics.as_ref()) {
+                    println!("numerics: {}", serde_json::to_string_pretty(report).unwrap_or_default());
+                    gate_failed = !report.passed();
+                    for why in &report.violations {
+                        eprintln!("brain finetune: numerics gate: {why}");
+                    }
+                }
                 if let Some(pg) = &o.policy_gradient {
                     println!("policy gradient: {} steps ({} skipped by the guard), mean loss {:?}, mean clip fraction {:?}, mean kl {:?}", pg.stats.steps.len(), pg.stats.steps_skipped_guard, pg.stats.mean_loss(), pg.stats.mean_clip_fraction(), pg.stats.mean_kl());
                 }
@@ -375,7 +409,11 @@ pub fn run_finetune(argv: &[String]) -> ! {
                 if let Some(p) = &o.resume_state {
                     println!("resume state: {}", p.display());
                 }
-                0
+                if gate_failed {
+                    NUMERICS_GATE_FAILED
+                } else {
+                    0
+                }
             }
             Err(e) => {
                 eprintln!("brain finetune: {e}");
@@ -452,6 +490,16 @@ mod tests {
     }
 
     #[test]
+    fn the_numerics_gate_needs_the_policy_gradient_and_takes_its_bounds_by_name() {
+        assert!(parse(&argv("base --lora 4 --numerics-gate")).unwrap_err().contains("--policy-gradient"));
+        assert!(parse(&argv("base --lora 4 --policy-gradient --gate-max-gap 0.5")).unwrap_err().contains("--numerics-gate"));
+        let a = parse(&argv("base --lora 4 --policy-gradient --numerics-gate --gate-max-mean-gap 0.02 --gate-max-gap 0.5 --gate-max-mismatch-kl 0.001 --gate-min-sequence-ess 0.5 --gate-max-grad-norm 5")).unwrap();
+        assert!(a.numerics_gate);
+        assert_eq!((a.gate.max_mean_abs_gap, a.gate.max_abs_gap, a.gate.max_mismatch_kl, a.gate.min_sequence_ess_fraction, a.gate.max_grad_norm), (Some(0.02), Some(0.5), Some(0.001), Some(0.5), Some(5.0)));
+        assert!(parse(&argv("base --lora 4 --policy-gradient --numerics-gate --gate-min-sequence-ess 2")).unwrap_err().contains("min_sequence_ess_fraction"));
+    }
+
+    #[test]
     fn strict_updates_is_a_flag_and_off_by_default() {
         assert!(!parse(&argv("base --steps 3")).unwrap().strict_updates);
         assert!(parse(&argv("base --strict-updates")).unwrap().strict_updates);
@@ -465,7 +513,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta", "--behaviour", "--ratio-clip-high", "--importance", "--max-step-kl", "--max-step-grad-norm"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta", "--behaviour", "--ratio-clip-high", "--importance", "--max-step-kl", "--max-step-grad-norm", "--numerics-gate", "--gate-max-mean-gap", "--gate-max-gap", "--gate-max-mismatch-kl", "--gate-min-sequence-ess", "--gate-max-grad-norm"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }
