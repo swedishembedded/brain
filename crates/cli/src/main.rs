@@ -65,8 +65,7 @@ multi-step workflows) are its Rust sample under samples/models/<model>.
 
 --device selects WHICH COMPUTE IS SCHEDULABLE. Omit it and brain uses every
 device on the machine - all GPUs, the CPU, and an NPU if present - scheduling
-models across them. Name devices to restrict the set (BRAIN_DEVICE does the same
-without a flag):
+models across them. Name devices to restrict the set:
 
   (omitted)     every device, scheduled together
   cpu           CPU only, all cores          gpu       every GPU, nothing else
