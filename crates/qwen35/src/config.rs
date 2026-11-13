@@ -650,8 +650,10 @@ impl Qwen35Config {
     /// Bytes one sequence's decode state costs on the card holding a layer of
     /// type `ty`, at `cap` decode positions: a GQA layer's `[cap, kv_dim]` K
     /// and V cache stored in `kv` ([`KvTier::plane_bytes`], scales included),
-    /// or a GDN layer's fixed-size (cap-independent, always `f32`) recurrent
-    /// state + conv history. `crate::int8_gguf_resident::layer_cost`'s own
+    /// or a GDN layer's fixed-size (cap-independent) recurrent state + conv
+    /// history, costed at `f32`: a caller that stores those pools bf16
+    /// (`--gdn-state bf16`) halves it (`int8_gguf_resident::layer_state_bytes`).
+    /// `crate::int8_gguf_resident::layer_cost`'s own
     /// per-layer decode-state term, and [`Self::infer_footprint_bytes`]'s -
     /// moved here so a multi-device resident's byte-exact plan and a plain
     /// single-device inference build's pre-flight estimate share ONE formula
