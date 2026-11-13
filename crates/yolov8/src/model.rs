@@ -49,7 +49,11 @@ use crate::head::Head;
 use crate::net;
 use vision::plumbing::{Acc, Cat, Up};
 use crate::net::{Ctx, Shape, ADAMW, CLIP_COEF, GRADNORM_SQ, GRAD_SCALE, GRAD_SCALE_BUF, PIPELINES, ADD2};
+use crate::boxmath::Letterbox;
 use crate::YoloConfig;
+
+/// Grey letterbox pad (114/255), the Ultralytics convention; with normalised `[0,1]` inputs that is 0.447.
+const LETTERBOX_FILL: f32 = 114.0 / 255.0;
 
 /// A ground-truth box for the (P4) detection loss. Normalised xywh + class id.
 #[derive(Clone, Copy, Debug)]
@@ -661,6 +665,15 @@ impl Yolo {
         let want = (self.b * 3 * self.cfg.input * self.cfg.input) as usize;
         assert_eq!(inputs.len(), want, "image size mismatch: {} != {}", inputs.len(), want);
         self.gpu.write(&self.img, bytemuck::cast_slice(inputs));
+    }
+
+    /// Letterbox the interleaved-RGB HWC image `src` (`w0 x h0`, `0..1`) on the device into slot `slot` of the
+    /// input batch: one upload of the decoded image, then `imaging::Ctx::letterbox_hwc_into`, bitwise equal to
+    /// `boxmath::letterbox_rgb` + [`Self::set_image`]. Returns the transform for un-letterboxing boxes.
+    pub fn set_image_letterboxed(&self, slot: u32, src: &[f32], w0: u32, h0: u32) -> Letterbox {
+        assert!(slot < self.b, "slot {slot} out of the model batch {}", self.b);
+        let ctx = imaging::Ctx::new(&self.gpu);
+        ctx.letterbox_hwc_into(src, w0, h0, self.cfg.input, LETTERBOX_FILL, &self.img, self.b, slot)
     }
 
     /// P4: set the ground-truth boxes for the detection loss. The assigner reads

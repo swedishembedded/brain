@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! YOLOv8 single-image / batch inference (P6): letterbox -> eval-mode forward ->
-//! DFL decode -> boxes -> per-class scores -> NMS -> un-letterbox. CPU backend.
+//! DFL decode -> boxes -> per-class scores -> NMS -> un-letterbox, on whichever backend the model was built on.
 //!
 //! ## The `detect` API (input form)
 //! [`Yolo::detect`] takes ONE image as **interleaved-RGB HWC** floats
@@ -10,25 +10,27 @@
 //! trained — typically `pixel/255`) plus its original `(w0, h0)`. It returns the
 //! surviving detections as `Vec<[f32;6]>` = `[x1,y1,x2,y2,conf,class]` in
 //! **original-image pixel coords**. HWC-RGB is chosen because that is the natural
-//! decoded-image layout; [`boxmath::letterbox_rgb`] does the resize+pad+CHW
-//! transpose into the model's `[3,size,size]` input. [`Yolo::detect_batch`] runs
+//! decoded-image layout; the decoded image is uploaded once and
+//! [`Yolo::set_image_letterboxed`] does the CHW transpose, resize and pad on the
+//! device into the model's `[3,size,size]` input (bitwise equal to the host
+//! [`crate::boxmath::letterbox_rgb`], which stays for host-memory callers). [`Yolo::detect_batch`] runs
 //! several such images (each letterboxed independently) through one forward.
 //!
 //! The runtime's later `DetectModel` adapter calls exactly this `detect`.
 //!
 //! ## Pipeline (per image)
-//! 1. [`boxmath::letterbox_rgb`]: aspect-preserving resize + centre-pad to the
-//!    square model input; record the [`boxmath::Letterbox`] transform.
+//! 1. [`Yolo::set_image_letterboxed`]: aspect-preserving resize + centre-pad to the
+//!    square model input, on the device; record the [`crate::boxmath::Letterbox`] transform.
 //! 2. forward in **eval-mode BN** (we flip [`Yolo::set_eval(true)`] so BN uses
 //!    running stats, not the current batch's stats).
 //! 3. `dfl_decode` over the raw box logits -> per-side `ltrb` distances, then
-//!    [`boxmath::dist_to_xyxy`] (anchor point + stride) -> boxes in INPUT coords.
+//!    [`crate::boxmath::dist_to_xyxy`] (anchor point + stride) -> boxes in INPUT coords.
 //! 4. `sigmoid` the cls logits -> per-class scores; per anchor take the argmax
 //!    class + its score; drop anchors whose best score `< conf_thresh`.
 //! 5. class-aware NMS ([`crate::nms::nms`]).
-//! 6. [`boxmath::Letterbox::invert_box`] -> original-image coords.
+//! 6. [`crate::boxmath::Letterbox::invert_box`] -> original-image coords.
 
-use crate::boxmath::{self, dist_to_xyxy, Letterbox};
+use crate::boxmath::{dist_to_xyxy, Letterbox};
 use crate::net::DFL_DECODE;
 use crate::nms::{nms, Detection};
 use crate::Yolo;
@@ -175,30 +177,21 @@ impl Yolo {
         conf_thresh: f32,
         iou_thresh: f32,
     ) -> Vec<Vec<Detection>> {
-        let size = self.cfg.input;
         let n = images.len();
         assert_eq!(n, self.batch() as usize, "detect_batch expects exactly model batch images");
         let prof = gpu_core::profile::enabled();
         let t_start = std::time::Instant::now();
 
-        // 1. letterbox each image into the model's CHW input; stack to [N,3,H,W].
-        let chw_len = (3 * size * size) as usize;
-        let mut input = vec![0.0f32; n * chw_len];
-        let mut lbs: Vec<Letterbox> = Vec::with_capacity(n);
-        for (i, &(src, w0, h0)) in images.iter().enumerate() {
-            // Grey pad (114/255) is the Ultralytics convention; with normalised
-            // [0,1] inputs that is 0.447. Matches a /255 preprocessing.
-            let (chw, lb) = boxmath::letterbox_rgb(src, w0, h0, size, 114.0 / 255.0);
-            input[i * chw_len..(i + 1) * chw_len].copy_from_slice(&chw);
-            lbs.push(lb);
-        }
+        // 1. letterbox each image on the device straight into its slot of the model's
+        // [N,3,H,W] input: the decoded image is uploaded once, never resized on the host.
+        let lbs: Vec<Letterbox> =
+            images.iter().enumerate().map(|(i, &(src, w0, h0))| self.set_image_letterboxed(i as u32, src, w0, h0)).collect();
 
         let t_pre = std::time::Instant::now();
 
         // 2. eval-mode BN forward.
         let was_eval = self.is_eval();
         self.set_eval(true);
-        self.set_image(&input);
         self.forward_net_pub();
         if !was_eval {
             self.set_eval(false);

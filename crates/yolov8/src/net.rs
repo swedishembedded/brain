@@ -155,6 +155,12 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // and their gradient rows scattered back, by anchor index.
     ("embed", kernels::EMBED),
     ("row_scatter", kernels::ROW_SCATTER),
+    // The device letterbox (`imaging::Ctx::letterbox_hwc_into`, resolved by
+    // name; it places into the batch with `chan_place` above): the decoded
+    // image is uploaded once and resized and padded where the network runs.
+    ("resize_nearest", kernels::RESIZE_NEAREST),
+    ("pad2d", kernels::PAD2D),
+    ("nlc_nchw", kernels::NLC_NCHW),
 ];
 
 /// [`PIPELINES`] slot of `region_copy`.

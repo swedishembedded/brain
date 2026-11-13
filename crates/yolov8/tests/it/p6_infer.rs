@@ -69,3 +69,33 @@ fn set_eval_toggle_is_reversible_and_changes_nothing_structural() {
     model.set_eval(false);
     assert!(!model.is_eval(), "toggle is reversible");
 }
+
+/// The device letterbox into the network's input equals the host letterbox plus
+/// upload bit for bit, so the raw logits of the two paths are identical. Odd
+/// pads in both orientations (96x65 and 65x96 onto the 128 square), batch of 2
+/// so the second image checks the slot offset.
+#[test]
+fn device_letterbox_input_equals_host_letterbox_input_bitwise() {
+    let cfg = YoloConfig::tiny(2);
+    let size = cfg.input;
+    let init = init_weights(&cfg, 5);
+    let host = Yolo::new(cfg.clone(), 2, size, &init);
+    let device = Yolo::new(cfg.clone(), 2, size, &init);
+    let unit = |seed: u64, n: u32| -> Vec<f32> { randvec(seed, n as usize).iter().map(|v| (v + 1.0) * 0.5).collect() };
+    let sizes = [(96u32, 65u32), (65, 96)];
+    let imgs: Vec<Vec<f32>> = sizes.iter().enumerate().map(|(i, &(w, h))| unit(0xA0 + i as u64, w * h * 3)).collect();
+
+    let chw_len = (3 * size * size) as usize;
+    let mut input = vec![0f32; 2 * chw_len];
+    for (i, &(w, h)) in sizes.iter().enumerate() {
+        let (chw, lb) = yolov8::boxmath::letterbox_rgb(&imgs[i], w, h, size, 114.0 / 255.0);
+        input[i * chw_len..(i + 1) * chw_len].copy_from_slice(&chw);
+        assert_eq!(device.set_image_letterboxed(i as u32, &imgs[i], w, h), lb, "image {i}: transform");
+    }
+    host.set_image(&input);
+    for m in [&host, &device] {
+        m.set_eval(true);
+        m.forward_net_pub();
+    }
+    assert_eq!(host.raw_logits(), device.raw_logits(), "device-letterboxed input must reproduce the host path's logits");
+}
