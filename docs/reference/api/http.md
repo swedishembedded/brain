@@ -46,6 +46,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   (`{"model", "input_audio": {"data": <base64>, "format"}, "language"?}`). The
   recording may be WAV (any rate, mono or stereo), Ogg/Opus or WebM/Opus,
   including the unknown-length WebM a live browser `MediaRecorder` writes; the
+<!-- perf-number: the endpoint's own length limit, an API constant -->
   container is read from the bytes, not from `format`. At most 300 s and the
   8 MiB body limit per request. A malformed, unsupported, empty or over-long
   recording is a 400 before any model runs. The answer is

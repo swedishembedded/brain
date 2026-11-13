@@ -25,7 +25,7 @@ per component and the open gaps.
 
 | Capability | Supported |
 |---|---|
-| Text to video | [x] `brain ltxv t2v` / the `t2v` action. Unnamed settings take the reference defaults (768x512, 121 frames, 24 fps) when the checkpoint is configured; a clip past one denoising window rolls a latent context across windows, past the single-stage ceiling it runs the reference's two stages |
+| Text to video | [x] `brain ltxv t2v` / the `t2v` action. Unnamed settings take the reference defaults (768x512, 121 frames, the model's fixed frame rate) when the checkpoint is configured; a clip past one denoising window rolls a latent context across windows, past the single-stage ceiling it runs the reference's two stages |
 | Text to video + audio | [x] `--audio` / `audio: true`: both streams denoised jointly, 48 kHz stereo through the vocoder's bandwidth extension, any length (see "Generating sound") |
 | Text to audio | [x] `brain ltxv t2a` / the `t2a` action: the audio stream alone, the video half never read |
 | Audio to video | [x] `--audio-source <wav>`: the soundtrack held frozen while the picture denoises against it, any length (each window holds its own slice) |
@@ -194,17 +194,17 @@ brain -v --device gpu0 ltxv t2v \
   slot's eight pixel frames and makes the clip jump into and out of the
   freeze. Measured on the real checkpoint at 768x448 x 97 frames with stills
   from an unconditioned run of the same prompt, the worst frame-to-frame step
-  was 3.0x its neighbours with the pin, and 1.09x with the guide (1.11x for
-  the unconditioned run itself). The guide also reached the still more
-  closely (mean |delta| 2.28 at its frame, against 4.95 for the pin).
+  was several times its neighbours with the pin, and no larger than the
+  unconditioned run's own with the guide. The guide also reached the still
+  more closely.
 * **Keyframes hold at `--keyframe-strength` (default `0.8`), the ends at
   `--conditioning-strength` (default `1.0`).** A keyframe whose still no
   continuous motion reaches from its neighbours - another camera position,
   another subject - is blended into at `0.8` where `1.0` cuts to it: measured
   with a mid still from a different composition of the same prompt, the
-  worst frame step was 6.3x at `1.0` and 1.16x at `0.8`, the still still
-  reached at its frame. A keyframe from the same shot is reached as closely
-  either way (mean |delta| 2.35 at `0.8`, 2.28 at `1.0`).
+  worst frame step was many times its neighbours at `1.0` and close to them
+  at `0.8`, the still still reached at its frame. A keyframe from the same
+  shot is reached as closely either way.
 * **Two identical anchors make a static clip.** Passing the same image to
   `--start-frame` and `--end-frame` asks for "start here, end here", which has
   a correct trivial answer; see `crates/ltxv/tests/it/motion_real.rs` for the

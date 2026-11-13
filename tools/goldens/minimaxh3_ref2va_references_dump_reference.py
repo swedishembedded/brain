@@ -6,7 +6,7 @@
 
 `MiniMaxH3Ref2VASetupStep` puts every reference on the model's own rates and
 resolutions before anything is encoded: an image onto its own short edge
-(LANCZOS, through diffusers' `VaeImageProcessor.resize`), a video onto 24 fps
+(LANCZOS, through diffusers' `VaeImageProcessor.resize`), a video onto the model's fixed frame rate
 (whole frames dropped or held) and onto the canvas its own aspect resolves to
 (LANCZOS), a soundtrack truncated at its native rate, upmixed to stereo and
 resampled with `torchaudio`. This dumper runs the installed diffusers'

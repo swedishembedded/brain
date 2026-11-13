@@ -52,10 +52,9 @@ first and last frames and in timeline order, beside or without
 ends; an interior keyframe is the same conditioning block at its own frame's
 rotary time (5/3 per pixel frame, the clock `"first"` and `"last"` already
 sit on). Measured at 768x448 x 124 frames, stills from one shot: the clip
-reaches a frame-62 still exactly at frame 62 (mean |delta| 2.61, against
-2.69/2.46 at the two ends) and moves through it as evenly as a first/last
-clip does (worst frame step 1.33x its neighbours, at rav1e's own keyframe;
-1.19x with the ends alone).
+reaches a frame-62 still exactly at frame 62 and moves through it nearly as
+evenly as a first/last clip does (the worst frame step is at rav1e's own
+keyframe).
 
 `t2va` takes the same flags without `--first_frame`/`--last_frame`. The clip
 carries the sound the same forward generated as its own track; `--out
@@ -75,7 +74,7 @@ brain minimaxh3 ref2va --allow-community \
   --num_frames 121 --steps 20 --out video=dog.mp4
 ```
 
-Images are scaled to a 2048-pixel short edge and videos resampled to 24 fps
+Images are scaled to a 2048-pixel short edge and videos resampled to the model's fixed frame rate
 as the reference does; each reference is VAE-encoded and packed ahead of the
 generated audio and video under the same rotary clock, and the prompt is
 encoded with the references themselves presented to Qwen3-VL. Every run
@@ -149,7 +148,7 @@ one at 640x352 with one image reference and ~10% less at 768x448 (~16% at
   everything but its attention a few thousand rows at a time, so its
   workspace grows slowly with the canvas: on two P40s a 768x448 x 121-frame
   `ref2va` with an image reference (~19k packed rows) holds resident with
-  the sparse-attention gates, at ~2.9 min per step.
+  the sparse-attention gates, at minutes per step.
 * **`--int8-activation-levels 2`** (`int8_activation_levels: 2` on a
   request) quantizes each int8 linear's input in two levels: the second
   quantizes what the first rounds away, so the activation side is exact to

@@ -168,6 +168,7 @@ times every candidate the device can run on a grid of shape classes (row count,
 disagreeing one, and caches the table per device and build, so later starts read
 it. `brain roofline gpu --kernels` lists the choice per class with its achieved
 bandwidth and its fraction of the memory roofline measured on the same device,
+<!-- perf-number: the gap-list threshold `brain roofline gpu --kernels` applies, a program constant -->
 and the classes under 60 % of it. `--kernel <slot>=<candidate>` pins a slot to one
 candidate for an A/B run, and `--no-autotune` keeps every slot on its default.
 

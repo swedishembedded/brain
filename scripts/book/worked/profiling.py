@@ -292,6 +292,7 @@ def warmup_series():
     rows.append(("runs", len(all_), len(after)))
     bias = _mean(all_) / _mean(after) - 1.0
     lines = [
+        # perf-number: hex prefix of a printed seed, not a multiplier
         f"The 200 runs of `profiling.warmup_runs` (the same series, the same seed 0x{bookrng.seed_of(name):016x}). Left: all 200 runs. Right: runs "
         f"{end} to 199, after the warm-up detected by the rule of the text. Units: floors. The noise factor's expected value "
         f"is (1 + 0.04 / 2) (1 + 0.2 x 0.25) = {FACTOR_MEAN:.3f}, so a steady mean near that is the right answer.",

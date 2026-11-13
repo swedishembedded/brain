@@ -28,6 +28,7 @@ def render() -> str:
              ylabel="log10 of attainable GFLOP/s", title="Decode and prefill on the roofline")
     knee = LG(rf.ridge("GPU"))
     xs = [-0.2, knee, 4.3]
+    # perf-number: illustrative machine of the figure, not a measurement
     p.line(xs, [LG(rf.attainable("GPU", 10 ** x)) for x in xs], color=5, label="GPU roof (40,000 GFLOP/s, 800 GB/s)")
     pts = kc.roofline_points()
     dec = [(LG(i), LG(rf.attainable("GPU", i))) for name, i in pts if name.startswith("decode")]

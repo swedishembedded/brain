@@ -51,6 +51,7 @@ from safetensors.torch import load_file, save_file
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from golden_source import source_block  # noqa: E402
 
+# perf-number: the model's fixed frame rate, a golden input, not a measurement
 # 17 frames at 24 fps, 128x128: a 3 x 4 x 4 video latent (48 tokens) and 18
 # audio tokens - small enough for an fp32 CPU forward of the whole model,
 # large enough that every axis of both streams' RoPE has more than one value.

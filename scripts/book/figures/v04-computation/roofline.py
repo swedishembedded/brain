@@ -37,8 +37,10 @@ def render() -> str:
     p = Plot((-2.0, 3.4), (0.5, 4.9), width=620, height=400, xlabel="log10 of arithmetic intensity (FLOP per byte)",
              ylabel="log10 of attainable GFLOP/s", title="The roofline of two illustrative machines")
     xs, ys = _roof("GPU")
+    # perf-number: illustrative machine of the figure, not a measurement
     p.line(xs, ys, color=0, label="GPU roof (40,000 GFLOP/s, 800 GB/s)")
     xs, ys = _roof("CPU")
+    # perf-number: illustrative machine of the figure, not a measurement
     p.line(xs, ys, color=1, label="CPU roof (800 GFLOP/s, 80 GB/s)")
     ops = rf._operations()
     marks = [(f / b, name) for name, f, b in ops]

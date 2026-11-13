@@ -1206,6 +1206,7 @@ def small_setup():
         f"Weights: the book's SplitMix64, seed 0x{bookrng.seed_of(SMALL):016x} (`seed_of` of the name `{SMALL}`), one stream for all "
         "tensors, drawn tensor by tensor in the order below (the two blocks l = 0 and l = 1 in turn, each in the order listed; a matrix row by row, so that its "
         "`[out, in]` entry (o, i) is draw number o*in + i of the matrix; `normal()` is the generator's Box-Muller draw). "
+        # perf-number: hex prefix of a printed seed, not a multiplier
         f"Inputs: seed 0x{bookrng.seed_of(SMALL_INPUT):016x} (`{SMALL_INPUT}`): the 32 entries of the latent (2 channels of 4 rows of 4 "
         "columns, channel slowest), then the 10 caption features (2 tokens of 5), each `round(normal(), 1)`. Width 24, 2 heads of width "
         "12, feed-forward width 64, conditioning width 24, timestep embedding of dimension 16, 2 blocks, patches of 2 by 2 "
