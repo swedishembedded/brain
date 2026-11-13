@@ -187,7 +187,7 @@ fn fastest(runs: &[Timed]) -> Timed {
 /// with it to `MAXABS`.
 fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with_it() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
-        eprintln!("cuda_provider_matmul: no CUDA device on this box - skipping");
+        brain_testutil::skip_unavailable("cuda_provider_matmul: no CUDA device on this box");
         return;
     };
     let caps = gpu.caps();
@@ -269,7 +269,7 @@ fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with
 /// fact nothing else can observe.
 fn the_production_registry_routes_a_real_matmul_to_the_tuned_kernel() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
-        eprintln!("cuda_provider_matmul: no CUDA device on this box - skipping");
+        brain_testutil::skip_unavailable("cuda_provider_matmul: no CUDA device on this box");
         return;
     };
     let selector: Arc<dyn KernelSelector> = Arc::new(select::CachedSelector::new(select::DefaultSelector));
@@ -341,7 +341,7 @@ fn the_production_registry_routes_a_real_matmul_to_the_tuned_kernel() {
 /// absolute `MAXABS` bar a tuned kernel is held to.
 fn the_tuned_cuda_matmul_clears_every_shared_parity_case() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
-        eprintln!("cuda_provider_matmul: no CUDA device on this box - skipping");
+        brain_testutil::skip_unavailable("cuda_provider_matmul: no CUDA device on this box");
         return;
     };
     let provider = CudaProvider::for_gpu(&gpu).expect("a CUDA handle must yield a CUDA provider");
@@ -392,7 +392,7 @@ fn the_tuned_cuda_matmul_clears_every_shared_parity_case() {
 /// that the 64 x 64 tile fills the device and keeps its kernel.
 fn a_starved_tile_grid_runs_the_skinny_kernel_and_agrees_with_an_f64_oracle() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
-        eprintln!("cuda_provider_matmul: no CUDA device on this box - skipping");
+        brain_testutil::skip_unavailable("cuda_provider_matmul: no CUDA device on this box");
         return;
     };
     let selector: Arc<dyn KernelSelector> = Arc::new(select::CachedSelector::new(select::DefaultSelector));

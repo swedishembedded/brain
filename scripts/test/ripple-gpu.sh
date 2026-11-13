@@ -74,7 +74,7 @@ validate() {
             for d in ${DEVICE//,/ }; do
                 [[ "$d" =~ ^gpu[0-9]+$ ]] || die "DEVICE=$DEVICE: expected cpu, software, or gpu<N>[,gpu<M>...]"
             done
-            [ -z "${CUDA_VISIBLE_DEVICES+x}" ] || [ -n "$CUDA_VISIBLE_DEVICES" ] || die "DEVICE=$DEVICE: this shell hides the cards (CUDA_VISIBLE_DEVICES is empty; ~/tmp/no-gpu-env.sh). Take a free card first (step 0 of the Ripple GPU validation ledger) in a shell that has not sourced it"
+            [ -z "${CUDA_VISIBLE_DEVICES+x}" ] || [ -n "$CUDA_VISIBLE_DEVICES" ] || die "DEVICE=$DEVICE: this shell hides the cards (CUDA_VISIBLE_DEVICES is empty; a no-GPU environment file was sourced). Take a free card first (step 0 of the Ripple GPU validation ledger) in a shell that has not sourced it"
             BACKEND="${BACKEND:-cuda}"
             case "$BACKEND" in cuda | vulkan) ;; *) die "BACKEND=$BACKEND: expected cuda or vulkan" ;; esac ;;
     esac

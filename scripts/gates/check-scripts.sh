@@ -43,17 +43,20 @@ done < <(git ls-files -z 'scripts/*.py' 'tools/*.py')
 [ "$fail" -eq 0 ] && echo "  ok"
 
 echo
-echo "=== 2/3: orphans (every script/tool must be named somewhere else in the repo) ==="
+echo "=== 2/3: orphans (every script/tool must be named somewhere else in the repo; the book's figure and worked-example sources are found by directory) ==="
 orphans=0
 while IFS= read -r -d '' f; do
   base="$(basename "$f")"
   # Search everywhere EXCEPT the file's own bytes; a hit anywhere else (Makefile
   # target, bats test, Rust doc comment, sibling script, doc) counts as "used".
-  if ! git grep -qF -- "$base" -- . ":(exclude)$f" 2>/dev/null; then
+  mod="${base%.py}"
+  # A Python module is named by an import, not by its file name.
+  if ! git grep -qF -- "$base" -- . ":(exclude)$f" 2>/dev/null \
+    && { [ "$mod" = "$base" ] || ! git grep -qE -- "^\s*(import|from) $mod( |$|\.)" -- '*.py' ":(exclude)$f" 2>/dev/null; }; then
     echo "  ORPHAN: $f (not named anywhere else in the repo)"
     orphans=$((orphans + 1))
   fi
-done < <(git ls-files -z 'scripts/*.sh' 'scripts/*.py' 'tools/*.sh' 'tools/*.py' 'tools/*.txt')
+done < <(git ls-files -z 'scripts/*.sh' 'scripts/*.py' 'tools/*.sh' 'tools/*.py' 'tools/*.txt' ':(exclude)scripts/book/figures/*' ':(exclude)scripts/book/worked/*')
 if [ "$orphans" -gt 0 ]; then
   echo "  $orphans orphan(s) — delete them, or wire them into a Makefile target /"
   echo "  bats test / doc / crate reference so the next run finds the citation."
