@@ -6,11 +6,11 @@
 // in distributed-training profiling or command-line validation, you can
 // procure our services by sending an email to info@swedishembedded.com.
 
-//! `--profile-collectives` on the two verbs that take a job plan.
-//!
-//! Each verb must consume the flag itself (an unparsed flag is refused by the
-//! leftovers check) and must refuse it when the run is not distributed. Both
-//! checks stop before a model or a dataset is opened, so no fixture is needed.
+//! `--profile-collectives` on the served training actions that join a
+//! distributed job (`model::job_params`): it is refused, naming the job
+//! params it needs, when the run is not distributed, and accepted beside them,
+//! so the run stops at the missing plan file. Both checks stop before a model
+//! or a dataset is read, so the checkpoint and dataset named are placeholders.
 
 use std::process::{Command, Output};
 
@@ -22,66 +22,60 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// A profile of a one-process run is not the point: it is a named usage
-/// error, before anything is trained.
-#[test]
-fn gpt2_train_refuses_a_profile_without_a_job_plan() {
-    let out = brain(&["gpt2", "train", "data/calculator", "--profile-collectives", "collectives.json"]);
-    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
-    let err = stderr(&out);
-    assert!(err.contains("--profile-collectives"), "the refusal must name the flag: {err}");
-    assert!(err.contains("--job-plan"), "and the missing companion: {err}");
-    assert!(!err.contains("unrecognised"), "the flag must not fall through to the leftovers check: {err}");
+/// Placeholder files for the LoRA fine-tune's checkpoint, tokenizer and data,
+/// named outright so nothing resolves from the model store.
+fn qwen3_lora(dir: &std::path::Path) -> Vec<String> {
+    std::fs::create_dir_all(dir).unwrap();
+    let file = |name: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, b"{}").unwrap();
+        path.to_string_lossy().into_owned()
+    };
+    vec!["qwen3".into(), "lora_train".into(), "--weights".into(), file("w.safetensors"), "--tokenizer".into(), file("tokenizer.json"), "--dataset".into(), file("train.jsonl")]
 }
 
-/// The same refusal on the LoRA fine-tune verb.
-#[test]
-fn qwen3_finetune_refuses_a_profile_without_a_job_plan() {
-    let out = brain(&["qwen3", "finetune", "--lora", "4", "--profile-collectives", "collectives.json"]);
-    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
-    let err = stderr(&out);
-    assert!(err.contains("--profile-collectives"), "the refusal must name the flag: {err}");
-    assert!(err.contains("--job-plan"), "and the missing companion: {err}");
-    assert!(!err.contains("ignoring unknown flag"), "the flag must not fall through to the unknown-flag notice: {err}");
+const JOB: [&str; 6] = ["--job-plan", "/nonexistent/brain-plan.json", "--job-rank", "0", "--job-secret", "/nonexistent/brain-job.secret"];
+
+fn scratch(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("brain-profile-collectives-{tag}-{}", std::process::id()))
 }
 
-/// With the job's flags present the flag is accepted: the run stops at the
-/// missing plan file, not at the flag. That proves each verb takes the flag
-/// by name rather than leaving it to a leftovers or unknown-flag path.
+/// A profile of a one-process run is not the point: it is refused, naming the
+/// job params it needs, before anything is trained.
 #[test]
-fn both_verbs_accept_the_flag_with_a_job_plan() {
-    let gpt = brain(&[
-        "gpt2",
-        "train",
-        "data/calculator",
-        "--job-plan",
-        "/nonexistent/brain-plan.json",
-        "--job-rank",
-        "0",
-        "--job-secret",
-        "/nonexistent/brain-job.secret",
-        "--profile-collectives",
-        "collectives.json",
-    ]);
-    assert_eq!(gpt.status.code(), Some(1), "stderr: {}", stderr(&gpt));
-    assert!(stderr(&gpt).contains("/nonexistent/brain-plan.json"), "the plan read must be what failed: {}", stderr(&gpt));
-    assert!(!stderr(&gpt).contains("--profile-collectives"), "the flag was not accepted: {}", stderr(&gpt));
+fn a_profile_without_a_job_plan_is_refused() {
+    let dir = scratch("refused");
+    let mut qwen = qwen3_lora(&dir);
+    qwen.extend(["--profile-collectives".into(), "collectives.json".into()]);
+    let save = dir.join("gpt.safetensors").to_string_lossy().into_owned();
+    let gpt: Vec<String> = ["gpt2", "train", "--data", "data/calculator", "--save", &save, "--profile-collectives", "collectives.json"].map(String::from).to_vec();
+    for argv in [gpt, qwen] {
+        let out = brain(&argv.iter().map(String::as_str).collect::<Vec<_>>());
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(1), "{argv:?}: {err}");
+        assert!(err.contains("profile_collectives") && err.contains("job_plan"), "{argv:?}: the refusal must name the param and its companion: {err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
-    let qwen = brain(&[
-        "qwen3",
-        "finetune",
-        "--lora",
-        "4",
-        "--job-plan",
-        "/nonexistent/brain-plan.json",
-        "--job-rank",
-        "0",
-        "--job-secret",
-        "/nonexistent/brain-job.secret",
-        "--profile-collectives",
-        "collectives.json",
-    ]);
-    assert_eq!(qwen.status.code(), Some(1), "stderr: {}", stderr(&qwen));
-    assert!(stderr(&qwen).contains("/nonexistent/brain-plan.json"), "the plan read must be what failed: {}", stderr(&qwen));
-    assert!(!stderr(&qwen).contains("--profile-collectives"), "the flag was not accepted: {}", stderr(&qwen));
+/// With the job's params present the profile is accepted: the run stops at
+/// the missing plan file, not at the profile.
+#[test]
+fn a_profile_with_a_job_plan_is_accepted() {
+    let dir = scratch("accepted");
+    let mut qwen = qwen3_lora(&dir);
+    let save = dir.join("gpt.safetensors").to_string_lossy().into_owned();
+    let mut gpt: Vec<String> = ["gpt2", "train", "--data", "data/calculator", "--save", &save].map(String::from).to_vec();
+    for argv in [&mut gpt, &mut qwen] {
+        argv.extend(JOB.iter().map(|s| s.to_string()));
+        argv.extend(["--profile-collectives".into(), "collectives.json".into()]);
+    }
+    for argv in [gpt, qwen] {
+        let out = brain(&argv.iter().map(String::as_str).collect::<Vec<_>>());
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(1), "{argv:?}: {err}");
+        assert!(err.contains("/nonexistent/brain-plan.json"), "{argv:?}: the plan read must be what failed: {err}");
+        assert!(!err.contains("profile_collectives"), "{argv:?}: the profile was not accepted: {err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
