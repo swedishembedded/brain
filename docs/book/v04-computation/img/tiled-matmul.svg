@@ -1,4 +1,4 @@
-<!-- source-sha256: 10726484a853adfd458f653ce80a165bfef0f3886f08d73accb2191aceb4384c -->
+<!-- source-sha256: f3ca9f7952c7e990e58456b9aafc5ca52d3cf87fb68e56e975e6c8c92482056b -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 398" width="780" height="398"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="398" fill="#ffffff"/>
 <rect x="20" y="14" width="740" height="370" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">One workgroup of a tiled product, n = 16, T = 4: it owns block (3, 1) of C</text>

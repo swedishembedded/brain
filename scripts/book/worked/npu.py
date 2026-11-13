@@ -184,7 +184,7 @@ def graph_listing():
     table = _table(["node", "op", "inputs", "output", "initializer values", "FLOPs", "bytes read", "bytes written"], rows,
                    "lllllrrr")
     return (f"```text\n{listing}\n```\n\n"
-            f"Counted as in Volume IV, Chapter 8: a Gemm of a vector with an [out, in] weight does 2 x out x in FLOPs for the products and sums plus out for the bias; "
+            f"Counted as in Chapter 8: a Gemm of a vector with an [out, in] weight does 2 x out x in FLOPs for the products and sums plus out for the bias; "
             f"every distinct operand is read once and the result written once, in float32 (4 bytes). The exported file carries {n_init} initializer values, "
             f"{4 * n_init} bytes of float32.\n\n{table}")
 

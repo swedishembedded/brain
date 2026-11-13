@@ -1,4 +1,4 @@
-<!-- source-sha256: 48ea67935a0a949dda443cb5fa9a53c60f0e5a391944bb7a4905abb97476dbd4 -->
+<!-- source-sha256: ccb6eaefa7ff68deb6529a7f5d6629196f8faaaa250aec513dca4acb82397ee2 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 452" width="780" height="452"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="452" fill="#ffffff"/>
 <rect x="20" y="14" width="740" height="124" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Five dispatches: 92.0 MiB through memory</text>

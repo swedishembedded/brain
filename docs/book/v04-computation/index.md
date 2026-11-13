@@ -8,9 +8,9 @@ arithmetic on arrays. Written that way they are correct and, for anything
 beyond a toy, far too slow: a modern model asks for billions of multiplications
 for every word it reads or writes, and the lines of arithmetic do not say where
 the numbers live, how many bytes they occupy or which of the machine's many
-workers computes what. This volume is about the machine. It follows one
-question from the bits of a single number to a whole program running on
-several kinds of hardware: where does the time go, and what can we do about it?
+workers computes what. The subject here is the machine, followed from the bits
+of a single number to a whole program running on several kinds of hardware
+through one question: where does the time go, and what can we do about it?
 
 Every later volume trains or runs models whose cost is set by the ideas of this
 one. Language models are limited by the bytes they read per token, image
@@ -28,7 +28,7 @@ computation needs (floating-point operations) and the data it must move
 or a larger share of what the device can do. Times appear only as dated
 observations of a named setup.
 
-You can say how many bits a number needs and what each format gives up, lay
+By its end you can say how many bits a number needs and what each format gives up, lay
 out data so a core and its caches use it well, decide from a computation's
 arithmetic intensity whether arithmetic or memory limits it, write the
 data-parallel programs (kernels) a GPU runs and the tiled matrix multiplication

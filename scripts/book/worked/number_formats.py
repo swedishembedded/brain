@@ -258,7 +258,7 @@ def float_formats():
         p = _props(f)
         rows.append([f, p["bits"], f"{p['ne']} / {p['nm']}", p["bias"], _num(p["max"]), _num(p["min_normal"], 3),
                      _num(p["min_sub"], 3), _num(p["eps"], 3), f"{p['digits']:.2f}", f"{p['decades']:.1f}"])
-    return ("Everything below is computed from the bit split n_e / n_m by the decoding rule of the chapter (bias = 2^(n_e-1) - 1, "
+    return ("Everything below is computed from the bit split n_e / n_m by the decoding rule decode_float (bias = 2^(n_e-1) - 1, "
             "eps = 2^-n_m, digits = (n_m + 1) log10 2, decades = log10(max / smallest subnormal)). "
             "fp32, fp16, bf16 and E5M2 use the IEEE-style rule (the all-ones exponent field is infinity and NaN); E4M3 sets the "
             "decoder's finite_only flag: its all-ones exponent field 1111 is an ordinary exponent, only the pattern with "
@@ -543,8 +543,9 @@ def int4_pack():
         back += [_signed(byte & 0xF, 4), _signed(byte >> 4, 4)]
     head = (f"Eight weights {INT4_WEIGHTS}; Delta = max|w| / 7 = {delta:.1f}, q = round(w / Delta) in -7 .. 7. Byte b holds the even-index code "
             "in its low four bits and the odd-index code in its high four bits: byte = (lo and 0xF) or ((hi and 0xF) << 4).\n\n")
-    tail = (f"\n\nUnpacking (low = byte and 0xF, high = byte >> 4, each read as a 4-bit two's complement number) returns the codes {back}; "
-            f"they equal the codes {q}: {back == q}. The eight weights now take 4 bytes plus one scale.")
+    assert back == q, (back, q)
+    tail = (f"\n\nUnpacking (low = byte and 0xF, high = byte >> 4, each read as a 4-bit two's complement number) returns the codes {back}, "
+            "the codes that were packed. The eight weights now take 4 bytes plus one scale.")
     return head + _table(["byte", "even element", "q", "low nibble", "odd element", "q", "high nibble", "byte (binary)", "hex"], rows) + tail
 
 

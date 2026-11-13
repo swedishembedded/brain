@@ -47,17 +47,17 @@ coarse corrupts the result, and a format with the wrong *shape* fails in a
 different way: some lose the small numbers, some the large ones, some the
 precision of the middle.
 
-This chapter opens Volume IV, which is about how machines carry out the
-arithmetic of Volumes I to III. Its first job is to say what a machine
-actually holds. We start with whole numbers in binary (including negatives,
-which need a trick), then read floating point as a layout of bits and derive
-the 16-bit and 8-bit formats from the same rule, then look at integers that
-stand for scaled numbers, then at converting between all of them, and finally
-count the bytes. Volume I, Chapter 15 derived how 32- and 64-bit floating
-point rounds and where it fails; this chapter builds on that and does not
-repeat its derivations.
+How a machine carries out the arithmetic of Volumes I to III starts with
+what it actually holds. Whole numbers come first, in binary, with negatives
+that need a trick; floating point then reads as a layout of bits, from which
+the 16-bit and 8-bit formats follow by one rule; after them come integers that
+stand for scaled numbers, the conversions between all of these, and the bytes.
+How 32- and 64-bit floating point rounds, and where it fails, was derived in
+Volume I, Chapter 15, and the narrower formats inherit all of it.
 
-The chapter leans on Volume I's account of floating point and on one number from the optimizer chapter of Volume III.
+The bit layouts rest on four ideas from Volume I's account of integers and
+floating point, and the byte count at the end on one number from the optimizer
+chapter of Volume III.
 
 1. (Volume I, Chapter 1, integers.) How many different patterns can 8 bits
    take? What range of whole numbers do they cover if all are non-negative, and
@@ -80,7 +80,7 @@ The chapter leans on Volume I's account of floating point and on one number from
 
 ### Unsigned numbers: place values
 
-Every other format in the chapter is built from bit patterns, so we first fix
+Every format that follows is built from bit patterns, so we first fix
 what a pattern of bits means as a whole number. A **bit** is a digit that is 0 or 1. A **binary representation** writes a
 non-negative whole number as bits, the way decimal writes it as digits: each
 position has a place value, a power of the base, and the number is the sum of
@@ -130,8 +130,8 @@ taking the result modulo $2^n$:
 An unsigned 8-bit counter at 255 goes to 0 when one is added, and $5 - 6$ is
 255. Nothing signals the wrap; it is what the arithmetic is. The bit
 operations of `pseudocode.md` (`and`, `or`, `xor`, `not`, `>>`, `<<`) work on the
-same patterns, in widths of 8, 16, 32 and 64 bits, and this chapter uses them
-throughout.
+same patterns, in widths of 8, 16, 32 and 64 bits, and every decoder below
+uses them.
 
 ### Negative numbers: two's complement
 
@@ -206,19 +206,19 @@ $100 + 28$ should be $128$, but the pattern `10000000` reads as $-128$: the sum 
 wrong is the program's job, as it is for the 32-bit parameter count that wrapped
 in Volume I, Chapter 1. The lower table shows how a narrow integer is widened:
 **sign extension** copies the sign bit into the new high bits, and the value is
-unchanged. It matters in this chapter because sums of 8-bit products are
-accumulated in 32-bit integers.
+unchanged. It matters for quantized arithmetic, where sums of 8-bit products
+are accumulated in 32-bit integers.
 
 ## Floating point as a layout of bits
 
 A floating-point format is a rule for turning a pattern of bits into a number.
-If the rule is written down once, every format of the chapter, from 32 bits to
-8, is the same rule with different field widths. Volume I, Chapter 15 wrote a normal floating-point number as $(-1)^s (1 +
+If the rule is written down once, every format from 32 bits to
+8 is the same rule with different field widths. Volume I, Chapter 15 wrote a normal floating-point number as $(-1)^s (1 +
 f/2^{p-1})\,2^{e}$. A machine stores three fields next to each other, from the top bit
 down: one **sign** bit $s$, an **exponent field** $E$ of $n_e$ bits and a
 **fraction field** $f$ of $n_m$ bits. The significand has $p = n_m + 1$
 bits, because the leading 1 is implied and not stored. The picture shows the layouts
-of the formats of this chapter, one box per bit.
+of all the formats below, one box per bit.
 
 ![The bit layouts of fp32 (1 sign, 8 exponent, 23 fraction bits), fp16 (1, 5, 10), bf16 (1, 8, 7), E4M3 (1, 4, 3), E5M2 (1, 5, 2) and an int8 two's complement code (1 sign bit and 7 further bits), drawn as rows of equally wide boxes aligned at the top bit, with sign boxes yellow, exponent boxes blue and fraction boxes grey.](img/bit-layouts.svg)
 
@@ -265,7 +265,7 @@ $\varepsilon = 2^{-n_m}$ (the gap between 1 and the next number, $2^{1-p}$ of Vo
 $p \log_{10} 2$, and the **decades** of range, $\log_{10}$ of the largest over the smallest positive number.
 
 <!-- worked: number_formats.float_formats -->
-Everything below is computed from the bit split n_e / n_m by the decoding rule of the chapter (bias = 2^(n_e-1) - 1, eps = 2^-n_m, digits = (n_m + 1) log10 2, decades = log10(max / smallest subnormal)). fp32, fp16, bf16 and E5M2 use the IEEE-style rule (the all-ones exponent field is infinity and NaN); E4M3 sets the decoder's finite_only flag: its all-ones exponent field 1111 is an ordinary exponent, only the pattern with fraction 111 as well is NaN, and there is no infinity, so its largest finite number is (1 + 6/8) * 2^8 = 448 (the IEEE-style rule would stop at (1 + 7/8) * 2^7 = 240). Decoding was checked against the machine's own binary16 for all 65536 codes, and encoding against its binary32 and binary16 on 2000 random values.
+Everything below is computed from the bit split n_e / n_m by the decoding rule decode_float (bias = 2^(n_e-1) - 1, eps = 2^-n_m, digits = (n_m + 1) log10 2, decades = log10(max / smallest subnormal)). fp32, fp16, bf16 and E5M2 use the IEEE-style rule (the all-ones exponent field is infinity and NaN); E4M3 sets the decoder's finite_only flag: its all-ones exponent field 1111 is an ordinary exponent, only the pattern with fraction 111 as well is NaN, and there is no infinity, so its largest finite number is (1 + 6/8) * 2^8 = 448 (the IEEE-style rule would stop at (1 + 7/8) * 2^7 = 240). Decoding was checked against the machine's own binary16 for all 65536 codes, and encoding against its binary32 and binary16 on 2000 random values.
 
 | format | bits | exponent / fraction bits | bias | largest finite | smallest normal | smallest subnormal | eps = 2^-n_m | decimal digits | decades of range |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -280,7 +280,7 @@ The row for fp32 repeats Volume I, Chapter 15: the **fp32 format** is 1 sign bit
 about 7 digits and 83 decades. Its rounding theory (round to nearest, ties to even, error at
 most $u = \varepsilon/2$, subnormals, overflow) is all that chapter, and every format
 below obeys it with its own $n_m$. What changes down the table is how the bits are split.
-Each bit taken from the fraction doubles the gap between neighbours; each bit taken from the exponent
+Each bit taken from the fraction doubles the gap between neighbours; each bit given to the exponent
 *squares* the range, because a field of $n_e$ bits spans $2^{n_e}$ binades. The 16-bit formats show the two
 choices side by side.
 
@@ -351,11 +351,12 @@ subnormal, kept with fewer significant bits (the "kept" column counts them, and 
 error is large). Raising $S$ rescues them: at $2^{16}$ nothing is lost to zero, and at $2^{24}$ the largest
 gradients start to overflow to infinity (4.20%). There is a window of workable scales, and a training
 run has to stay inside it. With bf16 the whole distribution is stored as it is, with no scale: the range is
-that of fp32, so there is no window to stay in. The price is precision: a mean error of 0.0014, about twice fp16's 0.0007 at $S = 2^{20}$, where nothing is lost. That is why bf16 training keeps its sums in 32 bits (see the sections below).
-This is the reason bf16 is the usual training format for large models and fp16 survives where the
+that of fp32, so there is no window to stay in. The price is precision: a mean error of 0.0014, about twice fp16's 0.0007 at $S = 2^{20}$, where nothing is lost; that
+coarseness is why bf16 arithmetic keeps its running sums in 32 bits, as the section on narrow sums below shows.
+The missing window is why bf16 is the usual training format for large models, while fp16 survives where the
 numbers are known to stay inside its range, as in serving. The mechanics of mixed-precision training (which tensors use which format, how
-the scale is adjusted) belong to the later volume on training large models (Volume XIII). Nothing here depends on it: all
-that is needed is that a master copy is a 32-bit copy of the weights to which the updates are added, with the narrow copy rebuilt from it for the arithmetic.
+the scale is adjusted) belong to the later volume on training large models (Volume XIII). Only one of its ideas is needed
+here: a **master copy**, a 32-bit copy of the weights to which the updates are added, with the narrow copy rebuilt from it for the arithmetic.
 
 ## Eight bits: E4M3 and E5M2
 
@@ -365,9 +366,9 @@ has 5 exponent and 2 fraction bits. Together they are the **fp8 formats**. Both 
 is exactly fp16 with the low 8 bits cut off: same sign, same 5-bit exponent field, same bias 15, 2 fraction bits
 instead of 10. E4M3 trades one exponent bit for one fraction bit, giving more precision and less range.
 
-E4M3 has one more difference, and it is a decision about what to do with a nearly useless pattern. With 4 exponent bits the all-ones field has
-only 16 patterns (8 for each sign, $f = 0 \dots 7$). In the IEEE convention they would hold two infinities and 14 NaNs, almost a whole binade
-spent on values that are never wanted. The E4M3 of the published definition of the format (the 8-bit formats of
+E4M3 has one more difference, and it is a decision about what to do with nearly useless patterns. With 4 exponent bits only
+16 patterns have the all-ones exponent field (8 for each sign, $f = 0 \dots 7$). In the IEEE convention they would hold two infinities and 14 NaNs, a whole binade
+of the format's sixteen spent on values that are never wanted. The E4M3 of the published definition of the format (the 8-bit formats of
 Micikevicius et al., 2022, and the Open Compute Project's specification) gives up infinity and keeps *one* NaN pattern, the one with exponent and
 fraction all ones. Every other pattern with the top exponent field is an ordinary number:
 
@@ -452,8 +453,8 @@ One block of 8 values, amax = 3000. The scale is s = amax / 448 = 6.696429; a va
 <!-- /worked -->
 
 Stored directly, the values 3000, -1200 and -2300 are clamped to $\pm 448$: errors of 63% to 85%, and unlike rounding error that is a loss of the number itself. With the scale every error is a few percent, at the price of one extra number per block that must be stored in
-a wider format. E5M2's range already holds 3000, but it has half of E4M3's precision (one fraction bit fewer, so a relative error twice as large). The 8-bit floating-point formats, then, are always used with a scale, and one scale per block of values is the cost that
-the memory table below will include.
+a wider format. E5M2's range already holds 3000, but it has half of E4M3's precision (one fraction bit fewer, so a relative error twice as large). The 8-bit floating-point formats, then, are always used with a scale, and one scale per block of values is a cost that
+the memory table below includes.
 
 ## The density of numbers
 
@@ -471,7 +472,7 @@ spacing stops shrinking and the number of values per decade falls with the decad
 The second picture plots the largest relative error of rounding a number, against the number. For each pair of
 neighbouring representable numbers the error is largest at their midpoint, where rounding errs by half the gap.
 
-![For bf16, fp16, E5M2 and E4M3, the base-10 logarithm of the largest relative rounding error in each binade, plotted against the base-10 logarithm of the number. Each format is a flat line (bf16 near -2.4, fp16 near -3.3, E5M2 near -1, E4M3 near -1.2) over its normal range, and rises steeply to 0 in its subnormal range, where relative error reaches 100%.](img/rounding-error.svg)
+![For bf16, fp16, E5M2 and E4M3, the base-10 logarithm of the largest relative rounding error in each binade, plotted against the base-10 logarithm of the number. Each format is a flat line (bf16 near -2.4, fp16 near -3.3, E5M2 near -0.9, E4M3 near -1.2) over its normal range, and rises steeply to 0 in its subnormal range, where relative error reaches 100%.](img/rounding-error.svg)
 
 Inside the normal range the relative error is constant: $u = 2^{-(n_m+1)}$, 0.39% for bf16 and 0.049% for fp16. The
 absolute error grows with the number, so that every number keeps the same count of correct digits. That is the
@@ -486,8 +487,8 @@ group scale of $0.00708661$. The stored integer is a **code** $q$ and the number
 $\Delta q$, where $\Delta$ is a scale shared by a group of values. An **integer-quantized format** is a
 storage format of this kind: small integer codes, such as 8-bit or 4-bit two's complement numbers, plus the scale (and sometimes an offset, the zero point, below)
 needed to read them as numbers. How to choose scales well, group sizes, and how to find the numbers worth
-protecting is the subject of Chapter 12 of this volume, on quantization; this section
-describes the format plainly so that the byte counts and kernels of the chapters between can be read.
+protecting is the subject of Chapter 12, on quantization; the format itself is plain enough to describe
+now, and the byte counts and kernels before that chapter need it.
 
 The simplest choice of scale maps the largest magnitude of the group to the largest code, $\Delta = \max_i |x_i| / q_{\max}$, with
 $q_{\max} = 127$ for 8 bits, and the code of a value is the rounded quotient:
@@ -506,7 +507,7 @@ function quantize_symmetric(x: array<real>[n], qmax: int) -> (delta: real, q: ar
 
 Why $127$ and not $128$? The range $-127 \dots 127$ is symmetric around zero, so negating a weight is always a valid code (the asymmetry of
 two's complement is not used), zero decodes to exactly zero, and one scale serves both signs. The error of
-rounding a code is at most half a step, $\Delta/2$: unlike a float's, an integer format's error is *absolute* and the same for
+rounding a code is at most half a step, $\Delta/2$: unlike a float's, an integer format's error bound is *absolute*, the same for
 every value in the group, so a small value is represented with a large relative error. That is why the scale must
 belong to a small group. One large weight sets the step for everyone:
 
@@ -584,14 +585,14 @@ Eight weights [0.5, -0.2, 0.7, 0.1, -0.7, 0.3, 0.0, -0.4]; Delta = max|w| / 7 = 
 | 2 | w[4] = -0.7 | -7 | 1001 | w[5] = 0.3 | 3 | 0011 | 00111001 | 0x39 |
 | 3 | w[6] = 0.0 | 0 | 0000 | w[7] = -0.4 | -4 | 1100 | 11000000 | 0xC0 |
 
-Unpacking (low = byte and 0xF, high = byte >> 4, each read as a 4-bit two's complement number) returns the codes [5, -2, 7, 1, -7, 3, 0, -4]; they equal the codes [5, -2, 7, 1, -7, 3, 0, -4]: True. The eight weights now take 4 bytes plus one scale.
+Unpacking (low = byte and 0xF, high = byte >> 4, each read as a 4-bit two's complement number) returns the codes [5, -2, 7, 1, -7, 3, 0, -4], the codes that were packed. The eight weights now take 4 bytes plus one scale.
 <!-- /worked -->
 
 Byte `0xE5` holds the codes 5 (low nibble `0101`) and $-2$ (high nibble `1110`). The masks `and 0xF` matter: without them, the sign
 extension of a negative code would spill ones into the neighbour's bits. Unpacking reads each nibble back through `signed(., 4)`. A group of eight
 weights is now four bytes and a scale.
 
-The 4-bit integer code is the narrowest format of the chapter, and the least forgiving: it has 15 usable levels, so the group size, the scale and the
+The 4-bit integer code is the narrowest format of all, and the least forgiving: it has 15 usable levels, so the group size, the scale and the
 rounding rule decide whether the result is usable. The memory table below counts what the scales add.
 
 ## Converting between formats
@@ -612,10 +613,10 @@ relations the formats were designed with: bf16 is the top half of fp32, and E5M2
 | the negative-zero code decodes to 0 and 0 encodes as the positive-zero code (sign of zero is dropped) | 4 | 0 |
 <!-- /worked -->
 
-The last row says that the finite positive codes are ordered like their values, so two positive numbers can be compared as integers. (For negative numbers the order reverses, and NaN has no place in it.)
+The fourth row says that the finite positive codes are ordered like their values, so two positive numbers can be compared as integers. (For negative numbers the order reverses, and NaN has no place in it.)
 
 **Narrowing rounds once.** Going to a narrower format, the result is the nearest representable number, ties to the even code,
-with the three edge cases above: overflow, underflow and the sign. The algorithm below is the whole conversion for any format of this chapter; it needs only
+with the three edge cases above: overflow, underflow and the sign. The algorithm below is the whole conversion for any of these formats; it needs only
 the split $(n_e, n_m)$, the finite-only flag and a choice of what to do on overflow (`saturate`).
 
 ```text
@@ -690,7 +691,7 @@ How much does it matter whether we truncate or round? Truncation saves one addit
 <!-- /worked -->
 
 Truncation moves *every* value toward zero, so the mean magnitude drops by 0.28% and the sum of squares (the square of a norm) by 0.57%, a systematic loss
-of the same sign on every element. Its worst-case error is also twice as large (0.77% against 0.39%), since the discarded part is a full unit in the last place instead of
+of the same sign on every element. Its worst-case error is also twice as large (0.77% against 0.39%), since the discarded part can approach a full unit in the last place instead of
 half. Round to nearest even errs in both directions equally often (49.9% of values move toward zero), and its errors average out: the mean change is 0.0004%. The size of one error is not what separates them: a bias adds up with the number of terms, while errors of random sign grow more slowly.
 
 ### Narrow sums stop growing
@@ -735,7 +736,7 @@ format therefore keeps the weights, or a master copy of them, in 32 bits, or rou
 
 ## Bytes and bandwidth
 
-The reason to put up with all of the above is the number of bytes, so we count them. A weight stored in $b$ bytes costs $b$ bytes of memory and, each time it is used, $b$ bytes of traffic. Generating one token with a dense model at batch size 1 reads each
+The reason to put up with all of the above is the number of bytes, so we count them. A weight stored in $b$ bytes costs $b$ bytes of memory and, each time it is used, $b$ bytes of traffic. Generating one token (a word or a piece of one) with a dense model at batch size 1 reads each
 weight once and does 2 FLOPs with it (a multiply and an add), so the work per token is $2P$ FLOPs and $Pb$ bytes: $2/b$ FLOPs per byte (the FLOPs per byte of a computation is its arithmetic divided by the bytes it moves; Chapter 3 builds the roofline on it). The scales of the
 block and group formats are charged in full.
 
@@ -753,7 +754,7 @@ A dense model of P = 7,000,000,000 parameters. Producing one token at batch size
 
 For $7 \times 10^9$ parameters the weights alone go from 28 GB in fp32 to 14 GB in a 16-bit format, to about 7 GB in 8 bits and 4.4 GB in 4 bits with a scale
 for every 32 values. The scales are not free: they turn "4 bits" into 5, and "8 bits" into 9. Because one token needs one pass over the
-weights, the bytes per token are the table's second column, and the arithmetic per byte rises as the bytes fall: the FLOPs per byte rise as $2/b$, from 0.5 for fp32 to 3.2 for the 4-bit format, and a device limited by its memory (Chapter 3 of this volume gives the test) gains exactly as the bytes fall. How a number of seconds follows depends on the device's bandwidth, and is for that chapter and for the profiling chapter.
+weights, the bytes per token are the table's third column, and the arithmetic per byte rises as the bytes fall: the FLOPs per byte rise as $2/b$, from 0.5 for fp32 to 3.2 for the 4-bit format, and a device limited by its memory (Chapter 3 gives the test) speeds up in proportion as the bytes fall. Turning bytes into seconds needs the device's bandwidth, which Chapters 3 and 11 take up.
 
 Training stores more than the weights. Volume III, Chapter 7 counted 16 bytes per parameter for AdamW in 32 bits:
 
@@ -784,7 +785,7 @@ The sections above leave five working rules, each of which a bug has taught some
 - **State every conversion's overflow rule.** Infinity, NaN or saturation: the choice is part of the format of a pipeline, and with E4M3 it is the only
   choice there is.
 - **NaN is a pattern, not a value.** Comparing NaN to anything is false, and a NaN written to a narrow format may become a number if the
-  conversion does not guard the pattern (the bf16 conversion above keeps the NaN's quiet bit for that reason).
+  conversion does not guard the pattern (the bf16 conversion above sets the NaN's quiet bit for that reason).
 - **Check a decode on every code.** An 8-bit format has 256 codes and a 16-bit one 65536: a decoder can be tested against an independent
   reference exhaustively, not by examples, and the NaN pattern of E4M3 is exactly the kind of case an example misses.
 
@@ -803,10 +804,10 @@ reference for every one of the 65536 patterns (`f16_decode_matches_an_independen
 `max_finite` returns those numbers, and `encode` rounds to the nearest finite code, ties to the even code, saturating (NaN keeps a NaN code). The reference decoders are in
 `crates/checkpoint/src/safetensors.rs`: `e4m3fn_to_f32` returns NaN only for exponent and fraction all ones, and `e5m2_to_f32` returns infinity for exponent 31 and fraction 0. The block scale of the chapter is
 `quantize_weight_fp8`: one 32-bit scale per tile of the weight, the tile's largest magnitude divided by `max_finite`; the checkpoint format brain reads uses one scale per 128 by 128 block
-(`dequant_block128`), and the CUDA activation quantisers do the same per 128 values (`crates/kernels-cuda/cu/add_rms_quant_e4m3.cu` computes `s = amax(|xn| over 128) / 448` and stores `e4m3(xn / s)`,
+(`dequant_block128`), and the CUDA activation quantizers do the same per 128 values (`crates/kernels-cuda/cu/add_rms_quant_e4m3.cu` computes `s = amax(|xn| over 128) / 448` and stores `e4m3(xn / s)`,
 rounded to nearest even and saturating, through the hardware instruction `cvt.rn.satfinite.e4m3x2.f32` in `crates/kernels-cuda/cu/e4m3_quant_common.cuh`).
 
-Two stories come from this code. First, decoding. In commit `068d2ff53` (19 August 2026) a profile of importing a real 27-billion-parameter FP8 checkpoint showed that the E4M3
+Two stories come from this code. First, decoding. In commit `068d2ff53` (19 August 2026) a profile of importing a real 27-billion-parameter fp8 checkpoint showed that the E4M3
 byte decode was the dominant cost: it recomputed each value, with calls to `powi`, for tens of millions of elements, though an 8-bit format has only 256 possible bytes. The fix
 is the table `LUT: [f32; 256]` that `e4m3fn_to_f32` indexes today, bit-identical to the formula it memoizes.
 
@@ -849,8 +850,8 @@ constant absolute error, so the scale must belong to a small group, and four-bit
 twice as large, accumulators in narrow formats stop growing at $2^p$, and an update smaller than half a gap vanishes. The bill is in bytes: 28 GB for seven billion parameters in fp32, 14 in a 16-bit format, 7 and 4.4 in the
 8-bit and 4-bit formats with scales, and a mixed-precision training run with a master copy and 32-bit moments saves no parameter memory at all.
 
-The limits are the chapter's own: the formats are described from their bit definitions, but how to choose a scale from data, how much precision a given layer can lose, and how to train in
-low precision are open questions that later chapters and volumes answer. The next chapter turns from the numbers to the machine that computes with them, a CPU with its caches and vector registers,
+The formats are described here from their bit definitions; how to choose a scale from data, how much precision a given layer can lose, and how to train in
+low precision are questions that later chapters and volumes answer. The next chapter turns from the numbers to the machine that computes with them, a CPU with its caches and vector registers,
 because a format that moves fewer bytes only helps if the machine is waiting for bytes.
 
 ## Exercises
@@ -883,7 +884,7 @@ because a format that moves fewer bytes only helps if the machine is waiting for
 **Recall questions.**
 
 1. $2^8 = 256$ patterns: $0 \dots 255$ unsigned, $-128 \dots 127$ with half used for negatives.
-2. The sign $s$, the exponent $e$ and the fraction $f$ (the significand has $p - 1$ stored bits plus an implied leading 1). Within a binade the gap is $2^{e-(p-1)}$, so entering the next binade doubles $e$'s contribution and doubles the gap while the number also roughly doubles: the relative gap stays between $2^{-p}$ and $2^{-(p-1)}$.
+2. The sign $s$, the exponent $e$ and the fraction $f$ (the significand has $p - 1$ stored bits plus an implied leading 1). Within a binade the gap is $2^{e-(p-1)}$, so entering the next binade raises $e$ by one and doubles the gap, while the numbers themselves also double: the relative gap stays between $2^{-p}$ and $2^{-(p-1)}$.
 3. $\varepsilon = 2^{-23} = 1.19 \times 10^{-7}$, with $p = 24$: $\varepsilon = 2^{1-p}$, twice the unit round-off $u = 2^{-p}$.
 4. A result beyond the largest finite number overflows to infinity (when it is past the halfway point to the next would-be number); a result below the smallest normal number is stored as a subnormal with fewer significant bits, and below half the smallest subnormal as zero. A value exactly halfway goes to the neighbour with the even fraction.
 5. $4 + 4 + 8 = 16$ bytes per parameter (value, gradient, two moments); $16 \times 7 \times 10^9 = 112$ GB.
@@ -894,7 +895,7 @@ because a format that moves fewer bytes only helps if the machine is waiting for
 2. $200$ does not fit in 8 signed bits; the pattern is $200 \bmod 256 = 200$, `11001000`, which reads as $200 - 256 = -56$. In an unsigned register the result is 200, which fits.
 3. fp16's smallest subnormal is $6 \times 10^{-8}$ and anything below half of it, $3 \times 10^{-8}$, becomes zero, so $10^{-9}$ is stored as 0. bf16 has fp32's exponent field: $10^{-9}$ is a normal number there, stored with an error of at most 0.4%. fp16 needs a loss scale $S$ that lifts $10^{-9}$ above its subnormal range, for example $S = 2^{16}$ gives $6.6 \times 10^{-5}$, near its smallest normal number, with $S$ small enough that the large gradients do not exceed 65504.
 4. 2048. At 2048 the gap in fp16 is 2, $2048 + 1$ is a tie between 2048 and 2050 and goes to the even fraction, 2048; every later addition is lost the same way.
-5. The shift always rounds toward zero (the discarded bits are dropped), so every value is stored with a smaller magnitude: a bias of about $-0.28\%$ on normal data in the chapter's measurement, and a worst case of one full unit in the last place, twice the error of rounding to nearest. Add the half-way bias `0x7FFF` and the kept bit before shifting.
+5. The shift always rounds toward zero (the discarded bits are dropped), so every value is stored with a smaller magnitude: a bias of about $-0.28\%$ on normally distributed data in the measurement above, and a worst case of nearly one full unit in the last place, twice the error of rounding to nearest. Add the half-way bias `0x7FFF` and the kept bit before shifting.
 6. With the IEEE rule the all-ones exponent field is reserved for infinity and NaN, and the largest number is $(1 + 7/8)\,2^{7} = 240$. E4M3 uses that field for ordinary numbers, leaving one NaN pattern, so the largest is $(1 + 6/8)\,2^{8} = 448$. It gave up infinity and all but one NaN pattern, so an overflow has no infinity to become.
 7. $\Delta = 0.35/7 = 0.05$. $0.12/0.05 = 2.4$ rounds to 2, which decodes to $0.10$ (error 0.02); $-0.35$ has code $-7$ and decodes to exactly $-0.35$.
 8. The scale is set by the large weight, $\Delta = 10 m/127$ where $m$ is the typical magnitude, so the step is $0.079\,m$ and a typical weight is rounded with an absolute error up to $0.04\,m$ (4% of its size), and weights smaller than $0.04\,m$ are stored as zero. The remedy is a smaller group (or a separate scale for the outlier), at the price of one more stored scale.

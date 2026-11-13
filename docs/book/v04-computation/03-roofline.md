@@ -31,10 +31,10 @@ times, and here the larger one has nothing to do with arithmetic: this machine s
 bytes, and its arithmetic units are idle for 49 of every 50 moments. Making the multiplications twice as fast
 would change nothing. Storing the weights in half the bytes would halve the time.
 
-This chapter turns that comparison into a method. A computation has two hardware-independent costs, the operations it
+That comparison generalizes into a method. A computation has two hardware-independent costs, the operations it
 performs and the bytes it moves, and a machine has two rates, the operations it can perform per second and the bytes it can move per
 second. Comparing the two ratios says which resource limits the computation and gives a number it cannot beat. The picture that
-shows it is called the roofline. Volume IV, Chapter 2 ended with the count of operations and bytes; this chapter says what to do with it.
+shows it is called the roofline. Chapter 2 ended with a count of operations and bytes; the roofline says what to do with it.
 
 The method leans on six earlier ideas, so bring them back before the counting starts.
 
@@ -42,26 +42,26 @@ The method leans on six earlier ideas, so bring them back before the counting st
    matrix and a $[k, n]$ matrix cost, counting a multiplication and an addition as one operation each?
 2. (Volume I, Chapter 16, asymptotic complexity.) One quantity grows as $n^3$ and another as $n^2$. How does their ratio
    grow, and in the notation of that chapter what is it?
-3. (Volume IV, Chapter 2, cache hierarchy.) A program reads one byte that is not in any cache. How many bytes travel
+3. (Chapter 2, cache hierarchy.) A program reads one byte that is not in any cache. How many bytes travel
    from main memory, and why?
-4. (Volume IV, Chapter 2, tiling.) What does tiling a loop change about a computation: its operation count, or the number of
+4. (Chapter 2, tiling.) What does tiling a loop change about a computation: its operation count, or the number of
    cache lines it fetches?
-5. (Volume IV, Chapter 1, number formats.) How many bytes per weight does fp16 take, and how many does int8 with one
+5. (Chapter 1, number formats.) How many bytes per weight does fp16 take, and how many does int8 with one
    32-bit scale for every 32 values take?
 6. (Volume III, Chapters 5 and 7.) The backward pass of a linear layer does about how many times the arithmetic of its forward
    pass? And an AdamW update of one parameter does 16 operations on how many bytes of traffic?
 
 ## Two rates of a machine
 
-The time a computation needs depends on the machine through only two numbers, both of which can be read off its design, so we can state them for a machine we have never met. A machine can be asked two different questions. How many floating-point operations can it complete in a second? That is its
+In the simplest useful model, the time a computation needs depends on the machine through only two numbers, both of which can be read off its design, so we can state them for a machine we have never met. A machine can be asked two different questions. How many floating-point operations can it complete in a second? That is its
 **peak arithmetic rate**, written $F_{\mathrm{pk}}$, in operations per second (FLOP/s). It comes from the design: the
 number of arithmetic units times the operations each does per cycle times the clock rate. And how many bytes can it bring from main
 memory in a second? That is its **memory bandwidth**, written $\mathrm{BW}$, in bytes per second: the number of bytes that main memory
 can deliver to the processor in one second when the processor asks for them in the best possible way. It too comes from the design: the
 bytes transferred at once times the transfers per second.
 
-Both are rates of work, and they are unrelated: a machine can have a great deal of one and little of the other. The book
-uses two machines, both **model parameters**: round numbers invented for the arithmetic and not claims about any
+Both are rates of work, and they are unrelated: a machine can have a great deal of one and little of the other. The examples
+use two machines, both **model parameters**: round numbers invented for the arithmetic and not claims about any
 product. The reader can rebuild them from a design. The CPU has 10 cores, each with 2 vector units of 8 lanes that do one fused
 multiply-add (2 operations) per lane per cycle, at a clock of 2.5 billion cycles per second: $10 \times 2 \times 8 \times 2 \times 2.5 \times 10^9 = 800 \times 10^9$
 operations per second (Chapter 2 built these three factors: cores, lanes and issue rate). Its memory moves 8 bytes per transfer on each of
@@ -78,12 +78,12 @@ Model parameters, round numbers invented for the book (not any product). Peak is
 | GPU | 40,000 | 800 | 50.0 |
 <!-- /worked -->
 
-The last column is the quotient $F_{\mathrm{pk}} / \mathrm{BW}$, operations per byte, and it is the number this chapter is
-about. For the CPU it is 10: for every byte that arrives, the machine could do 10 operations if it had them to do. For the GPU it is 50. A machine
+The last column is the quotient $F_{\mathrm{pk}} / \mathrm{BW}$, operations per byte, and everything below turns on
+it. For the CPU it is 10: for every byte that arrives, the machine could do 10 operations if it had them to do. For the GPU it is 50. A machine
 with a high quotient is one with a lot of arithmetic compared with its pipes to memory, and it needs a computation with a lot of arithmetic per
 byte to keep its arithmetic busy. That requirement is a property of the computation, and the next section counts it.
 
-Memory has levels (Volume IV, Chapter 2), and every level has its own bandwidth, higher for the small levels near the core. Unless a sentence says
+Memory has levels (Chapter 2), and every level has its own bandwidth, higher for the small levels near the core. Unless a sentence says
 otherwise, $\mathrm{BW}$ is the bandwidth of main memory, the largest and slowest level, because that is where a working set larger than the caches lives.
 The section on where the roofline stops being true returns to the others.
 
@@ -95,7 +95,7 @@ operations on $12n$ bytes, one twelfth of an operation per byte. No cleverness i
 output needs its two inputs and each input is used once.
 
 Define the two counts for any computation. $N_{\mathrm{flop}}$ is the number of floating-point operations, with a multiplication and an addition counting one each and
-a fused multiply-add two (the convention of Volume IV, Chapter 2). $N_{\mathrm{byte}}$ is the number of bytes that must cross between main memory and the
+a fused multiply-add two (the convention of Chapter 2). $N_{\mathrm{byte}}$ is the number of bytes that must cross between main memory and the
 arithmetic: at least every input read once and every output written once. It is a lower bound, because a program can be so careless
 that it reads a number several times (the tiling section shows when), but no program can read less than the inputs it
 needs. The ratio is the **arithmetic intensity**:
@@ -140,7 +140,7 @@ FLOPs count each multiplication and each addition as one. Bytes are the least th
 
 Four rows, a span of about 8,200: from 0.0833 for the addition to 682.67 for the product. The int8 row shows the effect of storage format on the
 matrix-vector product: the same 33,554,432 operations over a quarter of the weight bytes, so four times the intensity, nearly (the activations are still
-4-byte numbers, so the ratio is 1.996 and not 2). Volume IV, Chapter 2 counted the same three operations at $n = 1024$ in its closing table; the counts here follow the
+4-byte numbers, so the ratio is 1.996 and not 2). Chapter 2 counted the same three operations at $n = 1024$ in its closing table; the counts here follow the
 same rule and differ only in the size.
 
 ## Two lower bounds on time: the roofline
@@ -250,12 +250,12 @@ by moving fewer bytes, and the next two sections look at two ways: a different f
 
 ## Decoding a token reads the model
 
-The operation that dominates language-model generation is the matrix-vector product, so the roofline tells how fast generation can be, which is the question the chapter opened with. A decoder-only language model (a later volume builds one; here it is only a stack of layers, each a matrix product with weights) generates one token by passing one new vector through every layer. A layer is a matrix product with the weights, and for one token it is a
+The operation that dominates language-model generation is the matrix-vector product, so the roofline tells how fast generation can be, which is the question of the opening. A decoder-only language model (a later volume builds one; here it is only a stack of layers, each a matrix product with its weights) generates one token by passing one new vector through every layer. For one token each layer's product is a
 matrix-vector product, so the whole model does $2P$ operations for $P$ weights and reads all $P$ weights once; if a weight occupies $b$ bytes, a token moves $Pb$ bytes and has intensity $2P/(Pb) = 2/b$ (activations and the memory of earlier tokens are small by comparison, and ignored here; an exercise adds them).
 For a model of $P = 7 \times 10^9$ weights in the four storage formats of Chapter 1:
 
 <!-- worked: roofline.decode_per_token -->
-A dense model of P = 7,000,000,000 weights at batch size 1: one token is 2 P FLOPs and reads every weight once, so the bytes per token are P b for b bytes per weight (scales charged, as in Volume IV, Chapter 1) and the intensity is 2 / b. Activations and the cache of earlier tokens are ignored. Arithmetic is fp32 at the machine's peak whatever the storage format. The last column of each machine is the roofline's bound on tokens per second, BW / (P b): a model, not a measurement. GB = 10^9 bytes.
+A dense model of P = 7,000,000,000 weights at batch size 1: one token is 2 P FLOPs and reads every weight once, so the bytes per token are P b for b bytes per weight (scales charged, as in Chapter 1) and the intensity is 2 / b. Activations and the cache of earlier tokens are ignored. Arithmetic is fp32 at the machine's peak whatever the storage format. The last column of each machine is the roofline's bound on tokens per second, BW / (P b): a model, not a measurement. GB = 10^9 bytes.
 
 | weights stored as | bytes per weight | GB read per token | intensity | CPU fraction of peak | CPU tokens/s bound | GPU fraction of peak | GPU tokens/s bound |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -290,7 +290,7 @@ For small $B$ the weights dominate the denominator and $\mathcal{I} \approx 2B/b
 The table is for one layer with $D = O = 4096$ and fp32 activations, with the weights in three formats:
 
 <!-- worked: roofline.batch_ladder -->
-One layer [B, 4096] by [4096, 4096]: B rows of activations (fp32) times a weight matrix stored at b bytes per weight (fp32 b = 4; int8 and int4 with an f32 scale per 32 weights, b = 1.125 and 0.625). FLOPs 2 B (4096)^2; bytes b (4096)^2 + 4 B (4096 + 4096). Percent of the GPU's peak at the attainable rate min(F_pk, intensity x BW).
+One layer [B, 4096] by [4096, 4096]: B rows of activations (fp32) times a weight matrix stored at b bytes per weight (fp32 b = 4; int8 and int4 with an f32 scale per 32 weights, b = 1.125 and 0.625). FLOPs 2 B (4096)^2; bytes b (4096)^2 + 4 B (4096 + 4096). Fraction of the GPU's peak at the attainable rate min(F_pk, intensity x BW).
 
 | B | I fp32 | I int8 | I int4 | GPU fraction of peak fp32 | GPU fraction of peak int8 | GPU fraction of peak int4 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -316,7 +316,7 @@ The smallest batch B whose intensity reaches the ridge:
 <!-- /worked -->
 
 On the GPU the fp32 layer needs a batch of 106 before it leaves the slanted part, the int8 layer 30 and the 4-bit layer 17. The count for the CPU is much smaller, 21, 6 and 4, because its ridge is lower. Two things happen as the batch grows. First, the throughput in operations per second rises in proportion
-(compare the fractions of peak in the fp32 column: 0.0100 at $B = 1$, 0.0200 at 2, 0.0400 at 4): doubling the batch doubles the work done per byte read, so the machine finishes twice as many tokens in about the same time. Second, past the ridge the intensity continues to rise but the attainable rate does not: the flat part has been reached, and more
+(compare the fractions of peak in the fp32 column: 0.0100 at $B = 1$, 0.0200 at 2, 0.0399 at 4): doubling the batch doubles the work done per byte read, so the machine finishes twice as many tokens in about the same time. Second, past the ridge the intensity continues to rise but the attainable rate does not: the flat part has been reached, and more
 batch only adds time in proportion.
 
 The simplification $\mathcal{I} \approx 2B/b$, with the activations dropped, gives the batch at which a whole model reaches the ridge: $2B/b \ge \mathcal{I}_{\mathrm{ridge}}$, so $B^\ast = \lceil \mathcal{I}_{\mathrm{ridge}}\,b/2 \rceil$. On the GPU, 50 for fp16 weights and 16 for 4-bit ones. This simplification is what the model-wide table below uses, so its $B = 1$ intensity for 4 bits is exactly 3.2, while the layer table, which charges the activations, has 3.19.
@@ -342,7 +342,7 @@ only that the weights are worth sharing, and how many it takes before sharing st
 
 ## Quantization helps where bytes limit
 
-The quantization chapters later in this volume will cost accuracy for bytes, and the roofline says when bytes are worth buying. The last column of the model-wide table is the speed of the 4-bit model divided by that of the fp16 model. It is 3.20 at $B = 1$ and 4 and then falls: 3.13 at 16, 1.56 at 32 and 1.00 from 64 on. This is the roofline in one column. While both models are bandwidth-bound, the time is bytes divided by bandwidth and the ratio is
+Quantization (Chapter 12) trades accuracy for bytes, and the roofline says when bytes are worth buying. The last column of the model-wide table is the speed of the 4-bit model divided by that of the fp16 model. It is 3.20 at $B = 1$ and 4 and then falls: 3.13 at 16, 1.56 at 32 and 1.00 from 64 on. This is the roofline in one column. While both models are bandwidth-bound, the time is bytes divided by bandwidth and the ratio is
 the ratio of bytes per weight, $2/0.625 = 3.2$. At $B = 16$ the 4-bit model has crossed its ridge and the fp16 model has not, so the 4-bit model's time stops falling while the fp16 model's still does, and the ratio narrows. Once both are at the flat part, the time is
 operations divided by peak, which is the same for both because the arithmetic is the same (the weights are decoded and the arithmetic done in fp32, "store narrow, compute wide" of Chapter 1). Fewer bytes buy nothing there.
 
@@ -352,10 +352,10 @@ A different arithmetic helps compute-bound work. Many machines have faster units
 
 ## Training operations on the roofline
 
-The roofline classifies every operation, not only inference, and a training step is made of the same three kinds, whose counts Volume III already gave in the form we need. Volume III, Chapter 5 counted the three matrix products of a linear layer, one forward and two backward, as $2BDO$ operations each over the same bytes, and Chapter 7 counted the operations and bytes of an optimizer's update per parameter. Their intensities, placed on the machines:
+The roofline classifies every operation, not only inference, and a training step is made of the same three kinds, whose counts Volume III already gave in the form we need. Volume III, Chapter 5 counted the three matrix products of a linear layer, one forward and two backward, as $2BDO$ operations each over the same bytes, and its Chapter 7 counted the operations and bytes of an optimizer's update per parameter. Their intensities, placed on the machines:
 
 <!-- worked: roofline.training_operations -->
-FLOPs and bytes as counted in Volume III, Chapters 5 and 7 (fp32; a layer reads X, W and writes Y once; an update reads w, g and the state and writes w and the state). Percent of peak at min(F_pk, intensity x BW) on the two machines of `roofline.machines`.
+FLOPs and bytes as counted in Volume III, Chapters 5 and 7 (fp32; a layer reads X, W and writes Y once; an update reads w, g and the state and writes w and the state). Fraction of peak at min(F_pk, intensity x BW) on the two machines of `roofline.machines`.
 
 | operation | FLOPs | bytes | intensity | CPU fraction of peak | CPU bound | GPU fraction of peak | GPU bound |
 |---|---:|---:|---:|---:|---|---:|---|
@@ -366,7 +366,7 @@ FLOPs and bytes as counted in Volume III, Chapters 5 and 7 (fp32; a layer reads 
 | SGD update, per parameter | 2 | 12 | 0.17 | 0.0167 | bandwidth | 0.0033 | bandwidth |
 <!-- /worked -->
 
-Three observations. The forward and the two backward products of a layer have the same intensity, 24.03 at a batch of 64: so they have the same bound on a given machine. That intensity is above the CPU's ridge of 10, so on the CPU the layer is compute-bound; and below the GPU's ridge of 50, so on the GPU the same layer is
+Two observations. First, the forward and the two backward products of a layer have the same intensity, 24.03 at a batch of 64: so they have the same bound on a given machine. That intensity is above the CPU's ridge of 10, so on the CPU the layer is compute-bound; and below the GPU's ridge of 50, so on the GPU the same layer is
 bandwidth-bound, with an attainable fraction of 0.4806 of the peak. The classification belongs to the pair of computation and machine, never to the computation alone. Raising the batch to 8192 moves the layer past both ridges, as the batching argument says: weights are read once and used for more rows.
 
 Second, the optimizer updates are bandwidth-bound everywhere, at 0.57 and 0.17 operations per byte for AdamW and SGD, and nothing that happens to the arithmetic changes that: the way to make an update cheaper is to move fewer bytes. Volume III, Chapter 7 gave one way, storing the moments in 8 bits, which moves 16.25 bytes in place of 28 for the same 16 operations and so raises the attainable rate in the ratio $28/16.25$.
@@ -377,7 +377,7 @@ That raises the intensity to 0.98 and leaves the update still far below any ridg
 The byte count above was a lower bound that assumes each number is read from main memory once, and when a program does not manage that the count is larger. Tiling brings it back down, and we can say by how much. The matrix product reads each of $A$ and $B$ once if the processor can keep them somewhere near, but they do not fit. $A$ and $B$ at $n = 4096$ are 64 MiB each. Computing one entry $C_{ij}$ needs a row of $A$ and a column of $B$, and if the loops compute entries
 one after another and nothing is kept, then each of the $n^2$ entries re-reads $2n$ numbers: $2n^3$ numbers, or $8n^3$ bytes, for $2n^3$ operations. The intensity is $1/4$, the intensity of a dot product, however large $n$ is.
 
-Tiling (Volume IV, Chapter 2) brings numbers back by computing a $T \times T$ block of $C$ at a time. Keep the block in the cache. For each $k$, bring in the $T$ numbers of $A$ in the block's rows and the $T$ numbers of $B$ in its columns,
+Tiling (Chapter 2) brings numbers back by computing a $T \times T$ block of $C$ at a time. Keep the block in the cache. For each $k$, bring in the $T$ numbers of $A$ in the block's rows and the $T$ numbers of $B$ in its columns,
 and update all $T^2$ entries: $T^2$ multiply-adds from $2T$ loaded numbers. The block's working set is $T^2 + 2T$ numbers, and the traffic is
 
 $$
@@ -394,7 +394,7 @@ At $T = 1$ it is the $1/4$ of the loop with no reuse. At $T = n$, the whole matr
 What stops it is the cache: the tile must fit, $4(T^2 + 2T) \le C$ for a cache of $C$ bytes.
 
 <!-- worked: roofline.tiling_traffic -->
-C = A B for n = 4096, fp32. The cache holds a T by T tile of C and, for each k, the T numbers of A and the T numbers of B that update it: a working set of 4 (T^2 + 2 T) bytes. Main-memory traffic is 4 (2 n^3 / T + n^2) bytes (A and B re-read for every tile, C written once); FLOPs 2 n^3. Caches of Volume IV, Chapter 2: L1 32 KiB, L2 1 MiB, L3 32 MiB. The last two columns are percent of peak at min(F_pk, intensity x BW) for the two machines of `roofline.machines`; the model gives each machine the same cache, to isolate the effect of reuse.
+C = A B for n = 4096, fp32. The cache holds a T by T tile of C and, for each k, the T numbers of A and the T numbers of B that update it: a working set of 4 (T^2 + 2 T) bytes. Main-memory traffic is 4 (2 n^3 / T + n^2) bytes (A and B re-read for every tile, C written once); FLOPs 2 n^3. Caches of Chapter 2: L1 32 KiB, L2 1 MiB, L3 32 MiB. The last two columns are fractions of peak at min(F_pk, intensity x BW) for the two machines of `roofline.machines`; the model gives each machine the same cache, to isolate the effect of reuse.
 
 | T | working set (bytes) | smallest level that holds it | DRAM bytes | intensity | CPU fraction of peak | GPU fraction of peak |
 |---:|---:|---|---:|---:|---:|---:|
@@ -412,7 +412,7 @@ A tile of 256 fits the second level, and gives 62.06, above the GPU's ridge as w
 the ridge. Chapter 6 builds the real thing, with the levels of a GPU, and shows how close to $n/6$ the best tilings come.
 
 The effect is general. Any computation that uses a number several times gains from keeping the number near: fusing two operations so that the intermediate result never goes to main memory (Chapter 8) is the same idea with the roles of reuse and of the consumer exchanged.
-Reading a number again after another has been read, within the cache, costs none of the bandwidth of main memory. The cache hierarchy is, in this chapter's terms, a way to lower $N_{\mathrm{byte}}$ at the level that is slow.
+Reading a number again after another has been read, within the cache, costs none of the bandwidth of main memory. The cache hierarchy is, in roofline terms, a way to lower $N_{\mathrm{byte}}$ at the level that is slow.
 
 ## The achieved fraction of the roofline
 
@@ -438,10 +438,10 @@ HYPOTHETICAL stopwatch readings, invented for the example and not measurements: 
 <!-- /worked -->
 
 Look at the matrix-vector rows. On the stopwatch the GPU wins, by more than three times (the reading is 0.30 against 1.00 milliseconds). On the roofline the CPU is at a fraction of 0.8393 of what it could do and the GPU at 0.2798 of what it could do: the GPU is the one with the larger gap, and a tuner would
-work on it. The last column shows why the fraction of peak compute is not the measure for a bandwidth-bound operation. It says the CPU reached 0.0419 of its peak and the GPU 0.0028, which would suggest that both are doing awfully, when the CPU in fact is doing nearly the best the machine allows. In the matrix-product rows
+work on it. The last column shows why the fraction of peak compute is not the measure for a bandwidth-bound operation. It says the CPU reached 0.0419 of its peak and the GPU 0.0028, which would suggest that both are doing badly, when the CPU in fact is doing nearly the best the machine allows. In the matrix-product rows
 the two fractions coincide, because the bound is the peak. The achieved fraction is the same measure for both kinds.
 
-Three things the number must be taken with. It needs a denominator that is the machine's own, measured on it, because the peak of a data sheet is not what the machine delivers (the section on brain below has its example). It needs the numerator's counts to be complete: an operation count that leaves out
+The number comes with three cautions. It needs a denominator that is the machine's own, measured on it, because the peak of a data sheet is not what the machine delivers (the section on brain below has its example). It needs the numerator's counts to be complete: an operation count that leaves out
 part of the work divides a partial number by the whole time and reports a low fraction that is false (brain's example is below). And a fraction above 1 is a diagnosis, never a result: the bound is a lower bound on time, so no correct count and timing can beat it. Either the time is wrong (a clock that stopped before the device finished), or the bytes are wrong (the data were already in a cache, and the relevant bandwidth is that
 cache's, which is higher), or the machine's numbers are.
 
@@ -471,11 +471,11 @@ Below about 300 thousand elements the time is mostly the start, and the fraction
 and a chain of dependent steps (Chapter 2) is the same: its time is the length of the chain times the delay of a step, and neither peak nor bandwidth enters. The fix is the program's, never the machine's: do more work per start, which is what fusing steps and batching do.
 
 **Access patterns.** The bandwidth is quoted for streaming in whole lines. A program that reads one 4-byte number from each 64-byte line, a strided read (Volume I, Chapter 5), uses a sixteenth of the bytes it moves, so its useful bandwidth is a sixteenth of $\mathrm{BW}$.
-The byte count in the intensity should be the bytes moved, lines and all, and the count of the chapter's operations is the useful bytes, which is why the sections above call them a lower bound.
+The byte count in the intensity should be the bytes moved, lines and all; the byte counts above are the useful bytes, which is why they are called a lower bound.
 
 **Which roof.** A working set that fits in a cache is served at the cache's bandwidth, several times that of main memory. Grading it against the main-memory $\mathrm{BW}$ gives a fraction above 1. The roofline is a family, one slanted line per memory level.
 
-**Overlap and the other units.** The bound assumes arithmetic and memory work at the same time, and that the arithmetic can use the units its peak counts. A computation made of int8 and fp32 work has two flat parts, and the time of the two kinds of arithmetic adds when they share the same units, which brain's profiler below shows to be a real mistake in practice.
+**Overlap and the other units.** The bound assumes arithmetic and memory work at the same time, and that the arithmetic can use the units its peak counts. A computation made of int8 and fp32 work has two flat parts, and the times of the two kinds of arithmetic add when they share the same units; taking the larger of the two instead is a real mistake, which brain's history below shows.
 
 ## Habits that keep the roofline honest
 
@@ -485,13 +485,13 @@ Report the fraction together with its two counts, because "x percent of peak" wi
 
 ## How brain holds itself to its roofline
 
-brain's hard rule (`AGENTS.md`) is this chapter's method turned into an engineering promise: brain runs at its roofline on every device, by selection and not by hand-tuning. It measures the device's roofline by microbenchmark (not from a specification), times the candidate kernels per operation and shape class,
+The hard rule in brain's `AGENTS.md` is the roofline method turned into an engineering promise: brain runs at its roofline on every device, by selection and not by hand-tuning. It measures the device's roofline by microbenchmark (not from a specification), times the candidate kernels per operation and shape class,
 records each chosen kernel's achieved fraction and lists the operations below threshold as the device's gap list. Four places carry it.
 
 ### The measured roofline in `crates/gpu-core/src/roof.rs`
 
-The `Roofs` record holds what the chapter calls $F_{\mathrm{pk}}$ (`gflops`), $\mathrm{BW}$ (`gbs`), a second bandwidth for a working set that stays in cache (`cache_gbs`: the roofline is hierarchical, as the section on where the roofline stops being true says), and an int8 rate and a native-f16 rate where the device has such a path.
-`Roofs::ridge` is $F_{\mathrm{pk}}/\mathrm{BW}$, `Roofs::classify` compares a kernel's intensity with it and returns `Bound::Compute` or `Bound::Memory`, and `Roofs::utilisation` is the achieved fraction of this chapter, graded against the roof of its own class. No compute interface reports either peak, so both are
+The `Roofs` record holds $F_{\mathrm{pk}}$ (`gflops`), $\mathrm{BW}$ (`gbs`), a second bandwidth for a working set that stays in cache (`cache_gbs`: the roofline is hierarchical, as the section on where the roofline stops being true says), and an int8 rate and a native-f16 rate where the device has such a path.
+`Roofs::ridge` is $F_{\mathrm{pk}}/\mathrm{BW}$, `Roofs::classify` compares a kernel's intensity with it and returns `Bound::Compute` or `Bound::Memory`, and `Roofs::utilisation` is the achieved fraction, graded against the roof of its own class. No compute interface reports either peak, so both are
 measured. The arithmetic probe is a chain of fused multiply-adds held in registers with no memory traffic in its loop (`ROOF_FMA`: eight independent accumulators, 16 operations per thread per iteration, so that the dependency chain of Chapter 2 does not limit it); the bandwidth probe is the classic triad shape over two buffers of 64 Mi numbers
 (`BW_BYTES_PER_ELEM = 12`, the vector-addition count of this chapter), far past any cache. Both calibrate their trip count until the timed region lasts at least `MIN_PROBE_SECONDS` and are bracketed by waiting for the device to finish, because a timing that only submitted the work measured the host. The result is persisted per device and keyed by a fingerprint of the probe sources, so editing a probe
 invalidates old numbers. The probe deliberately measures the silicon and not "the best matrix product brain has written": grading kernels against brain's own best kernel would hide the gap that the method exists to close. The CPU backend has its own probe, `crates/backend-cpu/src/roofline.rs`, whose arithmetic rate comes from a representative mix of convolutions and not from a register-only chain, so it is the rate of a real kernel mix, a weaker bound than the GPU's.
@@ -501,18 +501,18 @@ Two stories from the history of that file are worth keeping. Commit 73466fee0 (A
 <!-- perf-number: historical measurement, commit 73466fee0 -->
 In August 2026, on one older discrete GPU, the measured arithmetic roof came to a fraction of 0.898 of the datasheet value and the measured bandwidth roof to 0.831 of it.
 
-Its own conclusion is the point: a datasheet peak is not an achievable peak, and grading kernels against a roof that nothing reaches builds a permanent pessimism into every row. Knowledge #27 states the lesson as the title says: a percentage of peak divided by a hard-coded peak is not a measurement, and the whole method (rank by distance from the roof, fix the top row, measure again) rests on that denominator. The commit also adds tests that are independent of the device on purpose: one that pinned a number would pass on exactly one card.
+Its own conclusion is the point: a datasheet peak is not an achievable peak, and grading kernels against a roof that nothing reaches builds a permanent pessimism into every row. Knowledge #27 states the lesson in its title: a percentage of peak divided by a hard-coded peak is not a measurement, and the whole method (rank by distance from the roof, fix the top row, measure again) rests on that denominator. The commit also adds tests that are independent of the device on purpose: one that pinned a number would pass on exactly one card.
 The second story is commit 1bbcfc77e (August 2026). A device that has been idle runs at a low clock and needs seconds of continuous work to reach the clock it will run a job at; the probe started timing at once, so on an integrated GPU it recorded the idle clock as the silicon's ceiling, and because the result is cached and persisted, that one cold probe became the denominator of every later fraction on the machine. The symptom was in the numbers: the measured arithmetic roof came out below the rate that a real matrix product reached on the same device,
-which cannot happen if the roof is a bound. The fix runs the register-only chain for a warm-up period before the first rung (`ROOF_WARMUP`), and a test, `real_work_can_never_beat_the_roof` in `crates/gpu-core/tests/it/roofline.rs`, states the invariant of the previous section directly: real work against the measured roof, on the same device, must not exceed it. A fraction above 1 caught the bug, as the chapter says it should.
+which cannot happen if the roof is a bound. The fix runs the register-only chain for a warm-up period before the first rung (`ROOF_WARMUP`), and a test, `real_work_can_never_beat_the_roof` in `crates/gpu-core/tests/it/roofline.rs`, states the invariant of the previous section directly: real work against the measured roof, on the same device, must not exceed it. A fraction above 1 caught the bug, as the previous section says it should.
 
 ### The counts in `crates/gpu-core/src/cost.rs`
 
-The achieved fraction needs the numerator, so brain keeps one registry that maps each dispatched kernel to its operation count, integer-operation count and bytes. Its header states the conventions of this chapter: one multiply-accumulate is two operations, and bytes are "best-effort streaming traffic" with each operand read or written once, "a roofline denominator, not a cache model", the lower bound of the
+The achieved fraction needs the numerator, so brain keeps one registry that maps each dispatched kernel to its operation count, integer-operation count and bytes. Its header states the conventions used here: one multiply-accumulate is two operations, and bytes are "best-effort streaming traffic" with each operand read or written once, "a roofline denominator, not a cache model", the lower bound of the
 byte-count section. A kernel the registry does not know yields no count at all and is reported as uncovered, never as zero.
 
 ### The per-kernel table in `crates/gpu-core/src/profile.rs`
 
-The profiler classifies each kernel as compute-bound or bandwidth-bound from the measured ridge and grades it against its own class's roof: reporting a streaming kernel as a fraction of an arithmetic peak is the mistake of the achieved-fraction table above. `Bound::target_pct` and `Bound::defect_pct` (in `roof.rs`) state the bands brain holds each class to: a target of 60 for compute-bound kernels and 70 for bandwidth-bound ones, and a defect line at 30 and 35, below which a kernel is a defect and not untuned.
+The profiler classifies each kernel as compute-bound or bandwidth-bound from the measured ridge and grades it against its own class's roof: reporting a streaming kernel as a fraction of an arithmetic peak is the mistake of the achieved-fraction table above. `Bound::target_pct` and `Bound::defect_pct` (in `roof.rs`) state the bands brain holds each class to: a target of 60 percent of the roof for compute-bound kernels and 70 percent for bandwidth-bound ones, and a defect line at 30 and 35 percent, below which a kernel is a defect and not untuned.
 Two lessons about the denominator and the numerator came out of it. Commit fc902a817 (August 2026), recorded as knowledge #28, found that a benchmark summed the operations of every kernel it had a formula for and divided by the time of the whole pass: ten of the 26 kinds of a backward pass had no formula, so the quoted rate was computed from a numerator missing about a third of the graph.
 
 <!-- perf-number: historical measurement, commit fc902a817 -->
@@ -524,14 +524,14 @@ Commit 2c4daefd7 (August 2026) is a related defect in grading an aggregate: taki
 ### Selection by roofline in `crates/gpu-core/src/native_tune.rs`
 
 The hard rule's other half is implemented by commit 72b363135 (October 2026). The decode linear layer for int8 weights is a set of candidates (a GEMV with 4-way dot products, a wide GEMV on matrix units, and tiled matrix-unit products of 16 and 32 rows), each declaring the device capability it needs and the shapes it serves. On the first use of a device, `native_tune` runs every candidate a device can run
-on a grid of shapes (rows, $K$, bytes of weight: the classes of a decode step, so the batching ladder of this chapter), rejects any candidate that disagrees with a reference computed in 64-bit floating point, times the survivors with the weights cycled past the cache so that the stream is bound by main memory as in real decoding, picks the fastest and records its achieved bandwidth as a fraction of the device's measured roof. The table is cached per device, build and candidate source. Operations whose fraction is below
-`GAP_THRESHOLD` (0.6) form the device's gap list, which `brain perf roofline gpu --kernels` prints (`crates/cli/src/roofline_cli.rs`). Models just call the operation. That is the chapter's batching and bandwidth arguments built into the dispatch: at one row the candidates are judged by the bytes of weights per second, at more rows by operations per second.
+on a grid of shapes (rows, $K$, bytes of weight: the classes of a decode step, so the batching ladder above), rejects any candidate that disagrees with a reference computed in 64-bit floating point, times the survivors with the weights cycled past the cache so that the stream is bound by main memory as in real decoding, picks the fastest and records its achieved bandwidth as a fraction of the device's measured roof. The table is cached per device, build and candidate source. Operations whose fraction is below
+`GAP_THRESHOLD` (0.6) form the device's gap list, which `brain perf roofline gpu --kernels` prints (`crates/cli/src/roofline_cli.rs`). Models just call the operation. That is the batching and bandwidth arguments above, built into the dispatch: at one row the candidates are judged by the bytes of weights per second, at more rows by operations per second.
 
 ### The performance suite asks a different question
 
 `crates/perf` is brain's performance suite, and it answers a different question from the roofline's: how much correct work, meeting a latency target, an engine delivers over time (requests, first-result time, goodput), with the device, backend and build recorded as axes so that two runs are compared only when they are comparable (`crates/perf/src/gate.rs`
 refuses a comparison across different hardware or after a failed correctness check, and skips and reports a metric that one side never measured; unmeasured fields are null and never zero). The suite records the device's peak bandwidth in its environment record when it is known, but it does not itself grade a run against a roofline; that grading is in `gpu-core` and the profiling chapter (Chapter 11) joins the two.
-A number from `crates/perf` is therefore a dated observation of one setup, and the quantity this chapter calls the achieved fraction comes from the roofline side.
+A number from `crates/perf` is therefore a dated observation of one setup, and the achieved fraction comes from the roofline side.
 
 ## Check your understanding
 
@@ -552,7 +552,7 @@ matrix product ($n/6$) lie at very different places, and so does decoding a toke
 Batching raises the intensity in proportion to the batch, and tiling raises that of a matrix product by keeping blocks in the cache; both lower the bytes that come from the slow memory. The honest measure of efficiency is the achieved fraction of the roofline, the best time the machine allows divided by the time taken, because it divides the machine out. It needs
 the machine's own measured roofs, complete counts, and a suspicion of any value above 1. The roofline is a bound: fixed costs, strided access, caches with their own bandwidths and units with their own peaks put real time above it.
 
-What this chapter could not say is what the machine is on the inside: how a GPU organizes the tens of thousands of lanes behind its peak, and what it demands of an algorithm to keep them all busy and its memory streaming. Chapter 4 opens the GPU.
+What the roofline cannot say is what the machine is on the inside: how a GPU organizes the tens of thousands of lanes behind its peak, and what it demands of an algorithm to keep them all busy and its memory streaming. Chapter 4 opens the GPU.
 
 ## References
 
@@ -588,9 +588,9 @@ What this chapter could not say is what the machine is on the inside: how a GPU 
 
 1. $2mnk$ operations: $mn$ outputs, each a dot product of length $k$ with $k$ multiplications and about $k$ additions. (Volume I, Chapter 4.)
 2. As $n^3 / n^2 = n$: the ratio is $\Theta(n)$. (Volume I, Chapter 16.)
-3. The whole 64-byte line that contains it, because memory is answered in aligned lines. (Volume IV, Chapter 2.)
-4. The number of cache lines fetched (the traffic), not the number of operations: the same additions are done in a different order. (Volume IV, Chapter 2.)
-5. fp16 takes 2 bytes; int8 with a 32-bit scale per 32 values takes $1 + 4/32 = 1.125$ bytes. (Volume IV, Chapter 1.)
+3. The whole 64-byte line that contains it, because memory is answered in aligned lines. (Chapter 2.)
+4. The number of cache lines fetched (the traffic), not the number of operations: the same additions are done in a different order. (Chapter 2.)
+5. fp16 takes 2 bytes; int8 with a 32-bit scale per 32 values takes $1 + 4/32 = 1.125$ bytes. (Chapter 1.)
 6. About twice (the backward pass has two products, $d\mathbf{X}$ and $d\mathbf{W}$, each the cost of the forward one). An AdamW update does 16 operations on 28 bytes of traffic, 0.57 per byte. (Volume III, Chapters 5 and 7.)
 
 **Check your understanding**

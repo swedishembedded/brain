@@ -303,6 +303,8 @@ def stencil_barrier():
                   [(r[0], *r[1]) for r in rows]], "l" + "r" * n)
     w = 64
     return (f"x = {STENCIL_X}, y_t = x_(t-1) + x_t + x_(t+1) with x_(-1) = x_8 = 0, one workgroup of {n} invocations. "
+            f"The shared array has {n + 2} slots: s[t + 1] holds x_t, written by invocation t, and the halo slots s[0] and s[{n + 1}] "
+            f"are set to 0 by invocations 0 and {n - 1}; invocation t then reads s[t], s[t + 1] and s[t + 2]. "
             f"Shared slots start as {STENCIL_STALE} (leftover). The sums of the first row are the correct answer.\n\n"
             + body
             + f"\n\nGlobal reads for a workgroup of {w}: without staging 3 x {w} = {3 * w}; staging in shared memory "

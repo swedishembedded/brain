@@ -506,7 +506,7 @@ def bank_conflicts():
         addrs = [(idx % 8) * stride + idx // 8 for idx in range(32)]       # As[kk x stride + r], r = idx div 8, kk = idx mod 8
         rows.append((f"staging store As[kk x {stride} + r], lanes idx = 0 .. 31 with r = idx div 8, kk = idx mod 8 ({name})",
                      bank_degree(addrs)))
-    out.append("The accesses of the tiles in this chapter (32 lanes unless the line says 16):\n")
+    out.append("The accesses of the tiles of the kernels above (32 lanes unless the line says 16):\n")
     out.append(_table(["access", "degree"], rows, "lr"))
     return "\n".join(out)
 
@@ -551,7 +551,7 @@ def register_blocking():
                      "yes" if d["hides"] else "no", _n(d["loads"]), f"{d['inten']:.2f}", f"{d['shared_per_fma']:.3f}",
                      f"{d['global_roof']:,.0f}", f"{d['shared_roof']:,.0f}", f"{d['att']:,.0f} ({d['limit']})"))
     return (f"C = A B, n = {N_BIG}, fp32, workgroup of {WG} invocations (16 x 16), each computing an r x r block, so the workgroup tile is T = 16 r on a side; "
-            f"k-chunk {BK}, shared memory (T + T) x {BK} x 4 bytes. PARAMETERS of this chapter: registers per invocation = {BASE_REGS} + r^2 + 2 r "
+            f"k-chunk {BK}, shared memory (T + T) x {BK} x 4 bytes. PARAMETERS of the model: registers per invocation = {BASE_REGS} + r^2 + 2 r "
             f"({BASE_REGS} for indices and loop counters, r^2 accumulators, 2 r operands); shared memory delivers {SHARED_BYTES_PER_CYCLE} bytes per cycle per compute unit "
             f"({_g(SHARED_BW_TOTAL, 0)} (GB/s) over the {gpu.N_CU} compute units at 2 GHz). Shared roof = shared bandwidth / (4 / r bytes per FLOP); "
             f"global roof = intensity x 800; both in (GFLOP/s); the arithmetic peak is {_n(int(F_PK))}. Occupancy by the model of Chapter 4; "
@@ -601,7 +601,7 @@ def roofline_climb():
         rows.append((name, f"{inten:.2f}", f"{att:,.0f}", f"{peak:,.0f}", f"{att / peak:.4f}",
                      "compute" if inten >= peak / BW else "bandwidth"))
     return (f"C = A B, n = {N_BIG}, on the model GPU: arithmetic peak {_n(int(F_PK))} (GFLOP/s) (Chapter 3), bandwidth {int(BW)} (GB/s), ridge {F_PK / BW:.0f} FLOP per byte; "
-            f"the matrix unit's peak is {TENSOR_RATIO} times the vector peak, {_n(int(F_TC))} (GFLOP/s), a PARAMETER of this chapter, with ridge {F_TC / BW:.0f}. "
+            f"the matrix unit's peak is {TENSOR_RATIO} times the vector peak, {_n(int(F_TC))} (GFLOP/s), a PARAMETER of the model, with ridge {F_TC / BW:.0f}. "
             "Bytes: fp32 operands 4 (2 n^3 / T + n^2); matrix-unit rows read fp16 operands (2 bytes) and write the fp32 output. Attainable = min(peak, intensity x 800) "
             "with global traffic only, the model's roofline of Chapter 3; shared memory is not the limit in any row.\n\n"
             + _table(["kernel", "FLOP per byte", "attainable (GFLOP/s)", "peak of its units (GFLOP/s)", "fraction of that peak",

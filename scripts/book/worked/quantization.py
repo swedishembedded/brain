@@ -516,7 +516,8 @@ def q4k_bytes():
     t4 = _table(["byte", "hex", "low nibble q", "weight", "high nibble q", "weight"], ex, align="rrrrrr")
     head = "The 144 bytes of the super-block of the two previous tables (index of the first byte of each row at the left).\n\n"
     mid1 = "\n\nBytes 4 to 15, the twelve bytes that hold eight 6-bit scales and eight 6-bit mins:\n\n"
-    mid2 = (f"\n\nUnpacking the twelve bytes with the rule of the chapter returns the pairs {back}; they equal (sc_j, mm_j): {ok}.\n\n"
+    assert ok, back
+    mid2 = (f"\n\nUnpacking the twelve bytes with `scale_min` returns the pairs {back}, which are the stored (sc_j, mm_j).\n\n"
             "The 128 code bytes, in four chunks of 32 bytes:\n\n")
     mid3 = "\n\nThe first eight bytes of the first chunk:\n\n"
     return head + t1 + mid1 + t2 + mid2 + t3 + mid3 + t4

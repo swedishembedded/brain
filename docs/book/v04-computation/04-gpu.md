@@ -7,7 +7,7 @@
 
 Sixteen million additions are not a demanding job, which makes them a fair first test of a machine with ten thousand lanes. Take $c_i = a_i + b_i$ for $i = 0, \ldots, 2^{24} - 1$. The work is as
 plain as work gets: $2^{24}$ additions, each reading two numbers and writing one, so 201,326,592 bytes cross between memory
-and the arithmetic (Volume IV, Chapter 3 counted 12 bytes per element). Here are the three machines of the last two
+and the arithmetic (Chapter 3 counted 12 bytes per element). Here are the three machines of the last two
 chapters doing it: one core of the CPU, the whole 10-core CPU, and the GPU of the roofline chapter, whose lanes the next
 section builds.
 
@@ -31,9 +31,9 @@ Why, then, does a GPU come with ten thousand lanes? Because of a different quest
 that can deliver 800 billion bytes in a second does not do so by magic: every request takes a few hundred cycles to come
 back, and to receive bytes at the full rate the machine must have a very large number of requests outstanding at once.
 Someone has to issue them. A single thread asks for a number and waits; a GPU keeps tens of thousands of threads asking at
-the same time. This chapter is about how such a machine is built, how its threads are grouped, and what a program must do so
-that the grouping works for it and not against it: which threads may cooperate, what happens when they disagree, how many
-fit at once, and which addresses they must ask for so that memory answers all of them with few transactions.
+the same time. Such a machine groups its threads, and a program must work with the grouping and not against it: it has to
+know which threads may cooperate, what happens when they disagree, how many fit at once, and which addresses they must ask
+for so that memory answers all of them with few transactions.
 
 A GPU is easiest to understand with six earlier ideas fresh in mind, so bring them back first.
 
@@ -41,17 +41,17 @@ A GPU is easiest to understand with six earlier ideas fresh in mind, so bring th
    with an $[n, n]$ matrix cost, counting a multiplication and an addition as one operation each?
 2. (Volume I, Chapter 5, row-major layout and stride.) In a row-major $[1024, 1024]$ matrix of 4-byte numbers, how many bytes
    separate element $[i, j]$ from element $[i, j + 1]$, and how many separate it from element $[i + 1, j]$?
-3. (Volume IV, Chapter 2, cache line.) A program reads one byte that is in no cache. How many bytes travel from memory?
-4. (Volume IV, Chapter 2, SIMD.) What does one instruction do to a 256-bit register holding eight f32 numbers, and what is
+3. (Chapter 2, cache line.) A program reads one byte that is in no cache. How many bytes travel from memory?
+4. (Chapter 2, SIMD.) What does one instruction do to a 256-bit register holding eight f32 numbers, and what is
    one of its eight positions called?
-5. (Volume IV, Chapter 2, thread parallelism.) What does a `parallel for` promise about its iterations, and what must a
+5. (Chapter 2, thread parallelism.) What does a `parallel for` promise about its iterations, and what must a
    program do when the iterations have to combine a result?
-6. (Volume IV, Chapter 3, memory bandwidth and the roofline.) The vector addition has an arithmetic intensity of $1/12$
+6. (Chapter 3, memory bandwidth and the roofline.) The vector addition has an arithmetic intensity of $1/12$
    FLOP per byte. On the GPU of Chapter 3 (peak 40,000 (GFLOP/s), bandwidth 800 (GB/s)), what fraction of the peak can it reach?
 
 ## The design of a GPU
 
-The table leaves one fact unexplained, why a machine with ten thousand lanes is built at all. Counting what such a machine must contain makes the rules of the later sections (groups of threads, limits on residents, addresses) read as consequences of the design and not as arbitrary rules. Start from the counts. The CPU of Chapter 3 has 10 cores, each issuing vector instructions on 2 units of 8 lanes: 160
+Counting what a machine with ten thousand lanes must contain makes its rules (groups of threads, limits on residents, addresses) read as consequences of the design and not as arbitrary constraints. Start from the counts. The CPU of Chapter 3 has 10 cores, each issuing vector instructions on 2 units of 8 lanes: 160
 lanes. The GPU has 10,240. A CPU core is built to make one thread fast. It spends most of its silicon on caches, on a
 machinery that finds independent instructions and runs them out of order, and on predicting branches, all so that a single
 sequence of instructions waits as little as possible. A GPU spends the same silicon on lanes instead. Each thread gets little:
@@ -61,8 +61,8 @@ The design is a trade: **throughput over latency**. The machine is not built to 
 threads per second, and it keeps its lanes busy by never letting them depend on one thread's wait. The remaining question
 is how, and it can be answered with the numbers of this section.
 
-The **GPU architecture** that follows from the trade has four parts, in the model of this book (all numbers are parameters
-invented for the book, not a product):
+The **GPU architecture** that follows from the trade has four parts, in the model used here (all numbers are parameters
+invented for the examples, not a product):
 
 - Many **compute units** (80 here), each an independent small processor with its own lanes (128 here), its own register file,
   its own on-chip scratch memory (shared memory, a later section) and a scheduler that chooses, every cycle, which group of
@@ -97,7 +97,7 @@ Model parameters, round numbers invented for the book (not any product). The las
 
 The peak in the table is the product of the three factors of Chapter 2: $10{,}240 \times 2 \times 2 \times 10^9 = 40{,}960
 \times 10^9$ operations per second, which the roofline chapter rounded to 40,000. Chapter 3's comparisons keep that rounded
-value (its ridge point is 50); this chapter uses only the bandwidth from it, and the one place where the peak enters, it says so.
+value (its ridge point is 50); only the bandwidth is taken from it below, and the one place where the peak enters says so.
 
 ### Hiding latency by having others to run
 
@@ -140,7 +140,7 @@ fit, is the question of the section on occupancy.
 A scheduler that chose an instruction for each of 10,240 lanes separately would cost more than the arithmetic. The GPU's answer is to decide once for a group of lanes, and the price falls due when the lanes of a group want different things. The lanes of Chapter 2 were the positions of a vector register, and one instruction worked on all of them: SIMD. A GPU
 is programmed differently. The program describes one **thread**'s work, using scalar code for its own data, and the hardware
 runs many copies of it. But it does not run them independently. The hardware gathers the threads into fixed groups of
-$n_{\mathrm{sg}}$ threads (32 in this book's model; some hardware uses 64) and issues each instruction once for the whole
+$n_{\mathrm{sg}}$ threads (32 in the model; some hardware uses 64) and issues each instruction once for the whole
 group, every lane applying it to its own registers. This is **SIMT execution**: single instruction, multiple threads. A group
 of threads executed together in this way is a **subgroup**. (Some hardware and programming interfaces call it a warp or a
 wavefront.) Compare with Chapter 2: a SIMD register has 8 or 16 lanes that the programmer or compiler fills explicitly; a
@@ -224,7 +224,7 @@ n = 1000 elements, workgroup size 64, subgroup size 32. Workgroups = ceil(n / 64
 ![The programming hierarchy for 1,000 elements: a dispatch grid of 16 workgroups, one workgroup of 64 invocations with a shared memory and two subgroups of 32, and one subgroup showing its 32 lanes, each an invocation](img/gpu-hierarchy.svg)
 
 The program of the vector addition, in the book's pseudocode, is the pair of nested loops that the hardware runs
-in parallel (`parallel for` was defined in Chapter 2 and is the contract: no iteration reads what another writes):
+in parallel (the `parallel for` of Chapter 2, whose contract is that no iteration reads what another writes):
 
 ```text
 require n >= 1, n_wg >= 1
@@ -244,7 +244,7 @@ the table shows `idle`. A grid is rounded up to whole workgroups, and the guard 
 The dispatch call needs a number, and there are two plausible numbers: how many invocations, or how many workgroups. For the
 vector addition each invocation owns one element, so the count is of invocations and the machine derives the workgroups. For a
 program whose 64 invocations cooperate on one row of a matrix (the layer normalization of Volume III, Chapter 10, in the form
-the account of `layernorm_rows.wgsl` in the brain section shows), the unit of work is the workgroup, and the count must be rows, not invocations:
+of brain's `layernorm_rows.wgsl`, described in the last section), the unit of work is the workgroup, and the count must be rows, not invocations:
 
 <!-- worked: gpu.dispatch_units -->
 A kernel in which one workgroup of 64 invocations normalizes one row (the shape of a layer normalization over 512 rows). The dispatch must count workgroups, one per row. If the caller passes the row count as an invocation count, the grid holds ceil(512 / 64) workgroups.
@@ -279,7 +279,7 @@ the first has finished for every invocation. To see what the barrier is for, run
 begins with leftover contents, 99 in every slot.
 
 <!-- worked: gpu.stencil_barrier -->
-x = [3, 1, 4, 1, 5, 9, 2, 6], y_t = x_(t-1) + x_t + x_(t+1) with x_(-1) = x_8 = 0, one workgroup of 8 invocations. Shared slots start as 99 (leftover). The sums of the first row are the correct answer.
+x = [3, 1, 4, 1, 5, 9, 2, 6], y_t = x_(t-1) + x_t + x_(t+1) with x_(-1) = x_8 = 0, one workgroup of 8 invocations. The shared array has 10 slots: s[t + 1] holds x_t, written by invocation t, and the halo slots s[0] and s[9] are set to 0 by invocations 0 and 7; invocation t then reads s[t], s[t + 1] and s[t + 2]. Shared slots start as 99 (leftover). The sums of the first row are the correct answer.
 
 | schedule | y0 | y1 | y2 | y3 | y4 | y5 | y6 | y7 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -291,7 +291,7 @@ Global reads for a workgroup of 64: without staging 3 x 64 = 192; staging in sha
 <!-- /worked -->
 
 The first row is the correct answer. In the second row each invocation runs completely before the next begins; invocation 0
-reads slot 2 before invocation 1 has written it and gets the leftover 99 (and sums to 102, not 4). In the third row the order
+reads slot 2, which holds $x_1$, before invocation 1 has written it and gets the leftover 99 (and sums to 102, not 4). In the third row the order
 is reversed and different outputs are wrong. Neither order is wrong for the hardware: with no barrier the program says nothing
 about the order, and any order is legal. A program whose result depends on which one happens is a data race. With the barrier
 between the writing phase and the reading phase every legal schedule gives the first row.
@@ -319,8 +319,8 @@ C = A B with n = 1024, fp32, one workgroup per T x T tile of C; for each of n/T 
 
 The loads fall in proportion to $T$, because every number loaded is used $T$ times, the same law as the tiling of Chapter 3. Two
 limits appear at once. The shared memory per workgroup is $8T^2$ bytes and the invocations per workgroup are $T^2$, and both are capped:
-brain's portable floor is 256 invocations and 16 KiB per workgroup (see the brain section at the end), so $T = 32$ does not fit that floor even
-though it fits this chapter's 64 KiB model. And even $T = 32$ reaches 7.88 FLOP per byte, below the ridge point of 50 of
+the portable floor that brain targets is 256 invocations and 16 KiB per workgroup (the last section explains it), so $T = 32$ does not fit that floor even
+though it fits the model's 64 KiB. And even $T = 32$ reaches 7.88 FLOP per byte, below the ridge point of 50 of
 Chapter 3: a tile in shared memory alone does not make the product compute-bound on this GPU. Chapter 6 adds the second level,
 a small tile held in each invocation's registers, which is where the remaining factor comes from. The point for now is the
 mechanism: reuse is something the program arranges, and it is limited by the size of shared memory.
@@ -390,7 +390,7 @@ threads: this is why the registers of a kernel matter to a speed that no count o
 Occupancy is a means. A kernel with 4 independent loads per invocation needs only 125 resident invocations (6.1 percent), so a
 kernel that keeps more of its own work in flight can run with fewer, fatter threads, and many fast kernels do exactly this
 (more registers per invocation, lower occupancy). A kernel with a chain of dependent instructions, each waiting for the last,
-has no such alternative and needs the crowd. The honest summary: the number to compare with occupancy is the
+has no such alternative and needs the crowd. So the number to compare with occupancy is the
 bytes in flight that the kernel's threads keep outstanding, and high occupancy is one way of getting it.
 
 ## Memory coalescing
@@ -465,7 +465,7 @@ The remedy does not depend on this: make the consecutive lanes consecutive in me
 
 Everything so far took the data as already being in device memory. The GPU, however, is a second computer attached to the first by a bus, and the cheapest computation on the device can still be the most expensive part of a program if its data has to cross the bus each time. The bus is much slower than the memory on either side of it: 32 (GB/s) in the model, against the GPU's 800. (Integrated GPUs, which share memory with the
 host, have no such copy, and a program can ask the device whether it is one.) The host prepares work and sends it; the device
-executes it later, on its own. Take the addition that opened the chapter with its vectors starting on the host and the result needed on the host:
+executes it later, on its own. Take the opening addition with its vectors starting on the host and the result needed on the host:
 
 <!-- worked: gpu.transfers -->
 c = a + b of the chapter's opening, with the data starting on the host: bytes over the bus = 201,326,592 (a and b up, c back), bus 32 (GB/s), device memory 800 (GB/s). Times are bytes / rate, a model.
@@ -520,8 +520,8 @@ The next chapter turns them into programs.
 
 ## How `crates/gpu-core` makes the hierarchy explicit
 
-brain is organized so that a model never states any of this. `crates/gpu-core` is the one facade over the compute devices, and
-its code is the book's hierarchy made explicit.
+The code of brain is organized so that a model never states any of this. `crates/gpu-core` is the one facade over the compute devices, and
+its code is the hierarchy above made explicit.
 
 ### The facade: `crates/gpu-core/src/lib.rs`
 
@@ -536,7 +536,7 @@ and so on, parsed by a pure function (`DeviceSpec::parse`) that needs no hardwar
 
 ### The device queried, not assumed: `DeviceCaps`
 
-The numbers that this chapter took as parameters are fields that
+The numbers taken above as model parameters are fields that
 the backend asks the device for: `compute_units` (absent where the interface does not report it, as in wgpu),
 `max_workgroup_size`, `workgroup_mem_bytes`, `subgroup_size` (`None` on the WebGPU baseline), `unified_memory`, and the
 `peak_bandwidth_gbs` and `peak_gflops` (no interface reports those two, so `crates/gpu-core/src/roof.rs` measures them, as Chapter 3 told). Commit
@@ -553,12 +553,11 @@ and `Gpu::step`, which takes a raw invocation count, refuses it with a panic tha
 records why. Dozens of kernels were cooperative, their threads sharing a row or a tile, and every call site multiplied the item count by
 the workgroup size itself. A site that got the unit wrong dispatched too few workgroups, the kernel wrote the first slice of its
 output, and no loss or crash showed it, because training read those buffers through a different kernel. The commit message reports a
-checkpoint that scored 16 percent where the same weights scored 98 percent; this was not rechecked here, but the mechanism is the
+checkpoint that scored 16 percent where the same weights scored 98 percent, a figure from one run; the mechanism is the
 504-of-512 table above. A second commit, 1ec9416cf, shows how a guard can be wrong in the other direction: the function that
 reads a shader to decide whether it is cooperative read its raw text, so eight shaders whose headers only *mention* a barrier (most
 to say they have none) were refused their correct dispatches. The reading is now of the code with comments removed
-(`wgsl_code_only`). The two commits count 77 and then 69 cooperative kernels; that count is theirs, and the number is not
-what the lesson depends on. The lesson is to put the unit into the type and to read facts about a program from the program.
+(`wgsl_code_only`). (The two commits count 77 and then 69 cooperative kernels.) The lesson is to put the unit into the type and to read facts about a program from the program.
 
 ### Why the portable kernels are written as they are
 
@@ -566,7 +565,7 @@ The repository's rule (`AGENTS.md`) is that the reference shaders live in
 `crates/kernels/wgsl/` and stay core-compute: fp32 arithmetic, at most 8 storage buffers, no atomics, no subgroups, no
 half-precision. Faster providers (tensor cores, CUDA, cooperative matrices) are selected through a seam and gated against them. The
 reason is portability: the same files run on old desktop GPUs, in the browser and on the CPU compiler, and the portable subset is
-what all of them accept. For the subgroups of this chapter, a program may not assume that 32 invocations move in lockstep: some devices run 64, and the
+what all of them accept. For subgroups, a program may not assume that 32 invocations move in lockstep: some devices run 64, and the
 baseline exposes no subgroup operation at all (`DeviceCaps::subgroup_size` is `None` there, and where it is reported it is a
 minimum). So a reduction is never written as a lane-to-lane shuffle. It goes through shared memory and a barrier, which every
 device has, and this costs a few more instructions than a subgroup operation, in exchange for one file that runs everywhere. The limit of 8 storage
@@ -578,8 +577,8 @@ aborted the whole process with a memory error and no kernel name, because the gu
 
 ### Coalescing in a real kernel: `layernorm.wgsl` and `layernorm_rows.wgsl`
 
-The two layer-normalization kernels are the chapter's two
-access patterns in code, and the device picks between them: the handle appends the second beside every `layernorm.wgsl` a model registers, and the shared builder dispatches it on any device that can run a workgroup reduction, so the first remains as the reference and as the kernel of a device that cannot. In `crates/kernels/wgsl/layernorm.wgsl` invocation $t$ owns row $t$ and walks it with three serial loops, so
+The two layer-normalization kernels are the two
+access patterns of the coalescing section in code, and the device picks between them: the handle appends the second beside every `layernorm.wgsl` a model registers, and the shared builder dispatches it on any device that can run a workgroup reduction, so the first remains as the reference and as the kernel of a device that cannot. In `crates/kernels/wgsl/layernorm.wgsl` invocation $t$ owns row $t$ and walks it with three serial loops, so
 the 32 lanes of a subgroup read addresses $d$ numbers apart. In `crates/kernels/wgsl/layernorm_rows.wgsl` one workgroup of 64 invocations
 walks one row with stride 64, two subgroups reading 32 consecutive numbers each, and the partial sums go through a 64-entry shared
 array and one barrier. The table counts the transactions of both for 32 rows:
@@ -612,7 +611,7 @@ by a different serial reduction. The selection rule that keeps the kernel in use
 A selection rule can also be wrong about waste. `pick_gemm` in `crates/model/src/block.rs`
 returned a count of $\lceil m/128 \rceil \lceil n/128 \rceil$ workgroups for a $128 \times 128$ tile, and used to refuse the tile when $m < 128$ on the
 reading that a partial tile wastes lanes. The case that exposed it was $m = 77$, $n = 2560$: 20 workgroups, of which the
-rows are $77/128 = 60.2$ percent full. In this chapter's model, 20 workgroups also occupy 20 of 80 compute units at most. Knowledge #15
+rows are $77/128 = 60.2$ percent full. In the model here, 20 workgroups also occupy 20 of 80 compute units at most. Knowledge #15
 and commit 6cfc15861 (August 2026) report that the alternative, one invocation per output element each walking the shared dimension
 serially, was far worse: the tile kernel was faster from 8 rows on, and the threshold is now 8
 (`GEMM_TILE_MIN_ROWS`, tested in `pick_gemm_routes_by_the_measured_crossover`). The idle fraction of a partial tile is a cost
@@ -627,7 +626,7 @@ for another's, and a process that mixes models uses `Gpu::new_like`, which gives
 commit 061202f6c (July 2026). A test binary running eight tests at once built a device for every model object, and on the machine it was
 developed on this put some two dozen live devices on one card, which deadlocked the driver in about half of the runs. The commit
 also reports that a device surviving into process exit crashed the driver's thread after all tests had passed.
-Those numbers belong to one driver and one box. The general lesson is that a GPU is a shared resource with one queue of work, and the facade should make
+Those numbers belong to one driver and one machine. The general lesson is that a GPU is a shared resource with one queue of work, and the facade should make
 the number of devices something a reader can count by reading the code, which is why sharing is explicit and the test fixture
 is a pool of weak handles that lets the device die in an orderly way with its last user.
 
@@ -681,8 +680,8 @@ the host and the device is far slower than device memory, so data stays on the d
 All the counts are of work: invocations, rounds, bytes in flight, issue slots, resident workgroups, transactions and bus bytes. None
 needs a clock beyond the model's stated parameters.
 
-What this chapter could not say is how one writes the programs that run on this machine. It used a kernel as a given and named
-its index arithmetic, its guard and its barriers in pseudocode. Chapter 5 turns that into the way a computation is expressed so that a GPU can
+What remains is how one writes the programs that run on this machine. Here a kernel was a given, its index arithmetic, its
+guard and its barriers named in pseudocode. Chapter 5 turns that into the way a computation is expressed so that a GPU can
 run it: the kernel, the dispatch, the buffers, and the discipline of describing their layout.
 
 ## References
@@ -723,7 +722,7 @@ run it: the kernel, the dispatch, the buffers, and the discipline of describing 
 - **GPU architecture**: the organization of a graphics processor used for computing: many compute units, each with lanes, a large register file, a small on-chip memory and a scheduler, over a memory of high bandwidth and high latency, built for throughput and not for the speed of one thread. <!-- concept: gpu-architecture -->
 - **SIMT execution**: single instruction, multiple threads: the hardware issues each instruction once for a fixed group of threads, each applying it to its own registers, so a program is written for one thread and the group's lanes are filled by the hardware. <!-- concept: simt-execution -->
 - **workgroup**: a set of invocations of one dispatch that run together on one compute unit, share an on-chip memory and can wait for each other at a barrier, while different workgroups are independent. <!-- concept: workgroup -->
-- **subgroup**: the group of consecutive invocations of a workgroup, 32 in this book's model, that the hardware executes with one instruction at a time. <!-- concept: subgroup -->
+- **subgroup**: the group of consecutive invocations of a workgroup, 32 in the model of Volume IV, that the hardware executes with one instruction at a time. <!-- concept: subgroup -->
 - **shared memory**: the small, fast, on-chip memory of a compute unit that all invocations of one workgroup can read and write and no other workgroup can see, a cache whose contents the programmer chooses. <!-- concept: shared-memory -->
 - **occupancy**: the fraction of a compute unit's resident-invocation slots that a kernel fills, limited by the registers per invocation, the shared memory per workgroup, the workgroup size and the cap on resident workgroups. <!-- concept: occupancy -->
 - **memory coalescing**: the merging of the loads or stores of the lanes of a subgroup into few memory transactions when they touch adjacent addresses, so that all the bytes of each block moved are used. <!-- concept: memory-coalescing -->
@@ -734,10 +733,10 @@ run it: the kernel, the dispatch, the buffers, and the discipline of describing 
 
 1. $2n^3$: $n^2$ outputs, each a dot product of length $n$ with $n$ multiplications and about $n$ additions. (Volume I, Chapter 4.)
 2. 4 bytes along a row and $1024 \times 4 = 4096$ bytes down a column, because an element is 4 bytes and a row holds 1024 of them. (Volume I, Chapter 5.)
-3. 64: the whole cache line that contains the byte. (Volume IV, Chapter 2.)
-4. It does the same operation, for example eight additions, on all eight positions at once; a position is a lane. (Volume IV, Chapter 2.)
+3. 64: the whole cache line that contains the byte. (Chapter 2.)
+4. It does the same operation, for example eight additions, on all eight positions at once; a position is a lane. (Chapter 2.)
 5. That no iteration reads anything another writes, so they may run in any order or at once; iterations that must combine results use an
-   explicit reduction (per-worker partial results combined afterwards), never a shared variable. (Volume IV, Chapter 2.)
+   explicit reduction (per-worker partial results combined afterwards), never a shared variable. (Chapter 2.)
 6. $(1/12) \times 800 / 40000 = 0.00167$, about 0.17 percent of the peak: the bandwidth bounds it, as in Chapter 3.
 
 **Check your understanding**

@@ -803,7 +803,7 @@ def reductions():
     # bytes of the two-pass sum against the one-pass minimum
     tot, recs, _ = global_sum(DEVICE_A, y, RED_GRP)
     words = sum(sum(r["loads"].values()) + sum(r["stores"].values()) for r in recs)
-    return (f"Row sums of an [{RED_M}, {RED_N}] array X (one workgroup per row, each invocation adds the elements l, l + wg, ... of its row, then the tree of Chapter 7) and the "
+    return (f"Row sums of a [{RED_M}, {RED_N}] array X (one workgroup per row, each invocation adds the elements l, l + wg, ... of its row, then the tree of Chapter 7) and the "
             f"two-pass sum of {RED_TOTAL} numbers Y (pass 1 over {RED_GRP} workgroups with a grid-stride loop, pass 2 one workgroup over the {RED_GRP} partials). {_seed('reductions')}. "
             f"Draw order: the {RED_M * RED_N} entries of X row-major, then the {RED_TOTAL} entries of Y, each `2 uniform() - 1` rounded to float32. Device A reduces with "
             f"workgroups of 8, device B with workgroups of 16. 'k_rd' counts the roundings on the longest chain (an invocation's loop adds ceil(N / (n_grp wg)) numbers to a zero "
@@ -850,6 +850,7 @@ def epilogue_bytes():
     rows = [("matmul, bias_add, gelu", 3, words([rec_mm, r2, r3]), _n(WORD * words([rec_mm, r2, r3])), blocks([rec_mm, r2, r3]), digest(out_un, "f")),
             ("matmul with the epilogue", 1, words([rec_fu]), _n(WORD * words([rec_fu])), blocks([rec_fu]), digest(out_fu, "f"))]
     saved = words([rec_mm, r2, r3]) - words([rec_fu])
+    assert saved == 4 * m * n, (saved, m, n)
     return (f"The epilogue of Chapter 8, bias then GELU (the nine operations of Chapter 8 in the order listed there, every one rounded to float32, the constants sqrt(2 / pi) and 0.044715 rounded to float32, tanh the library tanh of the float32 argument rounded to float32) on the output of the tiled kernel (T = 4), "
             f"m = {m}, n = {n}, k = {k}. {_seed('epilogue')}. Draw order: the {m * k} entries of A, the {k * n} entries of B (each `2 uniform() - 1` rounded to float32), then the {n} "
             f"bias entries `0.5 normal()` rounded to float32. 'Words' is every single-word load and store the executor counted, over all dispatches; bytes are 4 times that; "
@@ -857,7 +858,7 @@ def epilogue_bytes():
             f"bias_add stores u[g] = f32(z[g] + bias[g mod n]) and gelu stores the GELU of u[g]; the matmul is the tiled kernel's own launch. Every buffer starts on a 32-byte boundary, so the order of allocation does not change a count. "
             f"Digest: SHA-256 over binary32 little-endian bytes of the result, first 16 hex digits.\n\n"
             + _table(["design", "dispatches", "words through memory", "bytes", "transaction blocks", "digest of the result"], rows, "lrrrrl")
-            + f"\n\nWords saved: {saved} = 4 m n = {4 * m * n}: the intermediate z and the intermediate u are each stored once and loaded once. The results are bit-identical: "
+            + f"\n\nWords saved: {saved}, which is 4 m n: the intermediate z and the intermediate u are each stored once and loaded once. The results are bit-identical: "
             f"{_yes(out_un == out_fu)}; both equal the direct evaluation of the formula: {_yes(out_fu == want)}.")
 
 
@@ -1227,7 +1228,7 @@ def selection_report():
               "cost in equivalent bytes B_dev = L + max(executed FLOPs / (ridge e o_cmp), N_byte / o_mem). The time of a launch in microseconds is this cost divided by the TRUE bandwidth, "
               f"B_dev / ({dev['bw']:.0f} x 1000) (bytes per microsecond), times 0.95 for reg-nok. The fraction of the roofline uses the MEASURED roofline: the roofline time of the problem is "
               "max(2 m n k / 34,469 (GFLOP/s), 4 (m k + k n + m n) / 646 (GB/s)), divided by the median.\n\n")
-    return ("The GPU unit of Chapter 10 with its measured roofline, 34,469 (GFLOP/s) and 646 (GB/s) (`profiling.F_MS`, `profiling.BW_MS`), and the model clock of Chapters 10 and 11. " + params
+    return ("The GPU unit of Chapter 10 with its measured roofline, 34,469 (GFLOP/s) and 646 (GB/s), and the model clock of Chapters 10 and 11. " + params
             + "A run of a "
             "candidate is its noise-free cost (the cost in equivalent bytes of Chapter 10 over the bandwidth of the unit, times 0.95 for reg-nok, which the model grants for the "
             "checks it dropped) multiplied by the noise factor (1 + 0.04 u0)(1 - 0.25 ln(1 - u2) if u1 < 0.2, else 1) and by the warm-up transient 1 + 0.8 exp(-i / 5), plus 20 "

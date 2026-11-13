@@ -213,7 +213,7 @@ def decode_per_token():
         rows.append(row)
     return (
         "A dense model of P = 7,000,000,000 weights at batch size 1: one token is 2 P FLOPs and reads every weight once, so the bytes per token are P b for b bytes "
-        "per weight (scales charged, as in Volume IV, Chapter 1) and the intensity is 2 / b. Activations and the cache of earlier tokens are ignored. Arithmetic is fp32 "
+        "per weight (scales charged, as in Chapter 1) and the intensity is 2 / b. Activations and the cache of earlier tokens are ignored. Arithmetic is fp32 "
         "at the machine's peak whatever the storage format. The last column of each machine is the roofline's bound on tokens per second, BW / (P b): a model, not a measurement. GB = 10^9 bytes.\n\n"
         + _table(["weights stored as", "bytes per weight", "GB read per token", "intensity", "CPU fraction of peak", "CPU tokens/s bound", "GPU fraction of peak", "GPU tokens/s bound"], rows,
                  "lrrrrrrr")
@@ -249,7 +249,7 @@ def batch_ladder():
         first.append((name, f"{b:.3f}", _smallest_batch(side, b, "CPU"), _smallest_batch(side, b, "GPU")))
     return (
         "One layer [B, 4096] by [4096, 4096]: B rows of activations (fp32) times a weight matrix stored at b bytes per weight (fp32 b = 4; int8 and int4 with an f32 scale per 32 weights, "
-        "b = 1.125 and 0.625). FLOPs 2 B (4096)^2; bytes b (4096)^2 + 4 B (4096 + 4096). Percent of the GPU's peak at the attainable rate min(F_pk, intensity x BW).\n\n"
+        "b = 1.125 and 0.625). FLOPs 2 B (4096)^2; bytes b (4096)^2 + 4 B (4096 + 4096). Fraction of the GPU's peak at the attainable rate min(F_pk, intensity x BW).\n\n"
         + _table(["B", "I fp32", "I int8", "I int4", "GPU fraction of peak fp32", "GPU fraction of peak int8", "GPU fraction of peak int4"], rows)
         + "\n\nThe smallest batch B whose intensity reaches the ridge:\n\n"
         + _table(["weights", "bytes per weight b", "CPU (ridge 10)", "GPU (ridge 50)"], first)
@@ -305,7 +305,7 @@ def training_operations():
         rows.append(cells)
     return (
         "FLOPs and bytes as counted in Volume III, Chapters 5 and 7 (fp32; a layer reads X, W and writes Y once; an update reads w, g and the state and writes w and the state). "
-        "Percent of peak at min(F_pk, intensity x BW) on the two machines of `roofline.machines`.\n\n"
+        "Fraction of peak at min(F_pk, intensity x BW) on the two machines of `roofline.machines`.\n\n"
         + _table(["operation", "FLOPs", "bytes", "intensity", "CPU fraction of peak", "CPU bound", "GPU fraction of peak", "GPU bound"], rows, "lrrrrlrl")
     )
 
@@ -340,8 +340,8 @@ def tiling_traffic():
                  f"{attainable('GPU', f / b) / MACHINES['GPU'][0]:.4f}"))
     return (
         "C = A B for n = 4096, fp32. The cache holds a T by T tile of C and, for each k, the T numbers of A and the T numbers of B that update it: a working set of 4 (T^2 + 2 T) bytes. "
-        "Main-memory traffic is 4 (2 n^3 / T + n^2) bytes (A and B re-read for every tile, C written once); FLOPs 2 n^3. Caches of Volume IV, Chapter 2: L1 32 KiB, L2 1 MiB, L3 32 MiB. "
-        "The last two columns are percent of peak at min(F_pk, intensity x BW) for the two machines of `roofline.machines`; the model gives each machine the same cache, to isolate the effect of reuse.\n\n"
+        "Main-memory traffic is 4 (2 n^3 / T + n^2) bytes (A and B re-read for every tile, C written once); FLOPs 2 n^3. Caches of Chapter 2: L1 32 KiB, L2 1 MiB, L3 32 MiB. "
+        "The last two columns are fractions of peak at min(F_pk, intensity x BW) for the two machines of `roofline.machines`; the model gives each machine the same cache, to isolate the effect of reuse.\n\n"
         + _table(["T", "working set (bytes)", "smallest level that holds it", "DRAM bytes", "intensity", "CPU fraction of peak", "GPU fraction of peak"], rows,
                  "rrlrrrr")
     )

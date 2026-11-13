@@ -60,18 +60,17 @@ is 256, one fetch per read and sixteen times as many, until the cache is big eno
 (16 lines); then it falls to the 16 of the row order, because the lines read for column 0 are still there for
 columns 1 to 15. The additions are the same 256 in both cases. The data moved is not.
 
-This chapter is about the machine that makes the difference. It starts with the core, the part that executes
-instructions, and why even a plain sum can run slowly there. Then it follows the data: the levels of memory, a
-small cache simulator that counts the fetches above, and what loop orders and tilings do to the count. Then it
-turns to the two ways a core does many additions at once, vector instructions and several cores, and to the
-traps in each. It closes by counting the work of a few operations, which is the first step of Chapter 3, and
-reads the CPU backend of brain.
+The machine that makes the difference starts with the core, the part that executes instructions, where even
+a plain sum can run slowly. Then come the data: the levels of memory, a small cache simulator that counts the
+fetches above, and what loop orders and tilings do to the count; then the two ways a core does many additions
+at once, vector instructions and several cores, with the traps in each; and last a count of the work of a few
+operations, the first step towards Chapter 3.
 
-A note on how speed is stated. Seconds belong to one machine on one day, and the same program changes by a
-factor of several between two machines. Counts do not: the lines fetched, the instructions issued and the
-length of the longest chain of dependent operations are the same wherever you run the program. This chapter
-reasons with counts. Where it needs a cost in cycles it takes it from a small model whose assumptions are
-printed beside the result, and says so; it never reports a stopwatch reading as a fact about your computer.
+Speed is reasoned about here in counts. Seconds belong to one machine on one day, and the same program changes
+by a factor of several between two machines. Counts do not: the lines fetched, the instructions issued and the
+length of the longest chain of dependent operations are the same wherever you run the program. Where a cost in
+cycles is needed it comes from a small model whose assumptions are printed beside the result, and a stopwatch
+reading is never reported as a fact about your computer.
 
 The cache arguments below lean on layout and strides from Volume I and on its treatment of floating-point sums.
 
@@ -83,7 +82,7 @@ The cache arguments below lean on layout and strides from Volume I and on its tr
    tree reduction, how long is the longest chain of additions that depend on each other, for $n = 1024$?
 4. (Volume I, Chapter 15, floating point.) Is addition of 32-bit floating-point numbers associative? What
    happens to the result of a long sum if the additions are done in a different order?
-5. (Volume IV, Chapter 1.) How many bytes does an f32 take, and how many of them fit in a 64-byte line?
+5. (Chapter 1, the fp32 format.) How many bytes does an f32 take, and how many of them fit in a 64-byte line?
 
 ## What one core does
 
@@ -95,8 +94,8 @@ two registers, store a register to an address, jump. A **register** is a storage
 unit itself, a few bytes wide, named in the instruction, and reading it costs nothing extra. A **CPU core** is
 one such executing unit: it fetches instructions from memory, decodes them, finds the registers and numbers
 they name, executes them in its arithmetic units, and writes the results back, while owning its own registers
-and its own first caches. A chip holds several cores that share the rest of the memory system. Everything in
-the first half of this chapter concerns one core.
+and its own first caches. A chip holds several cores that share the rest of the memory system. Everything up
+to the section on many cores concerns one core.
 
 A core does not finish one instruction before it starts the next. It is a **pipeline**: while one instruction
 is being executed, the next is being decoded and the one after that fetched, as in an assembly line. A modern
@@ -145,7 +144,7 @@ Summing n = 8 numbers into L accumulators, then adding the L totals as a tree. M
 <!-- /worked -->
 
 The number of additions is the same for every $L$, 7 for 8 numbers, as Chapter 16 of Volume I says a
-reduction takes $n - 1$ of them. What changes is the longest chain: Chapter 16 showed that regrouping the
+reduction takes $n - 1$ of them. What changes is the longest chain: that chapter showed that regrouping the
 combinations of a reduction into a tree cuts the longest dependent chain from $n - 1$ to $\lceil \log_2 n
 \rceil$, and here the same regrouping is used inside one core, to give its execution units something to do.
 
@@ -177,7 +176,7 @@ result (Chapter 15 and Chapter 16 of Volume I); the section on vectors comes bac
 What makes the picture a model is everything it leaves out: operands are assumed to be in registers, there is
 no branch, and the core is assumed to find all its parallelism in the instruction list. Real cores are more
 complicated in each respect, and the next sections are about the first one. Getting an operand into a register
-is itself a request to the memory system, and that is where the table at the head of this chapter was won and
+is itself a request to the memory system, and that is where the row-and-column count of the opening was won and
 lost.
 
 ## The memory hierarchy
@@ -207,12 +206,12 @@ TYPICAL orders of magnitude for one core of a recent server or desktop chip, rou
 <!-- /worked -->
 
 The values are rounded orders of magnitude for a recent desktop or server core, chosen so that the arithmetic
-in this chapter is easy to follow. They are typical, not measured on any machine, and a particular chip
+below is easy to follow. They are typical, not measured on any machine, and a particular chip
 differs in every entry; what is stable across chips is the shape: each cache level is about thirty times
 larger than the one above and three to four times slower, with main memory a larger step in both.
 
 The unit that moves between levels is the cache line. The 64 bytes is a property of the hardware that has
-been the same on most chips for years, and the book assumes it throughout: every cache in the worked tables has 64-byte lines.
+been the same on most chips for years, and every cache in the worked tables below has 64-byte lines.
 Two habits of programs make this design pay.
 
 **Spatial locality** is the habit of using numbers near one another in memory soon after one another. A
@@ -230,7 +229,7 @@ returns to.
 ## A cache you can run
 
 "The cache is small, so lines get evicted" is not something you can count with. A precise, small rule is, and the
-same rule gives every table in this chapter. The model is a **set-associative cache with least-recently-used replacement**. A cache of $C$ bytes is made of
+same rule gives every count below. The model is a **set-associative cache with least-recently-used replacement**. A cache of $C$ bytes is made of
 lines of $s_{\mathrm{line}} = 64$ bytes, grouped into $n_{\mathrm{sets}}$ sets of $n_{\mathrm{ways}}$ lines each,
 so $C = n_{\mathrm{sets}} \cdot n_{\mathrm{ways}} \cdot s_{\mathrm{line}}$. Memory is cut into line numbers
 $\ell = \lfloor a / 64 \rfloor$ for address $a$, and a line may live only in the set $\ell \bmod
@@ -240,7 +239,7 @@ already full the line unused for longest in it is evicted. The count of misses i
 
 When $n_{\mathrm{sets}} = 1$ the cache is **fully associative**: any line may be anywhere, and only the total
 capacity limits it. Real first-level caches are 8-way associative or thereabouts, which is a compromise between
-the cost of searching every line and the freedom of placement; the book uses both, a fully associative cache as
+the cost of searching every line and the freedom of placement; the tables use both, a fully associative cache as
 the clean case and an 8-way cache with 64 sets as the realistic one, each of 32 KiB (512 lines), a typical size
 for a first-level data cache. Writes are treated as reads: a write to a line that is not present fetches it
 first. The model has one level, no prefetching and ignores the order in which fetches overlap in time. It
@@ -277,13 +276,13 @@ function access(address: int, inout cache: Cache) -> bool:
 ```
 
 Empty ways have stamp 0, below any used way, so they are filled before anything is evicted, and ties among them
-go to the lowest way. The 16 by 16 example of the first page is this function run on the addresses
+go to the lowest way. The 16 by 16 example of the opening is this function run on the addresses
 $4(16 i + j)$ of the elements in the order of the loop, with $n_{\mathrm{sets}} = 1$ and $n_{\mathrm{ways}}$ equal to
 4, 8, 15, 16, 17 and 32.
 
 ## Reading a matrix by rows and by columns
 
-The first page showed a cliff at a small size. Real matrices are big, and the cliff, together with the extra cliffs
+The opening example showed a cliff at a small size. Real matrices are big, and the cliff, together with the extra cliffs
 that associativity adds, decides whether a loop nest is cheap or expensive.
 
 ### The cliff
@@ -333,10 +332,10 @@ to 16 much sooner, at $n = 128$, a matrix of only 64 KiB, though its capacity is
 The set a line lives in is $\ell \bmod 64$. In a matrix with $n = 128$ a row is 128 numbers, 512 bytes, or 8
 lines; the lines of a column are $8 i$ lines apart, so their set numbers are $8 i \bmod 64$, and the 128 lines
 of the column fall into only 8 different sets, 16 of them in each. A set holds 8 lines, so only 64 of the 128 fit
-at once, and LRU then evicts as before. The cache has plenty of room but not in the places where this access
+at once, and least-recently-used replacement then evicts as before. The cache has plenty of room but not in the places where this access
 pattern puts its data. The same happens at $n = 192$ (a row is 12 lines, so the column falls into 16 sets), 256,
-384 and 512. It does not happen at $n = 96$ (a row is 6 lines, 32 sets are used, $32 \times 8 = 256$ lines fit
-in a column of 96). This is a **conflict**, as opposed to a capacity shortage, and the practical rule is that
+384 and 512. It does not happen at $n = 96$ (a row is 6 lines, so 32 sets are used, and they hold $32 \times 8 = 256$ lines,
+more than the 96 of a column). This is a **conflict**, as opposed to a capacity shortage, and the practical rule is that
 strides that are multiples of a power of two (the row length of a matrix whose side is a power of two) are the
 worst case: many lines, few sets. The usual remedy is padding, which a later table demonstrates: give each row
 a few unused elements at the end so that the row length is not a power of two.
@@ -392,7 +391,7 @@ being filled receives one more number and the $T$ lines are all in use at the sa
 16 values of $i$; during those 16 steps the loop needs the $T$ lines of $B$ it is filling, plus the one line of
 $A$ it is reading, to stay in the cache. If $T + 1$ lines do not fit, they are evicted before they are complete
 and fetched again; if they fit, each line of $B$ is fetched once. The working set of the tiled loop is about
-$T + 1$ lines, against $n$ for the untiled one, and $T$ is chosen. The table counts the fetches:
+$T + 1$ lines, against $n$ for the untiled one, and $T$ is ours to choose. The table counts the fetches:
 
 <!-- worked: cpu.tiled_transpose -->
 B[j][i] = A[i][j] for a 256 by 256 matrix of 4-byte numbers (256 KiB each; B starts right after A), visited tile by tile: tiles of T by T elements in row-major order of tiles, each tile in row-major order. Cache model: 8 KiB (128 lines), least recently used; "full" is fully associative, "8-way" has 16 sets of 8 ways, "8-way, padded" lays both matrices out with rows of 272 elements instead of 256 (the data is the same). Lines fetched; the least possible is every line once, 2 * 256 * 256 / 16 = 8,192.
@@ -413,14 +412,14 @@ Read the "full" column first. With no tiling ($T = 1$ is the plain row order) th
 the least possible, 8,192, which is every line of both matrices once. As $T$ grows the count falls (36,864,
 20,480, 12,288) and reaches the least possible at $T = 16$, the size at which a tile row is a whole line,
 and stays there for $T = 32$ and $T = 64$. At $T = 128$ it jumps back to 69,632: the 129 lines of the working
-set do not fit in 128, and the whole benefit is lost at once, as at the cliff of the first page. A tile has to be small enough
+set do not fit in 128, and the whole benefit is lost at once, as at the cliff of the opening example. A tile has to be small enough
 to fit and large enough that its rows fill lines; between those two bounds the choice does not matter in this
 model, which is why a tile size is usually picked from a table like this one and then left alone.
 
 The "8-way" column is the same experiment in a realistic cache, and it fails earlier for the reason of the previous
 section. The rows of both matrices are 256 numbers, 16 lines, apart, and with 16 sets of 8 ways every
 row begins in set 0 modulo 16, so the lines of a tile's column all compete for the same few places. A tile of
-8 is not yet hurt much (16,128), but from $T = 16$ the count is back at 69,632 as if there was no
+8 is not yet hurt much (16,128), but from $T = 16$ the count is back at 69,632 as if there were no
 tiling at all. The "8-way, padded" column is the remedy: lay the two matrices out with rows of 272 numbers
 instead of 256 (one line of padding, the data is the same) and the lines of a tile's column spread over 16
 different sets. The count is then the same as in the fully associative case for all $T$ up to 64.
@@ -441,8 +440,9 @@ instruction that works on all of them at once adds eight pairs, or multiplies ei
 instruction with the latency and issue rate of a single one. This is **SIMD** (single instruction, multiple
 data), and the groups are **vectors** in the machine sense, distinct from the mathematical vectors of Volume I;
 the number of numbers per register is its number of **lanes**. The instruction sets of the x86 family offer 4
-lanes (128-bit, called SSE), 8 lanes (256-bit, AVX2) and 16 lanes (512-bit, AVX-512) of f32; AArch64 has 4
-lanes (NEON). A core that supports a wider set is detected at run time, and a well-built program carries a
+lanes (128-bit, SSE, the Streaming SIMD Extensions), 8 lanes (256-bit, AVX2, the second Advanced Vector
+Extensions) and 16 lanes (512-bit, AVX-512) of f32; the 64-bit ARM architecture, AArch64, has 4 lanes (its
+vector extension, NEON). A core that supports a wider set is detected at run time, and a well-built program carries a
 version of each hot loop for each width and picks one when it starts.
 
 ### Instruction counts
@@ -531,7 +531,7 @@ An array that starts on a line boundary, or any multiple of 32 for the 32-byte l
 starts at any other multiple of 4 straddles on every other 32-byte load and on every 64-byte load. This is why
 allocators that serve numerical code return aligned blocks, and why a program that loads vectors from the middle
 of an array (the tail of a row, a slice that starts at a column) pays this. The cost on a real core is small and
-varies by chip, which is why the count of straddling loads is what the book gives.
+varies by chip, which is why the count of straddling loads is the number given here.
 
 ### The order of the additions changes
 
@@ -567,8 +567,8 @@ Generator: the book's SplitMix64, seed 0x123899b4aebbbb06 (the seed of the name 
 <!-- /worked -->
 
 The vector sum and the one-accumulator sum happen to agree to all 9 printed digits on this small example (both
-differ from the exact sum in the ninth digit), which is luck: eight chains of two or three products are too
-short to lose much. On 4096 products the orders separate:
+differ from the exact sum in the ninth digit), which is luck: eight chains of two products and a tail of four
+are too short to lose much. On 4096 products the orders separate:
 
 <!-- worked: cpu.simd_sum_order -->
 Generator: the book's SplitMix64, seed 0x02074311ab966a02 (the seed of the name `cpu.simd_sum_order`). n = 4096. Draw order: the 4096 values of x, each `2 * uniform() - 1` rounded to f32, then the 4096 of y. The products are rounded to f32 and then added in f32, one addition at a time. With w lanes, lane j adds the products j, j + w, j + 2w, ... in order, and the lanes are then combined by the horizontal sum (while more than 4 lanes remain, lane j + h is added to lane j for h = half the lanes; then (a0 + a1) + (a2 + a3)); w = 1 is the plain left-to-right sum. The reference is the exact sum, in exact arithmetic, of the exact (unrounded) products of the stored f32 inputs: 7.77823008. (The exact sum of the f32-rounded products is 7.77822936; the two differ by the rounding of the products, which no order of additions can remove.) The error column is |f32 sum - reference| / |reference|.
@@ -584,9 +584,9 @@ Generator: the book's SplitMix64, seed 0x02074311ab966a02 (the seed of the name 
 5 distinct results from 5 orders.
 <!-- /worked -->
 
-Five lane counts give five different results. All are within the error bound of Chapter 15, and the sums
+Five lane counts give five different results. All are within the error bound of Volume I, Chapter 15, and the sums
 with more lanes are closer to the reference in this run, because each chain accumulates fewer terms and a short
-sum rounds less (Chapter 16's pairwise argument again), though that is a property of the run and not a guarantee.
+sum rounds less (the pairwise argument of Volume I, Chapter 15, again), though that is a property of the run and not a guarantee.
 What is certain is that a vectorized kernel and a scalar kernel are different computations. Two consequences
 follow. A compiler that is asked to keep IEEE semantics will not vectorize a floating-point reduction by itself,
 because it would change the answer; a programmer who writes the lanes explicitly has decided that the change is
@@ -594,7 +594,7 @@ acceptable. And a test that compares a vectorized kernel with its scalar referen
 (Volume I, Chapter 15), unless the kernel is built to preserve the order. A way to do that is to vectorize
 across independent outputs instead of across the reduction: eight different output elements in the eight lanes,
 each lane summing its own products in the same order as the scalar code. That is bit-identical to the scalar
-loop, which the CPU backend uses where it needs that guarantee, as the last section explains.
+loop, which brain's CPU backend uses where it needs that guarantee, as the last section explains.
 
 ## Many cores: data-parallel loops
 
@@ -634,12 +634,12 @@ function parallel_sum(x: array<f32>[n], workers: int) -> f32:
     return total
 ```
 
-It has two properties to take from it. First, each worker owns a contiguous block of the input, so its reads
+Two properties matter. First, each worker owns a contiguous block of the input, so its reads
 are consecutive lines: the data-parallel loop keeps the spatial locality of the serial one. Second, the result
 depends on `workers`: a sum over 4 blocks and a sum over 8 are different groupings, exactly as lane counts were.
 A program whose answer must not change with the number of cores has to fix the grouping independently of it, for
-example by cutting the input into blocks of a fixed length and summing those in a fixed order. brain does this
-for the gradient norm, as the last section describes.
+example by cutting the input into blocks of a fixed length and summing those in a fixed order. The CPU backend of
+brain does this for the gradient norm, as the last section describes.
 
 ### Load balance
 
@@ -665,11 +665,11 @@ One equal block per worker leaves the first worker with 7,875 units and the last
 almost half the machine idle. Dealing the iterations round robin, or giving out chunks of one iteration to
 whichever worker is free, is almost perfect, and chunks of 16 are in between; chunks as big as a whole block
 are no better than blocks. The choice of a chunk size is a trade: small chunks balance better but there are more
-of them, and each one costs the runtime something to hand out and the worker something to start (a few
-microseconds on typical hardware, enough to be more than a small iteration's whole work).
+of them, and each one costs the runtime something to hand out and the worker something to start (thousands
+of cycles on typical hardware, more than a small iteration's whole work).
 
 The last point is what the **grain** of a parallel loop is about: the smallest piece of work worth giving a
-worker. brain's CPU backend fixes one for its generated kernels: it cuts a loop of $N$ invocations (one invocation is one run of the loop body for one index) into
+worker. The CPU backend of brain fixes one for its generated kernels: it cuts a loop of $N$ invocations (one invocation is one run of the loop body for one index) into
 about 8 chunks per thread, but never into chunks of fewer than 16,384 invocations, and a loop that fits in one
 chunk runs on the calling thread with no tasks at all.
 
@@ -690,7 +690,7 @@ The splitting rule: a loop of N invocations on T threads is cut into chunks of m
 
 A small kernel therefore costs nothing extra on a wide machine, and a large one is cut into enough chunks to
 balance. The row with 144 threads and 42 million invocations shows the target of 8 per thread, 1,152 tasks; every
-smaller row is held at the floor. The story in the last section is what the floor is for.
+smaller row is held at the floor. The last section tells what the floor is for.
 
 ### False sharing
 
@@ -722,17 +722,17 @@ the count of transfers is the number of times the next writer differs from the l
 when the workers alternate on every write, and as few as 3 when each worker's 1,000 writes come in one run. The
 real interleaving is not under the program's control, and the model's worst case is a good guide to what the
 structure can cost. The remedy has two forms: pad each worker's slot to a full line, or, better, keep the running
-value in a register and write it once at the end (a value that is written once is written once). The `partial`
+value in a register and write it once at the end (a slot written once costs at most one transfer). The `partial`
 array of the sum above is exactly this hazard: eight 4-byte partial sums are half a line. A loop that writes
 its own slots must separate them by a line.
 
-The cost of the transfers is time, and the time depends on the chip; the count is what the book gives.
+The cost of the transfers is time, and the time depends on the chip; the count is the portable part.
 
 ### Where the parallelism stops
 
 Splitting a loop among workers speeds up the part that is split and nothing else; the serial part of a program
-and the cost of starting and joining the workers set a ceiling. This is Amdahl's argument, and Chapter 11 of
-this volume, on measuring performance, derives it and shows how to find the serial part of a real program with
+and the cost of starting and joining the workers set a ceiling. This is Amdahl's argument, and Chapter 11,
+on measuring performance, derives it and shows how to find the serial part of a real program with
 a profile. The practical form is a question: what fraction of the work runs inside a parallel loop, and what
 does a worker cost to start? A sampled profile of a program of this kind can show most of its CPU samples in the worker pool spinning while the
 average core use stays low; that pattern means the work is sitting in a serial step and not in the loops that are
@@ -740,8 +740,8 @@ parallel, because idle workers spin while one thread works.
 
 ## Counting the work
 
-The three levers of this chapter, layout, vectors and cores, help different limits, and to tell which limit a
-computation is at, one counts what it does and what it moves. For an operation, count the arithmetic operations it needs (**FLOPs**: one multiplication or one addition is
+The three levers, layout, vectors and cores, help different limits, and to tell which limit a
+computation is at, one counts what it does and what it moves. For an operation, count the arithmetic operations it needs (FLOPs, as Volume III counted them: one multiplication or one addition is
 one, a fused multiply-add is two) and the bytes it must at least move into or out of the core's caches (every
 input once, every output once). The ratio, FLOPs per byte, says how much arithmetic each byte supports.
 
@@ -757,13 +757,13 @@ n = 1024, 4-byte numbers. FLOPs count each multiplication and each addition (a f
 <!-- /worked -->
 
 The dot product does a quarter of a FLOP per byte, and the elementwise sum a twelfth, because every byte it moves
-supports at most one operation. The matrix-vector product is about a half. The matrix product does 2n^3
-FLOPs on 3n^2 numbers: the ratio grows with $n$, here to about 171. A computation whose ratio is low has little
+supports at most one operation. The matrix-vector product is about a half. The matrix product does $2n^3$
+FLOPs on $3n^2$ numbers: the ratio grows with $n$, here to about 171. A computation whose ratio is low has little
 arithmetic to do per byte, and on a core that can do many operations in the time of one fetch from main memory it
 waits for data whatever vector width it has; a computation with a high ratio has work to hide the fetches behind.
 The next chapter turns this ratio into a criterion that says, for a given machine, which side of the line a
-computation is on, and into a bound on how fast it can run. Until then it is a count, like the lines of this
-chapter, and it is the reason that the layout and tiling work above is the first thing to do for a loop with a
+computation is on, and into a bound on how fast it can run. Until then it is a count, like the line counts
+above, and it is the reason that the layout and tiling work above is the first thing to do for a loop with a
 low ratio, and the vectors and cores the first thing for one with a high ratio.
 
 ## The CPU backend in brain's crates
@@ -811,8 +811,8 @@ consecutive numbers (one line) at a time, with a 4 KiB staging buffer. The funct
 `transpose_rows_tiled` in `crates/backend-cpu/src/fast_ops.rs`, and its test checks it against the plain
 definition.
 
-The commit says the destination lines were "evicted from L1" between revisits. Run through the model of this
-chapter, that is true for one reason and not the other:
+The commit says the destination lines were "evicted from L1" between revisits. Run through the cache model
+above, that is true for one reason and not the other:
 
 <!-- worked: cpu.commit_transpose -->
 VT[d][j] = V[j][d] with j in 0 .. 4096, d in 0 .. 64: V is 4096 by 64 (row of 64 elements, 256 B), VT is 64 by 4096 (row of 4096 elements, 16 KiB), VT starts right after V. "naive" is j outer, d inner, one element at a time. "tiled" reads 16 rows of V, then writes VT d by d, 16 consecutive elements (one whole line) each; the 4 KiB staging buffer is not counted. Cache: 32 KiB, 64-byte lines, least recently used. Every line of V and VT once is 2 * 4096 * 64 / 16 = 32,768 fetches.
@@ -829,9 +829,9 @@ With a fully associative 32 KiB cache the naive loop is already optimal: its 64 
 and fit, so capacity is not what is wrong. With an 8-way cache the 16 KiB row stride puts all 64 destination lines
 of one step into the same set (16 KiB is 256 lines, and $256 \bmod 64 = 0$), eight of them fit, and every write
 misses: 278,528 fetches against 32,768, about 8.5 times as many. The tiling cures the conflict by making the 16
-writes to a line consecutive. That is the model's reading, and it rests on an assumption the commit does
-not state, an 8-way first-level cache; this chapter did not measure it. The commit itself reports that the
-measured gain was not pinned down on the heavily loaded machine used, and says so. Line fetches are not time:
+writes to a line consecutive. That is the model's reading, not a measurement, and it rests on an assumption the commit does
+not state, an 8-way first-level cache. The commit itself reports that the
+measured gain could not be pinned down on the heavily loaded machine used. Line fetches are not time:
 a conflict in a first-level cache is usually served by the second level, so how much of the fetch count shows up as
 time is a measurement, and the model cannot give it.
 
@@ -840,7 +840,7 @@ that the first version staged the tile in a fixed 64-wide buffer and policed the
 which release builds remove; a model with a head width of 128 then indexed out of bounds and a parity test failed
 on the CPU backend. The fix, visible in the function today, derives the tile from a byte budget
 (`TILE = 16 * 64` numbers, 4 KiB) and blocks both axes, so the staged tile stays small whatever the row width. A
-fixed row count is wrong for somebody; a byte budget is the right unit, which is what the tiling table says.
+fixed row count is wrong for some row width; a byte budget is the right unit, which is what the tiling table says.
 
 ### One row on one core, and the grain
 
@@ -856,8 +856,8 @@ core computes a column and never the order of the sum along $k$; the commit gate
 the output columns, the iterations are independent, and a block of consecutive columns keeps the weights
 contiguous.
 
-Commit 50f04e6b7 (October 2026) is the grain story. The splitting rule then made a chunk per $8T$ pieces without
-a floor, so on a 144-core node a kernel of a few thousand invocations became one-invocation tasks. The commit
+Commit 50f04e6b7 (October 2026) is the grain story. The splitting rule then cut every dispatch into $8T$ chunks with no
+floor, so on a 144-core node a kernel of a few thousand invocations became one-invocation tasks. The commit
 reports, for one gradient check of a tiny model:
 
 <!-- perf-number: historical measurement, commit 50f04e6b7 -->
@@ -869,13 +869,13 @@ makes small work run where it is, and large work still fans out, which is the ta
 
 ### One implementation of the arithmetic, and the order that must not change
 
-Two more pieces of `backend-cpu` show the chapter's last themes. `crates/backend-cpu/src/host_gemm.rs`, from commit
+Two more pieces of `backend-cpu` return to the dependency chain and to the order of a sum. `crates/backend-cpu/src/host_gemm.rs`, from commit
 1ee64780e (August 2026), is a blocked matrix-multiply loop whose documentation names both of the first
 section's ideas. Its naive form reads the whole weight matrix once per output row. The new form computes
 `MR = 8` output rows against one weight row, so that row is read once per eight outputs, and it gives the core
-eight independent accumulator chains: the module doc says a single accumulator is a loop-carried
-dependency on a latency of about four cycles, so a core retires roughly one multiply-add per four cycles
-whatever the bandwidth. It also states why it does not simply use the vector kernel in `fast_ops.rs`, which is faster
+eight independent accumulator chains, for the reason of the dependency section: a single accumulator
+waits out the latency of each addition, about four cycles, so a core retires roughly one multiply-add per four
+cycles whatever the bandwidth. It also states why it does not simply use the vector kernel in `fast_ops.rs`, which is faster
 still: that kernel splits $k$ across eight lanes and uses fused multiply-add, so it is not bit-identical to the
 loop the surrounding code is gated on. The test `blocked_linear_is_bit_identical_to_the_naive_loop_it_replaces`
 in `crates/backend-cpu/tests/it/host_gemm.rs` compares bit patterns across tile sizes that divide the rows and ones
@@ -887,8 +887,8 @@ The reduction order is the second. `par::sum_sq_f64` is the global gradient-norm
 adaptive sum, whose last bit depended on how many threads were free; now every tensor is cut into chunks of a
 fixed size, each chunk summed in sequence, and the partials added in order. A test in `par.rs`,
 `sum_sq_is_bitwise_the_same_on_any_number_of_threads`, compares the bit patterns on different numbers of threads. The sum
-accumulates in 64-bit floating point on purpose (the doc says an f32 running total loses the low bits the clipping
-threshold needs). Every worker count gives the same bits, which is the "fix the grouping independently of the
+accumulates in 64-bit floating point on purpose: an f32 running total over millions of squares loses the low
+bits that the comparison with the clipping threshold needs. Every worker count gives the same bits, which is the "fix the grouping independently of the
 workers" rule of the parallel-sum section, in production.
 
 ## Check your understanding
@@ -927,7 +927,7 @@ iterations are independent, with each worker writing only its own results, balan
 are neither one equal block nor so small that starting them dominates, and without two workers writing one cache
 line. Counting FLOPs against bytes tells which of these levers will help.
 
-What this chapter could not do is say, for a given machine, whether a computation is limited by its arithmetic or by
+What the counts cannot yet say is, for a given machine, whether a computation is limited by its arithmetic or by
 the bytes it moves, and how to compare it with the best the machine could do. The ratio of FLOPs to bytes counted at
 the end is half of that answer; the other half is the machine's own rates of arithmetic and of memory traffic.
 Chapter 3 defines them and combines them into the roofline.
@@ -987,7 +987,7 @@ Chapter 3 defines them and combines them into the roofline.
 2. The strides are $(1, 4)$. Reading the transpose row by row moves the storage position by 4 elements at each step: it reads
    the original by columns, so it touches a new line on nearly every read of a long column.
 3. $\lceil \log_2 1024 \rceil = 10$ additions in the longest chain, against 1023 for the left-to-right sum.
-4. No. $(0.1 + 0.2) + 0.3 \neq 0.1 + (0.2 + 0.3)$ in f32. A different order of additions gives a slightly different
+4. No. In f32, $(0.1 + 0.1) + 0.5$ gives $0.69999999$ and $0.1 + (0.1 + 0.5)$ gives $0.70000005$. A different order of additions gives a slightly different
    result, within the error bound of the format.
 5. 4 bytes; 16 of them fit in a 64-byte line.
 
@@ -1014,7 +1014,7 @@ Chapter 3 defines them and combines them into the roofline.
 6. In the transposition, while one line of $B$'s tile is being filled, the loop touches the $T$ lines of the tile's
    rows of $B$ (one per tile row) and one line of $A$, so $T + 1$ lines. At $T = 64$ that is 65 of 128, at $T =
    128$ it is 129, one more than the cache, and least recently used replacement then evicts exactly the line needed
-   next, the cliff of the first page.
+   next, the cliff of the opening example.
 7. Commutativity is not what is needed. The vector sum does not only reorder additions; it regroups them into
    lane chains, and addition of f32 numbers is not associative (Volume I, Chapter 15). The two sums are different
    computations whose results differ in the low digits (the 4096-product table has five different results from five groupings).
