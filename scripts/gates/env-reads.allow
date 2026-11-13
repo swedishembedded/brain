@@ -126,7 +126,6 @@ crates/connectome/tests/it/bridge.rs	BRAIN_CONNECTOME_DIR
 crates/connectome/tests/it/import.rs	BRAIN_CONNECTOME_DIR
 crates/connectome/tests/it/mushroom_body.rs	BRAIN_CONNECTOME_DIR
 crates/connectome/tests/it/retinotopy.rs	BRAIN_CONNECTOME_DIR
-crates/controlnet/src/caps.rs	BRAIN_SDXL_VAE_DEVICE
 crates/controlnet/tests/it/parity.rs	BRAIN_CONTROLNET
 crates/controlnet/tests/it/parity.rs	BRAIN_TESTDATA
 crates/cosyvoice/src/pipeline.rs	BRAIN_COSYVOICE_PROFILE
@@ -842,8 +841,6 @@ crates/sdk/tests/video_pipeline.rs	BRAIN_HUB_ENDPOINT
 crates/sdk/tests/video_pipeline.rs	BRAIN_MODELS_DIR
 crates/sdk/tests/vlm_pipeline.rs	BRAIN_HUB_ENDPOINT
 crates/sdk/tests/vlm_pipeline.rs	BRAIN_MODELS_DIR
-crates/sdxlunet/src/bin/sdxl.rs	BRAIN_SDXL
-crates/sdxlunet/src/pipeline.rs	BRAIN_SDXL_VAE_DEVICE
 crates/sdxlunet/tests/it/inject.rs	MOE_SKIP_GPU_TESTS
 crates/sdxlunet/tests/it/int8_parity.rs	BRAIN_SUPIR_SDXL_LDM
 crates/sdxlunet/tests/it/parity.rs	BRAIN_SDXL

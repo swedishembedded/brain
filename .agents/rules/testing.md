@@ -374,9 +374,8 @@ Plus `BRAIN_DIAMOND_REPO`, `BRAIN_GENIEREDUX_REPO`.
 **Production-namespaced but test-only in practice** (these look like serving
 config but in this codebase only ever gate whole test suites):
 `BRAIN_QWEN_TE_SHARD`, `BRAIN_VAE_DEVICE`, `BRAIN_VQGAN_DEVICE`,
-`BRAIN_CODEFORMER_DEVICE`, `BRAIN_QWEN35_GGUF`, `BRAIN_SDXL`,
-`BRAIN_SDXL_VAE_DEVICE` (the SDXL UNet has no CLI or serving surface at all
-today - these two exist only for the dev-only `sdxl` binary).
+`BRAIN_CODEFORMER_DEVICE`, `BRAIN_QWEN35_GGUF`, `BRAIN_SDXL` (the
+sdxl-base-1.0 directory the SDXL, CLIP and VAE parity suites load).
 
 **Config-loader fixtures:** `BRAIN_TEST_CONFIG_FILLED`, `BRAIN_TEST_CONFIG_INHERITED`,
 `BRAIN_TEST_CONFIG_NUMBER`, `BRAIN_TEST_CONFIG_BOOL` are read only by

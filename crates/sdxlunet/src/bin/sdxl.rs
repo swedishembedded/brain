@@ -6,7 +6,7 @@
 //! Usage:
 //!   sdxl --root <sdxl-base-1.0> --prompt "..." [--out out.ppm]
 //!        [--steps 30] [--guidance 5.0] [--seed N] [--size 1024]
-//!        [--negative "..."]
+//!        [--negative "..."] [--vae-device cpu|gpu]
 //!
 //! Without `--seed` a random seed is drawn and printed; pass it back with
 //! `--seed` to reproduce the image.
@@ -19,12 +19,10 @@ fn arg(a: &[String], k: &str) -> Option<String> {
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let root = arg(&a, "--root")
-        .or_else(|| std::env::var("BRAIN_SDXL").ok())
-        .unwrap_or_else(|| {
-            eprintln!("sdxl: --root <checkpoint> (or BRAIN_SDXL) is required");
-            std::process::exit(2);
-        });
+    let root = arg(&a, "--root").unwrap_or_else(|| {
+        eprintln!("sdxl: --root <checkpoint> is required");
+        std::process::exit(2);
+    });
     let prompt = arg(&a, "--prompt").unwrap_or_else(|| {
         eprintln!("sdxl: --prompt \"...\" is required");
         std::process::exit(2);
@@ -48,6 +46,7 @@ fn main() {
         height: side,
         width: side,
         negative: arg(&a, "--negative").unwrap_or_default(),
+        vae_device: arg(&a, "--vae-device").unwrap_or_else(|| "cpu".into()),
     };
     let out = arg(&a, "--out").unwrap_or_else(|| "out/sdxl.ppm".into());
 

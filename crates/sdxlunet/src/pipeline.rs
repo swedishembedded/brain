@@ -34,6 +34,8 @@ pub struct GenerateOptions {
     pub height: u32,
     pub width: u32,
     pub negative: String,
+    /// Where the VAE decode runs, a `--device` spec (`"cpu"` by default).
+    pub vae_device: String,
 }
 
 impl Default for GenerateOptions {
@@ -45,6 +47,7 @@ impl Default for GenerateOptions {
             height: 1024,
             width: 1024,
             negative: String::new(),
+            vae_device: "cpu".to_string(),
         }
     }
 }
@@ -136,9 +139,8 @@ impl Sdxl {
         // fp32) and the VAE decode at 768^2 pushed a 24 GB card over — it OOMed
         // AFTER all 24 steps had run, which is the worst possible moment. The
         // decode is ONE pass, so the CPU cost is small next to losing the run;
-        // `BRAIN_SDXL_VAE_DEVICE=gpu` forces the card when there is room.
-        let vdev = std::env::var("BRAIN_SDXL_VAE_DEVICE").unwrap_or_else(|_| "cpu".into());
-        let vae = VaeDecoder::from_diffusers(self.vae_cfg.clone(), &vmap, lh, lw, Some(&vdev));
+        // `vae_device: "gpu"` uses the card when there is room.
+        let vae = VaeDecoder::from_diffusers(self.vae_cfg.clone(), &vmap, lh, lw, Some(&o.vae_device));
         let chw = vae.decode(&z);
         // diffusers maps the decoder's [-1,1] output to [0,1].
         let rgb: Vec<f32> = chw.iter().map(|v| ((v + 1.0) * 0.5).clamp(0.0, 1.0)).collect();
