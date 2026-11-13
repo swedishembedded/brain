@@ -134,7 +134,7 @@ pub enum Error {
 /// Run `f`; a device out-of-memory unwind (the payload a backend raises when an allocation is refused,
 /// [`gpu_core::DeviceOutOfMemory`]) is caught and returned as [`Error::DeviceOutOfMemory`], so a full card is an error a
 /// caller can act on instead of a panic that takes its process down. Any other panic keeps unwinding.
-#[cfg(feature = "device")]
+#[cfg(feature = "study")]
 pub(crate) fn typed_device_oom<R>(f: impl FnOnce() -> Result<R, Error>) -> Result<R, Error> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(result) => result,
@@ -247,7 +247,7 @@ mod tests {
 
     /// A full card inside a run is an error the caller can match, with what to do about it; any other panic is not
     /// swallowed.
-    #[cfg(feature = "device")]
+    #[cfg(feature = "study")]
     #[test]
     fn a_device_out_of_memory_unwind_becomes_a_typed_error_and_other_panics_stay_panics() {
         let oom = std::panic::catch_unwind(|| -> Result<(), Error> { gpu_core::DeviceOutOfMemory { bytes: 3 << 30, what: "the activations of a row".to_string(), detail: "out of memory".to_string() }.raise() });

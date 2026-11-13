@@ -5,7 +5,10 @@
 //! the shared parts are in `common`.
 
 pub mod common;
-pub use common::{cpu, qwen35_model_dir, TempDir};
+pub use common::{cpu, TempDir};
+// Only the test of several architectures at once takes it through this module.
+#[cfg(feature = "text")]
+pub use common::qwen35_model_dir;
 
 /// The model directory: `model.safetensors`, `tokenizer.json`,
 /// `tokenizer_config.json` (carrying the chat template).

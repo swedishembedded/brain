@@ -7,8 +7,11 @@
 //! process-wide state (the current directory, environment variables): the
 //! others run beside it; `auto_pipeline`, `depth_pipeline`, `detection_pipeline`, `embedding_pipeline`, `forecast_pipeline`, `ground_pipeline`, `image_pipeline`, `music_pipeline`, `restore_pipeline`, `segment_pipeline`, `text_pipeline`, `text_pipeline_variants`, `transcribe_pipeline`, `tts_pipeline`, `upscale_pipeline`, `video_pipeline`, `vlm_pipeline` keep binaries of their own.
 
+// The fixtures build a Qwen3 (and Qwen3.5) checkpoint, so each exists for the surface whose tests use it.
+#[cfg(feature = "study")]
 #[path = "../chat_fixture/mod.rs"]
 mod chat_fixture;
+#[cfg(feature = "text")]
 #[path = "../common/mod.rs"]
 mod common;
 
