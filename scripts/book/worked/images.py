@@ -594,7 +594,7 @@ def letterbox_pad():
     out.append(_table(["image to square", "scale", "content", "slack in y", "pad above", "pad below", "row 0 maps to y"], rows))
     out.append("")
     out.append("What a frame that disagrees with its pixels by half a row would cost. A box of k by k pixels, written (x1, y1, x2, y2) = "
-               "(0, 0, k, k), is compared with the same box moved down by 0.5; the IoU is the overlap area divided by the union "
+               "(0, 0, k, k), is compared with the same box moved down by 0.5; the IoU (intersection over union) is the overlap area divided by the union "
                "area, k (k - 0.5) / (2 k^2 - k (k - 0.5)) = (k - 0.5) / (k + 0.5).")
     out.append("")
     out.append(_table(["k", "IoU after a shift of 0.5"], [[k, f"{box_iou_shifted(k, 0.5):.4f}"] for k in (1, 2, 4, 16, 64)]))

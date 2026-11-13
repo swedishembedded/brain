@@ -1,4 +1,4 @@
-<!-- source-sha256: 30b87c606a7c9c87cfd49a09ea380afad81ed2a7697f1a787345b9a9150cc2f6 -->
+<!-- source-sha256: d182b722f1d6a85a34d73b9858ad6275af608e31ebe252875858c788a25f2b2d -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400" width="700" height="400"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="700" height="400" fill="#ffffff"/>
 <rect x="44" y="44" width="320" height="320" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
 <rect x="84" y="104" width="20" height="20" fill="#bee3f8"/>

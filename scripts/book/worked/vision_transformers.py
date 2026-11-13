@@ -224,7 +224,7 @@ def embedding_equivalence():
             "flattened patch, each sum left to right over the 12 numbers, then plus the bias:\n\n"
             + _table(["t", "token[0]", "token[1]", "token[2]", "token[3]"], trows)
             + f"\n\nThe same 64 numbers as a convolution of the [3, 8, 8] picture with the 4 filters W[o] reshaped to [3, 2, 2], stride 2, no "
-            f"padding (`corr2d` of Volume VII, Chapter 2), plus the bias: the largest absolute difference is {_below(d, 1e-12)}. "
+            f"padding (`corr2d` of Chapter 2), plus the bias: the largest absolute difference is {_below(d, 1e-12)}. "
             f"With the pixels flattened in the other order (row, column, channel) and the same W the largest absolute "
             f"difference from the tokens above is {_fx(wd, 3)}: both orders are matrix products, and only one of them is this "
             f"convolution.")
@@ -650,7 +650,7 @@ def swin_stages():
         tot_g += dep * glob
         tot_w += dep * win
         rows.append((i + 1, f"{SWIN_T['patch'] * 2 ** i}", f"{g} x {g}", _int(t), c, dep, _giga(glob), _giga(win), _fx(glob / win, 1)))
-    return (f"Swin-T on a 224 by 224 picture (Liu et al., 2021): patches of 4 pixels, widths 96, 192, 384, 768, blocks 2, 2, 6, 2, windows of "
+    return (f"Swin-T on a 224 by 224 picture (Liu and colleagues, 2021): patches of 4 pixels, widths 96, 192, 384, 768, blocks 2, 2, 6, 2, windows of "
             "7 by 7 (the last stage's grid is one window). Patch merging between stages takes the grid and the width to a half and "
             "twice. FLOPs are the score and average products, 4 * pairs * width, of one block of the stage.\n\n"
             + _table(["stage", "stride", "grid", "tokens", "width", "blocks", "global (GFLOPs per block)", "windowed (GFLOPs per block)",
@@ -1066,7 +1066,7 @@ def vit_setup():
     d, ff = TOY_D, TOY_FF
     macs = t * 4 * d + 4 * t * d * d + 2 * TOY_H * t * t * (d // TOY_H) + 2 * t * d * ff + d * cnns.NCLS
     cnn_macs = 5778
-    return (f"The images and the split are those of the convolutions chapter (`cnns.toy_data`: 150 images of 8 by 8 pixels, class n mod 3 "
+    return (f"The images and the split are those of Chapter 3 (`cnns.toy_data`: 150 images of 8 by 8 pixels, class n mod 3 "
             f"for stripes, checkerboards and blobs; the first 60 train, the other 90 test). The model: 2 by 2 patches (16 tokens of 4 "
             f"pixels, flattened row by row), a linear embedding to D = {d} with a bias, a learned position table of 16 rows added, one "
             f"pre-norm block of Volume V (RMS norm, {TOY_H} heads of width {d // TOY_H} with no mask (head h takes columns {d // TOY_H}h to {d // TOY_H}h + {d // TOY_H - 1} of the query, key and value projections, and the head outputs are concatenated in head order before the output projection), residual, RMS norm, a GELU "
@@ -1087,8 +1087,8 @@ def vit_training():
             a0, wa = _vit_twins(r, 0, lambda x, t=t: x["seen"][t][1])
             rows.append((r, t, cnns_text(l0, ws), cnns_text(a0, wa)))
     return (f"Both readouts, run 0 (the generator of the name {_vit_name(0)}, {_seed(_vit_name(0))}; run r uses the name "
-            f"vision_transformers.vit_init.r), trained on the 60 training images by full-batch Adam exactly as in the "
-            f"convolutions chapter (beta_1 = 0.9, beta_2 = 0.999, epsilon = 1e-8, learning rate {TOY_LR}, {TOY_STEPS} updates, mean "
+            f"vision_transformers.vit_init.r), trained on the 60 training images by full-batch Adam exactly as for the "
+            f"network of Chapter 3 (beta_1 = 0.9, beta_2 = 0.999, epsilon = 1e-8, learning rate {TOY_LR}, {TOY_STEPS} updates, mean "
             f"cross-entropy, sums over images in index order). Initialization: every entry is `normal() * scale` from that one "
             f"generator, matrix by matrix and row by row, in this order: We [4, 8] with scale 0.5, the position table E [16, 8] with "
             f"0.3, Wq, Wk, Wv and Wo [8, 8] with 1/sqrt(8) each, W1 [8, 16] with 1/sqrt(8), W2 [16, 8] with 1/4, the classifier Wh [8, 3] "
@@ -1117,5 +1117,5 @@ def vit_against_cnn():
                          _int(vit_n_params(vit_init(run), r)), cnns_text(tr, wtr), cnns_text(tl, wtl), cnns_text(ta, wta)))
     return (f"After {TOY_STEPS} updates on the same 60 training images, scored on the same 90 test images (30 of each class), same optimizer "
             f"and rate. The vision transformer is trained from three initializations (runs 0, 1, 2, generators of the printed seeds), "
-            f"each with both readouts; the convolutional network is the single run of the previous chapter. {stab.RULE}\n\n"
+            f"each with both readouts; the convolutional network is the single run of Chapter 3. {stab.RULE}\n\n"
             + _table(["model", "run (seed)", "parameters", "training accuracy", "test cross-entropy", "test accuracy"], rows, "llrrrr"))

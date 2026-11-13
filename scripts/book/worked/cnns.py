@@ -919,7 +919,7 @@ def depth_signal():
             "each entry is the geometric mean over the four seeds of a ratio formed within one seed. Columns 2 and 3: the root mean square of the stream "
             "(the post-ReLU activation; its root mean square is taken over all elements of all those images pooled together) after the last "
             "convolution (plain) or block (residual) divided by the same quantity after the stem's ReLU and pooling. Column 4: the factor "
-            f"{math.sqrt(bt):.4f}^d, where {bt:.4f} is the share of the 9 taps of a 3 by 3 window with padding 1 that land on a real pixel of a 4 by 4 "
+            f"{math.sqrt(bt):.4f}^d, the square root of {bt:.4f} because a root mean square scales with the square root of a variance, where {bt:.4f} is the share of the 9 taps of a 3 by 3 window with padding 1 that land on a real pixel of a 4 by 4 "
             f"map, averaged over positions (on 8 by 8 it is {border_taps(8):.4f}, on 28 by 28 it is {border_taps(28):.4f}). Columns 5 and 6: "
             "the Frobenius norm of the weight gradient of the first body convolution (the one farthest from the loss) of the mean cross-entropy of the images.\n\n"
             + _table(["d (convolutions)", "plain: stream", "residual: stream", "plain: border alone", "plain: first-layer gradient", "residual: first-layer gradient"], rows))
@@ -1174,7 +1174,7 @@ def pyramid_levels():
         side = PYRAMID_INPUT // 2 ** lvl
         rows.append((lvl, 2 ** lvl, f"{RESNET50_OUT[lvl]} x {side} x {side}", j, r, _fx(32 / j, 2), _fx(256 / j, 2)))
     return ("The three levels of a ResNet-50 on a 3 by 640 by 640 input: stride 2^level, output shape, the jump and the receptive field along one axis "
-            "by the recursion of Volume VII, Chapter 2 along the main path of the blocks (their 3x3 convolutions; the identity shortcut adds nothing), "
+            "by the recursion of Chapter 2 along the main path of the blocks (their 3x3 convolutions; the identity shortcut adds nothing), "
             "and how many cells an object 32 and 256 pixels across spans along one axis.\n\n"
             + _table(["level", "stride", "output shape", "jump j", "receptive field r", "cells across a 32 px object", "cells across a 256 px object"], rows))
 

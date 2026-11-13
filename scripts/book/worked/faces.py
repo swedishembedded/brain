@@ -450,8 +450,8 @@ def nms_conventions():
     tie_boxes, tie_scores = [(0.0, 0.0, 9.0, 9.0), (1.0, 0.0, 10.0, 9.0)], [0.5, 0.5]
     tie = [("higher index first (the reference)", _nms_plus1(tie_boxes, tie_scores, 0.5, True)),
            ("lower index first (a stable descending sort)", _nms_plus1(tie_boxes, tie_scores, 0.5, False))]
-    return ("Two boxes a = (0, 0, 9, 9) and b = (5, 0, 14, 9) with scores 0.9 and 0.8. IoU in the half-open convention of the "
-            "detection chapter (`detection.iou`) and in the inclusive convention (a side from x1 to x2 counts x2 - x1 + 1 pixels).\n\n"
+    return ("Two boxes a = (0, 0, 9, 9) and b = (5, 0, 14, 9) with scores 0.9 and 0.8. IoU in the half-open convention of "
+            "Chapter 4 (`detection.iou`) and in the inclusive convention (a side from x1 to x2 counts x2 - x1 + 1 pixels).\n\n"
             + _table(["coordinates", "IoU, no +1", "IoU, with +1"], rows)
             + f"\n\nBoxes kept at the threshold {thr} (inclusive convention):\n\n"
             + _table(["order of the two steps", "boxes kept"], verdict)
@@ -631,7 +631,7 @@ def margin_logits():
             "s (c cos m - sqrt(1 - c^2) sin m); the others are s c. The last column is the derivative of the loss with respect to the "
             "target cosine c, (p - 1) times d(target logit)/dc, with d/dc = s (cos m + sin m c / sqrt(1 - c^2)).\n\n"
             + _table(["margin m", "target logit", "largest other logit", "probability of the target", "loss", "dloss/dc"], rows)
-            + f"\n\nCheck of the derivative at c = 0.62, m = 0.5: the formula gives {ana:.6f} and the central difference with "
+            + f"\n\nCheck of the derivative of the target logit at c = 0.62, m = 0.5: the formula gives {ana:.6f} and the central difference with "
             f"h = 1e-6 in 64-bit arithmetic gives {num:.6f}; the relative difference is below 1e-7"
             + ("." if rel < 1e-7 else f" (it is {rel:.2e}).") + "\n")
 

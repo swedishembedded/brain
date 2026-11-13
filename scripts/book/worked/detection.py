@@ -165,7 +165,7 @@ def head_counts():
     lines = [
         f"Input {side} by {side}, {nc} classes, n_bin = {reg_max} bins per side (`reg_max` in the code). The anchor-based head has 3 anchors per cell, each with "
         f"x, y, w, h, objectness and the {nc} class scores; the anchor-free head has {nc} class scores and {reg_max} bin logits for each of the four sides. "
-        "The last column is (n_bin - 1) times the stride, the farthest a side can reach when the distribution is a single bin 15 (n_bin - 1 = 15).",
+        "The last column is (n_bin - 1) times the stride, the farthest a side can reach when all the mass is on the last bin, n_bin - 1 = 15.",
         "",
         t,
         "",
@@ -217,7 +217,7 @@ def anchor_decode():
     t = _table(["field", "logit", "sigmoid", "offset or scale", "pixels"], rows, "lrrll")
     cls_rows = [[f"class {i}", _f(z, 1), _f(cls[i]), _f(obj * cls[i])] for i, z in enumerate(c["cls"])]
     t2 = _table(["", "logit", "sigmoid", "objectness x class"], cls_rows, "lrrr")
-    return (f"One cell of the stride-{c['stride']} level of a 128 by 128 input (a 8 x 8 grid), column g_x = {c['gx']}, row g_y = {c['gy']}, "
+    return (f"One cell of the stride-{c['stride']} level of a 128 by 128 input (an 8 x 8 grid), column g_x = {c['gx']}, row g_y = {c['gy']}, "
             f"anchor {c['anchor']} of that level, which is {aw} x {ah} pixels. The head wrote the logits below; the objectness logit is "
             f"{c['obj']} and sigmoid({c['obj']}) = {_f(obj)}.\n\n{t}\n\n{t2}\n\n"
             f"The best class is {k} with score {_f(score)}. The box is (x1, y1, x2, y2) = ({_f(box[0])}, {_f(box[1])}, {_f(box[2])}, {_f(box[3])}).")
@@ -557,9 +557,9 @@ def detection_loss():
     total = (GAINS[0] * ciou_sum + GAINS[1] * bce + GAINS[2] * dfl_sum) / norm
     t = _table(["n", "rectangle", "1 - CIoU", "DFL (four sides)"], rows, "llrr")
     return (f"The loss of the assignment above. Each side of an anchor's box is held by the distribution softmax(-(k - d)^2 / 2) over the "
-            f"{NBIN} bins around its predicted distance d (the four d are {PRED_DIST}), and the DFL of a side is the loss (5) of the chapter against "
-            f"the target distance of the table. The class loss is the binary cross-entropy of all {len(A)} x 2 entries with the logit of each "
-            f"score as the logit and the soft target on the owner's class channel (0 elsewhere). Sums run over anchors in row-major order.\n\n{t}\n\n"
+            f"{NBIN} bins around its predicted distance d (the four d are {PRED_DIST}), and the DFL of a side is the loss (5) against "
+            f"the target distance of the table. The class loss is the binary cross-entropy of all {len(A)} x 2 entries, each taking as input the logit "
+            f"(the inverse sigmoid) of its class score and as target the soft target on the owner's class channel (0 elsewhere). Sums run over anchors in row-major order.\n\n{t}\n\n"
             f"Sum of (1 - CIoU) = {_f(ciou_sum)}; sum of the DFL terms = {_f(dfl_sum)}; sum of the binary cross-entropy over all {len(A) * 2} "
             f"entries = {_f(bce)}; sum of the class targets = {_f(sum(r['target'].values()))}, so the normaliser is max(sum, 1) = {_f(norm)}.\n\n"
             f"L = ({GAINS[0]} * {_f(ciou_sum)} + {GAINS[1]} * {_f(bce)} + {GAINS[2]} * {_f(dfl_sum)}) / {_f(norm)} = {_f(total)}.")

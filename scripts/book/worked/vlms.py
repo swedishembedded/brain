@@ -152,7 +152,7 @@ def splice_setup():
             + "\n\nThe picture is 4 by 4 pixels, one channel, brightness 0 to 1.\n\n"
             + _table(["", "column 0", "column 1", "column 2", "column 3"], pix_rows, "lrrrr")
             + "\n\nIt is cut into four patches of 2 by 2 pixels, each flattened row by row. The tower is reduced to its patch "
-            "embedding (the blocks of Volume VII, Chapter 6 are left out so that the numbers stay printable): a 2 by 4 matrix "
+            "embedding (the blocks of Chapter 6 are left out so that the numbers stay printable): a 2 by 4 matrix "
             f"W_v = {[list(r) for r in W_EMBED]} with no bias gives each patch a vector of width D_v = 2. The projector is one "
             f"linear map from 2 to 3 numbers, W_p = {[list(r) for r in W_PROJ]} and b_p = {list(B_PROJ)}, so that "
             "p = W_p f + b_p.\n\n"
@@ -667,7 +667,7 @@ def tower_attention():
         per_block = 4 * t * t * 1024
         rows.append((f"{h} x {w}", _int(t), _int(t // 4), _tflops(24 * per_block)))
     return ("The tower attends over every patch of the picture at once (no windows), 24 blocks of width 1024; one block's score "
-            "and average products cost 4 T^2 x 1024 FLOPs for T patches (Volume VII, Chapter 6). The decoder sees T / 4 tokens.\n\n"
+            "and average products cost 4 T^2 x 1024 FLOPs for T patches (Chapter 6). The decoder sees T / 4 tokens.\n\n"
             + _table(["picture h x w", "patches T", "tokens T / 4", "tower attention TFLOPs"], rows))
 
 

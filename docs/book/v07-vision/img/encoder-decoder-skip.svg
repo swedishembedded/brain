@@ -1,4 +1,4 @@
-<!-- source-sha256: 0dc68d52e63c98938262c1d4a29ec946126e00101457685966e046b16b4a5741 -->
+<!-- source-sha256: ce50463922a317f9e1e378f6a44d578fd0bbab8b6a933ab1b6953535bc9a4adb -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 420" width="760" height="420"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="760" height="420" fill="#ffffff"/>
 <text x="380" y="32.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Encoder-decoder segmenter: 687 parameters, 22,784 multiply-adds per 8 by 8 image</text>
 <rect x="25" y="87" width="126" height="86" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>

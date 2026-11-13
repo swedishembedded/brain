@@ -284,10 +284,10 @@ def doubling():
         errs = [abs(up[y][x] - truth[y][x]) for y in range(8) for x in range(8)]
         rows.append((name, _fx(min(interior), 4), _fx(max(interior), 4), _fx(sum(errs) / 64, 4), _fx(max(errs), 4)))
     return ("The surface (x - 3.5)^2 + (y - 3.5)^2 over 24.5 on an 8 by 8 grid is averaged over 2 by 2 blocks to a 4 by 4 map and "
-            "doubled again by five rules. 'Constant input' is a 4 by 4 map of ones doubled by the same rule: its output should be all "
+            "doubled again in five ways. 'Constant input' is a 4 by 4 map of ones doubled the same way: its output should be all "
             "ones, and the smallest and largest value on rows and columns 1 to 6 (the interior) show whether the rule adds a pattern. The error is "
             "against the original 8 by 8 surface, over all 64 pixels. The transposed convolutions use stride 2 and padding 1, "
-            "with output padding 1 for k = 3 and 0 for k = 4, and `convolution.convT2d` of the earlier chapter.\n\n"
+            "with output padding 1 for k = 3 and 0 for k = 4, and `convolution.convT2d` of Chapter 2.\n\n"
             + _table(["rule", "constant input: interior min", "interior max", "mean absolute error", "largest error"], rows))
 
 
@@ -400,7 +400,7 @@ def seg_shape_table():
     return (_table(["layer (kind unet)", "output [C, H, W]", "parameters", "multiply-adds"], [(a, b, _int(c), _int(d)) for a, b, c, d in rows_u], "llrr")
             + "\n\n" + _table(["kind", "parameters", "multiply-adds per image"], [(k, _int(p), _int(m)) for k, p, m in out], "lrr")
             + f"\n\nReceptive field along one axis of one bottleneck value: after the first convolution {rec[0][0]}, after the pool {rec[1][0]}, "
-            f"after the second convolution {rec[2][0]} input pixels (Volume VII, Chapter 2, recursion r = r + d (k - 1) j), so the "
+            f"after the second convolution {rec[2][0]} input pixels (the recursion r = r + d (k - 1) j of Chapter 2), so the "
             f"bottleneck of an 8 by 8 image sees all of it.")
 
 
@@ -765,7 +765,7 @@ def seg_training():
                      _twin_text(first, kind, weighted, lambda x: _fx(x, 4)), _twin_text(last, kind, weighted, lambda x: _fx(x, 4))))
     return (f"Five segmenters trained on the {N_TRAIN} training scenes by full-batch Adam (beta_1 = 0.9, beta_2 = 0.999, epsilon = 1e-8, "
             f"learning rate {SEG_LR}, bias correction), {SEG_STEPS} updates, from the initializations `{INIT_PREFIX}<kind>` (kinds pixel, "
-            f"coarse, noskip, unet; the last model reuses the unet initialization). Loss: the weighted mean cross-entropy of equation (1) of the chapter with "
+            f"coarse, noskip, unet; the last model reuses the unet initialization). Loss: the weighted mean cross-entropy of equation (1) with "
             f"the weights of the table above for the last row and 1 for the others (a plain mean). Weighted loss at update 0 and "
             f"at update {SEG_STEPS} on the training scenes; sums run over images in index order, then pixels row-major, and over taps in "
             f"the order (input channel, kernel row, kernel column). " + stab.RULE + "\n\n"
@@ -1074,7 +1074,7 @@ def midas_loss():
         refused = "accepted"
     except ValueError as e:
         refused = f"refused ({e})"
-    return ("The loss of a trained depth network on the 8 by 8 scene, with the predictions u of the alignment example on the 40 non-sky "
+    return ("The training loss of a depth network on the 8 by 8 scene, with the predictions u of the alignment example on the 40 non-sky "
             "pixels (valid, M) and the true inverse depth v as the target. R = a u + b - v with (a, b) the closed form (8) on M; "
             "L_ssi = sum_M R^2 / (2 |M|); the gradient-matching term sums, for each scale k = 0, 1, 2, 3, abs(R_j - R_i) over the pairs "
             "(i, j) of pixels at rows and columns that are multiples of 2^k, j the right neighbour (column + 2^k) or the one below "
@@ -1362,7 +1362,7 @@ def bisenet_counts():
             "counted at one position.\n\n"
             + _table(["stage", "output [C, H, W]", "parameters", "multiply-adds"], rows, "llrr")
             + f"\n\nTotal: {_int(tb)} parameters and {_int(tm)} multiply-adds ({_int(2 * tm)} FLOPs) per 512 by 512 image. Receptive field of one "
-            f"value along one axis through the main path of the backbone (Volume VII, Chapter 2, recursion): {r4[0]} pixels at stride {r4[1]} "
+            f"value along one axis through the main path of the backbone (the recursion of Chapter 2): {r4[0]} pixels at stride {r4[1]} "
             f"(layer 1), {r8[0]} at stride {r8[1]} (layer 2, the map that goes to the fusion unchanged), {r16[0]} at stride {r16[1]} "
             f"(layer 3) and {r32[0]} at stride {r32[1]} (layer 4); the global pool sees all 512.")
 

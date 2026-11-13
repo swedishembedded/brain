@@ -390,8 +390,8 @@ def receptive_field():
     t_d = traced_extent(STACK_DILATED)
     assert t_t[1] == receptive(STACK_TRUNK)[-1][0] and t_d[1] == receptive(STACK_DILATED)[-1][0]
     note = (f"Tracing the inputs read by one output of the last layer back through the trunk touches {t_t[0]} input positions spanning "
-            f"an interval of {t_t[1]}, equal to r after layer 7; for the dilated stack it touches {t_d[0]} positions (the dilated "
-            f"taps leave gaps) spanning {t_d[1]}, equal to r after layer 5.")
+            f"an interval of {t_t[1]}, equal to r after layer 7; for the dilated stack it touches {t_d[0]} positions (the doubling "
+            f"dilations leave no gaps) spanning {t_d[1]}, equal to r after layer 5.")
     return ("Receptive field r and jump j (input pixels between neighbouring outputs of a layer) after each layer along one axis, "
             "from r = j = 1 at the input. 'trunk' is seven 3x3 layers whose third and fifth have stride 2; 'dilated' is five stride-1 3x3 "
             "layers with dilations 1, 2, 4, 8, 16.\n\n"

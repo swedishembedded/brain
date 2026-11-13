@@ -693,8 +693,8 @@ def training_setup():
             f"Wp [8, 16] with 1/sqrt(16), E [11, 4] with 0.5, V1 [12, 12] with 1/sqrt(12), Vp [8, 12] with 1/sqrt(12); both biases 0. "
             f"The logit scale is a = exp(psi) with psi starting at ln(1/0.07) = {PSI0:.4f} (a = {math.exp(PSI0):.3f}) and clamped to "
             f"[0, ln 100] after every update. The classes are the 16 (colour, shape) pairs; the 4 held-out classes never appear in a "
-            f"training batch. Each step takes one batch of {cfg['batch']} pairs, one for each of {cfg['batch']} of the 12 training classes "
-            f"(a fresh `shuffle` of them, the first {cfg['batch']} kept), so that no two captions of a batch are equal. The training classes, "
+            f"training batch. Each step takes one batch of {cfg['batch']} pairs, one for each of the first {cfg['batch']} classes "
+            f"of a fresh `shuffle` of the 12 training classes, so that no two captions of a batch are equal. The training classes, "
             f"before each shuffle, are {list(TRAIN_CLASSES)} in ascending order (the held-out classes {list(HELD_OUT)} removed); the rows of "
             f"the embedding table E are the templates (rows 0 to 2), the colours (3 to 6) and the shapes (7 to 10). Pictures and "
             f"templates come from `bookrng.generator(\"clip.stream.r.main\")` (run 0: {_seed('clip.stream.0.main')}), the same stream that "
@@ -980,7 +980,7 @@ def pixel_vs_feature():
     data = {r[1]: r for r in perceptual_data()}
     s1, b1 = data["shifted right by 1"], data["blurred 1 time"]
     return ("Each distortion of the reference picture, scored by the pixel mean squared error (mean of the 144 squared differences) and "
-            "by the feature distance of the construction below, with weights 1 on each channel, tap by tap and summed. Noise is "
+            "by the feature distance of equation (4), with weights 1 on each channel, tap by tap and summed. Noise is "
             "sd * z for one field z of 144 `normal()` values drawn row by row from `bookrng.generator(\"clip.perceptual.noise\")` "
             f"({_seed('clip.perceptual.noise')}), added without clipping. A shift wraps around the border (a shift by 2 returns the reference, a shift by 3 equals a shift by 1); a blur is the separable "
             "kernel [1, 2, 1] / 4 applied to rows then columns, wrapping; a contrast factor f maps v to 0.5 + f (v - 0.5).\n\n"

@@ -366,7 +366,7 @@ def toy_setup():
               "projected by v and the result by out. In layer 0 the self-attention takes no position code and has no residual; in "
               "layer 1 it compares `q + tok_pe`, copies `q` and has a residual. Each attention and the MLP are followed by a residual "
               "add and a LayerNorm; the MLP is `relu(x W_up) W_down`. The upscaling is the transposed convolution of kernel 2 and "
-              "stride 2 from 8 to 2 channels, followed by the exact GELU (of the multilayer-network chapter), taking the 4 x 4 cells to "
+              "stride 2 from 8 to 2 channels, followed by the exact GELU (of Volume III, Chapter 2), taking the 4 x 4 cells to "
               "8 x 8. A hypernetwork is `relu(h W_1) W_2` on the mask token's output, giving 2 numbers; the IoU head is "
               "`relu(h W_1) W_2` on the overlap token followed by a sigmoid. The large model's hypernetworks have three layers (256, 256, "
               "256 and 32 numbers, a ReLU between layers); the toy keeps two.")

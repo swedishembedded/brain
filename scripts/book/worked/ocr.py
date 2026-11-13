@@ -165,7 +165,7 @@ def grids():
         rows.append((name, f"{side} x {side}", f"{n} x {n} = {_int(n * n)}", f"{n1} x {n1}", f"{n2} x {n2} = {_int(tokens)}",
                      f"{wn} x {wn} of 14 x 14 (padded to {padded})"))
     return ("Patches of 16 pixels (a convolution of kernel 16 and stride 16), then two convolutions of kernel 3, stride 2, padding 1, "
-            "whose output side is `out_size` of Volume VII, Chapter 2: (n + 2 - 3) // 2 + 1. The last column is the window "
+            "whose output side is `out_size` of Chapter 2: (n + 2 - 3) // 2 + 1. The last column is the window "
             "partition of the SAM blocks, which pads the patch grid on the bottom and the right to a multiple of 14.\n\n"
             + _table(["view", "pixels", "patch grid", "after conv 1", "after conv 2 (tokens)", "windows of a windowed block"], rows,
                      "lllllll"[:6]))

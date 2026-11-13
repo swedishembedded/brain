@@ -1,4 +1,4 @@
-<!-- source-sha256: b9640f4b759d5f5e456db74f5c0e898388afc430dcff873c97a3b45a8212b10a -->
+<!-- source-sha256: 80d80ec2bd581448e319d4283cfe72e69f3bee2a906be127072eaeec9ba65c0c -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="960" height="400" fill="#ffffff"/>
 <rect x="20" y="14" width="290" height="375" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="36" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">cosines cs_ij</text>
