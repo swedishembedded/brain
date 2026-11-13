@@ -312,7 +312,7 @@ fn caption_mode(args: &Args) {
     println!("qwen3vl caption profile: {} ({}x{}), {pixels} px budget, max_new {}, precision {}", path, img.w, img.h, args.max_new, args.precision.name());
     println!("decoder: {:.2} B params, {:.1} GiB fp32 -- every weight is read once per token at batch 1", params as f64 / 1e9, params as f64 * 4.0 / (1 << 30) as f64);
 
-    let load = qwen3vl::caps::load_time(&dir, pixels, args.precision).unwrap_or_else(|e| {
+    let load = qwen3vl::caps::load_time(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, args.precision).unwrap_or_else(|e| {
         eprintln!("caption: {e}");
         std::process::exit(1);
     });
@@ -323,7 +323,7 @@ fn caption_mode(args: &Args) {
     // without a device to measure on reported every stage as "no measured
     // roof" - the meter failing quietly rather than the kernels being
     // ungradeable.
-    let r = qwen3vl::caps::device_roof(&dir, pixels, args.precision).unwrap_or(None);
+    let r = qwen3vl::caps::device_roof(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, args.precision).unwrap_or(None);
     let head_params = cfg.text.vocab as u64 * cfg.text.d_model as u64;
     let layer_params = params - head_params;
     match decode_ceiling_tok_s(layer_params, head_params, r) {
@@ -338,12 +338,12 @@ fn caption_mode(args: &Args) {
     // caption costs as much as the measurement itself, and at one rep it would
     // double a multi-minute run to protect a number nothing is averaged into.
     if args.reps > 1 {
-        let _ = qwen3vl::caps::generate_profiled(&dir, pixels, args.precision, prompt, &hwc, img.w, img.h, args.max_new);
+        let _ = qwen3vl::caps::generate_profiled(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, args.precision, prompt, &hwc, img.w, img.h, args.max_new);
     }
 
     let mut best: Option<(qwen3vl::model::StageTimes, f64, String)> = None;
     for _ in 0..args.reps {
-        let (text, st, pre) = qwen3vl::caps::generate_profiled(&dir, pixels, args.precision, prompt, &hwc, img.w, img.h, args.max_new).unwrap_or_else(|e| {
+        let (text, st, pre) = qwen3vl::caps::generate_profiled(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, args.precision, prompt, &hwc, img.w, img.h, args.max_new).unwrap_or_else(|e| {
             eprintln!("caption: {e}");
             std::process::exit(1);
         });
@@ -417,7 +417,7 @@ fn caption_mode(args: &Args) {
         // Timestamp queries perturb, so read this for SHARES between kernels,
         // not as an absolute next to the stage table above.
         println!();
-        let _ = qwen3vl::caps::dump_profile(&dir, pixels, args.precision);
+        let _ = qwen3vl::caps::dump_profile(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, args.precision);
     }
 }
 
@@ -496,7 +496,7 @@ fn caption_all(dir: &str, pixels: u32, p: Precision, imgs: &[std::path::PathBuf]
                 std::process::exit(1)
             });
             let hwc: Vec<f32> = img.px.iter().map(|&b| b as f32 / 255.0).collect();
-            let (text, st, pre) = qwen3vl::caps::generate_profiled(dir, pixels, p, prompt, &hwc, img.w, img.h, max_new).unwrap_or_else(|e| {
+            let (text, st, pre) = qwen3vl::caps::generate_profiled(dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, p, prompt, &hwc, img.w, img.h, max_new).unwrap_or_else(|e| {
                 eprintln!("compare: {e}");
                 std::process::exit(1)
             });

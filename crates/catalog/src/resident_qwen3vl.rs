@@ -55,7 +55,7 @@
 //! here, not a shortcut.
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
-use qwen3vl::caps::{Precision, Resident, DEFAULT_SERVE_MAX_PIXELS, MODEL};
+use qwen3vl::caps::{Capacity, Precision, Resident, MODEL};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 /// Fallback fp32 estimate for the rare case `self.dir`'s config cannot be
@@ -69,7 +69,7 @@ const FP32_BYTES: u64 = 25u64 << 30;
 /// 4B config).
 const INT8_BYTES: u64 = 13u64 << 30;
 
-/// Qwen3-VL behind the scheduler. `BRAIN_QWEN3VL_WEIGHTS` names either an HF
+/// Qwen3-VL behind the scheduler. The resolved `weights` role names either an HF
 /// checkpoint DIRECTORY (`config.json` + `model.safetensors[.index.json]` +
 /// `tokenizer.json`) or a two-file llama.cpp GGUF checkpoint (the language
 /// half, or the directory holding it plus its `mmproj-*.gguf` sibling) - see
@@ -96,13 +96,6 @@ impl Qwen3VlResident {
         Some(Qwen3VlResident { dir })
     }
 
-    /// The resident capacity a request asks for, defaulting to
-    /// [`DEFAULT_SERVE_MAX_PIXELS`] - see `qwen3vl::caps`'s own doc on why
-    /// this is a construction-time CAPACITY, not one request's exact size.
-    fn max_pixels_of(inv: &Invocation) -> u32 {
-        inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32
-    }
-
     /// The precision a request asks for, defaulting to the one that fits
     /// (`Precision::default()` is fp32, matching the action spec's own
     /// `"precision"` param default). Unlike `qwen3vl::caps::GenerateAction`'s
@@ -118,7 +111,7 @@ impl Qwen3VlResident {
 impl ResidentModel for Qwen3VlResident {
     fn manifest(&self) -> Manifest {
         // The stripped, weights-free spec: this resident's checkpoint path is
-        // already resolved (`self.dir`, from `from_env`/`new`), so a served
+        // already resolved (`self.dir`, from `from_store`/`new`), so a served
         // caller must never be told a `weights` param exists to set - see
         // `qwen3vl::caps::manifest_resident`'s doc. `run` below never reads
         // `weights` from `inv` either (`Resident::generate` takes none).
@@ -126,14 +119,14 @@ impl ResidentModel for Qwen3VlResident {
     }
 
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
-        // `max_pixels` and `precision` are both part of the identity: each
-        // combination is a differently-sized build (DeepStack/splice buffer
-        // capacity and decoder linear width respectively), and sharing one
-        // key across them would let a stray request evict a working instance
-        // to build a differently-shaped one.
-        let max_pixels = Self::max_pixels_of(inv);
+        // The capacity (`max_pixels`, `ctx`) and `precision` are all part of
+        // the identity: each combination is a differently-sized build
+        // (DeepStack/splice buffers, KV cache, decoder linear width), and
+        // sharing one key across them would let a stray request evict a
+        // working instance to build a differently-shaped one.
+        let Capacity { max_pixels, ctx } = Capacity::of(inv);
         let p = Self::precision_of(inv).name();
-        InstanceKey::new(MODEL, format!("{}|{max_pixels}|{p}", self.dir))
+        InstanceKey::new(MODEL, format!("{}|{max_pixels}|{ctx}|{p}", self.dir))
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
@@ -142,13 +135,13 @@ impl ResidentModel for Qwen3VlResident {
         // `place::pick_device` falls a weight-holding model back to the CPU
         // pool at the same figure on a machine with no GPU, which is its own
         // rule and the behaviour this model wants.
-        let (_, max_pixels, precision) = parse_key(key).unwrap_or((String::new(), DEFAULT_SERVE_MAX_PIXELS, Precision::default()));
+        let (_, capacity, precision) = parse_key(key).unwrap_or((String::new(), Capacity::default(), Precision::default()));
         // Read THIS checkpoint's own config (never the request's `dir` from
         // `key` -- `self.dir` is the one this resident actually serves) and
         // derive the real figure from it; only a config this resident cannot
         // even read (a bad path, a malformed file) falls back to the
         // hand-derived 4B constant, which `activate` would refuse on anyway.
-        let bytes = qwen3vl::caps::config_and_capacity(&self.dir, max_pixels)
+        let bytes = qwen3vl::caps::config_and_capacity(&self.dir, capacity)
             .map(|(cfg, n_visual_capacity, seq_len)| qwen3vl::footprint::estimate_vram_bytes(&cfg, precision, seq_len, n_visual_capacity))
             .unwrap_or(match precision {
                 Precision::I8 => INT8_BYTES,
@@ -158,7 +151,7 @@ impl ResidentModel for Qwen3VlResident {
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let (dir, max_pixels, precision) = parse_key(key)?;
+        let (dir, capacity, precision) = parse_key(key)?;
         let gpu = match device {
             Device::Cpu => None,
             Device::Gpu(i) => Some(i),
@@ -168,23 +161,23 @@ impl ResidentModel for Qwen3VlResident {
                 return Err(format!("qwen3vl: assigned Npu({i}), but this model has no NPU export path"));
             }
         };
-        let resident = Resident::load_on(&dir, max_pixels, precision, gpu)?;
+        let resident = Resident::load_on(&dir, capacity, precision, gpu)?;
         Ok(Box::new(Qwen3VlInstance { resident }))
     }
 }
 
-/// `(dir, max_pixels, precision)` out of an [`InstanceKey`]'s
-/// `"{dir}|{max_pixels}|{precision}"` config string. Splitting from the
+/// `(dir, capacity, precision)` out of an [`InstanceKey`]'s
+/// `"{dir}|{max_pixels}|{ctx}|{precision}"` config string. Splitting from the
 /// RIGHT (`rsplitn`) means a directory path containing `|` still parses
-/// correctly, since only the last two fields are peeled off.
-fn parse_key(key: &InstanceKey) -> Result<(String, u32, Precision), String> {
-    let mut parts = key.config.rsplitn(3, '|');
-    let precision_s = parts.next().ok_or("qwen3vl: malformed instance key")?;
-    let max_pixels_s = parts.next().ok_or("qwen3vl: malformed instance key")?;
-    let dir = parts.next().ok_or("qwen3vl: malformed instance key")?.to_string();
-    let precision = Precision::from_name(precision_s)?;
-    let max_pixels: u32 = max_pixels_s.parse().map_err(|_| "qwen3vl: malformed instance key (max_pixels)".to_string())?;
-    Ok((dir, max_pixels, precision))
+/// correctly, since only the last three fields are peeled off.
+fn parse_key(key: &InstanceKey) -> Result<(String, Capacity, Precision), String> {
+    let mut parts = key.config.rsplitn(4, '|');
+    let malformed = || "qwen3vl: malformed instance key".to_string();
+    let precision = Precision::from_name(parts.next().ok_or_else(malformed)?)?;
+    let ctx: u32 = parts.next().ok_or_else(malformed)?.parse().map_err(|_| "qwen3vl: malformed instance key (ctx)".to_string())?;
+    let max_pixels: u32 = parts.next().ok_or_else(malformed)?.parse().map_err(|_| "qwen3vl: malformed instance key (max_pixels)".to_string())?;
+    let dir = parts.next().ok_or_else(malformed)?.to_string();
+    Ok((dir, Capacity { max_pixels, ctx }, precision))
 }
 
 /// A resident Qwen3-VL: the built composite (vision tower + decoder +

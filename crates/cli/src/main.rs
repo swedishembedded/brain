@@ -1415,6 +1415,7 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_MINIMAXMUSIC3_DIT", replacement: "serve: {pin: [minimaxmusic3.transformer=DIR]}" },
     Retired { name: "BRAIN_MINIMAXMUSIC3_VOCODER", replacement: "serve: {pin: [minimaxmusic3.vocoder=DIR]}" },
     Retired { name: "BRAIN_MINIMAXMUSIC3_TOKENIZER", replacement: "serve: {pin: [minimaxmusic3.tokenizer=DIR]}" },
+    Retired { name: "BRAIN_QWEN3VL_CTX", replacement: "qwen3vl generate: {ctx: N}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 

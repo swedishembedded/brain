@@ -164,15 +164,11 @@ impl Precision {
 /// checkpoint/workload that genuinely needs bigger images.
 pub const DEFAULT_SERVE_MAX_PIXELS: u32 = 1024 * 1024;
 
-/// The KV-cache capacity this resident's decoder is BUILT for, before
-/// clamping to the checkpoint's own declared ceiling (see
-/// [`load_hf_resident`]/[`load_gguf_resident`]).
+/// The KV-cache capacity a resident's decoder is built for when a request
+/// names no `ctx`, before clamping to the checkpoint's own declared ceiling
+/// (see [`load_hf_resident`]/[`load_gguf_resident`]).
 ///
-/// `$BRAIN_QWEN3VL_CTX`, the counterpart of `qwen3`'s served `--ctx`
-/// (`crates/catalog/src/resident_llm.rs`) - an env-level operator knob, not a
-/// per-request parameter, because it sizes a real device allocation the
-/// resident is built with once, not something a caller picks per call.
-/// 24576 matches that sibling's own default: real Qwen3-VL-4B-Instruct
+/// 24576 matches `qwen3`'s served default: real Qwen3-VL-4B-Instruct
 /// checkpoints declare a 262144-token `max_position_embeddings`, but this
 /// decode path allocates a PLAIN LINEAR fp32 KV cache (`Qwen::
 /// new_shard_dt_decode`), not the paged/int8 cache `qwen3::serve::Engine`
@@ -180,11 +176,34 @@ pub const DEFAULT_SERVE_MAX_PIXELS: u32 = 1024 * 1024;
 /// `n_layers=36, n_kv_heads=8, head_dim=128`, one token costs
 /// `36*8*128*2*4 = 294912` bytes, so the full 262144 would be ~77 GiB of KV
 /// alone. 24576 (~7.1 GiB) is a real, working default for a single request;
-/// raising it is an explicit operator choice, not a silent truncation - and
+/// raising it is the caller's explicit `ctx`, not a silent truncation - and
 /// a request that overflows it is refused BY NAME (see [`Prepared::build`]),
 /// never silently cropped.
-fn default_ctx_len() -> u32 {
-    std::env::var("BRAIN_QWEN3VL_CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(24576u32).max(1)
+pub const DEFAULT_CTX: u32 = 24576;
+
+/// What a resident is BUILT for: the per-image area its DeepStack/splice
+/// buffers hold (`max_pixels`) and its KV-cache length (`ctx`). Both are
+/// construction-time capacities rather than one request's exact size, so each
+/// combination is its own build and its own resident key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capacity {
+    pub max_pixels: u32,
+    pub ctx: u32,
+}
+
+impl Default for Capacity {
+    fn default() -> Capacity {
+        Capacity { max_pixels: DEFAULT_SERVE_MAX_PIXELS, ctx: DEFAULT_CTX }
+    }
+}
+
+impl Capacity {
+    /// The capacity a request asks for (`max_pixels`, `ctx`), each defaulted.
+    pub fn of(inv: &Invocation) -> Capacity {
+        let d = Capacity::default();
+        let get = |name: &str, default: u32| inv.get_i64(name).map_or(default, |v| v.clamp(1, u32::MAX as i64) as u32);
+        Capacity { max_pixels: get("max_pixels", d.max_pixels), ctx: get("ctx", d.ctx) }
+    }
 }
 
 /// Cap on the number of images one request may supply -- see this module's
@@ -239,6 +258,16 @@ pub fn generate_spec() -> ActionSpec {
             .min(1.0)
             .max(capability::blob::MAX_IMAGE_PIXELS as f64)
             .default(json!(DEFAULT_SERVE_MAX_PIXELS)),
+        )
+        .param(
+            ParamSpec::new(
+                "ctx",
+                ParamType::Int,
+                "resident capacity: KV-cache length in tokens, clamped to the checkpoint's own declared window; a request whose prompt plus max_new exceeds it errors by name",
+            )
+            .min(1.0)
+            .max(capability::bounds::CONTEXT_WINDOW)
+            .default(json!(DEFAULT_CTX)),
         )
         .param(
             // perf-number: size ratio: int8 is 1 byte against fp32's 4, not a rate
@@ -308,7 +337,7 @@ pub fn manifest() -> Manifest {
         MODEL,
         "Qwen3-VL -- image + text in, text out. Validation-tier: fp32 weights by default \
          (int8 decoder opt-in), temperature/top-k/top-p sampling (greedy by default), \
-         one request at a time (no batching), context capacity set by $BRAIN_QWEN3VL_CTX \
+         one request at a time (no batching), context capacity set by the `ctx` param \
          (clamped to the checkpoint's own declared max_position_embeddings). \
          `lora_train` fine-tunes a decoder-only LoRA adapter on a captioned-image folder.",
         vec![generate_spec(), lora_train_spec()],
@@ -339,7 +368,7 @@ use capability::last_user_text;
 /// `moondream3::caps::Session`'s split.
 pub struct Resident {
     weights: String,
-    max_pixels: u32,
+    capacity: Capacity,
     /// The tier this resident was BUILT at, part of its key - see
     /// [`Precision`]. What the device actually landed on is
     /// `Qwen3Vl::linear_dtype`, which `load_resident` checks against this.
@@ -354,7 +383,7 @@ pub struct Resident {
     /// request's images all share (see this module's own doc).
     n_visual_capacity: u32,
     /// The KV-cache capacity this resident's decoder was actually BUILT for -
-    /// `min(default_ctx_len(), cfg.text.max_position_embeddings)`, see
+    /// `min(capacity.ctx, cfg.text.max_position_embeddings)`, see
     /// [`load_hf_resident`]. Read by [`Prepared::build`] instead of a
     /// compile-time constant, so a request's context error names the real
     /// number this checkpoint and this box actually support.
@@ -377,10 +406,10 @@ impl Resident {
     /// selection (`--device` / scoped `with_gpu`)", so scoping the call here
     /// is sufficient - no device parameter needs to thread through
     /// `crate::model`.
-    pub fn load_on(dir: &str, max_pixels: u32, precision: Precision, gpu: Option<u32>) -> Result<Resident, String> {
+    pub fn load_on(dir: &str, capacity: Capacity, precision: Precision, gpu: Option<u32>) -> Result<Resident, String> {
         match gpu {
-            None => load_resident(dir, max_pixels, precision),
-            Some(i) => gpu_core::devices::with_gpu(i, || load_resident(dir, max_pixels, precision))?,
+            None => load_resident(dir, capacity, precision),
+            Some(i) => gpu_core::devices::with_gpu(i, || load_resident(dir, capacity, precision))?,
         }
     }
 
@@ -602,9 +631,8 @@ impl Action for GenerateAction {
             .filter(|s| !s.is_empty())
             .or_else(|| self.default_weights.clone())
             .ok_or("qwenvl generate: no checkpoint directory (pass 'weights', or configure one through the models directory)")?;
-        let max_pixels = inv.get_i64("max_pixels").unwrap_or(DEFAULT_SERVE_MAX_PIXELS as i64).max(1) as u32;
         let precision = Precision::from_name(inv.get_str("precision").unwrap_or_default().as_str())?;
-        with_resident(&dir, max_pixels, precision, |hot| hot.generate(inv, video_frames, tool_choice, &tools, seed, progress))
+        with_resident(&dir, Capacity::of(inv), precision, |hot| hot.generate(inv, video_frames, tool_choice, &tools, seed, progress))
     }
 }
 
@@ -657,18 +685,18 @@ impl Action for LoraTrainAction {
     }
 }
 
-/// Run `f` against the process-wide resident for `(dir, max_pixels)`, building
+/// Run `f` against the process-wide resident for `(dir, capacity)`, building
 /// it first when the key changed.
 ///
 /// The ONE place the resident is built and the lock is held, so a second entry
 /// point (the profiler below) cannot acquire it in a different order or forget
 /// to swap on a key change. `f` runs under the lock, which is also the
 /// concurrency contract this action already had ("one request at a time").
-fn with_resident<T>(dir: &str, max_pixels: u32, precision: Precision, f: impl FnOnce(&Resident) -> Result<T, String>) -> Result<T, String> {
+fn with_resident<T>(dir: &str, capacity: Capacity, precision: Precision, f: impl FnOnce(&Resident) -> Result<T, String>) -> Result<T, String> {
     let mut guard = RESIDENT.lock().map_err(|_| "qwenvl: resident lock poisoned")?;
-    if !matches!(&*guard, Some(r) if r.weights == dir && r.max_pixels == max_pixels && r.precision == precision) {
+    if !matches!(&*guard, Some(r) if r.weights == dir && r.capacity == capacity && r.precision == precision) {
         *guard = None;
-        *guard = Some(load_resident(dir, max_pixels, precision)?);
+        *guard = Some(load_resident(dir, capacity, precision)?);
     }
     f(guard.as_ref().unwrap())
 }
@@ -759,7 +787,7 @@ impl Prepared {
             // checkpoint's HF processor runs, no "caller must pre-align"
             // shortcut. Independent per image: a request's images need not
             // share a resolution or aspect ratio.
-            let (h_bar, w_bar) = smart_resize(*h, *w, factor, preprocess_min_pixels(), hot.max_pixels);
+            let (h_bar, w_bar) = smart_resize(*h, *w, factor, preprocess_min_pixels(), hot.capacity.max_pixels);
             let n_visual_i = crate::preprocess::image_token_count(h_bar, w_bar, hot.cfg.vision.patch_size, hot.cfg.vision.spatial_merge_size);
             n_visual += n_visual_i;
             if n_visual > hot.n_visual_capacity {
@@ -768,7 +796,7 @@ impl Prepared {
                      this resident's capacity {} (raise 'max_pixels', or send fewer/smaller images -- current cap {} px/image)",
                     images.len(),
                     hot.n_visual_capacity,
-                    hot.max_pixels
+                    hot.capacity.max_pixels
                 ));
             }
             let mut chw = hwc_to_chw_resized(hwc, *w, *h, w_bar, h_bar);
@@ -788,7 +816,7 @@ impl Prepared {
         if tokens.len() as u32 + max_new > hot.seq_len {
             return Err(format!(
                 "qwenvl generate: prompt ({} tokens incl. {n_visual} image tokens across {} image(s)) + max_new ({max_new}) \
-                 exceeds this resident's context {} (set $BRAIN_QWEN3VL_CTX to raise it, up to this checkpoint's own {} max_position_embeddings)",
+                 exceeds this resident's context {} (raise `ctx` to allow it, up to this checkpoint's own {} max_position_embeddings)",
                 tokens.len(),
                 images.len(),
                 hot.seq_len,
@@ -835,7 +863,7 @@ impl PreparedVideo {
     fn build(hot: &Resident, frames: &[(Vec<f32>, u32, u32)], fps: f32, prompt: &str, max_new: u32, tools: &[String]) -> Result<PreparedVideo, String> {
         let (_, w0, h0) = *frames.first().ok_or("qwenvl generate: an empty video has no frames to caption")?;
         let factor = hot.cfg.vision.patch_size * hot.cfg.vision.spatial_merge_size;
-        let (h_bar, w_bar) = smart_resize(h0, w0, factor, preprocess_min_pixels(), hot.max_pixels);
+        let (h_bar, w_bar) = smart_resize(h0, w0, factor, preprocess_min_pixels(), hot.capacity.max_pixels);
 
         let mut chw_frames: Vec<Vec<f32>> = Vec::with_capacity(frames.len());
         for (hwc, w, h) in frames {
@@ -856,7 +884,7 @@ impl PreparedVideo {
             return Err(format!(
                 "qwenvl generate: video needs {n_visual} visual tokens across {n_frames} frame group(s), exceeding \
                  this resident's capacity {} (raise 'max_pixels' -- current cap {} px)",
-                hot.n_visual_capacity, hot.max_pixels
+                hot.n_visual_capacity, hot.capacity.max_pixels
             ));
         }
 
@@ -906,7 +934,7 @@ impl PreparedVideo {
         if tokens.len() as u32 + max_new > hot.seq_len {
             return Err(format!(
                 "qwenvl generate: prompt ({} tokens incl. {n_visual} video tokens) + max_new ({max_new}) \
-                 exceeds this resident's context {} (set $BRAIN_QWEN3VL_CTX to raise it, up to this checkpoint's own {} max_position_embeddings)",
+                 exceeds this resident's context {} (raise `ctx` to allow it, up to this checkpoint's own {} max_position_embeddings)",
                 tokens.len(),
                 hot.seq_len,
                 hot.cfg.text.max_position_embeddings
@@ -927,7 +955,7 @@ impl PreparedVideo {
 #[allow(clippy::too_many_arguments)]
 pub fn generate_profiled(
     dir: &str,
-    max_pixels: u32,
+    capacity: Capacity,
     precision: Precision,
     prompt: &str,
     hwc: &[f32],
@@ -935,7 +963,7 @@ pub fn generate_profiled(
     h: u32,
     max_new: u32,
 ) -> Result<(String, crate::model::StageTimes, f64), String> {
-    with_resident(dir, max_pixels, precision, |hot| {
+    with_resident(dir, capacity, precision, |hot| {
         let p = Prepared::build(hot, hwc, w, h, prompt, max_new, &[])?;
         // Greedy: a bench measures cost, and a deterministic decode keeps
         // `qwen3vl_bench compare`'s tier-divergence numbers reproducible run
@@ -954,8 +982,8 @@ pub fn generate_profiled(
 /// caller that has not itself called `ensure` on a real handle gets `None` and
 /// silently reports every stage as "no measured roof". The handle lives behind
 /// the resident, so this is where the two can meet.
-pub fn device_roof(dir: &str, max_pixels: u32, precision: Precision) -> Result<Option<gpu_core::roof::Roofs>, String> {
-    with_resident(dir, max_pixels, precision, |hot| Ok(gpu_core::roof::ensure(hot.model.gpu())))
+pub fn device_roof(dir: &str, capacity: Capacity, precision: Precision) -> Result<Option<gpu_core::roof::Roofs>, String> {
+    with_resident(dir, capacity, precision, |hot| Ok(gpu_core::roof::ensure(hot.model.gpu())))
 }
 
 /// The tier this checkpoint's decoder ACTUALLY landed on, as the same string
@@ -966,7 +994,7 @@ pub fn device_roof(dir: &str, max_pixels: u32, precision: Precision) -> Result<O
 /// packed int8 dot has its request promoted back to fp32 by `Weight::upload`,
 /// and a caller reporting its own request would claim a lossy run that never
 /// happened - or, worse, miss one that did.
-pub fn linear_dtype(dir: &str, max_pixels: u32, precision: Precision) -> Result<Option<String>, String> {
+pub fn linear_dtype(dir: &str, capacity: Capacity, precision: Precision) -> Result<Option<String>, String> {
     use gpu_core::select::Dtype;
     // Exhaustive, and deliberately not a `Debug` format: this string is
     // compared against [`Precision::name`]'s vocabulary, and `{:?}` spells
@@ -999,7 +1027,7 @@ pub fn linear_dtype(dir: &str, max_pixels: u32, precision: Precision) -> Result<
         Dtype::Cq3 => "cq3",
         Dtype::Cq4 => "cq4",
     };
-    with_resident(dir, max_pixels, precision, |hot| Ok(hot.model.linear_dtype().map(|dt| name(dt).to_string())))
+    with_resident(dir, capacity, precision, |hot| Ok(hot.model.linear_dtype().map(|dt| name(dt).to_string())))
 }
 
 /// Print the per-kernel `--kernel-profile` table for this checkpoint's resident.
@@ -1010,8 +1038,8 @@ pub fn linear_dtype(dir: &str, max_pixels: u32, precision: Precision) -> Result<
 /// where a caller with a checkpoint path can reach it. `--kernel-profile` must
 /// already be set when the resident is BUILT, since the backend reads it once
 /// at construction.
-pub fn dump_profile(dir: &str, max_pixels: u32, precision: Precision) -> Result<(), String> {
-    with_resident(dir, max_pixels, precision, |hot| {
+pub fn dump_profile(dir: &str, capacity: Capacity, precision: Precision) -> Result<(), String> {
+    with_resident(dir, capacity, precision, |hot| {
         hot.model.gpu().dump_profile();
         Ok(())
     })
@@ -1020,9 +1048,9 @@ pub fn dump_profile(dir: &str, max_pixels: u32, precision: Precision) -> Result<
 /// Build (or reuse) the resident for `(dir, max_pixels)` and report how long
 /// that took, without generating anything - the one-off setup cost a caption
 /// profile must not fold into its per-image numbers.
-pub fn load_time(dir: &str, max_pixels: u32, precision: Precision) -> Result<f64, String> {
+pub fn load_time(dir: &str, capacity: Capacity, precision: Precision) -> Result<f64, String> {
     let t0 = std::time::Instant::now();
-    with_resident(dir, max_pixels, precision, |_| Ok(()))?;
+    with_resident(dir, capacity, precision, |_| Ok(()))?;
     Ok(t0.elapsed().as_secs_f64())
 }
 
@@ -1087,26 +1115,26 @@ fn classify_source(weights: &str) -> Result<Source, String> {
     Err(format!("qwenvl: {weights} is neither a checkpoint directory nor a GGUF file"))
 }
 
-fn load_resident(dir: &str, max_pixels: u32, precision: Precision) -> Result<Resident, String> {
+fn load_resident(dir: &str, capacity: Capacity, precision: Precision) -> Result<Resident, String> {
     match classify_source(dir)? {
-        Source::HfDir(d) => load_hf_resident(dir, &d, max_pixels, precision),
-        Source::Gguf(files) => load_gguf_resident(dir, files, max_pixels, precision),
+        Source::HfDir(d) => load_hf_resident(dir, &d, capacity, precision),
+        Source::Gguf(files) => load_gguf_resident(dir, files, capacity, precision),
     }
 }
 
 /// This checkpoint's config plus the derived KV-cache/DeepStack capacity a
-/// resident would actually be built with at `max_pixels` - everything
+/// resident would actually be built with at `capacity` - everything
 /// [`crate::footprint::estimate_vram_bytes`] needs, read WITHOUT touching a
 /// single weight tensor (a GGUF header is a mmap, an HF `config.json` a small
 /// JSON parse - both cheap enough to call from a residency `estimate()`).
 /// `crates/catalog/src/resident_qwen3vl.rs::Qwen3VlResident::estimate` calls this
 /// so a residency budgeting decision reflects the checkpoint actually named
-/// by `BRAIN_QWEN3VL_WEIGHTS`, not a constant hand-derived for one released
+/// by the resolved weights, not a constant hand-derived for one released
 /// size.
-pub fn config_and_capacity(weights: &str, max_pixels: u32) -> Result<(Qwen3VlConfig, u32, u32), String> {
+pub fn config_and_capacity(weights: &str, capacity: Capacity) -> Result<(Qwen3VlConfig, u32, u32), String> {
     let cfg = config_of(weights)?;
-    let n_visual_capacity = visual_capacity(&cfg, max_pixels);
-    let seq_len = resolved_ctx_len(&cfg);
+    let n_visual_capacity = visual_capacity(&cfg, capacity.max_pixels);
+    let seq_len = resolved_ctx_len(&cfg, capacity.ctx);
     Ok((cfg, n_visual_capacity, seq_len))
 }
 
@@ -1140,11 +1168,11 @@ fn gguf_config(files: &crate::gguf_import::GgufFiles) -> Result<(Qwen3VlConfig, 
 /// Build from a two-file llama.cpp checkpoint. Both halves are named on the
 /// way in, because a run that silently used a different projector than the
 /// operator expected has no visible symptom.
-fn load_gguf_resident(weights: &str, files: crate::gguf_import::GgufFiles, max_pixels: u32, precision: Precision) -> Result<Resident, String> {
+fn load_gguf_resident(weights: &str, files: crate::gguf_import::GgufFiles, capacity: Capacity, precision: Precision) -> Result<Resident, String> {
     eprintln!("qwenvl: gguf checkpoint: model {}, vision projector {}", files.lm.display(), files.mmproj.display());
     let (cfg, tok) = gguf_config(&files)?;
-    let n_visual_capacity = visual_capacity(&cfg, max_pixels);
-    let seq_len = resolved_ctx_len(&cfg);
+    let n_visual_capacity = visual_capacity(&cfg, capacity.max_pixels);
+    let seq_len = resolved_ctx_len(&cfg, capacity.ctx);
     let bytes = crate::footprint::estimate_vram_bytes(&cfg, precision, seq_len, n_visual_capacity);
     place_and_build(bytes, || {
         let w = crate::gguf_import::weights(&files, &cfg)?;
@@ -1160,7 +1188,7 @@ fn load_gguf_resident(weights: &str, files: crate::gguf_import::GgufFiles, max_p
             precision.dtype(),
         );
         report_tier(&model, precision);
-        Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, seq_len, cfg: cfg.clone(), model, tok })
+        Ok(Resident { weights: weights.to_string(), capacity, precision, n_visual_capacity, seq_len, cfg: cfg.clone(), model, tok })
     })
 }
 
@@ -1190,7 +1218,7 @@ fn place_and_build<R>(bytes: u64, f: impl FnOnce() -> Result<R, String>) -> Resu
 }
 
 /// The KV-cache capacity to actually build a resident's decoder with:
-/// [`default_ctx_len`] clamped DOWN to this checkpoint's own declared
+/// the requested `ctx` clamped DOWN to this checkpoint's own declared
 /// `max_position_embeddings` - "derive context from the checkpoint config"
 /// means the ceiling is real (read off `config.json`/GGUF metadata, never a
 /// number this crate made up), while the allocated default stays the
@@ -1198,8 +1226,8 @@ fn place_and_build<R>(bytes: u64, f: impl FnOnce() -> Result<R, String>) -> Resu
 /// a checkpoint declaring less than the default (e.g. a smaller variant)
 /// must not have this resident silently over-allocate past what training
 /// ever taught it to use.
-fn resolved_ctx_len(cfg: &Qwen3VlConfig) -> u32 {
-    default_ctx_len().min(cfg.text.max_position_embeddings.max(1))
+fn resolved_ctx_len(cfg: &Qwen3VlConfig, ctx: u32) -> u32 {
+    ctx.max(1).min(cfg.text.max_position_embeddings.max(1))
 }
 
 /// The largest visual-token count ONE image can produce at `max_pixels`.
@@ -1238,12 +1266,12 @@ fn visual_capacity(cfg: &Qwen3VlConfig, max_pixels: u32) -> u32 {
     per_image_visual_capacity(cfg, max_pixels) * MAX_IMAGES as u32
 }
 
-fn load_hf_resident(weights: &str, dir: &str, max_pixels: u32, precision: Precision) -> Result<Resident, String> {
+fn load_hf_resident(weights: &str, dir: &str, capacity: Capacity, precision: Precision) -> Result<Resident, String> {
     let cfg = hf_config(dir)?;
     let tok = data::qwen_tokenizer::QwenBpe::from_dir(dir).map_err(|e| format!("qwenvl: tokenizer: {e}"))?;
 
-    let n_visual_capacity = visual_capacity(&cfg, max_pixels);
-    let seq_len = resolved_ctx_len(&cfg);
+    let n_visual_capacity = visual_capacity(&cfg, capacity.max_pixels);
+    let seq_len = resolved_ctx_len(&cfg, capacity.ctx);
     let bytes = crate::footprint::estimate_vram_bytes(&cfg, precision, seq_len, n_visual_capacity);
     place_and_build(bytes, || {
         let model = Qwen3Vl::from_hf(
@@ -1258,7 +1286,7 @@ fn load_hf_resident(weights: &str, dir: &str, max_pixels: u32, precision: Precis
             precision.dtype(),
         )?;
         report_tier(&model, precision);
-        Ok(Resident { weights: weights.to_string(), max_pixels, precision, n_visual_capacity, seq_len, cfg: cfg.clone(), model, tok })
+        Ok(Resident { weights: weights.to_string(), capacity, precision, n_visual_capacity, seq_len, cfg: cfg.clone(), model, tok })
     })
 }
 
@@ -1351,10 +1379,11 @@ mod tests {
     fn resolved_ctx_len_never_exceeds_the_checkpoints_own_ceiling() {
         let mut cfg = Qwen3VlConfig::qwen3_vl_4b();
         cfg.text.max_position_embeddings = 2048; // smaller than the 24576 default
-        assert_eq!(resolved_ctx_len(&cfg), 2048, "must clamp DOWN to the checkpoint's declared max, never allocate past it");
+        assert_eq!(resolved_ctx_len(&cfg, DEFAULT_CTX), 2048, "must clamp DOWN to the checkpoint's declared max, never allocate past it");
 
         cfg.text.max_position_embeddings = 262144; // the real released config's declared ceiling
-        assert_eq!(resolved_ctx_len(&cfg), default_ctx_len(), "a checkpoint with real headroom gets the operator's configured default, not a fixed 4096");
+        assert_eq!(resolved_ctx_len(&cfg, DEFAULT_CTX), DEFAULT_CTX, "a checkpoint with real headroom gets the requested capacity, not a fixed 4096");
+        assert_eq!(resolved_ctx_len(&cfg, 65536), 65536, "a larger request is honoured up to the checkpoint's ceiling");
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
@@ -1413,8 +1442,8 @@ mod tests {
         write_hf_config(&small_dir, 36, 2560, 9728); // the released 4B's own shape
         write_hf_config(&big_dir, 72, 4096, 12288); // roughly 8B-class: more layers AND wider
 
-        let (small_cfg, small_nv, small_seq) = config_and_capacity(small_dir.to_str().unwrap(), DEFAULT_SERVE_MAX_PIXELS).expect("small config reads");
-        let (big_cfg, big_nv, big_seq) = config_and_capacity(big_dir.to_str().unwrap(), DEFAULT_SERVE_MAX_PIXELS).expect("big config reads");
+        let (small_cfg, small_nv, small_seq) = config_and_capacity(small_dir.to_str().unwrap(), Capacity::default()).expect("small config reads");
+        let (big_cfg, big_nv, big_seq) = config_and_capacity(big_dir.to_str().unwrap(), Capacity::default()).expect("big config reads");
         assert_eq!(small_cfg.text.n_layers, 36);
         assert_eq!(big_cfg.text.n_layers, 72);
 

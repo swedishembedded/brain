@@ -774,7 +774,6 @@ crates/qwen3tts/tests/it/sft_train.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3tts/tests/it/talker.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3vl/src/bin/qwen3vl_bench.rs	BRAIN_QWEN3VL_WEIGHTS
 crates/qwen3vl/src/caps.rs	BRAIN_QWEN3VL_WEIGHTS
-crates/qwen3vl/src/caps.rs	BRAIN_QWEN3VL_CTX
 crates/qwen3vl/src/captioner.rs	BRAIN_QWEN3VL_WEIGHTS
 crates/qwen3vl/src/parity.rs	BRAIN_DEVICE
 crates/qwen3vl/src/train_smoke.rs	BRAIN_DEVICE

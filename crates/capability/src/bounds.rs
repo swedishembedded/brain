@@ -39,6 +39,10 @@ pub const TRAIN_STEPS: f64 = 100_000.0;
 pub const TRAIN_COUNT: f64 = 1_000_000.0;
 /// A training row or context length, in tokens (`block`, `seq_len`).
 pub const CONTEXT_TOKENS: f64 = 131_072.0;
+/// The context window an inference resident is built for (`ctx`): the
+/// checkpoint's own declared window and the device's memory refuse less than
+/// this first.
+pub const CONTEXT_WINDOW: f64 = 16_777_216.0;
 /// The rank of a LoRA adapter.
 pub const LORA_RANK: f64 = 1_024.0;
 /// Frames per second of a clip.

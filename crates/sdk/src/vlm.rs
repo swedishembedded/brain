@@ -161,7 +161,7 @@ impl VisionLanguagePipeline {
         VisionLanguagePipelineBuilder {
             model_id: model_id.as_ref().to_string(),
             device: Device::default(),
-            max_pixels: qwen3vl::caps::DEFAULT_SERVE_MAX_PIXELS,
+            capacity: qwen3vl::caps::Capacity::default(),
             precision: qwen3vl::caps::Precision::default(),
             download_policy: loader::DownloadPolicy::default(),
         }
@@ -229,12 +229,12 @@ impl VisionLanguagePipeline {
     }
 }
 
-/// Builds a [`VisionLanguagePipeline`]. `.device(...)`/`.max_pixels(...)`/
-/// `.precision(...)` are the only knobs this milestone exposes.
+/// Builds a [`VisionLanguagePipeline`]: `.device(...)`, the resident capacity
+/// (`.max_pixels(...)`, `.ctx(...)`) and `.precision(...)`.
 pub struct VisionLanguagePipelineBuilder {
     model_id: String,
     device: Device,
-    max_pixels: u32,
+    capacity: qwen3vl::caps::Capacity,
     precision: qwen3vl::caps::Precision,
     download_policy: loader::DownloadPolicy,
 }
@@ -249,7 +249,16 @@ impl VisionLanguagePipelineBuilder {
     /// image independently (`qwen3vl::caps::generate_spec`'s own doc) -
     /// default `qwen3vl::caps::DEFAULT_SERVE_MAX_PIXELS` (~1024x1024).
     pub fn max_pixels(mut self, max_pixels: u32) -> Self {
-        self.max_pixels = max_pixels.max(1);
+        self.capacity.max_pixels = max_pixels.max(1);
+        self
+    }
+
+    /// Resident capacity: the KV-cache length in tokens, clamped to the
+    /// checkpoint's own declared window - default
+    /// `qwen3vl::caps::DEFAULT_CTX`. A request that needs more is refused by
+    /// name, never cropped.
+    pub fn ctx(mut self, ctx: u32) -> Self {
+        self.capacity.ctx = ctx.max(1);
         self
     }
 
@@ -291,12 +300,12 @@ impl VisionLanguagePipelineBuilder {
     ///    once. See [`crate::resolve_policy::resolve_with_policy`], shared
     ///    by every pipeline builder that resolves this way.
     /// 4. `qwen3vl::caps::Resident::load_on` builds the resident model at
-    ///    this builder's `max_pixels`/`precision`, letting device placement
+    ///    this builder's capacity/`precision`, letting device placement
     ///    fall to whatever step 1 already narrowed the ambient selection to
     ///    (`gpu: None`) - the same pattern every other resolver-backed
     ///    pipeline in this crate uses.
     pub fn load(self) -> Result<VisionLanguagePipeline> {
-        let VisionLanguagePipelineBuilder { model_id, device, max_pixels, precision, download_policy } = self;
+        let VisionLanguagePipelineBuilder { model_id, device, capacity, precision, download_policy } = self;
 
         crate::device::apply(&device)?;
 
@@ -304,7 +313,7 @@ impl VisionLanguagePipelineBuilder {
         let assembly = crate::resolve_policy::resolve_with_policy("qwen3vl", &qwen3vl::spec::Qwen3VlSpec, &model_id, &overrides, download_policy)?;
 
         let weights = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("qwen3vl: resolved assembly {:?} has no weights role", assembly.id)))?;
-        let resident = qwen3vl::caps::Resident::load_on(&weights.to_string_lossy(), max_pixels, precision, None).map_err(Error::Backend)?;
+        let resident = qwen3vl::caps::Resident::load_on(&weights.to_string_lossy(), capacity, precision, None).map_err(Error::Backend)?;
 
         Ok(VisionLanguagePipeline { resident })
     }

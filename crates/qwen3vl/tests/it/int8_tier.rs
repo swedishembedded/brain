@@ -84,7 +84,7 @@ fn asking_for_int8_gets_int8_and_does_not_reuse_the_fp32_resident() {
     }
     // A small budget: this test is about the tier, not about image detail, and
     // a full-size resident is minutes of load for no extra coverage.
-    let px = 256 * 256;
+    let px = qwen3vl::caps::Capacity { max_pixels: 256 * 256, ..Default::default() };
 
     let f32_load = qwen3vl::caps::load_time(&dir, px, Precision::F32).expect("fp32 resident");
     assert_eq!(qwen3vl::caps::linear_dtype(&dir, px, Precision::F32).unwrap(), Some("fp32".to_string()));
