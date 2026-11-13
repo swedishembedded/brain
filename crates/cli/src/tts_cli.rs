@@ -57,8 +57,7 @@ pub fn run_tts(args: &[String]) {
         }
         Some("sim") => sim(&args[1..]),
         Some("finetune") => finetune(&args[1..]),
-        // Any other verb is forwarded to the GENERIC capability dispatcher,
-        // the same way `sam2_cli::run_sam2` hands its non-`track` verbs back.
+        // Any other verb is forwarded to the GENERIC capability dispatcher.
         // Without this, an action that exists only on `qwen3tts::caps`'s
         // manifest (`batch`) was advertised by `brain caps qwen3tts` and then
         // rejected here as an unknown verb - the CLI contradicting the

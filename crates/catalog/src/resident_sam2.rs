@@ -5,9 +5,11 @@
 //!
 //! `activate` imports the release checkpoint ONCE and uploads it to the assigned
 //! device; the [`Instance`] owns the built [`sam2::caps::Session`], so dropping
-//! it frees the weights and the cached image encoding. One action, `segment` —
-//! the schema and the work both come from `sam2::caps`, so this file contains no
-//! second copy of the preprocessing, the prompt parsing or the mask emission.
+//! it frees the weights and the cached image encoding. `segment` and `track`
+//! run on separate instances (`track` holds the whole checkpoint, memory bank
+//! included); the schemas and the work both come from `sam2::caps`, so this
+//! file contains no second copy of the preprocessing, the prompt parsing or
+//! the mask emission.
 //!
 //! # Batching: group by IMAGE, not by request
 //!

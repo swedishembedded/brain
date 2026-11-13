@@ -6844,6 +6844,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-models-sam2"
+version = "5.1.0"
+dependencies = [
+ "brain-invoke",
+ "brain-sam2",
+]
+
+[[package]]
 name = "sample-npu-rockchip"
 version = "5.1.0"
 dependencies = [

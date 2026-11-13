@@ -36,7 +36,7 @@
 //! So a character swap masks the **background at 1** and the **character
 //! region at 0**. Every human-facing mask this repo consumes uses the opposite
 //! convention (a tracker paints the SUBJECT), so the flip has exactly one
-//! named home - [`MaskSeqPolarity::to_conditioning`] - and everything else in
+//! named home - [`conditioning`] - and everything else in
 //! this module speaks the reference's polarity.
 //!
 //! # The two blends, verbatim
@@ -104,7 +104,7 @@
 //! all wrong, and they differ from the mean only in the soft band around the
 //! subject, which is exactly where a wrong answer looks almost right.
 
-use std::path::Path;
+use imaging::maskseq::{MaskClip, Polarity};
 
 /// One [`apply_video_condition_by_mask`] result - the two tensors
 /// `VideoConditionByMask.apply_to` replaces on the latent state.
@@ -371,126 +371,16 @@ pub fn snap_to_latent_tokens(regions: &[Vec<bool>], w: usize, h: usize, grid: (u
 }
 
 // ===========================================================================
-// The `brain/sam2-maskseq/1` interchange format
+// Mask sequences (`imaging::maskseq`)
 // ===========================================================================
 
-/// The manifest's declared `format` string. Anything else is refused: a mask
-/// directory whose layout is not known is not something to guess at.
-pub const MASKSEQ_FORMAT: &str = "brain/sam2-maskseq/1";
-
-/// How a mask sequence encodes the TRACKED OBJECT - the region a swap
-/// regenerates - in its 8-bit PNGs.
-///
-/// Read from the manifest's `polarity` field and never inferred from the
-/// pixels. A sequence whose polarity is missing or unrecognised is rejected:
-/// guessing it backwards preserves the character and regenerates the entire
-/// background, which is the exact inverse of the intent and is not the kind of
-/// mistake a run reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MaskSeqPolarity {
-    /// `"object=255"` - white is the tracked object. SAM 2's native output.
-    ObjectWhite,
-    /// `"object=0"` - black is the tracked object.
-    ObjectBlack,
-}
-
-impl MaskSeqPolarity {
-    /// Parse the manifest's own spelling.
-    pub fn parse(s: &str) -> Result<MaskSeqPolarity, String> {
-        match s {
-            "object=255" => Ok(MaskSeqPolarity::ObjectWhite),
-            "object=0" => Ok(MaskSeqPolarity::ObjectBlack),
-            other => Err(format!(
-                "mask sequence declares polarity {other:?}, which is not one of \"object=255\" / \"object=0\" - refusing to guess, because guessing it backwards preserves the tracked subject and regenerates everything else"
-            )),
-        }
-    }
-
-    /// **The one place the polarity flip happens.**
-    ///
-    /// `px` is one mask sample normalised to `[0, 1]` from the PNG's channel 0.
-    /// The result is that sample in `VideoConditionByMask`'s polarity: `1` =
-    /// conditioning (carried verbatim), `0` = generated.
-    ///
-    /// The tracked object is what a swap REPLACES, so it must land at `0` and
-    /// everything else at `1`, whichever way the producer wrote it. Soft edges
-    /// survive as soft edges: this is an affine map, and it commutes with the
-    /// area average [`LatentMaskAccumulator`] applies afterwards.
-    #[inline]
-    pub fn to_conditioning(self, px: f32) -> f32 {
-        match self {
-            MaskSeqPolarity::ObjectWhite => 1.0 - px,
-            MaskSeqPolarity::ObjectBlack => px,
-        }
-    }
-}
-
-/// A parsed `masks.json`.
-#[derive(Debug, Clone)]
-pub struct MaskSeqManifest {
-    /// `printf`-style file name pattern, e.g. `mask_%06d.png`.
-    pub pattern: String,
-    pub frames: usize,
-    pub width: usize,
-    pub height: usize,
-    pub fps: f64,
-    pub polarity: MaskSeqPolarity,
-    /// Per-frame `object_score`, when the producer recorded one. A NEGATIVE
-    /// score is SAM 2 saying the object is absent or occluded on that frame -
-    /// see [`read_mask_sequence`] for what this port does about it.
-    pub object_score: Option<Vec<f32>>,
-}
-
-impl MaskSeqManifest {
-    /// Parse `masks.json` from its bytes.
-    ///
-    /// Every field this port depends on is REQUIRED. A sequence missing one is
-    /// refused rather than defaulted: each of these defaults would silently
-    /// produce a plausible-looking clip that conditioned the wrong region.
-    pub fn parse(bytes: &[u8]) -> Result<MaskSeqManifest, String> {
-        let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("masks.json is not valid JSON: {e}"))?;
-        let fmt = v.get("format").and_then(|f| f.as_str()).ok_or("masks.json has no \"format\" field")?;
-        if fmt != MASKSEQ_FORMAT {
-            return Err(format!("masks.json declares format {fmt:?}, expected {MASKSEQ_FORMAT:?}"));
-        }
-        let req_str = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string).ok_or_else(|| format!("masks.json has no string \"{k}\""));
-        let req_usize = |k: &str| v.get(k).and_then(serde_json::Value::as_u64).map(|x| x as usize).ok_or_else(|| format!("masks.json has no integer \"{k}\""));
-        let polarity = MaskSeqPolarity::parse(&req_str("polarity")?)?;
-        let object_score = v.get("per_frame").and_then(|p| p.as_array()).map(|rows| {
-            rows.iter().map(|r| r.get("object_score").and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32).collect::<Vec<f32>>()
-        });
-        Ok(MaskSeqManifest {
-            pattern: req_str("pattern")?,
-            frames: req_usize("frames")?,
-            width: req_usize("width")?,
-            height: req_usize("height")?,
-            fps: v.get("fps").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-            polarity,
-            object_score,
-        })
-    }
-
-    /// Expand [`Self::pattern`] for one frame index.
-    ///
-    /// Supports the one thing the format uses - a single `%0Nd` (or `%d`)
-    /// field - and refuses anything else rather than mis-naming a file.
-    pub fn file_name(&self, frame: usize) -> Result<String, String> {
-        let p = &self.pattern;
-        let start = p.find('%').ok_or_else(|| format!("mask pattern {p:?} has no % field"))?;
-        let rest = &p[start + 1..];
-        let end = rest.find('d').ok_or_else(|| format!("mask pattern {p:?} is not a %[0N]d field"))?;
-        let spec = &rest[..end];
-        let width: usize = if spec.is_empty() {
-            0
-        } else {
-            let digits = spec.strip_prefix('0').ok_or_else(|| format!("mask pattern {p:?} has an unsupported field {spec:?}"))?;
-            digits.parse().map_err(|_| format!("mask pattern {p:?} has an unsupported field {spec:?}"))?
-        };
-        if p[start + 1 + end + 1..].contains('%') {
-            return Err(format!("mask pattern {p:?} has more than one % field"));
-        }
-        Ok(format!("{}{:0width$}{}", &p[..start], frame, &p[start + 1 + end + 1..], width = width))
-    }
+/// The conditioning value of one stored mask-sequence pixel: `1` holds the
+/// source, `0` regenerates. A mask sequence paints the tracked OBJECT, the
+/// reference holds everything it does NOT regenerate, so this is
+/// `1 - objectness` - the one place that inversion happens.
+#[inline]
+pub fn conditioning(polarity: Polarity, stored: f32) -> f32 {
+    1.0 - polarity.objectness(stored)
 }
 
 /// `TemporalRegionMask.apply_to`: the denoise mask of a time window -
@@ -502,11 +392,9 @@ pub fn temporal_region(bounds: &[f32], t: usize, start_s: f32, end_s: f32) -> Ve
     (0..t).map(|tok| if bounds[tok * 2 + 1] > start_s && bounds[tok * 2] < end_s { 1.0 } else { 0.0 }).collect()
 }
 
-/// Read a `brain/sam2-maskseq/1` directory and reduce it to the `[lat_f *
-/// lat_h * lat_w]` latent conditioning mask [`apply_video_condition_by_mask`]
-/// takes, in the reference's polarity.
-///
-/// One PNG is resident at a time (see [`LatentMaskAccumulator`]).
+/// Reduce a mask sequence to the `[lat_f * lat_h * lat_w]` latent
+/// conditioning mask [`apply_video_condition_by_mask`] takes, in the
+/// reference's polarity.
 ///
 /// **Frame count is checked against the clip and never reconciled.** A mask
 /// sequence that is shorter or longer than the video it masks is a mismatch
@@ -527,53 +415,29 @@ pub fn temporal_region(bounds: &[f32], t: usize, start_s: f32, end_s: f32) -> Ve
 /// covered.
 ///
 /// # Errors
-/// Missing/invalid manifest, unknown format or polarity, a frame count or
-/// resolution that disagrees with the clip, a missing or wrongly sized PNG.
-pub fn read_mask_sequence(dir: &Path, clip_frames: usize, clip_width: usize, clip_height: usize, lat_f: usize, lat_h: usize, lat_w: usize) -> Result<Vec<f32>, String> {
-    let mpath = dir.join("masks.json");
-    let bytes = std::fs::read(&mpath).map_err(|e| format!("{}: {e}", mpath.display()))?;
-    let man = MaskSeqManifest::parse(&bytes).map_err(|e| format!("{}: {e}", mpath.display()))?;
-    if man.frames != clip_frames {
+/// A frame count or resolution that disagrees with the clip.
+pub fn mask_latents(mask: &MaskClip, clip_frames: usize, clip_width: usize, clip_height: usize, lat_f: usize, lat_h: usize, lat_w: usize) -> Result<Vec<f32>, String> {
+    if mask.frames.len() != clip_frames {
         return Err(format!(
-            "the mask sequence in {} covers {} frames but the clip has {clip_frames}: these are two different runs, and matching them up by truncating or padding would silently shift every mask",
-            dir.display(),
-            man.frames
+            "the mask sequence covers {} frames but the clip has {clip_frames}: these are two different runs, and matching them up by truncating or padding would silently shift every mask",
+            mask.frames.len()
         ));
     }
-    if man.width != clip_width || man.height != clip_height {
-        return Err(format!("the mask sequence in {} is {}x{} but the clip is {clip_width}x{clip_height}", dir.display(), man.width, man.height));
+    if (mask.width as usize, mask.height as usize) != (clip_width, clip_height) {
+        return Err(format!("the mask sequence is {}x{} but the clip is {clip_width}x{clip_height}", mask.width, mask.height));
     }
-    if let Some(scores) = &man.object_score {
-        if scores.len() != man.frames {
-            return Err(format!("{}: per_frame has {} entries but frames is {}", mpath.display(), scores.len(), man.frames));
-        }
-    } else {
-        tracing::warn!(dir = %dir.display(), "mask sequence carries no per_frame block: every frame is treated as a frame the tracker could see");
-    }
-
     let mut acc = LatentMaskAccumulator::new(clip_frames, clip_height, clip_width, lat_f, lat_h, lat_w);
     let mut occluded = 0usize;
     let mut plane = vec![0f32; clip_height * clip_width];
-    for f in 0..clip_frames {
-        let occl = man.object_score.as_ref().is_some_and(|s| s[f] < 0.0);
-        if occl {
-            occluded += 1;
+    for (stored, info) in mask.frames.iter().zip(&mask.info) {
+        if info.object_score < 0.0 {
             // Fully conditioned: carry the source frame, generate nothing.
+            occluded += 1;
             plane.fill(1.0);
-            acc.push_frame(&plane);
-            continue;
-        }
-        let name = man.file_name(f)?;
-        let p = dir.join(&name);
-        let img = image::open(&p).map_err(|e| format!("{}: {e}", p.display()))?.to_rgb8();
-        if img.width() as usize != clip_width || img.height() as usize != clip_height {
-            return Err(format!("{} is {}x{}, expected {clip_width}x{clip_height}", p.display(), img.width(), img.height()));
-        }
-        let raw = img.as_raw();
-        for (i, px) in plane.iter_mut().enumerate() {
-            // Channel 0 of the replicated luminance, the repo-wide convention
-            // (`capability::blob::decode_plane`).
-            *px = man.polarity.to_conditioning(raw[i * 3] as f32 / 255.0);
+        } else {
+            for (px, &v) in plane.iter_mut().zip(stored) {
+                *px = conditioning(mask.polarity, v);
+            }
         }
         acc.push_frame(&plane);
     }
@@ -582,7 +446,7 @@ pub fn read_mask_sequence(dir: &Path, clip_frames: usize, clip_width: usize, cli
     }
     let latent = acc.finish();
     let conditioned = latent.iter().filter(|&&v| v > 0.5).count();
-    tracing::info!(latent_tokens = latent.len(), conditioned, polarity = ?man.polarity, "mask sequence reduced to the latent grid");
+    tracing::info!(latent_tokens = latent.len(), conditioned, polarity = mask.polarity.tag(), "mask sequence reduced to the latent grid");
     Ok(latent)
 }
 
@@ -636,62 +500,16 @@ mod tests {
         assert!(latent_grid(16, w, h).is_err(), "16 frames is not 1 + 8k");
     }
 
-    /// The polarity flip is an involution pair, and it is the ONLY place the
-    /// inversion lives. A tracked object must reach the reference's polarity as
-    /// `0` (generated) from either encoding.
+    /// The polarity flip has one home, and a tracked object reaches the
+    /// reference's polarity as `0` (generated) from either encoding.
     #[test]
     fn polarity_puts_the_tracked_object_on_the_generated_side() {
-        assert_eq!(MaskSeqPolarity::ObjectWhite.to_conditioning(1.0), 0.0, "white object -> generated");
-        assert_eq!(MaskSeqPolarity::ObjectWhite.to_conditioning(0.0), 1.0, "white background -> conditioned");
-        assert_eq!(MaskSeqPolarity::ObjectBlack.to_conditioning(0.0), 0.0, "black object -> generated");
-        assert_eq!(MaskSeqPolarity::ObjectBlack.to_conditioning(1.0), 1.0, "black background -> conditioned");
+        assert_eq!(conditioning(Polarity::ObjectWhite, 1.0), 0.0, "white object -> generated");
+        assert_eq!(conditioning(Polarity::ObjectWhite, 0.0), 1.0, "white background -> conditioned");
+        assert_eq!(conditioning(Polarity::ObjectBlack, 0.0), 0.0, "black object -> generated");
+        assert_eq!(conditioning(Polarity::ObjectBlack, 1.0), 1.0, "black background -> conditioned");
         // Soft edges survive as soft edges rather than being thresholded.
-        assert!((MaskSeqPolarity::ObjectWhite.to_conditioning(0.25) - 0.75).abs() < 1e-7);
-    }
-
-    #[test]
-    fn an_unknown_or_absent_polarity_is_refused_rather_than_defaulted() {
-        assert!(MaskSeqPolarity::parse("object=1").is_err());
-        assert!(MaskSeqPolarity::parse("").is_err());
-        let no_polarity = br#"{"format":"brain/sam2-maskseq/1","pattern":"mask_%06d.png","frames":9,"width":64,"height":64}"#;
-        let e = MaskSeqManifest::parse(no_polarity).expect_err("a manifest without a polarity must not parse");
-        assert!(e.contains("polarity"), "{e}");
-    }
-
-    #[test]
-    fn a_foreign_format_is_refused() {
-        let other = br#"{"format":"brain/sam2-maskseq/2","pattern":"m_%d.png","frames":1,"width":1,"height":1,"polarity":"object=255"}"#;
-        assert!(MaskSeqManifest::parse(other).expect_err("must refuse").contains("format"));
-    }
-
-    #[test]
-    fn the_manifest_carries_the_fields_this_port_reads() {
-        let js = br#"{"format":"brain/sam2-maskseq/1","pattern":"mask_%06d.png","frames":9,"width":128,"height":64,
-                      "fps":24.0,"polarity":"object=255","binary":true,"threshold":0.5,"object_id":0,
-                      "per_frame":[{"frame":0,"object_score":1.5},{"frame":1,"object_score":-0.25}]}"#;
-        let m = MaskSeqManifest::parse(js).expect("parses");
-        assert_eq!(m.frames, 9);
-        assert_eq!((m.width, m.height), (128, 64));
-        assert_eq!(m.polarity, MaskSeqPolarity::ObjectWhite);
-        assert_eq!(m.object_score.as_deref(), Some(&[1.5f32, -0.25][..]));
-        assert_eq!(m.file_name(7).unwrap(), "mask_000007.png");
-    }
-
-    #[test]
-    fn patterns_expand_the_way_the_producer_writes_them() {
-        let mk = |p: &str| MaskSeqManifest {
-            pattern: p.to_string(),
-            frames: 1,
-            width: 1,
-            height: 1,
-            fps: 0.0,
-            polarity: MaskSeqPolarity::ObjectWhite,
-            object_score: None,
-        };
-        assert_eq!(mk("mask_%06d.png").file_name(12).unwrap(), "mask_000012.png");
-        assert_eq!(mk("%d.png").file_name(12).unwrap(), "12.png");
-        assert!(mk("mask.png").file_name(0).is_err(), "a pattern with no field cannot name frame 1");
-        assert!(mk("%06d_%06d.png").file_name(0).is_err(), "two fields is ambiguous");
+        assert!((conditioning(Polarity::ObjectWhite, 0.25) - 0.75).abs() < 1e-7);
     }
 
     /// The mask enters [`noised_initial_latent`] quadratically at fractional

@@ -12,9 +12,14 @@ use capability::{ActionSpec, Blob, Media};
 use serde_json::json;
 
 /// Load `path` as the input blob `name` of `spec`, in the media that input
-/// declares. A video container is demuxed to frames: the clip an editing
-/// action works on (the input its video contract names) whole and at its own
-/// rate, any other video input at the decoder's sampling defaults.
+/// declares. A video input is one of:
+///
+/// - a mask-sequence directory (`imaging::maskseq`), as that sequence;
+/// - a directory of numbered frames (PNG/JPEG/PPM, in name order), with no
+///   frame rate of its own - the action takes it from a param;
+/// - a container file, demuxed whole and at its own rate when the action
+///   works on the clip ([`ActionSpec::is_clip_input`]), otherwise sampled at
+///   the decoder's defaults as context for a prompt.
 pub fn load_blob(spec: &ActionSpec, name: &str, path: &str) -> Result<Blob, String> {
     let media = spec.inputs.iter().find(|b| b.name == name).map(|b| b.media).ok_or_else(|| format!("the action has no input '{name}'"))?;
     let p = Path::new(path);
@@ -30,12 +35,28 @@ pub fn load_blob(spec: &ActionSpec, name: &str, path: &str) -> Result<Blob, Stri
             Ok(Blob::new(media, bytes).with_meta(json!({"w": img.w, "h": img.h, "c": c})))
         }
         Media::Audio => audio_blob(std::fs::read(p).map_err(|e| format!("input '{name}': {path}: {e}"))?),
-        Media::Video if spec.video.as_ref().and_then(|c| c.clip_input.as_deref()) == Some(name) => {
-            imaging::video::clip_from_file(p, capability::video::MAX_EDIT_CLIP_FRAMES)
-        }
+        Media::Video if imaging::maskseq::is_dir(p) => Ok(imaging::maskseq::MaskClip::read_dir(p)?.to_blob()),
+        Media::Video if p.is_dir() => frames_dir_blob(p),
+        Media::Video if spec.is_clip_input(name) => imaging::video::clip_from_file(p, capability::video::MAX_EDIT_CLIP_FRAMES),
         Media::Video => capability::blob::video_blob(&imaging::video::decode_frames(p, &Default::default())?),
         _ => std::fs::read(p).map(|b| Blob::new(media, b)).map_err(|e| format!("input '{name}': {path}: {e}")),
     }
+}
+
+/// A directory of numbered frames as a clip blob, frames in file-name order,
+/// all of one size.
+fn frames_dir_blob(dir: &Path) -> Result<Blob, String> {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| ["png", "jpg", "jpeg", "ppm"].contains(&x.to_string_lossy().to_lowercase().as_str())))
+        .collect();
+    paths.sort();
+    if paths.is_empty() {
+        return Err(format!("{} holds no .png/.jpg/.ppm frames", dir.display()));
+    }
+    let frames = paths.iter().map(|p| imaging::load(p).map(|img| (img.to_hwc_unit(), img.w, img.h))).collect::<Result<Vec<_>, String>>()?;
+    capability::blob::video_blob(&frames)
 }
 
 /// An audio file's bytes as the `audio` blob: a RIFF/WAVE file is decoded to
@@ -49,10 +70,14 @@ pub fn audio_blob(bytes: Vec<u8>) -> Result<Blob, String> {
     }
 }
 
-/// Write `b` to `path`: an image or mask as PNG/PPM (one channel rendered as
-/// grey), audio as WAV, a clip through a container encoder carrying `sound`
-/// as its track, anything else as its raw bytes.
+/// Write `b` to `path`: a mask sequence as its directory, an image or mask as
+/// PNG/PPM (one channel rendered as grey), audio as WAV, a clip through a
+/// container encoder carrying `sound` as its track, anything else as its raw
+/// bytes.
 pub fn save_blob(b: &Blob, path: &str, sound: Option<&Blob>) -> Result<(), String> {
+    if imaging::maskseq::MaskClip::is_blob(b) {
+        return imaging::maskseq::MaskClip::from_blob(b)?.write_dir(path).map(|_| ());
+    }
     if let Some(dir) = Path::new(path).parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }

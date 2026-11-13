@@ -55,11 +55,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("zipdepth", crate::depth_cli::run_depth),
     ("flux2", crate::flux2_cli::run_flux2),
     ("wan", crate::wan_cli::run_wan),
-    // `sam2 track` (the video memory bank) writes a mask-sequence DIRECTORY,
-    // which no single capability blob can carry; every other sam2 verb is
-    // forwarded straight back to the generic path by `run_sam2` itself, so the
-    // image path keeps its `ARCH_TO_MODEL` row below and its shared code.
-    ("sam2", crate::sam2_cli::run_sam2),
     ("ltxv", crate::ltxv_cli::run_ltxv),
     ("worldmirror2", crate::mirror_cli::run_mirror),
     ("splat", crate::splat_cli::run_splat),
@@ -316,12 +311,11 @@ pub(crate) fn arch_for_model(model: &str) -> Option<&'static str> {
 /// `ARCH_HANDLERS` entry `ensure_env_weights` is already a guaranteed
 /// instant no-op, so there is nothing expensive to guard and adding a row
 /// here would just be a second verb list to keep in sync with each
-/// handler's own match arms for no behavioral gain. `qwen3tts` and `sam2`
-/// are the two exceptions among THOSE: both forward any verb their own match
-/// arm does not recognize to the generic capability dispatcher
+/// handler's own match arms for no behavioral gain. `qwen3tts` is the
+/// exception among THOSE: it forwards any verb its own match arm does not
+/// recognize to the generic capability dispatcher
 /// (`crate::caps_cli::run_do`) instead of rejecting it outright, so there is
-/// no fixed vocabulary to check them against here either -- they stay
-/// ungated, unchanged from before this table existed.
+/// no fixed vocabulary to check it against here either.
 const ARCH_HANDLER_VERBS: &[(&str, &[&str])] = &[
     ("flux2", &["generate", "infer", "finetune"]),
     // Deliberately NOT `infer` -- `wan_cli::run_wan`'s own module doc: that
@@ -978,8 +972,7 @@ mod tests {
     /// it) AND is listed in [`RESOLVER_MIGRATED_ARCHS`] - so the two can
     /// never drift apart as more architectures migrate (and so the
     /// `ARCH_HANDLERS` branch's `maybe_inject_default_weights` never runs for
-    /// one either - `sam2` is the one of these reachable through that
-    /// branch, via its own dedicated `_cli.rs`).
+    /// one either).
     #[test]
     fn resolver_migrated_archs_declare_no_weights_env() {
         for id in RESOLVER_MIGRATED_ARCHS {
@@ -1173,26 +1166,10 @@ mod tests {
     /// would mean the generic capability path is silently unreachable for it
     /// (ARCH_HANDLERS is checked first), which is exactly the kind of
     /// drift a table like this is supposed to make impossible to miss.
-    ///
-    /// One shape is exempt: a handler that exists only to add a verb the
-    /// capability wire format cannot carry, and that forwards every OTHER
-    /// verb straight back to the generic path. That arch keeps both rows on
-    /// purpose, and the exemption is checked rather than assumed -- it must
-    /// still have the ARCH_TO_MODEL row it claims to be forwarding to.
     #[test]
     fn arch_handlers_and_arch_to_model_do_not_overlap() {
-        // `sam2 track` returns a mask-sequence DIRECTORY, which no single
-        // capability blob can carry, so it needs a handler; `run_sam2`
-        // forwards everything that is not `track` to `caps_cli::run_do`, so
-        // the image path keeps its ARCH_TO_MODEL row and stays reachable.
-        const FORWARDS_TO_GENERIC: &[&str] = &["sam2"];
         for (id, _) in ARCH_HANDLERS {
-            let has_model_row = ARCH_TO_MODEL.iter().any(|(m, _)| m == id);
-            if FORWARDS_TO_GENERIC.contains(id) {
-                assert!(has_model_row, "{id:?} is exempted as forwarding to the generic path, but has no ARCH_TO_MODEL row to forward to");
-                continue;
-            }
-            assert!(!has_model_row, "{id:?} is in both ARCH_HANDLERS and ARCH_TO_MODEL");
+            assert!(!ARCH_TO_MODEL.iter().any(|(m, _)| m == id), "{id:?} is in both ARCH_HANDLERS and ARCH_TO_MODEL");
         }
     }
 

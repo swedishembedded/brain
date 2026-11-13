@@ -215,6 +215,7 @@ sample-decision-triage	6
 sample-fly-interactive	6
 sample-imagegen-batch	6
 sample-imagegen-generate	6
+sample-models-sam2	6
 sample-npu-rockchip	6
 sample-learning-reader	6
 sample-learning-rlcd	6

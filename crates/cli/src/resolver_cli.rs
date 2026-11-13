@@ -10,7 +10,7 @@
 //! its flags are interleaved with plenty that aren't roles at all.
 //!
 //! [`resolve_or_exit`]/[`extract_role_overrides`] are the two primitives a
-//! dedicated command (`flux2_cli`, `sam2_cli`'s `track`) calls directly.
+//! dedicated command (`flux2_cli`) calls directly.
 //! [`run_generic_migrated`] is the third: an architecture with NO dedicated
 //! command, reached through `crate::resolve::dispatch_arch`'s generic
 //! `ARCH_TO_MODEL` dispatch, runs its served action through

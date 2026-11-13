@@ -13,7 +13,7 @@
 //! # The pipeline
 //!
 //! 1. **Track the actor.** SAM 2.1 follows the clicked person through every
-//!    frame ([`crate::sam2_cli::track_frames`]).
+//!    frame ([`sam2::track::track_clip`]).
 //! 2. **Paint the character in on a few stills.** FLUX.2, with the sheet as
 //!    its reference, repaints the actor's grown silhouette on a canvas around
 //!    them and keeps the rest of the canvas exactly, so the character has to
@@ -85,7 +85,7 @@ USAGE:
                           whole person)
   --exclude <x,y>         a click on something that is NOT the actor (repeatable)
   --prompt-frame <n>      the frame the clicks sit on (default 0)
-  --actor-mask <dir>      the actor's track as a brain/sam2-maskseq/1 directory
+  --actor-mask <dir>      the actor's track as a mask-sequence directory
                           (`brain sam2 track` writes one), instead of clicks
   --prompt <text>         the clip as it should look: the character's looks
                           and clothes, what they do, the scene - LTX-2.5
@@ -312,7 +312,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
     let mut points = Vec::new();
     for (flag, label) in [("--point", 1.0), ("--exclude", 0.0)] {
         while let Some(p) = a.take_str(flag) {
-            let (x, y) = crate::sam2_cli::parse_point(&p)?;
+            let (x, y) = parse_point(&p)?;
             points.push((x, y, label));
         }
     }
@@ -469,7 +469,7 @@ pub(crate) fn replace(args: &[String]) -> Result<(), String> {
     let guides = guide_frames(req.guide_frames.as_deref(), req.tuning.guide_every, n)?;
     eprintln!("ltxv replace: {n} frames at {w}x{h}, edited stills at frames {:?}", std::iter::once(0).chain(guides.iter().copied()).collect::<Vec<_>>());
 
-    let tracker = crate::sam2_cli::load_tracker(&req.sam2_overrides)?;
+    let tracker = load_tracker(&req.sam2_overrides)?;
     let resume = Resume::new(&req.work, req.fresh);
     let track_key = serde_json::json!({
         "input": stamp(&req.input), "conform": req.conform, "frames": n, "size": [w, h], "points": points,
@@ -485,10 +485,7 @@ pub(crate) fn replace(args: &[String]) -> Result<(), String> {
         }
         None => {
             let unit: Vec<Vec<f32>> = source.frames.iter().map(|px| px.iter().map(|&v| v as f32 / 255.0).collect()).collect();
-            crate::sam2_cli::track_frames(&tracker, &unit, w as u32, h as u32, req.prompt_frame, &points, 0)?
-                .into_iter()
-                .map(|t| if t.object_score > 0.0 { t.logits.iter().map(|&l| l > 0.0).collect() } else { vec![false; w * h] })
-                .collect()
+            track(&tracker, &unit, w as u32, h as u32, req.prompt_frame, &points)?
         }
     };
     if !resume.holds("actor", &track_key) {
@@ -661,25 +658,16 @@ fn conform(clip: ltxv::pipeline::Video, points: &[(f32, f32, f32)], track: Optio
 /// tracks; a frame the tracker marked occluded is an empty mask, so the
 /// actor there is left as it is.
 fn read_track(dir: &Path, w: u32, h: u32, n: usize) -> Result<Vec<Vec<bool>>, String> {
-    let seq = sam2::MaskSeq::read(dir)?;
+    let seq = imaging::maskseq::MaskClip::read_dir(dir)?;
     if (seq.width, seq.height, seq.frames.len()) != (w, h, n) {
         return Err(format!("--actor-mask {}: {} frames at {}x{}, the clip has {n} at {w}x{h}", dir.display(), seq.frames.len(), seq.width, seq.height));
     }
-    let object = |v: u8| match seq.polarity {
-        sam2::Polarity::ObjectWhite => v > 127,
-        sam2::Polarity::ObjectBlack => v <= 127,
-    };
-    seq.frames
+    Ok(seq
+        .frames
         .iter()
-        .enumerate()
-        .map(|(i, info)| {
-            if info.object_score <= 0.0 {
-                return Ok(vec![false; (w * h) as usize]);
-            }
-            let img = imaging::load(seq.frame_path(i))?;
-            Ok(img.px.as_chunks::<3>().0.iter().map(|p| object(p[0])).collect())
-        })
-        .collect()
+        .zip(&seq.info)
+        .map(|(plane, info)| if info.object_score <= 0.0 { vec![false; (w * h) as usize] } else { plane.iter().map(|&v| seq.polarity.objectness(v) > 0.5).collect() })
+        .collect())
 }
 
 /// The WAV at `path`, cut to `frames` frames at `fps`. A soundtrack shorter
@@ -932,9 +920,8 @@ impl Editor<'_> {
         let figure: Vec<bool> = if points.is_empty() {
             vec![false; w * h]
         } else {
-            let t = crate::sam2_cli::track_frames(self.tracker, std::slice::from_ref(&painted_unit), w as u32, h as u32, 0, &points, 0)?;
-            let pick: Vec<bool> = t[0].logits.iter().map(|&l| l > 0.0).collect();
-            if t[0].object_score > 0.0 && count(&pick) <= 2 * actor_px {
+            let pick = track(self.tracker, std::slice::from_ref(&painted_unit), w as u32, h as u32, 0, &points)?.remove(0);
+            if count(&pick) <= 2 * actor_px {
                 pick
             } else {
                 vec![false; w * h]
@@ -988,7 +975,7 @@ fn iou(a: &[bool], b: &[bool]) -> f32 {
 }
 
 fn generate(req: &Request, clip: &ltxv::pipeline::Video, region: &Path, guides: &[Still]) -> Result<ltxv::pipeline::Video, String> {
-    let mut o = ltxv::pipeline::MaskedOpts { mask_dir: region.to_string_lossy().into_owned(), ..Default::default() };
+    let mut o = ltxv::pipeline::MaskedOpts { mask: Some(imaging::maskseq::MaskClip::read_dir(region)?), ..Default::default() };
     o.base.seed = req.seed;
     o.base.fps = clip.fps;
     o.base.device = req.device.clone();
@@ -1013,12 +1000,36 @@ fn generate(req: &Request, clip: &ltxv::pipeline::Video, region: &Path, guides: 
 
 /// A mask sequence on disk, object = 255, every frame seen.
 fn write_masks(dir: &Path, masks: &[Vec<bool>], w: usize, h: usize, fps: usize, source: &str) -> Result<(), String> {
-    let mut seq = sam2::MaskSeq::new(dir, w as u32, h as u32, fps as f64, sam2::Polarity::ObjectWhite, 0, (source.to_string(), masks.len()), 0, Vec::new());
-    for (f, m) in masks.iter().enumerate() {
-        let logits: Vec<f32> = m.iter().map(|&r| if r { 1.0 } else { -1.0 }).collect();
-        seq.write_frame(f, &logits, 1.0, 1.0)?;
+    let mut seq = imaging::maskseq::MaskClip::new(w as u32, h as u32, fps as f64, imaging::maskseq::Polarity::ObjectWhite, true);
+    seq.source = source.to_string();
+    for m in masks {
+        seq.push_logits(&m.iter().map(|&r| if r { 1.0 } else { -1.0 }).collect::<Vec<f32>>(), 1.0, 1.0)?;
     }
-    seq.write_manifest().map(|_| ())
+    seq.write_dir(dir).map(|_| ())
+}
+
+/// One `(x, y)` click in source pixels.
+fn parse_point(s: &str) -> Result<(f32, f32), String> {
+    let v: Vec<f32> = s.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>().map_err(|e| format!("--point wants 'x,y': {e}"))?;
+    match v[..] {
+        [x, y] => Ok((x, y)),
+        _ => Err(format!("--point wants 'x,y', got {} numbers", v.len())),
+    }
+}
+
+/// The SAM 2.1 tracking model the model store and `overrides` resolve to.
+fn load_tracker(overrides: &std::collections::BTreeMap<String, String>) -> Result<sam2::Sam2, String> {
+    let assembly = crate::resolver_cli::resolve_or_exit("sam2", &sam2::spec::Sam2Spec, overrides);
+    let variant = assembly.variant.clone().ok_or("ltxv replace: the resolved SAM 2 checkpoint has no variant")?;
+    sam2::track::load_video(&assembly.role_path("weights")?, sam2::caps::variant_config(&variant)?, gpu_core::Gpu::new(sam2::PIPELINES))
+}
+
+/// The object `points` pick, tracked through `frames`: one mask per frame,
+/// empty where SAM 2 believes the object is occluded.
+fn track(m: &sam2::Sam2, frames: &[Vec<f32>], w: u32, h: u32, prompt_frame: usize, points: &[(f32, f32, f32)]) -> Result<Vec<Vec<bool>>, String> {
+    let req = sam2::track::TrackRequest { points: points.to_vec(), prompt_frame, object_id: 0, polarity: imaging::maskseq::Polarity::ObjectWhite, binary: true };
+    let masks = sam2::track::track_clip(m, frames, w, h, 0.0, &req, &mut |_, _| {})?;
+    Ok(masks.frames.iter().zip(&masks.info).map(|(p, i)| if i.object_score > 0.0 { p.iter().map(|&v| v > 0.5).collect() } else { vec![false; p.len()] }).collect())
 }
 
 fn count(m: &[bool]) -> usize {

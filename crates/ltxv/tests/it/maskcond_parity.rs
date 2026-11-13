@@ -21,7 +21,8 @@
 //! `clamp(min = 0)` scored cosine 0.999999884, ABOVE this file's own bound,
 //! while rel_l2 4.8e-4 caught it. A cosine-only gate would have shipped it.
 
-use ltxv::maskcond::{apply_video_condition_by_mask, noised_initial_latent, LatentMaskAccumulator, MaskSeqPolarity};
+use imaging::maskseq::{MaskClip, Polarity};
+use ltxv::maskcond::{apply_video_condition_by_mask, conditioning, noised_initial_latent, LatentMaskAccumulator};
 use ltxv::refcond::downsample_mask_to_latent;
 
 // ------------------------------------------------------------------ metrics
@@ -292,71 +293,54 @@ fn ltxv_maskcond_polarity_flip_commutes_with_the_reduction() {
     let (fp, hp, wp, lf, lh, lw) = (9usize, 64usize, 64usize, 2usize, 2usize, 2usize);
     let mut rng = data::rng::Rng::new(data::rng::random_seed());
     let object: Vec<f32> = (0..fp * hp * wp).map(|_| rng.next_f32()).collect();
-    let flipped: Vec<f32> = object.iter().map(|&v| MaskSeqPolarity::ObjectWhite.to_conditioning(v)).collect();
+    let flipped: Vec<f32> = object.iter().map(|&v| conditioning(Polarity::ObjectWhite, v)).collect();
     let first = downsample_mask_to_latent(&flipped, fp, hp, wp, lf, lh, lw);
     let after: Vec<f32> = downsample_mask_to_latent(&object, fp, hp, wp, lf, lh, lw).iter().map(|&v| 1.0 - v).collect();
     report("polarity_commutes", &first, &after);
 }
 
-// ------------------------------------------- the sam2-maskseq contract
+// ------------------------------------------- the mask-sequence contract
 
-/// A `brain/sam2-maskseq/1` directory end to end: both polarities land the
-/// TRACKED OBJECT on the generated side, an occluded frame conditions fully
-/// rather than regenerating everything, and a frame-count mismatch is refused.
+/// A tracker's mask sequence end to end, through its directory form: both
+/// polarities land the TRACKED OBJECT on the generated side, an occluded
+/// frame conditions fully rather than regenerating everything, and a clip
+/// that does not match is refused.
 ///
 /// This is the gate for the failure the format exists to prevent. Reading the
 /// polarity backwards preserves the character and regenerates the whole set -
 /// visually plausible, completely wrong, and silent.
 #[test]
-fn ltxv_maskcond_a_sam2_mask_sequence_reaches_the_reference_polarity() {
+fn ltxv_maskcond_a_tracked_mask_sequence_reaches_the_reference_polarity() {
     let dir = std::env::temp_dir().join(format!("ltxv_maskseq_{}", std::process::id()));
     let (w, h, frames) = (64usize, 64usize, 9usize);
     let (lf, lh, lw) = (2usize, 2usize, 2usize);
 
     // The object occupies the LEFT half of every frame; frame 5 is occluded.
-    let write = |polarity: &str, occlude: bool| {
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let object_value: u8 = if polarity == "object=255" { 255 } else { 0 };
-        let other: u8 = 255 - object_value;
+    let write = |polarity: Polarity, occlude: bool| -> MaskClip {
+        let mut c = MaskClip::new(w as u32, h as u32, 24.0, polarity, true);
+        let logits: Vec<f32> = (0..w * h).map(|i| if i % w < w / 2 { 4.0 } else { -4.0 }).collect();
         for f in 0..frames {
-            let mut img = image::RgbImage::new(w as u32, h as u32);
-            for y in 0..h {
-                for x in 0..w {
-                    let v = if x < w / 2 { object_value } else { other };
-                    img.put_pixel(x as u32, y as u32, image::Rgb([v, v, v]));
-                }
-            }
-            img.save(dir.join(format!("mask_{f:06}.png"))).expect("write png");
+            c.push_logits(&logits, if occlude && f == 5 { -0.5 } else { 1.5 }, 0.9).unwrap();
         }
-        let per_frame: Vec<String> = (0..frames)
-            .map(|f| format!("{{\"frame\":{f},\"object_score\":{},\"iou\":0.9,\"area_px\":1}}", if occlude && f == 5 { "-0.5" } else { "1.5" }))
-            .collect();
-        std::fs::write(
-            dir.join("masks.json"),
-            format!(
-                "{{\"format\":\"brain/sam2-maskseq/1\",\"pattern\":\"mask_%06d.png\",\"frames\":{frames},\"width\":{w},\"height\":{h},\"fps\":24.0,\"polarity\":\"{polarity}\",\"binary\":true,\"threshold\":0.5,\"object_id\":0,\"per_frame\":[{}]}}",
-                per_frame.join(",")
-            ),
-        )
-        .expect("write manifest");
+        let _ = std::fs::remove_dir_all(&dir);
+        c.write_dir(&dir).expect("write the directory form");
+        MaskClip::read_dir(&dir).expect("read it back")
     };
 
-    for polarity in ["object=255", "object=0"] {
-        write(polarity, false);
-        let m = ltxv::maskcond::read_mask_sequence(&dir, frames, w, h, lf, lh, lw).expect("read mask sequence");
+    for polarity in [Polarity::ObjectWhite, Polarity::ObjectBlack] {
+        let m = ltxv::maskcond::mask_latents(&write(polarity, false), frames, w, h, lf, lh, lw).expect("reduce the mask sequence");
         assert_eq!(m.len(), lf * lh * lw);
         // Left latent column = the tracked object = GENERATED = 0. Right
         // column = background = CONDITIONING = 1. Both polarities, same answer.
         for f in 0..lf {
-            assert_eq!(m[f * lh * lw..(f + 1) * lh * lw], [0.0, 1.0, 0.0, 1.0], "{polarity}: the tracked object must land on the GENERATED side");
+            assert_eq!(m[f * lh * lw..(f + 1) * lh * lw], [0.0, 1.0, 0.0, 1.0], "{}: the tracked object must land on the GENERATED side", polarity.tag());
         }
     }
 
     // An occluded frame conditions fully, so its latent frame is pulled toward
     // 1 rather than left as an empty (= regenerate-everything) mask.
-    write("object=255", true);
-    let m = ltxv::maskcond::read_mask_sequence(&dir, frames, w, h, lf, lh, lw).expect("read mask sequence");
+    let occluded = write(Polarity::ObjectWhite, true);
+    let m = ltxv::maskcond::mask_latents(&occluded, frames, w, h, lf, lh, lw).expect("reduce the mask sequence");
     assert_eq!(&m[..lh * lw], &[0.0, 1.0, 0.0, 1.0], "latent frame 0 covers pixel frame 0 alone and is not occluded");
     // Latent frame 1 averages pixel frames 1..=8, one of which is all-ones.
     for (i, &v) in m[lh * lw..].iter().enumerate() {
@@ -365,9 +349,9 @@ fn ltxv_maskcond_a_sam2_mask_sequence_reaches_the_reference_polarity() {
     }
 
     // A mask sequence that does not cover the clip is refused outright.
-    let e = ltxv::maskcond::read_mask_sequence(&dir, frames + 8, w, h, lf, lh, lw).expect_err("a frame-count mismatch must be refused");
+    let e = ltxv::maskcond::mask_latents(&occluded, frames + 8, w, h, lf, lh, lw).expect_err("a frame-count mismatch must be refused");
     assert!(e.contains("frames"), "{e}");
-    let e = ltxv::maskcond::read_mask_sequence(&dir, frames, w * 2, h, lf, lh, lw).expect_err("a resolution mismatch must be refused");
+    let e = ltxv::maskcond::mask_latents(&occluded, frames, w * 2, h, lf, lh, lw).expect_err("a resolution mismatch must be refused");
     assert!(e.contains("64x64") || e.contains("128x64"), "{e}");
 
     let _ = std::fs::remove_dir_all(&dir);

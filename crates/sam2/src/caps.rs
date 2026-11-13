@@ -6,9 +6,13 @@
 //! method and `brain perf`'s `CapabilityTarget` work with no SAM-specific
 //! plumbing anywhere in the CLI or the transports.
 //!
-//! One action, `segment`: an image plus point / box prompts in **source-image
-//! pixels** in, one mask out (the shared `capability::blob` wire format,
-//! re-tagged [`Media::Mask`]).
+//! Two actions:
+//!
+//! - `segment`: an image plus point / box prompts in **source-image pixels**
+//!   in, one mask out (the shared `capability::blob` wire format, re-tagged
+//!   [`Media::Mask`]).
+//! - `track`: a clip plus clicks on one of its frames in, the object's mask on
+//!   every frame out, as an `imaging::maskseq` sequence ([`crate::track`]).
 //!
 //! # The encoder cache is the whole design
 //!
@@ -83,9 +87,26 @@ pub fn segment_spec() -> ActionSpec {
         .output(BlobSpec::new("mask", Media::Mask, "sigmoid mask probability on the SOURCE image grid (single channel; threshold at 0.5)"))
 }
 
+/// The `track` schema, shared by the [`Provider`] and the residency adapter.
+pub fn track_spec() -> ActionSpec {
+    ActionSpec::new("track", "follow one object through a clip: clicks on one frame -> the object's mask on every frame (SAM 2.1 memory bank)")
+        .streaming()
+        .param(ParamSpec::new("variant", ParamType::Enum(vec!["tiny".into(), "large".into()]), "released checkpoint variant").default(json!("tiny")))
+        .param(ParamSpec::new("points", ParamType::Str, "clicks ON the object in source pixels, 'x,y;x,y' - several pick one object together (head, coat and legs of a person)").required())
+        .param(ParamSpec::new("exclude", ParamType::Str, "clicks on things that are NOT the object, 'x,y;x,y'").default(json!("")))
+        .param(ParamSpec::new("prompt_frame", ParamType::Int, "the frame the clicks sit on; frames before it take its mask").min(0.0).max(capability::video::MAX_EDIT_CLIP_FRAMES as f64).default(json!(0)))
+        .param(ParamSpec::new("fps", ParamType::Float, "resample the clip to this frame rate first; for a directory of frames, the rate they were taken at (default: the clip's own)").min(0.01).max(capability::bounds::FPS))
+        .param(ParamSpec::new("max_frames", ParamType::Int, "track at most this many frames (0: the whole clip)").min(0.0).max(capability::video::MAX_EDIT_CLIP_FRAMES as f64).default(json!(0)))
+        .param(ParamSpec::new("object_id", ParamType::Int, "the id the sequence records, for work with several objects").min(0.0).max(u32::MAX as f64).default(json!(0)))
+        .param(ParamSpec::new("polarity", ParamType::Enum(vec!["object=255".into(), "object=0".into()]), "which value marks the object: object=255 (white object), or object=0 for an editor whose white means 'keep'").default(json!("object=255")))
+        .param(ParamSpec::new("soft", ParamType::Bool, "keep SAM 2's probability ramp instead of hard 0/1 masks").default(json!(false)))
+        .input(BlobSpec::new("video", Media::Video, "the clip, decoded whole at its own frame rate").required().clip())
+        .output(BlobSpec::new("masks", Media::Video, "the object's mask on every frame: a mask sequence (one channel, its manifest in meta.maskseq)"))
+}
+
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
-    Manifest::new(MODEL, "SAM 2.1 promptable segmentation (image path): points and boxes -> masks.", vec![segment_spec()])
+    Manifest::new(MODEL, "SAM 2.1 promptable segmentation: points and boxes -> a mask on an image, or one object's mask on every frame of a clip.", vec![segment_spec(), track_spec()])
         .with_presentation(
             ModelPresentation::default()
                 .display_name("SAM 2.1")
@@ -99,24 +120,30 @@ pub fn manifest() -> Manifest {
         )
 }
 
-/// Read a SAM 2.1 release checkpoint (`sam2.1_hiera_*.pt`, or an equivalent
-/// `.safetensors`) and build the model on `gpu`.
+/// One checkpoint tensor: its name, shape and values.
+pub type NamedTensor = (String, Vec<usize>, Vec<f32>);
+
+/// The tensors of a SAM 2.1 release checkpoint (`sam2.1_hiera_*.pt`, or an
+/// equivalent `.safetensors`), named as the importer expects.
 ///
 /// The archive root is `{"model": state_dict}` and `checkpoint::torchpt`
 /// flattens with `'.'`, so the `model.` prefix is stripped here exactly as
 /// `tests/parity.rs` does — one convention, two call sites, no third spelling.
-pub fn load(weights: &str, cfg: Sam2Config, gpu: Gpu) -> Result<Sam2, String> {
-    let raw: Vec<(String, Vec<usize>, Vec<f32>)> = if weights.ends_with(".safetensors") {
+pub fn read_checkpoint(weights: &str) -> Result<Vec<NamedTensor>, String> {
+    let raw: Vec<NamedTensor> = if weights.ends_with(".safetensors") {
         checkpoint::safetensors::read(weights)?.into_iter().map(|t| (t.name, t.shape, t.data)).collect()
     } else {
         checkpoint::torchpt::read(weights)?.into_iter().map(|t| (t.name, t.shape, t.data)).collect()
     };
-    let tensors: Vec<(String, Vec<usize>, Vec<f32>)> =
-        raw.into_iter().map(|(n, s, d)| (n.strip_prefix("model.").unwrap_or(&n).to_string(), s, d)).collect();
-    if tensors.is_empty() {
+    if raw.is_empty() {
         return Err(format!("sam2: {weights} contains no tensors"));
     }
-    let (weights, _report) = crate::import::import(tensors, &cfg)?;
+    Ok(raw.into_iter().map(|(n, s, d)| (n.strip_prefix("model.").unwrap_or(&n).to_string(), s, d)).collect())
+}
+
+/// Read a SAM 2.1 release checkpoint and build the image model on `gpu`.
+pub fn load(weights: &str, cfg: Sam2Config, gpu: Gpu) -> Result<Sam2, String> {
+    let (weights, _report) = crate::import::import(read_checkpoint(weights)?, &cfg)?;
     Ok(Sam2::new(gpu, cfg, &weights))
 }
 
@@ -389,6 +416,74 @@ fn parse_floats(s: &str) -> Result<Vec<f32>, String> {
         .collect()
 }
 
+// ===================== tracking =====================
+
+/// A `track` call checked and decoded, before any weight is read: the
+/// frames to track, their size and rate, and the request.
+pub struct TrackCall {
+    pub frames: Vec<Vec<f32>>,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    pub request: crate::track::TrackRequest,
+}
+
+/// Decode and check a `track` invocation. Every refusal (no clicks, a click
+/// off the frame, a clip with no frame rate) happens here, so it costs no
+/// checkpoint read.
+pub fn track_call(inv: &Invocation) -> Result<TrackCall, String> {
+    let blob = inv.get_blob("video").ok_or("sam2 track: 'video' is required")?;
+    let own_fps = blob.meta.get("fps").and_then(|v| v.as_f64()).filter(|f| *f > 0.0);
+    let want_fps = inv.get_f64("fps").filter(|f| *f > 0.0);
+    let mut decoded = capability::blob::decode_video(inv, "video")?;
+    let fps = match (own_fps, want_fps) {
+        (Some(own), Some(want)) => {
+            let keep = crate::track::resample_indices(decoded.len(), own, want);
+            decoded = keep.into_iter().map(|i| decoded[i].clone()).collect();
+            want
+        }
+        (Some(own), None) => own,
+        (None, Some(want)) => want,
+        (None, None) => return Err("sam2 track: the clip states no frame rate (a directory of frames); give it with fps".into()),
+    };
+    if let Some(max) = inv.get_i64("max_frames").filter(|&m| m > 0) {
+        decoded.truncate(max as usize);
+    }
+    let (width, height) = (decoded[0].1, decoded[0].2);
+    let mut points = clicks(&inv.get_str("points").unwrap_or_default(), 1.0)?;
+    points.extend(clicks(&inv.get_str("exclude").unwrap_or_default(), 0.0)?);
+    let request = crate::track::TrackRequest {
+        points,
+        prompt_frame: inv.get_i64("prompt_frame").unwrap_or(0).max(0) as usize,
+        object_id: inv.get_i64("object_id").unwrap_or(0).max(0) as u32,
+        polarity: imaging::maskseq::Polarity::parse(&inv.get_str("polarity").unwrap_or_else(|| "object=255".into()))?,
+        binary: !inv.get_bool("soft").unwrap_or(false),
+    };
+    request.check(decoded.len(), width, height)?;
+    Ok(TrackCall { frames: decoded.into_iter().map(|f| f.0).collect(), width, height, fps, request })
+}
+
+/// `'x,y;x,y'` as `(x, y, label)` clicks.
+fn clicks(s: &str, label: f32) -> Result<Vec<(f32, f32, f32)>, String> {
+    s.split(';')
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+        .map(|g| match parse_floats(g)?[..] {
+            [x, y] => Ok((x, y, label)),
+            _ => Err(format!("sam2: click '{g}' wants 'x,y'")),
+        })
+        .collect()
+}
+
+/// Run a checked `track` call on a tracking model ([`crate::track::load_video`]).
+pub fn run_track(model: &Sam2, call: &TrackCall, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    let masks = crate::track::track_clip(model, &call.frames, call.width, call.height, call.fps, &call.request, &mut |done, total| {
+        progress(Progress::step(done as u32, total as u32, "tracking"))
+    })?;
+    let occluded: Vec<usize> = masks.occluded_frames().into_keys().collect();
+    Ok(Outcome::new().set("frames", json!(masks.frames.len())).set("occluded_frames", json!(occluded)).blob("masks", masks.to_blob()))
+}
+
 // ===================== the provider =====================
 
 /// The executable SAM 2 model behind the manifest. Construction is free — the
@@ -397,6 +492,9 @@ fn parse_floats(s: &str) -> Result<Vec<f32>, String> {
 pub struct Sam2Provider {
     weights: String,
     hot: Arc<Hot<String, Session>>,
+    /// The tracking model (the whole checkpoint, memory bank included), kept
+    /// apart from the image session so a `segment` never pays for it.
+    tracker: Arc<Hot<String, Sam2>>,
 }
 
 impl Sam2Provider {
@@ -404,8 +502,13 @@ impl Sam2Provider {
     /// (see [`crate::spec::Sam2Spec`]) from the models directory, never a
     /// baked-in path or an env var read directly here.
     pub fn new(weights: impl Into<String>) -> Sam2Provider {
-        Sam2Provider { weights: weights.into(), hot: Arc::new(Hot::new()) }
+        Sam2Provider { weights: weights.into(), hot: Arc::new(Hot::new()), tracker: Arc::new(Hot::new()) }
     }
+}
+
+/// The provider over a resolved [`capability::Assembly`] (its `weights` role).
+pub fn provider(assembly: &capability::Assembly) -> Result<Arc<dyn Provider>, String> {
+    Ok(Arc::new(Sam2Provider::new(assembly.role_path("weights")?)))
 }
 
 impl Provider for Sam2Provider {
@@ -413,9 +516,11 @@ impl Provider for Sam2Provider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "segment").then(|| {
-            Arc::new(SegmentAction { weights: self.weights.clone(), hot: self.hot.clone() }) as Arc<dyn Action>
-        })
+        match name {
+            "segment" => Some(Arc::new(SegmentAction { weights: self.weights.clone(), hot: self.hot.clone() })),
+            "track" => Some(Arc::new(TrackAction { weights: self.weights.clone(), hot: self.tracker.clone() })),
+            _ => None,
+        }
     }
 }
 
@@ -441,6 +546,23 @@ impl Action for SegmentAction {
     }
 }
 
+struct TrackAction {
+    weights: String,
+    hot: Arc<Hot<String, Sam2>>,
+}
+
+impl Action for TrackAction {
+    fn spec(&self) -> ActionSpec {
+        track_spec()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let call = track_call(inv)?;
+        let variant = inv.get_str("variant").unwrap_or_else(|| "tiny".into());
+        let key = format!("{}:{variant}", self.weights);
+        self.hot.try_get_mut(key, || crate::track::load_video(&self.weights, variant_config(&variant)?, Gpu::new(PIPELINES)), |m| run_track(m, &call, progress))
+    }
+}
+
 #[cfg(test)]
 mod caps_tests {
     use super::*;
@@ -450,7 +572,7 @@ mod caps_tests {
     fn manifest_declares_segment() {
         let m = manifest();
         assert_eq!(m.model, MODEL);
-        assert_eq!(m.actions.len(), 1);
+        assert_eq!(m.actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["segment", "track"]);
         let a = &m.actions[0];
         assert_eq!(a.name, "segment");
         assert!(!a.streaming, "segment is one-shot (the mask is the single artifact)");
@@ -486,6 +608,28 @@ mod caps_tests {
         // a malformed box is likewise a message, not a panic
         let inv = Invocation::new().blob("image", img()).set("box", json!("1,2,3"));
         assert!(!reg.run(MODEL, "segment", inv, &mut |_| {}).unwrap_err().is_empty());
+    }
+
+    /// A `track` call that cannot run is refused before the checkpoint is
+    /// read: no clicks, a clip with no frame rate, a click off the frame.
+    #[test]
+    fn a_track_call_is_checked_before_any_weight_loads() {
+        let mut reg = Registry::new();
+        reg.register(Arc::new(Sam2Provider::new("/nonexistent/sam2.pt")));
+        let clip = |fps: Option<f64>| {
+            let mut b = capability::blob::video_blob(&[(vec![0.0; 4 * 4 * 3], 4, 4), (vec![0.0; 4 * 4 * 3], 4, 4)]).unwrap();
+            if let Some(f) = fps {
+                b.meta["fps"] = json!(f);
+            }
+            b
+        };
+        let run = |inv: Invocation| reg.run(MODEL, "track", inv, &mut |_| {}).unwrap_err();
+        assert!(run(Invocation::new().blob("video", clip(Some(24.0)))).contains("points"));
+        assert!(run(Invocation::new().blob("video", clip(None)).set("points", json!("1,1"))).contains("frame rate"));
+        assert!(run(Invocation::new().blob("video", clip(Some(24.0))).set("points", json!("9,1"))).contains("outside"));
+        let call = track_call(&track_spec().validate(Invocation::new().blob("video", clip(None)).set("points", json!("1,1")).set("exclude", json!("2,2")).set("fps", json!(12.0)).set("polarity", json!("object=0"))).unwrap()).unwrap();
+        assert_eq!((call.frames.len(), call.fps, call.request.points.len()), (2, 12.0, 2));
+        assert_eq!(call.request.polarity, imaging::maskseq::Polarity::ObjectBlack);
     }
 
     #[test]

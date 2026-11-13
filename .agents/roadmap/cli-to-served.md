@@ -15,7 +15,15 @@ Scope: Moving every model-specific CLI verb into its model's served actions, tur
 
 ## Done
 
-- `crates/invoke`: the action runner `brain <model> <action>` and every sample share.
+- `crates/invoke`: the action runner `brain <model> <action>` and every sample share. `invoke::main` is a per-model program's whole `main` (global `--device`/`--backend`/`--brain-data-dir`, help from the static manifest, flags checked before any weight lookup, weights from the store, a clean device drain at exit). Two checkpoints of one model that tie in the store are settled by the action's `variant` (given, else its default). The catalog is the one table of which model resolves its weights through which spec.
+- sam2: `track` is a served action (`sam2::track`); mask sequences are one format, `imaging::maskseq` (a one-channel clip blob between actions, a directory on disk), read by LTX's masked pass as well; `samples/models/sam2`.
+
+## Decisions for what is left
+
+- **Knobs only a host can set** (a file on the serving machine, a memory placement such as LTX's resident blocks or VAE tiling) are params declared `.host_resolved()`: `brain <model> <action>` and samples set them, a remote caller cannot.
+- **A checkpoint role is a `--<role> PATH` flag**, never an action param: `invoke` takes every role the model's spec declares (LTX's `spatial_upsampler`, `detailing_lora`, ...).
+- **A pipeline over several models** (LTX `replace`: SAM 2, FLUX.2, ArcFace and LTX) is one served action whose provider resolves each component model from the store; a component's checkpoint is a role named `<model>.<role>`.
+- kronos and timesfm3 have a resolver spec in the catalog but no `brain <model>` provider yet (they are served by their residency adapters only); the forecast migration gives them one.
 
 ## Open, in order
 
@@ -23,7 +31,6 @@ Each row is one or more self-contained commits: the served action gains what the
 
 | arch | CLI-only work to move | into |
 |---|---|---|
-| sam2 | `track` (mask sequence from clicks) | `brain/sam2` action `track`; sample |
 | ltxv | `replace`; knobs missing from `t2v`/`v2v`/`upscale`/`dfr`/`extend` (scene, reference video, keyframes, window, strength, factor, role files); mp4 output | actions; `replace` as an action of its own; sample; delete `samples/shell/videogen/{ltxv,character_replace}` |
 | flux2 | inpaint mask, tiling, reference scales, `finetune` knobs (precision, cache dir, train base, previews) | `brain/flux2-klein` actions; sample; shell imagegen samples call the action |
 | wan | device placement, dtype, role files, `finetune --report` | `t2v`/`lora_train`; sample |

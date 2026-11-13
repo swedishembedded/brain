@@ -3522,7 +3522,7 @@ struct MaskedSource<'a> {
     /// `[lat_t * lh * lw]` in the reference's own polarity: `1` conditions
     /// (carried), `0` generates. See [`crate::maskcond`]'s module doc - it is
     /// inverted from every human-facing mask convention in this repo, and
-    /// [`crate::maskcond::MaskSeqPolarity::to_conditioning`] is the one place
+    /// [`crate::maskcond::conditioning`] is the one place
     /// the flip happens.
     mask: &'a [f32],
     /// `VideoConditionByMask::strength`. `1.0` freezes the conditioned tokens
@@ -5464,11 +5464,10 @@ mod masked_stage_tests {
 /// already varies.
 #[derive(Clone, Debug)]
 pub struct MaskedOpts {
-    /// A `brain/sam2-maskseq/1` mask-sequence directory - see
-    /// [`crate::maskcond::read_mask_sequence`] for the format, the polarity
-    /// rule, and everything it refuses rather than reconciling. Empty when
-    /// [`Self::window`] says what to regenerate instead.
-    pub mask_dir: String,
+    /// What to regenerate, as a mask sequence over the clip (see
+    /// [`crate::maskcond::mask_latents`] for the polarity rule and what it
+    /// refuses). `None` when [`Self::window`] says what to regenerate instead.
+    pub mask: Option<imaging::maskseq::MaskClip>,
     /// A retake (`ltx_pipelines.retake`): regenerate `[start, end)` seconds
     /// of the clip and hold the rest - `TemporalRegionMask` on both streams.
     pub window: Option<(f32, f32)>,
@@ -5494,7 +5493,7 @@ pub struct MaskedOpts {
 
 impl Default for MaskedOpts {
     fn default() -> MaskedOpts {
-        MaskedOpts { mask_dir: String::new(), window: None, regenerate_video: true, regenerate_audio: true, strength: 1.0, base: GenOpts::default() }
+        MaskedOpts { mask: None, window: None, regenerate_video: true, regenerate_audio: true, strength: 1.0, base: GenOpts::default() }
     }
 }
 
@@ -5579,9 +5578,9 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
     check_audio_request(paths, &o.base)?;
     // `1` on a held token, `0` on a regenerated one - the mask sequence's own
     // polarity, the complement of the denoise mask.
-    let mask: Vec<f32> = match (o.mask_dir.is_empty(), o.window) {
-        (false, None) => crate::maskcond::read_mask_sequence(std::path::Path::new(&o.mask_dir), frames, w, h, lat_t, lh, lw)?,
-        (true, Some((start, end))) => {
+    let mask: Vec<f32> = match (&o.mask, o.window) {
+        (Some(m), None) => crate::maskcond::mask_latents(m, frames, w, h, lat_t, lh, lw)?,
+        (None, Some((start, end))) => {
             if start >= end {
                 return Err(format!("the retake window starts at {start} s, at or after its end {end} s"));
             }
@@ -5614,8 +5613,7 @@ pub fn generate_masked(paths: &Paths, prompt: &str, clip: &Video, o: &MaskedOpts
     let generated = mask.iter().filter(|&&m| m < 1.0).count();
     if generated == 0 && !audio_generates {
         return Err(format!(
-            "every one of the {t} latent tokens is a conditioning position, so this run would return the input clip unchanged - the mask sequence in {} marks nothing to regenerate (check its declared polarity)",
-            o.mask_dir
+            "every one of the {t} latent tokens is a conditioning position, so this run would return the input clip unchanged - the mask marks nothing to regenerate (check its declared polarity)"
         ));
     }
     tracing::info!(latent_tokens = t, touched = generated, "mask reduced to the latent grid");
@@ -5819,7 +5817,7 @@ pub fn extend(paths: &Paths, prompt: &str, clip: &Video, o: &ExtendOpts, cancel:
         }
     };
     let masked = MaskedOpts {
-        mask_dir: String::new(),
+        mask: None,
         window: Some(plan.window),
         regenerate_video: true,
         regenerate_audio: true,
@@ -7575,7 +7573,7 @@ mod tests {
         // A masked pass regenerates what ONE of a mask sequence or a window
         // marks, and holding a soundtrack needs one to hold.
         let clip = Video { width: 32, height: 32, fps: 8, frames: vec![vec![0u8; 32 * 32 * 3]; 9], audio: None };
-        let both = MaskedOpts { mask_dir: "/m".into(), window: Some((0.0, 1.0)), ..Default::default() };
+        let both = MaskedOpts { mask: Some(imaging::maskseq::MaskClip::new(32, 32, 8.0, imaging::maskseq::Polarity::ObjectWhite, true)), window: Some((0.0, 1.0)), ..Default::default() };
         let e = generate_masked(&bare, "x", &clip, &both, &Default::default(), |_, _, _| {}).err().expect("must be rejected");
         assert!(e.contains("exactly one"), "{e}");
 

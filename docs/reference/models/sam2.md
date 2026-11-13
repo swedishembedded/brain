@@ -20,7 +20,7 @@ than a rectangle held still.
 | HTTP API               | [ ] |
 | D-Bus                  | [x] |
 | Batched serving        | [x] |
-| Video tracking (`brain sam2 track`) | [x] |
+| Video tracking (`track`) | [x] |
 
 ## Getting the weights
 
@@ -64,20 +64,22 @@ image-batched path.
 
 ## Running it: a video
 
-`brain sam2 track` is the video path. Clicks on one frame in, a per-frame
-mask sequence out:
+`track` is the video path. Clicks on one frame in, the object's mask on
+every frame out:
 
 ```bash
-brain sam2 track --video clip.mp4 --point 640,300 --out masks/
+brain sam2 track --video clip.mp4 --points 640,300 --out masks=masks/
 ```
 
-`--point` repeats: several clicks pick one object together (a person whose
-coat and trousers a single click would take apart). `--exclude x,y` is a
-click on something that is not the object. With one click SAM 2 picks the
-best of its three ambiguity masks; with several it asks for one mask, as the
-reference does.
+`--points` takes several clicks, `"x,y;x,y"`, which pick one object together
+(a person whose coat and trousers a single click would take apart).
+`--exclude "x,y;x,y"` are clicks on things that are not the object. With one
+click SAM 2 picks the best of its three ambiguity masks; with several it
+asks for one mask, as the reference does.
 
-That writes a mask-sequence DIRECTORY:
+The result is a mask sequence. Over the served API it is one blob (a
+one-channel clip whose `meta.maskseq` is the manifest); written to a path it
+is a directory:
 
 ```text
 masks/masks.json          the manifest
@@ -85,35 +87,36 @@ masks/mask_000000.png     frame 0, 8-bit, source resolution
 masks/mask_000001.png     ...
 ```
 
-**Polarity is declared in `masks.json`, never inferred.** By default `255` is
-the tracked object (SAM 2's own meaning). `--invert` writes the exact inverse
-instead, which is what a consumer whose `1` means "keep this region, do not
-regenerate" wants - LTX-2.5's masked conditioning, where replacing a character
-means masking the BACKGROUND white. A consumer must read the `polarity` key
-and hard-error if it is missing: the two are exact inverses, and getting it
+That directory is what `brain ltxv v2v --mask` takes.
+
+**Polarity is declared in the manifest, never inferred.** By default `255`
+(1) is the tracked object, SAM 2's own meaning. `--polarity object=0` writes
+the exact inverse, for a consumer whose `1` means "keep this region"
+(LTX-2.5's masked conditioning). A reader acts on the `polarity` key and
+refuses a sequence without it: the two are exact inverses, and getting it
 backwards regenerates the whole background while preserving the subject.
 
-`masks.json` also carries a per-frame `object_score`. **Negative means SAM 2
+The manifest also carries a per-frame `object_score`. **Negative means SAM 2
 believes the object is absent or fully occluded on that frame**, so an empty
-mask there is the model's answer, not a bug - worth surfacing in a stunt
-sequence, which is full of occlusion.
+mask there is the model's answer, not a bug; the run lists those frames as
+`occluded_frames`.
 
-| Flag | Effect |
+| Param | Effect |
 |---|---|
-| `--video` / `--frames` | a clip (AV1 read in process, other codecs need ffmpeg), or a directory of numbered images |
-| `--point x,y` | the click that picks the object, in source pixels |
-| `--label 0\|1` | 0 = background click, 1 = foreground (default) |
-| `--prompt-frame n` | which frame the click sits on (default 0) |
-| `--max-frames n` / `--fps f` | trim or resample the clip before tracking |
-| `--object-id n` | recorded in `masks.json`, for multi-character work |
-| `--invert` | emit `object=0` polarity |
-| `--soft` | emit the sigmoid ramp instead of a hard 0/255 mask |
+| `--video` | a clip (AV1 read in process, other codecs need ffmpeg), or a directory of numbered images |
+| `points` | clicks on the object, `"x,y;x,y"` in source pixels (required) |
+| `exclude` | clicks on what is not the object |
+| `prompt_frame` | which frame the clicks sit on (default 0) |
+| `max_frames` / `fps` | trim or resample the clip before tracking; `fps` is required for a directory of frames |
+| `object_id` | recorded in the manifest, for multi-character work |
+| `polarity` | `object=255` (default) or `object=0` |
+| `soft` | keep the sigmoid ramp instead of hard masks |
 
-Masks come out at the SOURCE frame size, one PNG per source frame, contiguous
+Masks come out at the SOURCE frame size, one per source frame, contiguous
 from 0. Any spatial or temporal downsampling belongs to the consumer, against
-its own grid.
+its own grid. `brain sam2 track --help` lists every param with its default.
 
-## Options
+## Options (`segment`)
 
 | Param | Effect |
 |---|---|
@@ -129,7 +132,7 @@ is the efficient way to segment many regions of one photo.
 
 ## Hardware and limits
 
-The video path tracks ONE object per run: `--object-id` names it in the
+The video path tracks ONE object per run: `object_id` names it in the
 manifest, and several characters means several runs (they share nothing but
 the clip). Tracking is forward only - frames BEFORE the clicked one take the
 clicked frame's mask rather than being tracked backwards - and a correction
@@ -137,7 +140,5 @@ click on an already-tracked frame is not implemented, so re-prompting means
 re-running. A video mask PROMPT (segment from an existing mask rather than a
 point) is likewise not wired up.
 
-There's no training or fine-tune verb and no HTTP surface; `segment` is
-reached through the CLI's generic capability dispatch or D-Bus, and `track`
-through its own CLI verb (a mask sequence is a directory, which no single
-capability blob can carry).
+There's no training or fine-tune action and no HTTP surface; `segment` and
+`track` are reached through `brain sam2 <action>` and D-Bus.

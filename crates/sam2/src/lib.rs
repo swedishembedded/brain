@@ -50,15 +50,14 @@ pub mod caps;
 pub mod config;
 pub mod hostpe;
 pub mod import;
-pub mod maskseq;
 pub mod model;
 pub mod spec;
+pub mod track;
 pub mod train;
 pub mod video;
 
 pub use config::{BlockSpec, Sam2Config};
 pub use import::{import, import_scoped, ImportReport, Scope, Tensors};
-pub use maskseq::{MaskSeq, Polarity};
 pub use model::{Decoded, Encoded, Prompt, Sam2, PIPELINES};
 pub use train::{FrozenEncode, MaskDecoderTrainer, MaskTargets};
 pub use video::{MemoryEntry, TrackStep, Tracker, VideoConsts};

@@ -90,6 +90,8 @@ BRAIN=./target/release/brain
 DRY=0
 INPUT=""
 OUT=""
+POINTS=""   # track: the clicks, joined the way `brain sam2 track` takes them
+EXCLUDE=""
 ARGS=()      # flags for the brain command, in order
 PASS=()      # flags after a literal --, unchanged
 
@@ -110,6 +112,12 @@ while [ $# -gt 0 ]; do
     --editor-vae) need "$@"; ARGS+=(--component "flux2.vae=$2"); shift 2 ;;
     --editor-text-encoder) need "$@"; ARGS+=(--component "flux2.text_encoder=$2"); shift 2 ;;
     --editor-tokenizer) need "$@"; ARGS+=(--component "flux2.tokenizer=$2"); shift 2 ;;
+    --point | --exclude)
+      need "$@"
+      if [ "$MODE" != track ]; then ARGS+=("$1" "$2")
+      elif [ "$1" = --point ]; then POINTS="${POINTS:+$POINTS;}$2"
+      else EXCLUDE="${EXCLUDE:+$EXCLUDE;}$2"; fi
+      shift 2 ;;
     --tracker-weights)
       need "$@"
       if [ "$MODE" = track ]; then ARGS+=(--weights "$2"); else ARGS+=(--component "sam2.weights=$2"); fi
@@ -136,7 +144,8 @@ case "$MODE" in
     CMD=("$BRAIN" ltxv replace --input "$INPUT" --output-path "$OUT") ;;
   track)
     OUT="${OUT:-out/character_replace/$STEM-track}"
-    CMD=("$BRAIN" sam2 track --video "$INPUT" --out "$OUT") ;;
+    CMD=("$BRAIN" sam2 track --video "$INPUT" --points "$POINTS" --out "masks=$OUT")
+    [ -z "$EXCLUDE" ] || CMD+=(--exclude "$EXCLUDE") ;;
   video)
     OUT="${OUT:-out/character_replace/$STEM-video.mp4}"
     CMD=("$BRAIN" ltxv v2v --input "$INPUT" --output-path "$OUT") ;;

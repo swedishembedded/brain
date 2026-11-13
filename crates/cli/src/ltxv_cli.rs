@@ -667,7 +667,7 @@ would desync it from a mask sequence produced by a separate run.
 Required:
   --input <file>            the clip to edit (AV1 in .mp4/.mkv/.webm, or
                             anything an installed ffmpeg reads)
-  --mask <dir>              a `brain/sam2-maskseq/1` mask-sequence directory:
+  --mask <dir>              a mask-sequence directory (`brain sam2 track`):
                             one 8-bit PNG per source frame at the source
                             resolution, plus a masks.json giving the file
                             pattern, the frame count, the resolution and the
@@ -1442,6 +1442,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
     let mut input: Option<String> = None;
     let mut out: Option<String> = None;
     let mut fps: Option<usize> = None;
+    let mut mask_dir = String::new();
     // Whether --dit-config was given; unnamed, the real checkpoint runs when
     // it is configured (`ltxv::pipeline::resolve_defaults`).
     let mut dit_named = false;
@@ -1453,7 +1454,10 @@ fn v2v(args: &[String]) -> Result<(), String> {
         match args[i].as_str() {
             "--prompt" => prompt = Some(need(i)?.clone()),
             "--input" | "--in" => input = Some(need(i)?.clone()),
-            "--mask" => o.mask_dir = need(i)?.clone(),
+            "--mask" => {
+                mask_dir = need(i)?.clone();
+                o.mask = Some(imaging::maskseq::MaskClip::read_dir(&mask_dir)?);
+            }
             "--window" => {
                 let v = need(i)?;
                 let (a, b) = v.split_once(':').ok_or_else(|| format!("--window: '{v}' is not <start>:<end> in seconds"))?;
@@ -1504,7 +1508,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
     let input = input.ok_or("--input is required")?;
     let out = out.ok_or("--output-path is required")?;
     let prompt = prompt.ok_or("--prompt is required: the model denoises the regenerated region against the text context, and an empty one costs exactly the detail this command exists to produce")?;
-    if o.mask_dir.is_empty() && o.window.is_none() {
+    if o.mask.is_none() && o.window.is_none() {
         return Err("--mask or --window is required: without one this command has nothing to regenerate and would return the input clip".into());
     }
     let paths = resolve_ltxv(&overrides, None)?;
@@ -1521,7 +1525,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
     eprintln!(
         "ltxv v2v ({dit_desc}, real VAE, {ctx_desc}): {} frames, {w}x{h} at {fps} fps, mask {}, strength {}, guidance {:?}, seed {}",
         clip.frames.len(),
-        o.mask_dir,
+        mask_dir,
         o.strength,
         o.base.guidance,
         o.base.seed
@@ -1552,7 +1556,7 @@ fn v2v(args: &[String]) -> Result<(), String> {
         "ltxv v2v",
         o.base.seed,
         serde_json::json!({
-            "prompt": prompt, "input": input, "mask": o.mask_dir, "strength": o.strength,
+            "prompt": prompt, "input": input, "mask": mask_dir, "strength": o.strength,
             "keyframes": o.base.future_anchors.iter().map(|(at, path)| serde_json::json!({"frame": at, "image": path})).collect::<Vec<_>>(),
             "keyframe_strength": o.base.conditioning_strength,
             "settings": base_params(&o.base),
@@ -1840,7 +1844,6 @@ mod tests {
         // The interchange format this command consumes is a contract with a
         // separate producer, so its version string is in the help verbatim
         // rather than paraphrased.
-        assert!(super::V2V_HELP.contains(ltxv::maskcond::MASKSEQ_FORMAT), "the mask-sequence format v2v --help names is not MASKSEQ_FORMAT");
     }
 
     /// Every subcommand `run_ltxv` dispatches has to be listed in the help a

@@ -230,18 +230,32 @@ pub struct BlobSpec {
     pub media: Media,
     pub required: bool,
     pub help: String,
+    /// A [`Media::Video`] input the action works on frame by frame (a clip it
+    /// tracks or edits): a host decodes it whole, at its own frame rate,
+    /// rather than sampling a few frames the way it does for a clip that is
+    /// only context for a prompt.
+    pub clip: bool,
 }
 
 impl BlobSpec {
     pub fn new(name: &str, media: Media, help: &str) -> BlobSpec {
-        BlobSpec { name: name.into(), media, required: false, help: help.into() }
+        BlobSpec { name: name.into(), media, required: false, help: help.into(), clip: false }
     }
     pub fn required(mut self) -> BlobSpec {
         self.required = true;
         self
     }
+    /// See [`Self::clip`].
+    pub fn clip(mut self) -> BlobSpec {
+        self.clip = true;
+        self
+    }
     fn to_json(&self) -> Value {
-        json!({ "name": self.name, "media": self.media.name(), "required": self.required, "help": self.help })
+        let mut v = json!({ "name": self.name, "media": self.media.name(), "required": self.required, "help": self.help });
+        if self.clip {
+            v["clip"] = json!(true);
+        }
+        v
     }
 }
 
@@ -351,6 +365,13 @@ impl ActionSpec {
     pub fn for_serving(mut self) -> ActionSpec {
         self.params.retain(|p| p.host_env.is_none() && !p.host_resolved);
         self
+    }
+
+    /// Whether the input `name` is a clip the action works on whole (see
+    /// [`BlobSpec::clip`]), either declared so or named by the video contract
+    /// as the clip an edit takes.
+    pub fn is_clip_input(&self, name: &str) -> bool {
+        self.inputs.iter().any(|b| b.name == name && b.clip) || self.video.as_ref().and_then(|c| c.clip_input.as_deref()) == Some(name)
     }
 
     /// [`Self::validate`] for a call from a caller that does not share this

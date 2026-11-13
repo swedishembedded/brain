@@ -1,0 +1,20 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/sam2` -> `sample-models-sam2`.
+name = "sample-models-sam2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: SAM 2.1 segmentation and video tracking from the command line, every served action with every parameter."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1): the actions are SAM 2's own, served
+# ones, and `invoke` turns their manifest into this program's command line.
+brain-sam2.workspace = true
+brain-invoke.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 40

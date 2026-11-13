@@ -123,7 +123,7 @@
 //! than structurally. [`pipeline::generate_masked`] drives it (`brain ltxv
 //! v2v`). Its mask polarity is inverted from every human-facing convention in
 //! this repo - `1` is the position that is KEPT - so the flip has exactly one
-//! named, tested home in [`maskcond::MaskSeqPolarity::to_conditioning`].
+//! named, tested home in [`maskcond::conditioning`].
 
 pub mod audio;
 pub mod audio_vae;

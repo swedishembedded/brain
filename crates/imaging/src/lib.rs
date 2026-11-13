@@ -135,6 +135,7 @@ pub mod device;
 pub mod host;
 pub mod letterbox;
 pub mod mask;
+pub mod maskseq;
 pub mod nms;
 pub mod photo;
 pub mod pixels;

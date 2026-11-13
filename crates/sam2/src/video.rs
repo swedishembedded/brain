@@ -41,7 +41,7 @@
 //!   `_apply_non_overlapping_constraints` only does anything for a batch of
 //!   objects, and per-object slices are independent up to that constraint, so N
 //!   objects is N trackers sharing one [`Encoded`] per frame - no new math, and
-//!   the mask-sequence format ([`MaskSeq`]) already carries an `object_id`.
+//!   the mask-sequence format (`imaging::maskseq`) already carries an `object_id`.
 //! * **The mask-PROMPT entry point** (`add_new_mask` →
 //!   `_use_mask_as_output`), whose only weight is `mask_downsample`. That
 //!   tensor is imported and named in `Sam2Config::video_tensor_manifest`

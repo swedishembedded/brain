@@ -8950,7 +8950,7 @@ the source.
 `ltxv::maskcond` is `ltx_core.conditioning.types.mask_cond.VideoConditionByMask`
 verbatim - two blends over the latent state - plus the `GaussianNoiser` step the
 reference runs after every conditioning item, plus the consumer side of the
-`brain/sam2-maskseq/1` interchange format. `pipeline::generate_masked` runs it as
+`brain/maskseq/1` mask-sequence format (`imaging::maskseq`). `pipeline::generate_masked` runs it as
 ONE stage at the clip's own resolution (there is nothing to upscale: the content
 already exists at the size it is wanted), and `Stage` gained a `mask` field that
 `denoise_stage` refuses to combine with a conditioning still or a carried latent
@@ -9065,7 +9065,7 @@ the same quiet way, only at cell boundaries, only on soft content.
 
 #### 4 - the interchange format, and where it is enforced
 
-The mask arrives as `brain/sam2-maskseq/1`, written by `brain sam2 track` (one
+The mask arrives as a `brain/maskseq/1` sequence, written by `brain sam2 track` (one
 click, propagated by SAM 2.1's memory bank): one 8-bit PNG per source frame at
 the source resolution, contiguous from 0, plus a `masks.json` declaring the file
 pattern, frame count, resolution and **polarity**. `maskcond::read_mask_sequence`

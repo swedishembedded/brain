@@ -623,10 +623,7 @@ pub fn models() -> Vec<ModelEntry> {
         // counterpart of flux2's own `Paths::from_assembly`).
         ModelEntry {
             manifest: sam2::caps::manifest,
-            provider: |assembly: &Assembly| {
-                let weights = assembly.role_path("weights")?;
-                Ok(Arc::new(sam2::caps::Sam2Provider::new(weights)) as Arc<dyn Provider>)
-            },
+            provider: sam2::caps::provider,
             spec: Some(("sam2", &sam2::spec::Sam2Spec)),
             resident: crate::resident!(crate::resident_sam2::Sam2Resident::from_env),
         },
