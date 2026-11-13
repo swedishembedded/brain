@@ -863,6 +863,12 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
         let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
         return catalog::resident_edgerock::EdgeRockResident::from_hf_dir(dir, &card.id, qwen35_sizing).map(|r| Built::Other(Arc::new(r)));
     }
+    // A saved timeline model (the training service installs one with a manifest of this family): its directory, as
+    // `TimelineModel::save` or an ensemble's save wrote it, is served under the id the manifest names.
+    if card.family == "horizon" {
+        let dir = roles.get("weights").ok_or("compound manifest missing role \"weights\"")?;
+        return catalog::resident_horizon::HorizonResident::new(&card.id, dir).map(|r| Built::Other(Arc::new(r))).ok_or_else(|| format!("{}: not a saved timeline model", card.id));
+    }
     // A Qwen3.5/3.6 MoE release is served from its published directory, every tensor in the format it is stored in.
     if implementation == Some("qwen35moe") {
         let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
@@ -1478,6 +1484,37 @@ mod tests {
         }
         let manifest = brain_modelstore::CompoundManifest { id: format!("{vendor}/{repo}"), family: family.to_string(), roles };
         std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    /// A saved timeline model installed with a manifest of family `horizon` (what the training service's
+    /// `timeline_train` writes) is served under the id the manifest names, with predict, eval and calibrate.
+    #[test]
+    fn discover_serves_a_saved_timeline_model_under_its_manifest_id() {
+        use horizon::saved::Saved;
+        use horizon::vocab::{FitOptions, Vocab};
+        use horizon::{Horizon, HorizonConfig};
+
+        let root = tmp_dir("discover-horizon");
+        let repo_dir = root.join("local").join("risk");
+        let (subjects, _) = horizon::synthetic::population(20, 9);
+        let codes: Vec<String> = horizon::synthetic::CODES.iter().map(|c| c.to_string()).collect();
+        let vocab = Vocab::fit(&subjects, &codes, &codes[..2], &FitOptions::default()).unwrap();
+        let mut cfg = HorizonConfig::default_for(vocab.len(), codes.len() as u32);
+        cfg.max_tokens = 8;
+        cfg.d_model = 16;
+        cfg.n_heads = 2;
+        cfg.d_ff = 32;
+        cfg.rank = 8;
+        cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
+        Saved::new(Horizon::new(cfg.clone(), 8, &horizon::init_weights(&cfg, 3)), vocab).save(&repo_dir).unwrap();
+        let manifest = brain_modelstore::CompoundManifest { id: "local/risk".into(), family: "horizon".into(), roles: [("weights".to_string(), ".".to_string())].into() };
+        std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let Discovered { residents, errors, .. } = discover(&root, &ScanSettings::default());
+        assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
+        let served = residents.iter().find(|r| r.manifest().model == "local/risk").expect("the timeline model is served under its id");
+        assert_eq!(served.manifest().actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["predict", "eval", "calibrate"]);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A qwen3-decoder checkpoint pulled as downloaded (a manifest whose

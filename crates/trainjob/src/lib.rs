@@ -21,6 +21,7 @@
 //! * [`request`]: the action's contract and the typed, bounded request.
 //! * [`store`]: the content-addressed artifact store datasets and adapters
 //!   move through, by blake3 digest; a caller never names a path.
+//! * [`timeline`]: `timeline_train`, a timeline model trained and published as a checkpoint.
 //! * [`dryrun`]: `check_dataset`, a dataset checked against a base without training.
 //! * [`consolidate`]: the jobs that produce a checkpoint, `full_train` and `merge`.
 //! * [`job`]: one run, from staged inputs to the adapter and its report.
@@ -33,6 +34,7 @@ pub mod job;
 pub mod request;
 pub mod resident;
 pub mod store;
+pub mod timeline;
 
 pub use request::{ACTION, MODEL};
 pub use resident::{resident, TrainConfig, TrainResident};

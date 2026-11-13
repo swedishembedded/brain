@@ -1,24 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The timeline model behind the residency scheduler.
+//! A saved timeline model behind the residency scheduler.
 //!
-//! `activate` loads the saved model (or ensemble) from `BRAIN_HORIZON_DIR`
-//! once, on the assigned device; the [`Instance`] owns it, so dropping the
-//! instance frees it. Four actions - `predict`, `eval`, `calibrate` and
-//! `train` - whose schema and work come from `horizon::caps` and
-//! `horizon::lifecycle`, so this file holds no second copy of either.
-//! Concurrent `predict` requests are one batch: `run_batch` puts every
-//! request's subjects through one forward pass in device batches of the
-//! model's size and splits the answers back per request
+//! A directory `TimelineModel::save` (or an ensemble's) wrote, installed in the model store with a manifest of family
+//! `horizon` (`brain.manifest.json`, which the training service's `timeline_train` writes beside the model it
+//! installs), is one served model under its own id (`local/<name>`). `activate` loads it once, on the assigned
+//! device; the [`Instance`] owns it, so dropping the instance frees it. Three actions - `predict`, `eval` and
+//! `calibrate` - whose schema and work come from `horizon::caps` and `horizon::lifecycle`, so this file holds no
+//! second copy of either. Concurrent `predict` requests are one batch: `run_batch` puts every request's subjects
+//! through one forward pass in device batches of the model's size and splits the answers back per request
 //! (`horizon::caps::predict_batch`).
 //!
-//! `eval` judges the held model on the request's subjects; `calibrate`
-//! returns the calibration it would write and writes nothing, since the served
-//! directory is the host's. `train` needs no loaded weights: it has its own
-//! instance (`config: "train"`, nothing loaded) and writes the finished model to
-//! the host's `BRAIN_HORIZON_TRAIN_DIR`, polling the job's cancel token every
-//! step.
+//! `eval` judges the held model on the request's subjects; `calibrate` returns the calibration it would write and
+//! writes nothing, since the served directory is the host's. Training is not an action of a loaded model: it is the
+//! training service's `timeline_train`, which publishes the model it trains.
 
 use std::path::{Path, PathBuf};
 
@@ -27,41 +23,21 @@ use horizon::ensemble::{Loaded, MEMBERS_DIR};
 use horizon::saved::{VOCAB_FILE, WEIGHTS_FILE};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-/// The instance config of the `train` action: no weights are loaded for it.
-const TRAIN_CONFIG: &str = "train";
-/// What a training run is budgeted for on the device: the models are small,
-/// so a flat allowance bounds the batches and the optimiser state.
-const TRAIN_BUDGET: u64 = 1 << 30;
-
-/// A saved timeline model behind the scheduler.
+/// A saved timeline model behind the scheduler, served under `id`.
 pub struct HorizonResident {
+    id: String,
     dir: PathBuf,
 }
 
 impl HorizonResident {
-    /// `BRAIN_HORIZON_DIR` if the operator set it; `None` (not served, never
-    /// a startup failure) otherwise, or when the directory holds no saved
-    /// model.
-    pub fn from_env() -> Option<HorizonResident> {
-        let dir = std::env::var(horizon::caps::DIR_VAR)
-            .ok()
-            .filter(|d| !d.is_empty())?;
-        Self::new(Path::new(&dir))
-    }
-
-    /// From a directory `TimelineModel::save` or `TimelineEnsemble::save`
-    /// wrote; `None` if it is neither.
-    pub fn new(dir: &Path) -> Option<HorizonResident> {
+    /// From a directory `TimelineModel::save` or `TimelineEnsemble::save` wrote, served as `id`; `None` if it is
+    /// neither.
+    pub fn new(id: &str, dir: &Path) -> Option<HorizonResident> {
         if !Loaded::is_dir(dir) {
-            eprintln!(
-                "brain: horizon not served ({} holds neither {WEIGHTS_FILE} + {VOCAB_FILE} nor an ensemble)",
-                dir.display()
-            );
+            eprintln!("brain: horizon {id} not served ({} holds neither {WEIGHTS_FILE} + {VOCAB_FILE} nor an ensemble)", dir.display());
             return None;
         }
-        Some(HorizonResident {
-            dir: dir.to_path_buf(),
-        })
+        Some(HorizonResident { id: id.to_string(), dir: dir.to_path_buf() })
     }
 
     /// The size of every weights file below the directory: the model's, or
@@ -84,40 +60,32 @@ impl HorizonResident {
 
 impl ResidentModel for HorizonResident {
     fn manifest(&self) -> Manifest {
-        horizon::caps::manifest_resident()
+        horizon::caps::manifest_resident(&self.id)
     }
 
-    fn instance_key(&self, action: &str, _inv: &Invocation) -> InstanceKey {
-        let config = if action == "train" { TRAIN_CONFIG } else { "default" };
-        InstanceKey::new(horizon::caps::MODEL, config)
+    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
+        InstanceKey::new(self.id.as_str(), "default")
     }
 
-    fn estimate(&self, key: &InstanceKey) -> MemCost {
-        if key.config == TRAIN_CONFIG {
-            return MemCost::new(TRAIN_BUDGET, 0);
-        }
+    fn estimate(&self, _key: &InstanceKey) -> MemCost {
         // The weights plus a prediction batch's activations: the model is
         // small, so a flat allowance over the weights bounds the batch.
         MemCost::new(self.weights_bytes().saturating_mul(2) + (256 << 20), 0)
     }
 
-    fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if key.config == TRAIN_CONFIG {
-            return Ok(Box::new(HorizonInstance { loaded: None }));
-        }
+    fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let loaded = crate::resident_llm::on_device(device, || Loaded::load(&self.dir))??;
-        Ok(Box::new(HorizonInstance { loaded: Some(loaded) }))
+        Ok(Box::new(HorizonInstance { loaded }))
     }
 }
 
 struct HorizonInstance {
-    /// `None` for the training instance.
-    loaded: Option<Loaded>,
+    loaded: Loaded,
 }
 
 impl HorizonInstance {
     fn model(&self) -> Result<&Loaded, String> {
-        self.loaded.as_ref().ok_or_else(|| "horizon: this instance holds no model".to_string())
+        Ok(&self.loaded)
     }
 }
 
@@ -141,7 +109,6 @@ impl Instance for HorizonInstance {
                 progress(Progress::step(1, 1, "calibrate"));
                 horizon::lifecycle::calibrate_loaded(self.model()?, inv)
             }
-            "train" => horizon::lifecycle::train(inv, progress),
             other => Err(format!("horizon: no action '{other}'")),
         }
     }
@@ -213,8 +180,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("catalog-horizon-{}", std::process::id()));
         Saved::new(model, vocab).save(&dir).unwrap();
 
-        let resident = HorizonResident::new(&dir).expect("a saved model directory");
-        let key = InstanceKey::new(horizon::caps::MODEL, "default");
+        let resident = HorizonResident::new("local/timeline", &dir).expect("a saved model directory");
+        assert_eq!(resident.manifest().model, "local/timeline");
+        assert_eq!(resident.manifest().actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["predict", "eval", "calibrate"], "a loaded model does not train");
+        let key = InstanceKey::new("local/timeline", "default");
         let mut instance = resident.activate(&key, Device::Gpu(0)).unwrap();
         let invs = [
             request(&subjects[..10]),

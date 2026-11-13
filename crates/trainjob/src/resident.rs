@@ -41,6 +41,7 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::consolidate::{self, FullRequest, MergeRequest};
 use crate::dryrun;
+use crate::timeline;
 use crate::job::{self, FootprintCache, JobEnv};
 use crate::request::{self, Request};
 use crate::store::{ArtifactStore, StoreError};
@@ -85,6 +86,7 @@ impl TrainResident {
             consolidate::FULL_ACTION => self.admit_full(inv),
             consolidate::MERGE_ACTION => self.admit_merge(inv),
             dryrun::ACTION => self.admit_check(inv),
+            timeline::ACTION => self.admit_timeline(inv),
             other => Err(format!("{} has no action '{other}'", request::MODEL)),
         }
     }
@@ -142,6 +144,21 @@ impl TrainResident {
         Ok(Reservation::Host(2 * job::tree_bytes(&base_dir)))
     }
 
+    fn admit_timeline(&self, inv: &Invocation) -> Result<Reservation, String> {
+        let sources = timeline::Sources::from_invocation(inv)?;
+        if self.env.store.is_none() && sources.install_as.is_none() {
+            return Err("timeline_train: this server has no artifact store (--artifact-store) to publish the model to: set install_as to keep it in the model store".to_string());
+        }
+        if self.env.store.is_none() && !sources.digests().is_empty() {
+            return Err("timeline_train: this server has no artifact store (--artifact-store), so a dataset cannot be named by digest".to_string());
+        }
+        self.check_digests(&sources.digests())?;
+        if self.largest_card_bytes.is_some_and(|card| timeline::DEVICE_BUDGET > card) {
+            return Err(format!("timeline_train: a run is budgeted {} bytes of device memory and the largest card has less", timeline::DEVICE_BUDGET));
+        }
+        Ok(Reservation::Card(timeline::DEVICE_BUDGET))
+    }
+
     fn admit_check(&self, inv: &Invocation) -> Result<Reservation, String> {
         let request = dryrun::Request::from_invocation(inv)?;
         match (&self.env.store, &request.dataset) {
@@ -192,7 +209,7 @@ enum Reservation {
 
 impl ResidentModel for TrainResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec(), dryrun::spec()])
+        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec(), dryrun::spec(), timeline::spec()])
     }
 
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
@@ -248,6 +265,7 @@ impl Instance for TrainInstance {
             consolidate::FULL_ACTION => &mut || consolidate::run_full(env, inv, progress),
             consolidate::MERGE_ACTION => &mut || consolidate::run_merge(env, inv),
             dryrun::ACTION => &mut || dryrun::run(env, inv),
+            timeline::ACTION => &mut || timeline::run(env, inv, progress),
             other => return Err(format!("{} has no action '{other}'", request::MODEL)),
         };
         // The trainer reports a device failure (an allocation the card cannot hold) as a panic. One run's failure is

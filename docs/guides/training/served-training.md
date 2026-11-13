@@ -40,6 +40,14 @@ digits, `.`, `_`, `-`; a name that exists is refused), where a later job names i
 artifact store can only install. The files of an installed checkpoint are as large as the model: the operator owns
 the model store's disk.
 
+## Timeline models
+
+`timeline_train` trains a timeline (survival) model, or an ensemble, on `timeline-v1` subjects: the params of the
+model's own `train` action (see [Horizon](../../reference/models/horizon.md)) without `out` and `force`, the datasets
+as the input blobs `dataset` and `held_out` or `dataset_digest` and `held_out_digest`, and `install_as`. The model
+leaves like a full-parameter checkpoint (a manifest of per-file digests, `checkpoint_digest`); `install_as` installs
+it as `local/<name>` with a manifest of family `horizon`, and the server then serves it as a model of its own.
+
 ## Checking a dataset first
 
 `check_dataset` reads a dataset with the base's own tokenizer and chat template, as the trainer would, and reports

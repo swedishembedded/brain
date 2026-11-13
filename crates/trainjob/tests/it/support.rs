@@ -142,7 +142,9 @@ pub fn run_action(rig: &Rig, action: &str, spec: &capability::ActionSpec, params
     let mut inv = Invocation::new();
     inv.params = params;
     for (name, bytes) in blobs {
-        inv.blobs.insert((*name).to_string(), Blob::new(Media::Bytes, bytes.clone()));
+        // As the action declares the input: a caller of the HTTP route names the media the spec asks for.
+        let media = spec.inputs.iter().find(|b| b.name == *name).map_or(Media::Bytes, |b| b.media);
+        inv.blobs.insert((*name).to_string(), Blob::new(media, bytes.clone()));
     }
     let inv = spec.validate_served(inv)?;
     rig.exec.run_blocking(trainjob::MODEL, action, inv, frames.sink())

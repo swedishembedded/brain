@@ -16,8 +16,8 @@ Nothing in the model knows the domain: variables and outcome codes are data.
 | Inference | [x] (SDK) |
 | LoRA fine-tune | [ ] |
 | CLI (`brain <arch> <action>`) | [x] (`brain horizon train`, `eval`, `calibrate`, `predict`) |
-| HTTP API | [x] (`brain serve`, `BRAIN_HORIZON_DIR`) |
-| D-Bus | [x] (`brain serve`, `BRAIN_HORIZON_DIR`) |
+| HTTP API | [x] (`brain serve`, a saved model in the model store) |
+| D-Bus | [x] (`brain serve`, a saved model in the model store) |
 | Ensembles | [x] (seeded and bootstrap, SDK and `train --members`) |
 
 ## Data: `timeline-v1`
@@ -605,10 +605,9 @@ calibrated.
 returns the `calibration` blob (the `calibration.json` content) for the
 request's `validation` subjects and writes nothing: the served directory is the
 host's, so an operator installs it with `brain horizon calibrate` on the
-host. `train` needs no served weights; it reports progress, honours the job's
-cancellation (the D-Bus `Cancel`) and writes the finished model to the host's
-`BRAIN_HORIZON_TRAIN_DIR` (an existing directory there is refused). The
-datasets travel as blobs; no request names a path on the host.
+host. A served model does not train: training is the training service's
+`timeline_train` (below), which publishes the model it trains. No request names
+a path on the host.
 
 Every answer carries `support: {supported, ood_score, warnings}`. A subject
 whose score is above the request's `max_ood_score` (default 1, the edge of
@@ -636,21 +635,33 @@ shorthand for `--in <name>=PATH` (unless a parameter has that name), which is
 what `--history patient.json` is. `samples/shell/timeline/predict/history.sh`
 runs a patient through H0 to R0, an appended checkup to R1 and another to R2.
 
-`brain serve` serves it on HTTP and D-Bus as `brain/horizon` when
-`BRAIN_HORIZON_DIR` names the saved model (or ensemble) directory; there the
-directory is the host's, never a request parameter. A served `train` is the
-long-running case: it is one job on its own instance (nothing loaded) and one
-that a caller can cancel. `samples/shell/timeline/lifecycle/lifecycle.sh` runs
-train, eval, calibrate and predict (and a bootstrap ensemble) on the study
-sample's datasets.
+`brain serve` serves a saved model (or ensemble) that is in its model store: a
+directory with a `brain.manifest.json` of family `horizon` (id `vendor/repo`,
+role `weights` the model directory) is one served model under that id, with
+`predict`, `eval` and `calibrate`; the directory is the host's, never a request
+parameter. There is no environment variable: the model store is the one place
+a served model comes from.
+
+**Training as a service.** With `brain serve --training --artifact-store DIR`,
+`brain/train` has a `timeline_train` action: the `train` parameters above
+(except `out` and `force`, which are the host's), the datasets as the input
+blobs `dataset` and `held_out` or as `dataset_digest` and `held_out_digest`
+(blake3 digests of the artifact store; each exactly once), and `install_as`.
+It reports progress, honours the job's cancellation and publishes the model
+directory: each file by digest in the artifact store and a manifest of them,
+`checkpoint_digest`, in the result, which a remote caller fetches from the
+store. `install_as: "<name>"` also installs it in the model store as
+`local/<name>` with the manifest above, so the server serves it as a model of
+its own (after its next scan); a name that exists is refused. See
+[Training as a served job](../../guides/training/served-training.md).
+`samples/shell/timeline/lifecycle/lifecycle.sh` runs train, eval, calibrate and
+predict (and a bootstrap ensemble) on the study sample's datasets.
 
 ## Limits
 
 - `eval` and `calibrate` take one model, not an ensemble; there is no
   ensemble-level calibration (the members' own calibrations average where all
-  members have one). A served `train` writes to the host's directory and
-  returns its report but not the model files; a remote client fetches the
-  directory on the host. There is no Monte-Carlo dropout.
+  members have one). There is no Monte-Carlo dropout.
 - Calibration and support describe the population the model was trained,
   validated and assessed on; they do not transfer to another one. A
   calibration needs events: a recalibration slope estimated from a hundred

@@ -270,11 +270,12 @@ fn the_action_schemas_are_discoverable() {
 
     // A served surface names no host path: the weights, the training output
     // and the calibration's destination are the host's.
-    let served = manifest_resident();
+    let served = manifest_resident("local/timeline");
+    assert_eq!(served.model, "local/timeline");
     for a in &served.actions {
         for p in &a.params {
             assert!(!["weights", "out", "force"].contains(&p.name.as_str()), "{} serves {}", a.name, p.name);
         }
     }
-    assert_eq!(served.actions.len(), 4);
+    assert_eq!(served.actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["predict", "eval", "calibrate"], "training is the training service's, not a loaded model's");
 }

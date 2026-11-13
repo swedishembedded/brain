@@ -40,8 +40,11 @@ pub const FULL_ACTION: &str = "full_train";
 pub const MERGE_ACTION: &str = "merge";
 /// The longest model-store name `install_as` may take.
 pub const MAX_INSTALL_NAME_LEN: usize = 100;
-/// The most files a checkpoint directory may hold and still be published: a model is a handful of files.
-pub const MAX_CHECKPOINT_FILES: usize = 64;
+/// The most files a checkpoint directory may hold and still be published: a model is a handful of files, an ensemble
+/// of timeline models a few per member.
+pub const MAX_CHECKPOINT_FILES: usize = 1024;
+/// How many directories deep a checkpoint's files may sit (a model, or an ensemble's members beside it).
+pub const MAX_CHECKPOINT_DEPTH: usize = 3;
 /// The format named in a checkpoint manifest.
 pub const MANIFEST_FORMAT: &str = "brain-checkpoint-manifest-v1";
 
@@ -178,7 +181,7 @@ impl MergeRequest {
 
 /// `install_as` is one plain model-store name under the reserved `local` vendor: it parses as a model reference
 /// there (the one parser that refuses separators and dot segments) and is no adapter.
-fn check_install_name(name: &str) -> Result<(), String> {
+pub(crate) fn check_install_name(name: &str) -> Result<(), String> {
     let plain = !name.is_empty() && name.len() <= MAX_INSTALL_NAME_LEN && !name.starts_with('.') && name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
     let parsed = brain_modelref::ModelRef::parse(&format!("local/{name}")).ok().filter(|r| r.adapter().is_none() && r.vendor() == "local" && r.repo() == name);
     if plain && parsed.is_some() {
@@ -188,22 +191,30 @@ fn check_install_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// The files of the checkpoint directory `dir`, by name: regular files only, at most [`MAX_CHECKPOINT_FILES`].
+/// The files of the checkpoint directory `dir`, by path relative to it (`/`-separated): regular files, at most
+/// [`MAX_CHECKPOINT_DEPTH`] directories deep, at most [`MAX_CHECKPOINT_FILES`] of them. Anything else (a link, a device)
+/// refuses the checkpoint.
 fn checkpoint_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("train: reading the checkpoint: {e}"))? {
-        let entry = entry.map_err(|e| format!("train: reading the checkpoint: {e}"))?;
-        let meta = std::fs::symlink_metadata(entry.path()).map_err(|e| format!("train: reading the checkpoint: {e}"))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if meta.is_file() {
-            files.push((name, entry.path()));
-        } else {
-            return Err(format!("train: the checkpoint holds \"{name}\", which is not a plain file"));
+    fn walk(root: &Path, at: &Path, depth: usize, files: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+        for entry in std::fs::read_dir(at).map_err(|e| format!("train: reading the checkpoint: {e}"))? {
+            let entry = entry.map_err(|e| format!("train: reading the checkpoint: {e}"))?;
+            let meta = std::fs::symlink_metadata(entry.path()).map_err(|e| format!("train: reading the checkpoint: {e}"))?;
+            let relative = entry.path().strip_prefix(root).map_or_else(|_| entry.file_name().to_string_lossy().into_owned(), |r| r.to_string_lossy().replace('\\', "/"));
+            if meta.is_file() {
+                files.push((relative, entry.path()));
+            } else if meta.is_dir() && depth < MAX_CHECKPOINT_DEPTH {
+                walk(root, &entry.path(), depth + 1, files)?;
+            } else {
+                return Err(format!("train: the checkpoint holds \"{relative}\", which is not a plain file or a directory within {MAX_CHECKPOINT_DEPTH} levels"));
+            }
+            if files.len() > MAX_CHECKPOINT_FILES {
+                return Err(format!("train: the checkpoint holds more than {MAX_CHECKPOINT_FILES} files"));
+            }
         }
+        Ok(())
     }
-    if files.len() > MAX_CHECKPOINT_FILES {
-        return Err(format!("train: the checkpoint holds {} files; at most {MAX_CHECKPOINT_FILES} are published", files.len()));
-    }
+    let mut files = Vec::new();
+    walk(dir, dir, 0, &mut files)?;
     files.sort();
     Ok(files)
 }
@@ -235,6 +246,9 @@ fn install(models_dir: &Path, name: &str, dir: &Path) -> Result<String, String> 
         std::fs::create_dir(&partial).map_err(|e| format!("train: cannot stage the installation: {e}"))?;
         for (file, path) in checkpoint_files(dir)? {
             let to = partial.join(&file);
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("train: installing \"{file}\": {e}"))?;
+            }
             std::fs::hard_link(&path, &to).or_else(|_| std::fs::copy(&path, &to).map(drop)).map_err(|e| format!("train: installing \"{file}\": {e}"))?;
         }
         std::fs::rename(&partial, &target).map_err(|e| format!("train: install_as: local/{name} could not be put in place: {e}"))
@@ -246,7 +260,7 @@ fn install(models_dir: &Path, name: &str, dir: &Path) -> Result<String, String> 
 }
 
 /// What a finished checkpoint job returns: its report, with the checkpoint's manifest digest and where it was installed.
-fn checkpoint_outcome(env: &JobEnv, dir: &Path, install_as: Option<&str>, mut report: Value) -> ActionResult {
+pub(crate) fn checkpoint_outcome(env: &JobEnv, dir: &Path, install_as: Option<&str>, mut report: Value) -> ActionResult {
     let mut result = Outcome::new();
     if let Some(store) = &env.store {
         let (digest, manifest) = publish_checkpoint(store, dir)?;

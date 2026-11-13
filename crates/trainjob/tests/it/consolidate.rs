@@ -162,3 +162,50 @@ fn a_dataset_dry_run_reports_the_file_and_names_every_bad_line_without_claiming_
     assert!(ask(json!({"base": "nobody/nothing", "dataset_digest": digest.hex()}), &[]).unwrap_err().contains("not in the model store"));
     assert!(ask(json!({"base": BASE, "dataset_digest": trainjob::store::digest_of(b"absent").hex()}), &[]).unwrap_err().contains("not in the artifact store"));
 }
+
+/// A timeline model trains as a job of the service, leaves by manifest digest and is installed in the model store with
+/// a manifest of family `horizon`, which is how the model-dir scan serves it as a model of its own.
+#[test]
+fn a_timeline_job_publishes_its_model_and_installs_it_as_a_horizon_model_of_the_store() {
+    use horizon::synthetic::population;
+    use trainjob::timeline::{spec, ACTION};
+
+    let lines = |subjects: &[horizon::timeline::Subject]| -> Vec<u8> { subjects.iter().map(|s| serde_json::to_string(s).unwrap() + "\n").collect::<String>().into_bytes() };
+    let (train, _) = population(120, 1);
+    let (held, _) = population(40, 2);
+    let rig = rig_qwen3("timeline", 16 << 30);
+    let held_digest = data_digest(&rig, &lines(&held));
+    let params = json!({"absorbing": "death:a,death:b", "knots": "0,2,5,10", "steps": 10, "batch": 32, "eval_interval": 5, "seed": 3, "held_out_digest": held_digest.hex(), "install_as": "risk-1"});
+    let frames = Frames::default();
+    let outcome = run_action(&rig, ACTION, &spec(), params.clone(), &[("dataset", lines(&train))], &frames).expect("the run");
+
+    let report = &outcome.outputs;
+    assert_eq!((report["status"].as_str(), report["objective"].as_str(), report["kind"].as_str()), (Some("completed"), Some("timeline"), Some("single")), "{report}");
+    assert_eq!(report["train_subjects"], 120);
+    assert!(!frames.0.lock().unwrap().is_empty(), "progress per evaluation interval");
+    let files = published_files(&rig, report);
+    for name in ["model.safetensors", "vocab.json", "brain.manifest.json"] {
+        assert!(files.contains_key(name), "{name} in {:?}", files.keys());
+    }
+    assert_eq!(report["installed_as"], "local/risk-1");
+
+    // The store finds it by name, as a model of family `horizon` served from its directory.
+    let models = rig.dir.join("models");
+    let local = brain_modelstore::Store::new(&models).local(&brain_modelref::ModelRef::parse("local/risk-1").unwrap()).expect("the installed model is in the store");
+    assert_eq!(local.card.as_ref().map(|c| (c.id.as_str(), c.family.as_str())), Some(("local/risk-1", "horizon")));
+    let dir = local.roles.as_ref().and_then(|r| r.get("weights")).expect("the weights role is the model directory");
+    let served = catalog::resident_horizon::HorizonResident::new("local/risk-1", dir).expect("a saved timeline model");
+    assert_eq!(residency::ResidentModel::manifest(&served).actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["predict", "eval", "calibrate"]);
+
+    // The name is taken; a dataset named twice, a path and a digest the store lacks are refused before any work.
+    assert!(run_action(&rig, ACTION, &spec(), params.clone(), &[("dataset", lines(&train))], &Frames::default()).unwrap_err().contains("already in the model store"));
+    let ask = |p: Value, blobs: &[(&str, Vec<u8>)]| run_action(&rig, ACTION, &spec(), p, blobs, &Frames::default()).unwrap_err();
+    assert!(ask(json!({"held_out_digest": held_digest.hex()}), &[]).contains("exactly once"));
+    assert!(ask(json!({"held_out_digest": held_digest.hex(), "dataset_digest": held_digest.hex()}), &[("dataset", lines(&train))]).contains("exactly once"));
+    assert!(ask(json!({"held_out_digest": "/etc/passwd", "dataset_digest": held_digest.hex()}), &[]).contains("64 lowercase hexadecimal"));
+    assert!(ask(json!({"held_out_digest": trainjob::store::digest_of(b"absent").hex(), "dataset_digest": held_digest.hex()}), &[]).contains("not in the artifact store"));
+    assert!(ask(json!({"held_out_digest": held_digest.hex(), "dataset_digest": held_digest.hex(), "out": "elsewhere"}), &[]).contains("unknown param"), "the output directory is never a caller's");
+    assert!(ask(json!({"held_out_digest": held_digest.hex(), "dataset_digest": held_digest.hex(), "install_as": "../x"}), &[]).contains("install_as"));
+    assert!(work_is_clean(&rig.work_root));
+    assert_reservation_returned(&rig);
+}

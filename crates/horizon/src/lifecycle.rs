@@ -48,9 +48,6 @@ use crate::fit::{
 use crate::saved::{parse_jsonl, Saved};
 use crate::timeline::Subject;
 
-/// The host's directory a served `train` writes its model to.
-pub const TRAIN_DIR_VAR: &str = "BRAIN_HORIZON_TRAIN_DIR";
-
 /// The `train` action's schema.
 pub fn train_spec() -> ActionSpec {
     ActionSpec::new(
@@ -66,7 +63,7 @@ pub fn train_spec() -> ActionSpec {
             "directory the finished model is written to (must not exist); nothing is left there if training is cancelled or fails",
         )
         .required()
-        .host_env(TRAIN_DIR_VAR),
+        .host_resolved(),
     )
     .param(ParamSpec::new("force", ParamType::Bool, "replace an existing model directory at 'out' (after training completes)").default(json!(false)).host_resolved())
     .param(ParamSpec::new("codes", ParamType::Str, "comma-separated outcome codes; default: every event code that occurs after a subject's entry").default(json!("")))
@@ -110,7 +107,7 @@ pub fn eval_spec() -> ActionSpec {
     .param(
         ParamSpec::new("weights", ParamType::Str, "directory of a saved timeline model (not an ensemble: evaluate a member)")
             .required()
-            .host_env(crate::caps::DIR_VAR),
+            .host_resolved(),
     )
     .param(ParamSpec::new("horizons", ParamType::Str, "comma-separated horizons after entry, each within the model's knots").default(json!(crate::caps::DEFAULT_TIMES)))
     .param(ParamSpec::new("min_events", ParamType::Int, "a (code, horizon) with fewer events by then is left out and listed under 'absent'").max(capability::bounds::TRAIN_COUNT).default(json!(MIN_EVENTS)).min(1.0))
@@ -127,7 +124,7 @@ pub fn calibrate_spec() -> ActionSpec {
     .param(
         ParamSpec::new("weights", ParamType::Str, "directory of a saved timeline model (not an ensemble)")
             .required()
-            .host_env(crate::caps::DIR_VAR),
+            .host_resolved(),
     )
     .param(ParamSpec::new("horizons", ParamType::Str, "comma-separated horizons after entry to calibrate, each within the model's knots").required())
     .param(ParamSpec::new("kind", ParamType::Str, "logistic (intercept, and slope where the data show it is not one; no interval) or venn_abers (isotonic with its interval)").default(json!(calibration::Kind::default().name())))

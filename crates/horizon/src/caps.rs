@@ -38,7 +38,8 @@
 //! `cif`, per code and time; `null` at a time that was not calibrated.
 //!
 //! The model directory is the one `TimelineModel::save` (SDK) writes. On a
-//! served surface it is host configuration (`BRAIN_HORIZON_DIR`), never a
+//! served surface it is the model store's: a saved model installed as `local/<name>` is its own served model (see the
+//! catalog's `resident_horizon`), never a caller's parameter.
 //! caller's parameter.
 
 use std::path::Path;
@@ -61,8 +62,6 @@ use crate::timeline::Subject;
 
 /// The model id on the CLI and every served surface.
 pub const MODEL: &str = "brain/horizon";
-/// The host's saved-model directory on a served surface.
-pub const DIR_VAR: &str = "BRAIN_HORIZON_DIR";
 /// The `max_ood_score` threshold when the caller names none.
 pub use crate::support::DEFAULT_MAX_OOD_SCORE;
 /// Times reported when the caller names none (in the dataset's unit).
@@ -81,7 +80,7 @@ pub fn predict_spec() -> ActionSpec {
             "directory of a saved timeline model (model.safetensors + vocab.json, and calibration.json when calibrated) or of an ensemble (ensemble.json + members/)",
         )
         .required()
-        .host_env(DIR_VAR),
+        .host_resolved(),
     )
     .param(
         ParamSpec::new(
@@ -125,10 +124,14 @@ pub fn manifest() -> Manifest {
     )
 }
 
-/// The manifest a served surface advertises: the model directory is the
-/// host's, so it is not a parameter there.
-pub fn manifest_resident() -> Manifest {
-    manifest().for_serving()
+/// The manifest a served model advertises under its own id `model` (a saved model in the model store): the model
+/// directory is the host's, so it is not a parameter there, and training is not an action of a loaded model (it is
+/// the training service's `timeline_train`).
+pub fn manifest_resident(model: &str) -> Manifest {
+    let mut manifest = manifest().for_serving();
+    manifest.model = model.to_string();
+    manifest.actions.retain(|a| a.name != "train");
+    manifest
 }
 
 /// The requested times, each finite, non-negative and within the model.

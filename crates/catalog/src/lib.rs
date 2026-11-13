@@ -518,14 +518,14 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("ricursive", &resident_ricursive::RicursiveSpec)),
             resident: None,
         },
-        // The timeline model: a directory a caller trained and saved (no
-        // released weights to resolve), named per request locally and by
-        // `BRAIN_HORIZON_DIR` on a served surface.
+        // The timeline model: a directory a caller trained and saved (no released weights to resolve), named per
+        // request locally. A served one is a model of the model store (a manifest of family `horizon`, which
+        // `serving::model_dir` builds a `resident_horizon::HorizonResident` from), never a catalog resident.
         ModelEntry {
             manifest: horizon::caps::manifest,
             provider: always!(horizon::caps::HorizonProvider::new()),
             spec: None,
-            resident: resident!(crate::resident_horizon::HorizonResident::from_env),
+            resident: None,
         },
         // Decision models (decide + Laya): `brain caps decide`,
         // `brain decide decide ...`. The provider answers from the

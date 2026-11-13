@@ -14,6 +14,7 @@ brain-capability.workspace = true
 brain-residency.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
+brain-horizon.workspace = true
 brain-catalog.workspace = true
 brain = { workspace = true, features = ["study"] }
 blake3.workspace = true
@@ -23,6 +24,7 @@ serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+brain-modelref.workspace = true
 tempfile.workspace = true
 brain-qwen3.workspace = true
 brain-qwen35.workspace = true

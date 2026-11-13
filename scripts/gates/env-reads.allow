@@ -65,7 +65,6 @@ crates/catalog/src/resident_forecast.rs	BRAIN_FINCAST
 crates/catalog/src/resident_forecast.rs	BRAIN_KRONOS_DECODER
 crates/catalog/src/resident_forecast.rs	BRAIN_KRONOS_TOKENIZER
 crates/catalog/src/resident_forecast.rs	BRAIN_TIMESFM3
-crates/catalog/src/resident_horizon.rs	<horizon::caps::DIR_VAR>
 crates/catalog/src/resident_horizon.rs	MOE_SKIP_GPU_TESTS
 crates/catalog/src/resident_januspro.rs	BRAIN_JANUSPRO_TUNED
 crates/catalog/src/resident_januspro.rs	BRAIN_JANUSPRO_TUNED_GENERATION
