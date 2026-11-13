@@ -21,12 +21,22 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-/// How an attached adapter is named to the outside: its card's id and the
-/// digest of its weight file (`sha256:<hex>`). Never a filesystem location.
+/// How an attached adapter is named to the outside: its card's id, the
+/// digest of its weight file (`sha256:<hex>`) and its policy version. Never a
+/// filesystem location.
+///
+/// The version counts the releases of one id the server has offered: it is 1
+/// for the first, and each release of the same id with different weights
+/// takes the next number, for as long as the process runs (an id withdrawn
+/// and offered again continues its count, and the same weights offered again
+/// keep their number). A caller that records the version a completion was
+/// sampled under can tell how many refits behind the id's current weights it
+/// is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdapterIdentity {
     pub id: String,
     pub digest: String,
+    pub version: u64,
 }
 
 /// The model id -> attached adapter table behind [`Executor`](crate::Executor).
@@ -61,7 +71,7 @@ mod tests {
     use super::*;
 
     fn identity(id: &str, hex: char) -> AdapterIdentity {
-        AdapterIdentity { id: id.into(), digest: format!("sha256:{}", hex.to_string().repeat(64)) }
+        AdapterIdentity { id: id.into(), digest: format!("sha256:{}", hex.to_string().repeat(64)), version: 1 }
     }
 
     #[test]

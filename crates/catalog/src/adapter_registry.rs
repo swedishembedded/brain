@@ -81,7 +81,10 @@ pub const DEFAULT_ADAPTER_SLOTS: u32 = 4;
 
 /// The highest adapter rank a bank slot holds unless `--adapter-rank-cap`
 /// says otherwise. An adapter of a higher rank is refused when it is loaded.
-pub const DEFAULT_ADAPTER_RANK_CAP: u32 = 16;
+/// The bank's buffers are sized by the cap when the engine is built, so an
+/// adapter hot-loaded into a running server can never exceed it: the default
+/// is the rank a learning loop usually trains (32), not the smallest one.
+pub const DEFAULT_ADAPTER_RANK_CAP: u32 = 32;
 
 /// The linears the bank corrects unless `--adapter-targets` says otherwise:
 /// the four attention projections, which is what an adapter trained with the
@@ -158,6 +161,28 @@ struct Entry {
 #[derive(Default)]
 struct State {
     entries: BTreeMap<String, Entry>,
+    /// The last release offered under each id this process has served, with
+    /// its version, kept after the id is withdrawn: an id offered again
+    /// continues its count, and offering the same weights again keeps their
+    /// number. One small record per distinct id; the ids are the operator's.
+    releases: HashMap<String, (String, u64)>,
+}
+
+impl State {
+    /// Stamp `loaded` with its version under its id: the next number when its
+    /// weights differ from the last release of the id, that release's number
+    /// when they do not.
+    fn stamp(&mut self, loaded: &mut LoadedAdapter) {
+        let id = &loaded.release.id;
+        let digest = &loaded.release.digest;
+        let version = match self.releases.get(id) {
+            Some((last, version)) if last == digest => *version,
+            Some((_, version)) => version + 1,
+            None => 1,
+        };
+        loaded.version = version;
+        self.releases.insert(id.clone(), (digest.clone(), version));
+    }
 }
 
 /// The adapters one served Qwen3 base offers. See this module's doc.
@@ -203,7 +228,7 @@ impl AdapterRegistry {
 
     /// The identity (card id and content digest) offered under `id`.
     pub fn identity(&self, id: &str) -> Option<AdapterIdentity> {
-        self.lock().entries.get(id).map(|e| e.loaded.release.identity())
+        self.lock().entries.get(id).map(|e| e.loaded.identity())
     }
 
     /// Refuse an adapter the bank cannot hold, before it is offered: the
@@ -216,7 +241,10 @@ impl AdapterRegistry {
             return Err(format!("adapter {id} is a {} adapter; the base it would ride on takes {} adapters", loaded.family, self.family.tag));
         }
         if loaded.adapter.rank > settings.rank_cap {
-            return Err(format!("adapter {id} has rank {}, above this server's --adapter-rank-cap {}", loaded.adapter.rank, settings.rank_cap));
+            return Err(format!(
+                "adapter {id} has rank {}, above this server's --adapter-rank-cap {}; the cap sizes the bank's device buffers when the server starts, so restart with --adapter-rank-cap {} (or more) to serve it",
+                loaded.adapter.rank, settings.rank_cap, loaded.adapter.rank
+            ));
         }
         let mut missing: Vec<&str> = Vec::new();
         for site in &loaded.adapter.sites {
@@ -247,7 +275,7 @@ impl AdapterRegistry {
     /// an adapter (`<vendor>/<repo>[-QUANT]:<owner>:<name>:<tag>`): it becomes a
     /// model id that every front end resolves, and the grammar is what keeps it
     /// from being anything else.
-    pub fn attach(self: &Arc<Self>, loaded: LoadedAdapter) -> Result<AdapterLease, String> {
+    pub fn attach(self: &Arc<Self>, mut loaded: LoadedAdapter) -> Result<AdapterLease, String> {
         let id = loaded.release.id.clone();
         check_serving_id(&id)?;
         self.fits(&loaded)?;
@@ -255,6 +283,7 @@ impl AdapterRegistry {
         if !state.entries.contains_key(&id) && state.entries.len() as u32 >= MAX_SERVED_ADAPTERS {
             return Err(format!("this server already offers {MAX_SERVED_ADAPTERS} adapters, the most it holds; retire one before adding {id}"));
         }
+        state.stamp(&mut loaded);
         match state.entries.get_mut(&id) {
             Some(entry) => {
                 entry.loaded = Arc::new(loaded);
@@ -270,16 +299,21 @@ impl AdapterRegistry {
     }
 
     /// Replace the adapter offered under `id`, which must be offered (a lease
-    /// is held on it): the next release of a name already served.
-    pub fn replace(&self, loaded: LoadedAdapter) -> Result<(), String> {
+    /// is held on it): the next release of a name already served. Returns the
+    /// identity now offered, with its version.
+    pub fn replace(&self, mut loaded: LoadedAdapter) -> Result<AdapterIdentity, String> {
         let id = loaded.release.id.clone();
         self.fits(&loaded)?;
         let mut state = self.lock();
-        let entry = state.entries.get_mut(&id).ok_or_else(|| format!("adapter {id} is not offered"))?;
-        entry.loaded = Arc::new(loaded);
+        if !state.entries.contains_key(&id) {
+            return Err(format!("adapter {id} is not offered"));
+        }
+        state.stamp(&mut loaded);
+        let identity = loaded.identity();
+        state.entries.get_mut(&id).expect("checked present").loaded = Arc::new(loaded);
         drop(state);
         self.generation.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(identity)
     }
 
     fn release(&self, id: &str) {
@@ -485,8 +519,7 @@ impl LiveAdapters {
         if !self.target.registry().ids().contains(&id) {
             return Err(format!("adapter id {id} is already a served model; an adapter does not replace a model"));
         }
-        let identity = adapter.release.identity();
-        self.target.registry().replace(adapter)?;
+        let identity = self.target.registry().replace(adapter)?;
         self.executor.set_served_adapter(&id, Some(identity));
         Ok(())
     }
@@ -552,13 +585,13 @@ impl AdapterSync {
         for (id, adapter) in &offered {
             let digest = &adapter.release.digest;
             if let Some(&engine_id) = self.loaded.get(digest) {
-                self.routes.insert(id.clone(), Route::Ready(engine_id, adapter.release.identity()));
+                self.routes.insert(id.clone(), Route::Ready(engine_id, adapter.identity()));
                 continue;
             }
             match engine.load_adapter(adapter.as_ref().clone().into_engine()) {
                 Ok(engine_id) => {
                     self.loaded.insert(digest.clone(), engine_id);
-                    self.routes.insert(id.clone(), Route::Ready(engine_id, adapter.release.identity()));
+                    self.routes.insert(id.clone(), Route::Ready(engine_id, adapter.identity()));
                 }
                 Err(why) => {
                     eprintln!("serve: adapter {id} ({digest}) cannot be loaded into the bank, so requests for it fail: {why}");
@@ -716,6 +749,41 @@ mod tests {
 
     const ID: &str = "Qwen/Qwen3-0.6B:lab:canary:v1";
 
+    /// The policy version of an id counts its releases with different weights:
+    /// it starts at 1, moves up on each replacement, stays when the same
+    /// weights are offered again, and a withdrawn id continues its count.
+    #[test]
+    fn an_adapters_policy_version_counts_its_releases_and_survives_withdrawal() {
+        let dir = scratch_dir("registry-versions");
+        let reg = registry(Some(AdapterBankSettings::default()));
+        let (one, two) = (loaded(&dir, ID, 0.5), loaded(&dir, ID, 0.25));
+        assert_ne!(one.release.digest, two.release.digest, "the fixtures differ");
+        assert_eq!(one.version, 0, "a release read from disk has no version until it is offered");
+
+        let lease = reg.attach(one.clone()).unwrap();
+        assert_eq!(reg.identity(ID).unwrap().version, 1);
+        assert_eq!(reg.replace(two.clone()).unwrap().version, 2, "different weights under the id are the next release");
+        assert_eq!(reg.replace(two.clone()).unwrap().version, 2, "the same weights offered again keep their number");
+        assert_eq!(reg.identity(ID).unwrap().version, 2);
+
+        drop(lease);
+        assert!(reg.identity(ID).is_none(), "withdrawn");
+        let _again = reg.attach(one).unwrap();
+        assert_eq!(reg.identity(ID).unwrap().version, 3, "an id offered again continues its count, so a version never repeats");
+
+        let other = loaded(&dir, "Qwen/Qwen3-0.6B:lab:other:v1", 0.5);
+        let _other = reg.attach(other).unwrap();
+        assert_eq!(reg.identity("Qwen/Qwen3-0.6B:lab:other:v1").unwrap().version, 1, "each id counts for itself");
+    }
+
+    /// A learning loop trains rank 32; a server that sizes its bank by default
+    /// must not refuse it, and the cap above it stays a flag.
+    #[test]
+    fn the_default_rank_cap_holds_rank_32() {
+        assert_eq!(AdapterBankSettings::default().rank_cap, 32);
+        assert_eq!(DEFAULT_ADAPTER_RANK_CAP, 32);
+    }
+
     #[test]
     fn the_default_targets_are_the_attention_group() {
         assert_eq!(DEFAULT_ADAPTER_TARGETS, AdapterTargets::ATTENTION);
@@ -811,7 +879,8 @@ mod tests {
         assert!(none.attach(adapter.clone()).err().unwrap().contains("--adapter-slots"), "no bank, no adapters");
 
         let small = registry(Some(AdapterBankSettings { rank_cap: 1, ..Default::default() }));
-        assert!(small.attach(adapter.clone()).err().unwrap().contains("--adapter-rank-cap"), "the fixture is rank 2");
+        let refusal = small.attach(adapter.clone()).err().unwrap();
+        assert!(refusal.contains("--adapter-rank-cap 1;") && refusal.contains("restart with --adapter-rank-cap 2"), "the fixture is rank 2, and the refusal names the value that serves it: {refusal}");
 
         let ok = registry(Some(AdapterBankSettings::default()));
         let wrong_sites = registry(Some(AdapterBankSettings { targets: AdapterTargets::parse("down").unwrap(), ..Default::default() }));

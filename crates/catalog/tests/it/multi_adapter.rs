@@ -188,11 +188,52 @@ fn a_reply_names_the_adapter_that_answered_and_the_seed_it_used() {
 
     let answered = exec.run_blocking(ONE, "generate", greedy(4), |_| {}).expect("the adapter answers");
     let identity = exec.served_adapter(ONE).expect("the adapter is offered");
-    assert_eq!(answered.outputs["adapter"], json!({"id": identity.id, "digest": identity.digest}));
+    assert_eq!(answered.outputs["adapter"], json!({"id": identity.id, "digest": identity.digest, "version": identity.version}));
+    assert_eq!(identity.version, 1, "the first release of an id is version 1");
     assert_eq!(answered.outputs["seed"], json!(1));
 
     let base = exec.run_blocking(BASE, "generate", greedy(4), |_| {}).expect("the base answers");
     assert!(base.outputs.get("adapter").is_none(), "the base names no adapter: {:?}", base.outputs);
+    exec.shutdown();
+}
+
+/// A refit keeps the id and changes the weights: the reply names the new
+/// policy version, and the prompts the previous release cached are never
+/// read for the new one (each release has its own prefix-cache namespace),
+/// while the new release then caches its own.
+#[test]
+fn a_refit_adapter_never_reads_the_previous_releases_cached_prompts() {
+    let f = fixture("multi-adapter-refit");
+    let served = resident(&f, BASE, &f.base, Some(bank()));
+    let exec = executor(vec![served.clone()]);
+    let live = LiveAdapters::new(served.clone(), exec.clone());
+    offer(&live, &served, &f.adapters[0]);
+
+    let long = Invocation::new().set("prompt", json!("the quick brown fox jumps over the lazy dog while the sky is blue and the grass is green")).set("chat", json!(false)).set("max_new", json!(2)).set("temp", json!(0.0)).set("top_k", json!(1)).set("seed", json!(1));
+    let cached = |exec: &Executor| -> (i64, serde_json::Value) {
+        let out = exec.run_blocking(ONE, "generate", long.clone(), |_| {}).expect("the adapter answers");
+        (out.outputs["cached_tokens"].as_i64().expect("a reply reports its cached tokens"), out.outputs["adapter"].clone())
+    };
+    let (cold, first) = cached(&exec);
+    let (warm, _) = cached(&exec);
+    assert_eq!(cold, 0, "a prompt no one has asked is computed");
+    assert!(warm > 0, "the release caches its own prompt: {warm}");
+    assert_eq!(first["version"], json!(1));
+
+    // The next release of the same id, with different weights.
+    let linears = attention_linears(&cfg());
+    let next = f.dir.join("next.safetensors");
+    write_lora_adapter(&next, ONE, BASE, RANK, &linears, 33);
+    offer(&live, &served, &next);
+    let identity = exec.served_adapter(ONE).expect("still offered");
+    assert_eq!(identity.version, 2, "a release of the same id with different weights is the next version");
+
+    let (after, second) = cached(&exec);
+    assert_eq!(after, 0, "the previous release's cached prompt is not read by the new one");
+    assert_eq!(second["version"], json!(2), "and the reply names the policy that decoded it");
+    assert_eq!(second["digest"], json!(identity.digest));
+    let (again, _) = cached(&exec);
+    assert!(again > 0, "the new release caches its own prompt: {again}");
     exec.shutdown();
 }
 

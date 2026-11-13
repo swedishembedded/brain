@@ -74,7 +74,7 @@ impl Frontend for Vision {
         })
     }
     fn route(&self, _inv: &Invocation) -> Result<Option<(AdapterId, AdapterIdentity)>, String> {
-        let identity = AdapterIdentity { id: "candidate".into(), digest: "sha256:0".into() };
+        let identity = AdapterIdentity { id: "candidate".into(), digest: "sha256:0".into(), version: 1 };
         Ok(Some((AdapterId::new(1).expect("namespace 1"), identity)))
     }
 }

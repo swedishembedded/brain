@@ -110,7 +110,7 @@ pub trait AdapterServing: LoraSites {
 
     /// The highest adapter rank a slot holds unless the operator says.
     fn default_rank_cap(&self) -> u32 {
-        16
+        32
     }
 }
 

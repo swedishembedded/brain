@@ -205,14 +205,14 @@ fn a_base_job_and_sibling_jobs_run_as_one_batch() {
 /// does not leaves the table alone.
 #[test]
 fn a_registered_model_that_names_an_adapter_is_recorded_under_its_id() {
-    let identity = AdapterIdentity { id: "base:t:a:v1".into(), digest: format!("sha256:{}", "a".repeat(64)) };
+    let identity = AdapterIdentity { id: "base:t:a:v1".into(), digest: format!("sha256:{}", "a".repeat(64)), version: 1 };
     let seen = Arc::new(Seen::default());
     let dropped = Arc::new(AtomicU32::new(0));
     let exec = executor(&seen, &[("base:t:a:v1", Some(identity.clone()))], &dropped);
     assert_eq!(exec.served_adapter("base:t:a:v1"), Some(identity));
     assert_eq!(exec.served_adapter("base"), None);
 
-    let late = AdapterIdentity { id: "base:t:late:v1".into(), digest: format!("sha256:{}", "b".repeat(64)) };
+    let late = AdapterIdentity { id: "base:t:late:v1".into(), digest: format!("sha256:{}", "b".repeat(64)), version: 1 };
     exec.register(Arc::new(Sibling { name: "base:t:late:v1".into(), base: Arc::new(Base { seen }), dropped, identity: Some(late.clone()) }));
     assert_eq!(exec.served_adapter("base:t:late:v1"), Some(late), "registration after start records it too");
     exec.shutdown();
@@ -222,7 +222,7 @@ fn a_registered_model_that_names_an_adapter_is_recorded_under_its_id() {
 /// refuses new work, and is dropped; the base is untouched.
 #[test]
 fn an_unregistered_sibling_is_unlisted_refused_and_released() {
-    let identity = AdapterIdentity { id: "base:t:a:v1".into(), digest: format!("sha256:{}", "a".repeat(64)) };
+    let identity = AdapterIdentity { id: "base:t:a:v1".into(), digest: format!("sha256:{}", "a".repeat(64)), version: 1 };
     let seen = Arc::new(Seen::default());
     let dropped = Arc::new(AtomicU32::new(0));
     let exec = executor(&seen, &[("base:t:a:v1", Some(identity))], &dropped);

@@ -549,25 +549,26 @@ async fn model_card_names_the_attached_adapter_and_tracks_a_swap() {
         assert_valid(model_schema.0, model_schema.1, &card);
         assert!(card.get("adapter").is_none(), "{provider}: no adapter attached, so none is advertised: {card}");
 
-        let first = residency::AdapterIdentity { id: "acme/tuned".into(), digest: format!("sha256:{}", "a".repeat(64)) };
+        let first = residency::AdapterIdentity { id: "acme/tuned".into(), digest: format!("sha256:{}", "a".repeat(64)), version: 1 };
         exec.set_served_adapter("brain-agent", Some(first.clone()));
         let card = get_json(&app, provider, one_uri, &key).await;
         assert_valid(model_schema.0, model_schema.1, &card);
-        assert_eq!(card["adapter"], json!({ "id": first.id, "digest": first.digest }), "{provider}: {card}");
+        assert_eq!(card["adapter"], json!({ "id": first.id, "digest": first.digest, "version": 1 }), "{provider}: {card}");
         let listed = get_json(&app, provider, list_uri, &key).await;
         let entry = listed["data"].as_array().unwrap().iter().find(|m| m["id"] == "brain-agent").unwrap();
         assert_eq!(entry["adapter"]["digest"], json!(first.digest), "{provider}: the list carries it too");
         let embed = listed["data"].as_array().unwrap().iter().find(|m| m["id"] == "brain-embed").unwrap();
         assert!(embed.get("adapter").is_none(), "{provider}: an adapter is advertised on its own model only");
 
-        let second = residency::AdapterIdentity { id: "acme/tuned".into(), digest: format!("sha256:{}", "b".repeat(64)) };
+        let second = residency::AdapterIdentity { id: "acme/tuned".into(), digest: format!("sha256:{}", "b".repeat(64)), version: 2 };
         exec.set_served_adapter("brain-agent", Some(second.clone()));
         let card = get_json(&app, provider, one_uri, &key).await;
         assert_eq!(card["adapter"]["digest"], json!(second.digest), "{provider}: a hot swap is visible on the next read");
+        assert_eq!(card["adapter"]["version"], json!(2), "{provider}: and so is the policy version it moved to");
 
         let text = card.to_string();
         assert!(!text.contains(".safetensors") && !text.contains("/tmp") && !text.contains("/home"), "{provider}: no path in the card: {text}");
-        assert_eq!(card["adapter"].as_object().unwrap().len(), 2, "{provider}: the adapter object is exactly id + digest");
+        assert_eq!(card["adapter"].as_object().unwrap().len(), 3, "{provider}: the adapter object is exactly id + digest + version");
 
         exec.set_served_adapter("brain-agent", None);
         let card = get_json(&app, provider, one_uri, &key).await;
@@ -3814,7 +3815,7 @@ impl Instance for SiblingChatInst {
         let who = adapter.clone().unwrap_or_else(|| "the base".to_string());
         let mut out = Outcome::new().set("prompt_tokens", json!(5)).set("completion_tokens", json!(2)).set("finish_reason", json!("stop")).set("seed", json!(seed));
         if let Some(id) = adapter {
-            out = out.set("adapter", json!({"id": id, "digest": adapter_identity().digest}));
+            out = out.set("adapter", json!({"id": id, "digest": adapter_identity().digest, "version": adapter_identity().version}));
         }
         if inv.get_bool("logprobs") == Some(true) || inv.get_bool("return_token_ids") == Some(true) {
             out = out.set("completion_token_ids", json!([11, 12])).set("completion_logprobs", json!([-0.5, -0.25]));
@@ -3836,7 +3837,7 @@ impl Instance for SiblingChatInst {
 }
 
 fn adapter_identity() -> residency::AdapterIdentity {
-    residency::AdapterIdentity { id: ADAPTER_ID.into(), digest: format!("sha256:{}", "c".repeat(64)) }
+    residency::AdapterIdentity { id: ADAPTER_ID.into(), digest: format!("sha256:{}", "c".repeat(64)), version: 1 }
 }
 
 /// The base and one adapter riding on it, behind `provider`.
@@ -3868,7 +3869,7 @@ async fn an_adapter_is_a_listed_model_named_by_identity_and_never_by_a_path() {
         let base = cards.iter().find(|m| m["id"] == ADAPTER_BASE).unwrap_or_else(|| panic!("{provider}: base missing: {listed}"));
         let adapter = cards.iter().find(|m| m["id"] == ADAPTER_ID).unwrap_or_else(|| panic!("{provider}: adapter missing: {listed}"));
         assert!(base.get("adapter").is_none(), "{provider}: the base entry names no adapter: {base}");
-        assert_eq!(adapter["adapter"], json!({"id": ADAPTER_ID, "digest": adapter_identity().digest}), "{provider}: {adapter}");
+        assert_eq!(adapter["adapter"], json!({"id": ADAPTER_ID, "digest": adapter_identity().digest, "version": adapter_identity().version}), "{provider}: {adapter}");
 
         let card = get_json(&app, provider, &one_uri, &key).await;
         assert_eq!(card["adapter"]["digest"], json!(adapter_identity().digest), "{provider}: {card}");
@@ -4061,7 +4062,7 @@ async fn a_reply_names_the_adapter_that_answered_by_digest() {
     let (_, base) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &chat_body(ADAPTER_BASE)).await;
     assert!(base["brain"].get("adapter").is_none(), "the base names no adapter: {base}");
     let (_, tuned) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &chat_body(ADAPTER_ID)).await;
-    assert_eq!(tuned["brain"]["adapter"], json!({"id": ADAPTER_ID, "digest": adapter_identity().digest}), "{tuned}");
+    assert_eq!(tuned["brain"]["adapter"], json!({"id": ADAPTER_ID, "digest": adapter_identity().digest, "version": adapter_identity().version}), "{tuned}");
     assert_eq!(tuned["model"], json!(ADAPTER_ID));
 
     let mut streamed = chat_body(ADAPTER_ID);
@@ -4071,7 +4072,7 @@ async fn a_reply_names_the_adapter_that_answered_by_digest() {
     let frames: Vec<Value> = sse_data(&sse).iter().filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
     let with_brain: Vec<&Value> = frames.iter().filter(|f| f.get("brain").is_some()).collect();
     assert_eq!(with_brain.len(), 1, "exactly the terminal chunk carries the extension: {sse}");
-    assert_eq!(with_brain[0]["brain"], json!({"seed": 5, "adapter": {"id": ADAPTER_ID, "digest": adapter_identity().digest}}));
+    assert_eq!(with_brain[0]["brain"], json!({"seed": 5, "adapter": {"id": ADAPTER_ID, "digest": adapter_identity().digest, "version": adapter_identity().version}}));
     assert_eq!(with_brain[0]["choices"][0]["finish_reason"], json!("stop"));
 }
 

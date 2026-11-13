@@ -11,7 +11,7 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
             [--tls-cert PEM --tls-key PEM | --insecure-plaintext] \
             [--caller NAME:ROLE:KEYFILE[:MAX] ...] \
             [--checkpoint PATH [--tokenizer PATH]] \
-            [--adapter FILE | --adapter-manifest FILE | --watch-adapters DIR] \
+            [--adapter FILE | --adapter-manifest FILE | --watch-adapters DIR | --serve-adapters DIR] \
             [--training [--artifact-store DIR]]
 ```
 
@@ -53,8 +53,9 @@ With no surface flag, `brain serve` serves the OpenAI-compatible API on
   descriptor or by digest in `DIR`. Off unless given. See
   [Training as a served job](../training/served-training.md).
 - `--adapter FILE`, `--adapter-manifest FILE`, `--watch-adapters DIR`,
-  `--adapter-slots N`, `--adapter-rank-cap R`, `--adapter-targets LIST` - see
-  **Serving LoRA adapters** below. At most one of the first three may be given.
+  `--serve-adapters DIR`, `--adapter-slots N`, `--adapter-rank-cap R`,
+  `--adapter-targets LIST` - see **Serving LoRA adapters** below. At most one
+  of the first four may be given.
 - `--decision-model REF|DIR` (repeatable), `--decision-default ID` - serve
   decision models beyond the ones found in the model store, and name the one
   `auto` resolves to. See [Decision models](../../reference/models/decision.md).
@@ -207,7 +208,9 @@ above, or by one of these flags - and costs nothing otherwise:
 - `--adapter-slots N` - adapters resident on the device at once (default 4).
   More adapters than slots are still served: the least recently used idle one
   is swapped out of its slot when another is needed.
-- `--adapter-rank-cap R` - the highest LoRA rank a slot holds (default 16).
+- `--adapter-rank-cap R` - the highest LoRA rank a slot holds (default 32). The bank's
+  buffers are sized by it when the server starts, so an adapter above it - loaded at
+  startup or hot-loaded later - is refused, naming the value to restart with.
 - `--adapter-targets LIST` - the linears the bank corrects: `attention`
   (the default; `wq,wk,wv,wo` on Qwen3, what the default LoRA training targets;
   the Gated-DeltaNet and attention projections on Qwen3.8 - an adapter that also
@@ -249,7 +252,29 @@ per layer) are part of the model's footprint, so placement budgets them.
   `adapter-NNNNNN.safetensors` in `DIR` (the version, never the modification
   time). Files there are read once and checked to be Qwen3 LoRA adapters; they
   are not bound to the base, since a gated promotion put them there.
-- The three are mutually exclusive: each names the adapter it offers by its own
+- `--serve-adapters DIR` serves every adapter in `DIR`, each as a model of its
+  own under its card id, and follows the directory: a file that appears is
+  offered, a file whose bytes change (renamed over) replaces its adapter under
+  the same id, and a file that disappears withdraws its adapter once the
+  requests already accepted for it are done. Nothing restarts and no other
+  adapter or the base is disturbed; the adapters run in the same batches. Every
+  file is verified against the served base as `--adapter` does; one that
+  fails is refused (said once) and the release it would have replaced keeps
+  serving, and a card id already served from another file is refused. Symbolic
+  links, hidden files and files not named `*.safetensors` are ignored, the
+  search goes at most four directories down and holds at most 1024 files, and
+  a file larger than any adapter is refused. Publish a release by writing it
+  to a hidden name and renaming it into place. A server holds at most 64
+  adapters at once; those beyond the bank's slots are swapped in on demand.
+- Each adapter has a policy version: 1 for the first release of its id the
+  process served, +1 each time a file for the id with different weights
+  replaces it (an id withdrawn and offered again continues its count). It is
+  reported in `GET /v1/models` (`adapter.version`) and in the `brain.adapter`
+  object of every reply, so a caller that records the version a sample came
+  from can tell how many refits behind the current weights it is. A
+  request keeps the release it started on and the prefix cache never serves one
+  release's cached prompts to another.
+- The four are mutually exclusive: each names the adapter it offers by its own
   card id, and with two sources "which id is current" would depend on which
   moved last.
 

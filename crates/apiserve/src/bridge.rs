@@ -190,8 +190,9 @@ pub struct ChatOutcome {
     pub tool_calls: Vec<serde_json::Value>,
     /// The sampling seed the model decoded with, when it reports one.
     pub seed: Option<u64>,
-    /// The `(id, digest)` of the adapter that answered, when one did.
-    pub adapter: Option<(String, String)>,
+    /// The `(id, digest, version)` of the adapter that answered, when one did. The version is the policy version
+    /// of that release under its id.
+    pub adapter: Option<(String, String, u64)>,
     /// `sha256:<hex>` of the base checkpoint that answered, when the model knows it.
     pub base_digest: Option<String>,
     /// The backend the decode ran on (`cuda`, `cpu`, ...).
@@ -223,7 +224,7 @@ impl ChatOutcome {
         let mut trace = self.trace.clone()?;
         let policy = serde_json::json!({
             "base_digest": self.base_digest,
-            "adapter": self.adapter.as_ref().map(|(id, digest)| serde_json::json!({ "id": id, "digest": digest })),
+            "adapter": self.adapter.as_ref().map(|(id, digest, version)| serde_json::json!({ "id": id, "digest": digest, "version": version })),
         });
         trace["policy"] = policy;
         trace["finish_reason"] = serde_json::json!(self.finish);
@@ -240,8 +241,8 @@ impl ChatOutcome {
         if let Some(seed) = self.seed {
             served.insert("seed".into(), serde_json::json!(seed));
         }
-        if let Some((id, digest)) = &self.adapter {
-            served.insert("adapter".into(), serde_json::json!({ "id": id, "digest": digest }));
+        if let Some((id, digest, version)) = &self.adapter {
+            served.insert("adapter".into(), serde_json::json!({ "id": id, "digest": digest, "version": version }));
         }
         for (key, value) in [("base_digest", &self.base_digest), ("backend", &self.backend), ("engine", &self.engine)] {
             if let Some(value) = value {
@@ -265,7 +266,7 @@ pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
     let seed = o.outputs.get("seed").and_then(|v| v.as_u64());
-    let adapter = o.outputs.get("adapter").and_then(|a| Some((a.get("id")?.as_str()?.to_string(), a.get("digest")?.as_str()?.to_string())));
+    let adapter = o.outputs.get("adapter").and_then(|a| Some((a.get("id")?.as_str()?.to_string(), a.get("digest")?.as_str()?.to_string(), a.get("version")?.as_u64()?)));
     let numbers = |key: &str| o.outputs.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_i64()).collect::<Vec<_>>());
     let logprobs = o.outputs.get("completion_logprobs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_f64()).collect::<Vec<_>>());
     let text_of = |key: &str| o.outputs.get(key).and_then(|v| v.as_str()).map(str::to_string);

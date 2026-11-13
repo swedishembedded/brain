@@ -245,7 +245,7 @@ fn a_banks_targets_group_per_model_and_attention_is_the_mixers() {
     let attention = AdapterTargets::ATTENTION.resolve(&cfg).unwrap();
     assert_eq!(attention, ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj", "q_proj", "k_proj", "v_proj", "o_proj"]);
     assert_eq!(AdapterTargets::ALL.resolve(&cfg).unwrap().len(), 12);
-    assert_eq!(cfg.default_rank_cap(), 16);
+    assert_eq!(cfg.default_rank_cap(), 32);
     assert!(AdapterTargets::parse("wq").unwrap().resolve(&cfg).is_err(), "wq is a Qwen3 leaf");
 }
 

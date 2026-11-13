@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::adapter_directory::BankDirectory;
 use catalog::adapter_registry::{AdapterHost, LiveAdapters};
 use catalog::adapter_release::{load_adapter, verify_adapter, LoadedAdapter, ManifestFollower, ManifestPoll};
 use catalog::resident_llm::QwenResident;
@@ -48,18 +49,22 @@ pub enum AdapterMode {
     /// `--adapter-manifest FILE`: the release a manifest names, offered
     /// only once its digest verifies.
     Manifest(PathBuf),
+    /// `--serve-adapters DIR`: every adapter in `DIR`, followed as files
+    /// appear, change and disappear.
+    Directory(PathBuf),
 }
 
 impl AdapterMode {
-    /// The mode `--adapter`, `--adapter-manifest` and `--watch-adapters`
-    /// select, or why they cannot be combined.
-    pub fn from_flags(adapter: Option<PathBuf>, manifest: Option<PathBuf>, watch: Option<PathBuf>) -> Result<AdapterMode, String> {
-        match (adapter, manifest, watch) {
-            (None, None, None) => Ok(AdapterMode::Base),
-            (Some(path), None, None) => Ok(AdapterMode::Pinned(path)),
-            (None, Some(path), None) => Ok(AdapterMode::Manifest(path)),
-            (None, None, Some(dir)) => Ok(AdapterMode::Latest(dir)),
-            _ => Err("--adapter, --adapter-manifest and --watch-adapters each choose the served adapter; give at most one".to_string()),
+    /// The mode `--adapter`, `--adapter-manifest`, `--watch-adapters` and
+    /// `--serve-adapters` select, or why they cannot be combined.
+    pub fn from_flags(adapter: Option<PathBuf>, manifest: Option<PathBuf>, watch: Option<PathBuf>, serve: Option<PathBuf>) -> Result<AdapterMode, String> {
+        match (adapter, manifest, watch, serve) {
+            (None, None, None, None) => Ok(AdapterMode::Base),
+            (Some(path), None, None, None) => Ok(AdapterMode::Pinned(path)),
+            (None, Some(path), None, None) => Ok(AdapterMode::Manifest(path)),
+            (None, None, Some(dir), None) => Ok(AdapterMode::Latest(dir)),
+            (None, None, None, Some(dir)) => Ok(AdapterMode::Directory(dir)),
+            _ => Err("--adapter, --adapter-manifest, --watch-adapters and --serve-adapters each choose which adapters are served; give at most one".to_string()),
         }
     }
 }
@@ -77,6 +82,8 @@ enum FollowSource {
     Latest(PathBuf),
     /// A release manifest.
     Manifest(ManifestFollower),
+    /// Every adapter in a directory.
+    Directory(BankDirectory),
 }
 
 impl Follow {
@@ -89,6 +96,7 @@ impl Follow {
         match &self.source {
             FollowSource::Latest(dir) => dir.clone(),
             FollowSource::Manifest(follower) => follower.path().to_path_buf(),
+            FollowSource::Directory(bank) => bank.dir().to_path_buf(),
         }
     }
 }
@@ -107,6 +115,10 @@ pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&A
     match mode {
         AdapterMode::Base => Ok((None, None)),
         AdapterMode::Latest(dir) => Ok((Some(Follow::latest(dir)), None)),
+        AdapterMode::Directory(dir) => {
+            let resident = required("--serve-adapters")?;
+            Ok((Some(Follow { source: FollowSource::Directory(BankDirectory::new(dir, resident.served_base())), served: None }), None))
+        }
         AdapterMode::Pinned(path) => {
             let resident = required("--adapter")?;
             let loaded = verify_adapter(&path, &resident.served_base())?;
@@ -288,6 +300,7 @@ pub fn spawn_adapter_watcher<R: AdapterHost>(follow: Option<Follow>, resident: O
     match &follow.source {
         FollowSource::Latest(dir) => eprintln!("brain serve: watching {} for promoted LoRA adapters", dir.display()),
         FollowSource::Manifest(follower) => eprintln!("brain serve: following release manifest {}", follower.path().display()),
+        FollowSource::Directory(bank) => eprintln!("brain serve: serving every adapter in {}", bank.dir().display()),
     }
     let join = std::thread::Builder::new()
         .name("brain-adapter-watch".to_string())
@@ -369,6 +382,8 @@ fn next_adapter(source: &mut FollowSource, memory: &mut DirMemory, rejections: &
             }
             ManifestPoll::Missing | ManifestPoll::Unchanged => None,
         },
+        // Followed as a whole by `watch_loop`, not one adapter at a time.
+        FollowSource::Directory(_) => None,
     }
 }
 
@@ -379,6 +394,13 @@ fn watch_loop(follow: &mut Follow, live: &LiveAdapters, counters: &WatchCounters
     let WatchCounters { stop, swaps, rejections } = counters;
     let mut memory = DirMemory::default();
     while !stop.load(Ordering::SeqCst) {
+        if let FollowSource::Directory(bank) = &mut follow.source {
+            let pass = bank.poll(live);
+            swaps.fetch_add(pass.offered as u64, Ordering::SeqCst);
+            rejections.fetch_add(pass.refused as u64, Ordering::SeqCst);
+            std::thread::sleep(POLL);
+            continue;
+        }
         if let Some(loaded) = next_adapter(&mut follow.source, &mut memory, rejections) {
             let release = loaded.release.clone();
             match live.serve(loaded) {
@@ -493,12 +515,13 @@ mod tests {
     #[test]
     fn the_adapter_flags_pick_exactly_one_source() {
         let p = || Some(PathBuf::from("x"));
-        assert!(matches!(AdapterMode::from_flags(None, None, None), Ok(AdapterMode::Base)));
-        assert!(matches!(AdapterMode::from_flags(p(), None, None), Ok(AdapterMode::Pinned(_))));
-        assert!(matches!(AdapterMode::from_flags(None, p(), None), Ok(AdapterMode::Manifest(_))));
-        assert!(matches!(AdapterMode::from_flags(None, None, p()), Ok(AdapterMode::Latest(_))));
-        for (a, m, w) in [(p(), p(), None), (p(), None, p()), (None, p(), p())] {
-            assert!(AdapterMode::from_flags(a, m, w).is_err(), "two adapter sources at once must be refused");
+        assert!(matches!(AdapterMode::from_flags(None, None, None, None), Ok(AdapterMode::Base)));
+        assert!(matches!(AdapterMode::from_flags(p(), None, None, None), Ok(AdapterMode::Pinned(_))));
+        assert!(matches!(AdapterMode::from_flags(None, p(), None, None), Ok(AdapterMode::Manifest(_))));
+        assert!(matches!(AdapterMode::from_flags(None, None, p(), None), Ok(AdapterMode::Latest(_))));
+        assert!(matches!(AdapterMode::from_flags(None, None, None, p()), Ok(AdapterMode::Directory(_))));
+        for (a, m, w, d) in [(p(), p(), None, None), (p(), None, p(), None), (None, p(), p(), None), (None, None, p(), p()), (p(), None, None, p())] {
+            assert!(AdapterMode::from_flags(a, m, w, d).is_err(), "two adapter sources at once must be refused");
         }
     }
 
@@ -668,7 +691,7 @@ mod tests {
         assert!(follow.is_none(), "a pinned adapter must leave nothing to follow");
         assert_eq!(line.as_deref(), Some(format!("brain serve: {ONE} adapter={ONE} digest={}", digest(&adapter)).as_str()));
         assert!(listed(&executor, ONE) && listed(&executor, "brain/qwen3"), "the adapter is a model beside the base");
-        assert_eq!(executor.served_adapter(ONE), Some(residency::AdapterIdentity { id: ONE.to_string(), digest: digest(&adapter) }), "the serving surfaces are told the verified release, by id and digest");
+        assert_eq!(executor.served_adapter(ONE), Some(residency::AdapterIdentity { id: ONE.to_string(), digest: digest(&adapter), version: 1 }), "the serving surfaces are told the verified release, by id and digest");
         assert_eq!(executor.served_adapter("brain/qwen3"), None, "the base names none");
 
         let wrong = Arc::new(QwenResident::from_card_configured(other.to_str().unwrap(), &card, None, banked()));
@@ -738,7 +761,7 @@ mod tests {
         wait("the verified release to be offered", &|| watcher.swaps() == 1);
         wait("the previous release to be withdrawn", &|| !listed(&executor, ONE));
         assert!(listed(&executor, TWO) && listed(&executor, "brain/qwen3"));
-        assert_eq!(executor.served_adapter(TWO), Some(residency::AdapterIdentity { id: TWO.to_string(), digest: digest(&two) }), "a hot swap moves the reported identity with the served file");
+        assert_eq!(executor.served_adapter(TWO), Some(residency::AdapterIdentity { id: TWO.to_string(), digest: digest(&two), version: 1 }), "a hot swap moves the reported identity with the served file");
         assert_eq!(executor.served_adapter(ONE), None);
     }
 }

@@ -14,6 +14,13 @@ Scope: Training as a job of the serving process (`crates/trainjob`): `brain/trai
 - A call a model refuses at the door (`check_job`) is a 400 on HTTP and a bus error, before a job exists. `/v1/run` and `/v1/jobs` bodies refuse unknown fields.
 - Tests: `crates/trainjob` (store, request, door refusals, real runs, scheduling, HTTP, D-Bus), `crates/apiserve/tests/capabilities.rs` (event stream), `tests/e2e/api_conformance.bats` (flags, auth, refusals), `crates/residency` (transient, check_job).
 
+## Adapter hot-load (lane rollout, 2026-11-13)
+
+- [x] `--serve-adapters DIR`: every `*.safetensors` adapter under a directory is offered as a model of its own and the offered set follows the files (appear, renamed over, disappear) with no restart; symlinks, hidden files and other names ignored, depth 4, 1024 files, each file read once, size-capped and verified against the base. Gated on the CPU in `crates/cli/src/adapter_directory.rs` (follow, refuse without replacing what serves, id moves).
+- [x] A policy version per adapter id (`AdapterIdentity::version`): 1 for the first release, +1 for a replacement with different weights, kept across withdrawal; in `/v1/models` (`adapter.version`), in every reply's `brain.adapter` and in the policy trace's `policy.adapter`. A refit never reads the previous release's prefix-cache entries (one namespace per release digest): `a_refit_adapter_never_reads_the_previous_releases_cached_prompts` (`crates/catalog/tests/it/multi_adapter.rs`).
+- [x] `--adapter-rank-cap` defaults to 32; a refusal names the cap to restart with. The cap is fixed when the engine is built (the bank's buffers are bound into recorded tapes), so an adapter above it cannot be hot-loaded.
+- [ ] Real-weight check of several concurrent adapters hot-loaded onto a running 27B, and the adapter-bank decode cost at batch 8/32/64 (knowledge 315 has one measure at batch 8).
+
 ## Open
 
 - Multi-card runs: the qwen35 trainer is one card per run; a run that needs two cards (a bf16 27B on 80 GB cards) is refused with what it needs. The pipelined qwen3 trainer could be placed over several cards through `register_multi`.

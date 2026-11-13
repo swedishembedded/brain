@@ -64,6 +64,7 @@ mod qwen_cli;
 mod resolver_cli;
 mod deepseekvl_cli;
 mod januspro_cli;
+mod adapter_directory;
 mod continuous_train;
 mod resolve;
 mod roofline_cli;

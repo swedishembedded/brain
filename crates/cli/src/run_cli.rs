@@ -208,6 +208,18 @@ SERVING OPTIONS
                          The previous release is withdrawn once the new one is
                          offered; a request already running is never
                          interrupted, it finishes on the adapter it started on.
+  --serve-adapters DIR   serve every LoRA adapter in DIR, each as a model of its
+                         own under its card id, and follow the directory with
+                         no restart: a file that appears is offered, a file
+                         renamed over (new bytes) replaces its adapter under
+                         the same id with the next policy version, a file that
+                         disappears withdraws its adapter. Every adapter
+                         must verify against the served base like --adapter;
+                         one that does not is refused and the release it
+                         would replace keeps serving. Symlinks and hidden
+                         files are ignored; publish by writing aside and
+                         renaming into place. OFF unless given. GET /v1/models
+                         lists each adapter with {id, digest, version}.
   --adapter FILE         offer this LoRA adapter release as a model of its own,
                          never replaced. It must verify against the served base
                          (the base digest its card records, else its base id)
@@ -223,8 +235,8 @@ SERVING OPTIONS
                          a bad manifest keeps the previous adapter and says why.
                          Replace FILE atomically (write aside, rename over it)
                          and never rewrite a published adapter file.
-                         --adapter, --adapter-manifest and --watch-adapters are
-                         mutually exclusive.
+                         --adapter, --adapter-manifest, --watch-adapters and
+                         --serve-adapters are mutually exclusive.
 
 ADAPTERS  (one resident copy of the Qwen3 weights serves the base and every
            adapter at once, in the same batches. An adapter is a model: it is
@@ -240,8 +252,11 @@ ADAPTERS  (one resident copy of the Qwen3 weights serves the base and every
                          either flag below, or any adapter flag above, builds
                          the adapter bank; without them none is built and the
                          bank costs nothing.
-  --adapter-rank-cap R   highest LoRA rank a slot holds (default 16). An
-                         adapter of a higher rank is refused.
+  --adapter-rank-cap R   highest LoRA rank a slot holds (default 32). The cap
+                         sizes the bank's device buffers when the server
+                         starts, so an adapter of a higher rank, loaded now
+                         or hot-loaded later, is refused with the value to
+                         restart with.
   --adapter-targets LIST linears the bank corrects: attention (wq,wk,wv,wo
                          on Qwen3, the default), all (every adapter site of
                          the model), or a comma-separated list of the model's
@@ -690,6 +705,9 @@ pub fn run_serve(args: &[String]) {
     // silently reloads its weights because a file appeared on disk is not
     // something an operator should get without asking for it.
     let mut watch_adapters: Option<String> = None;
+    // `--serve-adapters DIR`: every adapter in DIR is served, followed as files
+    // appear, change and disappear.
+    let mut serve_adapters: Option<String> = None;
     // `--adapter FILE` / `--adapter-manifest FILE`: an explicit release, pinned
     // or followed through a manifest (see `continuous_train::AdapterMode`).
     let mut adapter: Option<String> = None;
@@ -795,6 +813,7 @@ pub fn run_serve(args: &[String]) {
             "--training" => training = true,
             "--artifact-store" => artifact_store = Some(val(args, &mut i, "--artifact-store")),
             "--watch-adapters" => watch_adapters = Some(val(args, &mut i, "--watch-adapters")),
+            "--serve-adapters" => serve_adapters = Some(val(args, &mut i, "--serve-adapters")),
             "--adapter" => adapter = Some(val(args, &mut i, "--adapter")),
             "--adapter-manifest" => adapter_manifest = Some(val(args, &mut i, "--adapter-manifest")),
             "--adapter-slots" => {
@@ -945,7 +964,7 @@ pub fn run_serve(args: &[String]) {
         std::process::exit(2);
     }
 
-    let adapter_mode = match crate::continuous_train::AdapterMode::from_flags(adapter.map(PathBuf::from), adapter_manifest.map(PathBuf::from), watch_adapters.map(PathBuf::from)) {
+    let adapter_mode = match crate::continuous_train::AdapterMode::from_flags(adapter.map(PathBuf::from), adapter_manifest.map(PathBuf::from), watch_adapters.map(PathBuf::from), serve_adapters.map(PathBuf::from)) {
         Ok(mode) => mode,
         Err(e) => {
             eprintln!("brain serve: {e}");
@@ -1043,7 +1062,7 @@ pub fn run_serve(args: &[String]) {
     // The stdio controller serves no Qwen3, so an adapter flag here would be
     // ignored while the operator believes it is in effect.
     if adapter_mode != crate::continuous_train::AdapterMode::Base {
-        eprintln!("brain serve: --adapter, --adapter-manifest and --watch-adapters apply to the Qwen3 the HTTP and D-Bus surfaces serve; the stdio controller serves none. Add --openai, --anthropic, --openrouter or --dbus.");
+        eprintln!("brain serve: --adapter, --adapter-manifest, --watch-adapters and --serve-adapters apply to the Qwen3 the HTTP and D-Bus surfaces serve; the stdio controller serves none. Add --openai, --anthropic, --openrouter or --dbus.");
         std::process::exit(2);
     }
 

@@ -181,7 +181,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   quantisation and KV precision that served it), so they are what a trainer's
   teacher-forced forward computes for those tokens, up to the serve/train numeric
   gap a numerics gate measures. The object also names the `policy` that generated
-  it (`base_digest`, and `adapter: {id, digest}` or null), `finish_reason`, and
+  it (`base_digest`, and `adapter: {id, digest, version}` or null), `finish_reason`, and
   `truncated` (the token budget ended the generation, which a trainer masks).
   The request is refused (400, `invalid-request`) when it sets penalties, DRY,
   no-repeat bans or a thinking budget, which reshape the distribution the tokens
@@ -192,11 +192,11 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   (above) is the sampler's own, truncated figure and is a different quantity.
 - **Seed and served identity.** An OpenAI or OpenRouter chat or completions
   reply (and the terminal chunk of a stream) carries a non-standard
-  `brain: {"seed": <int>, "adapter": {"id", "digest"}, "base_digest", "backend",
+  `brain: {"seed": <int>, "adapter": {"id", "digest", "version"}, "base_digest", "backend",
   "engine"}` object. `seed` is the
   seed the decode used, drawn fresh for an unseeded request, so any reply can
   be reproduced by sending it back; `adapter` appears only when an adapter
-  answered and names the release that did, the same pair its model card carries.
+  answered and names the release that did, the same triple its model card carries. `version` is the policy version of that release under its id: 1 for the first release the server offered, +1 each time a release with different weights replaces it, never repeated while the process runs. A sequence runs on the release it started on and never spans a refit, so every token of a reply carries the one version; a trainer that records it with the tokens can mask a sample whose version is too far behind the weights it trains.
   `base_digest` is the `sha256:<hex>` of the base checkpoint (hashed in the
   background after load, so absent on the first replies of a large model),
   `backend` the compute backend that ran the decode (`cuda`, `cpu`, ...) and
@@ -309,7 +309,7 @@ The Anthropic entry is unchanged.
 | `max_images_per_request`, `max_image_pixels_per_request` | On a `vision` model: the most images, and pixels over all of them, one request may carry; a request past either is refused with 400. |
 | `architecture.input_modalities` | On a chat model: `["text", "image"]` for a `vision` model, else `["text"]` (the field an agent runtime reads to decide whether it may attach images). |
 | `max_output_tokens` | The most new tokens one request may ask for, when the model's `generate` action declares an upper bound. On OpenRouter it is also `top_provider.max_completion_tokens`. |
-| `adapter` | Present on an entry that IS a LoRA adapter: `{ "id": "<adapter card id>", "digest": "sha256:<hex>" }`. The id is the adapter's name and the digest is that of its file; no file path is ever included. A release that replaces an adapter under the same id changes the digest on the next read. |
+| `adapter` | Present on an entry that IS a LoRA adapter: `{ "id": "<adapter card id>", "digest": "sha256:<hex>", "version": <int> }`. The id is the adapter's name and the digest is that of its file; no file path is ever included. A release that replaces an adapter under the same id changes the digest and raises the policy version on the next read. |
 | `zero_data_retention` | Always `true`: the server keeps nothing of a request (no prompt, answer or upload is written anywhere or logged). A client that routes by data retention reads it to tell this server from one that does not say. |
 
 ### Adapters are models

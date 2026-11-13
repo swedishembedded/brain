@@ -120,7 +120,7 @@ pub fn card(provider: Provider, info: &ModelInfo, adapter: Option<&AdapterIdenti
 /// The fields an agent runtime reads to discover what a served model can do and
 /// which fine-tune is in front of it. Each is optional and absent when unknown:
 /// an unmeasured limit is never `0`, and an adapter is named only by the
-/// identity (`id`, `digest`) its release was verified under, never by where its
+/// identity (`id`, `digest`, `version`) its release was verified under, never by where its
 /// file lives.
 fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIdentity>) {
     let capabilities = info.caps.names();
@@ -141,7 +141,7 @@ fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIde
         card["max_output_tokens"] = json!(max);
     }
     if let Some(adapter) = adapter {
-        card["adapter"] = json!({ "id": adapter.id, "digest": adapter.digest });
+        card["adapter"] = json!({ "id": adapter.id, "digest": adapter.digest, "version": adapter.version });
     }
     // The server keeps nothing of a request: no prompt, answer or upload is
     // written anywhere or logged. Said on every card, so a client that routes

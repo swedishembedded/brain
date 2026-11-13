@@ -168,11 +168,6 @@ pub struct AdapterRelease {
 }
 
 impl AdapterRelease {
-    /// What the serving surface calls this release: id and digest, no path.
-    pub fn identity(&self) -> AdapterIdentity {
-        AdapterIdentity { id: self.id.clone(), digest: self.digest.clone() }
-    }
-
     /// The line `brain serve` prints when `model` starts serving this
     /// release, the one a caller greps to confirm what is served.
     pub fn serving_line(&self, model: &str) -> String {
@@ -189,9 +184,18 @@ pub struct LoadedAdapter {
     pub release: AdapterRelease,
     /// The factors, parsed from the bytes `release.digest` names.
     pub adapter: DeviceAdapter,
+    /// The policy version of this release under its id, which the registry
+    /// that offers it assigns ([`AdapterIdentity`]); `0` until then.
+    pub version: u64,
 }
 
 impl LoadedAdapter {
+    /// What the serving surface calls this release: id, digest and version,
+    /// no path.
+    pub fn identity(&self) -> AdapterIdentity {
+        AdapterIdentity { id: self.release.id.clone(), digest: self.release.digest.clone(), version: self.version }
+    }
+
     /// The form the serving engine registers an adapter in
     /// ([`model::adapter::bank::BankedEngine::load_adapter`]).
     pub fn into_engine(self) -> VerifiedAdapter {
@@ -232,7 +236,7 @@ fn read_once(path: &Path, expect: Option<&str>) -> Result<(LoadedAdapter, ModelC
         return Err(format!("adapter {shown}: a {} {:?} adapter; the served base is {served} that takes LoRA adapters of family {}", card.family, descriptor.kind, expect.unwrap_or("qwen, qwen35 or ricursive")));
     }
     let release = AdapterRelease { id: card.id.clone(), path: path.to_path_buf(), digest };
-    Ok((LoadedAdapter { family: card.family.clone(), release, adapter }, card))
+    Ok((LoadedAdapter { family: card.family.clone(), release, adapter, version: 0 }, card))
 }
 
 /// Read the adapter at `path` as a release, WITHOUT binding it to a base:
