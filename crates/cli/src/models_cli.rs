@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use brain_modelref::ModelRef;
 use brain_modelstore::{Format, LocalModel, Store};
 use checkpoint::st::ModelCard;
+use loader::progress::human_bytes;
 use serde_json::Value;
 
 use crate::args::Args;
@@ -169,10 +170,6 @@ fn resolve_gguf_arch(family: &str, path: Option<&str>) -> Option<&'static brain_
             None
         }
     }
-}
-
-fn human_bytes(n: u64) -> String {
-    loader::progress::human_bytes(n)
 }
 
 /// Bytes on disk for whatever `local` actually points at - a single file for
@@ -843,12 +840,34 @@ fn run_measure(arch_id: &str, ref_str: &str, config: &serde_json::Value, reps: u
         eng(m.total.flops as f64 / m.hot_seconds.max(f64::MIN_POSITIVE), "FLOP/s"),
     );
     println!("  per layer: {}", eng(m.per_layer.flops as f64, "FLOP"));
+    println!("  {}", device_bytes_line(m.held_bytes, m.peak_bytes));
     0
+}
+
+/// The measured device footprint: what the built model holds and the most
+/// live at once during the timed passes. A backend that does not account
+/// allocations reports neither, and the line says so rather than print a
+/// zero that reads as "holds nothing".
+fn device_bytes_line(held: Option<u64>, peak: Option<u64>) -> String {
+    match (held, peak) {
+        (Some(h), Some(p)) => format!("device: {} held, {} peak", human_bytes(h), human_bytes(p)),
+        (Some(h), None) => format!("device: {} held, peak not measured", human_bytes(h)),
+        (None, _) => "device: not measured (this backend does not account allocations)".to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_bytes_line_names_held_and_peak_or_says_unmeasured() {
+        let l = device_bytes_line(Some(3 << 20), Some(5 << 20));
+        assert!(l.contains(&human_bytes(3 << 20)) && l.contains(&human_bytes(5 << 20)), "{l}");
+        assert!(l.find("held").unwrap() < l.find("peak").unwrap(), "{l}");
+        assert!(device_bytes_line(None, None).contains("not measured"));
+        assert!(!device_bytes_line(None, None).contains('0'), "an unmeasured footprint is never printed as a number");
+    }
 
     fn compound_local(id: &str, family: &str) -> LocalModel {
         let reference = brain_modelref::ModelRef::parse(id).unwrap();

@@ -176,7 +176,12 @@ builds the model for real and runs it, reporting
   flux2/ltxv's block-depth-affine graphs; for a hybrid stack whose layers
   are not interchangeable (`lfm2`'s per-layer choice of gated short-conv vs
   attention) it is the plain average (`total ÷ layer count`) instead, and is
-  never presented as more precise than that.
+  never presented as more precise than that;
+- the device footprint: the bytes the built model holds (weights plus the
+  buffers its forward pass lives in) and the most bytes live at any moment of
+  the timed passes, by the backend's own allocation accounting. A backend
+  that does not account allocations (the CPU one) prints "not measured"
+  instead of a number.
 
 Never cached - a timing is a fact about this machine right now, not about the
 model, unlike the dry tiers above.
