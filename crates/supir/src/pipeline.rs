@@ -316,8 +316,7 @@ impl Restorer {
             vae_decoder.decode(&z)
         };
         let fixed_chw = imaging::colorfix::wavelet_reconstruction(&out_chw, &x_stage1_chw, 3, h as usize, w as usize);
-        let rgb: Vec<f32> = fixed_chw.iter().map(|v| ((v + 1.0) * 0.5).clamp(0.0, 1.0)).collect();
-        Ok(imaging::pixels::chw_to_hwc(&rgb, 3, h as usize, w as usize))
+        Ok(imaging::pixels::chw_signed_to_hwc_unit(&fixed_chw, 3, h as usize, w as usize))
     }
 
     /// `RestoreEDMSampler`'s loop: `diffusion::restore`'s scalar math driving
