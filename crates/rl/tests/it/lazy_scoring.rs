@@ -43,7 +43,7 @@ fn write_dataset(dir: &Path, examples: usize, teacher: bool) {
             (with, mask)
         });
         let advantage = if e % 2 == 0 { 1.0 } else { -1.0 };
-        split.push_rollout(&EncodedSample { ids, mask, behavior: vec![f32::NAN; STUDENT_LEN], teacher }, &[], Some(advantage));
+        split.push_rollout(&EncodedSample { ids, mask, behavior: vec![f32::NAN; STUDENT_LEN], teacher, ..Default::default() }, &[], Some(advantage));
     }
     data::chat::write_split(dir, "train", &split).unwrap();
     data::chat::write_split(dir, "val", &split).unwrap();

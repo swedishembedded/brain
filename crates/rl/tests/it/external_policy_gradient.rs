@@ -31,11 +31,13 @@ pub(crate) struct Row {
     pub(crate) advantage: Option<f32>,
     /// One value per supervised token.
     pub(crate) behavior: Option<Vec<f32>>,
+    /// The rollout did not reach an outcome: the record is masked.
+    pub(crate) truncated: bool,
 }
 
 impl Row {
     pub(crate) fn new(ids: &[u32], answer_from: usize, advantage: Option<f32>) -> Row {
-        Row { ids: ids.to_vec(), answer_from, advantage, behavior: None }
+        Row { ids: ids.to_vec(), answer_from, advantage, behavior: None, truncated: false }
     }
 }
 
@@ -48,7 +50,7 @@ pub(crate) fn write_dataset(dir: &Path, rows: &[Row]) {
             assert_eq!(b.len(), row.ids.len() - row.answer_from);
             behavior[row.answer_from..].copy_from_slice(b);
         }
-        split.push_rollout(&data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, teacher: None }, &[], row.advantage);
+        split.push_rollout(&data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, teacher: None, truncated: row.truncated }, &[], row.advantage);
     }
     data::chat::write_split(dir, "train", &split).unwrap();
     data::chat::write_split(dir, "val", &split).unwrap();
@@ -84,13 +86,13 @@ pub(crate) fn answer_logprobs(m: &Qwen35, row: &Row) -> Vec<f32> {
     (row.answer_from - 1..row.ids.len() - 1).map(|t| lp[t]).collect()
 }
 
-fn grad_l1(m: &Qwen35) -> f32 {
+pub(crate) fn grad_l1(m: &Qwen35) -> f32 {
     m.param_names().iter().map(|n| m.read_grad(n).iter().map(|g| g.abs()).sum::<f32>()).sum()
 }
 
 /// An objective opened on `rows`, prepared on `m`, positioned at the first draw: the state `fit_controlled` hands
 /// the first step.
-fn started(rows: &[Row], cfg: PolicyGradientConfig, m: &mut Qwen35) -> (ExternalPolicyGradient, tempfile::TempDir) {
+pub(crate) fn started(rows: &[Row], cfg: PolicyGradientConfig, m: &mut Qwen35) -> (ExternalPolicyGradient, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     write_dataset(dir.path(), rows);
     let mut obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), cfg).unwrap();
@@ -99,7 +101,7 @@ fn started(rows: &[Row], cfg: PolicyGradientConfig, m: &mut Qwen35) -> (External
     (obj, dir)
 }
 
-fn one_step(obj: &mut ExternalPolicyGradient, m: &Qwen35) -> f32 {
+pub(crate) fn one_step(obj: &mut ExternalPolicyGradient, m: &Qwen35) -> f32 {
     m.zero_grads();
     let loss = Objective::<Qwen35>::micro_steps(obj, m, &mut Rng::new(1), 1);
     m.poll_wait();
@@ -107,7 +109,7 @@ fn one_step(obj: &mut ExternalPolicyGradient, m: &Qwen35) -> f32 {
     loss
 }
 
-fn no_kl() -> PolicyGradientConfig {
+pub(crate) fn no_kl() -> PolicyGradientConfig {
     PolicyGradientConfig { kl_beta: 0.0, log_kl: false, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }
 }
 
@@ -322,7 +324,7 @@ fn every_step_reports_finite_statistics_and_the_step_log_line_carries_them() {
     assert!(obj.stats().steps[0].kl.unwrap().abs() < 1e-6, "the first step sits on its own reference");
 }
 
-fn recorded(ids: &[u32], answer_from: usize, advantage: f32) -> Row {
+pub(crate) fn recorded(ids: &[u32], answer_from: usize, advantage: f32) -> Row {
     Row { behavior: Some(vec![-1.0; ids.len() - answer_from]), ..Row::new(ids, answer_from, Some(advantage)) }
 }
 

@@ -39,7 +39,7 @@ fn write_dataset(dir: &Path, rows: &[Row]) {
             let lead = ids.len() - row.ids.len() + ANSWER_FROM;
             (ids.clone(), (0..ids.len()).map(|i| i >= lead).collect::<Vec<bool>>())
         });
-        split.push_rollout(&EncodedSample { ids: row.ids.clone(), mask, behavior: vec![f32::NAN; row.ids.len()], teacher }, &[], Some(0.0));
+        split.push_rollout(&EncodedSample { ids: row.ids.clone(), mask, behavior: vec![f32::NAN; row.ids.len()], teacher, ..Default::default() }, &[], Some(0.0));
     }
     data::chat::write_split(dir, "train", &split).unwrap();
     data::chat::write_split(dir, "val", &split).unwrap();
@@ -172,7 +172,7 @@ fn a_teacher_that_cannot_be_scored_is_refused_by_name() {
     let mut split = EncodedSplit::default();
     let mask: Vec<bool> = (0..ids.len()).map(|i| i >= ANSWER_FROM).collect();
     let teacher = (ids.clone(), vec![true; ids.len()]);
-    split.push_rollout(&EncodedSample { ids: ids.clone(), mask, behavior: vec![f32::NAN; ids.len()], teacher: Some(teacher) }, &[], Some(0.0));
+    split.push_rollout(&EncodedSample { ids: ids.clone(), mask, behavior: vec![f32::NAN; ids.len()], teacher: Some(teacher), ..Default::default() }, &[], Some(0.0));
     let dir = tempfile::tempdir().unwrap();
     data::chat::write_split(dir.path(), "train", &split).unwrap();
     data::chat::write_split(dir.path(), "val", &split).unwrap();

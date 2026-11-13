@@ -1226,6 +1226,10 @@ impl ChatFineTune {
             "modules_to_save": self.modules_to_save,
             "policy_gradient": self.policy_gradient.map(|c| serde_json::json!({
                 "clip_eps_bits": c.clip_eps.to_bits(),
+                "clip_eps_high_bits": c.clip_eps_high.map(f32::to_bits),
+                "importance": serde_json::to_value(c.importance).unwrap_or_default(),
+                "max_step_kl_bits": c.max_step_kl.map(f32::to_bits),
+                "max_step_grad_norm_bits": c.max_step_grad_norm.map(f32::to_bits),
                 "kl_beta_bits": c.kl_beta.to_bits(),
                 "reference": c.reference.name(),
                 "behaviour": c.behaviour.name(),
@@ -1508,6 +1512,10 @@ impl PolicyGradientOutcome {
         let s = &self.stats;
         serde_json::json!({
             "clip_eps": c.clip_eps,
+            "clip_eps_high": c.clip_eps_high,
+            "importance": c.importance,
+            "max_step_kl": c.max_step_kl,
+            "max_step_grad_norm": c.max_step_grad_norm,
             "kl_beta": c.kl_beta,
             "reference": c.reference.name(),
             "behaviour": s.behaviour.name(),
@@ -1522,7 +1530,9 @@ impl PolicyGradientOutcome {
             "sequences_imitation": s.sequences_imitation,
             "tokens_recorded_behavior": s.tokens_recorded_behavior,
             "tokens_start_of_run_behavior": s.tokens_start_of_run_behavior,
+            "sequences_truncated": s.sequences_truncated,
             "steps_skipped_nonfinite": s.steps_skipped_nonfinite,
+            "steps_skipped_guard": s.steps_skipped_guard,
             "mean_loss": s.mean_loss(),
             "mean_clip_fraction": s.mean_clip_fraction(),
             "mean_kl": s.mean_kl(),

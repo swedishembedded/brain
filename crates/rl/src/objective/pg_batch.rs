@@ -17,7 +17,7 @@
 use model::{adapter, training};
 use model::{Model, IGNORE};
 
-use super::grpo_term::{k3_kl, token_term_banded, ClipBand};
+use super::grpo_term::{k3_kl, token_term_weighted, ClipBand};
 
 /// The objective's two knobs besides the data: the clip band and the weight of the KL term.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -38,6 +38,9 @@ pub struct PgBatch<'a> {
     pub ref_lp: Option<&'a [f32]>,
     /// The advantage of each position's sequence; NaN marks an imitation position.
     pub advantage: &'a [f32],
+    /// The importance-sampling weight each position's policy term is scaled by (`None`: one everywhere), a constant
+    /// the parameters do not move: the engine-versus-trainer correction of [`super::external::ImportanceCorrection`].
+    pub is_weight: Option<&'a [f32]>,
 }
 
 /// What one batch measured.
@@ -52,8 +55,21 @@ pub struct BatchTerms {
     /// Of those, the tokens with a non-zero advantage whose ratio sat outside the clip band on the side the advantage
     /// pushes toward, so they carry no gradient.
     pub clipped: usize,
+    /// Of [`Self::clipped`], those pushed up (a positive advantage whose ratio passed the upper edge) and those
+    /// pushed down (a negative advantage whose ratio fell under the lower edge): the two edges of an asymmetric band
+    /// are tuned separately, so they are read separately.
+    pub clipped_high: usize,
+    pub clipped_low: usize,
     /// Tokens with a non-zero advantage (what [`Self::clipped`] is a fraction of).
     pub signed_tokens: usize,
+    /// Policy tokens whose importance-sampling weight is zero (dropped by the mismatch mask) and those it is below
+    /// one for (truncated at the cap), and the sum of the weights over the policy tokens.
+    pub weight_masked: usize,
+    pub weight_truncated: usize,
+    pub weight_sum: f64,
+    /// The sum of `-new_lp` over the policy tokens: over tokens the current policy sampled, its mean estimates the
+    /// policy's entropy (`E[-log p(y)] = H`), an estimate only while the rollouts are on-policy.
+    pub nll_sum: f64,
     pub imitation_tokens: usize,
     /// The sum of the k3 KL to the reference over the policy tokens, and how many tokens it covers.
     pub kl_sum: f32,
@@ -75,7 +91,13 @@ impl Default for BatchTerms {
             supervised: 0,
             policy_tokens: 0,
             clipped: 0,
+            clipped_high: 0,
+            clipped_low: 0,
             signed_tokens: 0,
+            weight_masked: 0,
+            weight_truncated: 0,
+            weight_sum: 0.0,
+            nll_sum: 0.0,
             imitation_tokens: 0,
             kl_sum: 0.0,
             kl_tokens: 0,
@@ -103,12 +125,19 @@ pub fn weigh(new_lp: &[f32], batch: &PgBatch<'_>, spec: &PgSpec) -> (Vec<f32>, B
             continue;
         }
         let ref_lp = batch.ref_lp.map(|r| r[i]);
-        let term = token_term_banded(batch.old_lp[i], new_lp[i], advantage, spec.band, ref_lp.filter(|_| spec.kl_beta > 0.0), spec.kl_beta);
+        let is_weight = batch.is_weight.map_or(1.0, |w| w[i]);
+        let term = token_term_weighted(batch.old_lp[i], new_lp[i], advantage, spec.band, ref_lp.filter(|_| spec.kl_beta > 0.0), spec.kl_beta, is_weight);
         weights[i] = term.weight;
         terms.loss += term.loss;
         terms.policy_tokens += 1;
         terms.signed_tokens += usize::from(advantage != 0.0);
         terms.clipped += usize::from(term.clipped);
+        terms.clipped_high += usize::from(term.clipped && advantage > 0.0);
+        terms.clipped_low += usize::from(term.clipped && advantage < 0.0);
+        terms.weight_masked += usize::from(is_weight == 0.0);
+        terms.weight_truncated += usize::from(is_weight > 0.0 && is_weight < 1.0);
+        terms.weight_sum += f64::from(is_weight);
+        terms.nll_sum -= f64::from(new_lp[i]);
         if let Some(r) = ref_lp {
             terms.kl_sum += k3_kl(r, new_lp[i]);
             terms.kl_tokens += 1;
@@ -128,16 +157,23 @@ pub fn weigh(new_lp: &[f32], batch: &PgBatch<'_>, spec: &PgSpec) -> (Vec<f32>, B
 /// per-batch mean. A batch with a non-finite log-probability, weight or loss is not differentiated (`finite` is
 /// `false`) and leaves the gradients as they were.
 pub fn backward_weighted<M: Model>(model: &M, batch: &PgBatch<'_>, spec: &PgSpec, denominator: Option<f32>) -> BatchTerms {
+    backward_weighted_lp(model, batch, spec, denominator).0
+}
+
+/// [`backward_weighted`], also returning the forward's per-position log-probabilities it differentiated (the numerics
+/// gate reads them against the behaviour log-probabilities without a second readback).
+pub fn backward_weighted_lp<M: Model>(model: &M, batch: &PgBatch<'_>, spec: &PgSpec, denominator: Option<f32>) -> (BatchTerms, Vec<f32>) {
     let objectives = training::objectives(model);
     if let Some(d) = denominator {
         objectives.set_loss_denominator(d);
     }
-    let (weights, terms) = weigh(&objectives.batch_token_logprobs(), batch, spec);
+    let new_lp = objectives.batch_token_logprobs();
+    let (weights, terms) = weigh(&new_lp, batch, spec);
     if terms.finite {
         objectives.set_loss_weights(&weights);
         model.backward();
     }
-    terms
+    (terms, new_lp)
 }
 
 /// The adapter tensors a fresh adapter starts at zero (LoRA's `B`): zeroed, the adapter is an exact no-op.
@@ -214,7 +250,7 @@ mod tests {
     const SPEC: PgSpec = PgSpec { band: ClipBand { low: 0.2, high: 0.2 }, kl_beta: 0.0 };
 
     fn batch<'a>(targets: &'a [u32], old: &'a [f32], advantage: &'a [f32]) -> PgBatch<'a> {
-        PgBatch { targets, old_lp: old, ref_lp: None, advantage }
+        PgBatch { targets, old_lp: old, ref_lp: None, advantage, is_weight: None }
     }
 
     /// An imitation token weighs 1 and costs its cross-entropy, whatever its old log-probability.

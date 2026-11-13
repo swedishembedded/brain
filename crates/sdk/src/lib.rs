@@ -187,7 +187,7 @@ pub use model::StepWork;
 /// The settings and statistics of [`ChatFineTune::policy_gradient`]: reinforcement learning from rollouts collected
 /// outside brain.
 #[cfg(feature = "study")]
-pub use rl::objective::external::{BehaviourSource, PolicyGradientConfig, PolicyGradientStats, PolicyGradientStep, ReferencePolicy};
+pub use rl::objective::external::{BehaviourSource, ImportanceCorrection, PolicyGradientConfig, PolicyGradientStats, PolicyGradientStep, ReferencePolicy};
 #[cfg(feature = "study")]
 pub use rl::objective::grpo::LossAgg;
 #[cfg(feature = "study")]

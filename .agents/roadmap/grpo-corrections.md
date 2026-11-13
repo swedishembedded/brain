@@ -48,6 +48,20 @@ its definition, the on-policy first step and the supervised parity of a record w
       `crates/rl/tests/it/self_distill.rs`, a per-token-advantage gradcheck in `external_policy_gradient_gradcheck.rs`,
       the record format and the teacher sidecar in `crates/data/tests/it/chat_teacher_context.rs`, and an SDK run in
       `chat_finetune_policy_gradient.rs`. Not run on real weights.
+- [x] Stability and readout of the external policy gradient (2026-11-13, gaps 13, 24 of the closing-the-loop report):
+      clip-higher (`clip_eps_high`, an upper edge wider than the lower one) and the clip fraction per edge; the
+      engine-versus-trainer importance correction (`importance`: truncated `min(pi_trainer / pi_rollout, cap)` weight on
+      the policy term, or a mask outside `[1/cap, cap]`, with the ratio centred on the trainer's own start-of-run policy);
+      per step the entropy estimate (mean `-log p` of the sampled tokens), the response length, the gradient norm and the
+      importance weights; a step guard (`max_step_kl`, `max_step_grad_norm`) that skips and logs an update over its bound
+      and ends a run after 8 skipped steps in a row (knowledge #440 is the evidence for it: a step at KL 0.50 and
+      gradient norm 21.1 among neighbours at 0.2-0.4, KL 26.6 at lr 3e-5); `"truncated": true` on a record masks a rollout
+      that reached no outcome (never drawn, scored or counted); observation tokens are never supervised (spec test in
+      `crates/data/tests/it/chat_rollout_records.rs`). Gated on the CPU: finite differences of the weighted loss under a
+      wide upper edge and per-token weights (`external_policy_gradient_gradcheck.rs`), the term and its derivative
+      (`grpo_term.rs`), the behaviours above in `crates/rl/tests/it/policy_gradient_stability.rs`. Not yet run on real
+      weights: whether the guard bounds that suit the 27B (KL 0.05, gradient norm 5 are the first guess) leave the
+      healthy steps alone, and whether clip-higher raises the entropy of a real run.
 - [ ] Full-distribution reverse KL for self-distillation (follow-up). Instead of `log q - log p` at the sampled token,
       take the teacher's top-K tokens at each position and minimise `sum_v p(v) (log p(v) - log q(v))` over the
       student's own top-K, reusing the `DistillTopK` weighted-CE trick with the direction reversed (the weight of
@@ -63,7 +77,7 @@ its definition, the on-policy first step and the supervised parity of a record w
       and negative-advantage actions moving apart over 20-40 steps on `score_tokens_qwen35`, and (3) record the
       peak device memory and the seconds of the start-of-run pass per 1000 tokens.
 - [ ] `brain qwen35 finetune` (the CLI) reads no advantage sidecar; the SDK is the one entry point.
-- [ ] Only `qwen35` bases; `qwen3` is refused by name. Held-out and monitoring selection are refused for these runs.
+- [x] Every trainer that declares `ChatTrainer::POLICY_GRADIENT` takes it: `qwen35`, `qwen3` (95c1a48d4) and `ricursive`; an architecture that does not is refused by name. Held-out and monitoring selection are refused for these runs.
 - [x] Lazy, cached preparation: the start-of-run pass, the reference (KL) pass and the teacher pass used to be one
       forward per example over the whole dataset before step 1 (a 5890-record, 265 MB agent-call set sat over an hour
       there while 60 steps x 4 records read 240 of them; the earlier CAD run measured ~47 min for 1.19M tokens). Now an

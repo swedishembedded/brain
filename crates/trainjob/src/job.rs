@@ -216,6 +216,12 @@ fn policy_gradient_config(params: &crate::request::Params) -> Result<brain::Poli
     if let Some(v) = params.clip_eps {
         config.clip_eps = v;
     }
+    config.clip_eps_high = params.clip_eps_high.or(config.clip_eps_high);
+    if let Some(v) = &params.importance {
+        config.importance = v.parse().map_err(|e| format!("train: importance: {e}"))?;
+    }
+    config.max_step_kl = params.max_step_kl.or(config.max_step_kl);
+    config.max_step_grad_norm = params.max_step_grad_norm.or(config.max_step_grad_norm);
     if let Some(v) = params.kl_beta {
         config.kl_beta = v;
     }

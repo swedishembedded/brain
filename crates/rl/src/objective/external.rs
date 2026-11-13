@@ -72,6 +72,23 @@ use super::grpo_term::ClipBand;
 use super::pg_batch::{adapters_are_zero, adapters_can_be_disabled, backward_weighted, weigh, with_adapters_disabled, AdapterState, BatchTerms, PgBatch, PgSpec};
 use super::score_cache::{ExampleScores, ScoreCache, TokenAdvantages};
 
+/// Consecutive optimiser steps the step guard may skip before the run is aborted.
+pub const MAX_CONSECUTIVE_GUARD_SKIPS: u32 = 8;
+
+/// Whether every gradient of the model is finite, and the sum of their squares (in f64), read back once. A model that
+/// does not expose its gradients counts as finite with a zero norm.
+fn gradient_scan<M: Model>(model: &M) -> (bool, f64) {
+    let Some(names) = model.optimized_params() else { return (true, 0.0) };
+    let (mut finite, mut sum_sq) = (true, 0.0f64);
+    for name in names {
+        for g in model.read_grad(&name) {
+            finite &= g.is_finite();
+            sum_sq += f64::from(g) * f64::from(g);
+        }
+    }
+    (finite, sum_sq)
+}
+
 /// The policy the KL term keeps the trained policy close to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,6 +117,67 @@ impl std::str::FromStr for ReferencePolicy {
             "base" => Ok(ReferencePolicy::Base),
             "start" => Ok(ReferencePolicy::StartOfRun),
             other => Err(format!("unknown reference policy {other:?}; expected \"base\" or \"start\"")),
+        }
+    }
+}
+
+/// The correction for the gap between the engine that sampled a rollout and the trainer that updates on it.
+///
+/// With `None` the importance ratio is taken against the recorded behaviour log-probability, so every step-0 token
+/// starts at `pi_trainer / pi_rollout`, not at one: the serve/train numeric gap eats the clip band before the first
+/// update. With a correction the ratio is taken against the trainer's own start-of-run log-probability (one at step
+/// 0, the clip band centred), and each token's policy term is scaled by the constant weight
+/// `w = pi_trainer_start / pi_rollout` that corrects for the engine: truncated at `cap` ([`Self::Truncate`], TIS), or
+/// dropped when `w` leaves `[1 / cap, cap]` ([`Self::Mask`], MIS, for a gap too large to correct by reweighting).
+/// Costs one forward pass over each example the first time a step draws it (the start-of-run scoring); needs the
+/// recorded behaviour log-probabilities ([`BehaviourSource::Recorded`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportanceCorrection {
+    #[default]
+    None,
+    Truncate { cap: f32 },
+    Mask { cap: f32 },
+}
+
+impl ImportanceCorrection {
+    /// The name the CLI and the adapter's provenance use.
+    pub fn name(self) -> &'static str {
+        match self {
+            ImportanceCorrection::None => "none",
+            ImportanceCorrection::Truncate { .. } => "truncate",
+            ImportanceCorrection::Mask { .. } => "mask",
+        }
+    }
+
+    /// Whether a correction is asked for.
+    pub fn is_on(self) -> bool {
+        self != ImportanceCorrection::None
+    }
+
+    /// The weight of a token whose trainer start-of-run log-probability is `trainer` and whose rollout engine
+    /// recorded `rollout`.
+    pub fn weight(self, trainer: f32, rollout: f32) -> f32 {
+        let w = (trainer - rollout).exp();
+        match self {
+            ImportanceCorrection::None => 1.0,
+            ImportanceCorrection::Truncate { cap } => w.min(cap),
+            ImportanceCorrection::Mask { cap } if w > cap || w < 1.0 / cap => 0.0,
+            ImportanceCorrection::Mask { .. } => w,
+        }
+    }
+}
+
+impl std::str::FromStr for ImportanceCorrection {
+    type Err = String;
+    /// `none`, `truncate:<cap>` or `mask:<cap>`.
+    fn from_str(s: &str) -> Result<ImportanceCorrection, String> {
+        let cap = |c: &str| c.parse::<f32>().map_err(|_| format!("the cap {c:?} is not a number"));
+        match s.split_once(':') {
+            None if s == "none" => Ok(ImportanceCorrection::None),
+            Some(("truncate", c)) => Ok(ImportanceCorrection::Truncate { cap: cap(c)? }),
+            Some(("mask", c)) => Ok(ImportanceCorrection::Mask { cap: cap(c)? }),
+            _ => Err(format!("unknown importance correction {s:?}; expected \"none\", \"truncate:CAP\" or \"mask:CAP\"")),
         }
     }
 }
@@ -149,8 +227,22 @@ fn coverage_note(opts: &FitOpts, records: usize) -> Option<String> {
 /// The knobs of [`ExternalPolicyGradient`]. [`Default`] is the recommended configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PolicyGradientConfig {
-    /// Half-width of the clip band `[1 - eps, 1 + eps]` of the importance ratio, in `(0, 1)`.
+    /// Half-width of the clip band `[1 - eps, 1 + eps]` of the importance ratio, in `(0, 1)`: its lower edge, and its
+    /// upper edge too unless [`Self::clip_eps_high`] widens it.
     pub clip_eps: f32,
+    /// The upper edge `1 + eps_high` of the band when it is wider than the lower one ("clip-higher"): a low-probability
+    /// token that turns out well can then keep gaining mass instead of being clipped at `1 + clip_eps`, which
+    /// counters the entropy collapse a symmetric band causes. `None`: symmetric. At least `clip_eps`.
+    pub clip_eps_high: Option<f32>,
+    /// The engine-versus-trainer correction ([`ImportanceCorrection`]).
+    pub importance: ImportanceCorrection,
+    /// Skip, and log, the optimiser step of a step whose mean k3 KL to the reference exceeds this: a rare step with a
+    /// few extreme log-ratios (KL 0.50 among neighbours of 0.003) must not reach the weights. Needs a reference
+    /// measurement ([`Self::log_kl`] or a KL weight). `None`: no bound.
+    pub max_step_kl: Option<f32>,
+    /// Skip, and log, the optimiser step of a step whose global gradient norm (after averaging over the step's
+    /// micro-batches, before the optimiser's clip) exceeds this. `None`: no bound.
+    pub max_step_grad_norm: Option<f32>,
     /// Coefficient of the k3 KL to the reference policy; `0.0` puts no KL term in the loss.
     pub kl_beta: f32,
     pub reference: ReferencePolicy,
@@ -176,7 +268,7 @@ pub struct PolicyGradientConfig {
 
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
-        PolicyGradientConfig { clip_eps: 0.2, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None }
+        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None }
     }
 }
 
@@ -196,8 +288,27 @@ impl PolicyGradientConfig {
         if !(self.clip_eps.is_finite() && self.clip_eps > 0.0 && self.clip_eps < 1.0) {
             return Err(format!("clip_eps is {}; it must lie in (0, 1)", self.clip_eps));
         }
+        if let Some(high) = self.clip_eps_high.filter(|h| !(h.is_finite() && *h >= self.clip_eps && *h < 10.0)) {
+            return Err(format!("clip_eps_high is {high}; it must be finite, at least clip_eps ({}) and below 10 (leave it unset for a symmetric band)", self.clip_eps));
+        }
         if !(self.kl_beta.is_finite() && self.kl_beta >= 0.0) {
             return Err(format!("kl_beta is {}; it must be a finite number, at least 0", self.kl_beta));
+        }
+        if let ImportanceCorrection::Truncate { cap } | ImportanceCorrection::Mask { cap } = self.importance {
+            if !(cap.is_finite() && cap > 1.0) {
+                return Err(format!("the importance correction's cap is {cap}; it must be finite and above 1"));
+            }
+            if self.behaviour != BehaviourSource::Recorded {
+                return Err("an importance correction weighs the trainer against the recorded behaviour log-probabilities; it needs behaviour \"recorded\"".to_string());
+            }
+        }
+        for (name, value) in [("max_step_kl", self.max_step_kl), ("max_step_grad_norm", self.max_step_grad_norm)] {
+            if let Some(v) = value.filter(|v| !(v.is_finite() && *v > 0.0)) {
+                return Err(format!("{name} is {v}; it must be finite and positive (leave it unset for no guard)"));
+            }
+        }
+        if self.max_step_kl.is_some() && !self.wants_reference() {
+            return Err("max_step_kl bounds the KL to the reference, which is measured only with log_kl or a positive kl_beta".to_string());
         }
         if !(self.temperature.is_finite() && self.temperature > 0.0) {
             return Err(format!("temperature is {}; it must be finite and positive", self.temperature));
@@ -229,6 +340,23 @@ pub struct PolicyGradientStep {
     /// Of the tokens with a non-zero advantage, the fraction whose ratio was outside the clip band on the side the
     /// advantage pushes toward (no gradient).
     pub clip_fraction: f32,
+    /// [`Self::clip_fraction`] split by edge: the share of the signed tokens clipped at the upper edge (a positive
+    /// advantage past `1 + eps_high`) and at the lower one (a negative advantage under `1 - eps`). They add up to it.
+    pub clip_fraction_high: f32,
+    pub clip_fraction_low: f32,
+    /// The mean of `-log p(y)` over the policy tokens under the current policy: an estimator of the policy's entropy
+    /// while the rollouts are on-policy (a falling series is the entropy collapse clip-higher counters).
+    pub entropy_estimate: f32,
+    /// Mean supervised tokens per sequence of the step: the response length.
+    pub mean_response_tokens: f32,
+    /// The global gradient norm of the step, averaged over its micro-batches, before the optimiser's clip.
+    pub grad_norm: f32,
+    /// The mean importance-sampling weight over the policy tokens and the share of them it dropped (one and zero
+    /// without a correction).
+    pub importance_weight_mean: f32,
+    pub importance_masked_fraction: f32,
+    /// Why the step's optimiser update was not taken (a guard bound was exceeded), when it was not.
+    pub skipped: Option<String>,
     /// Mean k3 KL to the reference over the policy tokens, when a reference was measured.
     pub kl: Option<f32>,
     /// The importance ratio over the policy tokens: mean, smallest and largest.
@@ -257,6 +385,11 @@ pub struct PolicyGradientStats {
     pub steps: Vec<PolicyGradientStep>,
     /// Optimiser steps not taken because a loss or gradient was not finite.
     pub steps_skipped_nonfinite: usize,
+    /// Optimiser steps not taken because the step's KL or gradient norm was over its bound
+    /// ([`PolicyGradientConfig::max_step_kl`], [`PolicyGradientConfig::max_step_grad_norm`]).
+    pub steps_skipped_guard: usize,
+    /// Truncated rollouts of the dataset: never drawn, scored or trained on (`"truncated": true` on the record).
+    pub sequences_truncated: usize,
     /// Sequences of the dataset with an advantage, and without (imitation).
     pub sequences_with_advantage: usize,
     pub sequences_imitation: usize,
@@ -302,6 +435,9 @@ struct Rows {
     starts: Vec<usize>,
     ends: Vec<usize>,
     advantage: Vec<f32>,
+    /// The examples a step may draw: every one whose rollout reached an outcome. A truncated rollout is masked as a
+    /// whole ([`data::chat_rollout`]) by never being drawn, scored or counted among the training sequences.
+    eligible: Vec<usize>,
     /// Per token of the stream; NaN where none was recorded.
     behavior: Vec<f32>,
     /// The teacher's renderings, when any example has one.
@@ -383,6 +519,8 @@ struct Laid {
     old_lp: Vec<f32>,
     ref_lp: Vec<f32>,
     advantage: Vec<f32>,
+    /// The importance-sampling weight of each position, when a correction is on.
+    is_weight: Option<Vec<f32>>,
     has_ref: bool,
     /// The teacher advantages of the rows that have them, for the step's statistics.
     teacher: Vec<TokenAdvantages>,
@@ -424,6 +562,7 @@ pub struct ExternalPolicyGradient {
     accumulating: StepAccumulator,
     stats: PolicyGradientStats,
     consecutive_nonfinite: u32,
+    consecutive_guard: u32,
     verdict: Option<StepVerdict>,
 }
 
@@ -457,7 +596,8 @@ impl ExternalPolicyGradient {
                 None => format!("{}: the training split carries no rollout advantages, so a policy gradient would train every record as imitation; use the supervised objective, or prepare the dataset from records with an \"advantage\"", dir.display()),
             }));
         };
-        let (advantage, behavior) = (recorded.advantage, recorded.behavior);
+        let (advantage, behavior, truncated) = (recorded.advantage, recorded.behavior, recorded.truncated);
+        let eligible: Vec<usize> = (0..starts.len()).filter(|&e| !truncated[e]).collect();
         // NaN marks an imitation record; anything else must be a number a loss can be built from.
         if let Some(e) = advantage.iter().position(|a| a.is_infinite()) {
             return Err(invalid(format!("{}: example {e} has an infinite advantage", dir.display())));
@@ -469,8 +609,11 @@ impl ExternalPolicyGradient {
         if let Some(teacher) = &teacher {
             check_teacher(teacher, &starts, &ends, &mask, batch_cfg.block_size).map_err(invalid)?;
         }
-        let mut stats = PolicyGradientStats { sequences_with_teacher: teacher.as_ref().map_or(0, |t| (0..starts.len()).filter(|&e| t.example(e).is_some()).count()), ..Default::default() };
+        let mut stats = PolicyGradientStats { sequences_truncated: truncated.iter().filter(|t| **t).count(), sequences_with_teacher: teacher.as_ref().map_or(0, |t| (0..starts.len()).filter(|&e| t.example(e).is_some()).count()), ..Default::default() };
         for (e, &a) in advantage.iter().enumerate() {
+            if truncated[e] {
+                continue;
+            }
             if a.is_nan() {
                 stats.sequences_imitation += 1;
                 continue;
@@ -487,6 +630,9 @@ impl ExternalPolicyGradient {
                 }
             }
         }
+        if eligible.is_empty() {
+            return Err(invalid(format!("{}: all {} records are truncated rollouts, which a policy gradient never trains on", dir.display(), starts.len())));
+        }
         if stats.sequences_with_advantage == 0 {
             return Err(invalid(format!("{}: no training record carries an advantage, so a policy gradient would train every record as imitation; use the supervised objective", dir.display())));
         }
@@ -499,14 +645,14 @@ impl ExternalPolicyGradient {
             )));
         }
         stats.behaviour = cfg.behaviour;
-        if let Some(note) = coverage_note(opts, starts.len()) {
+        if let Some(note) = coverage_note(opts, eligible.len()) {
             eprintln!("policy gradient: {note}");
         }
         let tag_examples = ["train", "val"].iter().any(|split| dir.join(format!("{split}.img.bin")).exists());
-        let rows = Rows { starts, ends, advantage, behavior, teacher };
+        let rows = Rows { starts, ends, advantage, eligible, behavior, teacher };
         let cache = ScoreCache::create(dir, rows.starts.len())?;
         let max_token = tokens.iter().copied().chain(rows.teacher.iter().flat_map(|t| (0..rows.starts.len()).filter_map(|e| t.example(e)).flat_map(|(ids, _)| ids.iter().copied()))).max().unwrap_or(0);
-        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, verdict: None })
+        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, consecutive_guard: 0, verdict: None })
     }
 
     /// What the run has measured so far.
@@ -520,7 +666,7 @@ impl ExternalPolicyGradient {
     }
 
     fn spec(&self) -> PgSpec {
-        PgSpec { band: ClipBand::symmetric(self.cfg.clip_eps), kl_beta: self.cfg.kl_beta }
+        PgSpec { band: ClipBand { low: self.cfg.clip_eps, high: self.cfg.clip_eps_high.unwrap_or(self.cfg.clip_eps) }, kl_beta: self.cfg.kl_beta }
     }
 
     fn upload<M: Model>(&self, model: &M, tokens: &[u32], targets: &[u32], picks: &[Option<usize>]) {
@@ -543,7 +689,8 @@ impl ExternalPolicyGradient {
         let (x, targets) = self.token_batch(picks);
         let (bs, bl) = (self.batch_cfg.batch_size, self.batch_cfg.block_size);
         let has_ref = self.anchors.as_ref().is_some_and(|a| a.wants_reference);
-        let mut laid = Laid { tokens: x, targets, picks: picks.to_vec(), old_lp: vec![0.0; bs * bl], ref_lp: vec![0.0; bs * bl], advantage: vec![f32::NAN; bs * bl], has_ref, teacher: Vec::new() };
+        let corrected = self.cfg.importance.is_on();
+        let mut laid = Laid { tokens: x, targets, picks: picks.to_vec(), old_lp: vec![0.0; bs * bl], ref_lp: vec![0.0; bs * bl], advantage: vec![f32::NAN; bs * bl], is_weight: corrected.then(|| vec![1.0; bs * bl]), has_ref, teacher: Vec::new() };
         for (b, pick) in picks.iter().enumerate() {
             let Some(e) = *pick else { continue };
             let scores = self.cache.get(e).unwrap_or_else(|err| panic!("policy-gradient score cache, example {e}: {err}"));
@@ -554,6 +701,12 @@ impl ExternalPolicyGradient {
                 }
                 laid.advantage[at] = self.rows.advantage[e] + scores.teacher.as_ref().map_or(0.0, |a| a.value[t]);
                 laid.old_lp[at] = self.old_logprob(e, t, scores.behavior.as_deref());
+                if let (Some(weights), true) = (laid.is_weight.as_mut(), self.is_policy_example(e)) {
+                    // The ratio is taken against the trainer's own start-of-run policy; the engine's gap to it is the weight.
+                    let trainer = scores.behavior.as_ref().and_then(|lp| lp.get(t)).copied().expect("a corrected run scored the start-of-run log-probabilities of every policy token");
+                    weights[at] = self.cfg.importance.weight(trainer, self.rows.behavior[self.rows.starts[e] + 1 + t]);
+                    laid.old_lp[at] = trainer;
+                }
                 if has_ref {
                     laid.ref_lp[at] = scores.reference.as_ref().and_then(|r| r.get(t)).copied().unwrap_or(0.0);
                 }
@@ -580,7 +733,9 @@ impl ExternalPolicyGradient {
     /// teacher's advantage.
     fn needs_start_behavior(&self, e: usize) -> bool {
         let reads = self.is_policy_example(e) || self.rows.teacher.as_ref().is_some_and(|t| t.example(e).is_some());
-        reads && ((self.rows.starts[e] + 1)..self.rows.ends[e]).any(|token| self.mask[token] && self.rows.behavior[token].is_nan())
+        let corrected = self.cfg.importance.is_on() && self.is_policy_example(e);
+        let mut supervised = ((self.rows.starts[e] + 1)..self.rows.ends[e]).filter(|&token| self.mask[token]);
+        reads && supervised.any(|token| corrected || self.rows.behavior[token].is_nan())
     }
 
     /// The model's log-probability of every row position of the examples, by one forward pass per batch, in the
@@ -742,7 +897,7 @@ impl ExternalPolicyGradient {
     }
 
     /// The step's statistics from what its micro-batches measured.
-    fn close_step(&mut self) {
+    fn close_step(&mut self, grad_norm: f32) {
         let acc = std::mem::take(&mut self.accumulating);
         let mut sum = BatchTerms::default();
         for t in &acc.terms {
@@ -750,6 +905,11 @@ impl ExternalPolicyGradient {
             sum.supervised += t.supervised;
             sum.policy_tokens += t.policy_tokens;
             sum.clipped += t.clipped;
+            sum.clipped_high += t.clipped_high;
+            sum.clipped_low += t.clipped_low;
+            sum.weight_masked += t.weight_masked;
+            sum.weight_sum += t.weight_sum;
+            sum.nll_sum += t.nll_sum;
             sum.signed_tokens += t.signed_tokens;
             sum.imitation_tokens += t.imitation_tokens;
             sum.kl_sum += t.kl_sum;
@@ -766,6 +926,14 @@ impl ExternalPolicyGradient {
             tokens: sum.supervised,
             loss: per_token(sum.loss),
             clip_fraction: if sum.signed_tokens > 0 { sum.clipped as f32 / sum.signed_tokens as f32 } else { 0.0 },
+            clip_fraction_high: if sum.signed_tokens > 0 { sum.clipped_high as f32 / sum.signed_tokens as f32 } else { 0.0 },
+            clip_fraction_low: if sum.signed_tokens > 0 { sum.clipped_low as f32 / sum.signed_tokens as f32 } else { 0.0 },
+            entropy_estimate: if sum.policy_tokens > 0 { (sum.nll_sum / f64::from(policy)) as f32 } else { 0.0 },
+            mean_response_tokens: if acc.sequences > 0 { sum.supervised as f32 / acc.sequences as f32 } else { 0.0 },
+            grad_norm,
+            importance_weight_mean: if sum.policy_tokens > 0 { (sum.weight_sum / f64::from(policy)) as f32 } else { 1.0 },
+            importance_masked_fraction: if sum.policy_tokens > 0 { sum.weight_masked as f32 / policy } else { 0.0 },
+            skipped: None,
             kl: (sum.kl_tokens > 0).then(|| sum.kl_sum / sum.kl_tokens as f32),
             ratio_mean: if sum.policy_tokens > 0 { (sum.ratio_sum / f64::from(policy)) as f32 } else { 1.0 },
             ratio_min: if sum.policy_tokens > 0 { sum.ratio_min } else { 1.0 },
@@ -779,23 +947,45 @@ impl ExternalPolicyGradient {
         });
     }
 
+    /// The verdict on the step just closed: a non-finite loss or gradient skips it (the run aborts after
+    /// [`MAX_CONSECUTIVE_NONFINITE`] in a row), and so does a KL or gradient norm over the configured bound, logged
+    /// with the values and counted (the run aborts after [`MAX_CONSECUTIVE_GUARD_SKIPS`] in a row: a bound that
+    /// skips every step is wrong, or the policy has left the region it can be trained in).
     fn rule(&mut self, finite: bool) -> StepVerdict {
-        if finite {
-            self.consecutive_nonfinite = 0;
-            return StepVerdict::Apply;
+        if !finite {
+            self.consecutive_guard = 0;
+            self.consecutive_nonfinite += 1;
+            self.stats.steps_skipped_nonfinite += 1;
+            return if self.consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE {
+                StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, NonFiniteSteps { consecutive: self.consecutive_nonfinite }))
+            } else {
+                StepVerdict::Skip(format!("non-finite loss or gradient ({} in a row)", self.consecutive_nonfinite))
+            };
         }
-        self.consecutive_nonfinite += 1;
-        self.stats.steps_skipped_nonfinite += 1;
-        if self.consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE {
-            StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, NonFiniteSteps { consecutive: self.consecutive_nonfinite }))
-        } else {
-            StepVerdict::Skip(format!("non-finite loss or gradient ({} in a row)", self.consecutive_nonfinite))
+        self.consecutive_nonfinite = 0;
+        let last = self.stats.steps.last_mut().expect("close_step ran");
+        let over_kl = self.cfg.max_step_kl.zip(last.kl).filter(|(bound, kl)| kl > bound);
+        let over_grad = self.cfg.max_step_grad_norm.filter(|bound| last.grad_norm > *bound);
+        let why = match (over_kl, over_grad) {
+            (Some((bound, kl)), _) => format!("the step's KL {kl:.4} is over the bound {bound} (gradient norm {:.3})", last.grad_norm),
+            (None, Some(bound)) => format!("the step's gradient norm {:.3} is over the bound {bound}", last.grad_norm),
+            (None, None) => {
+                self.consecutive_guard = 0;
+                return StepVerdict::Apply;
+            }
+        };
+        last.skipped = Some(why.clone());
+        self.stats.steps_skipped_guard += 1;
+        self.consecutive_guard += 1;
+        if self.consecutive_guard >= MAX_CONSECUTIVE_GUARD_SKIPS {
+            return StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{MAX_CONSECUTIVE_GUARD_SKIPS} optimiser steps in a row were skipped by the step guard ({why}); the bound is too tight for this policy, or the policy has diverged")));
         }
+        StepVerdict::Skip(why)
     }
 
     fn draw(&mut self) -> Vec<Option<usize>> {
         let order = self.order.as_mut().expect("Objective::begin positions the order before the first step");
-        (0..self.batch_cfg.batch_size).map(|_| Some(order.next())).collect()
+        (0..self.batch_cfg.batch_size).map(|_| Some(self.rows.eligible[order.next()])).collect()
     }
 }
 
@@ -832,7 +1022,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
     }
 
     fn begin(&mut self, seed: u64, draws_done: u64) {
-        self.order = Some(Order::new(seed, self.rows.starts.len(), draws_done));
+        self.order = Some(Order::new(seed, self.rows.eligible.len(), draws_done));
     }
 
     /// The weights differ from the start-of-run ones exactly when an update was applied (also true of a
@@ -863,7 +1053,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         for l in &laid {
             self.upload(model, &l.tokens, &l.targets, &l.picks);
             let _ = model.forward();
-            let batch = PgBatch { targets: &l.targets, old_lp: &l.old_lp, ref_lp: l.has_ref.then_some(&l.ref_lp[..]), advantage: &l.advantage };
+            let batch = PgBatch { targets: &l.targets, old_lp: &l.old_lp, ref_lp: l.has_ref.then_some(&l.ref_lp[..]), advantage: &l.advantage, is_weight: l.is_weight.as_deref() };
             let terms = backward_weighted(model, &batch, &spec, denominator);
             finite &= terms.finite;
             loss += terms.loss / denominator.unwrap_or(terms.supervised.max(1) as f32);
@@ -884,9 +1074,11 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
             }
             self.accumulating.terms.push(terms);
         }
-        finite &= model.optimized_params().is_none_or(|names| names.iter().all(|n| model.read_grad(n).iter().all(|g| g.is_finite())));
+        let (grads_finite, grad_sq) = gradient_scan(model);
+        finite &= grads_finite;
+        let grad_norm = (grad_sq.sqrt() / f64::from(k.max(1))) as f32;
+        self.close_step(grad_norm);
         self.verdict = Some(self.rule(finite));
-        self.close_step();
         loss
     }
 
@@ -896,13 +1088,13 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
 
     /// The loss of freshly drawn examples on the forward alone: nothing is queued, counted or differentiated.
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
-        let examples = self.rows.starts.len();
-        let picks: Vec<Option<usize>> = (0..self.batch_cfg.batch_size).map(|_| Some(rng.gen_range_inclusive(0, examples as i64 - 1) as usize)).collect();
+        let eligible = self.rows.eligible.len();
+        let picks: Vec<Option<usize>> = (0..self.batch_cfg.batch_size).map(|_| Some(self.rows.eligible[rng.gen_range_inclusive(0, eligible as i64 - 1) as usize])).collect();
         self.ensure_scored(model, &picks).expect("Objective::prepare checked the scoring policies");
         let laid = self.lay_out(&picks);
         self.upload(model, &laid.tokens, &laid.targets, &laid.picks);
         let _ = model.forward();
-        let batch = PgBatch { targets: &laid.targets, old_lp: &laid.old_lp, ref_lp: laid.has_ref.then_some(&laid.ref_lp[..]), advantage: &laid.advantage };
+        let batch = PgBatch { targets: &laid.targets, old_lp: &laid.old_lp, ref_lp: laid.has_ref.then_some(&laid.ref_lp[..]), advantage: &laid.advantage, is_weight: laid.is_weight.as_deref() };
         let (_, terms) = weigh(&training::objectives(model).batch_token_logprobs(), &batch, &self.spec());
         terms.loss / terms.supervised.max(1) as f32
     }
@@ -912,12 +1104,13 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         let kl = last.kl.map(|kl| format!("kl {kl:.4}  ")).unwrap_or_default();
         let teacher = if self.stats.sequences_with_teacher > 0 { format!("  adv mean {:+.3} max {:.3} clipped {:.3}", last.token_advantage_mean, last.token_advantage_max, last.token_advantage_clip_fraction) } else { String::new() };
         let scoring = if last.scoring_seconds > 0.0 { format!("  scoring {:.1}s", last.scoring_seconds) } else { String::new() };
-        Some(format!("{kl}clip {:.3}  ratio {:.3}{teacher}{scoring}", last.clip_fraction, last.ratio_mean))
+        let skipped = if last.skipped.is_some() { "  SKIPPED" } else { "" };
+        Some(format!("{kl}clip {:.3} (hi {:.3} lo {:.3})  ratio {:.3}  entropy~{:.3}  len {:.0}  gnorm {:.3}{teacher}{scoring}{skipped}", last.clip_fraction, last.clip_fraction_high, last.clip_fraction_low, last.ratio_mean, last.entropy_estimate, last.mean_response_tokens, last.grad_norm))
     }
 
     fn metrics(&self) -> Vec<(&'static str, f32)> {
         let Some(last) = self.stats.steps.last() else { return Vec::new() };
-        let mut m = vec![("pg_loss", last.loss), ("pg_clip_fraction", last.clip_fraction), ("pg_ratio_mean", last.ratio_mean), ("pg_ratio_min", last.ratio_min), ("pg_ratio_max", last.ratio_max), ("pg_mean_advantage", last.mean_advantage), ("pg_scoring_seconds", last.scoring_seconds)];
+        let mut m = vec![("pg_loss", last.loss), ("pg_clip_fraction", last.clip_fraction), ("pg_clip_fraction_high", last.clip_fraction_high), ("pg_clip_fraction_low", last.clip_fraction_low), ("pg_entropy_estimate", last.entropy_estimate), ("pg_response_tokens", last.mean_response_tokens), ("pg_grad_norm", last.grad_norm), ("pg_importance_weight_mean", last.importance_weight_mean), ("pg_importance_masked_fraction", last.importance_masked_fraction), ("pg_ratio_mean", last.ratio_mean), ("pg_ratio_min", last.ratio_min), ("pg_ratio_max", last.ratio_max), ("pg_mean_advantage", last.mean_advantage), ("pg_scoring_seconds", last.scoring_seconds)];
         if let Some(kl) = last.kl {
             m.push(("pg_kl", kl));
         }

@@ -68,6 +68,10 @@ pub fn action_spec() -> ActionSpec {
         .param(ParamSpec::new("keep_evaluations", ParamType::Bool, "also publish the adapter of every evaluation (needs eval_every > 0)").default(json!(false)))
         .param(ParamSpec::new("return_adapter", ParamType::Bool, "also return the adapter as an output blob (a file descriptor over D-Bus); over HTTP take it by digest from the artifact store").default(json!(false)))
         .param(optional_f("clip_eps", "policy gradient: half-width of the clip band of the importance ratio", 0.0, 1.0))
+        .param(optional_f("clip_eps_high", "policy gradient: the upper edge of the clip band is 1 + this (clip-higher), at least clip_eps; omitted, the band is symmetric", 0.0, 10.0))
+        .param(ParamSpec::new("importance", ParamType::Str, "policy gradient: the correction for the sampling engine's gap to the trainer: `none`, `truncate:CAP` or `mask:CAP`; needs recorded behaviour log-probabilities"))
+        .param(optional_f("max_step_kl", "policy gradient: skip (and log) an optimiser step whose mean KL to the reference is over this", 0.0, 1e9))
+        .param(optional_f("max_step_grad_norm", "policy gradient: skip (and log) an optimiser step whose gradient norm is over this", 0.0, 1e12))
         .param(optional_f("kl_beta", "policy gradient: coefficient of the KL term to the reference policy", 0.0, 1000.0))
         .param(ParamSpec::new("reference", ParamType::Enum(vec!["base".into(), "start".into()]), "policy gradient: the policy the KL term is taken against"))
         .param(ParamSpec::new("behaviour", ParamType::Enum(vec!["recorded".into(), "start_of_run_proxy".into()]), "policy gradient: where the behaviour log-probabilities of the importance ratio come from: `recorded` (default) the sampler's own, required on every supervised token; `start_of_run_proxy` the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it"))
@@ -252,6 +256,10 @@ pub struct Params {
     pub keep_evaluations: bool,
     pub return_adapter: bool,
     pub clip_eps: Option<f32>,
+    pub clip_eps_high: Option<f32>,
+    pub importance: Option<String>,
+    pub max_step_kl: Option<f32>,
+    pub max_step_grad_norm: Option<f32>,
     pub kl_beta: Option<f32>,
     pub reference: Option<String>,
     pub behaviour: Option<String>,
@@ -279,6 +287,10 @@ impl Request {
         let refused = |what: &str| Err(format!("train: {what}"));
         let pg_named: Vec<&str> = [
             (params.clip_eps.is_some(), "clip_eps"),
+            (params.clip_eps_high.is_some(), "clip_eps_high"),
+            (params.importance.is_some(), "importance"),
+            (params.max_step_kl.is_some(), "max_step_kl"),
+            (params.max_step_grad_norm.is_some(), "max_step_grad_norm"),
             (params.kl_beta.is_some(), "kl_beta"),
             (params.reference.is_some(), "reference"),
             (params.behaviour.is_some(), "behaviour"),
@@ -433,6 +445,10 @@ mod tests {
         assert!(e.contains("kl_beta, teacher") && e.contains("sft"), "{e}");
         assert!(request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "kl_beta": 0.1, "teacher": "start", "reference": "base", "loss_agg": "token-sum"}), &[]).is_ok());
         assert!(request(json!({"base": "a/b", "data": data, "keep_evaluations": true}), &[]).unwrap_err().contains("eval_every"));
+        let e = request(json!({"base": "a/b", "data": data, "max_step_kl": 0.1}), &[]).unwrap_err();
+        assert!(e.contains("max_step_kl") && e.contains("sft"), "the step guard belongs to the policy gradient: {e}");
+        let stable = json!({"base": "a/b", "data": data, "objective": "policy_gradient", "clip_eps_high": 0.28, "importance": "truncate:2", "max_step_kl": 0.1, "max_step_grad_norm": 5.0});
+        assert!(request(stable, &[]).is_ok());
     }
 
     #[test]

@@ -490,11 +490,16 @@ raises it.
   inserted before, at or before the first supervised message. Unknown fields, a missing `at`, no messages, an empty
   text, an `assistant`/`tool` role, an `at` past the first answer and a record that holds images are refused naming
   the field. A record may carry a teacher context instead of an advantage (the scalar part is then 0) or with one.
+- `"truncated"` (record, optional, needs an `"advantage"` or a `"teacher_context"`): `true` when the rollout did not
+  reach an outcome (the token budget cut it, a step timed out), so its advantage says nothing about its actions. A policy
+  gradient never draws, scores or trains on such a record (`stats.sequences_truncated` counts them); a dataset of nothing
+  else is refused. Tokens of an observation (a tool's output, a user turn) are never supervised: only a message with
+  `"train": true` is action.
 - Images and tool turns: records carry them exactly as in supervised fine-tuning (an image in a context turn, never in
   a supervised one); they train through the same vision path.
 
 ```rust
-use brain::{BehaviourSource, ChatFineTune, LossAgg, PolicyGradientConfig, ReferencePolicy};
+use brain::{BehaviourSource, ChatFineTune, ImportanceCorrection, LossAgg, PolicyGradientConfig, ReferencePolicy};
 
 let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
     .arch("qwen35")
@@ -506,6 +511,10 @@ let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
     .grad_accum(8)
     .policy_gradient(PolicyGradientConfig {
         clip_eps: 0.2,                         // ratio clipped to [0.8, 1.2]
+        clip_eps_high: Some(0.28),             // widen the upper edge to 1.28 ("clip-higher"); None: symmetric
+        importance: ImportanceCorrection::Truncate { cap: 2.0 }, // engine-vs-trainer correction; None for none
+        max_step_kl: Some(0.1),                // skip (and log) a step whose KL to the reference is over this
+        max_step_grad_norm: Some(5.0),         // skip (and log) a step whose gradient norm is over this
         kl_beta: 0.02,                         // k3 KL to the reference; 0 for none
         reference: ReferencePolicy::Base,      // the base, or StartOfRun: the adapter this run began from
         behaviour: BehaviourSource::Recorded,  // the sampler's recorded log-probs (exact), or StartOfRunProxy
@@ -555,6 +564,18 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   reported (`behaviour`, `tokens_recorded_behavior`, `tokens_start_of_run_behavior`) in the outcome, the training
   record and the adapter card. A dataset with no advantage sidecar, or sidecars without it, is refused rather than
   trained as imitation.
+- **Stability** (`clip_eps_high`, `importance`, `max_step_kl`, `max_step_grad_norm`; CLI `--ratio-clip-high`,
+  `--importance`, `--max-step-kl`, `--max-step-grad-norm`). *Clip-higher*: the ratio band is `[1 - clip_eps, 1 +
+  clip_eps_high]`, so a low-probability token that turns out well keeps gaining mass; the clip fraction is reported per
+  edge (`clip_fraction_high`, `clip_fraction_low`). *Importance correction*: with `Truncate { cap }` (TIS) the ratio is
+  taken against the trainer's own start-of-run log-probability (one at step 0) and each token's policy term is scaled by
+  `min(pi_trainer / pi_rollout, cap)`, the engine's gap to the trainer; `Mask { cap }` (MIS) drops tokens whose weight
+  leaves `[1/cap, cap]`; it needs the recorded behaviour log-probabilities and one extra forward per record on first
+  draw. *Step guard*: a step whose mean k3 KL to the reference, or whose gradient norm (averaged over the step's
+  micro-batches, before the optimiser's clip), is over its bound is not applied: it is logged with the values, counted
+  (`steps_skipped_guard`, `skipped` on the step) and the run goes on; 8 skipped steps in a row end it. Each step also
+  reports `entropy_estimate` (the mean `-log p` of the sampled tokens, an entropy estimate while the rollouts are
+  on-policy), `mean_response_tokens`, `grad_norm` and the importance weight statistics.
 - **Reference policy.** `Base` (the adapter disabled) or `StartOfRun` (the adapter being continued); the same for a
   fresh adapter. Measured by a forward pass over each record the first time a step draws it (a second pass when a
   continued adapter is compared with the base).
@@ -570,8 +591,8 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   tokens and the seconds spent scoring the records the step drew for the first time; `training.json` has the same, and the adapter card's provenance (`regime: "policy_gradient_lora"`) the
   settings and the means.
 - **Refused before a device is claimed.** Records with an advantage without `.policy_gradient(..)` (supervised
-  training would silently ignore it); `.policy_gradient(..)` without any record carrying one; an invalid setting; a
-  base that is not `qwen35`; `eval_every`, `patience`, `keep_best`, `held_out` and `held_out_text` (a run has no
+  training would silently ignore it); `.policy_gradient(..)` without any record carrying one; an invalid setting; an
+  architecture whose trainer does not declare the policy gradient; `eval_every`, `patience`, `keep_best`, `held_out` and `held_out_text` (a run has no
   monitoring loss to select on: score the exported adapter with `score_tokens_qwen35`); a held-out or monitoring set
   that carries advantages; `SeqMean` with more than one sequence per batch row.
 - `.continue_from`, `.grad_accum`, `.strict_updates`, `.steps`, `.lr`, `.rank`, `.base_format`, `.activations`, `.checkpoint_every` and

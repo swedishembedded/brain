@@ -510,7 +510,7 @@ impl ChatSample {
                 mask.extend(std::iter::repeat_n(*supervised, encoded.len()));
                 ids.extend(encoded);
             }
-            return Ok(EncodedSample { ids, mask, behavior, teacher: None });
+            return Ok(EncodedSample { ids, mask, behavior, teacher: None, truncated: self.rollout.as_ref().is_some_and(|r| r.truncated) });
         }
         if self.rollout.as_ref().is_some_and(Rollout::has_behavior) {
             return Err(TemplateError("\"behavior_logprobs\" are placed on an answer rendered as the model is asked for it; this sample still holds whole messages (render it with answers_as_asked or answers_packed)".to_string()));
@@ -537,7 +537,7 @@ impl ChatSample {
             ids.extend(tid);
         }
         let behavior = vec![f32::NAN; ids.len()];
-        Ok(EncodedSample { ids, mask, behavior, teacher: None })
+        Ok(EncodedSample { ids, mask, behavior, teacher: None, truncated: self.rollout.as_ref().is_some_and(|r| r.truncated) })
     }
 
     /// Whether any message carries behaviour log-probabilities, which only an answer rendered as asked can place.
@@ -623,6 +623,9 @@ struct WireRecord {
     /// The group-relative advantage of the rollout this record is one call of ([`crate::chat_rollout`]).
     #[serde(default)]
     advantage: Option<serde_json::Value>,
+    /// The rollout did not reach an outcome ([`crate::chat_rollout`]).
+    #[serde(default)]
+    truncated: bool,
     /// Messages only the teacher of a self-distillation run is shown ([`crate::chat_rollout`]).
     #[serde(default)]
     teacher_context: Option<WireTeacherContext>,
@@ -722,13 +725,15 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
     reader.check_record(&media)?;
     let teacher = record.teacher_context.map(|context| teacher_view(&messages, &record.tools, &media, context)).transpose()?;
     let advantage = record.advantage.as_ref().map(chat_rollout::check_advantage).transpose()?;
+    let truncated = record.truncated;
     let rollout = match (advantage, teacher) {
+        (None, None) if truncated => return Err("\"truncated\" belongs to a rollout, and the record has no \"advantage\" or \"teacher_context\"".to_string()),
         (None, None) => match behavior_logprobs.iter().position(Option::is_some) {
             Some(at) => return Err(format!("messages[{at}]: \"behavior_logprobs\" belong to a rollout, and the record has no \"advantage\" or \"teacher_context\"")),
             None => None,
         },
         // A teacher context alone trains on its per-token advantage: the scalar part is 0.
-        (advantage, teacher) => Some(Rollout { advantage: advantage.unwrap_or(0.0), behavior_logprobs, teacher }),
+        (advantage, teacher) => Some(Rollout { advantage: advantage.unwrap_or(0.0), truncated, behavior_logprobs, teacher }),
     };
     Ok(ChatSample { messages, tools: record.tools, rendered: None, media, rollout })
 }
@@ -1039,6 +1044,8 @@ pub struct EncodedSample {
     /// The teacher's rendering of the same conversation (tokens and supervision mask), when the record carries a
     /// teacher context ([`crate::chat_rollout`]).
     pub teacher: Option<(Vec<u32>, Vec<bool>)>,
+    /// The rollout the example came from did not reach an outcome ([`crate::chat_rollout`]).
+    pub truncated: bool,
 }
 
 /// A split's token stream, supervision mask and the start offset of each
@@ -1057,6 +1064,8 @@ pub struct EncodedSplit {
     pub behavior: Vec<f32>,
     /// The teacher's rendering of each example, aligned with `starts`; `None` for an example without a teacher context.
     pub teacher: Vec<Option<(Vec<u32>, Vec<bool>)>>,
+    /// Whether each example's rollout did not reach an outcome, aligned with `starts`.
+    pub truncated: Vec<bool>,
 }
 
 impl EncodedSplit {
@@ -1068,13 +1077,13 @@ impl EncodedSplit {
     /// [`Self::push`] for an example that also reads `media`, in the order its text places them.
     pub fn push_with_media(&mut self, ids: &[u32], mask: &[bool], media: &[ImageBytes]) {
         let behavior = vec![f32::NAN; ids.len()];
-        self.push_rollout(&EncodedSample { ids: ids.to_vec(), mask: mask.to_vec(), behavior, teacher: None }, media, None);
+        self.push_rollout(&EncodedSample { ids: ids.to_vec(), mask: mask.to_vec(), behavior, ..Default::default() }, media, None);
     }
 
     /// [`Self::push_with_media`] for an example of a rollout: its `advantage` and the behaviour log-probabilities
     /// `encoded` carries.
     pub fn push_rollout(&mut self, encoded: &EncodedSample, media: &[ImageBytes], advantage: Option<f32>) {
-        let EncodedSample { ids, mask, behavior, teacher } = encoded;
+        let EncodedSample { ids, mask, behavior, teacher, truncated } = encoded;
         assert_eq!(ids.len(), mask.len(), "EncodedSplit::push: ids and mask differ in length");
         assert_eq!(ids.len(), behavior.len(), "EncodedSplit::push: ids and behaviour log-probabilities differ in length");
         if ids.is_empty() {
@@ -1083,6 +1092,7 @@ impl EncodedSplit {
         self.media.push(media.to_vec());
         self.advantage.push(advantage.unwrap_or(f32::NAN));
         self.teacher.push(teacher.clone());
+        self.truncated.push(*truncated);
         self.starts.push(self.ids.len());
         self.ids.extend_from_slice(ids);
         self.mask.extend_from_slice(mask);
@@ -1114,7 +1124,7 @@ pub fn write_split(dir: &Path, split: &str, data: &EncodedSplit) -> io::Result<(
     binio::write_mask_bin(&dir.join(format!("{split}.mask.bin")), &data.mask)?;
     let starts: Vec<u64> = data.starts.iter().map(|&s| s as u64).collect();
     binio::write_u64_bin(&dir.join(format!("{split}.ex.bin")), &starts)?;
-    chat_rollout::write(dir, split, &data.advantage, &data.behavior)?;
+    chat_rollout::write(dir, split, &data.advantage, &data.behavior, &data.truncated)?;
     chat_rollout::write_teacher(dir, split, &data.teacher)?;
     crate::chat_media::write(dir, split, &data.media)
 }

@@ -15,6 +15,10 @@
 //! * `"behavior_logprobs": [<number>, ...]` on a supervised assistant message: the log-probability the sampler gave
 //!   each token of that answer, one per token of the answer as the chat template renders it after the prompt (the
 //!   answer's text and its closing end-of-turn marker). A value above zero is not a log-probability.
+//! * `"truncated": true` on the record: the rollout did not reach an outcome (the token budget cut it, a step timed
+//!   out), so its advantage says nothing about the action. A policy-gradient run never trains on such a record; it is
+//!   counted, not drawn. A truncated rollout is masked as a whole, because the sampler's budget, not the policy,
+//!   decided where it ended.
 //!
 //! * `"teacher_context": {"at": <index>, "messages": [{"role": "system"|"user", "content": "..."}, ...]}` on the
 //!   record: messages the teacher of an on-policy self-distillation run is shown and the student never saw, inserted
@@ -25,7 +29,8 @@
 //! A prepared dataset keeps both beside its token files, per split: `<split>.adv.bin` (`f32` per example, NaN for an
 //! example whose record had no advantage) and `<split>.blp.bin` (`f32` per token of the stream, NaN where no
 //! behaviour log-probability was recorded). A split with neither has no sidecar, and preparing one removes a stale
-//! sidecar. The teacher's renderings are kept as `<split>.tch.u32.bin`, `<split>.tch.mask.bin` and `<split>.tch.ex.bin`
+//! sidecar; `<split>.trn.bin` (a flag per example, written only when some example is truncated) holds the truncated
+//! rollouts. The teacher's renderings are kept as `<split>.tch.u32.bin`, `<split>.tch.mask.bin` and `<split>.tch.ex.bin`
 //! (an example without a teacher context holds none of its own: an empty range).
 
 use std::io;
@@ -42,6 +47,8 @@ const LOGPROB_SLACK: f32 = 1e-3;
 #[derive(Clone, Debug)]
 pub struct Rollout {
     pub advantage: f32,
+    /// The rollout did not reach an outcome; no policy-gradient run trains on it (see the module docs).
+    pub truncated: bool,
     /// One entry per message of the record; `Some` only on a supervised assistant message.
     pub behavior_logprobs: Vec<Option<Vec<f32>>>,
     /// What the teacher is shown instead of the record's own conversation, when the record carries a
@@ -68,7 +75,7 @@ impl Rollout {
     /// The rollout of a sample derived from this record's (a prefix, one answer, a packing): the same advantage, with
     /// the derived sample's log-probabilities and teacher view.
     pub(crate) fn derived(&self, behavior_logprobs: Vec<Option<Vec<f32>>>, teacher: Option<Teacher>) -> Rollout {
-        Rollout { advantage: self.advantage, behavior_logprobs, teacher }
+        Rollout { advantage: self.advantage, truncated: self.truncated, behavior_logprobs, teacher }
     }
 }
 
@@ -104,15 +111,16 @@ pub(crate) fn check_behavior_logprobs(values: &serde_json::Value) -> Result<Vec<
         .collect()
 }
 
-fn names(dir: &Path, split: &str) -> (PathBuf, PathBuf) {
-    (dir.join(format!("{split}.adv.bin")), dir.join(format!("{split}.blp.bin")))
+fn names(dir: &Path, split: &str) -> (PathBuf, PathBuf, PathBuf) {
+    (dir.join(format!("{split}.adv.bin")), dir.join(format!("{split}.blp.bin")), dir.join(format!("{split}.trn.bin")))
 }
 
-/// Write a split's sidecars: `advantage[i]` is example `i`'s (NaN for none), `behavior[t]` token `t`'s (NaN for none).
+/// Write a split's sidecars: `advantage[i]` is example `i`'s (NaN for none), `behavior[t]` token `t`'s (NaN for none),
+/// `truncated[i]` whether example `i`'s rollout did not reach an outcome.
 /// Nothing is written, and a stale sidecar is removed, when no example has an advantage.
-pub fn write(dir: &Path, split: &str, advantage: &[f32], behavior: &[f32]) -> io::Result<()> {
-    let (adv, blp) = names(dir, split);
-    for stale in [&adv, &blp] {
+pub fn write(dir: &Path, split: &str, advantage: &[f32], behavior: &[f32], truncated: &[bool]) -> io::Result<()> {
+    let (adv, blp, trn) = names(dir, split);
+    for stale in [&adv, &blp, &trn] {
         match std::fs::remove_file(stale) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
             _ => {}
@@ -125,6 +133,9 @@ pub fn write(dir: &Path, split: &str, advantage: &[f32], behavior: &[f32]) -> io
     if behavior.iter().any(|b| !b.is_nan()) {
         binio::write_f32_bin(&blp, behavior)?;
     }
+    if truncated.iter().any(|t| *t) {
+        binio::write_mask_bin(&trn, truncated)?;
+    }
     Ok(())
 }
 
@@ -135,12 +146,14 @@ pub struct SplitRollouts {
     pub advantage: Vec<f32>,
     /// Per token of the split's stream, aligned with it; NaN where none was recorded.
     pub behavior: Vec<f32>,
+    /// Per example: the rollout did not reach an outcome and is not trained on.
+    pub truncated: Vec<bool>,
 }
 
 /// The sidecars of `split` in `dir`, checked against the `examples` and `tokens` the split holds; `None` when the
 /// split has no rollout data.
 pub fn read(dir: &Path, split: &str, examples: usize, tokens: usize) -> io::Result<Option<SplitRollouts>> {
-    let (adv, blp) = names(dir, split);
+    let (adv, blp, trn) = names(dir, split);
     if !adv.exists() {
         return Ok(None);
     }
@@ -157,7 +170,16 @@ pub fn read(dir: &Path, split: &str, examples: usize, tokens: usize) -> io::Resu
     } else {
         vec![f32::NAN; tokens]
     };
-    Ok(Some(SplitRollouts { advantage, behavior }))
+    let truncated = if trn.exists() {
+        let flags = binio::read_mask_bin(&trn)?;
+        if flags.len() != examples {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{}: truncation flags for {} examples, the split holds {examples}", trn.display(), flags.len())));
+        }
+        flags
+    } else {
+        vec![false; examples]
+    };
+    Ok(Some(SplitRollouts { advantage, behavior, truncated }))
 }
 
 /// The teacher renderings of a split: every example's tokens and supervision mask, back to back.

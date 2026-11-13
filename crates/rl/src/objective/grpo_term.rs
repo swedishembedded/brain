@@ -99,6 +99,16 @@ pub fn token_term(old_lp: f32, new_lp: f32, advantage: f32, clip_eps: f32, ref_l
 /// k3 exponent: past [`MAX_LOG_RATIO`] both continue along their tangent, and `weight`
 /// is the derivative of the `loss` reported with it.
 pub fn token_term_banded(old_lp: f32, new_lp: f32, advantage: f32, band: ClipBand, ref_lp: Option<f32>, kl_beta: f32) -> TokenTerm {
+    token_term_weighted(old_lp, new_lp, advantage, band, ref_lp, kl_beta, 1.0)
+}
+
+/// [`token_term_banded`] with the policy term scaled by `policy_weight`, a constant the parameters do not move (the
+/// truncated importance-sampling weight of a token: `min(pi_trainer / pi_rollout, cap)`, or `0.0` for a token the
+/// mismatch mask drops). The scale multiplies the clipped surrogate and its gradient weight alike, so the weight stays
+/// the derivative of the reported loss; the KL term is not scaled, since it regularises the policy at every sampled
+/// token whatever engine sampled it.
+pub fn token_term_weighted(old_lp: f32, new_lp: f32, advantage: f32, band: ClipBand, ref_lp: Option<f32>, kl_beta: f32, policy_weight: f32) -> TokenTerm {
+    let policy_weight = f64::from(policy_weight);
     let (ratio, ratio_slope) = bounded_exp(f64::from(new_lp) - f64::from(old_lp));
     let advantage = f64::from(advantage);
     let mut weight = 0.0f64;
@@ -109,9 +119,9 @@ pub fn token_term_banded(old_lp: f32, new_lp: f32, advantage: f32, band: ClipBan
         let unclipped = ratio * advantage;
         let clipped = ratio.clamp(1.0 - f64::from(band.low), 1.0 + f64::from(band.high)) * advantage;
         let surrogate = unclipped.min(clipped);
-        loss += -surrogate;
+        loss += -surrogate * policy_weight;
         if unclipped <= clipped {
-            weight += advantage * ratio_slope;
+            weight += advantage * ratio_slope * policy_weight;
         } else {
             clipped_out = true;
         }
@@ -282,6 +292,26 @@ mod tests {
             loss += kl_beta * (eu - u - 1.0);
         }
         (weight, loss)
+    }
+
+    /// The importance-sampling weight scales the policy term only: the surrogate, its gradient weight and the clip
+    /// flag follow the unweighted ones, a zero weight leaves the KL term alone, and the weight stays the derivative
+    /// of the weighted loss.
+    #[test]
+    fn a_policy_weight_scales_the_surrogate_and_leaves_the_kl_term_alone() {
+        let band = ClipBand::symmetric(0.2);
+        let (old_lp, new_lp, advantage, ref_lp, beta) = (-2.0f32, -1.9f32, 1.5f32, Some(-2.2f32), 0.04f32);
+        let plain = token_term_weighted(old_lp, new_lp, advantage, band, None, 0.0, 1.0);
+        let half = token_term_weighted(old_lp, new_lp, advantage, band, None, 0.0, 0.5);
+        assert!((half.weight - 0.5 * plain.weight).abs() < 1e-6 && (half.loss - 0.5 * plain.loss).abs() < 1e-6, "{plain:?} {half:?}");
+        let kl_only = token_term_weighted(old_lp, new_lp, advantage, band, ref_lp, beta, 0.0);
+        let kl_ref = token_term_banded(old_lp, new_lp, 0.0, band, ref_lp, beta);
+        assert!((kl_only.weight - kl_ref.weight).abs() < 1e-6 && (kl_only.loss - kl_ref.loss).abs() < 1e-6, "{kl_only:?} {kl_ref:?}");
+        let h = 1e-2f32;
+        let (lo, hi) = (token_term_weighted(old_lp, new_lp - h, advantage, band, ref_lp, beta, 0.7), token_term_weighted(old_lp, new_lp + h, advantage, band, ref_lp, beta, 0.7));
+        let t = token_term_weighted(old_lp, new_lp, advantage, band, ref_lp, beta, 0.7);
+        let fd = -f64::from(hi.loss - lo.loss) / f64::from(2.0 * h);
+        assert!((fd - f64::from(t.weight)).abs() <= 1e-2 * fd.abs() + 1e-3, "finite difference {fd}, weight {}", t.weight);
     }
 
     /// Log-probability gaps that exercise every regime: ordinary, past the cap on both sides,

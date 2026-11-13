@@ -27,7 +27,7 @@ use model::training;
 use model::{Batch, Model, IGNORE};
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
-use rl::objective::grpo_term::{near_clip_boundary, ClipBand};
+use rl::objective::grpo_term::ClipBand;
 use rl::objective::pg_batch::{weigh, PgBatch, PgSpec};
 
 const T: usize = 12;
@@ -45,11 +45,10 @@ struct Harness {
     old_lp: Vec<f32>,
     ref_lp: Vec<f32>,
     advantage: Vec<f32>,
+    /// The importance-sampling weight of each position, when the run corrects for the engine.
+    is_weight: Option<Vec<f32>>,
+    band: ClipBand,
     forwarded: Cell<bool>,
-}
-
-fn spec() -> PgSpec {
-    PgSpec { band: ClipBand::symmetric(CLIP_EPS), kl_beta: KL_BETA }
 }
 
 impl Harness {
@@ -91,7 +90,7 @@ impl Harness {
                 })
                 .collect()
         });
-        let mut h = Harness { m, rows, tokens, targets, embeds, old_lp: vec![0.0; rows * T], ref_lp: vec![0.0; rows * T], advantage: vec![f32::NAN; rows * T], forwarded: Cell::new(false) };
+        let mut h = Harness { m, rows, tokens, targets, embeds, old_lp: vec![0.0; rows * T], ref_lp: vec![0.0; rows * T], advantage: vec![f32::NAN; rows * T], is_weight: None, band: ClipBand::symmetric(CLIP_EPS), forwarded: Cell::new(false) };
 
         // Behaviour and reference are offsets from the model's own log-probabilities, so the ratios are known.
         h.load();
@@ -116,6 +115,27 @@ impl Harness {
         self
     }
 
+    /// Give every supervised token its own importance-sampling weight, cycling `values` (zero drops the token's
+    /// policy term, as the mismatch mask does).
+    fn with_importance_weights(mut self, values: &[f32]) -> Harness {
+        let mut weights = vec![1.0; self.rows * T];
+        for (k, i) in (0..self.rows * T).filter(|&i| self.targets[i] != IGNORE).enumerate() {
+            weights[i] = values[k % values.len()];
+        }
+        self.is_weight = Some(weights);
+        self
+    }
+
+    /// The clip band `[1 - low, 1 + high]`.
+    fn with_band(mut self, low: f32, high: f32) -> Harness {
+        self.band = ClipBand { low, high };
+        self
+    }
+
+    fn spec(&self) -> PgSpec {
+        PgSpec { band: self.band, kl_beta: KL_BETA }
+    }
+
     fn load(&self) {
         match &self.embeds {
             Some(embeds) => self.m.set_batch_embeds(&self.tokens, &self.targets, embeds),
@@ -124,7 +144,7 @@ impl Harness {
     }
 
     fn batch(&self) -> PgBatch<'_> {
-        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage }
+        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage, is_weight: self.is_weight.as_deref() }
     }
 
     fn assert_base_point_is_clear_of_the_clip_boundaries(&self) {
@@ -133,7 +153,8 @@ impl Harness {
         let lp = training::objectives(&self.m).batch_token_logprobs();
         for i in (0..self.rows * T).filter(|&i| self.targets[i] != IGNORE && !self.advantage[i].is_nan() && self.advantage[i] != 0.0) {
             let ratio = (lp[i] - self.old_lp[i]).exp();
-            assert!(!near_clip_boundary(ratio, CLIP_EPS, MARGIN), "token {i}: base ratio {ratio} sits within the FD-unsafe margin of a clip boundary");
+            let near = (ratio - (1.0 - self.band.low)).abs() < MARGIN || (ratio - (1.0 + self.band.high)).abs() < MARGIN;
+            assert!(!near, "token {i}: base ratio {ratio} sits within the FD-unsafe margin of a clip boundary");
         }
     }
 }
@@ -159,7 +180,7 @@ impl CheckModel for Harness {
         let _ = self.m.forward();
         self.forwarded.set(true);
         let objectives = training::objectives(&self.m);
-        let (weights, terms) = weigh(&objectives.batch_token_logprobs(), &self.batch(), &spec());
+        let (weights, terms) = weigh(&objectives.batch_token_logprobs(), &self.batch(), &self.spec());
         objectives.set_loss_weights(&weights);
         terms.loss / terms.supervised as f32
     }
@@ -201,4 +222,12 @@ fn the_adapters_match_finite_differences_on_rows_that_hold_an_image() {
 #[test]
 fn the_adapters_match_finite_differences_when_every_token_has_its_own_advantage() {
     check(&Harness::new(17, &[1.0, 1.0, 1.0], false).with_token_advantages(&[1.3, -0.8, 0.0, 0.45, -1.6, 0.9]), "per-token");
+}
+
+/// Clip-higher and the importance-sampling weight: with a band whose upper edge sits beyond the base ratios (so the
+/// tokens a symmetric band would clip carry gradient) and per-token weights of one, a half, zero and two, the backward
+/// still matches finite differences of the weighted loss the host computes.
+#[test]
+fn the_adapters_match_finite_differences_under_a_wide_upper_clip_edge_and_importance_weights() {
+    check(&Harness::new(19, &[1.2, -1.1, 0.8], false).with_band(0.2, 1.4).with_importance_weights(&[1.0, 0.5, 0.0, 2.0]), "clip-higher and weights");
 }

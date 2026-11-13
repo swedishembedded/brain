@@ -50,6 +50,14 @@ brain finetune BASE --dataset FILE --out DIR [options]
                      (the loss is printed); for architectures whose trainer scores it (Ripple, qwen35).
   --policy-gradient  train the clipped policy gradient on rollout records (`advantage` on each record) instead of the
                      supervised loss, for an adapter; --ratio-clip X and --kl-beta X set its clip band and KL weight.
+  --ratio-clip-high X
+                     with --policy-gradient: widen the clip band's upper edge to 1+X (clip-higher; at least --ratio-clip).
+  --importance C     with --policy-gradient: correct for the sampling engine's gap to the trainer: none (default),
+                     truncate:CAP (weight each token's policy term by min(pi_trainer / pi_rollout, CAP)) or mask:CAP
+                     (drop tokens whose weight leaves [1/CAP, CAP]); needs recorded behaviour log-probabilities.
+  --max-step-kl X --max-step-grad-norm X
+                     with --policy-gradient: skip, and log, an optimiser step whose KL to the reference, or whose gradient
+                     norm, is over the bound (a run that skips 8 steps in a row stops).
   --behaviour B      with --policy-gradient: where the behaviour log-probabilities of the ratio come from.
                      recorded (default): the sampler's own, on every supervised token of every record; start_of_run_proxy:
                      where none was recorded, the start-of-run policy's (exact only if the rollouts were sampled from it).
@@ -101,6 +109,10 @@ struct Args {
     clip_eps: Option<f32>,
     kl_beta: Option<f32>,
     behaviour: Option<brain::BehaviourSource>,
+    clip_eps_high: Option<f32>,
+    importance: Option<brain::ImportanceCorrection>,
+    max_step_kl: Option<f32>,
+    max_step_grad_norm: Option<f32>,
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -152,6 +164,10 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--ratio-clip" => a.clip_eps = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--kl-beta" => a.kl_beta = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--behaviour" => a.behaviour = Some(need(&mut i, &flag)?.parse().map_err(|e| format!("brain finetune: {flag}: {e}"))?),
+            "--ratio-clip-high" => a.clip_eps_high = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--importance" => a.importance = Some(need(&mut i, &flag)?.parse().map_err(|e| format!("brain finetune: {flag}: {e}"))?),
+            "--max-step-kl" => a.max_step_kl = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--max-step-grad-norm" => a.max_step_grad_norm = Some(number(&need(&mut i, &flag)?, &flag)?),
             "-h" | "--help" => return Err(String::new()),
             other if other.starts_with('-') => return Err(format!("brain finetune: unknown option '{other}'")),
             other if a.base.is_empty() => a.base = other.to_string(),
@@ -171,7 +187,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         }
     }
     if !a.policy_gradient {
-        for (flag, given) in [("--ratio-clip", a.clip_eps.is_some()), ("--kl-beta", a.kl_beta.is_some()), ("--behaviour", a.behaviour.is_some())] {
+        for (flag, given) in [("--ratio-clip", a.clip_eps.is_some()), ("--kl-beta", a.kl_beta.is_some()), ("--behaviour", a.behaviour.is_some()), ("--ratio-clip-high", a.clip_eps_high.is_some()), ("--importance", a.importance.is_some()), ("--max-step-kl", a.max_step_kl.is_some()), ("--max-step-grad-norm", a.max_step_grad_norm.is_some())] {
             if given {
                 return Err(format!("brain finetune: {flag} shapes the policy gradient; give --policy-gradient"));
             }
@@ -256,7 +272,7 @@ fn lora(a: &Args, rank: u32) -> brain::ChatFineTune {
     }
     if a.policy_gradient {
         let d = brain::PolicyGradientConfig::default();
-        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), behaviour: a.behaviour.unwrap_or(d.behaviour), ..d });
+        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), behaviour: a.behaviour.unwrap_or(d.behaviour), clip_eps_high: a.clip_eps_high, importance: a.importance.unwrap_or(d.importance), max_step_kl: a.max_step_kl, max_step_grad_norm: a.max_step_grad_norm, ..d });
     }
     t
 }
@@ -351,7 +367,7 @@ pub fn run_finetune(argv: &[String]) -> ! {
                     println!("held-out: {} records, {} positions, loss {} -> {}", base.records, base.positions, show(base.loss), show(tuned.loss));
                 }
                 if let Some(pg) = &o.policy_gradient {
-                    println!("policy gradient: {} steps, mean loss {:?}, mean clip fraction {:?}, mean kl {:?}", pg.stats.steps.len(), pg.stats.mean_loss(), pg.stats.mean_clip_fraction(), pg.stats.mean_kl());
+                    println!("policy gradient: {} steps ({} skipped by the guard), mean loss {:?}, mean clip fraction {:?}, mean kl {:?}", pg.stats.steps.len(), pg.stats.steps_skipped_guard, pg.stats.mean_loss(), pg.stats.mean_clip_fraction(), pg.stats.mean_kl());
                 }
                 if let Some(p) = &o.adapter {
                     println!("adapter: {}", p.display());
@@ -425,6 +441,17 @@ mod tests {
     }
 
     #[test]
+    fn the_stability_settings_need_the_policy_gradient_and_parse_by_name() {
+        let err = parse(&argv("base --lora 4 --max-step-kl 0.1")).unwrap_err();
+        assert!(err.contains("--max-step-kl") && err.contains("--policy-gradient"), "{err}");
+        let a = parse(&argv("base --lora 4 --policy-gradient --ratio-clip-high 0.28 --importance truncate:2 --max-step-kl 0.1 --max-step-grad-norm 5")).unwrap();
+        assert_eq!((a.clip_eps_high, a.max_step_kl, a.max_step_grad_norm), (Some(0.28), Some(0.1), Some(5.0)));
+        assert_eq!(a.importance, Some(brain::ImportanceCorrection::Truncate { cap: 2.0 }));
+        let err = parse(&argv("base --lora 4 --policy-gradient --importance sometimes")).unwrap_err();
+        assert!(err.contains("--importance") && err.contains("truncate:CAP"), "{err}");
+    }
+
+    #[test]
     fn strict_updates_is_a_flag_and_off_by_default() {
         assert!(!parse(&argv("base --steps 3")).unwrap().strict_updates);
         assert!(parse(&argv("base --strict-updates")).unwrap().strict_updates);
@@ -438,7 +465,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta", "--behaviour"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--ratio-clip", "--kl-beta", "--behaviour", "--ratio-clip-high", "--importance", "--max-step-kl", "--max-step-grad-norm"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }

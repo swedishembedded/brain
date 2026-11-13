@@ -14,7 +14,7 @@ use data::binio;
 use data::chat::{prepare_chat_samples, ChatSample, RenderOpts};
 use data::chat_rollout;
 use data::chat_template::ChatTemplate;
-use data::tokenizer::CharTokenizer;
+use data::tokenizer::{CharTokenizer, Tokenizer};
 
 const TEMPLATE: &str = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}\
 {% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}";
@@ -162,4 +162,47 @@ fn a_packed_record_places_each_answers_log_probs_on_that_answers_tokens() {
     for (mask, lp) in encoded.mask.iter().zip(&encoded.behavior) {
         assert_eq!(*mask, !lp.is_nan(), "a log-probability sits on exactly the supervised tokens");
     }
+}
+
+/// A record marked `"truncated": true` (the rollout never reached an outcome) is kept as such in a sidecar beside its
+/// advantage, and a record that is not marked costs no sidecar at all.
+#[test]
+fn a_truncated_rollout_is_flagged_in_its_own_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let truncated = record(Some("1.0"), None).replacen("{", "{\"truncated\": true,", 1);
+    let path = write_records(tmp.path(), &[record(Some("0.5"), None), truncated]);
+    let out = tmp.path().join("prepared");
+    prepare(&examples(&path).unwrap(), &out).unwrap();
+    let starts = binio::read_u64_bin(&out.join("train.ex.bin")).unwrap();
+    let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
+    let rollout = chat_rollout::read(&out, "train", starts.len(), ids.len()).unwrap().expect("sidecars");
+    assert_eq!(rollout.truncated, vec![false, true]);
+
+    let plain = write_records(tmp.path(), &[record(Some("0.5"), None)]);
+    prepare(&examples(&plain).unwrap(), &out).unwrap();
+    assert!(!out.join("train.trn.bin").exists(), "a stale flag sidecar is removed");
+}
+
+#[test]
+fn truncated_belongs_to_a_rollout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_records(tmp.path(), &[record(None, None).replacen("{", "{\"truncated\": true,", 1)]);
+    let why = examples(&path).expect_err("refused");
+    assert!(why.contains("truncated") && why.contains("advantage"), "{why}");
+}
+
+/// Observation tokens (a tool's output, the user's turn) are context, not action: only the assistant answer marked
+/// to train is supervised, so a policy gradient moves nothing the environment wrote.
+#[test]
+fn the_tokens_of_an_observation_are_never_supervised() {
+    let tmp = tempfile::tempdir().unwrap();
+    let line = r#"{"advantage": 1.0, "messages": [{"role":"user","content":"q","train":false},{"role":"assistant","content":"x","train":false,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"a long observation the environment wrote","train":false},{"role":"assistant","content":"y","train":true}]}"#;
+    let path = write_records(tmp.path(), &[line.to_string()]);
+    let samples = examples(&path).unwrap();
+    let out = tmp.path().join("prepared");
+    prepare(&samples, &out).unwrap();
+    let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
+    let mask = binio::read_mask_bin(&out.join("train.mask.bin")).unwrap();
+    let supervised: String = ids.iter().zip(&mask).filter(|(_, m)| **m).map(|(i, _)| tokenizer().decode(&[*i])).collect();
+    assert_eq!(supervised, "y<|im_end|>\n", "only the final answer is action; the observation and the earlier turns are context");
 }
