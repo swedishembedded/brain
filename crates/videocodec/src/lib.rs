@@ -89,9 +89,12 @@ impl Container {
     }
 }
 
-/// `fps` as an exact rational: integer rates exactly, the NTSC family
-/// (23.976, 29.97, 59.94) as `n * 1000 / 1001`, anything else to a
-/// millisecond-of-a-frame.
+/// `fps` as an exact rational: integer rates exactly, a rate that is
+/// `n * 1000 / 1001` for an integer `n` (23.976..., 29.97..., 59.94..., the
+/// NTSC family) as that fraction, anything else to a millisecond-of-a-frame.
+/// The NTSC rate is recognised when `fps * 1.001` is within 1e-6 of an integer,
+/// so a rate computed as `30000 / 1001` is, and the decimal 29.97 (a different
+/// rate, 2997 / 100) is not.
 pub fn fps_rational(fps: f64) -> Result<(u64, u64), Error> {
     if !(fps.is_finite() && fps > 0.0 && fps <= 1000.0) {
         return Err(Error::Invalid(format!("a frame rate of {fps}")));
