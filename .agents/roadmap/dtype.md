@@ -288,7 +288,7 @@ numbers found"). Full program from the approved plan, not just the gate:
   constraining/forcing the schedulable device set, not the sole trigger for
   reaching the NPU.
 - **`docs/reference/models/glmdsa/npu.md`** - corrected "`infer --device npu` does not
-  yet exist": `crates/cli/src/glm_cli.rs` dispatches it to
+  yet exist": the GLM NPU decode calls
   `npu::glm_decode::generate` today (fp32 greedy decode, real). Also found
   `brain glmdsa export --int8` is implemented and tested
   (`crates/npu/tests/it/glm_onnx.rs::glm_onnx_int8_runs`) but `infer --device
@@ -995,7 +995,7 @@ living alongside the one A4 had just made canonical.
 **Call sites migrated** (all `crate::npu_requested()` -> `crate::npu_explicit()`):
 
 - `crates/cli/src/yolo_cli.rs:355` (`brain yolov8 detect`)
-- `crates/cli/src/glm_cli.rs:218` (`brain glmdsa infer`)
+- the GLM NPU decode (now `npu-generate` in `samples/models/glmdsa`)
 - `crates/cli/src/wm_cli.rs:270` (`brain diamond play`/`bench`, `--model diamond`)
 - `crates/cli/src/qwen_cli.rs:47` (`want_npu()`, used by `brain qwen3 infer`)
 - `crates/cli/src/tts_cli.rs:310,349,388` (`clone`/`synth`/`design`) - not

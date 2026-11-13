@@ -24,7 +24,6 @@ mod federated_cli;
 mod flops_cli;
 mod forecast_cli;
 mod label_cli;
-mod glm_cli;
 mod gguf_cli;
 mod image_io;
 mod lsa_cli;
@@ -61,7 +60,7 @@ mod supply;
 mod tree;
 /// Whether `--device`/`BRAIN_DEVICE` EXPLICITLY named the NPU. The NPU is a
 /// whole-graph (OpenVINO) path, not a `gpu_core` backend, so the commands that
-/// support it (`brain yolo detect`, `glm infer`, `qwen infer`,
+/// support it (`brain yolo detect`, `qwen infer`,
 /// `tts clone`/`synth`/`design`) consult this instead of a `gpu_core` backend
 /// check. Reads the SAME resolved `ComputeSet` every other caller reads
 /// (`gpu_core::ambient_compute_set()` - published by `select_backend` below
@@ -396,7 +395,12 @@ QWEN3 (dense decoder; paged continuous-batching serving)
   brain qwen3 train|finetune|export|precompile|toolcall|eval|calib ...
 
 GLM-5.2 (MLA + sigmoid noaux_tc MoE)
-  brain glmdsa <train|finetune|infer|eval|import|export> ...
+  brain glmdsa train --data <dir> [--save F --size tiny|small|base --steps N --seed $RANDOM]
+  brain glmdsa finetune --data <dir> --save F [--weights BASE --steps N --lr X]
+  brain glmdsa eval --data <dir> [--weights F --batches N]
+  brain glmdsa generate --prompt \"...\" [--weights F --max-new N --temp X --top-k K]
+  brain glmdsa import --source <hf_dir> --dest glm.safetensors
+      # the OpenVINO export and NPU decode are actions of samples/models/glmdsa
 
 QWEN3-OMNI (text/audio/image/video in, text + speech out)
   brain qwen3omnimoe import --hf <dir> --out Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors [--id VENDOR/REPO]

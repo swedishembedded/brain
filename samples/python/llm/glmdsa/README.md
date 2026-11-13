@@ -4,11 +4,10 @@ GLM-5.2 text generation, D-Bus only. `glmdsa.py` talks to GLM-5.2's MLA +
 sigmoid `noaux_tc` MoE decoder over D-Bus. Decoding is
 `glmdsa::sample::generate_kv` end to end - the served path
 (`crates/catalog/src/resident_llm.rs::GlmResident`) and the direct `brain glmdsa
-generate` path (`crates/glmdsa/src/caps.rs`) sample identically.
+generate` path (`crates/glmdsa/src/caps.rs`) are one provider and sample identically.
 
 ```bash
-BRAIN_GLMDSA_WEIGHTS=/path/to/glm.brain.safetensors \
-  tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --pin glmdsa.weights=/path/to/glm.brain.safetensors" -- \
   python3 samples/python/llm/glmdsa/glmdsa.py --dbus --prompt "Once upon a time" --max_new 64
 ```
 
@@ -21,12 +20,11 @@ BRAIN_MOCK=1 tools/dbus-session.sh --serve "--dbus" -- \
 ```
 
 Ad hoc, no server at all - `brain glmdsa generate` loads a checkpoint and
-generates directly (weights are a per-call flag, not an env-configured
-resident):
+generates directly:
 
 ```bash
 brain glmdsa generate --weights /path/to/glm.brain.safetensors \
-    --prompt "2+2=" --max_new 8
+    --prompt "2+2=" --max_new 8 --out text=out.txt
 ```
 
 ## What it demonstrates
@@ -44,8 +42,8 @@ brain glmdsa generate --weights /path/to/glm.brain.safetensors \
 
 ## What it needs
 
-`BRAIN_GLMDSA_WEIGHTS` pointed at a converted `.brain.safetensors`
-checkpoint before `brain serve --dbus`, plus `jeepney` (`pip install -e
+A converted `.brain.safetensors` checkpoint in the model store (or pinned
+with `brain serve --pin glmdsa.weights=PATH`) before `brain serve --dbus`, plus `jeepney` (`pip install -e
 brain-py`).
 
 ## Options

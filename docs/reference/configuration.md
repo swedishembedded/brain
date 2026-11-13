@@ -118,7 +118,6 @@ model is not served.
 | --- | --- | --- |
 | `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint (produced by `brain import`) + `tokenizer.json` |
 | `BRAIN_GPT2_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
-| `BRAIN_GLMDSA_WEIGHTS` | GLM decoder | checkpoint (char-level) |
 | `BRAIN_S3DIT_DIT`, `BRAIN_S3DIT_VAE`, `BRAIN_S3DIT_QWEN`, `BRAIN_S3DIT_TOKENIZER` | Z-Image text2image/edit | optional overrides, one per component -- unset, each is resolved from the model store instead (`s3dit::spec::S3ditSpec`); set, it pins that exact file |
 | `BRAIN_SCRFD_DIR` | antelopev2 face detection | dir holding `scrfd_10g_bnkps.onnx` |
 | `BRAIN_ARCFACE_DIR` | antelopev2 face identity embedding | dir holding `glintr100.onnx` (plus `scrfd_10g_bnkps.onnx` for the default `align=true` path) |

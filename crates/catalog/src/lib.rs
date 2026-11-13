@@ -68,7 +68,7 @@ pub mod resident_horizon;
 pub mod resident_lfm;
 pub mod resident_ouro;
 pub mod resident_provider;
-pub mod family_spec;
+pub use brain_modelstore::family_spec;
 pub mod resident_huginn;
 pub mod resident_llm;
 pub mod resident_ltxv;
@@ -449,18 +449,14 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("qwen3", &qwen3::spec::Qwen3Spec)),
             resident: None,
         },
-        // GLM-5.2. Same shape as qwen3 above: `weights` is a per-invocation
-        // action param, so the manifest is weights-free and `brain caps` lists
-        // GLM on a box with no checkpoint. The always-hot HTTP/D-Bus path is
-        // `crate::resident_llm::GlmResident`, registered directly by the
-        // serving executor, advertising
-        // `glmdsa::caps::manifest_resident` - the same definition as this one,
-        // minus the `weights` param the service supplies itself.
+        // GLM-5.2: the checkpoint is the `weights` role `glmdsa::spec::SPEC`
+        // resolves (a brain checkpoint or a Hugging Face directory), for the
+        // provider and the residency adapter alike.
         ModelEntry {
             manifest: glmdsa::caps::manifest,
-            provider: always!(glmdsa::caps::GlmProvider::new()),
-            spec: None,
-            resident: None,
+            provider: glmdsa::caps::provider,
+            spec: Some(("glmdsa", &glmdsa::spec::SPEC)),
+            resident: crate::resident_in_store!(crate::resident_llm::GlmResident::from_store),
         },
         // Qwen3.5-35B-A3B: like qwen3, `weights` is a per-invocation action
         // param (not baked into the Provider at construction), so this
@@ -551,13 +547,13 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: resident_ouro::direct_manifest,
             provider: resident_ouro::provider,
-            spec: Some(("ouro", &family_spec::FamilySpec { arch: "ouro", card_family: "ouro" })),
+            spec: Some(("ouro", &family_spec::FamilySpec { arch: "ouro", card_family: "ouro", tokenizer: true })),
             resident: None,
         },
         ModelEntry {
             manifest: resident_huginn::direct_manifest,
             provider: resident_huginn::provider,
-            spec: Some(("huginn", &family_spec::FamilySpec { arch: "huginn", card_family: "huginn" })),
+            spec: Some(("huginn", &family_spec::FamilySpec { arch: "huginn", card_family: "huginn", tokenizer: true })),
             resident: None,
         },
         // FastVLM: `weights` is resolved through `fastvlm::spec::FastvlmSpec`

@@ -22,7 +22,9 @@ pub mod distill;
 pub mod import;
 pub mod init;
 pub mod model;
+pub mod eval;
 pub mod sample;
+pub mod spec;
 
 pub use config::GlmConfig;
 pub use init::init_weights;

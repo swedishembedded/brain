@@ -1859,11 +1859,8 @@ impl Glm {
             let arr: Vec<serde_json::Value> = itos.iter().map(|ch| serde_json::Value::from(ch.to_string())).collect();
             config["itos"] = serde_json::Value::Array(arr);
         }
-        // "brain/glm" matches the reserved-vendor fallback
-        // -- the same id crates/catalog/src/resident_llm.rs::GlmResident::from_env
-        // synthesizes for an env-loaded checkpoint -- so a checkpoint saved
-        // here is auto-discoverable by crates/serving/src/model_dir.rs without
-        // requiring BRAIN_GLMDSA_WEIGHTS to be set.
+        // The card names the model `brain/glm` and the `glm` family, so the
+        // model store resolves a checkpoint saved here (`crate::spec::SPEC`).
         checkpoint::save_carded(path, config, &tensors, &checkpoint::st::ModelCard::new("brain/glm", "glm"));
     }
 }

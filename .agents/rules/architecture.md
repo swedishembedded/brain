@@ -76,14 +76,14 @@ layer 6 - serving, front ends, SDK, samples
     sample-decision-json, sample-decision-patterns, sample-decision-rubiks, sample-decision-
     salesagent, sample-decision-triage, sample-fly-interactive, sample-imagegen-batch, sample-
     imagegen-generate, sample-learning-reader, sample-learning-rlcd, sample-learning-
-    visualclick, sample-models-diamond, sample-models-flux2, sample-models-gpt2, sample-models-
-    lfm2, sample-models-ltxv, sample-models-qwen3tts, sample-models-sam2, sample-models-splat,
-    sample-models-toymoe, sample-models-toypid, sample-models-wan, sample-models-worldmirror2,
-    sample-models-yolov8, sample-models-zipdepth, sample-npu-rockchip, sample-reconstruction-
-    splat, sample-study-chat, sample-study-document, sample-study-timeline, sample-text-chat-
-    full-finetune, sample-text-embed, sample-text-embed-train, sample-text-encoder-finetune,
-    sample-text-retrieve, sample-text-retrieve-json, sample-text-spectral-lm, sample-tts-clone,
-    sample-vision-perception, server, serving, trainjob, web
+    visualclick, sample-models-diamond, sample-models-flux2, sample-models-glmdsa, sample-
+    models-gpt2, sample-models-lfm2, sample-models-ltxv, sample-models-qwen3tts, sample-models-
+    sam2, sample-models-splat, sample-models-toymoe, sample-models-toypid, sample-models-wan,
+    sample-models-worldmirror2, sample-models-yolov8, sample-models-zipdepth, sample-npu-
+    rockchip, sample-reconstruction-splat, sample-study-chat, sample-study-document, sample-
+    study-timeline, sample-text-chat-full-finetune, sample-text-embed, sample-text-embed-train,
+    sample-text-encoder-finetune, sample-text-retrieve, sample-text-retrieve-json, sample-text-
+    spectral-lm, sample-tts-clone, sample-vision-perception, server, serving, trainjob, web
 ```
 <!-- crate-layers:end -->
 

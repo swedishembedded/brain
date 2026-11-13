@@ -71,7 +71,7 @@ pub fn manifest() -> Manifest {
 /// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP):
 /// the checkpoint directory is service-side configuration
 /// (`BRAIN_LLAVA_WEIGHTS`), so the served action carries only real
-/// per-request parameters - see `glmdsa::caps::manifest_resident`'s doc for
+/// per-request parameters - see `capability::Manifest::for_serving` for
 /// why a static, CLI-facing manifest and a stripped resident one are two
 /// different things, not one hidden behind deployment state. Used by
 /// `residency::bridge::ProviderResident::stateless_with_manifest`, which

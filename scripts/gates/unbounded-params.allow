@@ -25,8 +25,10 @@ brain/flux2-klein	lora_train	lr
 brain/flux2-klein	lora_train	min_lr
 brain/flux2-klein	lora_train	seed
 brain/flux2-klein	text2image	seed
+brain/glm	eval	seed
+brain/glm	finetune	seed
 brain/glm	generate	seed
-brain/glm	generate	temp
+brain/glm	train	seed
 brain/gpt2	eval	seed
 brain/gpt2	generate	seed
 brain/gpt2	train	seed

@@ -18,7 +18,7 @@
 //! caller is TOLD it may pass and what every invocation is actually
 //! validated against, so a param the override omits is unreachable even from
 //! a caller that ignores the advertised schema and crafts a raw invocation
-//! by hand - the same reason `glmdsa::caps::manifest_resident` and
+//! by hand - the same reason `capability::Manifest::for_serving` and
 //! `qwen3tts::caps::resident_manifest` exist as a second, weights-free
 //! manifest next to their static one.
 

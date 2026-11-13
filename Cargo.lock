@@ -1024,7 +1024,6 @@ dependencies = [
  "brain-flux2",
  "brain-forecast",
  "brain-gguf",
- "brain-glmdsa",
  "brain-gpt2",
  "brain-gpu-core",
  "brain-gradcheck",
@@ -1658,6 +1657,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-optim",
  "brain-paramstore",
  "brain-testutil",
@@ -6882,6 +6882,18 @@ version = "5.1.0"
 dependencies = [
  "brain-flux2",
  "brain-invoke",
+]
+
+[[package]]
+name = "sample-models-glmdsa"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-data",
+ "brain-glmdsa",
+ "brain-invoke",
+ "brain-npu",
+ "serde_json",
 ]
 
 [[package]]

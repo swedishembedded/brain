@@ -119,7 +119,7 @@ pub fn manifest() -> Manifest {
 /// the checkpoint directory is service-side configuration (resolved through
 /// the model store, see `crate::spec::Moondream3Spec`), so
 /// the served action carries only real per-request parameters - see
-/// `glmdsa::caps::manifest_resident`'s doc for why a static, CLI-facing
+/// `capability::Manifest::for_serving` for why a static, CLI-facing
 /// manifest and a stripped resident one are two different things, not one
 /// hidden behind deployment state. `crate::resident_moondream3::
 /// Moondream3Resident::manifest` calls this rather than [`manifest`].

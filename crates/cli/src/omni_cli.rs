@@ -19,7 +19,7 @@
 //! auto-fetch/convert pipeline (`crate::supply`), which only fires for a
 //! checkpoint brain itself downloaded; this verb is how a checkpoint already
 //! on disk gets converted, matching every sibling model's `import` verb
-//! (`brain qwen import`, `brain glm import`, `brain lfm import`, …).
+//! (`brain qwen import`, `brain glmdsa import`, `brain lfm import`, …).
 
 use crate::args::{canon_verb, Args};
 

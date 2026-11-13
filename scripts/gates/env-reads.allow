@@ -62,7 +62,6 @@ crates/catalog/src/resident_horizon.rs	MOE_SKIP_GPU_TESTS
 crates/catalog/src/resident_januspro.rs	BRAIN_JANUSPRO_TUNED
 crates/catalog/src/resident_januspro.rs	BRAIN_JANUSPRO_TUNED_GENERATION
 crates/catalog/src/resident_llm.rs	BRAIN_DEVICE
-crates/catalog/src/resident_llm.rs	BRAIN_GLMDSA_WEIGHTS
 crates/catalog/src/resident_llm.rs	BRAIN_GPT2_WEIGHTS
 crates/catalog/src/resident_llm.rs	QWEN3_DIR
 crates/catalog/src/resident_llm.rs	QWEN_TOKENIZER
@@ -438,7 +437,6 @@ crates/genieredux/tests/it/stblock.rs	MOE_SKIP_GPU_TESTS
 crates/genieredux/tests/it/sttransformer.rs	MOE_SKIP_GPU_TESTS
 crates/genieredux/tests/it/tokenizer.rs	MOE_SKIP_GPU_TESTS
 crates/genieredux/tests/it/vq.rs	MOE_SKIP_GPU_TESTS
-crates/glmdsa/src/caps.rs	BRAIN_GLMDSA_WEIGHTS
 crates/glmdsa/src/import.rs	MOE_SKIP_GPU_TESTS
 crates/glmdsa/src/model.rs	BRAIN_GLMDSA_NAIVE_MM
 crates/glmdsa/src/model.rs	MOE_SKIP_GPU_TESTS

@@ -66,7 +66,6 @@ brain-minicpmv.workspace = true
 brain-mirage.workspace = true
 # `catalog`/`resident_januspro` - Janus-Pro's caps surface and residency adapter.
 brain-januspro.workspace = true
-brain-glmdsa.workspace = true
 brain-lfm2.workspace = true
 brain-ouro.workspace = true
 brain-huginn.workspace = true

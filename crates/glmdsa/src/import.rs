@@ -241,7 +241,7 @@ pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Res
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     // hf-fixture: glmdsa
     use super::*;
 
@@ -272,7 +272,7 @@ mod tests {
     /// checkpoint dir: config.json + a single model.safetensors. Layer 1's packed
     /// `gate_up_proj`/`down_proj` are purpose-built (not `seq`) so expert 0 vs 1's
     /// gate/up/down values are distinguishable and can't pass a swapped/aliased test.
-    fn build_tiny_hf_dir(tag: &str) -> std::path::PathBuf {
+    pub(crate) fn build_tiny_hf_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("brain-glm-import-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let json = r#"{"vocab_size":5,"hidden_size":8,"num_hidden_layers":2,

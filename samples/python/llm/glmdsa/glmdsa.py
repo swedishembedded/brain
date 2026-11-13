@@ -11,7 +11,7 @@ checkpoint carries its own vocabulary), so there is no `messages`, no chat
 template, no per-token streaming deltas: just `prompt`/`max_new`/`temp`/
 `top_k`/`seed` in, `text` out. Decoding is
 `glmdsa::sample::generate_kv` (the KV-cached fast path) end to end - the
-served path and `brain glmdsa infer` sample identically.
+served path and `brain glmdsa generate` sample identically.
 
 **This example offers `--dbus` only.** GLM's `generate` action is not
 `.streaming()` - `crates/apiserve/src/catalog.rs::api_caps` gates
@@ -22,7 +22,7 @@ silently hanging or degrading against an HTTP endpoint that will never see
 this model. Reach GLM over D-Bus (this script) or `brain do glm generate ...`.
 
 Examples:
-  # D-Bus (needs BRAIN_GLMDSA_WEIGHTS=... brain serve --dbus running):
+  # D-Bus (needs `brain serve --dbus` running over a store with a GLM checkpoint):
   python3 samples/python/llm/glmdsa/glmdsa.py --dbus --prompt "Once upon a time" --max_new 64
 
   # Quick, deps-free wire-contract check against the mock resident (no GLM
@@ -79,7 +79,7 @@ def main() -> None:
     served = brain.models()
     if args.model not in served:
         skip(f"model {args.model!r} is not served (served: {served}); for real GLM: "
-             "BRAIN_GLMDSA_WEIGHTS=<checkpoint.safetensors> brain serve --dbus")
+             "brain serve --dbus --pin glmdsa.weights=<checkpoint.safetensors>")
 
     params = {"prompt": args.prompt, "max_new": args.max_new, "temp": args.temp, "top_k": args.top_k}
     if args.seed is not None:

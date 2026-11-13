@@ -168,6 +168,34 @@ impl GlmConfig {
         }
     }
 
+    /// A from-scratch shape by size name (`tiny`, `small`, `base`) at context
+    /// `block_size`. The vocabulary is left at 0: the dataset sizes it.
+    pub fn preset(name: &str, block_size: u32) -> Option<GlmConfig> {
+        let tiny = GlmConfig { block_size, vocab: 0, ..GlmConfig::tiny() };
+        let sized = |n_layers, d_model, n_heads, q_lora_rank, kv_lora_rank, n_routed_experts, ff| GlmConfig {
+            n_layers,
+            d_model,
+            n_heads,
+            q_lora_rank,
+            kv_lora_rank,
+            qk_nope_head_dim: 32,
+            qk_rope_head_dim: 16,
+            v_head_dim: 32,
+            n_routed_experts,
+            num_experts_per_tok: 2,
+            moe_intermediate_size: ff,
+            intermediate_size: ff,
+            first_k_dense_replace: 1,
+            ..tiny.clone()
+        };
+        match name {
+            "tiny" => Some(tiny),
+            "small" => Some(sized(4, 128, 4, 96, 48, 4, 256)),
+            "base" => Some(sized(6, 256, 8, 192, 96, 8, 512)),
+            _ => None,
+        }
+    }
+
     /// The published GLM-5.2 shape (`configs/glm-5.2-config.json`). Not runnable
     /// locally at full size; used for import shape validation and reference.
     pub fn glm5_2() -> GlmConfig {

@@ -42,7 +42,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("qwen35", crate::qwen35_cli::run_qwen35),
     ("qwen35moe", crate::qwen35moe_cli::run_qwen35moe),
     ("qwen3omnimoe", crate::omni_cli::run_omni),
-    ("glmdsa", crate::glm_cli::run_glm),
 ];
 
 /// The catalog model id an [`ARCH_HANDLERS`] architecture ALSO registers under
@@ -124,6 +123,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("minicpmv", "brain/minicpmv"),
     ("yolov8", "brain/yolov8"),
     ("gpt2", "brain/gpt2"),
+    ("glmdsa", "brain/glm"),
     ("toypid", "brain/toypid"),
     ("toymoe", "brain/toymoe"),
     ("huginn", "brain/huginn"),
@@ -343,6 +343,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "worldmirror2",
     "lfm2",
     "yolov8",
+    "glmdsa",
     "lpips",
     "rrdbnet",
     "timesfm3",
@@ -1084,8 +1085,8 @@ mod tests {
     /// existed.
     #[test]
     fn verb_is_known_has_no_opinion_on_an_ungated_handler() {
-        assert_eq!(verb_is_known("glmdsa", "t2i"), None);
-        assert_eq!(verb_is_known("glmdsa", "infer"), None);
+        assert_eq!(verb_is_known("qwen3", "t2i"), None);
+        assert_eq!(verb_is_known("qwen3", "infer"), None);
     }
 
     /// The actual gate `dispatch_arch` consults before calling
@@ -1111,8 +1112,8 @@ mod tests {
     fn wants_weight_acquisition_still_proceeds_for_every_real_verb() {
         // An arch with no verb table entry is unaffected: unchanged
         // (pre-existing) behavior, gated only by help/no-verb.
-        assert!(wants_weight_acquisition("glmdsa", &s(&["t2i"])));
-        assert!(wants_weight_acquisition("glmdsa", &s(&["infer"])));
+        assert!(wants_weight_acquisition("qwen3", &s(&["t2i"])));
+        assert!(wants_weight_acquisition("qwen3", &s(&["infer"])));
     }
 
     /// `ARCH_TO_MODEL` architectures validate against their own capability

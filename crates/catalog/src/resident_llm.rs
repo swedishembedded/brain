@@ -15,16 +15,16 @@
 //! selection ([`on_device`]), exactly like z-image.
 //!
 //! Model SELECTION: `--checkpoint` (+ `--tokenizer`) names the Qwen3
-//! checkpoint to serve; `BRAIN_GPT2_WEIGHTS` and `BRAIN_GLMDSA_WEIGHTS` still
-//! name theirs, and each `from_env` returns `None` when its variable is
-//! unset/empty. HOW to serve Qwen3 - context length, batching, KV/weight
+//! checkpoint to serve; `BRAIN_GPT2_WEIGHTS` still names GPT-2's (`from_env`
+//! returns `None` when it is unset/empty) and GLM's comes from the model
+//! store ([`GlmResident::from_store`]). HOW to serve Qwen3 - context length, batching, KV/weight
 //! precision - is [`QwenServeConfig`], which `run_cli.rs`'s serving-policy
 //! flags build; see that struct's own doc for every field and its default.
 //! With no `--ctx` given, context auto-sizes to the target device's
 //! real free VRAM (see [`QwenResident::resolve_ctx`]) rather than a single
 //! fixed number for every box.
 
-use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress};
+use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress, Provider};
 use checkpoint::st::ModelCard;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
@@ -363,24 +363,16 @@ impl Instance for GptInstance {
 
 // ---------------------------------------------------------------- glm
 
-/// The GLM decoder (MLA + sigmoid noaux_tc MoE) behind the scheduler
-/// (`BRAIN_GLMDSA_WEIGHTS`). Char-level: the checkpoint must embed its vocab.
+/// The GLM decoder (MLA + sigmoid noaux_tc MoE) behind the scheduler, over the
+/// checkpoint the model store resolves: a brain checkpoint (char-level, it
+/// embeds its vocabulary) or a downloaded Hugging Face directory.
 ///
-/// Decoding is [`glmdsa::sample::generate_kv`] (the KV-cached fast path) -
-/// the same one `glmdsa::caps::GenerateAction` (the direct `brain glmdsa
-/// generate` path) calls, so the served and direct surfaces sample
-/// identically rather than drifting (they used to: this adapter called the
-/// slower cache-free `generate` while the direct path had already moved to
-/// `generate_kv`). Bit-identity between `generate` and `generate_kv` only
-/// holds at `temperature=0` (greedy) - `generate_kv` applies GLM's untied
-/// `lm_head` on the host in a scalar loop, agreeing with the device path to
-/// only ~1e-3, which is enough to flip a sampled token when two candidates
-/// are close (see `generate_kv`'s own doc comment). The served default is
-/// `temp=0.8`, so this is a real, disclosed numerical difference from the
-/// pre-KV behaviour, not a regression: the two paths were never
-/// bit-identical at temperature>0, they now just agree with EACH OTHER
-/// (served == direct) instead of the served path being the slow, no-longer-
-/// canonical one.
+/// The instance is [`glmdsa::caps::GlmProvider`] itself, so the served and
+/// direct (`brain glmdsa <action>`) surfaces load, decode and sample
+/// identically: [`glmdsa::sample::generate_kv`], the KV-cached path, applies
+/// GLM's untied `lm_head` on the host in a scalar loop and agrees with the
+/// device path to only ~1e-3, which is enough to flip a sampled token when two
+/// candidates are close (see its own doc comment).
 ///
 /// # Batching: deliberately serial, and here is why
 ///
@@ -408,10 +400,12 @@ pub struct GlmResident {
 }
 
 impl GlmResident {
-    pub fn from_env() -> Option<GlmResident> {
-        let path = std::env::var("BRAIN_GLMDSA_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        // See GptResident::from_env's comment: env-loaded, no upstream provenance.
-        Some(Self::from_card(&path, &ModelCard::new("brain/glm", "glm"), None))
+    /// The checkpoint the model store resolves - a brain checkpoint
+    /// (`import`, `train` or `finetune` wrote it) or a downloaded Hugging Face
+    /// directory - under the model's own id.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<GlmResident> {
+        let path = loader::served::served_assembly(store, "glmdsa", &glmdsa::spec::SPEC)?.role_path("weights").ok()?;
+        Some(Self::from_card(&path, &ModelCard::new(glmdsa::caps::MODEL, glmdsa::spec::CARD_FAMILY), None))
     }
 
     /// Construct under the card's id. `path` is a brain checkpoint (char-level,
@@ -427,21 +421,24 @@ impl GlmResident {
     }
 }
 
+/// Instance key of the actions that need no resident model (training,
+/// evaluation, conversion); `generate`'s is the model itself.
+const GLM_ENGINE_KEY: &str = "engine";
+
 impl ResidentModel for GlmResident {
-    /// One definition, shared with the direct `brain glmdsa generate` path:
-    /// `glmdsa::caps::manifest_resident` is `manifest()` minus the `weights`
-    /// param this adapter supplies from `BRAIN_GLMDSA_WEIGHTS`. Building an
-    /// `ActionSpec` here instead is how the served and direct surfaces drift
-    /// into advertising different parameters for the same action.
+    /// One definition, shared with the direct `brain glmdsa <action>` path.
     fn manifest(&self) -> Manifest {
-        let mut m = glmdsa::caps::manifest_resident();
+        let mut m = glmdsa::caps::manifest();
         m.model = self.id.clone();
         m
     }
-    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(self.id.as_str(), "default")
+    fn instance_key(&self, action: &str, _inv: &Invocation) -> InstanceKey {
+        InstanceKey::new(self.id.as_str(), if action == "generate" { "default" } else { GLM_ENGINE_KEY })
     }
-    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+    fn estimate(&self, key: &InstanceKey) -> MemCost {
+        if key.config == GLM_ENGINE_KEY {
+            return MemCost::default();
+        }
         if !self.is_hf_dir() {
             return est_vram(&self.path);
         }
@@ -452,45 +449,22 @@ impl ResidentModel for GlmResident {
         MemCost::new(bytes, 0)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if self.is_hf_dir() {
-            let dir = std::path::Path::new(&self.path);
-            let (cfg, src) = glmdsa::import::open_dir(dir).map_err(|e| format!("glm: {e}"))?;
-            let tok = data::qwen_tokenizer::QwenBpe::from_file(dir.join("tokenizer.json").to_str().ok_or("glm: non-UTF8 path")?).map_err(|e| format!("glm: {e}"))?;
-            let block = cfg.block_size;
-            let model = on_device(device, || glmdsa::model::Glm::from_source_inference(cfg, &src, 1, block))?;
-            return Ok(Box::new(GlmInstance { model, tok: Box::new(tok) }));
-        }
-        // Stream weights from the mmap (see GptResident::activate).
-        let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("glm: {e}"))?;
-        let itos = glmdsa::model::Glm::itos_from_config(&reader.config())
-            .ok_or("glm: checkpoint has no embedded char vocab (BRAIN_GLMDSA_WEIGHTS)")?;
-        let tok = CharTokenizer::from_itos(itos);
-        let block = glmdsa::config::GlmConfig::from_json(&reader.config()).block_size;
-        let model = on_device(device, || glmdsa::model::Glm::from_reader_inference(&reader, 1, block))?;
-        Ok(Box::new(GlmInstance { model, tok: Box::new(tok) }))
+        Ok(Box::new(GlmInstance { provider: glmdsa::caps::GlmProvider::new(Some(self.path.clone())), device }))
     }
 }
 
+/// The served provider over the checkpoint, run on the assigned device: its
+/// first `generate` loads the model onto it and keeps it; dropping the
+/// instance frees it.
 struct GlmInstance {
-    model: glmdsa::model::Glm,
-    /// The checkpoint's own vocabulary: brain's char-level one, or a
-    /// downloaded checkpoint's `tokenizer.json`.
-    tok: Box<dyn Tokenizer + Send>,
+    provider: glmdsa::caps::GlmProvider,
+    device: Device,
 }
 
 impl Instance for GlmInstance {
-    fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let (max_new, temp, top_k, seed) = sampling_params(inv)?;
-        let max_new = max_new.unwrap_or(TOY_MAX_NEW);
-        let prompt = inv.get_str("prompt").unwrap_or_default();
-        let prompt_text = if prompt.is_empty() { "\n".to_string() } else { prompt };
-        let ids = self.tok.encode(&prompt_text);
-        let mut rng = Rng::new(seed);
-        progress(Progress::step(0, max_new as u32, "generating"));
-        let gen = glmdsa::sample::generate_kv(&self.model, &ids, max_new, temp, top_k, None, &mut rng);
-        let text = self.tok.decode(&gen);
-        progress(Progress::step(max_new as u32, max_new as u32, "done"));
-        Ok(text_outcome(text).set("seed", json!(seed)))
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let act = self.provider.action(action).ok_or_else(|| format!("glm: unknown action '{action}'"))?;
+        on_device(self.device, || act.run(inv, progress))?
     }
     // `run_batch` is deliberately the residency-default serial loop - GLM has
     // no batch axis to exploit yet, see `GlmResident`'s module doc for why.
@@ -2613,5 +2587,34 @@ mod tests {
         assert!(start.elapsed() < std::time::Duration::from_secs(5), "rejected admission must resolve promptly, not hang");
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err(), "an out-of-vocab prompt must be reported as an error, not silently dropped");
+    }
+
+    /// A serving process finds the GLM checkpoint in its model store with
+    /// nothing set in its environment, serves nothing when the store holds
+    /// none, and generates through the scheduled instance.
+    #[test]
+    fn the_served_glm_checkpoint_comes_from_the_model_store() {
+        let store = std::env::temp_dir().join(format!("catalog-glm-store-{}", std::process::id()));
+        let empty = store.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(GlmResident::from_store(&loader::served::ServedStore::new(Some(empty))).is_none());
+
+        let cfg = glmdsa::GlmConfig::tiny();
+        let init = glmdsa::init_weights(&cfg, 1);
+        let itos: Vec<char> = ('a'..='z').take(cfg.vocab as usize).collect();
+        let ckpt = store.join("full").join("brain").join("glm").join("glm.safetensors");
+        std::fs::create_dir_all(ckpt.parent().unwrap()).unwrap();
+        glmdsa::Glm::new(cfg.clone(), 1, cfg.block_size, &init).save_with_itos(ckpt.to_str().unwrap(), Some(&itos));
+        let resident = GlmResident::from_store(&loader::served::ServedStore::new(Some(store.join("full")))).expect("the store's checkpoint is served");
+        assert_eq!(resident.path, ckpt.to_str().unwrap());
+        assert_eq!(resident.manifest().actions.len(), glmdsa::caps::manifest().actions.len());
+
+        let key = resident.instance_key("generate", &Invocation::new());
+        let mut instance = resident.activate(&key, Device::Cpu).expect("activates on the host tier");
+        let inv = Invocation::new().set("prompt", json!("abc")).set("max_new", json!(4)).set("seed", json!(3));
+        let out = instance.run("generate", &inv, &mut |_| {}).expect("generates");
+        assert_eq!(out.outputs["seed"].as_u64(), Some(3));
+        assert!(out.blobs.contains_key("text"));
+        let _ = std::fs::remove_dir_all(&store);
     }
 }

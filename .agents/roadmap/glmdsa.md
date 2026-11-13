@@ -5,8 +5,11 @@ Scope: GLM-5.2 decoder (`crates/glmdsa`).
 GLM-5.2 (`glm_moe_dsa`) decoder - MLA + sigmoid `noaux_tc` MoE + DSA indexer +
 MTP - on brain's fp32/WGSL engine. Core forward/backward, learnability,
 indexer distillation, KV-cache decode, and HF import are done and
-parity-gated against the reference implementation. `brain glmdsa export`
-produces an ONNX graph validated on real NPU hardware (fp32 only).
+parity-gated against the reference implementation. Its actions (`train`,
+`finetune`, `eval`, `generate`, `import`) are served and resolve their
+checkpoint from the model store; `samples/models/glmdsa` adds `export`, an ONNX
+graph validated on real NPU hardware, and `npu-generate`, greedy decoding
+through OpenVINO (fp32 or INT8 weight-only).
 
 ## Not yet done
 
@@ -17,28 +20,15 @@ produces an ONNX graph validated on real NPU hardware (fp32 only).
 - [ ] `norm_fwd` normalizes at the 1e-6 `rmsnorm.wgsl` hardcodes, not at
       `GlmConfig::rms_eps` (1e-5); `rmsnorm_eps`/`rmsnorm_eps_rows` are not
       registered, so the config field is round-tripped but not honoured
-- [x] GLM discovery and the direct action path. `glmdsa::caps` now carries a
-      **weight-free** manifest plus a `GlmProvider`, wired into
-      `cli::catalog::models()`, so `brain caps` lists `brain/glm` and
-      `brain glmdsa generate` runs it with no checkpoint on the box.
-
-      Scheduling and D-Bus/HTTP serving were never actually missing -
-      `cli::resident_llm::GlmResident` has always implemented `ResidentModel`
-      and been registered in `serving::build_executor`, which the serving
-      contract accepts. What was missing is that its manifest is only built
-      when `BRAIN_GLMDSA_WEIGHTS` is set, so on a box with no GLM checkpoint
-      the model did not appear in `brain caps` **at all**, while every other
-      model advertises itself weight-free and takes `weights` as a request
-      parameter. Discovery that depends on deployment state is discovery a
-      client cannot rely on.
-
-      `GlmResident::manifest` now returns `glmdsa::caps::manifest_resident()`
-      (the same definition minus the `weights` param the service supplies
-      itself) rather than building its own `ActionSpec`, so the served and
-      direct surfaces cannot advertise different parameters for one action.
-      The model ref stays `brain/glm`, which is what `modelref::alias::ROWS`,
-      `perf_cli` and the checkpoint `ModelCard` already use - `glmdsa` is the
-      *architecture* id, a different namespace.
+- [x] GLM discovery and the direct action path. `glmdsa::caps` carries a
+      static manifest plus a `GlmProvider`, wired into `catalog::models()`, so
+      `brain caps` lists `brain/glm` with no checkpoint on the box and
+      `brain glmdsa <action>` runs it. The checkpoint is the store's `weights`
+      role (`glmdsa::spec::SPEC`), for the provider and for `GlmResident`
+      alike, whose instance is the provider itself. The model ref stays
+      `brain/glm`, which is what `modelref::alias::ROWS`, `perf_cli` and the
+      checkpoint `ModelCard` use - `glmdsa` is the *architecture* id, a
+      different namespace.
 - [ ] **A streaming `generate`, which is what puts GLM on the HTTP chat
       routes.** `crates/apiserve/src/catalog.rs::api_caps` derives HTTP
       exposure from action SHAPE, not from a per-model list:
@@ -58,8 +48,7 @@ produces an ONNX graph validated on real NPU hardware (fp32 only).
       lies to the router.
 - [x] `crates/catalog/src/resident_llm.rs::GlmInstance::run` now calls
       `glmdsa::sample::generate_kv` (the KV-cached fast path), matching the
-      direct `brain glmdsa generate` path (`glmdsa::caps::GenerateAction`,
-      which already called `generate_kv`). Before this the served and direct
+      direct `brain glmdsa generate` path (`glmdsa::caps`, now the same provider). Before this the served and direct
       surfaces silently disagreed about how GLM samples - not an RNG-ordering
       bug (`sample_logits` draws exactly one `rng.next_f32()` per emitted
       token, identically ordered in both `generate` and `generate_kv`), but a
@@ -94,8 +83,8 @@ produces an ONNX graph validated on real NPU hardware (fp32 only).
         exists, GLM's `run_batch` correctly stays the residency default
         serial loop (see above); do not reach for `PagedDecoder` without it.
   - [ ] `GlmInstance`'s served (resident) path has no automated test on this
-        box: `GlmResident::activate` requires `BRAIN_GLMDSA_WEIGHTS` to point
-        at a checkpoint with an embedded char vocab, and no such fixture is
+        box: `GlmResident::activate` requires the model store to hold
+        a checkpoint with an embedded char vocab, and no such fixture is
         committed (this repo's convention gitignores test fixtures/goldens
         under `testdata/`). A real, disclosed coverage gap, not a hidden one -
         `crates/glmdsa/src/sample.rs`'s `kv_gen_tests` cover the sampling
@@ -108,10 +97,8 @@ produces an ONNX graph validated on real NPU hardware (fp32 only).
       `.streaming()`, see the item above, so it is not reachable over
       `/v1/chat/completions`/`/v1/messages`; `--openai`/`--anthropic` are
       refused with that explanation rather than silently doing nothing).
-- [ ] `brain glmdsa infer --device npu` - the exported ONNX graph isn't wired
-      into an inference command yet; today `export` hands you a graph to run
-      through OpenVINO yourself
-- [ ] INT8 weight-only export for the NPU path (fp32 only today)
+- [x] NPU decode and INT8 weight-only export: the `export` and `npu-generate`
+      actions of `samples/models/glmdsa`
 - [ ] Full-size config (78 layers, 256 experts, ~155k vocab) is not runnable
       locally - only used for import shape validation; tests/training run on
       small presets

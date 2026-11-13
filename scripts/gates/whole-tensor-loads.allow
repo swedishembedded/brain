@@ -24,7 +24,6 @@ crates/gemma4/src/block.rs	2	class T: one whole tensor as fp32 on the host, then
 crates/gemma4/src/gguf_src.rs	1	the embedded tokenizer_json blob, read whole because it is bytes, not a weight
 crates/gemma4/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/gguf/src/gdn_order.rs	5	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
-crates/glmdsa/src/caps.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/glmdsa/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/horizon/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/kronos/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader

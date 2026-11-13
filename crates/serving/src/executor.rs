@@ -197,11 +197,8 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     } else {
         residency::log::not_served("brain: yolo not served over the scheduler (pull Ultralytics/YOLOv8 into the model dir)");
     }
-    // Text-generation LLMs (each gated on its own weights env var).
+    // The text-generation LLM gated on its own weights env var.
     if let Some(g) = catalog::resident_llm::GptResident::from_env() {
-        models.push(Arc::new(g));
-    }
-    if let Some(g) = catalog::resident_llm::GlmResident::from_env() {
         models.push(Arc::new(g));
     }
     // The one resident kept BOTH ways: erased for the executor, concrete for

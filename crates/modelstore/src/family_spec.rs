@@ -3,9 +3,10 @@
 
 //! The store spec of a model whose checkpoint says which architecture it is:
 //! a Hugging Face directory whose `config.json` declares it (the registry's
-//! `hf` class names, `brain_modelstore::family_of_config`), or a brain
+//! `hf` class names, `crate::family_of_config`), or a brain
 //! checkpoint whose card names the family. Its `weights` role is that
-//! checkpoint and its `tokenizer` role the `tokenizer.json` beside it.
+//! checkpoint and, for a family that has one, its `tokenizer` role the
+//! `tokenizer.json` beside it.
 //!
 //! One spec for every such architecture, instead of a classifier per model.
 //!
@@ -17,18 +18,22 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use brain_modelstore::inventory::{ArtifactKind, ArtifactRecord};
-use brain_modelstore::resolve::{classify_tokenizer_role, ArchSpec, AssembleOutcome, AssembledVariant, Confidence};
+use crate::inventory::{ArtifactKind, ArtifactRecord};
+use crate::resolve::{classify_tokenizer_role, ArchSpec, AssembleOutcome, AssembledVariant, Confidence};
 use capability::Assembly;
 
 /// The spec of architecture `arch`; `card_family` is what a brain checkpoint
-/// of it carries on its card.
+/// of it carries on its card. `tokenizer` says whether the family is served
+/// with a `tokenizer.json` role (a family whose checkpoint carries its own
+/// vocabulary, or whose directory holds its tokenizer, has none).
 pub struct FamilySpec {
     pub arch: &'static str,
     pub card_family: &'static str,
+    pub tokenizer: bool,
 }
 
-const ROLES: &[&str] = &["weights", "tokenizer"];
+const WEIGHTS_ONLY: &[&str] = &["weights"];
+const WEIGHTS_AND_TOKENIZER: &[&str] = &["weights", "tokenizer"];
 
 impl FamilySpec {
     fn is_weights(&self, rec: &ArtifactRecord) -> bool {
@@ -36,7 +41,7 @@ impl FamilySpec {
             ArtifactKind::HfDir => std::fs::read(rec.path.join("config.json"))
                 .ok()
                 .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-                .is_some_and(|config| brain_modelstore::family_of_config(&config) == Some(self.arch)),
+                .is_some_and(|config| crate::family_of_config(&config) == Some(self.arch)),
             ArtifactKind::Safetensors => checkpoint::st::read_card(&rec.path.to_string_lossy()).ok().flatten().is_some_and(|card| card.family == self.card_family),
             _ => false,
         }
@@ -49,13 +54,19 @@ impl ArchSpec for FamilySpec {
     }
 
     fn roles(&self) -> &'static [&'static str] {
-        ROLES
+        if self.tokenizer {
+            WEIGHTS_AND_TOKENIZER
+        } else {
+            WEIGHTS_ONLY
+        }
     }
 
     fn classify(&self, records: &[ArtifactRecord], inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out: Vec<(usize, String, Confidence)> = records.iter().enumerate().filter(|(_, r)| r.usable() && self.is_weights(r)).map(|(idx, _)| (idx, "weights".to_string(), Confidence::Declared)).collect();
-        let weights: Vec<&Path> = out.iter().map(|(idx, ..)| records[*idx].path.as_path()).collect();
-        classify_tokenizer_role(records, inventory_root, "tokenizer", &weights, &mut out);
+        if self.tokenizer {
+            let weights: Vec<&Path> = out.iter().map(|(idx, ..)| records[*idx].path.as_path()).collect();
+            classify_tokenizer_role(records, inventory_root, "tokenizer", &weights, &mut out);
+        }
         out
     }
 
@@ -65,7 +76,7 @@ impl ArchSpec for FamilySpec {
         let weights = *chosen.get("weights").ok_or_else(|| format!("{} assemble: no weights chosen", self.arch))?;
         let path = &records[weights].path;
         let dir = if path.is_dir() { path.as_path() } else { path.parent().unwrap_or(path) };
-        let id = brain_modelstore::repo_id(dir);
+        let id = crate::repo_id(dir);
         let id = if id.starts_with("local/") { format!("local/{}", self.arch) } else { id };
         Ok(AssembleOutcome::Assembled(AssembledVariant { id, variant: None }))
     }
@@ -79,7 +90,7 @@ impl ArchSpec for FamilySpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brain_modelstore::inventory::Completeness;
+    use crate::inventory::Completeness;
 
     fn record(path: std::path::PathBuf, kind: ArtifactKind) -> ArtifactRecord {
         ArtifactRecord { path, size: 1, mtime_ns: 0, kind, completeness: Completeness::Complete }
@@ -97,7 +108,7 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join("config.json"), serde_json::json!({"architectures": [class]}).to_string()).unwrap();
         }
-        let spec = FamilySpec { arch: "huginn", card_family: "huginn" };
+        let spec = FamilySpec { arch: "huginn", card_family: "huginn", tokenizer: true };
         let records = vec![record(ours.clone(), ArtifactKind::HfDir), record(other, ArtifactKind::HfDir)];
         let out = spec.classify(&records, &root);
         assert!(out.contains(&(0, "weights".to_string(), Confidence::Declared)), "{out:?}");

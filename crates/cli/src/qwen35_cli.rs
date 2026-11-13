@@ -452,7 +452,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
         block_size,
         lr,
         // Derived from THIS run's length and lr, exactly as `brain qwen3
-        // train` / `brain glm train` derive them - not left at the struct
+        // train` / `brain glmdsa train` derive them - not left at the struct
         // default. `FitOpts::default()`'s `decay_iters: 2000` against a
         // `--steps 50` finetune would spend the whole run in the first 2.5%
         // of the cosine schedule, so the LR would never anneal at all.
@@ -473,7 +473,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
         patience: 0,
         ..d
     };
-    // The corpus is positional, matching `brain glm finetune <data_dir> ...`
+    // The corpus is positional, matching `brain gpt2 finetune <data_dir> ...`
     // and `brain flux2 finetune <data_dir> ...`. Taken LAST, after every
     // value flag has claimed its own value: `Args::positional` returns the
     // first token not yet marked used, so asking for it first would happily
@@ -485,7 +485,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     }
 
     // `full` is the default mode because that is what the sibling verbs mean
-    // by a plain finetune: `brain qwen3 finetune` and `brain glm finetune`
+    // by a plain finetune: `brain qwen3 finetune` and `brain glmdsa finetune`
     // are both full-parameter unless a LoRA rank is asked for explicitly.
     if tuning.kind == model::adapter::DeviceKind::Dora && is_frozen_only(base_dtype) {
         return Err(format!("--adapter-kind dora reads the base weight, so it needs --base-format f32 (a {} base is held narrow)", model::policy::format_name(base_dtype)));
@@ -633,7 +633,7 @@ mod finetune_cli_tests {
     }
 
     /// The three required arguments, and nothing else: a plain finetune is a
-    /// FULL one (same as `brain qwen3 finetune` / `brain glm finetune` with no
+    /// FULL one (same as `brain qwen3 finetune` / `brain glmdsa finetune` with no
     /// LoRA rank), and every `FitOpts` field the caller did not name keeps the
     /// shared `FitOpts::default()` value rather than a qwen35-private one.
     #[test]

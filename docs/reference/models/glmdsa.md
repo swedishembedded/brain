@@ -26,36 +26,40 @@ GLM-family MoE decoder, or import official GLM-5.2 HuggingFace weights.
 Import official GLM-5.2 HuggingFace weights (single or sharded safetensors):
 
 ```bash
-brain glm import --hf <hf_dir> --out glm.safetensors
+brain glmdsa import --source <hf_dir> --dest glm.safetensors
 ```
 
+The model store resolves the checkpoint: a brain checkpoint (`import`,
+`train` and `finetune` write one with a `glm` card) or a downloaded Hugging
+Face directory (served as released, with its own tokenizer) under the models
+directory is found without configuration; `--weights PATH` names one outright.
 There's no auto-fetch by model id yet - either import a checkpoint yourself
-or train/finetune your own from scratch. For CLI inference against an
-existing checkpoint, point `BRAIN_GLMDSA_WEIGHTS` at it.
+or train/finetune your own from scratch.
 
 ## Running it
 
 ```bash
-brain glm train    <data_dir> --size tiny|small|base [...]
-brain glm finetune  --weights F [...]
-brain glm infer     --weights F --prompt "..."
-brain glm eval      --weights F --data <data_dir>
-brain glm import    --hf <hf_dir> --out glm.safetensors
-brain glm export    --weights F --out model.onnx --seq T
+brain glmdsa train    --data <data_dir> --size tiny|small|base --save F --seed $RANDOM
+brain glmdsa finetune --weights BASE --data <data_dir> --save F --seed $RANDOM
+brain glmdsa generate --weights F --prompt "..." --seed $RANDOM --out text=out.txt
+brain glmdsa eval     --weights F --data <data_dir> --seed $RANDOM
+brain glmdsa import   --source <hf_dir> --dest glm.safetensors
 ```
 
-`--size tiny|small|base` selects a runnable preset shape; the CLI grammar is
-shared with `gpt`/`qwen`. `train` and `finetune` take
-`--activations keep|recompute` (what the backward keeps of the forward:
-every layer's activations, or only each layer's input, rebuilt in the backward
-for the same gradients at lower memory). `export` produces an ONNX graph for the Intel NPU
-path (below) rather than a servable checkpoint.
+Every action is the model's served one, so `brain glmdsa <action> --help`
+lists each parameter with its default and bounds, and the same parameters are
+what `brain serve` accepts. `--size tiny|small|base` selects a runnable preset
+shape that `--layers`, `--d-model`, `--heads` and `--experts` override. `train` and
+`finetune` take `--activations keep|recompute` (what the backward keeps of the
+forward: every layer's activations, or only each layer's input, rebuilt in the
+backward for the same gradients at lower memory), stop between steps when
+cancelled, and print the seed they used. The ONNX export and NPU decode are
+actions of `samples/models/glmdsa` (below).
 
 ## Options
 
 - `--size tiny|small|base` - model size preset.
 - `--device cpu|gpu` - backend selection.
-- `--seq T` (export) - sequence length baked into the exported ONNX graph.
 
 ## Hardware and limits
 
@@ -72,19 +76,19 @@ vocabulary) is far too large to run locally today and is used only to
 validate that HuggingFace imports resolve to the right shapes - train,
 finetune, and evaluate against the `tiny`/`small`/`base` presets instead.
 
-GLM also has a validated **Intel NPU export path**: `brain glm export`
-produces a dense-expert (every expert computed, non-selected ones masked to
+GLM also has a validated **Intel NPU export path**: the `export` action of
+`samples/models/glmdsa` produces a dense-expert (every expert computed, non-selected ones masked to
 zero) fp32 ONNX graph that has been confirmed to run correctly on real NPU
-hardware. NPU INT8 weight-only quantization for GLM isn't implemented yet,
-and the attention indexer and multi-token-prediction head aren't part of the
+hardware. The attention indexer and multi-token-prediction head aren't part of the
 exported graph - the NPU path runs dense attention, and multi-token
 prediction there would need a separate host-side draft loop. See
 [glm/npu.md](glmdsa/npu.md) for the export design.
 
-To serve it over HTTP or D-Bus:
+To serve it over HTTP or D-Bus, with the checkpoint found in the model store
+(or named with `--pin glmdsa.weights=PATH`):
 
 ```bash
-BRAIN_GLMDSA_WEIGHTS=glm.safetensors brain serve --dbus --openai
+brain serve --dbus --openai
 ```
 
 Once serving, it's reachable over `brain do` and D-Bus - one request decodes
@@ -99,5 +103,4 @@ those routes; GLM and the char-level GPT baseline are not.
 
 `brain caps` lists `brain/glm` whether or not a checkpoint is present, and
 `brain glmdsa generate --weights glm.safetensors --prompt "..."` runs it
-directly, without a server. Use the CLI verbs above for
-train/finetune/infer/eval.
+directly, without a server.

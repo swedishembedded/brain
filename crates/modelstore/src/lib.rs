@@ -26,6 +26,7 @@
 //! later by a residency-side supplier without either pulling in the other.
 
 pub mod adapter_manifest;
+pub mod family_spec;
 pub mod fetch;
 pub mod hub;
 pub mod inventory;

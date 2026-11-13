@@ -218,6 +218,7 @@ sample-imagegen-batch	6
 sample-imagegen-generate	6
 sample-models-diamond	6
 sample-models-flux2	6
+sample-models-glmdsa	6
 sample-models-gpt2	6
 sample-models-lfm2	6
 sample-models-ltxv	6

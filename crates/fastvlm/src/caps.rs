@@ -61,7 +61,7 @@ pub fn manifest() -> Manifest {
 /// the checkpoint directory is service-side configuration (resolved through
 /// the model store, see `crate::spec::FastvlmSpec`), so the served action
 /// carries only real per-request parameters - see
-/// `glmdsa::caps::manifest_resident`'s doc for
+/// `capability::Manifest::for_serving` for
 /// why a static, CLI-facing manifest and a stripped resident one are two
 /// different things, not one hidden behind deployment state. Used by
 /// `residency::bridge::ProviderResident::stateless_with_manifest`, which

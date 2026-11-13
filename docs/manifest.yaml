@@ -193,6 +193,8 @@ navigation:
         path: examples/models/diamond.md
       - source: samples/models/flux2/README.md
         path: examples/models/flux2.md
+      - source: samples/models/glmdsa/README.md
+        path: examples/models/glmdsa.md
       - source: samples/models/gpt2/README.md
         path: examples/models/gpt2.md
       - source: samples/models/lfm2/README.md
