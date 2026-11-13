@@ -83,7 +83,6 @@ way.
 | `brain serve` | serve models over HTTP/D-Bus, or (with `--stdio`) run the event-driven stdio controller - see below |
 | `brain perf` | performance benchmarking: latency/throughput/serve/sweep, vs. a baseline |
 | `brain flops` | offline/online FLOP and int-OPS accounting for a forward/backward pass, or for a whole image/video generation stage by stage (`--model flux2\|ltxv`) |
-| `brain gradcheck` | finite-difference backprop correctness gate |
 | `brain npu` | OpenVINO/NPU: `export`, `quantize`, `check`, `run`, `bench`, `sim` |
 | `brain federated` | sharded MoE: `split`, `verify`, `merge`, `assemble`, `train-expert` |
 | `brain bench` | cross-architecture evaluation harness: `eval`, `scale`, `advise`, `compare` |

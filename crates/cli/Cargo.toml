@@ -99,7 +99,6 @@ brain-capture.workspace = true
 brain-model.workspace = true
 brain-data.workspace = true
 brain-federated.workspace = true
-brain-gradcheck.workspace = true
 brain-eval.workspace = true
 brain-bench.workspace = true
 brain-perf.workspace = true

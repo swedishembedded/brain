@@ -7,7 +7,7 @@
 //! same command ([`resolve::dispatch`]) - the architecture is chosen by
 //! whichever token names one of `brain_arch::ARCHS`, in either position.
 //! Infrastructure commands (`data`, `devices`, `npu`, `federated`, `bench`,
-//! `perf`, `forecast`, `caps`, `serve`, `gradcheck`, `flops`) are matched
+//! `perf`, `forecast`, `caps`, `serve`, `flops`) are matched
 //! first and never go through that resolver.
 //!
 //! Run `brain help` for the full usage with examples.
@@ -539,7 +539,6 @@ OPTIMIZE (the weight format of every linear, searched within a byte budget)
       directory; `brain prune --help` for every option.
 
 OTHER
-  brain gradcheck                          # finite-difference backprop check (GPT2)
   brain help
   brain --version
 
@@ -551,7 +550,6 @@ EXAMPLES
   brain toymoe train --steps 2000 --save moe.safetensors
   brain toymoe generate --weights moe.safetensors --prompt 1,2,3,4 --max-new 64
   brain federated split moe.safetensors out/shards && brain federated verify out/shards
-  brain gradcheck
 
 Or drive everything via the Makefile:  make gpt/calculator/data gpt/calculator/train gpt/calculator/eval
 ";
@@ -1665,17 +1663,6 @@ fn main() {
         Some("npu") => npu_cli::run_npu(&argv[2..]),
         Some("federated") => federated_cli::run_federated(&argv[2..]),
         Some("flops") => flops_cli::run_flops(&argv[2..]),
-        Some("gradcheck") => {
-            let report = gradcheck::check_gpt(1);
-            report.print();
-            let fails = report.failures(4e-3, 8e-2);
-            if fails.is_empty() {
-                println!("gradcheck OK ({} tensors)", report.checks.len());
-            } else {
-                eprintln!("gradcheck FAILED for {} tensors", fails.len());
-                std::process::exit(1);
-            }
-        }
         Some("bench") => run_bench(&argv[2..]),
         Some("perf") => perf_cli::run_perf(&argv[2..]),
         Some("forecast") => forecast_cli::run_forecast(&argv[2..]),

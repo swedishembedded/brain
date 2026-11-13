@@ -439,9 +439,8 @@ test/times: build/release
 test/capability-report:
 	scripts/gates/capability-report.sh
 
-# The documented backprop gate must BE the real gate: `brain gradcheck` runs
-# exactly one model (GPT), while the ~20 model checks + kernel FD suites live
-# in crates/gradcheck's tests. Point the target at those (audit F17).
+# The backprop gate: the ~20 model checks and the kernel FD suites in
+# crates/gradcheck's tests.
 ## test/gradcheck - the FULL numerical backprop gate (every model check + kernel FD suite in crates/gradcheck)
 test/gradcheck:
 	$(CARGO_TEST) -p brain-gradcheck
