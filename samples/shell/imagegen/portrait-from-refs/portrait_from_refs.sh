@@ -97,7 +97,8 @@ mapfile -t REFS < <(
     | grep -Ei '/(ref[-_]?)?[0-9]+\.(jpe?g|png|ppm|webp|bmp)$' | sort
 )
 
-ARGS=(--ref-size "${REF_PX:-512}")
+ARGS=()
+[ "${#REFS[@]}" -eq 0 ] || ARGS+=(--ref-size "${REF_PX:-512}")
 if [ "${MASK:-0}" = 1 ]; then
   TARGET="$(find "$D" -maxdepth 1 -type f | grep -Ei '/target\.(jpe?g|png|ppm|webp|bmp)$' | sort | head -1 || true)"
   [ -n "$TARGET" ] || { echo "MASK=1 but no target.* image in $D" >&2; exit 1; }
@@ -118,13 +119,24 @@ Image.fromarray((hole * 255).astype("uint8")).filter(ImageFilter.GaussianBlur(6)
 print(f"mask: {hole.mean():.1%} of the frame regenerates", file=sys.stderr)
 PY
   # The target is the init latent, so it must come FIRST.
-  ARGS+=(--mask "$W/mask.png" --ref "$TARGET" --strength "${STRENGTH:-0.99}" --ref-cond-scale 0)
+  ARGS+=(--mask "$W/mask.png" --image "$TARGET" --strength "${STRENGTH:-0.99}" --ref-resolution-scale 0)
 else
   SIZE="${SIZE:-768x1024}"
   ARGS+=(--width "${SIZE%x*}" --height "${SIZE#*x}")
 fi
 
-for f in "${REFS[@]}"; do ARGS+=(--ref "$f"); done
+# Edit with references, or plain text-to-image when only an adapter carries the
+# person. With a mask the target is already `--image`, so references start at
+# `--image0`; otherwise the first reference is `--image`.
+ACTION=text2image
+if [ "${#REFS[@]}" -gt 0 ] || [ "${MASK:-0}" = 1 ]; then
+  ACTION=edit
+  if [ "${MASK:-0}" = 1 ]; then FIRST=0; else FIRST=-1; fi
+  for f in "${REFS[@]}"; do
+    if [ "$FIRST" -lt 0 ]; then ARGS+=(--image "$f"); else ARGS+=("--image$FIRST" "$f"); fi
+    FIRST=$((FIRST + 1))
+  done
+fi
 [ "${#REFS[@]}" -gt 0 ] || [ -n "${ADAPTER:-}" ] || { echo "$D: no numbered reference images" >&2; exit 1; }
 # A missing adapter warns rather than stops: the rest of the run is still
 # worth having. But it warns LOUDLY, because the result then looks like a
@@ -132,7 +144,7 @@ for f in "${REFS[@]}"; do ARGS+=(--ref "$f"); done
 # far more expensive thing to debug than a typo.
 if [ -n "${ADAPTER:-}" ]; then
   if [ -e "$ADAPTER" ]; then
-    ARGS+=(--adapter "$ADAPTER" --lora-scale "${LORA_SCALE:-0.5}")
+    ARGS+=(--adapter "$ADAPTER@${LORA_SCALE:-0.5}")
   else
     echo "WARNING: adapter not found, generating WITHOUT it: $ADAPTER" >&2
     echo "         (every image below is the base model; check the path)" >&2
@@ -145,10 +157,10 @@ SEED="${SEED:-$(( (RANDOM << 15) ^ RANDOM ))}"
 echo "portrait_from_refs: seeds $SEED.. (SEED=$SEED reproduces this run)" >&2
 
 for i in $(seq 1 "$N"); do
-  "$BRAIN" flux2 generate \
+  "$BRAIN" flux2 "$ACTION" \
     --variant "${VARIANT:-klein-4b}" --precision "${PRECISION:-int8}" \
     --prompt "A photorealistic portrait photograph of the person in the reference images, keeping their exact facial identity, head shape, eye colour and skin texture. ${POSE:-Soft key light from the left, dark plain background, plain dark crew-neck top, head level and facing camera, calm closed-mouth expression, sharp focus on the eyes, 85mm lens, shallow depth of field.}" \
     "${ARGS[@]}" \
     --steps "${STEPS:-12}" --seed "$(( SEED + i - 1 ))" \
-    --out "$D/result-$(printf '%02d' "$i").jpg"
+    --out "image=$D/result-$(printf '%02d' "$i").jpg"
 done

@@ -11,7 +11,7 @@
 
     rir_synth.py generate --splits S.json --config synth.json --brain BRAIN --out DIR --modes neutral,prior
 
-`generate` runs `brain flux2 generate` once per frame and mode (the CLI takes
+`generate` runs `brain flux2 edit` once per frame and mode (the CLI takes
 one prompt and one output per process, so the model is loaded for every image)
 and is built to be interrupted and restarted:
 
@@ -67,7 +67,7 @@ Modes (the instruction and the source image):
               directory is a `ConfigMismatch` like any other changed instruction.
     vae-roundtrip
               the frame's REAL IR (one channel replicated to three) as the reference at
-              `--strength 0`, which `brain flux2 generate` documents as the source itself
+              `--strength 0`, which `brain flux2 edit` documents as the source itself
               through the autoencoder with no denoising step: a control arm that carries the
               autoencoder's artefacts and nothing a translator learned, to tell whether a
               detector learns those artefacts. The adapter is not applied.
@@ -314,7 +314,7 @@ class Retry:
 
 
 class BrainRunner:
-    """Builds and runs the `brain flux2 generate` command of a config."""
+    """Builds and runs the `brain flux2 edit` command of a config."""
 
     def __init__(self, brain: str, config: SynthConfig, retry: Retry = Retry(),
                  sleep: Callable[[float], None] = time.sleep):
@@ -332,13 +332,13 @@ class BrainRunner:
     def command(self, prompt: str, ref: str, out: str, size: tuple[int, int], strength: float, adapter: bool) -> list[str]:
         c = self.config
         global_args = [a for flag, v in (("--device", c.device), ("--backend", c.backend)) if v for a in (flag, v)]
-        cmd = [self.brain, *global_args, "flux2", "generate", "--variant", c.variant,
+        cmd = [self.brain, *global_args, "flux2", "edit", "--variant", c.variant,
                "--dit", c.dit, "--vae", c.vae, "--text-encoder", c.text_encoder, "--tokenizer", c.tokenizer,
-               "--prompt", prompt, "--ref", ref, "--strength", str(strength),
+               "--prompt", prompt, "--image", ref, "--strength", str(strength),
                "--width", str(size[0]), "--height", str(size[1]), "--seed", str(c.seed)]
         if adapter and c.adapter:
             cmd += ["--adapter", c.adapter]
-        return [*cmd, *c.extra_args, "--out", out]
+        return [*cmd, *c.extra_args, "--out", f"image={out}"]
 
     def run(self, cmd: list[str]) -> int:
         """Run until success; returns the number of attempts."""

@@ -16,7 +16,7 @@ captions) and the evaluation and decision harness (offline mAP scoring, the
 sequence-clustered bootstrap, the pre-registered decision rules, the
 label-preservation gates, the instruction-obedience measurement) are
 implemented and tested on synthetic inputs. The translator itself is trained
-with `brain flux2 finetune` and the detectors with `brain yolov8 fine-tune`;
+with `brain flux2 lora_train` and the detectors with `brain yolov8 fine-tune`;
 neither is run by this sample, and no real result is claimed here: the numbers
 that decide the study come from those runs, scored by the stages below. The
 synthetic-IR arms (a driver that runs the translator over the frames of split S,
@@ -73,7 +73,7 @@ $R tiles --limit 1100               # lora-set/: aligned RGB / IR tiles of split
 $R measure                          # lora-set/regions/*.json (needs a resident SAM 2, see below)
 $R captions                         # lora-set/captions.yaml + captions-report.json
 $R sheet                            # lora-set/sheet.png, 12 random tiles to look at
-brain flux2 finetune "$WORK/lora-set" --out rgb2ir.brain --size 512
+brain flux2 lora_train --data "$WORK/lora-set" --save rgb2ir.brain --seed "$(cat "$WORK/seed")" --size 512
 $R generate c2 --config synth.json --modes neutral,prior   # generated/c2/<mode>/: synthetic IR for the frames of S
 $R ingest c2 c2/neutral --sensor-model "$WORK/sensor-model.json"   # arms/c2/ (add --no-sensor to skip the sensor model)
 $R gate c2                                       # rejects.jsonl, gate-stats.json; rejected frames leave the manifest
@@ -206,12 +206,12 @@ deliberately simple version using GT boxes as regions.
 
 ## Instruction captions for the RGB-to-IR translator
 
-The translator is a FLUX.2 Klein LoRA trained with `brain flux2 finetune` in its
+The translator is a FLUX.2 Klein LoRA trained with `brain flux2 lora_train` in its
 paired mode: the RGB tile is the reference, the real IR tile the target, and
 the caption is the INSTRUCTION. Its data comes from split T only, in three
 steps; each is a stage of the driver and a module with `--help`.
 
-**1. Tiles (`rir_tiles.py`).** `brain flux2 finetune <dir>` reads `pairs.yaml`
+**1. Tiles (`rir_tiles.py`).** `brain flux2 lora_train --data <dir>` reads `pairs.yaml`
 (`target: reference`, one per line), `captions.yaml` (targets only: a reference
 is an input, not a sample) and the images, center-crops each to a square and
 resizes to `--size` identically for target and reference. Tiles are therefore
@@ -328,7 +328,7 @@ Captions: 30.0 percent neutral, 1147 name one object, 227 two, 37 three.
 Three subcommands, one driver stage each, turn the translator into training
 arms for the same frames of S as the arms above.
 
-**`generate`** runs `brain flux2 generate` once per frame and mode. The CLI takes
+**`generate`** runs `brain flux2 edit` once per frame and mode. The CLI takes
 one prompt and one output per process, so the model is loaded for every image;
 `--shard i/n` splits the selected frames over n processes (one per card) and
 `--limit N` takes a seeded subset first. A frame is cut to the largest centred
@@ -369,7 +369,7 @@ never shows (here, for instance, a cooler person) is never asked for, and a
 frame without a class that has a prior gets the neutral caption. No IR is
 measured for it: a prior instruction uses the class and nothing else about the
 frame. `vae-roundtrip` is the exact codec round trip that `--strength 0` is
-documented as in `brain flux2 generate --help`, applied to real IR.
+documented as in `brain flux2 edit --help`, applied to real IR.
 
 Each output is `<mode>/<frame>.ppm` with a `<frame>.json` record (frame, mode,
 instruction, seed, strength, crop, source, the adapter path and its sha256, the

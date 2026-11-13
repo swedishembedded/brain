@@ -41,11 +41,13 @@ PROMPT="${2:?a prompt is required -- include the trigger phrase you trained with
 N="${3:-4}"
 OUT="${A%.brain}"; SIZE="${SIZE:-1024x768}"
 
+ACTION=text2image
 ARGS=()
 if [ -n "${REF:-}" ]; then
+  ACTION=edit
   R="$(dirname "$A")/.ref.png"
   python3 -c "from PIL import Image;import sys;Image.open(sys.argv[1]).convert('RGB').resize((${SIZE%x*},${SIZE#*x}),Image.LANCZOS).save(sys.argv[2])" "$REF" "$R"
-  ARGS+=(--ref "$R" --strength "${STRENGTH:-1.0}")
+  ARGS+=(--image "$R" --strength "${STRENGTH:-1.0}")
   [ "${STRENGTH:-1.0}" = "1.0" ] && ARGS+=(--ref-size 768)
 fi
 
@@ -54,10 +56,10 @@ SEED="${SEED:-$(( (RANDOM << 15) ^ RANDOM ))}"
 echo "run_lora: seeds $SEED.. (SEED=$SEED reproduces this run)" >&2
 
 for i in $(seq 1 "$N"); do
-  "${BRAIN:-./target/release/brain}" flux2 generate \
+  "${BRAIN:-./target/release/brain}" flux2 "$ACTION" \
     --variant "${VARIANT:-klein-4b}" --precision "${PRECISION:-int8}" \
-    --prompt "$PROMPT" --adapter "$A" --lora-scale "${SCALE:-1.0}" \
+    --prompt "$PROMPT" --adapter "$A@${SCALE:-1.0}" \
     --width "${SIZE%x*}" --height "${SIZE#*x}" "${ARGS[@]}" \
     --steps "${STEPS:-12}" --seed "$(( SEED + i - 1 ))" \
-    --out "$OUT-$(printf '%02d' "$i").jpg"
+    --out "image=$OUT-$(printf '%02d' "$i").jpg"
 done

@@ -2,7 +2,7 @@
 
 A person in a target pose, from a folder of their photographs. The only
 imagegen sample that isn't a D-Bus client: a short shell wrapper around
-`brain flux2 generate` (direct CLI invocation, no server involved).
+`brain flux2 edit` and `brain flux2 text2image` (direct CLI invocation, no server involved).
 
 ```bash
 BRAIN_FLUX2_DIT=... BRAIN_FLUX2_VAE=... BRAIN_FLUX2_TE=... BRAIN_FLUX2_TOKENIZER=... \
@@ -22,11 +22,6 @@ one, on one card when it has one - and prints the placement it chose.
   photographs are the expected input: `--ref-size` bounds each reference
   before it is tokenized, so you never have to work out a token budget by
   hand.
-- The target is passed as a reference by default - that is what carries its
-  pose and framing across literally, at the cost of pulling some of the
-  target person's face along with it. `TARGET_REF=0` drops it and takes the
-  pose from the `POSE` prompt text instead, which keeps identity coming from
-  the numbered references alone.
 - `MASK=1` switches on inpainting instead: `target.*`'s WHITE region is the
   hole to fill, regenerated while everything else is preserved exactly
   (output takes the target's own size). Keeps the background and body
@@ -59,7 +54,6 @@ portrait_from_refs.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--
 | `--lora-scale` / `LORA_SCALE` | `0.5` | adapter strength |
 | `--text-encoder` / `TEXT_ENCODER` | none | HF dir or single `.safetensors`/`.gguf` |
 | `MASK` | `0` | `1` = inpaint mode (needs `target.*`) |
-| `TARGET_REF` | `1` | `0` = drop target as a reference, use `POSE` text only |
 | `SEED` | random, printed | first seed; each result adds 1 |
 | `STRENGTH` | `0.99` | mask mode only |
 | `STEPS` | `12` | denoise steps |

@@ -51,7 +51,30 @@ impl AdapterSpec {
     pub fn new(path: impl Into<String>) -> AdapterSpec {
         AdapterSpec { path: path.into(), scale: 1.0 }
     }
+
+    /// The adapters a served `adapter` param names, in the order they fold
+    /// in: comma-separated `path` or `path@scale` entries, an entry without a
+    /// scale taking `default_scale` (the `lora_scale` param). Empty entries
+    /// are skipped; a scale that is not a finite number is refused, naming
+    /// the entry.
+    pub fn parse_list(list: &str, default_scale: f32) -> Result<Vec<AdapterSpec>, String> {
+        list.split(',')
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .map(|entry| match entry.rsplit_once('@') {
+                Some((path, scale)) => match scale.trim().parse::<f32>() {
+                    Ok(s) if s.is_finite() => Ok(AdapterSpec { path: path.trim().to_string(), scale: s }),
+                    _ => Err(format!("adapter '{entry}': '{scale}' after '@' is not a strength")),
+                },
+                None => Ok(AdapterSpec { path: entry.to_string(), scale: default_scale }),
+            })
+            .collect()
+    }
 }
+
+/// The help text of a served `adapter` param, shared so every model spells
+/// the list the same way.
+pub const ADAPTER_LIST_HELP: &str = "server-side LoRA adapter(s) to apply, in order: comma-separated `path` or `path@strength` entries; an entry without a strength takes lora_scale";
 
 /// Where one adapter's delta lands inside a (possibly FUSED) base tensor.
 /// The whole-tensor case is `row0=0, row_stride=inn, col0=0`, which is
@@ -532,5 +555,21 @@ impl<K: AdapterKind> AdapterSet<K> {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod list_tests {
+    use super::AdapterSpec;
+
+    /// Entries fold in the order given, an entry's own strength wins over the
+    /// default, and a strength that is not a number is refused.
+    #[test]
+    fn an_adapter_list_keeps_order_and_per_entry_strength() {
+        let l = AdapterSpec::parse_list("a.safetensors@0.6, b.brain ,,c@1.5", 0.8).unwrap();
+        let got: Vec<(&str, f32)> = l.iter().map(|a| (a.path.as_str(), a.scale)).collect();
+        assert_eq!(got, [("a.safetensors", 0.6), ("b.brain", 0.8), ("c", 1.5)]);
+        assert!(AdapterSpec::parse_list("a@x", 1.0).unwrap_err().contains("not a strength"));
+        assert!(AdapterSpec::parse_list("", 1.0).unwrap().is_empty());
     }
 }

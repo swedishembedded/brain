@@ -8,7 +8,7 @@
 # info@swedishembedded.com.
 
 """Spec tests for rir_tiles: aligned square tiles of split-T pairs only, in the
-folder format `brain flux2 finetune` reads."""
+folder format `brain flux2 lora_train` reads."""
 import json
 import os
 import secrets

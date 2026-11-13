@@ -1571,6 +1571,7 @@ dependencies = [
  "bytemuck",
  "serde_json",
  "sha2",
+ "tracing",
 ]
 
 [[package]]
@@ -6841,6 +6842,14 @@ name = "sample-learning-visualclick"
 version = "5.1.0"
 dependencies = [
  "brain",
+]
+
+[[package]]
+name = "sample-models-flux2"
+version = "5.1.0"
+dependencies = [
+ "brain-flux2",
+ "brain-invoke",
 ]
 
 [[package]]

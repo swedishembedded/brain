@@ -9,7 +9,7 @@
 # info@swedishembedded.com.
 
 """Aligned square tiles of split-T pairs, in the folder format
-`brain flux2 finetune <dir>` reads for PAIRED reference-to-target training.
+`brain flux2 lora_train --data <dir>` reads for PAIRED reference-to-target training.
 
 The translator maps RGB (the reference) to IR (the target). A training folder
 holds, per accepted tile:
@@ -201,7 +201,7 @@ def cut_tiles(doc: dict, out_dir: str, size: int = 512, seed: int | None = None,
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Cut aligned square tiles of split-T RGB / IR pairs into a "
-                                             "`brain flux2 finetune` paired training folder.")
+                                             "`brain flux2 lora_train` paired training folder.")
     ap.add_argument("--splits", required=True, help="splits.json from rir_splits.py")
     ap.add_argument("--out", required=True, help="training folder to write")
     ap.add_argument("--size", type=int, default=512, help="tile side in pixels (default 512)")

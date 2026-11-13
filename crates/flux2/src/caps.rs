@@ -21,7 +21,7 @@ use capability::{ActionSpec, BlobSpec, Manifest, Media, ParamSpec, ParamType};
 use serde_json::json;
 
 use crate::config::Flux2Config;
-use crate::pipeline::{GenOpts, Paths, Pipeline};
+use crate::pipeline::{Paths, Pipeline};
 
 /// The model id used on the CLI (`brain do flux2-klein …`) and the event API.
 pub const MODEL: &str = "brain/flux2-klein";
@@ -32,26 +32,28 @@ const VARIANTS: [&str; 4] = ["klein-4b", "klein-9b", "base-4b", "base-9b"];
 /// The DiT numeric-tier enum ([`crate::Precision`] names, fp32 first).
 const PRECISIONS: [&str; 2] = ["fp32", "int8"];
 
-/// Optional extra reference-image blob names accepted by `edit` (the primary
-/// is `image`; the manifest must declare every accepted name — validation
-/// rejects undeclared blobs).
-const EXTRA_REFS: [&str; 3] = ["image0", "image1", "image2"];
-
 /// Shared generation params (size / steps / seed / guidance / variant / adapter).
 fn gen_params(spec: ActionSpec) -> ActionSpec {
     spec.param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required())
-        .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16)").default(json!(512)).min(64.0).max(2048.0).step(16.0))
-        .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(512)).min(64.0).max(2048.0).step(16.0))
+        .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16); unset, 512 - or, for an edit that starts from its image (strength or mask), that image's").min(64.0).max(capability::bounds::SIDE_PX).step(16.0))
+        .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16); unset, as width").min(64.0).max(capability::bounds::SIDE_PX).step(16.0))
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default (4 distilled / 50 base)").default(json!(0)).min(0.0).max(crate::pipeline::MAX_STEPS as f64).step(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same prompt/params and no explicit distinct seed would otherwise be indistinguishable to an orchestrator's execution cache and collapse to one cached result").required())
-        .param(ParamSpec::new("ckpt_every", ParamType::Int, "checkpoint the adapter every N steps (0 = only at the end); each write is atomic, so an interrupted one cannot damage the last good checkpoint").min(0.0).max(capability::bounds::TRAIN_COUNT).default(json!(100)))
-        .param(ParamSpec::new("resume", ParamType::Bool, "continue from the adapter already at 'save' instead of starting over - a cancelled multi-hour run then costs only the steps since its last checkpoint").default(json!(false)))
         .param(ParamSpec::new("guidance", ParamType::Float, "CFG scale -- base variants only (klein is guidance-distilled)").default(json!(4.0)).min(0.0).max(30.0).step(0.1))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; 9B needs BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)").default(json!("klein-4b")))
         // perf-number: 4 bytes per weight to 1 is the definition of int8, not a measured speedup
-        .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier: fp32 (parity reference) or int8 (DP4A, ~4x smaller weights; GPU only)").default(json!("fp32")))
-        .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a LoRA adapter to apply: brain's own lora_train checkpoint, or a third-party ai-toolkit/ComfyUI .safetensors").host_resolved())
+        .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier: fp32 (parity reference) or int8 (DP4A, ~4x smaller weights; GPU only). Unset: the checkpoint's own - int8 for a GGUF DiT, else fp32"))
+        .param(ParamSpec::new("adapter", ParamType::Str, model::adapter::ADAPTER_LIST_HELP).host_resolved())
         .param(ParamSpec::new("lora_scale", ParamType::Float, "LoRA strength multiplier (ComfyUI strength_model); 1.0 = the reference default").default(json!(1.0)).min(0.0).max(4.0).step(0.05))
+        .param(ParamSpec::new("experimental_steps", ParamType::Bool, "let `steps` override a distilled variant's fixed 4-step sampler (off: a distilled variant ignores `steps`)").default(json!(false)))
+        .param(ParamSpec::new("tile_size", ParamType::Int, "denoise a large canvas in windows of this many px (multiple of 16; 0 or unset: one forward over the whole canvas). The DiT is built for one window, the VAE decodes the whole canvas").min(0.0).max(capability::bounds::SIDE_PX))
+        .param(ParamSpec::new("tile_overlap", ParamType::Int, "px two neighbouring windows share; needs tile_size (default: the tiling's own)").min(0.0).max(capability::bounds::SIDE_PX))
+}
+
+/// The reference-image knobs `edit` adds.
+fn ref_params(spec: ActionSpec) -> ActionSpec {
+    spec.param(ParamSpec::new("ref_size", ParamType::Int, "long edge, px, a reference is encoded at (0: its own size; unset: 512). The image an edit starts from, and a tiled run's anchor, are never bounded").min(0.0).max(capability::bounds::SIDE_PX))
+        .param(ParamSpec::new("ref_resolution_scale", ParamType::Float, "the share of its own resolution the starting image conditions at (0..1): lower is cheaper and looser").min(0.0).max(1.0).step(0.05).default(json!(crate::pipeline::DEFAULT_REF_RESOLUTION_SCALE)))
 }
 
 /// The full, static capability manifest — safe to build with no weights loaded.
@@ -61,16 +63,18 @@ pub fn manifest() -> Manifest {
     let text2image = gen_params(ActionSpec::new("text2image", "generate an image from a text prompt (4-step distilled rectified flow; base variants add CFG)").streaming())
         .output(image_out());
 
-    let mut edit = gen_params(ActionSpec::new("edit", "regenerate toward a prompt conditioned on reference image(s) (token-concatenation editing)").streaming())
+    let edit = gen_params(ActionSpec::new("edit", "regenerate toward a prompt conditioned on reference image(s) (token-concatenation editing)").streaming())
         // `strength` belongs to `edit` alone: it seeds the trajectory from the
         // FIRST input image's latent, so it is meaningless without one.
         .param(ParamSpec::new(
             "strength",
             ParamType::Float,
-            "img2img init strength in (0,1] = the starting noise level: the first input image seeds the              trajectory instead of pure noise. Low = keep the source, high = redraw it.              Does NOT add colour, and does NOT turn conditioning off - every input image              conditions the model at every strength. Omit to start from pure noise.",
+            "img2img init strength in [0,1] = the starting noise level (0: the image back through the VAE round trip): the first input image seeds the              trajectory instead of pure noise. Low = keep the source, high = redraw it.              Does NOT add colour, and does NOT turn conditioning off - every input image              conditions the model at every strength. Omit to start from pure noise.",
         ).min(0.0).max(1.0).step(0.01))
-        .input(BlobSpec::new("image", Media::Image, "the reference image to edit (center-cropped to /16); also the img2img init when `strength` is set").required());
-    for r in EXTRA_REFS {
+        .input(BlobSpec::new("image", Media::Image, "the reference image to edit (center-cropped to /16); also the img2img init when `strength` or `mask` is set").required())
+        .input(BlobSpec::new("mask", Media::Mask, "inpaint: white regenerates, black keeps `image`; over the output canvas, at any resolution"));
+    let mut edit = ref_params(edit);
+    for r in crate::request::EXTRA_REFS {
         edit = edit.input(BlobSpec::new(r, Media::Image, "additional reference image"));
     }
     let edit = edit.output(image_out());
@@ -96,6 +100,11 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("method", ParamType::Enum(vec!["lora".into(), "rslora".into()]), "adapter scale: 'lora' is alpha/rank, 'rslora' is alpha/sqrt(rank) (rank-stabilized, does not suppress the update as rank grows)").default(json!("lora")))
         .param(ParamSpec::new("lr_ratio", ParamType::Float, "LoRA+ : B's effective learning rate is lr_ratio*lr; 1.0 (the default) is plain LoRA").default(json!(1.0)).min(1.0).max(64.0))
         .param(ParamSpec::new("freeze_a", ParamType::Bool, "LoRA-FA: freeze A at its random init, train only B").default(json!(false)))
+        .param(ParamSpec::new("ckpt_every", ParamType::Int, "checkpoint the adapter every N steps (0 = only at the end); each write is atomic, so an interrupted one cannot damage the last good checkpoint").min(0.0).max(capability::bounds::TRAIN_COUNT).default(json!(100)))
+        .param(ParamSpec::new("resume", ParamType::Bool, "continue from the adapter already at 'save' instead of starting over - a cancelled multi-hour run then costs only the steps since its last checkpoint").default(json!(false)))
+        .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "the frozen base's tier in the host trainer").default(json!("fp32")))
+        .param(ParamSpec::new("train_base", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "the device trainer's frozen base: fp32, or int8 (smaller, fits a 9B on one card); unset, the checkpoint's own"))
+        .param(ParamSpec::new("cache_dir", ParamType::Str, "server-side directory caching the encoded dataset between runs (unset: none)").host_resolved())
         .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()), "what the host trainer's backward keeps of the forward: 'keep' every block's activations or 'recompute' them from each block's input (less memory, one extra forward); the device trainer always rebuilds from block inputs; default: keep"))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"));
 
@@ -128,79 +137,6 @@ pub fn manifest() -> Manifest {
 use std::sync::Arc;
 
 use capability::{hot::Hot, Action, ActionResult, Invocation, Outcome, Progress, Provider};
-
-/// Decoded generation request: the variant config + name, [`GenOpts`], and an
-/// optional LoRA adapter path. Validates sizes (/16); does NOT gate the 9B
-/// license - this decodes a bare `Invocation`, with no weight file to sniff,
-/// so its `variant`/`cfg` are the caller's STATED request only. A caller with
-/// real weights in hand (a `paths.dit`) must run [`bind_variant`] against them
-/// and gate on the result - see that function's doc.
-pub struct GenParams {
-    pub cfg: Flux2Config,
-    pub variant: String,
-    pub opts: GenOpts,
-    pub adapter: Option<crate::AdapterSpec>,
-    /// DiT numeric tier (fp32 default; int8 = DP4A, GPU only).
-    pub precision: crate::Precision,
-}
-
-/// Decode + validate the shared generation params from an invocation. Does
-/// NOT license-gate - see [`GenParams`]'s doc.
-pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
-    let variant = inv.get_str("variant").unwrap_or_else(|| "klein-4b".into());
-    let cfg = Flux2Config::from_name(&variant)?;
-    let precision = crate::Precision::from_name(
-        &inv.get_str("precision").unwrap_or_else(|| "fp32".into()),
-    )?;
-    let width = inv.get_i64("width").unwrap_or(512).max(16) as u32;
-    let height = inv.get_i64("height").unwrap_or(512).max(16) as u32;
-    if !width.is_multiple_of(16) || !height.is_multiple_of(16) {
-        return Err(format!("width/height must be multiples of 16 (got {width}×{height})"));
-    }
-    let steps = inv.get_i64("steps").unwrap_or(0).max(0) as u32;
-    // 0 = absent -> generate from noise; (0,1] -> img2img init from the first
-    // reference (the faithful-colorize path).
-    let strength = inv.get_f64("strength").unwrap_or(0.0) as f32;
-    let opts = GenOpts {
-        width,
-        height,
-        strength: (strength > 0.0).then_some(strength),
-        steps: (steps > 0).then_some(steps),
-        guidance: inv.get_f64("guidance").unwrap_or(4.0) as f32,
-        seed: inv
-            .get_i64("seed")
-            .expect("ActionSpec::validate refuses an invocation missing this required param")
-            .max(0) as u64,
-        // Masked editing is reachable from `brain flux2 generate --mask` but
-        // has no wire representation yet: it would need a second image blob on
-        // the `edit` action, and `refs_from` currently treats every blob it
-        // finds as a reference image. Declared here rather than hidden behind
-        // `..Default::default()` so the gap is visible at the decode site.
-        mask: None,
-        // No wire parameter: a served call never overrides the distilled
-        // fixed step count.
-        experimental_steps: false,
-        // No wire parameter yet: over the capability interface the caller
-        // supplies the reference blob itself, so the only reference whose
-        // resolution it cannot pick is the `strength` init latent - which is
-        // exactly the one this default is for.
-        ref_resolution_scale: crate::pipeline::DEFAULT_REF_RESOLUTION_SCALE,
-        // No wire parameter: tiled generation trades passes for activation
-        // memory, and how much memory a served instance has is a residency
-        // decision this side of the wire, not the caller's to make. Declared
-        // here rather than hidden behind `..Default::default()` so the gap is
-        // visible at the decode site.
-        tile: None,
-    };
-    // `lora_scale` is ComfyUI's `strength_model`, not a value read from the
-    // adapter file - third-party LoRAs carry no alpha, so this is the dial.
-    let lora_scale = inv.get_f64("lora_scale").unwrap_or(1.0) as f32;
-    let adapter = inv
-        .get_str("adapter")
-        .filter(|s| !s.is_empty())
-        .map(|path| crate::AdapterSpec { path, scale: lora_scale });
-    Ok(GenParams { cfg, variant, adapter, opts, precision })
-}
 
 /// Combine a caller-STATED variant's klein/base FAMILY with the DiT at
 /// `dit_path`'s ACTUAL, sniffed size ([`crate::sniff_dit_size`]), so the
@@ -248,48 +184,10 @@ pub fn check_license(variant: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Collect reference images from an invocation (`image`, then `image0..`):
-/// each decoded through the shared `capability::blob` codec and converted to
-/// the `[-1,1]` CHW /16-cropped layout by [`crate::pipeline::ref_from_hwc`].
-/// `require_primary` = the action needs `image` (edit); text2image passes
-/// none.
-pub fn refs_from(inv: &Invocation, require_primary: bool) -> Result<Vec<(Vec<f32>, u32, u32)>, String> {
-    let mut refs = Vec::new();
-    if inv.get_blob("image").is_some() {
-        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
-        refs.push(crate::pipeline::ref_from_hwc(&hwc, w, h)?);
-    } else if require_primary {
-        return Err("edit: input blob 'image' is required".into());
-    }
-    for name in EXTRA_REFS {
-        if inv.get_blob(name).is_some() {
-            let (hwc, w, h) = capability::blob::decode_image(inv, name)?;
-            refs.push(crate::pipeline::ref_from_hwc(&hwc, w, h)?);
-        }
-    }
-    Ok(refs)
-}
-
-/// Total reference latent tokens for a set of pre-cropped refs.
-pub fn ref_tokens(refs: &[(Vec<f32>, u32, u32)], opts: &GenOpts) -> u32 {
-    crate::pipeline::ref_tokens(refs, opts)
-}
-
-/// Run one generation on a built pipeline and wrap the result as an
-/// image-output [`Outcome`] (the shared `capability::blob` wire format).
-/// Cancellation rides in `inv.cancel` — [`Pipeline::generate`] polls it per
-/// denoise step.
-pub fn generate_on(
-    pipe: &Pipeline,
-    inv: &Invocation,
-    refs: &[(Vec<f32>, u32, u32)],
-    opts: &GenOpts,
-    progress: &mut dyn FnMut(Progress),
-) -> ActionResult {
-    let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
-    let (rgb, w, h) = pipe.generate(&prompt, refs, opts, &inv.cancel, |step, total, msg| {
-        progress(Progress::step(step, total, msg.to_string()))
-    })?;
+/// Run a planned generation on a built pipeline.
+pub fn generate_on(pipe: &Pipeline, inv: &Invocation, plan: &crate::request::Plan, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    let refs = plan.decode(inv)?;
+    let (rgb, w, h) = pipe.generate(&plan.prompt, &refs, &plan.opts, &inv.cancel, |step, total, msg| progress(Progress::step(step, total, msg.to_string())))?;
     Ok(image_outcome(&rgb, w, h))
 }
 
@@ -349,8 +247,13 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         cards: inv.get_i64("cards").unwrap_or(1).max(1) as usize,
         // A served request is already placed by the residency layer.
         card: None,
-        train_base: None,
-        cache_dir: None,
+        train_base: match inv.get_str("train_base").as_deref() {
+            Some("int8") => Some(crate::devgrad::BasePrecision::Int8),
+            Some("fp32") => Some(crate::devgrad::BasePrecision::F32),
+            Some(other) => return Err(format!("lora_train: unknown train_base {other} (fp32|int8)")),
+            None => None,
+        },
+        cache_dir: inv.get_str("cache_dir").filter(|d| !d.is_empty()).map(std::path::PathBuf::from),
         size: inv.get_i64("size").unwrap_or(512).max(16) as u32,
         seed: inv
             .get_i64("seed")
@@ -388,10 +291,9 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
 
 // ===================== execution (hot-pipeline provider) =====================
 
-/// Cache key for a resident pipeline: everything that fixes the built graphs —
-/// (variant, precision, width, height, reference latent tokens) plus the
-/// folded adapter.
-type HotKey = (String, &'static str, u32, u32, u32, Option<crate::AdapterSpec>);
+/// What a built pipeline is fixed to: (variant, precision, tokens per
+/// forward, canvas tokens, the adapters folded in).
+type HotKey = (String, &'static str, u32, u32, Vec<crate::AdapterSpec>);
 
 /// The executable FLUX.2 model behind the manifest. Holds a **hot pipeline
 /// cache** so a long-lived process (`brain run` / the event server) loads the
@@ -407,6 +309,11 @@ impl Flux2Provider {
     pub fn new(paths: Paths) -> Flux2Provider {
         Flux2Provider { hot: Arc::new(Hot::new()), paths }
     }
+}
+
+/// The provider over a resolved [`capability::Assembly`] (its four roles).
+pub fn provider(assembly: &capability::Assembly) -> Result<Arc<dyn Provider>, String> {
+    Ok(Arc::new(Flux2Provider::new(Paths::from_assembly(assembly)?)))
 }
 
 impl Provider for Flux2Provider {
@@ -438,28 +345,19 @@ impl Action for Flux2Action {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match self.name.as_str() {
             "text2image" | "edit" => {
-                // Params before the license gate - a missing/malformed
-                // request must not hide behind a licensing message. The gate
-                // itself needs `paths` (it checks the REAL weights' sniffed
-                // size, not the request's claim - see `bind_variant`).
-                let mut p = gen_params_from(inv)?;
+                // The plan before the license gate: a malformed request must
+                // not hide behind a licensing message. `resolve` (not
+                // `build_resolved`) because the variant and precision are the
+                // cache key, needed before deciding whether to build at all;
+                // it also corrects the precision a served `.gguf` DiT needs.
+                let plan = crate::request::plan(inv, self.name == "edit")?;
                 let paths = &self.paths;
-                // `resolve` (not `build_resolved`): the variant/precision are
-                // the hot-cache KEY below, needed before deciding whether a
-                // rebuild is even necessary - see that function's own doc for
-                // why calling the full resolve-and-build here would defeat
-                // the cache. This is also where the precision correction a
-                // served `.gguf` DiT needs happens (`brain flux2 generate`/
-                // `brain::ImagePipeline` already apply it; this path once
-                // didn't, and built at the WRONG precision as a result).
-                let precision_was_explicit = inv.params.get("precision").is_some();
-                let (cfg, precision, variant) = crate::build::resolve(crate::build::VariantSource::Sniff(&p.variant), paths, p.precision, precision_was_explicit)?;
-                p.precision = precision;
-                let refs = refs_from(inv, self.name == "edit")?;
-                let n_gen = (p.opts.height / 16) * (p.opts.width / 16);
-                let n_ref = ref_tokens(&refs, &p.opts);
-                let key: HotKey = (variant, p.precision.name(), p.opts.width, p.opts.height, n_ref, p.adapter.clone());
-
+                let (cfg, precision, variant) = crate::build::resolve(crate::build::VariantSource::Sniff(&plan.variant), paths, plan.precision, plan.precision_explicit)?;
+                for note in &plan.notes {
+                    tracing::info!(target: "flux2", "{note}");
+                }
+                let (fwd, canvas) = (plan.forward_tokens(), plan.canvas_tokens());
+                let key: HotKey = (variant, precision.name(), fwd, canvas, plan.adapters.clone());
                 // Both closures report through the same sink, so it is shared
                 // rather than borrowed twice.
                 let sink = std::cell::RefCell::new(progress);
@@ -467,13 +365,9 @@ impl Action for Flux2Action {
                     key,
                     || {
                         (**sink.borrow_mut())(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
-                        // One adapter at most over the wire: the `adapter` param
-                        // is a single string, so a served call cannot express the
-                        // stack `Pipeline` folds (`brain flux2 generate` can).
-                        let adapters: &[crate::AdapterSpec] = p.adapter.as_slice();
-                        Pipeline::build_sized(&cfg, paths, n_gen + n_ref, n_gen, adapters, p.precision, 1)
+                        Pipeline::build_sized(&cfg, paths, fwd, canvas, &plan.adapters, precision, 1)
                     },
-                    |pipe| generate_on(pipe, inv, &refs, &p.opts, &mut **sink.borrow_mut())
+                    |pipe| generate_on(pipe, inv, &plan, &mut **sink.borrow_mut()),
                 )
             }
             "lora_train" => train_action(&self.paths, inv, progress),
@@ -515,22 +409,23 @@ mod tests {
         // to an orchestrator's execution cache and collapse to one cached
         // result.
         assert!(t2i.params.iter().any(|p| p.name == "seed" && p.required && p.default.is_none()));
-        assert_eq!(t2i.params.iter().find(|p| p.name == "width").unwrap().default, Some(json!(512)));
+        assert_eq!(t2i.params.iter().find(|p| p.name == "width").unwrap().default, None, "unset width is 512, or an edit's init image's");
         assert_eq!(t2i.params.iter().find(|p| p.name == "steps").unwrap().default, Some(json!(0)));
         let variant = t2i.params.iter().find(|p| p.name == "variant").unwrap();
         assert_eq!(variant.default, Some(json!("klein-4b")));
         assert!(matches!(&variant.ty, ParamType::Enum(v) if v == &VARIANTS.map(String::from).to_vec()));
         let precision = t2i.params.iter().find(|p| p.name == "precision").unwrap();
-        assert_eq!(precision.default, Some(json!("fp32")));
+        assert_eq!(precision.default, None, "unset precision is the checkpoint's own; a default would read as an explicit choice");
         assert!(matches!(&precision.ty, ParamType::Enum(v) if v == &PRECISIONS.map(String::from).to_vec()));
         assert!(t2i.streaming);
         assert_eq!(t2i.outputs[0].media, Media::Image);
         // edit requires the primary reference image and accepts extra refs.
         let edit = m.actions.iter().find(|a| a.name == "edit").unwrap();
         assert!(edit.inputs.iter().any(|b| b.name == "image" && b.media == Media::Image && b.required));
-        for r in EXTRA_REFS {
+        for r in crate::request::EXTRA_REFS {
             assert!(edit.inputs.iter().any(|b| b.name == r && !b.required));
         }
+        assert!(edit.inputs.iter().any(|b| b.name == "mask" && b.media == Media::Mask && !b.required));
         // lora_train declares the trained adapter as a retrievable output blob.
         let lt = m.actions.iter().find(|a| a.name == "lora_train").unwrap();
         assert!(lt.params.iter().any(|p| p.name == "data" && p.required));
@@ -544,6 +439,10 @@ mod tests {
         assert!(matches!(&method.ty, ParamType::Enum(v) if v == &["lora".to_string(), "rslora".to_string()]));
         assert_eq!(lt.params.iter().find(|p| p.name == "lr_ratio").unwrap().default, Some(json!(1.0)));
         assert_eq!(lt.params.iter().find(|p| p.name == "freeze_a").unwrap().default, Some(json!(false)));
+        for p in ["ckpt_every", "resume", "precision", "train_base", "cache_dir"] {
+            assert!(lt.params.iter().any(|q| q.name == p), "lora_train takes {p}");
+            assert!(!t2i.params.iter().any(|q| q.name == p && p != "precision"), "{p} is a training knob, not a generation one");
+        }
         // the whole manifest round-trips to JSON for discovery.
         let j = m.to_json();
         assert_eq!(j["actions"].as_array().unwrap().len(), 3);
@@ -553,8 +452,8 @@ mod tests {
     fn generation_params_carry_ui_ranges() {
         let t2i = &manifest().actions[0];
         let p = |name: &str| t2i.params.iter().find(|p| p.name == name).unwrap();
-        assert_eq!((p("width").min, p("width").max, p("width").step), (Some(64.0), Some(2048.0), Some(16.0)));
-        assert_eq!((p("height").min, p("height").max, p("height").step), (Some(64.0), Some(2048.0), Some(16.0)));
+        assert_eq!((p("width").min, p("width").max, p("width").step), (Some(64.0), Some(capability::bounds::SIDE_PX), Some(16.0)));
+        assert_eq!((p("height").min, p("height").max, p("height").step), (Some(64.0), Some(capability::bounds::SIDE_PX), Some(16.0)));
         assert_eq!((p("steps").min, p("steps").max, p("steps").step), (Some(0.0), Some(150.0), Some(1.0)));
         assert_eq!((p("guidance").min, p("guidance").max), (Some(0.0), Some(30.0)));
 

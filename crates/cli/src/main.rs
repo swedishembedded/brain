@@ -23,7 +23,6 @@ mod devices_cli;
 mod doctor_cli;
 mod federated_cli;
 mod flops_cli;
-mod flux2_cli;
 mod forecast_cli;
 mod label_cli;
 mod glm_cli;
@@ -79,9 +78,9 @@ mod tts_cli;
 /// `brain tts serve`: a Unix domain socket server, so Unix only.
 #[cfg(unix)]
 mod tts_serve;
+mod wm_cli;
 mod wan_cli;
 mod wan_report;
-mod wm_cli;
 mod yolo_cli;
 
 /// Whether `--device`/`BRAIN_DEVICE` EXPLICITLY named the NPU. The NPU is a
@@ -280,14 +279,10 @@ GPT2 (dense baseline)
                               (vocab is read from the checkpoint; --data only for old ones)
 
 FLUX.2 Klein (text-to-image + image editing; 4-step distilled flow matching)
-  brain flux2 generate --prompt \"...\" --out out.ppm [--width W --height H]
-      [--steps N --seed S --variant klein-4b|klein-9b|base-4b|base-9b]
-      [--guidance G]              # CFG, base variants only
-      [--ref in.ppm]...           # reference images => editing mode
-      weights resolve from the models dir; --dit/--vae/--text-encoder/--tokenizer name a role
-      served generically as model `flux2-klein`: brain caps flux2-klein, and D-Bus
-      (samples/python/imagegen); the manifest's text2image/edit/lora_train actions are
-      D-Bus/HTTP only today -- this `brain flux2` CLI reaches generate/infer, not those
+  brain flux2 text2image --prompt \"...\" --seed S --out image=out.png [--width W --height H]
+  brain flux2 edit --image in.png [--image0 ref.png]... [--mask m.png | --strength S] --prompt \"...\" --seed S --out image=out.png
+  brain flux2 lora_train --data <dir> --save adapter.brain --seed S
+      every parameter: brain flux2 <action> --help; --dit/--vae/--text-encoder/--tokenizer name a role
       9B variants need BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)
 
 WAN 2.1 (text-to-video; 81 frames at 16 fps, 480p on the 1.3B variant)

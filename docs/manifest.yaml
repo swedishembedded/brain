@@ -189,6 +189,8 @@ navigation:
         path: examples/learning/rlcd.md
       - source: samples/learning/visualclick/README.md
         path: examples/learning/visualclick.md
+      - source: samples/models/flux2/README.md
+        path: examples/models/flux2.md
       - source: samples/models/sam2/README.md
         path: examples/models/sam2.md
       - source: samples/npu/rockchip/README.md

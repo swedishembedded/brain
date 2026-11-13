@@ -162,7 +162,7 @@ class SyntheticArmChain(unittest.TestCase):
         with open(self.log) as fh:
             calls = [json.loads(line) for line in fh]
         self.assertEqual(len(calls), 4)
-        self.assertEqual(calls[0][:5], ["--device", "gpu1", "flux2", "generate", "--variant"])
+        self.assertEqual(calls[0][:5], ["--device", "gpu1", "flux2", "edit", "--variant"])
         self.assertEqual(calls[0][calls[0].index("--seed") + 1], str(self.synth_seed))
         self.drive("ingest", "c2", "run1/neutral", "--no-sensor")
         self.drive("ingest", "v0", "run1/vae-roundtrip", "--no-sensor")

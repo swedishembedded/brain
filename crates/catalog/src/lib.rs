@@ -392,10 +392,7 @@ pub fn models() -> Vec<ModelEntry> {
         // entries here are resolver-migrated now, each naming its own `spec`.
         ModelEntry {
             manifest: flux2::caps::manifest,
-            provider: |assembly: &Assembly| {
-                let paths = flux2::pipeline::Paths::from_assembly(assembly)?;
-                Ok(Arc::new(flux2::caps::Flux2Provider::new(paths)) as Arc<dyn Provider>)
-            },
+            provider: flux2::caps::provider,
             spec: Some(("flux2", &flux2::spec::Flux2Spec)),
             resident: None,
         },

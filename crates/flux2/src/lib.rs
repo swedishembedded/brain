@@ -39,6 +39,7 @@ pub mod model;
 pub mod modelgrad;
 pub mod pipeline;
 pub mod refcond;
+pub mod request;
 pub mod spec;
 pub mod weights;
 

@@ -28,7 +28,7 @@
 #                                                        -> sensor-model.json, arms/<arm>/
 #   rgb_to_ir.sh pack <arm> [--size 512] [--limit N]     -> packed/<arm>/ for `brain yolov8 fine-tune`
 #   rgb_to_ir.sh tiles [--size 512] [--limit N]          -> lora-set/ : aligned RGB / IR tiles of split T
-#                                                        + pairs.yaml for `brain flux2 finetune`
+#                                                        + pairs.yaml for `brain flux2 lora_train`
 #   rgb_to_ir.sh captions [--neutral-share 0.3]          -> lora-set/captions.yaml, captions-report.json (needs `measure`)
 #   rgb_to_ir.sh sheet                                   -> lora-set/sheet.png : random tiles, captions, mask overlays
 #   rgb_to_ir.sh generate RUN --config FILE [--modes neutral,prior,vae-roundtrip] [--split S] [--shard i/n] [--limit N]

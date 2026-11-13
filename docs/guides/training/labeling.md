@@ -16,7 +16,7 @@ brain label images ./my-dataset --model qwen3vl --trigger "bohemian style"
 ```
 
 That writes `./my-dataset/captions.yaml`, which is exactly what
-`brain flux2 finetune ./my-dataset --out adapter.safetensors` consumes.
+`brain flux2 lora_train --data ./my-dataset --save adapter.brain --seed 1` consumes.
 
 ## Why the captions matter more than the hyper-parameters
 

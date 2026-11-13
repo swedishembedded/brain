@@ -18,7 +18,7 @@
 #
 # # Why the target has to be first, and why that is the model's rule
 #
-# Under `--strength` and under `--mask`, brain treats the FIRST `--ref` as the
+# Under `--strength` and under `--mask`, brain treats the FIRST `--image` as the
 # init latent: it is VAE-encoded and the denoise starts from it, which is the
 # only reason the pose survives at all. Every later reference is conditioning.
 # So the ordering is not a convention this script invented, it is what the
@@ -26,7 +26,7 @@
 #
 # # The two settings that decide whether this works
 #
-# **`--ref-cond-scale 0`.** The target does double duty: it seeds the latent
+# **`--ref-resolution-scale 0`.** The target does double duty: it seeds the latent
 # AND it conditions the model. But it contains a face -- the one being replaced
 # -- so conditioning on it feeds the model the wrong identity, which then
 # competes with the face references and wins, because it is also the thing
@@ -116,7 +116,7 @@ echo "target: $(basename "$TARGET")   face: ${#FACES[@]} image(s)" >&2
 # -- a softer result with no seam. So every way of not having a mask (MASK=0,
 # no mask.* in the folder, no detector weights, no face found, no python)
 # lands on the same route rather than stopping the run.
-ARGS=(--ref "$TARGET" --ref-cond-scale 0)
+ARGS=(--ref-resolution-scale 0)
 MASK_FILE=""
 if [ "${MASK:-1}" != 0 ]; then
   SUPPLIED="$(find "$D" -maxdepth 1 -type f \
@@ -143,14 +143,16 @@ else
   ARGS+=(--strength "${STRENGTH:-0.9}")
 fi
 
-for f in "${FACES[@]}"; do ARGS+=(--ref "$f"); done
+# The target is `--image`, the init latent; each face is `--image0`, `--image1`, ...
+ARGS+=(--image "$TARGET")
+for i in "${!FACES[@]}"; do ARGS+=("--image$i" "${FACES[$i]}"); done
 # A missing adapter warns rather than stops: the rest of the run is still
 # worth having. But it warns LOUDLY, because the result then looks like a
 # weak adapter rather than like a path that was never read -- which is a
 # far more expensive thing to debug than a typo.
 if [ -n "${ADAPTER:-}" ]; then
   if [ -e "$ADAPTER" ]; then
-    ARGS+=(--adapter "$ADAPTER" --lora-scale "${LORA_SCALE:-0.5}")
+    ARGS+=(--adapter "$ADAPTER@${LORA_SCALE:-0.5}")
   else
     echo "WARNING: adapter not found, generating WITHOUT it: $ADAPTER" >&2
     echo "         (every image below is the base model; check the path)" >&2
@@ -163,10 +165,10 @@ SEED="${SEED:-$(( (RANDOM << 15) ^ RANDOM ))}"
 echo "face_swap: seeds $SEED.. (SEED=$SEED reproduces this run)" >&2
 
 for i in $(seq 1 "$N"); do
-  "$BRAIN" flux2 generate \
+  "$BRAIN" flux2 edit \
     --variant "${VARIANT:-klein-4b}" --precision "${PRECISION:-int8}" \
     --prompt "${PROMPT:-A photograph of the person in the face reference images, keeping their exact facial identity, head shape, eye colour and skin texture, in the pose, framing, clothing, background and lighting of the first reference photograph.}" \
     "${ARGS[@]}" \
     --steps "${STEPS:-12}" --seed "$(( SEED + i - 1 ))" \
-    --out "$D/result-$(printf '%02d' "$i").jpg"
+    --out "image=$D/result-$(printf '%02d' "$i").jpg"
 done

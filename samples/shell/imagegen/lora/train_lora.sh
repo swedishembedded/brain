@@ -14,14 +14,14 @@
 # reviewing them is the highest-leverage minute in this script.
 #
 # Step 2 trains the adapter on those captions. Use the result with
-# `brain flux2 generate --adapter <adapter.brain>`.
+# `brain flux2 text2image --adapter <adapter.brain>`.
 #
 # The trigger phrase is what you type later to invoke the style. A rare token
 # binds cleanly but reads oddly; a natural phrase composes well but shifts a
 # concept the base model already owns, so it leaks into every prompt that
 # mentions it. Pick knowing that.
 #
-# Optional, all env: MODEL (qwen3vl|fastvlm), STEPS, RANK, LR, SIZE, VARIANT,
+# Optional, all env: MODEL (qwen3vl|fastvlm), SEED, STEPS, RANK, LR, SIZE, VARIANT,
 # TRAINER (device|host -- device is the GPU trainer and the default), BRAIN.
 #
 # Weights come from BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}; the captioner needs
@@ -39,7 +39,11 @@ BRAIN="${BRAIN:-./target/release/brain}"
 echo "captions written to $DIR/captions.yaml - review them, then press enter" >&2
 [ -t 0 ] && read -r _
 
-exec "$BRAIN" flux2 finetune "$DIR" --out "$OUT" \
+# One seed per run: unset, a random one is drawn and printed.
+SEED="${SEED:-$RANDOM$RANDOM}"
+echo "train_lora: seed $SEED (SEED=$SEED reproduces this run)" >&2
+
+exec "$BRAIN" flux2 lora_train --data "$DIR" --save "$OUT" --seed "$SEED" \
   --variant "${VARIANT:-klein-4b}" --trainer "${TRAINER:-device}" \
   --steps "${STEPS:-1500}" --rank "${RANK:-16}" --lr "${LR:-1e-4}" \
   --size "${SIZE:-512}" --ckpt-every "${CKPT_EVERY:-100}"

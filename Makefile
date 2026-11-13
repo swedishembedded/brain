@@ -1294,15 +1294,15 @@ tts/data: build/release
 flux2:
 	$(LIST_CHILDREN)
 
-## flux2/generate - generate one image with FLUX.2 Klein (PROMPT=..., BRAIN_FLUX2_* env)
+## flux2/generate - generate one image with FLUX.2 Klein (PROMPT=..., SEED=1, BRAIN_FLUX2_* env)
 flux2/generate: build/release
 	@test -n "$(BRAIN_FLUX2_DIT)" || (echo "set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER"; exit 2)
-	$(BRAIN) flux2 generate --prompt "$(PROMPT)" --out out/flux2.ppm $(FLUX2_FLAGS)
+	$(BRAIN) flux2 text2image --prompt "$(PROMPT)" --seed $(or $(SEED),1) --out image=out/flux2.ppm $(FLUX2_FLAGS)
 
-## flux2/edit - reference-image edit with FLUX.2 Klein (FLUX2_REF=<ref.ppm> PROMPT=...)
+## flux2/edit - reference-image edit with FLUX.2 Klein (FLUX2_REF=<ref.ppm> PROMPT=... SEED=1)
 flux2/edit: build/release
 	@test -n "$(FLUX2_REF)" || (echo "set FLUX2_REF=<ref.ppm> PROMPT=..."; exit 2)
-	$(BRAIN) flux2 generate --prompt "$(PROMPT)" --ref $(FLUX2_REF) --out out/flux2-edit.ppm $(FLUX2_FLAGS)
+	$(BRAIN) flux2 edit --prompt "$(PROMPT)" --image $(FLUX2_REF) --seed $(or $(SEED),1) --out image=out/flux2-edit.ppm $(FLUX2_FLAGS)
 
 # WAN_FLAGS carries no seed: wan t2v draws one and prints it (add `--seed N` to
 # reproduce). It is deliberately NOT upstream's sampling defaults: 81 frames at

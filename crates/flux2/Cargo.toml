@@ -10,6 +10,8 @@ name = "flux2"
 path = "src/lib.rs"
 
 [dependencies]
+# What a generation decided about its geometry (bounded references, tiling), at info level.
+tracing.workspace = true
 brain-capability.workspace = true
 brain-gpu-core.workspace = true
 brain-modelstore.workspace = true

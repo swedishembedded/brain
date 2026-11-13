@@ -1,0 +1,19 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/flux2` -> `sample-models-flux2`.
+name = "sample-models-flux2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: FLUX.2 Klein text-to-image, editing, inpainting and LoRA training from the command line, every served action with every parameter."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-flux2.workspace = true
+brain-invoke.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 45

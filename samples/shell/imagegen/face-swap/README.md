@@ -1,7 +1,7 @@
 # sample: imagegen/face-swap
 
 Put someone's face into someone else's photograph. A direct CLI wrapper (no
-server) around `brain flux2 generate`, using the colocated helper
+server) around `brain flux2 edit`, using the colocated helper
 `head_mask.py` to derive a feathered head mask from face landmarks - it's an
 internal helper for this sample, not a separate sample of its own.
 
@@ -20,10 +20,10 @@ photograph of the person whose face goes in. Results are written as
 ## What it demonstrates
 
 - **Why the target has to be first**: under `--strength` and under `--mask`,
-  brain treats the first `--ref` as the init latent - it is VAE-encoded and
+  brain treats the first `--image` as the init latent - it is VAE-encoded and
   the denoise starts from it, which is the only reason the pose survives at
   all. Every later reference is conditioning.
-- **`--ref-cond-scale 0`**: the target contains a face - the one being
+- **`--ref-resolution-scale 0`**: the target contains a face - the one being
   replaced - so conditioning on it as well as seeding from it feeds the
   model the wrong identity, which then competes with the face references and
   wins (it's also what every pixel is pulled back toward). Measured on a

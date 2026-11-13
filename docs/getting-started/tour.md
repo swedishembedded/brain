@@ -73,21 +73,21 @@ Generate an empty room, then furnish it in a style learned from your own
 pictures, keeping the room itself:
 
 ```bash
-$ brain --device gpu flux2 generate --variant klein-9b --precision int8 \
+$ brain --device gpu flux2 text2image --variant klein-9b --precision int8 \
     --prompt "Photorealistic professional real estate photograph of an empty unfurnished bedroom. Bare white walls, plain light oak floorboards, a single large window, a radiator under the window, a white panelled door. Completely empty room, no furniture, no rugs, no curtains." \
-    --width 1024 --height 768 --seed 20260827 --out empty-room.png   # the seed reproduces the picture below
-$ brain --device gpu flux2 generate --variant klein-9b --precision int8 \
-    --ref empty-room.png --strength 1.0 --ref-size 768 \
-    --adapter boho.brain --lora-scale 1.0 \
+    --width 1024 --height 768 --seed 20260827 --out image=empty-room.png   # the seed reproduces the picture below
+$ brain --device gpu flux2 edit --variant klein-9b --precision int8 \
+    --image empty-room.png --strength 1.0 --ref-size 768 \
+    --adapter boho.brain \
     --prompt "a bohemian style room, photorealistic interior photograph, warm natural daylight, layered textiles and patterned fabrics, rattan and natural wood, plants, eclectic decor, professional real estate photography" \
-    --width 1024 --height 768 --seed 7 --out staged-room.png   # the seed reproduces the picture below
+    --seed 7 --out image=staged-room.png   # the seed reproduces the picture below
 ```
 
 | before | after |
 |---|---|
 | ![an empty unfurnished bedroom](../reference/models/flux2/staging-source.jpg) | ![the same room furnished in a bohemian style](../reference/models/flux2/staging-result.jpg) |
 
-`brain flux2 finetune <captioned-image-dir> --out boho.brain` trains the style
+`brain flux2 lora_train --data <captioned-image-dir> --save boho.brain --seed $RANDOM` trains the style
 adapter; LoRA files from other tools load too
 ([`reference/models/flux2.md`](../reference/models/flux2.md)).
 

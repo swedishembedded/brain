@@ -185,32 +185,10 @@ pub fn max_batch() -> u32 {
         .max(1)
 }
 
-/// Image + reference latent tokens from an instance key
-/// (`"{variant}:{precision}:{w}x{h}:{nref}[:{lora_scale}:{adapter}]"`), for the
-/// memory estimate. Only the size field is read, so the optional adapter tail
-/// does not affect it. 0 if the key does not parse (an unknown key costs
-/// nothing extra).
+/// The tokens one forward of an instance key's pipeline sees, for the memory
+/// estimate; 0 if the key does not parse (an unknown key costs nothing extra).
 fn tokens_from_key(config: &str) -> u64 {
-    let mut it = config.splitn(5, ':');
-    let (_, _) = (it.next(), it.next());
-    let Some((w, h)) = it.next().and_then(|wh| wh.split_once('x')) else { return 0 };
-    let (Ok(w), Ok(h)) = (w.parse::<u64>(), h.parse::<u64>()) else { return 0 };
-    let nref: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    (w / 16) * (h / 16) + nref
-}
-
-/// Reference latent tokens declared by an invocation's input blobs, from their
-/// `{w,h}` metadata after the /16 center-crop — used for the instance key
-/// without decoding any pixels.
-fn ref_tokens_from_meta(inv: &Invocation) -> u32 {
-    ["image", "image0", "image1", "image2"]
-        .iter()
-        .filter_map(|n| inv.get_blob(n))
-        .map(|b| {
-            let dim = |k: &str| b.meta.get(k).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            (dim("h") / 16) * (dim("w") / 16)
-        })
-        .sum()
+    config.split(':').nth(2).and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
 impl ResidentModel for Flux2Resident {
@@ -228,22 +206,23 @@ impl ResidentModel for Flux2Resident {
         if action == "lora_train" {
             return InstanceKey::new(&self.id, format!("train:{}", self.variant));
         }
-        let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".into());
-        let w = inv.get_i64("width").unwrap_or(512);
-        let h = inv.get_i64("height").unwrap_or(512);
-        let nref = ref_tokens_from_meta(inv);
-        // "{variant}:{precision}:{w}x{h}:{nref}" fixes the built graphs; a
-        // folded LoRA changes the weights, so its path AND strength are
-        // appended when present (a different strength is different weights).
-        // The path goes last because it is the only field that may contain ':'.
-        let adapter = inv.get_str("adapter").filter(|s| !s.is_empty());
+        // "{variant}:{precision}:{forward tokens}:{canvas tokens}:{lora_scale}:{adapters}"
+        // fixes the built graphs; the plan reads the images' sizes from their
+        // meta, never their pixels. A request whose plan fails gets a key of
+        // its own and is refused when it runs, with the plan's message. The
+        // adapter list goes last because it is the only field that may
+        // contain ':'.
         let variant = &self.variant;
-        let config = match adapter {
-            Some(a) => {
-                let sc = inv.get_f64("lora_scale").unwrap_or(1.0);
-                format!("{variant}:{precision}:{w}x{h}:{nref}:{sc}:{a}")
-            }
-            None => format!("{variant}:{precision}:{w}x{h}:{nref}"),
+        let config = match flux2::request::plan(inv, action == "edit") {
+            Ok(plan) => format!(
+                "{variant}:{}:{}:{}:{}:{}",
+                plan.precision.name(),
+                plan.forward_tokens(),
+                plan.canvas_tokens(),
+                inv.get_f64("lora_scale").unwrap_or(1.0),
+                inv.get_str("adapter").unwrap_or_default()
+            ),
+            Err(_) => format!("{variant}:invalid"),
         };
         InstanceKey::new(&self.id, config)
     }
@@ -294,29 +273,16 @@ impl ResidentModel for Flux2Resident {
             // run — no resident pipeline to hold.
             return Ok(Box::new(Flux2Instance { pipe: None, paths: clone_paths(&self.paths), variant: self.variant.clone() }));
         }
-        // "{variant}:{precision}:{w}x{h}:{nref}[:{lora_scale}:{adapter}]" -
-        // the adapter path is last because it may contain ':'. The variant
-        // field is always `self.variant` (see `instance_key`), so parsing it
-        // back out here is just recovering what this resident itself wrote.
+        // Parsing back what `instance_key` wrote; the variant field is
+        // always `self.variant`.
         let mut it = key.config.splitn(6, ':');
-        let variant = it.next().ok_or("flux2: bad instance key")?;
-        let precision = flux2::Precision::from_name(it.next().ok_or("flux2: bad instance key")?)?;
-        let wh = it.next().ok_or("flux2: bad instance key")?;
-        let nref: u32 = it.next().and_then(|s| s.parse().ok()).ok_or("flux2: bad instance key")?;
+        let bad = || format!("flux2: this request could not be planned (instance key {})", key.config);
+        let variant = it.next().ok_or_else(bad)?;
+        let precision = flux2::Precision::from_name(it.next().ok_or_else(bad)?).map_err(|_| bad())?;
+        let n_fwd: u32 = it.next().and_then(|s| s.parse().ok()).ok_or_else(bad)?;
+        let n_gen: u32 = it.next().and_then(|s| s.parse().ok()).ok_or_else(bad)?;
         let lora_scale: f32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
-        // The instance key carries at most ONE adapter: `Pipeline` folds a
-        // whole stack, but the residency key is a flat `:`-separated string
-        // with no list encoding, so a served instance stays single-adapter
-        // (stacking is reachable from `brain flux2 generate --adapter ...`).
-        let adapters: Vec<flux2::AdapterSpec> = it
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(|path| flux2::AdapterSpec { path: path.to_string(), scale: lora_scale })
-            .into_iter()
-            .collect();
-        let (w, h) = wh.split_once('x').ok_or("flux2: bad instance key")?;
-        let (w, h): (u32, u32) = (w.parse().map_err(|_| "flux2: bad width")?, h.parse().map_err(|_| "flux2: bad height")?);
-        let n_gen = (h / 16) * (w / 16);
+        let adapters = flux2::AdapterSpec::parse_list(it.next().unwrap_or_default(), lora_scale)?;
         // `flux2::build_resolved` runs the license/config/precision decision
         // AND the build - `variant` here is already `self.variant` (bound at
         // construction, never re-derived per request, see `instance_key`'s
@@ -331,7 +297,7 @@ impl ResidentModel for Flux2Resident {
         // the assigned card (scoped registry selection; the TE card is
         // flux2's own BRAIN_FLUX2_TE_DEVICE and left as configured).
         let (pipe, ..) = crate::resident_llm::on_device(device, || {
-            flux2::build_resolved(flux2::VariantSource::Bound(variant), &self.paths, n_gen + nref, n_gen, &adapters, precision, false, max_batch())
+            flux2::build_resolved(flux2::VariantSource::Bound(variant), &self.paths, n_fwd, n_gen, &adapters, precision, false, max_batch())
         })??;
         Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths), variant: self.variant.clone() }))
     }
@@ -357,9 +323,7 @@ impl Instance for Flux2Instance {
         match action {
             "text2image" | "edit" => {
                 let pipe = self.pipe.as_ref().ok_or("flux2: generation on a training instance")?;
-                let p = flux2::caps::gen_params_from(inv)?;
-                let refs = flux2::caps::refs_from(inv, action == "edit")?;
-                flux2::caps::generate_on(pipe, inv, &refs, &p.opts, progress)
+                flux2::caps::generate_on(pipe, inv, &flux2::request::plan(inv, action == "edit")?, progress)
             }
             "lora_train" => flux2::caps::train_action(&self.paths, inv, progress),
             other => Err(format!("flux2-klein: unknown action '{other}'")),
@@ -429,10 +393,9 @@ impl Instance for Flux2Instance {
 /// token), through the same shared `flux2::caps` decoders the single-request
 /// path uses — no second copy of the param contract.
 fn build_request(action: &str, inv: &Invocation) -> Result<flux2::BatchRequest, String> {
-    let p = flux2::caps::gen_params_from(inv)?;
-    let refs = flux2::caps::refs_from(inv, action == "edit")?;
-    let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
-    Ok(flux2::BatchRequest { prompt, refs, opts: p.opts, cancel: inv.cancel.clone() })
+    let plan = flux2::request::plan(inv, action == "edit")?;
+    let refs = plan.decode(inv)?;
+    Ok(flux2::BatchRequest { prompt: plan.prompt, refs, opts: plan.opts, cancel: inv.cancel.clone() })
 }
 
 #[cfg(test)]

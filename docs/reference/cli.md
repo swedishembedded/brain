@@ -163,7 +163,7 @@ spellings of a file's page, one from the address bar and one from the download
 button - pulls **exactly that one file**, whatever its extension and from
 whatever revision the URL names. Nothing is inferred, because the file is
 named. The command prints the path the file landed at, which is what a flag
-like `brain flux2 generate --text-encoder <path>` is then pointed at:
+like `brain flux2 text2image --text-encoder <path>` is then pointed at:
 
 ```bash
 brain pull https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/main/flux-2-klein-9b-Q8_0.gguf
@@ -242,7 +242,7 @@ precedence ladder.
 ### Naming weights on a model command
 
 A multi-role model command names each weight role with a flag spelled exactly
-as the role is: `brain flux2 generate --dit <ARG>` states the DiT,
+as the role is: `brain flux2 text2image --dit <ARG>` states the DiT,
 `--vae`/`--text-encoder`/`--tokenizer` the rest. The 1:1 spelling is load
 bearing, not cosmetic: when a role cannot be resolved, the error prints the
 role name as the flag to pass, so a role whose flag is spelled differently

@@ -26,22 +26,22 @@ diffusers-layout checkout (or a GGUF) under the models directory
 (`--models-dir` / `BRAIN_MODELS_DIR`) and brain finds the four roles by
 scanning it.
 
-`brain flux2 generate` and `brain flux2 finetune` resolve those roles from
-that scan, and each role has **one flag, spelled as the role is**, for the
+`brain flux2 <action>` resolves those roles from that scan, and each role has
+**one flag, spelled as the role is**, for the
 cases the scan cannot decide on its own - several candidate DiTs in the store,
 say. An ambiguous or missing role prints every real candidate and exits rather
 than guessing, naming the flag to pass:
 
 ```bash
-brain flux2 generate --prompt "…" --out fox.png \
+brain flux2 text2image --prompt "…" --seed $RANDOM --out image=fox.png \
     --dit …/FLUX.2-klein-4B-GGUF/Q8_0.gguf \
     --vae …/flux2-vae.safetensors \
     --text-encoder …/FLUX.2-klein-4B/text_encoder \
     --tokenizer …/FLUX.2-klein-4B/tokenizer/tokenizer.json
 ```
 
-The `BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}` variables belong to the **served**
-path (`brain serve`, below), not to these two commands.
+The `BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}` variables belong to `brain serve`
+(below), not to `brain flux2 <action>`.
 
 ### Serving more than one checkpoint at once
 
@@ -61,54 +61,53 @@ Setting `BRAIN_FLUX2_DIT` (and the other three variables) pins one exact
 instance instead, which is the single-resident behavior to reach for when the
 store holds more checkpoints than you want served.
 
-`brain flux2 finetune` resolves its four weights exactly the way `generate`
-does - by scanning the models directory, with one flag per role for what the
-scan cannot decide.
-
-`--activations keep|recompute` (default `keep`) sets what the host trainer
+`lora_train`'s `--activations keep|recompute` (default `keep`) sets what the host trainer
 (`--trainer host`) holds of each step's forward for its backward: `keep` holds
 every block's activations, `recompute` holds only each block's input and
 rebuilds the rest block by block in the backward. The loss and gradients are
 bit-identical; `recompute` trades extra forward compute for lower memory. The
-device trainer ignores it. Any other value is refused. The `lora_train` action
-takes the same choice as its optional `activations` parameter.
+device trainer ignores it. Any other value is refused.
 
 ## Running it
 
 ```bash
-brain flux2 generate --prompt "a red fox on a mossy rock" --out fox.ppm \
+brain flux2 text2image --prompt "a red fox on a mossy rock" --seed $RANDOM --out image=fox.png \
     --width 512 --height 512
 
-# reference-image editing: pass the source image as --ref and an instruction as the prompt
-brain flux2 generate --prompt "make it snow" --ref fox.ppm --out snow.ppm
+# reference-image editing: the source image and an instruction as the prompt
+brain flux2 edit --image fox.png --prompt "make it snow" --seed $RANDOM --out image=snow.png
+
+# a LoRA from a folder of captioned images
+brain flux2 lora_train --data my-set/ --save my.brain --seed $RANDOM
 ```
 
-The same model is also reachable through the generalized capability
-interface's `text2image`/`edit`/`lora_train` actions (`brain caps
-brain/flux2-klein` lists them) over D-Bus and over HTTP at
-`/v1/images/generations` - those three are not CLI-reachable today, only
-`generate`/`infer` above are. The params that name files on the serving
-machine - `text2image`'s `adapter`, `lora_train`'s `data` and `save` - are
-host-only: `brain do` on the machine takes them, while D-Bus and HTTP do not
-list or accept them, so `lora_train` runs from the machine that holds the
-dataset (`brain flux2 finetune`, `brain do`).
+The three actions, `text2image`, `edit` and `lora_train`, are the same ones
+`brain serve` publishes over D-Bus and over HTTP at `/v1/images/generations`;
+`brain flux2 <action> --help` lists every parameter with its default, and
+`samples/models/flux2` is the same command line as a standalone program. The
+params that name files on the serving machine - `adapter`, `lora_train`'s
+`data`, `save` and `cache_dir` - are host-only: `brain flux2 <action>` on the
+machine takes them, while D-Bus and HTTP do not list or accept them, so
+`lora_train` runs from the machine that holds the dataset.
 
 ## Options
 
-- `--width` / `--height`
+- `--width` / `--height` - default 512; an edit that starts from its image
+  (`--strength` or `--mask`) takes that image's size
 - `--steps`, `--seed` - on the distilled Klein variants the sampler is fixed
   at 4 steps, so `--steps` is ignored with a warning; `--experimental-steps`
   makes it honour `--steps` again, for experiments only
 - `--guidance` - classifier-free guidance strength; only meaningful on the
   undistilled `base` variants, since Klein is guidance-distilled
 - `--variant klein-4b|klein-9b|base-4b|base-9b`
-- `--precision fp32|int8` - supports INT8 inference for lower VRAM use
-- `--ref <image>` (repeatable) - supplying one or more reference images
-  switches generation into editing mode
-- `--ref-size <N>` - downscale every `--ref` so its **long edge** is at most
-  `N` pixels before the /16 centre crop, preserving aspect. Downscale only: a
-  reference already inside the bound is used untouched, and omitting the flag
-  uses every reference at its own resolution, exactly as before. Each
+- `--precision fp32|int8` - supports INT8 inference for lower VRAM use; unset,
+  the checkpoint's own (int8 for a GGUF DiT)
+- `edit`'s `--image <image>` and `--image0` ... `--image6` - the image to edit
+  and up to seven further references, in order
+- `--ref-size <N>` - downscale every further reference so its **long edge**
+  is at most `N` pixels before the /16 centre crop, preserving aspect (default
+  512; `0` keeps every reference at its own resolution). The image an edit
+  starts from, and a tiled run's anchor, are never bounded. Each
   reference contributes `(w/16)·(h/16)` tokens to the joint sequence, so a
   full-resolution camera photograph costs more of them than the generation it
   is conditioning - and the failure that causes is an out-of-memory during the
@@ -116,8 +115,9 @@ dataset (`brain flux2 finetune`, `brain do`).
   photographs a valid input; the per-reference sizes and token counts are
   printed before the pipeline is built, so a run that does not fit says which
   reference spent the budget.
-- `--adapter <path>` (repeatable) - fold a LoRA adapter into the DiT before
-  generating. brain's own `finetune` checkpoint and third-party
+- `--adapter <list>` - fold LoRA adapters into the DiT before generating:
+  comma-separated `path` or `path@strength` entries, in the order they fold
+  in. brain's own `lora_train` checkpoint and third-party
   `.safetensors` files are told apart by extension; a third-party file may be
   in either of the two conventions the ai-toolkit / ComfyUI / diffusers /
   LyCORIS ecosystem writes, and which one it is comes from its own keys:
@@ -138,33 +138,28 @@ dataset (`brain flux2 finetune`, `brain do`).
   that does not match a tensor of that variant is a hard error naming the
   tensor, never a silent skip.
 
-  Pass the flag more than once to **stack** adapters in one generation - a
-  face-identity adapter plus a style adapter, say. The two families mix
+  List several to **stack** adapters in one generation - a face-identity
+  adapter plus a style adapter, say. The two families mix
   freely. They fold in the order given, each onto the result of the ones
   before it, so a linear that more than one of them adapts ends up moved by
   the **sum** of their deltas: two adapters both at strength `1.0` push that
   weight further than either was trained and validated at, which usually
-  reads as an over-cooked image. Lower each one's `--lora-scale` when
-  stacking rather than expecting the result to be an average.
-- `--lora-scale <S>` (repeatable) - LoRA strength, ComfyUI's
-  `strength_model`. Default `1.0`. Third-party adapter files usually carry no
-  alpha, in which case both ai-toolkit and ComfyUI resolve the alpha
-  multiplier to exactly 1.0 and this flag is the only dial; `0.0` reproduces
-  the base model, which is the way to check what the adapter is actually
-  contributing.
-
-  With several adapters it pairs **positionally** and must follow the
-  `--adapter` it belongs to. A `--lora-scale` with no adapter of its own is
-  refused rather than guessed at:
+  reads as an over-cooked image. Lower each one's strength when stacking
+  rather than expecting the result to be an average:
 
   ```
-  brain flux2 generate --prompt "..." --out out.ppm \
-    --adapter face.brain          --lora-scale 0.8 \
-    --adapter style.safetensors   --lora-scale 0.4
+  brain flux2 text2image --prompt "..." --seed $RANDOM --out image=out.png \
+    --adapter "face.brain@0.8,style.safetensors@0.4"
   ```
+- `--lora-scale <S>` - the strength of every listed adapter that names none,
+  ComfyUI's `strength_model`. Default `1.0`. Third-party adapter files usually
+  carry no alpha, in which case both ai-toolkit and ComfyUI resolve the alpha
+  multiplier to exactly 1.0 and the strength is the only dial; `0.0`
+  reproduces the base model, which is the way to check what the adapter is
+  actually contributing.
 - `--strength` - for image-to-image editing, a **continuous anchoring dial**
-  in `0..=1` on the first `--ref` (which must then be supplied at the output
-  size). `1.0` is free generation conditioned on the reference; lowering it
+  in `0..=1` on `--image`, whose size the output takes unless `--width` and
+  `--height` say otherwise. `1.0` is free generation conditioned on the reference; lowering it
   anchors progressively more of the source photograph; `0` returns the source
   through the VAE round trip. It does not add color/hue changes on its own.
 
@@ -185,15 +180,16 @@ dataset (`brain flux2 finetune`, `brain do`).
   the model can see the reference**: a supplied reference contributes
   conditioning tokens at every value of `--strength`. Below `1.0` the first
   reference does double duty - it is the init latent *and* it is attended to.
-- `--ref-cond-scale <S>` - linear size of the **conditioning copy** of that
-  init reference, in `0..=1`, default `0.75`. Only the first `--ref` under
+- `--ref-resolution-scale <S>` - linear size of the **conditioning copy** of that
+  init reference, in `0..=1`, default `1.0`. Only `--image` under
   `--strength < 1` is affected: the init-latent role pins it to the output
   size, so it is the one reference whose resolution you cannot choose by
   picking a different file. Reference tokens cost joint attention
   quadratically, so a full-size copy of a same-size reference doubles the
-  image half of the sequence; the default downscale keeps an edit at roughly
-  the cost of a moderate second reference. `1.0` conditions at full size -
-  identical token cost to `--strength 1.0`. `0` switches the conditioning
+  image half of the sequence; a lower value keeps an edit at roughly the cost
+  of a moderate second reference (`0.75` halves it). The default `1.0`
+  conditions at full size - identical token cost to `--strength 1.0`. `0`
+  switches the conditioning
   copy off, which is the explicit opt-in to the cheap mode where the
   reference reaches the denoiser only through the init latent.
 - `--mask <image>` - a spatial preservation mask over the output canvas.
@@ -263,7 +259,7 @@ pull the same knob in opposite directions.
 `--mask <image>` takes a greyscale image over the **output canvas**:
 
 * **white (255) = regenerate** - the denoiser owns these pixels;
-* **black (0) = preserve** - these track the first `--ref` image exactly;
+* **black (0) = preserve** - these track `--image` exactly;
 * **grey = blend** - the value is used verbatim as a linear weight, so
   mid-grey is an even mix of source and generation. There is no threshold, and
   soft edges are the point: a hard latent-cell boundary between "kept" and
@@ -285,18 +281,18 @@ step instead of being softly guided toward it and drifting a little with each
 forward.
 
 ```bash
-brain flux2 generate --variant klein-9b --precision int8 \
-    --prompt "..." --ref room.png --mask arch-mask.png \
-    --strength 0.999 --width 1024 --height 768 --steps 12 --out staged.png
+brain flux2 edit --variant klein-9b --precision int8 \
+    --prompt "..." --image room.png --mask arch-mask.png \
+    --strength 0.999 --steps 12 --experimental-steps --seed $RANDOM --out image=staged.png
 ```
 
 ### Rules the implementation guarantees
 
-* The first `--ref` is the preserved source and must be at the output size -
-  the same rule `--strength` already imposes. `--mask` does **not** consume
+* `--image` is the preserved source and the canvas takes its size - the
+  same rule `--strength` already imposes. `--mask` does **not** consume
   it and does not change the token budget either way: that reference
   contributes conditioning tokens regardless, at the size
-  `--ref-cond-scale` picks.
+  `--ref-resolution-scale` picks.
 * An **all-white** mask is bit-for-bit identical to no mask at all, and an
   **all-black** one reproduces the source latent exactly. Both are asserted,
   and both are exact rather than approximate - the mask resampler accumulates

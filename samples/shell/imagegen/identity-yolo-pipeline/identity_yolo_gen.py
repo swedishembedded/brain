@@ -11,12 +11,12 @@
 
 """One generated PNG from a RESIDENT `brain serve --dbus` session.
 
-`identity_yolo_pipeline.sh`'s image generator. It replaces the two fresh
-CLI subprocesses that script used to spawn per image (`brain pulid text2image`
-and `brain flux2 generate`), each of which reloaded its whole weight set -
+`identity_yolo_pipeline.sh`'s image generator. A fresh CLI subprocess per
+image (`brain pulid text2image` or `brain flux2 text2image`) would reload its
+whole weight set each time -
 ~27 GB for PuLID (FLUX.1-dev DiT + T5-XXL + CLIP-L + the PuLID adapter +
 ArcFace + BiSeNet + EVA-CLIP), ~10-15 GB for FLUX.2 Klein (DiT + Qwen3-8B +
-VAE) - so a 75-image run paid that cost 75 times.
+VAE) - so a 75-image run would pay that cost 75 times.
 
 Driving the same two actions over `com.swedishembedded.Brain1` instead, the
 daemon's residency executor keeps one built instance per instance key and

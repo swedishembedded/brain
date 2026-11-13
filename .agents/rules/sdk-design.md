@@ -229,8 +229,8 @@ per-pipeline checkpoint format.
 ## 10. CLI, D-Bus, HTTP, and Python must call the SAME code as the SDK
 
 **This is the rule most at risk of silent violation, and it is already
-violated once, tracked in `.agents/roadmap/sdk.md`:** `crates/cli/src/
-flux2_cli.rs` and `s3dit::caps::ZAction` each build their own
+violated once, tracked in `.agents/roadmap/sdk.md`:** `flux2::caps` and
+`s3dit::caps::ZAction` each build their own
 `flux2::Pipeline`/`s3dit::pipeline::HotPipeline` inline, independently of
 `crates/sdk::ImagePipeline` - the resolve/build logic exists in two places
 today, not one. Treat that as an open defect, not a precedent: a CLI handler

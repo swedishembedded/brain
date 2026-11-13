@@ -17,7 +17,7 @@ let pipe = brain::ImagePipeline::from_pretrained("black-forest-labs/FLUX.2-klein
 pipe.generate("a whale submarine")?.save("out.png")?;
 ```
 
-`from_pretrained` resolves the model id the same way `brain flux2 generate`
+`from_pretrained` resolves the model id the same way `brain flux2 text2image`
 does - a local model directory or a `<vendor>/<repo>` hub reference, fetching
 only what's missing - and returns a pipeline that's ready to call: no second
 initialization step. The returned `Image` is one normalized type regardless

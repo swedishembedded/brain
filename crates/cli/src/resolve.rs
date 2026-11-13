@@ -53,7 +53,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("qwen3tts", crate::tts_cli::run_tts),
     ("yolov8", crate::yolo_cli::run_yolo),
     ("zipdepth", crate::depth_cli::run_depth),
-    ("flux2", crate::flux2_cli::run_flux2),
     ("wan", crate::wan_cli::run_wan),
     ("ltxv", crate::ltxv_cli::run_ltxv),
     ("worldmirror2", crate::mirror_cli::run_mirror),
@@ -66,21 +65,10 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("toymoe", run_toymoe),
 ];
 
-/// For an [`ARCH_HANDLERS`] id whose crate's own catalog `MODEL` id is NOT
-/// simply `brain/<id>` -- `caps_cli::run_caps`'s "is this arch id ALSO a
-/// catalog entry" guess otherwise assumes that pattern, which every
-/// `ARCH_HANDLERS` architecture but this one follows. Without this row,
-/// `brain caps flux2` (and `brain caps flux2-klein`, which is not an
-/// `ARCH_HANDLERS`/`ARCH_TO_MODEL` id at all) both report "no such model" even
-/// though `crates/flux2/src/caps.rs` has a real, listed manifest.
-const ARCH_HANDLER_CATALOG_ID_OVERRIDES: &[(&str, &str)] = &[("flux2", "brain/flux2-klein")];
-
 /// The catalog model id an [`ARCH_HANDLERS`] architecture ALSO registers under
-/// (most do, for `brain caps`/discovery, even though dispatch never routes
-/// through it) -- the override above when one is needed, else the
-/// `brain/<id>` pattern every other row follows.
+/// (for `brain caps`/discovery): `brain/<id>`.
 pub(crate) fn catalog_id_for_arch_handler(id: &str) -> String {
-    ARCH_HANDLER_CATALOG_ID_OVERRIDES.iter().find(|(a, _)| *a == id).map(|(_, m)| m.to_string()).unwrap_or_else(|| format!("brain/{id}"))
+    format!("brain/{id}")
 }
 
 /// The bare sparse-MoE toy model used to be three unrelated top-level
@@ -160,14 +148,13 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     // row was missing. `pulid`'s model id is `brain/flux1-pulid`, not
     // `brain/pulid` (`pulid::caps::MODEL`).
     ("flux1", "brain/flux1"),
+    ("flux2", "brain/flux2-klein"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
     // listed-but-unreachable gap `catalog.rs`'s own module docs warn about
     // (`ai-forever/Real-ESRGAN` shipped with a manifest and a provider and was
     // still unreachable because only the residency list had been updated).
-    // `flux2-klein`'s `text2image`/`edit`/`lora_train` have the same gap today
-    // and are tracked separately, not fixed here.
     ("imageops", "brain/imageops"),
     ("demo", "brain/demo"),
     // Same gap again: imgpipe was documented as CLI-reachable, and every
@@ -317,7 +304,6 @@ pub(crate) fn arch_for_model(model: &str) -> Option<&'static str> {
 /// (`crate::caps_cli::run_do`) instead of rejecting it outright, so there is
 /// no fixed vocabulary to check it against here either.
 const ARCH_HANDLER_VERBS: &[(&str, &[&str])] = &[
-    ("flux2", &["generate", "infer", "finetune"]),
     // Deliberately NOT `infer` -- `wan_cli::run_wan`'s own module doc: that
     // canonicalizes from `generate`/`gen`/`sample`, which would inject a
     // single `--weights` flag onto a command that takes four weight roles.
@@ -904,7 +890,7 @@ mod tests {
     /// same way `ensure_env_weights`'s own help gate exists to prevent.
     #[test]
     fn maybe_inject_default_weights_ignores_a_help_request() {
-        for rest in [s(&["generate", "--help"]), s(&["generate", "-h"]), s(&["--help"])] {
+        for rest in [s(&["text2image", "--help"]), s(&["text2image", "-h"]), s(&["--help"])] {
             assert_eq!(maybe_inject_default_weights("flux2", rest.clone()), rest);
         }
     }
@@ -955,7 +941,7 @@ mod tests {
     fn flux2_no_longer_wants_env_based_weight_acquisition() {
         let _serial = env_lock();
         assert!(brain_arch::by_id("flux2").expect("flux2 row").weights_env.is_empty());
-        assert!(!weights_already_named("flux2", &s(&["generate", "--prompt", "p"])));
+        assert!(!weights_already_named("flux2", &s(&["text2image", "--prompt", "p"])));
     }
 
     /// `wan` moved to the resolver too - same gate as `flux2`'s own test
@@ -1174,7 +1160,7 @@ mod tests {
     }
 
     /// The reported bug: `brain flux2 t2i` ("t2i" is not a real flux2 verb --
-    /// the real one is `generate`/`infer`) printed "not pulled: BRAIN_FLUX2_DIT,
+    /// the real one is `text2image`) printed "not pulled: BRAIN_FLUX2_DIT,
     /// ... unset and no local copy of black-forest-labs/FLUX.2-klein-4B" and
     /// exited 1, because `dispatch_arch` ran `ensure_env_weights`
     /// unconditionally before ever reaching `flux2_cli::run_flux2`'s own
@@ -1188,14 +1174,12 @@ mod tests {
         assert_eq!(verb_is_known("flux2", "bogus"), Some(false));
     }
 
-    /// flux2's real verbs (`generate`/`infer`/`finetune`) and their
-    /// `canon_verb` synonyms (`gen`/`sample` -> infer, `fine-tune` ->
-    /// finetune) must still be recognized -- this is the regression guard: a
+    /// flux2's real verbs are its served actions - the regression guard: a
     /// gate that is too strict would turn a real invocation into a false
     /// "unknown subcommand".
     #[test]
-    fn verb_is_known_accepts_flux2s_real_verbs_and_synonyms() {
-        for v in ["generate", "infer", "finetune", "gen", "sample", "fine-tune"] {
+    fn verb_is_known_accepts_flux2s_served_actions() {
+        for v in ["text2image", "edit", "lora_train"] {
             assert_eq!(verb_is_known("flux2", v), Some(true), "flux2 should accept {v:?}");
         }
     }
@@ -1251,9 +1235,6 @@ mod tests {
     /// change.
     #[test]
     fn wants_weight_acquisition_still_proceeds_for_every_real_verb() {
-        for v in ["generate", "infer", "finetune", "gen", "sample", "fine-tune"] {
-            assert!(wants_weight_acquisition("flux2", &s(&[v])), "flux2 {v:?} should still attempt weight acquisition");
-        }
         for v in ["t2v", "text2video", "finetune"] {
             assert!(wants_weight_acquisition("wan", &s(&[v])), "wan {v:?} should still attempt weight acquisition");
         }

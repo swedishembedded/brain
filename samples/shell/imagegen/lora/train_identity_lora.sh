@@ -148,7 +148,11 @@ PY
 echo "captions written to $DATA/captions.yaml - review them, then press enter" >&2
 [ -t 0 ] && read -r _
 
-exec "$BRAIN" flux2 finetune "$DATA" --out "$OUT" \
+# One seed per run: unset, a random one is drawn and printed.
+SEED="${SEED:-$RANDOM$RANDOM}"
+echo "train_identity_lora: seed $SEED (SEED=$SEED reproduces this run)" >&2
+
+exec "$BRAIN" flux2 lora_train --data "$DATA" --save "$OUT" --seed "$SEED" \
   --variant "${VARIANT:-klein-4b}" --trainer "${TRAINER:-device}" \
   --steps "${STEPS:-1500}" --rank "${RANK:-16}" --lr "${LR:-1e-4}" \
   --size "${SIZE:-512}" --ckpt-every "${CKPT_EVERY:-100}"

@@ -1,8 +1,8 @@
 # sample: imagegen/lora
 
 A train -> generate workflow around FLUX.2 Klein LoRA adapters, direct CLI
-invocations (no D-Bus, no server) of `brain label`, `brain flux2 finetune`
-and `brain flux2 generate`. Three scripts:
+invocations (no D-Bus, no server) of `brain label`, `brain flux2 lora_train`,
+`brain flux2 text2image` and `brain flux2 edit`. Three scripts:
 
 - `train_lora.sh` - caption a folder, then train an adapter on it.
 - `run_lora.sh` - generate with an adapter `train_lora.sh` produced.
@@ -30,7 +30,7 @@ binds cleanly but reads oddly; a natural phrase composes well but shifts a
 concept the base model already owns, so it leaks into every prompt that
 mentions it.
 
-Options (env only): `MODEL` (`qwen3vl`\|`fastvlm`), `STEPS`, `RANK`, `LR`,
+Options (env only): `MODEL` (`qwen3vl`\|`fastvlm`), `SEED` (a random one is drawn and printed when unset), `STEPS`, `RANK`, `LR`,
 `SIZE`, `VARIANT`, `TRAINER` (`device`\|`host` - device is the GPU trainer and
 the default), `BRAIN`.
 
@@ -103,7 +103,7 @@ samples/shell/imagegen/identity-score/identity_score.sh <photo-dir> <generated-d
 then generate with
 `ADAPTER=<out> samples/shell/imagegen/portrait-from-refs/portrait_from_refs.sh`.
 
-Options (env only): `OUT` (adapter path), `STEPS`, `RANK`, `LR`, `SIZE`,
+Options (env only): `OUT` (adapter path), `SEED`, `STEPS`, `RANK`, `LR`, `SIZE`,
 `VARIANT`, `TRAINER`, `CKPT_EVERY`, `MODEL` (captioner), `BRAIN`.
 
 ## What it needs

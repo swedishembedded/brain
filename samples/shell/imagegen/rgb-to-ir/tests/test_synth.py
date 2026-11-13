@@ -61,7 +61,7 @@ if step == "fail":
     sys.exit(2)
 if step == "empty":
     sys.exit(0)
-shutil.copy(argv[argv.index("--ref") + 1], argv[argv.index("--out") + 1])
+shutil.copy(argv[argv.index("--image") + 1], argv[argv.index("--out") + 1].split("=", 1)[1])
 """
 
 
@@ -242,14 +242,14 @@ class Generation(World):
         self.generate()
         argv = self.calls()[0]
         self.assertEqual(argv[:5], ["--device", "gpu1", "--backend", "cuda", "flux2"])
-        self.assertEqual(argv[5], "generate")
+        self.assertEqual(argv[5], "edit")
         self.assertEqual(opt(argv, "--variant"), "klein-4b")
         self.assertEqual(opt(argv, "--dit"), self.path("m/dit.gguf"))
         self.assertEqual(opt(argv, "--adapter"), self.path("adapter.brain"))
         self.assertEqual((opt(argv, "--strength"), opt(argv, "--seed")), ("1.0", "3"))
         self.assertEqual((opt(argv, "--width"), opt(argv, "--height")), ("64", "48"))
         self.assertEqual(opt(argv, "--prompt"), C.NEUTRAL_CAPTION)
-        self.assertTrue(opt(argv, "--ref").endswith(".ppm"))
+        self.assertTrue(opt(argv, "--image").endswith(".ppm"))
         self.assertEqual(len(self.calls()), 3)
 
     def test_the_record_names_the_frame_mode_instruction_seed_command_and_duration(self):

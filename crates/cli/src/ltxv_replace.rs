@@ -891,16 +891,23 @@ impl Editor<'_> {
         let repaint_path = work.join(format!("repaint_{k}.png"));
         imaging::save_png(&repaint_path, &Rgb8::new(ew, eh, resample(ctx, &repaint_px, cw, ch, ew as usize, eh as usize, Filter::Nearest))?)?;
         let edit_path = work.join(format!("edit_{k}_{seed}.png"));
-        let mut argv: Vec<String> = [self.req.flux2_roles.clone(), self.req.edit_adapter_flags.clone()].concat();
+        // FLUX.2's served `edit`, run in this process: the canvas is the
+        // image it starts from (anchored by the mask), the sheet and frame
+        // 0's appearance are further references.
+        let mut argv: Vec<String> = vec![flux2::caps::MODEL.into(), "edit".into()];
+        argv.extend(self.req.flux2_roles.clone());
+        argv.extend(served_adapters(&self.req.edit_adapter_flags));
         argv.extend(edit_refs(&canvas_path, &self.req.character, appearance.map(|a| a.path.as_path()), self.req.tuning.edit_long_side));
         argv.extend(
             [
                 "--mask", &repaint_path.to_string_lossy(), "--width", &ew.to_string(), "--height", &eh.to_string(),
-                "--seed", &seed.to_string(), "--prompt", &self.req.edit_prompt, "--out", &edit_path.to_string_lossy(),
+                "--seed", &seed.to_string(), "--prompt", &self.req.edit_prompt, "--out", &format!("image={}", edit_path.to_string_lossy()),
             ]
             .map(String::from),
         );
-        crate::flux2_cli::generate(&argv).map_err(|e| format!("editing frame {k}: {e}"))?;
+        if crate::caps_cli::run_do(&argv) != 0 {
+            return Err(format!("editing frame {k}: the FLUX.2 edit failed (its message is above)"));
+        }
         let edited = fit(ctx, &imaging::load(&edit_path)?, cw, ch);
         let mut painted = src.to_vec();
         paste(&mut painted, w, Box2 { h: visible, ..canvas }, &edited[..visible * cw * 3]);
@@ -1133,14 +1140,33 @@ fn edit_size(cw: usize, ch: usize, long_side: u32) -> (u32, u32) {
 /// image the default edit prompt names.
 fn edit_refs(canvas: &Path, character: &str, appearance: Option<&Path>, long_side: u32) -> Vec<String> {
     let mut refs = vec![
-        "--ref".to_string(), canvas.to_string_lossy().into_owned(),
-        "--ref".to_string(), character.to_string(),
+        "--image".to_string(), canvas.to_string_lossy().into_owned(),
+        "--image0".to_string(), character.to_string(),
     ];
     if let Some(appearance) = appearance {
-        refs.extend(["--ref".to_string(), appearance.to_string_lossy().into_owned()]);
+        refs.extend(["--image1".to_string(), appearance.to_string_lossy().into_owned()]);
     }
     refs.extend(["--ref-size".to_string(), long_side.to_string()]);
     refs
+}
+
+/// `--adapter P [--lora-scale S]...` flags as the served `adapter` list
+/// (`P@S,...`); none when there are none.
+fn served_adapters(flags: &[String]) -> Vec<String> {
+    let mut list: Vec<String> = Vec::new();
+    let mut it = flags.iter();
+    while let Some(f) = it.next() {
+        match (f.as_str(), it.next()) {
+            ("--adapter", Some(p)) => list.push(p.clone()),
+            ("--edit-lora-scale" | "--lora-scale", Some(s)) => {
+                if let Some(last) = list.last_mut() {
+                    *last = format!("{last}@{s}");
+                }
+            }
+            _ => {}
+        }
+    }
+    if list.is_empty() { Vec::new() } else { vec!["--adapter".into(), list.join(",")] }
 }
 
 /// The pixels of `b`; rows below the `h`-row frame are mid grey.
@@ -1320,12 +1346,21 @@ mod tests {
     fn a_guide_edit_is_given_frame_0s_appearance_as_a_third_reference() {
         let canvas = Path::new("canvas_112.png");
         let refs = |appearance| edit_refs(canvas, "sheet.png", appearance, 768).join(" ");
-        assert_eq!(refs(None), "--ref canvas_112.png --ref sheet.png --ref-size 768");
+        assert_eq!(refs(None), "--image canvas_112.png --image0 sheet.png --ref-size 768");
         assert_eq!(
             refs(Some(Path::new("appearance.png"))),
-            "--ref canvas_112.png --ref sheet.png --ref appearance.png --ref-size 768",
+            "--image canvas_112.png --image0 sheet.png --image1 appearance.png --ref-size 768",
             "frame 0's accepted still is the third reference, after the sheet the prompt names"
         );
+    }
+
+    /// The still-edit adapters reach FLUX.2's served `adapter` list in order,
+    /// each with the strength that followed it.
+    #[test]
+    fn edit_adapters_become_the_served_list() {
+        let f = |v: &[&str]| served_adapters(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).join(" ");
+        assert_eq!(f(&["--adapter", "a.safetensors", "--lora-scale", "0.6", "--adapter", "b.brain"]), "--adapter a.safetensors@0.6,b.brain");
+        assert_eq!(f(&[]), "");
     }
 
     /// How much body the bottom edge cuts off is the silhouette's expected

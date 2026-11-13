@@ -184,7 +184,7 @@ for why.
       `scripts/gates/check-sdk-features.sh` now names it an explicit
       cross-cutting exception) that pulls in every other resolver-backed
       surface as a hard prerequisite.
-- [ ] CLI migration onto the SDK: `crates/cli/src/flux2_cli.rs` and
+- [ ] Serving onto the SDK: `flux2::caps` and
       `s3dit::caps::ZAction`/`crates/serving/src/executor.rs` each still
       construct their own `flux2::Pipeline`/`s3dit::pipeline::HotPipeline`
       inline, independently of `crates/sdk` -- the CLI does not call
