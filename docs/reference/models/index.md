@@ -127,7 +127,7 @@ named on the model's own page (see
 | Architecture | Solves | Infer | Train |
 |---|---|:---:|:---:|
 | [`diamond`](diamond.md) | playable, action-conditioned video (Atari-100k) | [x] | [x] |
-| [`genieredux`](genieredux.md) | playable, action-conditioned video (CoinRun) | [ ] | [ ] |
+| [`genieredux`](genieredux.md) | playable, action-conditioned video (CoinRun) | [x] | [ ] |
 
 ## A digital animal
 

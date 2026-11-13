@@ -11,7 +11,7 @@
 //!   cargo test -p brain-genieredux --test parity_maskgit -- --ignored --nocapture
 use gpu_core::Gpu;
 use genieredux::import::{import_dynamics, import_tokenizer};
-use genieredux::{decode_indices, kernel_sources, maskgit_sample};
+use genieredux::{decode_indices, kernel_sources, maskgit_sample, MaskSchedule, MaskgitSettings};
 
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
@@ -49,7 +49,9 @@ fn maskgit_sampler_parity_and_loop() {
     let gpu = Gpu::new_cpu(&kernel_sources());
 
     // inference_steps=1, temperature=1.0 -> temp collapses to 0 -> argmax.
-    let sampled = maskgit_sample(&gpu, &prime, &actions, num_tokens, h, w, &dw, &dc, 1, 1.0, 0);
+    // The seed only feeds Gumbel noise, which the single greedy pass scales to 0.
+    let settings = MaskgitSettings { inference_steps: 1, schedule: MaskSchedule::Cosine, sample_temperature: 1.0 };
+    let sampled = maskgit_sample(&gpu, &prime, &actions, num_tokens, h, w, &dw, &dc, &settings, 0);
     let matches = sampled.iter().zip(&ref_out).filter(|(a,b)| a==b).count();
     eprintln!("sampled tokens: {}/{} match reference", matches, ref_out.len());
     assert_eq!(sampled, ref_out, "sampled tokens must match the reference exactly");

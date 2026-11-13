@@ -384,10 +384,10 @@ unblocks.**
   parity-proven; only `pipeline::generate` is CV2-only, and it correctly errors
   rather than silently falling back), streaming chunked token2wav, kaldi fbank
   bit-exact gate, docs.
-- **`world-models`** - CoinRun ingest, GenieRedux interactive play loop, and
-  moving its forward onto a single on-device graph (it round-trips through the
-  host between every op with a naive matmul). The on-device graph is the
-  prerequisite for the other two.
+- **`world-models`** - CoinRun ingest and moving GenieRedux's forward onto a
+  single on-device graph (it round-trips through the host between every op with
+  a naive matmul; the interactive play loop is `GenieReduxWorldModel`). The
+  on-device graph is the prerequisite for real-time play.
 - **`chronos2`** - real covariates, long-horizon unrolling, a GPU kernel for
   multivariate group attention (host-computed today).
 - **`kronos`** - finish the parity ladder (isolated decoder block, exposure-bias

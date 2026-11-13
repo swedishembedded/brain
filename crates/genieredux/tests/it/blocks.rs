@@ -5,14 +5,8 @@
 //! reference forward (models/components/attention.py): the QK-normalized biased
 //! Attention (num_null_kv=0, bidir + causal) and the GEGLU FeedForward.
 use gpu_core::Gpu;
+use crate::tiny::{self, rand};
 use genieredux::{attn_forward, geglu_forward, kernel_sources, AttnWeights, FfWeights};
-
-fn rand(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| { s = s.wrapping_add(0x9E3779B97F4A7C15); let mut z=s;
-        z=(z^(z>>30)).wrapping_mul(0xBF58476D1CE4E5B9); z=(z^(z>>27)).wrapping_mul(0x94D049BB133111EB);
-        ((( (z^(z>>31))>>40) as f32)/(1u64<<24) as f32 - 0.5)*2.0 }).collect()
-}
 
 fn layernorm(x: &[f32], g: &[f32], dim: usize) -> Vec<f32> {
     let rows = x.len()/dim;
@@ -76,13 +70,7 @@ fn host_attn(x: &[f32], w: &AttnWeights, bias: &[f32], b: usize, n: usize, dim: 
 }
 
 fn make_attn(dim: usize, inner: usize, hd: usize) -> AttnWeights {
-    AttnWeights {
-        norm_gamma: rand(10, dim).iter().map(|v| v+1.0).collect(),
-        to_q: rand(11, inner*dim), to_k: rand(12, inner*dim), to_v: rand(13, inner*dim),
-        to_out: rand(14, dim*inner),
-        q_scale: rand(15, hd).iter().map(|v| v+1.0).collect(),
-        k_scale: rand(16, hd).iter().map(|v| v+1.0).collect(),
-    }
+    tiny::attn(dim, inner, hd, 10)
 }
 
 fn run_attn(causal: bool) {

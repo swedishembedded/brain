@@ -8,7 +8,8 @@ live in a window so you can watch and steer it like a game.
 | Architecture | Environment | Status |
 |---|---|---|
 | [DIAMOND](diamond.md) | Atari-100k | playable end to end |
-| [GenieRedux-G](genieredux.md) | CoinRun | not yet playable (tokenizer/MaskGIT dynamics in progress) |
+| [GenieRedux-G](genieredux.md) | CoinRun | playable (`--model genieredux`; host-orchestrated, slower than real time at full size) |
 
-DIAMOND is the one to reach for today - see its page for getting started,
-recording/replaying episodes, and fine-tuning on your own data.
+DIAMOND is the one to reach for for speed and fine-tuning - see its page for
+getting started, recording/replaying episodes, and fine-tuning on your own
+data. GenieRedux-G generates CoinRun frames as discrete tokens; see its page.

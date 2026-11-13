@@ -7,16 +7,10 @@
 //! causal (temporal pad (2,0)). Confirms the reshape/PEG/residual wiring, not
 //! just the sub-modules.
 use gpu_core::Gpu;
+use crate::tiny::{self, rand};
 use genieredux::{
     ff_inner, kernel_sources, stblock_forward, AttnWeights, FfWeights, PegWeights, StBlockWeights,
 };
-
-fn rand(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| { s = s.wrapping_add(0x9E3779B97F4A7C15); let mut z=s;
-        z=(z^(z>>30)).wrapping_mul(0xBF58476D1CE4E5B9); z=(z^(z>>27)).wrapping_mul(0x94D049BB133111EB);
-        ((( (z^(z>>31))>>40) as f32)/(1u64<<24) as f32 - 0.5)*2.0 }).collect()
-}
 
 // ---- host reference pieces (independent naive impls) ----
 fn h_layernorm(x: &[f32], g: &[f32], dim: usize) -> Vec<f32> {
@@ -145,24 +139,6 @@ fn h_stblock(x: &[f32], w: &StBlockWeights, b: usize, t: usize, h: usize, wd: us
     }
 }
 
-fn mk_attn(dim: usize, inner: usize, hd: usize, s: u64) -> AttnWeights {
-    AttnWeights {
-        norm_gamma: rand(s, dim).iter().map(|v| v+1.0).collect(),
-        to_q: rand(s+1, inner*dim), to_k: rand(s+2, inner*dim), to_v: rand(s+3, inner*dim),
-        to_out: rand(s+4, dim*inner),
-        q_scale: rand(s+5, hd).iter().map(|v| v+1.0).collect(),
-        k_scale: rand(s+6, hd).iter().map(|v| v+1.0).collect(),
-    }
-}
-fn mk_ff(dim: usize, inner: usize, s: u64) -> FfWeights {
-    FfWeights { norm_gamma: rand(s, dim).iter().map(|v| v+1.0).collect(),
-        norm_beta: rand(s+7, dim),
-        w_x: rand(s+1, inner*dim), w_gate: rand(s+2, inner*dim), w_out: rand(s+3, dim*inner) }
-}
-fn mk_peg(dim: usize, s: u64) -> PegWeights {
-    PegWeights { dsconv: rand(s, dim*27).iter().map(|v| v*0.3).collect(), bias: rand(s+1, dim) }
-}
-
 fn run_stblock(temporal_first: bool) {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
     let (b, t, h, w, dim, heads, hd) = (2usize, 3usize, 2usize, 2usize, 16usize, 2usize, 8usize);
@@ -173,8 +149,8 @@ fn run_stblock(temporal_first: bool) {
     let sb = rand(2, heads*(h*w)*(h*w)); // spatial CPB
     let tb = rand(3, heads*t*t);          // temporal ALiBi
     let wts = StBlockWeights {
-        spatial_peg: mk_peg(dim, 100), spatial_attn: mk_attn(dim, inner, hd, 110), spatial_ff: mk_ff(dim, ffi, 120),
-        temporal_peg: mk_peg(dim, 130), temporal_attn: mk_attn(dim, inner, hd, 140), temporal_ff: mk_ff(dim, ffi, 150),
+        spatial_peg: tiny::peg(dim, 100), spatial_attn: tiny::attn(dim, inner, hd, 110), spatial_ff: tiny::ff(dim, ffi, 120),
+        temporal_peg: tiny::peg(dim, 130), temporal_attn: tiny::attn(dim, inner, hd, 140), temporal_ff: tiny::ff(dim, ffi, 150),
     };
     let got = stblock_forward(&gpu, &x, b as u32, t as u32, h as u32, w as u32, dim as u32, heads as u32, hd as u32, &wts, &sb, &tb, true, temporal_first);
     let want = h_stblock(&x, &wts, b, t, h, w, dim, heads, hd, &sb, &tb, true, temporal_first);

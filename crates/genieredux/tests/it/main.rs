@@ -9,14 +9,19 @@
 
 mod bias;
 mod blocks;
+mod dynamics_embed;
 mod gelu_erf;
 mod import;
 mod import_inspect;
+mod kv_cache;
+mod maskgit;
 mod parity_dynamics;
 mod parity_maskgit;
 mod parity_tokenizer;
 mod patch;
 mod stblock;
 mod sttransformer;
+mod tiny;
 mod tokenizer;
 mod vq;
+mod world_model;

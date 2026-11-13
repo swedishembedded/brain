@@ -25,7 +25,17 @@ use gpu_core::{f, DeviceBuffer, Gpu};
 use wm_core::attn::BiasedAttn;
 
 pub mod bias;
+pub mod cache;
 pub mod import;
+pub mod maskgit;
+pub mod session;
+
+pub use cache::{
+    cached_forward_flops, decode_extend, dynamics_forward_extend, dynamics_spatial_bias,
+    sttransformer_extend, StCache, StCacheMark,
+};
+pub use session::{GenieReduxWorldModel, COINRUN_CONTEXT_FRAMES, COINRUN_GRID};
+pub use maskgit::{maskgit_sample, maskgit_sample_with, MaskSchedule, MaskgitSettings};
 
 /// Kernel-table indices used by this crate. Load [`kernel_sources`] at offset 0
 /// and these line up; the biased-attention slice (indices 5..17) also backs
@@ -106,38 +116,26 @@ fn concat_cols(gpu: &Gpu, a: &DeviceBuffer, b: &DeviceBuffer, rows: u32, ca: u32
     out
 }
 
-/// GenieRedux `Attention.forward` for num_null_kv = 0.
-///
-/// * `x`     — input, `R*dim` row-major (`R = b*n`).
-/// * `bias`  — additive per-head score bias `heads*n*n` (ContinuousPositionBias
-///   for spatial / ALiBi for temporal), shared across `b`.
-/// * `causal` — temporal attention masks `j>i`; spatial passes `false`.
-///
-/// Returns the output, `R*dim`.
-#[allow(clippy::too_many_arguments)]
-pub fn attn_forward(
-    gpu: &Gpu, x: &[f32], b: u32, n: u32, dim: u32, heads: u32, head_dim: u32,
-    w: &AttnWeights, bias: &[f32], causal: bool,
-) -> Vec<f32> {
+/// The q/k/v projections of one `Attention` with QK-normalization applied,
+/// shared by the full forward and the cached temporal attention. q comes from
+/// the NORMED `x`; k and v from the RAW `x` (GenieRedux captures
+/// `kv_input = x` before `x = norm(x)`, so for self-attention the key/value
+/// projections see the un-normalized input - a real parity detail, not an
+/// oversight). Returns `(qn, kn, v)`, each `rows*inner`.
+fn attn_project(
+    gpu: &Gpu, xb: &DeviceBuffer, rows: u32, dim: u32, heads: u32, head_dim: u32, w: &AttnWeights,
+) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+    const EPS: f32 = 1e-6;
     let att = biased_attn();
     let inner = heads * head_dim;
-    let rows = b * n;
-    const SCALE: f32 = 8.0;
-    const EPS: f32 = 1e-6;
-
     let up = |d: &[f32]| gpu.storage_init("w", d);
-    let xb = up(x);
     let gamma = up(&w.norm_gamma);
     let beta = gpu.storage(dim as u64); // LayerNorm bias is a fixed zero buffer
 
-    // q from the NORMED x; k,v from the RAW x. GenieRedux captures
-    // `kv_input = x` before `x = norm(x)`, so for self-attention (context=None)
-    // the key/value projections see the un-normalized input — a real parity
-    // detail, not an oversight.
-    let xn = layernorm(gpu, &xb, &gamma, &beta, rows, dim);
+    let xn = layernorm(gpu, xb, &gamma, &beta, rows, dim);
     let q = matmul(gpu, &xn, &up(&w.to_q), rows, dim, inner);
-    let kk = matmul(gpu, &xb, &up(&w.to_k), rows, dim, inner);
-    let v = matmul(gpu, &xb, &up(&w.to_v), rows, dim, inner);
+    let kk = matmul(gpu, xb, &up(&w.to_k), rows, dim, inner);
+    let v = matmul(gpu, xb, &up(&w.to_v), rows, dim, inner);
 
     // QK-norm: L2 over head_dim (rows*heads slices) times per-dim scale.
     let qn = gpu.storage((rows * inner) as u64);
@@ -148,6 +146,30 @@ pub fn attn_forward(
         att.step_l2norm(gpu, rows * heads, head_dim, EPS, &q, &qs, &qn),
         att.step_l2norm(gpu, rows * heads, head_dim, EPS, &kk, &ks, &kn),
     ]);
+    (qn, kn, v)
+}
+
+/// Score multiplier of GenieRedux's QK-normalized attention (a constant 8).
+const ATTN_SCORE_SCALE: f32 = 8.0;
+
+/// GenieRedux `Attention.forward` for num_null_kv = 0.
+///
+/// * `x`     - input, `R*dim` row-major (`R = b*n`).
+/// * `bias`  - additive per-head score bias `heads*n*n` (ContinuousPositionBias
+///   for spatial / ALiBi for temporal), shared across `b`.
+/// * `causal` - temporal attention masks `j>i`; spatial passes `false`.
+///
+/// Returns the output, `R*dim`.
+#[allow(clippy::too_many_arguments)]
+pub fn attn_forward(
+    gpu: &Gpu, x: &[f32], b: u32, n: u32, dim: u32, heads: u32, head_dim: u32,
+    w: &AttnWeights, bias: &[f32], causal: bool,
+) -> Vec<f32> {
+    let att = biased_attn();
+    let inner = heads * head_dim;
+    let rows = b * n;
+    let up = |d: &[f32]| gpu.storage_init("w", d);
+    let (qn, kn, v) = attn_project(gpu, &up(x), rows, dim, heads, head_dim, w);
 
     // pack fused [rows, 3*inner] = [qn | kn | v]
     let qk = concat_cols(gpu, &qn, &kn, rows, inner, inner);
@@ -158,7 +180,7 @@ pub fn attn_forward(
     let probs = gpu.storage((b * heads * n * n) as u64);
     let ao = gpu.storage((rows * inner) as u64);
     gpu.submit(&[], &[
-        att.step_scores(gpu, b, heads, n, head_dim, SCALE, causal, &packed, &bias_b, &scores),
+        att.step_scores(gpu, b, heads, n, head_dim, ATTN_SCORE_SCALE, causal, &packed, &bias_b, &scores),
         att.step_softmax(gpu, b, heads, n, &scores, &probs),
         att.step_apply(gpu, b, heads, n, head_dim, &probs, &packed, &ao),
     ]);
@@ -514,16 +536,40 @@ pub fn tokenizer_forward(
     b: u32, c: u32, f: u32, hh: u32, ww: u32, p: u32, dim: u32, heads: u32, head_dim: u32,
     code_dim: u32, n_codes: u32,
 ) -> (Vec<f32>, Vec<u32>) {
+    let (h, wd) = (hh / p, ww / p);
+    let sbias = bias::cpb_bias(&w.cpb_net, h as usize, wd as usize, heads as usize);
+    let tbias = bias::alibi_bias(heads as usize, f as usize);
+    let (quant, indices) = tokenizer_encode(gpu, video, w, b, c, f, hh, ww, p, dim, heads, head_dim, code_dim, n_codes, &sbias, &tbias);
+
+    // decode the quantized latents back to a video.
+    let recon = decode_latents(gpu, &quant, w, b, f, h, wd, dim, heads, head_dim, c, p, &sbias, &tbias);
+    (recon, indices)
+}
+
+/// The encoding half of [`tokenizer_forward`]: patch-embed (first frame + rest)
+/// -> encoder(8,"st") -> cosine VQ. Returns `(quantized latents [b,f,h,w,dim],
+/// codebook indices [b*f*h*w])`. `spatial_bias`/`temporal_bias` are the
+/// ContinuousPositionBias and ALiBi tables for this grid and `f` frames.
+#[allow(clippy::too_many_arguments)]
+pub fn tokenizer_encode(
+    gpu: &Gpu, video: &[f32], w: &TokenizerWeights,
+    b: u32, c: u32, f: u32, hh: u32, ww: u32, p: u32, dim: u32, heads: u32, head_dim: u32,
+    code_dim: u32, n_codes: u32, spatial_bias: &[f32], temporal_bias: &[f32],
+) -> (Vec<f32>, Vec<u32>) {
     let (bu, cu, fu, hhu, wwu, pu) = (b as usize, c as usize, f as usize, hh as usize, ww as usize, p as usize);
     let (h, wd) = ((hhu / pu) as u32, (wwu / pu) as u32);
 
     // patch-embed first frame + rest, concat along t -> [b,f,h,w,dim]
     let first = frame_slice(video, bu, cu, fu, hhu, wwu, 0, 1);
-    let rest = frame_slice(video, bu, cu, fu, hhu, wwu, 1, fu);
     let tok_first = patch_embed(gpu, &first, &w.patch_first, b, c, 1, hh, ww, p, dim);
-    let tok_rest = patch_embed(gpu, &rest, &w.patch_rest, b, c, f - 1, hh, ww, p, dim);
     let frame_toklen = (h * wd * dim) as usize;
     let mut tokens = vec![0.0f32; bu * fu * frame_toklen];
+    let tok_rest = if fu > 1 {
+        let rest = frame_slice(video, bu, cu, fu, hhu, wwu, 1, fu);
+        patch_embed(gpu, &rest, &w.patch_rest, b, c, f - 1, hh, ww, p, dim)
+    } else {
+        Vec::new()
+    };
     for bb in 0..bu {
         let dst = bb * fu * frame_toklen;
         tokens[dst..dst + frame_toklen].copy_from_slice(&tok_first[bb * frame_toklen..(bb + 1) * frame_toklen]);
@@ -532,18 +578,11 @@ pub fn tokenizer_forward(
             .copy_from_slice(&tok_rest[src..src + (fu - 1) * frame_toklen]);
     }
 
-    // position biases + encode (st)
-    let sbias = bias::cpb_bias(&w.cpb_net, h as usize, wd as usize, heads as usize);
-    let tbias = bias::alibi_bias(heads as usize, fu);
-    let enc = sttransformer_forward(gpu, &tokens, b, f, h, wd, dim, heads, head_dim, &w.encoder, &sbias, &tbias, true, false);
+    let enc = sttransformer_forward(gpu, &tokens, b, f, h, wd, dim, heads, head_dim, &w.encoder, spatial_bias, temporal_bias, true, false);
 
     // VQ over all tokens
     let n = b * f * h * wd;
-    let (quant, indices) = vq_quantize(gpu, &enc, &w.vq, n, dim, code_dim, n_codes);
-
-    // decode the quantized latents back to a video.
-    let recon = decode_latents(gpu, &quant, w, b, f, h, wd, dim, heads, head_dim, c, p, &sbias, &tbias);
-    (recon, indices)
+    vq_quantize(gpu, &enc, &w.vq, n, dim, code_dim, n_codes)
 }
 
 /// Decode quantized latents `[b,t,h,w,dim]` back to a video `[b,c,t,H,W]`:
@@ -592,97 +631,21 @@ pub fn decode_indices(
     gpu: &Gpu, indices: &[u32], w: &TokenizerWeights, b: u32, t: u32, h: u32, wd: u32,
     dim: u32, heads: u32, head_dim: u32, code_dim: u32,
 ) -> Vec<f32> {
-    let n = b * t * h * wd;
-    let codes = embed_gather(gpu, indices, &w.vq.codebook, n, code_dim); // [n, cd]
-    let cb = gpu.storage_init("c", &codes);
-    let pow = gpu.storage_init("pow", &w.vq.project_out_w);
-    let pob = gpu.storage_init("pob", &w.vq.project_out_b);
-    let latents = gpu.read(&linear_bias(gpu, &cb, &pow, &pob, n, code_dim, dim), (n * dim) as usize);
+    let latents = indices_to_latents(gpu, indices, &w.vq, b * t * h * wd, dim, code_dim);
     let sbias = bias::cpb_bias(&w.cpb_net, h as usize, wd as usize, heads as usize);
     let tbias = bias::alibi_bias(heads as usize, t as usize);
     // channels 3, patch 4 for CoinRun.
     decode_latents(gpu, &latents, w, b, t, h, wd, dim, heads, head_dim, 3, 4, &sbias, &tbias)
 }
 
-fn argmax(row: &[f32]) -> u32 {
-    row.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &x)| if x > bv { (i, x) } else { (bi, bv) }).0 as u32
-}
-
-/// Guided-MaskGIT sampler — replicates `Dynamics.sample`. Generates `num_tokens`
-/// new tokens (one or more frames' worth) conditioned on `prime_ids` (the
-/// context frames' tokens flattened) and per-frame `actions`. `inference_steps`
-/// iterations of: re-mask the least-confident tokens (cosine schedule) -> run
-/// the dynamics forward on `cat(prime, current)[:, :-1]` (the reference drops
-/// the last frame) -> Gumbel-sample (argmax as temperature -> 0). For the
-/// checkpoint default (`inference_steps=1`, temperature*0) this is a single
-/// deterministic argmax pass. `seed` drives Gumbel noise when temperature > 0.
-#[allow(clippy::too_many_arguments)]
-pub fn maskgit_sample(
-    gpu: &Gpu, prime_ids: &[u32], actions: &[f32], num_tokens: usize, h: u32, wd: u32,
-    dw: &DynamicsWeights, dc: &crate::import::DynamicsConfig,
-    inference_steps: usize, sample_temperature: f32, seed: u64,
-) -> Vec<u32> {
-    let hw = (h * wd) as usize;
-    let nc = dc.n_codes as usize;
-    let mask_id = dc.n_codes;
-    let total = prime_ids.len() + num_tokens;
-    let tt = total / hw;          // frames in cat(prime, video)
-    let t_fwd = tt - 1;           // after the reference's [:, :-1]
-    let mut vids = vec![mask_id; num_tokens];
-    let mut scores = vec![0.0f32; num_tokens];
-    let mut masked_now = vec![true; num_tokens];
-    let mut rng = seed;
-    let mut next = || { rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (rng >> 33) as f32 / (1u64 << 31) as f32 };
-
-    for step in 0..inference_steps {
-        let steps_til_x0 = inference_steps - (step + 1);
-        if step != 0 {
-            let ratio = (step + 1) as f32 / inference_steps as f32;
-            let mask_ratio = (ratio * std::f32::consts::FRAC_PI_2).cos().clamp(1e-6, 1.0);
-            let num_mask = (mask_ratio * num_tokens as f32) as usize;
-            let mut order: Vec<usize> = (0..num_tokens).collect();
-            order.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap());
-            masked_now = vec![false; num_tokens];
-            for &i in &order[..num_mask.min(num_tokens)] { masked_now[i] = true; }
-            for i in 0..num_tokens { if masked_now[i] { vids[i] = mask_id; } }
-        }
-        // input = cat(prime, vids); drop the last frame ([:, :-1])
-        let mut input = Vec::with_capacity(total);
-        input.extend_from_slice(prime_ids);
-        input.extend_from_slice(&vids);
-        let input_fwd = &input[..t_fwd * hw];
-        let logits = dynamics_forward(gpu, input_fwd, actions, dw, 1, t_fwd as u32, h, wd,
-            dc.dim, dc.heads, dc.head_dim, dc.n_codes, dc.code_dim, dc.num_actions);
-        let start = (t_fwd * hw - num_tokens) * nc; // last num_tokens rows
-        let temp = sample_temperature * (steps_til_x0 as f32 / inference_steps as f32);
-        for tk in 0..num_tokens {
-            let row = &logits[start + tk * nc..start + (tk + 1) * nc];
-            let pred = if temp < 1e-9 {
-                argmax(row)
-            } else {
-                // gumbel_sample: argmax(logit + temp * -log(-log(u)))
-                let mut bi = 0u32; let mut bv = f32::NEG_INFINITY;
-                for (i, &l) in row.iter().enumerate() {
-                    let u = next().clamp(1e-10, 1.0);
-                    let g = -(-u.ln()).ln();
-                    let v = l + temp * g;
-                    if v > bv { bv = v; bi = i as u32; }
-                }
-                bi
-            };
-            vids[tk] = pred;
-        }
-        if step + 1 < inference_steps {
-            for tk in 0..num_tokens {
-                let row = &logits[start + tk * nc..start + (tk + 1) * nc];
-                let mx = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let denom: f32 = row.iter().map(|&l| (l - mx).exp()).sum();
-                let prob = (row[vids[tk] as usize] - mx).exp() / denom;
-                scores[tk] = if masked_now[tk] { 1.0 - prob } else { -1e4 };
-            }
-        }
-    }
-    vids
+/// `project_out(codebook[idx])` for `n` indices: the decoder's input latents
+/// `[n, dim]`.
+fn indices_to_latents(gpu: &Gpu, indices: &[u32], vq: &VqWeights, n: u32, dim: u32, code_dim: u32) -> Vec<f32> {
+    let codes = embed_gather(gpu, indices, &vq.codebook, n, code_dim); // [n, cd]
+    let cb = gpu.storage_init("c", &codes);
+    let pow = gpu.storage_init("pow", &vq.project_out_w);
+    let pob = gpu.storage_init("pob", &vq.project_out_b);
+    gpu.read(&linear_bias(gpu, &cb, &pow, &pob, n, code_dim, dim), (n * dim) as usize)
 }
 
 // ---- dynamics (guided MaskGIT) ----
@@ -713,19 +676,31 @@ pub struct DynamicsWeights {
     pub to_logits_b: Vec<f32>, // [n_codes]
 }
 
-/// Guided-MaskGIT forward: token IDs (`mask_id = n_codes`) + per-frame action
-/// one-hots -> next-token logits `[b*n, n_codes]`. Matches `MaskGIT.forward`
-/// (use_token=True, is_guided=True; gradient-shrink is identity at inference).
+/// Embed `ids` (`[b, t, h, w]` flattened; the mask token is `n_codes`) with the
+/// one-hot `actions` (`[b, t, num_actions]`) into the transformer input
+/// `[b*t*h*w, dim + num_actions]`: token blend, positional embedding at
+/// sequence index `first_frame * h*w + position`, action concat.
+///
+/// `first_frame` is the absolute index of the first frame passed, so frames
+/// appended to a cache are embedded exactly as in a full pass.
+///
+/// Reference rule (`MaskGIT.forward`, use_token): `x = token_emb(ids) + blend`,
+/// `blend = 10 * project_out(codebook[ids])` at kept tokens and
+/// `mask_token_template` at masked ones. The template is
+/// `torch.zeros(dim)`, a plain tensor (neither parameter nor buffer, so no
+/// checkpoint stores it): masked positions get no blend, only the learned
+/// mask embedding `token_emb[n_codes]`.
 #[allow(clippy::too_many_arguments)]
-pub fn dynamics_forward(
+pub fn dynamics_embed(
     gpu: &Gpu, ids: &[u32], actions: &[f32], w: &DynamicsWeights,
-    b: u32, t: u32, h: u32, wd: u32, dim: u32, heads: u32, head_dim: u32,
-    n_codes: u32, code_dim: u32, num_actions: u32,
+    b: u32, t: u32, h: u32, wd: u32, dim: u32, n_codes: u32, code_dim: u32, num_actions: u32,
+    first_frame: u32,
 ) -> Vec<f32> {
     let (bu, tu, hu, wu, du, nau) = (b as usize, t as usize, h as usize, wd as usize, dim as usize, num_actions as usize);
     let n = tu * hu * wu;          // tokens per batch
     let rows = bu * n;
     let mask_id = n_codes;
+    let pos0 = first_frame as usize * hu * wu;
 
     // token blend: token_emb(ids) + (project_out(codebook[where(mask,0,ids)]) * 10, zeroed at mask)
     let masks: Vec<bool> = ids.iter().map(|&i| i == mask_id).collect();
@@ -748,7 +723,7 @@ pub fn dynamics_forward(
     for bb in 0..bu {
         for pos in 0..n {
             for c in 0..du {
-                vt[(bb * n + pos) * du + c] += w.pos_emb[pos * du + c];
+                vt[(bb * n + pos) * du + c] += w.pos_emb[(pos0 + pos) * du + c];
             }
         }
     }
@@ -764,19 +739,36 @@ pub fn dynamics_forward(
         let act = &actions[(bb * tu + tt) * nau..(bb * tu + tt) * nau + nau];
         vta[dst + du..dst + dim2].copy_from_slice(act);
     }}}}
+    vta
+}
 
-    // STTransformer (12 blocks, order "st", causal temporal, peg causal) at dim2
-    let sbias = bias::cpb_bias(&w.cpb_net, hu, wu, heads as usize);
-    let tbias = bias::alibi_bias(heads as usize, tu);
-    let dim2u = dim2 as u32;
-    let enc = sttransformer_forward(gpu, &vta, b, t, h, wd, dim2u, heads, head_dim, &w.transformer, &sbias, &tbias, true, false);
-
-    // to_logits [n_codes, dim2]
-    let eb = gpu.storage_init("e", &enc);
+/// `to_logits`: `[rows, dim2]` transformer output -> `[rows, n_codes]`.
+fn dynamics_logits(gpu: &Gpu, enc: &[f32], w: &DynamicsWeights, rows: u32, dim2: u32, n_codes: u32) -> Vec<f32> {
+    let eb = gpu.storage_init("e", enc);
     let lw = gpu.storage_init("lw", &w.to_logits_w);
     let lb = gpu.storage_init("lb", &w.to_logits_b);
-    let logits = linear_bias(gpu, &eb, &lw, &lb, rows as u32, dim2u, n_codes);
-    gpu.read(&logits, rows * n_codes as usize)
+    let logits = linear_bias(gpu, &eb, &lw, &lb, rows, dim2, n_codes);
+    gpu.read(&logits, (rows * n_codes) as usize)
+}
+
+/// Guided-MaskGIT forward: token IDs (`mask_id = n_codes`) + per-frame action
+/// one-hots -> next-token logits `[b*n, n_codes]`. Matches `MaskGIT.forward`
+/// (use_token=True, is_guided=True; gradient-shrink is identity at inference).
+#[allow(clippy::too_many_arguments)]
+pub fn dynamics_forward(
+    gpu: &Gpu, ids: &[u32], actions: &[f32], w: &DynamicsWeights,
+    b: u32, t: u32, h: u32, wd: u32, dim: u32, heads: u32, head_dim: u32,
+    n_codes: u32, code_dim: u32, num_actions: u32,
+) -> Vec<f32> {
+    let vta = dynamics_embed(gpu, ids, actions, w, b, t, h, wd, dim, n_codes, code_dim, num_actions, 0);
+
+    // STTransformer (12 blocks, order "st", causal temporal, peg causal) at dim2
+    let sbias = bias::cpb_bias(&w.cpb_net, h as usize, wd as usize, heads as usize);
+    let tbias = bias::alibi_bias(heads as usize, t as usize);
+    let dim2 = dim + num_actions;
+    let enc = sttransformer_forward(gpu, &vta, b, t, h, wd, dim2, heads, head_dim, &w.transformer, &sbias, &tbias, true, false);
+
+    dynamics_logits(gpu, &enc, w, b * t * h * wd, dim2, n_codes)
 }
 
 /// Run the block stack over a channels-last `[b,t,h,w,dim]` video and apply the
@@ -791,9 +783,13 @@ pub fn sttransformer_forward(
     for blk in &wts.layers {
         cur = stblock_forward(gpu, &cur, b, t, h, w, dim, heads, head_dim, blk, spatial_bias, temporal_bias, peg_causal, temporal_first);
     }
-    let rows = b * t * h * w;
-    let xb = gpu.storage_init("x", &cur);
-    let g = gpu.storage_init("g", &wts.norm_out_gamma);
+    final_norm(gpu, &cur, &wts.norm_out_gamma, b * t * h * w, dim)
+}
+
+/// The STTransformer's closing LayerNorm (gamma only, zero bias).
+fn final_norm(gpu: &Gpu, x: &[f32], gamma: &[f32], rows: u32, dim: u32) -> Vec<f32> {
+    let xb = gpu.storage_init("x", x);
+    let g = gpu.storage_init("g", gamma);
     let beta = gpu.storage(dim as u64);
     let out = layernorm(gpu, &xb, &g, &beta, rows, dim);
     gpu.read(&out, (rows * dim) as usize)
