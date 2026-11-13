@@ -119,7 +119,16 @@ pub enum Act {
     HardSigmoid,
     /// ReLU capped at 6 - MobileNetV2-style heads (torch's `nn.ReLU6`).
     Relu6,
+    /// Leaky ReLU at slope [`LEAKY_SLOPE`] (0.2), the GAN discriminator's
+    /// activation (torch's `nn.LeakyReLU(0.2)`). The slope is a constant rather
+    /// than a field because `Act` is `Eq`; a model that wants another slope
+    /// adds its own variant, the way ReLU is slope 0 of the same kernel pair.
+    /// Never fuses.
+    LeakyRelu,
 }
+
+/// The slope [`Act::LeakyRelu`] applies to negative inputs.
+pub const LEAKY_SLOPE: f32 = 0.2;
 
 impl Act {
     /// The FUSED kernels' activation selector — `conv_act*`'s and `bn_eval`'s
@@ -136,7 +145,7 @@ impl Act {
             Act::Relu => Some(1),
             Act::Silu => Some(2),
             Act::Sigmoid => Some(3),
-            Act::Gelu | Act::GeluErf | Act::HardSwish | Act::HardSigmoid | Act::Relu6 => None,
+            Act::Gelu | Act::GeluErf | Act::HardSwish | Act::HardSigmoid | Act::Relu6 | Act::LeakyRelu => None,
         }
     }
 }
@@ -152,7 +161,7 @@ fn act_pair(ctx: &Ctx, act: Act) -> Option<(usize, usize)> {
     match act {
         Act::None => None,
         Act::Silu => Some((ctx.ids.need(ctx.ids.silu, "silu"), ctx.ids.need(ctx.ids.silu_bwd, "silu_bwd"))),
-        Act::Relu => Some((
+        Act::Relu | Act::LeakyRelu => Some((
             ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"),
             ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"),
         )),
@@ -179,6 +188,7 @@ fn act_pair(ctx: &Ctx, act: Act) -> Option<(usize, usize)> {
 fn act_params(act: Act, n: u32) -> Vec<u32> {
     match act {
         Act::Relu => vec![n, f(0.0)],
+        Act::LeakyRelu => vec![n, f(LEAKY_SLOPE)],
         _ => vec![n],
     }
 }
@@ -1187,7 +1197,19 @@ impl Conv {
         d_out: &DeviceBuffer,
         d_in: &DeviceBuffer,
     ) {
-        self.backward_into(ctx, ps, x_in, d_out, Some(d_in));
+        self.backward_into(ctx, ps, x_in, d_out, Some(d_in), true);
+    }
+
+    /// [`Conv::backward`] for a unit whose weights are frozen: only `d_in`, the
+    /// gradient wrt `x_in`, is produced, and no weight or bias gradient is
+    /// touched (the store need not even hold a gradient buffer for them, as for
+    /// a [`paramstore::Role::Frozen`] tensor). The way a frozen network is
+    /// differentiated wrt its INPUT - a perceptual metric's trunk. Raw units
+    /// only: a normalised unit's backward is what produces its norm's
+    /// parameter gradients, so there is nothing to skip.
+    pub fn backward_input(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        assert_eq!(self.spec.norm, Norm::None, "Conv::backward_input: `{}` is a normalised unit; use `backward`", self.prefix);
+        self.backward_into(ctx, ps, x_in, d_out, Some(d_in), false);
     }
 
     /// [`Conv::backward`] for a unit whose input needs no gradient - the first
@@ -1196,12 +1218,12 @@ impl Conv {
     /// stem over full-resolution images is one of the most expensive passes of
     /// the whole backward.
     pub fn backward_params(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer) {
-        self.backward_into(ctx, ps, x_in, d_out, None);
+        self.backward_into(ctx, ps, x_in, d_out, None, true);
     }
 
     /// The backward with the input gradient written into `d_in` when one is
     /// asked for.
-    fn backward_into(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: Option<&DeviceBuffer>) {
+    fn backward_into(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: Option<&DeviceBuffer>, weight_grads: bool) {
         let on = self.out_shape.numel();
         let dx_step = |d_conv: &DeviceBuffer, d_in: &DeviceBuffer| {
             ctx.step(self.conv_dx_kind(ctx), &[d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel())
@@ -1219,12 +1241,15 @@ impl Conv {
             } else {
                 d_out
             };
-            let mut steps = self.dw_steps(ctx, ps, d_conv, x_in);
+            let mut steps = if weight_grads { self.dw_steps(ctx, ps, d_conv, x_in) } else { Vec::new() };
             steps.extend(d_in.map(|d| dx_step(d_conv, d)));
             ctx.gpu.submit(&[], &steps);
-            self.bias_backward(ctx, ps, d_conv);
+            if weight_grads {
+                self.bias_backward(ctx, ps, d_conv);
+            }
             return;
         }
+        assert!(weight_grads, "a normalised unit's backward always produces its parameter gradients");
         let (d_bn, d_conv) = (ctx.scratch("conv.d_bn", on), ctx.scratch("conv.d_conv", on));
         let (conv_out, bn_out) = self.bn_temps(ctx);
         // A recomputing unit first rebuilds its intermediates from its input: the conv, then the normalisation with
