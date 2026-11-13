@@ -13,7 +13,7 @@
 //! `conformer_layer`/`basic_transformer_block`'s self-attention loops are
 //! private to `crate::flow`. This module is that one seam: a global atomic
 //! accumulator the self-attention hot loop adds to on every call, read by a
-//! profiling harness (`BRAIN_COSYVOICE_PROFILE=1`, see `pipeline::generate`)
+//! profiling harness (`GenOpts::profile`, see `pipeline::generate`)
 //! after the fact.
 //!
 //! Always-on, not feature-gated: the added cost is one `Instant::now()` call

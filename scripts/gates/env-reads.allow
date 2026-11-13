@@ -128,7 +128,6 @@ crates/connectome/tests/it/mushroom_body.rs	BRAIN_CONNECTOME_DIR
 crates/connectome/tests/it/retinotopy.rs	BRAIN_CONNECTOME_DIR
 crates/controlnet/tests/it/parity.rs	BRAIN_CONTROLNET
 crates/controlnet/tests/it/parity.rs	BRAIN_TESTDATA
-crates/cosyvoice/src/pipeline.rs	BRAIN_COSYVOICE_PROFILE
 crates/cosyvoice/tests/it/cv3_flow_parity.rs	BRAIN_COSYVOICE3_FLOW
 crates/cosyvoice/tests/it/cv3_hift_parity.rs	BRAIN_COSYVOICE3_HIFT
 crates/cosyvoice/tests/it/flow_parity.rs	BRAIN_COSYVOICE_FLOW

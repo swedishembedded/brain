@@ -225,6 +225,8 @@ pub struct GenOpts {
     pub n_timesteps: usize,
     /// Which generation to run - see [`Variant`].
     pub variant: Variant,
+    /// Print each stage's wall-clock time to stderr.
+    pub profile: bool,
 }
 
 impl Default for GenOpts {
@@ -235,6 +237,7 @@ impl Default for GenOpts {
             min_token_text_ratio: 2.0,
             n_timesteps: Variant::CosyVoice2.default_timesteps(),
             variant: Variant::CosyVoice2,
+            profile: false,
         }
     }
 }
@@ -321,12 +324,10 @@ fn token_budget(target_text_len: usize, opts: &GenOpts) -> (usize, usize) {
 /// flow decoder -> HiFT vocoder. See this module's own doc for the RAM
 /// discipline and the honest RNG-crossing/kaldi-fbank gaps.
 pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path: &str, ref_text: &str) -> Result<GeneratedSpeech, String> {
-    // Opt-in per-stage wall-clock profiling: a per-kernel-kind table should
-    // exist before any NPU-export optimization work touches code, so this
-    // is the seam that produces it. Off by default so a normal call pays
-    // only the cost of one env lookup
-    // and a handful of `Instant::now()` calls it never reads.
-    let profile = std::env::var("BRAIN_COSYVOICE_PROFILE").map(|v| v != "0" && !v.is_empty()).unwrap_or(false);
+    // Opt-in per-stage wall-clock profiling (`opts.profile`): the seam a
+    // per-stage cost table comes from. Off by default, so a normal call pays
+    // only a handful of `Instant::now()` calls it never reads.
+    let profile = opts.profile;
     let mut stage_times: Vec<(&'static str, std::time::Duration)> = Vec::new();
 
     let wav = audio::wav::read(ref_wav_path).map_err(|e| format!("cosyvoice::generate: read {ref_wav_path}: {e}"))?;

@@ -359,7 +359,7 @@ fine-tuning would be new architecture, not just a missing backward.
 
 ## NPU export
 
-A per-stage wall-clock profile of `pipeline::generate` (`BRAIN_COSYVOICE_PROFILE=1`,
+A per-stage wall-clock profile of `pipeline::generate` (the `profile` param of `synth`,
 `crate::profile`) confirms the flow decoder dominates end-to-end cost by a
 wide margin over the LM and HiFT combined, and refines the flow decoder's own
 internal breakdown: its self-attention loops and its causal convolutions

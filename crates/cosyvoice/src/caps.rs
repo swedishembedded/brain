@@ -112,6 +112,7 @@ fn synth_spec() -> ActionSpec {
             .min(1.0)
             .max(50.0),
     )
+    .param(ParamSpec::new("profile", ParamType::Bool, "print each stage's wall-clock time to the host's stderr").default(json!(false)))
     .input(BlobSpec::new("ref_audio", Media::Audio, "reference audio clip for zero-shot cloning: a WAV container at its own sample rate, or raw mono f32 little-endian PCM (meta.sample_rate, defaulting to 16 kHz when absent)").required())
     .output(BlobSpec::new("audio", Media::Audio, "the synthesized speech: a complete 24 kHz mono WAV"))
 }
@@ -206,6 +207,7 @@ pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, _progress: &mut dy
     let opts = GenOpts {
         seed,
         n_timesteps: inv.get_i64("n_timesteps").unwrap_or(d.n_timesteps as i64).max(1) as usize,
+        profile: inv.get_bool("profile").unwrap_or(false),
         ..d
     };
 
