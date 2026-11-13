@@ -331,13 +331,6 @@ def _largest_n(cost, budget):
     return lo
 
 
-def _human_time(seconds):
-    for unit, size in (("years", 365 * 86400), ("days", 86400), ("hours", 3600), ("minutes", 60)):
-        if seconds >= size:
-            return f"{seconds / size:.3g} {unit}"
-    return f"{seconds:.3g} seconds"
-
-
 def growth_values():
     ns = [10, 20, 40, 80]
     cols = [("log2 n", lambda n: math.log2(n)), ("n", lambda n: n), ("n log2 n", lambda n: n * math.log2(n)),
@@ -353,19 +346,21 @@ def growth_values():
 
 
 def growth_budget():
-    rate = 10 ** 9      # assumption: one billion simple operations per second
+    """Largest n whose cost fits a budget stated in operations, not seconds: work is machine-independent."""
     classes = [("n", lambda n: n), ("n log2 n", lambda n: n * math.log2(n)), ("n^2", lambda n: n ** 2),
                ("n^3", lambda n: n ** 3), ("2^n", lambda n: 2 ** n)]
+    budgets = (10 ** 9, 10 ** 12, 10 ** 15)
     rows = []
     for name, f in classes:
         cells = []
-        for seconds in (1, 3600, 86400):
-            best = _largest_n(f, rate * seconds)
+        for budget in budgets:
+            best = _largest_n(f, budget)
             cells.append(_n(best) if best < 10 ** 12 else _sci(best))
         rows.append((name, *cells))
-    t = [(f"n = {n}", _human_time(2 ** n / rate)) for n in (30, 50, 70, 100)]
-    return (_table(["cost", "largest n in 1 second", "in 1 hour", "in 1 day"], rows)
-            + "\n\nTime for 2^n operations at the same rate:\n\n" + _table(["n", "time"], t, "lr"))
+    t = [(f"n = {n}", _sci(2 ** n)) for n in (30, 50, 70, 100)]
+    return (_table(["cost", "largest n for 10^9 operations", "for 10^12", "for 10^15"], rows)
+            + "\n\nThe work 2^n itself:\n\n"
+            + _table(["n", "operations 2^n"], t, "lr"))
 
 
 def known_costs():

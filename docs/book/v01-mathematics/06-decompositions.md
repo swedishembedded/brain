@@ -6,7 +6,7 @@
 *What hidden structure does a matrix have, and how can a big matrix be approximated by small ones?*
 
 A weight matrix in a language model has $4096$ rows and $4096$ columns:
-$16\,777\,216$ numbers, about sixty-four mebibytes in 32-bit floating point,
+$16\,777\,216$ numbers, exactly sixty-four mebibytes in 32-bit floating point,
 for one layer of dozens. Chapter 4 taught us what such a table does: it is a
 linear map, it composes with other maps by multiplication, and it can be
 inverted only if its rank is full. That describes what the table *is*. It says
@@ -37,23 +37,18 @@ two hundred and fifty-six times fewer, and a fine-tuning method could train
 only those. Whether that is true of a given matrix is something the matrix
 itself can tell us, through numbers called singular values.
 
-The answers come in that order, and each is one idea from the earlier chapters
-used a little harder. The area number is the $ad - bc$ of Chapter 4, the
+Each answer is one idea from the earlier chapters used a little harder. The area number is the $ad - bc$ of Chapter 4, the
 stretched directions come from solving $\mathbf{A}\mathbf{x} = \lambda
 \mathbf{x}$ with the elimination of Chapter 4, the rigid maps are the matrices
 whose columns are orthogonal unit vectors in the sense of Chapter 3, and the
 approximation is a sum of simple matrices whose size is measured with the norm
-of Chapter 3. Complex numbers belong to Chapter 14, so wherever one would be
-needed the text says so and goes around it; derivatives wait for Chapter 7, and
-statistics for Volume II.
+of Chapter 3. Complex numbers belong to Chapter 14, and the few places that
+would need one go around them.
 
-Six ideas from earlier chapters carry the weight, and it helps to have them
-fresh: matrix multiplication and the transpose with its adjoint identity
-$(\mathbf{M}\mathbf{x})\cdot\mathbf{y} = \mathbf{x}\cdot(\mathbf{M}^\top\mathbf{y})$,
-the inverse and rank, norms and orthogonality, the unit circle, the roots of a
-quadratic, and the flat view of an array as one long list (Chapter 5). Answer
-these from memory; the answers are at the end, and a hard one sends you back to
-the chapter named.
+Six ideas from earlier chapters carry the weight, one question each: matrix
+products and the transpose, the inverse, rank, norms and orthogonality, the unit
+circle, and the roots of a quadratic. An answer that will not come is a reason
+to reread the chapter named before going further.
 
 1. (Chapter 4, matrix multiplication and transpose.) For $\mathbf{A} =
    \begin{pmatrix}1&2\\0&1\end{pmatrix}$ and $\mathbf{B} =
@@ -101,7 +96,7 @@ matrix has columns $(1, \tfrac12)$ and $(2, 1)$, one twice the other, so the
 image is a segment, area $0$, the same flattened case as the right half of
 Chapter 4's Figure 1.
 
-Two things in the table need a name. The number is **signed**: the swap
+One feature of the table needs a name. The number is **signed**: the swap
 $\begin{pmatrix}0&1\\1&0\end{pmatrix}$ exchanges the two axes, the image of
 $\mathbf{e}_1$ is now where $\mathbf{e}_2$ was, and walking the image corners
 in the original order goes round the other way, giving $-1$. A negative sign
@@ -349,7 +344,8 @@ determinant, which explains the first section from this side: the map scales
 area by $3 \times 1$ because it scales one direction by $3$ and the other by
 $1$.
 
-A matrix need not be symmetric about a diagonal. For $\begin{pmatrix}4&1\\2&3\end{pmatrix}$ the same recipe works:
+The recipe does not need the matrix to mirror itself across its diagonal, as
+$\begin{pmatrix}2&1\\1&2\end{pmatrix}$ does. For $\begin{pmatrix}4&1\\2&3\end{pmatrix}$ it works the same way:
 
 <!-- worked: decompositions.eigen_nonsymmetric -->
 A = [[4, 1], [2, 3]]: trace 7, det 10, lambda^2 - 7 lambda + 10 = 0.
@@ -560,8 +556,7 @@ had them at $90^\circ$. A square matrix is **symmetric** if $\mathbf{A} =
 common in machine learning, because the product $\mathbf{X}^\top\mathbf{X}$ of
 any matrix with its own transpose is symmetric (its entry $(i, j)$ is the dot
 product of columns $i$ and $j$ of $\mathbf{X}$, the same as entry $(j, i)$), and
-so are the tables of similarities between a set of vectors and the second
-moments of data.
+so is any table of similarities between every pair of vectors in a set.
 
 **Claim.** If $\mathbf{A}$ is symmetric and $\mathbf{v}, \mathbf{w}$ are
 eigenvectors with different eigenvalues $\lambda \ne \mu$, then
@@ -585,7 +580,7 @@ step $\mathbf{A}^\top = \mathbf{A}$ is not available, which is why the angle
 was $108.4^\circ$ there.
 
 Two further facts hold for every real symmetric matrix and are stated without
-proof here (the second needs the complex numbers of Chapter 14): its
+proof here (the proof of the first needs the complex numbers of Chapter 14): its
 eigenvalues are real, and when an eigenvalue is repeated one can still choose
 orthogonal eigenvectors inside its eigenspace (the set of all eigenvectors
 of that eigenvalue, with the zero vector). The conclusion is the
@@ -611,8 +606,8 @@ The three eigenvectors have pairwise dot product $0$ (to the printed
 precision). The matrix $\mathbf{Q}$ whose columns are those eigenvectors
 satisfies $\mathbf{Q}^\top\mathbf{Q} = \mathbf{I}$, and
 $\mathbf{Q}\,\mathrm{diag}(\lambda)\,\mathbf{Q}^\top$ reproduces $\mathbf{A}$ to
-about $10^{-15}$. The next section explains why $\mathbf{Q}^\top\mathbf{Q} =
-\mathbf{I}$ is the defining property of a very useful kind of matrix.
+about $10^{-15}$. That property, $\mathbf{Q}^\top\mathbf{Q} = \mathbf{I}$,
+defines a very useful kind of matrix.
 
 ## Orthogonal matrices: maps that keep lengths and angles
 
@@ -686,8 +681,7 @@ Three consequences are used constantly.
   \mathbf{Q}_2^\top\mathbf{Q}_2 = \mathbf{I}$. Chains of rotations are rotations.
 - **No error is amplified.** Multiplying by $\mathbf{Q}$ cannot make a vector,
   or a rounding error in it, longer. This is why numerical methods are built
-  from orthogonal steps whenever they can be, and why the eigenvector routines
-  of the previous sections end with an orthogonal $\mathbf{Q}$.
+  from orthogonal steps whenever they can be.
 
 Putting the spectral theorem and this section together, a symmetric
 $\mathbf{A}$ is
@@ -700,9 +694,9 @@ the earlier $\mathbf{V}\boldsymbol{\Lambda}\mathbf{V}^{-1}$ with
 $\mathbf{V}^{-1} = \mathbf{V}^\top$ because the eigenvector matrix is
 orthogonal. In words: **rotate** the input so that the eigenvector
 directions become the coordinate axes, **stretch** each axis by its
-eigenvalue, and **rotate back**. The next two sections build the rotations and
-then show that a rotate-stretch-rotate description exists for every matrix,
-symmetric or not, square or not.
+eigenvalue, and **rotate back**. Rotations can be written down explicitly,
+and a rotate-stretch-rotate description exists for every matrix, symmetric or
+not, square or not.
 
 ## Rotation matrices
 
@@ -831,8 +825,8 @@ The same quantity computed with a single rotation by the offset, sum over pairs 
 Moving both positions by the same amount (rows $(2, 5)$, $(10, 13)$ and
 $(100, 103)$, all at offset $3$) changes nothing. The two ways of computing the
 quantity, rotating both vectors and then taking the dot product, or rotating one
-by the offset, agree digit for digit. This is a forward pointer only: Volume V
-builds a position encoding on it.
+by the offset, agree digit for digit. Volume V builds a position encoding on
+this property.
 
 ## The singular value decomposition
 
@@ -849,7 +843,7 @@ stretched by $\sigma_1$ and $\sigma_2$:
 $\mathbf{A}\mathbf{v}_i = \sigma_i\mathbf{u}_i$. (In this chapter $\sigma_i$,
 with an index, is always the $i$-th stretch factor, a singular value; it is
 unrelated to the sigmoid $\sigma(x)$, which has an argument, and to the
-standard deviation $\sigma$ of Volume I's later chapters. Likewise
+standard deviation $\sigma$ of Chapters 11 and 12. Likewise
 $\boldsymbol{\Sigma}$ here is the diagonal matrix of the $\sigma_i$, not a
 covariance matrix.)
 
@@ -1029,11 +1023,11 @@ $$
 $$
 
 a matrix of rank at most $r$. A **low-rank approximation** of $\mathbf{A}$ is
-a matrix of small rank $r$ that is close to $\mathbf{A}$. The pieces for our
-$2 \times 2$ example. Besides the largest stretch (the spectral norm above), the
-block reports the **Frobenius norm** $\|\cdot\|_F$ of the error, the Euclidean
-norm of all the entries of a matrix read as one long vector; the next
-subsections come back to both.
+a matrix of small rank $r$ that is close to $\mathbf{A}$. The block shows the
+pieces for our $2 \times 2$ example. Besides the largest stretch (the spectral
+norm above), it reports the Frobenius norm $\|\cdot\|_F$ of the error, the
+Euclidean norm of all the entries of a matrix read as one long vector, which
+is defined properly below.
 
 <!-- worked: decompositions.rank_one_pieces -->
 A = [[3, 0], [4, 5]] = sigma_1 u_1 v_1^T + sigma_2 u_2 v_2^T.
@@ -1265,8 +1259,8 @@ met again in Volume II.
 
 ## Jacobi eigenvalues and the SVD as pseudocode
 
-The procedures of this chapter, in the book's [pseudocode](../pseudocode.md).
-The first function is the one shown above. The next two compute eigenpairs of a symmetric matrix and the SVD;
+Power iteration was written out above; the functions below, in the book's
+[pseudocode](../pseudocode.md), compute the eigenpairs of a symmetric matrix and the SVD;
 the textbook cost of either is on the order of $n^3$ for a square matrix, so
 they are for matrices up to a few thousand wide, not for the full weights of a
 large model.
@@ -1454,8 +1448,8 @@ costs far less than all $n$ for $k \ll n$. A full decomposition is cubic.
 
 ## Eigensolvers, rotations and adapters in brain
 
-brain uses a symmetric eigensolver, orthogonal rotations of activations, low-rank
-adapters and rotary position embeddings. Four places show them, and two stories
+The brain engine uses a symmetric eigensolver, orthogonal rotations of
+activations, low-rank adapters and rotary position embeddings. Four places show them, and two stories
 show what they cost.
 
 **The symmetric eigensolver.** `crates/model/src/eigen.rs` has one public
@@ -1465,10 +1459,9 @@ this chapter computed for matrices as wide as a model's hidden state:
 Householder reflections (orthogonal matrices with determinant $-1$) reduce the
 matrix to tridiagonal form, and a sequence of plane rotations, the same
 $\mathbf{R}(\theta)$ as here, then drives it to diagonal, with every rotation
-accumulated into the eigenvector matrix. The module's doc says why not
-the Jacobi sweeps of the pseudocode above: they make many passes of order $n^3$
-each, while this pair of routines (known as `tred2` and `tql2` from an old
-numerical library) makes one. Its test, `decomposes_symmetric_matrices`, checks
+accumulated into the eigenvector matrix. The Jacobi sweeps of the pseudocode
+above would make many passes of order $n^3$ each, while this pair of routines
+(known as `tred2` and `tql2` from an old numerical library) makes one. Its test, `decomposes_symmetric_matrices`, checks
 the chapter's three properties on a random $37 \times 37$ matrix and on a
 deliberately degenerate one with a repeated eigenvalue and a zero block: every
 returned pair satisfies $\mathbf{A}\mathbf{v} = \lambda\mathbf{v}$ to
@@ -1482,11 +1475,8 @@ properties and never compares against fixed vectors.
 module. Its message gives the reason in the vocabulary of this chapter: the
 principal directions of hidden-state covariances need eigenvectors of matrices
 as wide as a model's residual stream, and an earlier routine based on cyclic
-Jacobi rotations made many cubic sweeps.
-
-<!-- perf-number: historical measurement, commit 655f7927f -->
-The message records that the one-pass routine handled $n = 2048$ in 13 seconds
-(the hardware is not stated).
+Jacobi rotations made many cubic sweeps where the new one makes a single cubic
+pass.
 
 The same day, commit `a882fe8d3` added the program that uses it (`samples/text/spectral-lm/src/slice.rs`), a tool that
 pools the second moment of a Qwen3 model's residual rows at every point of the
@@ -1506,7 +1496,7 @@ every layer that reads the stream is multiplied by $\mathbf{Q}^\top$ on the
 right and every layer that writes it by $\mathbf{Q}$, so $(\mathbf{W}
 \mathbf{Q}^\top)(\mathbf{Q}\mathbf{x}) = \mathbf{W}\mathbf{x}$; once the
 learned gains of the normalisation are folded into the layers that read the
-stream (the test's doc says they are), what remains of the normalisation depends
+stream, as the slicing does, what remains of the normalisation depends
 only on length and is unchanged by $\mathbf{Q}$. Dropping directions then
 makes the rotation a projection, which is exactly the truncation of the
 low-rank section, and the test fixes the exact end of the scale (all
@@ -1518,11 +1508,10 @@ machinery. Its `Pair` is the factorisation of this chapter: `a` of shape
 `[r, in]`, `b` of shape `[out, r]`, `Pair::new` draws `a` at random and sets
 `b` to zero ("initial no-op", the table above), and `Pair::delta` adds
 `scale * B * A` to a weight in `[out, in]` layout with `scale = alpha / rank`.
-The fold runs the output rows in parallel but gives each row its own loop over
-the rank in ascending order, and skips zero entries of `b`, with a comment
-explaining why: it must be bit-identical to the serial walk, because a LoRA
-run's point is that applying the adapter at $\mathbf{B} = \mathbf{0}$ reproduces
-the base weights exactly.
+Applying the adapter at $\mathbf{B} = \mathbf{0}$ must reproduce the base
+weights exactly, so the fold must give the same bits as a serial walk: it runs
+the output rows in parallel but gives each row its own loop over the rank in
+ascending order, and skips zero entries of `b`.
 The same module reads adapters written by other tools in two shapes, and
 distinguishes them on purpose: LoRA, a low-rank product $\Delta\mathbf{W} =
 (\alpha/r)\mathbf{B}\mathbf{A}'$, and LoKr, a Kronecker product, which is
@@ -1574,13 +1563,13 @@ chapter's section on pairs: the other kernel in the same directory,
 $m$ with $m + \mathrm{half}$ to match imported weights; pairing is
 a permutation of coordinates, and an orthogonal matrix again. The backward
 kernel `rope_base_bwd.wgsl` is the shortest proof of this chapter's
-orthogonality section in the repository: its comment says "the gradient is the
-transpose (inverse) rotation, i.e. rotate by $-\theta$", and the code
-multiplies by the transpose, $\mathbf{R}(\theta)^\top = \mathbf{R}(-\theta)$.
+orthogonality section in the repository: the gradient of a rotation is the
+transposed, that is inverse, rotation, and the code multiplies by
+$\mathbf{R}(\theta)^\top = \mathbf{R}(-\theta)$.
 Finally `rope_base_yarn.wgsl` multiplies both cosine and sine by an
 `attention_factor` before rotating. That scales the matrix by the factor, so
-it is no longer orthogonal (lengths grow by exactly that factor), and
-the header notes that a factor of $1$ reproduces the plain kernel exactly.
+it is no longer orthogonal (lengths grow by exactly that factor), and a factor
+of $1$ reproduces the plain kernel exactly.
 
 **Low-rank structure in an index.** The test
 `pca_projections_are_orthonormal_leading_directions` in
@@ -1648,7 +1637,7 @@ the determinant, make repeated application $\mathbf{A}^k = \mathbf{V}
 \boldsymbol{\Lambda}^k\mathbf{V}^{-1}$ trivial, and for a large matrix are found
 by **power iteration**, whose error shrinks by $|\lambda_2|/|\lambda_1|$ per
 step. A symmetric matrix has real eigenvalues and orthogonal eigenvectors,
-proved from the adjoint identity of Chapter 4.
+the second proved from the adjoint identity of Chapter 4.
 
 An **orthogonal matrix** has orthonormal columns, satisfies
 $\mathbf{Q}^\top\mathbf{Q} = \mathbf{I}$ (the entry $(i, j)$ is a dot product of
@@ -1708,5 +1697,5 @@ variable, and builds the derivative.
 4. $\mathbf{Q}^\top\mathbf{Q} = \begin{pmatrix}2&0\\0&2\end{pmatrix} = 2\mathbf{I}$: the columns are orthogonal but have length $\sqrt2$, not $1$. The map multiplies every length by $\sqrt2$. Orthogonal columns are not enough; they must be orthonormal.
 5. $\mathbf{R}(40^\circ)\mathbf{R}(50^\circ) = \mathbf{R}(90^\circ) = \begin{pmatrix}0&-1\\1&0\end{pmatrix}$, and $\mathbf{R}(40^\circ)^\top = \mathbf{R}(-40^\circ)$.
 6. $|\det| = 6 \times 0.5 = 3$. The longest image of a unit vector has length $6$ (the shortest $0.5$). Rank $2$ (both nonzero). The unit circle becomes an ellipse with semi-axes $6$ and $0.5$.
-7. Keeping the longest column and zeroing the rest is not the truncated SVD, and Eckart-Young only guarantees the truncated SVD is optimal. The second row of the `eckart_young_check` table shows projecting onto the longest column(s) giving $14.09$ against $11.63$ for the SVD at $r = 1$.
+7. Keeping the longest column and zeroing the rest is not the truncated SVD, and Eckart-Young only guarantees the truncated SVD is optimal. The second column of the `eckart_young_check` table, at $r = 1$, shows projecting onto the longest column giving $14.09$ against $11.63$ for the SVD at $r = 1$.
 8. $r(m + n) < mn$ means $r < mn/(m + n)$. For $100 \times 100$: $r < 50$ (at $r = 50$ the counts are equal, $10\,000$). For $4096 \times 4096$: $r < 2048$.

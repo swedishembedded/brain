@@ -93,7 +93,7 @@ NEXT_SCORES = [3.0, 2.0, 1.0, -1.0, 0.0]
 # The three contexts of the next-token examples: name and the scores (logits) for NEXT_WORDS.
 NEXT_CONTEXTS = [
     ("confident context", [6.0, 1.0, 0.0, -2.0, -1.0]),
-    ("the chapter's context", NEXT_SCORES),
+    ("Chapter 11's context", NEXT_SCORES),
     ("undecided context", [0.4, 0.3, 0.2, -0.1, 0.0]),
 ]
 

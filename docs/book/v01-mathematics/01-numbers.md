@@ -37,19 +37,19 @@ divide by how many there were. Saying "do this for every example and add them
 all up" without ambiguity, for a dataset of any size, takes a notation of its
 own.
 
-So the chapter is a toolkit for those three troubles. It starts with the
-number systems machine learning computes with, then builds powers and
-scientific notation for sizes, the device that turns products into sums, the
-$\sum$ and $\prod$ symbols for repeated addition and multiplication, braces
-for collections, and the $f(x)$ notation for a rule with inputs and outputs.
-Nothing here goes beyond school arithmetic in difficulty. What is new is the
-care: every rule is derived from the one before it, and every numerical claim
-is computed by a program rather than typed, so that you can check it.
+Those three troubles call for a small toolkit: the number systems machine
+learning computes with, braces for collections, powers and scientific notation
+for sizes, the device that turns products into sums, the $f(x)$ notation for a
+rule with inputs and outputs, and the $\sum$ and $\prod$ symbols for repeated
+addition and multiplication. Nothing here goes beyond school arithmetic in
+difficulty. What is new is the care: every rule is derived from the one before
+it, and every number in the tables below was computed by a program, so that
+you can check it.
 
-School arithmetic is the whole prerequisite, and it is worth five quick checks
-before we lean on it. Answer these from memory; the answers are at the end of
-the chapter. There is no earlier chapter to go back to, so if one is hard, work
-it through on paper before reading on.
+School arithmetic is the whole prerequisite, and fractions, powers and the
+order of operations carry most of the weight below, so they deserve five quick
+checks first. With no earlier chapter to go back to, a question that resists is
+one to work through on paper before reading on; the answers close the chapter.
 
 1. Compute $\frac{1}{2} + \frac{1}{3}$ as a single fraction.
 2. What is $2^5$, and what is $10^3 \times 10^2$ written as a single power of 10?
@@ -62,9 +62,8 @@ it through on paper before reading on.
 The simplest numbers are the ones we count with. A **natural number** answers
 "how many?": $0, 1, 2, 3, \dots$. An **integer** is a natural number or the
 negative of one: $\dots, -3, -2, -1, 0, 1, 2, 3, \dots$. The set of all
-integers is written $\mathbb{Z}$, and the natural numbers $\mathbb{N}$ (a
-**set** is a collection of things; the notation is introduced a few sections
-below).
+integers is written $\mathbb{Z}$, and the natural numbers $\mathbb{N}$ (both
+are collections of numbers, whose notation comes in the section on sets).
 
 Integers are also the numbers of naming. A vocabulary of 50,000 tokens numbers
 them $0, 1, \dots, 49999$, and the number is the token's identity. The
@@ -154,7 +153,7 @@ then on forever.
 <!-- /worked -->
 
 Repeating blocks are why $\tfrac13$ cannot be written exactly with a finite
-number of decimal digits, and (as a later chapter shows) why $0.1$ cannot be
+number of decimal digits, and (as Chapter 15 shows) why $0.1$ cannot be
 written exactly with a finite number of binary digits either.
 
 Do fractions exhaust the numbers? The ancient answer is no. Consider a square
@@ -210,7 +209,7 @@ errors stop being small, is the subject of the chapter on floating-point
 numbers. For the rest of this chapter we treat real numbers as exact and use a
 program only to print them.
 
-Real numbers are ordered (for any two, one is smaller), so we can name
+Real numbers are ordered (of any two different ones, one is smaller), so we can name
 stretches of the line as **intervals**: $[a, b]$ is all $x$ with
 $a \le x \le b$, the **closed interval** that includes both ends; $(a, b)$ is
 all $x$ with $a < x < b$, the **open interval** without them. A probability,
@@ -236,9 +235,9 @@ notation $\{\, n \in \mathbb{Z} : n^2 < 20 \,\}$ reads "the set of integers $n$
 such that $n^2 < 20$", the colon meaning "such that". We also use the
 shorthand $\{1, \dots, n\}$ for the integers from $1$ to $n$ (the book's
 notation page lists it), and $\mathbb{R}$, $\mathbb{Z}$, $\mathbb{N}$ are sets
-in this sense. Since $\mathbb{N}$, $\mathbb{Z}$ and $\mathbb{R}$ contain one
-another, we say that $B$ is a **subset** of $A$, written $B \subseteq A$, when
-every element of $B$ is in $A$.
+in this sense. $\mathbb{N}$ sits inside $\mathbb{Z}$ and $\mathbb{Z}$ inside
+$\mathbb{R}$, and that relation has a name: $B$ is a **subset** of $A$, written
+$B \subseteq A$, when every element of $B$ is in $A$.
 
 Sets combine in three ways. The **union** $A \cup B$ holds everything in
 either; the **intersection** $A \cap B$ holds what is in both; the
@@ -367,7 +366,8 @@ of magnitude apart.
 Exponents also let us count. A natural way to organise the numbers in a model
 is as square grids of $d \times d$ numbers, each with $d$ extra numbers
 alongside. One such grid holds $d^2 + d$ numbers. A network stacks many of
-them; the table repeats the same grid 32 times.
+them; the table repeats the same grid 32 times, and its last column is the
+memory those numbers occupy at 4 bytes each, in gibibytes (GiB, defined below).
 
 <!-- worked: numbasics.parameter_counts -->
 | d | numbers per grid d*d + d | scientific | 32 grids | scientific | GiB at 4 bytes each |
@@ -416,8 +416,9 @@ $$
 So $\log_2 1024 = 10$, $\log_{10} 1000 = 3$ and $\log_{10} 0.001 = -3$. The
 restriction $y > 0$ is not a technicality: a positive base raised to any real
 power is positive, so no exponent produces $0$ or a negative number, and
-$\log_b y$ is undefined there. We will see shortly why a program that is asked
-for $\log 0$ answers $-\infty$ and not an error.
+$\log_b y$ is undefined there. A program asked for $\log 0$ nevertheless
+answers $-\infty$ rather than an error, because as $y$ shrinks toward $0$ the
+logarithm (to a base above 1) falls below every bound.
 
 By definition, a logarithm and an exponent undo one another:
 $\log_b(b^x) = x$ and $b^{\log_b y} = y$.
@@ -490,8 +491,8 @@ e = 2.718281828459
 <!-- /worked -->
 
 The values settle: $2$, $2.59$, $2.7048$, $2.71692$, and so on toward a number
-written $e = 2.718281828\ldots$, an irrational number. (We will not prove that
-the values converge; the chapter on derivatives defines the limit properly.)
+written $e = 2.718281828\ldots$, an irrational number. (Convergence is taken on
+trust here; the chapter on derivatives defines the limit properly.)
 The bottom rows warn of something else. For very large $n$ the printed value
 drifts away from $e$, and at $n = 10^{16}$ it is exactly $1$. The mathematics
 has not changed; the computer cannot distinguish $1 + 10^{-16}$ from $1$, and
@@ -577,8 +578,8 @@ when comparing quantities that range from $10^{-8}$ to $10^{12}$.
 We have been writing expressions like $e^x$ and $\log_b y$, where a letter
 stands for an input and the expression says what to do with it. That is the
 idea of a function, and this section introduces only its notation; the next
-chapter builds the theory. We need the notation now because the loss, the
-quantity this chapter promised to make precise, is one.
+chapter builds the theory. We need the notation now because the loss of the
+opening is a function.
 
 A function is a rule that takes an input and produces an output. We give the
 rule a name, usually a single letter, and write $f(x)$ for the output the rule
@@ -631,7 +632,7 @@ sets, as above, are how we state it.
 
 A **loss** is a function too: its input is the parameters (everything else is
 held fixed) and its output is one number saying how badly the model does. We
-write it $L(w)$, and the next section constructs one.
+write it $L(w)$.
 
 ## Adding up a loss
 
@@ -678,7 +679,7 @@ function mean_squared_error(x: array<real>[N], y: array<real>[N],
                             w: real, b: real) -> real:
     require N > 0, "the mean of no examples is undefined"
     total = 0.0
-    for n in 0 .. N:                  # n = 0, ..., N-1: the book's i = 1, ..., N
+    for n in 0 .. N:                  # n = 0, ..., N-1: the formula's n = 1, ..., N
         err = (w * x[n] + b) - y[n]
         total = total + err * err
     return total / N
@@ -688,7 +689,7 @@ Watch the loop's range. Mathematics indexes from 1 and pseudocode from 0, so
 the sum over $n = 1, \dots, N$ becomes a loop over `0 .. N`, as the notation
 page promises. The number of terms in a sum from $a$ to $b$ is $b - a + 1$ if
 $b \ge a$ and zero otherwise; mistakes in this count are among the commonest
-bugs in code that sums, which is why the table below is worth reading.
+bugs in code that sums, and the table checks the count on five ranges.
 
 <!-- worked: numbasics.term_counts -->
 | i from .. to | terms by counting | max(b - a + 1, 0) |
@@ -705,8 +706,8 @@ keeps every rule below valid even for empty ranges.
 
 Because the loss is a function of the model's parameters, we can treat it as
 one. Holding $b = 1$ fixed, here is $L$ at five values of $w$; it is lowest
-near $w = 2$, and we will later learn how to find that minimum without trying
-values.
+near $w = 2$, and finding such a minimum without trying values is what the
+derivatives of Chapter 7 are for.
 
 <!-- worked: numbasics.loss_as_function_of_w -->
 | w | L(w) with b = 1 |
@@ -871,8 +872,8 @@ closed form.
 Every piece is now on the table, and the question from the opening can be
 answered. A model reading a text assigns, to each word, a chance that it would
 have appeared there: a number $p_i$ in $(0, 1]$. (What these chances mean, and
-how a model computes them, are the subjects of the probability and learning
-volumes. For now they are just numbers between 0 and 1.) The chance the model
+how a model computes them, are the subjects of Chapter 10 and of
+Volume II. For now they are just numbers between 0 and 1.) The chance the model
 gives to the whole text, when each word's chance is judged given the words
 before it, is their product,
 
@@ -888,8 +889,8 @@ $$
 
 The product has become a sum, and a sum of per-example quantities is the shape
 of a loss. Better predictions mean larger $P$ and therefore a larger
-$\log P$, since $\log$ is increasing. Everything about the quality of a text
-model can be read from $\sum_i \log p_i$, which is why log-probabilities
+$\log P$, since $\log$ is increasing. How well a model predicted a text can
+be read from $\sum_i \log p_i$, which is why log-probabilities
 (rather than probabilities) are the language of model evaluation.
 
 Try it on four words with chances $0.5, 0.2, 0.1, 0.4$:
@@ -905,7 +906,7 @@ Try it on four words with chances $0.5, 0.2, 0.1, 0.4$:
 
 The last column recovers the product from the sum of logs: $\exp(\log P) = P$.
 Each log is negative, because each $p_i < 1$, and the sum gets more negative
-with more words. A longer text always has a smaller chance.
+with more words: adding a word never raises the chance of the text.
 
 Elegance is not the main reason for the logarithm, though. The main reason is
 whether the answer can be computed at all. Computers store numbers in a fixed
@@ -993,9 +994,10 @@ fails in five different ways, and each is worth knowing by name.
 The mildest is a question of units. A program's `log` is the natural
 logarithm. Information content measured with $\log_2$ is in bits, with $\log$
 in nats, and the two differ by the constant factor $\log 2 \approx 0.693$ of
-the change-of-base rule. Mixing them silently is a classic error: a loss
-reported in nats and compared with a published figure in bits is off by 44
-percent.
+the change-of-base rule. Mixing them silently is a classic error: the same
+loss is $1/\log 2 \approx 1.44$ times larger in bits than in nats, so a
+figure in nats compared with a published one in bits looks 31 percent better
+than it is.
 
 More tempting are the equalities that look plausible and are false. They all
 come from treating an operation as if it distributed over addition.
@@ -1056,21 +1058,23 @@ this under compensated summation in the floating-point chapter.
 
 ## Where the exponents and logarithms show up in the code
 
-None of this is a preliminary the engine outgrew; it is in the code.
+None of this is a preliminary that brain, the engine this book follows,
+outgrew; it is in the code.
 
-Start with the log-probabilities. `crates/model/src/logprobs.rs` defines
-`row_logprob`, the log of the chance a model gave to one chosen word, computed
-from the model's raw scores for every word in the vocabulary. Its doc comment
-calls it "numerically-stable", which is the problem of the last two sections:
-the function never forms the tiny probability itself. Its tests include one
+Start with the log-probabilities. The log of the chance a model gave to one
+chosen word can be computed from the model's raw scores for every word in the
+vocabulary without ever forming the tiny probability itself, which is the
+remedy of the last two sections. `crates/model/src/logprobs.rs` does this in
+`row_logprob`: it subtracts the largest score and the logarithm of a sum of
+exponentials from the chosen word's score. Its tests include one
 that asserts the result is never positive (`row_logprob_is_never_positive`),
 which is the statement of this chapter that the logarithm of a number at most
 1 is at most 0. The function arrived in commit `78c381b52` (5 September 2026),
 which gave models a per-token log-probability primitive and replaced two
 hand-written copies of the same reduction in the evaluation code with one
-shared function. The commit also says that the objectives for preference
-optimisation, policy-gradient and distillation training are built from this
-primitive: every one of them is a sum of log-probabilities of the shape
+shared function. The commit names it as the primitive from which the
+objectives for preference optimisation, policy-gradient and distillation
+training are built: every one of them is a sum of log-probabilities of the shape
 $\sum_i \log p_i$ derived above.
 
 Counting is the other half. `crates/bench/src/arch.rs` computes a model's
@@ -1082,8 +1086,8 @@ table above warned. The same crate's scaling-law sweep,
 fits the law $L(N) \approx E + A N^{-\alpha}$ relating a loss to the parameter
 count $N$. A power law is a curve with an exponent, and the fit works by taking
 logarithms so that the curve becomes a straight line in $\log N$ and
-$\log(L - E)$, where an ordinary line-fitting method applies; its doc comment
-describes the method as ordinary least squares in log-log space. An exponent
+$\log(L - E)$, where an ordinary line-fitting method (least squares, for each
+candidate floor $E$ of a coarse grid) applies. An exponent
 and a logarithm, used for exactly the reasons this chapter gives.
 
 ## Check your understanding
@@ -1099,8 +1103,8 @@ Answers are at the end of the chapter.
 
 ## Summary
 
-The chapter began with a model of seven billion parameters and a learning rate
-of $3 \times 10^{-4}$, and with the need to write both. The numbers themselves
+A model of seven billion parameters trained with a learning rate of
+$3 \times 10^{-4}$ needs a notation that writes both. The numbers themselves
 come in layers. **Integers** are the exact numbers of counting and naming; held
 in a fixed number of bits, they have a range and wrap when it is exceeded.
 **Real numbers** fill the line between them, including irrational numbers such

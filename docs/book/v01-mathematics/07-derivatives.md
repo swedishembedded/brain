@@ -51,17 +51,16 @@ little, in the direction its own derivative recommends. Nudging each knob and
 re-reading the score would cost millions of runs per step; a formula for the
 derivative costs about one.
 
-To get there we follow the slope of a line through two points of a curve and ask
-what happens as the points merge. That gives rules for sums, products,
-quotients and compositions, then the exponential and the logarithm, then the
-meaning of a slope of zero and the cases where it guarantees a single best
-answer. Newton's method, which uses the slope to find roots and minima very
-quickly, comes next, and the chapter closes with the error one makes in
-estimating a derivative numerically. The tools needed are functions,
-composition and polynomials (Chapter 2), the exponential function and its
-inverse the logarithm (Chapters 1 and 2), and the number $e$ (Chapter 1), so
-here are six questions on them, to answer from memory. The answers are at the
-end of the chapter, and a hard one sends you back to the chapter named.
+The road there starts from the slope of a line through two points of a curve,
+as the two points merge. It leads to rules for sums, products, quotients,
+exponentials, logarithms and compositions, to the meaning of a slope of zero
+and the cases where it guarantees a single best answer, to Newton's method,
+which uses the slope to find roots and minima very quickly, and to the error
+one makes in estimating a derivative numerically. Along the way it leans on
+functions, composition and polynomials (Chapter 2), the exponential function
+and its inverse the logarithm (Chapters 1 and 2), and the number $e$
+(Chapter 1); six questions bring them back, and one that resists is worth a
+return to the chapter named before the limits begin.
 
 1. (Chapter 2, composition.) With $f(x) = x^2$ and $g(x) = 3x + 1$, compute $(f \circ g)(2)$ and $(g \circ f)(2)$.
 2. (Chapter 2, polynomials.) Evaluate $p(x) = 2x^3 - 5x + 1$ at $x = 2$.
@@ -232,8 +231,8 @@ The error does not merely shrink with $h$; it shrinks like $h^2$. The last
 column settles at $3$. When $h$ is cut by ten, the error is cut by a hundred.
 This is why derivatives are useful: close to the point, a curve is almost a
 straight line, and the closer, the straighter. The number $3$ is not a
-coincidence either; it is half of the curvature of the function at $x = 1$,
-which the section on critical points explains.
+coincidence either; it is half of the second derivative of the function at
+$x = 1$, a quantity defined in the section on critical points.
 
 One fact about derivatives is needed in a derivation below. If $f'(x)$ exists,
 then $f$ cannot jump at $x$: $f(x + h) - f(x)$ equals the difference quotient
@@ -676,8 +675,8 @@ For $f(x) = x^3 - 3x$ we have $f'(x) = 3x^2 - 3$, zero at $x = \pm 1$, and
 $f''(x) = 6x$, which is $-6$ at $-1$ (a maximum) and $+6$ at $1$ (a minimum). The
 last three rows show what a silent test means: $x^3$, $x^4$ and $-x^4$ all have
 $f'(0) = f''(0) = 0$, and one is a shelf, one a valley and one a hill. When the
-test is silent, look at the values on both sides (the last column does so with
-$f(\pm 0.1)$).
+test is silent, look at the values on both sides (the verdicts marked "test
+silent" compare $f(\pm 0.1)$ with $f(0)$).
 
 The second derivative also explains the number $3$ from the tangent-error table.
 For $x^3$, $f''(x) = 6x$, so $f''(1) = 6$ and half of it is $3$: near $x$, the
@@ -706,7 +705,7 @@ Step against the slope, x <- x - eta f'(x), 2000 times. Left: f = x^4 - 3x^2 + x
 
 The curve $g(x) = e^x - 2x$ sends every start to the same place, $\log 2$. The
 curve $f(x) = x^4 - 3x^2 + x$ has two valleys, and where you end depends on
-where you started: the outcome of the left column is $-3.51$ for three starts and
+where you started: the value of $f$ reached is $-3.51$ for three starts and
 only $-1.07$ for the other three. Both procedures stop at a critical point; only
 one of the curves guarantees it is the best. The property that separates them is
 **convexity**.
@@ -772,8 +771,8 @@ chords; if $f''<0$ somewhere the slope decreases there and a short chord there
 lies below. We take this equivalence as the working criterion; a rigorous proof
 uses the mean value theorem, which this book does not need. The scan below tests
 the criterion against the chord definition on a grid of $2460$ chords per
-function. The rightmost column should be zero exactly when the second column is
-positive.
+function. The rightmost column should be zero exactly when the smallest $f''$
+is not negative.
 
 <!-- worked: derivatives.convexity_scan -->
 | function | interval | smallest f'' on a 41-point grid | chords with the curve above them |
@@ -992,11 +991,11 @@ which is why the study of step sizes returns to it.
 The last table is the price of that sharper question. Newton's method looks for a
 point where the slope is zero, with no regard to whether it is a valley. Started on
 the non-convex curve where $f'' < 0$, it converges, quickly, to the *hilltop* at
-$x = 0.1699$. The convergence is only toward a good answer where the curve bends
-upward, $f'' > 0$, which is another way convexity matters. Newton's method also
-needs $f''$ and a division per step; for a function of millions of variables the
-second derivative is a matrix of trillions of entries, and the chapter on
-many-variable derivatives that follows this one shows what is done about that.
+$x = 0.1699$. It heads for a minimum only where the curve bends upward,
+$f'' > 0$, which is another way convexity matters. Newton's method also needs
+$f''$ and a division per step; for a function of millions of variables the
+second derivative is a matrix of trillions of entries, which is why later
+chapters approximate or avoid it.
 
 ## Numerical differentiation and its error
 
@@ -1096,8 +1095,8 @@ number format.
 
 ## Trusting a derivative formula
 
-A derivative formula is easy to get subtly wrong, so the working habits of this
-chapter are all ways of checking one.
+A derivative formula is easy to get subtly wrong, and the working habits that
+protect it are all ways of checking one.
 
 The surest is to compare with a central difference. Every formula in this
 chapter was checked that way: evaluate at a handful of points that are not
@@ -1119,16 +1118,21 @@ evaluates the formula blindly.
 
 ## Derivative formulas inside brain's backward kernels
 
-**The rules in the kernels.** The rules of this chapter are what
-each backward kernel in `crates/kernels/wgsl` implements, written out in its header
-comment. `crates/kernels/wgsl/tanh_act_bwd.wgsl` computes $dx = dy\,(1 - \tanh^2 x)$,
+**The rules in the kernels.** The rules of this chapter are what the backward
+kernels in `crates/kernels/wgsl` implement, one formula per kernel. `crates/kernels/wgsl/tanh_act_bwd.wgsl` computes $dx = dy\,(1 - \tanh^2 x)$,
 the derivative $1 - \tanh^2$ that the central differences below confirm.
 `crates/kernels/wgsl/silu_bwd.wgsl` computes $s + x\,s\,(1 - s)$ with
 $s = 1/(1 + e^{-x})$, which is exactly the product-rule example of the chain-rule
-section. `crates/kernels/wgsl/gelu_bwd.wgsl` differentiates $0.5\,x\,(1 + \tanh u)$ with
+section. `crates/kernels/wgsl/gelu_bwd.wgsl` differentiates the tanh form of the
+Gaussian error linear unit (GELU), $0.5\,x\,(1 + \tanh u)$ with
 $u = k\,(x + 0.044715\,x^3)$, $k = \sqrt{2/\pi}$, by the product rule and the chain rule, giving
-$0.5\,(1 + t) + 0.5\,x\,(1 - t^2)\,u'$. Each of the three formulas, recomputed
-here from the rules and compared with a central difference ($h = 10^{-5}$) of its forward function, where the forward functions are $\tanh x$, $x\cdot s(x)$ evaluated as the product of $x$ and $s(x)$ with $s(x) = 1/(1 + e^{-x})$ computed first (the last column depends on this order at the $10^{-11}$ level), and $0.5\,x\,(1 + \tanh u)$ with $u = k\,(x + 0.044715\,x^3)$:
+$0.5\,(1 + t) + 0.5\,x\,(1 - t^2)\,u'$, where $t = \tanh u$. The block recomputes
+each of the three formulas from the rules and compares it with a central
+difference ($h = 10^{-5}$) of its forward function. The forward functions are
+$\tanh x$; $x\cdot s(x)$, evaluated as the product of $x$ and $s(x)$ with
+$s(x) = 1/(1 + e^{-x})$ computed first (the last column depends on this order
+at the $10^{-11}$ level); and $0.5\,x\,(1 + \tanh u)$ with
+$u = k\,(x + 0.044715\,x^3)$.
 
 <!-- worked: derivatives.activation_derivatives -->
 | function | x | value | formula | central difference | abs difference |
@@ -1159,14 +1163,13 @@ gate for whether a hand-written backward really is the derivative of its forward
 It compares the analytic directional derivative with the central difference
 $\big(L(w + h\,v) - L(w - h\,v)\big)/2h$ along random directions
 $v$, and the step follows exactly the rule of the previous section: the
-documentation of `directional_check` says that a step of about
-$5\times10^{-3}$ suits 32-bit floats, and the double-precision check of one model
-uses $10^{-5}$. Compare $4\times10^{-3}$ and $5\times10^{-6}$ in the table of
+32-bit checks call `directional_check` with a step of $5\times10^{-3}$, and the
+double-precision check of one model block uses $10^{-5}$. Compare $4\times10^{-3}$ and $5\times10^{-6}$ in the table of
 best steps. The checker was introduced in commit `afbbae41d` (June 2026) as the
 correctness gate of the first language model's backward.
 
-**Story: two derivatives that agree to $10^{-3}$.** brain has two GELU
-activation functions, an approximation built from $\tanh$ and an exact form built
+**Story: two derivatives that agree to $10^{-3}$.** The brain engine has two
+GELU activation functions, an approximation built from $\tanh$ and an exact form built
 from the error function $\mathrm{erf}$, each with its own forward kernel. For a
 while only the $\tanh$ form had a backward kernel; the exact form, as commit
 `afb291e1a` (July 2026) records, had none, so a model training through it would

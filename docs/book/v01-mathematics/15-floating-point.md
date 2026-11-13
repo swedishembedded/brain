@@ -20,8 +20,8 @@ $0.3$:
 | the number stored for 0.1, exactly | 0.1000000000000000055511151231257827021182 |
 <!-- /worked -->
 
-Nothing is broken. The machine did exactly what it was built to do, and the
-rest of this chapter explains what that is. But the consequences are real. The
+Nothing is broken: the machine did exactly what it was built to do. But the
+consequences are real. The
 two sides of a comparison that school arithmetic says are equal are not; adding
 the same three numbers in a different order gives a different answer; and the
 number stored for $0.1$ is not $0.1$ at all but a close neighbour of it.
@@ -60,19 +60,21 @@ stored copies is $100000.00149\ldots$, which is not a 32-bit number, and the nea
 $100000$. The last row adds the 32-bit terms in a 64-bit accumulator and rounds that total to 32 bits at the
 end, which gives the same $100000$.)
 
-Two questions follow, and they organise this chapter. What exactly are the
+Two questions follow. What exactly are the
 numbers a computer has, and how big is the error that each operation commits?
 And given that every operation errs a little, how do we write computations so
 that the errors stay small, and how do we recognise the computations in which
 they cannot? Chapter 1 met the first failures: a product of probabilities that
 underflowed to zero at 46 factors, and $(1 + 1/n)^n$ that fell to exactly $1$
 at $n = 10^{16}$. Chapter 7 found that a finite-difference derivative has a best
-step. This chapter explains all three, and finishes the techniques that
+step. One explanation covers all three, and it also yields the two techniques
 those chapters postponed: log-sum-exp and compensated summation.
 
-Six ideas from earlier chapters carry the argument, and it helps to have them in
-hand before the rounding starts. Answer from memory; the answers are at the end
-of the chapter, and if one is hard, the chapter in brackets is where to go back.
+Six ideas from earlier chapters carry the argument: how dense the real numbers
+are, scientific notation, bits as logarithms, the underflowing product, the
+best step of a finite difference and the condition number of a bowl. Bring each
+back before the rounding starts; a question that stays blank sends you to the
+chapter it names.
 
 1. (Chapter 1, real numbers.) How many real numbers lie between $0.1$ and $0.2$? A computer stores a number in a fixed number of bits: what does that imply about which real numbers it can hold?
 2. (Chapter 1, exponents and scientific notation.) Write $0.00032$ and $5400$ in scientific notation. What is $2^{-3}$, and what is $2^{10}$?
@@ -87,7 +89,7 @@ of the chapter, and if one is hard, the chapter in brackets is where to go back.
 
 Chapter 1 wrote very large and very small numbers in scientific notation:
 $0.000314 = 3.14 \times 10^{-4}$. A number has two parts: a **significand**
-$3.14$ that carries the digits, and an exponent $-4$ that says where the
+$3.14$ (Chapter 1 called it the mantissa) that carries the digits, and an exponent $-4$ that says where the
 decimal point goes. The same idea works in any base, and a computer uses
 base 2. Every positive real number $x$ can be written
 
@@ -168,8 +170,10 @@ fraction bits. The exponent is stored with an offset (a bias of $127$) so that
 the stored field is a plain unsigned integer $E$ and the exponent is
 $e = E - 127$ for $1 \le E \le 254$. The two extreme fields are reserved: $E =
 0$ is zero and the subnormals, $E = 255$ is infinity and "not a number".
-The 64-bit format has $p = 53$, 11 exponent bits and 52 fraction bits. Using
-Python's `struct` module to look at the bits of some 32-bit numbers:
+The 64-bit format has $p = 53$, 11 exponent bits and 52 fraction bits. Both
+are defined by the IEEE 754 standard (IEEE is the Institute of Electrical and
+Electronics Engineers), which nearly all processors follow. The bits of some
+32-bit numbers:
 
 <!-- worked: floating.fp32_bit_patterns -->
 | real number | hex | s | exponent field | fraction field | value stored |
@@ -314,7 +318,7 @@ $$
 $$
 
 For 32 bits $\varepsilon_{\mathrm{mach}} = 2^{-23} = 1.19 \times 10^{-7}$, for 64
-bits $2^{-52} = 2.22 \times 10^{-16}$. The last row of the parameter table found
+bits $2^{-52} = 2.22 \times 10^{-16}$. The parameter table also found
 these by a loop: halve $\varepsilon$ until $1 + \varepsilon/2$ rounds back to
 $1$.
 
@@ -356,9 +360,9 @@ $2^{24}$ and $2^{24} + 2$ and goes down; $2^{24} + 3$ goes up. The last row
 adds a tiny excess to a tie, which makes the number strictly closer to the
 upper neighbour: no longer a tie, so it rounds up.
 
-To trust the rule rather than a library's implementation of it, the worked
-module also contains a second, independent rounder written from the text above
-using exact fractions, and compares it with the hardware conversion:
+To trust the rule rather than a library's implementation of it, a second,
+independent rounder written from the rule above with exact fractions can be
+compared with the hardware conversion:
 
 <!-- worked: floating.rounding_agreement -->
 Exact rounding of 20000 random doubles to 32 bits against the hardware conversion: 0 disagreements. Generator: the book's SplitMix64, seed 0xab72908388d0f139. Each double is x = (2a - 1) * 10^(60b - 30) from two draws, a then b, both `uniform()`.
@@ -366,7 +370,7 @@ Exact rounding of 20000 random doubles to 32 bits against the hardware conversio
 
 ### Arithmetic: one rounding per operation
 
-Computers do not add real numbers; they add stored numbers. The standard
+Computers do not add real numbers; they add stored numbers. IEEE 754
 requires that for $a, b$ stored and an operation $\circ \in \{+, -, \times,
 \div\}$ (and square root) the result is the *correctly rounded* exact result:
 
@@ -521,7 +525,7 @@ the first number $x_1$ and the second $x_2$ each pass through $n - 1$
 additions, $x_3$ through $n - 2$, and so on, so that
 
 $$
-s_n \approx \sum_{i=1}^{n} x_i\,(1 + \theta_i), \qquad |\theta_i| \le (n - i + 1)\,u \le (n-1)\,u,
+s_n \approx \sum_{i=1}^{n} x_i\,(1 + \theta_i), \qquad |\theta_1| \le (n-1)\,u, \quad |\theta_i| \le (n - i + 1)\,u \le (n-1)\,u \ (i \ge 2),
 $$
 
 and therefore
@@ -650,16 +654,17 @@ $c$ records it as $-4 \times 10^{-8}$; at step 2 the term to be added is $x - c
 whole gap, $1.19 \times 10^{-7}$), and $c$ becomes the small positive number
 left over by that overshoot.
 
-Kahan summation has an error bound of about $(2u + O(n u^2)) \sum_i |x_i|$,
-independent of $n$ to first order, at the price of four additions per term in
+Kahan summation has an error bound of about $2u \sum_i |x_i|$, plus a term of
+size $n u^2 \sum_i |x_i|$ that matters only when $n$ approaches $1/u$: independent
+of $n$ to first order, at the price of four additions per term in
 place of one. Two practical notes. The step $c = (t - s) - y$ is zero in real
 arithmetic, so a compiler or a language mode that is allowed to treat addition
 as associative (the "fast math" modes) may simplify it away and silently turn
 the algorithm into the naive sum. And the simplest alternative often
 suffices: add the 32-bit terms into a 64-bit accumulator, which has 29 more bits
 to absorb the low-order losses. The last row of the million-tenths table does
-exactly that and is as accurate as the other two. Brain's cosine does this, as
-the "in brain" section shows.
+exactly that and is as accurate as the other two. The cosine in brain does this,
+as the last section shows.
 
 The figure compares the three on the opening problem, for $n$ from $10$ to
 $10^6$.
@@ -1172,8 +1177,8 @@ before the exponential).
 
 ## Habits that keep rounding error small
 
-The chapter's results compress into a handful of habits, each the answer to one
-of the failures above.
+These results compress into a handful of habits, each the answer to one of the
+failures above.
 
 Never test floating-point results for equality. Compare with a tolerance derived
 from the computation: a few times $\kappa\,u$ for a stable one, or $(n-1)u$ times
@@ -1201,9 +1206,8 @@ changes the function, and the story in the next section shows what that costs.
 **Accumulating in 64 bits.** `crates/model/src/hostmath.rs` holds the shared
 `cosine` and `l2_normalize`, which accumulate the dot product and the squared norms
 in 64-bit floating point even though their inputs are 32-bit; Chapter 3 told the story of
-commit `f94c9dcda`, which put them there. The doc comment of `cosine` says that a
-512-dimensional embedding is gated at seven digits of cosine and that a 32-bit dot product
-loses the last two. The same experiment, run here on pairs of 512-dimensional
+commit `f94c9dcda`, which put them there so that the cosine of a 512-dimensional
+embedding holds the seven digits its reference test demands. The experiment, run here on pairs of 512-dimensional
 vectors with a cosine near $0.995$ and 200 random trials:
 
 <!-- worked: floating.cosine_accumulation -->
@@ -1217,15 +1221,15 @@ Cosine of 200 pairs of 512-dimensional vectors (the second is the first plus noi
 
 The mean error of the 32-bit accumulation is about five units of $u$ and its
 worst case is $1.1 \times 10^{-6}$: the cosine is right to about $6$ digits instead of
-$7$, so one digit is lost in the typical case (the doc comment says two). With a 64-bit
+$7$, so one digit is lost in the typical case. With a 64-bit
 accumulator the remaining error is the rounding of the final result to 32 bits. The accumulator width is the cheapest of this
 chapter's cures, and this function takes it.
 
 **Log-sum-exp in the loss and the host.** The cross-entropy kernel
 `crates/kernels/wgsl/ce_value.wgsl` computes, per row, a first pass for the maximum
 of the logits, a second for $\sum e^{z - m}$, and writes `(mx + log(sum)) - logits[target]`:
-exactly $\mathrm{lse}(z) - z_t$. `crates/model/src/logprobs.rs`
-(`row_logprob`, whose doc comment says "numerically-stable") and the host `softmax`
+exactly $\mathrm{lse}(z) - z_t$. `row_logprob` in `crates/model/src/logprobs.rs`
+and the host `softmax`
 in `crates/model/src/hostmath.rs` use the same shift. The kernel starts its running
 maximum at `-3.4e38`, just above the most negative finite 32-bit number, rather than $-\infty$, so that any
 finite logit replaces it. Another piece in the same spirit is
@@ -1266,9 +1270,8 @@ see it, because the floor flattens the loss by the same amount that it flattens 
 analytic gradient, so the two agree and are both wrong. The fix is this chapter's
 technique rather than another patch: `softmax_with_log` in the same file computes
 the softmax and its logarithm in 64 bits from one pass shifted by the maximum
-(its doc comment notes that $p$ underflows at a gap near $745$, where
-Chapter 1's table put the 64-bit limit of $e^x$, while $\log p$ is merely
-$-745$ and exact), and `focal_slope_times_p` forms $p$ times the slope as a single
+(in 64 bits $p$ underflows at a gap near $745$, where Chapter 1's table put the
+limit of $e^x$, while $\log p$ is merely $-745$ and exact), and `focal_slope_times_p` forms $p$ times the slope as a single
 quantity so that the division by $p$ is never performed. The regression test is
 `cross_entropy_keeps_its_gradient_when_a_prediction_saturates`, which checks the
 closed form $p - \text{target}$ at gaps up to $400$.
@@ -1288,10 +1291,11 @@ producing repeated garbage on long prompts. Commit `970137320` (September
 they do for repetitive text, where keys are nearly parallel) the powers
 $\mathbf{A}^{32}$ reach a largest entry near $10^{17}$ while the true inverse has
 entries of size $1$; recovering a result of size $1$ from intermediates of size
-$10^{17}$ needs about 24 significant digits, and the format has 7. The comment in
-`crates/model/src/gdn.rs` says so, and notes that a 64-bit version of the product
-fails the same way a little further along: "the instability is in the
-reformulation, not in the precision it is evaluated at". A stand-in for the
+$10^{17}$ needs about 24 significant digits, and the format has 7. A 64-bit
+version of the product fails the same way at slightly stronger correlation, as
+the commit found: the instability is in the reformulation, not in the precision
+it is evaluated at, and `crates/model/src/gdn.rs` keeps forward substitution
+for that reason. A stand-in for the
 situation, with all entries of $\mathbf{A}$ equal to $-a$:
 
 <!-- worked: floating.nilpotent_inverse -->
@@ -1316,14 +1320,13 @@ the general lesson about testing: random weights sample a benign corner, where t
 entries are small and every way of forming the inverse agrees.
 
 **Choosing the step of a gradient check.** `crates/gradcheck/src/lib.rs` uses
-central differences with $\epsilon \approx 5 \times 10^{-3}$ for 32-bit models (the
-doc comment of `directional_check` says that value "suits fp32"), the value this
-chapter derives: $(3u)^{1/3} = 5.6 \times 10^{-3}$. The checks of host reference
+central differences with $\epsilon \approx 5 \times 10^{-3}$ for 32-bit models in
+`directional_check`, the value derived above: $(3u)^{1/3} = 5.6 \times 10^{-3}$. The checks of host reference
 models in 64 bits (`check_wan`, for example) use $10^{-5}$, close to
-$6.9 \times 10^{-6}$. The doc comment of `elementwise_check` explains why that
-function wants a larger $\epsilon$: a step on a single entry changes the loss by only
+$6.9 \times 10^{-6}$. A check that steps a single entry, `elementwise_check`, wants a
+larger $\epsilon$: such a step changes the loss by only
 $\epsilon\,|\partial L/\partial w_i|$, so the numerator of the difference quotient is
-small next to the rounding error of the loss, and "fp32 cancellation bites sooner". That
+small next to the rounding error of the loss and cancellation sets in sooner. That
 is the round-off term $u|f|/h$ of the derivation. The same cancellation is behind
 knowledge #40: a tiny test configuration shrank the inputs of an L2-normalisation to
 about $10^{-6}$, so that a sum of squares of such numbers, far below $10^{-6}$, was added to an epsilon of
@@ -1388,10 +1391,10 @@ cliffs of the range.
 
 The limits are stated by the conditioning floor: when a problem is ill-conditioned
 no algorithm recovers digits the input never had, and the work is in recognising
-which kind of difficulty one has. The chapter's results make arithmetic predictable, but
+which kind of difficulty one has. These results make arithmetic predictable, but
 they do not tell us how much arithmetic a computation needs. That is the
-question of the next chapter: counting operations and memory, so as to predict how long a
-computation will take, and why some algorithms (such as the fast transform of Chapter 14) are
+question of the next chapter: counting operations and memory, so as to predict the work
+a computation needs before running it, and why some algorithms (such as the fast transform of Chapter 14) are
 worth their complexity.
 
 ## Key terms

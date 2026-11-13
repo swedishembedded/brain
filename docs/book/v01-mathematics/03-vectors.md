@@ -5,9 +5,9 @@
 
 *How can a list of numbers have a length and a direction, and how do we measure how alike two lists are?*
 
-Houses A and B are $(120\ \text{m}^2, 4\text{ rooms}, 30\text{ years})$ and
-$(125, 4, 28)$; house C is $(80, 3, 5)$. Nobody needs a program to say that A
-and B are the alike pair. Put the same question to a search engine that has
+One house is $(120\ \text{m}^2, 4\text{ rooms}, 30\text{ years})$, a second
+$(125, 4, 28)$ and a third $(80, 3, 5)$. Nobody needs a program to say that the
+first two are the alike pair. Put the same question to a search engine that has
 turned every document into a list of a few hundred numbers, produced by a
 trained model so that documents about similar things get similar lists, and
 wants the documents closest to your query. Or put it to a test that holds ten
@@ -33,18 +33,17 @@ bug that slips through a test.
 All three come from a single operation, the **dot product**, and from a
 picture: a list of numbers can be drawn as an arrow. The picture is exact for
 lists of two and three numbers and, remarkably, the algebra that follows from
-it works unchanged for lists of a thousand. This chapter builds the picture,
-derives the algebra from it, and ends with a practical warning about measuring
-similarity.
+it works unchanged for lists of a thousand. The algebra also carries a
+practical warning about measuring similarity, which closes the story.
 
-From Chapter 1 it uses real numbers and the notation for sums,
-$\sum_{i=1}^{n}$; Chapter 2's ideas (functions, parameters) appear in a few
-places and are named when they do. Trigonometry is not assumed: the one piece
-we need, the cosine of an angle, is defined here from a circle. Matrices,
-which are lists of lists, are the subject of the next chapter, and
-derivatives, which give a vector a gradient, are Chapters 7 and 8. Three
-questions on Chapter 1 first, to answer from memory; the answers are at the end
-of the chapter.
+Real numbers and the notation for sums, $\sum_{i=1}^{n}$, from Chapter 1 do
+most of the work; Chapter 2's functions and parameters appear in a few places
+and are named when they do. Trigonometry is not assumed: the one piece we need,
+the cosine of an angle, is defined here from a circle. Matrices, which are
+lists of lists, come next, in Chapter 4, and derivatives, which give a vector a
+gradient, in Chapters 7 and 8. Sums, averages and square roots carry the first
+definitions, so recall them before reading on; the answers are with the
+others at the end.
 
 1. (Chapter 1, summation.) Evaluate $\sum_{i=1}^{3} i^2$.
 2. (Chapter 1, summation.) Write the average of $n$ numbers $x_1, \dots, x_n$ using summation notation.
@@ -216,9 +215,10 @@ $$
 = a_1 b_1 + a_2 b_2 + \dots + a_n b_n .
 $$
 
-The result is a scalar. Written $\mathbf{a}^\top \mathbf{b}$ in the rest of the
-book (the transpose, defined in the next chapter, turns a column into a row;
-for now it is just another spelling of the same sum).
+The result is a scalar. The rest of the book writes it
+$\mathbf{a}^\top \mathbf{b}$ (the transpose, defined in the next chapter,
+turns a column into a row; for now it is just another spelling of the same
+sum).
 
 <!-- worked: vectors.dot_products -->
 | dot product | terms x_i y_i | sum |
@@ -260,9 +260,10 @@ weight, becomes with $n$ inputs
 $$
 h(\mathbf{x}; \mathbf{w}, b) = \mathbf{w} \cdot \mathbf{x} + b = \sum_{i=1}^{n} w_i x_i + b .
 $$
-This is the first, and in a precise sense the only, building block of a neural
-network layer: one neuron is a dot product plus a constant, and the next
-chapter shows that a whole layer is many dot products sharing the same input.
+This is the arithmetic core of a neural network layer: one neuron is a dot
+product plus a constant (followed, as Chapter 2 showed is necessary, by
+something that bends), and the next chapter shows that a whole layer is many
+dot products sharing the same input.
 
 <!-- worked: vectors.weighted_sum -->
 | i | w_i | x_i | w_i x_i |
@@ -276,8 +277,9 @@ w.x = 1, so w.x + b = 1.25 with b = 0.25. With w = (1, 1, 1) the dot product is 
 
 Special weights read out special facts. The all-ones vector gives the sum of
 the entries; a vector with a single 1 at position $i$ picks out entry $x_i$.
-The first fact will matter when we compute means, the second when we say that
-the entries themselves are dot products with the simplest vectors there are.
+The first fact will matter when we compute means. The second says that every
+entry of a vector is itself a dot product, with the simplest vectors there
+are.
 
 The algebra says nothing yet about a *length* or an *angle*, and that is the
 point. The geometric meaning of $\sum a_i b_i$ is not obvious from the sum, so
@@ -322,7 +324,8 @@ each answers a slightly different question about "size":
 
 - The **L1 norm** $\lVert \mathbf{x} \rVert_1 = \sum_i \lvert x_i \rvert$ adds
   the sizes of the entries. It is the total amount, and it treats a
-  difference of 1 in one entry the same as ten differences of 0.1 across ten.
+  difference of 1 in one entry the same as differences of 0.1 in each of ten
+entries.
 - The **max norm** $\lVert \mathbf{x} \rVert_\infty = \max_i \lvert x_i
   \rvert$ is the size of the largest entry. It answers "what is the worst
   entry?", which is the question a tolerance (every entry must be within
@@ -410,7 +413,7 @@ this chapter uses degrees and the worked block shows both.
 One more function is needed, to read an angle off a point. The function
 `atan2(y, x)` returns the angle $\theta$ in $(-180^\circ, 180^\circ]$ (in
 radians, $(-\pi, \pi]$) at which the unit circle meets the half-line from the
-origin through the point $(x, y)$, measured anticlockwise from $(1, 0)$. So
+origin through the point $(x, y)$, measured counterclockwise from $(1, 0)$. So
 `atan2(1, 1)` is $45^\circ$, `atan2(1, -1)` is $135^\circ$ and `atan2(-1, -1)`
 is $-135^\circ$: unlike the plain ratio $y/x$, it uses the signs of both
 coordinates to tell the quadrants apart.
@@ -622,8 +625,8 @@ and why normalising once at write time is the usual choice.
 undefined if either is $\mathbf{0}$. An implementation must say what it does,
 and the answer is a policy, not mathematics: raise an error, return 0
 (meaning "no direction, no agreement"), or return NaN. The pseudocode below
-raises; the last section shows that real code in one repository chose
-differently in different places and what that cost.
+raises; the section on brain shows that brain's code chose differently in
+different places, and what that cost.
 
 ## Orthogonality
 
@@ -632,8 +635,8 @@ $\mathbf{a}\cdot\mathbf{b} = 0$. For nonzero vectors that means
 $\cos\theta = 0$, so the angle is $90^\circ$: they are perpendicular. The zero
 vector is orthogonal to every vector, as a matter of the definition.
 Orthogonality is the dot-product way to say "these two share nothing": the
-products $a_i b_i$ cancel in total, so one vector tells you nothing about the
-other along the direction of the first.
+products $a_i b_i$ cancel in total, so $\mathbf{b}$ has nothing pointing along
+$\mathbf{a}$, a statement the section on projection makes exact.
 
 The worked block below tests four pairs; the last is not orthogonal, and it
 is a good check that orthogonality is not just "different". The two right
@@ -662,7 +665,8 @@ vectors, its squared length is the sum of the squared lengths of the pieces,
 so the pieces' contributions to the total can be read off independently.
 And in high dimensions orthogonality is the *default*: two arbitrary vectors
 of a thousand entries are almost always nearly orthogonal, and that is worth
-seeing in a number before we trust a similarity score (next section).
+seeing in a number before we trust a similarity score; a table further on
+shows it.
 
 ## Projection
 
@@ -796,9 +800,9 @@ $$
 $$
 
 This is the **Cauchy-Schwarz inequality**. It settles the three things we left
-open. First, the cosine similarity is a ratio of $\lvert\mathbf{a}\cdot\mathbf{b}\rvert$ to the
-product of norms, so it lies in $[-1, 1]$ and an angle with that cosine
-exists. Second, equality holds exactly when $\mathbf{r} = \mathbf{0}$, that is,
+open. First, the absolute value of the cosine similarity is the ratio of
+$\lvert\mathbf{a}\cdot\mathbf{b}\rvert$ to the product of norms, at most 1, so
+the cosine lies in $[-1, 1]$ and an angle with that cosine exists. Second, equality holds exactly when $\mathbf{r} = \mathbf{0}$, that is,
 when $\mathbf{v}$ is a multiple of $\mathbf{u}$: cosine similarity is $\pm 1$ if
 and only if the vectors lie on one line. Third, the triangle inequality:
 
@@ -943,7 +947,7 @@ in.
 
 **Features on different scales.** The dot product and the norm add up
 quantities entry by entry, so every entry must be in a unit that makes adding
-sensible. The three houses of the opening vector example have area in square
+sensible. The three houses of the first worked example have area in square
 metres, rooms as a count and age in years; the area dominates every distance
 and every cosine simply because its numbers are bigger, not because it is more
 important. Practice is to rescale each feature to a comparable range (the
@@ -1001,8 +1005,8 @@ row sits between (cosine 0.9999993, relative L2 0.0012). Cosine sees changes of
 direction and is blind to changes of length, and a good gate has one
 measurement for each.
 
-This is not hypothetical. The last section of the chapter gives the knowledge entry and the
-commit that closed such a gap in a parity test.
+This is not hypothetical: a parity test in brain had exactly this gap until
+a commit closed it, as the next section tells.
 
 ## Cosine gates, retrieval and the dot product in brain
 
@@ -1017,8 +1021,7 @@ example in `crates/s3dit/tests/it/block_parity.rs`, which accumulates the dot
 product and both squared norms in 64-bit floating point and divides, exactly
 the formula of this chapter. The shared version lives in `crates/model/src/hostmath.rs`
 as `cosine` and `l2_normalize`, added by commit `f94c9dcda` (31 July 2026).
-Its message explains the design choices that this chapter predicted: it
-accumulates in 64-bit because a 512-dimensional face embedding is gated at
+Its message gives the reasons for its design: it accumulates in 64-bit because a 512-dimensional face embedding is gated at
 seven digits of cosine against a reference and a 32-bit dot product loses the
 last two of them to summation order alone, the floating-point effect of the
 section above, and it returns 0.0 for a zero norm and panics on a length
@@ -1043,28 +1046,27 @@ difference alongside it. Commit `8835c9410` (24 August 2026) applied it to a
 vocoder parity test that "asserted a cosine floor and nothing else". The
 message says the gate was mutation-verified: a uniform gain of 1.001 on the output
 left cosine at 1.000000000 and was caught only by the new relative-L2 ceiling
-of $10^{-4}$. It also explains the choice of ceiling, which the arithmetic of
-the previous section reproduces: both stages measured about $10^{-6}$ clean,
-leaving about 60 times of headroom for reassociated sums, while a ceiling of
-$10^{-3}$ would have put the mutation exactly on the line, "too close to call
-a gate". The relative L2 of that 0.001 gain error is $10^{-3}$, as in the table. The
+of $10^{-4}$. It also explains the choice of ceiling: both stages measured a
+relative L2 of about $10^{-6}$ clean, leaving headroom for reassociated sums,
+while a ceiling of $10^{-3}$ would have put the mutation exactly on the line,
+"too close to call a gate", because the relative L2 of a 0.001 gain error is
+$10^{-3}$, as in the table of the previous section. The
 commit also notes why it lands first: the next change reassociated the
 reduction, "and a gate blind to the failure mode of the change it guards is
 decoration".
 
 **Cosine similarity as retrieval.** `crates/sdk/src/embedding.rs` carries the
 one piece of retrieval arithmetic the library owns: `Embedding::cosine_similarity`,
-computed in 64-bit from the dot product and the two norms. Its documentation
-states the zero-vector policy in this chapter's terms (a zero vector, or two
-vectors of different lengths, scores 0.0, "no direction to compare") and
-that cosine is "scale-invariant ... so this is meaningful whether or not the
-pipeline that produced them normalizes". Its test
-`cosine_similarity_of_a_vector_with_itself_is_one` in
-`crates/sdk/tests/embedding_pipeline.rs` and the neighbouring tests on a
-real checkpoint's output ("returns a unit norm vector") use the identity
+computed in 64-bit from the dot product and the two norms. Its zero-vector
+policy is to score a zero vector, or two vectors of different lengths, as 0.0
+(no direction to compare), and because cosine ignores length the score means
+the same whether or not the pipeline that produced the vectors normalised
+them. Its test `cosine_similarity_of_a_vector_with_itself_is_one` in
+`crates/sdk/tests/embedding_pipeline.rs` and the neighbouring tests that check
+a real checkpoint's output has unit norm use the identity
 $\lVert\hat{\mathbf{x}}\rVert = 1$. The sample `samples/text/retrieve`
 embeds a corpus and a query and scores each passage with it (commit
-`3dcca1817`, 21 September 2026); its README is plain that this is a flat scan,
+`3dcca1817`, 21 September 2026); its README states that this is a flat scan,
 linear in the number of passages per query, which is the $Nn$ cost of the
 section above, and that a corpus beyond a few thousand passages needs an
 approximate-nearest-neighbour index over the same vectors. Note that the

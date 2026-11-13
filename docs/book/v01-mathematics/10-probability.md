@@ -26,20 +26,20 @@ ratios are different even though they come from one table: $200$ of $1000$ are
 spam, but $180$ of the $220$ flagged ones are, and $180$ of the $200$ spam ones
 are flagged.
 
-This chapter turns counting into a calculus. It gives a vocabulary for
-experiments and their results, a small set of rules that every probability
-obeys, and four tools that carry the weight of machine learning: tables over two
+Probability turns such counting into a calculus: a vocabulary for experiments
+and their results, a small set of rules that every probability obeys, and four
+tools that carry the weight of machine learning: tables over two
 quantities at once and the one-quantity tables that can be read off them, a rule
 for turning "how likely is the evidence if the cause is present" into "how
 likely is the cause given the evidence", and two numbers, a centre and a spread,
-that summarise a whole distribution. We start with dice and coins because every
-probability in them can be counted, build the rules from the counts, and only
-then use them on the filter, on a defect detector for rare faults, and on the
+that summarise a whole distribution. Dice and coins come first, because every
+probability in them can be counted; the rules are built from the counts and only
+then used on the filter, on a defect detector for rare faults, and on the
 average that training minimises.
 
-The counting needs only sets, sums, functions and areas from earlier chapters.
-Five questions to try from memory before we start; the answers are at the end, and
-the chapter each names is where to go back if one is hard.
+The counting needs only sets, sums, functions and areas from earlier chapters,
+and the five questions below bring each of them back; one that resists sends you
+to the chapter it names, and the answers close the chapter.
 
 1. (Chapter 1, set.) For $A = \{1, 2, 3, 4\}$ and $B = \{3, 4, 5\}$, what are $A \cap B$, $A \cup B$ and $\lvert A \cup B \rvert$?
 2. (Chapter 1, summation notation.) Evaluate $\sum_{i=1}^{4} i/10$.
@@ -75,8 +75,8 @@ After ten flips the fraction is far from one half; after a hundred thousand it i
 within $0.001$. The fraction does not jump to $0.5$ and stay
 there, and no single row proves anything. But the pattern is stable enough to
 define the thing we are after: the **probability** of an outcome is the number
-that its long-run relative frequency settles towards. Later in this chapter we
-will see why it settles and how fast.
+that its long-run relative frequency settles towards. Why it settles, and how
+fast, follows from the expectation and the variance below.
 
 For some experiments we do not need to flip anything, because the structure
 gives the answer by counting. Roll two dice. Write each result as a pair
@@ -217,15 +217,15 @@ values is. It is computed by the same counting as before: the event "$X = x$" is
 the set of outcomes that $X$ sends to $x$ (the preimage, the inputs of the
 function that land on $x$), and $p(x) = P(X = x)$ is the probability of that set.
 Above, the value $1$ comes from $\{\text{TTH}, \text{THT}, \text{HTT}\}$, so
-$p(1) = 3/8$. For a variable with a finite list of values this is a **table**,
+$p(1) = 3/8$. For a variable with a finite list of values this is a table,
 and the rules above force its properties: every $p(x) \ge 0$, and because the
 events $\{X = x\}$ partition $\Omega$, $\sum_x p(x) = 1$. Notation: $P(\cdot)$
 takes an event, $p(x)$ takes a value of a random variable; when the variable is
 not obvious we write $p_X(x)$.
 
 Two derived facts are used constantly. A function of a random variable is a
-random variable (a composition, Chapter 2): $X^2$, or the sum $X + Y$ of two
-variables defined on the same sample space, add up outcome by outcome. And an
+random variable (a composition, Chapter 2): $X^2$, and the sum $X + Y$ of two
+variables defined on the same sample space, are computed outcome by outcome. And an
 event $A$ becomes a number through its **indicator** $\mathbf{1}_A$, which is
 $1$ on outcomes in $A$ and $0$ elsewhere. The indicator of "the filter was
 right" is a random variable on the $1000$ emails, and the fraction of ones is the
@@ -355,8 +355,8 @@ the accuracy is a single sum over cells of the joint. The right-hand column says
 how the true classes are distributed; the bottom row says how often the
 classifier predicts each class, which is not the same, since the classifier
 predicts "dog" a little more often than dogs occur ($0.355$ against $0.340$).
-Everything that a confusion matrix reports is a quantity derived from this table;
-the *shape* of the table is what the rest of the chapter works with.
+The same table with counts in place of probabilities is what classification
+reports call a confusion matrix, and every rate they quote is derived from it.
 
 Two variables with a continuous joint distribution have a joint density
 $f(x, y)$ whose volume is $1$, and the marginal is obtained by integrating one
@@ -440,7 +440,7 @@ sum of their logarithms is not is the reason it reports log-probabilities.
 The most common error with conditionals is to swap the two sides.
 $P(\text{flagged} \mid \text{spam}) = 0.9$ and $P(\text{spam} \mid \text{flagged}) = 0.818$
 are different numbers answering different questions. They coincide only when
-$P(A) = P(B)$. The next sections explain how to convert one into the other.
+$P(A) = P(B)$. Bayes' rule, two sections on, converts one into the other.
 
 ## Independence
 
@@ -587,7 +587,7 @@ time in a thousand; when half the parts are defective, the alarm is right $90\%$
 of the time. A detector is only as informative as its base rate allows. Every
 rare-event detector in machine learning (fraud, disease screening, a safety
 monitor) faces this arithmetic, and a high accuracy figure reported without the
-base rate is meaningless.
+base rate says little.
 
 The posterior of one piece of evidence is the prior for the
 next. Suppose a second and then a third detector, each with the same $90\%$ and $10\%$
@@ -710,7 +710,7 @@ the $40$ lost good emails for $0.40$. Choosing the
 quantity whose expectation we want is the design decision; computing it is a sum.
 
 A dataset is a distribution too. The mean of the per-example losses of a dataset
-of $N$ examples is an expectation too: give each example probability $1/N$. Equal
+of $N$ examples is an expectation: give each example probability $1/N$. Equal
 values pool their weights:
 
 <!-- worked: probability.dataset_mean_is_expectation -->
@@ -940,8 +940,8 @@ examples is a smaller average: its expectation is the dataset's, by linearity,
 and its variance is $\sigma^2/B$, by the section just before. These three facts are the
 whole reason training works with noisy gradients: the noisy average has the right
 centre, and a larger batch buys precision at a square-root price. Volume II builds
-the losses and Volume III the gradient; this chapter has supplied the meaning of
-"average" they use.
+the losses and Volume III the gradient, and both use "average" in exactly this
+sense.
 
 ## Tables that must be valid, and drawing from one
 
@@ -973,8 +973,7 @@ function condition_on_row(p: array<real>[R, C], r: int) -> array<real>[C]:
     return q
 ```
 
-Every simulation in this chapter needs a random draw
-from a distribution given as a table. One uniform number is enough: lay the
+A simulation often needs a random draw from a distribution given as a table. One uniform number is enough: lay the
 probabilities end to end on $[0, 1)$ and see which segment the number lands in.
 
 ```text
@@ -1028,13 +1027,14 @@ its condition.
 
 ## Token sampling, log-probabilities and a screening test in brain
 
-This chapter is background for most of Volume II onwards, and brain uses it in
-small, concrete places.
+Probability underlies most of Volume II onwards, and brain uses it in small,
+concrete places.
 
 Sampling a token is `sample_discrete`. A language model's output for one
 position is a table of scores over the vocabulary; exponentiating and
 normalising it (the softmax of the notation page) turns it into a distribution, and generating text means drawing from it. `sample_from_topk_impl`
-in `crates/model/src/serve.rs` does exactly the pseudocode above. It scales the
+in `crates/model/src/serve.rs` walks the cumulative sum as the pseudocode above
+does. It scales the
 candidate scores by a temperature, optionally keeps only the top $k$ or the
 smallest set holding mass $p$ (so some probabilities are set to zero and the
 rest are renormalised, which is conditioning on "the token is among the kept
@@ -1049,8 +1049,8 @@ the same draws, which is what makes a stochastic procedure testable.
 
 A NaN is not a probability, and the sampler of `crates/qwen3/src/sample.rs`
 once had to learn it: it used to crash when a score was NaN, because the sort that ranks candidates
-panicked on it; commit `072148692` (August 2026) fixed that. The fix maps a NaN score to negative infinity right
-after the temperature division (so its weight $e^{-\infty}$ is $0$, a probability
+panicked on it; commit `072148692` (August 2026) fixed that. The fix maps a NaN score to negative infinity where the
+other scores are divided by the temperature (so its weight $e^{-\infty}$ is $0$, a probability
 that cannot be drawn) and gives the sort an order in which NaN always loses. The
 lesson is the table-validity rule above: a distribution must be made of
 non-negative numbers, and an invalid entry has to be removed at the boundary
@@ -1114,8 +1114,7 @@ Answers are at the end of the chapter.
 
 ## Summary
 
-We asked how to put numbers on uncertainty and update them on evidence. A
-**probability** is a number between $0$ and $1$ on events, which are sets of
+A **probability** is a number between $0$ and $1$ on events, which are sets of
 outcomes, obeying three rules (non-negative, total $1$, additive over disjoint
 events), from which the complement, union and partition rules follow. A **random
 variable** is a function from outcomes to numbers; its **probability distribution**

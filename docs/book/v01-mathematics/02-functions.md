@@ -37,12 +37,11 @@ choose from: straight lines, curves that bend a fixed number of times, curves
 that grow explosively, curves made of straight pieces joined at corners. Each
 has a use in learning and a failure of its own.
 
-The chapter takes those questions in order and ends with the shapes the rest of
-the book builds on. It uses real numbers, exponents, logarithms and function
-notation from Chapter 1 and nothing else; where it points forward to vectors,
-matrices or derivatives, it says so and does not use them. Before the first
-definition, bring five ideas from Chapter 1 back to mind. The answers are at the
-end of the chapter.
+Real numbers, exponents, logarithms and function notation from Chapter 1 are
+all the equipment these questions need; vectors, matrices and derivatives
+appear only as pointers forward. The first definitions lean on each of the
+four, so bring them back to mind now, from memory, and find the answers at the
+close of the chapter.
 
 1. (Chapter 1, real numbers.) Is $\sqrt{2}$ a fraction of two integers? What does a computer store instead of it?
 2. (Chapter 1, exponents.) Write $2^3 \times 2^{-5}$ as a single power of 2 and as a fraction.
@@ -97,8 +96,7 @@ nonnegative numbers, so its range is $[0, \infty)$ even though its codomain
 may be written $\mathbb{R}$; $2^x$ gives only positive numbers, range
 $(0, \infty)$; $\log$ gives every real number, range $\mathbb{R}$. Notice the
 mirror: the domain of $\log$ is the range of $2^x$ (or $e^x$) and vice
-versa. That is not an accident, and Section "Running a function backwards"
-explains why.
+versa. That is not an accident, and the reason comes with inverses below.
 
 A program is the same idea with a contract. A function in the sense of this
 chapter has no memory and no side effects: the same input always gives the
@@ -166,11 +164,11 @@ intercept follows from either point:
 
 Two examples fix a line exactly. Three examples that do not lie on one line
 cannot be matched by any line, and the choice of the "closest" one needs a
-definition of closest, which is the subject of Volume II. This section keeps
-the exact case, because it shows the counting that returns below: **a family
-with $k$ parameters can be made to pass through $k$ chosen points** (under a
-mild condition: below, that the chosen $x$ values are all different), and no more. To fit more points we need more parameters, which
-means richer families. The classical one is next.
+definition of closest, which is the subject of Volume II. The exact case
+already shows a counting rule that returns below: **a family with $k$
+parameters can be made to pass through $k$ chosen points** (provided the
+chosen $x$ values are all different), and no more. To fit more points we need
+more parameters, which means richer families. The classical one is next.
 
 ## Polynomials
 
@@ -195,8 +193,8 @@ four have the same *kind* of shape and visibly different ones.
 
 ![Four parabolas y = a x^2 + b x + c with different parameters, one of them (a = 2, b = -3, c = 1) drawn thicker and passing through the three marked points (0, 1), (1, 0) and (2, 3).](img/polynomial-family.svg)
 
-**Figure 1.** A quadratic family. The thick curve is the member that passes
-through the three marked points; the next subsection computes it.
+**Figure 1.** A quadratic family. The thick curve passes through the three
+marked points.
 
 ### Evaluating a polynomial
 
@@ -394,8 +392,9 @@ section on piecewise functions.
 
 ## Composition
 
-One rule has so far taken a number and returned a number, and a network does
-not stop there: let the output of one rule be the input of another. If $g: A \to B$ and $f: B \to C$, the
+So far each rule has taken a number and returned a number. A network chains
+them, letting the output of one rule be the input of another. If
+$g: A \to B$ and $f: B \to C$, the
 **composition** $f \circ g$ ("$f$ after $g$") is the function
 
 $$
@@ -498,9 +497,10 @@ The same is true of ten lines in a row, or a hundred: composing any number of
 lines yields one line. A network of nothing but lines could be replaced by one
 line (with several inputs, one matrix; Chapter 4), and all its depth would be
 wasted. This is not only a thought experiment. When a trained network is
-deployed, a normalisation step that is a line per channel followed by a
-convolution that is a line per channel can be, and is, merged into one: the
-section on brain below shows that merge in a kernel. What makes depth
+deployed, a normalisation step that is two lines per channel in a row
+(subtract a mean and divide by a spread, then scale and shift) can be, and is,
+merged into one line per channel: the section on brain below shows that merge
+in a kernel. What makes depth
 worthwhile is putting a function that is *not* a line between the lines. We
 need such a function; the section on piecewise functions supplies the simplest.
 
@@ -642,7 +642,8 @@ After $k$ steps the interval has width $(\text{hi} - \text{lo})/2^k$, so to
 reach a tolerance $\varepsilon$ we need
 $k \ge \log_2\bigl((\text{hi} - \text{lo})/\varepsilon\bigr)$ steps: the
 logarithm of Chapter 1 is the cost. The method relies on exactly one property
-of $f$, that it is increasing, which Section "Monotonic functions" names.
+of $f$, that it is increasing, a property that gets its name with monotonic
+functions below.
 
 ```text
 function invert_increasing(f: function(real) -> real, y: real, lo: real, hi: real,
@@ -681,13 +682,14 @@ $$
 b^x = e^{x \log b} ,
 $$
 
-so any exponential is $e^{kx}$ for some **rate** $k = \log b$, negative for
-decay. This is why $e^x$ is the exponential function and the others are
-rescalings of its input: it removes a constant from every formula.
+so any exponential is $a\,e^{kx}$ for some **rate** $k = \log b$, negative for
+decay. This is why $e^x$ is called *the* exponential function: every other one
+is a rescaling of its input, and the base $e$ makes the rate $k$ appear
+directly in the exponent.
 
 ### Compounding
 
-A deposit of 100 earning 5 % a year is multiplied by 1.05 each year:
+A deposit of 100 earning 5 percent a year is multiplied by 1.05 each year:
 $100 \cdot 1.05^t$ after $t$ years. The doubling time is the $t$ at which the
 factor reaches 2, so $1.05^t = 2$ and $t = \log 2 / \log 1.05$. The logarithm is
 the inverse of the exponential doing its job:
@@ -745,12 +747,12 @@ $t = \log 2 / k$ (the **half-life**), and dropped tenfold at $t = \log 10 / k$:
 | 0.94 | 0.06188 | 11.2 | 37.21 | 38 |
 <!-- /worked -->
 
-Figure 4 plots the three curves and marks the step at which each reaches 0.01.
-With a decay factor of 0.99 the rate takes 229 steps to fall to a tenth of its
-start; with 0.94 it takes 38. The table and the picture are one fact stated in
+Figure 4 plots the three curves and marks where each reaches 0.01. With a
+decay factor of 0.99 the rate first falls below a tenth of its start at step
+230; with 0.94, at step 38. The table and the picture are one fact stated in
 two ways, and the choice of $\gamma$ is the choice of a time scale.
 
-![Three decaying curves of learning rate against step number from 0 to 240, gamma 0.99, 0.97 and 0.94, starting at 0.1; a dashed horizontal line at 0.01 is crossed at step 229, 76 and 38 respectively, each crossing marked by a point.](img/exp-decay.svg)
+![Three decaying curves of learning rate against step number from 0 to 240, gamma 0.99, 0.97 and 0.94, starting at 0.1; a dashed horizontal line at 0.01 is crossed near steps 229, 76 and 37 respectively, each crossing marked by a point.](img/exp-decay.svg)
 
 **Figure 4.** Exponential decay for three decay factors. The dashed line is a
 tenth of the starting rate.
@@ -1090,8 +1092,8 @@ returns $-739.99742$), and below it $\exp$ is exactly zero and the round trip
 fails completely. The remedy is the one already used: stay in the logarithmic
 domain where the numbers are, and never leave it to come back.
 
-**A formula can be safe where it is mathematically fine and fail where it is
-not.** The function $x / (1 + e^{-x})$ is perfectly defined for every real $x$,
+**A formula that is fine on paper can pass through a value the machine cannot
+hold.** The function $x / (1 + e^{-x})$ is perfectly defined for every real $x$,
 but $e^{-x}$ is enormous for very negative $x$:
 
 <!-- worked: functions_ch.silu_tail -->
@@ -1149,8 +1151,10 @@ commit selects between the two gradient kernels on a queried device capability.
 exponential, an addition, and a division. `crates/kernels/wgsl/gelu.wgsl` computes
 `0.5 * v * (1.0 + tanh(inner))` with `inner = k * (v + 0.044715 * v * v * v)`,
 whose inner part is a degree-3 polynomial from this chapter. A second kernel,
-`crates/kernels/wgsl/gelu_erf.wgsl`, computes the exact formula instead of the
-polynomial-inside-tanh approximation. Commit `c76a78130` (16 July 2026) added it
+`crates/kernels/wgsl/gelu_erf.wgsl`, computes the exact formula, built on the
+error function $\operatorname{erf}$ (evaluated by a standard approximation good
+to about $1.5 \times 10^{-7}$), instead of the polynomial-inside-tanh
+approximation. Commit `c76a78130` (16 July 2026) added it
 because a reference model used the exact version and the two differ by about
 $10^{-3}$, enough to break a parity check against the reference: two functions
 that are plotted as the same curve are not the same function, and the tests
@@ -1176,17 +1180,16 @@ anatomy as the schedule of the last section: a linear warmup to a `peak`, a
 `hold` at the peak, a decay down to a `floor`, and the floor held after that. Its
 decay piece is a half-period of the cosine curve (the cosine arrives with
 sinusoids in the Fourier chapter), not an exponential, but the structure,
-pieces with joins and a floor, is the same. Its doc comment states the reason for
-the floor ("a rate that reaches exactly zero stops training some steps before
-the run ends"), and its tests state the properties of this chapter as
+pieces with joins and a floor, is the same, and the floor is there for the
+reason given above. Its tests state the properties of this chapter as
 assertions: the warmup starts below the peak, the decay is monotone
 (`warmup_ramps_decay_is_monotone_and_the_floor_is_reached` checks that each
 rate is no smaller than the next), and the floor is reached and held. Commit
 `cb2136638` (11 September 2026) gave the curve its own name. Before it, the same
-curve was spelled twice (once inside `fit`, once in the `lfm2` trainer), and
-neither spelling was reachable from a trainer that owned neither options
-struct; the commit turned it into a value and gated the old function to be bit-for-bit identical over 400
-steps. `hold = 0` is the previous curve exactly. The point of the new piece
+curve was spelled twice (once inside `fit`, once in the `lfm2` trainer), each
+tied to its own options, so a third trainer could use neither; the commit made
+the curve a value of its own and checked that it reproduces the old function
+bit for bit over 400 steps. `hold = 0` is the previous curve exactly. The point of the new piece
 is that a plain cosine from step 0 bakes the total step count into every step's
 rate, so a run later extended has already annealed itself against the short
 total, while the held-peak shape keeps every pre-cooldown rate independent of

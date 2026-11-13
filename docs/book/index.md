@@ -42,7 +42,7 @@ historical sections draw on in the [Chronology](history/chronology.md).
 13. [Information, Entropy and Surprise](v01-mathematics/13-information-theory.md): How many bits does it take to describe what we expect to see, and what does it cost to expect the wrong thing?
 14. [Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md): How can any signal be written as a sum of waves, and why does that make convolution cheap?
 15. [Floating Point and Numerical Error](v01-mathematics/15-floating-point.md): Why does a computer get arithmetic slightly wrong, and when does slightly wrong become completely wrong?
-16. [Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md): How do we predict how long a computation will take and how much memory it needs before we run it?
+16. [Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md): How do we predict how much work a computation will do and how much memory it needs before we run it?
 17. [Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md): How does a deterministic computer produce random numbers, and how do we make random experiments repeatable?
 18. [Project: A Numerical Library from Nothing](v01-mathematics/18-project-numerical-library.md): Can you build the numerical toolkit every later chapter relies on, and prove each piece correct?
 
@@ -199,4 +199,8 @@ historical sections draw on in the [Chronology](history/chronology.md).
 6. [Decision Models in Practice](v12-reinforcement-learning/06-decision-models.md): How is a small learned model used to make fast, auditable decisions inside an application?
 7. [Continual Learning and Promotion](v12-reinforcement-learning/07-continual-learning.md): How can a model keep learning from new experience without forgetting, and how do we decide a new version is better?
 8. [Project: An Agent That Improves from Verified Feedback](v12-reinforcement-learning/08-project-agent.md): Can you train an agent that solves progressively harder tasks from verified rewards, and decide when a new version is better?
+
+### [Volume XIII: Training Large Models Efficiently](v13-training-at-scale/index.md)
+
+1. [Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md): How is training data prepared, mixed and fed at scale?
 <!-- /contents -->

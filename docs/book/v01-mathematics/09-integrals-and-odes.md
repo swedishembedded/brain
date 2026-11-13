@@ -32,17 +32,18 @@ speed. This question runs the other way, from a rate to the accumulated total.
 We know how fast the quantity changes at every moment and want to know how much
 it changed. The same question appears wherever a continuous quantity must be
 summed: the total probability under a bell curve, the average of a function over
-all its inputs, the final state of a system whose rate of change we know. This
-chapter builds the operation, called the integral, from the smallest case above,
-and then uses it for the second half of the question: if the rate of change of a
-quantity depends on the quantity itself, how do we follow it forward in time?
+all its inputs, the final state of a system whose rate of change we know. The
+operation that answers it, the integral, grows out of the smallest case above.
+The second half of the question is harder: if the rate of change of a quantity
+depends on the quantity itself, how do we follow it forward in time?
 That is a differential equation, and the simplest method for following it is
 the one that, in disguise, trains every neural network.
 
 The derivative and the exponential of Chapter 7 carry the first half of what
 follows; the second half leans on the gradient and the Taylor expansion of
-Chapter 8. Six questions to try from memory before we start; the answers are at
-the end, and the chapter each names is where to go back if one is hard.
+Chapter 8. The six questions below bring those tools back before they are
+needed; a question that resists sends you to the chapter it names, and the
+answers close the chapter.
 
 1. (Chapter 7, derivative.) What is the derivative of $x^3$, and of $e^{2x}$?
 2. (Chapter 7, limit.) What number does $(e^h - 1)/h$ approach as $h \to 0$, and why is that the reason $\tfrac{d}{dx}e^x = e^x$?
@@ -109,10 +110,10 @@ $$
 
 The symbol $\int$ is an elongated S for "sum", $dt$ stands for the width $\Delta t$
 once it has become infinitesimal, and $a$ and $b$ are the limits of integration.
-For $v(t) = t(4 - t)$ on $[0, 3]$ the integral is $9$. We will derive that number
-exactly from a formula in the next section; for now the table is the evidence.
-(Continuous functions have an integral; so do functions with a finite number of
-jumps. That covers everything in this book.)
+For $v(t) = t(4 - t)$ on $[0, 3]$ the integral is $9$. A formula derives that
+number exactly in the next section; until then the table is the evidence.
+(Continuous functions have an integral; so do bounded functions with a finite
+number of jumps. That covers every integral in this volume.)
 
 A speed is never negative but a velocity is: a car reversing has
 negative velocity. A rectangle of negative height contributes negative area, so the
@@ -275,7 +276,8 @@ Most integrals in machine learning are not distances, and the antiderivative
 trick does not apply to them. Three appear again and again in later chapters.
 
 The first is the expectation. The average of a quantity $g(x)$ over a continuous variable $x$
-that occurs with density $p(x)$ is $\int g(x)\,p(x)\,dx$, the sum over all $x$ of
+that occurs with density $p(x)$ (a function whose area over a range is the chance
+of landing in it, defined in Chapter 10) is $\int g(x)\,p(x)\,dx$, the sum over all $x$ of
 the value times how likely it is. This is the expectation of the probability chapter
 that follows, and every loss that is "an average over the data distribution" is one.
 
@@ -304,8 +306,8 @@ known that none exists. The only way to a number is a numerical method.
 
 The third is a score. The area under a receiver operating
 characteristic curve, a standard summary of how well a classifier ranks, is a sum
-of trapezoids over a few measured points. Volume II (*Measuring Models*) defines it; the point here is
-that evaluation code integrates.
+of trapezoids over a few measured points. Volume II (*Measuring Models: Metrics
+and Calibration*) defines it; evaluation code integrates too.
 
 So we need to approximate integrals from function values, with a known error.
 
@@ -371,10 +373,10 @@ to something proportional to $\Delta t$. For the trapezoid, expand
 $f$ about the middle $m$ of a panel: $f(m + s) = f(m) + f'(m)s + \tfrac12 f''(m)s^2 + \dots$.
 The exact area of the panel is $f(m)\Delta t + \tfrac{1}{24}f''(m)\Delta t^3 + \dots$
 (the odd term integrates to zero) and the trapezoid, the average of the two end heights times
-$\Delta t$, is $f(m)\Delta t + \tfrac18 f''(m)\Delta t^3 + \dots$, so each panel is
-wrong by about $-\tfrac1{12}f''(m)\Delta t^3$. Adding $n$ panels, $\sum f''(m_i)\Delta t$ is
-itself a Riemann sum of $f''$, equal to $f'(b) - f'(a)$ by the fundamental theorem, so
-the total is about $-\tfrac1{12}\bigl(f'(b) - f'(a)\bigr)\Delta t^2$: order $2$.
+$\Delta t$, is $f(m)\Delta t + \tfrac18 f''(m)\Delta t^3 + \dots$, so each panel
+overestimates by about $\tfrac1{12}f''(m)\Delta t^3$. Adding $n$ panels, $\sum f''(m_i)\Delta t$ is
+itself a Riemann sum of $f''$, close to $f'(b) - f'(a)$ by the fundamental theorem, so
+the total excess is about $\tfrac1{12}\bigl(f'(b) - f'(a)\bigr)\Delta t^2$: order $2$.
 Simpson's parabola is right through the quadratic term, and by symmetry through
 the cubic one as well, leaving $\Delta t^4$. The last claim is visible exactly:
 
@@ -394,7 +396,7 @@ With two panels, the left rule is exact only for constants, the trapezoid rule f
 lines, and Simpson's rule for every polynomial up to degree three. (Degree three,
 not two, is the lucky cancellation the symmetry gives: the rule's parabola is built to
 match $1$, $s$ and $s^2$ exactly, and for $s^3$ both the exact area over
-$[-\Delta t, \Delta t]$ and the rule's value $\tfrac{\Delta t}{3}(-\Delta t^3 + 0 + \Delta t^3)$ are $0$.) A higher order is worth
+$[-\Delta t, \Delta t]$ and the rule's value $\tfrac{\Delta t}{3}(-\Delta t^3 + 0 + \Delta t^3)$ are $0$.) A higher order saves
 function evaluations. To bring the error on $e^x$ below $10^{-6}$:
 
 <!-- worked: integrals.evaluations_needed -->
@@ -448,13 +450,14 @@ its value $y(0)$ at $t = 0$, and $y = y(0)e^{-kt}$. The solution is unique and i
 **exponential decay**: the continuous version of the schedule $\eta_0\gamma^{t}$ of
 Chapter 2 with $\gamma = e^{-k}$, and the same shape as a cooling cup of coffee
 (whose rate is proportional to the difference from room temperature, and so decays
-the same way). With a negative sign replaced by a positive one, it is growth.
+the same way). With a positive rate, $dx/dt = kx$, the same argument gives
+exponential growth.
 
 Compound interest is the same arithmetic. Chapter 1 met $e$ as the limit of
 $(1 + 1/n)^n$, and Chapter 2 compounded a balance once a year. A balance that earns
 at rate $r$ per year satisfies $dy/dt = r y$: the interest earned at each instant is
 proportional to what is there. Compounding $n$ times a year multiplies the balance
-by $1 + r/n$ every $1/n$ of a year. But that is "add the rate times the step",
+by $1 + r/n$ every $1/n$ of a year. That is "add the rate times the step",
 $y \leftarrow y + (1/n)(r y)$, a step along the slope. Following the ODE by steps
 along its slope and compounding are the same arithmetic:
 
@@ -555,7 +558,7 @@ expansion $\ln(1 - h) = -h - \tfrac12 h^2 - \dots$ (integrate $1/(1 - s) = 1 + s
 $x \approx e^{-t}\bigl(1 - \tfrac12 t h\bigr)$, an error of $\tfrac12 t e^{-t}\,h$:
 the last column converges to its predicted limit $0.1353$.
 
-![The exact curve e to the minus t from 1 towards 0, and the paths Euler's method takes with step 0.5, 1.5 and 2.5. The step 0.5 path follows the curve from above-the-line points that fall just short of it. The step 1.5 path jumps below zero at t = 1.5 and then returns, flipping sign at every step while shrinking. The step 2.5 path alternates in sign and grows, reaching minus 3.4 at t = 7.5.](img/euler-trajectories.svg)
+![The exact curve e to the minus t from 1 towards 0, and the paths Euler's method takes with step 0.5, 1.5 and 2.5. The step 0.5 path stays just below the curve. The step 1.5 path jumps below zero at t = 1.5 and then returns, flipping sign at every step while shrinking. The step 2.5 path alternates in sign and grows, reaching minus 3.4 at t = 7.5.](img/euler-trajectories.svg)
 
 The figure shows something the error table hid. The
 step $h = 1.5$ gives a path that flips sign every step although the true solution
@@ -677,9 +680,7 @@ Along the exact flow from (0, 0): the rate of change of L against minus the squa
 | 0.8 | (0.8886, 2.0459) | 0.0025 | -0.0017 | -0.0017 |
 <!-- /worked -->
 
-The exact solution comes from the same split as Chapter 8 (the central difference
-in the table is $(L(\mathbf{w}(t + h)) - L(\mathbf{w}(t - h)))/2h$ with $h = 10^{-5}$,
-evaluating this closed form, also at $t - h = -h$ for the first row). Write the error from the
+The exact solution comes from the same split as Chapter 8. Write the error from the
 minimum as $\mathbf{e} = a\,\mathbf{v}_1 + b\,\mathbf{v}_2$ along the curvature
 directions. The equation $d\mathbf{e}/dt = -\mathbf{H}\mathbf{e}$ separates into
 $\dot a = -\lambda_1 a$ and $\dot b = -\lambda_2 b$, two decay equations solved above:
@@ -717,8 +718,7 @@ runs ahead of the flow: the gradient is largest at the start and shrinks as the
 path moves, but a step uses the gradient at its start for its whole length, so it
 travels farther than the flow does in the same time (the local error of Euler's method). With $\eta = 0.18$, above $2/\lambda_{\max} = 0.1716$, the descent
 climbs to $L = 129.85$ while the flow it is supposed to follow is already at
-$L = 0.0016$. The flow never diverges, because a bowl has a downhill direction
-everywhere. Divergence is an artefact of the discretisation, and the picture shows
+$L = 0.0016$. The flow never diverges, because the loss can only fall along it. Divergence is an artefact of the discretisation, and the picture shows
 both on one field:
 
 ![Contours of the two-knob loss of Chapter 8 as ellipses elongated along a diagonal, with a grey arrow of fixed length at each grid point pointing downhill, towards the minimum at (1, 2). A smooth blue curve starts at (0, 3.5), drops steeply to the valley floor near (-0.2, 2.5) and then runs slowly along the floor towards the minimum. Orange dots joined by lines show gradient descent with step 0.15 from the same start: they swing from side to side across the valley, each swing smaller than the last, around the blue path.](img/gradient-flow-field.svg)
@@ -779,7 +779,7 @@ function midpoint(f: function(real, real) -> real, t0: real, x0: real, h: real, 
     return x
 ```
 
-For a vector state the same code applies with `x[i]`, `k1`, `k2` and `k` as vectors and `+`, `*` acting on every component (the one place where the book allows this implicit broadcast).
+For a vector state the same code applies with `x[i]`, `k1`, `k2` and `k` as vectors and `+`, `*` acting on every component.
 
 Both have local error of order $h^3$ and global error of order $h^2$. Since they
 cost two evaluations per step, the fair comparison fixes the number of evaluations
@@ -836,8 +836,8 @@ An explicit method such as Euler's is stable only for $h < 2/k$ on a decay of ra
 $k$, so stability has to be checked before accuracy. A solution may be smooth, with
 no accuracy reason for small steps, and the step is still capped by the fastest
 decay anywhere in the system. Equations with a fast and a slow time scale are
-called **stiff**, and the bowl of this chapter ($\lambda_1/\lambda_2 = 34$) is the
-smallest example.
+called **stiff**, and the bowl of Chapter 8 ($\lambda_1/\lambda_2 = 34$) is a
+small example.
 
 When the fast part is linear, it can be solved exactly instead. Over one step the
 equation $dx/dt = -B(x - x_\infty)$, with $B$ and $x_\infty$ held fixed, has the
@@ -878,12 +878,12 @@ the chapters that use integrals inherit its remedies.
 
 ## Euler steps, a leaky neuron and trapezoids in brain's crates
 
-The flow-matching sampler is Euler's method in plain sight. The header of
-`crates/diffusion/src/scheduler.rs` documents the model of the process: the noisy latent is a straight
-line between a data point $x_0$ and noise $\varepsilon$, $x_\sigma = (1-\sigma)x_0 + \sigma\varepsilon$,
-the denoising network predicts the velocity $v = dx/d\sigma$, and sampling
-"integrates that ODE backwards from $\sigma_{\max}$ toward 0 with explicit Euler
-steps". Its `step` computes `dt = sigmas[i + 1] - sigmas[i]` (negative, as in the
+The flow-matching sampler is Euler's method in plain sight. In a rectified flow
+the noisy latent is a straight line between a data point $x_0$ and noise
+$\varepsilon$, $x_\sigma = (1-\sigma)x_0 + \sigma\varepsilon$, the denoising
+network predicts the velocity $v = dx/d\sigma$, and sampling integrates that ODE
+backwards from $\sigma_{\max}$ toward 0. The `step` of
+`crates/diffusion/src/scheduler.rs` computes `dt = sigmas[i + 1] - sigmas[i]` (negative, as in the
 backward-in-time table above) and returns `sample + dt * model_output`, which is the
 Euler step of this chapter verbatim. The scheduler was introduced as the first piece
 of a new crate for model-agnostic diffusion machinery in commit `5f7ae6dc2`
@@ -899,11 +899,12 @@ both is a plain Euler step, because no earlier slope exists yet.
 
 A spiking neuron shows the stability limit at work. The leaky
 integrate-and-fire membrane of `crates/neuro` obeys a relaxation equation of the
-exponential-decay kind. `crates/neuro/src/lif.rs` documents `dt_over_tau`, the step
-in units of the membrane time constant, as "must be in `(0, 1]`: at `a > 1` the
-Euler update overshoots the resting potential and the membrane oscillates". That is
-the factor $1 - kh$ of the stability table: for $kh > 1$ the sign flips. The
-story of this kernel is the lesson of the section on stability above. The first version
+exponential-decay kind, with the step measured in units of the membrane time
+constant, $a = \Delta t/\tau$ (`dt_over_tau` in `crates/neuro/src/lif.rs`). A
+forward Euler update multiplies the distance from the resting potential by
+$1 - a$, the factor $1 - kh$ of the stability table, and for $a > 1$ the sign
+flips and the membrane overshoots. The story of this kernel is the lesson of the
+section on stability above. The first version
 (commit `36bee10b7`, September 2026) used forward Euler and was gated on the closed
 form of the Euler recurrence, a geometric sequence, compared with the kernel's
 output with no tolerance fitted. The next day commit `3945b43c6` made synapses
@@ -916,9 +917,7 @@ tick. In `crates/kernels/wgsl/lif_step.wgsl` the line is
 `bb` as $B$. The oracle `analytic_v` in `crates/neuro/src/lif.rs` was updated to the
 exponential form, and the test `membrane_matches_the_closed_form_for_a_constant_input`
 in `crates/neuro/tests/it/dynamics.rs` compares the device with it for $64$ ticks to
-within $10^{-6}$. (The header comment of the kernel still describes the earlier
-forward-Euler update and its $(1-a)^k$ closed form; the code below it is the
-exponential step.)
+within $10^{-6}$.
 
 Evaluation code integrates too, with the trapezoid rule.
 `crates/survival/src/brier.rs` has `integrated_brier`, the squared-error score of
@@ -965,8 +964,7 @@ Answers are at the end of the chapter.
 
 ## Summary
 
-We asked how to add up infinitely many small pieces and how to follow a system
-that changes continuously. A Riemann sum, the sum of rectangle areas
+A Riemann sum, the sum of rectangle areas
 $\sum f(t_i)\,\Delta t$, brackets a total; its limit as the width goes to zero is
 the **integral** $\int_a^b f(t)\,dt$, a signed area. The **fundamental theorem of
 calculus** says the rate of change of the accumulated area $\int_a^x f$ is

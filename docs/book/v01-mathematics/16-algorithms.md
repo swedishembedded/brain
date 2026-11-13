@@ -3,7 +3,7 @@
 
 # Algorithms, Cost and Complexity
 
-*How do we predict how long a computation will take and how much memory it needs before we run it?*
+*How do we predict how much work a computation will do and how much memory it needs before we run it?*
 
 A training set is a long list of token ids, and before it is used someone has to check it. One check is easy to state: *does this list of ids contain a repeat?* A repeated id inside a short window can mean a corrupted sample, a duplicated line in a document, or a degenerate generation. The question has a perfectly clear answer, and there is more than one way to compute it.
 
@@ -41,11 +41,11 @@ Each time $n$ doubles, the first column of counts is multiplied by about $4$, th
 
 ![Three straight-ish lines on log-log axes of operations against list length from 8 to 4096. All pairs rises with slope 2 to nearly 10 million operations; sorting rises a little steeper than slope 1 to about 48 thousand; the hash set rises with slope 1 to about 9 thousand.](img/duplicate-op-counts.svg)
 
-Nothing about the machine decided that; it is a property of the three *procedures*. This chapter is about learning to read such a property off a procedure before running it: to say how many steps it takes as a function of the size of its input, how much memory it needs, and what that implies for the sizes it can handle at all.
+Nothing about the machine decided that; it is a property of the three *procedures*. Such a property can be read off a procedure before running it: to say how many steps it takes as a function of the size of its input, how much memory it needs, and what that implies for the sizes it can handle at all.
 
 This is the tool for a question every later volume asks: will it fit, and will it finish? A matrix product, a Fourier transform and a sort are all procedures with a cost, and Chapters 4 and 14 already counted two of them informally. Here the counting becomes a method, and we use it to study the building blocks that every machine learning system is made of: reductions, prefix sums, sorting and hashing.
 
-Counting cost leans on six ideas from earlier chapters, and it helps to have them to hand before the counting starts. Answer from memory; the answers are at the end of the chapter, and the chapter in brackets is where to look if one is hard.
+Counting cost leans on six ideas from earlier chapters: closed-form sums, logarithms as counts of halvings, what doubling does to a function, the cost of a matrix product, the bytes of an array and the rounding of a floating-point sum. If one of the six questions resists, the chapter it names is the place to rebuild it before the counting starts.
 
 1. (Chapter 1, summation notation.) Write $\sum_{i=0}^{n-1} i$ in closed form. Evaluate it for $n = 5$ by adding and by the formula.
 2. (Chapter 1, logarithms.) How many times can you halve $1024$ before you reach $1$? How does that number relate to $\log_2 1024$? What is $\log_2 10^6$, roughly?
@@ -94,11 +94,11 @@ Maximum of x = [3, 7, 2, 9, 4], checking the invariant after every step.
 | after i = 4 | 5 | 9 | [3, 7, 2, 9, 4] | True |
 <!-- /worked -->
 
-Every algorithm in this chapter has such an invariant, and we will state it for each one. It is also the best way to find a bug: when an implementation is wrong, some pass breaks the invariant, and the first pass where the invariant fails is where to look.
+Every algorithm below comes with such an invariant. It is also the best way to find a bug: when an implementation is wrong, some pass breaks the invariant, and the first pass where the invariant fails is where to look.
 
 ## Counting operations
 
-Time on a real machine depends on the machine, the language, what else is running and the state of its caches. A count of elementary operations depends on none of these, and it predicts how the time *grows* with the size of the input, which is the part we need before running anything. We fix a **cost model**: a list of the operations we count and agree to treat each as one unit. For the duplicate checkers the unit is an element comparison (plus a hash evaluation for the hash set). For numerical code it is usually a multiply-add, as in Chapter 4.
+Time on a real machine depends on the machine, the language, what else is running and the state of its caches. A count of elementary operations depends on none of these, and it predicts how the cost *grows* with the size of the input, which is the part we need before running anything. We fix a **cost model**: a list of the operations we count and agree to treat each as one unit. For the duplicate checkers the unit is an element comparison (plus a hash evaluation for the hash set). For numerical code it is usually a multiply-add, as in Chapter 4.
 
 For an input of size $n$ the algorithm performs $T(n)$ steps in the worst case, the largest over all inputs of that size. Counting is a summation (Chapter 1), and the all-pairs method shows it. The outer index $i$ runs over $0, \dots, n-1$ and the inner index $j$ over $i + 1, \dots, n - 1$, one comparison for each pair:
 
@@ -106,7 +106,7 @@ $$
 T_{\text{pairs}}(n) = \sum_{i=0}^{n-1} (n - 1 - i) = (n-1) + (n-2) + \dots + 1 + 0 = \frac{n(n-1)}{2}.
 $$
 
-The last step is the closed form you recalled in Before you begin: the sum of the first $n - 1$ whole numbers. For $n = 4096$ it is $4096 \cdot 4095 / 2 = 8{,}386{,}560$, exactly the entry of the growth table. The instrumented program counted every comparison, and the formula agrees with it.
+The last step is the closed form of the first recall question: the sum of the first $n - 1$ whole numbers. For $n = 4096$ it is $4096 \cdot 4095 / 2 = 8{,}386{,}560$, exactly the entry of the growth table. The instrumented program counted every comparison, and the formula agrees with it.
 
 Real counts have several parts. A dense layer with $n$ inputs and $n$ outputs, $\mathbf{y} = \max(0, \mathbf{W}\mathbf{x} + \mathbf{b})$ with $\mathbf{W}$ of shape $[n, n]$, performs $n^2$ multiply-adds for the matrix-vector product (Chapter 4), $n$ additions for the bias and $n$ evaluations of the maximum: in total $n^2 + 2n$. The table counts these inside the loops and divides:
 
@@ -126,9 +126,7 @@ By $n = 1024$ the $n^2$ term is $99.8$ percent of the total and the rest does no
 
 ## Asymptotic notation
 
-Look at the counts again. The all-pairs count is $\tfrac12 n^2 - \tfrac12 n$. The sorted-neighbours count is, on random lists, about $n \log_2 n$ minus a multiple of $n$. The hash count is about $2.2\,n$. We say that the three are of order $n^2$, $n \log n$ and $n$. Here is the definition that makes "of order" precise.
-
-Precisely, for functions $T, f : \mathbb{N} \to \mathbb{R}_{\ge 0}$:
+Look at the counts again. The all-pairs count is $\tfrac12 n^2 - \tfrac12 n$. The sorted-neighbours count is, on random lists, about $n \log_2 n$ minus a multiple of $n$. The hash count is about $2.2\,n$. We say that the three are of order $n^2$, $n \log n$ and $n$. A definition makes "of order" precise. For functions $T, f : \mathbb{N} \to \mathbb{R}_{\ge 0}$:
 
 - $T(n) = O(f(n))$ if there are constants $c > 0$ and $n_0$ such that $T(n) \le c\, f(n)$ for all $n \ge n_0$. ($f$ is an upper bound up to a constant.)
 - $T(n) = \Omega(f(n))$ if there are constants $c > 0$ and $n_0$ such that $T(n) \ge c\, f(n)$ for all $n \ge n_0$. (A lower bound up to a constant.)
@@ -175,9 +173,9 @@ Four facts about the notation get used constantly.
 1. *Constants and lower-order terms vanish.* $3n^2 + 5n + 7 = \Theta(n^2)$: for $n \ge 1$ the whole is at most $15 n^2$ and at least $3 n^2$.
 2. *Logarithm bases do not matter.* $\log_2 n = \log_{10} n / \log_{10} 2$ differs from $\log_{10} n$ by a constant factor, so $O(\log n)$ needs no base.
 3. *Sums and products.* Doing a step of cost $O(f)$ and then one of cost $O(g)$ costs $O(f + g)$, which is the larger of the two. Repeating a step of cost $O(f)$ a number of times $O(g)$ costs $O(f \cdot g)$.
-4. *Upper bounds are not claims about every input.* $O$ says nothing about a particular input. Insertion sort on an already sorted list takes $n - 1$ comparisons although its worst case is $\Theta(n^2)$. We therefore always say which case we mean: the **worst case** (the largest over all inputs of size $n$), or the **average case** (over a stated distribution of inputs, such as all orderings equally likely).
+4. *Upper bounds are not claims about every input.* $O$ says nothing about a particular input. Insertion sort (which inserts each element into the sorted prefix before it) on an already sorted list takes $n - 1$ comparisons although its worst case is $\Theta(n^2)$. We therefore always say which case we mean: the **worst case** (the largest over all inputs of size $n$), or the **average case** (over a stated distribution of inputs, such as all orderings equally likely).
 
-The word **asymptotic complexity** names the growth rate of the cost as the input size grows, $\Theta(f)$ or $O(f)$ for the cost of the best known way to do a task. Complexity says how an algorithm *scales*; it does not say which of two algorithms is faster at a given $n$. A $\Theta(n)$ method with a large constant can lose to a $\Theta(n^2)$ method with a small one for every $n$ below a crossover. That is why the chapter measured as well as classified.
+The term **asymptotic complexity** names the growth rate of the cost as the input size grows, $\Theta(f)$ or $O(f)$ for the cost of the best known way to do a task. Complexity says how an algorithm *scales*; it does not say which of two algorithms is faster at a given $n$. A $\Theta(n)$ method with a large constant can lose to a $\Theta(n^2)$ method with a small one for every $n$ below a crossover, which is why the counts above were measured as well as classified.
 
 ## How fast is "fast": growth rates
 
@@ -192,28 +190,28 @@ Which growth rates occur, and what do they allow? Here are the usual ones, evalu
 | 80 | 6.3 | 80.0 | 506 | 6,400 | 512,000 | 1.21e+24 |
 <!-- /worked -->
 
-Between $n = 10$ and $n = 80$ the logarithm moves from $3.3$ to $6.3$, the linear cost grows eightfold, the quadratic sixty-four-fold, the cubic five hundred and twelve-fold, and $2^n$ goes from a thousand to a number with twenty-five digits. To say what these mean in time we need a rate. We take, as an **assumption** to make the table concrete, that the machine performs $10^9$ simple operations per second; real machines are faster or slower by factors that depend on the operation and on memory, but the conclusions below survive a factor of a hundred either way. The largest $n$ that fits in a budget is the $n$ at which the cost reaches the number of operations the budget allows:
+Between $n = 10$ and $n = 80$ the logarithm moves from $3.3$ to $6.3$, the linear cost grows eightfold, the quadratic sixty-four-fold, the cubic five hundred and twelve-fold, and $2^n$ goes from a thousand to a number with twenty-five digits. What these mean in practice is clearest as a budget of work: the largest $n$ whose cost fits within a stated number of operations. The budgets below grow by factors of a thousand, from $10^9$ to $10^{15}$ operations; how long a given machine takes to perform them depends on the operation and on memory, but the conclusions do not:
 
 <!-- worked: algorithms.growth_budget -->
-| cost | largest n in 1 second | in 1 hour | in 1 day |
+| cost | largest n for 10^9 operations | for 10^12 | for 10^15 |
 |---|---:|---:|---:|
-| n | 1,000,000,000 | 3.60e+12 | 8.64e+13 |
-| n log2 n | 39,620,077 | 98,574,774,544 | 2.11e+12 |
-| n^2 | 31,622 | 1,897,366 | 9,295,160 |
-| n^3 | 1,000 | 15,326 | 44,208 |
-| 2^n | 29 | 41 | 46 |
+| n | 1,000,000,000 | 1.00e+12 | 1.00e+15 |
+| n log2 n | 39,620,077 | 28,781,593,877 | 2.25e+13 |
+| n^2 | 31,622 | 1,000,000 | 31,622,776 |
+| n^3 | 1,000 | 10,000 | 100,000 |
+| 2^n | 29 | 39 | 49 |
 
-Time for 2^n operations at the same rate:
+The work 2^n itself:
 
-| n | time |
+| n | operations 2^n |
 |---|---:|
-| n = 30 | 1.07 seconds |
-| n = 50 | 13 days |
-| n = 70 | 3.74e+04 years |
-| n = 100 | 4.02e+13 years |
+| n = 30 | 1.07e+09 |
+| n = 50 | 1.13e+15 |
+| n = 70 | 1.18e+21 |
+| n = 100 | 1.27e+30 |
 <!-- /worked -->
 
-A linear algorithm handles $10^9$ items in a second. A $\Theta(n \log n)$ algorithm handles about forty million. A quadratic one stops near $3 \times 10^4$ items: this is why all-pairs duplicate detection is hopeless on a corpus. A cubic algorithm stops near $1000$, which is why matrix products of large matrices are the thing that must be done on dedicated hardware (Chapter 4: $n^3$ multiply-adds). And an exponential algorithm stops at $29$: adding *one* element to the input doubles its running time, so a day of computation buys seventeen extra elements over a second. No hardware improvement changes that picture.
+With $10^9$ operations a linear algorithm handles $10^9$ items and a $\Theta(n \log n)$ algorithm about forty million. A quadratic one stops near $3 \times 10^4$ items, and a millionfold larger budget takes it only a thousandfold further: this is why all-pairs duplicate detection is hopeless on a corpus. A cubic algorithm stops near $1000$, and the same millionfold budget buys a factor of a hundred, which is why matrix products of large matrices are the work that dedicated hardware is built for (Chapter 4: $n^3$ multiply-adds). And an exponential algorithm stops at $29$: adding *one* element to the input doubles its work, so a millionfold budget buys twenty extra elements. No hardware improvement changes that picture.
 
 Two costs from earlier chapters are now exact. The product of an $[m, k]$ and a $[k, n]$ matrix takes $mkn$ multiply-adds, which for three sizes equal to $n$ is $\Theta(n^3)$. The discrete Fourier transform of Chapter 14, by its definition, takes $n^2$ complex multiplications, and the fast Fourier transform takes $\tfrac n2 \log_2 n$:
 
@@ -228,7 +226,7 @@ The fast transform turns a $\Theta(n^2)$ task into a $\Theta(n \log n)$ one. At 
 
 ## Memory complexity
 
-Time is half the cost. A computation also needs space: the numbers it must keep. The **memory complexity** of an algorithm is the amount of memory it needs as a function of the input size, counted in the same style as time, in cells (elements) and usually *extra* cells beyond the input and output. It is measured at the peak, the largest amount held at the same moment, because a machine must have that much at that instant.
+Operations are half the cost. A computation also needs space: the numbers it must keep. The **memory complexity** of an algorithm is the amount of memory it needs as a function of the input size, counted in the same style as operations, in cells (elements) and usually *extra* cells beyond the input and output. It is measured at the peak, the largest amount held at the same moment, because a machine must have that much at that instant.
 
 The three duplicate checkers differ in memory as sharply as in time. Comparing all pairs keeps a few loop variables, $O(1)$. Merge sort needs a second array of the size of the input to merge into, $\Theta(n)$ extra cells. The hash set keeps a table twice as large as the number of items and the items themselves, again $\Theta(n)$:
 
@@ -263,7 +261,7 @@ A chain of 64 layers a_1 ... a_64, input a_0. Stride s keeps the checkpoints a_0
 Over every stride from 1 to 64, the smallest peak is 15 stored activations, first reached at s = 6.
 <!-- /worked -->
 
-With every array kept ($s = 1$) the peak is $64$ arrays at $64$ evaluations. At $s = 8 = \sqrt{64}$, the peak falls to $15$ arrays, about a quarter, at the price of $120$ evaluations: fewer than twice the work of a plain forward pass. The reason is visible in the count: the peak is at most $\lceil L/s \rceil + s - 1$: the checkpoints held when the backward pass reaches the segment (a checkpoint is dropped when its segment is finished, so the last segments hold fewer) plus the $s - 1$ arrays recomputed inside it (the segment's checkpoint is already stored). For $s = 8$ that is $8 + 7 = 15$, the entry of the table. The bound $\lceil L/s \rceil + s - 1$ is smallest when $s \approx \sqrt L$, at about $2\sqrt L - 1$ arrays; for $s = 6$ the last segment is shorter ($64 = 10 \cdot 6 + 4$) and the peak is $15$ as well, one below the bound $\lceil 64/6 \rceil + 5 = 16$. Memory for a deep chain has fallen from $\Theta(L)$ to $\Theta(\sqrt L)$ for a constant factor of at most two in time. Beyond $\sqrt L$ the peak rises again, because the segment being recomputed becomes the larger part. Volume III's treatment of backpropagation shows which arrays the backward pass needs, and Volume XIII's treatment of training at scale builds this dial into a training run; both are applications of the tradeoff counted here.
+With every array kept ($s = 1$) the peak is $64$ arrays at $64$ evaluations. At $s = 8 = \sqrt{64}$, the peak falls to $15$ arrays, about a quarter, at the price of $120$ evaluations: fewer than twice the work of a plain forward pass. The reason is visible in the count: the peak is at most $\lceil L/s \rceil + s - 1$: the checkpoints held when the backward pass reaches the segment (a checkpoint is dropped when its segment is finished, so the last segments hold fewer) plus the $s - 1$ arrays recomputed inside it (the segment's checkpoint is already stored). For $s = 8$ that is $8 + 7 = 15$, the entry of the table. The bound $\lceil L/s \rceil + s - 1$ is smallest when $s \approx \sqrt L$, at about $2\sqrt L - 1$ arrays; for $s = 6$ the last segment is shorter ($64 = 10 \cdot 6 + 4$) and the peak is $15$ as well, one below the bound $\lceil 64/6 \rceil + 5 = 16$. Memory for a deep chain has fallen from $\Theta(L)$ to $\Theta(\sqrt L)$ for a constant factor of at most two in work. Beyond $\sqrt L$ the peak rises again, because the segment being recomputed becomes the larger part. Volume III's treatment of backpropagation shows which arrays the backward pass needs, and Volume XIII's treatment of training at scale builds this dial into a training run; both are applications of the tradeoff counted here.
 
 ## Reductions
 
@@ -430,7 +428,7 @@ Each sequence can now be written to its slot independently, without waiting for 
 
 ## Sorting
 
-**Sorting** is the algorithm that rearranges a list into non-decreasing order, so that $x_0 \le x_1 \le \dots \le x_{n-1}$, with the output a permutation of the input. A sorted list can be searched by halving (the binary search above), the neighbours of a value are adjacent to it, and equal values are next to each other. The duplicate detector used the last property: after sorting, a repeat can only be a neighbour. Sorting is also how the $k$ largest logits are found, how the nucleus of a distribution is selected, and how items are grouped by key.
+**Sorting** is the task of rearranging a list into non-decreasing order, so that $x_0 \le x_1 \le \dots \le x_{n-1}$, with the output a permutation of the input. A sorted list can be searched by halving (the binary search above), the neighbours of a value are adjacent to it, and equal values are next to each other. The duplicate detector used the last property: after sorting, a repeat can only be a neighbour. Sorting is also how the $k$ largest logits are found, how the nucleus of a distribution is selected, and how items are grouped by key.
 
 Merge sort is a divide-and-conquer algorithm. To sort a list: if it has one element it is sorted; otherwise cut it in two halves, sort each, and *merge* the two sorted halves into one sorted list.
 
@@ -626,7 +624,7 @@ The manifest files: weights.bin is the first 4096 bytes of that buffer, config.j
 
 Three uses follow from what the table shows. *Identity.* Two files have the same bytes if and only if (for practical purposes) they have the same fingerprint, so a fingerprint can name a checkpoint or a dataset: "the model I trained on" becomes a string that someone else can check. *Integrity.* After a download or a crash, recompute the fingerprint and compare with the recorded one: a truncated or corrupted file does not match. *Streaming.* The computation consumes its input in chunks, so a file of any size can be fingerprinted with a small buffer, and the whole-file fingerprint equals the fingerprint built from chunks, as the table's second line shows. A *manifest*, a list of file names with their fingerprints, then pins an entire directory: change one bit of the weights and only that entry differs.
 
-A hash table's function and a fingerprint differ in what they promise. The table's function only needs to spread keys and to be fast; a collision costs a little time. The fingerprint's function makes collisions practically undiscoverable, and the price is that it is slower per byte. The names are the same because the mechanism, a fixed-size summary of a value, is the same.
+A hash table's function and a fingerprint differ in what they promise. The table's function only needs to spread keys and to be fast; a collision costs a little time. The fingerprint's function makes collisions practically undiscoverable, and the price is more work per byte. The names are the same because the mechanism, a fixed-size summary of a value, is the same.
 
 ## Putting it together: choosing an algorithm
 
@@ -645,7 +643,7 @@ function.
 
 ## A quadratic tokenizer, top-k selection, scans and checkpoint digests in the engine
 
-**A quadratic hiding in a tokenizer.** Byte-pair encoding turns text into token ids by repeatedly merging the adjacent pair of symbols with the lowest *rank* in a table; Volume V derives it. The table is a hash table from a pair of symbols to its rank, `ranks: HashMap<(String, String), u32>` in `crates/data/src/bpe.rs`. The textbook loop rescans every adjacent pair after each merge, and that is the same count as the "all pairs" method: for a piece of $n$ symbols that merge one at a time, $n(n-1)/2$ rank lookups. Commit `c13603044` (October 2026) records the consequence. A prompt with no whitespace, such as random text, base64 or a minified file, reaches the tokenizer as one piece, and the quadratic loop held a serving thread for seconds while the GPU sat idle; the commit message describes how it was found, serving a large model to a load generator that sent random prompts. The fix keeps the symbols in a linked list and the candidate pairs in a min-heap ordered by rank then position, so each merge updates only the two pairs it touches; the doc comment of `bpe_merge` states the cost as $O(n \log n)$ instead of $O(n^2)$ and says that the result is the textbook loop's. The test beside it pins the new code to the textbook loop on small alphabets and requires a $100{,}000$-symbol piece to finish. The worked module has both versions as independent implementations and counts their rank lookups on a merge table that forces one merge at a time:
+**A quadratic hiding in a tokenizer.** Byte-pair encoding turns text into token ids by repeatedly merging the adjacent pair of symbols with the lowest *rank* in a table; Volume V derives it. The table is a hash table from a pair of symbol ids to its rank and merged symbol (`MergeTable` in `crates/data/src/bpe.rs`, keyed by the pair packed into one 64-bit integer). The textbook loop rescans every adjacent pair after each merge, and that is the same count as the "all pairs" method: for a piece of $n$ symbols that merge one at a time, $n(n-1)/2$ rank lookups. Commit `c13603044` (October 2026) records the consequence. A prompt with no whitespace, such as random text, base64 or a minified file, reaches the tokenizer as one piece, and the quadratic loop kept a serving thread busy while the GPU sat idle; the commit message describes how it was found, serving a large model to a load generator that sent random prompts. The fix keeps the symbols in a linked list and the candidate pairs in a min-heap ordered by rank then position, so each merge updates only the two pairs it touches and costs $O(\log n)$ heap work: $O(n \log n)$ for the piece instead of $O(n^2)$, with the same result as the textbook loop. The test beside it pins the new code to the textbook loop on small alphabets and requires a $100{,}000$-symbol piece to finish. Two independent implementations of the two versions count their rank lookups on a merge table that forces one merge at a time:
 
 <!-- worked: algorithms.bpe_scan_counts -->
 The piece is the n symbols 0, 1, ..., n - 1. The merge table has n - 1 entries: for k = 0 .. n - 2 the pair (A_k, k + 1) has rank k and merges into the new symbol A_(k+1) = n + k, where A_0 = 0 (so only the leftmost symbol ever merges, one merge at a time). For n = 4 the table is: (0, 1) -> 4 (rank 0); (4, 2) -> 5 (rank 1); (5, 3) -> 6 (rank 2). A pair lookup is one read of this table for one ordered pair of adjacent symbols (found or not). Textbook loop: each round looks up every adjacent pair of the current piece, merges the pair of lowest rank (every non-overlapping occurrence, left to right), and stops after a round in which no pair is found; it ends with one symbol. Heap + linked list: the pieces are a doubly linked list of symbols; one lookup for each of the n - 1 initial pairs, then after each merge one lookup for the new pair with the left neighbour (if any) and one for the new pair with the right neighbour (if any); a found pair is pushed on a min-heap ordered by (rank, position); popping the heap and discarding stale entries costs no lookup.
@@ -660,7 +658,7 @@ The piece is the n symbols 0, 1, ..., n - 1. The merge table has n - 1 entries: 
 
 The textbook count equals $n(n-1)/2$ exactly; the heap version does exactly $2n - 3$ lookups ($2045$ at $n = 1024$). The lesson is the chapter's, not a trick of tokenizers: a quadratic loop on an input whose size the user controls is a denial of service, and nothing in a short test shows it.
 
-**Top-k selection in sampling.** Sampling needs the best few logits of a vocabulary of $V$ tokens, not the whole ordering. `crates/model/src/serve.rs` documents the default of the trait method `admit_topk`: sort the full vocabulary vector on the host and truncate, $\Theta(V \log V)$ comparisons. The Qwen3 serving engine in `crates/qwen3/src/serve.rs` overrides it with an on-device top-$k$ that repeats an argmax reduction $k$ times and masks the winner out each time (`topk_extract_step`, `crates/kernels/wgsl/topk_extract_step.wgsl`), so only $k$ index and value pairs travel back to the host. In comparisons, that is $k(V-1)$, which for large $k$ is *more* than sorting. The table counts the three ways on a vocabulary of $16{,}384$ and also the bytes that cross back:
+**Top-k selection in sampling.** Sampling needs the best few logits of a vocabulary of $V$ tokens, not the whole ordering. The default of the trait method `admit_topk` in `crates/model/src/serve.rs` sorts the full vocabulary vector on the host and truncates, $\Theta(V \log V)$ comparisons. The Qwen3 serving engine in `crates/qwen3/src/serve.rs` overrides it with an on-device top-$k$ that repeats an argmax reduction $k$ times and masks the winner out each time (`topk_extract_step`, `crates/kernels/wgsl/topk_extract_step.wgsl`), so only $k$ index and value pairs travel back to the host. In comparisons, that is $k(V-1)$, which for large $k$ is *more* than sorting. The table counts the three ways on a vocabulary of $16{,}384$ and also the bytes that cross back:
 
 <!-- worked: algorithms.topk_costs -->
 Logits of a vocabulary of 16,384 tokens: the first 16,384 `normal()` draws of the book's SplitMix64, seed 0x7b1a8bc829fc61cb. Comparisons to find the k largest. Sort everything: the comparisons of the chapter's merge sort. k scans: k (V - 1), each scan finds the maximum of the remaining logits with V - 1 comparisons. Heap of size k: a binary min-heap holding the k largest so far; a logit is first compared with the smallest (the root) once the heap is full and replaces it only if larger, and every comparison made while moving an element up or down the heap counts (sifting up: one comparison with the parent per level; sifting down: one comparison between the two children and one of the smaller child with the element, per level).
@@ -674,9 +672,9 @@ Logits of a vocabulary of 16,384 tokens: the first 16,384 `normal()` draws of th
 
 A heap of size $k$ is the cheapest in comparisons (tied with the scan at $k = 1$), and the repeated argmax is the cheapest in data moved. Which cost dominates depends on where the logits live: on a device that evaluates the reduction in parallel, the $k$ scans are $k$ short steps and the cost that matters is not shipping the row to the host. This is the lesson that a cost model has to name what is counted.
 
-**Scan and radix sort without atomics.** `crates/kernels/wgsl/scan_block.wgsl` and `scan_add.wgsl` implement the blocked exclusive scan of this chapter: each invocation scans one block of $256$ elements in place and writes the block total; the host scans the totals recursively and applies `scan_add`. `sort_hist.wgsl` and `sort_scatter.wgsl` are one pass of an LSD radix sort on $8$-bit digits: a per-chunk histogram of the digit, written column-major so that *one* exclusive scan of the whole histogram array yields, for each chunk and digit, the global position at which that chunk's keys with that digit begin; then a stable scatter. Commit `bd714622f` (July 2026) introduced them as the engine's first sort and scan primitives; its message says the point was a sort under the constraints of no atomics, no subgroups and a fixed workgroup size, with the multi-pass dispatch replacing what other platforms do with a library and atomics. Commit `8eb2d2196` (November 2026) moved the host orchestration to `crates/gpu-core/src/sort.rs` (`ScanKernels`, `SortKernels`) so that the grouped mixture-of-experts forward and the Gaussian splatting renderer share one copy; the tests in `crates/gpu-core/tests/it/scan_sort.rs` check scans and sorts of random inputs on both the CPU and the GPU. The structure is the chapter's: histogram, scan for offsets, stable scatter. Volume IV derives why this shape suits a GPU.
+**Scan and radix sort without atomics.** `crates/kernels/wgsl/scan_block.wgsl` and `scan_add.wgsl` implement the blocked exclusive scan of this chapter: each invocation scans one block of $256$ elements in place and writes the block total; the host scans the totals recursively and applies `scan_add`. `sort_hist.wgsl` and `sort_scatter.wgsl` are one pass of an LSD radix sort on $8$-bit digits: a per-chunk histogram of the digit, written column-major so that *one* exclusive scan of the whole histogram array yields, for each chunk and digit, the global position at which that chunk's keys with that digit begin; then a stable scatter. Commit `bd714622f` (July 2026) introduced them as the engine's first sort and scan primitives, built under the constraints of no atomics, no subgroups and a fixed workgroup size, with the multi-pass dispatch doing what other platforms do with a library and atomics. Commit `8eb2d2196` (November 2026) moved the host orchestration to `crates/gpu-core/src/sort.rs` (`ScanKernels`, `SortKernels`) so that the grouped mixture-of-experts forward and the Gaussian splatting renderer share one copy; the tests in `crates/gpu-core/tests/it/scan_sort.rs` check scans and sorts of random inputs on both the CPU and the GPU. The structure is the chapter's: histogram, scan for offsets, stable scatter. Volume IV derives why this shape suits a GPU.
 
-**SHA-256 as the identity of a checkpoint.** `crates/modelstore/src/fetch.rs` computes the digest of a file by streaming it through SHA-256 in chunks (`sha256_file`) and spells it `sha256:<hex>`. The training-provenance record in `crates/checkpoint/src/st.rs` (`TrainingProvenance`) keeps the digest of the base checkpoint a fine-tune was trained against (`base_digest`), so that a server can check that an adapter is applied to the base it was made for. Commit `3e11bacb9` (October 2026) makes a distributed training step *committed* by a manifest, `CheckpointCommit` in `crates/model/src/job.rs`, which lists every file with its length and SHA-256 and is written to a temporary file, flushed and renamed; a reader verifies every named file against the manifest and does not trust a directory listing. The test `a_crashed_commit_leaves_the_previous_generation_and_a_tampered_file_is_refused` in the same file covers both a crash and a changed byte. Commit `f516738d5` is the cost-model side: hashing a multi-gigabyte base is a full sequential read, and every rank of a distributed fine-tune repeated it on every save, so the digest is cached in a sidecar file that records the length and modification time and is reused only while both still match. A fingerprint costs $\Theta(\text{bytes})$ time and $O(1)$ memory (streaming), and the way to avoid paying it repeatedly is to remember it: the time-memory tradeoff again, with a validity check on what is remembered.
+**SHA-256 as the identity of a checkpoint.** `crates/modelstore/src/fetch.rs` computes the digest of a file by streaming it through SHA-256 in chunks (`sha256_file`) and spells it `sha256:<hex>`. The training-provenance record in `crates/checkpoint/src/st.rs` (`TrainingProvenance`) keeps the digest of the base checkpoint a fine-tune was trained against (`base_digest`), so that a server can check that an adapter is applied to the base it was made for. Commit `3e11bacb9` (October 2026) makes a distributed training step *committed* by a manifest, `CheckpointCommit` in `crates/model/src/job.rs`, which lists every file with its length and SHA-256 and is written to a temporary file, flushed and renamed; a reader verifies every named file against the manifest and does not trust a directory listing. The test `a_crashed_commit_leaves_the_previous_generation_and_a_tampered_file_is_refused` in the same file covers both a crash and a changed byte. Commit `f516738d5` is the cost-model side: hashing a multi-gigabyte base is a full sequential read, and every rank of a distributed fine-tune repeated it on every save, so the digest is cached in a sidecar file that records the length and modification time and is reused only while both still match. A fingerprint costs $\Theta(\text{bytes})$ work and $O(1)$ memory (streaming), and the way to avoid paying it repeatedly is to remember it: the time-memory tradeoff again, with a validity check on what is remembered.
 
 ## Check your understanding
 
@@ -692,7 +690,7 @@ A heap of size $k$ is the cheapest in comparisons (tied with the scan at $k = 1$
 ## Exercises
 
 1. **[Calculate]** Prove from the definition that $5n^2 + 3n + 1 = \Theta(n^2)$ by giving constants $c_1, c_2, n_0$. Then show that $n \log_2 n$ is not $O(n)$ by showing that for every constant $c$ there is an $n$ with $n \log_2 n > c n$.
-2. **[Calculate]** A $\Theta(n^2)$ algorithm needs $t$ seconds for $n = 10^4$. Predict the time for $n = 10^5$ and $n = 10^6$. At $10^9$ operations per second and about $\tfrac12 n^2$ steps, how large can $n$ be for a one-minute budget?
+2. **[Calculate]** A $\Theta(n^2)$ algorithm performs $W$ operations for $n = 10^4$. Predict its operations for $n = 10^5$ and $n = 10^6$. With about $\tfrac12 n^2$ steps, how large can $n$ be for a budget of $6 \times 10^{10}$ operations?
 3. **[Calculate]** Solve $T(n) = T(n/2) + 1$ with $T(1) = 0$ for $n = 2^k$, and identify the algorithm (a binary search). Solve $T(n) = 2T(n/2) + 1$ with $T(1) = 0$: what does it count?
 4. **[Calculate]** Compute the inclusive and exclusive scans of $(2, 7, 1, 8, 2, 8)$. Then perform the blocked scan with block size $3$ and show the three phases.
 5. **[Calculate]** For a chain of $L = 100$ layers with checkpoint stride $s$, the peak is at most $\lceil L/s \rceil + s - 1$ and the total evaluations $L + (L - \lceil L/s \rceil)$. Find the $s$ that minimises the peak and compute both quantities. What is the ratio of evaluations to a plain forward pass?
@@ -706,7 +704,7 @@ A heap of size $k$ is the cheapest in comparisons (tied with the scan at $k = 1$
 
 ## Summary
 
-A procedure's cost is a function of the size of its input, and counting its operations, which means finding the dominant term and saying what is counted, predicts how it scales before it runs. Asymptotic notation, $O$, $\Omega$ and $\Theta$, keeps the shape of the count and drops the constants, and tables of counted data can refute a claimed rate or support it. Growth rates separate what is possible from what is not: at about $10^9$ operations a second (an assumption) a linear method handles a billion items in a second, a quadratic one tens of thousands, a cubic one a thousand, an exponential one thirty. Memory has its own complexity, and time and memory trade: a hash table buys speed with space, and recomputing activations buys memory with time, down to about $\sqrt L$ stored arrays for $L$ layers at less than twice the work.
+A procedure's cost is a function of the size of its input, and counting its operations, which means finding the dominant term and saying what is counted, predicts how it scales before it runs. Asymptotic notation, $O$, $\Omega$ and $\Theta$, keeps the shape of the count and drops the constants, and tables of counted data can refute a claimed rate or support it. Growth rates separate what is possible from what is not: within $10^9$ operations a linear method handles a billion items, a quadratic one tens of thousands, a cubic one a thousand, an exponential one thirty. Memory has its own complexity, and work and memory trade: a hash table buys fewer operations with space, and recomputing activations buys memory with work, down to about $\sqrt L$ stored arrays for $L$ layers at less than twice the work.
 
 Four families of algorithms carry most of the weight in what follows. Reductions fold a list with an associative operator, which allows a tree of depth $\lceil \log_2 n \rceil$, but in floating point regrouping changes the digits. The prefix sum gives every partial total, and its uses (the cumulative distribution for sampling, the offsets for packing) are the reason it recurs. Sorting costs $\Theta(n \log n)$ by merge sort and no comparison sort can beat that, while radix sort, which uses a histogram, a scan and a stable scatter, avoids comparing and is linear in $n$ for fixed-width keys. Hashing gives expected constant-time lookup, provided the function spreads its keys, and in its content-fingerprint form gives files and checkpoints an identity that changes with any byte.
 

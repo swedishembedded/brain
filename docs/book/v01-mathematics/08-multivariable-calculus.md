@@ -56,9 +56,9 @@ end we use the model to see why a narrow valley makes walking downhill slow.
 
 The derivative and the chain rule of Chapter 7, vectors and the dot product of
 Chapter 3 and matrices as linear maps of Chapter 4 carry most of the weight, with
-a little from Chapters 1 and 2. Six questions to try from memory before we start;
-the answers are at the end, and if one is hard, the chapter it names is the place
-to go back to.
+a little from Chapters 1 and 2. Each of the six questions below is used before
+long; if one resists, the chapter it names is the place to go back to, and the
+answers close the chapter.
 
 1. (Chapter 7, derivative.) For $L(w) = (2w - 3)^2$, what is $L'(0.5)$?
 2. (Chapter 7, chain rule.) What is the derivative of $(3x + 1)^2$ at $x = 1$?
@@ -240,10 +240,8 @@ At p = (0.5, 1.5) the gradient is (-3.00, -7.00) with length 7.6158. Angles are 
 | perpendicular to the gradient | (0.919, -0.394) | 0.0000 | 0.0000 |
 <!-- /worked -->
 
-The formula and the experiment agree on every row. The pattern across the rows
-is the content of the next paragraph.
-
-The rows have a pattern: the slope is large and positive toward the lower left,
+The formula and the experiment agree on every row, and the rows have a
+pattern: the slope is large and positive toward the lower left,
 large and negative toward the upper right, and zero in one direction between.
 Among all unit directions, which one makes $\nabla L\cdot\mathbf{u}$ largest? Chapter 3 proved the Cauchy-Schwarz
 inequality, $\mathbf{a}\cdot\mathbf{b} \le \lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert$,
@@ -274,9 +272,9 @@ Each direction is u = (cos t, sin t) with t = 2 pi times one uniform draw of the
 | smallest grad . u over the same u | -7.6158 |
 <!-- /worked -->
 
-This is the answer to the question of the chapter, in the local sense that a
-derivative always gives: to lower the score fastest per unit of distance
-travelled, move against the gradient. One subtlety first: steepest
+So, in the local sense that a derivative always gives, the way to lower the
+score fastest per unit of distance travelled is against the gradient. One
+subtlety: steepest
 is measured in the ordinary length of Chapter 3. If the knobs have different
 scales (one measured in metres, one in kilometres), a different measure of
 length picks a different "steepest" direction. In all that follows we use the
@@ -382,7 +380,7 @@ depends on how quickly the slope itself changes along the line. That quantity,
 the curvature, is the subject of the last sections. For now, two things have been
 established: the negative gradient is the right direction to start in, and
 choosing the distance needs a second piece of information. (Volume II names this
-rule gradient descent, gives it a chapter of its own, and the later chapters of
+rule gradient descent and gives it a chapter of its own; later chapters of
 Volume III study how to choose its step sizes.)
 
 ## Vector functions and the Jacobian
@@ -453,9 +451,9 @@ Step d = s (0.6, -0.8) from (1, 2), length s. Actual change of f against J d.
 | 0.001 | (0.00160, 0.00333) | (0.00160, 0.00333) | 3.77e-07 | 0.3774 |
 <!-- /worked -->
 
-The last column is nearly constant: the error shrinks like $s^2$, as the length
-$s$ of the step, so the error shrinks much faster than the step itself, which is
-what "best linear approximation" means. (The Taylor section below explains why the
+The last column is nearly constant: the error shrinks like $s^2$, the square of
+the step length $s$, and so much faster than the step itself, which is what
+"best linear approximation" means. (The Taylor section below explains why the
 error has this size.) The approximation is useful only for small steps; at
 $s = 1$ the two columns disagree in the first digit.
 
@@ -571,7 +569,8 @@ g(a, b) = a b composed after f(x, y) = (x^2 y, 5x + sin y) at (1, 2). J_g = [5.9
 | 0.001 | 0.016124 | 0.016121 | 3.33e-06 | 3.329 |
 <!-- /worked -->
 
-The error falls like $s^2$ again, as the derivation promised.
+The error falls like $s^2$ again, faster than the step, as the derivation
+requires.
 
 Take a chain of three links, a layer's pre-activation, its nonlinearity and its
 loss:
@@ -607,8 +606,9 @@ transpose of the gradient column.
 
 The product can be evaluated in either order, and the shapes decide the cost. From the left, multiplying the row $[1, 3]$ by $[3, 3]$ and
 then by $[3, 2]$ only ever combines a row with a matrix. From the right, we would
-build the $[3, 2]$ matrix first, which is a full matrix product, and at the widths of a real
-network that is the difference between tiny and impossible. Taking the transpose
+build the $[3, 2]$ matrix first, which is a full matrix product; at the widths
+of a real network that order needs about a layer width's factor more arithmetic
+than the matrix-vector products of the other. Taking the transpose
 of the row result turns it into the gradient column and reverses the order of the
 product (Chapter 4: $(\mathbf{A}\mathbf{B})^\top = \mathbf{B}^\top\mathbf{A}^\top$):
 
@@ -868,8 +868,9 @@ measured error of the forward difference:
 
 Each further term removes most of what is left: the gap between the measured error and the sum falls from $4.6\times10^{-3}$ to $1.2\times10^{-4}$ to $2\times10^{-6}$.
 
-In several variables the expansion reduces to the one-variable case. To expand a function of $\mathbf{w}$ about $\mathbf{p}$ by a
-step $\mathbf{d}$, reduce to one variable. The function
+In several variables the expansion reduces to the one-variable case. To expand
+a function of $\mathbf{w}$ about $\mathbf{p}$ by a step $\mathbf{d}$, follow
+the line through them. The function
 $\varphi(t) = L(\mathbf{p} + t\mathbf{d})$ of the distance $t$ along the line has
 $\varphi(0) = L(\mathbf{p})$, $\varphi'(0) = \nabla L\cdot\mathbf{d}$ (the
 directional derivative, unnormalised) and $\varphi''(0) = \mathbf{d}^\top\mathbf{H}\mathbf{d}$
@@ -1051,10 +1052,10 @@ the largest curvature caps how far, $\eta < 2/\lambda_{\max}$ on a quadratic.
 
 ## Transposed Jacobians in the kernels, and a check that missed a third of a gradient
 
-In brain the backward pass is a product of transposed Jacobians, as derived
-above. For a linear layer the derivative of the loss with respect to the input is $\mathbf{W}^\top$ times
-the derivative with respect to the output, which is what we derived. The kernel
-`crates/kernels/wgsl/matmul_dx.wgsl` documents it in its header for the batched,
+In brain the backward pass is a product of transposed Jacobians. For a linear
+layer the derivative of the loss with respect to the input is $\mathbf{W}^\top$
+times the derivative with respect to the output, and the kernel
+`crates/kernels/wgsl/matmul_dx.wgsl` computes exactly that for the batched,
 row-per-example layout: `dX[m, k] = sum_n dY[m, n] * W[n, k]`, the matrix-vector
 product with $\mathbf{W}^\top$ for each row $m$ of the batch. Its neighbour
 `crates/kernels/wgsl/matmul_dw.wgsl` computes
@@ -1076,7 +1077,8 @@ derivative, at a cost of two evaluations of the loss per entry.
 There are two checks because one of them once let a bug through. In August 2026,
 commit `4171bccb0` added `elementwise_check` after finding that the directional
 check could not see a particular bug. The doc comment of `directional_check`
-(which the commit corrected) records it: in T5, a weight shared across blocks had its
+(which the commit corrected) records it: in brain's T5 model (a text-to-text
+transformer), a weight shared across blocks had its
 gradient contributions summed across blocks by a fold, and deleting the fold left
 $33\%$ of that gradient missing, yet the directional check reported a relative
 error of $6.2\times10^{-4}$ for it and passed. The check keeps the best of several
@@ -1162,7 +1164,7 @@ Answers are at the end of the chapter.
 
 ## Summary
 
-We asked which way to move many knobs to lower a score, and answered in layers.
+Which way to move many knobs to lower a score has a layered answer.
 The **partial derivative** is the one-knob slope with the others frozen. The
 **gradient** collects them into a vector of the same shape as the knobs. The
 slope in any unit direction $\mathbf{u}$, the **directional derivative**, is

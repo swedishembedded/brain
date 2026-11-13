@@ -19,12 +19,11 @@ the code, cannot find these. This volume gives the reader both: every idea is
 derived, and then computed with real numbers that a program produced, so that
 statement and arithmetic can be checked against one another.
 
-The volume assumes nothing beyond school arithmetic. It is needed by every
-later volume: Volume II uses functions, derivatives and probability to define
+Every later volume needs it: Volume II uses functions, derivatives and probability to define
 what it means to learn, and Volume III uses the chain rule, matrices and
 floating-point numbers to build and train networks.
 
-You can read and write the notation of the rest of the book: sums, products,
+By its end you can read and write the notation of the rest of the book: sums, products,
 sets, functions, vectors, matrices and tensors, derivatives, gradients,
 expectations. You can derive the gradient of a function of many variables,
 reason about the shape and memory layout of an array, describe a data
@@ -66,8 +65,8 @@ repeatable.
     as a sum of waves, and why that makes convolution cheap.
 15. [Floating Point and Numerical Error](15-floating-point.md): why a computer gets
     arithmetic slightly wrong, and when slightly wrong becomes completely wrong.
-16. [Algorithms, Cost and Complexity](16-algorithms.md): predicting how long a computation takes
-    and how much memory it needs before running it.
+16. [Algorithms, Cost and Complexity](16-algorithms.md): predicting how much work a computation
+    needs and how much memory it occupies before running it.
 17. [Randomness on a Deterministic Machine](17-randomness.md): how a deterministic
     computer produces random numbers, and how to make random experiments repeatable.
 18. [Project: A Numerical Library from Nothing](18-project-numerical-library.md): build the

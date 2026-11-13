@@ -31,10 +31,10 @@ will disagree about which number is which. Chapter 4 defined the transpose as
 swapping rows and columns and remarked that a program rarely needs a copy;
 how can a matrix be read as its own transpose without moving a single number?
 A sequence of vectors of width 6 can be seen as two vectors of width 3 per
-position (two "heads"), and moving the head axis in front of the position axis
-is also a change of shape; the two give arrays of the same shape with different
-contents, and the program runs either way and produces a plausible wrong
-answer for one of them. And a layer adds a bias vector of length $D$ to every
+position (two "heads"), with the head axis moved in front of the position axis;
+a plain change of shape produces an array of the same final shape with
+different contents, and the program runs either way and produces a plausible
+wrong answer for one of them. And a layer adds a bias vector of length $D$ to every
 one of $T$ rows, which Chapter 4 wrote as "add $\mathbf{b}$ to every row" in
 words; there should be one precise rule for it, so that code can do it without
 making $T$ copies of the bias, and so that mistakes are caught and not
@@ -44,17 +44,17 @@ One idea, the stride, and one habit, keeping the numbers in memory apart from
 the way they are read, answer all four. Chapter 3 gave us vectors and Chapter 4
 matrices; here both are generalised to arrays with any number of axes, their
 place in memory is pinned down exactly, and the operations that move, reorder
-and combine them are derived. Nothing about computer memory is assumed beyond
-what the text explains. How memory speed depends on the order of reading is
-only touched on here and is measured in Volume IV.
+and combine them are derived. How the cost of reading memory depends on the
+order of reading is only touched on here; Volume IV measures it.
 
 Indices in this chapter start at **0**. Elsewhere in mathematics they start at
 1, but this chapter is about addresses, where the first element is at offset 0,
 and the [pseudocode conventions](../pseudocode.md) do the same.
 
-The derivation leans on five ideas from earlier chapters, so it is worth
-bringing them back first. Answer them from memory; the answers are at the end,
-and if one is hard, the chapter named is the place to look.
+The offset formula is a sum, undoing it asks for an inverse function, and
+the transpose and the batched layer of Chapter 4 are its first customers, so
+five earlier ideas are worth bringing back before the derivation; where one
+will not come, the chapter named beside it is the place to look.
 
 1. (Chapter 1, sums.) Write $\sum_{k=0}^{2} i_k s_k$ out in full and evaluate it for
    $(i_0, i_1, i_2) = (1, 2, 3)$ and $(s_0, s_1, s_2) = (12, 4, 1)$.
@@ -103,8 +103,8 @@ sequences of $T$ positions with a vector of width $D$ at each position, and
 $[B, C, H, W]$ is a batch of images with $C$ channels, $H$ rows and $W$
 columns. Nothing in a tensor records these meanings. The program holds numbers
 and a shape; the meaning of each axis lives in the programmer's head and in the
-names of the functions. That is why this chapter spends so long on exactly how
-the axes are ordered.
+names of the functions, which is why the order of the axes has to be fixed
+exactly and kept.
 
 ## Memory is one long line
 
@@ -115,7 +115,7 @@ bytes, so element offset 3 is byte offset 12, and the conversion is one
 multiplication that every real program does last and the book does not mention
 again until it matters.
 
-An array with a shape of $12$ elements is easy to store: element $i$ at offset
+An array of shape $[12]$ is easy to store: element $i$ at offset
 $i$. The interesting question is a matrix of shape $[3, 4]$. It has twelve
 elements and two indices, and memory has one. Whatever we choose, we are
 choosing an ordering of the twelve index pairs $(i, j)$ into a single line.
@@ -128,7 +128,8 @@ Two choices come to mind at once.
 
 The first is called **row-major layout**, the second **column-major layout**.
 The book uses row-major throughout, and so do the pseudocode conventions, the
-WGSL kernels of the case study and most of the machine learning world. Column-major
+WebGPU Shading Language (WGSL) kernels of the case study and most of the
+machine learning world. Column-major
 is the layout of Fortran, and therefore of the linear-algebra libraries
 descended from it, which the case study meets at the end of this chapter.
 
@@ -335,8 +336,8 @@ deriving the strides, take the strides as the *definition* of how an array
 reads its storage.
 
 A **view** of a flat storage is four things: the storage itself (a flat list of
-numbers), a **shape** $[d_0, \dots, d_{R-1}]$, a list of **strides**
-$(s_0, \dots, s_{R-1})$ in elements, and a starting **offset** $o_0$. Element
+numbers), a shape $[d_0, \dots, d_{R-1}]$, a list of strides
+$(s_0, \dots, s_{R-1})$ in elements, and a starting offset $o_0$. Element
 $(i_0, \dots, i_{R-1})$ of the view is the storage cell
 $$\mathrm{offset}(i_0, \dots, i_{R-1}) = o_0 + \sum_{k=0}^{R-1} i_k\, s_k. \tag{1}$$
 An array "stored row-major" is the special case $o_0 = 0$ and
@@ -486,10 +487,10 @@ after setting element 1 of the column view A[:, 2:3] to -1, A = [[0, 1, 2, 3], [
 Each line is a different way to look at the storage of $A$, and none moved a
 number. A row is a view of shape $[1, 4]$ at offset 4, a column is a view of shape
 $[3, 1]$ at offset 2 whose elements are four cells apart, and taking every other
-row keeps the stride $4$ doubled to $8$.
+row doubles the stride $4$ to $8$.
 
 **Views share storage, so writes go through.** The last line of the block is
-the price of not copying. The column $A[:, 2]$ is not a separate array: writing
+the price of not copying. The column view $A[:, 2:3]$ is not a separate array: writing
 $-1$ to its middle element wrote it into $A$. That is what the pseudocode
 conventions mean by "a slice is a **view**; where a copy is needed, the pseudocode
 says `copy(...)`". Sharing is the reason views are cheap and the reason a
@@ -501,8 +502,8 @@ an **alias**: two names for the same cells.
 A view is **contiguous** when its strides are the row-major strides of its
 shape, so that reading it in row-major order walks its storage in order, with
 no gaps. (An axis of size 1 is never stepped along, so its stride is
-irrelevant: the row $A[1, :]$ above is contiguous at stride 4 in front of its
-single row.) The `contiguous` column of the last block is the test. A whole
+irrelevant: the row view $A[1:2, :]$ above has stride 4 on its axis of size 1
+and is still contiguous.) The `contiguous` column of the last block is the test. A whole
 array is contiguous, a block of whole rows is contiguous, a block of columns is
 not, nor is every second row, nor is a transpose.
 
@@ -582,7 +583,7 @@ A = [[1, 2, 3], [4, 5, 6]] [2, 3], storage [1, 2, 3, 4, 5, 6].
 
 The two results have the same shape and different contents: True.
 
-Flattening the transposed view needs a copy (copy): reshape(transpose(A), [6]) = [1, 4, 2, 5, 3, 6], whereas reshape(A, [6]) = [1, 2, 3, 4, 5, 6].
+Flattening the transposed view is a copy: reshape(transpose(A), [6]) = [1, 4, 2, 5, 3, 6], whereas reshape(A, [6]) = [1, 2, 3, 4, 5, 6].
 
 Multiply each [3, 2] result by v = (1, 10): reshape gives [21, 43, 65], transpose gives [41, 52, 63].
 <!-- /worked -->
@@ -638,11 +639,11 @@ line of each row into groups of $D_h$ and does not move any axis. Then
 that moves nothing. The wrong recipe is the one-step reshape of $[T, D]$ to
 $[H, T, D_h]$ that has the same final shape. It cuts the line $0, 1, 2, 3, 4, 5, 10, \dots$
 into rows of three and calls the first two rows "head 0": position 0's first
-head, then position 0's *second* head, Head 0 is now all of position 0 (its two
+head, then position 0's *second* head. Head 0 is now all of position 0 (its two
 real heads, laid out as if they were two positions) and head 1 is all of
 position 1. The shapes agree, every later operation runs, and
-the model learns from scrambled data. This is the bug the chapter warns about: not
-a crash, a model that trains to something worse than it should.
+the model learns from scrambled data. That is the expensive kind of layout bug:
+not a crash, but a model that trains to something worse than it should.
 
 The last paragraph of the block shows the way back, merging the heads into
 the width again: permute to $[T, H, D_h]$ and reshape to $[T, D]$. It also shows that
@@ -710,8 +711,8 @@ takes a view when every group of old axes can be merged by rule (2).
 
 ## Broadcasting
 
-The fourth question of the problem was how to add a bias vector of length $D$ to
-every row of a $[T, D]$ matrix. In Chapter 4's notation the book wrote
+The fourth question of the opening was how to add a bias vector of length $D$ to
+every row of a $[T, D]$ matrix. Chapter 4 wrote
 $\mathbf{1}\mathbf{b}^\top$ and said "add $\mathbf{b}$ to every row". Doing it
 literally means building a $[T, D]$ matrix with $T$ copies of $\mathbf{b}$,
 which is wasteful: the copies hold no new information. **Broadcasting** is the
@@ -854,8 +855,8 @@ an extra, normally first, axis of size $B$ that indexes independent examples, so
 that a tensor of shape $[B, \dots]$ holds $B$ examples of shape $[\dots]$. An
 operation is *batched* when its result for the whole tensor equals the result
 for each example separately, stacked. Two reasons make this the way machine
-learning works, one about hardware and one about learning; the second is
-developed in later volumes and only previewed here.
+learning works, one about hardware and one about learning; Volume II develops
+the second.
 
 **Hardware.** A weight matrix has to be fetched from memory to be used. A
 product with one example reads all of $\mathbf{W}$ to do $d_{\text{out}}\,d_{\text{in}}$
@@ -885,7 +886,9 @@ numbers at offset $(b T + t) D$. The linear layer of Chapter 4 does not care
 about the sequence structure: each token is an independent row. Merging the
 first two axes, $[B, T, D] \to [B T, D]$, satisfies rule (2) ($s_0 = T D = T \cdot s_1$),
 so it is free, and the whole batch is one matrix product with $m = B T$ rows,
-after which a reshape back restores $[B, T, D]$:
+after which a reshape back restores $[B, T, D]$. The block below ends with this
+merge; it opens with a batch of images in two layouts, the subject of the next
+section.
 
 <!-- worked: arrays.image_layouts -->
 Image batch with B = 2, C = 3, H = 2, W = 2; element value = its NCHW offset.
@@ -902,7 +905,7 @@ The NHWC array is the same picture stored channels-last: its element (b, h, w, c
 
 In NCHW the three channels of one pixel are 4 apart; in NHWC they are adjacent.
 
-Viewing the NCHW storage as NHWC without moving anything is the permuted view with axes (0, 2, 3, 1): shape [2, 2, 2, 3], strides (12, 2, 1, 4), contiguous False; its elements equal the NHWC array's: True. So a real NHWC layout needs a copy (True contiguous afterwards).
+Viewing the NCHW storage as NHWC without moving anything is the permuted view with axes (0, 2, 3, 1): shape [2, 2, 2, 3], strides (12, 2, 1, 4), contiguous False; its elements equal the NHWC array's: True. So a real NHWC layout needs a copy, which is contiguous: True.
 
 Sequence batch B = 2, T = 3, D = 4: shape [2, 3, 4], strides (12, 4, 1). Merging the first two axes to [B*T, D] = [6, 4] is a view; the row of token (b, t) is b*T + t:
 
@@ -935,7 +938,7 @@ the NHWC elements but strides $(12, 2, 1, 4)$, it is not contiguous (the block s
 so), and a routine that expects NHWC storage needs the copy.
 
 The same applies to sequences: $[B, T, D]$ and $[T, B, D]$ both occur, and
-exchange of them is a permutation with the same cost and the same
+converting between them is a permutation with the same cost and the same
 trap. Code that handles several models must say which layout every tensor
 has, in a name or a comment, because the shape alone, as the heads bug showed, does not.
 
@@ -1063,9 +1066,9 @@ function broadcast_view(v: View, shape: array<int>[R]) -> View:
 
 Every function checks its assumptions with `require`. The two copy-producing
 functions are `materialize` and, when it must, `reshape`; every other function
-returns in time independent of the number of elements. `reshape` is deliberately
+does an amount of work independent of the number of elements. `reshape` is deliberately
 conservative: it copies whenever the input is not contiguous, even when
-rules (2) and the axis split would have allowed a view, which is safe and keeps
+rule (2) and the axis split would have allowed a view, which is safe and keeps
 the algorithm short. `reshape_view` is the complete rule. Try it on a
 contiguous $[2, 3, 4]$ made into $[6, 4]$: the old sizes $2, 3, 4$ and the new
 sizes $6, 4$ group as $\{2, 3\} \to \{6\}$ and $\{4\} \to \{4\}$; the first group
@@ -1095,12 +1098,12 @@ shapes cannot find them; a test on values like $10t + c$ above, where each
 number names its position, finds them immediately. Sizes matter in the same
 way: a test with square matrices accepts a transposed buffer, and one with
 every size a multiple of 64 never notices an alignment assumption. Make the
-sizes distinct and awkward (2, 3, 5), which is why the chapter's examples use
-$[2, 3]$ and $[3, 4]$ and not $[4, 4]$.
+sizes distinct and awkward (2, 3, 5), as in the examples above: $[2, 3]$ and
+$[3, 4]$, never $[4, 4]$.
 
 Three smaller hazards belong with these. A stride or an offset must be stored
-in an integer big enough for the largest array: with 32-bit integers an array
-of more than $2^{32}$ elements cannot be indexed, and the failure, a wrapped
+in an integer big enough for the largest array: a signed 32-bit integer cannot
+index an array of $2^{31}$ elements or more, and the failure, a wrapped
 offset, is silent, so check the element count when the shape is created.
 A write through a view changes everything that shares the storage, so where a
 function must not change its input it copies, where it may the conventions mark
@@ -1113,7 +1116,7 @@ last story below is about it.
 
 ## How brain's kernels compute offsets
 
-Every kernel in brain receives its tensors as flat buffers plus a small block of
+A kernel in brain receives its tensors as flat buffers plus a small block of
 parameters, and computes the offset formula of this chapter by hand, one index
 at a time. Reading a few of them shows the whole chapter.
 
@@ -1187,10 +1190,10 @@ The index formula y[idx] = a[nc*H + h] + b[nc*W + w] gives [11, 21, 31, 12, 22, 
 <!-- /worked -->
 
 Its neighbour `crates/kernels/wgsl/add_chan_bcast.wgsl` adds a per-image,
-per-channel scalar `v : [N, C]` to a map. Its header explains why the
-existing `bias_add` kernel does not do the job: the bias there is a `[C]`
-vector shared by the whole batch, and at `N > 1` it would add the wrong image's context. That
-sentence is the explicit-broadcast policy as an engineering fact: two
+per-channel scalar `v : [N, C]` to a map. The existing `bias_add` kernel cannot
+do that job: its bias is a `[C]` vector shared by the whole batch, so at
+`N > 1` it would add one image's values to another image's map. The pair is the
+explicit-broadcast policy as an engineering fact: two
 broadcasts that both look like "add a small array to a big one" are
 different operations, and an engine that wishes to be correct gives each its own
 kernel and its own name instead of inferring one from the shapes.
@@ -1207,12 +1210,11 @@ never changes any element's offset (the "first size never matters" fact again).
 
 **Column-major libraries, by swapping operands.**
 `crates/backend-api/src/lib.rs` defines `LibraryGemm`, the description of a
-product for a vendor library in the library's column-major convention, with
-its documentation stating "Products over row-major data are stated by swapping the
-operands, so no operand is ever copied or transposed". The code that builds one,
-`crates/gpu-core/src/provider/library.rs`, has the derivation of this chapter
-as a comment: "Row-major `y = x W^T` is column-major `y^T[n, m] = W[k, n]^T x^T[k, m]`",
-with the fields `trans_a: true`, `m: n`, `n: m`, `lda: k`, `ldb: k`, `ldc: n`
+product for a vendor library in the library's column-major convention; a
+product over row-major data is stated by swapping the operands, so no operand
+is copied or transposed. The code that builds one,
+`crates/gpu-core/src/provider/library.rs`, states row-major $y = x W^\top$ as
+column-major $y^\top = (W^\top)^\top x^\top$ over the stored buffers, with the fields `trans_a: true`, `m: n`, `n: m`, `lda: k`, `ldb: k`, `ldc: n`
 (there `n` is the width of the row-major output, which is the number of rows $M$
 of the column-major one, so `ldc` is $M$ as above). The
 worked example `arrays.misread_and_swap` is this call on a small size. It
@@ -1293,10 +1295,10 @@ Answers are at the end of the chapter.
 3. **Predict.** What are the shapes of $[5, 1] - [1, 3]$, of $[5] - [5, 1]$ and of
    $[2, 3, 4] + [3, 1]$? Which of them would you spell differently in the
    book's pseudocode, and why?
-4. **Explain.** The transpose of a $[1000, 1000]$ matrix as a view takes no time
-   at all. Why can summing the entries of that view row by row still be much
-   slower than summing the original row by row, and what would you do if you had to
-   do it many times?
+4. **Explain.** The transpose of a $[1000, 1000]$ matrix as a view moves no
+   number at all. Why can summing the entries of that view row by row still
+   fetch far more memory than summing the original row by row, and what would
+   you do if you had to do it many times?
 5. **Find the error.** "$A[:, 1:3]$ of a $[3, 4]$ array is a block of two whole
    columns, so reshaping it to $[6]$ is free." Use rule (2) to say whether it is.
 6. **Explain.** Why does the size of the first axis never appear in any row-major
@@ -1453,7 +1455,7 @@ the way a large matrix is approximated by a sum of a few simple ones.
    $(1, 2, 6)$: $1 + 4 + 0 = 5$.
 2. Reshape never moves an axis, it only re-cuts the line of numbers. Cutting the
    line of $[4, 12]$ into $[3, 4, 4]$ gives "head" 0 the first 16 numbers, which are
-   the first one and a third of positions 0 and 1, not one head of every
+   all of position 0 and the first third of position 1, not one head of every
    position. The right sequence is to reshape $[4, 12]$ to $[T, H, D_h] = [4, 3, 4]$
    (splitting the last axis) and then permute the first two axes to
    $[H, T, D_h] = [3, 4, 4]$.

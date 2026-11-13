@@ -64,8 +64,7 @@ sine, and keep both numbers. A pair of numbers is a point in the plane. Its
 distance from the origin says how much of that frequency is present whatever
 the starting time, and its angle says where in its cycle the wave starts. The
 pair of correlations, $(24, 0)$ at $k = 2$ and $(0, 12)$ at $k = 5$, is the
-answer to the question, and the rest of this chapter makes it systematic and
-fast.
+answer to the question; what remains is to make it systematic and fast.
 
 Three things are needed. First, a way to treat a point in the plane as a
 number that can be multiplied, so that "a cosine and a sine at once" becomes
@@ -76,10 +75,10 @@ fast Fourier transform. Third, the reason the same machinery makes
 convolution (a sliding weighted sum, the operation inside every filter and
 later inside convolutional layers) cheap: the convolution theorem.
 
-The route there leans on six ideas from earlier chapters, and it is cheaper to
-bring them back now than to stumble on them later. Answer from memory; the
-answers are at the end of the chapter, and if one is hard, the chapter named in
-brackets is where to go back to.
+The route there leans on six ideas from earlier chapters: sums, the cosine,
+the unit circle, projection, rotation matrices and the exponential. Each
+question names where its idea was taught, and one that will not come back is a
+reason to reread that chapter before the plane starts to turn.
 
 1. (Chapter 1, summation notation.) Evaluate $\sum_{n=0}^{3} 2^n$. How many terms does $\sum_{n=0}^{N-1}$ have?
 2. (Chapter 2, exponential function and the cosine schedule.) The decay piece of the cosine learning-rate schedule is $\tfrac12(1 + \cos \pi u)$ for $u$ from $0$ to $1$. What are its values at $u = 0$, $\tfrac12$ and $1$?
@@ -161,7 +160,7 @@ $$
 which the rule confirms directly: $(0, 1)\cdot(0, 1) = (0\cdot 0 - 1\cdot 1,\;
 0\cdot 1 + 1\cdot 0) = (-1, 0)$. This is not an extra assumption added to
 arithmetic. It is a consequence of what we asked the product to do, and it
-explains the word "imaginary", which is only an old name: no real number
+takes the mystery out of the word "imaginary", which is only an old name: no real number
 squares to $-1$ (a real square is never negative), but a quarter turn applied
 twice is a half turn. The powers of $i$ walk around the circle in quarter turns
 and repeat every four steps:
@@ -234,8 +233,8 @@ $$
 
 Multiplying the rectangular forms of $2$ at $30^\circ$ and $3$ at $45^\circ$
 gives the same point as the single polar step $6$ at $75^\circ$. Rectangular
-form is better for adding, polar form for multiplying, and the transform of
-this chapter needs both.
+form is better for adding, polar form for multiplying, and the Fourier
+transform needs both.
 
 ## Euler's formula: the exponential of a turn
 
@@ -505,7 +504,7 @@ $$
 
 We use the integer $k$, the number of cycles per window, as the frequency from
 now on. In the opening, $N = 16$ samples at $f_s = 16$ per second make each $k$
-exactly $k$ hertz. One caution that later volumes treat fully: with only $N$
+exactly $k$ cycles per second ($k$ hertz, Hz). One caution that later volumes treat fully: with only $N$
 samples some different frequencies give literally the same numbers.
 
 <!-- worked: fourier.same_samples_different_frequencies -->
@@ -534,8 +533,8 @@ range is $0 \le k \le N/2$.
 ## The discrete Fourier transform
 
 The pair of correlations of the signal with the cosine and the sine can be
-computed at every frequency at once and stored as complex numbers. That is the
-transform, and the rest of this section builds it.
+computed at every frequency at once and stored as complex numbers, one per
+frequency. The list of those numbers is the transform.
 
 ### From a pair of correlations to one complex number
 
@@ -566,8 +565,8 @@ minus sign in $\omega$ is a convention: with it, a component $e^{+2\pi i k n/N}$
 the signal produces $X[k] = N$ at exactly $k$, as the orthogonality below shows.)
 
 The opening's table of correlations gave $C_2 = 24$, $S_2 = 0$, so $X[2] = 24$, and $C_5 = 0$,
-$S_5 = 12$, so $X[5] = -12i$. The next paragraph shows how to turn these numbers
-into amplitudes and phases.
+$S_5 = 12$, so $X[5] = -12i$. One more step turns these numbers into
+amplitudes and phases.
 
 ### What X[k] tells us
 
@@ -578,8 +577,8 @@ The first term is a pointer turning exactly opposite to $\omega^{kn}$, so
 multiplied by $\omega^{kn}$ it is the constant $\tfrac{A}{2}e^{i\varphi}$ for every
 $n$, and the sum over $N$ samples is $\tfrac{N}{2}Ae^{i\varphi}$. The second term
 turns in the same sense as $\omega^{kn}$, so it contributes nothing at frequency
-$k$ (the next section proves this, by showing the sum of such a pointer over a
-whole window is zero). Therefore
+$k$ (the orthogonality of the pointers, proved below, shows that the sum of
+such a pointer over a whole window is zero). Therefore
 
 $$
 X[k] = \frac{N}{2}\,A e^{i\varphi}, \qquad\text{so}\qquad
@@ -700,8 +699,8 @@ $N \times N$ matrix with entries $F_{kn} = \omega^{kn}$ (Chapter 4's matrix time
 vector, with complex entries). Computing it from the definition takes $N$
 multiplications for each of $N$ outputs: $N^2$ complex multiplications. For
 $N = 8$ that is $64$; for a second of audio at $16{,}000$ samples a second, a
-quarter of a billion. We will bring that down after finishing what the transform
-means.
+quarter of a billion. The fast transform below brings that down; first, what
+the transform means.
 
 ### The pointers are orthogonal
 
@@ -855,7 +854,7 @@ The one with $3.5$ cycles falls between bins $3$ and $4$ and leaks into every bi
 with its largest values at the two neighbours and slowly decaying tails. The
 window of $N$ samples resolves frequencies only to the spacing of the bins,
 $f_s/N$; two tones closer than that cannot be separated without a longer window.
-Shaping the window to tame the leakage is the business of the audio volumes.
+Shaping the window to tame the leakage is the business of Volume IX (Audio).
 
 ### A real basis for real signals
 
@@ -889,8 +888,8 @@ The coefficients computed as dot products with the real basis and the same numbe
 read off the complex DFT, $z_0 = \operatorname{Re}X[0]/\sqrt{N}$, $z_{2k-1} =
 \sqrt{2/N}\operatorname{Re}X[k]$, $z_{2k} = -\sqrt{2/N}\operatorname{Im}X[k]$, agree, and the
 length of $\mathbf{z}$ equals the length of $\mathbf{x}$ (the orthonormal scaling
-makes the transform length-preserving). The last section of the chapter shows where
-a machine learning engine uses exactly this basis.
+makes the transform length-preserving). A machine learning engine can use exactly
+this basis as the coordinates of a model, as the case study at the end shows.
 
 ## The fast Fourier transform
 
@@ -1188,8 +1187,8 @@ nothing overhangs, the two agree.
 
 ### The convolution theorem
 
-The reason to bring convolution into a chapter on the Fourier transform: the
-transform turns a circular convolution into a pointwise product. Let $X$, $H$ and
+Convolution and the Fourier transform meet in one fact: the transform turns a
+circular convolution into a pointwise product. Let $X$, $H$ and
 $Y$ be the DFTs of $x$, $h$ and $y$. Starting from the definition,
 
 $$
@@ -1208,7 +1207,7 @@ $$
 
 This is the **convolution theorem**: the DFT of a circular convolution is the
 pointwise product of the DFTs. Every wave component of the signal is scaled and
-shifted by the complex number $H[k]$, independently of all the others. The
+shifted in phase by the complex number $H[k]$, independently of all the others. The
 verification on the example:
 
 <!-- worked: fourier.convolution_theorem -->
@@ -1226,7 +1225,7 @@ verification on the example:
 Largest difference between X[k] H[k] and the DFT of the convolution: below 1e-12.
 <!-- /worked -->
 
-The third and fourth columns are the same numbers: the DFT of the circular
+The last two columns are the same numbers: the DFT of the circular
 convolution and the product of the two separate DFTs agree to within rounding.
 
 ### Linear convolution through the transform
@@ -1404,11 +1403,10 @@ Rotation rate omega_m = base^(-2m/d) radians per position for head size d = 8, a
 | 3 | 0.001 | 6283 | 3.162e-05 | 198692 |
 <!-- /worked -->
 
-This is a forward pointer: the chapter on positional information (Volume V) builds
-the position encoding from these frequencies. The backward kernel
-`crates/kernels/wgsl/rope_base_bwd.wgsl` states "the gradient is the transpose
-(inverse) rotation, i.e. rotate by $-\theta$", multiplication by $e^{-i\theta}$, the
-conjugate of the forward factor.
+The chapter on positional information (Volume V) builds the position encoding
+from these frequencies. The gradient of a rotation is the inverse rotation, so
+the backward kernel `crates/kernels/wgsl/rope_base_bwd.wgsl` rotates by
+$-\theta$: multiplication by $e^{-i\theta}$, the conjugate of the forward factor.
 
 **A Fourier basis as a model's coordinates.** Commit `78c842f18` (25 October 2026)
 introduced `crates/spectrallm`, a decoder whose residual stream is not the usual
@@ -1438,12 +1436,9 @@ length, width and row count, including the edge cases (an odd band, the full bas
 with its Nyquist mode, the largest length), and a second test requires the model's
 logits to agree between the two paths. The lesson is the chapter's own: the fast
 transform is a different computation of the same function, and the slow definition
-is kept as the oracle. The roadmap ledger for the model
-(`.agents/roadmap/spectrallm.md`) also records a limit of the operation count: the FFT
-pair ran far below the tuned matrix multiplication on the same card, so $N\log N$ is
-the right trend and not a promise of speed at the sizes of interest, and a variant
-that shared a twiddle table across rows measured slower than computing the twiddles
-in each butterfly. A later chapter in Volume VI (the research architecture
+is kept as the oracle. An operation count of $N\log N$ gives the trend, not the
+achieved speed, which also depends on how fully each kernel uses the hardware's
+arithmetic and memory bandwidth (Volume IV). A later chapter in Volume VI (the research architecture
 chapter) takes up the model.
 
 **The audio front ends and a transform for every length.**
@@ -1457,12 +1452,12 @@ Bluestein path because the speech synthesiser's front end needs a window of
 $1920 = 2^7\cdot 3\cdot 5$ samples; the ASR front ends had already needed a window
 of $400$ (commit `91a20b963`, 28 July 2026). The method is the one the previous
 section ended on: write the length-$n$ transform as a convolution of two sequences
-and compute that convolution with three power-of-two FFTs, the recipe of this
-chapter, of length $\ge 2n - 1$. The commit's gate is the chapter's own check: an
+and compute that convolution with three power-of-two FFTs of length at least
+$2n - 1$, the recipe of the convolution section. The commit's gate is the chapter's own check: an
 FFT is compared with a naive DFT oracle (whose table is indexed by $kn \bmod n$,
 the exponent table above) at power-of-two sizes and at composite sizes including
-$1920$, with a tolerance that scales with $n$ because a sum of $n$ terms of size $1$
-carries $O(n)$ single-precision rounding. Commit `220594174` (the same day) added
+$1920$, with a tolerance that scales with $n$ because the rounding error of a sum
+of $n$ single-precision terms of size $1$ can grow in proportion to $n$. Commit `220594174` (the same day) added
 the inverse, `crates/audio/src/istft.rs`, which reuses that one forward routine via
 the conjugate trick: negate the imaginary part, transform, scale by $1/n$.
 
@@ -1495,8 +1490,7 @@ Answers are at the end of the chapter.
 
 ## Summary
 
-We asked how a signal can be written as a sum of waves, and why that makes
-convolution cheap. To test a frequency without caring when its wave starts, the
+To test a frequency without caring when its wave starts, the
 signal must be compared with a cosine and a sine, and the pair of results is one
 point of the plane. Giving the plane a product that rotates and stretches (the
 matrix of Chapter 6, with $i$ a quarter turn, so $i^2 = -1$) made the
@@ -1519,8 +1513,9 @@ pointwise product of the transforms: a convolution scales each frequency by one
 complex number, and a long one can be computed with three FFTs and a pointwise
 product instead of $NM$ multiplications.
 
-The limits are as important as the results. We worked with power-of-two lengths,
-and other lengths need extra machinery (mentioned, not derived). Whole numbers of
+The limits are as important as the results. The radix-2 algorithm needs a power-of-two
+length, and other lengths need splits by other factors or Bluestein's
+rewriting as a convolution. Whole numbers of
 cycles per window are exact and anything else leaks, which windows tame; why a
 sampled signal can only carry frequencies up to half the number of samples, and
 what happens beyond, is a matter for the audio volume. The transform route wins

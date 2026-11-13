@@ -347,7 +347,7 @@ def reshape_vs_transpose():
                   "lllll"), "",
            f"The two results have the same shape and different contents: {R.nested() != T.nested()}.", ""]
     flat, was_view = T.reshape((6,))
-    out.append(f"Flattening the transposed view needs a copy ({'view' if was_view else 'copy'}): reshape(transpose(A), [6]) "
+    out.append(f"Flattening the transposed view is a {'view' if was_view else 'copy'}: reshape(transpose(A), [6]) "
                f"= {flat.flat()}, whereas reshape(A, [6]) = {A.reshape((6,))[0].flat()}.")
     v = [1, 10]
     out += ["", f"Multiply each [3, 2] result by v = {_t(v)}: reshape gives "
@@ -472,7 +472,7 @@ def image_layouts():
            f"Viewing the NCHW storage as NHWC without moving anything is the permuted view with axes (0, 2, 3, 1): "
            f"shape {_sh(view.shape)}, strides {_t(view.strides)}, contiguous {view.is_contiguous()}; "
            f"its elements equal the NHWC array's: {view.flat() == nhwc.flat()}. "
-           f"So a real NHWC layout needs a copy ({nhwc.is_contiguous()} contiguous afterwards).", ""]
+           f"So a real NHWC layout needs a copy, which is contiguous: {nhwc.is_contiguous()}.", ""]
     Bs, T, D = 2, 3, 4
     seq = Arr(list(range(Bs * T * D)), (Bs, T, D))
     flat, was_view = seq.reshape((Bs * T, D))

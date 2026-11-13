@@ -5,7 +5,7 @@
 
 *Can you build the numerical toolkit every later chapter relies on, and prove each piece correct?*
 
-Seventeen chapters have taught ideas. This one asks you to turn them into a program. You will write, in a language of your choice and using nothing but its standard library, a small numerical library with seven parts:
+An idea that holds on paper still has to survive being run. Write, in a language of your choice and using nothing but its standard library, a small numerical library with seven parts:
 
 1. A **strided array** with views (transpose, slice) and explicit broadcasting.
 2. Matrix multiplication, checked against a naive reference, with an operation count.
@@ -15,28 +15,28 @@ Seventeen chapters have taught ideas. This one asks you to turn them into a prog
 6. A small **statistics** module: mean, standard error and a bootstrap confidence interval.
 7. One **integration task** that uses all of it: generate noisy points, find a straight line through them by repeated small steps against a checked gradient, and report an interval for the slope.
 
-None of this is new. Every part was derived in an earlier chapter; the project asks whether you can make it work, which is a different thing from following a derivation. Expect some of the parts to fail on the first run in ways the earlier chapters warned about. That is the purpose: the failures are cheap now and expensive in Volume III.
+None of this is new. Every part was derived in an earlier chapter; making it work is a different thing from following a derivation. Expect some of the parts to fail on the first run in ways the earlier chapters warned about. That is the purpose: the failures are cheap now and expensive in Volume III.
 
 The library is also what the rest of the book quietly assumes. Volume III checks every gradient it derives against a numerical one, Volume IV spends whole chapters on making the matrix product and the reductions fast, and every experiment from Volume II onward starts from a seeded generator. Having your own version of these pieces, verified to the bit where bits can be verified, gives you a trusted base to compare everything else against.
 
-Each milestone below states what to build in the book's pseudocode, which fixes the interface and nothing else, says why the piece will be needed again, gives numbers to check against before you move on, and names the slips readers actually make. The **acceptance tests** at the end give concrete inputs and the exact outputs a correct library produces, written so that any implementation in any language can be tested against them. Every expected value was computed by a second, independent implementation, `scripts/book/worked/project_numlib.py`, and is regenerated whenever the book is built.
+Each milestone fixes an interface in the book's pseudocode (the interface and nothing else), says why the piece will be needed again, gives numbers to check against before you move on, and lists the slips most likely to creep in. The table of expected values that follows the milestones gives concrete inputs and the exact outputs a correct library produces, so that any implementation in any language can be tested against them. Every expected value was computed by a second, independent implementation, `scripts/book/worked/project_numlib.py`, and is regenerated whenever the book is built.
 
 ![Seven boxes labelled with the milestones 1 to 7, placed in four layers with no crossing arrows. Arrows show that milestone 2 and milestone 5 use milestone 1, milestone 5 also uses milestones 2 and 3, milestone 6 uses 3 and 4, and the integration task, highlighted, uses 4, 5 and 6.](img/numlib-milestones.svg)
 
 The figure shows which milestone calls which, so the order 1 to 7 is a valid build order. Build and test each before starting the next; a failure in milestone 7 that traces back to milestone 1 costs an afternoon, and the same failure caught by milestone 1's own check costs a minute.
 
-Before the first line of code, six questions that reach across the whole volume. Answer each from memory; the answers are at the end.
+Before the first line of code, six questions that reach across the whole volume, one for each piece that leans hardest on an earlier chapter: if one will not come back, the milestone that needs it will not either, so reread first. Their answers close the chapter.
 
 1. (Chapter 5, [Arrays, Shapes, Strides and Broadcasting](05-arrays.md)) A row-major array of shape $[3, 4]$ has strides $(4, 1)$. What are the shape and strides of its transpose, and does transposing move any number?
 2. (Chapter 4, [Matrices as Linear Maps](04-matrices.md), and Chapter 16, [Algorithms, Cost and Complexity](16-algorithms.md)) How many multiplications and additions does the product of an $[m, k]$ matrix and a $[k, n]$ matrix take, counted as multiply-adds?
 3. (Chapter 15, [Floating Point and Numerical Error](15-floating-point.md)) Why does log-sum-exp subtract the largest score before exponentiating, and what does Kahan's variable $c$ hold?
 4. (Chapter 17, [Randomness on a Deterministic Machine](17-randomness.md)) A generator yields 3 random bits and you want a die with 6 faces. Why is `raw mod 6` wrong, and what repairs it?
-5. (Chapter 7, [Derivatives](07-derivatives.md), and Chapter 15) A central difference has two competing errors. Name them, and say how the best step scales with the machine epsilon.
-6. (Chapter 12, [Statistics](12-statistics.md)) What does a bootstrap do with a sample of $n$ values, and why must the unit it resamples be an independent one?
+5. (Chapter 7, [Derivatives: The Mathematics of Change](07-derivatives.md), and Chapter 15) A central difference has two competing errors. Name them, and say how the best step scales with the machine epsilon.
+6. (Chapter 12, [Statistics: Learning Facts from Samples](12-statistics.md)) What does a bootstrap do with a sample of $n$ values, and why must the unit it resamples be an independent one?
 
 ## Seven pieces of a numerical library
 
-A note on language and style. The pseudocode below follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. Use 64-bit floats throughout unless a milestone says otherwise, and integers wide enough for 64 unsigned bits where the generator needs them (a language without them can use a pair of 32-bit halves, or a big-integer type, at some cost in speed). Use only your language's standard library, and write the checks as a test file that you can rerun after every change. The tolerances in the acceptance tests assume 64-bit floats.
+A note on language and style. The pseudocode below follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. Use 64-bit floats throughout unless a milestone says otherwise, and integers wide enough for 64 unsigned bits where the generator needs them (a language without them can use a pair of 32-bit halves, or a big-integer type, at the cost of a few extra operations per step). Use only your language's standard library, and write the checks as a test file that you can rerun after every change. The tolerances in the acceptance tests assume 64-bit floats.
 
 ### Milestone 1: a strided array with views and explicit broadcasting
 
@@ -161,7 +161,7 @@ Three slips to look for.
 - Testing only square, contiguous, small-integer inputs. A routine that reads `b.strides[0]` where it meant `b.strides[1]` passes on a symmetric matrix.
 - Comparing floating-point results with `==` after changing the order of the additions along $p$ (a blocked, reversed or parallel version). Use `close` (Pseudocode Conventions) with a tolerance derived from the bound of Chapter 15: for a sum of $k$ products of numbers of size $1$, a few times $k \cdot 1.1 \times 10^{-16}$. Between the two loop orders of this milestone the result must be identical, and a nonzero difference there is a bug.
 
-### Milestone 3: reductions that survive: compensated sum and log-sum-exp
+### Milestone 3: compensated summation and log-sum-exp
 
 Two reductions that survive input which breaks the obvious versions come next.
 
@@ -173,7 +173,7 @@ function logsumexp(z: array<real>[N]) -> real:
     # return m + log(sum(exp(z[i] - m)))      # the sum is a plain left-to-right sum; kahan_sum is not needed
 ```
 
-Two details beyond the chapter. First, the language must not be allowed to "optimise" the compensation away: if your compiler has a fast-math mode, leave it off for this file, and let the acceptance test be the proof. Second, define what happens at the edges of `logsumexp`: a list of $-\infty$ must return $-\infty$ without computing $-\infty - (-\infty)$, which is not a number.
+Two details go beyond Chapter 15. First, the language must not be allowed to "optimise" the compensation away: if your compiler has a fast-math mode, leave it off for this file, and let the acceptance test be the proof. Second, define what happens at the edges of `logsumexp`: a list of $-\infty$ must return $-\infty$ without computing $-\infty - (-\infty)$, which is not a number.
 
 Log-sum-exp is the denominator of the softmax and the core of the loss every classifier and language model in Volumes III and V trains on. Kahan summation is the cheapest repair for the sums of millions of terms that appear in losses, norms and statistics (Volume IV, "Parallel Reductions, Scans and Sorting", asks how to get the same accuracy when the sum is spread over thousands of workers).
 
@@ -216,7 +216,7 @@ Cross-entropy by lse(z) - z[t] for z = [1000.0, 998.0, 990.0, 0.0, -5.0], t = 1:
 The naive column evaluates the formula as written in IEEE arithmetic (exp overflows to inf above about 709.78, exp of a very negative number underflows to 0, and log(0) = -inf); (wrong) marks a value that differs from logsumexp(z). The naive formula is right for the all -inf row, because log(0) = -inf is the correct answer; the special case there only avoids computing -inf - (-inf). The empty list must be refused with an error.
 <!-- /worked -->
 
-The first case is the clearest: each of the $10^6$ terms $10^{-16}$ is smaller than half the gap above $1$ ($1.1 \times 10^{-16}$), so a left-to-right sum never moves off $1.0$, and loses all $10^{-10}$ of the true excess. The compensated sum recovers it. The third case adds $10^6$ small terms to a large one and then cancels the large one (Chapter 15, "Cancellation"): the left-to-right sum is off by about $6 \times 10^{-11}$ on an answer of $0.01$, a relative error near $6 \times 10^{-9}$, while the compensated sum is exact to the last digit shown.
+The first case is the clearest: each of the $10^6$ terms $10^{-16}$ is smaller than half the gap above $1$ ($1.1 \times 10^{-16}$), so a left-to-right sum never moves off $1.0$, and loses all $10^{-10}$ of the true excess. The compensated sum recovers it. The third case adds $10^6$ small terms to a large one and then cancels the large one (Chapter 15, "Cancellation"): the left-to-right sum is off by about $6 \times 10^{-11}$ on an answer of $0.01$, a relative error near $6 \times 10^{-9}$, while the compensated sum is off by less than $10^{-17}$.
 
 Three slips are worth testing for.
 
@@ -315,7 +315,7 @@ Five slips are common here.
 - Using `raw mod n` without the threshold. The scripted test with $n = 3 \cdot 2^{62}$ fails, and the test with `integer(3)` shows whether the first raw value $0$ was refused.
 - Shuffling with `j = integer(n)` instead of `integer(i + 1)`. The scripted test fails and the frequencies of the six orders of three items drift to the $4/27$ and $5/27$ of Chapter 17.
 - A signed 64-bit integer type: the multiplications and the right shifts then act on negative numbers. Use an unsigned type or mask after each operation.
-- Seeding by the system clock. The point of this milestone is that the same seed gives the same numbers on every machine.
+- Seeding the tests from the system clock. A test needs the same seed to give the same numbers on every machine; a drawn default seed belongs to runs, where it is printed and recorded (Chapter 17).
 
 ### Milestone 5: derivatives and gradients, checked
 
@@ -370,7 +370,7 @@ f(x) = log(exp(z_0) + exp(z_1) + exp(z_2)) + (1/2)(x_0^2 + x_1^2), where z = A x
 With close(analytic, numerical, rtol = 1e-6, atol = 1e-8): the correct gradient passes; the gradient with the + x term forgotten (A^T p alone, [0.38922201806602547, -1.5263357081885092]) fails.
 <!-- /worked -->
 
-The second half of that last paragraph is the more important test. A check that passes a correct gradient proves little unless it also rejects a wrong one. Here the wrong one forgets the term $\mathbf{x}$ contributed by the half squared norm, a realistic omission, and it must fail.
+The rejection of the wrong gradient is the more important test. A check that passes a correct gradient proves little unless it also rejects a wrong one. Here the wrong one forgets the term $\mathbf{x}$ contributed by the half squared norm, a realistic omission, and it must fail.
 
 Four slips are common here.
 
@@ -402,7 +402,7 @@ Note that `bootstrap_interval` takes a statistic as a function and a list of uni
 
 From Volume II on, every number reported about a model, an accuracy, a gap between two models, a latency, is an estimate from a sample, and Chapter 12's discipline is the difference between a finding and an accident. The bootstrap is the tool you reach for when the statistic has no formula, which is most statistics of interest.
 
-The data for the check are the twenty-five latencies of Chapter 12.
+The data for the check are twenty-five request latencies, a sample of the kind Chapter 12 bootstrapped (the values here are fixed and printed, not those of that chapter).
 
 <!-- worked: project_numlib.statistics_cases -->
 Twenty-five latencies in milliseconds: [18.9, 19.8, 22.7, 23.5, 25.9, 27.5, 28.3, 36.4, 37.2, 37.8, 38.8, 46.9, 52.3, 56.1, 57.4, 58.5, 62.9, 67.0, 72.8, 77.3, 79.2, 81.2, 84.1, 90.0, 116.7]
@@ -422,7 +422,7 @@ Ten identical values (3.0): standard error 0.0, bootstrap interval [3.0, 3.0].
 The bootstrap draws, for each resample, n indices in order from integer(n), each used as the next value of the resample; the sorted statistics are read at positions 0.025 (R - 1) and 0.975 (R - 1) with linear interpolation. Tolerance: 1e-9 for a bit-exact generator.
 <!-- /worked -->
 
-The normal-formula interval and the bootstrap interval of the mean agree to within about a quarter of a millisecond at each end, as they did in Chapter 12; the difference is simulation noise plus the mild skew of the data. The interval of the median is wide, and is the same interval as in Chapter 12, for the same reason.
+The normal-formula interval and the bootstrap interval of the mean agree to within about a quarter of a millisecond at each end; the difference is simulation noise plus the mild skew of the data. The interval of the median is wide, as in Chapter 12: a median of $25$ values is a rough estimate, and its interval ends move by whole sorted values.
 
 Five slips are common here.
 
@@ -504,7 +504,7 @@ Every block printed in the milestones is checked again below. A library passes w
 | 6 | bootstrap intervals, identical values | as printed | $10^{-9}$ for a bit-exact generator |
 | 7 | the integration run, plain left-to-right sums | data, gradients, fit and interval as printed; stepped against closed form and the gradient at the stepped values below $10^{-12}$ | $10^{-9}$ for the data, the fit and the interval; the size bounds are tested as stated |
 
-Two conventions apply to the whole list. A number printed with a seed was computed from a generator started at that seed and fed through your own generator, so a mismatch in a sampler's numbers with a matching raw sequence points at the sampler, and a mismatch in the raw sequence points at the mixing; test in that order. And where the table says "stated", the criterion is part of the test, not a number to copy: those are the statements that remain true on any correct implementation, including one that uses a different generator.
+Two conventions apply to the whole list. Every number printed with a seed comes from a generator started at that seed, so reproduce it with your own generator started there: a mismatch in a sampler's numbers with a matching raw sequence points at the sampler, and a mismatch in the raw sequence points at the mixing; test in that order. And where the table says "stated", the criterion is part of the test, not a number to copy: those are the statements that remain true on any correct implementation, including one that uses a different generator.
 
 ## Summary
 
@@ -520,7 +520,7 @@ These are optional. Each is a bigger test of the same ideas.
 2. **Beyond Kahan.** Implement Neumaier's variant (which also compensates when the new term is larger than the running total) and find an input of three numbers on which Kahan's sum is wrong and Neumaier's is right.
 3. **One-pass log-sum-exp.** Rewrite `logsumexp` to read the data once, keeping a running maximum and rescaling the running sum when the maximum changes. Verify it against the table, and against the two-pass version on random inputs.
 4. **Strides for free.** Add `permute(a, order)` for any axis order, and `reshape` that returns a view whenever the strides allow it (Chapter 5, "Which reshapes are free?"). Test with the transposed slice of Milestone 1.
-5. **A faster product.** Block the matrix product in tiles of $8 \times 8$ and confirm that the answers agree with the naive version and that the operation count is unchanged. Time the three versions on your machine and explain the order of the timings; you have just met the subject of Volume IV.
+5. **A faster product.** Block the matrix product in tiles of $8 \times 8$ and confirm that the answers agree with the naive version and that the operation count is unchanged. Then measure the three versions on your machine and explain the order of the measurements from the data each version moves between memory and cache, since the arithmetic is the same; you have just met the subject of Volume IV.
 6. **A second generator.** Replace SplitMix64 by the LCG of Chapter 17, run the Milestone 4 statistical tests on it, and report which tests it fails.
 
 ## Answers

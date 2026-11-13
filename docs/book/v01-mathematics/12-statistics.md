@@ -44,19 +44,20 @@ produces. It is not evidence that B is better, and it is not evidence that B is 
 better: it is a measurement too coarse to say.
 
 That situation is the daily one for anyone who evaluates models. Every score on a
-finite test set is an **estimate** of a quantity we cannot observe, the accuracy the
+finite test set is an estimate of a quantity we cannot observe, the accuracy the
 model would show on all questions of the kind, and an estimate is only as useful as our
-knowledge of its error. So the chapter starts with one estimate and the way its error
-shrinks as examples are added, widens that into an interval we can trust, and turns the
-interval into a rule for deciding whether a gap between two scores is real. Two models
-asked the same questions carry more information than two separate totals, and the
-chapter spends it. Last comes the quiet trap of trying twenty things and reporting the
-best. The two models and their $500$ questions stay as the running example, first as
-the puzzle and then as the case every tool is applied to.
+knowledge of its error. That error shrinks in a known way as examples are added, it
+widens into an interval we can trust, and the interval becomes a rule for deciding
+whether a gap between two scores is real. Two models asked the same questions carry
+more information than two separate totals, and that information can be spent. And
+trying twenty things and reporting the best sets a quiet trap. The two models and
+their $500$ questions are the running example, first as the puzzle and then as the
+case every tool is applied to.
 
-The arguments below use six ideas from earlier chapters, one of them from the first.
-Answer them from memory; each names the chapter that taught it, to go back to if the
-answer will not come.
+Measuring an error leans on the variance of an average, covariance, the central
+limit theorem, binomial counts, distances between examples and summation notation,
+the last from the first chapter. Each question names where its idea was taught, the
+place to return to if the answer will not come.
 
 1. (Chapter 10, probability.) Ten independent measurements each have variance $4$. What is the variance of their average?
 2. (Chapter 11, distributions.) $X$ and $Y$ each have variance $1$ and their covariance is $0.8$. What is $\mathrm{Var}[X - Y]$?
@@ -78,8 +79,8 @@ $\hat{p}$, is an **estimate**.
 The rule that turns a sample into a number is an **estimator**. "Add up the right
 answers and divide by $n$" is an estimator. So is "take the accuracy on the first
 $100$ questions only", and so is "always say $0.5$". All three give a number for any
-sample; they differ in how good the number is, and the point of this chapter is to make
-"how good" a computable quantity.
+sample; they differ in how good the number is, and "how good" can be made a computable
+quantity.
 
 The key step is to notice that an estimate is the outcome of a random experiment. The
 sample was drawn at random, so $\hat{p}$ is a random variable, and like any random
@@ -151,9 +152,8 @@ Accuracy 0.704. Questions needed for a 95% half-width of 1 point: (1.960 / 0.01)
 Quadrupling the questions halves the error: $\sqrt{4} = 2$, the same square-root law
 Chapter 10 showed for dice. To pin an accuracy of about $0.70$ to within a point
 (a $95\%$ half-width, the multiplier $1.96$ coming from the next section) takes about
-eight thousand questions, sixteen times as many as the $500$ we had. This is the
-first practical fact of the chapter: precision is bought at a square-root price, so small
-differences are expensive to resolve.
+eight thousand questions, sixteen times as many as the $500$ we had. Precision is
+bought at a square-root price, so small differences are expensive to resolve.
 
 The standard error is not the standard deviation of the data. Each answer is $0$ or $1$
 with a standard deviation of $\sqrt{0.704 \times 0.296} = 0.456$, and that does not
@@ -247,16 +247,16 @@ Generator: the book's SplitMix64, seed 0x02efca81066ce338 (211610363017093944). 
 <!-- /worked -->
 
 The divisor-$n$ column follows $(n-1)/n$ times the true variance, and the divisor-$(n-1)$
-column stays at it. One caution: $s = \sqrt{s^2}$ is still very slightly too small on
+column stays at it. One caution: $s = \sqrt{s^2}$ is still too small on
 average, as the second table of the exact computation shows ($1.37$ against $1.71$ at
 $n = 2$), because a square root bends downward. Unbiasedness is a property of one
 estimator of one quantity, not something that survives applying a function to it.
 
 ### Putting the sample mean to work: standardising features
 
-Chapter 3 promised a remedy for features of different scales, to be applied before
-distances and dot products are taken, and the sample mean and variance now supply it. Chapter 3 noticed that if one feature is measured in large numbers, it dominates every
-distance. Here are eight houses described by area in square metres and age in years:
+Chapter 3 noticed that a feature measured in large numbers dominates every distance,
+and promised a remedy to apply before distances and dot products are taken; the sample
+mean and variance supply it. Here are eight houses described by area in square metres and age in years:
 
 <!-- worked: statistics_ch.feature_scales -->
 | house | area (m^2) | age (years) |
@@ -294,7 +294,7 @@ $$
 
 with $\bar{x}$ and $s$ the sample mean and standard deviation of that feature. This moves
 the average of the feature to $0$ and its standard deviation to $1$, whatever the original
-unit, so a $z$ of $1.8$ means "$1.8$ standard deviations above the typical value":
+unit, so a $z$ of $1.8$ means "$1.8$ standard deviations above the mean":
 
 <!-- worked: statistics_ch.feature_zscores -->
 | house | z of area | z of age |
@@ -334,7 +334,7 @@ unit, so a $z$ of $1.8$ means "$1.8$ standard deviations above the typical value
 The two columns now have mean $0$ and standard deviation $1$ exactly, and the distance
 between houses 1 and 2 is $1.74$, now split $18\%$ and $82\%$ between area and age. Neither
 feature dominates by units. (Which split is right depends on the task, but it no longer
-depends on whether somebody measured the area in square feet.) Three points of method
+depends on whether the area was measured in square feet.) Three points of method
 follow from the earlier sections.
 
 The mean and standard deviation are estimates, computed from a sample, and a new
@@ -381,9 +381,9 @@ function standardise(X: array<real>[N, F], mean: array<real>[F], std: array<real
 ## Confidence intervals: how far off can the estimate be?
 
 A score without its uncertainty invites misreading. Start from the computed case. Each
-model's accuracy comes with its standard error, and the interval that extends $1.96$
-standard errors on either side, an estimate plus and minus a multiple of its standard
-error, called a **Wald interval**:
+model's accuracy comes with its standard error and with the interval that extends $1.96$
+standard errors on either side of it; an estimate plus and minus a multiple of its
+standard error is called a **Wald interval**:
 
 <!-- worked: statistics_ch.accuracy_intervals -->
 | model | right of 500 | accuracy % | standard error | 95% lower % | 95% upper % |
@@ -392,7 +392,7 @@ error, called a **Wald interval**:
 | B | 356 | 71.2 | 0.0203 | 67.2 | 75.2 |
 <!-- /worked -->
 
-A reader of these two rows sees at once what the problem section only suggested: the
+The two rows show at once what the opening simulation only suggested: the
 interval of A, from $66.4\%$ to $74.4\%$, and that of B, from $67.2\%$ to $75.2\%$, overlap
 over nearly their whole length. (Overlap of two intervals is not itself the test of the
 next section, but wide, mostly shared intervals are a warning that the data cannot separate the
@@ -505,19 +505,18 @@ $m_\nu$ is the number with $\int_{-m}^{m} f_\nu(t)\,dt = 0.95$, found for
 $\nu = 1, 2, 5, 10, 30$ as follows: the area $2\int_0^m f_\nu$ is computed by Simpson's rule
 with $4000$ equal intervals on $[0, m]$, and $m$ is found by bisection on $[0, 200]$ with $60$
 halvings (raise the lower end when the area is below $0.95$, otherwise lower the upper end;
-the answer is the midpoint). The last row is the Gaussian multiplier $1.959964$. The chapter
-does not need the distribution beyond the fact that few observations call for a wider
-interval.
+the answer is the midpoint). The last row is the Gaussian multiplier $1.959964$. Beyond
+this table, all that matters here is that few observations call for a wider interval.
 
 Two further points. A confidence level is a choice, not a law: $90\%$ and $99\%$ intervals
 use the multipliers $1.645$ and $2.576$ of the table above, and a wider interval is more
 likely to contain the truth and less informative. And the interval's width is the
 quantity to plan with: width $\approx 2\times 1.96\sqrt{p(1-p)/n}$, which is the source of the
-eight thousand questions of the last section.
+eight thousand questions of the standard-error table.
 
 ## Hypothesis tests: is the difference real?
 
-Now the problem's question. Is the four-question gap between A and B real? A
+Now the opening question. Is the four-question gap between A and B real? A
 **hypothesis test** answers a question of this kind by asking how surprising the data would
 be in a world where nothing is going on. It has four parts.
 
@@ -553,8 +552,8 @@ The simulated share uses the 2000 runs of the first table of this chapter (same 
 | share of 2000 simulated null experiments with |gap| >= 4 questions | 0.804 |
 <!-- /worked -->
 
-The p-value is $0.78$, and the last row checks it against the experiment of the problem
-section, an independent measurement of the same probability: in $80\%$ of the simulated null
+The p-value is $0.78$, and the last row checks it against the opening experiment, an
+independent measurement of the same probability: in $80\%$ of the simulated null
 experiments the gap was at least four questions. (The $0.78$ and $0.80$ differ because a
 count of questions is discrete and the Gaussian is a continuous approximation; both say
 "about four in five".) A p-value is therefore a computed probability, in a world we can
@@ -587,7 +586,7 @@ With equal models the test fires about $5\%$ of the time (the simulated $6.0\%$ 
 the noise of $1000$ experiments). With a model that is truly three points better, $500$
 questions detect it only about $18\%$ of the time ($19\%$ in the simulation): the standard error $0.029$ is almost as
 large as the gain. Detecting a three-point gain reliably takes thousands of questions, and
-the table shows $98\%$ power at $8000$. The consequence for the problem: a non-significant
+the table shows $98\%$ power at $8000$. The consequence for the two models: a non-significant
 result on $500$ questions is not a finding that the models are equal. It says the test was
 too weak to tell.
 
@@ -619,8 +618,8 @@ alternative was before the test.
 So far we treated the two scores as independent measurements, each with its own questions.
 But in a real evaluation both models see the same $500$, and we know much more than two
 totals: we know, question by question, who was right. Here is the full picture behind
-the problem's two scores. The first row is the problem's data; the second row is a
-variant with a larger gap that the chapter returns to:
+the two scores. The first row is the opening's data; the second row is a variant with a
+larger gap, used again below:
 
 <!-- worked: statistics_ch.table_two_by_two -->
 | scenario | both right | only A right | only B right | both wrong | A right | B right | discordant |
@@ -631,7 +630,7 @@ variant with a larger gap that the chapter returns to:
 
 In scenario 1 the models agree on $456$ questions ($332$ both right, $124$ both wrong)
 and disagree on $44$: A alone is right on $20$ and B alone on $24$. The totals of the
-problem, $352$ and $356$, are the margins of this table. The $456$ questions on which they
+opening, $352$ and $356$, are the margins of this table. The $456$ questions on which they
 agree carry no information about which is better. All the information about the gap is in
 the $44$ on which they differ.
 
@@ -698,8 +697,8 @@ change, are strongly correlated, and for them ignoring the pairing throws away m
 the evidence. Comparing two models on the same examples through the per-example
 differences is a **paired test**.
 
-Two paired tests follow. The first is the one the unpaired test already was, with the paired
-standard error: the statistic is $\bar{D}$ divided by $s_D/\sqrt{n}$, where $s_D$ is the
+Two paired tests follow. The first is the $z$-test already used, with the paired standard
+error in place of the unpaired one: the statistic is $\bar{D}$ divided by $s_D/\sqrt{n}$, where $s_D$ is the
 sample standard deviation of the differences (the unbiased one, from the earlier section).
 It is the form of Student's test for paired data; with hundreds of questions the Gaussian
 and t multipliers agree.
@@ -739,7 +738,7 @@ questions, $74.0\%$, a $3.6$-point lead. The unpaired test cannot confirm it ($z
 $p = 0.20$), the paired test and the sign test both can (paired $z = 2.67$, $p = 0.008$; B wins $32$
 of the $46$ disagreements, sign-test $p = 0.011$). The data is the same in both analyses; the
 paired one used the information that the questions were shared. To resolve the gap of scenario 1
-at a paired standard error of $0.004$ would take $(0.0133/0.004)^2 \approx 11$ times as many questions,
+at a paired standard error of $0.004$ (half the gap, so that $z$ reaches $2$) would take $(0.0133/0.004)^2 \approx 11$ times as many questions,
 which is about $5500$.
 
 The sign test has a floor: with few disagreements it cannot be significant at all, even if
@@ -808,7 +807,7 @@ function sign_test(a: array<real>[n], b: array<real>[n]) -> (int, int, real, rea
 
 The standard error $\sigma/\sqrt{n}$ is a fact about the mean. Many quantities we report are
 not means: the median latency of a service, the ratio of two scores, a percentile, an
-F-score. Their sampling distributions have no formula in this book. The idea of the
+F-score. Their sampling distributions have no simple formula. The idea of the
 **bootstrap** is to estimate the sampling distribution by simulation, using the sample
 itself as a stand-in for the population. We cannot draw new samples from the world, but we
 can draw new samples from the sample: pick $n$ values from our $n$ with replacement, so that
@@ -1056,9 +1055,8 @@ this chapter is there, with one exception that is instructive. `crates/stats/src
 keeps every latency sample in full and reports exact nearest-rank percentiles rather than
 a bucketed histogram, and its `BestOf` type reports the best of several repeated runs of
 a measurement together with the observed spread, `(max - min) / max`. Why report the best
-and not the mean? Its doc comment calls the best value the stable signal on a shared or
-thermally throttled machine, and the reason is the shape of the noise: other work on the
-machine only adds time, so the mean of repeated runs is pulled upward by noise that is
+and not the mean? On a shared or thermally throttled machine the best value is the stable
+signal, because of the shape of the noise: other work on the machine only adds time, so the mean of repeated runs is pulled upward by noise that is
 not the quantity being measured, while the fastest run is least affected; the spread
 says how far to trust it.
 That is an estimator chosen for the shape of its noise, which is the first
@@ -1116,20 +1114,19 @@ pooled mean over $k$ earlier blocks moves by only $d/k$ when one block falls by 
 
 With the default budget of $0.02$, a block falling by $0.30$ goes unseen once there are $15$
 earlier cycles. The commit added a per-block bar, `MAX_BLOCK_DROP = 0.20` in
-`crates/promote/src/document.rs`, and its doc comment derives the value rather than
-choosing it: the mean of $48$ pass/fail probes has a standard error of at most
+`crates/promote/src/document.rs`, with a value derived rather than chosen: the mean of $48$ pass/fail probes has a standard error of at most
 $0.5/\sqrt{48} = 0.072$, so the bar sits $2.8$ standard errors out, beyond ordinary
 wobble and yet short of a fifth of an earlier cycle's facts lost. Two tests make a pair
 on purpose: `one_earlier_cycle_collapsing_behind_a_healthy_pooled_mean_does_not_promote`
 and `ordinary_per_block_wobble_still_promotes_under_the_document_gate_config`, so the bar is
-shown both to fire and not to fire on noise. This is the chapter's central habit: a
+shown both to fire and not to fire on noise. This is the central habit of error bars: a
 threshold is meaningful only in units of the noise of the quantity it guards.
 
 Bootstrap, paired comparison and a seed-noise rule come together elsewhere. `crates/survival/src/compare.rs`
 holds `corrected_resampled_t` and a cluster bootstrap. The first is the paired t-test across
-cross-validation folds with a variance correction (the module notes that folds share most of
-their training data, so their results are positively correlated and the naive standard
-error is too small), and the second resamples whole units so within-unit correlation is
+cross-validation folds with a variance correction (folds share most of their training
+data, so their results are positively correlated and the naive standard error is too
+small), and the second resamples whole units so within-unit correlation is
 respected; both arrived with commit `332bc236e` (October 2026), and the general
 statistic form with commit `ab3fbb140`. `crates/yolov8/src/detection_report.rs` dumps every
 image's ground truth and predictions so that a clustered bootstrap can be run offline.
@@ -1168,13 +1165,12 @@ freedom runs from $-0.22$ to $0.38$, wide enough to contain every story. A sign 
 seeds could never go below $0.125$. A three-seed ablation can only say "not established", and
 the knowledge entry says so.
 
-Not every comparison in brain carries a standard error. The
-comparison grid of `crates/fcbench` (`Comparison` in `crates/fcbench/src/harness.rs`)
-averages each model's score over a number of windows and reports one value per model,
-scenario and metric, and its negative-control check flags a model that beats the naive
-baseline by more than a fixed relative margin. A grid of means is a set of estimates; the
-tools of this chapter are what turn two entries of it into a claim, and the exercises
-ask for that step.
+A grid of means is a set of estimates. The comparison grid of `crates/fcbench`
+(`Comparison` in `crates/fcbench/src/harness.rs`) averages each model's score over a
+number of windows and reports one value per model, scenario and metric, and its
+negative-control check flags a model that beats the naive baseline by more than a fixed
+relative margin; standard errors and a paired test are what turn two of its entries into
+a claim.
 
 The trend line that `crates/bench/src/metrics.rs` fits over the cycles of a continual
 study (`ols_slope_ci`, introduced in commit `05446791a`, September 2026) is a
@@ -1215,9 +1211,9 @@ Answers are at the end of the chapter.
 
 ## Summary
 
-We asked how much a finite sample can tell us. A test score is an **estimator** of a
-quantity we cannot see, a random variable with its own sampling distribution, judged by
-its bias and spread. The **sample mean** is unbiased with **standard error**
+How much a finite sample tells is itself computable. A test score is an estimate of a
+quantity we cannot see, produced by an **estimator**: a random variable with its own
+sampling distribution, judged by its bias and spread. The **sample mean** is unbiased with **standard error**
 $\sigma/\sqrt{n}$, estimated by $s/\sqrt{n}$ with the unbiased variance that divides by
 $n - 1$, and precision comes at a square-root price. The same mean and spread standardise
 the features of a data set, with the statistics fitted on training data only. The central
@@ -1235,7 +1231,7 @@ any statistic by resampling the sample, provided the resampled units are indepen
 Bonferroni and Holm control at the cost of power, and which no correction repairs if the
 number of comparisons is not honestly counted.
 
-The limits are the ones we carried. Everything assumed independent examples drawn from the
+Three limits remain. Everything assumed independent examples drawn from the
 population that matters; a test set that does not resemble deployment gives precise
 answers to the wrong question. The Gaussian approximations need enough data, and we stated
 the central limit theorem and the shape of Student's t without proof. And we treated each

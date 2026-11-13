@@ -47,15 +47,14 @@ yes/no questions per observation does the mistake cost? Third, a number for the
 entropy, cross-entropy with its close relative the divergence, and mutual
 information. The averages of surprise that training minimises and that
 evaluation reports (the loss of a classifier, the perplexity of a language
-model) are special cases, and later chapters will use them as if they had always
-been there. The route to them runs from one event to a whole distribution, from
+model) are special cases. The route to them runs from one event to a whole distribution, from
 the distribution to the length of messages, and last to the comparison of two
 distributions.
 
 Surprise is a logarithm, an average of surprise is an expectation, and the table the
 average runs over is a categorical distribution, so six earlier ideas are in play
-before the first formula. Answer them from memory; the answers are at the end of the
-chapter, and the chapter named is the place to go back to.
+before the first formula. Each question below names the chapter to reopen if it
+resists; the answers close this one.
 
 1. (Chapter 1, logarithm.) What are $\log_2 8$, $\log_2 \tfrac{1}{4}$ and $\log_2 1$? Write $\log(u v)$ in terms of $\log u$ and $\log v$.
 2. (Chapter 1, logarithm.) A product of $400$ factors, each $0.1$, underflows to zero on a computer. What is the sum of the base-10 logarithms, and why is the sum safe?
@@ -120,8 +119,8 @@ in **nats**. The table shows both for events of different rarity:
 Two features of the table matter later. Surprise grows slowly: a one-in-a-million
 event is $19.9$ bits, only about twice the surprise of a one-in-a-thousand one.
 And it has no upper limit: as $p \to 0$, $-\log p \to \infty$, so an event the
-model called impossible is infinitely surprising. We will meet that as a
-practical hazard.
+model called impossible is infinitely surprising, a practical hazard whenever a
+model gives zero probability to something that then happens.
 
 Requirement 3 is easy to check on a coin and a die. Heads has probability
 $1/2$, a six has probability $1/6$, and both together $1/12$:
@@ -274,8 +273,7 @@ within $0.0009$ of it. The picture of the coin says the same for two outcomes: t
 arch peaks in the middle. Why should it be true for any number of outcomes? An
 exchange argument gives the intuition. Take two outcomes with probabilities
 $a < b$ and move a small amount of probability from the larger to the smaller.
-The two surprises move toward each other, and the average becomes harder to
-predict. Repeating the move ends only when no pair differs, which is the uniform
+The two surprises move toward each other, and the entropy rises. Repeating the move ends only when no pair differs, which is the uniform
 distribution. A short exact proof comes after the divergence is defined, below;
 it shows that $\log_2 K - H(p)$ is itself a divergence and so cannot be negative.
 So the largest entropy on $K$ outcomes is $\log_2 K$ bits, the entropy of the
@@ -287,14 +285,15 @@ uniform is always more predictable.
 A language model that has read "the cat sat on the" assigns probabilities to the
 next word. Take the five-word distribution of Chapter 11 (obtained from the
 scores $(3, 2, 1, -1, 0)$ by the softmax) and two other contexts over the same
-five words (the scores are listed in the table; probabilities are printed to five
-decimals, entropies are computed from the unrounded probabilities), from a model that is nearly sure to one that cannot decide:
+five words, from a model that is nearly sure to one that cannot decide (the
+scores are listed in the table; probabilities are printed to five decimals,
+entropies are computed from the unrounded probabilities):
 
 <!-- worked: information.next_token_entropy -->
 | context | scores z | mat | floor | sofa | moon | the | H in bits |
 |---|---|---:|---:|---:|---:|---:|---:|
 | confident context | (6, 1, 0, -2, -1) | 0.98964 | 0.00667 | 0.00245 | 0.00033 | 0.00090 | 0.0973 |
-| the chapter's context | (3, 2, 1, -1, 0) | 0.63641 | 0.23412 | 0.08613 | 0.01166 | 0.03168 | 1.4427 |
+| Chapter 11's context | (3, 2, 1, -1, 0) | 0.63641 | 0.23412 | 0.08613 | 0.01166 | 0.03168 | 1.4427 |
 | undecided context | (0.4, 0.3, 0.2, -0.1, 0) | 0.24997 | 0.22619 | 0.20466 | 0.15162 | 0.16756 | 2.2979 |
 | uniform guess | (0, 0, 0, 0, 0) | 0.20000 | 0.20000 | 0.20000 | 0.20000 | 0.20000 | 2.3219 |
 <!-- /worked -->
@@ -356,8 +355,8 @@ The code words have lengths $1, 2, 3, 3$: short for the likely symbol, long for
 the unlikely ones. The average length is the expectation of the length, a sum of
 the table's last column, $0.40 + 0.60 + 0.60 + 0.30 = 1.90$ bits per day, better
 than the fixed $2.00$. The code is a prefix code because the symbols are the
-leaves of the tree: no leaf lies on the path to another. Reading the table from the second merge on, *snow* (taken first at merge 1)
-gets $0$ and *rain* gets $1$ under their node. Try it on ten days:
+leaves of the tree: no leaf lies on the path to another. Under the node of merge 1,
+*snow* (taken first) gets $0$ and *rain* gets $1$. Try it on ten days:
 
 <!-- worked: information.encode_message -->
 |  |  |
@@ -409,7 +408,8 @@ condition that the words fit in a binary tree; the weather code gives exactly
 $1$, as the table reports). Words of length $\ell_k = -\log_2 q_k$ use up a share
 $q_k$ of the tree, so a code is, in effect, a probability distribution $q$ over
 the symbols, and its price on data from $p$ is the average $\sum p_k \ell_k$.
-The next section shows that this price is never below $H(p)$.
+Gibbs' inequality, proved with the divergence below, shows that this price is
+never below $H(p)$.
 
 The "within one bit" slack disappears if symbols are coded in blocks: send ten
 days at a time, and the overhead of one bit is spread over ten days. That is why
@@ -493,8 +493,8 @@ from the quotient form and matches the difference of the two columns before it.
 ### It is never negative
 
 Is $D_{\mathrm{KL}}(p \,\Vert\, q) \ge 0$, with equality only when $q = p$, for
-every pair of distributions? The table already suggests yes (Gibbs' inequality),
-and a quick experiment supports it. Draw $5000$ random pairs of distributions on
+every pair of distributions? The table already suggests yes, the statement is
+known as Gibbs' inequality, and a quick experiment supports it. Draw $5000$ random pairs of distributions on
 five outcomes, three times with increasingly lopsided draws (the exponent
 sharpens each draw by raising the random weights to a power before
 normalising):
@@ -609,7 +609,7 @@ only mildly. Every use of cross-entropy as a training signal is of the first for
 with $p$ the data and $q$ the model, so a model is pushed hard toward covering
 everything that occurs in the data.
 
-A pseudocode for the three quantities, in the conventions of
+Pseudocode for the three quantities, in the conventions of
 [Pseudocode Conventions](../pseudocode.md). All three use `log`, the natural logarithm, so
 they return **nats**; divide by `log(2)` for bits:
 
@@ -646,7 +646,8 @@ digits).
 ## Cross-entropy on observed labels
 
 The number a classifier or language model reports is a cross-entropy against
-observed data, not against a known distribution. In practice nobody has the true $p$. What exists is a list of observations: five
+observed data, not against a known distribution. In practice the true $p$ is never
+available. What exists is a list of observations: five
 emails with their true kinds, a million words of text with the word that actually
 came next. Chapter 10 showed how to treat a dataset as a distribution: give each
 observed example probability $1/N$. For one example with the observed label $y$,
@@ -684,8 +685,7 @@ $H(p, q) = H(p) + D_{\mathrm{KL}}(p \,\Vert\, q) = 0 + D_{\mathrm{KL}}$. Trainin
 to reduce its average surprise on the labels is the same as reducing the
 divergence from the data distribution. This is the quantity that the loss of a
 classifier and of a language model reduces; later chapters define those losses
-and derive their gradients, and this chapter only supplies the meaning of the
-number.
+and derive their gradients.
 
 How the average is dominated is worth a table:
 
@@ -775,9 +775,9 @@ the sentence as a whole has probability $5.0 \times 10^{-5}$ (the product of the
 six), and $(1/5.0\times 10^{-5})^{1/6} = 5.21$. Perplexity is the per-token
 branching factor that would produce the same sentence probability. Because it is
 an exponential of a mean, it is large when a few tokens are very surprising: the
-token $0.05$ costs $2.996$ nats, about $30$ percent of the total of $9.90$.
+token given $0.05$ costs $2.996$ nats, about $30$ percent of the total of $9.90$.
 
-Perplexity does not go below the entropy of the data: with data from $p$, the
+Perplexity does not go below the exponential of the data's entropy: with data from $p$, the
 best model is $q = p$ and its perplexity is $\exp H(p)$, not $1$. The same four
 beliefs as before, scored this way:
 
@@ -883,7 +883,7 @@ Three extreme cases fix the scale:
 <!-- /worked -->
 
 Independent fair bits share nothing. A perfect copy shares everything: $I(X; Y) =
-H(X)$, the whole uncertainty of $X$, which is also the upper bound of mutual
+H(X)$, the whole uncertainty of $X$, which is also an upper bound on the mutual
 information. A copy that is wrong ten percent of the time shares $0.531$ bits of
 the $1$ bit; the errors cost almost half of it. Mutual information, unlike
 covariance (Chapter 11), which can be zero for variables that depend on each
@@ -924,8 +924,8 @@ see how it behaves.
 
 ## Perplexity, cross-entropy kernels and divergences in brain
 
-This chapter is background for the losses and metrics of later volumes, and in
-brain its quantities appear in a few concrete places. Start with perplexity, which
+The losses and metrics of later volumes are built from these quantities, and in
+brain they appear in a few concrete places. Start with perplexity, which
 is an exponentiated mean cross-entropy. `val_perplexity` in
 `crates/gpt2/src/eval.rs` loads a checkpoint and a held-out token stream, draws
 random batches of windows, adds up the model's mean cross-entropy over each batch
@@ -943,12 +943,12 @@ host sums these and divides by the number of rows to get the mean cross-entropy.
 Its sibling `crates/kernels/wgsl/ce_grad.wgsl` writes the gradient with respect
 to the scores, $(q - \text{onehot}(y))/n$, which a later chapter derives.
 
-KL divergence appears in distillation and in policy training. The comment at the top
-of `crates/rl/src/objective/distill.rs` derives that distilling a teacher
-distribution $q$ into a student $p$ by minimising $D_{\mathrm{KL}}(q \,\Vert\, p)$ has
-the same gradient as cross-entropy with the teacher as target, because
-$D_{\mathrm{KL}} = H(q, p) - H(q)$ and the entropy of the teacher does not depend
-on the student. The summed pass losses are therefore the cross-entropy
+KL divergence appears in distillation and in policy training. Distilling a
+teacher distribution $q$ into a student $p$ by minimising
+$D_{\mathrm{KL}}(q \,\Vert\, p)$ has the same gradient as cross-entropy with the
+teacher as target, because $D_{\mathrm{KL}} = H(q, p) - H(q)$ and the entropy of the
+teacher does not depend on the student; `crates/rl/src/objective/distill.rs` is
+built on that identity. The summed pass losses are therefore the cross-entropy
 $H(q, p)$, and `neg_entropy` adds $-H(q)$ so that the reported number is the
 actual divergence (commit `9e0b8a619`, September 2026). Its test
 `distill_topk_at_k_equals_vocab_reproduces_exact_kl` in
@@ -1000,10 +1000,11 @@ Answers are at the end of the chapter.
 
 ## Summary
 
-We asked how many bits it takes to describe what we expect to see, and what it
-costs to expect the wrong thing. The **information content** of an event is
-$-\log_2 p$ bits, forced by three requirements (certain events teach nothing,
-rare events surprise more, independent surprises add) and a unit (a fair coin
+Describing what we expect to see takes a computable number of bits, and
+expecting the wrong thing has a computable price. The **information content** of
+an event is $-\log_2 p$ bits, forced by four requirements (certain events teach
+nothing, rare events surprise more, independent surprises add, and a small change
+in probability changes the surprise only a little) and a unit (a fair coin
 toss is one bit; with natural logarithms the unit is the nat, and the two differ
 by a factor $\ln 2$). The **entropy** of a distribution is the expected surprise,
 $-\sum p_k \log_2 p_k$; it is $0$ for a certain outcome and largest, $\log_2 K$,

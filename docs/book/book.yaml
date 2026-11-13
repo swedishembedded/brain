@@ -141,7 +141,7 @@ volumes:
         brain: []
       - id: algorithms
         title: "Algorithms, Cost and Complexity"
-        question: "How do we predict how long a computation will take and how much memory it needs before we run it?"
+        question: "How do we predict how much work a computation will do and how much memory it needs before we run it?"
         introduces: [algorithm, asymptotic-complexity, memory-complexity, reduction-algorithm, prefix-sum, sorting, hashing]
         requires: [function, summation-notation, tensor]
         brain: []

@@ -30,8 +30,8 @@ none, or infinitely many, and how many numbers a layer really needs.
 A fourth question is practical and, for a machine that must pay for every
 multiplication, decisive: how much does it cost? The answer depends on the
 *order* in which we group a chain of products, by factors of hundreds, with
-identical results. That is the first place the book's central habit, estimating
-a computation before running it, pays for itself.
+identical results. That is the first place the habit of estimating a
+computation before running it pays for itself.
 
 The tools are already on the shelf. Chapter 3 gave us the vector, the dot
 product and the linear combination, and Chapter 2 gave us functions and their
@@ -46,9 +46,9 @@ Sums from Chapter 1 appear throughout. Determinants, eigenvalues and subspaces
 are not assumed: the one idea we need from that territory, the dimension of the
 set of outputs a map can reach, is built here from scratch under the name
 **rank**. How a matrix is laid out in memory is Chapter 5, and what a matrix
-hides inside it (rotations, low-rank structure) is Chapter 6. Before the first
-definition, bring five ideas from earlier chapters back to mind; the answers
-are at the end of the chapter.
+hides inside it (rotations, low-rank structure) is Chapter 6. The derivations
+below stand on the dot product, on composition and on sums, so test those first,
+reaching back as far as Chapter 1; the answers are with the others at the end.
 
 1. (Chapter 3, dot product.) Compute $(1, 2, 3) \cdot (4, 5, 6)$.
 2. (Chapter 3, orthogonality.) What does it mean for the dot product of two nonzero vectors to be 0?
@@ -81,7 +81,7 @@ counts from 1, so $A_{11}$ is the top left entry; array code counts from 0,
 and where the text shows computed output (which uses 0-based labels like
 "row 0") it says so.
 
-There are two ways to read the same table, and the chapter's main work is
+There are two ways to read the same table, and much of what follows is
 moving between them.
 
 **By rows.** Row $i$ is a vector of $n$ numbers, $\mathbf{a}_{i}^{\top} =
@@ -130,7 +130,8 @@ graph looks.
 
 The definition is only useful if it excludes things. Here are three functions
 checked against it, one that passes and two that fail, on the layer's weights
-$\mathbf{W}$ (rows $(2,-1,1)$ and $(1,3,2)$) and the vectors $\mathbf{x} =
+$\mathbf{W}$ (rows $(2,-1,1)$ and $(1,3,2)$, written $\mathbf{A}$ in the table)
+and the vectors $\mathbf{x} =
 (1, 2, 3)$ and $\mathbf{y} = (0, -1, 4)$.
 
 <!-- worked: matrices.linearity_check -->
@@ -170,7 +171,7 @@ $\operatorname{relu}(u) + \operatorname{relu}(w)$ when the signs differ.
 
 That last failure is no accident of the example. It is why a network is
 built from linear maps *and* bends: a pile of linear maps is secretly just one
-linear map (we will see exactly why in a few sections), so all the expressive
+linear map (the section on composition shows exactly why), so all the expressive
 power of a network beyond a single linear map comes from the functions between
 the layers. The matrix is the part of a network that is easy to analyse, and
 this chapter is about that part.
@@ -313,19 +314,14 @@ The image of the unit square is a parallelogram of area 5/2 (shoelace formula ov
 
 ![Two maps applied to the unit square and a grid on it. Left: the matrix with columns (2, 0.5) and (1, 1.5) turns the square into a tilted parallelogram of area 5/2, with the images of the unit vectors drawn as arrows. Right: a matrix with columns (1, 0.5) and (2, 1), whose second column is twice the first, sends the whole square onto a single line through the origin, area 0.](img/linear-map-square.svg)
 
-**Figure 1.** Left: the map with columns $(2, \tfrac12)$ and $(1, \tfrac32)$.
-Both images of the unit vectors are drawn, the square becomes the shaded
-parallelogram and each grid line becomes a parallel line. Right: a map whose
-second column is twice the first. The images of $\mathbf{e}_1$ and
-$\mathbf{e}_2$ lie on one line, so every combination of them does too, and the
-square is flattened to a segment. All points of the figure are computed with
-the matrix-vector product of this chapter.
+**Figure 1.** Left: the map with columns $(2, \tfrac12)$ and $(1, \tfrac32)$
+turns the square into a parallelogram. Right: a map whose second column is
+twice the first flattens the square to a segment.
 
 The right panel is the other half of the story. When the columns point along
 one line, the map squashes the plane onto that line: two different inputs can
 land on the same output, and the information that told them apart is gone. How
-often that happens, and what it costs, is the subject of the second half of
-the chapter. The area of the parallelogram in the left panel, computed by the
+often that happens, and what it costs, is what the rank measures, below. The area of the parallelogram in the left panel, computed by the
 shoelace formula over its four corners, is $\tfrac52$, and the right panel
 has area $0$; keep both numbers, the next sections explain them.
 
@@ -342,7 +338,7 @@ The composition of two linear maps is linear. Adding inputs, $g(f(\mathbf{x} +
 \mathbf{y})) = g(f(\mathbf{x}) + f(\mathbf{y})) = g(f(\mathbf{x})) +
 g(f(\mathbf{y}))$, using linearity of $f$ and then of $g$; scaling is the same.
 Therefore $g \circ f$ is a linear map $\mathbb{R}^n \to \mathbb{R}^m$ and, by
-the previous section, **it has a matrix**. Which one? The section tells us how
+the previous section, **it has a matrix**. Which one? That section tells us how
 to find it without guessing: its columns are the images of the unit vectors.
 Column $j$ is $g(f(\mathbf{e}_j))$, which is $\mathbf{B}$ applied to
 $\mathbf{A}\mathbf{e}_j$, which is column $j$ of $\mathbf{A}$. So
@@ -440,9 +436,8 @@ Three things to notice. The count depends on all three sizes and is the
 The matrix-vector case (second row) is far cheaper than the square product
 (fourth row) at the same $k$, by a factor of $n$: this will matter in a moment.
 And the count makes no mention of the numbers, only of the shapes, so it can be
-computed before a single weight exists. That is the practice Chapter 16 builds
-into a method; this chapter uses it once, in the next section, to settle an
-argument about order.
+computed before a single weight exists. Chapter 16 builds that practice into
+a method; here it settles, in the next section, an argument about order.
 
 ## Order: commutativity, associativity, and the cost of grouping
 
@@ -493,7 +488,7 @@ $[512, 512]$ matrices $\mathbf{A}$ and $\mathbf{B}$ and a vector $\mathbf{x}$ of
 512 entries. The expression $\mathbf{A}\mathbf{B}\mathbf{x}$ may be computed as
 $(\mathbf{A}\mathbf{B})\mathbf{x}$: multiply the two matrices, then the result
 by the vector. Or as $\mathbf{A}(\mathbf{B}\mathbf{x})$: two matrix-vector
-products. Chain of three matrices of different shapes shows the effect too.
+products. A chain of three matrices of different shapes shows the effect too.
 
 <!-- worked: matrices.association_costs -->
 A and B are [512, 512], x is [512, 1]. Cost in multiply-adds:
@@ -1020,7 +1015,7 @@ Factored as [1024, h] times [h, 1024] instead of one [1024, 1024] matrix:
 <!-- /worked -->
 
 The second table shows the factoring trade: a narrow middle is much cheaper
-($h = 16$ stores a thirtieth of the entries) but limited to rank 16, while at
+($h = 16$ stores a thirty-second of the entries) but limited to rank 16, while at
 $h = d$ the factorisation costs twice what one matrix does and gains nothing.
 Chapter 6 shows how to find the best narrow factorisation of a given matrix, and
 Volume III adds the bend and the training. For the rest of this volume the
@@ -1181,8 +1176,8 @@ without ever materialising it.
 
 ## The linear layer in brain's kernels, and what its schedule costs
 
-The operation of this chapter is, by volume of executed code, most of what
-brain does. Four places show it, and one story shows what ignoring its costs.
+The operation of this chapter runs through every model brain executes. Four
+places show it, and two commits show what ignoring its cost does.
 
 **The linear layer as a kernel.** `crates/kernels/wgsl/matmul.wgsl` is the
 reference implementation of $\mathbf{y} = \mathbf{x}\mathbf{W}^\top$: its header
@@ -1237,18 +1232,21 @@ that existed but was never reached. Commit `3d438068a` (6 August 2026) found
 that a serving engine's prefill dispatched the naive one-thread-per-output
 matmul because its kernel table did not contain the register-tiled one, so that
 every chunk above 32 rows ran the slow path. The message records the
-measurement, a dated observation on one GPU (a P40) with a 0.6B-parameter model:
+measurement, a dated observation on one GPU (a P40) with a 0.6B-parameter model,
+stated as a fraction of the GPU's roofline (the peak rate its arithmetic and
+memory allow, the subject of Volume IV):
 
-On 6 August 2026, with a 128-row prefill on one P40 GPU, the matrix product
-took 2400.38 ms (98.0% of the pass) in the naive kernel and 78.47 ms with the <!-- perf-number: historical measurement, commit 3d438068a -->
-register-tiled `matmul_reg3`, and the whole pass fell from 2207.90 ms to about <!-- perf-number: historical measurement, commit 3d438068a -->
-75 to 82 ms. The commit stresses that no new kernel was written: the fix was <!-- perf-number: historical measurement, commit 3d438068a -->
-registering and selecting the one that already existed, by the rule
-`block::gemm_variant` that the other image models already shared. 
+On 6 August 2026, with a 128-row prefill on one P40 GPU, the naive kernel ran
+the matrix product at 0.4% of the GPU's roofline and took 98.0% of the pass; <!-- perf-number: historical measurement, commit 3d438068a -->
+the register-tiled `matmul_reg3` reached 13.6% of the roofline, and the whole <!-- perf-number: historical measurement, commit 3d438068a -->
+pass fell from 2207.90 ms to between 75 and 82 ms. The commit stresses that no <!-- perf-number: historical measurement, commit 3d438068a -->
+new kernel was written: the fix was registering and selecting the one that
+already existed, by the rule `block::gemm_variant` that other parts of brain
+already shared.
 
 Knowledge #15 records a sibling failure: a selection guard (`m < 128 || n < 128`)
 sent short batches to the naive kernel, and the cure was lowering the guard, with
-bit-identical output at the same seed. 
+bit-identical output at the same seed.
 
 The operation is the same matrix product throughout, and its cost is decided
 by shapes and schedule: when the $m n k$ count says a product should be cheap
@@ -1280,7 +1278,7 @@ Answers are at the end of the chapter.
    $\mathbf{x} = \mathbf{e}_2$, and what does that tell you about column 2?
 
 3. **[Calculate]** Find the matrices of these maps of the plane from the images
-   of $\mathbf{e}_1$ and $\mathbf{e}_2$: the rotation by $90^\circ$ anticlockwise;
+   of $\mathbf{e}_1$ and $\mathbf{e}_2$: the rotation by $90^\circ$ counterclockwise;
    the reflection in the line $x_2 = x_1$; the projection of Chapter 3 onto the
    line through $\mathbf{u} = (1, 1)$. Which of them have an inverse, and what
    is the inverse of each that does?
