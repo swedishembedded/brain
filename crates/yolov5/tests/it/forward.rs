@@ -98,3 +98,22 @@ fn detect_returns_in_range_boxes_in_original_image_pixels() {
         assert!(d[0] <= d[2] && d[1] <= d[3] && (d[5] as u32) < cfg.nc, "{d:?}");
     }
 }
+
+/// `detect` letterboxes on the device; the old path letterboxed on the host and
+/// uploaded. Both must give the same detections bit for bit, for odd pads in
+/// both orientations (95x40 and 40x95 onto the 64 square).
+#[test]
+fn device_letterbox_detections_equal_the_host_letterbox_path_bitwise() {
+    let _device = gpu_core::testgpu::exclusive();
+    let cfg = tiny_cfg(Activation::Relu);
+    let m = model(&cfg, 64, 64);
+    for (w0, h0) in [(95u32, 40u32), (40, 95)] {
+        let hwc = image(h0, w0);
+        let (chw, lb) = imaging::letterbox_rgb(&hwc, w0, h0, 64, 114.0 / 255.0);
+        let out = m.forward(&chw).unwrap();
+        let host = yolov5::decode::detections(&cfg, out.heads(), &lb, (w0, h0), 0.0, 0.45, yolov5::decode::MAX_DETECTIONS).unwrap();
+        let device = m.detect(&hwc, w0, h0, 0.0, 0.45).unwrap();
+        assert!(!host.is_empty(), "{w0}x{h0}: a zero threshold keeps candidates");
+        assert_eq!(host, device, "{w0}x{h0}");
+    }
+}

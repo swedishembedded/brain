@@ -49,6 +49,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("upsample2", kernels::UPSAMPLE2),
     ("concat2", kernels::CONCAT2),
     ("add2", kernels::ADD2),
+    // The device letterbox (`imaging::Ctx::letterbox_hwc_into`, resolved by name).
+    ("resize_nearest", kernels::RESIZE_NEAREST),
+    ("pad2d", kernels::PAD2D),
+    ("nlc_nchw", kernels::NLC_NCHW),
+    ("chan_place", kernels::CHAN_PLACE),
 ];
 
 fn ids() -> &'static ConvKernelIds {
@@ -201,6 +206,12 @@ impl Yolov5 {
             return Err(Error::Input(format!("image has {} values, expected {want} (3 x {} x {})", chw.len(), self.height, self.width)));
         }
         self.gpu.write_f32(&self.values[0], chw);
+        Ok(self.forward_resident())
+    }
+
+    /// The forward over the input already resident in `values[0]` (written by [`Self::forward`] or by the device
+    /// letterbox of [`Self::detect`]), reading the three head maps back.
+    fn forward_resident(&self) -> HeadOutputs {
         let ctx = Ctx::new(&self.gpu, ids());
         {
             let _pass = self.gpu.pass_scope();
@@ -229,12 +240,20 @@ impl Yolov5 {
             let s = self.shapes[self.graph.outputs[i]];
             (s.h as usize, s.w as usize)
         });
-        Ok(HeadOutputs { maps: std::array::from_fn(read), dims })
+        HeadOutputs { maps: std::array::from_fn(read), dims }
+    }
+
+    /// Letterbox `hwc` on the device into the input buffer, returning the box transform.
+    fn letterbox_into_input(&self, hwc: &[f32], w0: u32, h0: u32) -> imaging::Letterbox {
+        imaging::Ctx::new(&self.gpu).letterbox_hwc_into(hwc, w0, h0, self.height, LETTERBOX_PAD, &self.values[0], 1, 0)
     }
 
     /// Detect objects in one interleaved-RGB HWC image (`0..1`, `w0 * h0 * 3`
     /// values): letterbox to the (square) input, forward, decode, NMS, and map
-    /// the boxes back to original-image pixels.
+    /// the boxes back to original-image pixels. The decoded image is uploaded
+    /// once and letterboxed on the device straight into the network's input
+    /// buffer (bitwise equal to the host `imaging::letterbox_rgb`, which the
+    /// NPU path keeps for its host-memory input).
     pub fn detect(&self, hwc: &[f32], w0: u32, h0: u32, conf_thresh: f32, iou_thresh: f32) -> Result<Vec<Detection>, Error> {
         if self.height != self.width {
             return Err(Error::Input(format!("detect letterboxes into a square input; this instance is {}x{}", self.height, self.width)));
@@ -242,8 +261,8 @@ impl Yolov5 {
         if w0 == 0 || h0 == 0 || hwc.len() != (w0 as usize) * (h0 as usize) * 3 {
             return Err(Error::Input(format!("image of {w0}x{h0} needs {} values, got {}", (w0 as usize) * (h0 as usize) * 3, hwc.len())));
         }
-        let (chw, lb) = imaging::letterbox_rgb(hwc, w0, h0, self.height, LETTERBOX_PAD);
-        let out = self.forward(&chw)?;
+        let lb = self.letterbox_into_input(hwc, w0, h0);
+        let out = self.forward_resident();
         decode::detections(&self.cfg, out.heads(), &lb, (w0, h0), conf_thresh, iou_thresh, decode::MAX_DETECTIONS)
     }
 }
