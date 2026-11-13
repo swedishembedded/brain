@@ -103,6 +103,9 @@ pub struct ScanSettings {
     pub gpus: Vec<(u32, u64)>,
     /// Bytes kept free on each of [`Self::gpus`].
     pub reserved: u64,
+    /// `--max-batch` for the encoders that batch equal-length requests into
+    /// one forward (LFM2.5); `None` keeps each one's own default.
+    pub encoder_batch: Option<u32>,
 }
 
 /// What [`discover`] found.
@@ -393,7 +396,7 @@ impl Scan {
             None
         };
 
-        match resident_for(&wp, card, tokenizer.as_deref(), self.qwen_cfg_for(&card.id), self.settings.qwen35.fp32) {
+        match resident_for(&wp, card, tokenizer.as_deref(), self.qwen_cfg_for(&card.id), self.settings.qwen35.fp32, self.settings.encoder_batch) {
             Some(built) => self.keep(&card.id, built, dir),
             None => {
                 self.seen.remove(&card.id); // free the id if the family declined
@@ -553,7 +556,7 @@ fn register_compound(local: &brain_modelstore::LocalModel, scan: &mut Scan, erro
         return;
     }
     let gpus: Vec<u32> = scan.settings.gpus.iter().map(|&(i, _)| i).collect();
-    match build_for_local(local, scan.qwen_cfg_for(&id), scan.settings.qwen35.fp32, &gpus) {
+    match build_for_local(local, scan.qwen_cfg_for(&id), scan.settings.qwen35.fp32, scan.settings.encoder_batch, &gpus) {
         Ok(built) => scan.keep(&id, built, &local.dir),
         Err(reason) => {
             scan.seen.remove(&id); // free the id if the family declined, same as `register`
@@ -720,7 +723,7 @@ fn gguf_advice(weights: &str, architecture: &str) -> String {
 /// Construct the resident matching `card.family` (normalized via
 /// [`brain_family`]), or log + `None` for an unknown / not-yet-dispatchable
 /// family.
-fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Option<Built> {
+fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, encoder_batch: Option<u32>) -> Option<Built> {
     let family = brain_family(&card.family);
     // The GGUF gate, BEFORE the family match: a GGUF card's family is its
     // `general.architecture` copied verbatim, so an architecture string is
@@ -744,7 +747,7 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
     let other: Option<Arc<dyn ResidentModel>> = match family {
         "gpt" => Some(Arc::new(catalog::resident_llm::GptResident::from_card(weights, card, tokenizer))),
         "glm" => Some(Arc::new(catalog::resident_llm::GlmResident::from_card(weights, card, tokenizer))),
-        "lfm" => match catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer) {
+        "lfm" => match catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer, encoder_batch.unwrap_or(catalog::resident_lfm::DEFAULT_BATCH)) {
             Ok(l) => Some(Arc::new(l)),
             Err(e) => {
                 eprintln!("brain: skip {} ({e})", card.id);
@@ -818,21 +821,21 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
 /// No card is offered here: a model that spans cards is never auto-fetched
 /// (it has no default reference), so it reaches serving only through
 /// [`discover`], which hands it the cards it may use.
-pub fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Result<Arc<dyn ResidentModel>, String> {
-    build_for_local(local, qwen_cfg, qwen35_sizing, &[]).map(|built| built.erased())
+pub fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, encoder_batch: Option<u32>) -> Result<Arc<dyn ResidentModel>, String> {
+    build_for_local(local, qwen_cfg, qwen35_sizing, encoder_batch, &[]).map(|built| built.erased())
 }
 
-fn build_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, gpus: &[u32]) -> Result<Built, String> {
+fn build_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, encoder_batch: Option<u32>, gpus: &[u32]) -> Result<Built, String> {
     let card = local.card.as_ref().ok_or_else(|| "no model card".to_string())?;
     if local.adapter.is_some() {
         return Err(format!("{}: an adapter is served by the base it rides on, not built as a model of its own", card.id));
     }
     if let Some(roles) = &local.roles {
-        return resident_for_compound(card, roles, qwen_cfg, qwen35_sizing, gpus);
+        return resident_for_compound(card, roles, qwen_cfg, qwen35_sizing, encoder_batch, gpus);
     }
     let weights = local.weights.to_str().ok_or_else(|| "weights path is not valid UTF-8".to_string())?;
     let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
-    resident_for(weights, card, tokenizer, qwen_cfg, qwen35_sizing).ok_or_else(|| format!("family '{}' not servable from the model dir yet", card.family))
+    resident_for(weights, card, tokenizer, qwen_cfg, qwen35_sizing, encoder_batch).ok_or_else(|| format!("family '{}' not servable from the model dir yet", card.family))
 }
 
 /// The compound-model counterpart of [`resident_for`]: family dispatch keyed
@@ -841,7 +844,7 @@ fn build_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resi
 /// A checkpoint of a family whose model reads a downloaded Hugging Face
 /// directory (the qwen3 decoder and its `llama`/`qwen2` rows, glmdsa, lfm2)
 /// is served straight from the directory its `weights` role names.
-fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, gpus: &[u32]) -> Result<Built, String> {
+fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, encoder_batch: Option<u32>, gpus: &[u32]) -> Result<Built, String> {
     let implementation = brain_arch::by_id(&card.family).map(|a| a.implementation().id);
     if matches!(implementation, Some("qwen3" | "glmdsa" | "lfm2" | "qwen3omnimoe")) {
         let dir = roles.get("weights").ok_or("compound manifest missing role \"weights\"")?;
@@ -852,7 +855,7 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
             Some("qwen3") if catalog::resident_qwen_embed::is_embedding_id(&card.id) => Ok(Built::Other(catalog::resident_qwen_embed::embedding_resident(weights, card, tokenizer.to_str()))),
             Some("qwen3") => Ok(Built::Qwen(Arc::new(QwenResident::from_card_configured(weights, card, tokenizer.to_str(), qwen_cfg)))),
             Some("glmdsa") => Ok(Built::Other(Arc::new(catalog::resident_llm::GlmResident::from_card(weights, card, None)))),
-            Some("lfm2") => Ok(Built::Other(Arc::new(catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer.to_str())?))),
+            Some("lfm2") => Ok(Built::Other(Arc::new(catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer.to_str(), encoder_batch.unwrap_or(catalog::resident_lfm::DEFAULT_BATCH))?))),
             // Sharded across several GPUs, so it is registered on its own
             // multi-device path rather than from the model directory.
             _ => Err(format!("{} is served across GPUs: set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT={weights}", card.id)),
@@ -1249,7 +1252,7 @@ mod tests {
             let card = card_of(&p).expect("gguf card");
             assert_eq!(card.family, arch, "a GGUF card's family IS general.architecture, verbatim");
             assert!(
-                resident_for(p.to_str().unwrap(), &card, tok, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).is_none(),
+                resident_for(p.to_str().unwrap(), &card, tok, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default(), None).is_none(),
                 "raw {arch}.gguf routed into the brain-native '{arch}' resident, which cannot read GGUF bytes"
             );
         }
@@ -1263,7 +1266,7 @@ mod tests {
         write_gguf_qwen(&dir, "qwen3.gguf", "toy-qwen-gguf");
         let p = dir.join("qwen3.gguf");
         let card = card_of(&p).expect("gguf card");
-        assert!(resident_for(p.to_str().unwrap(), &card, None, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default()).is_some(), "a qwen3 GGUF must still serve from the scan");
+        assert!(resident_for(p.to_str().unwrap(), &card, None, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default(), None).is_some(), "a qwen3 GGUF must still serve from the scan");
 
         std::fs::remove_dir_all(&dir).ok();
     }

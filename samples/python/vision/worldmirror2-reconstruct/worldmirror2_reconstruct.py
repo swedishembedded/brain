@@ -13,8 +13,7 @@ them; the action also takes known ones as a `poses` blob). `reconstruct` is
 NOT streaming: it is a single feed-forward pass, nothing to report progress
 about.
 
-    BRAIN_WORLDMIRROR2_WEIGHTS=<mirror.safetensors> \\
-      tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus" -- \
         python3 samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py \\
             --images a.ppm,b.ppm,c.ppm --out scene.ply
 
@@ -99,7 +98,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():
-            print(f"FATAL: '{MODEL}' not served (set BRAIN_WORLDMIRROR2_WEIGHTS)", file=sys.stderr)
+            print(f"FATAL: '{MODEL}' not served (put a WorldMirror-2 checkpoint in the model store)", file=sys.stderr)
             return 2
 
         print(f"reconstructing {n_frames} frame(s) at {w}x{h} ...", flush=True)

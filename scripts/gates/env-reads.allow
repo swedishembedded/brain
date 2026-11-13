@@ -57,7 +57,6 @@ crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR_WINDOW
 crates/catalog/src/resident_controlnet.rs	BRAIN_CONTROLNET_DIR
 crates/catalog/src/resident_controlnet.rs	BRAIN_SDXL_DIR
 crates/catalog/src/resident_deepseekvl.rs	BRAIN_DEEPSEEKVL_TUNED
-crates/catalog/src/resident_depth.rs	BRAIN_ZIPDEPTH_WEIGHTS
 crates/catalog/src/resident_flux2.rs	BRAIN_FLUX2_FAMILY
 crates/catalog/src/resident_flux2.rs	BRAIN_FLUX2_MAX_BATCH
 crates/catalog/src/resident_forecast.rs	BRAIN_CHRONOS2
@@ -68,9 +67,6 @@ crates/catalog/src/resident_forecast.rs	BRAIN_TIMESFM3
 crates/catalog/src/resident_horizon.rs	MOE_SKIP_GPU_TESTS
 crates/catalog/src/resident_januspro.rs	BRAIN_JANUSPRO_TUNED
 crates/catalog/src/resident_januspro.rs	BRAIN_JANUSPRO_TUNED_GENERATION
-crates/catalog/src/resident_lfm.rs	BRAIN_LFM2
-crates/catalog/src/resident_lfm.rs	BRAIN_LFM2_BATCH
-crates/catalog/src/resident_lfm.rs	BRAIN_LFM2_TOKENIZER
 crates/catalog/src/resident_llm.rs	BRAIN_DEVICE
 crates/catalog/src/resident_llm.rs	BRAIN_GLMDSA_WEIGHTS
 crates/catalog/src/resident_llm.rs	BRAIN_GPT2_WEIGHTS
@@ -89,8 +85,6 @@ crates/catalog/src/resident_qwen35moe.rs	BRAIN_QWEN35MOE_WEIGHTS
 crates/catalog/src/resident_qwen3vl.rs	<DIR_VAR>
 crates/catalog/src/resident_restore.rs	BRAIN_CODEFORMER_WEIGHTS
 crates/catalog/src/resident_restore.rs	BRAIN_VQGAN_WEIGHTS
-crates/catalog/src/resident_sam2.rs	BRAIN_SAM2_VARIANT
-crates/catalog/src/resident_sam2.rs	BRAIN_SAM2_WEIGHTS
 crates/catalog/src/resident_sdxl.rs	BRAIN_SDXL_DIR
 crates/catalog/src/resident_supir.rs	BRAIN_SDXL_DIR
 crates/catalog/src/resident_supir.rs	BRAIN_SUPIR_DIR
@@ -101,7 +95,6 @@ crates/catalog/src/resident_tts.rs	BRAIN_QWEN3TTS_REF
 crates/catalog/src/resident_tts.rs	BRAIN_QWEN3TTS_REF_TEXT
 crates/catalog/src/resident_tts.rs	BRAIN_QWEN3TTS_WEIGHTS
 crates/catalog/src/resident_upscale.rs	BRAIN_ESRGAN_WEIGHTS
-crates/catalog/src/resident_worldmirror2.rs	BRAIN_WORLDMIRROR2_WEIGHTS
 crates/catalog/src/resident_yolo.rs	BRAIN_YOLOV8
 crates/catalog/src/resident_yolo.rs	BRAIN_YOLOV8_BATCH
 crates/catalog/src/resident_zimage.rs	BRAIN_S3DIT_RETAIN_INT8_CACHE
@@ -146,7 +139,6 @@ crates/cli/src/perf_cli.rs	BRAIN_FLUX2_TOKENIZER
 crates/cli/src/perf_cli.rs	BRAIN_FLUX2_VAE
 crates/cli/src/perf_cli.rs	BRAIN_FORECAST_HORIZON
 crates/cli/src/perf_cli.rs	BRAIN_FORECAST_SAMPLES
-crates/cli/src/perf_cli.rs	BRAIN_LFM2_BATCH
 crates/cli/src/perf_cli.rs	BRAIN_WAN_DIT
 crates/cli/src/perf_cli.rs	BRAIN_WAN_T5
 crates/cli/src/perf_cli.rs	BRAIN_WAN_TOKENIZER

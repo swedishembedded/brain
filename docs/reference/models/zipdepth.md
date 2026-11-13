@@ -114,9 +114,9 @@ which layers keep full precision when quantizing.
 | `--device-path <dev>`, `--res WxH` | `camera` | the webcam and the size asked of it |
 | `--scale N`, `--frames N` | the windows | window pixel scale; close after N frames |
 
-Served (`brain serve`, D-Bus), the same three actions are offered; a serving
-process loads a carded checkpoint found in its models directory, or
-`BRAIN_ZIPDEPTH_WEIGHTS`, and places `infer` on an NPU when one is budgeted.
+Served (`brain serve`, D-Bus), the same three actions are offered over the
+checkpoint the model store holds, and `infer` is placed on an NPU when one is
+budgeted.
 
 ## Hardware and limits
 

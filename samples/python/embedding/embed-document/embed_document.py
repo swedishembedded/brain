@@ -10,10 +10,8 @@ per-token hidden states come back the same way. Concurrency goes through
 brain's residency executor: equal-length requests batch into one true batched
 forward; different devices run in parallel lanes.
 
-Run under a private session bus (weights + tokenizer via env):
+Run under a private session bus (the checkpoint from the model store):
 
-    BRAIN_LFM2=out/lfm-230m.weights \
-    BRAIN_LFM2_TOKENIZER=/path/to/tokenizer.json \
     tools/dbus-session.sh --serve "--dbus" -- \
       python3 samples/python/embedding/embed-document/embed_document.py --input README.md --concurrent 4
 
@@ -80,7 +78,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            skip(f"{args.model!r} not served (models: {models}); set BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER")
+            skip(f"{args.model!r} not served (models: {models}); put an LFM2.5-Encoder checkpoint in the model store")
 
         # Warm-up (weight upload + graph build for this length) - never timed.
         print("warm-up:")

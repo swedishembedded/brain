@@ -33,10 +33,10 @@ pub struct DepthResident {
 const ENGINE_KEY: &str = "engine";
 
 impl DepthResident {
-    pub fn from_env() -> Option<DepthResident> {
-        let path = std::env::var("BRAIN_ZIPDEPTH_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        // See resident_llm.rs::GptResident::from_env's comment: env-loaded,
-        // no upstream vendor/repo provenance.
+    /// The checkpoint the model store resolves - a released `.pth`, or one
+    /// `train` wrote - under the model's own id.
+    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<DepthResident> {
+        let path = loader::served::served_assembly(models_dir, "zipdepth", &zipdepth::spec::ZipdepthSpec, &[])?.role_path("weights").ok()?;
         Some(Self::from_card(&path, &checkpoint::st::ModelCard::new(zipdepth::caps::MODEL, "depth"), None))
     }
 
@@ -155,5 +155,31 @@ impl Instance for DepthInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let act = self.provider.action(action).ok_or_else(|| format!("zipdepth: unknown action '{action}'"))?;
         crate::resident_llm::on_device(self.device, || act.run(inv, progress))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use checkpoint::torchpt_write::{write, TensorOut};
+
+    /// A serving process finds ZipDepth in its model store with nothing set
+    /// in its environment, and serves nothing when the store holds none.
+    #[test]
+    fn the_served_checkpoint_comes_from_the_model_store() {
+        let store = std::env::temp_dir().join(format!("catalog-depth-store-{}", std::process::id()));
+        let empty = store.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(DepthResident::from_store(Some(&empty)).is_none());
+
+        let cfg = ZipConfig { dims: [8, 16, 32, 64], depths: [1, 1, 1, 1], dec_ch: 6, half_dec_ch: 4, ..ZipConfig::base() };
+        let ckpt = store.join("full").join("brain").join("zipdepth").join("zipdepth_tiny.pth");
+        std::fs::create_dir_all(ckpt.parent().unwrap()).unwrap();
+        let tensors: Vec<TensorOut> = cfg.param_list().into_iter().map(|(name, shape)| TensorOut { data: vec![0.0; shape.iter().product()], name, shape }).collect();
+        write(ckpt.to_str().unwrap(), &tensors).unwrap();
+        let resident = DepthResident::from_store(Some(&store.join("full"))).expect("the store's checkpoint is served");
+        assert_eq!(resident.path, ckpt.to_str().unwrap());
+        assert_eq!(resident.manifest().actions.len(), zipdepth::caps::manifest().actions.len());
+        let _ = std::fs::remove_dir_all(&store);
     }
 }

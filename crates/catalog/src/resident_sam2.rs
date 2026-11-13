@@ -29,10 +29,9 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use sam2::caps::Session;
 
-/// SAM 2.1 behind the scheduler. `BRAIN_SAM2_WEIGHTS` names the release
-/// checkpoint (`sam2.1_hiera_{tiny,large}.pt`), `BRAIN_SAM2_VARIANT` its variant
-/// (default `tiny`); a request may override the variant per call, which keys a
-/// separate instance.
+/// SAM 2.1 behind the scheduler, over the release checkpoint the model store
+/// resolves (`sam2.1_hiera_{tiny,large}.pt`) and its variant; a request may
+/// override the variant per call, which keys a separate instance.
 pub struct Sam2Resident {
     path: String,
     variant: String,
@@ -41,10 +40,9 @@ pub struct Sam2Resident {
 impl Sam2Resident {
     /// `None` when the checkpoint is unset or absent — registering a model whose
     /// every call would fail is worse than not serving it.
-    pub fn from_env() -> Option<Sam2Resident> {
-        let path = std::env::var("BRAIN_SAM2_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        let variant = std::env::var("BRAIN_SAM2_VARIANT").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "tiny".into());
-        Self::new(path, variant)
+    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<Sam2Resident> {
+        let assembly = loader::served::served_assembly(models_dir, "sam2", &sam2::spec::Sam2Spec, &[])?;
+        Self::new(assembly.role_path("weights").ok()?, assembly.variant.unwrap_or_else(|| "tiny".into()))
     }
 
     /// Direct constructor (no env round-trip) — see

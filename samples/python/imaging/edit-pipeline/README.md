@@ -5,7 +5,7 @@ restore -> (optionally) upscale.** `edit_pipeline.py` drives `brain/imgpipe`'s
 `run` action as a single request instead of four round trips.
 
 ```bash
-BRAIN_SAM2_WEIGHTS=... BRAIN_CODEFORMER_WEIGHTS=... BRAIN_ESRGAN_WEIGHTS=... \
+BRAIN_CODEFORMER_WEIGHTS=... BRAIN_ESRGAN_WEIGHTS=... \
   tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/imaging/edit-pipeline/edit_pipeline.py --image photo.ppm --point 614,430 --upscale
 ```
@@ -32,8 +32,9 @@ lists - the sample builds the JSON, it does not define it.
 
 ## What it needs
 
-- `BRAIN_SAM2_WEIGHTS`, `BRAIN_CODEFORMER_WEIGHTS`, `BRAIN_ESRGAN_WEIGHTS` -
-  only the stages you actually request need their weights configured.
+- A SAM 2.1 checkpoint in the model store, `BRAIN_CODEFORMER_WEIGHTS`,
+  `BRAIN_ESRGAN_WEIGHTS` - only the stages you actually request need their
+  weights configured.
 - `jeepney` - `pip install -e brain-py`.
 
 ## Options

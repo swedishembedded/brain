@@ -32,45 +32,36 @@ const SLAB_BUDGET: u64 = 512 << 20;
 /// Probe capacity for fill_mask (masks per request).
 const PROBE_CAP: u32 = 64;
 
+/// Batched-forward slots per instance when the operator names none.
+pub const DEFAULT_BATCH: u32 = 2;
+
 pub struct LfmResident {
     /// Catalog id (the model-card id): the manifest/instance-key key.
     id: String,
     weights: String,
     tokenizer_path: String,
     tok: Arc<QwenBpe>,
-    /// Batched-forward slots per instance (`BRAIN_LFM2_BATCH`, default 2).
+    /// Batched-forward slots per instance (`--max-batch`, default [`DEFAULT_BATCH`]).
     batch: u32,
     /// Bytes of the checkpoint (device weight footprint ≈ file size, fp32).
     weight_bytes: u64,
 }
 
 impl LfmResident {
-    pub fn from_env() -> Option<LfmResident> {
-        let weights = std::env::var("BRAIN_LFM2").ok().filter(|p| !p.is_empty())?;
-        let tokenizer = std::env::var("BRAIN_LFM2_TOKENIZER").ok().filter(|p| !p.is_empty())?;
-        match Self::new(&weights, &tokenizer) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                residency::log::not_served(&format!("brain: lfm not served over the scheduler ({e})"));
-                None
-            }
-        }
-    }
-
     /// Explicit-path constructor (the perf harness builds it directly): the
     /// canonical brain/ fallback as the catalog id (see
     /// `resident_llm.rs::GptResident::from_env`'s comment -- no upstream
     /// vendor/repo provenance from an env-loaded checkpoint).
-    pub fn new(weights: &str, tokenizer_path: &str) -> Result<LfmResident, String> {
-        Self::from_card(weights, &ModelCard::new("brain/lfm2", "lfm"), Some(tokenizer_path))
+    pub fn new(weights: &str, tokenizer_path: &str, batch: u32) -> Result<LfmResident, String> {
+        Self::from_card(weights, &ModelCard::new("brain/lfm2", "lfm"), Some(tokenizer_path), batch)
     }
 
     /// Construct under the card's id. The encoder tokenizes eagerly, so a
     /// `tokenizer.json` is required (LFM embeds no vocab); `None`/empty errors.
-    pub fn from_card(weights: &str, card: &ModelCard, tokenizer_path: Option<&str>) -> Result<LfmResident, String> {
+    pub fn from_card(weights: &str, card: &ModelCard, tokenizer_path: Option<&str>, batch: u32) -> Result<LfmResident, String> {
         let tokenizer_path = tokenizer_path.filter(|t| !t.is_empty()).ok_or("lfm: a sibling tokenizer.json is required")?;
         let tok = Arc::new(QwenBpe::from_file(tokenizer_path)?);
-        let batch = std::env::var("BRAIN_LFM2_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(2u32).max(1);
+        let batch = batch.max(1);
         // fp32 on the device: from the config for a downloaded directory (whose
         // files may be bf16), else the brain file's own size.
         let weight_bytes = if std::path::Path::new(weights).is_dir() {

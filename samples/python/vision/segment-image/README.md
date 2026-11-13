@@ -5,7 +5,7 @@ D-Bus: one image, several point/box prompts, a mask plus a cut-out per
 prompt back.
 
 ```bash
-BRAIN_SAM2_WEIGHTS=$BRAIN_TESTDATA/sam2/hiera-tiny/sam2.1_hiera_tiny.pt \
+brain pull facebook/sam2.1-hiera-tiny
 tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/vision/segment-image/segment_image.py --image photo.ppm --point 614,430 --concurrent 4
 ```
@@ -35,7 +35,8 @@ the reference's rule).
 
 ## What it needs
 
-`BRAIN_SAM2_WEIGHTS` (+ optional `BRAIN_SAM2_VARIANT=tiny|large`). Input is
+A SAM 2.1 checkpoint in the model store (`brain pull facebook/sam2.1-hiera-tiny`,
+or `-large`); the served model takes its variant from it. Input is
 a binary PPM (P6).
 
 **Not supported**: a mask prompt. The reference downsamples one with

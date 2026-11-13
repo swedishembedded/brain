@@ -160,8 +160,7 @@ OpenVINO - an advanced path for NPU deployment rather than everyday use.
 ## Serving (D-Bus)
 
 Model id: `brain/worldmirror2`. The checkpoint is a machine-side setting
-(the model store, or `BRAIN_WORLDMIRROR2_WEIGHTS` for the scheduled service),
-not a per-request param: a remote caller cannot answer "where is the
+(the model store), not a per-request param: a remote caller cannot answer "where is the
 checkpoint on THIS machine".
 
 ```bash

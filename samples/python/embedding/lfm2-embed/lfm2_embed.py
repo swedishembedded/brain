@@ -13,10 +13,9 @@ request length because bidirectional attention makes unmasked padding
 unsound (see `crates/lfm2/src/caps.rs`), so this sample does not batch
 client-side the way `t5_embed.py --concurrent` does.
 
-Run under a private session bus (weights via env):
+Run under a private session bus (the checkpoint from the model store):
 
-    BRAIN_LFM2=<ckpt>.safetensors BRAIN_LFM2_TOKENIZER=<tokenizer>.json \\
-      tools/dbus-session.sh --serve "--dbus" -- \\
+    tools/dbus-session.sh --serve "--dbus" -- \\
       python3 samples/python/embedding/lfm2-embed/lfm2_embed.py \\
         --text "the quick brown fox jumps over the lazy dog"
 
@@ -82,7 +81,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():
-            skip(f"{MODEL!r} not served (set BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER)")
+            skip(f"{MODEL!r} not served (import an LFM2.5-Encoder checkpoint into the model store)")
 
         if args.action == "embed":
             text = args.text or "the quick brown fox jumps over the lazy dog"

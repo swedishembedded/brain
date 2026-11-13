@@ -11,7 +11,7 @@
 //! every `hiera_tiny` release and 144 for every `hiera_large` one
 //! ([`crate::config::Sam2Config::hiera_tiny`]/[`hiera_large`]), so `assemble`
 //! derives it from the chosen checkpoint's own shape instead of trusting a
-//! `--variant`/`BRAIN_SAM2_VARIANT` flag that could name a different file than
+//! `--variant` flag that could name a different file than
 //! the one actually loaded - the same class of gap FLUX.2's own resolver
 //! migration closed for its klein-vs-base binding.
 

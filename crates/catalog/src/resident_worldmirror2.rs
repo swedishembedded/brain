@@ -41,7 +41,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use worldmirror2::caps::Session;
 
-/// WorldMirror-2 behind the scheduler (`BRAIN_WORLDMIRROR2_WEIGHTS`).
+/// WorldMirror-2 behind the scheduler, over the checkpoint the model store resolves.
 pub struct WorldMirror2Resident {
     path: String,
 }
@@ -49,8 +49,8 @@ pub struct WorldMirror2Resident {
 impl WorldMirror2Resident {
     /// `None` when the checkpoint is unset or absent - registering a model
     /// whose every call would fail is worse than not serving it.
-    pub fn from_env() -> Option<WorldMirror2Resident> {
-        let path = std::env::var("BRAIN_WORLDMIRROR2_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<WorldMirror2Resident> {
+        let path = loader::served::served_assembly(models_dir, "worldmirror2", &worldmirror2::spec::MirrorSpec, &[])?.role_path("weights").ok()?;
         if !std::path::Path::new(&path).exists() {
             residency::log::not_served(&format!("brain: worldmirror2 not served ({path} does not exist)"));
             return None;

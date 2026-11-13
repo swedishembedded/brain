@@ -51,4 +51,5 @@ Each row is one or more self-contained commits: the served action gains what the
 | gpt2, toypid, toymoe | train, sample text, eval, rollout, profile | a provider each; samples |
 | diamond | `play`, `replay`, `bench`, `import`, `finetune`, `export` | game loop in the sample; actions |
 | top level | `npu`, `label`, `forecast`, `decide` lifecycle, `federated`, `data`, `gradcheck` | the owning model's actions and samples; generic tools stay where generic |
+| env | serving adapters still built from `BRAIN_*` variables (`resident!(..::from_env)`, the executor's direct `from_env` calls), per-model tuning variables (`BRAIN_*_BATCH`, `_CTX`, `_TE_DEVICE`, ...), tests that find checkpoints through variables | store resolution (`resident_in_store!`), generic serve parameters (`--max-batch`, `--ctx`, ...) or the model's own action params; tests through the store |
 | cli | `resolver_cli`'s private arch-to-spec table duplicates `catalog::resolver_spec_for`; help text; `docs/reference/cli.md` | one table; regenerated reference |

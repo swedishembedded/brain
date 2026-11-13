@@ -19,7 +19,7 @@
 //! registering the model, not extending the transport.
 //!
 //! The registry is supplied by the caller rather than built here, because which
-//! models are available is an environment question (`BRAIN_SAM2_WEIGHTS`,
+//! models are available is a question of the machine (the model store, or
 //! `BRAIN_CODEFORMER_WEIGHTS`, …) that `crates/cli` already answers. A stage whose
 //! model is not registered fails with that model's own "set BRAIN_… " message,
 //! which is more useful than a generic one from here.

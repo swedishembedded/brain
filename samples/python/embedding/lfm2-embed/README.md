@@ -6,8 +6,7 @@ same chunked long-context path, so an 8k-token document works the same way
 as a short sentence.
 
 ```bash
-BRAIN_LFM2=<ckpt>.safetensors BRAIN_LFM2_TOKENIZER=<tokenizer>.json \
-  tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/embedding/lfm2-embed/lfm2_embed.py \
     --text "the quick brown fox jumps over the lazy dog"
 
@@ -29,8 +28,8 @@ python3 samples/python/embedding/lfm2-embed/lfm2_embed.py \
 
 ## What it needs
 
-`BRAIN_LFM2` (a brain-format LFM2.5-Encoder `.safetensors` checkpoint) and
-`BRAIN_LFM2_TOKENIZER` (its `tokenizer.json`).
+A brain-format LFM2.5-Encoder checkpoint and its `tokenizer.json` in the
+model store (see `samples/models/lfm2` for the one-time import).
 
 Plus `jeepney` - `pip install -e brain-py`.
 

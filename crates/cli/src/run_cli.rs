@@ -408,7 +408,7 @@ STDIO CONTROLLER  (--stdio)
 MODEL CONFIGURATION
   Which models this server serves: every model in the model store, each
   under its store id, the --checkpoint, plus those some families still take
-  from BRAIN_* env vars (BRAIN_LFM2, BRAIN_NEMOTRONASR, ...). A family with
+  from BRAIN_* env vars (BRAIN_NEMOTRONASR, ...). A family with
   nothing on this machine is counted in one startup line; -v lists each. Tuning an already-selected
   model (context length, batching, precision, ...) is a flag where one
   exists - see QWEN3 / QWEN3.8 SERVING above. Run
@@ -1057,7 +1057,7 @@ pub fn run_serve(args: &[String]) {
             ready,
             deadlines,
             adapter_mode,
-            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, train },
+            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, encoder_batch: policy.limits.max_batch, train },
         });
     }
 

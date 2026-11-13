@@ -6,7 +6,6 @@ scene plus the per-frame cameras WorldMirror-2 itself predicted out - this
 script sends no poses; the model estimates them.
 
 ```bash
-BRAIN_WORLDMIRROR2_WEIGHTS=<mirror.safetensors> \
 tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py \
       --images a.ppm,b.ppm,c.ppm --out scene.ply
@@ -30,9 +29,8 @@ with `sample-models-splat view scene.ply` or
 
 ## What it needs
 
-`BRAIN_WORLDMIRROR2_WEIGHTS` pointing at the checkpoint (the scheduled
-service's setting; a direct run resolves it from the model store, see
-`sample-models-worldmirror2`).
+A WorldMirror-2 checkpoint in the model store, where the server finds it (see
+`samples/models/worldmirror2`).
 
 ## Options
 

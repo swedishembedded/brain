@@ -604,7 +604,7 @@ pub fn models() -> Vec<ModelEntry> {
             manifest: zipdepth::caps::manifest,
             provider: zipdepth::caps::provider,
             spec: Some(("zipdepth", &zipdepth::spec::ZipdepthSpec)),
-            resident: None,
+            resident: crate::resident_in_store!(crate::resident_depth::DepthResident::from_store),
         },
         // The imaging models carry their weights path in the provider (from a
         // `BRAIN_*` env var), not as an action param, so `brain do` and the
@@ -616,7 +616,7 @@ pub fn models() -> Vec<ModelEntry> {
             manifest: sam2::caps::manifest,
             provider: sam2::caps::provider,
             spec: Some(("sam2", &sam2::spec::Sam2Spec)),
-            resident: crate::resident!(crate::resident_sam2::Sam2Resident::from_env),
+            resident: crate::resident_in_store!(crate::resident_sam2::Sam2Resident::from_store),
         },
         ModelEntry {
             manifest: scrfd::caps::manifest,
@@ -986,7 +986,7 @@ pub fn models() -> Vec<ModelEntry> {
             manifest: worldmirror2::caps::manifest,
             provider: worldmirror2::caps::provider,
             spec: Some(("worldmirror2", &worldmirror2::spec::MirrorSpec)),
-            resident: resident!(resident_worldmirror2::WorldMirror2Resident::from_env),
+            resident: resident_in_store!(resident_worldmirror2::WorldMirror2Resident::from_store),
         },
         // No-weights utility models, listed by `brain caps` and served as
         // stateless residents by the serving executor rather than through this

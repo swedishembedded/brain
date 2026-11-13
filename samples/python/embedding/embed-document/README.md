@@ -21,10 +21,8 @@ call is as slow as the cold fetch; every one after is instant). Point
 `--model` at `LiquidAI/LFM2.5-230M` for the smaller encoder, or `brain/mock`
 for a weight-free smoke test.
 
-Prefer an already-converted local checkpoint instead? Set `BRAIN_LFM2`/
-`BRAIN_LFM2_TOKENIZER` before `brain serve --dbus` and pass `--model
-brain/lfm2` - the env-loaded-checkpoint fallback (the `brain/` table),
-unchanged from before auto-fetch existed.
+Prefer an already-converted local checkpoint instead? Keep it, with its
+`tokenizer.json`, in the model store and pass `--model` with its store id.
 
 ## What it demonstrates
 
@@ -47,8 +45,7 @@ unchanged from before auto-fetch existed.
 
 ## What it needs
 
-- Nothing pre-fetched, or `BRAIN_LFM2`/`BRAIN_LFM2_TOKENIZER` for a local
-  checkpoint.
+- Nothing pre-fetched, or a local checkpoint in the model store.
 - `jeepney` - `pip install -e brain-py`.
 
 ## Options
@@ -57,7 +54,7 @@ unchanged from before auto-fetch existed.
 |---|---|
 | `--input FILE` | *required* - text file to embed (long context welcome) |
 | `--concurrent N` | `1` - issue N identical requests concurrently |
-| `BRAIN_LFM2_BATCH` | `2` - batched-forward slots per instance |
+| `brain serve --max-batch N` | `2` - batched-forward slots per instance |
 | `BRAIN_DEVICE` | unset - which compute is schedulable |
 
 The benchmark twin of this sample is `make perf/model/lfm` - the same executor

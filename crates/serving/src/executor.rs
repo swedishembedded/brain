@@ -99,6 +99,8 @@ pub struct ServeKnobs {
     pub decision: catalog::resident_decision::DecisionServeConfig,
     /// The DeepSeek-OCR generations: the model-agnostic policy flags they honour (`--max-batch`, `--ctx`, `--kv-cache`, `--gemm`).
     pub ocr: ocrserve::OcrServeConfig,
+    /// `--max-batch` for the encoders that batch equal-length requests into one forward (LFM2.5).
+    pub encoder_batch: Option<u32>,
     /// Serve training (`brain/train`) beside the models; `None` serves none.
     pub train: Option<TrainKnobs>,
 }
@@ -145,7 +147,7 @@ pub struct TrainKnobs {
 /// resident, and `knobs.decision` naming the decision models served beyond
 /// those the store holds.
 pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std::path::Path>, policy: Policy, knobs: ServeKnobs) -> Serving {
-    let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, train } = knobs;
+    let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, encoder_batch, train } = knobs;
     // Process-wide, before any OCR model is built: the models read it when they load.
     ocrserve::configure(ocr);
     let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
@@ -236,13 +238,8 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
         }
         Err(e) => residency::log::not_served(&format!("brain: qwen35 not served over the scheduler ({e})")),
     }
-    // LFM2.5-Encoder (BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER): fill-mask + embeddings
-    // with equal-length true batching (see resident_lfm.rs).
-    if let Some(l) = catalog::resident_lfm::LfmResident::from_env() {
-        models.push(Arc::new(l));
-    } else {
-        residency::log::not_served("brain: lfm not served over the scheduler (set BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER)");
-    }
+    // LFM2.5-Encoder is served from the model-dir scan below: a checkpoint
+    // carded `lfm` beside its tokenizer.json (see resident_lfm.rs).
     // FLUX.2 Klein (BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}, else every
     // independent `dit` checkpoint the model store holds, each its own
     // resident under its real vendor/repo id): text-to-image,
@@ -274,35 +271,13 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     for l in ltxv_residents {
         models.push(Arc::new(l));
     }
-    // Monocular depth (BRAIN_ZIPDEPTH_WEIGHTS).
-    if let Some(d) = catalog::resident_depth::DepthResident::from_env() {
-        models.push(Arc::new(d));
-    }
-    // Imaging models, each gated on its own weights env var: SAM 2.1 promptable
-    // segmentation (BRAIN_SAM2_WEIGHTS, prompt-batched per image), the
-    // antelopev2 face stack (BRAIN_SCRFD_DIR + BRAIN_ARCFACE_DIR), the VQ autoencoder
-    // (BRAIN_VQGAN_WEIGHTS), CodeFormer restoration (BRAIN_CODEFORMER_WEIGHTS) and
-    // the CLIP encoders (BRAIN_CLIP_DIR, genuinely batched per tower).
-    // The imaging models come from `crate::catalog`, which owns their manifests
-    // and providers too - so a model cannot be listed by `brain caps`, runnable
-    // by `brain do` and yet missing here (which is exactly how Real-ESRGAN
-    // shipped unreachable). Each is still gated on its own weights env var.
-    // ... plus, from the same catalog: TTS (BRAIN_QWEN3TTS_WEIGHTS), speech-to-text
-    // (BRAIN_NEMOTRONASR + BRAIN_QWEN3ASR), the forecasting foundation models
-    // (BRAIN_CHRONOS2 / BRAIN_FINCAST / BRAIN_KRONOS_* - chronos2/fincast
-    // advertise an NPU footprint and auto-place there when budgeted), and
-    // splat (`brain/splat` - render/fit, `resident_splat.rs`) which, unlike
-    // every other entry here, needs no weights at all: the scene arrives as
-    // request bytes, so it is always registered, gated on nothing, and
-    // worldmirror2 (`brain/worldmirror2` - reconstruct, `BRAIN_WORLDMIRROR2_
-    // WEIGHTS`, `resident_worldmirror2.rs`) which, like GLM/qwen3.5 above,
-    // takes `weights` as a per-invocation action param on the direct path,
-    // so its own `manifest` is weights-free - but whose resident (like
-    // splat's) is registered declaratively here rather than by a manual push
-    // below, since `resident_worldmirror2.rs` lives in this crate the same
-    // reason `resident_splat.rs` does. Folded into `catalog::models()` so
-    // `brain caps`/`brain do` and this executor can no longer disagree about
-    // their existence.
+    // Every catalog model with a residency adapter (`catalog::models()`, the
+    // one table `brain caps` and `brain <model> <action>` read too, so a model
+    // cannot be runnable there and missing here): built from the checkpoint
+    // the model store resolves where the model has a store spec (SAM 2.1,
+    // ZipDepth, WorldMirror-2, the antelopev2 face stack, CLIP, FLUX.1, ...),
+    // else from that model's own weights variable until it moves to the store.
+    // splat needs no weights and is always registered.
     models.extend(catalog::residents(models_dir));
     // Decision models (decide + Laya): one resident per checkpoint under its
     // store id, plus the family model that answers inventory and `auto`
@@ -396,7 +371,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     let mut ricursive_discovered = Vec::new();
     if let Some(dir) = models_dir {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
-        let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved };
+        let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved, encoder_batch };
         let discovered = crate::model_dir::discover(dir, &settings);
         // The env-selected resident and a model-dir entry may be the same
         // checkpoint. Two residents would be two instances: two copies of the

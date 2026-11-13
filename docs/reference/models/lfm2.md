@@ -50,10 +50,11 @@ brain lfm2 eval --data data/lfm --weights ft.safetensors --seed $RANDOM
 
 A long document comes from a file with `--in text=doc.txt`.
 
-To serve it over HTTP or D-Bus:
+To serve it over HTTP or D-Bus, keep the imported checkpoint and its
+`tokenizer.json` in the model store and start the server:
 
 ```bash
-BRAIN_LFM2=lfm-350m.safetensors BRAIN_LFM2_TOKENIZER=tokenizer.json brain serve --dbus --openai
+brain serve --dbus --openai
 ```
 
 Embeddings are reachable at the standard `POST /embeddings` endpoint once
@@ -66,7 +67,7 @@ other actions as they are.
   context).
 - `--topk K` - number of mask-fill candidates to return.
 - `--normalize true` - L2-normalize the mean-pooled embedding.
-- `BRAIN_LFM2_BATCH` - batched-forward slots per serving instance (default 2).
+- `brain serve --max-batch N` - batched-forward slots per serving instance (default 2).
 
 ## Hardware and limits
 

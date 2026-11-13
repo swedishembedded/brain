@@ -176,7 +176,7 @@ pub struct Arch {
     /// about compound fetches it would need for exactly one model.
     pub extra_refs: &'static [&'static str],
     /// `(env var, manifest role)` pairs this architecture's OWN weights
-    /// resolution reads (`BRAIN_SAM2_WEIGHTS`, `BRAIN_S3DIT_DIT`, ...) -- the
+    /// resolution reads (`BRAIN_S3DIT_DIT`, ...) -- the
     /// capability-path counterpart to [`default_ref`](Self::default_ref):
     /// architectures reached via `brain <arch> <action>`'s generic capability
     /// dispatch (never through the `--weights`-flag injection the
@@ -630,7 +630,7 @@ pub const ARCHS: &[Arch] = &[
     // No `weights_env`: sam2 resolves its single `weights` role through
     // `brain_modelstore::resolve` (`crates/sam2/src/spec.rs`, which also
     // derives the tiny/large variant from the checkpoint's own trunk width),
-    // not `BRAIN_SAM2_WEIGHTS`.
+    // not a weights variable.
     arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2", default_ref: Some("facebook/sam2.1-hiera-tiny"),
         variants: &[
             Variant { reference: "facebook/sam2.1-hiera-tiny", params: 38_963_010, quants: &[], license: None },

@@ -24,7 +24,7 @@ Model id: `brain/imgpipe`. It has no weights of its own - each stage resolves
 its own model's weights the normal way, and a stage whose model is
 unconfigured fails with that model's own error:
 
-- `segment` → `BRAIN_SAM2_WEIGHTS`
+- `segment` → the SAM 2.1 checkpoint in the model store
 - `restore` → `BRAIN_CODEFORMER_WEIGHTS`
 - `upscale` → `BRAIN_ESRGAN_WEIGHTS`
 - `supir_restore` → `BRAIN_SDXL_DIR` + `BRAIN_SUPIR_DIR`

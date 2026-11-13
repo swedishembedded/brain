@@ -17,8 +17,8 @@ segmented region. The point of the example is what the timings show:
 
 Run it against a private session bus:
 
-    BRAIN_SAM2_WEIGHTS=$BRAIN_TESTDATA/sam2/hiera-tiny/sam2.1_hiera_tiny.pt \\
-      tools/dbus-session.sh --serve "--dbus" -- \
+    brain pull facebook/sam2.1-hiera-tiny
+    tools/dbus-session.sh --serve "--dbus" -- \
         python3 samples/python/vision/segment-image/segment_image.py --image photo.ppm --point 614,430
 """
 from __future__ import annotations
@@ -81,7 +81,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if "brain/sam2" not in brain.models():
-            print("FATAL: 'sam2' not served (set BRAIN_SAM2_WEIGHTS)", file=sys.stderr)
+            print("FATAL: 'sam2' not served (pull a SAM 2.1 checkpoint: brain pull facebook/sam2.1-hiera-tiny)", file=sys.stderr)
             return 2
 
         print(f"{args.image}: {w}x{h}, {len(prompts)} prompt(s)")

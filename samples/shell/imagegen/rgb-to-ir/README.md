@@ -245,7 +245,7 @@ SAM 2 through the CLI loads the checkpoint in every process: measured at 37 to
 boxes. `--backend dbus` (default) uses one resident `brain serve --dbus` and
 brain-py (needs `pip install jeepney`; `--brain-py` names the brain-py
 location): the first box of a tile costs the image encoder (about 2.5 s), the
-rest about 0.1 s each. Start the server with `BRAIN_SAM2_WEIGHTS=<ckpt> brain
+rest about 0.1 s each. Start the server (it finds SAM 2.1 in the model store) with `brain
 --device gpu1 --backend cuda serve --dbus --dbus-address <addr>` and pass
 `--dbus-address <addr>`; `--backend cli --brain-args '--device gpu1 --backend
 cuda'` is the dependency-free fallback.

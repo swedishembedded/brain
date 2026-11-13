@@ -900,20 +900,24 @@ fn build_http_target(weights: &str, tokenizer: &str, model_id: &str, info: Targe
 
 
 
-/// `lfm:<weights>:<tokenizer.json>` - the LFM2.5 encoder behind the residency
+/// `lfm:<weights>:<tokenizer.json>[:<batch>]` - the LFM2.5 encoder behind the residency
 /// EXECUTOR (scheduler + budgets + device lanes), so concurrency>1 measures
 /// brain's real batching/placement rather than a synchronous provider mutex.
 /// One-shot semantics: artifact_unit "sequence", ttfa == e2e, tpoa null.
 /// The synthetic payload realises `input_artifacts` EXACTLY via `max_tokens`
 /// truncation, so every request of a length shares one built graph.
 fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
-    let (weights, tokenizer) = rest
-        .split_once(':')
-        .ok_or("lfm target needs 'lfm:<weights>:<tokenizer.json>'")?;
+    let (weights, rest) = rest.split_once(':').ok_or("lfm target needs 'lfm:<weights>:<tokenizer.json>[:<batch>]'")?;
+    // An optional last field is the batched-forward slot count; a tokenizer path
+    // is never a bare number.
+    let (tokenizer, batch) = match rest.rsplit_once(':') {
+        Some((tokenizer, n)) if n.parse::<u32>().is_ok() => (tokenizer, n.parse::<u32>().expect("checked")),
+        _ => (rest, catalog::resident_lfm::DEFAULT_BATCH),
+    };
     if !std::path::Path::new(weights).exists() {
         return Err(format!("lfm weights not found: {weights}"));
     }
-    let resident = catalog::resident_lfm::LfmResident::new(weights, tokenizer)?;
+    let resident = catalog::resident_lfm::LfmResident::new(weights, tokenizer, batch)?;
     // Budget ONLY the schedulable devices (`--device`/BRAIN_DEVICE narrowing,
     // exactly as `brain serve --dbus` does): budgeting an excluded GPU lets
     // placement pick an index the process cannot see, and the lane silently
@@ -936,7 +940,7 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     );
     let info = vec![
         ("weights".to_string(), serde_json::json!(weights)),
-        ("batch".to_string(), serde_json::json!(std::env::var("BRAIN_LFM2_BATCH").unwrap_or_else(|_| "2".into()))),
+        ("batch".to_string(), serde_json::json!(batch)),
         ("engine".to_string(), serde_json::json!("residency-executor")),
     ];
     let build = Box::new(|req: &perf::target::PerfRequest| {
