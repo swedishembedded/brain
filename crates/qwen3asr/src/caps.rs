@@ -16,8 +16,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use audio::asr_caps::{transcribe_spec, transcription_outcome, wav_from_blob};
-use capability::{Action, ActionResult, ActionSpec, Invocation, Manifest, Progress, Provider};
+use audio::asr_caps::{transcription_outcome, wav_from_blob};
+use capability::{Action, ActionResult, ActionSpec, Invocation, Manifest, ParamSpec, ParamType, Progress, Provider};
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 
@@ -84,7 +84,45 @@ pub fn window_features(wav: &[f32], window_samples: usize) -> (Vec<f32>, u32) {
     (fm.mel, fm.n_frames as u32)
 }
 
-/// The manifest (one `transcribe` action; schema shared via [`audio::asr_caps`]).
+/// The decode window, seconds, when the caller names none.
+pub const DEFAULT_WINDOW_SECS: f32 = 30.0;
+/// Tokens one transcription may generate when the caller names no limit.
+pub const DEFAULT_MAX_NEW: usize = 200;
+/// Longest decode window an engine may be built for, seconds.
+const MAX_WINDOW_SECS: f64 = 600.0;
+/// Most tokens one transcription may generate.
+const MAX_NEW_TOKENS: f64 = 4_096.0;
+
+/// The `transcribe` action: the schema every ASR model shares
+/// ([`audio::asr_caps::transcribe_spec`]) plus the engine's sizing - the
+/// decode window and the generation limit the model is built for, host-side
+/// like every engine-sizing knob.
+pub fn transcribe_spec() -> ActionSpec {
+    audio::asr_caps::transcribe_spec()
+        .param(
+            ParamSpec::new("window_secs", ParamType::Float, "decode window, seconds; longer audio is transcribed up to it and reported truncated")
+                .default(serde_json::json!(DEFAULT_WINDOW_SECS))
+                .min(1.0)
+                .max(MAX_WINDOW_SECS)
+                .host_resolved(),
+        )
+        .param(
+            ParamSpec::new("max_new", ParamType::Int, "most tokens one transcription generates")
+                .default(serde_json::json!(DEFAULT_MAX_NEW))
+                .min(1.0)
+                .max(MAX_NEW_TOKENS)
+                .host_resolved(),
+        )
+}
+
+/// The engine sizing an invocation names: `(window seconds, max new tokens)`.
+pub fn tuning(inv: &Invocation) -> (f32, usize) {
+    let window = inv.get_f64("window_secs").map_or(DEFAULT_WINDOW_SECS, |w| w as f32);
+    let max_new = inv.get_i64("max_new").map_or(DEFAULT_MAX_NEW, |n| n.max(1) as usize);
+    (window, max_new)
+}
+
+/// The manifest (one `transcribe` action).
 pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "Qwen3-ASR 1.7B — offline speech-to-text (fixed audio window).", vec![transcribe_spec()])
 }
@@ -211,7 +249,7 @@ impl Action for TranscribeAction {
         let wav = wav_from_blob(blob)?;
         let truncated = window_truncation(self.inner.window_samples, &wav);
         if let Some((total, window)) = truncated {
-            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise BRAIN_QWEN3ASR_WINDOW)")));
+            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise window_secs)")));
         }
         progress(Progress::step(0, 1, "transcribing"));
         let (text, tokens) = self.inner.transcribe(&wav)?;

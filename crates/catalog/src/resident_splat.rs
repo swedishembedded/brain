@@ -30,7 +30,8 @@ use splat::caps::SplatProvider;
 pub struct SplatResident;
 
 impl SplatResident {
-    pub fn from_env() -> Option<SplatResident> {
+    /// Splatting needs no checkpoint: always served.
+    pub fn new() -> Option<SplatResident> {
         Some(SplatResident)
     }
 }

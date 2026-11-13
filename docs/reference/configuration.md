@@ -185,7 +185,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_MIMI_WEIGHTS` | TTS codec weights override | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |
-| `BRAIN_QWEN3ASR_WINDOW` / `BRAIN_QWEN3ASR_MAXNEW` | Qwen3-ASR window (s) / max tokens | 30 / 200 |
 | `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` | forecast horizon / sample count | 64 / 1 |
 | `BRAIN_MOCK_DELAY_MS` | mock model artificial latency | 0 |
 

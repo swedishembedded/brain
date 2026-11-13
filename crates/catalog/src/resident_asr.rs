@@ -13,11 +13,10 @@
 //! autoregressive, so its `run_batch` is sequential over a build-once, fixed-window
 //! instance (the audio encoder still amortises across the batch).
 //!
-//! Config is env-only (each `from_env` returns `None`/skips when unset):
-//!   * `BRAIN_NEMOTRONASR`      - Nemotron 3.5 ASR checkpoint dir.
-//!   * `BRAIN_QWEN3ASR`      - Qwen3-ASR checkpoint dir.
-//!   * `BRAIN_QWEN3ASR_WINDOW` - Qwen3-ASR audio window in seconds (default 30).
-//!   * `BRAIN_QWEN3ASR_MAXNEW` - Qwen3-ASR max generated tokens (default 200).
+//! Both checkpoints come from the model store (`from_store`, or a pin). Qwen3-ASR's
+//! decode window and generation limit are params of its `transcribe` action
+//! ([`qwen3asr::caps::tuning`]): the instance key carries them, so a request of
+//! another size gets an engine built for it.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -279,8 +278,6 @@ impl NemotronInstance {
 /// Qwen3-ASR (1.7B) behind the scheduler - offline, fixed audio window. CPU-resident.
 pub struct QwenAsrResident {
     dir: String,
-    window_secs: f32,
-    max_new: usize,
 }
 
 impl QwenAsrResident {
@@ -289,29 +286,31 @@ impl QwenAsrResident {
         Some(Self::new(loader::served::served_assembly(store, "qwen3asr", &qwen3asr::spec::Qwen3AsrSpec)?.role_path("weights").ok()?))
     }
 
-    /// Direct constructor for a caller that already holds the directory, with
-    /// the engine tuning of [`qwen_asr_tuning`].
+    /// Direct constructor for a caller that already holds the directory.
     pub fn new(dir: impl Into<String>) -> QwenAsrResident {
-        let (window_secs, max_new) = qwen_asr_tuning();
-        QwenAsrResident { dir: dir.into(), window_secs, max_new }
+        QwenAsrResident { dir: dir.into() }
     }
 }
 
-/// The Qwen3-ASR tuning knobs (`BRAIN_QWEN3ASR_WINDOW` seconds, default 30;
-/// `BRAIN_QWEN3ASR_MAXNEW` tokens, default 200) - one reader, shared by the
-/// resident adapter and the catalog's direct `brain do` provider.
-pub(crate) fn qwen_asr_tuning() -> (f32, usize) {
-    let window_secs = std::env::var("BRAIN_QWEN3ASR_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0f32);
-    let max_new = std::env::var("BRAIN_QWEN3ASR_MAXNEW").ok().and_then(|s| s.parse().ok()).unwrap_or(200usize);
-    (window_secs, max_new)
+/// The instance config for an engine of `(window seconds, max new tokens)`.
+fn qwen_asr_config((window_secs, max_new): (f32, usize)) -> String {
+    format!("w{window_secs}-n{max_new}")
+}
+
+/// The engine sizing [`qwen_asr_config`] wrote into `key` (a replica's marker
+/// after it ignored).
+fn qwen_asr_tuning_of(key: &InstanceKey) -> Result<(f32, usize), String> {
+    let config = key.config.split('#').next().unwrap_or_default();
+    let parsed = config.strip_prefix('w').and_then(|rest| rest.split_once("-n")).and_then(|(w, n)| Some((w.parse().ok()?, n.parse().ok()?)));
+    parsed.ok_or_else(|| format!("qwen3asr: instance config {config:?} names no window and token limit"))
 }
 
 impl ResidentModel for QwenAsrResident {
     fn manifest(&self) -> Manifest {
         qwen3asr::caps::manifest()
     }
-    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(qwen3asr::caps::MODEL, format!("w{}", self.window_secs))
+    fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
+        InstanceKey::new(qwen3asr::caps::MODEL, qwen_asr_config(qwen3asr::caps::tuning(inv)))
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         // 1.7B decoder (~7 GB f32) + audio tower (~2 GB), held in RAM. `with_npu`
@@ -319,9 +318,10 @@ impl ResidentModel for QwenAsrResident {
         // + the Qwen decoder stay on the device backend).
         MemCost::new(0, 10u64 << 30).with_npu(2u64 << 30)
     }
-    fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+    fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let cfg = qwen3asr::config::QwenAsrConfig::qwen3_asr_1_7b();
-        let provider = qwen3asr::caps::QwenAsrProvider::load(&self.dir, cfg.clone(), self.window_secs, self.max_new)?;
+        let (window_secs, max_new) = qwen_asr_tuning_of(key)?;
+        let provider = qwen3asr::caps::QwenAsrProvider::load(&self.dir, cfg.clone(), window_secs, max_new)?;
         if let Device::Npu(_) = device {
             return Ok(Box::new(QwenAsrNpuInstance::new(&self.dir, cfg, provider)?));
         }
@@ -339,7 +339,7 @@ impl Instance for QwenAsrInstance {
         let wav = wav_from_blob(blob)?;
         let truncated = qwen3asr::caps::window_truncation(self.provider.window_samples(), &wav);
         if let Some((total, window)) = truncated {
-            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise BRAIN_QWEN3ASR_WINDOW)")));
+            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise window_secs)")));
         }
         progress(Progress::step(0, 1, "transcribing"));
         let (text, tokens) = self.provider.transcribe(&wav)?;

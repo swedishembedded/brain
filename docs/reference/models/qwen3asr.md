@@ -56,11 +56,11 @@ protocol.
 
 - `prompt_id` - language-prompt id (default `0` = English).
 - `sample_rate` - input PCM sample rate; must be `16000`.
-- `BRAIN_QWEN3ASR_WINDOW` - audio window in seconds (default `30`); audio
-  longer than the window is truncated to its first window, not chunked -
-  use [Nemotron](nemotronasr.md)'s streaming path for clips longer than
-  the window.
-- `BRAIN_QWEN3ASR_MAXNEW` - max generated tokens (default `200`).
+- `window_secs` - audio window in seconds (default `30`, host-side); audio
+  longer than the window is truncated to its first window and reported
+  `truncated`, not chunked - use [Nemotron](nemotronasr.md)'s streaming path
+  for clips longer than the window. An engine is built per window, and kept.
+- `max_new` - max generated tokens (default `200`, host-side).
 
 ## Hardware and limits
 

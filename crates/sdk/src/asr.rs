@@ -25,6 +25,8 @@
 
 use std::collections::BTreeMap;
 
+use qwen3asr::caps::{DEFAULT_MAX_NEW, DEFAULT_WINDOW_SECS};
+
 pub use qwen3asr::AudioFeatures;
 
 use crate::{Device, Error, Result};
@@ -160,15 +162,10 @@ impl TranscribePipeline {
     }
 }
 
-const DEFAULT_WINDOW_SECS: f32 = 30.0;
-const DEFAULT_MAX_NEW: usize = 200;
-
 /// Builds a [`TranscribePipeline`]. `.device(...)`/`.window_secs(...)`/
-/// `.max_new_tokens(...)` are the only knobs this milestone exposes -
-/// `window_secs`/`max_new_tokens` default to the SAME values
-/// `resident_asr.rs`'s own `BRAIN_QWEN3ASR_WINDOW`/`BRAIN_QWEN3ASR_MAXNEW`
-/// fall back to, so an embedder who never touches them gets the served
-/// path's own default behavior.
+/// `.max_new_tokens(...)` are the knobs it exposes; `window_secs` and
+/// `max_new_tokens` default to the `transcribe` action's own defaults, so an
+/// embedder who never touches them gets the served path's behavior.
 pub struct TranscribePipelineBuilder {
     model_id: String,
     device: Device,

@@ -940,16 +940,12 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: qwen3asr::caps::manifest,
+            // The serving adapter itself: it builds an engine for the window
+            // and token limit each request names, keeping it for the next.
             provider: |assembly: &Assembly| {
                 let dir = assembly.role_path("weights")?;
-                Ok(Arc::new(LazyProvider::new(
-                    qwen3asr::caps::manifest,
-                    Box::new(move || {
-                        let (window_secs, max_new) = resident_asr::qwen_asr_tuning();
-                        qwen3asr::caps::QwenAsrProvider::load(&dir, qwen3asr::config::QwenAsrConfig::qwen3_asr_1_7b(), window_secs, max_new)
-                            .map(|p| Arc::new(p) as Arc<dyn Provider>)
-                    }),
-                )) as Arc<dyn Provider>)
+                let build = move |_: &capability::Invocation| Ok(Arc::new(resident_asr::QwenAsrResident::new(dir.clone())) as Arc<dyn ResidentModel>);
+                Ok(Arc::new(resident_provider::ResidentProvider::new(qwen3asr::caps::manifest(), Box::new(build), Box::new(|_| String::new()), Vec::new())) as Arc<dyn Provider>)
             },
             spec: Some(("qwen3asr", &qwen3asr::spec::Qwen3AsrSpec)),
             resident: crate::resident_in_store!(crate::resident_asr::QwenAsrResident::from_store),
@@ -990,7 +986,7 @@ pub fn models() -> Vec<ModelEntry> {
             manifest: recon::caps::manifest,
             provider: recon::caps::provider,
             spec: None,
-            resident: resident!(resident_splat::SplatResident::from_env),
+            resident: resident!(resident_splat::SplatResident::new),
         },
         // WorldMirror-2 multi-view 3D reconstruction: its checkpoint is the
         // `weights` role, resolved from the model store.
