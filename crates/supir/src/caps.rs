@@ -46,7 +46,7 @@ use std::sync::{Arc, Mutex};
 use capability::{Action, ActionResult, ActionSpec, Invocation, Manifest, Outcome, ParamSpec, ParamType, Progress, Provider, Registry};
 use serde_json::json;
 
-use crate::pipeline::{target_size, Paths, RestoreOptions, Restorer};
+use crate::pipeline::{target_size, RestoreOptions, Restorer};
 
 /// The model id used on the CLI (`brain do brain/supir restore ...`), over
 /// D-Bus and in the residency manifest.
@@ -194,13 +194,6 @@ impl RestoreProvider {
         RestoreProvider { session: Arc::new(Session::new(backbone_root, supir_ckpt)), registry: Some(registry) }
     }
 
-    /// `BRAIN_SDXL_DIR` + `BRAIN_SUPIR_DIR` - `None` when either is unset or
-    /// the backbone directory holds no released `unet/`, since without one no
-    /// action can run.
-    pub fn from_env() -> Option<RestoreProvider> {
-        let paths = Paths::from_env().ok()?;
-        std::path::Path::new(&paths.backbone_root).join("unet").exists().then(|| RestoreProvider::new(paths.backbone_root, paths.supir_ckpt))
-    }
 }
 
 impl Provider for RestoreProvider {
@@ -282,11 +275,6 @@ mod tests {
         let inv = Invocation::new();
         let err = session.run("edit", &inv, None, &mut |_| {}).unwrap_err();
         assert!(err.contains("edit"), "{err}");
-    }
-
-    #[test]
-    fn from_env_declines_a_directory_with_no_unet() {
-        assert!(RestoreProvider::from_env().is_none() || std::env::var("BRAIN_SDXL_DIR").is_ok());
     }
 
     /// An unarmed cancel token never fires; an armed, cancelled one aborts

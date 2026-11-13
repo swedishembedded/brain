@@ -98,13 +98,13 @@ pub const DEFAULT_NEGATIVE_PROMPT: &str = "painting, oil painting, illustration,
 painting, cartoon, CG Style, 3D render, unreal engine, blurring, dirty, messy, worst quality, low quality, \
 frames, watermark, signature, jpeg artifacts, deformed, lowres, over-smooth";
 
-/// Checkpoint roots this pipeline loads from - `BRAIN_SDXL_DIR` (the frozen
-/// backbone, same layout `sdxlunet`/`controlnet` already load) and
-/// `BRAIN_SUPIR_DIR` (SUPIR's own delta: a directory holding the released
-/// `SUPIR-v0*.safetensors`, or that file directly). No `default_ref`/auto-fetch
+/// Checkpoint roots this pipeline loads from - the frozen backbone (`sdxl`,
+/// same layout `sdxlunet`/`controlnet` already load) and SUPIR's own delta
+/// (`supir`: the released `SUPIR-v0*.safetensors`, or a directory holding it),
+/// as [`crate::spec::SupirSpec`] resolves them. No `default_ref`/auto-fetch
 /// for either - SUPIR's weights carry a non-commercial licence, so a user
-/// points brain at weights they obtained themselves (see this crate's own
-/// module doc).
+/// puts weights they obtained themselves in the model store (see this crate's
+/// own module doc).
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub backbone_root: String,
@@ -112,10 +112,11 @@ pub struct Paths {
 }
 
 impl Paths {
-    pub fn from_env() -> Result<Paths, String> {
-        let backbone_root = std::env::var("BRAIN_SDXL_DIR").map_err(|_| "supir: set BRAIN_SDXL_DIR to a released diffusers SDXL checkpoint root".to_string())?;
-        let supir_dir = std::env::var("BRAIN_SUPIR_DIR").map_err(|_| "supir: set BRAIN_SUPIR_DIR to a SUPIR delta checkpoint (file or directory)".to_string())?;
-        let supir_ckpt = resolve_supir_checkpoint(&supir_dir)?;
+    /// The roles of a resolved (or pinned) assembly; a `supir` naming a
+    /// directory resolves to the one checkpoint in it.
+    pub fn from_assembly(assembly: &capability::Assembly) -> Result<Paths, String> {
+        let backbone_root = assembly.role_path("sdxl")?;
+        let supir_ckpt = resolve_supir_checkpoint(&assembly.role_path("supir")?)?;
         Ok(Paths { backbone_root, supir_ckpt })
     }
 }

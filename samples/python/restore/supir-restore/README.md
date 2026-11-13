@@ -10,8 +10,6 @@ real multi-step (50 by default) diffusion sample, so this call is
 seconds-to-minutes, not sub-second.
 
 ```bash
-BRAIN_SDXL_DIR=/path/to/stable-diffusion-xl-base-1.0 \
-BRAIN_SUPIR_DIR=/path/to/SUPIR-v0Q_fp32.safetensors \
 tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/restore/supir-restore/supir_restore.py --image degraded.ppm
 ```
@@ -29,8 +27,9 @@ tools/dbus-session.sh --serve "--dbus" -- \
 
 ## What it needs
 
-* `BRAIN_SDXL_DIR` (the frozen SDXL backbone) + `BRAIN_SUPIR_DIR` (SUPIR's
-  own delta checkpoint). `BRAIN_LLAVA_WEIGHTS` is optional, for
+* The frozen SDXL backbone and SUPIR's own delta checkpoint in the model
+  store (or pinned: `--pin supir.sdxl=DIR --pin supir.supir=FILE` in the
+  `--serve` arguments). `BRAIN_LLAVA_WEIGHTS` is optional, for
   auto-captioning.
 * **Licence**: SUPIR's weights carry a non-commercial licence (SUPIR
   Software License Agreement, (c) 2024 SupPixel Pty Ltd) - commercial use,

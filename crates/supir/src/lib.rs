@@ -45,5 +45,6 @@ pub mod int8;
 pub mod lora;
 pub mod model;
 pub mod pipeline;
+pub mod spec;
 pub mod train;
 pub mod trunk;

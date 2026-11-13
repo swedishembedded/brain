@@ -19,7 +19,7 @@ samples/python/imagegen/flux2-klein/cancel_generation.py	run	--model mock with -
 samples/python/imagegen/flux2-klein/edit_image.py	skip	needs real FLUX.2 weights; the mock model has no edit action
 samples/python/imagegen/flux2-klein/generate.py	run	--model mock streams real denoise ticks and returns a real image blob
 samples/python/imagegen/pulid/pulid_generate.py	skip	hardcodes brain/flux1-pulid (no --model override); needs BRAIN_FLUX1_DIR + BRAIN_PULID_DIR + BRAIN_ARCFACE_DIR + BRAIN_CLIP_DIR
-samples/python/imagegen/sdxl/sdxl_generate.py	skip	hardcodes brain/sdxl (no --model override); needs BRAIN_SDXL_DIR
+samples/python/imagegen/sdxl/sdxl_generate.py	skip	hardcodes brain/sdxl (no --model override); needs SDXL in the model store
 samples/shell/imagegen/face-swap/face_swap.sh	skip	direct-CLI (no D-Bus); needs real FLUX.2 + segmentation weights
 samples/shell/imagegen/face-swap/head_mask.py	skip	internal helper of face_swap.sh, not an independent entry point; not run standalone here
 samples/shell/imagegen/identity-score/identity_score.sh	skip	direct-CLI (no D-Bus); needs BRAIN_ARCFACE_DIR and generated photos to score

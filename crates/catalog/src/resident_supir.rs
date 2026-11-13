@@ -4,8 +4,9 @@
 //! SUPIR behind the residency scheduler.
 //!
 //! `activate` builds a [`supir::caps::Session`] rooted at the SDXL backbone
-//! (`BRAIN_SDXL_DIR`, same directory `resident_sdxl.rs`/`resident_controlnet.rs`
-//! already load) and the SUPIR delta checkpoint (`BRAIN_SUPIR_DIR`); the
+//! (`sdxl`, the same directory `resident_sdxl.rs`/`resident_controlnet.rs`
+//! load) and the SUPIR delta checkpoint (`supir`), both resolved through
+//! `supir::spec::SupirSpec`; the
 //! restoration graph is built lazily inside it, keyed by `(pixel size,
 //! control_scale)` (see `supir::caps::Session`'s own doc for why - the graph
 //! bakes `control_scale` in). All of the work comes from `supir::caps`, so
@@ -34,26 +35,24 @@ use capability::{ActionResult, Invocation, Manifest, Progress, Registry};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use supir::caps::Session;
 
-/// SUPIR behind the scheduler (`BRAIN_SDXL_DIR` - the backbone, same layout
-/// `resident_sdxl.rs` uses; `BRAIN_SUPIR_DIR` - a SUPIR delta checkpoint,
-/// file or directory).
+/// SUPIR behind the scheduler over the SDXL backbone (same layout
+/// `resident_sdxl.rs` uses) and the SUPIR delta checkpoint.
 pub struct SupirResident {
     sdxl_root: String,
     supir_ckpt: String,
 }
 
 impl SupirResident {
-    /// `None` unless both are set and the backbone holds a released `unet/` -
-    /// registering a model whose every call would fail is worse than not
-    /// serving it.
-    pub fn from_env() -> Option<SupirResident> {
-        let sdxl_root = std::env::var("BRAIN_SDXL_DIR").ok().filter(|p| !p.is_empty())?;
-        let supir_dir = std::env::var("BRAIN_SUPIR_DIR").ok().filter(|p| !p.is_empty())?;
-        Self::new(sdxl_root, supir_dir)
+    /// Both checkpoints `store` resolves (or pins) for `supir`; `None` unless
+    /// both are there and the backbone holds a released `unet/` - registering
+    /// a model whose every call would fail is worse than not serving it.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<SupirResident> {
+        let assembly = loader::served::served_assembly(store, "supir", &supir::spec::SupirSpec)?;
+        let paths = supir::pipeline::Paths::from_assembly(&assembly).map_err(|e| residency::log::not_served(&format!("brain: supir not served ({e})"))).ok()?;
+        Self::new(paths.backbone_root, paths.supir_ckpt)
     }
 
-    /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
+    /// Direct constructor for a caller that already holds both checkpoints.
     pub fn new(sdxl_root: impl Into<String>, supir_ckpt: impl Into<String>) -> Option<SupirResident> {
         let sdxl_root = sdxl_root.into();
         if !std::path::Path::new(&sdxl_root).join("unet").exists() {

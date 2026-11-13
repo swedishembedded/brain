@@ -27,7 +27,7 @@ unconfigured fails with that model's own error:
 - `segment` → the SAM 2.1 checkpoint in the model store
 - `restore` → the CodeFormer checkpoint in the model store
 - `upscale` → the RRDBNet checkpoint in the model store
-- `supir_restore` → `BRAIN_SDXL_DIR` + `BRAIN_SUPIR_DIR`
+- `supir_restore` → the SDXL and SUPIR checkpoints in the model store
 
 ## Running it
 

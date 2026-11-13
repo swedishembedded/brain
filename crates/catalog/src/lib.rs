@@ -760,25 +760,25 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("controlnet", &controlnet::spec::ControlnetSpec)),
             resident: crate::resident_in_store!(crate::resident_controlnet::ControlnetResident::from_store),
         },
-        // SUPIR photo-realistic restoration: a frozen SDXL backbone
-        // (BRAIN_SDXL_DIR, same layout `sdxlunet`/`controlnet` load) plus its
-        // own 1.24B GLVControl trunk + 12 adaptors (BRAIN_SUPIR_DIR - a
-        // delta checkpoint file, or a directory holding exactly one). No
+        // SUPIR photo-realistic restoration: a frozen SDXL backbone (`sdxl`,
+        // same layout `sdxlunet`/`controlnet` load) plus its own 1.24B
+        // GLVControl trunk + 12 adaptors (`supir`, the delta checkpoint), both
+        // resolved through `supir::spec::SupirSpec`. No
         // `default_ref`/auto-fetch - the SUPIR weights carry a
         // non-commercial licence (see `supir`'s own crate doc). Optional
         // LLaVA auto-captioning dispatches through `supir_registry` below,
         // not a direct dependency - see `supir::caps`'s own module doc.
         ModelEntry {
             manifest: supir::caps::manifest,
-            provider: |_assembly: &Assembly| {
-                let paths = supir::pipeline::Paths::from_env()?;
+            provider: |assembly: &Assembly| {
+                let paths = supir::pipeline::Paths::from_assembly(assembly)?;
                 if !std::path::Path::new(&paths.backbone_root).join("unet").exists() {
                     return Err(format!("supir: {} holds no unet/", paths.backbone_root));
                 }
                 Ok(Arc::new(supir::caps::RestoreProvider::with_registry(paths.backbone_root, paths.supir_ckpt, Arc::new(supir_registry()))) as Arc<dyn Provider>)
             },
-            spec: None,
-            resident: crate::resident!(crate::resident_supir::SupirResident::from_env),
+            spec: Some(("supir", &supir::spec::SupirSpec)),
+            resident: crate::resident_in_store!(crate::resident_supir::SupirResident::from_store),
         },
         ModelEntry {
             manifest: flux1::caps::manifest,

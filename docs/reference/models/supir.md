@@ -58,21 +58,22 @@ weights you have obtained yourself and cleared for your own use - there is no
 
 ## Getting the weights
 
-Model id: `brain/supir`. Two checkpoints:
+Model id: `brain/supir`. Two checkpoints, both found in the model store
+(`--sdxl DIR`/`--supir FILE` on a one-shot command, `brain serve --pin
+supir.sdxl=DIR --pin supir.supir=FILE`, name them outright):
 
-- `BRAIN_SDXL_DIR` - the frozen backbone: a released `stable-diffusion-xl-base-1.0`
+- `sdxl` - the frozen backbone: a released `stable-diffusion-xl-base-1.0`
   diffusers checkpoint root (`unet/`, `vae/`, `text_encoder/`, `text_encoder_2/`,
   `tokenizer/`, `tokenizer_2/`) - the same directory [SDXL](sdxlunet.md) and
   [ControlNet](controlnet.md) already load.
-- `BRAIN_SUPIR_DIR` - SUPIR's own delta: a directory holding the released
-  `SUPIR-v0Q_fp32.safetensors` (or that file directly).
+- `supir` - SUPIR's own delta: the released `SUPIR-v0Q_fp32.safetensors`
+  (recognised by its `model.control_model.*` tensors; a pin may name the
+  directory holding it).
 
 ## Running it
 
 ```bash
-BRAIN_SDXL_DIR=/path/to/stable-diffusion-xl-base-1.0 \
-BRAIN_SUPIR_DIR=/path/to/SUPIR-v0Q_fp32.safetensors \
-  brain supir restore --caption "a weathered brick building" \
+brain supir restore --caption "a weathered brick building" \
     --in image=degraded.ppm --out image=restored.ppm --json
 ```
 

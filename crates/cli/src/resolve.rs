@@ -367,6 +367,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "huginn",
     "qwen35moe",
     "qwen3omnimoe",
+    "supir",
     "edgerock",
     "ricursive",
 ];

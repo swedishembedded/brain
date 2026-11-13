@@ -59,8 +59,6 @@ crates/catalog/src/resident_horizon.rs	MOE_SKIP_GPU_TESTS
 crates/catalog/src/resident_llm.rs	BRAIN_DEVICE
 crates/catalog/src/resident_llm.rs	QWEN_TOKENIZER
 crates/catalog/src/resident_qwen35.rs	QWEN_TOKENIZER
-crates/catalog/src/resident_supir.rs	BRAIN_SDXL_DIR
-crates/catalog/src/resident_supir.rs	BRAIN_SUPIR_DIR
 crates/catalog/src/resident_zimage.rs	BRAIN_S3DIT_RETAIN_INT8_CACHE
 crates/checkpoint/src/gguf.rs	BRAIN_GGUF_TESTFILE
 crates/checkpoint/tests/it/torchpt.rs	TORCHPT_REAL_PT
@@ -932,12 +930,9 @@ crates/splat/tests/it/s23_ray_renderer.rs	PROBE_MASK
 crates/splat/tests/it/s2_tiled_parity.rs	MOE_SKIP_GPU_TESTS
 crates/splat/tests/it/s5_bwd_fit.rs	MOE_SKIP_GPU_TESTS
 crates/supir/src/bin/supir_bench.rs	BRAIN_SUPIR_ALLOW_FULL_MEMORY
-crates/supir/src/caps.rs	BRAIN_SDXL_DIR
 crates/supir/src/finetune.rs	MOE_SKIP_GPU_TESTS
 crates/supir/src/lora.rs	MOE_SKIP_GPU_TESTS
 crates/supir/src/model.rs	MOE_SKIP_GPU_TESTS
-crates/supir/src/pipeline.rs	BRAIN_SDXL_DIR
-crates/supir/src/pipeline.rs	BRAIN_SUPIR_DIR
 crates/supir/src/trunk.rs	MOE_SKIP_GPU_TESTS
 crates/supir/tests/it/import_real.rs	BRAIN_SUPIR_WEIGHTS
 crates/supir/tests/it/parity.rs	BRAIN_SUPIR_ALLOW_FULL_MEMORY

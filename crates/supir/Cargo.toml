@@ -15,6 +15,7 @@ brain-kernels.workspace = true    # edm_mix/scale_row - the ZeroSFT/ZeroCrossAtt
 brain-model.workspace = true      # model::block (cross-attn ids), model::hostmath
 brain-optim.workspace = true      # optim::NamedMoments (the host fine-tune's AdamW state)
 brain-checkpoint.workspace = true # safetensors reader (import)
+brain-modelstore.workspace = true # spec: the store classification
 brain-sdxlunet.workspace = true   # sdxlunet::model::Rec/Unet - the frozen backbone IS its blocks
 brain-vae.workspace = true        # vae::blocks::{Builder, skipfuse::{Map, SkipFuse}}
 brain-data.workspace = true       # data::rng::Rng for init.rs

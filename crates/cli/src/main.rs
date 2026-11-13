@@ -1384,6 +1384,8 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_DEEPSEEKVL_TUNED", replacement: "the fine-tune saved under <model dir>/adapters/<owner>/<name>/<tag>/ (served as its own model)" },
     Retired { name: "BRAIN_JANUSPRO_TUNED", replacement: "the fine-tune saved under <model dir>/adapters/<owner>/<name>/<tag>/ (served as its own model)" },
     Retired { name: "BRAIN_JANUSPRO_TUNED_GENERATION", replacement: "the fine-tune saved under <model dir>/adapters/<owner>/<name>/<tag>/ (served as its own model)" },
+    Retired { name: "BRAIN_SDXL_DIR", replacement: "serve: {pin: [sdxlunet.root=DIR, controlnet.sdxl=DIR, supir.sdxl=DIR]}" },
+    Retired { name: "BRAIN_SUPIR_DIR", replacement: "serve: {pin: [supir.supir=FILE]}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 

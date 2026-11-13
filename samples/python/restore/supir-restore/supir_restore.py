@@ -13,9 +13,7 @@ multi-second-to-minutes request, not a sub-second one, and the output size is
 whatever SUPIR's own resize/snap rule picks (short side >= 1024, both axes
 snapped to a 64px multiple) - read back from the result rather than assumed.
 
-    BRAIN_SDXL_DIR=/path/to/stable-diffusion-xl-base-1.0 \\
-    BRAIN_SUPIR_DIR=/path/to/SUPIR-v0Q_fp32.safetensors \\
-      tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus" -- \
         python3 samples/python/restore/supir-restore/supir_restore.py --image degraded.ppm
 
 Set `BRAIN_LLAVA_WEIGHTS` too (and leave `--caption` unset) to auto-caption the
@@ -56,7 +54,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if "brain/supir" not in brain.models():
-            print("FATAL: 'restore' not served (set BRAIN_SDXL_DIR and BRAIN_SUPIR_DIR)", file=sys.stderr)
+            print("FATAL: 'restore' not served (put SDXL and a SUPIR checkpoint in the model store, or brain serve --pin supir.sdxl=DIR --pin supir.supir=FILE)", file=sys.stderr)
             return 2
 
         params = {"caption": args.caption, "steps": args.steps, "cfg_scale": args.cfg_scale, "control_scale": args.control_scale}
