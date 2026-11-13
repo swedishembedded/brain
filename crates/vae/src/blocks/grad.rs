@@ -179,6 +179,20 @@ impl Trace {
         self.w.get(name).unwrap_or_else(|| panic!("vae::blocks::grad: no tensor {name}"))
     }
 
+    /// The trace of the final op alone, which must be a convolution, and the name of its weight: the graph's last
+    /// layer cut off from the rest. Its reverse from the same seed reaches only that layer's weight and bias, so the
+    /// last layer's weight gradient (what an adaptive adversarial weight is measured against) costs one convolution's
+    /// backward instead of the whole network's. Holds the same weight buffers as `self`.
+    pub fn last_conv(&self) -> (Trace, String) {
+        let last = self.ops.last().expect("vae::blocks::grad: an empty trace has no last layer");
+        let Op::Conv { w, b, .. } = last else {
+            panic!("vae::blocks::grad: the last op of the trace is not a convolution");
+        };
+        let order = self.order.iter().filter(|(name, _)| name == w || name == b).cloned().collect();
+        let tail = Trace { ops: vec![last.clone()], segments: Vec::new(), order, w: self.w.clone(), xf_mul: self.xf_mul, xf_scale_row: self.xf_scale_row };
+        (tail, w.clone())
+    }
+
     /// One zeroed gradient buffer per tensor in [`Trace::params`].
     pub fn alloc_grads(&self, gpu: &Gpu) -> Grads {
         let g = self.order.iter().map(|(n, len)| (n.clone(), gpu.storage(*len))).collect();
