@@ -423,7 +423,8 @@ struct CycleRow {
 #[derive(Serialize)]
 struct ArmReport {
     acc: f64,
-    bwt: f64,
+    /// `None` for a one-cycle study: nothing earlier to have forgotten.
+    bwt: Option<f64>,
     promotions: usize,
     cycles: Vec<CycleRow>,
 }
