@@ -22,11 +22,11 @@ fn short_uuid(u: &Option<[u8; 16]>) -> String {
 
 /// Which backends can bind this card, verified against each backend's own
 /// enumeration by identity (never by position).
-fn backends_seeing(
+pub(crate) fn backends_seeing(
     index: u32,
     id: &gpu_core::devices::GpuIdentity,
     wgpu_ids: &[gpu_core::devices::GpuIdentity],
-) -> String {
+) -> Vec<&'static str> {
     let mut seen = Vec::new();
     if gpu_core::devices::registry().source() == "vulkan" {
         seen.push("vulkan");
@@ -38,6 +38,11 @@ fn backends_seeing(
     if hw.cuda_unusable.is_none() && hw.cards.iter().any(|c| c.index == index && c.compute_capability.is_some()) {
         seen.push("cuda");
     }
+    seen
+}
+
+/// [`backends_seeing`] as the table prints it.
+fn backends_text(seen: &[&str]) -> String {
     if seen.is_empty() { "-".into() } else { seen.join("+") }
 }
 
@@ -63,7 +68,7 @@ pub fn run_devices(_args: &[String]) {
             id.pci_bus.as_deref().unwrap_or("-"),
             short_uuid(&id.uuid),
             id.vram_bytes as f64 / (1u64 << 30) as f64,
-            backends_seeing(d.index, id, &wgpu_ids),
+            backends_text(&backends_seeing(d.index, id, &wgpu_ids)),
         );
     }
     match gpu_core::devices::ambient_gpu() {

@@ -18,6 +18,7 @@ mod collective_profile;
 mod data_cli;
 mod decide_cli;
 mod depth_cli;
+mod devices_api;
 mod devices_cli;
 mod doctor_cli;
 mod federated_cli;

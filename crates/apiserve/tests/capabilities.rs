@@ -347,6 +347,39 @@ async fn the_catalogue_lists_every_action_with_its_contract() {
     assert_eq!(render["streaming"], true);
 }
 
+/// The devices the executor schedules on are listed with their memory as it accounts it; the host adds what each one
+/// is, and nothing it adds is a path or an address. No key is no answer, as for every route.
+#[tokio::test]
+async fn the_devices_are_listed_with_their_memory_and_what_the_host_says_they_are() {
+    struct Host;
+    impl apiserve::DeviceInventory for Host {
+        fn host(&self) -> serde_json::Map<String, Value> {
+            json!({"backend": "cpu"}).as_object().unwrap().clone()
+        }
+        fn device(&self, _device: Device) -> serde_json::Map<String, Value> {
+            json!({"name": "host", "class": "cpu"}).as_object().unwrap().clone()
+        }
+    }
+    let rig = rig();
+    let (status, body) = call(&rig.app, Method::GET, "/v1/devices", "alice", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"], json!([{"id": "cpu", "kind": "cpu", "memory": {"total_bytes": 8u64 << 30, "reserved_bytes": 0, "used_bytes": 0, "free_bytes": 8u64 << 30}}]));
+    assert_eq!(body["host"], json!({}), "a host that describes nothing adds nothing");
+
+    let described = AppState::new(Executor::start(Vec::new(), { let mut b = Budgets::new(); b.set(Device::Cpu, 1 << 30, 1 << 20); b }, Policy::default()), "key", Provider::OpenAI).with_devices(Some(Arc::new(Host)));
+    let app = router(described);
+    let (status, body) = call(&app, Method::GET, "/v1/devices", "key", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!((body["host"]["backend"].as_str(), body["data"][0]["name"].as_str(), body["data"][0]["memory"]["free_bytes"].as_u64()), (Some("cpu"), Some("host"), Some((1 << 30) - (1 << 20))));
+    let text = body.to_string();
+    assert!(!text.contains('/') && !text.to_lowercase().contains("uuid") && !text.contains("pci"), "no path, address or identifier of the machine: {text}");
+
+    let bare = app.clone().oneshot(Request::builder().uri("/v1/devices").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(bare.status(), StatusCode::UNAUTHORIZED, "the route is behind the key like every other");
+    let wrong = app.oneshot(Request::builder().uri("/v1/devices").header(header::AUTHORIZATION, "Bearer wrong").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn the_catalogue_does_not_offer_what_only_the_host_may_choose() {
     let rig = rig();

@@ -238,6 +238,13 @@ present on every surface and behind the same key, hooks and admission:
 - `GET /v1/capabilities` lists every model's every action with its contract: params
   (type, default, range, allowed values), blob inputs and blob outputs. Clients are
   generated from it.
+- `GET /v1/devices` lists the devices the server schedules work on, as `{"object": "list", "host": {...}, "data":
+  [...]}`. Each entry has `id` (`cpu`, `gpu<i>`, `npu<i>`: the names `--device` takes), `kind` and `memory`
+  (`total_bytes`, `reserved_bytes` held back by the operator, `used_bytes` held by resident models and runs,
+  `free_bytes`), and, for a card, `name`, `vendor_id`, `class` (`discrete`, `integrated`) and `backends` (which of
+  `cuda`, `vulkan`, `wgpu` can drive it). `host` has the backend in use, the core count and the card and NPU counts.
+  It names no path, bus address or UUID of the machine. Per-card compute capability is not reported: it is known
+  only by opening the card, which the serving process does once, for the cards it serves on.
 - `POST /v1/run` runs one action and answers with its outputs and blobs.
 - `POST /v1/jobs` starts one in the background, for work too long to hold a request
   open. `GET /v1/jobs/{id}` reports `running` (with `progress.step` / `progress.total`),

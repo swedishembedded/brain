@@ -679,6 +679,18 @@ train_body() { # train_body <extra params json fragment, with a leading comma or
   printf '{"model":"brain/train","action":"train","params":{"base":"nobody/nothing","data":"{\\"train\\":{\\"digest\\":\\"%s\\"}}"%s}}' "$TRAIN_DIGEST" "$1"
 }
 
+@test "devices: GET /v1/devices needs the key and names no path, address or uuid" {
+  local st
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$(base openai)/v1/devices")
+  [ "$st" -eq 401 ]
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" "$(base openai)/v1/devices")
+  [ "$st" -eq 401 ]
+  get_url openai /v1/devices
+  [ "$STATUS" -eq 200 ]
+  jq -e '.object == "list" and (.data | length) >= 1 and all(.data[]; .id and .memory.total_bytes >= 0)' "$RESP"
+  ! grep -qiE 'uuid|pci|/dev/|/home/' "$RESP"
+}
+
 @test "training: it is offered like any model, with no param that names a path" {
   get_url openai /v1/capabilities
   [ "$STATUS" -eq 200 ]

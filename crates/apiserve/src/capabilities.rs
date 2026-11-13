@@ -6,6 +6,8 @@
 //!
 //! - `GET /v1/capabilities` lists every model's every action with its contract:
 //!   params, blob inputs and blob outputs. It is what a client is generated from.
+//! - `GET /v1/devices` lists the devices the server schedules work on: each one's memory (total, reserved,
+//!   in use, free) and, where the host can say, what it is.
 //! - `POST /v1/run` runs one action and answers with its outputs and blobs.
 //! - `POST /v1/jobs` starts one in the background, for work too long to hold a
 //!   request open (video, music, 3D); `GET /v1/jobs/{id}` reports its progress,
@@ -75,6 +77,7 @@ pub const MAX_EVENT_STREAMS_PER_JOB: usize = 8;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/capabilities", get(list))
+        .route("/v1/devices", get(devices))
         .route("/v1/run", post(run))
         .route("/v1/jobs", post(create_job))
         .route("/v1/jobs/:id", get(job_status).delete(cancel_job))
@@ -204,6 +207,45 @@ async fn list(State(state): State<AppState>) -> Json<Value> {
         })
         .collect();
     Json(json!({ "object": "list", "data": data }))
+}
+
+/// `GET /v1/devices`: the devices the executor schedules on, each with its memory as the scheduler accounts it,
+/// merged with what the host's [`crate::DeviceInventory`] says each is. Nothing here names a path or an address of
+/// the machine: an id is `cpu`, `gpu<i>` or `npu<i>`, the names `--device` takes.
+async fn devices(State(state): State<AppState>) -> Json<Value> {
+    let report = state.exec.residency();
+    let mut budgets = report.budgets;
+    budgets.sort_by_key(|b| match b.device {
+        residency::Device::Cpu => (0, 0),
+        residency::Device::Gpu(i) => (1, i),
+        residency::Device::Npu(i) => (2, i),
+    });
+    let data: Vec<Value> = budgets
+        .iter()
+        .map(|b| {
+            let (id, kind) = match b.device {
+                residency::Device::Cpu => ("cpu".to_string(), "cpu"),
+                residency::Device::Gpu(i) => (format!("gpu{i}"), "gpu"),
+                residency::Device::Npu(i) => (format!("npu{i}"), "npu"),
+            };
+            let mut entry = json!({
+                "id": id,
+                "kind": kind,
+                "memory": {
+                    "total_bytes": b.total,
+                    "reserved_bytes": b.reserved,
+                    "used_bytes": b.used,
+                    "free_bytes": b.total.saturating_sub(b.reserved).saturating_sub(b.used),
+                },
+            });
+            if let (Some(inventory), Some(fields)) = (&state.devices, entry.as_object_mut()) {
+                fields.extend(inventory.device(b.device));
+            }
+            entry
+        })
+        .collect();
+    let host = state.devices.as_ref().map(|inventory| Value::Object(inventory.host())).unwrap_or_else(|| json!({}));
+    Json(json!({ "object": "list", "host": host, "data": data }))
 }
 
 async fn run(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {

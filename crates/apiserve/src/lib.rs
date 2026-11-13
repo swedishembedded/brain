@@ -80,7 +80,7 @@ pub use error::{ApiError, Kind};
 pub use hooks::{Call, CallResult, RequestHooks, Ticket};
 pub use listener::ConnectionLimits;
 pub use tls::Tls;
-pub use state::{AppState, JobRegistry, DEFAULT_ADMIT_DEADLINE};
+pub use state::{AppState, DeviceInventory, JobRegistry, DEFAULT_ADMIT_DEADLINE};
 pub use surface::{write_keys, Provider, Surface};
 
 use residency::Executor;
@@ -201,6 +201,8 @@ pub struct ServeOpts {
     /// surface (a caller's budget covers all dialects together). `None`
     /// authenticates each surface with its own static key.
     pub callers: Option<std::sync::Arc<Callers>>,
+    /// What the host knows of its devices, for `GET /v1/devices` ([`AppState::with_devices`]).
+    pub devices: Option<std::sync::Arc<dyn DeviceInventory>>,
 }
 
 impl ServeOpts {
@@ -243,6 +245,10 @@ impl ServeOpts {
         self.callers = callers;
         self
     }
+    pub fn with_devices(mut self, devices: Option<std::sync::Arc<dyn DeviceInventory>>) -> ServeOpts {
+        self.devices = devices;
+        self
+    }
 }
 
 /// The addresses every surface actually bound, gathered as each listener
@@ -283,7 +289,7 @@ pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(3
 /// concurrently on a [`tokio::task::JoinSet`]. Blocks the calling thread.
 pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> anyhow::Result<()> {
     let shutdown = opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
-    let ServeOpts { supplier, ready, deadlines, record, limits, tls, training, callers, .. } = opts;
+    let ServeOpts { supplier, ready, deadlines, record, limits, tls, training, callers, devices, .. } = opts;
     let scheme = if tls.is_some() { "https" } else { "http" };
     let publication = record.and_then(|path| {
         if let Err(e) = path.parent().map_or(Ok(()), surface::private_dir) {
@@ -305,7 +311,8 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
                 .with_admit_deadline(deadlines.admit)
                 .with_cold_build_admit_deadline(deadlines.cold_build)
                 .with_supplier(supplier.clone())
-                .with_training(training);
+                .with_training(training)
+                .with_devices(devices.clone());
             // Graceful shutdown waits for every in-flight request, and a
             // generation answers only when it ends: cancel them all the moment
             // shutdown fires so they end at their next poll.
