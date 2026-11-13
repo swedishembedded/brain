@@ -50,15 +50,12 @@ crates/capability/src/lib.rs	BRAIN_TEST_HOST_OVERRIDE
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_SERVED
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_UNSET
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_WEIGHTS
-crates/catalog/src/resident_deepseekvl.rs	BRAIN_DEEPSEEKVL_TUNED
 crates/catalog/src/resident_forecast.rs	BRAIN_CHRONOS2
 crates/catalog/src/resident_forecast.rs	BRAIN_FINCAST
 crates/catalog/src/resident_forecast.rs	BRAIN_KRONOS_DECODER
 crates/catalog/src/resident_forecast.rs	BRAIN_KRONOS_TOKENIZER
 crates/catalog/src/resident_forecast.rs	BRAIN_TIMESFM3
 crates/catalog/src/resident_horizon.rs	MOE_SKIP_GPU_TESTS
-crates/catalog/src/resident_januspro.rs	BRAIN_JANUSPRO_TUNED
-crates/catalog/src/resident_januspro.rs	BRAIN_JANUSPRO_TUNED_GENERATION
 crates/catalog/src/resident_llm.rs	BRAIN_DEVICE
 crates/catalog/src/resident_llm.rs	QWEN_TOKENIZER
 crates/catalog/src/resident_qwen35.rs	QWEN_TOKENIZER

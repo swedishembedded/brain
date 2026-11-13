@@ -80,14 +80,11 @@ keep|recompute` included.
   guidance contrasts against. `--save` receives `adapter.safetensors` and
   `generation.safetensors`.
 
-An understanding fine-tune is served by starting `brain serve` with
-`BRAIN_JANUSPRO_TUNED=<out dir>` (the adapter is folded into the decoder as it loads,
-the trained aligner replaces the checkpoint's); a generation fine-tune is served
-by `BRAIN_JANUSPRO_TUNED_GENERATION=<out dir>` (its adapter is folded into the
-drawing engine's decoder, its head, aligner and code embedding replace the
-checkpoint's).
-
-A fine-tune kept in `<model dir>/adapters/<owner>/<name>/<tag>/` is listed as a
+A fine-tune is served once it is `--save`d beside the checkpoint (an
+understanding fine-tune's adapter is folded into the decoder as it loads and
+its aligner replaces the checkpoint's; a generation fine-tune's adapter is
+folded into the drawing engine's decoder and its head, aligner and code
+embedding replace the checkpoint's). A fine-tune kept in `<model dir>/adapters/<owner>/<name>/<tag>/` is listed as a
 model of its own, `brain/januspro:<owner>:<name>:<tag>`, beside the base. One
 holding `generation.safetensors` serves `text2image`; any other serves
 `generate`.

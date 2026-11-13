@@ -90,19 +90,14 @@ supervised, and the messages place one `<image_placeholder>` per image.
 that does not fit one card is split across the cards by what each has free,
 with no flag (the images are spliced into the first stage, and their
 gradient comes back from it); `--device` pins one card. The checkpoint is
-read as downloaded and nothing is written beside it: `--save` receives
+read as downloaded and only `--save` is written to: it receives
 `adapter.safetensors` and `aligner.safetensors`. The schedule and optimiser
 flags (`--weight-decay`, `--grad-clip`, `--warmup`, `--min-lr`) are
 `brain qwen3 lora_train`'s.
 
-To serve the result, start `brain serve` with `BRAIN_DEEPSEEKVL_TUNED=<out dir>`:
-the adapter is folded into the decoder's weights as they load and the
-trained aligner replaces the checkpoint's. The served model
-is then the fine-tune.
-
-A fine-tune can instead be kept beside the checkpoint, in
-`<model dir>/adapters/<owner>/<name>/<tag>/` (the layout a text adapter has),
-and `brain serve` then lists it as a model of its own,
+To serve the result, `--save` it beside the checkpoint, in
+`<model dir>/adapters/<owner>/<name>/<tag>/` (the layout a text adapter has):
+`brain serve` then lists it as a model of its own,
 `brain/deepseekvl:<owner>:<name>:<tag>`, next to the base: one process serves
 the base and every stored fine-tune, each loaded when first asked for. A
 host that cannot hold two of them at once replaces the idle one when the

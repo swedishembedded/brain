@@ -5,7 +5,7 @@
 # DeepSeek-VL-7B fine-tuned from its checkpoint as downloaded: `brain
 # deepseekvl finetune` extracts an image's tower features, releases the towers,
 # trains the aligner and a LoRA over the bf16 decoder for a few steps on one
-# card, and writes the adapter and the aligner to --out.
+# card, and writes the adapter and the aligner to --save.
 #
 # Needs a GPU with about 20 GB free and the checkpoint under
 # $BRAIN_MODELS_DIR (default ~/.local/share/brain/models); skips otherwise.
@@ -37,14 +37,15 @@ teardown_file() {
 
 @test "the aligner and an adapter train on a bf16 decoder read from the checkpoint as downloaded" {
   # seed: the loss comparison below is taken over four steps, so the run is pinned
-  run "$BRAIN" deepseekvl finetune --weights "$STORE/$REPO_ID" --dataset "$WORK/data" --seed 1 \
-    --out "$WORK/out" --steps 4 --lr 1e-4
+  run "$BRAIN" deepseekvl finetune --dir "$STORE/$REPO_ID" --dataset "$WORK/data" --seed 1 \
+    --save "$WORK/out" --steps 4 --lr 1e-4 --json
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
-  [[ "$output" == *"trained on 2 example(s)"* ]]
+  local outcome; outcome="$(echo "$output" | tail -n 1)"
+  [ "$(echo "$outcome" | jq .examples)" -eq 2 ]
   [ -s "$WORK/out/adapter.safetensors" ]
   [ -s "$WORK/out/aligner.safetensors" ]
-  # the loss moved down: "loss A -> B" with B < A
-  echo "$output" | awk '/^trained on/ { for (i = 1; i <= NF; i++) if ($i == "loss") { a = $(i+1); b = $(i+3) } } END { exit !(b + 0 < a + 0) }'
+  # the loss moved down
+  echo "$outcome" | jq -e '.final_loss < .initial_loss'
 }
 
 # An example may carry several images, one placeholder per image in its
@@ -57,47 +58,25 @@ teardown_file() {
     '{"images":["a.png","b.png"],"messages":[{"role":"user","content":"<image_placeholder><image_placeholder>\nWhich of the two is a photograph?"},{"role":"assistant","content":"The first one."}]}' \
     '{"images":["b.png","a.png"],"messages":[{"role":"user","content":"<image_placeholder><image_placeholder>\nWhich of the two is a photograph?"},{"role":"assistant","content":"The second one."}]}' \
     >"$WORK/two/train.jsonl"
-  run "$BRAIN" deepseekvl finetune --weights "$STORE/$REPO_ID" --dataset "$WORK/two" \
-    --out "$WORK/out2" --steps 3 --batch 2 --lr 1e-4
+  run "$BRAIN" deepseekvl finetune --dir "$STORE/$REPO_ID" --dataset "$WORK/two" \
+    --save "$WORK/out2" --steps 3 --batch 2 --lr 1e-4 --json
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
-  [[ "$output" == *"trained on 2 example(s)"* ]]
+  [ "$(echo "$output" | tail -n 1 | jq .examples)" -eq 2 ]
   [ -s "$WORK/out2/adapter.safetensors" ]
 }
 
-# The fine-tune is served: BRAIN_DEEPSEEKVL_TUNED names the directory `finetune`
-# wrote, and the served model answers with what it learned.
-@test "a fine-tune is served and answers with what it learned" {
-  mkdir -p "$WORK/models/$REPO_ID" "$WORK/learn"
+# A fine-tune kept beside the checkpoint is served as a model of its own: the
+# id carries its owner, name and tag, it answers with what it learned, and the
+# base model beside it still answers as the base.
+@test "a stored fine-tune is served as its own model and the base is unchanged" {
+  mkdir -p "$WORK/models/$REPO_ID/adapters/local/blorb" "$WORK/learn"
   for f in "$STORE/$REPO_ID"/*; do ln -s "$f" "$WORK/models/$REPO_ID/"; done
   cp "$WORK/data/dog.png" "$WORK/learn/dog.png"
   printf '%s\n' '{"image":"dog.png","messages":[{"role":"user","content":"<image_placeholder>\nWhat animal is this?"},{"role":"assistant","content":"That is a Blorbville puppy."}]}' >"$WORK/learn/train.jsonl"
   # seed: the served reply below asserts this 14-step run learned the answer, so the run is pinned
-  run "$BRAIN" deepseekvl finetune --weights "$REPO_ID" --models-dir "$WORK/models" --dataset "$WORK/learn" --seed 1 \
-    --out "$WORK/tuned" --steps 14 --lr 3e-4
+  run "$BRAIN" deepseekvl finetune --dir "$STORE/$REPO_ID" --dataset "$WORK/learn" --seed 1 \
+    --save "$WORK/models/$REPO_ID/adapters/local/blorb/v1" --steps 14 --lr 3e-4
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
-
-  local port="${DEEPSEEK_VL_FT_PORT:-8942}"
-  BRAIN_DEEPSEEKVL_TUNED="$WORK/tuned" "$BRAIN" serve --models-dir "$WORK/models" --openai "$port" \
-    --api-keys-out "$WORK/keys.json" --ready-file "$WORK/ready" >"$WORK/serve.log" 2>&1 &
-  local server=$!
-  for _ in $(seq 1 120); do [ -e "$WORK/ready" ] && break; sleep 0.5; done
-  [ -e "$WORK/ready" ] || { kill -9 "$server" 2>/dev/null; cat "$WORK/serve.log" >&3; false; }
-  local key; key="$(jq -r .openai "$WORK/keys.json")"
-  { printf 'data:image/png;base64,'; base64 -w0 "$WORK/learn/dog.png"; } >"$WORK/url.txt"
-  jq -n --rawfile u "$WORK/url.txt" '{model: "brain/deepseekvl", max_tokens: 30, temperature: 0, messages: [{role: "user", content: [{type: "image_url", image_url: {url: $u}}, {type: "text", text: "What animal is this?"}]}]}' >"$WORK/ask.json"
-  curl -fsS --max-time 900 -H "Authorization: Bearer $key" -H 'content-type: application/json' \
-    -X POST "http://127.0.0.1:$port/v1/chat/completions" --data-binary @"$WORK/ask.json" >"$WORK/answer.json" || { kill -9 "$server" 2>/dev/null; cat "$WORK/serve.log" >&3; false; }
-  kill -9 "$server" 2>/dev/null || true
-  jq -e '.choices[0].message.content | test("Blorbville")' "$WORK/answer.json" || { cat "$WORK/answer.json" >&3; false; }
-}
-
-# The same fine-tune kept beside the checkpoint is a model of its own: no
-# environment variable, the id carries its owner, name and tag, and the base
-# model beside it still answers as the base.
-@test "a stored fine-tune is listed as its own model and the base is unchanged" {
-  [ -d "$WORK/tuned" ] || skip "the fine-tune test did not run"
-  mkdir -p "$WORK/models/$REPO_ID/adapters/local/blorb"
-  cp -r "$WORK/tuned" "$WORK/models/$REPO_ID/adapters/local/blorb/v1"
   local port="${DEEPSEEK_VL_FT_PORT:-8942}"
   "$BRAIN" serve --models-dir "$WORK/models" --openai "$port" \
     --api-keys-out "$WORK/keys2.json" --ready-file "$WORK/ready2" >"$WORK/serve2.log" 2>&1 &

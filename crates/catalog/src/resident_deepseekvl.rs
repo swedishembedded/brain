@@ -24,8 +24,8 @@ pub struct DeepseekVlResident {
     /// a stored fine-tune's `:owner:name:tag`.
     id: String,
     dir: String,
-    /// A fine-tune to serve (`BRAIN_DEEPSEEKVL_TUNED`: the directory
-    /// `brain deepseekvl finetune` wrote), applied when the model loads.
+    /// The fine-tune this resident serves (one stored beside the checkpoint),
+    /// applied when the model loads; `None` for the base.
     tuned: Option<std::path::PathBuf>,
     footprint: Footprint,
     placement: Placement,
@@ -41,7 +41,7 @@ impl DeepseekVlResident {
             deepseekvl::model::place(&fp, &cards).map(|p| (fp, p))
         });
         match placed {
-            Ok((footprint, placement)) => Some(DeepseekVlResident { id: MODEL.to_string(), dir, tuned: std::env::var_os("BRAIN_DEEPSEEKVL_TUNED").map(Into::into), footprint, placement }),
+            Ok((footprint, placement)) => Some(DeepseekVlResident { id: MODEL.to_string(), dir, tuned: None, footprint, placement }),
             Err(e) => {
                 residency::log::not_served(&format!("brain: deepseekvl not served ({e})"));
                 None

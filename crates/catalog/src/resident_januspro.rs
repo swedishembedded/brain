@@ -42,11 +42,10 @@ pub struct JanusProResident {
     /// the two builds); `None` for the base, which serves both.
     only: Option<&'static str>,
     dir: String,
-    /// A fine-tune of the understanding path to serve
-    /// (`BRAIN_JANUSPRO_TUNED`: what `brain januspro finetune --mode
-    /// understanding` wrote), applied when the chat build loads.
+    /// The understanding fine-tune this resident serves (one stored beside
+    /// the checkpoint), applied when the chat build loads; `None` for the base.
     tuned: Option<std::path::PathBuf>,
-    /// A generation fine-tune for the drawing build (`BRAIN_JANUSPRO_TUNED_GENERATION`).
+    /// The generation fine-tune this resident serves for the drawing build.
     tuned_generation: Option<std::path::PathBuf>,
     understanding: Option<Plan>,
     generation: Option<Plan>,
@@ -86,7 +85,7 @@ impl JanusProResident {
         if understanding.is_none() && generation.is_none() {
             return None;
         }
-        Some(JanusProResident { id: MODEL.to_string(), only: None, dir, tuned: std::env::var_os("BRAIN_JANUSPRO_TUNED").map(Into::into), tuned_generation: std::env::var_os("BRAIN_JANUSPRO_TUNED_GENERATION").map(Into::into), understanding, generation })
+        Some(JanusProResident { id: MODEL.to_string(), only: None, dir, tuned: None, tuned_generation: None, understanding, generation })
     }
 
     /// The base and every fine-tune stored beside it, as the model ids they
