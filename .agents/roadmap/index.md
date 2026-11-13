@@ -22,6 +22,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`book`](book.md) | book | The textbook under `docs/book` (*From First Principles to Intelligent Machines*): its specification, tooling, chapters and their verification. |
 | [`cancellation`](cancellation.md) | cancellation | Cooperative cancellation of every served action (`CancelToken`, `ActionSpec::cancellable`). |
 | [`chronos2`](chronos2.md) | chronos2 | Chronos-2 time-series forecaster (`crates/chronos2`). |
+| [`cli-to-served`](cli-to-served.md) | cli-to-served | Moving every model-specific CLI verb into its model's served actions, turning the per-architecture CLI modules into per-model Rust samples, and reducing the `brain` binary to its generic verbs (a major release: no compatibility aliases). |
 | [`codeformer`](codeformer.md) | codeformer | CodeFormer blind face restoration (`crates/codeformer`). |
 | [`completion-plan`](completion-plan.md) | completion-plan - finishing the incomplete work | Cross-cutting plan for finishing incomplete work across the per-model ledgers. |
 | [`continual-learning`](continual-learning.md) | continual-state | Durable recurrent state and cheap, undoable adapter updates for the hybrid decoders. |
