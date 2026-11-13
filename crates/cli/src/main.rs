@@ -28,8 +28,6 @@ mod glm_cli;
 mod gguf_cli;
 mod image_io;
 mod lsa_cli;
-mod ouro_cli;
-mod huginn_cli;
 mod load_line;
 mod import_gguf_cli;
 mod models_cli;

@@ -148,24 +148,6 @@ pub fn merge_activations(flag: Option<model::saved::SavedPolicy>, precision: &mu
     }
 }
 
-/// Give `model` the saved-activation policy a verb was asked for: `None` leaves the model's own default, and a
-/// model that does not run the choice refuses it by name, so the verb exits before training instead of ignoring
-/// the flag.
-pub fn apply_activations<M: model::Model>(model: &mut M, policy: Option<model::saved::SavedPolicy>, name: &str) -> Result<(), String> {
-    match policy {
-        Some(policy) => model.set_saved_policy(policy).map_err(|e| format!("{name}: {ACTIVATIONS_FLAG} {policy:?}: {e}")),
-        None => Ok(()),
-    }
-}
-
-/// [`apply_activations`] for a verb that reports a refusal by exiting 1 before any training step.
-pub fn apply_activations_or_exit<M: model::Model>(model: &mut M, policy: Option<model::saved::SavedPolicy>, name: &str) {
-    if let Err(e) = apply_activations(model, policy, name) {
-        eprintln!("{e}");
-        std::process::exit(1);
-    }
-}
-
 /// `--out`'s value, accepting either a dedicated command's own bare-path
 /// spelling (`--out out.png`) or the generic capability-manifest convention
 /// `brain caps <arch>` documents (`--out <blob_name>=<path>`, what `brain

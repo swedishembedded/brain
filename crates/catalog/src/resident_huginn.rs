@@ -29,7 +29,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use capability::{Invocation, Manifest, Provider};
+use capability::{ActionSpec, Invocation, Manifest, ParamSpec, ParamType, Provider};
+use serde_json::json;
 use checkpoint::st::ModelCard;
 use llmserve::{ParsedRequest, ScheduledInstance, TextFrontend};
 use model::serve::Scheduler;
@@ -66,26 +67,63 @@ pub fn manifest() -> Manifest {
     )
 }
 
-#[derive(Default)]
-pub struct HuginnProvider;
+/// Engine sizing a local run may set: the shared KV capacity, its page size
+/// and the recurrent depth (a serving process takes them from its policy).
+fn sizing_params() -> Vec<ParamSpec> {
+    let mut p = crate::resident_provider::kv_sizing_params(DEFAULT_CTX, DEFAULT_BLOCK);
+    p.push(ParamSpec::new("steps", ParamType::Int, "recurrent steps (depth); omit for the checkpoint's own mean_recurrence, capped at the serving default").min(1.0).max(MAX_STEPS).host_resolved());
+    p
+}
 
-impl HuginnProvider {
-    pub fn new() -> HuginnProvider {
-        HuginnProvider
+/// Most recurrent steps a run may ask for.
+const MAX_STEPS: f64 = 1_024.0;
+
+fn import_spec() -> ActionSpec {
+    crate::resident_provider::import_spec("convert a Hugging Face Huginn checkpoint into brain's checkpoint, carded for the model store")
+        .param(ParamSpec::new("id", ParamType::Str, "the model id recorded on the card (default: brain's own id; a pulled checkpoint is named by its vendor and repository)"))
+}
+
+/// What `brain huginn <action>` and a sample run: `generate` with the engine
+/// sizing a local run sets, and `import`.
+pub fn direct_manifest() -> Manifest {
+    let mut m = manifest();
+    for a in &mut m.actions {
+        a.params.extend(sizing_params());
+    }
+    m.actions.push(import_spec());
+    m
+}
+
+struct ImportAction;
+
+impl capability::Action for ImportAction {
+    fn spec(&self) -> ActionSpec {
+        import_spec()
+    }
+    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(capability::Progress)) -> capability::ActionResult {
+        let source = inv.get_str("source").ok_or("huginn import: missing required param 'source'")?;
+        let dest = inv.get_str("dest").ok_or("huginn import: missing required param 'dest'")?;
+        huginn::import::import_as(&source, &dest, inv.get_str("id").as_deref())?;
+        Ok(capability::Outcome::new().set("dest", json!(dest)))
     }
 }
 
-impl Provider for HuginnProvider {
-    fn manifest(&self) -> Manifest {
-        manifest()
-    }
-
-    /// Huginn is served through the residency executor; a one-shot provider
-    /// action would build a second engine from a path the invocation does not
-    /// carry. The manifest is what `/v1/models` and `brain caps` read.
-    fn action(&self, _name: &str) -> Option<Arc<dyn capability::Action>> {
-        None
-    }
+/// Huginn over `assembly`'s checkpoint and tokenizer, run in this process
+/// through its own serving adapter (`crate::resident_provider`).
+pub fn provider(assembly: &capability::Assembly) -> Result<Arc<dyn Provider>, String> {
+    let weights = assembly.role_path("weights").ok();
+    let tokenizer = assembly.role_path("tokenizer").ok();
+    let id = if assembly.id.is_empty() { MODEL_ID.to_string() } else { assembly.id.clone() };
+    let build = move |inv: &Invocation| -> Result<Arc<dyn ResidentModel>, String> {
+        let weights = weights.as_deref().ok_or("huginn: no checkpoint (brain pull tomg-group-umd/huginn-0125, or name one with --weights)")?;
+        let n = |name: &str, default: u32| inv.get_i64(name).map_or(default, |v| v.max(1) as u32);
+        let resident = HuginnResident::from_card(weights, &ModelCard::new(&id, "huginn"), tokenizer.as_deref())?
+            .with_sizing(n("ctx", DEFAULT_CTX), n("block", DEFAULT_BLOCK), DEFAULT_BATCH)
+            .with_steps(inv.get_i64("steps").map(|v| v.max(1) as u32));
+        Ok(Arc::new(resident))
+    };
+    let sizing = |inv: &Invocation| format!("{:?}:{:?}:{:?}", inv.get_i64("ctx"), inv.get_i64("block"), inv.get_i64("steps"));
+    Ok(Arc::new(crate::resident_provider::ResidentProvider::new(direct_manifest(), Box::new(build), Box::new(sizing), vec![Arc::new(ImportAction)])))
 }
 
 pub struct HuginnResident {

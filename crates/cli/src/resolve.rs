@@ -43,8 +43,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("qwen35moe", crate::qwen35moe_cli::run_qwen35moe),
     ("qwen3omnimoe", crate::omni_cli::run_omni),
     ("glmdsa", crate::glm_cli::run_glm),
-    ("ouro", crate::ouro_cli::run_ouro),
-    ("huginn", crate::huginn_cli::run_huginn),
     ("qwen3tts", crate::tts_cli::run_tts),
     // wm_cli's own `--arch`/`--model` flags (not this resolver) pick
     // fake-vs-diamond within `play`/`import`/`export` -- diamond is its one
@@ -132,6 +130,8 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("gpt2", "brain/gpt2"),
     ("toypid", "brain/toypid"),
     ("toymoe", "brain/toymoe"),
+    ("huginn", "brain/huginn"),
+    ("ouro", "brain/ouro"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same

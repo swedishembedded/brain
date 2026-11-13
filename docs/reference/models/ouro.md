@@ -12,14 +12,14 @@ multi-head attention with half-split RoPE, and a SwiGLU FFN.
 
 ```bash
 # Import the Hugging Face checkpoint (single BF16 safetensors + tokenizer).
-brain ouro import --hf <hf checkpoint dir> --out ouro.safetensors
+brain ouro import --source <hf checkpoint dir> --dest ouro.safetensors
 
-# Run the paged serving engine locally (greedy).
-brain ouro generate --checkpoint <hf checkpoint dir> --prompt "The capital of France is" --max-new 32
+# Run the paged serving engine locally: the checkpoint the store holds, or the
+# one --weights names; --ctx and --block size the engine.
+brain ouro generate --prompt "The capital of France is" --max-new 32 --temp 0
 
 # Train it in place: one AdamW step per batch over the released objective.
-brain ouro train --checkpoint <checkpoint> --steps 32 --seq 128 --batch 2 --lr 2e-5 \
-    --out trained.safetensors
+brain ouro train --steps 32 --seq 128 --batch 2 --lr 2e-5 --save trained.safetensors
 ```
 
 `--activations recompute` is what `train` already does: ouro rebuilds every
@@ -30,7 +30,7 @@ is refused by name before the first step.
 
 The objective is the released one: every pass's cross-entropy weighted by
 that pass's exit probability, summed over passes, averaged over supervised
-rows, through the analytic backward. `brain ouro train` runs it and prints
+rows, through the analytic backward. `brain ouro train` runs it and reports
 the loss every step; the gradient itself is gated by finite differences over
 every parameter on cpu, wgpu and cuda. Measured: the tiny fixture checkpoint
 falls from 3.37 to 1.99 nats in 40 steps; the released 2.6 B checkpoint falls

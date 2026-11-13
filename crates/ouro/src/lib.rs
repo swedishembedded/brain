@@ -42,5 +42,6 @@ pub mod import;
 pub mod init;
 pub mod model;
 pub mod serve;
+pub mod train;
 
 pub use config::OuroConfig;

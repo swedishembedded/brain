@@ -67,6 +67,8 @@ pub mod resident_januspro;
 pub mod resident_horizon;
 pub mod resident_lfm;
 pub mod resident_ouro;
+pub mod resident_provider;
+pub mod family_spec;
 pub mod resident_huginn;
 pub mod resident_llm;
 pub mod resident_ltxv;
@@ -545,15 +547,15 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None,
         },
         ModelEntry {
-            manifest: resident_ouro::manifest,
-            provider: always!(resident_ouro::OuroProvider::new()),
-            spec: None,
+            manifest: resident_ouro::direct_manifest,
+            provider: resident_ouro::provider,
+            spec: Some(("ouro", &family_spec::FamilySpec { arch: "ouro", card_family: "ouro" })),
             resident: None,
         },
         ModelEntry {
-            manifest: resident_huginn::manifest,
-            provider: always!(resident_huginn::HuginnProvider::new()),
-            spec: None,
+            manifest: resident_huginn::direct_manifest,
+            provider: resident_huginn::provider,
+            spec: Some(("huginn", &family_spec::FamilySpec { arch: "huginn", card_family: "huginn" })),
             resident: None,
         },
         // FastVLM: `weights` is resolved through `fastvlm::spec::FastvlmSpec`

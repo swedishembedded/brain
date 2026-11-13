@@ -14,10 +14,12 @@ fused gate/up SwiGLU. The released checkpoint is 3.57 B parameters, width
 
 ```bash
 # Import the Hugging Face checkpoint (four fp32 safetensors shards).
-brain huginn import --hf <hf checkpoint dir> --out huginn.safetensors
+brain huginn import --source <hf checkpoint dir> --dest huginn.safetensors
 
-# Run the paged serving engine locally (greedy).
-brain huginn generate --checkpoint <hf checkpoint dir> --prompt "The capital of France is" --max-new 32
+# Run the paged serving engine locally: the checkpoint the store holds (a pulled
+# directory or an import), or the one --weights names; --ctx, --block and
+# --steps size the engine.
+brain huginn generate --prompt "The capital of France is" --max-new 32 --temp 0
 ```
 
 `brain serve` picks up an imported `huginn` checkpoint from the model store
@@ -72,8 +74,8 @@ runtime a system prompt that fits that window - a stock agent system prompt
 is larger than 4096 tokens:
 
 ```bash
-brain huginn import --hf <hf checkpoint dir> \
-    --out <models>/brain/huginn-0125/model.brain.safetensors --id brain/huginn-0125
+brain huginn import --source <hf checkpoint dir> \
+    --dest <models>/brain/huginn-0125/model.brain.safetensors --id brain/huginn-0125
 cp <hf checkpoint dir>/tokenizer*.json <hf checkpoint dir>/generation_config.json \
     <models>/brain/huginn-0125/
 brain serve --device gpu --models-dir <models> --ctx 4096 --reserve-gb 0 \
