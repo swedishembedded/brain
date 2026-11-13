@@ -79,8 +79,6 @@ mod tts_cli;
 #[cfg(unix)]
 mod tts_serve;
 mod wm_cli;
-mod wan_cli;
-mod wan_report;
 mod yolo_cli;
 
 /// Whether `--device`/`BRAIN_DEVICE` EXPLICITLY named the NPU. The NPU is a
@@ -286,14 +284,9 @@ FLUX.2 Klein (text-to-image + image editing; 4-step distilled flow matching)
       9B variants need BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)
 
 WAN 2.1 (text-to-video; 81 frames at 16 fps, 480p on the 1.3B variant)
-  brain wan t2v --prompt \"...\" --output-path out.mp4 [--seed S]
-      [--frames N (1+4k) --width W --height H --steps N --shift S --guidance G]
-      [--negative-prompt \"...\" --fps N --solver unipc|dpm++ --variant t2v-1.3B]
-      [--device cpu|gpu --t5-device cpu|gpu]
-      weights by flag or env: --dit/--vae/--t5/--tokenizer beat BRAIN_WAN_DIT,
-      BRAIN_WAN_VAE, BRAIN_WAN_T5, BRAIN_WAN_TOKENIZER
-      writing the file needs ffmpeg; without it the frames land in
-      <output-path>.frames/ and the assembling command is printed
+  brain --device gpu0 wan t2v --prompt \"...\" --out video=out.mp4 [--seed S --dit-dtype int8 --te-device gpu1]
+  brain wan lora_train --data <dir> --save adapter.brain --seed S [--report <dir>]
+      every parameter: brain wan <action> --help; --dit/--vae/--text-encoder/--tokenizer name a role
 
 World models (playable action-conditioned video models; docs/reference/models/world-models/)
   brain diamond play  --model fake|diamond [--weights F --device cpu|gpu|npu --onnx M]   # SDL window

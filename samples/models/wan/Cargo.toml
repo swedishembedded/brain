@@ -1,0 +1,19 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/wan` -> `sample-models-wan`.
+name = "sample-models-wan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: Wan2.1 text-to-video and video LoRA training from the command line, every served action with every parameter."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-wan.workspace = true
+brain-invoke.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 45

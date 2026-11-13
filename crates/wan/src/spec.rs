@@ -172,7 +172,7 @@ impl ArchSpec for WanSpec {
         out
     }
 
-    fn assemble(&self, chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+    fn assemble(&self, chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
         let dit_idx = *chosen.get("dit").ok_or("wan assemble: no dit chosen")?;
         let dit_rec = &records[dit_idx];
         let shapes = dit_shapes(&dit_rec.path)?;
@@ -181,7 +181,12 @@ impl ArchSpec for WanSpec {
         // unrecoverable from the weights: `dit_config_from_shapes` already
         // matches the exact (dim, layer count) pair against a real, named
         // variant, or fails - so a resolved dit always names a full variant,
-        // never an ambiguity.
+        // never an ambiguity. A stated variant (the action's `variant`) is
+        // checked against it, which is also what settles two DiTs of
+        // different sizes tied in one store.
+        if let Some(want) = overrides.get("variant").filter(|w| w.as_str() != cfg.name) {
+            return Err(format!("wan assemble: variant {want} does not match {} ({}, from its shapes)", dit_rec.path.display(), cfg.name));
+        }
         Ok(AssembleOutcome::Assembled(AssembledVariant { id: format!("local/wan-{}", cfg.name), variant: Some(cfg.name.to_string()) }))
     }
 

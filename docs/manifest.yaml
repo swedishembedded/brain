@@ -193,6 +193,8 @@ navigation:
         path: examples/models/flux2.md
       - source: samples/models/sam2/README.md
         path: examples/models/sam2.md
+      - source: samples/models/wan/README.md
+        path: examples/models/wan.md
       - source: samples/npu/rockchip/README.md
         path: examples/npu/rockchip.md
       - source: samples/python/api/deepseek-chat/README.md

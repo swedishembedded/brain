@@ -53,7 +53,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("qwen3tts", crate::tts_cli::run_tts),
     ("yolov8", crate::yolo_cli::run_yolo),
     ("zipdepth", crate::depth_cli::run_depth),
-    ("wan", crate::wan_cli::run_wan),
     ("ltxv", crate::ltxv_cli::run_ltxv),
     ("worldmirror2", crate::mirror_cli::run_mirror),
     ("splat", crate::splat_cli::run_splat),
@@ -149,6 +148,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     // `brain/pulid` (`pulid::caps::MODEL`).
     ("flux1", "brain/flux1"),
     ("flux2", "brain/flux2-klein"),
+    ("wan", "brain/wan"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
@@ -304,10 +304,6 @@ pub(crate) fn arch_for_model(model: &str) -> Option<&'static str> {
 /// (`crate::caps_cli::run_do`) instead of rejecting it outright, so there is
 /// no fixed vocabulary to check it against here either.
 const ARCH_HANDLER_VERBS: &[(&str, &[&str])] = &[
-    // Deliberately NOT `infer` -- `wan_cli::run_wan`'s own module doc: that
-    // canonicalizes from `generate`/`gen`/`sample`, which would inject a
-    // single `--weights` flag onto a command that takes four weight roles.
-    ("wan", &["t2v", "text2video", "finetune"]),
     ("ltxv", &["t2v", "text2video", "upscale", "v2v", "dfr", "t2a", "extend"]),
 ];
 
@@ -1184,23 +1180,15 @@ mod tests {
         }
     }
 
-    /// `wan` deliberately does NOT accept the generic `generate`/`infer`
-    /// spelling (its own module doc: those canonicalize to "infer", which
-    /// would wrongly inject a single `--weights` flag onto a command that
-    /// takes four weight roles) -- only `t2v`/`text2video` and `finetune`.
-    /// The regression guard for the OTHER architecture this bug class hits:
-    /// a bogus wan verb must be rejected too, and wan's real verbs must stay
-    /// accepted.
+    /// wan's real verbs are its served actions; anything else is refused
+    /// before any weight lookup.
     #[test]
-    fn verb_is_known_matches_wans_own_closed_verb_set() {
+    fn verb_is_known_matches_wans_served_actions() {
         assert_eq!(verb_is_known("wan", "t2i"), Some(false));
-        for v in ["t2v", "text2video", "finetune"] {
+        for v in ["t2v", "lora_train"] {
             assert_eq!(verb_is_known("wan", v), Some(true), "wan should accept {v:?}");
         }
-        // `generate`/`infer` canonicalize to "infer", which wan's own CLI
-        // does not accept -- must stay rejected, not silently allowed.
         assert_eq!(verb_is_known("wan", "generate"), Some(false));
-        assert_eq!(verb_is_known("wan", "infer"), Some(false));
     }
 
     /// An architecture this gate has no opinion about (no `weights_env`, so
@@ -1235,9 +1223,6 @@ mod tests {
     /// change.
     #[test]
     fn wants_weight_acquisition_still_proceeds_for_every_real_verb() {
-        for v in ["t2v", "text2video", "finetune"] {
-            assert!(wants_weight_acquisition("wan", &s(&[v])), "wan {v:?} should still attempt weight acquisition");
-        }
         // An arch with no verb table entry is unaffected: unchanged
         // (pre-existing) behavior, gated only by help/no-verb.
         assert!(wants_weight_acquisition("gpt2", &s(&["t2i"])));

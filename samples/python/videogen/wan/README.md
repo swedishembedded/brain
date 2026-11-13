@@ -123,10 +123,10 @@ which the host cannot interrupt.
 The same generation without a server, one command, one playable file:
 
 ```bash
-brain wan t2v --prompt "a cat walking on a beach" --output-path cat.mp4
+brain wan t2v --prompt "a cat walking on a beach" --out video=cat.mp4
 ```
 
-With no `--dit/--vae/--t5/--tokenizer` and no `BRAIN_WAN_*` exported, that
-command auto-fetches `Wan-AI/Wan2.1-T2V-1.3B` (17.6 GB) into
-`$BRAIN_MODELS_DIR` first. Naming all four paths (or exporting all four
-variables) skips the fetch entirely.
+The weights resolve from the model store (`brain pull Wan-AI/Wan2.1-T2V-1.3B`
+puts them there); `--dit`, `--vae`, `--text-encoder` and `--tokenizer` name a
+role outright. `samples/models/wan` is the same command as a standalone Rust
+program.

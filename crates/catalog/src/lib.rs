@@ -403,10 +403,7 @@ pub fn models() -> Vec<ModelEntry> {
         // env-gated `from_env` families), not from here.
         ModelEntry {
             manifest: wan::caps::manifest,
-            provider: |assembly: &Assembly| {
-                let paths = wan::pipeline::Paths::from_assembly(assembly)?;
-                Ok(Arc::new(wan::caps::WanProvider::from_paths(paths)) as Arc<dyn Provider>)
-            },
+            provider: wan::caps::provider,
             spec: Some(("wan", &wan::spec::WanSpec)),
             resident: None,
         },

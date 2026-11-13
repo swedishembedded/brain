@@ -168,8 +168,6 @@ crates/cli/src/supply.rs	BRAIN_QWEN3TTS_WEIGHTS
 crates/cli/src/supply.rs	YOLO_RAW_PT
 crates/cli/src/tts_serve.rs	BRAIN_QWEN3TTS_NPU_DEVICE
 crates/cli/src/tts_serve.rs	BRAIN_QWEN3TTS_RES
-crates/cli/src/wan_cli.rs	BRAIN_WAN_DIT_DTYPE
-crates/cli/src/wan_report.rs	BRAIN_CLIP_DIR
 crates/cli/tests/it/device_routing.rs	BRAIN_DEVICE
 crates/cli/tests/it/flops_diffusion_cli.rs	BRAIN_FLUX2_VAE
 crates/cli/tests/it/forecast_finetune_timesfm3.rs	MOE_SKIP_GPU_TESTS

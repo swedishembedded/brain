@@ -17,6 +17,7 @@ Scope: Moving every model-specific CLI verb into its model's served actions, tur
 
 - `crates/invoke`: the action runner `brain <model> <action>` and every sample share. `invoke::main` is a per-model program's whole `main` (global `--device`/`--backend`/`--brain-data-dir`, help from the static manifest, flags checked before any weight lookup, weights from the store, a clean device drain at exit). Two checkpoints of one model that tie in the store are settled by the action's `variant` (given, else its default). The catalog is the one table of which model resolves its weights through which spec.
 - flux2: `text2image`/`edit` take everything the CLI verb did - inpainting (`mask`), up to eight references with the default 512 px bound (`ref_size`), the init image's size as the canvas, tiled canvases, `experimental_steps`, `ref_resolution_scale`, several adapters with their own strengths (`adapter` is a `path@strength` list, `model::adapter::AdapterSpec::parse_list`, for every model) - planned from the images' sizes alone (`flux2::request`), which is also what the scheduler keys a resident on; `lora_train` gained `ckpt_every`/`resume` (they sat on the generation actions), `precision`, `train_base`, `cache_dir`. An unset `precision` is the checkpoint's own, so a served GGUF DiT runs. `samples/models/flux2`.
+- wan: `t2v` gained `dit_dtype` (it was read but not declared) and `te_device`; the global `--device` places the DiT and VAE. `lora_train`'s `report` writes the base-vs-adapted evidence (`wan::report`), its EVA-CLIP table from `report_clip` instead of an environment variable. `--variant` settles two DiTs of different sizes in one store. `samples/models/wan`.
 - sam2: `track` is a served action (`sam2::track`); mask sequences are one format, `imaging::maskseq` (a one-channel clip blob between actions, a directory on disk), read by LTX's masked pass as well; `samples/models/sam2`.
 
 ## Decisions for what is left
@@ -34,7 +35,6 @@ Each row is one or more self-contained commits: the served action gains what the
 |---|---|---|
 | ltxv | `replace`; knobs missing from `t2v`/`v2v`/`upscale`/`dfr`/`extend` (scene, reference video, keyframes, window, strength, factor, role files); mp4 output | actions; `replace` as an action of its own; sample; delete `samples/shell/videogen/{ltxv,character_replace}` |
 | splat | `orient`, `merge`, `prune`, `sfm`, `train`, `fit`/`render` knobs; `view`, `info` | actions; `view`/`info` in the sample |
-| wan | device placement, dtype, role files, `finetune --report` | `t2v`/`lora_train`; sample |
 | worldmirror2 | `infer` knobs and directory/video input, `import`, `export-npu` | `reconstruct`; conversion actions; sample |
 | zipdepth | views, colormaps, headless composite; `camera`; `calib`; `train` | actions; camera viewer and window in the sample |
 | yolov8 | identity verification, NPU route, `train`/`finetune`/`eval` | `detect`; training actions; sample |

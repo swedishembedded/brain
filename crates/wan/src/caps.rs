@@ -53,6 +53,9 @@ const VARIANTS: [&str; 2] = ["t2v-1.3B", "t2v-14B"];
 /// reference; they do not share a starting sigma, so this is a real choice.
 const SOLVERS: [&str; 2] = ["unipc", "dpm++"];
 
+/// The DiT tiers `dit_dtype` takes (`crate::dev::WanDtype::from_name`).
+const DIT_DTYPES: [&str; 4] = ["f32", "f16", "int8", "int4"];
+
 /// The variant a name selects, or an error naming what IS available.
 pub fn config_from_name(name: &str) -> Result<WanConfig, String> {
     match name {
@@ -84,6 +87,8 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("solver", ParamType::Enum(SOLVERS.iter().map(|s| s.to_string()).collect()), "multistep flow-matching solver").default(json!("unipc")))
     .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; the checkpoint at BRAIN_WAN_DIT must match").default(json!("t2v-1.3B")))
     .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a trained LoRA adapter (from lora_train) to fold in before generation").host_resolved())
+    .param(ParamSpec::new("dit_dtype", ParamType::Enum(DIT_DTYPES.iter().map(|s| s.to_string()).collect()), "the DiT's tier: f32 (reference), f16, int8 or int4 (smaller and faster, lower fidelity)").default(json!("f32")))
+    .param(ParamSpec::new("te_device", ParamType::Str, "where the umT5 text encoder runs, a --device spec (unset: cpu)").host_resolved())
     .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required())
     // What `/videos` maps onto t2v: the 1 + 4k frame grid at the requested
     // rate, sides on 16 pixels, up to the 14B variant's 1280x720, silent.
@@ -108,6 +113,8 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("device", ParamType::Str, "device for the VAE encode and the DiT trainer; 'cpu' forces the host trainer (omit for brain's default, which uses the GPU where one is present)"))
         .param(ParamSpec::new("te_device", ParamType::Str, "device for the umT5 text encoder (omit for $BRAIN_WAN_T5_DEVICE, then cpu)"))
         .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()), "what the host trainer's backward keeps of the forward: 'keep' every block's activations or 'recompute' them from each block's input (less memory, one extra forward); the device trainer always rebuilds from block inputs; default: keep"))
+        .param(ParamSpec::new("report", ParamType::Str, "server-side directory for a base-vs-adapted report after training: held-out clips with and without the adapter, contact sheets, the loss curve").host_resolved())
+        .param(ParamSpec::new("report_clip", ParamType::Str, "server-side EVA-CLIP checkpoint directory: adds a concept-vs-distractor score table to the report").host_resolved())
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"));
 
     Manifest::new(
@@ -159,7 +166,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         solver: Solver::from_name(&inv.get_str("solver").unwrap_or_else(|| "unipc".into()))?,
         fps: inv.get_i64("fps").unwrap_or(d.fps as i64).max(1) as usize,
         device: None,
-        te_device: None,
+        te_device: inv.get_str("te_device").filter(|s| !s.is_empty()),
         adapter: inv.get_str("adapter").filter(|s| !s.is_empty()),
         dit_dtype: match inv.get_str("dit_dtype").filter(|s| !s.is_empty()) {
             Some(s) => crate::dev::WanDtype::from_name(&s)?,
@@ -225,6 +232,12 @@ pub fn video_outcome(video: &crate::pipeline::Video, timings: &crate::pipeline::
 
 /// What `lora_train`'s `activations` names for the host trainer's backward; absent keeps every block's activations,
 /// the trainer's own default.
+/// `(step, loss)` from a trainer progress line `step N/M  loss L`.
+fn step_loss(message: &str) -> Option<(u32, f32)> {
+    let (step_part, loss_part) = message.strip_prefix("step ")?.split_once("  loss ")?;
+    Some((step_part.split_once('/')?.0.parse().ok()?, loss_part.trim().parse().ok()?))
+}
+
 fn saved_policy(inv: &Invocation) -> Result<model::saved::SavedPolicy, String> {
     match inv.get_str("activations") {
         Some(value) => model::saved::SavedPolicy::parse_activations(&value).map_err(|e| format!("lora_train: {e}")),
@@ -257,8 +270,27 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         te_device: inv.get_str("te_device").filter(|s| !s.is_empty()),
         saved: saved_policy(inv)?,
     };
-    let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
+    let mut losses: Vec<(u32, f32)> = Vec::new();
+    let mut prog = |step: u32, total: u32, message: String| {
+        if let Some(l) = step_loss(&message) {
+            losses.push(l);
+        }
+        progress(Progress::step(step, total, message))
+    };
     let tensors = crate::finetune::run(paths, std::path::Path::new(&dir), &cfg, &opts, &inv.cancel, &mut prog)?;
+    if let Some(out_dir) = inv.get_str("report").filter(|d| !d.is_empty()) {
+        let clip_dir = inv.get_str("report_clip").filter(|d| !d.is_empty());
+        crate::report::write_report(&crate::report::ReportRequest {
+            paths,
+            cfg: &cfg,
+            opts: &opts,
+            data_dir: std::path::Path::new(&dir),
+            adapter_path: std::path::Path::new(&save),
+            losses: &losses,
+            out_dir: std::path::Path::new(&out_dir),
+            clip_dir: clip_dir.as_deref().map(std::path::Path::new),
+        })?;
+    }
     use capability::Blob;
     let bytes = std::fs::read(&save).map_err(|e| format!("read trained adapter '{save}': {e}"))?;
     Ok(Outcome::new()
@@ -284,6 +316,11 @@ impl WanProvider {
     pub fn from_paths(paths: Paths) -> WanProvider {
         WanProvider { hot: Arc::new(Hot::new()), paths }
     }
+}
+
+/// The provider over a resolved [`capability::Assembly`] (its four roles).
+pub fn provider(assembly: &capability::Assembly) -> Result<Arc<dyn Provider>, String> {
+    Ok(Arc::new(WanProvider::from_paths(Paths::from_assembly(assembly)?)))
 }
 
 impl Provider for WanProvider {
@@ -316,6 +353,11 @@ impl Action for WanAction {
         match self.name.as_str() {
             "t2v" => {
                 let p = gen_params_from(inv)?;
+                // One forward is the whole 30-block stack in one submit: give
+                // the device the time it needs unless the host already chose.
+                if gpu_core::hardware::wait_timeout_override().is_none() {
+                    gpu_core::hardware::set_wait_timeout(Some(std::time::Duration::from_secs(1200)));
+                }
                 generate_on(&self.paths, &self.hot, inv, &p, progress)
             }
             "lora_train" => train_action(&self.paths, inv, progress),
@@ -340,6 +382,13 @@ mod tests {
         assert_eq!(saved_policy(&Invocation::new().set("activations", json!("recompute"))), Ok(SavedPolicy::Recompute));
         let e = saved_policy(&Invocation::new().set("activations", json!("recompute+bf16"))).unwrap_err();
         assert!(e.contains("activations"), "{e}");
+    }
+
+    /// A trainer progress line yields its step and loss; anything else none.
+    #[test]
+    fn the_loss_curve_is_read_from_progress() {
+        assert_eq!(step_loss("step 12/200  loss 0.25"), Some((12, 0.25)));
+        assert_eq!(step_loss("encoding"), None);
     }
 
     #[test]

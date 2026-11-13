@@ -96,7 +96,7 @@ adapter; LoRA files from other tools load too
 ```bash
 $ brain --device gpu wan t2v \
     --prompt "a golden retriever running along a sandy beach at sunset, waves in the background, cinematic" \
-    --frames 9 --width 416 --height 240 --steps 20 --seed 7 --output-path wan.mp4   # the seed reproduces the picture below
+    --frames 9 --width 416 --height 240 --steps 20 --seed 7 --out video=wan.mp4   # the seed reproduces the picture below
 ```
 
 ![five frames of the generated clip: a dog running along the waterline at sunset](img/wan-strip.png)

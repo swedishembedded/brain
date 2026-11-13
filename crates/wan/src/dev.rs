@@ -72,7 +72,7 @@ pub enum WanDtype {
 }
 
 impl WanDtype {
-    /// Parse `--dit-dtype`/`BRAIN_WAN_DIT_DTYPE`'s spelling.
+    /// Parse `dit_dtype`'s spelling.
     pub fn from_name(s: &str) -> Result<WanDtype, String> {
         match s {
             "f32" => Ok(WanDtype::F32),

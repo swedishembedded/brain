@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain wan finetune --report <dir>` (G3): the human-readable artifact that
-//! proves a trained LoRA adapter actually changed generation, not just the
-//! training loss number. Writes, under `<dir>`, with only relative paths:
+//! `lora_train`'s `report`: the human-readable artifact that shows a trained
+//! LoRA adapter actually changed generation, not just the training loss
+//! number. Writes, under the report directory, with only relative paths:
 //!
 //! * `index.md` - run summary, the loss curve, and (base, adapted) pairs for
 //!   a few held-out prompts/seeds with links to their clips/contact sheets.
@@ -13,7 +13,7 @@
 //! * `sheets/{base,adapted}_<prompt>_<seed>.png` - first/middle/last frame
 //!   side by side, so the difference is visible without a video player.
 //! * a lightweight EVA-CLIP image-tower score table (`s_base`, `s_adapted`,
-//!   `delta`) when `BRAIN_CLIP_DIR` names an EVA-CLIP checkpoint directory -
+//!   `delta`) when `report_clip` names an EVA-CLIP checkpoint directory -
 //!   the FULL statistically-controlled comparison (random-adapter control,
 //!   paired significance test) is `crates/wan/tests/it/finetune_ab.rs`'s job,
 //!   not this report's; this table is a quick visual/numeric sanity check.
@@ -21,8 +21,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use wan::pipeline::{GenOpts, Paths};
-use wan::WanConfig;
+use crate::config::WanConfig;
+use crate::pipeline::{GenOpts, Paths};
 
 /// Paraphrases of the concept, deliberately NOT the exact training captions
 /// (`data::gen_clips::CONCEPT_CAPTIONS`) - a held-out prompt has to exercise
@@ -66,15 +66,15 @@ fn generate_one(cfg: &WanConfig, paths: &Paths, prompt: &str, seed: u64, frames:
         guidance: 1.0, // one forward/step - the A/B contrast rides the fold, not CFG
         seed,
         negative_prompt: None,
-        solver: wan::pipeline::Solver::UniPc,
+        solver: crate::pipeline::Solver::UniPc,
         fps: 8,
         device: None,
         te_device: None,
         adapter,
-        dit_dtype: wan::WanDtype::F32,
+        dit_dtype: crate::WanDtype::F32,
     };
     let cancel = capability::CancelToken::default();
-    let (video, _) = wan::generate(cfg, paths, prompt, &o, &cancel, |_, _, _| {})?;
+    let (video, _) = crate::generate(cfg, paths, prompt, &o, &cancel, |_, _, _| {})?;
     let frames_hwc = video.frames.iter().map(|px| (px.iter().map(|&b| b as f32 / 255.0).collect::<Vec<f32>>(), video.width, video.height)).collect();
     Ok(ClipOut { frames_hwc, width: video.width, height: video.height, fps: video.fps })
 }
@@ -115,9 +115,9 @@ fn write_contact_sheet(clip: &ClipOut, path: &Path) -> Result<(), String> {
 }
 
 /// One held-out EVA-CLIP image embedding session, built once and reused
-/// across every frame this report embeds. `None` when `BRAIN_CLIP_DIR` is
-/// unset or holds no EVA checkpoint - the G2 table is then omitted rather
-/// than failing the whole report over an optional check.
+/// across every frame this report embeds. `None` when no EVA-CLIP directory
+/// is given or it holds no EVA checkpoint - the G2 table is then omitted
+/// rather than failing the whole report over an optional check.
 struct EvaSession {
     gpu: gpu_core::Gpu,
     model: clip::model::EvaVision,
@@ -125,9 +125,8 @@ struct EvaSession {
 }
 
 impl EvaSession {
-    fn from_env() -> Option<EvaSession> {
-        let dir = std::env::var("BRAIN_CLIP_DIR").ok().filter(|s| !s.is_empty())?;
-        let path = Path::new(&dir).join(clip::caps::EVA_FILE);
+    fn open(dir: Option<&Path>) -> Option<EvaSession> {
+        let path = dir?.join(clip::caps::EVA_FILE);
         if !path.exists() {
             return None;
         }
@@ -201,16 +200,23 @@ fn sibling_distractor_dir(data_dir: &Path) -> Option<std::path::PathBuf> {
     d.is_dir().then_some(d)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn write_report(
-    paths: &Paths,
-    cfg: &WanConfig,
-    opts: &wan::finetune::TrainOpts,
-    data_dir: &Path,
-    adapter_path: &Path,
-    losses: &[(u32, f32)],
-    out_dir: &Path,
-) -> Result<(), String> {
+/// What a report is about: the trained run and where its evidence goes.
+pub struct ReportRequest<'a> {
+    pub paths: &'a Paths,
+    pub cfg: &'a WanConfig,
+    pub opts: &'a crate::finetune::TrainOpts,
+    pub data_dir: &'a Path,
+    pub adapter_path: &'a Path,
+    /// `(step, loss)` as the run reported them.
+    pub losses: &'a [(u32, f32)],
+    pub out_dir: &'a Path,
+    /// An EVA-CLIP checkpoint directory for the score table; `None` omits it.
+    pub clip_dir: Option<&'a Path>,
+}
+
+/// Write the report `r` describes.
+pub fn write_report(r: &ReportRequest) -> Result<(), String> {
+    let ReportRequest { paths, cfg, opts, data_dir, adapter_path, losses, out_dir, clip_dir } = *r;
     std::fs::create_dir_all(out_dir.join("clips")).map_err(|e| format!("wan report: {e}"))?;
     std::fs::create_dir_all(out_dir.join("sheets")).map_err(|e| format!("wan report: {e}"))?;
 
@@ -224,7 +230,7 @@ pub fn write_report(
     let mut rows: Vec<(String, u64, String, String, String, String)> = Vec::new(); // (prompt, seed, base_mp4, adapted_mp4, base_png, adapted_png)
     let mut scores: Vec<(String, u64, f32, f32, f32)> = Vec::new(); // (prompt, seed, s_base, s_adapted, delta)
 
-    let eva = EvaSession::from_env();
+    let eva = EvaSession::open(clip_dir);
     let concept_centroid_and_w_h = eva.as_ref().map(|e| {
         // `data_dir` IS the concept set this adapter trained on; reusing it
         // for the centroid is the honest tradeoff this report makes (the held
@@ -306,7 +312,7 @@ pub fn write_report(
         md.push_str(&format!("| {p} | {seed} | [{bm}]({bm}) | [{am}]({am}) | ![base]({bp}) | ![adapted]({ap}) |\n"));
     }
     if scores.is_empty() {
-        md.push_str("\n_G2 score table omitted: set `BRAIN_CLIP_DIR` to an EVA-CLIP checkpoint directory and keep a sibling `distractor/` set next to `--data` to compute it. The statistically-controlled A/B comparison (random-adapter control, significance test) is `crates/wan/tests/it/finetune_ab.rs`._\n");
+        md.push_str("\n_G2 score table omitted: give `report_clip` an EVA-CLIP checkpoint directory and keep a sibling `distractor/` set next to `data` to compute it. The statistically-controlled A/B comparison (random-adapter control, significance test) is `crates/wan/tests/it/finetune_ab.rs`._\n");
     } else {
         md.push_str("\n## G2 sanity scores (EVA-CLIP image tower; concept-centroid vs distractor-centroid margin)\n\n");
         md.push_str("| prompt | seed | s_base | s_adapted | delta |\n|---|---|---|---|---|\n");

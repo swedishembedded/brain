@@ -220,7 +220,7 @@ elif ! need "$IMG_DIR/wan-strip.png"; then
   "$BRAIN" --device gpu wan t2v \
     --prompt "a golden retriever running along a sandy beach at sunset, waves in the background, cinematic" \
     --frames 9 --width 416 --height 240 --steps 20 --seed 7 \
-    --output-path "$IMG_DIR/wan.mp4"
+    --out "video=$IMG_DIR/wan.mp4"
   # Every other step here publishes a PNG the README embeds; a video cannot be
   # embedded, so publish every other frame as one contact strip instead. The
   # .mp4 is kept beside it - the strip is the still that proves motion, the

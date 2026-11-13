@@ -541,8 +541,8 @@ pub(crate) mod tests {
         std::env::remove_var("BRAIN_AUTO_FETCH");
     }
 
-    /// `wan` moved to the resolver (`wan::spec::WanSpec`,
-    /// `wan_cli::resolve_wan`): its `weights_env` is now empty, so
+    /// `wan` resolves through the model store (`wan::spec::WanSpec`): its
+    /// `weights_env` is empty, so
     /// `ensure_env_weights_with` - the env-based supply path this whole
     /// section otherwise exercises with real fetch-gate scenarios - has
     /// nothing left to check for it and is a documented no-op (see

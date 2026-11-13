@@ -1312,14 +1312,13 @@ flux2/edit: build/release
 WAN_PROMPT ?= a golden retriever running along a sandy beach at sunset, waves in the background, cinematic
 WAN_FLAGS ?= --frames 9 --width 416 --height 240 --steps 20
 
-## wan - lists the Wan2.1 text-to-video targets (weights via BRAIN_WAN_* env); does nothing
+## wan - lists the Wan2.1 text-to-video targets (weights from the model store); does nothing
 wan:
 	$(LIST_CHILDREN)
 
-## wan/t2v - generate one video clip with Wan2.1 (BRAIN_WAN_* env, WAN_PROMPT, WAN_FLAGS)
+## wan/t2v - generate one video clip with Wan2.1 (weights from the model store; WAN_PROMPT, WAN_FLAGS)
 wan/t2v: build/release
-	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER"; exit 2)
-	$(BRAIN) wan t2v --prompt "$(WAN_PROMPT)" --output-path out/wan.mp4 $(WAN_FLAGS)
+	$(BRAIN) wan t2v --prompt "$(WAN_PROMPT)" --out video=out/wan.mp4 $(WAN_FLAGS)
 
 # ---- forecasting ----------------------------------------------------------
 ## forecast - lists the forecasting targets; does nothing

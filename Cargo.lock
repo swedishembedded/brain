@@ -6861,6 +6861,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-models-wan"
+version = "5.1.0"
+dependencies = [
+ "brain-invoke",
+ "brain-wan",
+]
+
+[[package]]
 name = "sample-npu-rockchip"
 version = "5.1.0"
 dependencies = [

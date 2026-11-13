@@ -25,9 +25,9 @@ is a matter of configuration, not a different model.
 |---|---|
 | Inference (text to video) | [x] |
 | Inference (image to video) | [ ] |
-| LoRA fine-tune         | [x] (library only, no command) |
+| LoRA fine-tune         | [x] (`lora_train`) |
 | INT8                   | [ ] |
-| CLI (`brain wan t2v`)  | [x] |
+| CLI (`brain wan <action>`) | [x] |
 | HTTP API               | [ ] |
 | D-Bus                  | [x] |
 | Batched serving        | [ ] |
@@ -37,22 +37,23 @@ model: a weights-free manifest `brain caps brain/wan` prints, a residency
 adapter the scheduler budgets and places, and a cancellable streaming job over
 D-Bus. Image-to-video does not exist yet.
 
-LoRA fine-tuning is `brain wan finetune --data <clips-dir> --save <adapter.brain>`
-(the same code as the `lora_train` capability action, `wan::finetune::run`),
-gradient-checked end to end. The transformer's forward and backward run on
+LoRA fine-tuning is `brain wan lora_train --data <clips-dir> --save
+<adapter.brain> --seed S` (`wan::finetune::run`), gradient-checked end to end.
+`--report <dir>` then writes the evidence that the adapter changed generation:
+clips of held-out prompts with and without it under the same seed, contact
+sheets, the loss curve, and with `--report-clip <eva-clip-dir>` an EVA-CLIP
+score table. The transformer's forward and backward run on
 the GPU (`wan::train::DeviceTrainer` over `wan::devgrad::BlockDev`), with the
 patch embedding, conditioning MLPs, head and loss left on the host; `--device
 cpu` selects the host f32 trainer instead, which is also what a machine with no
 accelerator falls back to.
 
-`--activations keep|recompute` (default `keep`) sets what the host trainer holds
+`lora_train`'s `--activations keep|recompute` (default `keep`) sets what the host trainer holds
 of each step's forward for its backward: `keep` holds every block's
 activations, `recompute` holds only each block's input and rebuilds the rest
 block by block in the backward. The loss and gradients are bit-identical;
 `recompute` trades extra forward compute for lower memory. The GPU trainer
-always rebuilds from block inputs. Any other value is refused. The
-`lora_train` action takes the same choice as its optional `activations`
-parameter.
+always rebuilds from block inputs. Any other value is refused.
 
 Because a LoRA freezes the base, the GPU trainer keeps every block's base
 weights resident for the whole run and assembles `W_eff = base + (α/r)·B·A`
@@ -116,24 +117,25 @@ materialising the whole model.
 
 ```bash
 brain wan t2v --prompt "A belgian malinois running on a paved highway" \
-              --output-path out.mp4
+              --out video=out.mp4
 
 # start small to check a set of weights before committing to a long run
 brain wan t2v --prompt "a golden retriever running along a sandy beach at sunset" \
-              --frames 9 --width 416 --height 240 --steps 20 --output-path dog.mp4
+              --frames 9 --width 416 --height 240 --steps 20 --out video=dog.mp4
 ```
 
-Everything else has a default taken from the variant's own configuration, and
-every weight path is both a flag (`--dit`, `--vae`, `--t5`, `--tokenizer`) and
-an environment variable, with the flag winning. `make wan/t2v` runs the small
-command above.
+Everything else has a default taken from the variant's own configuration
+(`brain wan t2v --help` lists them), and every weight role resolves from the
+model store or is named with a flag (`--dit`, `--vae`, `--text-encoder`,
+`--tokenizer`). Two DiTs of different sizes in one store are told apart by
+`--variant`. `make wan/t2v` runs the small command above, and
+`samples/models/wan` is the same command line as a standalone program.
 
 brain writes the clip itself, as AV1 video in `.mp4`, `.mov`, `.mkv` or
 `.webm`, or as an animated `.gif`; no external encoder is involved.
 
-Wan also declares one action, `t2v`, through the generalized capability
-interface - the same schema `brain caps` prints and the D-Bus and event
-surfaces dispatch:
+`t2v` and `lora_train` are the same actions `brain caps` prints and the D-Bus
+and event surfaces dispatch:
 
 ```bash
 brain caps brain/wan                     # discovery, no weights needed
@@ -148,12 +150,6 @@ and the clip comes back as a file descriptor. It is **cancellable** - a cancel
 flips the job's token and the denoise loop aborts at its next step boundary,
 which matters for a model whose default run occupies a card for a long time.
 `samples/python/videogen/wan/` is the runnable client for both.
-
-The action is not reachable as a CLI verb of its own: `wan` has a dedicated CLI
-module and the resolver gives those precedence over generic capability
-dispatch, so `brain wan t2v` runs that module rather than the action. Both drive
-the same pipeline, so this is a routing difference, not a behavioural one - the
-same state `flux2-klein` is in.
 
 Served, the transformer stays resident between requests, keyed on the variant
 and the latent extent - the only things that fix its graphs. Two requests that
@@ -178,9 +174,10 @@ are still built and dropped per request, for the memory reason below.
   from 5.0.
 - `--solver unipc|dpm++` - the multistep solver. The two do not share a
   schedule: UniPC starts at the training grid's top sigma, dpm++ at exactly 1.0.
-- `--variant t2v-1.3B|t2v-14B`, `--negative-prompt`, `--output-path`.
-- `--device cpu|gpu` for the transformer and VAE, `--t5-device cpu|gpu` for the
-  text encoder (see below for why they are separate).
+- `--variant t2v-1.3B|t2v-14B`, `--negative-prompt`, `--out video=<file>`.
+- `--dit-dtype f32|f16|int8|int4` - the transformer's tier (default f32).
+- the global `--device` places the transformer and VAE, `--te-device` the text
+  encoder (see below for why they are separate).
 
 | Variant | Parameters | Sizes | Steps | Shift |
 |---|---|---|---|---|
@@ -237,7 +234,7 @@ Three things that shape is saying:
 The three models are never resident at once, and that staging is a design
 constraint rather than an optimisation. The text encoder runs first and is
 dropped before the transformer loads; the transformer is dropped in turn before
-the VAE decodes. `--t5-device` exists because of it.
+the VAE decodes. `--te-device` exists because of it.
 
 A dense attention score matrix at Wan's sequence lengths would be 4.3 GB per
 head at 480p and 22.9 GB at 720p, so self-attention always runs through flash or
@@ -245,7 +242,8 @@ query-chunked attention. That is a correctness requirement here, not a tuning
 option.
 
 One transformer forward is the whole 30-block stack in a single submit, which at
-any real size is minutes rather than seconds, so `brain wan t2v` raises the
+any real size is minutes rather than seconds, so `brain wan t2v` (and the
+sample) raises the
 <!-- perf-number: the device wait bound is a configured timeout the command sets, not a measurement -->
 backend's `--gpu-wait-s` deadlock guard to 1200 s unless the caller has
 already set it. `brain serve` does not raise it, because the same process may

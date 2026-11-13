@@ -1037,7 +1037,7 @@ fn t2v(args: &[String]) -> Result<(), String> {
 
     let t0 = std::time::Instant::now();
     // A one-shot CLI run has no second party to cancel it: Ctrl-C already
-    // ends the process - see `wan_cli::t2v`'s identical reasoning.
+    // ends the process.
     let cancel = capability::CancelToken::default();
     let (video, timings) = ltxv::pipeline::generate_scenes(&paths, &scenes, &long, &cancel, |done, total, phase| {
         eprint!("\rltxv [{done}/{total}] {phase}                    ");
