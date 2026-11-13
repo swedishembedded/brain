@@ -7,9 +7,9 @@
 //! Two adapters, one file, because they read the SAME released checkpoint
 //! directory and their scope only differs by what part of it they use:
 //!
-//! * [`RestoreResident`] (`BRAIN_CODEFORMER_WEIGHTS`) - `restore_face`, the code
+//! * [`RestoreResident`] (the `codeformer` weights) - `restore_face`, the code
 //!   Transformer + controllable feature transformation + the `w` dial.
-//! * [`VqganResident`] (`BRAIN_VQGAN_WEIGHTS`) - `encode`/`decode`, the discrete
+//! * [`VqganResident`] (the `vqgan` weights) - `encode`/`decode`, the discrete
 //!   autoencoder alone.
 //!
 //! `activate` imports once and the [`Instance`] owns the built graph, so
@@ -36,24 +36,22 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 // ---------------------------------------------------------------- restore
 
-/// CodeFormer behind the scheduler. `BRAIN_CODEFORMER_WEIGHTS` is `codeformer.pth`
-/// or the directory holding it.
+/// CodeFormer behind the scheduler, over `codeformer.pth` or the directory
+/// holding it.
 pub struct RestoreResident {
     path: String,
 }
 
 impl RestoreResident {
-    /// `None` when the var is unset or does not resolve to an existing file -
+    /// The weights `store` resolves (or pins) for `codeformer`; `None` when
+    /// there are none or they do not resolve to an existing file -
     /// registering a model whose every call would fail is worse than not
-    /// serving it. Deliberately NOT falling back to `BRAIN_VQGAN_WEIGHTS`: that
-    /// one commonly names `vqgan_code1024.pth`, which carries none of the
-    /// CodeFormer tensors.
-    pub fn from_env() -> Option<RestoreResident> {
-        Self::new(std::env::var("BRAIN_CODEFORMER_WEIGHTS").ok().filter(|p| !p.is_empty())?)
+    /// serving it.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<RestoreResident> {
+        Self::new(loader::served::served_assembly(store, "codeformer", &codeformer::spec::CodeFormerSpec)?.role_path("weights").ok()?)
     }
 
-    /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
+    /// Direct constructor for a caller that already holds the path.
     pub fn new(path: impl Into<String>) -> Option<RestoreResident> {
         let path = path.into();
         std::path::Path::new(&codeformer::caps::checkpoint_path(&path)).exists().then_some(RestoreResident { path })
@@ -100,20 +98,20 @@ impl Instance for RestoreInstance {
 
 // ---------------------------------------------------------------- vqgan
 
-/// The VQ autoencoder behind the scheduler (`BRAIN_VQGAN_WEIGHTS` = a released
-/// checkpoint or the directory holding one).
+/// The VQ autoencoder behind the scheduler, over a released checkpoint or the
+/// directory holding one.
 pub struct VqganResident {
     path: String,
 }
 
 impl VqganResident {
-    /// `None` when the var is unset or does not resolve to an existing file.
-    pub fn from_env() -> Option<VqganResident> {
-        Self::new(std::env::var("BRAIN_VQGAN_WEIGHTS").ok().filter(|p| !p.is_empty())?)
+    /// The weights `store` resolves (or pins) for `vqgan`; `None` when there
+    /// are none or they do not resolve to an existing file.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<VqganResident> {
+        Self::new(loader::served::served_assembly(store, "vqgan", &vqgan::spec::VqganSpec)?.role_path("weights").ok()?)
     }
 
-    /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
+    /// Direct constructor for a caller that already holds the path.
     pub fn new(path: impl Into<String>) -> Option<VqganResident> {
         let path = path.into();
         std::path::Path::new(&vqgan::caps::checkpoint_path(&path)).exists().then_some(VqganResident { path })

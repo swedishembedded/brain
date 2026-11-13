@@ -15,9 +15,9 @@ the resident encoder (`crates/catalog/src/resident_t5encoder.rs` groups
 `run_batch` invocations that way) - `--concurrent` demonstrates it the same
 way `samples/python/vision/segment-image/segment_image.py` demonstrates SAM 2's batching.
 
-Run under a private session bus (weights via env):
+Run under a private session bus (the checkpoint from the model store, or pinned):
 
-    BRAIN_T5ENCODER_DIR=<ckpt-root> tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus --pin t5encoder.root=<ckpt-root>" -- \
       python3 samples/python/embedding/t5-embed/t5_embed.py \\
         --text "a red cube on a wooden table" --variant flux_xxl --concurrent 4
 
@@ -65,7 +65,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():
-            skip(f"{MODEL!r} not served (set BRAIN_T5ENCODER_DIR)")
+            skip(f"{MODEL!r} not served (put its checkpoint in the model store, or brain serve --pin t5encoder.root=DIR)")
 
         for text in texts:
             t0 = time.monotonic()

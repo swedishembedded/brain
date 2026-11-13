@@ -90,8 +90,7 @@ pub fn manifest() -> Manifest {
 }
 
 /// Resolve the checkpoint: `path` may be `codeformer.pth` itself or the
-/// directory holding it (the layout `tests/parity.rs` and
-/// `BRAIN_CODEFORMER_WEIGHTS` already use).
+/// directory holding it (the released layout).
 pub fn checkpoint_path(path: &str) -> String {
     let p = std::path::Path::new(path);
     if p.is_dir() {
@@ -202,18 +201,9 @@ pub struct RestoreProvider {
 
 impl RestoreProvider {
     /// `weights` is `codeformer.pth` or the directory holding it; it comes from
-    /// a CLI flag or `BRAIN_CODEFORMER_WEIGHTS`, never a baked-in path.
+    /// the resolved `weights` role, never a baked-in path.
     pub fn new(weights: impl Into<String>) -> RestoreProvider {
         RestoreProvider { weights: weights.into(), hot: Arc::new(Hot::new()) }
-    }
-    /// `BRAIN_CODEFORMER_WEIGHTS` - `None` when unset or when it does not resolve to
-    /// a file that exists. Deliberately NOT falling back to `BRAIN_VQGAN_WEIGHTS`:
-    /// that one commonly points at `vqgan_code1024.pth`, which has none of the
-    /// CodeFormer tensors, so the fallback would register a model whose every
-    /// call fails.
-    pub fn from_env() -> Option<RestoreProvider> {
-        let path = std::env::var("BRAIN_CODEFORMER_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        std::path::Path::new(&checkpoint_path(&path)).exists().then(|| RestoreProvider::new(path))
     }
 }
 
@@ -294,8 +284,10 @@ mod caps_tests {
         let img = || Blob::new(Media::Image, vec![0u8; 12]).with_meta(json!({"w":1,"h":1,"c":3}));
         let err = reg.run(MODEL, "restore_face", Invocation::new().blob("image", img()), &mut |_| {}).unwrap_err();
         assert!(!err.is_empty(), "expected a descriptive error, got: {err}");
-        // out-of-range w is rejected by the action, not by the schema (the spec
-        // has no range type) - assert the message names the bound.
-        assert!(restore_spec().validate(Invocation::new().blob("image", img()).set("w", json!(2.0))).is_ok());
+        // An out-of-range w is refused by the schema, before any weight loads,
+        // naming the param.
+        let err = restore_spec().validate(Invocation::new().blob("image", img()).set("w", json!(2.0))).unwrap_err();
+        assert!(err.contains("param 'w' must be at most"), "{err}");
+        assert!(restore_spec().validate(Invocation::new().blob("image", img()).set("w", json!(1.0))).is_ok());
     }
 }

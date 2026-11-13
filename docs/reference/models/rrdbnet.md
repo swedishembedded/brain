@@ -17,8 +17,9 @@ resolution. Feed it any RGB image and get back a larger, sharper version.
 ## Getting the weights
 
 Model id: `brain/rrdbnet`. `RealESRGAN_x4plus.pth` auto-fetches (⤓, opt-in `--autofetch`) on first
-CLI use, no env var needed. To point at a different checkpoint, set
-`BRAIN_ESRGAN_WEIGHTS` to a released RRDBNet checkpoint file (`x2plus` and
+CLI use, no env var needed. To use a different checkpoint, put it in the model
+store, or name it with `--weights FILE` (one-shot) or `brain serve --pin
+rrdbnet.weights=FILE`; a released RRDBNet checkpoint file (`x2plus` and
 `x4plus_anime_6B` checkpoints also work - the scale factor is read from the
 checkpoint itself).
 

@@ -122,12 +122,6 @@ impl SdxlProvider {
         SdxlProvider { root: root.into(), hot: Arc::new(Hot::new()) }
     }
 
-    /// `BRAIN_SDXL_DIR` - `None` when unset, or when the directory holds no
-    /// released `unet/`, since without one no action can run.
-    pub fn from_env() -> Option<SdxlProvider> {
-        let root = std::env::var("BRAIN_SDXL_DIR").ok().filter(|p| !p.is_empty())?;
-        std::path::Path::new(&root).join("unet").exists().then(|| SdxlProvider::new(root))
-    }
 }
 
 impl Provider for SdxlProvider {
@@ -170,11 +164,6 @@ mod caps_tests {
     fn an_unknown_action_is_named_not_ignored() {
         let p = SdxlProvider::new("/nonexistent");
         assert!(p.action("edit").is_none());
-    }
-
-    #[test]
-    fn from_env_declines_a_directory_with_no_unet() {
-        assert!(SdxlProvider::from_env().is_none() || std::env::var("BRAIN_SDXL_DIR").is_ok());
     }
 
     #[test]

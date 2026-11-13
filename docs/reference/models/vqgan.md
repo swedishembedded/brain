@@ -19,8 +19,9 @@ see what the model's prior reconstructs from a code grid.
 
 ## Getting the weights
 
-Model id: `brain/vqgan`. Set `BRAIN_VQGAN_WEIGHTS` to a released checkpoint
-(`vqgan_code1024.pth` or `codeformer.pth`), or to a directory holding one -
+Model id: `brain/vqgan`. Put a released checkpoint (`vqgan_code1024.pth` or
+`codeformer.pth`) in the model store, or name it - or a directory holding one -
+with `--weights` (one-shot) or `brain serve --pin vqgan.weights=PATH`;
 a directory resolves to `vqgan_code1024.pth` first, falling back to
 `codeformer.pth`. Both checkpoints share tensor names but are different
 weights and produce different codes; which one loaded is logged.

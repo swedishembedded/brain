@@ -21,7 +21,7 @@
 # Optional, all env: TILE, BRAIN_DEVICE (gpu0/gpu1/cpu -- the CPU backend
 # handles this fine if the cards are busy), BRAIN.
 #
-# Needs BRAIN_ESRGAN_WEIGHTS pointing at a RealESRGAN_x4plus.pth.
+# Needs a RealESRGAN_x4plus.pth in the model store (brain pull schwgHao/RealESRGAN_x4plus).
 
 set -euo pipefail
 

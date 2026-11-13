@@ -12,8 +12,7 @@ on ONE resident instance with one buffer write per value and no rebuild. The
 timings below make that visible: the first call pays the import + upload, every
 later `w` costs one forward.
 
-    BRAIN_CODEFORMER_WEIGHTS=/path/to/codeformer \\
-      tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus --pin codeformer.weights=/path/to/codeformer" -- \
         python3 samples/python/restore/restore-face/restore_face.py --image face.ppm
 
 The action takes an ALIGNED face and returns a 512x512 one (the reference CLI's
@@ -56,7 +55,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if "brain/codeformer" not in brain.models():
-            print("FATAL: 'restore' not served (set BRAIN_CODEFORMER_WEIGHTS)", file=sys.stderr)
+            print("FATAL: 'restore' not served (put codeformer.pth in the model store, or brain serve --pin codeformer.weights=PATH)", file=sys.stderr)
             return 2
 
         print(f"{args.image}: {w}x{h} -> 512x512 restored face")

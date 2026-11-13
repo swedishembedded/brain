@@ -10,8 +10,7 @@ its 16x16 code grid is 256 indices - 1 KiB, or 320 bytes at 10 bits each. This
 example measures that, prints the code histogram, and optionally corrupts a few
 codes so you can see what a single index is worth.
 
-    BRAIN_VQGAN_WEIGHTS=/path/to/vqgan_code1024.pth \\
-      tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus --pin vqgan.weights=/path/to/vqgan_code1024.pth" -- \
         python3 samples/python/restore/vq-roundtrip/vq_roundtrip.py --image face.ppm
 """
 from __future__ import annotations
@@ -41,7 +40,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if "brain/vqgan" not in brain.models():
-            print("FATAL: 'vqgan' not served (set BRAIN_VQGAN_WEIGHTS)", file=sys.stderr)
+            print("FATAL: 'vqgan' not served (put a VQ checkpoint in the model store, or brain serve --pin vqgan.weights=PATH)", file=sys.stderr)
             return 2
 
         enc = brain.run(

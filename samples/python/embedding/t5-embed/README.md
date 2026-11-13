@@ -8,8 +8,7 @@ is a genuine forward at `b = N`: `crates/catalog/src/resident_t5encoder.rs`
 groups concurrent calls by `(variant, max_len)`.
 
 ```bash
-BRAIN_T5ENCODER_DIR=/path/to/FLUX.1-dev \
-  tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --pin t5encoder.root=/path/to/FLUX.1-dev" -- \
   python3 samples/python/embedding/t5-embed/t5_embed.py \
     --text "a red cube on a wooden table" --variant flux_xxl --concurrent 4
 ```
@@ -26,7 +25,7 @@ BRAIN_T5ENCODER_DIR=/path/to/FLUX.1-dev \
 
 ## What it needs
 
-`BRAIN_T5ENCODER_DIR` pointed at:
+A checkpoint root in the model store (or named with `--pin t5encoder.root=DIR`) holding:
 
 - `text_encoder_2/` + `tokenizer_2/tokenizer.json` (the FLUX.1-*/ release
   layout, unmodified) for `flux_xxl`, and/or

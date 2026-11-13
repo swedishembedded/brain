@@ -8,8 +8,7 @@ a discrete latent is that the **codes travel**: a 512x512 RGB image is
 bytes at 10 bits each).
 
 ```bash
-BRAIN_VQGAN_WEIGHTS=/path/to/vqgan_code1024.pth \
-tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --pin vqgan.weights=/path/to/vqgan_code1024.pth" -- \
   python3 samples/python/restore/vq-roundtrip/vq_roundtrip.py --image face.ppm --corrupt 20
 ```
 
@@ -34,7 +33,7 @@ evidence.
 
 ## What it needs
 
-`BRAIN_VQGAN_WEIGHTS` pointing at a released checkpoint (or its directory -
+A released checkpoint in the model store, or pinned as above (or its directory -
 see `restore-face/README.md` for the directory-resolution caveat it shares
 with CodeFormer's weights).
 

@@ -22,26 +22,25 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use controlnet::caps::Session;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-/// SDXL + ControlNet behind the scheduler (`BRAIN_SDXL_DIR` - the backbone,
-/// same layout `resident_sdxl.rs` uses; `BRAIN_CONTROLNET_DIR` - a released
-/// diffusers SDXL `ControlNetModel` checkpoint).
+/// SDXL + ControlNet behind the scheduler (`sdxl` - the backbone, same layout
+/// `resident_sdxl.rs` uses; `control` - a released diffusers SDXL
+/// `ControlNetModel` checkpoint).
 pub struct ControlnetResident {
     sdxl_root: String,
     control_root: String,
 }
 
 impl ControlnetResident {
-    /// `None` unless both directories are set and the backbone holds a
-    /// released `unet/` - registering a model whose every call would fail is
-    /// worse than not serving it.
-    pub fn from_env() -> Option<ControlnetResident> {
-        let sdxl_root = std::env::var("BRAIN_SDXL_DIR").ok().filter(|p| !p.is_empty())?;
-        let control_root = std::env::var("BRAIN_CONTROLNET_DIR").ok().filter(|p| !p.is_empty())?;
-        Self::new(sdxl_root, control_root)
+    /// Both checkpoints `store` resolves (or pins) for `controlnet`; `None`
+    /// unless both are there and the backbone holds a released `unet/` -
+    /// registering a model whose every call would fail is worse than not
+    /// serving it.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<ControlnetResident> {
+        let assembly = loader::served::served_assembly(store, "controlnet", &controlnet::spec::ControlnetSpec)?;
+        Self::new(assembly.role_path("sdxl").ok()?, assembly.role_path("control").ok()?)
     }
 
-    /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
+    /// Direct constructor for a caller that already holds both roots.
     pub fn new(sdxl_root: impl Into<String>, control_root: impl Into<String>) -> Option<ControlnetResident> {
         let sdxl_root = sdxl_root.into();
         if !std::path::Path::new(&sdxl_root).join("unet").exists() {

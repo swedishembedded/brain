@@ -21,8 +21,9 @@ detail from its own learned prior.
 
 Model id: `brain/codeformer`. Put a `codeformer.pth` checkpoint under the
 models directory (`--models-dir` / `BRAIN_MODELS_DIR`) and brain finds it by
-scanning - `brain codeformer restore_face` needs no variable set.
-`BRAIN_CODEFORMER_WEIGHTS` still works as an explicit pin to one file.
+scanning - `brain codeformer restore_face` and `brain serve` need nothing
+else. `--weights FILE` (one-shot) and `brain serve --pin codeformer.weights=FILE`
+name one file outright.
 
 ## Running it
 

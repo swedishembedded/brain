@@ -9,9 +9,9 @@ not a streaming `Subscribe` - `sdxlunet::pipeline::Sdxl::generate` has no
 per-step progress hook to forward yet, so this is a single blocking request
 that returns the finished image.
 
-Run under a private session bus (weights via env):
+Run under a private session bus (the checkpoint from the model store, or pinned):
 
-    BRAIN_SDXL_DIR=/path/to/stable-diffusion-xl-base-1.0 tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus --pin sdxlunet.root=/path/to/stable-diffusion-xl-base-1.0" -- \
       python3 samples/python/imagegen/sdxl/sdxl_generate.py --prompt "a red fox in the snow"
 
 Requires: jeepney - `pip install -e brain-py`.
@@ -60,7 +60,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():
-            skip(f"{MODEL!r} not served (set BRAIN_SDXL_DIR)")
+            skip(f"{MODEL!r} not served (put SDXL in the model store, or brain serve --pin sdxlunet.root=DIR)")
 
         print(f"text2image {args.width}x{args.height}, {args.steps} steps:")
         t0 = time.monotonic()

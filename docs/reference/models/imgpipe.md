@@ -25,8 +25,8 @@ its own model's weights the normal way, and a stage whose model is
 unconfigured fails with that model's own error:
 
 - `segment` → the SAM 2.1 checkpoint in the model store
-- `restore` → `BRAIN_CODEFORMER_WEIGHTS`
-- `upscale` → `BRAIN_ESRGAN_WEIGHTS`
+- `restore` → the CodeFormer checkpoint in the model store
+- `upscale` → the RRDBNet checkpoint in the model store
 - `supir_restore` → `BRAIN_SDXL_DIR` + `BRAIN_SUPIR_DIR`
 
 ## Running it

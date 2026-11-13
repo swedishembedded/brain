@@ -6,8 +6,7 @@ aligned face crop. Images travel as file descriptors (sealed memfd), not
 bytes marshalled through D-Bus.
 
 ```bash
-BRAIN_CODEFORMER_WEIGHTS=/path/to/codeformer \
-tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --pin codeformer.weights=/path/to/codeformer" -- \
   python3 samples/python/restore/restore-face/restore_face.py --image face.ppm --w 0,0.5,1
 ```
 
@@ -32,7 +31,7 @@ same evidence from the scheduler's side, not just the clock.
 
 ## What it needs
 
-`BRAIN_CODEFORMER_WEIGHTS` pointing at `codeformer.pth` (or its directory -
+`codeformer.pth` in the model store, or pinned as above (the pin may name its directory -
 `vqgan_code1024.pth` ships alongside it in the same release and shares
 every VQ tensor name, so a directory resolves to `vqgan_code1024.pth`
 first; the server logs `vqgan: <dir> -> <file>` so the choice is never

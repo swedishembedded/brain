@@ -210,16 +210,10 @@ fn deferred_load_providers_construct_from_the_assembly_with_no_env_set() {
 }
 
 /// `rrdbnet`'s provider loads EAGERLY at construction (unlike the three
-/// above), so a made-up path is a real, immediate load error - the
-/// regression this guards is the SAME one as above, just visible as a
-/// different `Err` rather than an `Ok`/`Err` flip: `from_env!` would
-/// answer with `BRAIN_ESRGAN_WEIGHTS`'s own "set BRAIN_…" message
-/// regardless of the assembly, which this checks is no longer the
-/// failure mode.
+/// above), so a made-up path in the assembly is a real, immediate load error
+/// about that path.
 #[test]
-fn rrdbnets_eager_provider_reads_the_assembly_not_env() {
-    let _serial = brain_testutil::env_lock();
-    std::env::remove_var("BRAIN_ESRGAN_WEIGHTS");
+fn rrdbnets_eager_provider_reads_the_assembly() {
     let assembly = assembly_with_weights("rrdbnet", "/nonexistent/brain-catalog-test-weights");
     // `Arc<dyn Provider>` (the `Ok` side) isn't `Debug`, so `expect_err` -
     // which needs that to format its own panic message - doesn't apply.
@@ -228,5 +222,5 @@ fn rrdbnets_eager_provider_reads_the_assembly_not_env() {
         Ok(_) => panic!("a nonexistent path must fail to load, not silently succeed"),
     };
     assert!(!err.contains("unknown model"), "{err}");
-    assert!(!err.contains("BRAIN_ESRGAN_WEIGHTS"), "rrdbnet provider still reads BRAIN_ESRGAN_WEIGHTS instead of the assembly: {err}");
+    assert!(err.contains("brain-catalog-test-weights"), "the failure must name the assembly's path: {err}");
 }

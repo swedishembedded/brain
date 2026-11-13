@@ -108,8 +108,8 @@ pub fn manifest() -> Manifest {
 }
 
 /// Resolve the checkpoint: `path` may be a `.pth`/`.safetensors` file or a
-/// directory holding `codeformer.pth` / `vqgan_code1024.pth` (the layout
-/// `BRAIN_VQGAN_WEIGHTS` already uses in the parity tests).
+/// directory holding `codeformer.pth` / `vqgan_code1024.pth` (the released
+/// CodeFormer layout).
 pub fn checkpoint_path(path: &str) -> String {
     let p = std::path::Path::new(path);
     if !p.is_dir() {
@@ -238,15 +238,9 @@ pub struct VqganProvider {
 
 impl VqganProvider {
     /// `weights` is a released checkpoint or the directory holding one; it comes
-    /// from a CLI flag or `BRAIN_VQGAN_WEIGHTS`, never a baked-in path.
+    /// from the resolved `weights` role, never a baked-in path.
     pub fn new(weights: impl Into<String>) -> VqganProvider {
         VqganProvider { weights: weights.into(), hot: Arc::new(Hot::new()) }
-    }
-    /// `BRAIN_VQGAN_WEIGHTS` — `None` when unset or when it does not resolve to
-    /// a file that exists.
-    pub fn from_env() -> Option<VqganProvider> {
-        let path = std::env::var("BRAIN_VQGAN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        std::path::Path::new(&checkpoint_path(&path)).exists().then(|| VqganProvider::new(path))
     }
 }
 

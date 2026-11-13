@@ -10,9 +10,8 @@ backbone-agnostic by design, so a FLUX ControlNet would plug into the same
 seam without touching it).
 
 ```bash
-BRAIN_SDXL_DIR=/path/to/stable-diffusion-xl-base-1.0 \
-BRAIN_CONTROLNET_DIR=/path/to/controlnet-canny-sdxl-1.0 \
-tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --pin controlnet.sdxl=/path/to/stable-diffusion-xl-base-1.0 \
+    --pin controlnet.control=/path/to/controlnet-canny-sdxl-1.0" -- \
   python3 samples/python/imagegen/controlnet/controlnet_generate.py \
     --prompt "a red fox in the snow" --control canny_edges.ppm
 ```
@@ -27,8 +26,9 @@ tools/dbus-session.sh --serve "--dbus" -- \
 
 ## What it needs
 
-`BRAIN_SDXL_DIR` (see `../sdxl/README.md`) plus `BRAIN_CONTROLNET_DIR`, a
-diffusers ControlNet checkpoint directory (e.g. `controlnet-canny-sdxl-1.0`).
+The SDXL backbone (see `../sdxl/README.md`) plus a diffusers ControlNet
+checkpoint directory (e.g. `controlnet-canny-sdxl-1.0`), both in the model
+store or pinned as above.
 
 `pip install -e brain-py` (jeepney with fd passing).
 

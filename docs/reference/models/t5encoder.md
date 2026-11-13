@@ -22,8 +22,9 @@ gated to exact-id equality against the real `google/umt5-xxl` tokenizer over a
 nine-prompt multilingual corpus.
 
 It is **served**: a capability manifest (one `encode` action, model id
-`brain/t5encoder`), a residency adapter (`BRAIN_T5ENCODER_DIR`, holding
-either or both variants' released layout), genuine batched `run_batch`
+`brain/t5encoder`), a residency adapter (its `root` from the model store, or
+`brain serve --pin t5encoder.root=DIR`, holding either or both variants'
+released layout), genuine batched `run_batch`
 (grouped by `(variant, max_len)`, one forward per group), D-Bus `Run`, and a
 runnable example (`samples/python/embedding/t5-embed/t5_embed.py`).
 

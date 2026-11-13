@@ -25,7 +25,7 @@
 //!
 //! # Directory layout
 //!
-//! `BRAIN_T5ENCODER_DIR` holds either or both variants, so a FLUX.1 release
+//! The `root` role holds either or both variants, so a FLUX.1 release
 //! root can be pointed at directly with no renaming:
 //!
 //! * `flux_xxl`: `text_encoder_2/` (safetensors, HF `T5EncoderModel` layout)
@@ -118,7 +118,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// `dir` is `BRAIN_T5ENCODER_DIR` - see the module docs for the layout.
+    /// `dir` is the resolved `root` - see the module docs for the layout.
     pub fn load(dir: &str, gpu: Gpu) -> Result<Session, String> {
         if !has_flux(dir) && !has_wan(dir) {
             return Err(format!("t5encoder: {dir} holds neither the flux_xxl nor the wan_umt5 layout"));
@@ -244,12 +244,6 @@ impl T5encoderProvider {
         T5encoderProvider { dir: dir.into(), hot: Arc::new(Hot::new()) }
     }
 
-    /// `BRAIN_T5ENCODER_DIR` - `None` when unset, or when the directory holds
-    /// neither released layout, since without one no action can run.
-    pub fn from_env() -> Option<T5encoderProvider> {
-        let dir = std::env::var("BRAIN_T5ENCODER_DIR").ok().filter(|p| !p.is_empty())?;
-        (has_flux(&dir) || has_wan(&dir)).then(|| T5encoderProvider::new(dir))
-    }
 }
 
 impl Provider for T5encoderProvider {
@@ -302,11 +296,6 @@ mod caps_tests {
     fn an_unknown_action_is_named_not_ignored() {
         let p = T5encoderProvider::new("/nonexistent");
         assert!(p.action("summarize").is_none());
-    }
-
-    #[test]
-    fn from_env_declines_a_directory_with_neither_layout() {
-        assert!(T5encoderProvider::from_env().is_none() || std::env::var("BRAIN_T5ENCODER_DIR").is_ok());
     }
 
     #[test]

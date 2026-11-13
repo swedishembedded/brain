@@ -20,7 +20,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use sdxlunet::caps::Session;
 
-/// SDXL behind the scheduler (`BRAIN_SDXL_DIR` - a released diffusers SDXL
+/// SDXL behind the scheduler (its `root` - a released diffusers SDXL
 /// checkpoint root holding `unet/`, `vae/`, `text_encoder/`, `text_encoder_2/`,
 /// `tokenizer/`, `tokenizer_2/`).
 pub struct SdxlResident {
@@ -28,14 +28,14 @@ pub struct SdxlResident {
 }
 
 impl SdxlResident {
-    /// `None` when the directory is unset or holds no `unet/` - registering a
-    /// model whose every call would fail is worse than not serving it.
-    pub fn from_env() -> Option<SdxlResident> {
-        Self::new(std::env::var("BRAIN_SDXL_DIR").ok().filter(|p| !p.is_empty())?)
+    /// The checkpoint `store` resolves (or pins) for `sdxlunet`; `None` when
+    /// there is none or it holds no `unet/` - registering a model whose every
+    /// call would fail is worse than not serving it.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<SdxlResident> {
+        Self::new(loader::served::served_assembly(store, "sdxlunet", &sdxlunet::spec::SdxlunetSpec)?.role_path("root").ok()?)
     }
 
-    /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
+    /// Direct constructor for a caller that already holds the root.
     pub fn new(root: impl Into<String>) -> Option<SdxlResident> {
         let root = root.into();
         if !std::path::Path::new(&root).join("unet").exists() {

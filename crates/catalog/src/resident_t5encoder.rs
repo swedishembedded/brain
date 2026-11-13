@@ -25,22 +25,21 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 use t5encoder::caps::Session;
 
-/// The T5/umT5 encoders behind the scheduler (`BRAIN_T5ENCODER_DIR` - see
+/// The T5/umT5 encoders behind the scheduler (its `root` - see
 /// `t5encoder::caps`'s module docs for the layout).
 pub struct T5encoderResident {
     dir: String,
 }
 
 impl T5encoderResident {
-    /// `None` when the directory is unset or holds neither released layout -
-    /// registering a model whose every call would fail is worse than not
-    /// serving it.
-    pub fn from_env() -> Option<T5encoderResident> {
-        Self::new(std::env::var("BRAIN_T5ENCODER_DIR").ok().filter(|p| !p.is_empty())?)
+    /// The root `store` resolves (or pins) for `t5encoder`; `None` when there
+    /// is none or it holds neither released layout - registering a model
+    /// whose every call would fail is worse than not serving it.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<T5encoderResident> {
+        Self::new(loader::served::served_assembly(store, "t5encoder", &t5encoder::spec::T5encoderSpec)?.role_path("root").ok()?)
     }
 
-    /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
+    /// Direct constructor for a caller that already holds the root.
     pub fn new(dir: impl Into<String>) -> Option<T5encoderResident> {
         let dir = dir.into();
         let d = std::path::Path::new(&dir);

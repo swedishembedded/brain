@@ -6,8 +6,7 @@ conditioning, a discrete Euler scheduler, and classifier-free guidance
 a plain `Run` (no per-step progress hook yet), so it is one blocking call.
 
 ```bash
-BRAIN_SDXL_DIR=/path/to/stable-diffusion-xl-base-1.0 \
-tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus --pin sdxlunet.root=/path/to/stable-diffusion-xl-base-1.0" -- \
   python3 samples/python/imagegen/sdxl/sdxl_generate.py --prompt "a red fox in the snow"
 ```
 
@@ -20,7 +19,7 @@ tools/dbus-session.sh --serve "--dbus" -- \
 
 ## What it needs
 
-`BRAIN_SDXL_DIR` is a released diffusers SDXL checkpoint root (`unet/`,
+A released diffusers SDXL checkpoint root in the model store (or pinned as above) (`unet/`,
 `vae/`, `text_encoder/`, `text_encoder_2/`, `tokenizer/`, `tokenizer_2/`). No
 batching: every request runs its own denoising loop (`resident_sdxl.rs`'s
 module docs explain why grouping would not help).

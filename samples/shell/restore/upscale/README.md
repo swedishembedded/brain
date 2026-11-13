@@ -4,7 +4,7 @@ Upscale an image 4x with Real-ESRGAN, straight from the CLI - no server, no
 D-Bus.
 
 ```bash
-BRAIN_ESRGAN_WEIGHTS=/path/to/RealESRGAN_x4plus.pth \
+brain pull schwgHao/RealESRGAN_x4plus   # once
 samples/shell/restore/upscale/upscale.sh photo.png photo-4x.jpg
 ```
 
@@ -24,7 +24,7 @@ frame).
 
 ## What it needs
 
-`BRAIN_ESRGAN_WEIGHTS` pointing at a `RealESRGAN_x4plus.pth` checkpoint.
+A `RealESRGAN_x4plus.pth` checkpoint in the model store.
 
 ## Options
 

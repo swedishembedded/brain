@@ -11,8 +11,9 @@ and residual-parity-gated against a hooked diffusers reference (140
 comparisons, worst 1-cos 1.914e-11) on both a real GPU and CPU.
 
 It is **served**: a capability manifest (`text2image`, model id
-`brain/sdxl-controlnet`), a residency adapter (`BRAIN_SDXL_DIR` for the SDXL
-backbone plus `BRAIN_CONTROLNET_DIR` for the ControlNet checkpoint), D-Bus
+`brain/sdxl-controlnet`), a residency adapter (the SDXL backbone and the ControlNet
+checkpoint from the model store, or `brain serve --pin controlnet.sdxl=DIR
+--pin controlnet.control=DIR`), D-Bus
 `Run`, and a runnable example (`samples/python/imagegen/controlnet/controlnet_generate.py`),
 on top of the same complete sampler loop [SDXL UNet](sdxlunet.md) uses - a
 prompt plus a conditioning image (edge map, depth map, pose, ...) in, an

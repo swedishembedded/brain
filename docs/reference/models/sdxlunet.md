@@ -10,7 +10,7 @@ covered) and forward-parity-gated (165 comparisons, worst cosine
 0.9999999999, `out.sample` cosine 1.0000000000).
 
 It is **served**: a capability manifest (`text2image`), a residency adapter
-(`BRAIN_SDXL_DIR`), D-Bus `Run`, and a runnable example under
+(the checkpoint from the model store, or `brain serve --pin sdxlunet.root=DIR`), D-Bus `Run`, and a runnable example under
 `samples/python/imagegen/`, on top of a complete sampler loop (dual CLIP
 conditioning, a discrete Euler step, CFG, VAE decode). It is also
 **trainable**: the backward is gated by finite differences over the whole

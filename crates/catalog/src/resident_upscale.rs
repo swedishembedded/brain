@@ -3,9 +3,9 @@
 
 //! Real-ESRGAN behind the residency scheduler.
 //!
-//! `BRAIN_ESRGAN_WEIGHTS` names `RealESRGAN_x4plus.pth` (or any RRDBNet
-//! checkpoint — the shape is derived, so the anime and x2 variants work here
-//! too).
+//! The checkpoint is the `rrdbnet` weights the store resolves:
+//! `RealESRGAN_x4plus.pth` or any RRDBNet checkpoint - the shape is derived,
+//! so the anime and x2 variants work here too.
 //!
 //! **The instance key carries the input size**, because the graph is recorded
 //! for one `(h, w)`: two different image sizes are two different builds, and
@@ -28,16 +28,15 @@ pub struct UpscaleResident {
 }
 
 impl UpscaleResident {
-    /// `None` when the var is unset or names nothing that exists — registering a
-    /// model whose every call would fail is worse than not serving it.
-    pub fn from_env() -> Option<UpscaleResident> {
-        Self::new(std::env::var("BRAIN_ESRGAN_WEIGHTS").ok().filter(|p| !p.is_empty())?)
+    /// The weights `store` resolves (or pins) for `rrdbnet`; `None` when there
+    /// are none - registering a model whose every call would fail is worse
+    /// than not serving it.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<UpscaleResident> {
+        Self::new(loader::served::served_assembly(store, "rrdbnet", &rrdbnet::spec::RrdbnetSpec)?.role_path("weights").ok()?)
     }
 
     /// Direct constructor for callers that already hold the path (e.g. `brain
-    /// perf`'s `upscale:<weights>` target) — no env round-trip: that pattern
-    /// shipped this exact target dead (`BRAIN_RRDBNET_WEIGHTS` set, the var
-    /// above read).
+    /// perf`'s `upscale:<weights>` target).
     pub fn new(path: impl Into<String>) -> Option<UpscaleResident> {
         let path = path.into();
         std::path::Path::new(&path).exists().then_some(UpscaleResident { path })
@@ -112,4 +111,28 @@ impl Instance for UpscaleInstance {
         }
     }
     // `run_batch` is deliberately the serial default — see the module docs.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The served adapter takes the checkpoint the model store resolves, and
+    /// a pin outranks it. Skips cleanly when the store holds no RRDBNet.
+    #[test]
+    fn the_served_checkpoint_comes_from_the_store_or_its_pin() {
+        let store = loader::served::ServedStore::new(brain_modelstore::default_root());
+        let Some(resident) = UpscaleResident::from_store(&store) else {
+            brain_testutil::skip("no RRDBNet checkpoint in the model store");
+            return;
+        };
+        assert!(std::path::Path::new(&resident.path).is_file(), "{}", resident.path);
+        let mut pinned = store.clone();
+        let elsewhere = std::env::temp_dir().join(format!("upscale-pin-{}.pth", std::process::id()));
+        std::fs::write(&elsewhere, b"x").unwrap();
+        pinned.pin(&format!("rrdbnet.weights={}", elsewhere.display())).unwrap();
+        let pinned_path = UpscaleResident::from_store(&pinned).map(|r| r.path);
+        std::fs::remove_file(&elsewhere).ok();
+        assert_eq!(pinned_path.as_deref(), elsewhere.to_str());
+    }
 }

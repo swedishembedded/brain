@@ -54,8 +54,6 @@ crates/catalog/src/resident_asr.rs	BRAIN_NEMOTRONASR
 crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR
 crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR_MAXNEW
 crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR_WINDOW
-crates/catalog/src/resident_controlnet.rs	BRAIN_CONTROLNET_DIR
-crates/catalog/src/resident_controlnet.rs	BRAIN_SDXL_DIR
 crates/catalog/src/resident_deepseekvl.rs	BRAIN_DEEPSEEKVL_TUNED
 crates/catalog/src/resident_flux2.rs	BRAIN_FLUX2_FAMILY
 crates/catalog/src/resident_flux2.rs	BRAIN_FLUX2_MAX_BATCH
@@ -83,15 +81,9 @@ crates/catalog/src/resident_qwen35moe.rs	BRAIN_QWEN35MOE_MAX_BATCH
 crates/catalog/src/resident_qwen35moe.rs	BRAIN_QWEN35MOE_TOKENIZER
 crates/catalog/src/resident_qwen35moe.rs	BRAIN_QWEN35MOE_WEIGHTS
 crates/catalog/src/resident_qwen3vl.rs	<DIR_VAR>
-crates/catalog/src/resident_restore.rs	BRAIN_CODEFORMER_WEIGHTS
-crates/catalog/src/resident_restore.rs	BRAIN_VQGAN_WEIGHTS
-crates/catalog/src/resident_sdxl.rs	BRAIN_SDXL_DIR
 crates/catalog/src/resident_supir.rs	BRAIN_SDXL_DIR
 crates/catalog/src/resident_supir.rs	BRAIN_SUPIR_DIR
-crates/catalog/src/resident_t5encoder.rs	BRAIN_T5ENCODER_DIR
-crates/catalog/src/resident_upscale.rs	BRAIN_ESRGAN_WEIGHTS
 crates/catalog/src/resident_zimage.rs	BRAIN_S3DIT_RETAIN_INT8_CACHE
-crates/catalog/tests/served.rs	BRAIN_ESRGAN_WEIGHTS
 crates/checkpoint/src/gguf.rs	BRAIN_GGUF_TESTFILE
 crates/checkpoint/tests/it/torchpt.rs	TORCHPT_REAL_PT
 crates/chronos2/src/forecaster.rs	MOE_SKIP_GPU_TESTS
@@ -176,7 +168,6 @@ crates/clip/tests/it/parity.rs	BRAIN_EVA_CLIP
 crates/clip/tests/it/parity.rs	BRAIN_SDXL
 crates/clip/tests/it/serving.rs	BRAIN_CLIP_DIR
 crates/clip/tests/it/vision.rs	MOE_SKIP_GPU_TESTS
-crates/codeformer/src/caps.rs	BRAIN_CODEFORMER_WEIGHTS
 crates/codeformer/src/train.rs	MOE_SKIP_GPU_TESTS
 crates/codeformer/tests/parity.rs	<k>
 crates/codeformer/tests/parity.rs	BRAIN_CODEFORMER_DEVICE
@@ -186,8 +177,6 @@ crates/connectome/tests/it/bridge.rs	BRAIN_CONNECTOME_DIR
 crates/connectome/tests/it/import.rs	BRAIN_CONNECTOME_DIR
 crates/connectome/tests/it/mushroom_body.rs	BRAIN_CONNECTOME_DIR
 crates/connectome/tests/it/retinotopy.rs	BRAIN_CONNECTOME_DIR
-crates/controlnet/src/caps.rs	BRAIN_CONTROLNET_DIR
-crates/controlnet/src/caps.rs	BRAIN_SDXL_DIR
 crates/controlnet/src/caps.rs	BRAIN_SDXL_VAE_DEVICE
 crates/controlnet/tests/it/parity.rs	BRAIN_CONTROLNET
 crates/controlnet/tests/it/parity.rs	BRAIN_TESTDATA
@@ -955,7 +944,6 @@ crates/sdk/tests/video_pipeline.rs	BRAIN_MODELS_DIR
 crates/sdk/tests/vlm_pipeline.rs	BRAIN_HUB_ENDPOINT
 crates/sdk/tests/vlm_pipeline.rs	BRAIN_MODELS_DIR
 crates/sdxlunet/src/bin/sdxl.rs	BRAIN_SDXL
-crates/sdxlunet/src/caps.rs	BRAIN_SDXL_DIR
 crates/sdxlunet/src/pipeline.rs	BRAIN_SDXL_VAE_DEVICE
 crates/sdxlunet/tests/it/inject.rs	MOE_SKIP_GPU_TESTS
 crates/sdxlunet/tests/it/int8_parity.rs	BRAIN_SUPIR_SDXL_LDM
@@ -984,7 +972,6 @@ crates/supir/tests/it/import_real.rs	BRAIN_SUPIR_WEIGHTS
 crates/supir/tests/it/parity.rs	BRAIN_SUPIR_ALLOW_FULL_MEMORY
 crates/supir/tests/it/parity.rs	BRAIN_SUPIR_SDXL_LDM
 crates/supir/tests/it/parity.rs	BRAIN_SUPIR_WEIGHTS
-crates/t5encoder/src/caps.rs	BRAIN_T5ENCODER_DIR
 crates/t5encoder/src/train.rs	MOE_SKIP_GPU_TESTS
 crates/t5encoder/tests/it/parity.rs	<var>
 crates/t5encoder/tests/it/parity.rs	BRAIN_T5ENCODER_XXL
@@ -1035,7 +1022,6 @@ crates/vision/src/blocks.rs	BRAIN_CONV_GEMM
 crates/vision/src/blocks.rs	BRAIN_CONV_GEMM_MIN
 crates/vision/src/blocks.rs	BRAIN_NAIVE_CONV
 crates/vision/src/blocks.rs	BRAIN_TILED_CONV
-crates/vqgan/src/caps.rs	BRAIN_VQGAN_WEIGHTS
 crates/vqgan/src/train.rs	MOE_SKIP_GPU_TESTS
 crates/vqgan/tests/it/parity.rs	BRAIN_VQGAN_DEVICE
 crates/vqgan/tests/it/parity.rs	BRAIN_VQGAN_WEIGHTS

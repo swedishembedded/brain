@@ -9,11 +9,10 @@ depth map, pose, ...) rides in as a second input blob, `control_image`.
 `crates/controlnet/src/caps.rs` resizes it on the device to match the output
 size, so it need not be pre-sized to match `--width`/`--height`.
 
-Run under a private session bus (weights via env):
+Run under a private session bus (the checkpoints from the model store, or pinned):
 
-    BRAIN_SDXL_DIR=/path/to/stable-diffusion-xl-base-1.0 \\
-    BRAIN_CONTROLNET_DIR=/path/to/controlnet-canny-sdxl-1.0 \\
-    tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus --pin controlnet.sdxl=/path/to/stable-diffusion-xl-base-1.0 \\
+        --pin controlnet.control=/path/to/controlnet-canny-sdxl-1.0" -- \
       python3 samples/python/imagegen/controlnet/controlnet_generate.py \\
         --prompt "a red fox in the snow" --control canny_edges.ppm
 
@@ -66,7 +65,7 @@ def main() -> int:
 
     with BrainDBus() as brain:
         if MODEL not in brain.models():
-            skip(f"{MODEL!r} not served (set BRAIN_SDXL_DIR + BRAIN_CONTROLNET_DIR)")
+            skip(f"{MODEL!r} not served (put SDXL and a ControlNet in the model store, or brain serve --pin controlnet.sdxl=DIR --pin controlnet.control=DIR)")
 
         print(f"text2image {args.width}x{args.height}, control {cw}x{ch}, {args.steps} steps:")
         t0 = time.monotonic()

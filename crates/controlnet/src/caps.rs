@@ -255,14 +255,6 @@ impl ControlnetProvider {
         ControlnetProvider { sdxl_root: sdxl_root.into(), control_root: control_root.into(), hot: Arc::new(Hot::new()) }
     }
 
-    /// `BRAIN_SDXL_DIR` (the backbone) + `BRAIN_CONTROLNET_DIR` (the control
-    /// model) - `None` unless both are set and the backbone directory holds a
-    /// released `unet/`, since without either no action can run.
-    pub fn from_env() -> Option<ControlnetProvider> {
-        let sdxl_root = std::env::var("BRAIN_SDXL_DIR").ok().filter(|p| !p.is_empty())?;
-        let control_root = std::env::var("BRAIN_CONTROLNET_DIR").ok().filter(|p| !p.is_empty())?;
-        std::path::Path::new(&sdxl_root).join("unet").exists().then(|| ControlnetProvider::new(sdxl_root, control_root))
-    }
 }
 
 impl Provider for ControlnetProvider {
@@ -320,14 +312,6 @@ mod caps_tests {
     fn an_unknown_action_is_named_not_ignored() {
         let p = ControlnetProvider::new("/nonexistent", "/nonexistent");
         assert!(p.action("edit").is_none());
-    }
-
-    #[test]
-    fn from_env_declines_without_both_directories() {
-        assert!(
-            ControlnetProvider::from_env().is_none()
-                || (std::env::var("BRAIN_SDXL_DIR").is_ok() && std::env::var("BRAIN_CONTROLNET_DIR").is_ok())
-        );
     }
 
     #[test]

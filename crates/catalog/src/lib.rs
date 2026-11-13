@@ -676,7 +676,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(vqgan::caps::VqganProvider::new(weights)) as Arc<dyn Provider>)
             },
             spec: Some(("vqgan", &vqgan::spec::VqganSpec)),
-            resident: crate::resident!(crate::resident_restore::VqganResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_restore::VqganResident::from_store),
         },
         ModelEntry {
             manifest: codeformer::caps::manifest,
@@ -697,7 +697,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(codeformer::caps::RestoreProvider::new(weights)) as Arc<dyn Provider>)
             },
             spec: Some(("codeformer", &codeformer::spec::CodeFormerSpec)),
-            resident: crate::resident!(crate::resident_restore::RestoreResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_restore::RestoreResident::from_store),
         },
         ModelEntry {
             manifest: rrdbnet::caps::manifest,
@@ -708,8 +708,7 @@ pub fn models() -> Vec<ModelEntry> {
                 // resolve time) - a caller handing this fn a raw Assembly
                 // directly (a unit test, say) must not pay for a real
                 // device just to find out the path is bad, the same
-                // discipline `from_env!`'s own existence check gave every
-                // other entry here.
+                // discipline every other entry here keeps.
                 if !std::path::Path::new(&weights).exists() {
                     return Err(format!("rrdbnet: {weights} does not exist"));
                 }
@@ -717,7 +716,7 @@ pub fn models() -> Vec<ModelEntry> {
                 rrdbnet::caps::load(&weights, gpu).map(|s| Arc::new(rrdbnet::caps::UpscaleProvider::new(s)) as Arc<dyn Provider>)
             },
             spec: Some(("rrdbnet", &rrdbnet::spec::RrdbnetSpec)),
-            resident: crate::resident!(crate::resident_upscale::UpscaleResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_upscale::UpscaleResident::from_store),
         },
         ModelEntry {
             manifest: clip::caps::manifest,
@@ -735,7 +734,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(t5encoder::caps::T5encoderProvider::new(root)) as Arc<dyn Provider>)
             },
             spec: Some(("t5encoder", &t5encoder::spec::T5encoderSpec)),
-            resident: crate::resident!(crate::resident_t5encoder::T5encoderResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_t5encoder::T5encoderResident::from_store),
         },
         ModelEntry {
             manifest: sdxlunet::caps::manifest,
@@ -744,7 +743,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(sdxlunet::caps::SdxlProvider::new(root)) as Arc<dyn Provider>)
             },
             spec: Some(("sdxlunet", &sdxlunet::spec::SdxlunetSpec)),
-            resident: crate::resident!(crate::resident_sdxl::SdxlResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_sdxl::SdxlResident::from_store),
         },
         ModelEntry {
             manifest: controlnet::caps::manifest,
@@ -754,7 +753,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(controlnet::caps::ControlnetProvider::new(sdxl, control)) as Arc<dyn Provider>)
             },
             spec: Some(("controlnet", &controlnet::spec::ControlnetSpec)),
-            resident: crate::resident!(crate::resident_controlnet::ControlnetResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_controlnet::ControlnetResident::from_store),
         },
         // SUPIR photo-realistic restoration: a frozen SDXL backbone
         // (BRAIN_SDXL_DIR, same layout `sdxlunet`/`controlnet` load) plus its

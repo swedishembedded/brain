@@ -122,13 +122,7 @@ model is not served.
 | `BRAIN_S3DIT_DIT`, `BRAIN_S3DIT_VAE`, `BRAIN_S3DIT_QWEN`, `BRAIN_S3DIT_TOKENIZER` | Z-Image text2image/edit | optional overrides, one per component -- unset, each is resolved from the model store instead (`s3dit::spec::S3ditSpec`); set, it pins that exact file |
 | `BRAIN_SCRFD_DIR` | antelopev2 face detection | dir holding `scrfd_10g_bnkps.onnx` |
 | `BRAIN_ARCFACE_DIR` | antelopev2 face identity embedding | dir holding `glintr100.onnx` (plus `scrfd_10g_bnkps.onnx` for the default `align=true` path) |
-| `BRAIN_ESRGAN_WEIGHTS` | Real-ESRGAN upscale | `RealESRGAN_x4plus.pth` (or any RRDBNet) |
-| `BRAIN_CODEFORMER_WEIGHTS` | CodeFormer face restore | `codeformer.pth` (or its dir) |
-| `BRAIN_VQGAN_WEIGHTS` | CodeFormer VQ encode/decode | checkpoint (or its dir) |
 | `BRAIN_CLIP_DIR` | CLIP text/image embeddings | SDXL-layout root (`tokenizer[_2]/`, `text_encoder[_2]/`, EVA `.pt`) |
-| `BRAIN_T5ENCODER_DIR` | T5-XXL / umT5-XXL text encoding (`encode`) | root holding `text_encoder_2/`+`tokenizer_2/` (the `flux_xxl` variant) and/or `wan/` (the `wan_umt5` variant) |
-| `BRAIN_SDXL_DIR` | SDXL text2image | diffusers-layout root; must hold `unet/`, or the model is not served |
-| `BRAIN_SDXL_DIR` + `BRAIN_CONTROLNET_DIR` | SDXL + ControlNet text2image (both required) | the SDXL root above plus a diffusers ControlNet root |
 | `BRAIN_FLUX1_DIR` | FLUX.1 text2image | diffusers-layout root; must hold `transformer/`, or the model is not served |
 | `BRAIN_FLUX1_DIR` + `BRAIN_PULID_DIR` + `BRAIN_ARCFACE_DIR` + `BRAIN_CLIP_DIR` + `BRAIN_BISENET_DIR` | PuLID identity-conditioned FLUX.1 text2image (all five required) | the FLUX.1 root plus the PuLID weights dir, the face/CLIP dirs above, and a dir holding `parsing_bisenet.safetensors` (see `pulid::caps::BISENET_FILE`'s doc for how to produce one) |
 | _(none)_ | Qwen3.8-27B dense hybrid decoder, FastVLM vision-language, Moondream 3 vision-language, DeepSeek-OCR and DeepSeek-OCR-2 document image → text/markdown - all resolved automatically from the models directory (`qwen35`/`fastvlm`/`moondream3`/`deepseek2ocr::spec`/`deepseekocr2::spec`); `--weights`/`weights` (and `--tokenizer` for qwen35) still name a checkpoint outright per call | n/a |

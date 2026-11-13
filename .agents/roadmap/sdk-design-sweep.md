@@ -1035,10 +1035,8 @@ hand-built `ArtifactRecord` with an explicitly chosen `kind` - the exact
 class of bug `RrdbnetSpec`'s own equivalent test caught after the fact, only
 this time written correctly from day one rather than needing a fix.
 
-**Not done, tracked for later**: `crates/catalog/src/resident_restore.rs`'s
-served/D-Bus path still reads `BRAIN_CODEFORMER_WEIGHTS` directly rather
-than the resolver, the same tracked (not silent) gap `resident_upscale.rs`
-already has for `rrdbnet`.
+The served/D-Bus path (`resident_restore.rs`, `resident_upscale.rs`)
+resolves through the same spec, from `loader::served::ServedStore`.
 
 Verified with `cargo test -p brain-codeformer --lib` (26 passed, 6 new),
 `cargo test -p brain-catalog --lib` (9 passed, including
