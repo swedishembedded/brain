@@ -185,7 +185,7 @@ fn from_pretrained_upscales_a_real_tiny_fixture_end_to_end() {
 }
 
 /// `UpscaleOptions::tile` takes the SAME fixture through the tiled path
-/// (`rrdbnet::caps::Session::upscale_with_halo`'s `tile != 0` branch)
+/// (`rrdbnet::caps::Session::upscale`'s `tile != 0` branch)
 /// instead of the whole-image one -- a second real forward pass, through
 /// different code, over the same checkpoint.
 #[test]

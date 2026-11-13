@@ -29,10 +29,11 @@ use crate::{Device, Error, Image, Result};
 /// [`UpscalePipeline::upscale_with`]'s one knob, mirroring
 /// `rrdbnet::caps::upscale_spec`'s own `tile` param: process in tiles of
 /// this many input pixels a side (`0`, the default = the whole image in one
-/// pass). Peak VRAM is quadratic in the tile side, so a large image on a
-/// small card needs this; it changes the memory/latency trade-off, not the
-/// task -- `rrdbnet::caps::TILE_HALO` bounds the resulting seam, it does not
-/// remove it (see that constant's own doc for the measured cost).
+/// pass). Tiling is exact: the output equals the whole-image pass bit for
+/// bit. Each tile is cut with the network's receptive radius of context
+/// around it, so peak VRAM follows `tile + 2R` and the work grows by
+/// `((tile + 2R) / tile)^2` (see `rrdbnet::caps`); it pays only for images
+/// larger than `2R + tile` per side.
 #[derive(Clone, Debug, Default)]
 pub struct UpscaleOptions {
     tile: u32,
