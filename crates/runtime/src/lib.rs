@@ -116,7 +116,8 @@ pub struct SynthRequest {
 /// is deliberately light. Without the feature the dependency is not linked at
 /// all and [`FakeSynthModel`] is the only implementation compiled in - exactly
 /// the state this seam shipped in. `brain serve --stdio` registers the real
-/// adapter when the feature is on and `BRAIN_QWEN3TTS_WEIGHTS` is set.
+/// adapter when the feature is on and the model store resolves a Qwen3-TTS
+/// checkpoint.
 pub trait SynthModel {
     /// Synthesize a waveform for `req`. The companion [`sample_rate`] gives its
     /// rate (Hz).

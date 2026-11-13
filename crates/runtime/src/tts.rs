@@ -42,10 +42,8 @@ pub const SAMPLE_RATE: u32 = 24_000;
 
 /// A real [`SynthModel`] backed by a Qwen3-TTS checkpoint.
 ///
-/// Construct with [`load`](Qwen3TtsSynthModel::load) (explicit paths) or
-/// [`from_env`](Qwen3TtsSynthModel::from_env) (`BRAIN_QWEN3TTS_WEIGHTS` /
-/// `BRAIN_QWEN3TTS_CKPT` / `BRAIN_QWEN3TTS_LANG`, the same variables the D-Bus
-/// resident already uses - one spelling for both serving surfaces).
+/// Construct with [`load`](Qwen3TtsSynthModel::load) from the two resolved
+/// checkpoint directories.
 ///
 /// The public pipeline entry points load their weights per call (the load-once
 /// seam is OpenVINO/NPU-only), so this holds configuration, not tensors; its
@@ -75,20 +73,6 @@ impl Qwen3TtsSynthModel {
             ));
         }
         Ok(Qwen3TtsSynthModel { paths, opts: GenOpts::default(), language: "english".to_string() })
-    }
-
-    /// Configure from the environment, mirroring the D-Bus resident's own
-    /// `from_env`. `None` (not registered) when `BRAIN_QWEN3TTS_WEIGHTS` is unset
-    /// or empty; `Some(Err(..))` when it is set but the checkpoint is unusable,
-    /// so a typo in the path is reported instead of silently serving nothing.
-    pub fn from_env() -> Option<Result<Qwen3TtsSynthModel, String>> {
-        let weights = std::env::var("BRAIN_QWEN3TTS_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        let ckpt = std::env::var("BRAIN_QWEN3TTS_CKPT").unwrap_or_default();
-        let lang = std::env::var("BRAIN_QWEN3TTS_LANG")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "english".to_string());
-        Some(Qwen3TtsSynthModel::load(&weights, &ckpt).map(|m| m.with_language(lang)))
     }
 
     /// Override the sampling / length controls.

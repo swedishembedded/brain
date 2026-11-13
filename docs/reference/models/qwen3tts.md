@@ -114,13 +114,14 @@ behind a build feature.
 
 ```bash
 cargo build --release -p brain-cli --features qwen3tts-synth
-BRAIN_QWEN3TTS_WEIGHTS=out/tts BRAIN_QWEN3TTS_CKPT=[path/to/Qwen3-TTS-12Hz-0.6B-Base] \
-  brain serve --stdio
+brain serve --stdio --pin qwen3tts.weights_dir=out/tts \
+  --pin qwen3tts.ckpt=[path/to/Qwen3-TTS-12Hz-0.6B-Base]
 ```
 
-It reads `BRAIN_QWEN3TTS_WEIGHTS`, `BRAIN_QWEN3TTS_CKPT` and
-`BRAIN_QWEN3TTS_LANG`. Without the feature, or with `BRAIN_QWEN3TTS_WEIGHTS`
-unset, a `user_synth_request` is still answered - with an empty terminal
+It serves the Qwen3-TTS checkpoint the model store resolves; the pins above
+name one outright. A request's own language field picks the language
+(English when it names none). Without the feature, or with no checkpoint, a
+`user_synth_request` is still answered - with an empty terminal
 `audio_chunk`.
 
 ### On the NPU

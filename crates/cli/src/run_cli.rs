@@ -18,11 +18,11 @@
 //!     the YOLO detector (default 0.25). Lower it so a lightly-trained tiny model's
 //!     low-confidence boxes still surface. No effect on the fake detector.
 //!   * `--max-new N`, `--temp X`, `--top-k K`, `--seed S` - generation config.
-//!   * Text-to-speech has no flag: it is env-only (`BRAIN_QWEN3TTS_WEIGHTS` /
-//!     `BRAIN_QWEN3TTS_CKPT` / `BRAIN_QWEN3TTS_LANG`, the same variables the
-//!     D-Bus resident reads), and only in a build carrying the `qwen3tts-synth`
-//!     feature - the TTS stack is too heavy for the default binary. Without it,
-//!     a `user_synth_request` still answers, with the terminal empty chunk.
+//!   * Text-to-speech serves the Qwen3-TTS checkpoint the model store resolves
+//!     (or `--pin qwen3tts.ROLE=PATH` names), and only in a build carrying the
+//!     `qwen3tts-synth` feature - the TTS stack is too heavy for the default
+//!     binary. Without it, a `user_synth_request` still answers, with the
+//!     terminal empty chunk.
 //!   * `--models-dir <path>` (or env `BRAIN_MODELS_DIR`) - the global model
 //!     directory `brain serve --dbus` scans at startup to build the served-model
 //!     catalog (one entry per carded file, keyed by model-card id). Defaults to
@@ -625,29 +625,28 @@ fn take_addrs(args: &[String], i: &mut usize, default_port: u16) -> Vec<SocketAd
 
 /// Fill the controller's text-to-speech seam, when this build has one.
 ///
-/// Configuration is env-only and reuses the SAME variables the D-Bus resident
-/// (`catalog::resident_tts::TtsResident::from_env`) already reads - one spelling
-/// across both serving surfaces, and no new flag on `brain serve`. With
-/// `BRAIN_QWEN3TTS_WEIGHTS` unset there is no synth model, which is exactly the
-/// behaviour of every build before this: a `user_synth_request` answers with the
-/// terminal empty `audio_chunk`.
+/// The checkpoint is the one `store` resolves for `qwen3tts` (its
+/// `weights_dir` and `ckpt` roles, or `--pin qwen3tts.ROLE=PATH`), the same
+/// resolution the D-Bus resident uses. With none there is no synth model and a
+/// `user_synth_request` answers with the terminal empty `audio_chunk`.
 #[cfg(feature = "qwen3tts-synth")]
-fn register_synth(registry: &mut Registry) {
-    match runtime::Qwen3TtsSynthModel::from_env() {
-        None => {}
-        Some(Ok(m)) => {
+fn register_synth(registry: &mut Registry, store: &loader::served::ServedStore) {
+    let Some(assembly) = loader::served::served_assembly(store, "qwen3tts", &qwen3tts::spec::Qwen3TtsSpec) else { return };
+    let role = |r: &str| assembly.roles.get(r).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    match runtime::Qwen3TtsSynthModel::load(&role("weights_dir"), &role("ckpt")) {
+        Ok(m) => {
             eprintln!("brain serve --stdio: Qwen3-TTS synth model registered");
             registry.synth = Some(Box::new(m));
         }
-        // The weights var was set but the checkpoint is unusable: say so rather
-        // than silently serving no audio from a path the operator meant to use.
-        Some(Err(e)) => eprintln!("brain serve --stdio: {e}; synthesis disabled"),
+        // A checkpoint resolved but is unusable: say so rather than silently
+        // serving no audio from weights the operator meant to use.
+        Err(e) => eprintln!("brain serve --stdio: {e}; synthesis disabled"),
     }
 }
 
 /// No-op twin for the default build, which does not link the TTS stack.
 #[cfg(not(feature = "qwen3tts-synth"))]
-fn register_synth(_registry: &mut Registry) {}
+fn register_synth(_registry: &mut Registry, _store: &loader::served::ServedStore) {}
 
 /// The OpenAI dialect's port, the surface `brain serve` binds when it is
 /// asked for none.
@@ -1137,7 +1136,7 @@ pub fn run_serve(args: &[String]) {
     };
 
     let mut registry = Registry::with_models(infer, detect);
-    register_synth(&mut registry);
+    register_synth(&mut registry, &pins.with_models_dir(loader::model_dir::resolve(models_dir.as_deref())));
     let mut ctrl = Controller::with_config(registry, cfg);
 
     // Expose the generic capability providers over the event API (manifest_request

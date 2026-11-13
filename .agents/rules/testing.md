@@ -293,6 +293,8 @@ neither this variable nor an explicit shard path is given), `BRAIN_QWEN3OMNIMOE_
 `crates/fastvlm/src/captioner.rs`'s own real-image test reads this one
 directly, independent of `BRAIN_FASTVLM_CKPT`),
 `BRAIN_LLAVA_WEIGHTS` (`crates/llava/src/captioner.rs`'s real-image test),
+`BRAIN_QWEN3TTS_WEIGHTS` + `BRAIN_QWEN3TTS_CKPT` (`crates/runtime/src/tts.rs`'s
+real-checkpoint synthesis test; `crates/mimi`'s stream parity reads the first),
 `BRAIN_FASTVLM_TEST_IMG`, `BRAIN_VL_PARITY_OUT`, `BRAIN_REF_RECT`,
 `BRAIN_WAN_VAE`, `BRAIN_WAN_T5`, `BRAIN_WAN_TOKENIZER`, `BRAIN_WAN_GGUF` (a
 released `city96/Wan2.1-*-gguf` file for `crates/wan`'s `gguf_import_real`

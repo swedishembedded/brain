@@ -798,7 +798,6 @@ crates/residency/src/scheduler.rs	BRAIN_SCHED_MAX_WAIT_MS
 crates/rrdbnet/tests/it/parity.rs	BRAIN_ESRGAN
 crates/rrdbnet/tests/it/parity.rs	BRAIN_TESTDATA
 crates/runtime/src/tts.rs	BRAIN_QWEN3TTS_CKPT
-crates/runtime/src/tts.rs	BRAIN_QWEN3TTS_LANG
 crates/runtime/src/tts.rs	BRAIN_QWEN3TTS_WEIGHTS
 crates/runtime/tests/it/controller.rs	MOE_SKIP_GPU_TESTS
 crates/runtime/tests/it/yolo_detect.rs	MOE_SKIP_GPU_TESTS

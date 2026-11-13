@@ -1402,6 +1402,9 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_S3DIT_VAE", replacement: "serve: {pin: [s3dit.vae=FILE]}" },
     Retired { name: "BRAIN_S3DIT_QWEN", replacement: "serve: {pin: [s3dit.text_encoder=PATH]}" },
     Retired { name: "BRAIN_S3DIT_TOKENIZER", replacement: "serve: {pin: [s3dit.tokenizer=PATH]}" },
+    Retired { name: "BRAIN_QWEN3TTS_WEIGHTS", replacement: "serve: {pin: [qwen3tts.weights_dir=DIR]}" },
+    Retired { name: "BRAIN_QWEN3TTS_CKPT", replacement: "serve: {pin: [qwen3tts.ckpt=DIR]}" },
+    Retired { name: "BRAIN_QWEN3TTS_LANG", replacement: "the synth request's own language field" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 
