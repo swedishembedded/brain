@@ -168,13 +168,6 @@ impl Flux1Provider {
     pub fn new(root: impl Into<String>) -> Flux1Provider {
         Flux1Provider { root: root.into(), hot: Arc::new(Hot::new()) }
     }
-
-    /// `BRAIN_FLUX1_DIR` - `None` when unset, or when the directory holds no
-    /// released `transformer/`, since without one no action can run.
-    pub fn from_env() -> Option<Flux1Provider> {
-        let root = std::env::var("BRAIN_FLUX1_DIR").ok().filter(|p| !p.is_empty())?;
-        std::path::Path::new(&root).join("transformer").exists().then(|| Flux1Provider::new(root))
-    }
 }
 
 impl Provider for Flux1Provider {
@@ -228,11 +221,6 @@ mod caps_tests {
     fn an_unknown_action_is_named_not_ignored() {
         let p = Flux1Provider::new("/nonexistent");
         assert!(p.action("edit").is_none());
-    }
-
-    #[test]
-    fn from_env_declines_a_directory_with_no_transformer() {
-        assert!(Flux1Provider::from_env().is_none() || std::env::var("BRAIN_FLUX1_DIR").is_ok());
     }
 
     #[test]

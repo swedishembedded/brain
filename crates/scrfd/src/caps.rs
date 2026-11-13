@@ -108,8 +108,8 @@ impl ScrfdSession {
     /// `gpu` is passed in rather than built here: a process holds ONE device
     /// (`AGENTS.md`), and a caller that also runs another model shares it
     /// (`Gpu::share` for this same kernel set, `Gpu::new_like` for a different
-    /// one on the same device). `dir` comes from a CLI flag or `BRAIN_SCRFD_DIR`,
-    /// never a baked-in path.
+    /// one on the same device). `dir` comes from the resolved
+    /// assembly or a CLI flag, never a baked-in path.
     pub fn load(dir: &str, gpu: Gpu) -> Result<ScrfdSession, String> {
         let w = crate::import::import_dir(std::path::Path::new(dir))?;
         let cfg = ScrfdConfig::scrfd_10g_bnkps();
@@ -204,14 +204,6 @@ impl ScrfdProvider {
     }
     /// The released file this detector needs, by its antelopev2 name.
     pub const RELEASE_FILES: [&str; 1] = [crate::import::RELEASE_FILE];
-
-    /// `BRAIN_SCRFD_DIR` - `None` when unset or when the directory does not hold
-    /// the released graph.
-    pub fn from_env() -> Option<ScrfdProvider> {
-        let dir = std::env::var("BRAIN_SCRFD_DIR").ok().filter(|p| !p.is_empty())?;
-        let d = std::path::Path::new(&dir);
-        ScrfdProvider::RELEASE_FILES.iter().all(|f| d.join(f).exists()).then(|| ScrfdProvider::new(dir))
-    }
 }
 
 impl Provider for ScrfdProvider {

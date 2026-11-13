@@ -206,14 +206,6 @@ impl Florence2Provider {
     }
 
     pub const RELEASE_FILES: [&str; 3] = ["config.json", "model.safetensors", "tokenizer.json"];
-
-    /// `BRAIN_FLORENCE2_DIR` - `None` when unset or when the directory does
-    /// not hold the released checkpoint.
-    pub fn from_env() -> Option<Florence2Provider> {
-        let dir = std::env::var("BRAIN_FLORENCE2_DIR").ok().filter(|p| !p.is_empty())?;
-        let d = std::path::Path::new(&dir);
-        Florence2Provider::RELEASE_FILES.iter().all(|f| d.join(f).exists()).then(|| Florence2Provider::new(dir))
-    }
 }
 
 impl Provider for Florence2Provider {

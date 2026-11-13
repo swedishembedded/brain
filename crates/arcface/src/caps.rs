@@ -147,8 +147,8 @@ impl ArcFaceSession {
     ///
     /// `gpu` is passed in rather than built here: a process holds ONE device
     /// (`AGENTS.md`). The detector gets `Gpu::new_like` - the same device, its
-    /// own kernel set. `dir` comes from a CLI flag or `BRAIN_ARCFACE_DIR`, never
-    /// a baked-in path.
+    /// own kernel set. `dir` comes from the resolved
+    /// assembly or a CLI flag, never a baked-in path.
     pub fn load(dir: &str, gpu: Gpu) -> Result<ArcFaceSession, String> {
         let w = crate::import::import_dir(std::path::Path::new(dir))?;
         let cfg = ArcFaceConfig::iresnet100();
@@ -289,14 +289,6 @@ impl ArcFaceProvider {
     /// this list: it is needed by `align = true` only, so a directory without it
     /// still serves `align = false` and the action reports the difference.
     pub const RELEASE_FILES: [&str; 1] = [crate::import::RELEASE_FILE];
-
-    /// `BRAIN_ARCFACE_DIR` - `None` when unset or when the directory does not
-    /// hold the released graph.
-    pub fn from_env() -> Option<ArcFaceProvider> {
-        let dir = std::env::var("BRAIN_ARCFACE_DIR").ok().filter(|p| !p.is_empty())?;
-        let d = std::path::Path::new(&dir);
-        ArcFaceProvider::RELEASE_FILES.iter().all(|f| d.join(f).exists()).then(|| ArcFaceProvider::new(dir))
-    }
 }
 
 impl Provider for ArcFaceProvider {

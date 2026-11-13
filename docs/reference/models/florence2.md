@@ -25,7 +25,8 @@ assumptions in it.
 Model id: `brain/florence2` - not auto-fetched. Put the released
 `microsoft/Florence-2-base` checkpoint under the models directory
 (`--models-dir` / `BRAIN_MODELS_DIR`) and brain resolves it by scanning;
-`BRAIN_FLORENCE2_DIR` still works as an explicit pin. The checkpoint is its
+`--weights DIR` (one-shot) or `brain serve --pin florence2.weights=DIR` names
+one outright. The checkpoint is its
 three released files - `config.json`, `model.safetensors`, `tokenizer.json` -
 read directly, with no
 separate import/conversion step; the few host-side transforms the vision

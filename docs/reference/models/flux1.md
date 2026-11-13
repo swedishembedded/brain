@@ -11,8 +11,8 @@ covered), forward-parity-gated (reduced-depth fp32 worst 1-cos 1.5e-11;
 full-depth int8 out cosine 0.9985/0.9991).
 
 It is **served**: a capability manifest (`text2image`, model id
-`brain/flux1`), a residency adapter (`BRAIN_FLUX1_DIR`, a released diffusers
-FLUX.1 checkpoint root), D-Bus `Run`, and a runnable example
+`brain/flux1`), a residency adapter (the `root` role: a released diffusers
+FLUX.1 checkpoint root from the store, or `brain serve --pin flux1.root=DIR`), D-Bus `Run`, and a runnable example
 (`samples/python/imagegen/flux1/flux1_generate.py`), on top of a complete sampler loop
 (T5-XXL + CLIP-L conditioning, FLUX.1's own linear-shift schedule, VAE
 decode). The glue this loop adds on top of the parity-gated DiT/T5/CLIP/VAE

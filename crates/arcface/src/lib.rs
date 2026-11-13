@@ -39,7 +39,7 @@
 //! gradient, which is how the reference recipe trains too.
 //!
 //! The serving contract is met by [`caps`] (the `embed`
-//! `capability::Provider`), the CLI's residency adapter (`BRAIN_ARCFACE_DIR`)
+//! `capability::Provider`), the residency adapter (`resident_arcface`)
 //! and `samples/python/vision/`.
 //!
 //! # Two normalisations, one letter apart

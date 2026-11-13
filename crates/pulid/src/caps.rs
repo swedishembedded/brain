@@ -88,7 +88,7 @@ const VARIANTS: [&str; 4] = ["dev", "kontext-dev", "krea-dev", "schnell"];
 /// `Flux1` (and hence every `Bundle`) is actually sized for.
 const DEFAULT_MAX_LEN: u32 = flux1::pipeline::MAX_TXT_LEN;
 
-/// The BiSeNet face-parsing checkpoint filename under `BRAIN_BISENET_DIR` -
+/// The BiSeNet face-parsing checkpoint filename under the `bisenet` root -
 /// `tools/goldens/pulid_face_parsing_dump_reference.py`'s re-serialization
 /// of facexlib's own release (see `crates/bisenet/src/import.rs`'s module
 /// docs for why the released `.pth` needs converting first).
@@ -455,28 +455,6 @@ impl PulidProvider {
     ) -> PulidProvider {
         PulidProvider { roots: (flux1_root.into(), pulid_root.into(), arcface_root.into(), clip_root.into(), bisenet_root.into()), hot: Arc::new(Hot::new()) }
     }
-
-    /// `BRAIN_FLUX1_DIR` + `BRAIN_PULID_DIR` (a `pulid_flux_v0.9.1.safetensors`
-    /// file or its directory) + `BRAIN_ARCFACE_DIR` + `BRAIN_CLIP_DIR` (for the
-    /// EVA-CLIP-L/336 file, the same variable `clip::caps` uses) +
-    /// `BRAIN_BISENET_DIR` (a directory holding `parsing_bisenet.safetensors`
-    /// -- see `BISENET_FILE`'s doc for how to produce one) - `None` unless
-    /// every one of the five is set and the FLUX.1 directory holds a
-    /// released `transformer/`.
-    pub fn from_env() -> Option<PulidProvider> {
-        let get = |k: &str| std::env::var(k).ok().filter(|p| !p.is_empty());
-        let (flux1_root, pulid_root, arcface_root, clip_root, bisenet_root) = (
-            get("BRAIN_FLUX1_DIR")?,
-            get("BRAIN_PULID_DIR")?,
-            get("BRAIN_ARCFACE_DIR")?,
-            get("BRAIN_CLIP_DIR")?,
-            get("BRAIN_BISENET_DIR")?,
-        );
-        std::path::Path::new(&flux1_root)
-            .join("transformer")
-            .exists()
-            .then(|| PulidProvider::new(flux1_root, pulid_root, arcface_root, clip_root, bisenet_root))
-    }
 }
 
 impl Provider for PulidProvider {
@@ -533,22 +511,6 @@ mod caps_tests {
     fn an_unknown_action_is_named_not_ignored() {
         let p = PulidProvider::new("/nonexistent", "/nonexistent", "/nonexistent", "/nonexistent", "/nonexistent");
         assert!(p.action("edit").is_none());
-    }
-
-    #[test]
-    fn from_env_declines_unless_all_five_directories_are_set() {
-        assert!(
-            PulidProvider::from_env().is_none()
-                || [
-                    std::env::var("BRAIN_FLUX1_DIR").is_ok(),
-                    std::env::var("BRAIN_PULID_DIR").is_ok(),
-                    std::env::var("BRAIN_ARCFACE_DIR").is_ok(),
-                    std::env::var("BRAIN_CLIP_DIR").is_ok(),
-                    std::env::var("BRAIN_BISENET_DIR").is_ok(),
-                ]
-                .into_iter()
-                .all(|x| x)
-        );
     }
 
     #[test]

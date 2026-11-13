@@ -22,15 +22,17 @@ scanning: `text_encoder/` (CLIP-L) and/or `text_encoder_2/` (OpenCLIP-bigG)
 weight directories, `tokenizer/` and/or `tokenizer_2/` BPE directories (at
 least one tokenizer must be present), and the EVA-CLIP image tower file
 (`EVA02_CLIP_L_336_psz14_s6B.pt`) at the root if you want image embeddings.
-`BRAIN_CLIP_DIR` still works as an explicit pin.
+To choose one root outright, pass `--towers DIR` (and `--eva FILE`) to a
+one-shot command, or pin it for the server (`brain serve --pin clip.towers=DIR
+--pin clip.eva=FILE`).
 
 ## Running it
 
 ```bash
 brain caps brain/clip
-BRAIN_CLIP_DIR=<ckpt-root> brain clip embed_text --text "a photo of a cat" \
+brain clip embed_text --text "a photo of a cat" \
     --tower clip_l --out embedding=text.bin --json
-BRAIN_CLIP_DIR=<ckpt-root> brain clip embed_image \
+brain clip embed_image \
     --in image=photo.ppm --out embedding=img.bin --json
 ```
 

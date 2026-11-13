@@ -1,4 +1,3 @@
-crates/arcface/src/caps.rs	BRAIN_ARCFACE_DIR
 crates/backend-api/src/lib.rs	HOME
 crates/backend-api/src/lib.rs	XDG_CACHE_HOME
 crates/backend-cpu/src/fast_conv.rs	BRAIN_WINOGRAD
@@ -123,7 +122,6 @@ crates/cli/tests/it/serve_cli.rs	BRAIN_DEVICE
 crates/cli/tests/it/serve_cli.rs	BRAIN_MODELS_DIR
 crates/cli/tests/it/serve_cli.rs	BRAIN_QWEN_WEIGHTS
 crates/cli/tests/it/zipdepth_smoke.rs	ZIPDEPTH_PTH
-crates/clip/src/caps.rs	BRAIN_CLIP_DIR
 crates/clip/tests/deepseek_ocr_real.rs	BRAIN_DEVICE
 crates/clip/tests/it/parity.rs	<var>
 crates/clip/tests/it/parity.rs	BRAIN_EVA_CLIP
@@ -201,7 +199,6 @@ crates/fincast/src/model.rs	FINCAST_MOE_DENSE
 crates/fincast/src/model.rs	MOE_SKIP_GPU_TESTS
 crates/fincast/tests/it/parity.rs	FINCAST_CKPT
 crates/fincast/tests/it/t0_param_layout.rs	FINCAST_CKPT
-crates/florence2/src/caps.rs	BRAIN_FLORENCE2_DIR
 crates/florence2/src/tokenizer.rs	FLORENCE2_DIR
 crates/florence2/tests/it/davit_channel_block_parity.rs	FLORENCE2_DIR
 crates/florence2/tests/it/davit_full_forward_parity.rs	FLORENCE2_DIR
@@ -212,7 +209,6 @@ crates/florence2/tests/it/ground_smoke.rs	FLORENCE2_DIR
 crates/florence2/tests/it/import_end_to_end_parity.rs	FLORENCE2_DIR
 crates/florence2/tests/it/text_lm_parity.rs	FLORENCE2_DIR
 crates/florence2/tests/it/train_overfit.rs	MOE_SKIP_GPU_TESTS
-crates/flux1/src/caps.rs	BRAIN_FLUX1_DIR
 crates/flux1/src/model.rs	BRAIN_FLUX1_I8_KEEP_F32
 crates/flux1/src/model.rs	SMOKE_STEPS
 crates/flux1/src/pipeline.rs	BRAIN_FLUX1_TE_DEVICE
@@ -623,12 +619,6 @@ crates/ouro/tests/it/parity.rs	BRAIN_OURO_DIR
 crates/paramstore/src/lib.rs	MOE_SKIP_GPU_TESTS
 crates/paramstore/src/upload.rs	MOE_SKIP_GPU_TESTS
 crates/perf/src/env.rs	<f>
-crates/pulid/src/caps.rs	<k>
-crates/pulid/src/caps.rs	BRAIN_ARCFACE_DIR
-crates/pulid/src/caps.rs	BRAIN_BISENET_DIR
-crates/pulid/src/caps.rs	BRAIN_CLIP_DIR
-crates/pulid/src/caps.rs	BRAIN_FLUX1_DIR
-crates/pulid/src/caps.rs	BRAIN_PULID_DIR
 crates/pulid/tests/it/parity.rs	<var>
 crates/pulid/tests/it/parity.rs	BRAIN_FLUX1_TRANSFORMER
 crates/pulid/tests/it/parity.rs	BRAIN_PULID
@@ -847,7 +837,6 @@ crates/sam1/tests/it/gradcheck.rs	MOE_SKIP_GPU_TESTS
 crates/sam1/tests/parity.rs	BRAIN_DEVICE
 crates/sam1/tests/it/wgpu_block_count_corruption.rs	MOE_SKIP_GPU_TESTS
 crates/sam1/tests/it/wgpu_real_weight_parity.rs	MOE_SKIP_GPU_TESTS
-crates/scrfd/src/caps.rs	BRAIN_SCRFD_DIR
 crates/sdk/src/chat_tokens.rs	QWEN_TOKENIZER
 crates/sdk/src/error.rs	BRAIN_FLUX2_ALLOW_NC
 crates/sdk/tests/auto_pipeline.rs	BRAIN_MODELS_DIR

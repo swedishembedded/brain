@@ -11,9 +11,10 @@ This is a real, verified port - 312 tensors, parity-gated on both backends
 forward 10, worst 1-cos 1.44e-11).
 
 It is **served**: a capability manifest (`text2image`, model id
-`brain/flux1-pulid`), a residency adapter (`BRAIN_FLUX1_DIR` for the FLUX.1
-backbone, `BRAIN_PULID_DIR` for the PuLID checkpoint, `BRAIN_ARCFACE_DIR` and
-`BRAIN_CLIP_DIR` for the identity towers), D-Bus `Run`, and a runnable
+`brain/flux1-pulid`), a residency adapter (roles `flux1` for the FLUX.1 backbone,
+`pulid` for the PuLID checkpoint, `arcface`, `clip` and `bisenet` for the
+identity towers, each resolved from the store or pinned with
+`brain serve --pin pulid.ROLE=PATH`), D-Bus `Run`, and a runnable
 example (`samples/python/imagegen/pulid/pulid_generate.py`) - a prompt plus a face photo
 in, an identity-conditioned image out. The image -> `id_cond` path is wired
 at this serving layer (an ArcFace embedding plus EVA-CLIP taps composed by

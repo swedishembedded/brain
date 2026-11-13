@@ -206,7 +206,7 @@ targets (--target):
                                      (unit: mask; one centred point prompt per request)
   clip:<checkpoint-root>             EVA-CLIP-L/336 image tower via the residency executor
                                      (unit: embedding; embed_image only). The root is the same
-                                     SDXL-layout dir BRAIN_CLIP_DIR serves (tokenizer[_2]/ +
+                                     SDXL-layout root the clip.towers role serves (tokenizer[_2]/ +
                                      the EVA release .pt)
   scrfd:<weights-dir>                SCRFD face detection via the residency executor
                                      (unit: image; one synthetic 640x480 frame per request)
@@ -1572,9 +1572,8 @@ fn build_sam2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
 /// residency executor (unit: embedding). The root is the SDXL-layout dir
 /// `ClipResident` serves from (`tokenizer[_2]/`, `text_encoder[_2]/`, plus
 /// the EVA release file for `embed_image`) - the SAME directory `brain
-/// serve` takes via `BRAIN_CLIP_DIR`, because this target measures that
-/// resident. (The old `clip:<text-encoder-dir>:<eva.pt>` spec set two env
-/// vars nothing reads - dead on arrival, the env round-trip's third victim.)
+/// serve` resolves for the `clip.towers` role, because this target measures
+/// that resident.
 /// Text towers exist on the same resident but need a real tokenizer to
 /// exercise honestly; `embed_image` needs only a pixel grid.
 fn build_clip(dir: &str) -> Result<Box<dyn PerfTarget>, String> {

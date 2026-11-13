@@ -28,8 +28,8 @@ directly, with no import or conversion step and no variable to export.
 
 The antelopev2 release ships `glintr100.onnx`, the [ArcFace](arcface.md)
 embedder, in the same directory - so one copy of that release serves both
-models. `BRAIN_SCRFD_DIR` still works as an explicit pin when you want one
-exact directory used.
+models. To use one exact file, pass `--weights FILE` to a one-shot command or
+pin it for the server (`brain serve --pin scrfd.weights=FILE`).
 
 ## Running it
 

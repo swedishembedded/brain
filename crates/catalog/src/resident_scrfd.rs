@@ -4,7 +4,7 @@
 //! Face detection (insightface antelopev2 SCRFD-10GF) behind the residency
 //! scheduler.
 //!
-//! `activate` imports the released ONNX graph from `BRAIN_SCRFD_DIR` ONCE and
+//! `activate` imports the released ONNX graph from the resolved directory ONCE and
 //! builds it on the assigned device; the [`Instance`] owns the resulting
 //! [`scrfd::caps::ScrfdSession`], so dropping it frees the model. One action,
 //! `detect` - the schema and the work both come from `scrfd::caps`, so this file
@@ -29,8 +29,8 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use scrfd::caps::ScrfdSession;
 
 
-/// The antelopev2 face detector behind the scheduler (`BRAIN_SCRFD_DIR` = the
-/// directory holding `scrfd_10g_bnkps.onnx`).
+/// The antelopev2 face detector behind the scheduler (the directory holding
+/// `scrfd_10g_bnkps.onnx`).
 pub struct ScrfdResident {
     dir: String,
 }

@@ -1391,6 +1391,13 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_LLAVA_WEIGHTS", replacement: "serve: {pin: [llava.weights=DIR]}" },
     Retired { name: "BRAIN_S3TOKENIZER_V2", replacement: "serve: {pin: [cosyvoice.s3tokenizer=FILE]}" },
     Retired { name: "BRAIN_CAMPPLUS_DIR", replacement: "serve: {pin: [cosyvoice.campplus=FILE]}" },
+    Retired { name: "BRAIN_CLIP_DIR", replacement: "serve: {pin: [clip.towers=DIR, clip.eva=FILE]}" },
+    Retired { name: "BRAIN_SCRFD_DIR", replacement: "serve: {pin: [scrfd.weights=FILE]}" },
+    Retired { name: "BRAIN_ARCFACE_DIR", replacement: "serve: {pin: [arcface.weights=FILE]}" },
+    Retired { name: "BRAIN_FLORENCE2_DIR", replacement: "serve: {pin: [florence2.weights=DIR]}" },
+    Retired { name: "BRAIN_FLUX1_DIR", replacement: "serve: {pin: [flux1.root=DIR, pulid.flux1=DIR]}" },
+    Retired { name: "BRAIN_PULID_DIR", replacement: "serve: {pin: [pulid.pulid=FILE]}" },
+    Retired { name: "BRAIN_BISENET_DIR", replacement: "serve: {pin: [pulid.bisenet=DIR]}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 

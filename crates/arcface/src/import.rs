@@ -211,8 +211,8 @@ pub fn import_arcface(g: &GraphProto, cfg: &ArcFaceConfig) -> Result<Tensors, St
 
 /// Read the embedder from `dir` and return its imported tensors.
 ///
-/// `dir` comes from a CLI flag, `BRAIN_ARCFACE_DIR` or `$BRAIN_TESTDATA` - never
-/// a baked-in path.
+/// `dir` comes from the resolved assembly, a CLI flag or `$BRAIN_TESTDATA` -
+/// never a baked-in path.
 pub fn import_dir(dir: &std::path::Path) -> Result<Tensors, String> {
     let rec = onnx::read_file(dir.join(RELEASE_FILE))?;
     import_arcface(read::graph(&rec)?, &ArcFaceConfig::iresnet100())

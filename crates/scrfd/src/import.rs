@@ -242,8 +242,8 @@ pub fn import_scrfd(g: &GraphProto, cfg: &ScrfdConfig) -> Result<Tensors, String
 
 /// Read the detector from `dir` and return its imported tensors.
 ///
-/// `dir` comes from a CLI flag, `BRAIN_SCRFD_DIR` or `$BRAIN_TESTDATA` - never a
-/// baked-in path.
+/// `dir` comes from the resolved assembly, a CLI flag or `$BRAIN_TESTDATA` -
+/// never a baked-in path.
 pub fn import_dir(dir: &std::path::Path) -> Result<Tensors, String> {
     let det = onnx::read_file(dir.join(RELEASE_FILE))?;
     import_scrfd(read::graph(&det)?, &ScrfdConfig::scrfd_10g_bnkps())

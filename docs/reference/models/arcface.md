@@ -30,8 +30,8 @@ variable to export, no import or conversion step.
 
 Keep `scrfd_10g_bnkps.onnx` (the [SCRFD](scrfd.md) detector) beside it, as the
 antelopev2 release ships them, or the default `align = true` path has no
-detector to run and says so. `BRAIN_ARCFACE_DIR` still works as an explicit
-pin.
+detector to run and says so. To use one exact file, pass `--weights FILE` or
+pin it for the server (`brain serve --pin arcface.weights=FILE`).
 
 ## Running it
 

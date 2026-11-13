@@ -129,7 +129,8 @@ pub struct Session {
 impl Session {
     /// `dir` is the released checkpoint root — the SDXL layout, holding
     /// `text_encoder/`, `text_encoder_2/`, `tokenizer/` and `tokenizer_2/`.
-    /// It comes from a CLI flag or `BRAIN_CLIP_DIR`, never a baked-in path.
+    /// It comes from the resolved `clip` assembly or a CLI flag, never a
+    /// baked-in path.
     pub fn load(dir: &str, gpu: Gpu) -> Result<Session, String> {
         let root = std::path::Path::new(dir);
         let mut tok = HashMap::new();
@@ -276,14 +277,6 @@ impl ClipProvider {
     pub fn new(dir: impl Into<String>) -> ClipProvider {
         ClipProvider { dir: dir.into(), hot: Arc::new(Hot::new()) }
     }
-
-    /// `BRAIN_CLIP_DIR` — `None` when unset, or when the directory holds neither
-    /// released tokenizer, since without one no action can run.
-    pub fn from_env() -> Option<ClipProvider> {
-        let dir = std::env::var("BRAIN_CLIP_DIR").ok().filter(|p| !p.is_empty())?;
-        let d = std::path::Path::new(&dir);
-        (d.join("tokenizer").exists() || d.join("tokenizer_2").exists()).then(|| ClipProvider::new(dir))
-    }
 }
 
 impl Provider for ClipProvider {
@@ -351,12 +344,5 @@ mod caps_tests {
         // A silent no-op here would surface as an empty embedding downstream.
         let p = ClipProvider::new("/nonexistent");
         assert!(p.action("embed_audio").is_none());
-    }
-
-    #[test]
-    fn from_env_declines_a_directory_with_no_tokenizer() {
-        // Guards the case that used to make this crate unservable: without a
-        // tokenizer the text action cannot run at all.
-        assert!(ClipProvider::from_env().is_none() || std::env::var("BRAIN_CLIP_DIR").is_ok());
     }
 }
