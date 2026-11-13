@@ -1,0 +1,33 @@
+<!-- source-sha256: d18c3e7897c6e0a22df0bd245c999b804323f824307b99b4e09969c6a4b5ddd5 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 340" width="620" height="340">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="340" fill="#ffffff"/>
+<line x1="58" y1="294" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="168.86" y1="294" x2="168.86" y2="30" stroke="#edf2f7"/>
+<text x="168.86" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="315.42" y1="294" x2="315.42" y2="30" stroke="#edf2f7"/>
+<text x="315.42" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="426.28" y1="294" x2="426.28" y2="30" stroke="#edf2f7"/>
+<text x="426.28" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="537.15" y1="294" x2="537.15" y2="30" stroke="#edf2f7"/>
+<text x="537.15" y="310" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="58" y1="294" x2="602" y2="294" stroke="#edf2f7"/>
+<text x="52" y="298" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="241.2" x2="602" y2="241.2" stroke="#edf2f7"/>
+<text x="52" y="245.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<line x1="58" y1="188.4" x2="602" y2="188.4" stroke="#edf2f7"/>
+<text x="52" y="192.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">40</text>
+<line x1="58" y1="135.6" x2="602" y2="135.6" stroke="#edf2f7"/>
+<text x="52" y="139.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">60</text>
+<line x1="58" y1="82.8" x2="602" y2="82.8" stroke="#edf2f7"/>
+<text x="52" y="86.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">80</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100</text>
+<rect x="58" y="30" width="544" height="264" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="264"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,123.65 168.86,168.2 233.72,202.5 315.42,232.64 344.58,235.03 426.28,257.49 491.14,272.84 602,278.94"/><circle cx="58" cy="123.65" r="3.5" fill="#2b6cb0"/><circle cx="168.86" cy="168.2" r="3.5" fill="#2b6cb0"/><circle cx="233.72" cy="202.5" r="3.5" fill="#2b6cb0"/><circle cx="315.42" cy="232.64" r="3.5" fill="#2b6cb0"/><circle cx="344.58" cy="235.03" r="3.5" fill="#2b6cb0"/><circle cx="426.28" cy="257.49" r="3.5" fill="#2b6cb0"/><circle cx="491.14" cy="272.84" r="3.5" fill="#2b6cb0"/><circle cx="602" cy="278.94" r="3.5" fill="#2b6cb0"/></g>
+<text x="330" y="330" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">pool size, in batches (log scale)</text>
+<text x="14" y="162" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 162)">padding, percent of positions computed</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Padding falls as the pool grows</text>
+</svg>

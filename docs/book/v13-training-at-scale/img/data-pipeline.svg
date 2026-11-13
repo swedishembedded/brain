@@ -1,0 +1,39 @@
+<!-- source-sha256: 9b002f781e5662f690284c92e4bbd012d544075b7547d658cfb8de912747877a -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 300" width="1000" height="300"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="300" fill="#ffffff"/>
+<ellipse cx="110" cy="62" rx="75" ry="28" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sources</text>
+<text x="110" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">documents, records</text>
+<rect x="265" y="34" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">deduplicate</text>
+<text x="340" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">exact and near copies</text>
+<rect x="495" y="34" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mix</text>
+<text x="570" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">groups listed per share</text>
+<rect x="725" y="34" width="150" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="800" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">record format</text>
+<text x="800" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ids, mask, starts</text>
+<line x1="188" y1="62" x2="262" y2="62" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="418" y1="62" x2="492" y2="62" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="648" y1="62" x2="722" y2="62" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="725" y="186" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="800" y="210.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rows</text>
+<text x="800" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">one record per row</text>
+<rect x="495" y="186" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="210.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">batches</text>
+<text x="570" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sorted within a pool</text>
+<rect x="265" y="186" width="150" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="210.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">order and shard</text>
+<text x="340" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">seed, epoch, worker</text>
+<ellipse cx="110" cy="214" rx="75" ry="28" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="210.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">training step</text>
+<text x="110" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">loss over the mask</text>
+<line x1="800" y1="93" x2="800" y2="183" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="809" y="142.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">[B, T] ids</text>
+<line x1="722" y1="214" x2="648" y2="214" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="685" y="205.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">lengths</text>
+<line x1="492" y1="214" x2="418" y2="214" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="455" y="205.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">batch list</text>
+<line x1="262" y1="214" x2="188" y2="214" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="225" y="205.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">batches</text>
+<text x="455" y="280.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">counted at every stage: records, tokens, supervised tokens, padding positions</text>
+</svg>
