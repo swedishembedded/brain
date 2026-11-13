@@ -148,7 +148,7 @@ pub fn infer_spec() -> ActionSpec {
 }
 
 pub fn train_spec() -> ActionSpec {
-    ActionSpec::new("train", "train ZipDepth on synthetic RGB to inverse-depth pairs (forward, masked L1, backward, AdamW): from the resolved checkpoint (fine-tune), or from freshly initialized weights when there is none or `fresh` asks")
+    ActionSpec::new("train", "train ZipDepth on RGB to depth pairs (a paired directory, or synthetic scenes) with the MiDaS loss (scale-and-shift-invariant MSE plus multi-scale gradient matching on inverse depth), backward and AdamW: from the resolved checkpoint (fine-tune), or from freshly initialized weights when there is none or `fresh` asks")
         .training()
         .streaming()
         .from_scratch()
@@ -159,7 +159,9 @@ pub fn train_spec() -> ActionSpec {
         .param(ParamSpec::new("height", ParamType::Int, "training height, px (a multiple of 32)").default(json!(64)).min(32.0).max(capability::bounds::SIZE_PX))
         .param(ParamSpec::new("lr", ParamType::Float, "AdamW learning rate").default(json!(1e-3)).min(0.0).max(capability::bounds::UNIT))
         .param(ParamSpec::new("wd", ParamType::Float, "AdamW weight decay").default(json!(0.0)).min(0.0).max(capability::bounds::UNIT))
-        .param(ParamSpec::new("seed", ParamType::Int, "seed of the fresh weights and the synthetic pairs (omit for random)").min(0.0))
+        .param(ParamSpec::new("data", ParamType::Str, "directory of paired images on the serving machine (manifest.json and <stem>.png beside <stem>.depth.png); synthetic scenes when absent").host_resolved())
+        .param(ParamSpec::new("grad_weight", ParamType::Float, "weight of the gradient-matching term of the MiDaS loss").default(json!(0.5)).min(0.0).max(capability::bounds::UNIT))
+        .param(ParamSpec::new("seed", ParamType::Int, "seed of the fresh weights, the synthetic pairs and the epoch shuffles (omit for random)").min(0.0))
         .param(ParamSpec::new("fresh", ParamType::Bool, "start from freshly initialized weights even when a checkpoint is resolved").default(json!(false)))
         .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.map(String::from).to_vec()), "what the backward keeps of the forward: every unit's intermediates, or only each unit's input, rebuilt in the backward for the same gradients at lower memory (default keep)"))
 }
@@ -350,14 +352,20 @@ impl Action for TrainAction {
             wd: inv.get_f64("wd").unwrap_or(0.0) as f32,
             seed,
             fixed_batch: false,
+            grad_weight: inv.get_f64("grad_weight").map_or(crate::train::DEFAULT_GRAD_WEIGHT, |a| a as f32),
             saved,
+        };
+        // Paired images when `data` names a directory, synthetic scenes otherwise.
+        let mut source: Box<dyn crate::train::BatchSource> = match inv.get_str("data") {
+            Some(dir) => Box::new(crate::dataset::DepthDataset::open(std::path::Path::new(&dir), seed)?),
+            None => Box::new(crate::train::Synthetic::new(seed)),
         };
         // The checkpoint keeps every tensor's own shape: the model store reads
         // the variant and its dimensions back from them.
         let shapes: HashMap<String, Vec<u64>> = cfg.param_list().into_iter().map(|(name, shape)| (name, shape.iter().map(|&d| d as u64).collect())).collect();
         let gpu = Gpu::new(crate::net::PIPELINES);
         let steps = t.steps;
-        let (ps, res) = crate::train::train_loop(&gpu, cfg, &t, &init, |step, loss| {
+        let (ps, res) = crate::train::train_loop(&gpu, cfg, &t, &init, source.as_mut(), |step, loss| {
             progress(Progress::step(step + 1, steps, format!("loss {loss:.4}")));
             !inv.cancel.is_cancelled()
         })?;

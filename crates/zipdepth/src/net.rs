@@ -112,8 +112,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("concat_split", kernels::CONCAT_SPLIT),
     ("chan_place", kernels::CHAN_PLACE),
     // ---- loss ----
-    ("masked_l1", kernels::MASKED_L1),
-    ("masked_l1_grad", kernels::MASKED_L1_GRAD),
+    // `zipdepth::loss`: scale-and-shift-invariant MSE + multi-scale gradient matching.
+    ("ssi_moments", kernels::SSI_MOMENTS),
+    ("ssi_resid", kernels::SSI_RESID),
+    ("grad_match", kernels::GRAD_MATCH),
+    ("ssi_grad", kernels::SSI_GRAD),
     // ---- optimizer ----
     ("adamw", kernels::ADAMW),
     ("gradnorm_sq", kernels::GRADNORM_SQ),
@@ -133,13 +136,6 @@ pub const PIPELINES: &[(&str, &str)] = &[
 pub fn optim_ids() -> (usize, usize, usize, usize, usize) {
     let k = |n: &str| PIPELINES.iter().position(|(m, _)| *m == n).expect("optimizer kernel missing");
     (k("adamw"), k("gradnorm_sq"), k("grad_scale"), k("clip_coef"), k("grad_scale_buf"))
-}
-
-/// The loss kernels' indices (`masked_l1`, `masked_l1_grad`) — positional for
-/// the same reason as [`optim_ids`].
-pub fn loss_ids() -> (usize, usize) {
-    let k = |n: &str| PIPELINES.iter().position(|(m, _)| *m == n).expect("loss kernel missing");
-    (k("masked_l1"), k("masked_l1_grad"))
 }
 
 /// The shared conv blocks' kernel ids, resolved by name against [`PIPELINES`].

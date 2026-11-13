@@ -9,8 +9,13 @@ been dropped - ZipDepth is the depth model.
 
 ## Not yet done
 
-- [ ] Real training data + the SSI/gradient loss (the training loop itself is
-      done; data and loss are still placeholder-grade)
+- [x] Real training data + the SSI/gradient loss: `zipdepth::loss` (MiDaS SSI
+      MSE + 4-scale gradient matching, four WGSL kernels, exact gradient
+      gradchecked against an f64 oracle in `tests/it/p4_loss.rs`) and
+      `zipdepth::dataset` (paired RGB + 16-bit depth directory, hostile-input
+      validated, seeded shuffled epochs), wired as `train_loop`'s `BatchSource`
+      and `brain zipdepth train --data DIR --grad-weight A`. No run on a real
+      dataset has been measured yet.
 - [ ] INT8 quantization - activation-range calibration mechanics are fixed,
       but no run against real weights/calibration images has measured how far
       the INT8 scales move or what that does to depth quality

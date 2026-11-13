@@ -12,10 +12,12 @@
 pub mod blocks;
 pub mod caps;
 pub mod config;
+pub mod dataset;
 pub mod init;
 pub mod net;
 pub mod fuse;
 pub mod import;
+pub mod loss;
 pub mod predict;
 pub mod quant;
 pub mod effects;

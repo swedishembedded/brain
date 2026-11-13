@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! P4: the end-to-end training loop — forward -> masked-L1 -> backward ->
-//! AdamW — provably LEARNS.
+//! P4: the end-to-end training loop - forward -> SSI + gradient-matching loss
+//! -> backward -> AdamW - provably LEARNS.
 //!
 //! The overfit-one-batch sanity test: a tiny ZipDepth on one fixed synthetic
 //! batch must drive its training loss well below where it started. This is the
@@ -13,16 +13,16 @@
 //! the loss flat, which is exactly what the assertion catches — verified by
 //! running the loop with the optimizer step disabled: red).
 //!
-//! Placeholder-grade by design: synthetic rectangles, plain masked L1 (mask
-//! all ones), no eval split. Real data + the SSI/gradient loss are the next
-//! increment; the loop's structure does not change.
+//! The batch is the synthetic source's (rectangles, mask all ones): it needs no
+//! files. The directory loader has its own tests (`p4_dataset`), the loss its own
+//! gradient check (`p4_loss`).
 //!
 //! Run with `BRAIN_DEVICE=cpu`.
 
 use data::rng::random_seed;
 use std::collections::HashMap;
 
-use zipdepth::train::{synth_pair, train_loop, TrainCfg};
+use zipdepth::train::{synth_pair, train_loop, Synthetic, TrainCfg, DEFAULT_GRAD_WEIGHT};
 use zipdepth::ZipConfig;
 use gpu_core::Gpu;
 
@@ -41,15 +41,16 @@ fn tiny() -> ZipConfig {
 fn overfit_one_batch_loss_decreases() {
     let cfg = tiny();
     let gpu = Gpu::new_cpu(zipdepth::net::PIPELINES);
-    // seed: the 30-step 'loss at least halves' margin was measured at this init and batch.
-    let t = TrainCfg { steps: 30, batch: 2, h: 32, w: 32, lr: 3e-3, wd: 0.0, seed: 7, fixed_batch: true, saved: None };
+    // seed: the 150-step 'loss at least halves' margin (first -> last printed below) was measured at this init and
+    // batch. The loss is scale-invariant, so unlike plain L1 it has no cheap global-scale win and needs a larger step.
+    let t = TrainCfg { steps: 150, batch: 2, h: 32, w: 32, lr: 1e-2, wd: 0.0, seed: 7, fixed_batch: true, grad_weight: DEFAULT_GRAD_WEIGHT, saved: None };
     let init = zipdepth::init_weights(&cfg, t.seed);
     let mut losses: Vec<f32> = Vec::new();
-    let (_ps, out) = train_loop(&gpu, cfg, &t, &init, |_, l| {
+    let (_ps, out) = train_loop(&gpu, cfg, &t, &init, &mut Synthetic::new(t.seed), |_, l| {
         losses.push(l);
         true
-    })
-    .unwrap();
+    }).unwrap();
+    eprintln!("overfit: {} -> {}", out.first_loss, out.last_loss);
     assert!(out.first_loss.is_finite() && out.last_loss.is_finite(), "loss diverged: {losses:?}");
     assert!(
         out.last_loss < 0.5 * out.first_loss,
@@ -98,8 +99,8 @@ fn fixed_batch_repeats_and_rotating_batches_differ() {
     let init: HashMap<String, Vec<f32>> = zipdepth::init_weights(&cfg, seed);
     // 2 steps each; just proving the loop runs in both modes and stays finite.
     for fixed in [true, false] {
-        let t = TrainCfg { steps: 2, batch: 1, h: 32, w: 32, lr: 1e-3, wd: 0.0, seed, fixed_batch: fixed, saved: None };
-        let (_ps, out) = train_loop(&gpu, cfg.clone(), &t, &init, |_, _| true).unwrap();
+        let t = TrainCfg { steps: 2, batch: 1, h: 32, w: 32, lr: 1e-3, wd: 0.0, seed, fixed_batch: fixed, grad_weight: DEFAULT_GRAD_WEIGHT, saved: None };
+        let (_ps, out) = train_loop(&gpu, cfg.clone(), &t, &init, &mut Synthetic::new(seed), |_, _| true).unwrap();
         assert!(out.last_loss.is_finite());
     }
 }

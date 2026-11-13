@@ -22,6 +22,7 @@ brain-data.workspace = true
 brain-checkpoint.workspace = true
 brain-kernels.workspace = true
 brain-modelstore.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
 # Host-side pre/post-processing (resize + layout pack) runs per camera frame;
@@ -32,3 +33,4 @@ bytemuck.workspace = true
 # absent fixture can be made fatal and absent hardware cannot.
 brain-testutil.workspace = true
 brain-gradcheck.workspace = true
+tempfile.workspace = true

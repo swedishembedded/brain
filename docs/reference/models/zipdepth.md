@@ -81,8 +81,17 @@ times a stereogram's pattern repeats.
 
 ```bash
 brain zipdepth train --save zipdepth.safetensors --steps 50 --batch 2 --width 64 --height 64 --seed $RANDOM
+brain zipdepth train --save zipdepth.safetensors --data my_pairs/ --width 384 --height 384 --seed $RANDOM
 brain zipdepth train --save ft.safetensors --weights zipdepth_base.pth --seed $RANDOM   # fine-tune
 ```
+
+The loss is the MiDaS scale-and-shift-invariant MSE plus multi-scale gradient matching on inverse
+depth; `--grad-weight A` sets the gradient-matching weight (default 0.5). `--data DIR` trains on a
+directory of paired images: `manifest.json` (`{"depth_per_count": 0.001, "invalid_count": 0}`), and
+per sample `<stem>.png` (or `.jpg`) beside `<stem>.depth.png`, a 16-bit grayscale PNG of the same size
+whose count `invalid_count` marks pixels with no measurement. Samples are centre-cropped to the
+training aspect and resized; a malformed file stops the run naming it. Without `--data` the run uses
+synthetic scenes.
 
 `train` starts from the checkpoint in the store when there is one (or the one
 `--weights` names) and from freshly initialized weights otherwise, or when

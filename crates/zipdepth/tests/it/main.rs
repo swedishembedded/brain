@@ -22,6 +22,8 @@ mod p3_gradcheck;
 mod p3_import;
 mod p3_layout;
 mod p3_reference_rect;
+mod p4_dataset;
+mod p4_loss;
 mod p4_train;
 mod p5_font;
 mod p5_predict;
