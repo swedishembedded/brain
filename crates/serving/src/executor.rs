@@ -246,7 +246,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     // size) - see resident_wan.rs. A pulled checkpoint reaches its adapter
     // through `model_dir::resident_for_compound`'s `"wan"` arm, so whether
     // Wan is missing is decided after the model-dir scan below.
-    if let Some(w) = catalog::resident_wan::WanResident::from_env() {
+    if let Some(w) = catalog::resident_wan::WanResident::from_pins(store) {
         models.push(Arc::new(w));
     }
     // MiniMax-H3 joint video+audio reaches its adapter through

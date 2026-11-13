@@ -96,44 +96,18 @@ pub struct Paths {
     pub tokenizer: String,
 }
 
-/// `(variable, human name)` for each role, in the order [`Paths`] declares
-/// them. One table so the env reader and the "you are missing X" error cannot
-/// disagree about the spelling.
-pub const PATH_VARS: [(&str, &str); 4] = [
-    ("BRAIN_WAN_DIT", "transformer"),
-    ("BRAIN_WAN_VAE", "VAE"),
-    ("BRAIN_WAN_T5", "umT5 text encoder"),
-    ("BRAIN_WAN_TOKENIZER", "tokenizer"),
-];
-
 impl Paths {
-    /// Every role from its environment variable.
-    pub fn from_env() -> Result<Paths, String> {
-        Paths::resolve(None, None, None, None)
-    }
-
-    /// Every role from an explicit value if given, else from its environment
-    /// variable. A role that resolves to neither is an error naming BOTH the
-    /// flag and the variable - a user who has just downloaded four files
-    /// should be told the flag, and a user running the served path should be
-    /// told the variable.
-    pub fn resolve(dit: Option<&str>, vae: Option<&str>, t5: Option<&str>, tokenizer: Option<&str>) -> Result<Paths, String> {
-        let pick = |flag: Option<&str>, i: usize, flag_name: &str| -> Result<String, String> {
-            let (var, role) = PATH_VARS[i];
-            if let Some(v) = flag.filter(|s| !s.is_empty()) {
-                return Ok(v.to_string());
-            }
-            match std::env::var(var) {
-                Ok(v) if !v.is_empty() => Ok(v),
-                _ => Err(format!("no {role} weights: pass {flag_name} <path> or set {var}")),
-            }
-        };
-        Ok(Paths {
-            dit: pick(dit, 0, "--dit")?,
-            vae: pick(vae, 1, "--vae")?,
-            t5: pick(t5, 2, "--t5")?,
-            tokenizer: pick(tokenizer, 3, "--tokenizer")?,
-        })
+    /// The four roles the model store at `root` resolves through
+    /// [`crate::spec::WanSpec`].
+    pub fn from_store(root: &std::path::Path) -> Result<Paths, String> {
+        use brain_modelstore::resolve::{describe_ambiguity, describe_missing, ArchSpec, Resolution};
+        let records = brain_modelstore::inventory::scan(root);
+        let specs: [&dyn ArchSpec; 1] = [&crate::spec::WanSpec];
+        match brain_modelstore::resolve::resolve("wan", &records, &specs, &std::collections::BTreeMap::new()) {
+            Resolution::Resolved(assembly) => Paths::from_assembly(&assembly),
+            Resolution::Ambiguous(a) => Err(describe_ambiguity(&a)),
+            Resolution::Missing(m) => Err(describe_missing(&m)),
+        }
     }
 
     /// Build `Paths` from an already-resolved [`capability::Assembly`]
@@ -779,37 +753,6 @@ mod tests {
         let assembly = assembly_with_roles(&[("dit", "d"), ("vae", "v"), ("tokenizer", "k")]);
         let err = Paths::from_assembly(&assembly).unwrap_err();
         assert!(err.contains("text_encoder"), "{err}");
-    }
-
-    /// The flag must win over the variable, in both directions, for every one
-    /// of the four roles - this is the whole contract of `--dit` and friends.
-    #[test]
-    fn an_explicit_path_beats_the_environment_variable() {
-        // Set every variable to a marker, then override one role at a time.
-        for (var, _) in PATH_VARS {
-            std::env::set_var(var, format!("env-{var}"));
-        }
-        let p = Paths::resolve(None, None, None, None).expect("all four from env");
-        assert_eq!(p.dit, "env-BRAIN_WAN_DIT");
-        assert_eq!(p.tokenizer, "env-BRAIN_WAN_TOKENIZER");
-
-        let p = Paths::resolve(Some("/flag/dit"), None, Some("/flag/t5"), None).expect("mixed");
-        assert_eq!(p.dit, "/flag/dit");
-        assert_eq!(p.t5, "/flag/t5");
-        assert_eq!(p.vae, "env-BRAIN_WAN_VAE");
-        assert_eq!(p.tokenizer, "env-BRAIN_WAN_TOKENIZER");
-
-        // An empty flag is not a value: it must fall through to the variable
-        // rather than resolving to "".
-        let p = Paths::resolve(Some(""), None, None, None).expect("empty flag falls through");
-        assert_eq!(p.dit, "env-BRAIN_WAN_DIT");
-
-        for (var, _) in PATH_VARS {
-            std::env::remove_var(var);
-        }
-        let e = Paths::resolve(None, None, None, None).unwrap_err();
-        // The error names BOTH spellings, because the two audiences differ.
-        assert!(e.contains("--dit") && e.contains("BRAIN_WAN_DIT"), "{e}");
     }
 
     /// A frame count that is not `1 + 4k` must be rejected with an explanation,

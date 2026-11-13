@@ -20,11 +20,11 @@
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-/// Wan resident model family, gated on the four weight env vars
-/// (`BRAIN_WAN_{DIT,VAE,T5,TOKENIZER}`).
+/// Wan resident model family: a checkpoint the model-dir scan found, or the
+/// four roles the operator pinned.
 pub struct WanResident {
-    /// The id this registers under. `wan::caps::MODEL` for the env-configured
-    /// build, but a FETCHED checkpoint registers under its own reference
+    /// The id this registers under. `wan::caps::MODEL` for a pinned build,
+    /// but a FETCHED checkpoint registers under its own reference
     /// (`Wan-AI/Wan2.1-T2V-1.3B`) - a client that asked the supplier for that
     /// name has to find it afterwards, and the compiled-in constant would
     /// leave the request that triggered the fetch looking at nothing. Same
@@ -34,15 +34,20 @@ pub struct WanResident {
 }
 
 impl WanResident {
-    /// `None` (not registered) unless all four `BRAIN_WAN_*` vars are set.
-    pub fn from_env() -> Option<WanResident> {
-        wan::Paths::from_env().ok().map(|paths| WanResident { id: wan::caps::MODEL.to_string(), paths })
+    /// The checkpoint the operator pinned outside the store: every one of
+    /// `wan.dit`, `wan.vae`, `wan.text_encoder` and `wan.tokenizer` (a pulled
+    /// checkpoint is served by the model-dir scan instead). `None` unless all
+    /// four are pinned.
+    pub fn from_pins(store: &loader::served::ServedStore) -> Option<WanResident> {
+        let pins = store.pins("wan");
+        let role = |name: &str| pins.get(name).cloned();
+        let paths = wan::Paths { dit: role("dit")?, vae: role("vae")?, t5: role("text_encoder")?, tokenizer: role("tokenizer")? };
+        Some(WanResident { id: wan::caps::MODEL.to_string(), paths })
     }
 
     /// The same adapter over explicitly-named role paths - what a fetched
     /// compound checkpoint's `brain.manifest.json` supplies
-    /// (`serving::model_dir::wan_paths_from_roles`), with no `BRAIN_WAN_*`
-    /// variable involved anywhere. `id` is the checkpoint's own model-card id.
+    /// (`serving::model_dir::wan_paths_from_roles`). `id` is the checkpoint's own model-card id.
     pub fn from_paths(id: String, paths: wan::Paths) -> WanResident {
         WanResident { id, paths }
     }

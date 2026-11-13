@@ -30,10 +30,7 @@ PPMs and shells out to `ffmpeg` only to mux them.
 
 ```bash
 # deps: pip install -e brain-py   (jeepney with fd passing)
-BRAIN_WAN_DIT=/path/to/Wan2.1-T2V-1.3B/diffusion_pytorch_model.safetensors \
-BRAIN_WAN_VAE=/path/to/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth \
-BRAIN_WAN_T5=/path/to/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth \
-BRAIN_WAN_TOKENIZER=/path/to/Wan2.1-T2V-1.3B/google/umt5-xxl \
+# the Wan checkpoint in the model store: brain pull Wan-AI/Wan2.1-T2V-1.3B
 BRAIN_GPU_WAIT_S=1200 \
 tools/dbus-session.sh --serve "--dbus" -- bash -c '
   # a clip you can watch finish: the scripts default to 9 frames at 416x240

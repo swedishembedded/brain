@@ -402,9 +402,9 @@ pub fn models() -> Vec<ModelEntry> {
         },
         // Wan2.1 text-to-video. Like flux2, the provider builds its weight
         // paths from the resolved Assembly (`wan::pipeline::Paths::
-        // from_assembly`) instead of `BRAIN_WAN_*`. The residency adapter is
-        // registered directly by `serving::build_executor` (one of the
-        // env-gated `from_env` families), not from here.
+        // from_assembly`). The residency adapter is built by the model-dir
+        // scan for a pulled checkpoint, and by `serving::build_executor` from
+        // four pinned roles (`WanResident::from_pins`), not from here.
         ModelEntry {
             manifest: wan::caps::manifest,
             provider: wan::caps::provider,

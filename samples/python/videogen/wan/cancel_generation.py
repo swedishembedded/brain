@@ -14,7 +14,6 @@ server flips the job's cancel token; `wan::pipeline`'s denoise loop polls it
 once per step, so the abort lands at the next step boundary (the forward
 already in flight is one submit of the whole block stack and finishes first).
 
-          BRAIN_WAN_DIT=… BRAIN_WAN_VAE=… BRAIN_WAN_T5=… BRAIN_WAN_TOKENIZER=… \
       BRAIN_GPU_WAIT_S=1200 tools/dbus-session.sh --serve "--dbus" -- \
       python3 samples/python/videogen/wan/cancel_generation.py
 
@@ -51,7 +50,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            skip(f"{args.model!r} not served (models: {models}); set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER")
+            skip(f"{args.model!r} not served (models: {models}); pull Wan-AI/Wan2.1-T2V-1.3B into the model store, or brain serve --pin wan.dit=F --pin wan.vae=F --pin wan.text_encoder=F --pin wan.tokenizer=DIR")
 
         params: dict = {"prompt": args.prompt}
         for name, value in [("frames", args.frames), ("width", args.width), ("height", args.height)]:

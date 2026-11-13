@@ -81,20 +81,14 @@ why it is the default rather than the `-Diffusers` export (28.9 GB, because it
 stores the text encoder in fp32 rather than bf16; brain reads the native
 repository and uses the diffusers naming only for importing).
 
-A command that names none of the four paths, and has none of the four variables
-exported, downloads that repository into the model store first and points
-itself at what landed. Naming all four paths, or exporting all four variables,
-skips the fetch entirely; a partial set still fetches, because a fetch that
-resolved only the missing roles would mix two checkpoints.
+A command that finds no Wan checkpoint in the model store downloads that
+repository first (with `--autofetch`). `--dit`, `--vae`, `--text_encoder` and
+`--tokenizer` name the four parts outright for one run; `brain serve --pin
+wan.dit=F --pin wan.vae=F --pin wan.text_encoder=F --pin wan.tokenizer=DIR`
+serves a checkpoint kept outside the store (all four pinned), while one in the
+store is served as it is found.
 
-```bash
-export BRAIN_WAN_DIT=…/Wan2.1-T2V-1.3B/diffusion_pytorch_model.safetensors
-export BRAIN_WAN_VAE=…/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth
-export BRAIN_WAN_T5=…/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth
-export BRAIN_WAN_TOKENIZER=…/Wan2.1-T2V-1.3B/google/umt5-xxl
-```
-
-The tokenizer variable names the *directory*, not a file: brain reads that
+The tokenizer role names the *directory*, not a file: brain reads that
 directory's `tokenizer.json` rather than the `spiece.model` protobuf beside it.
 Both describe the same 256k pieces, but the JSON is what
 `AutoTokenizer.from_pretrained` loads and therefore what upstream Wan actually

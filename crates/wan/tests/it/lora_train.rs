@@ -174,13 +174,13 @@ fn an_adapter_round_trips_through_the_checkpoint_container() {
 // (`tests/finetune_ab.rs`) - this test's job is just "does the real training
 // path move the real held-out loss the right direction, fast".
 
-/// `BRAIN_WAN_{DIT,VAE,T5,TOKENIZER}` or a loud skip - see `pipeline::Paths`'s
-/// doc on why the path is an env var, never a literal.
+/// The Wan checkpoint in the model store, or a loud skip.
 fn real_paths() -> Option<wan::Paths> {
-    match wan::Paths::from_env() {
+    let root = brain_modelstore::default_root()?;
+    match wan::Paths::from_store(&root) {
         Ok(p) => Some(p),
         Err(e) => {
-            brain_testutil::skip(&format!("set BRAIN_WAN_{{DIT,VAE,T5,TOKENIZER}} to run the real-weight G1 gate: {e}"));
+            brain_testutil::skip(&format!("pull a Wan checkpoint into the model store to run the real-weight G1 gate: {e}"));
             None
         }
     }
@@ -208,13 +208,13 @@ fn mean_loss(tcfg: &Cfg, base: &ModelWeights<f32>, adapter: &LoraAdapter, sample
     total / samples.len() as f64
 }
 
-// `#[ignore]`, not just the BRAIN_WAN_* env gate: this imports an 11GB bf16
+// `#[ignore]`, not just the model-store gate: this imports an 11GB bf16
 // umT5-XXL checkpoint (22.72GB as the fp32 this crate trains in) on the CPU
 // backend, unlike its siblings in dev_lora_train.rs/finetune_ab.rs, which
 // require an EXTRA opt-in (BRAIN_DEV_GPU=1 or their own #[ignore]) beyond
-// just having the paths set. Without this, anyone with BRAIN_WAN_* exported
-// persistently (a real-weight validation session's shell, a CI profile) gets
-// this test running unattended under a bare `cargo test`/`make test`.
+// just having the checkpoint. Without this, any machine holding a Wan
+// checkpoint (a real-weight validation box, a CI profile) gets this test
+// running unattended under a bare `cargo test`/`make test`.
 #[test]
 #[ignore = "slow: real-weight G1 gate, 11GB umT5-XXL import on the CPU backend - run via 'make test/slow'"]
 fn a_concept_only_lora_lowers_held_out_concept_loss_more_than_distractor_loss() {

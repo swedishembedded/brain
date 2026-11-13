@@ -9,7 +9,7 @@
 //! `BRAIN_DEV_GPU=1`. The second test is the real-weight version of the same
 //! comparison `tests/lora_train.rs` runs on the host: a concept-only adapter
 //! must lower a HELD-OUT concept clip's loss more than a distractor's. It needs
-//! `BRAIN_WAN_{DIT,VAE,T5,TOKENIZER}` and skips loudly without them.
+//! the Wan checkpoint in the model store and skips loudly without it.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -301,12 +301,13 @@ fn the_on_device_lora_route_tracks_the_host_route_over_a_run() {
 
 // ============ real weights, real data, GPU (smoke scale) ============
 
-/// `BRAIN_WAN_{DIT,VAE,T5,TOKENIZER}` or a loud skip.
+/// The Wan checkpoint in the model store, or a loud skip.
 fn real_paths() -> Option<wan::Paths> {
-    match wan::Paths::from_env() {
+    let root = brain_modelstore::default_root()?;
+    match wan::Paths::from_store(&root) {
         Ok(p) => Some(p),
         Err(e) => {
-            brain_testutil::skip_unavailable(&format!("set BRAIN_WAN_{{DIT,VAE,T5,TOKENIZER}} for the real-weight device LoRA gate: {e}"));
+            brain_testutil::skip_unavailable(&format!("pull a Wan checkpoint into the model store for the real-weight device LoRA gate: {e}"));
             None
         }
     }

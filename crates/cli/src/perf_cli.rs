@@ -64,7 +64,7 @@ OPTIONS
                           flux2[:<W>x<H>x<steps>[:<precision>]]
                                                    FLUX.2 Klein (klein-4b) behind the
                                                    residency executor; weights from
-                                                   BRAIN_FLUX2_* env. Default
+                                                   the model store. Default
                                                    512x512x4:fp32; unit: denoise_step.
                                                    Concurrent same-size requests share
                                                    one batched denoise loop (cap:
@@ -72,7 +72,7 @@ OPTIONS
                           wan[:<frames>x<W>x<H>x<steps>]
                                                    Wan2.1 text-to-video (t2v-1.3B)
                                                    behind the residency executor;
-                                                   weights from BRAIN_WAN_* env.
+                                                   weights from the model store.
                                                    Default 9x256x256x4, a smoke size:
                                                    upstream's 81x832x480x50 is about
                                                    an hour a request. Unit:
@@ -183,10 +183,10 @@ targets (--target):
   fincast:<weights>                  FinCast financial forecaster (unit: forecast)
   timesfm3:<weights>                  TimesFM-3 forecaster (unit: forecast)
   flux2[:<W>x<H>x<steps>[:<prec>]]   FLUX.2 Klein via the residency executor (unit: denoise_step;
-                                     weights from BRAIN_FLUX2_* env; default 512x512x4:fp32;
+                                     weights from the model store; default 512x512x4:fp32;
                                      prec = fp32|int8; batches concurrent same-key requests)
   wan[:<frames>x<W>x<H>x<steps>]     Wan2.1 text-to-video (t2v-1.3B) via the residency executor
-                                     (unit: denoise_step; weights from BRAIN_WAN_* env;
+                                     (unit: denoise_step; weights from the model store;
                                      default 9x256x256x4, a smoke size -- upstream's
                                      81x832x480x50 is about an hour a request. Requests at
                                      one key share the resident transformer but denoise in
@@ -1169,7 +1169,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
 }
 
 /// `wan[:<frames>x<W>x<H>x<steps>]` - Wan2.1 text-to-video (t2v-1.3B, weights from
-/// the `BRAIN_WAN_*` env like the rest of the wan stack) behind the residency
+/// the model store like the rest of the wan stack) behind the residency
 /// EXECUTOR (scheduler + budgets + device lanes), running
 /// [`catalog::resident_wan::WanResident`].
 ///
@@ -1205,19 +1205,9 @@ fn build_wan(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         return Err(format!("wan: width/height must be multiples of 16 (got {w}x{h})"));
     }
     // Fail before the run starts, naming what is missing - not at first activation.
-    let paths = wan::Paths::from_env()
-        .map_err(|e| format!("wan target needs BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER: {e}"))?;
-    for (var, p) in [
-        ("BRAIN_WAN_DIT", &paths.dit),
-        ("BRAIN_WAN_VAE", &paths.vae),
-        ("BRAIN_WAN_T5", &paths.t5),
-        ("BRAIN_WAN_TOKENIZER", &paths.tokenizer),
-    ] {
-        if !std::path::Path::new(p).exists() {
-            return Err(format!("wan: {var} not found: {p}"));
-        }
-    }
-    let resident = catalog::resident_wan::WanResident::from_env().ok_or("wan: BRAIN_WAN_* env incomplete")?;
+    let root = loader::model_dir::resolve(None).ok_or("wan target needs a model store (--brain-data-dir)")?;
+    let paths = wan::Paths::from_store(&root).map_err(|e| format!("wan target needs a Wan checkpoint in the model store: {e}"))?;
+    let resident = catalog::resident_wan::WanResident::from_paths(wan::caps::MODEL.to_string(), paths);
     // Budget ONLY the schedulable devices - the same guard `build_flux2` carries.
     let set = crate::compute_set();
     let mut budgets = residency::budget::Budgets::new();

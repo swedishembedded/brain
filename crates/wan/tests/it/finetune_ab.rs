@@ -26,11 +26,13 @@ use wan::train::Trainer;
 use wan::vae3d::{WanVaeConfig, WanVaeDecoder, WanVaeEncoder};
 use wan::WanDitDev;
 
+/// The Wan checkpoint in the model store, or a loud skip.
 fn real_paths() -> Option<wan::Paths> {
-    match wan::Paths::from_env() {
+    let root = brain_modelstore::default_root()?;
+    match wan::Paths::from_store(&root) {
         Ok(p) => Some(p),
         Err(e) => {
-            brain_testutil::skip(&format!("set BRAIN_WAN_{{DIT,VAE,T5,TOKENIZER}} to run the real-weight G2 gate: {e}"));
+            brain_testutil::skip(&format!("pull a Wan checkpoint into the model store to run the real-weight G2 gate: {e}"));
             None
         }
     }

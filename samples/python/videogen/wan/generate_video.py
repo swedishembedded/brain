@@ -15,9 +15,8 @@ muxed into the requested container. No ffmpeg means the PPMs plus the command
 line that finishes the job -- an hour of GPU time is never thrown away for
 want of an encoder.
 
-Run under a private session bus (weights via env -- see the README):
+Run under a private session bus (the checkpoint from the model store -- see the README):
 
-          BRAIN_WAN_DIT=… BRAIN_WAN_VAE=… BRAIN_WAN_T5=… BRAIN_WAN_TOKENIZER=… \
       BRAIN_GPU_WAIT_S=1200 tools/dbus-session.sh --serve "--dbus" -- \
       python3 samples/python/videogen/wan/generate_video.py --prompt "a cat on a beach" \
           --out cat.mp4
@@ -123,7 +122,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            skip(f"{args.model!r} not served (models: {models}); set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER")
+            skip(f"{args.model!r} not served (models: {models}); pull Wan-AI/Wan2.1-T2V-1.3B into the model store, or brain serve --pin wan.dit=F --pin wan.vae=F --pin wan.text_encoder=F --pin wan.tokenizer=DIR")
         print(f"t2v {args.prompt!r}:")
         t0 = time.monotonic()
 
