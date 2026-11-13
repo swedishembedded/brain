@@ -5,9 +5,8 @@
 //! CFG (base) rectified-flow Euler → FLUX.2 VAE decode; image editing via
 //! reference-image token concatenation (RoPE t-offsets 10·(i+1)).
 //!
-//! Weight locations come from either `Paths::from_env` (env only) or
-//! `Paths::from_assembly` (a resolver-picked [`capability::Assembly`]) -
-//! never a literal path baked in. The text encoder runs the parity-proven
+//! Weight locations come from `Paths::from_assembly` (a resolver-picked
+//! [`capability::Assembly`]) - never a literal path baked in. The text encoder runs the parity-proven
 //! masked-pad path (`Qwen::encode_hiddens_padded`, layers 9/18/27
 //! concatenated).
 
@@ -21,12 +20,11 @@ pub const TAP_LAYERS: [usize; 3] = [9, 18, 27];
 /// Right-pad token for the masked-pad text-encoder path.
 pub const PAD_TOKEN: u32 = 151643;
 
-/// Weight locations - either read straight from env ([`Paths::from_env`]:
-/// `BRAIN_FLUX2_DIT`, diffusers `transformer/` dir, BFL single-file
-/// safetensors, or BF16 GGUF; `BRAIN_FLUX2_VAE`, diffusers `vae/` dir or
-/// file; `BRAIN_FLUX2_TE`, HF text-encoder dir; `BRAIN_FLUX2_TOKENIZER`,
-/// `tokenizer.json`) or resolved by [`Paths::from_assembly`] from a
-/// `dit`/`vae`/`text_encoder`/`tokenizer`-rolled [`capability::Assembly`].
+/// Weight locations: the DiT (a diffusers `transformer/` dir, a BFL
+/// single-file safetensors or a BF16 GGUF), the VAE (diffusers `vae/` dir or
+/// file), the text encoder (HF dir) and its `tokenizer.json`, resolved by
+/// [`Paths::from_assembly`] from a `dit`/`vae`/`text_encoder`/`tokenizer`-rolled
+/// [`capability::Assembly`].
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub dit: String,
@@ -36,26 +34,6 @@ pub struct Paths {
 }
 
 impl Paths {
-    pub fn from_env() -> Result<Paths, String> {
-        Self::from_env_with_dit(None)
-    }
-
-    /// [`Self::from_env`], but the DiT may come from the CLI's `--model`
-    /// flag instead of `BRAIN_FLUX2_DIT`: the flag names the DiT weights
-    /// outright, so the variable is then not required. The other three
-    /// components have no flag and stay required either way.
-    pub fn from_env_with_dit(dit: Option<String>) -> Result<Paths, String> {
-        let get = |k: &str| std::env::var(k).map_err(|_| format!("{k} not set"));
-        Ok(Paths {
-            dit: dit
-                .or_else(|| std::env::var("BRAIN_FLUX2_DIT").ok())
-                .ok_or_else(|| "BRAIN_FLUX2_DIT not set (pass --model to name the DiT weights)".to_string())?,
-            vae: get("BRAIN_FLUX2_VAE")?,
-            te: get("BRAIN_FLUX2_TE")?,
-            tokenizer: get("BRAIN_FLUX2_TOKENIZER")?,
-        })
-    }
-
     /// Build `Paths` from an already-resolved [`capability::Assembly`]
     /// ([`brain_modelstore::resolve::resolve`]'s `Resolution::Resolved`
     /// output) - no environment involved. A missing role should be
@@ -2754,34 +2732,6 @@ mod tests {
 
     fn img(h: u32, w: u32) -> (Vec<f32>, u32, u32) {
         (Vec::new(), h, w)
-    }
-
-    /// `--model` names the DiT outright, so `BRAIN_FLUX2_DIT` must not be
-    /// required when the CLI hands one in -- while the three components with
-    /// no flag stay required, and `from_env` itself is unchanged.
-    #[test]
-    fn from_env_with_dit_lets_the_flag_stand_in_for_the_variable() {
-        std::env::remove_var("BRAIN_FLUX2_DIT");
-        for (k, v) in [("BRAIN_FLUX2_VAE", "v"), ("BRAIN_FLUX2_TE", "t"), ("BRAIN_FLUX2_TOKENIZER", "k")] {
-            std::env::set_var(k, v);
-        }
-
-        let p = Paths::from_env_with_dit(Some("d".to_string())).unwrap();
-        assert_eq!(p.dit, "d");
-        assert_eq!(p.vae, "v");
-
-        // Without a flag the variable is still required -- and the error
-        // teaches the flag that replaces it.
-        let err = Paths::from_env_with_dit(None).unwrap_err();
-        assert!(err.contains("BRAIN_FLUX2_DIT") && err.contains("--model"), "{err}");
-
-        // The other three have no flag: still required with one present.
-        std::env::remove_var("BRAIN_FLUX2_VAE");
-        assert!(Paths::from_env_with_dit(Some("d".to_string())).is_err());
-
-        // `from_env` keeps requiring all four.
-        std::env::set_var("BRAIN_FLUX2_VAE", "v");
-        assert!(Paths::from_env().is_err());
     }
 
     fn assembly_with_roles(roles: &[(&str, &str)]) -> capability::Assembly {

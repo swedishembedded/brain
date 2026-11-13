@@ -40,8 +40,8 @@ pub struct Sam2Resident {
 impl Sam2Resident {
     /// `None` when the checkpoint is unset or absent — registering a model whose
     /// every call would fail is worse than not serving it.
-    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<Sam2Resident> {
-        let assembly = loader::served::served_assembly(models_dir, "sam2", &sam2::spec::Sam2Spec, &[])?;
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<Sam2Resident> {
+        let assembly = loader::served::served_assembly(store, "sam2", &sam2::spec::Sam2Spec)?;
         Self::new(assembly.role_path("weights").ok()?, assembly.variant.unwrap_or_else(|| "tiny".into()))
     }
 

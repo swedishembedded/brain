@@ -1075,7 +1075,7 @@ fn build_timesfm3(path: &str) -> Result<Box<dyn PerfTarget>, String> {
 }
 
 /// `flux2[:<W>x<H>x<steps>[:<precision>]]` - FLUX.2 Klein (klein-4b, weights from the
-/// `BRAIN_FLUX2_*` env like the rest of the flux2 stack) behind the residency
+/// model store like the rest of the flux2 stack) behind the residency
 /// EXECUTOR (scheduler + budgets + device lanes), running [`catalog::resident_flux2::Flux2Resident`]
 /// - so concurrency measures brain's real scheduler, not a bare provider.
 ///
@@ -1109,20 +1109,8 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         return Err(format!("flux2: width/height must be multiples of 16 (got {w}x{h})"));
     }
     // Fail before the run starts, naming what is missing - not at first activation.
-    let paths = flux2::Paths::from_env()
-        .map_err(|e| format!("flux2 target needs BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER: {e}"))?;
-    for (var, p) in [
-        ("BRAIN_FLUX2_DIT", &paths.dit),
-        ("BRAIN_FLUX2_VAE", &paths.vae),
-        ("BRAIN_FLUX2_TE", &paths.te),
-        ("BRAIN_FLUX2_TOKENIZER", &paths.tokenizer),
-    ] {
-        if !std::path::Path::new(p).exists() {
-            return Err(format!("flux2: {var} not found: {p}"));
-        }
-    }
-    let resident = catalog::resident_flux2::Flux2Resident::from_env(loader::model_dir::resolve(None).as_deref())
-        .ok_or("flux2: BRAIN_FLUX2_* env incomplete")?;
+    let resident = catalog::resident_flux2::Flux2Resident::from_store(&catalog::ServedStore::new(loader::model_dir::resolve(None)))
+        .ok_or("flux2 target needs one FLUX.2 checkpoint (DiT, VAE, text encoder, tokenizer) in the model store: brain pull black-forest-labs/FLUX.2-klein-4B")?;
     // Budget ONLY the schedulable devices - same guard as `build_lfm` (its
     // ledger records a silent, order-of-magnitude llvmpipe regression from budgeting a GPU the
     // process could not see; the lane fell back to a software adapter and the
@@ -1327,7 +1315,7 @@ fn build_ltxv(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         return Err(format!("ltxv: width/height must be multiples of 32 (got {w}x{h})"));
     }
     // Fail before the run starts, naming what is missing - not at first activation.
-    let resident = catalog::resident_ltxv::LtxvResident::from_store(loader::model_dir::resolve(None).as_deref()).ok_or("ltxv target needs an LTX-2.5 VAE in the model store")?;
+    let resident = catalog::resident_ltxv::LtxvResident::from_store(&catalog::ServedStore::new(loader::model_dir::resolve(None))).ok_or("ltxv target needs an LTX-2.5 VAE in the model store")?;
     if real && !resident.has_real_dit() {
         return Err("ltxv@real needs the real LTX-2.5 DiT in the model store".into());
     }

@@ -33,8 +33,8 @@ const ENGINE_KEY: &str = "engine";
 
 impl YoloResident {
     /// The checkpoint the model store resolves, under the model's own id.
-    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<YoloResident> {
-        let path = loader::served::served_assembly(models_dir, "yolov8", &yolov8::spec::YoloSpec, &[])?.role_path("weights").ok()?;
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<YoloResident> {
+        let path = loader::served::served_assembly(store, "yolov8", &yolov8::spec::YoloSpec)?.role_path("weights").ok()?;
         Some(Self::from_card(&path, &checkpoint::st::ModelCard::new(yolov8::caps::MODEL, "yolo"), None))
     }
 

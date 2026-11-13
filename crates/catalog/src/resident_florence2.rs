@@ -3,7 +3,7 @@
 
 //! Florence-2 visual grounding behind the residency scheduler.
 //!
-//! `activate` imports the checkpoint from `BRAIN_FLORENCE2_DIR` ONCE and
+//! `activate` imports the checkpoint from its checkpoint ONCE and
 //! builds the vision tower on the assigned device; the [`Instance`] owns the
 //! resulting [`florence2::caps::FlorenceSession`], so dropping it frees the
 //! model. One action, `ground` - the schema and the work both come from
@@ -23,31 +23,30 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use florence2::caps::FlorenceSession;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use loader::served::RoleEnv;
 
-/// Florence-2 behind the scheduler (`BRAIN_FLORENCE2_DIR` = the directory
+/// Florence-2 behind the scheduler (the checkpoint: the directory
 /// holding `config.json`, `model.safetensors` and `tokenizer.json`).
 pub struct Florence2Resident {
     dir: String,
 }
 
 impl Florence2Resident {
-    /// `BRAIN_FLORENCE2_DIR` if the operator set it, else whatever the
+    /// The operator's `florence2.weights` pin, else whatever the
     /// model-store resolver finds for `florence2::spec::Florence2Spec`'s
     /// `weights` role - the same scan and candidate rules the one-shot CLI
     /// uses. `None` (not served, never a daemon startup failure) when the
     /// store holds no released checkpoint, or holds more than one and
     /// nothing says which.
     ///
-    /// `models_dir` is the serving process's resolved models directory (see
+    /// `store` is the serving process's model store and role pins (see
     /// `loader::served::served_assembly`).
-    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<Florence2Resident> {
-        let assembly = loader::served::served_assembly(models_dir, "florence2", &florence2::spec::Florence2Spec, &[RoleEnv { role: "weights", var: "BRAIN_FLORENCE2_DIR" }])?;
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<Florence2Resident> {
+        let assembly = loader::served::served_assembly(store, "florence2", &florence2::spec::Florence2Spec)?;
         Self::new(assembly.roles.get("weights")?.to_string_lossy().into_owned())
     }
 
     /// Direct constructor for callers that already hold the directory. Same
-    /// validation as `from_env`.
+    /// validation as `from_store`.
     pub fn new(dir: impl Into<String>) -> Option<Florence2Resident> {
         let dir = dir.into();
         let d = std::path::Path::new(&dir);

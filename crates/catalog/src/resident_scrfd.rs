@@ -28,7 +28,6 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use scrfd::caps::ScrfdSession;
 
-use loader::served::RoleEnv;
 
 /// The antelopev2 face detector behind the scheduler (`BRAIN_SCRFD_DIR` = the
 /// directory holding `scrfd_10g_bnkps.onnx`).
@@ -37,20 +36,20 @@ pub struct ScrfdResident {
 }
 
 impl ScrfdResident {
-    /// `BRAIN_SCRFD_DIR` if the operator set it, else whatever the model-store
+    /// The operator's `scrfd.weights` pin, else whatever the model-store
     /// resolver finds for `scrfd::spec::ScrfdSpec`'s `weights` role - the same
     /// scan and candidate rules the one-shot CLI uses. See
-    /// `crate::resident_arcface::ArcFaceResident::from_env` for why the
+    /// `crate::resident_arcface::ArcFaceResident::from_store` for why the
     /// resolved graph path becomes its containing directory here.
     ///
     /// `None` (not served, never a daemon startup failure) when the store
     /// holds no released detector, or holds more than one and nothing says
     /// which - see `loader::served::served_assembly`.
     ///
-    /// `models_dir` is the serving process's resolved models directory (see
+    /// `store` is the serving process's model store and role pins (see
     /// `loader::served::served_assembly`).
-    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<ScrfdResident> {
-        let assembly = loader::served::served_assembly(models_dir, "scrfd", &scrfd::spec::ScrfdSpec, &[RoleEnv { role: "weights", var: "BRAIN_SCRFD_DIR" }])?;
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<ScrfdResident> {
+        let assembly = loader::served::served_assembly(store, "scrfd", &scrfd::spec::ScrfdSpec)?;
         Self::new(loader::served::containing_dir(assembly.roles.get("weights")?)?)
     }
 
@@ -58,7 +57,7 @@ impl ScrfdResident {
     /// `brain perf`'s `scrfd:<dir>` target) - the compile-time seam that
     /// avoids round-tripping the path through the process environment (an
     /// env-name mismatch shipped that perf target dead on arrival). Same
-    /// validation as `from_env`.
+    /// validation as `from_store`.
     pub fn new(dir: impl Into<String>) -> Option<ScrfdResident> {
         let dir = dir.into();
         let d = std::path::Path::new(&dir);

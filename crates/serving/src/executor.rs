@@ -146,7 +146,7 @@ pub struct TrainKnobs {
 /// cards `--device` allows), `knobs.qwen35.fp32` sizing the brain-checkpoint
 /// resident, and `knobs.decision` naming the decision models served beyond
 /// those the store holds.
-pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std::path::Path>, policy: Policy, knobs: ServeKnobs) -> Serving {
+pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedStore, policy: Policy, knobs: ServeKnobs) -> Serving {
     let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, encoder_batch, train } = knobs;
     // Process-wide, before any OCR model is built: the models read it when they load.
     ocrserve::configure(ocr);
@@ -187,12 +187,12 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // z-image (BRAIN_S3DIT_{DIT,VAE,QWEN,TOKENIZER}, else whatever the model
     // store resolves through `s3dit::spec::S3ditSpec` - see `ZImageResident::
     // from_store`'s own doc).
-    match ZImageResident::from_store(models_dir) {
+    match ZImageResident::from_store(store) {
         Some(z) => models.push(Arc::new(z)),
         None => residency::log::not_served("brain: z-image not served over the scheduler (set BRAIN_S3DIT_DIT/_VAE/_QWEN/_TOKENIZER, or place a checkpoint under the model dir)"),
     }
     // YOLO object detection, over the checkpoint the model store holds.
-    if let Some(y) = YoloResident::from_store(models_dir) {
+    if let Some(y) = YoloResident::from_store(store) {
         models.push(Arc::new(y));
     } else {
         residency::log::not_served("brain: yolo not served over the scheduler (pull Ultralytics/YOLOv8 into the model dir)");
@@ -228,7 +228,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // GGUFs are not candidates: the model-dir scan serves each as its own
     // multi-card model. Sized from the caller's parsed `fp32` knobs (context,
     // batch ceiling).
-    match loader::resolver::try_resolve(models_dir, "qwen35", &qwen35::spec::Qwen35Fp32Spec, &Default::default()) {
+    match store.resolve("qwen35", &qwen35::spec::Qwen35Fp32Spec) {
         Ok(assembly) => {
             if let Some(why) = qwen35.fp32_refused.as_ref().filter(|_| qwen35.fp32.refused) {
                 residency::log::not_served(&format!("brain: qwen35 (brain checkpoint) not served: {why}"));
@@ -244,7 +244,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // independent `dit` checkpoint the model store holds, each its own
     // resident under its real vendor/repo id): text-to-image,
     // reference-image editing, LoRA training (see resident_flux2.rs).
-    let flux2_residents = catalog::resident_flux2::Flux2Resident::all_from_store(models_dir);
+    let flux2_residents = catalog::resident_flux2::Flux2Resident::all_from_store(store);
     if flux2_residents.is_empty() {
         residency::log::not_served("brain: flux2-klein not served over the scheduler (pull a FLUX.2 Klein checkpoint into the model dir)");
     }
@@ -264,7 +264,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // each under its own reference: see resident_ltxv.rs. One with only its
     // VAE runs the random-weight smoke-test DiT and is not offered for sale
     // on /videos.
-    let ltxv_residents = catalog::resident_ltxv::LtxvResident::all_from_store(models_dir);
+    let ltxv_residents = catalog::resident_ltxv::LtxvResident::all_from_store(store);
     if ltxv_residents.is_empty() {
         residency::log::not_served("brain: ltxv not served over the scheduler (pull an LTX-2.5 checkpoint into the model dir)");
     }
@@ -278,11 +278,11 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // ZipDepth, WorldMirror-2, the antelopev2 face stack, CLIP, FLUX.1, ...),
     // else from that model's own weights variable until it moves to the store.
     // splat needs no weights and is always registered.
-    models.extend(catalog::residents(models_dir));
+    models.extend(catalog::residents(store));
     // Decision models (decide + Laya): one resident per checkpoint under its
     // store id, plus the family model that answers inventory and `auto`
     // selection without loading anything.
-    models.extend(catalog::resident_decision::serve_all(&decision, models_dir));
+    models.extend(catalog::resident_decision::serve_all(&decision, store.models_dir()));
     // Deterministic mock model (BRAIN_MOCK): a real ResidentModel - no weights, no
     // GPU - registered as `mock` so the HTTP conformance harness can validate the
     // whole API surface through the true serving path (placement → activate →
@@ -306,7 +306,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // `weights` param is CLI-only convenience (`brain fastvlm caption
     // --weights ...`) that a scheduled caller must never see or be able to
     // set - see `fastvlm::caps::manifest_resident`'s doc.
-    let fastvlm_weights = match loader::resolver::try_resolve(models_dir, "fastvlm", &fastvlm::spec::FastvlmSpec, &Default::default()) {
+    let fastvlm_weights = match store.resolve("fastvlm", &fastvlm::spec::FastvlmSpec) {
         Ok(assembly) => assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()),
         Err(e) => {
             residency::log::not_served(&format!("brain: fastvlm serving no default checkpoint ({e})"));
@@ -323,7 +323,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // from_assembly` needs the resolved `Assembly` the generic `SingleCtor`
     // shape has no room for, the same reason FLUX.2's own resident is
     // registered directly above rather than through that list.
-    match loader::resolver::try_resolve(models_dir, "moondream3", &moondream3::spec::Moondream3Spec, &Default::default()) {
+    match store.resolve("moondream3", &moondream3::spec::Moondream3Spec) {
         Ok(assembly) => {
             if let Some(m) = catalog::resident_moondream3::Moondream3Resident::from_assembly(&assembly) {
                 models.push(Arc::new(m));
@@ -333,7 +333,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     }
     // Janus-Pro: registered directly, like Moondream 3, because its plan
     // needs the cards' budgets (see `catalog::resident_januspro`).
-    match loader::resolver::try_resolve(models_dir, "januspro", &januspro::spec::JANUS_PRO, &Default::default()) {
+    match store.resolve("januspro", &januspro::spec::JANUS_PRO) {
         Ok(assembly) => {
             for m in catalog::resident_januspro::JanusProResident::family_from_assembly(&assembly, gpus, reserved) {
                 models.push(Arc::new(m));
@@ -354,9 +354,9 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // `catalog::stage_registry`, the SAME registry `brain caps`/`brain do`
     // compose (two lists drifting apart once left `ai-forever/Real-ESRGAN`
     // unreachable over D-Bus/HTTP despite a working `brain do`), resolved
-    // against this process's `models_dir` rather than the library default,
+    // against this process's model store rather than the library default,
     // so the pipeline reads the store every other resident here reads.
-    models.push(Arc::new(ProviderResident::stateless(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(catalog::stage_registry(models_dir)))))));
+    models.push(Arc::new(ProviderResident::stateless(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(catalog::stage_registry(store.models_dir())))))));
 
     // Global model directory: append every discovered file as its own catalog
     // entry (keyed by model-card id), deduped against the env-gated residents
@@ -369,7 +369,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // The released Qwen3.8 `--checkpoint` named, by served id.
     let mut qwen35_discovered_pick: Option<String> = None;
     let mut ricursive_discovered = Vec::new();
-    if let Some(dir) = models_dir {
+    if let Some(dir) = store.models_dir() {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
         let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved, encoder_batch };
         let discovered = crate::model_dir::discover(dir, &settings);
@@ -454,7 +454,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // can charge only one of them, leaving the other silently unbudgeted.
     // `catalog::residents()` deliberately excludes them, so nothing is
     // registered twice.
-    for m in catalog::multi_residents(models_dir, gpus, reserved) {
+    for m in catalog::multi_residents(store, gpus, reserved) {
         exec.register_multi(m);
     }
     // Qwen3-Omni (BRAIN_QWEN3OMNIMOE_HF_DIR): the full chat/multimodal surface, placed
@@ -492,7 +492,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // see `trainjob::resident` for the policy. One run per card that serving may use.
     if let Some(train) = train {
         let largest = gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max();
-        exec.register(trainjob::resident(trainjob::TrainConfig { models_dir: models_dir.map(std::path::Path::to_path_buf), store: train.artifact_store, work_root: trainjob::job::default_work_root(), largest_card_bytes: largest, devices: gpus.len().max(1) }));
+        exec.register(trainjob::resident(trainjob::TrainConfig { models_dir: store.models_dir().map(std::path::Path::to_path_buf), store: train.artifact_store, work_root: trainjob::job::default_work_root(), largest_card_bytes: largest, devices: gpus.len().max(1) }));
     }
     Serving { executor: exec, qwen, qwen35: qwen35_discovered, ricursive: ricursive_discovered }
 }

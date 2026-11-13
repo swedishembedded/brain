@@ -22,18 +22,17 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use flux1::caps::Session;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use loader::served::RoleEnv;
 
 /// FLUX.1 behind the scheduler. The checkpoint root - a released diffusers
 /// FLUX.1 directory holding `transformer/`, `vae/`, `text_encoder/`,
 /// `text_encoder_2/`, `tokenizer/`, `tokenizer_2/` - comes from
-/// `BRAIN_FLUX1_DIR` when set, and otherwise from the model-store resolver.
+/// its `flux1.root` pin when given, and otherwise from the model-store resolver.
 pub struct Flux1Resident {
     root: String,
 }
 
 impl Flux1Resident {
-    /// `BRAIN_FLUX1_DIR` if the operator set it, else whatever the model-store
+    /// The operator's `flux1.root` pin, else whatever the model-store
     /// resolver finds - the same scan, the same `flux1::spec::Flux1Spec`, and
     /// the same candidate rules `brain flux1 …` uses on the one-shot path.
     ///
@@ -41,10 +40,10 @@ impl Flux1Resident {
     /// holds no released FLUX.1 pipeline, or holds more than one and nothing
     /// says which - see `loader::served::served_assembly`.
     ///
-    /// `models_dir` is the serving process's resolved models directory (see
+    /// `store` is the serving process's model store and role pins (see
     /// `loader::served::served_assembly`).
-    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<Flux1Resident> {
-        let assembly = loader::served::served_assembly(models_dir, "flux1", &flux1::spec::Flux1Spec, &[RoleEnv { role: "root", var: "BRAIN_FLUX1_DIR" }])?;
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<Flux1Resident> {
+        let assembly = loader::served::served_assembly(store, "flux1", &flux1::spec::Flux1Spec)?;
         Self::new(assembly.roles.get("root")?.to_string_lossy().into_owned())
     }
 

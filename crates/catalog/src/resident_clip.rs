@@ -33,9 +33,8 @@ use clip::caps::Session;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
-use loader::served::RoleEnv;
 
-/// The CLIP encoders behind the scheduler (`BRAIN_CLIP_DIR` = the released
+/// The CLIP encoders behind the scheduler (the checkpoint: the released
 /// checkpoint root, in the SDXL layout: `text_encoder/`, `text_encoder_2/`,
 /// `tokenizer/`, `tokenizer_2/`).
 pub struct ClipResident {
@@ -43,7 +42,7 @@ pub struct ClipResident {
 }
 
 impl ClipResident {
-    /// `BRAIN_CLIP_DIR` if the operator set it, else whatever the model-store
+    /// The operator's `clip.towers` pin, else whatever the model-store
     /// resolver finds for `clip::spec::ClipSpec`'s `towers` role - an
     /// SDXL-layout checkpoint root, which is what this session loads.
     ///
@@ -53,10 +52,10 @@ impl ClipResident {
     /// `clip::spec::is_sdxl_tower_root`). A store with no SDXL release simply
     /// does not serve this model, exactly as an unset variable already meant.
     ///
-    /// `models_dir` is the serving process's resolved models directory (see
+    /// `store` is the serving process's model store and role pins (see
     /// `loader::served::served_assembly`).
-    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<ClipResident> {
-        let assembly = loader::served::served_assembly(models_dir, "clip", &clip::spec::ClipSpec, &[RoleEnv { role: "towers", var: "BRAIN_CLIP_DIR" }])?;
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<ClipResident> {
+        let assembly = loader::served::served_assembly(store, "clip", &clip::spec::ClipSpec)?;
         Self::new(assembly.roles.get("towers")?.to_string_lossy().into_owned())
     }
 

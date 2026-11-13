@@ -159,7 +159,7 @@ fn a_store_scan_finds_the_checkpoint_with_no_setting() {
     };
     // `<store>/Cactus-Compute/mirage` -> the store is two levels up.
     let store = std::path::Path::new(&dir).parent().and_then(std::path::Path::parent).expect("a store layout").to_path_buf();
-    let resident = MirageResident::from_store(Some(&store));
+    let resident = MirageResident::from_store(&loader::served::ServedStore::new(Some(store.clone())));
     assert!(resident.is_some(), "the resolver finds {dir} under {}", store.display());
     let manifest = resident.unwrap().manifest();
     assert_eq!(manifest.model, MODEL);

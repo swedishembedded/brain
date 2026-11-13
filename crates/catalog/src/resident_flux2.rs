@@ -14,7 +14,6 @@
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use loader::served::RoleEnv;
 
 /// FLUX.2 Klein resident model family, gated on the four weight env vars
 /// (`BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`).
@@ -63,19 +62,13 @@ impl Flux2Resident {
     /// a misconfigured or unreadable DiT must not silently masquerade as "not
     /// registered".
     ///
-    /// `models_dir` is the caller's resolved models directory (see
+    /// `store` is the caller's model store and role pins (see
     /// `loader::served::served_assembly`).
-    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<Flux2Resident> {
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<Flux2Resident> {
         let assembly = loader::served::served_assembly(
-            models_dir,
+            store,
             "flux2",
             &flux2::spec::Flux2Spec,
-            &[
-                RoleEnv { role: "dit", var: "BRAIN_FLUX2_DIT" },
-                RoleEnv { role: "vae", var: "BRAIN_FLUX2_VAE" },
-                RoleEnv { role: "text_encoder", var: "BRAIN_FLUX2_TE" },
-                RoleEnv { role: "tokenizer", var: "BRAIN_FLUX2_TOKENIZER" },
-            ],
         )?;
         // `Paths::from_assembly` owns the role-name -> field mapping already;
         // this must not carry a second copy of it.
@@ -95,29 +88,23 @@ impl Flux2Resident {
         }
     }
 
-    /// [`Self::from_env`]'s multi-instance counterpart: one resident per
+    /// [`Self::from_store`]'s multi-instance counterpart: one resident per
     /// real, independent `dit` checkpoint the store holds - see
     /// `flux2::spec::Flux2Spec::instance_role`'s own doc for why several
     /// tied `dit` candidates are not necessarily one ambiguous choice.
-    /// Reduces to `from_env`'s exact single result (as `vec![]` or `vec![_]`)
-    /// when every role is already named by the environment, or the store
+    /// Reduces to `from_store`'s exact single result (as `vec![]` or `vec![_]`)
+    /// when every role is pinned, or the store
     /// holds at most one real `dit` candidate.
     ///
     /// One candidate's own failure (a `dit` size this store's `vae` cannot
     /// match, an unsniffable checkpoint) is logged and that ONE instance is
     /// skipped - it never drops every other real, independently-servable
     /// checkpoint with it.
-    pub fn all_from_store(models_dir: Option<&std::path::Path>) -> Vec<Flux2Resident> {
+    pub fn all_from_store(store: &loader::served::ServedStore) -> Vec<Flux2Resident> {
         loader::served::served_assemblies(
-            models_dir,
+            store,
             "flux2",
             &flux2::spec::Flux2Spec,
-            &[
-                RoleEnv { role: "dit", var: "BRAIN_FLUX2_DIT" },
-                RoleEnv { role: "vae", var: "BRAIN_FLUX2_VAE" },
-                RoleEnv { role: "text_encoder", var: "BRAIN_FLUX2_TE" },
-                RoleEnv { role: "tokenizer", var: "BRAIN_FLUX2_TOKENIZER" },
-            ],
             flux2::caps::MODEL,
         )
         .into_iter()

@@ -19,17 +19,14 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use pulid::caps::Session;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use loader::served::RoleEnv;
 
 /// PuLID-conditioned FLUX.1 behind the scheduler. Five components, all
-/// required, each resolved from its own environment variable when set and
-/// otherwise from the model store: the backbone (`BRAIN_FLUX1_DIR`, same as
-/// `resident_flux1.rs`), the PuLID adapter (`BRAIN_PULID_DIR`,
-/// `pulid_flux_v0.9.1.safetensors` or its directory), ArcFace
-/// (`BRAIN_ARCFACE_DIR`, same as `resident_arcface.rs`), the EVA-CLIP-L/336
-/// checkpoint's directory (`BRAIN_CLIP_DIR`) and a directory holding
-/// `parsing_bisenet.safetensors` (`BRAIN_BISENET_DIR` - see
-/// `pulid::caps::BISENET_FILE`'s doc for how to produce one).
+/// required, each pinned or resolved from the model store: the backbone
+/// (`flux1`, same as `resident_flux1.rs`), the PuLID adapter (`pulid`,
+/// `pulid_flux_v0.9.1.safetensors` or its directory), ArcFace (`arcface`,
+/// same as `resident_arcface.rs`), the EVA-CLIP-L/336 checkpoint's directory
+/// (`clip`) and a directory holding `parsing_bisenet.safetensors` (`bisenet` -
+/// see `pulid::caps::BISENET_FILE`'s doc for how to produce one).
 pub struct PulidResident {
     flux1_root: String,
     pulid_root: String,
@@ -39,15 +36,13 @@ pub struct PulidResident {
 }
 
 impl PulidResident {
-    /// Each of the five components independently: its own environment
-    /// variable if the operator set that one, else whatever the model-store
-    /// resolver finds for that role.
+    /// Each of the five components independently: its pin if the operator
+    /// gave one, else whatever the model-store resolver finds for that role.
     ///
     /// The per-role independence is the point. PuLID's five components come
     /// from four different vendors, and an operator commonly has a hand-placed
     /// path for exactly one of them (a re-quantized backbone, say) and nothing
-    /// to say about the other four. Before this, naming one meant naming all
-    /// five or being served nothing at all.
+    /// to say about the other four.
     ///
     /// `pulid::spec::PulidSpec` classifies the adapter itself and delegates the
     /// other four roles to the architectures that own them, so "what does a
@@ -58,20 +53,13 @@ impl PulidResident {
     /// cannot answer for some role and nothing named it - see
     /// `loader::served::served_assembly`.
     ///
-    /// `models_dir` is the serving process's resolved models directory (see
+    /// `store` is the serving process's model store and role pins (see
     /// `loader::served::served_assembly`).
-    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<PulidResident> {
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<PulidResident> {
         let assembly = loader::served::served_assembly(
-            models_dir,
+            store,
             "pulid",
             &pulid::spec::PulidSpec,
-            &[
-                RoleEnv { role: "flux1", var: "BRAIN_FLUX1_DIR" },
-                RoleEnv { role: "pulid", var: "BRAIN_PULID_DIR" },
-                RoleEnv { role: "arcface", var: "BRAIN_ARCFACE_DIR" },
-                RoleEnv { role: "clip", var: "BRAIN_CLIP_DIR" },
-                RoleEnv { role: "bisenet", var: "BRAIN_BISENET_DIR" },
-            ],
         )?;
         // `flux1` and `pulid` are taken as resolved: the backbone role is
         // already a directory, and the adapter role is the checkpoint itself

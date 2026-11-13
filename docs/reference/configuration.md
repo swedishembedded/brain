@@ -42,7 +42,6 @@ the flag that replaced it, and has no effect in the environment.
 | `BRAIN_BACKEND` | for programs with no CLI in the loop: how the selected hardware is driven: `wgpu`, `vulkan`, `cuda` or `cpu`; same values as `--backend`, which the `brain` CLI takes instead. `cuda` needs a GPU in the device set; an unknown or unrunnable backend stops the program, naming it, rather than falling back | chosen from the hardware: `cuda` where every card is NVIDIA's and CUDA can run (driver plus NVRTC or the ahead-of-time kernels), `wgpu` on any other GPU, else `cpu`; `brain devices` prints the choice and why |
 | `BRAIN_VK_DEVICE` | forces a specific Vulkan physical-device index, overriding brain's discrete-GPU-first ranking | automatic ranking |
 | `BRAIN_QWEN_STEP_CACHE` | `0` disables the Qwen capability path's recorded-step cache, re-recording every dispatch - an A/B seam for measuring what the recording buys | on |
-| `BRAIN_WM_RENDERER` | `software` or `accelerated`, forcing the world-model window's SDL renderer instead of letting it choose | chosen from the driver |
 | `BRAIN_SPLAT_PROFILE` | set (any value) to print `splat fit`'s per-stage timing breakdown | off |
 | `BRAIN_GPU_NO_READ_STAGING_REUSE` | `1` makes every device-to-host readback allocate its own staging buffer instead of reusing the device's, trading throughput for a smaller resident host footprint | off (the buffer is reused) |
 
@@ -108,16 +107,18 @@ than the sole trigger for ever using it.
 
 ## Model weights & gating
 
-Whether a model shows up in `brain caps` / is servable by `brain serve` is
-gated entirely by whether its weights variable(s) are set. Unset ⇒ not
-served, with no error.
+`brain serve` resolves each model's weights from the model store
+(`--models-dir`); `--pin ARCH.ROLE=PATH` serves one role from an explicit path
+instead, and settles a store that holds two candidates for it. A model whose
+weights resolve to nothing is not served, with no error. The variables below
+are still read by the models that have not moved onto the store; unset, such a
+model is not served.
 
 | Variable | Serves | Value |
 | --- | --- | --- |
 | `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint (produced by `brain import`) + `tokenizer.json` |
 | `BRAIN_GPT2_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
 | `BRAIN_GLMDSA_WEIGHTS` | GLM decoder | checkpoint (char-level) |
-| `BRAIN_FLUX2_DIT`, `BRAIN_FLUX2_VAE`, `BRAIN_FLUX2_TE`, `BRAIN_FLUX2_TOKENIZER` | FLUX.2 Klein text2image/edit/finetune | optional overrides, one per component -- unset, each is resolved from the model store instead (`flux2::spec::Flux2Spec`); set, it pins that exact file. `BRAIN_FLUX2_TE` takes either an HF text-encoder directory or a Qwen3 `.gguf` file -- sniffed, not declared |
 | `BRAIN_S3DIT_DIT`, `BRAIN_S3DIT_VAE`, `BRAIN_S3DIT_QWEN`, `BRAIN_S3DIT_TOKENIZER` | Z-Image text2image/edit | optional overrides, one per component -- unset, each is resolved from the model store instead (`s3dit::spec::S3ditSpec`); set, it pins that exact file |
 | `BRAIN_SCRFD_DIR` | antelopev2 face detection | dir holding `scrfd_10g_bnkps.onnx` |
 | `BRAIN_ARCFACE_DIR` | antelopev2 face identity embedding | dir holding `glintr100.onnx` (plus `scrfd_10g_bnkps.onnx` for the default `align=true` path) |

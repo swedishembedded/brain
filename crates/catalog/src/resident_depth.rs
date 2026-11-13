@@ -35,8 +35,8 @@ const ENGINE_KEY: &str = "engine";
 impl DepthResident {
     /// The checkpoint the model store resolves - a released `.pth`, or one
     /// `train` wrote - under the model's own id.
-    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<DepthResident> {
-        let path = loader::served::served_assembly(models_dir, "zipdepth", &zipdepth::spec::ZipdepthSpec, &[])?.role_path("weights").ok()?;
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<DepthResident> {
+        let path = loader::served::served_assembly(store, "zipdepth", &zipdepth::spec::ZipdepthSpec)?.role_path("weights").ok()?;
         Some(Self::from_card(&path, &checkpoint::st::ModelCard::new(zipdepth::caps::MODEL, "depth"), None))
     }
 
@@ -170,14 +170,14 @@ mod tests {
         let store = std::env::temp_dir().join(format!("catalog-depth-store-{}", std::process::id()));
         let empty = store.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
-        assert!(DepthResident::from_store(Some(&empty)).is_none());
+        assert!(DepthResident::from_store(&loader::served::ServedStore::new(Some(empty.clone()))).is_none());
 
         let cfg = ZipConfig { dims: [8, 16, 32, 64], depths: [1, 1, 1, 1], dec_ch: 6, half_dec_ch: 4, ..ZipConfig::base() };
         let ckpt = store.join("full").join("brain").join("zipdepth").join("zipdepth_tiny.pth");
         std::fs::create_dir_all(ckpt.parent().unwrap()).unwrap();
         let tensors: Vec<TensorOut> = cfg.param_list().into_iter().map(|(name, shape)| TensorOut { data: vec![0.0; shape.iter().product()], name, shape }).collect();
         write(ckpt.to_str().unwrap(), &tensors).unwrap();
-        let resident = DepthResident::from_store(Some(&store.join("full"))).expect("the store's checkpoint is served");
+        let resident = DepthResident::from_store(&loader::served::ServedStore::new(Some(store.join("full")))).expect("the store's checkpoint is served");
         assert_eq!(resident.path, ckpt.to_str().unwrap());
         assert_eq!(resident.manifest().actions.len(), zipdepth::caps::manifest().actions.len());
         let _ = std::fs::remove_dir_all(&store);

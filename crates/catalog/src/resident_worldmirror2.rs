@@ -49,8 +49,8 @@ pub struct WorldMirror2Resident {
 impl WorldMirror2Resident {
     /// `None` when the checkpoint is unset or absent - registering a model
     /// whose every call would fail is worse than not serving it.
-    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<WorldMirror2Resident> {
-        let path = loader::served::served_assembly(models_dir, "worldmirror2", &worldmirror2::spec::MirrorSpec, &[])?.role_path("weights").ok()?;
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<WorldMirror2Resident> {
+        let path = loader::served::served_assembly(store, "worldmirror2", &worldmirror2::spec::MirrorSpec)?.role_path("weights").ok()?;
         if !std::path::Path::new(&path).exists() {
             residency::log::not_served(&format!("brain: worldmirror2 not served ({path} does not exist)"));
             return None;

@@ -10,7 +10,6 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 use s3dit::pipeline::{HotPipeline, Image, Paths};
 use serde_json::{json, Value};
 
-use loader::served::RoleEnv;
 
 /// z-image behind the scheduler. A resident instance is a built [`HotPipeline`] for a
 /// `(width, height, precision, adapter)` key - the DiT (and its encoder) on the GPU;
@@ -28,14 +27,11 @@ impl ZImageResident {
         Self::from_paths(s3dit::caps::MODEL, Paths::from_env()?)
     }
 
-    /// Each of the four components independently: its own `BRAIN_S3DIT_*`
-    /// variable if the operator set that one, else whatever the model-store
-    /// resolver finds for that role through `s3dit::spec::S3ditSpec` - the
-    /// SAME spec/scan/candidate rules a one-shot resolver-backed command
-    /// would use, rather than [`Self::from_env`]'s four-variables-or-nothing
-    /// mechanism. Mirrors `crate::resident_flux2::Flux2Resident::from_env`
-    /// exactly - the same `served_assembly` seam, the other architecture
-    /// already migrated onto it.
+    /// Each of the four components independently: its pin if the operator
+    /// gave one, else whatever the model-store resolver finds for that role
+    /// through `s3dit::spec::S3ditSpec` - the SAME spec/scan/candidate rules
+    /// a one-shot resolver-backed command would use. Mirrors
+    /// `crate::resident_flux2::Flux2Resident::from_store`.
     ///
     /// `None` when nothing resolves, or the outcome is ambiguous (logged) -
     /// never a hard startup failure for the whole daemon. [`Self::from_env`]
@@ -43,19 +39,13 @@ impl ZImageResident {
     /// run zimage`, the `#[ignore]`d real-checkpoint tests) still use when
     /// they deliberately want every path named outright.
     ///
-    /// `models_dir` is the serving process's resolved models directory (see
+    /// `store` is the serving process's model store and role pins (see
     /// `loader::served::served_assembly`).
-    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<ZImageResident> {
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<ZImageResident> {
         let assembly = loader::served::served_assembly(
-            models_dir,
+            store,
             "s3dit",
             &s3dit::spec::S3ditSpec,
-            &[
-                RoleEnv { role: "dit", var: "BRAIN_S3DIT_DIT" },
-                RoleEnv { role: "vae", var: "BRAIN_S3DIT_VAE" },
-                RoleEnv { role: "text_encoder", var: "BRAIN_S3DIT_QWEN" },
-                RoleEnv { role: "tokenizer", var: "BRAIN_S3DIT_TOKENIZER" },
-            ],
         )?;
         // `Paths::from_assembly` owns the role-name -> field mapping already
         // (including `text_encoder` -> `qwen`); this must not carry a second
@@ -456,13 +446,10 @@ mod tests {
         std::fs::create_dir_all(root.join("other-vendor")).unwrap();
         checkpoint::st::save_safetensors(root.join("other-vendor").join("unrelated.safetensors").to_str().unwrap(), &[("w".to_string(), vec![1], vec![0.0f32])], &json!({}), None).unwrap();
 
-        for v in ["BRAIN_S3DIT_DIT", "BRAIN_S3DIT_VAE", "BRAIN_S3DIT_QWEN", "BRAIN_S3DIT_TOKENIZER"] {
-            std::env::remove_var(v);
-        }
-        let resident = ZImageResident::from_store(Some(&root));
+        let resident = ZImageResident::from_store(&loader::served::ServedStore::new(Some(root.clone())));
         std::fs::remove_dir_all(&root).ok();
 
-        assert!(resident.is_some(), "must resolve purely from local discovery with no BRAIN_S3DIT_* set");
+        assert!(resident.is_some(), "must resolve purely from local discovery with nothing pinned");
     }
 
     /// The served half of the same contract, on real weights: a caller who

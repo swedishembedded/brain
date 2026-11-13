@@ -62,12 +62,11 @@ impl LtxvResident {
     /// Every LTX checkpoint the model store resolves (`ltxv::spec::LtxvSpec`),
     /// each under its own reference - the lane `resident_flux2`'s residents
     /// take. The environment names no weights.
-    pub fn all_from_store(models_dir: Option<&std::path::Path>) -> Vec<LtxvResident> {
+    pub fn all_from_store(store: &loader::served::ServedStore) -> Vec<LtxvResident> {
         loader::served::served_assemblies(
-            models_dir,
+            store,
             "ltxv",
             &ltxv::spec::LtxvSpec,
-            &[],
             ltxv::caps::MODEL,
         )
         .into_iter()
@@ -85,8 +84,8 @@ impl LtxvResident {
     }
 
     /// The first checkpoint the model store resolves, if any.
-    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<LtxvResident> {
-        Self::all_from_store(models_dir).into_iter().next()
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<LtxvResident> {
+        Self::all_from_store(store).into_iter().next()
     }
 
     /// Whether the real DiT resolved from the model store (`brain perf ltxv@real` needs it before it starts).
@@ -662,7 +661,7 @@ mod tests {
     #[test]
     #[ignore = "real multi-minute generation against real LTX-2.5 checkpoints"]
     fn two_real_generations_share_one_warm_checkpoint_cache() {
-        let Some(r) = LtxvResident::from_store(loader::model_dir::resolve(None).as_deref()) else {
+        let Some(r) = LtxvResident::from_store(&loader::served::ServedStore::new(loader::model_dir::resolve(None))) else {
             eprintln!("skipped: no LTX-2.5 checkpoints in the model store");
             return;
         };
@@ -754,7 +753,7 @@ mod tests {
     #[test]
     #[ignore = "real multi-minute generations against real LTX-2.5 checkpoints"]
     fn concurrent_generations_share_one_cache_and_overlap_across_the_cards() {
-        let Some(r) = LtxvResident::from_store(loader::model_dir::resolve(None).as_deref()) else {
+        let Some(r) = LtxvResident::from_store(&loader::served::ServedStore::new(loader::model_dir::resolve(None))) else {
             eprintln!("skipped: no LTX-2.5 checkpoints in the model store");
             return;
         };

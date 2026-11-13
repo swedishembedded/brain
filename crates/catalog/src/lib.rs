@@ -102,6 +102,7 @@ pub mod sampling_defaults;
 mod served_family;
 mod serving;
 
+pub use loader::served::ServedStore;
 pub use serving::{multi_residents, residents};
 
 use std::path::Path;
@@ -200,13 +201,13 @@ pub enum ResidentCtor {
 
 /// Builds a single-device adapter, or `None` when its weights are not configured.
 ///
-/// The argument is the serving process's already-resolved models directory
-/// (its own `--models-dir`, else the resolver's documented fallback), so an
-/// adapter that resolves its weights through the model store reads the SAME
-/// store as every other resolver in that process. An adapter configured
-/// purely from its own environment variables ignores it ([`resident!`]); one
-/// that consults the store takes it ([`resident_in_store!`]).
-pub type SingleCtor = fn(Option<&Path>) -> Option<Arc<dyn ResidentModel>>;
+/// The argument is the serving process's model store and role pins
+/// (`--models-dir`, `--pin`), so an adapter that resolves its weights through
+/// the store reads the SAME store as every other resolver in that process.
+/// An adapter configured purely from its own environment variables ignores it
+/// ([`resident!`]); one that consults the store takes it
+/// ([`resident_in_store!`]).
+pub type SingleCtor = fn(&ServedStore) -> Option<Arc<dyn ResidentModel>>;
 
 /// Builds a multi-device adapter from an already-resolved [`Assembly`] (see
 /// [`ModelEntry::provider`]'s doc - the same contract, for the multi-device
@@ -320,7 +321,7 @@ pub fn role_dir(assembly: &Assembly, role: &str) -> Result<String, String> {
 macro_rules! resident {
     ($ctor:path) => {
         Some($crate::ResidentCtor::Single(
-            (|_models_dir: Option<&std::path::Path>| $ctor().map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>)) as $crate::SingleCtor,
+            (|_store: &$crate::__reexport::ServedStore| $ctor().map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>)) as $crate::SingleCtor,
         ))
     };
 }
@@ -332,7 +333,7 @@ macro_rules! resident {
 macro_rules! resident_in_store {
     ($ctor:path) => {
         Some($crate::ResidentCtor::Single(
-            (|models_dir: Option<&std::path::Path>| $ctor(models_dir).map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>)) as $crate::SingleCtor,
+            (|store: &$crate::__reexport::ServedStore| $ctor(store).map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>)) as $crate::SingleCtor,
         ))
     };
 }
@@ -367,6 +368,7 @@ macro_rules! resident_multi_family {
 #[doc(hidden)]
 pub mod __reexport {
     pub use capability::{Assembly, Provider};
+    pub use loader::served::ServedStore;
     pub use residency::multi::MultiDeviceResidentModel;
     pub use residency::ResidentModel;
 }
@@ -632,7 +634,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(scrfd::caps::ScrfdProvider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("scrfd", &scrfd::spec::ScrfdSpec)),
-            resident: crate::resident_in_store!(crate::resident_scrfd::ScrfdResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_scrfd::ScrfdResident::from_store),
         },
         ModelEntry {
             manifest: florence2::caps::manifest,
@@ -641,7 +643,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(florence2::caps::Florence2Provider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("florence2", &florence2::spec::Florence2Spec)),
-            resident: crate::resident_in_store!(crate::resident_florence2::Florence2Resident::from_env),
+            resident: crate::resident_in_store!(crate::resident_florence2::Florence2Resident::from_store),
         },
         ModelEntry {
             manifest: mirage::caps::manifest,
@@ -659,7 +661,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(arcface::caps::ArcFaceProvider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("arcface", &arcface::spec::ArcFaceSpec)),
-            resident: crate::resident_in_store!(crate::resident_arcface::ArcFaceResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_arcface::ArcFaceResident::from_store),
         },
         ModelEntry {
             manifest: vqgan::caps::manifest,
@@ -718,7 +720,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(clip::caps::ClipProvider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("clip", &clip::spec::ClipSpec)),
-            resident: crate::resident_in_store!(crate::resident_clip::ClipResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_clip::ClipResident::from_store),
         },
         ModelEntry {
             manifest: t5encoder::caps::manifest,
@@ -775,7 +777,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(flux1::caps::Flux1Provider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("flux1", &flux1::spec::Flux1Spec)),
-            resident: crate::resident_in_store!(crate::resident_flux1::Flux1Resident::from_env),
+            resident: crate::resident_in_store!(crate::resident_flux1::Flux1Resident::from_store),
         },
         ModelEntry {
             manifest: pulid::caps::manifest,
@@ -792,7 +794,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(pulid::caps::PulidProvider::new(flux1, pulid_w, arcface, clip, bisenet)) as Arc<dyn Provider>)
             },
             spec: Some(("pulid", &pulid::spec::PulidSpec)),
-            resident: crate::resident_in_store!(crate::resident_pulid::PulidResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_pulid::PulidResident::from_store),
         },
         // DeepSeek-OCR and DeepSeek-OCR-2: a document image in, decoded text out.
         // The vision encoder runs on one card and the decoder engine on a second

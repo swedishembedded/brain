@@ -126,10 +126,6 @@ crates/cli/src/main.rs	BRAIN_VERBOSE
 crates/cli/src/main.rs	HOME
 crates/cli/src/main.rs	XDG_CONFIG_HOME
 crates/cli/src/perf_cli.rs	<var>
-crates/cli/src/perf_cli.rs	BRAIN_FLUX2_DIT
-crates/cli/src/perf_cli.rs	BRAIN_FLUX2_TE
-crates/cli/src/perf_cli.rs	BRAIN_FLUX2_TOKENIZER
-crates/cli/src/perf_cli.rs	BRAIN_FLUX2_VAE
 crates/cli/src/perf_cli.rs	BRAIN_FORECAST_HORIZON
 crates/cli/src/perf_cli.rs	BRAIN_FORECAST_SAMPLES
 crates/cli/src/perf_cli.rs	BRAIN_WAN_DIT
@@ -291,16 +287,11 @@ crates/flux2/src/caps.rs	BRAIN_FLUX2_ALLOW_NC
 crates/flux2/src/model.rs	BRAIN_FLUX2_I8_KEEP_F32
 crates/flux2/src/model.rs	BRAIN_FLUX2_TIME_FORWARD
 crates/flux2/src/model.rs	SMOKE_STEPS
-crates/flux2/src/pipeline.rs	<k>
-crates/flux2/src/pipeline.rs	BRAIN_FLUX2_DIT
 crates/flux2/src/pipeline.rs	BRAIN_FLUX2_DUMP_LATENT
 crates/flux2/src/pipeline.rs	BRAIN_FLUX2_LORA_FOLD
 crates/flux2/src/pipeline.rs	BRAIN_FLUX2_NO_STREAM
-crates/flux2/src/pipeline.rs	BRAIN_FLUX2_TE
 crates/flux2/src/pipeline.rs	BRAIN_FLUX2_TE_DEVICE
 crates/flux2/src/pipeline.rs	BRAIN_FLUX2_TE_NO_STREAM
-crates/flux2/src/pipeline.rs	BRAIN_FLUX2_TOKENIZER
-crates/flux2/src/pipeline.rs	BRAIN_FLUX2_VAE
 crates/flux2/tests/it/batch_time.rs	BRAIN_FLUX2_BATCH_LADDER
 crates/flux2/tests/it/batch_time.rs	BRAIN_FLUX2_BATCH_PRECISION
 crates/flux2/tests/it/batch_time.rs	BRAIN_FLUX2_BATCH_REPS
@@ -583,8 +574,6 @@ crates/lfm2/tests/it/parity.rs	BRAIN_LFM25_350M
 crates/lfm2/tests/it/parity.rs	BRAIN_TESTDATA
 crates/llava/src/caps.rs	BRAIN_LLAVA_WEIGHTS
 crates/llava/src/captioner.rs	BRAIN_LLAVA_WEIGHTS
-crates/loader/src/served.rs	<b.var>
-crates/loader/src/served.rs	BRAIN_SERVEDTEST_WEIGHTS
 crates/ltxv/tests/it/av_lora_reload.rs	<CHILD_ENV>
 crates/ltxv/tests/it/av_lora_reload.rs	<PATH_ENV>
 crates/ltxv/tests/it/av_lora_reload.rs	<SEED_ENV>

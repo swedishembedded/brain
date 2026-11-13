@@ -274,17 +274,11 @@ resolves from the live registry, so it can never go stale as real
 architectures migrate onto the model-store resolver): `BRAIN_RESOLVETESTARCH_DIT`,
 `BRAIN_RESOLVETESTARCH_VAE` - never read outside that one fixture.
 
-**Served-path resolver test fixture** (`crates/cli/src/resolver_cli.rs`'s
-`ServedSpec`, a hand-built one-role `ArchSpec` for exercising the served
-(resident) assembly path the same way `multi_role_fixture` above exercises
-the general one): `BRAIN_SERVEDTEST_WEIGHTS` - never read outside that one
-fixture.
-
 **Model-weights-required test gates** (each enables a parity/import/training test
 that needs a real checkpoint; unset means the test skips):
 `BRAIN_EVA_CLIP`, `BRAIN_CONTROLNET`, `BRAIN_PULID`, `BRAIN_INSTANTID`,
 `BRAIN_INSTANTID_CKPT`, `BRAIN_INSTANTID_CODE`, `BRAIN_T5ENCODER_XXL`, `BRAIN_ESRGAN`,
-`BRAIN_FLUX1_FULL`, `BRAIN_FLUX2_TRANSFORMER`, `BRAIN_FLUX2_BATCH_LADDER`,
+`BRAIN_FLUX1_FULL`, `BRAIN_FLUX2_TRANSFORMER`, `BRAIN_FLUX2_VAE`, `BRAIN_FLUX2_BATCH_LADDER`,
 `BRAIN_FLUX2_BATCH_PRECISION`, `BRAIN_FLUX2_BATCH_REPS`, `BRAIN_S3DIT_I8`,
 `BRAIN_LFM25_230M`, `BRAIN_LFM25_350M`, `BRAIN_QWEN3_4B`,
 `BRAIN_QWEN35_SMOKE_GPUS`, `BRAIN_QWEN35_SMOKE_LAYERS`, `BRAIN_QWEN35_SMOKE_LR`,

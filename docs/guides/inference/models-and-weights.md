@@ -84,6 +84,12 @@ compute, int8 packing where a model is served quantized).
 `BRAIN_MODELS_DIR` - see [Configuration](../../reference/configuration.md#paths) for the full
 precedence ladder.
 
+`brain serve` serves every model it can resolve from that store. When the store
+holds two candidates for one role (two DiTs, two tokenizers) and nothing says
+which, that model is not served and the startup log names a
+`--pin ARCH.ROLE=PATH` for each; giving one serves it. A pin also serves a
+role from a path outside the store.
+
 ## Seeing what you have
 
 `brain models list` is the store's own view of itself: architecture →

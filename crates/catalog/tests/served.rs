@@ -156,9 +156,9 @@ fn every_residency_adapter_here_is_also_listed_here() {
     let catalog: std::collections::HashSet<String> = manifests().into_iter().map(|m| m.model).collect();
     // Both claim paths, or the multi-device half is exactly as unguarded as
     // the single-device half was before this test existed.
-    let store = loader::model_dir::resolve(None);
-    let single = residents(store.as_deref()).into_iter().map(|r| r.manifest().model);
-    let multi = multi_residents(store.as_deref(), &[(0, 24u64 << 30)], 2u64 << 30).into_iter().map(|r| r.manifest().model);
+    let store = loader::served::ServedStore::new(loader::model_dir::resolve(None));
+    let single = residents(&store).into_iter().map(|r| r.manifest().model);
+    let multi = multi_residents(&store, &[(0, 24u64 << 30)], 2u64 << 30).into_iter().map(|r| r.manifest().model);
     for id in single.chain(multi) {
         assert!(catalog.contains(&id), "residency adapter '{id}' is not in the catalog");
     }
@@ -171,9 +171,9 @@ fn every_residency_adapter_here_is_also_listed_here() {
 /// this test is what says so out loud.
 #[test]
 fn no_model_is_registered_through_both_claim_paths() {
-    let store = loader::model_dir::resolve(None);
-    let single: std::collections::HashSet<String> = residents(store.as_deref()).into_iter().map(|r| r.manifest().model).collect();
-    for r in multi_residents(store.as_deref(), &[(0, 24u64 << 30)], 2u64 << 30) {
+    let store = loader::served::ServedStore::new(loader::model_dir::resolve(None));
+    let single: std::collections::HashSet<String> = residents(&store).into_iter().map(|r| r.manifest().model).collect();
+    for r in multi_residents(&store, &[(0, 24u64 << 30)], 2u64 << 30) {
         let id = r.manifest().model;
         assert!(!single.contains(&id), "'{id}' is registered as BOTH a single- and a multi-device resident");
     }

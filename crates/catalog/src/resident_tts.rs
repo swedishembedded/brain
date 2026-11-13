@@ -50,8 +50,8 @@ pub struct TtsResident {
 impl TtsResident {
     /// The checkpoint the model store resolves for Qwen3-TTS, or `None` (not
     /// served) when it holds none or several that cannot be told apart.
-    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<TtsResident> {
-        let assembly = loader::served::served_assembly(models_dir, "qwen3tts", &qwen3tts::spec::Qwen3TtsSpec, &[])?;
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<TtsResident> {
+        let assembly = loader::served::served_assembly(store, "qwen3tts", &qwen3tts::spec::Qwen3TtsSpec)?;
         Some(TtsResident { paths: TtsPaths::from_assembly(&assembly).ok()? })
     }
 
@@ -229,7 +229,7 @@ mod tests {
     /// Skips cleanly when the model store holds no Qwen3-TTS checkpoint.
     #[test]
     fn synth_streams_chunks_that_reassemble_into_the_terminal_blob() {
-        let Some(r) = TtsResident::from_store(brain_modelstore::default_root().as_deref()) else {
+        let Some(r) = TtsResident::from_store(&loader::served::ServedStore::new(brain_modelstore::default_root())) else {
             brain_testutil::skip("no Qwen3-TTS checkpoint in the model store");
             return;
         };

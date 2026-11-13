@@ -175,6 +175,10 @@ PROCESS LIFECYCLE
 SERVING OPTIONS
   --models-dir DIR       the model store every served model is resolved from
                          (else $BRAIN_MODELS_DIR, else $XDG_DATA_HOME/brain/models)
+  --pin ARCH.ROLE=PATH   serve that role of that architecture from PATH instead of
+                         what the store holds (repeatable; e.g. --pin flux2.dit=F).
+                         It also settles a store holding two candidates for a role:
+                         the startup log names the --pin for each.
   --training             serve training as a job: the model `brain/train`, action
                          `train`, fine-tunes a chat model's LoRA adapter (supervised, or
                          by the clipped policy gradient on rollout records, with teacher
@@ -696,6 +700,9 @@ pub fn run_serve(args: &[String]) {
     // and every architecture resolver (`--models-dir`, else BRAIN_MODELS_DIR /
     // XDG default; see model_dir::resolve).
     let mut models_dir: Option<String> = None;
+    // `--pin ARCH.ROLE=PATH`: roles served from an explicit path, checked as
+    // they are parsed; the store they apply over is resolved in `run_apis`.
+    let mut pins = loader::served::ServedStore::default();
     // `--training` / `--artifact-store DIR`: serve the training workload, and the store it exchanges bulk data through.
     let mut training = false;
     let mut artifact_store: Option<String> = None;
@@ -810,6 +817,12 @@ pub fn run_serve(args: &[String]) {
             "--status" => do_status = true,
             "--reserve-gb" => dbus_reserve_gb = Some(parsed(args, &mut i, "--reserve-gb")),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
+            "--pin" => {
+                if let Err(e) = pins.pin(&val(args, &mut i, "--pin")) {
+                    eprintln!("brain serve: {e}");
+                    std::process::exit(2);
+                }
+            }
             "--training" => training = true,
             "--artifact-store" => artifact_store = Some(val(args, &mut i, "--artifact-store")),
             "--watch-adapters" => watch_adapters = Some(val(args, &mut i, "--watch-adapters")),
@@ -1043,6 +1056,7 @@ pub fn run_serve(args: &[String]) {
             dbus_name,
             reserve_gb: dbus_reserve_gb,
             models_dir,
+            pins,
             anthropic,
             openai,
             openrouter,
@@ -1153,7 +1167,7 @@ pub fn run_serve(args: &[String]) {
 
 /// Discover schedulable compute (GPUs/NPUs/CPU RAM, narrowed by `--device`) and build
 /// the one shared residency executor that every serving surface (D-Bus + the HTTP APIs)
-/// drives, with every model resolved from `models_dir` (already resolved by `run_apis`).
+/// drives, with every model resolved from `store` (built by `run_apis`).
 ///
 /// Returns `serving::Serving`, not a bare `Executor`: the
 /// continuous-learning hot swap needs the CONCRETE `QwenResident` handle
@@ -1176,7 +1190,7 @@ fn widest_batch(knobs: &serving::ServeKnobs) -> u32 {
     [knobs.qwen.max_batch, knobs.qwen35.fp32.max_batch, knobs.qwen35.gguf.max_batch.unwrap_or(0), knobs.ricursive.max_batch.unwrap_or(0), knobs.ocr.max_batch.unwrap_or(0)].into_iter().max().unwrap_or(0)
 }
 
-fn build_serving_executor(reserve_gb: u64, models_dir: Option<&Path>, knobs: serving::ServeKnobs) -> serving::Serving {
+fn build_serving_executor(reserve_gb: u64, store: &loader::served::ServedStore, knobs: serving::ServeKnobs) -> serving::Serving {
     let machine = serving::Machine::probe(crate::compute_set());
     let reserved = reserve_gb << 30;
     eprintln!(
@@ -1190,7 +1204,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<&Path>, knobs: ser
     // `models_dir` is the ONE store every resolver below reads (see
     // `run_apis`); the catalog scan appends every carded file in it as its
     // own catalog entry.
-    if let Some(d) = models_dir {
+    if let Some(d) = store.models_dir() {
         // First run on a fresh install: the dir doesn't exist yet. Create it so
         // the scan is clean (an empty catalog, not an ENOENT warning) - models
         // dropped in later are picked up on the next `brain serve` with no env
@@ -1200,7 +1214,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<&Path>, knobs: ser
         }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
-    serving::build_executor(&machine, reserved, models_dir, residency::Policy::from_env(), knobs)
+    serving::build_executor(&machine, reserved, store, residency::Policy::from_env(), knobs)
 }
 
 /// Live host RAM this process could actually get right now: `MemAvailable`
@@ -1228,6 +1242,8 @@ struct RunApis {
     /// `--reserve-gb`; `None` sizes it from the widest `--max-batch` ([`default_reserve_gb`]).
     reserve_gb: Option<u64>,
     models_dir: Option<String>,
+    /// `--pin`s, applied over the resolved models directory.
+    pins: loader::served::ServedStore,
     anthropic: Option<Vec<SocketAddr>>,
     openai: Option<Vec<SocketAddr>>,
     openrouter: Option<Vec<SocketAddr>>,
@@ -1347,6 +1363,7 @@ fn run_apis(a: RunApis) {
     // store - the startup scan, every architecture resolver, the auto-fetch
     // supplier and the healer - so the flag decides the store everywhere.
     let models_dir = loader::model_dir::resolve(a.models_dir.as_deref());
+    let store = a.pins.with_models_dir(models_dir.clone());
     let supplier = build_auto_fetch_supplier(models_dir.as_deref());
     // `--training` is the one switch for every training action, not only
     // `brain/train`'s: without it every surface refuses them.
@@ -1356,7 +1373,7 @@ fn run_apis(a: RunApis) {
     if a.reserve_gb.is_none() && reserve_gb > DEFAULT_RESERVE_GB {
         eprintln!("brain serve: --max-batch {widest} keeps {reserve_gb} GB free per card for the decode batch's activations and graph launches (--reserve-gb to change it)");
     }
-    let serving::Serving { executor, qwen, qwen35, ricursive } = build_serving_executor(reserve_gb, models_dir.as_deref(), a.knobs);
+    let serving::Serving { executor, qwen, qwen35, ricursive } = build_serving_executor(reserve_gb, &store, a.knobs);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("{}", served_models_line(&served, models_dir.as_deref()));
@@ -1697,7 +1714,7 @@ mod tests {
     fn help_documents_every_flag_the_parser_accepts() {
         for f in [
             "--gpt", "--yolo", "--max-new", "--temp", "--top-k", "--seed", "--conf", "--dbus", "--dbus-system", "--dbus-name",
-            "--reserve-gb", "--models-dir", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
+            "--reserve-gb", "--models-dir", "--pin", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
             "--admit-deadline-ms", "--cold-build-admit-deadline-ms",
         ] {
             assert!(HELP.contains(f), "{f} is parsed by run_serve but not documented in HELP");

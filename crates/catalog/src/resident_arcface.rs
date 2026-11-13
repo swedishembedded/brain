@@ -4,7 +4,7 @@
 //! Face identity embedding (insightface antelopev2 ArcFace IResNet-100) behind
 //! the residency scheduler.
 //!
-//! `activate` imports the released ONNX graph from `BRAIN_ARCFACE_DIR` ONCE and
+//! `activate` imports the released ONNX graph from its checkpoint ONCE and
 //! builds it on the assigned device; the [`Instance`] owns the resulting
 //! [`arcface::caps::ArcFaceSession`], so dropping it frees the model. One
 //! action, `embed` - the schema and the work both come from `arcface::caps`, so
@@ -40,10 +40,9 @@ use arcface::caps::ArcFaceSession;
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use loader::served::RoleEnv;
 
 /// The directory holding `glintr100.onnx` (and `scrfd_10g_bnkps.onnx` beside it
-/// for the default aligned path): `BRAIN_ARCFACE_DIR` if the operator set it,
+/// for the default aligned path): The operator's `arcface.weights` pin,
 /// else whatever the model-store resolver finds for
 /// `arcface::spec::ArcFaceSpec`'s `weights` role.
 ///
@@ -59,14 +58,14 @@ use loader::served::RoleEnv;
 /// to verify who each detected person is. Both find the weights the same way,
 /// here, rather than each growing its own env/store precedence rules.
 ///
-/// `models_dir` is the caller's resolved models directory (see
+/// `store` is the caller's model store and role pins (see
 /// `loader::served::served_assembly`).
-pub fn dir_from_env(models_dir: Option<&std::path::Path>) -> Option<String> {
-    let assembly = loader::served::served_assembly(models_dir, "arcface", &arcface::spec::ArcFaceSpec, &[RoleEnv { role: "weights", var: "BRAIN_ARCFACE_DIR" }])?;
+pub fn dir_from_store(store: &loader::served::ServedStore) -> Option<String> {
+    let assembly = loader::served::served_assembly(store, "arcface", &arcface::spec::ArcFaceSpec)?;
     loader::served::containing_dir(assembly.roles.get("weights")?)
 }
 
-/// The antelopev2 identity embedder behind the scheduler (`BRAIN_ARCFACE_DIR` =
+/// The antelopev2 identity embedder behind the scheduler (the checkpoint:
 /// the directory holding `glintr100.onnx`, and `scrfd_10g_bnkps.onnx` beside it
 /// for the default aligned path).
 pub struct ArcFaceResident {
@@ -74,13 +73,13 @@ pub struct ArcFaceResident {
 }
 
 impl ArcFaceResident {
-    /// [`dir_from_env`]'s directory, checked for the released graph. `None`
+    /// [`dir_from_store`]'s directory, checked for the released graph. `None`
     /// (not served, never a daemon startup failure) when there is none.
     ///
-    /// `models_dir` is the serving process's resolved models directory (see
+    /// `store` is the serving process's model store and role pins (see
     /// `loader::served::served_assembly`).
-    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<ArcFaceResident> {
-        Self::new(dir_from_env(models_dir)?)
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<ArcFaceResident> {
+        Self::new(dir_from_store(store)?)
     }
 
     /// Direct constructor for callers that already hold the directory (e.g.
