@@ -30,7 +30,7 @@ fn trained_and_measured(tag: &str, task: &SyntheticTask) -> (Scratch, brain::dec
     run.batch = 8;
     // seed: the lift > 0.25 and shuffled-label lift < 0.15 bounds were tuned on this training draw
     run.seed = 3;
-    train(&run, &mut |_, _| {}).unwrap();
+    train(&run, &mut |_, _| true).unwrap();
     let eval = evaluate_model(&EvalRun::new(root.join("out").to_str().unwrap(), root.join("data.jsonl"), Split::Test)).unwrap();
     (root, eval)
 }

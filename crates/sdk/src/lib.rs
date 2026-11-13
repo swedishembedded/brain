@@ -144,6 +144,10 @@ pub use decision::{Choice, ChoiceCase, DecisionPipeline, DecisionPipelineBuilder
 /// checkpoint with its lineage: the run behind `brain decide train`.
 #[cfg(feature = "decision")]
 pub mod decision_run;
+/// The decision-model lifecycle (`train`, `eval`, `promote`, `rollback`,
+/// `inspect`) as the served actions of `brain/decision`.
+#[cfg(feature = "decision")]
+pub mod decision_actions;
 
 /// Learning to reach a known goal state by retracing random walks away from
 /// it - a policy rolled out with one forward pass per action and no search.

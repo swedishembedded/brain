@@ -214,7 +214,7 @@ async fn a_trained_laya_head_over_the_wire_agrees_with_the_sdk() {
     let mut run = TrainRun::new(root.join("data.jsonl"), root.join("base").to_str().unwrap(), root.join("tuned"));
     run.steps = 6;
     run.batch = 2;
-    train(&run, &mut |_, _| {}).unwrap();
+    train(&run, &mut |_, _| true).unwrap();
     assert!(!root.join("tuned/model.safetensors").exists(), "the trunk is referenced, not copied");
 
     let (stock, tuned) = (sdk(&root.join("base")), sdk(&root.join("tuned")));

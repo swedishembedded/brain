@@ -52,7 +52,7 @@ impl Setup {
 fn a_laya_run_writes_the_head_and_a_reference_to_the_backbone_with_its_lineage() {
     let s = Setup::new("train-laya-lineage");
     let run = s.run("out");
-    let outcome = train(&run, &mut |_, _| {}).unwrap();
+    let outcome = train(&run, &mut |_, _| true).unwrap();
     assert!(outcome.final_loss.is_finite());
 
     assert!(!run.out.join("model.safetensors").exists(), "the frozen backbone must not be duplicated");
@@ -86,13 +86,13 @@ fn a_laya_run_writes_the_head_and_a_reference_to_the_backbone_with_its_lineage()
 #[test]
 fn the_same_seed_gives_the_same_weights_and_another_seed_does_not() {
     let s = Setup::new("train-laya-determinism");
-    let a = train(&s.run("a"), &mut |_, _| {}).unwrap();
-    let b = train(&s.run("b"), &mut |_, _| {}).unwrap();
+    let a = train(&s.run("a"), &mut |_, _| true).unwrap();
+    let b = train(&s.run("b"), &mut |_, _| true).unwrap();
     assert_eq!(a.manifest.weights_sha256, b.manifest.weights_sha256);
     assert_eq!(std::fs::read(s.root.join("a").join(HEAD_FILE)).unwrap(), std::fs::read(s.root.join("b").join(HEAD_FILE)).unwrap());
     let mut other = s.run("c");
     other.seed = s.seed ^ 1;
-    let c = train(&other, &mut |_, _| {}).unwrap();
+    let c = train(&other, &mut |_, _| true).unwrap();
     assert_ne!(a.manifest.weights_sha256, c.manifest.weights_sha256);
 }
 
@@ -101,13 +101,13 @@ fn training_the_trunk_and_training_from_a_trained_directory_are_refused_before_a
     let s = Setup::new("train-laya-refusals");
     let mut finetune = s.run("x");
     finetune.freeze_encoder = false;
-    let e = train(&finetune, &mut |_, _| {}).unwrap_err().to_string();
-    assert!(e.contains("--finetune-encoder") && e.contains("trunk"), "{e}");
+    let e = train(&finetune, &mut |_, _| true).unwrap_err().to_string();
+    assert!(e.contains("finetune_encoder") && e.contains("trunk"), "{e}");
 
-    train(&s.run("trained"), &mut |_, _| {}).unwrap();
+    train(&s.run("trained"), &mut |_, _| true).unwrap();
     let mut chained = s.run("x");
     chained.base = s.root.join("trained").to_str().unwrap().to_string();
-    let e = train(&chained, &mut |_, _| {}).unwrap_err().to_string();
+    let e = train(&chained, &mut |_, _| true).unwrap_err().to_string();
     assert!(e.contains("itself a trained head"), "{e}");
 
     assert!(!s.root.join("x").exists(), "a refused run leaves no output");

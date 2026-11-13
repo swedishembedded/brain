@@ -51,7 +51,7 @@ impl World {
         run.batch = 8;
         // seed: the accuracy-lift gates of the promotion were tuned on this training draw
         run.seed = 3;
-        train(&run, &mut |_, _| {}).unwrap();
+        train(&run, &mut |_, _| true).unwrap();
     }
 
     fn promote(&self, name: &str) -> brain::decision_run::PromoteOutcome {

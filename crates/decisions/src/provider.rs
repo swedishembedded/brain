@@ -5,7 +5,8 @@
 //! runs - and the family model that answers "which decision models are here
 //! and which would `auto` pick" without loading any of them.
 //!
-//! `brain/decision` has three actions:
+//! `brain/decision` has three family actions, and the lifecycle actions of
+//! [`crate::lifecycle`] beside them on the host:
 //!
 //! * `decide` - the capability itself, with a `model` param: a model id, a
 //!   checkpoint directory on this machine, or `auto` (the default), which
@@ -19,10 +20,17 @@
 //! * `select` - the model `auto` (or a named id) resolves to, with the rule
 //!   and the reason. Loads nothing.
 //!
+//! * `train`, `eval`, `promote`, `rollback`, `inspect` - the lifecycle. They
+//!   are declared here ([`manifest`] lists them) and run by the provider the
+//!   host attaches with [`DecisionProvider::with_lifecycle`]: the training
+//!   pipeline lives above this crate. Without one the actions are absent.
+//!
 //! A serving process schedules each checkpoint as its own model under its
 //! store id with just the `decide` action
 //! (`crates/catalog/src/resident_decision.rs`) and serves this family model
-//! with [`served_manifest`], whose actions are the two that load nothing.
+//! with [`served_manifest`], whose actions are the two that load nothing. The
+//! lifecycle is host-only: every input is a file on the host and `train`
+//! writes one, so a server neither registers nor runs it.
 //!
 //! Swedish Embedded AB implements model inventories and policy-driven
 //! selection for its clients. If your team needs a decision model you can ask
@@ -36,6 +44,7 @@ use capability::{tag, Action, ActionResult, ActionSpec, FailureClass, Invocation
 use serde_json::{json, Value};
 
 use crate::caps::{self, Session, FAMILY};
+use crate::lifecycle;
 use crate::load::{self, pipelines};
 use crate::store::{resolve_spec, Catalog};
 
@@ -62,15 +71,19 @@ fn select_spec() -> ActionSpec {
 
 /// The full family manifest, for discovery and the in-process path.
 pub fn manifest() -> Manifest {
-    Manifest::new(FAMILY, "Decision models: calibrated answers to typed questions over options supplied at request time, plus an inventory of the models that can answer.", vec![family_decide_spec(), models_spec(), select_spec()])
+    Manifest::new(FAMILY, "Decision models: calibrated answers to typed questions over options supplied at request time, plus an inventory of the models that can answer.", family_actions().into_iter().chain(lifecycle::specs()).collect())
+}
+
+fn family_actions() -> Vec<ActionSpec> {
+    vec![family_decide_spec(), models_spec(), select_spec()]
 }
 
 /// The family manifest as a serving process registers it: the actions that
 /// load nothing. `decide` is served by each checkpoint's own model, which the
-/// scheduler places and budgets.
+/// scheduler places and budgets, and the lifecycle is host-only.
 pub fn served_manifest() -> Manifest {
     let mut m = manifest();
-    m.actions.retain(|a| a.name != caps::ACTION);
+    m.actions.retain(|a| a.name == "models" || a.name == "select");
     m
 }
 
@@ -91,11 +104,20 @@ type Hot = Arc<Mutex<Option<(String, Arc<Mutex<Session>>)>>>;
 pub struct DecisionProvider {
     catalog: Catalog,
     hot: Hot,
+    /// Runs the [`lifecycle`] actions; `None` where the host has no training pipeline.
+    lifecycle: Option<Arc<dyn Provider>>,
 }
 
 impl DecisionProvider {
     pub fn new(catalog: Catalog) -> DecisionProvider {
-        DecisionProvider { catalog, hot: Arc::new(Mutex::new(None)) }
+        DecisionProvider { catalog, hot: Arc::new(Mutex::new(None)), lifecycle: None }
+    }
+
+    /// Attach the provider that runs the [`lifecycle`] actions (it must answer
+    /// to every name in [`lifecycle::ACTIONS`]).
+    pub fn with_lifecycle(mut self, lifecycle: Arc<dyn Provider>) -> DecisionProvider {
+        self.lifecycle = Some(lifecycle);
+        self
     }
 
     /// The session for `model`, loading it on first use.
@@ -128,8 +150,11 @@ impl Provider for DecisionProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        let spec = manifest().actions.into_iter().find(|a| a.name == name)?;
-        Some(Arc::new(FamilyAction { spec, provider: DecisionProvider { catalog: self.catalog.clone(), hot: self.hot.clone() } }))
+        if lifecycle::ACTIONS.contains(&name) {
+            return self.lifecycle.as_ref()?.action(name);
+        }
+        let spec = family_actions().into_iter().find(|a| a.name == name)?;
+        Some(Arc::new(FamilyAction { spec, provider: DecisionProvider { catalog: self.catalog.clone(), hot: self.hot.clone(), lifecycle: None } }))
     }
 }
 
@@ -169,9 +194,9 @@ mod tests {
     }
 
     #[test]
-    fn the_family_lists_three_actions_and_serves_the_two_that_load_nothing() {
+    fn the_family_lists_its_actions_and_serves_the_two_that_load_nothing() {
         let names = |m: &Manifest| m.actions.iter().map(|a| a.name.clone()).collect::<Vec<_>>();
-        assert_eq!(names(&manifest()), ["decide", "models", "select"]);
+        assert_eq!(names(&manifest()), ["decide", "models", "select", "train", "eval", "promote", "rollback", "inspect"]);
         assert_eq!(names(&served_manifest()), ["models", "select"]);
     }
 

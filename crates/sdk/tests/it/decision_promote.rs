@@ -48,7 +48,7 @@ impl World {
         run.steps = 1500;
         run.batch = 8;
         run.seed = seed;
-        train(&run, &mut |_, _| {}).unwrap();
+        train(&run, &mut |_, _| true).unwrap();
     }
 
     fn promote(&self, name: &str, data: &str, policy: &str) -> brain::decision_run::PromoteOutcome {

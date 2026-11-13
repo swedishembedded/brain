@@ -63,6 +63,16 @@ Nothing is loaded at registration. The scheduler loads a model on the first
 `brain decide models` lists what is installed without loading it and `brain
 decide select` says which model `auto` would pick.
 
+The lifecycle of a checkpoint (`train`, `eval`, `promote`, `rollback`,
+`inspect`, below) are actions of the same model, run as `brain decide <action>`
+(`brain decide <action> --help` lists every parameter with its default and
+bounds). Every input is a file on the machine that runs the action and `train`
+writes one, so these actions are host-only: `brain serve` registers the
+inventory actions (`models`, `select`) and each checkpoint's `decide`, never the
+lifecycle. Each returns typed outputs, a `report` text blob holding the table it
+used to print (`--out report=FILE` writes it) and, for `eval` and `promote`,
+the evaluation `record` as JSON.
+
 ### The `decide` action
 
 Reachable as `decide` on the model's own id: over D-Bus `Run`, over HTTP
@@ -293,27 +303,29 @@ split only is a held-out family.
 ## Training a decision model
 
 `brain decide inspect --data FILE` validates a file of examples (schema,
-duplicate ids, leakage) and prints its counts, label entropy and
-majority-label baseline per split; `--json` prints the same machine-readably.
+duplicate ids, leakage) and returns its counts, label entropy and
+majority-label baseline per split as the `summary` output (JSON) and the
+`report` table.
 
 ```bash
 brain decide train --data decisions.jsonl --base sentence-transformers/all-MiniLM-L6-v2 \
     --out /models/triage-v1 --steps 600 --batch 16
 ```
 
-| flag | |
+| parameter | |
 |---|---|
 | `--data FILE` | the JSONL above; only its `train` split is trained on |
 | `--base REF` | a `decide` checkpoint or a stock Laya checkpoint: a model-store id or a directory. A trained Laya directory is not a base; name the stock checkpoint it was trained from |
 | `--out DIR` | the checkpoint to create; it must not exist, and a failed run leaves nothing behind |
-| `--freeze-encoder` / `--finetune-encoder` | head only (the default) or encoder and head. A Laya base is always head only and `--finetune-encoder` is refused for it |
-| `--steps N`, `--batch N`, `--seed N` | optimizer updates (600), examples per update (16), seed (drawn at random and printed) |
+| `--finetune-encoder` | train the encoder as well as the head; absent trains the head only. A Laya base is always head only and `--finetune-encoder` is refused for it |
+| `--steps N`, `--batch N`, `--seed N` | optimizer updates (600), examples per update (16), seed (drawn at random and echoed in the `seed` output) |
 | `--activations keep\|recompute` | what the backward keeps of the forward: every layer's activations, or only each layer's input, rebuilt in the backward for the same gradients at lower memory. Absent keeps them; a backend that cannot run the choice refuses it by name |
 
 Each case brings its own question and options. A step draws cases at random
 and shows each one's options in a fresh seeded order, so a position never
 stands in for reading the option text. The same data, base, flags and seed give
-the same weights.
+the same weights. `train` reports every optimizer step and stops between
+steps when the run is cancelled, writing nothing.
 
 The checkpoint's `decision.manifest.json` records its lineage and never claims
 validation:
@@ -415,13 +427,15 @@ few steps on your own data and device.
 
 ```bash
 brain decide eval --model /models/triage-v1 --data decisions.jsonl --split test \
-    --costs costs.json --out /tmp/triage-v1.eval.json
+    --costs costs.json --out record=/tmp/triage-v1.eval.json
 ```
 
 `--model` is a checkpoint directory or a store id (a stock model measures the
 same way; a checkpoint whose manifest declares a hash its file does not match is
-refused). `--split` is `validation` or `test`. The command prints a table, or
-with `--json` the record; `--out` also writes the record to a file. A cost file
+refused). `--split` is `validation` or `test`. The command prints the
+`record` (the evaluation as JSON) and the table is the `report` output;
+`--out record=FILE` / `--out report=FILE` write them. `--seed` seeds the option
+permutation (drawn and echoed when absent). A cost file
 is `{"false_exclusion": 5.0, "wasted_tokens": 1.0}`.
 
 | measure | meaning |
@@ -520,8 +534,9 @@ question is outside what it knows, `confidence` is usually the tell. See
 
 The act/escalate head of Laya is reachable through the SDK only
 (`DecisionPipeline::route`). Batching across requests is the serial default,
-for the reason given above. Training is `brain decide train`, the SDK and
-`samples/decision`: the served surface is inference.
+for the reason given above. Training and the rest of the lifecycle are
+`brain decide train|eval|promote|rollback|inspect` on the host, the SDK and
+`samples/decision`: the served surface is inference and the inventory.
 
 ## Samples
 

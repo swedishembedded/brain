@@ -127,10 +127,12 @@ fn cases_of(dataset: &Dataset) -> Vec<ChoiceCase> {
 
 /// Train a decision head on a dataset's `train` split and write the checkpoint.
 ///
-/// `log` receives `(step, loss)` for every optimizer update.
-pub fn train(run: &TrainRun, log: &mut dyn FnMut(usize, f32)) -> Result<TrainOutcome> {
+/// `log` receives `(step, loss)` after every optimizer update and returns
+/// whether to go on; `false` ends the run with [`Error::Cancelled`] before
+/// anything is written.
+pub fn train(run: &TrainRun, log: &mut dyn FnMut(usize, f32) -> bool) -> Result<TrainOutcome> {
     if run.steps == 0 {
-        return Err(Error::MissingArgument("--steps must be at least 1".into()));
+        return Err(Error::MissingArgument("steps must be at least 1".into()));
     }
     if run.out.exists() {
         return Err(Error::MissingArgument(format!("{} already exists; a training run writes a new directory", run.out.display())));
@@ -151,7 +153,7 @@ pub fn train(run: &TrainRun, log: &mut dyn FnMut(usize, f32)) -> Result<TrainOut
         }
         if !run.freeze_encoder {
             return Err(Error::MissingArgument(
-                "--finetune-encoder is not supported for a Laya base: the 395M-parameter trunk is trained with a gradient and two optimizer moments per weight, and a trained trunk could only be saved as a full copy of the weights; train the head with the trunk frozen".into(),
+                "finetune_encoder is not supported for a Laya base: the 395M-parameter trunk is trained with a gradient and two optimizer moments per weight, and a trained trunk could only be saved as a full copy of the weights; train the head with the trunk frozen".into(),
             ));
         }
     }

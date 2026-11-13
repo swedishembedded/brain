@@ -131,6 +131,19 @@ fn render_listing(mans: &[Manifest], style: Style) -> String {
 
 // -------------------------------------------------------- generic dispatch
 
+/// The provider `brain <model> <action>` runs: the catalog's, plus the
+/// host-only actions a model has beyond what a server registers. The decision
+/// lifecycle (`train`, `eval`, `promote`, `rollback`, `inspect`) needs the
+/// SDK's training pipeline, which sits above the catalog, so it is attached
+/// here.
+fn local_provider(model: &str, assembly: &capability::Assembly) -> Result<std::sync::Arc<dyn capability::Provider>, String> {
+    if model == decisions::caps::FAMILY {
+        let catalog = decisions::store::Catalog::new(brain_modelstore::default_root(), Vec::new(), None);
+        return Ok(std::sync::Arc::new(decisions::provider::DecisionProvider::new(catalog).with_lifecycle(brain::decision_actions::lifecycle_provider())));
+    }
+    catalog::provider_from_assembly(model, assembly)
+}
+
 /// `brain <model> <action> [flags]`: one served action run on this machine,
 /// through the catalog entry of `argv[0]` (`invoke::run_model`).
 pub fn run_do(argv: &[String]) -> i32 {
@@ -146,7 +159,7 @@ pub fn run_do(argv: &[String]) -> i32 {
         eprintln!("brain: unknown model '{model}' (see `brain caps`)");
         return 1;
     };
-    let build = |assembly: &capability::Assembly| catalog::provider_from_assembly(&model, assembly);
+    let build = |assembly: &capability::Assembly| local_provider(&model, assembly);
     let entry = invoke::Model { manifest, weights: catalog::resolver_spec_for(&model), build: &build };
     let shown = crate::resolve::arch_for_model(&model).unwrap_or(&model);
     invoke::run_model(&format!("brain {shown}"), &entry, &argv[1..])

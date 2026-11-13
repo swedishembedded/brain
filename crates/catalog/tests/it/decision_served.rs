@@ -115,7 +115,7 @@ fn code(body: &Value) -> &str {
 fn brain_caps_lists_the_decision_family_and_its_inventory_runs_with_no_weights() {
     let listed = catalog::manifests().into_iter().find(|m| m.model == "brain/decision").expect("`brain caps` must list the decision family");
     let actions: Vec<&str> = listed.actions.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(actions, ["decide", "models", "select"]);
+    assert_eq!(actions, ["decide", "models", "select", "train", "eval", "promote", "rollback", "inspect"]);
     // What a remote caller is shown never offers a model or path to choose.
     let served = catalog::serving_manifests().into_iter().find(|m| m.model == "brain/decision").unwrap();
     assert!(served.actions[0].params.iter().all(|p| p.name != "model"));

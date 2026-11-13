@@ -26,6 +26,7 @@
 //!   loading any.
 //! * [`laya_head`] - a trained Laya head that references its backbone by identity.
 //! * [`load`] - a checkpoint into a session, every failure classed.
+//! * [`lifecycle`] - the declaration of `train`, `eval`, `promote`, `rollback` and `inspect`.
 //! * [`provider`] - the in-process provider behind `brain caps decide` / `brain decide`.
 //! * [`fixtures`] - tiny random-weight checkpoints for tests.
 //!
@@ -40,6 +41,7 @@ pub mod evaluation;
 pub mod examples;
 pub mod fixtures;
 pub mod laya_head;
+pub mod lifecycle;
 pub mod load;
 pub mod manifest;
 pub mod promotion;

@@ -11,6 +11,7 @@
 mod common;
 
 mod decision_agreement;
+mod decision_lifecycle;
 mod decision_served;
 mod edgerock_real_served;
 mod edgerock_served;

@@ -51,7 +51,7 @@ impl Setup {
 fn a_run_writes_a_checkpoint_whose_manifest_records_its_lineage_and_is_unvalidated() {
     let s = Setup::new("train-lineage", &SyntheticTask::new(12, 4, 4));
     let run = s.run("out");
-    let outcome = train(&run, &mut |_, _| {}).unwrap();
+    let outcome = train(&run, &mut |_, _| true).unwrap();
     assert!(outcome.final_loss.is_finite());
 
     let m = DecisionManifest::read(&run.out, Backend::Decide).unwrap();
@@ -74,12 +74,12 @@ fn a_run_writes_a_checkpoint_whose_manifest_records_its_lineage_and_is_unvalidat
 #[test]
 fn the_same_seed_gives_the_same_weights_and_another_seed_does_not() {
     let s = Setup::new("train-determinism", &SyntheticTask::new(12, 4, 4));
-    let a = train(&s.run("a"), &mut |_, _| {}).unwrap();
-    let b = train(&s.run("b"), &mut |_, _| {}).unwrap();
+    let a = train(&s.run("a"), &mut |_, _| true).unwrap();
+    let b = train(&s.run("b"), &mut |_, _| true).unwrap();
     assert_eq!(a.manifest.weights_sha256, b.manifest.weights_sha256);
     let mut other = s.run("c");
     other.seed = s.seed ^ 1;
-    let c = train(&other, &mut |_, _| {}).unwrap();
+    let c = train(&other, &mut |_, _| true).unwrap();
     assert_ne!(a.manifest.weights_sha256, c.manifest.weights_sha256);
 }
 
@@ -88,17 +88,17 @@ fn a_bad_request_is_refused_before_anything_is_written() {
     let s = Setup::new("train-refusals", &SyntheticTask::new(12, 4, 4));
     let mut no_steps = s.run("x");
     no_steps.steps = 0;
-    assert!(train(&no_steps, &mut |_, _| {}).unwrap_err().to_string().contains("--steps"));
+    assert!(train(&no_steps, &mut |_, _| true).unwrap_err().to_string().contains("steps"));
 
     let mut missing = s.run("x");
     missing.data = s.root.join("absent.jsonl");
-    assert!(train(&missing, &mut |_, _| {}).is_err());
+    assert!(train(&missing, &mut |_, _| true).is_err());
 
     // No train split: nothing to learn from.
     std::fs::write(s.root.join("test-only.jsonl"), synthetic_jsonl(&SyntheticTask::new(0, 0, 4))).unwrap();
     let mut test_only = s.run("x");
     test_only.data = s.root.join("test-only.jsonl");
-    assert!(train(&test_only, &mut |_, _| {}).unwrap_err().to_string().contains("train"));
+    assert!(train(&test_only, &mut |_, _| true).unwrap_err().to_string().contains("train"));
 
     // A leaking file is refused with the leak report.
     let leaky = synthetic_jsonl(&SyntheticTask::new(2, 0, 0)).replace("\"split\":\"train\"", "\"split\":\"test\"");
@@ -106,11 +106,11 @@ fn a_bad_request_is_refused_before_anything_is_written() {
     std::fs::write(s.root.join("leaky.jsonl"), doubled).unwrap();
     let mut leaky_run = s.run("x");
     leaky_run.data = s.root.join("leaky.jsonl");
-    assert!(train(&leaky_run, &mut |_, _| {}).unwrap_err().to_string().contains("leak"));
+    assert!(train(&leaky_run, &mut |_, _| true).unwrap_err().to_string().contains("leak"));
 
     // An existing output is never overwritten.
     std::fs::create_dir_all(s.root.join("taken")).unwrap();
-    assert!(train(&s.run("taken"), &mut |_, _| {}).unwrap_err().to_string().contains("already exists"));
+    assert!(train(&s.run("taken"), &mut |_, _| true).unwrap_err().to_string().contains("already exists"));
 
     assert!(!s.root.join("x").exists(), "a refused run leaves no output");
 }

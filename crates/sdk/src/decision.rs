@@ -621,7 +621,10 @@ impl DecisionPipeline {
         }
         let pool: Vec<usize> = (0..options.len()).collect();
         let sampler = OptionSampler::default();
-        let tail_sum = self.train_steps(steps, batch, seed, log, |rng| {
+        let tail_sum = self.train_steps(steps, batch, seed, &mut |step, loss| {
+            log(step, loss);
+            true
+        }, |rng| {
             let (text, label) = examples[(rng.next_u64() % examples.len() as u64) as usize];
             if label >= options.len() {
                 return Err(Error::MissingArgument(format!(
@@ -658,6 +661,10 @@ impl DecisionPipeline {
     /// instructions, options, label)`, and the options of one case need not
     /// be the options of another.
     ///
+    /// `log` receives `(step, loss)` after every optimizer update and returns
+    /// whether to go on; `false` stops the run before the next step with
+    /// [`Error::Cancelled`].
+    ///
     /// Everything [`DecisionPipeline::train_choices`] says about steps, batch
     /// and the two arms' objectives holds here. What differs is the option
     /// draw: a case's options are real, so none are dropped, and their order
@@ -669,7 +676,7 @@ impl DecisionPipeline {
         steps: usize,
         batch: usize,
         seed: u64,
-        log: &mut dyn FnMut(usize, f32),
+        log: &mut dyn FnMut(usize, f32) -> bool,
     ) -> Result<f32> {
         if cases.is_empty() {
             return Err(Error::MissingArgument("train_cases needs at least one case".into()));
@@ -708,7 +715,7 @@ impl DecisionPipeline {
         steps: usize,
         batch: usize,
         seed: u64,
-        log: &mut dyn FnMut(usize, f32),
+        log: &mut dyn FnMut(usize, f32) -> bool,
         mut draw: impl FnMut(&mut data::rng::Rng) -> Result<Draw<'a>>,
     ) -> Result<f32> {
         let loss_cfg = LossConfig::cross_entropy();
@@ -799,9 +806,11 @@ impl DecisionPipeline {
                 }
             }
             let l = sum * scale;
-            log(step, l);
             if step >= steps.saturating_sub(tail) {
                 tail_sum += l / tail as f32;
+            }
+            if !log(step, l) {
+                return Err(Error::Cancelled);
             }
         }
 
