@@ -366,6 +366,18 @@ pub fn tally(report: &mut CostReport, names: &[String], steps: &[Step]) {
     }
 }
 
+/// Adjacent-pixel pairs `grad_match` differences in one `h x w` image over its four scales: on the 2^k grid
+/// (`ceil(h / 2^k)` by `ceil(w / 2^k)` pixels) every pixel pairs with its right and its lower neighbour where they
+/// exist.
+fn grad_match_pairs(h: u64, w: u64) -> u64 {
+    (0..4)
+        .map(|k| {
+            let (gh, gw) = (h.div_ceil(1 << k), w.div_ceil(1 << k));
+            gh * gw.saturating_sub(1) + gh.saturating_sub(1) * gw
+        })
+        .sum()
+}
+
 /// The cost of one dispatch of kernel `name` with the given uniform `params`
 /// and dispatch `threads`, or `None` if the kernel has no formula.
 ///
@@ -1524,6 +1536,18 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // and a write; `masked_l1_grad` is sign(diff)*scale over three.
         "mse_grad" => f(3 * p(0)?, 12 * p(0)?),
         "masked_l1_grad" => f(3 * n0(), 16 * n0()),
+        // ZipDepth's objective (`zipdepth::loss`), params [total = N*hw, hw, ...]; `n_img` images of `hw` pixels.
+        // The five moment terms of a scale-and-shift fit: m*p, (m*p)*p, (m*p)*t, m*t over three reads and five writes.
+        "ssi_moments" => f(4 * p(0)?, 32 * p(0)?),
+        // r = m*(s*p + b - t) and 0.5*r*r: 6 ops; p, t, m read, r and the term written, the (s, b) pair per image.
+        "ssi_resid" => f(6 * p(0)?, 20 * p(0)? + 8 * (p(0)? / p(1)?.max(1))),
+        // params [total, hw, h, w]; see `grad_match_pairs` for the count, taken with every difference valid.
+        "grad_match" => {
+            let (total, hw, h, w) = (p(0)?, p(1)?.max(1), p(2)?, p(3)?);
+            f(10 * (total / hw) * grad_match_pairs(h, w) + 3 * total, 24 * total + 4 * (total / hw))
+        }
+        // d = m*(w_r r + w_g g + w_t t + w_p p + w_0): 9 ops; five reads and a write, five weights per image.
+        "ssi_grad" => f(9 * p(0)?, 24 * p(0)? + 20 * (p(0)? / p(1)?.max(1))),
         // params [numel, out_off, n_wg] — same work as gradnorm_sq, spread over
         // n_wg workgroups; the n_wg partials it writes are the only extra bytes.
         "gradnorm_part" => f(2 * p(0)?, 4 * p(0)? + 4 * p(2)?),
@@ -1999,6 +2023,34 @@ mod tests {
         let delta = cost("lora_delta_rows", &[6, 5, 4, 2, 15, 5, 3], 30);
         assert_eq!(delta.flops, 240);
         assert_eq!(delta.bytes, 4 * (6 * 4 + 2 * 4 * 5 + 2 * 6 * 5));
+    }
+
+    /// ZipDepth's objective: scale-and-shift-invariant MSE plus multi-scale gradient matching, four elementwise
+    /// kernels over `N` images of `hw` pixels (`total = N * hw`).
+    #[test]
+    fn depth_loss_costs() {
+        // ssi_moments [total, hw]: m*p, (m*p)*p, (m*p)*t, m*t = 4 flops a pixel; reads p, t, m and writes five
+        // moment planes = 8 words.
+        let mo = cost("ssi_moments", &[24, 12], 24);
+        assert_eq!((mo.flops, mo.bytes), (4 * 24, 32 * 24));
+        // ssi_resid: r = m*(s*p + b - t) is 4 flops, the 0.5 r^2 term 2 more; reads p, t, m, writes r and the term,
+        // plus the (s, b) pair of each of the N = 2 images.
+        let re = cost("ssi_resid", &[24, 12], 24);
+        assert_eq!((re.flops, re.bytes), (6 * 24, 20 * 24 + 8 * 2));
+        // grad_match [total, hw, h, w] on N = 1, 3 x 4: pairs a neighbour grid has are 17 at scale 0, 4 at scale 1
+        // (step 2: a 2 x 2 grid), none above. Each pair costs both endpoints' gather (valid-product, difference,
+        // sign, accumulate) and the owning endpoint's |d| and term accumulate: 10 flops. Every pixel then scales
+        // its three outputs by the image coefficient: 3 flops. Counted with every difference valid.
+        let gm = cost("grad_match", &[12, 12, 3, 4], 12);
+        assert_eq!(gm.flops, 10 * (17 + 4) + 3 * 12);
+        assert_eq!(gm.bytes, 24 * 12 + 4);
+        // Two images cost twice the pairs and the coefficient of each.
+        let gm2 = cost("grad_match", &[24, 12, 3, 4], 24);
+        assert_eq!((gm2.flops, gm2.bytes), (2 * 10 * 21 + 3 * 24, 24 * 24 + 4 * 2));
+        // ssi_grad: m*(w_r r + w_g g + w_t t + w_p p + w_0) is 4 multiplies, 4 adds and the mask: 9 flops; reads p,
+        // t, m, r, g, writes the gradient, plus five weights per image.
+        let gr = cost("ssi_grad", &[24, 12], 24);
+        assert_eq!((gr.flops, gr.bytes), (9 * 24, 24 * 24 + 20 * 2));
     }
 
     #[test]
