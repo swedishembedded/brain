@@ -19,33 +19,36 @@ head).
   manifest.json                    # base-config SHA-256 + per-file SHA-256 + expert list
 ```
 
-## `brain federated` subcommands
+## The federated actions of `samples/models/toymoe`
 
-- `split <base.safetensors> <dir>` — vertical split into shared + per-expert shards
-  with a hash-verified manifest.
-- `verify <dir>` — re-hash every file and confirm the shared config matches the
-  manifest's base hash (rejects tampering / wrong base).
-- `merge <dir> --out <full.safetensors>` — reassemble a shard dir into one checkpoint.
-- `assemble <base_dir> [overlay_dir ...] --out <full.safetensors>` — overlay expert
-  (or shared) shards onto a base, **last-wins** per expert id, verifying all
-  overlays share the base config hash.
-- `train-expert --base <B> --expert E --out <dir>` — train one expert against a
-  frozen shared backbone, leaving the backbone and every other expert
+- `split --weights <base.safetensors> --dest <dir>`: vertical split into shared +
+  per-expert shards with a hash-verified manifest.
+- `verify --dir <dir>`: re-hash every file and confirm the shared config matches
+  the manifest's base hash (rejects tampering / wrong base).
+- `merge --dir <dir> --dest <full.safetensors>`: reassemble a shard dir into one
+  checkpoint.
+- `assemble --base <base_dir> --overlays <dir>,<dir> --dest <full.safetensors>`:
+  overlay expert (or shared) shards onto a base, **last-wins** per expert id,
+  verifying all overlays share the base config hash.
+- `train_expert --weights <B> --expert E --dest <dir>`: train one expert against
+  a frozen shared backbone, leaving the backbone and every other expert
   bit-for-bit unchanged, and write an overlay shard dir ready for `assemble`.
-  This is the "train experts separately" worker step — run it one expert at a
-  time, in separate sessions, only needing the common base.
+  This is the "train experts separately" worker step: run it one expert at a
+  time, in separate sessions, only needing the common base. It reports every
+  step and stops between steps when cancelled.
 
 ## Train experts separately, then assemble
 
 ```bash
-brain train --steps 2000 --out base.safetensors              # common base (resumes if it exists)
-brain federated split base.safetensors out/base              # base shard set
-brain federated train-expert --base base.safetensors --expert 0 --out out/exp0 --steps 500
-brain federated train-expert --base base.safetensors --expert 1 --out out/exp1 --steps 500
-brain federated assemble out/base out/exp0 out/exp1 --out out/final.safetensors
+T=target/release/sample-models-toymoe
+$T train --steps 2000 --save base.safetensors --seed $RANDOM      # common base
+$T split --weights base.safetensors --dest out/base               # base shard set
+$T train_expert --weights base.safetensors --expert 0 --dest out/exp0 --steps 500 --seed $RANDOM
+$T train_expert --weights base.safetensors --expert 1 --dest out/exp1 --steps 500 --seed $RANDOM
+$T assemble --base out/base --overlays out/exp0,out/exp1 --dest out/final.safetensors
 ```
 
-`train-expert` takes `--activations keep|recompute` (what the backward keeps of
+`train_expert` takes `--activations keep|recompute` (what the backward keeps of
 the forward; absent keeps every layer's activations).
 
 Each `train-expert` runs independently and only needs `base.safetensors`, so you

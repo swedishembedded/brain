@@ -6,7 +6,7 @@
 //! `brain <verb> <architecture>` and `brain <architecture> <verb>` are the
 //! same command ([`resolve::dispatch`]) - the architecture is chosen by
 //! whichever token names one of `brain_arch::ARCHS`, in either position.
-//! Infrastructure commands (`data`, `devices`, `npu`, `federated`, `bench`,
+//! Infrastructure commands (`data`, `devices`, `npu`, `bench`,
 //! `perf`, `forecast`, `caps`, `serve`, `flops`) are matched
 //! first and never go through that resolver.
 //!
@@ -19,7 +19,6 @@ mod decide_cli;
 mod devices_api;
 mod devices_cli;
 mod doctor_cli;
-mod federated_cli;
 mod flops_cli;
 mod forecast_cli;
 mod label_cli;
@@ -279,11 +278,11 @@ TOY ARCHITECTURES (brain's own, no upstream reference; samples/models/toymoe, to
   brain toymoe eval --weights F [--samples N]
   brain toypid <train|rollout|profile> ...   # the WebGPU browser demo's model
 
-FEDERATED MoE (train experts separately, then assemble)
-  brain federated split    <base.safetensors> <out_dir>
-  brain federated verify   <dir>
-  brain federated merge     <dir> --out <full.safetensors>
-  brain federated assemble  <base_dir> [overlay_dir ...] --out <full.safetensors>
+FEDERATED MoE (train experts separately, then assemble: actions of samples/models/toymoe)
+  sample-models-toymoe split --weights base.safetensors --dest shards/
+  sample-models-toymoe train_expert --weights base.safetensors --expert 0 --dest exp0/ [--steps N]
+  sample-models-toymoe assemble --base shards/ --overlays exp0/,exp1/ --dest final.safetensors
+  sample-models-toymoe <merge|verify> ...
 
 BENCHMARK SUITE (architecture evaluation)
   brain bench [<name>] [--seed S]          # run all benchmarks, or one by name
@@ -549,7 +548,6 @@ EXAMPLES
   brain gpt2 generate --weights out/gpt2.safetensors --prompt \"12+7=\" --max-new 8
   brain toymoe train --steps 2000 --save moe.safetensors
   brain toymoe generate --weights moe.safetensors --prompt 1,2,3,4 --max-new 64
-  brain federated split moe.safetensors out/shards && brain federated verify out/shards
 
 Or drive everything via the Makefile:  make gpt/calculator/data gpt/calculator/train gpt/calculator/eval
 ";
@@ -1661,7 +1659,6 @@ fn main() {
         Some("devices") => devices_cli::run_devices(&argv[2..]),
         Some("doctor") => std::process::exit(doctor_cli::run_doctor(&argv[2..])),
         Some("npu") => npu_cli::run_npu(&argv[2..]),
-        Some("federated") => federated_cli::run_federated(&argv[2..]),
         Some("flops") => flops_cli::run_flops(&argv[2..]),
         Some("bench") => run_bench(&argv[2..]),
         Some("perf") => perf_cli::run_perf(&argv[2..]),
@@ -1688,7 +1685,7 @@ fn main() {
     // returning normally never reaches `drain_before_exit`'s `hard_exit`
     // unless something calls it, so falling through to a bare return here
     // would skip the fix entirely for every subcommand above that does not
-    // exit itself, e.g. `data`/`npu`/`federated`/`bench`).
+    // exit itself, e.g. `data`/`npu`/`bench`).
     drain_before_exit(0);
 }
 

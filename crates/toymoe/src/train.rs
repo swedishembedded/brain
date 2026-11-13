@@ -1059,12 +1059,21 @@ pub struct ExpertTrainArgs {
 /// Train one expert against an immutable shared backbone, starting from `base`.
 /// Writes a full updated `.safetensors` to `out`; the backbone and every other
 /// expert are left bit-for-bit unchanged. This is the federated worker step:
-/// load the common base, train your expert, return its shard.
-pub fn train_expert(args: ExpertTrainArgs) -> Result<(), String> {
+/// load the common base, train your expert, return its shard. `on_step(step,
+/// loss)` sees every step and stops the run by returning false; nothing is
+/// written then.
+pub fn train_expert(args: ExpertTrainArgs, on_step: &mut dyn FnMut(u32, f32) -> bool) -> Result<ExpertTrained, String> {
+    if !std::path::Path::new(&args.base_weights).is_file() {
+        return Err(format!("{}: no such checkpoint", args.base_weights));
+    }
     let c = checkpoint::load(&args.base_weights);
     let cfg = cfg_from_json(&c.header["config"]);
-    assert!(args.t <= cfg.block_size, "T must be <= block_size");
-    assert!(args.expert < cfg.n_experts, "expert {} >= n_experts {}", args.expert, cfg.n_experts);
+    if args.t > cfg.block_size {
+        return Err(format!("block {} is longer than the checkpoint's {}", args.t, cfg.block_size));
+    }
+    if args.expert >= cfg.n_experts {
+        return Err(format!("expert {} does not exist: the checkpoint has {}", args.expert, cfg.n_experts));
+    }
     let init = c.by_role("");
     let mut trainer = Trainer::new(cfg.clone(), args.b, args.t, &init);
     if let Some(policy) = args.saved {
@@ -1074,6 +1083,7 @@ pub fn train_expert(args: ExpertTrainArgs) -> Result<(), String> {
     let (corpus, _table) = corpus_and_table(20_000, cfg.vocab, CORPUS_SEED);
     let mut rng = args.seed.max(1) ^ 0x9E3779B97F4A7C15;
     let tt = args.t as usize;
+    let (mut first, mut last) = (None, 0.0f32);
     for step in 1..=args.steps {
         let (mut xs, mut ys) = (Vec::new(), Vec::new());
         for _ in 0..args.b {
@@ -1087,13 +1097,21 @@ pub fn train_expert(args: ExpertTrainArgs) -> Result<(), String> {
         trainer.backward();
         trainer.freeze_grads_except_expert(args.expert); // freeze the shared backbone
         trainer.adamw_step(step, args.lr, 0.0, MOE_ADAM, None, 1.0); // wd=0 keeps frozen params fixed
-        if step == 1 || step % 50 == 0 || step == args.steps {
-            println!("expert {} | step {:5} | loss {:.4}", args.expert, step, loss);
+        first.get_or_insert(loss);
+        last = loss;
+        if !on_step(step, loss) {
+            return Err(format!("cancelled after step {step}"));
         }
     }
     trainer.save(&args.out);
-    println!("saved expert-{} checkpoint {}", args.expert, args.out);
-    Ok(())
+    Ok(ExpertTrained { initial_loss: first.unwrap_or(last), final_loss: last })
+}
+
+/// What [`train_expert`] measured.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExpertTrained {
+    pub initial_loss: f32,
+    pub final_loss: f32,
 }
 
 fn save_weights(trainer: &Trainer, cfg: &Config, path: &str) {

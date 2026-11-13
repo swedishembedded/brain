@@ -41,12 +41,14 @@ baseline decoder instead, use `brain gpt2 …`.
 
 ### Federated / sharded training
 
+These are actions of the sample program (`samples/models/toymoe`):
+
 ```bash
-brain federated split         <base.safetensors> <out_dir>
-brain federated verify        <dir>
-brain federated merge         <dir> --out <full.safetensors>
-brain federated assemble      <base_dir> [overlay_dir ...] --out <full.safetensors>
-brain federated train-expert  --base B --expert E --out DIR --steps N
+sample-models-toymoe split         --weights base.safetensors --dest DIR
+sample-models-toymoe verify        --dir DIR
+sample-models-toymoe merge         --dir DIR --dest full.safetensors
+sample-models-toymoe assemble      --base DIR --overlays DIR,DIR --dest full.safetensors
+sample-models-toymoe train_expert  --weights B --expert E --dest DIR --steps N
 ```
 
 Each expert spans every layer, so a shard can be trained independently by a

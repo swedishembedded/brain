@@ -1017,7 +1017,6 @@ dependencies = [
  "brain-events",
  "brain-fastvlm",
  "brain-fcbench",
- "brain-federated",
  "brain-fincast",
  "brain-florence2",
  "brain-flux1",
@@ -1078,7 +1077,6 @@ dependencies = [
  "brain-t5encoder",
  "brain-testutil",
  "brain-timesfm3",
- "brain-toymoe",
  "brain-toypid",
  "brain-trace",
  "brain-trainjob",
@@ -6996,8 +6994,13 @@ dependencies = [
 name = "sample-models-toymoe"
 version = "5.1.0"
 dependencies = [
+ "brain-capability",
+ "brain-data",
+ "brain-federated",
  "brain-invoke",
+ "brain-model",
  "brain-toymoe",
+ "serde_json",
 ]
 
 [[package]]
