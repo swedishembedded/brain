@@ -97,6 +97,25 @@ fn a_readback_inside_a_recording_is_refused() {
     let _ = g.read(&a, 4);
 }
 
+/// A recording an unwind passes through is abandoned with its guard: the handle reads, waits and records again. (A card
+/// refusing an allocation while a step is being built unwinds through the recording; without the guard every later call
+/// on the handle failed with "a tape is being recorded" until the process restarted.)
+#[test]
+fn a_recording_an_unwind_passes_through_leaves_the_handle_usable() {
+    let _s = serial();
+    let g = gpu();
+    let a = g.storage_init("a", &[1.0, 2.0, 3.0, 4.0]);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _recording = g.record_tape();
+        panic!("an allocation was refused mid-recording");
+    }));
+    assert!(unwound.is_err());
+    assert_eq!(g.read(&a, 4), vec![1.0, 2.0, 3.0, 4.0], "no recording is left open");
+    g.poll_wait();
+    let finished = g.record_tape();
+    assert!(finished.finish().is_empty(), "a new recording opens and ends normally");
+}
+
 /// The leak counters are process-wide, so the check runs alone in a child process.
 #[test]
 fn a_tape_returns_every_device_object_it_held() {

@@ -215,6 +215,12 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_that_names_no_size_does_not_claim_zero_bytes() {
+        let oom = DeviceOutOfMemory { bytes: 0, what: "a graph launch".to_string(), detail: "out of memory".to_string() };
+        assert_eq!(oom.to_string(), "device out of memory for a graph launch: out of memory");
+    }
+
+    #[test]
     fn a_working_set_larger_than_the_binding_is_inconsistent() {
         let l = MemoryLimits { max_allocation_bytes: 8 << 30, max_binding_bytes: 1 << 30, workspace_bytes: 1 << 20, working_set_bytes: 2 << 30 };
         assert!(!l.is_consistent());
@@ -246,7 +252,7 @@ pub struct MemoryUsage {
 /// happened: [`DeviceOutOfMemory::raise`] writes one line naming the bytes and the allocation before unwinding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceOutOfMemory {
-    /// Bytes the refused allocation asked for.
+    /// Bytes the refused allocation asked for; 0 when the driver does not say (a graph launch).
     pub bytes: u64,
     /// What the allocation was for.
     pub what: String,
@@ -271,6 +277,9 @@ impl DeviceOutOfMemory {
 
 impl std::fmt::Display for DeviceOutOfMemory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.bytes == 0 {
+            return write!(f, "device out of memory for {}: {}", self.what, self.detail);
+        }
         write!(f, "device out of memory allocating {} bytes for {}: {}", self.bytes, self.what, self.detail)
     }
 }

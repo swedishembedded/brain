@@ -418,7 +418,11 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     let began = Instant::now();
     let outcome = fine_tune
         .run_with(&inv.cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64()))))
-        .map_err(|e| format!("train: {e}"))?;
+        .map_err(|e| match e {
+            // A full card is a condition the caller can act on, with nothing wrong in the request.
+            brain::Error::DeviceOutOfMemory { .. } => capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("train: {e}")),
+            e => format!("train: {e}"),
+        })?;
     if outcome.status != brain::FineTuneStatus::Completed {
         return Err("cancelled".into());
     }

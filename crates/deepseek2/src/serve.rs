@@ -680,10 +680,10 @@ impl Engine {
         let at = match self.tapes.iter().position(|(rows, _)| *rows == b) {
             Some(at) => at,
             None => {
-                self.gpu.begin_tape();
+                let recording = self.gpu.record_tape();
                 let s = self.decode_steps(b, cap);
                 self.gpu.submit(&[], &s);
-                let tape = self.gpu.end_tape();
+                let tape = recording.finish();
                 if self.tapes.len() >= MAX_DECODE_TAPES {
                     self.tapes.remove(0);
                 }

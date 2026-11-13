@@ -95,3 +95,4 @@ Format: `- [ ] T### severity - file pointer - required completion gate`.
   in the learning rate. No objective defect found. The one silent factor was the number of records read: a run draws
   `steps * grad_accum * batch` records, 100 by default, so 2400 rollouts at default steps train on 4% of them; the run
   now says so when it opens.
+- [x] T063 P1 - crates/sdk/src/finetune.rs, crates/backend-cuda/src/backend.rs - a device out-of-memory in a chat fine-tune is `Error::DeviceOutOfMemory` (and `[unavailable]` through `brain/train`), not an unwind; a graph launch that runs out of memory after its first graph unwinds with the allocator's typed payload so the scheduler backs off (knowledge #445)

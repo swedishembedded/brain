@@ -345,9 +345,9 @@ impl Qwen35GgufInstance {
             None => {
                 let mut plan = fresh();
                 if self.plans_on.get() {
-                    g.begin_tape();
+                    let recording = g.record_tape();
                     self.issue_round(round, &plan.partner, &plan.pending, &plan.last, &plan.layer_inputs, &plan.ids);
-                    plan.tape = Some(g.end_tape());
+                    plan.tape = Some(recording.finish());
                 }
                 plan
             }

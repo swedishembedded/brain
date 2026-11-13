@@ -195,7 +195,9 @@ SERVING OPTIONS
                          it a job takes its datasets and returns its adapter by file
                          descriptor over D-Bus only.
   --api-keys-out FILE    write {\"openai\":\"sk-brain-…\", …} as JSON, mode 0600
-  --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2)
+  --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2, and
+                         1 more for every 4 rows of --max-batch above 16: the
+                         graph launches of a wide decode batch need that room)
   --admit-deadline-ms N  how long a request may wait to START (be claimed onto a
                          lane) before it is shed with HTTP 429 (default 900000)
   --cold-build-admit-deadline-ms N
@@ -691,7 +693,7 @@ pub fn run_serve(args: &[String]) {
         std::env::var("BRAIN_CONF").ok().and_then(|s| s.parse().ok());
     // D-Bus control surface (`--dbus [--dbus-system] [--dbus-name NAME]`).
     let (mut dbus, mut dbus_system, mut dbus_name) = (false, false, None::<String>);
-    let mut dbus_reserve_gb: u64 = 2; // GB kept free per GPU (headroom for activations)
+    let mut dbus_reserve_gb: Option<u64> = None; // GB kept free per GPU (headroom for activations); unset: sized from --max-batch
     // The one model store everything served reads: the startup catalog scan
     // and every architecture resolver (`--models-dir`, else BRAIN_MODELS_DIR /
     // XDG default; see model_dir::resolve).
@@ -808,7 +810,7 @@ pub fn run_serve(args: &[String]) {
             "--reload" => reload = true,
             "--stop" => do_stop = true,
             "--status" => do_status = true,
-            "--reserve-gb" => dbus_reserve_gb = parsed(args, &mut i, "--reserve-gb"),
+            "--reserve-gb" => dbus_reserve_gb = Some(parsed(args, &mut i, "--reserve-gb")),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
             "--training" => training = true,
             "--artifact-store" => artifact_store = Some(val(args, &mut i, "--artifact-store")),
@@ -1155,6 +1157,24 @@ pub fn run_serve(args: &[String]) {
 /// Returns `serving::Serving`, not a bare `Executor`: the
 /// continuous-learning hot swap needs the CONCRETE `QwenResident` handle
 /// alongside the type-erased one the executor holds - see that type's doc.
+/// GB kept free per card for activations when `--reserve-gb` is not given and the batch is at most [`NARROW_BATCH`] rows.
+const DEFAULT_RESERVE_GB: u64 = 2;
+/// The widest decode batch the default reserve covers.
+const NARROW_BATCH: u32 = 16;
+
+/// The default `--reserve-gb` for a server whose widest decode batch is `max_batch` rows: [`DEFAULT_RESERVE_GB`], and one
+/// more for every 4 rows above [`NARROW_BATCH`]. Measured on Qwen3.8-27B-FP8 on one 96 GB card at `--max-batch 64`, 64
+/// concurrent requests: 2 GB made the scheduler halve its batch down to one row on device out-of-memory failures, 6 GB still
+/// failed five times, 12 GB none; the rule gives 14.
+fn default_reserve_gb(max_batch: u32) -> u64 {
+    DEFAULT_RESERVE_GB + u64::from(max_batch.saturating_sub(NARROW_BATCH).div_ceil(4))
+}
+
+/// The widest decode batch any served family was asked for (0 when none was).
+fn widest_batch(knobs: &serving::ServeKnobs) -> u32 {
+    [knobs.qwen.max_batch, knobs.qwen35.fp32.max_batch, knobs.qwen35.gguf.max_batch.unwrap_or(0), knobs.ricursive.max_batch.unwrap_or(0), knobs.ocr.max_batch.unwrap_or(0)].into_iter().max().unwrap_or(0)
+}
+
 fn build_serving_executor(reserve_gb: u64, models_dir: Option<&Path>, knobs: serving::ServeKnobs) -> serving::Serving {
     let machine = serving::Machine::probe(crate::compute_set());
     let reserved = reserve_gb << 30;
@@ -1204,7 +1224,8 @@ struct RunApis {
     /// long-lived one.
     dbus_addr: Option<String>,
     dbus_name: Option<String>,
-    reserve_gb: u64,
+    /// `--reserve-gb`; `None` sizes it from the widest `--max-batch` ([`default_reserve_gb`]).
+    reserve_gb: Option<u64>,
     models_dir: Option<String>,
     anthropic: Option<Vec<SocketAddr>>,
     openai: Option<Vec<SocketAddr>>,
@@ -1329,7 +1350,12 @@ fn run_apis(a: RunApis) {
     // `--training` is the one switch for every training action, not only
     // `brain/train`'s: without it every surface refuses them.
     let training = a.knobs.train.is_some();
-    let serving::Serving { executor, qwen, qwen35, ricursive } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.knobs);
+    let widest = widest_batch(&a.knobs);
+    let reserve_gb = a.reserve_gb.unwrap_or_else(|| default_reserve_gb(widest));
+    if a.reserve_gb.is_none() && reserve_gb > DEFAULT_RESERVE_GB {
+        eprintln!("brain serve: --max-batch {widest} keeps {reserve_gb} GB free per card for the decode batch's activations and graph launches (--reserve-gb to change it)");
+    }
+    let serving::Serving { executor, qwen, qwen35, ricursive } = build_serving_executor(reserve_gb, models_dir.as_deref(), a.knobs);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("{}", served_models_line(&served, models_dir.as_deref()));
@@ -1576,6 +1602,22 @@ pub(crate) fn query_ram_bytes() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_default_reserve_grows_with_the_decode_batch_only_past_the_narrow_batch() {
+        use super::default_reserve_gb;
+        for narrow in [0, 1, 4, 16] {
+            assert_eq!(default_reserve_gb(narrow), 2, "{narrow} rows");
+        }
+        assert_eq!((default_reserve_gb(17), default_reserve_gb(20), default_reserve_gb(32), default_reserve_gb(64)), (3, 3, 6, 14));
+        assert!(default_reserve_gb(64) >= 12, "12 GB is the least that ran 64 rows of the 27B FP8 without a device out-of-memory failure");
+    }
+
+    #[test]
+    fn a_default_server_asks_for_no_more_than_the_narrow_reserve() {
+        let knobs = serving::ServeKnobs::default();
+        assert_eq!(super::default_reserve_gb(super::widest_batch(&knobs)), 2);
+    }
+
     use super::{surface_choice, unserved_line, SurfaceChoice};
 
     /// With nothing named, `brain serve` is the OpenAI API a local client

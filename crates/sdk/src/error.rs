@@ -122,8 +122,27 @@ pub enum Error {
     /// A local filesystem operation failed (e.g. [`crate::Image::save`]'s
     /// write, or reading a `--adapter`-style LoRA path).
     Io(std::io::Error),
+    /// The device ran out of memory during a run. Nothing is wrong with the request: the run released what it held
+    /// and left its resume state where it was, so repeating it on a card with more room, with a shorter `max_block`
+    /// or with the card's other tenants gone can succeed. `bytes` is what the refused allocation asked for (0 when the
+    /// driver did not say) and `what` what it was for.
+    DeviceOutOfMemory { bytes: u64, what: String, detail: String },
     /// The caller's [`capability::CancelToken`] fired mid-generation.
     Cancelled,
+}
+
+/// Run `f`; a device out-of-memory unwind (the payload a backend raises when an allocation is refused,
+/// [`gpu_core::DeviceOutOfMemory`]) is caught and returned as [`Error::DeviceOutOfMemory`], so a full card is an error a
+/// caller can act on instead of a panic that takes its process down. Any other panic keeps unwinding.
+#[cfg(feature = "device")]
+pub(crate) fn typed_device_oom<R>(f: impl FnOnce() -> Result<R, Error>) -> Result<R, Error> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(payload) => match payload.downcast::<gpu_core::DeviceOutOfMemory>() {
+            Ok(oom) => Err(Error::DeviceOutOfMemory { bytes: oom.bytes, what: oom.what, detail: oom.detail }),
+            Err(other) => std::panic::resume_unwind(other),
+        },
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -141,6 +160,8 @@ impl std::fmt::Display for Error {
             Error::Forecast(e) => write!(f, "{e}"),
             Error::Backend(m) => write!(f, "{m}"),
             Error::Io(e) => write!(f, "{e}"),
+            Error::DeviceOutOfMemory { bytes: 0, what, detail } => write!(f, "the device ran out of memory for {what} ({detail}); the run released its memory: retry on a card with more room, or with a shorter max_block"),
+            Error::DeviceOutOfMemory { bytes, what, detail } => write!(f, "the device ran out of memory allocating {bytes} bytes for {what} ({detail}); the run released its memory: retry on a card with more room, or with a shorter max_block"),
             Error::Cancelled => write!(f, "generation cancelled"),
         }
     }
@@ -222,6 +243,21 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("text_encoder"), "{rendered}");
         assert!(rendered.contains("--dit a"), "{rendered}");
+    }
+
+    /// A full card inside a run is an error the caller can match, with what to do about it; any other panic is not
+    /// swallowed.
+    #[cfg(feature = "device")]
+    #[test]
+    fn a_device_out_of_memory_unwind_becomes_a_typed_error_and_other_panics_stay_panics() {
+        let oom = std::panic::catch_unwind(|| -> Result<(), Error> { gpu_core::DeviceOutOfMemory { bytes: 3 << 30, what: "the activations of a row".to_string(), detail: "out of memory".to_string() }.raise() });
+        let caught = oom.expect_err("the stand-in raises");
+        let err = typed_device_oom::<()>(|| std::panic::resume_unwind(caught)).expect_err("typed");
+        assert!(matches!(&err, Error::DeviceOutOfMemory { bytes, .. } if *bytes == 3 << 30), "{err:?}");
+        assert!(err.to_string().contains("shorter max_block") && err.to_string().contains("the activations of a row"), "{err}");
+        let other = std::panic::catch_unwind(|| typed_device_oom::<()>(|| panic!("a bug"))).expect_err("a bug keeps unwinding");
+        assert_eq!(other.downcast_ref::<&str>().copied(), Some("a bug"));
+        assert_eq!(typed_device_oom(|| Ok(7)).unwrap(), 7);
     }
 
     #[test]

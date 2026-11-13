@@ -2789,6 +2789,22 @@ mod native_facade {
             self.taping.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
+        /// [`Self::begin_tape`] as a guard: the recording ends with [`TapeRecording::finish`], and is abandoned when the
+        /// guard is dropped any other way. A recording that an unwind passes through (a full card refusing an
+        /// allocation while a step is being built is the case that happens) would otherwise stay open on the handle, and
+        /// every later `read`, `poll_wait` or recording on it would fail with "a tape is being recorded" until the
+        /// process restarted.
+        pub fn record_tape(&self) -> TapeRecording<'_> {
+            self.begin_tape();
+            TapeRecording { gpu: self, open: true }
+        }
+
+        /// Drop an open recording and what it recorded, if one is open (nothing recorded has run).
+        pub fn abandon_tape(&self) {
+            self.taping.store(false, std::sync::atomic::Ordering::Relaxed);
+            drop(self.tape.lock().unwrap_or_else(|e| e.into_inner()).take());
+        }
+
         /// While `on`, the vendor library declines every product on this handle, so each is built from the in-house
         /// kernels. A recording that is replayed as a graph sets it around the build: the in-house kernels are the
         /// dispatches a replay runs identically every time.
@@ -3009,6 +3025,29 @@ mod native_facade {
         lane: crate::lane::Lane,
     }
 
+    /// An open recording on a handle ([`Gpu::record_tape`]): [`Self::finish`] ends it and returns the tape; dropped any
+    /// other way (an unwind, an early return) it abandons the recording, so the handle is usable again.
+    pub struct TapeRecording<'g> {
+        pub(super) gpu: &'g Gpu,
+        pub(super) open: bool,
+    }
+
+    impl TapeRecording<'_> {
+        /// Stop recording and return what was recorded.
+        pub fn finish(mut self) -> crate::tape::Tape {
+            self.open = false;
+            self.gpu.end_tape()
+        }
+    }
+
+    impl Drop for TapeRecording<'_> {
+        fn drop(&mut self) {
+            if self.open {
+                self.gpu.abandon_tape();
+            }
+        }
+    }
+
     /// The open pass returned by [`Gpu::pass_scope`]; dropping it ends the
     /// pass and issues anything the backend held for it.
     pub struct PassScope<'a> {
@@ -3067,7 +3106,7 @@ mod native_facade {
 pub use native_facade::{
     adapter_info, backend_name, backend_selected, device_caps, discrete_gpu_count,
     available_gpu_backends, set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, PassScope, ScratchMark,
-    ScratchScope, WeakGpu,
+    ScratchScope, TapeRecording, WeakGpu,
 };
 
 /// Process-wide, monotonic CUDA host-call totals (allocations, individual

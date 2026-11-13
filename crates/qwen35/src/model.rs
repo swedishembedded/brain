@@ -6981,9 +6981,9 @@ impl Qwen35 {
             None => {
                 let inputs = self.alloc_decode_inputs_at(bsz, 1);
                 // Building the step writes the inputs for these rows too (host writes land immediately).
-                g.begin_tape();
+                let recording = g.record_tape();
                 let hidden = self.decode_batch_dispatches(tokens, caches, None, None, Some(&inputs), None);
-                let tape = g.end_tape();
+                let tape = recording.finish();
                 SlotDecodeTape { bsz, fusion, tape, inputs, hidden }
             }
         };
@@ -7002,10 +7002,10 @@ impl Qwen35 {
     pub(crate) fn record_decode_step<R>(&self, tokens: &[u32], caches: &BatchDecodeCaches, tail: impl FnOnce(&DeviceBuffer) -> R) -> (Tape, DecodeInputs, R) {
         let g = &self.gpu;
         let inputs = self.alloc_decode_inputs_at(tokens.len() as u32, self.paged_step_shape(caches).1);
-        g.begin_tape();
+        let recording = g.record_tape();
         let hidden = self.decode_batch_dispatches(tokens, caches, None, None, Some(&inputs), None);
         let out = tail(&hidden);
-        (g.end_tape(), inputs, out)
+        (recording.finish(), inputs, out)
     }
 
     /// [`Self::record_decode_step`] for a speculative verify round: the rows of `verify` (`caches` has one entry per row, a
@@ -7017,10 +7017,10 @@ impl Qwen35 {
         let g = &self.gpu;
         let inputs = self.alloc_decode_inputs_at(tokens.len() as u32, self.paged_step_shape(caches).1);
         let layout = verify.upload(g);
-        g.begin_tape();
+        let recording = g.record_tape();
         let hidden = self.decode_batch_dispatches(tokens, caches, None, Some(verify), Some(&inputs), Some(&layout));
         let out = tail(&hidden);
-        (g.end_tape(), inputs, layout, hidden, out)
+        (recording.finish(), inputs, layout, hidden, out)
     }
 
     /// This stage's operator façade: the one whose steps its own card handle accepts (a step built by another handle's

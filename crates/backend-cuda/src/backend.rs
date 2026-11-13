@@ -124,6 +124,23 @@ fn bound_words(mem: &exec::DeviceMem, off_bytes: u64, len_words: u64) -> u64 {
     if len_words == 0 { avail } else { len_words.min(avail) }
 }
 
+/// What launching graph `at` of a frozen program failing with `error` means. The first graph failing leaves nothing
+/// queued: the program's steps are submitted one by one instead (`false`). A later graph failing cannot be recovered
+/// from, since the earlier ones are already queued and the program cannot be submitted again from its start; a full card
+/// then unwinds with a [`backend_api::DeviceOutOfMemory`] payload, the typed refusal an allocation's failure raises, so
+/// the scheduler that owns the step backs off and recomputes the sequences it carried instead of failing them and
+/// condemning the model. Any other failure at that point is a bug and panics.
+fn refuse_after_launch_failure(at: usize, error: &str) -> bool {
+    if at == 0 {
+        return false;
+    }
+    if error.contains("out of memory") {
+        // The driver does not say how many bytes the launch wanted.
+        backend_api::DeviceOutOfMemory { bytes: 0, what: format!("the launch of graph {at} of a frozen program"), detail: error.to_string() }.raise();
+    }
+    panic!("backend-cuda: launching graph {at} of a frozen program failed after the first was queued: {error}")
+}
+
 /// The 64-bit argument slots for a native kernel's by-value scalars, from the
 /// step's parameter words. A 32-bit scalar is its value zero-extended - the
 /// kernel reads the low four bytes of its slot - and a 64-bit one is its two
@@ -1729,10 +1746,8 @@ impl backend_api::Backend for CudaBackend {
         }
         for (at, exec) in f.execs.iter().enumerate() {
             if let Err(e) = self.ctx.launch_graph(exec) {
-                // Once a graph has been launched the rest of the program cannot be submitted again from its start.
-                assert!(at == 0, "backend-cuda: launching graph {at} of a frozen program failed after the first was queued: {e}");
                 tracing::warn!(reason = %e, "backend-cuda: launching a frozen program failed; submitting its steps one by one");
-                return false;
+                return refuse_after_launch_failure(at, &e);
             }
         }
         self.fence_out(f.touched.iter().map(|(m, w)| (m, *w)));
@@ -2370,6 +2385,18 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn a_launch_that_runs_out_of_memory_after_the_first_graph_unwinds_with_the_typed_refusal() {
+        // The first graph failing is a fallback to step-by-step submission, whatever the reason.
+        assert!(!refuse_after_launch_failure(0, "cuGraphLaunch failed: out of memory"));
+        let payload = std::panic::catch_unwind(|| refuse_after_launch_failure(3, "cuGraphLaunch failed: out of memory")).expect_err("a later graph cannot fall back");
+        let oom = payload.downcast::<backend_api::DeviceOutOfMemory>().expect("the scheduler's payload, not a string panic");
+        assert!(oom.what.contains("graph 3") && oom.detail.contains("out of memory"), "{oom:?}");
+        // Any other failure there is a bug and stays a panic with its message.
+        let other = std::panic::catch_unwind(|| refuse_after_launch_failure(2, "cuGraphLaunch failed: invalid value")).expect_err("a bug");
+        assert!(other.downcast_ref::<String>().is_some_and(|m| m.contains("invalid value")));
+    }
 
     /// The four limits answer four questions, so on a card with real memory they
     /// are four different numbers - and the slab a tiling pipeline aims for stays

@@ -1070,7 +1070,16 @@ impl ChatFineTune {
     /// adapter; it leaves its resume state
     /// ([`ChatFineTuneOutcome::resume_state`]) and running the same fine-tune
     /// again continues it.
-    pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFineTuneOutcome> {
+    ///
+    /// # Errors
+    /// [`Error::DeviceOutOfMemory`] when the device refuses an allocation mid-run (the unwind is caught here: nothing
+    /// above this call sees a panic for a full card).
+    pub fn run_with(&self, cancel: &CancelToken, on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFineTuneOutcome> {
+        crate::error::typed_device_oom(|| self.run_unwinding(cancel, on_progress))
+    }
+
+    /// [`Self::run_with`] before a device out-of-memory unwind is made an error.
+    fn run_unwinding(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFineTuneOutcome> {
         // A named architecture is refused before anything is read.
         let named = self.arch.as_deref().map(crate::study::arch).transpose()?;
         if let Some(arch) = named {

@@ -3785,7 +3785,7 @@ impl Qwen35 {
         let g = &self.gpu;
         // The NVFP4 tier records without vendor-library products (see `Gpu::set_declines_library`).
         self.ops.gpu().set_declines_library(self.moe_nvfp4_active());
-        g.begin_tape();
+        let recording = g.record_tape();
         let hidden = self.decode_layers(&meta, bsz, caches, caches.gqa_cap);
         let out = match head {
             DecodeHead::Greedy => TapeOut::Greedy(self.head_argmax_rows_record(&hidden, bsz)),
@@ -3794,7 +3794,7 @@ impl Qwen35 {
                 TapeOut::TopK { vals, idx, cap }
             }
         };
-        let tape = g.end_tape();
+        let tape = recording.finish();
         self.ops.gpu().set_declines_library(false);
         DecodeTape { tape, meta, bsz, out }
     }
