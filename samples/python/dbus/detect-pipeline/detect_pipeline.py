@@ -9,7 +9,7 @@ image with labeled boxes drawn over the detections - every step over D-Bus, exch
 the image as a file descriptor. Both models are served and scheduled by the same
 residency Executor.
 
-    BRAIN_S3DIT_*=... tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus" -- \
         python3 samples/python/dbus/detect-pipeline/detect_pipeline.py
 """
 from __future__ import annotations

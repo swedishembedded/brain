@@ -59,15 +59,16 @@ The pipeline's image generator: one generated PNG from the resident daemon,
 replacing what used to be two fresh CLI subprocesses per image. Can also be
 run standalone, or used as a readiness probe (`--wait SECONDS`, which is how
 the pipeline script fails in seconds when the daemon comes up without the
-right `BRAIN_*` weight variables, instead of at the first two-minute
+right `--pin` arguments, instead of at the first two-minute
 generation):
 
 ```bash
-BRAIN_FLUX1_DIR=... BRAIN_PULID_DIR=... BRAIN_ARCFACE_DIR=... \
-BRAIN_CLIP_DIR=... BRAIN_BISENET_DIR=... \
-BRAIN_FLUX2_DIT=... BRAIN_FLUX2_VAE=... BRAIN_FLUX2_TE=... \
-BRAIN_FLUX2_TOKENIZER=... BRAIN_FLUX2_ALLOW_NC=1 \
-tools/dbus-session.sh --serve "--dbus" -- \
+BRAIN_FLUX2_ALLOW_NC=1 \
+tools/dbus-session.sh --serve "--dbus \
+    --pin pulid.flux1=... --pin pulid.pulid=... --pin pulid.arcface=... \
+    --pin pulid.clip=... --pin pulid.bisenet=... \
+    --pin flux2.dit=... --pin flux2.vae=... --pin flux2.text_encoder=... \
+    --pin flux2.tokenizer=..." -- \
   python3 samples/shell/imagegen/identity-yolo-pipeline/identity_yolo_gen.py pulid \
     --prompt "a photo of a person in a park" --face portrait.jpg --out img.png
 ```

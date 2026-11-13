@@ -33,5 +33,5 @@ A `RealESRGAN_x4plus.pth` checkpoint in the model store.
 | `<image>` | *required* |
 | `[out]` | `<image>-4x.jpg` |
 | `TILE` (env) | `128` |
-| `BRAIN_DEVICE` (env) | `gpu0`/`gpu1`/`cpu` - CPU handles this fine if the cards are busy |
+| `DEVICE` (env) | `gpu0`/`gpu1`/`cpu`, passed as `--device` - CPU handles this fine if the cards are busy |
 | `BRAIN` (env) | `./target/release/brain` |

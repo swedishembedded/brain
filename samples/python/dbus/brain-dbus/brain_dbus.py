@@ -10,7 +10,8 @@ Run under a private session bus so it needs no system config:
 
     tools/dbus-session.sh --serve "--dbus" -- python3 samples/python/dbus/brain-dbus/brain_dbus.py
 
-With brain's z-image weights exported (``BRAIN_S3DIT_*``) it also generates an image
+With the z-image weights served (the model store, or ``--pin s3dit.ROLE=PATH`` in
+the ``--serve`` arguments) it also generates an image
 over D-Bus; otherwise it runs the no-GPU ``imageops`` path.
 """
 from __future__ import annotations

@@ -5,14 +5,13 @@ imagegen sample that isn't a D-Bus client: a short shell wrapper around
 `brain flux2 edit` and `brain flux2 text2image` (direct CLI invocation, no server involved).
 
 ```bash
-BRAIN_FLUX2_DIT=... BRAIN_FLUX2_VAE=... BRAIN_FLUX2_TE=... BRAIN_FLUX2_TOKENIZER=... \
-  samples/shell/imagegen/portrait-from-refs/portrait_from_refs.sh ~/photos/alice
+samples/shell/imagegen/portrait-from-refs/portrait_from_refs.sh ~/photos/alice
 ```
 
 No device variables: with none given, brain places the DiT, the text encoder
 and the VAE itself - on two cards when the machine has two and they do not fit
 one, on one card when it has one - and prints the placement it chose.
-`BRAIN_DEVICE` / `BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8]` still override it.
+`DEVICE` (`gpu0`, `gpu1`, `cpu`; passed to brain as `--device`) restricts it.
 
 ## What it demonstrates
 
@@ -39,13 +38,15 @@ one, on one card when it has one - and prints the placement it chose.
 
 ## What it needs
 
-Weights from `BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`; brain picks a card with
-room unless `BRAIN_DEVICE` says otherwise.
+Weights from the model store, or named with `--dit`, `--vae`,
+`--text-encoder` and `--tokenizer`; brain picks a card with room unless
+`DEVICE` says otherwise.
 
 ## Options
 
 ```
 portrait_from_refs.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--text-encoder P]
+    [--dit P] [--vae P] [--tokenizer P]
 ```
 
 | flag / env | default | meaning |

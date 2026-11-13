@@ -31,8 +31,7 @@ PPMs and shells out to `ffmpeg` only to mux them.
 ```bash
 # deps: pip install -e brain-py   (jeepney with fd passing)
 # the Wan checkpoint in the model store: brain pull Wan-AI/Wan2.1-T2V-1.3B
-BRAIN_GPU_WAIT_S=1200 \
-tools/dbus-session.sh --serve "--dbus" -- bash -c '
+tools/dbus-session.sh --serve "--gpu-wait-s 1200 --dbus" -- bash -c '
   # a clip you can watch finish: the scripts default to 9 frames at 416x240
   python3 samples/python/videogen/wan/generate_video.py --prompt "a cat walking on a beach" \
       --out cat.mp4
@@ -41,7 +40,7 @@ tools/dbus-session.sh --serve "--dbus" -- bash -c '
   python3 samples/python/videogen/wan/cancel_generation.py'
 ```
 
-`BRAIN_GPU_WAIT_S` is not optional on a GPU: one Wan forward is the whole
+`--gpu-wait-s` is not optional on a GPU: one Wan forward is the whole
 30-block stack in a single submit, which at any real size is far past the
 backend's 30 s deadlock guard. `brain wan t2v` raises it automatically;
 `brain serve` does not, because the same process may be serving models for
@@ -106,10 +105,11 @@ which the host cannot interrupt.
 
 ## What it needs
 
-* **Weights**: all four `BRAIN_WAN_{DIT,VAE,T5,TOKENIZER}` env vars, or a
-  `brain pull Wan-AI/Wan2.1-T2V-1.3B` auto-fetch when none are set (see
-  below). Without them the model is discoverable but not served, and both
-  scripts print which vars are missing rather than hanging.
+* **Weights**: the Wan checkpoint in the model store
+  (`brain pull Wan-AI/Wan2.1-T2V-1.3B`), or the four `wan` roles (`dit`,
+  `vae`, `text_encoder`, `tokenizer`) named with `--pin wan.ROLE=PATH` in the
+  `--serve` arguments. Without them the model is discoverable but not served,
+  and both scripts print which pins are missing rather than hanging.
 * `pip install -e brain-py` (jeepney with fd passing).
 * `ffmpeg` on PATH to mux the PPM frames into `cat.mp4` - without it,
   `generate_video.py` still succeeds and prints the numbered PPMs plus the

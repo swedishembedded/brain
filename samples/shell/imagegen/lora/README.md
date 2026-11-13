@@ -14,8 +14,7 @@ invocations (no D-Bus, no server) of `brain label`, `brain flux2 lora_train`,
 A folder of images in, a LoRA adapter out, in two steps:
 
 ```bash
-BRAIN_FLUX2_DIT=... BRAIN_FLUX2_VAE=... BRAIN_FLUX2_TE=... BRAIN_FLUX2_TOKENIZER=... \
-  samples/shell/imagegen/lora/train_lora.sh <image-dir> [adapter.brain] [trigger phrase]
+samples/shell/imagegen/lora/train_lora.sh <image-dir> [adapter.brain] [trigger phrase]
 ```
 
 Step 1 captions every image with a vision-language model and writes
@@ -68,8 +67,7 @@ model - the way to see what the adapter is actually contributing), `VARIANT`,
 A few photographs of one person in, a LoRA that knows their face out:
 
 ```bash
-BRAIN_SCRFD_DIR=... BRAIN_FLUX2_DIT=... BRAIN_FLUX2_VAE=... BRAIN_FLUX2_TE=... BRAIN_FLUX2_TOKENIZER=... \
-  samples/shell/imagegen/lora/train_identity_lora.sh <photo-dir> "<their name>"
+samples/shell/imagegen/lora/train_identity_lora.sh <photo-dir> "<their name>"
 ```
 
 This is `train_lora.sh` specialised for the case where the concept is a
@@ -108,11 +106,13 @@ Options (env only): `OUT` (adapter path), `SEED`, `STEPS`, `RANK`, `LR`, `SIZE`,
 
 ## What it needs
 
-- `train_lora.sh` / `run_lora.sh`: `BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`, plus
-  the captioner's own weights (fetched on demand or pointed at with
-  `--weights`).
-- `train_identity_lora.sh`: additionally `BRAIN_SCRFD_DIR` (the directory
-  holding `scrfd_10g_bnkps.onnx`) for the face detector, and
-  `$BRAIN_QWEN3VL_WEIGHTS` (default) for the captioner.
+- `train_lora.sh` / `run_lora.sh`: the FLUX.2 weights, plus (for training)
+  the captioner's own. All come from the model store; flags before the
+  positional arguments name one outright: `--dit`, `--vae`, `--text-encoder`,
+  `--tokenizer` and, for training, `--captioner DIR`.
+- `train_identity_lora.sh`: additionally the SCRFD face detector
+  (`scrfd_10g_bnkps.onnx`), from the store or `--scrfd PATH`.
+- `run_lora.sh` reads `DEVICE` (`gpu0`, `gpu1`, `cpu`) and passes it as
+  `--device`.
 
 Direct CLI invocations throughout - no `brain serve`, no D-Bus.

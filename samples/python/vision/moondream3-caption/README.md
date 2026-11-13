@@ -27,7 +27,8 @@ every later call on the same server reuses the resident instance.
 
 ## What it needs
 
-`BRAIN_MOONDREAM3_WEIGHTS` pointing at the checkpoint directory. Input is a
+The model pulled into the model store (above), or the checkpoint directory
+named with `--pin moondream3.dir=DIR` in the `--serve` arguments. Input is a
 binary PPM (P6).
 
 ## Options

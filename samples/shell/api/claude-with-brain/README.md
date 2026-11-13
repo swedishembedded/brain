@@ -37,9 +37,9 @@ every request after is instant.
 - `make build/release` (a `brain` binary).
 - The `claude` CLI on `PATH`.
 - Nothing pre-fetched: point `MODEL` at any `<vendor>/<repo>[-<QUANT>]` your
-  build of brain can serve to use a different model. Set `BRAIN_AUTO_FETCH=0`
-  to require `MODEL` already be resident instead (the pre-auto-fetch
-  behavior) and fail fast rather than fetching.
+  build of brain can serve to use a different model. The script serves with
+  `--autofetch`; pass `--no-autofetch` to require `MODEL` already be pulled
+  (`brain pull MODEL`) and fail fast rather than fetching.
 
 ## Options
 
@@ -48,6 +48,7 @@ every request after is instant.
 | `MODEL` | `Qwen/Qwen3-0.6B` |
 | `PORT` | `8787` |
 | `BRAIN` | `./target/release/brain` |
+| `--no-autofetch` (flag) | do not download `MODEL` on demand; it must already be in the model store |
 | `--mock` (flag) | serve the weight-free mock model instead (also skips the `claude`-installed check under `--check`) |
 
 `--check` runs the same preflight -> launch -> key-capture sequence, makes

@@ -77,13 +77,11 @@ class Server:
         self.log = rundir / "server.log"
         self.keys = rundir / "keys.json"
         ready = rundir / "ready"
-        env = dict(os.environ)
         argv = [brain, "serve", "--openai", str(port), "--api-keys-out", str(self.keys), "--ready-file", str(ready)]
         if mock:
-            argv.append("--mock")
-            env.setdefault("BRAIN_DEVICE", "cpu")
+            argv += ["--mock", "--device", "cpu"]
         with open(self.log, "wb") as f:
-            self.proc = subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, env=env)
+            self.proc = subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT)
         for _ in range(60):
             if ready.exists():
                 break

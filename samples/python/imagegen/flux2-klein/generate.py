@@ -9,9 +9,9 @@ denoise step (printed as a step counter), then the generated image arrives as
 a `blob` frame whose payload is an out-of-band memfd (HWC f32 `[0,1]`), saved
 here as a binary PPM.
 
-Run under a private session bus (weights via env - see the README):
+Run under a private session bus (weights from the model store, or `--pin flux2.ROLE=PATH` in the
+`--serve` arguments - see the README):
 
-          BRAIN_FLUX2_DIT=… BRAIN_FLUX2_VAE=… BRAIN_FLUX2_TE=… BRAIN_FLUX2_TOKENIZER=… \
       tools/dbus-session.sh --serve "--dbus" -- \
       python3 samples/python/imagegen/flux2-klein/generate.py --prompt "a red fox in the snow"
 
@@ -90,7 +90,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            skip(f"{args.model!r} not served (models: {models}); set BRAIN_FLUX2_*")
+            skip(f"{args.model!r} not served (models: {models}); add the FLUX.2 weights to the model store or pin flux2.dit/vae/text_encoder/tokenizer")
         print(f"text2image {args.width}x{args.height} ({args.variant}):")
         return run_streaming(brain, args.model, "text2image", params, args.out)
 

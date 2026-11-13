@@ -22,7 +22,7 @@ in the `--serve` arguments names one outright):
           --lyrics "$(printf '[verse]\\nquiet morning light\\n[chorus]\\nhold on to this feeling\\n')" \\
           --out song.wav
 
-`BRAIN_DEVICE=cpu` is required on a machine whose GPU cannot hold the
+`--device cpu` is required on a machine whose GPU cannot hold the
 Global LLM's ~3.28 GB embedding/`lm_head` tensors as single buffers (an
 Intel integrated GPU, for instance) - see this repo's own roadmap ledger
 for the measured diagnosis. Whole-checkpoint residency does not fit on
@@ -77,7 +77,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            skip(f"{args.model!r} not served (models: {models}); set the six BRAIN_MINIMAXMUSIC3_* env vars")
+            skip(f"{args.model!r} not served (models: {models}); add the six minimaxmusic3 roles to the model store or pin them")
         print(f"generate {args.caption!r}:")
         t0 = time.monotonic()
 

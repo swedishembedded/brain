@@ -12,7 +12,8 @@ tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/dbus/brain-dbus/brain_dbus.py
 ```
 
-With brain's z-image weights exported (`BRAIN_S3DIT_*`) it also streams an
+With the z-image weights served (model store, or `--pin s3dit.ROLE=PATH`
+in the `--serve` arguments) it also streams an
 image generation; otherwise it runs the no-GPU `imageops` path only.
 
 ## What it demonstrates
@@ -27,7 +28,7 @@ image generation; otherwise it runs the no-GPU `imageops` path only.
 ## What it needs
 
 - `pip install -e brain-py` (jeepney with fd passing).
-- `BRAIN_S3DIT_*` exported, to exercise the streaming generation demo; without
+- The z-image (`s3dit`) weights served, to exercise the streaming generation demo; without
   it that demo prints a note and is skipped, everything else still runs.
 
 ## The interface

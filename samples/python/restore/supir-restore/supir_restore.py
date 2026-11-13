@@ -16,7 +16,8 @@ snapped to a 64px multiple) - read back from the result rather than assumed.
     tools/dbus-session.sh --serve "--dbus" -- \
         python3 samples/python/restore/supir-restore/supir_restore.py --image degraded.ppm
 
-Set `BRAIN_LLAVA_WEIGHTS` too (and leave `--caption` unset) to auto-caption the
+Serve LLaVA too (`--pin llava.weights=DIR` in the `--serve` arguments, or the
+model store) and leave `--caption` unset to auto-caption the
 degraded image through LLaVA before restoring it - SUPIR's own `--no_llava`
 default (an explicit `--caption ""` also stays silent, matching upstream).
 

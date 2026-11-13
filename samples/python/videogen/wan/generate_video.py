@@ -17,7 +17,7 @@ want of an encoder.
 
 Run under a private session bus (the checkpoint from the model store -- see the README):
 
-      BRAIN_GPU_WAIT_S=1200 tools/dbus-session.sh --serve "--dbus" -- \
+      tools/dbus-session.sh --serve "--gpu-wait-s 1200 --dbus" -- \
       python3 samples/python/videogen/wan/generate_video.py --prompt "a cat on a beach" \
           --out cat.mp4
 

@@ -55,7 +55,7 @@ Prefer an already-converted local checkpoint instead? Keep it, with its
 | `--input FILE` | *required* - text file to embed (long context welcome) |
 | `--concurrent N` | `1` - issue N identical requests concurrently |
 | `brain serve --max-batch N` | `2` - batched-forward slots per instance |
-| `BRAIN_DEVICE` | unset - which compute is schedulable |
+| `brain serve --device D` | unset - which compute is schedulable |
 
 The benchmark twin of this sample is `make perf/model/lfm` - the same executor
 measured by the brain perf suite (`brain perf run sweep --target

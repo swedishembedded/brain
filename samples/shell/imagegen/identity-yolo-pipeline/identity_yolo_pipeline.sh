@@ -101,12 +101,10 @@ DETECT_INPUT="${DETECT_INPUT:-640}"
 IDENTITY_THRESHOLD="${IDENTITY_THRESHOLD:-0.20}"
 SURVIVE_FLOOR=$((N_TARGET * 8 / 10))       # 80% of N_TARGET must pass the identity gate to trust training
 
-# The served path resolves each of these from the model store on its own now
-# (`resolver_cli::served_assembly`, the same resolver the one-shot CLI uses),
-# so these are overrides rather than the only way to point brain at them: each
-# variable still wins unconditionally for its own role when set. They stay
-# pinned here so a run is reproducible on a box whose store holds something
-# else. `brain pull` still does not fetch FLUX.1/PuLID themselves.
+# Each weight is named to `brain serve` with a `--pin ARCH.ROLE=PATH` (stage
+# 1b) and to the direct CLI calls with a role flag, so a run is reproducible on
+# a box whose model store holds something else. `brain pull` does not fetch
+# FLUX.1/PuLID themselves.
 FLUX1_DIR="${FLUX1_DIR:-$HOME/.local/share/brain/models/black-forest-labs/FLUX.1-dev}"
 PULID_FILE="${PULID_FILE:-$HOME/.local/share/brain/models/guozinan/PuLID/pulid_flux_v0.9.1.safetensors}"
 ARCFACE_DIR="${ARCFACE_DIR:-$HOME/.local/share/brain/models/DIAMONIK7777/antelopev2}"
@@ -125,8 +123,9 @@ FLUX2_TE="${FLUX2_TE:-$HOME/.local/share/brain/models/Qwen/Qwen3-8B}"
 FLUX2_TOKENIZER="${FLUX2_TOKENIZER:-$HOME/.local/share/brain/models/Qwen/Qwen3-8B/tokenizer.json}"
 FLUX2_VARIANT="${FLUX2_VARIANT:-klein-9b}"  # must match FLUX2_DIT's own weights (klein_9b needs Qwen3-8B, not -4B)
 
-export BRAIN_FLUX1_DIR="$FLUX1_DIR" BRAIN_PULID_DIR="$PULID_FILE" BRAIN_ARCFACE_DIR="$ARCFACE_DIR" \
-       BRAIN_SCRFD_DIR="$ARCFACE_DIR" BRAIN_CLIP_DIR="$CLIP_DIR" BRAIN_BISENET_DIR="$BISENET_DIR"
+# The antelopev2 release holds both detectors the direct CLI calls below use.
+ARCFACE_WEIGHTS="$ARCFACE_DIR/glintr100.onnx"
+SCRFD_WEIGHTS="$ARCFACE_DIR/scrfd_10g_bnkps.onnx"
 
 PY_TOOLS="$OUT_DIR/pytoolkit.py"
 
@@ -174,8 +173,6 @@ YOLO_COCO_WEIGHTS="$(find "$YOLOV8_COCO_DIR" -name '*.safetensors' | head -1)"
 
 log "Stage 1b: resident serving daemon"
 
-export BRAIN_FLUX2_DIT="$FLUX2_DIT" BRAIN_FLUX2_VAE="$FLUX2_VAE" BRAIN_FLUX2_TE="$FLUX2_TE" BRAIN_FLUX2_TOKENIZER="$FLUX2_TOKENIZER"
-
 SERVE_LOG="$OUT_DIR/brain-serve.log"
 SERVE_READY="$OUT_DIR/brain-serve.ready"
 SERVE_PID="" SERVE_BACKEND=""
@@ -207,7 +204,14 @@ serve_for() {
   # generation - staging buffers, upload/download scratch - exceeds the
   # steady-state resident figure the estimate is measured from. 3 GiB of
   # headroom is what stopped it in practice on this hardware.
-  "$BRAIN" serve --dbus --reserve-gb "${SERVE_RESERVE_GB:-3}" --ready-file "$SERVE_READY" > "$SERVE_LOG" 2>&1 &
+  local pins
+  case "$want" in
+    pulid) pins=(--pin "pulid.flux1=$FLUX1_DIR" --pin "pulid.pulid=$PULID_FILE" --pin "pulid.arcface=$ARCFACE_WEIGHTS"
+                        --pin "pulid.clip=$CLIP_DIR" --pin "pulid.bisenet=$BISENET_DIR") ;;
+    *)            pins=(--pin "flux2.dit=$FLUX2_DIT" --pin "flux2.vae=$FLUX2_VAE" --pin "flux2.text_encoder=$FLUX2_TE"
+                        --pin "flux2.tokenizer=$FLUX2_TOKENIZER") ;;
+  esac
+  "$BRAIN" serve --dbus "${pins[@]}" --reserve-gb "${SERVE_RESERVE_GB:-3}" --ready-file "$SERVE_READY" > "$SERVE_LOG" 2>&1 &
   SERVE_PID=$!
   for _ in $(seq 1 300); do
     [ -e "$SERVE_READY" ] && break
@@ -216,7 +220,7 @@ serve_for() {
   done
   [ -e "$SERVE_READY" ] || die "brain serve --dbus never became ready - see $SERVE_LOG"
   python3 "$GEN_CLIENT" "$want" --wait 60 || \
-    die "brain serve --dbus does not serve '$want' - check its BRAIN_* weight variables above. See $SERVE_LOG"
+    die "brain serve --dbus does not serve '$want' - check the --pin arguments above. See $SERVE_LOG"
   SERVE_BACKEND="$want"
 }
 
@@ -236,7 +240,7 @@ BRAIN = os.environ["BRAIN"]
 def arcface_embed(img_path):
     out = img_path + ".arcembed.bin"
     try:
-        subprocess.run([BRAIN, "arcface", "embed", "--in", f"image={img_path}", "--out", f"embedding={out}"],
+        subprocess.run([BRAIN, "arcface", "embed", "--weights", os.environ["ARCFACE_WEIGHTS"], "--in", f"image={img_path}", "--out", f"embedding={out}"],
                         capture_output=True, text=True, timeout=120)
         if not os.path.exists(out):
             return None
@@ -263,7 +267,7 @@ def cmd_save_ref_embed(argv):
 
 def cmd_face_count(argv):
     """-> 'N x1 y1 x2 y2' for the largest face, or 'NONE'."""
-    r = subprocess.run([BRAIN, "scrfd", "detect", "--in", f"image={argv[0]}", "--max_faces", "16"],
+    r = subprocess.run([BRAIN, "scrfd", "detect", "--weights", os.environ["SCRFD_WEIGHTS"], "--in", f"image={argv[0]}", "--max_faces", "16"],
                         capture_output=True, text=True, timeout=120)
     faces = []
     for line in r.stdout.splitlines():
@@ -309,6 +313,7 @@ def cmd_detect_verify(argv):
     weights, img, conf, inp, ref, name, thr, out_json = argv[:8]
     r = subprocess.run([BRAIN, "yolov8", "detect", "--weights", weights, "--image", img,
                         "--conf", conf, "--iou", "0.45", "--input", inp,
+                        "--components", f"arcface.weights={os.environ['ARCFACE_WEIGHTS']}",
                         "--identity-ref", ref, "--identity-name", name, "--identity-threshold", thr, "--json"],
                        capture_output=True, text=True, timeout=600)
     dets = []
@@ -387,7 +392,7 @@ if __name__ == "__main__":
     COMMANDS[sys.argv[1]](sys.argv[2:])
 PY
 
-pytool() { BRAIN="$BRAIN" python3 "$PY_TOOLS" "$@"; }
+pytool() { BRAIN="$BRAIN" ARCFACE_WEIGHTS="$ARCFACE_WEIGHTS" SCRFD_WEIGHTS="$SCRFD_WEIGHTS" python3 "$PY_TOOLS" "$@"; }
 
 # ============================================================= stage 2: source photo
 

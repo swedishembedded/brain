@@ -59,6 +59,9 @@
 #   --lora-scale <s>        its strength, default 0.5 - see above, start low
 #   --text-encoder <path>   swap the encoder: an HF directory, or a single
 #                           .safetensors/.gguf file
+#   --dit/--vae/--tokenizer <path>
+#                           the other FLUX.2 weights; every weight not named
+#                           comes from the model store
 #   --                      end of flags (a count may follow the directory)
 #
 # Every flag also has an environment variable of the same name in caps
@@ -69,18 +72,21 @@
 # long edge; 0 = each at its own resolution), SIZE (WxH, default mode only),
 # POSE, VARIANT, PRECISION, BRAIN.
 #
-# Weights come from BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}; brain picks a card
-# with room unless BRAIN_DEVICE says otherwise.
+# Weights come from the model store unless a flag names one; brain picks a card
+# with room unless DEVICE (gpu0/gpu1/cpu, passed as --device) says otherwise.
 
 set -euo pipefail
 
-USAGE='usage: portrait_from_refs.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--text-encoder P]'
+USAGE='usage: portrait_from_refs.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--text-encoder P] [--dit P] [--vae P] [--tokenizer P]'
 D=""; N=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --adapter)      ADAPTER="${2:?--adapter needs a path}"; shift 2 ;;
     --lora-scale)   LORA_SCALE="${2:?--lora-scale needs a number}"; shift 2 ;;
     --text-encoder) TEXT_ENCODER="${2:?--text-encoder needs a path}"; shift 2 ;;
+    --dit)          DIT="${2:?--dit needs a path}"; shift 2 ;;
+    --vae)          VAE="${2:?--vae needs a path}"; shift 2 ;;
+    --tokenizer)    TOKENIZER="${2:?--tokenizer needs a path}"; shift 2 ;;
     -h|--help)      echo "$USAGE"; exit 0 ;;
     --)             shift; continue ;;
     -*)             echo "unknown flag $1" >&2; echo "$USAGE" >&2; exit 1 ;;
@@ -151,13 +157,16 @@ if [ -n "${ADAPTER:-}" ]; then
   fi
 fi
 [ -n "${TEXT_ENCODER:-}" ] && ARGS+=(--text-encoder "$TEXT_ENCODER")
+[ -n "${DIT:-}" ] && ARGS+=(--dit "$DIT")
+[ -n "${VAE:-}" ] && ARGS+=(--vae "$VAE")
+[ -n "${TOKENIZER:-}" ] && ARGS+=(--tokenizer "$TOKENIZER")
 
 # One seed per run: unset, a random one is drawn; each result adds 1 to it.
 SEED="${SEED:-$(( (RANDOM << 15) ^ RANDOM ))}"
 echo "portrait_from_refs: seeds $SEED.. (SEED=$SEED reproduces this run)" >&2
 
 for i in $(seq 1 "$N"); do
-  "$BRAIN" flux2 "$ACTION" \
+  "$BRAIN" ${DEVICE:+--device "$DEVICE"} flux2 "$ACTION" \
     --variant "${VARIANT:-klein-4b}" --precision "${PRECISION:-int8}" \
     --prompt "A photorealistic portrait photograph of the person in the reference images, keeping their exact facial identity, head shape, eye colour and skin texture. ${POSE:-Soft key light from the left, dark plain background, plain dark crew-neck top, head level and facing camera, calm closed-mouth expression, sharp focus on the eyes, 85mm lens, shallow depth of field.}" \
     "${ARGS[@]}" \

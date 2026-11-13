@@ -29,11 +29,12 @@ residency executor --instance key--> resident flux2::Pipeline (DiT+TE+VAE)
 
 ```bash
 # deps: pip install -e brain-py   (jeepney with fd passing)
-BRAIN_FLUX2_DIT=/path/to/flux2-klein/transformer \
-BRAIN_FLUX2_VAE=/path/to/flux2-klein/vae \
-BRAIN_FLUX2_TE=/path/to/Qwen3-4B \
-BRAIN_FLUX2_TOKENIZER=/path/to/Qwen3-4B/tokenizer.json \
-tools/dbus-session.sh --serve "--dbus" -- bash -c '
+# weights come from the model store; --pin names one outright
+tools/dbus-session.sh --serve "--dbus \
+    --pin flux2.dit=/path/to/flux2-klein/transformer \
+    --pin flux2.vae=/path/to/flux2-klein/vae \
+    --pin flux2.text_encoder=/path/to/Qwen3-4B \
+    --pin flux2.tokenizer=/path/to/Qwen3-4B/tokenizer.json" -- bash -c '
   # text-to-image (progress = one line per denoise step)
   python3 samples/python/imagegen/flux2-klein/generate.py --prompt "a red fox in the snow" --out fox.ppm
 
@@ -61,9 +62,10 @@ wrote fox.ppm (512x512)
 
 ## What it needs
 
-- **Weights** come only from the four `BRAIN_FLUX2_*` env vars (diffusers
-  `transformer/`+`vae/` dirs, BFL single-file safetensors, or BF16 GGUF for
-  the DiT). Without them the model is discoverable (`brain caps brain/flux2-klein`,
+- **Weights** come from the model store or the four `flux2` roles (`dit`,
+  `vae`, `text_encoder`, `tokenizer`), each named with
+  `--pin flux2.ROLE=PATH` (diffusers `transformer/`+`vae/` dirs, BFL
+  single-file safetensors, or BF16 GGUF for the DiT). Without them the model is discoverable (`brain caps brain/flux2-klein`,
   static manifest) but not served.
 - **Variants**: `klein-4b` (default, 4-step distilled), `klein-9b`,
   `base-4b`/`base-9b` (50 steps + CFG via `guidance`). The **9B weights are

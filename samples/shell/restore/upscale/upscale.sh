@@ -18,8 +18,8 @@
 # Generation models cap out well below print resolution, so the usual shape
 # is: generate at what the model does well, then upscale here.
 #
-# Optional, all env: TILE, BRAIN_DEVICE (gpu0/gpu1/cpu -- the CPU backend
-# handles this fine if the cards are busy), BRAIN.
+# Optional, all env: TILE, DEVICE (gpu0/gpu1/cpu -- the CPU backend
+# handles this fine if the cards are busy; default: every device), BRAIN.
 #
 # Needs a RealESRGAN_x4plus.pth in the model store (brain pull schwgHao/RealESRGAN_x4plus).
 
@@ -28,5 +28,5 @@ set -euo pipefail
 IN="${1:?usage: upscale.sh <image> [out.jpg]}"
 OUT="${2:-${IN%.*}-4x.jpg}"
 
-exec "${BRAIN:-./target/release/brain}" rrdbnet upscale \
+exec "${BRAIN:-./target/release/brain}" ${DEVICE:+--device "$DEVICE"} rrdbnet upscale \
   --in "image=$IN" --tile "${TILE:-128}" --out "image=$OUT"

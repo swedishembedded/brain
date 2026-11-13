@@ -15,13 +15,13 @@
 #   samples/shell/api/claude-with-brain/claude-with-brain.sh -p "hi"      # or pass any claude flags through
 #
 # Nothing to pre-fetch or pre-import: MODEL doesn't have to be resident yet.
-# brain's transparent auto-fetch downloads +
+# The server runs with `--autofetch`, so brain downloads +
 # converts it on the first request that names it -- the first message you send
 # in claude takes as long as that cold fetch (progress streams to Claude Code
 # as it happens); every one after is instant. Point MODEL at any
-# `<vendor>/<repo>[-<QUANT>]` your machine can serve to use a different model, or set
-# `BRAIN_AUTO_FETCH=0` to require it already be resident (the pre-auto-fetch
-# behavior) and fail fast instead of fetching.
+# `<vendor>/<repo>[-<QUANT>]` your machine can serve to use a different model, or pass
+# `--no-autofetch` to require it already be resident (`brain pull MODEL`) and
+# fail fast instead of fetching.
 #
 # --check runs the same preflight -> launch -> key-capture sequence, makes ONE
 # authenticated GET /v1/models, prints OK, and exits WITHOUT exec'ing `claude` - the
@@ -38,10 +38,12 @@ set -uo pipefail
 
 CHECK=0
 MOCK=0
+AUTOFETCH=(--autofetch)
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) CHECK=1 ;;
     --mock) MOCK=1 ;;   # serve the weight-free mock model instead
+    --no-autofetch) AUTOFETCH=() ;;   # require MODEL already pulled
     *) break ;;
   esac
   shift
@@ -64,9 +66,9 @@ RUNDIR="$(mktemp -d)"
 READY="$RUNDIR/ready"
 KEYS="$RUNDIR/keys.json"   # 0600; the key is kept out of the server log
 if [ "$MOCK" = "0" ]; then
-  "$BRAIN" serve --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
+  "$BRAIN" serve "${AUTOFETCH[@]}" --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
 else
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
+  "$BRAIN" serve --device cpu --mock --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
 fi
 BRAIN_PID=$!
 echo "brain serve --anthropic on http://127.0.0.1:$PORT  (pid $BRAIN_PID)"

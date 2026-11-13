@@ -8,7 +8,6 @@ Loads a binary PPM (P6), sends it as a **memfd input blob** (HWC f32 `[0,1]`,
 the standard brain image wire format) together with an edit prompt, and saves
 the regenerated image. The server center-crops references to multiples of 16.
 
-          BRAIN_FLUX2_DIT=… BRAIN_FLUX2_VAE=… BRAIN_FLUX2_TE=… BRAIN_FLUX2_TOKENIZER=… \
       tools/dbus-session.sh --serve "--dbus" -- \
       python3 samples/python/imagegen/flux2-klein/edit_image.py --image in.ppm \
           --prompt "the same scene at night" --out edited.ppm
@@ -66,7 +65,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            skip(f"{args.model!r} not served (models: {models}); set BRAIN_FLUX2_*")
+            skip(f"{args.model!r} not served (models: {models}); add the FLUX.2 weights to the model store or pin flux2.dit/vae/text_encoder/tokenizer")
         print(f"edit -> {args.width}x{args.height} ({args.variant}):")
         return run_streaming(brain, args.model, "edit", params, args.out, blobs=blobs, meta=meta)
 

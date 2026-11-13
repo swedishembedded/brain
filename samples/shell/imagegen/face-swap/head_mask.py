@@ -35,9 +35,10 @@ mask.png beside the images - white over the region to replace, black to keep,
 soft edges blend - and face_swap.sh will use that instead."""
 
 
-def landmarks(path, brain):
+def landmarks(path, brain, weights=None):
+    role = ["--weights", weights] if weights else []
     out = subprocess.run(
-        [brain, "scrfd", "detect", "--in", f"image={path}", "--max_faces", "1"],
+        [brain, "scrfd", "detect", *role, "--in", f"image={path}", "--max_faces", "1"],
         capture_output=True, text=True,
     ).stdout
     for line in out.splitlines():
@@ -48,8 +49,8 @@ def landmarks(path, brain):
     return None
 
 
-def main(src, dst, grow):
-    kps = landmarks(src, os.environ.get("BRAIN", "./target/release/brain"))
+def main(src, dst, grow, weights=None):
+    kps = landmarks(src, os.environ.get("BRAIN", "./target/release/brain"), weights)
     if kps is None:
         raise SystemExit(NO_FACE.format(name=os.path.basename(src)))
     left_eye, right_eye, _nose, left_mouth, right_mouth = kps
@@ -76,6 +77,7 @@ def main(src, dst, grow):
 
 
 if __name__ == "__main__":
-    if not 3 <= len(sys.argv) <= 4:
+    if not 3 <= len(sys.argv) <= 5:
         raise SystemExit(__doc__)
-    main(sys.argv[1], sys.argv[2], float(sys.argv[3]) if len(sys.argv) > 3 else 2.0)
+    main(sys.argv[1], sys.argv[2], float(sys.argv[3]) if len(sys.argv) > 3 else 2.0,
+         sys.argv[4] if len(sys.argv) > 4 else None)

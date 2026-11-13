@@ -14,7 +14,7 @@ server flips the job's cancel token; `wan::pipeline`'s denoise loop polls it
 once per step, so the abort lands at the next step boundary (the forward
 already in flight is one submit of the whole block stack and finishes first).
 
-      BRAIN_GPU_WAIT_S=1200 tools/dbus-session.sh --serve "--dbus" -- \
+      tools/dbus-session.sh --serve "--gpu-wait-s 1200 --dbus" -- \
       python3 samples/python/videogen/wan/cancel_generation.py
 
 Requires: jeepney -- `pip install -e brain-py`.

@@ -18,12 +18,11 @@ ref_audio=clip.wav` takes on the CLI, which downsamples any input clip to a
 fixed 16 kHz before the action ever sees it - going through D-Bus directly,
 as this script does, avoids that cap.
 
-Run under a private session bus (weights via env - six roles: the
-speech-token LM, the flow decoder, the HiFT vocoder, S3Tokenizer,
-CAM++, and the text BPE tokenizer identity):
+Run under a private session bus (six roles resolve from the model store:
+`llm` the speech-token LM, `flow` the flow decoder, `hift` the vocoder,
+`s3tokenizer`, `campplus`, and `tokenizer` the text BPE tokenizer identity;
+`--pin cosyvoice.ROLE=PATH` in the `--serve` arguments names one outright):
 
-    BRAIN_COSYVOICE_LLM=… BRAIN_COSYVOICE_FLOW=… BRAIN_COSYVOICE_HIFT=… \\
-    BRAIN_S3TOKENIZER_V2=… BRAIN_CAMPPLUS_DIR=… BRAIN_COSYVOICE_TOKENIZER=… \\
     tools/dbus-session.sh --serve "--dbus" -- \\
       python3 samples/python/tts/cosyvoice-synth/cosyvoice_synth.py \\
           --text "Hello, this is a cloned voice." \\
@@ -61,7 +60,7 @@ def main() -> int:
     ap.add_argument("--text", required=True, help="the target text to synthesize")
     ap.add_argument("--ref-audio", required=True, metavar="WAV", help="reference clip for zero-shot cloning (any sample rate)")
     ap.add_argument("--ref-text", required=True, help="the reference clip's own transcript")
-    ap.add_argument("--variant", default="cosyvoice2", choices=["cosyvoice2", "cosyvoice3"], help="cosyvoice2 or cosyvoice3 (BRAIN_COSYVOICE_* must hold that generation's checkpoint)")
+    ap.add_argument("--variant", default="cosyvoice2", choices=["cosyvoice2", "cosyvoice3"], help="cosyvoice2 or cosyvoice3 (the cosyvoice roles must hold that generation's checkpoint)")
     ap.add_argument("--model", default=MODEL, help="a streaming synth model")
     ap.add_argument("--out", default="cosyvoice_synth.wav", help="output WAV path")
     ap.add_argument("--n-timesteps", type=int, default=-1, help="Euler steps the flow decoder's CFM solver takes (-1 = the model's own default)")
@@ -82,7 +81,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            skip(f"{args.model!r} not served (models: {models}); set the six BRAIN_COSYVOICE_*/BRAIN_S3TOKENIZER_V2/BRAIN_CAMPPLUS_DIR env vars")
+            skip(f"{args.model!r} not served (models: {models}); add the six cosyvoice roles (llm, flow, hift, tokenizer, s3tokenizer, campplus) to the model store or pin them")
         print(f"synth {args.text!r} (variant={args.variant}):")
         t0 = time.monotonic()
 

@@ -9,7 +9,6 @@ progress frame, and verifies the stream ends with the `error` frame
 `"cancelled"` - the server flips the job's cancel token and the pipeline
 aborts at its next per-step poll (the current denoise step finishes first).
 
-          BRAIN_FLUX2_DIT=… BRAIN_FLUX2_VAE=… BRAIN_FLUX2_TE=… BRAIN_FLUX2_TOKENIZER=… \
       tools/dbus-session.sh --serve "--dbus" -- \
       python3 samples/python/imagegen/flux2-klein/cancel_generation.py
 
@@ -46,7 +45,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            skip(f"{args.model!r} not served (models: {models}); set BRAIN_FLUX2_*")
+            skip(f"{args.model!r} not served (models: {models}); add the FLUX.2 weights to the model store or pin flux2.dit/vae/text_encoder/tokenizer")
 
         # `variant` is a FLUX.2-specific param the mock model doesn't declare.
         params = {"prompt": args.prompt}

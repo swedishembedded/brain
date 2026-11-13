@@ -66,6 +66,11 @@
 #   --lora-scale <s>        its strength, default 0.5
 #   --text-encoder <path>   swap the encoder: an HF directory, or a single
 #                           .safetensors/.gguf file
+#   --dit/--vae/--tokenizer <path>
+#                           the other FLUX.2 weights; every weight not named
+#                           comes from the model store
+#   --scrfd <path>          the SCRFD face detector (scrfd_10g_bnkps.onnx); from
+#                           the model store when not named
 #
 # Each also has an environment variable of the same name in caps, and the flag
 # wins when both are given.
@@ -73,19 +78,22 @@
 # Other options, env only: MASK (0 disables), MASK_GROW, STRENGTH, SEED, STEPS,
 # PROMPT, VARIANT, PRECISION, BRAIN.
 #
-# Weights: BRAIN_SCRFD_DIR for the landmarks, BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}
-# for generation. References are sized by brain and the output takes the
+# Weights: the model store, or the flags above. References are sized by brain and the output takes the
 # target's own size, so pass photographs exactly as they are.
 
 set -euo pipefail
 
-USAGE='usage: face_swap.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--text-encoder P]'
+USAGE='usage: face_swap.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--text-encoder P] [--dit P] [--vae P] [--tokenizer P] [--scrfd P]'
 D=""; N=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --adapter)      ADAPTER="${2:?--adapter needs a path}"; shift 2 ;;
     --lora-scale)   LORA_SCALE="${2:?--lora-scale needs a number}"; shift 2 ;;
     --text-encoder) TEXT_ENCODER="${2:?--text-encoder needs a path}"; shift 2 ;;
+    --dit)          DIT="${2:?--dit needs a path}"; shift 2 ;;
+    --vae)          VAE="${2:?--vae needs a path}"; shift 2 ;;
+    --tokenizer)    TOKENIZER="${2:?--tokenizer needs a path}"; shift 2 ;;
+    --scrfd)        SCRFD="${2:?--scrfd needs a path}"; shift 2 ;;
     -h|--help)      echo "$USAGE"; exit 0 ;;
     --)             shift; continue ;;
     -*)             echo "unknown flag $1" >&2; echo "$USAGE" >&2; exit 1 ;;
@@ -126,7 +134,7 @@ if [ "${MASK:-1}" != 0 ]; then
     cp "$SUPPLIED" "$W/mask.png"
     MASK_FILE="$W/mask.png"
   elif BRAIN="$BRAIN" python3 "$(dirname "$0")/head_mask.py" \
-         "$TARGET" "$W/mask.png" "${MASK_GROW:-2.0}"; then
+         "$TARGET" "$W/mask.png" "${MASK_GROW:-2.0}" ${SCRFD:+"$SCRFD"}; then
     MASK_FILE="$W/mask.png"
   else
     echo "mask: none derived - continuing without one, letting the model place" >&2
@@ -159,6 +167,9 @@ if [ -n "${ADAPTER:-}" ]; then
   fi
 fi
 [ -n "${TEXT_ENCODER:-}" ] && ARGS+=(--text-encoder "$TEXT_ENCODER")
+[ -n "${DIT:-}" ] && ARGS+=(--dit "$DIT")
+[ -n "${VAE:-}" ] && ARGS+=(--vae "$VAE")
+[ -n "${TOKENIZER:-}" ] && ARGS+=(--tokenizer "$TOKENIZER")
 
 # One seed per run: unset, a random one is drawn; each result adds 1 to it.
 SEED="${SEED:-$(( (RANDOM << 15) ^ RANDOM ))}"

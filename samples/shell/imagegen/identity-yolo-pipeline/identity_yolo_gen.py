@@ -40,14 +40,15 @@ Images cross the bus as HWC f32 RGB in `[0,1]` over sealed memfds; PNG
 encode/decode happens here (via Pillow) because the rest of the pipeline
 reads and writes PNG.
 
-The daemon must already be running on this session bus with the weight env
-vars set - see `identity_yolo_pipeline.sh`, which starts it, or:
+The daemon must already be running on this session bus with its weights pinned
+- see `identity_yolo_pipeline.sh`, which starts it, or (FLUX.2 Klein-9B is
+non-commercial: export `BRAIN_FLUX2_ALLOW_NC=1` to confirm that use):
 
-    BRAIN_FLUX1_DIR=... BRAIN_PULID_DIR=... BRAIN_ARCFACE_DIR=... \\
-    BRAIN_CLIP_DIR=... BRAIN_BISENET_DIR=... \\
-    BRAIN_FLUX2_DIT=... BRAIN_FLUX2_VAE=... BRAIN_FLUX2_TE=... \\
-    BRAIN_FLUX2_TOKENIZER=... BRAIN_FLUX2_ALLOW_NC=1 \\
-    tools/dbus-session.sh --serve "--dbus" -- \\
+    BRAIN_FLUX2_ALLOW_NC=1 tools/dbus-session.sh --serve "--dbus \\
+        --pin pulid.flux1=... --pin pulid.pulid=... --pin pulid.arcface=... \\
+        --pin pulid.clip=... --pin pulid.bisenet=... \\
+        --pin flux2.dit=... --pin flux2.vae=... --pin flux2.text_encoder=... \\
+        --pin flux2.tokenizer=..." -- \\
       python3 samples/shell/imagegen/identity-yolo-pipeline/identity_yolo_gen.py pulid \\
         --prompt "a photo of a person in a park" --face portrait.jpg --out img.png
 
@@ -121,7 +122,7 @@ def wait_for(model: str, timeout: float) -> int:
                 if model in served:
                     print(f"{model}: served", file=sys.stderr)
                     return 0
-                last = f"daemon is up but does not serve {model!r} (models: {served}) - check its BRAIN_* weight variables"
+                last = f"daemon is up but does not serve {model!r} (models: {served}) - check its --pin arguments"
         except Exception as e:  # bus not up yet, name not taken yet
             last = f"{type(e).__name__}: {e}"
         time.sleep(1.0)
@@ -138,8 +139,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, help="RNG seed (flux2 requires one; pulid honours it)")
     ap.add_argument("--wait", type=float, metavar="SECONDS",
                     help="readiness probe: generate nothing, just block until the daemon advertises this "
-                         "backend's model, then exit. A daemon started without the right BRAIN_* weight "
-                         "variables then fails here in seconds instead of at the first two-minute generation")
+                         "backend's model, then exit. A daemon started without the right --pin "
+                         "arguments then fails here in seconds instead of at the first two-minute generation")
     ap.add_argument("--face", help="pulid only: photo of the identity to condition on (required there)")
     ap.add_argument("--width", type=int, default=512, help="output width (multiple of 16)")
     ap.add_argument("--height", type=int, default=512, help="output height (multiple of 16)")
@@ -176,7 +177,7 @@ def main() -> int:
         served = brain.models()
         if model not in served:
             print(f"ERROR: {model!r} is not served by the running daemon (models: {served}) - "
-                  "check the BRAIN_* weight variables it was started with", file=sys.stderr)
+                  "check the --pin arguments it was started with", file=sys.stderr)
             return 1
         try:
             if args.backend == "pulid":

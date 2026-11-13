@@ -5,7 +5,7 @@
 #
 # A few photographs of one person in, a LoRA that knows their face out.
 #
-#   samples/shell/imagegen/lora/train_identity_lora.sh <photo-dir> "<their name>"
+#   samples/shell/imagegen/lora/train_identity_lora.sh [weight flags] <photo-dir> "<their name>"
 #
 # This is `train_lora.sh` specialised for the case where the concept is a
 # PERSON, which changes three things that matter more than the hyperparameters:
@@ -42,31 +42,44 @@
 # Optional, all env: OUT (adapter path), STEPS, RANK, LR, SIZE, VARIANT,
 # TRAINER, CKPT_EVERY, MODEL (captioner), BRAIN.
 #
-# Weights: BRAIN_SCRFD_DIR for the detector, BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}
-# for training, and the captioner's own ($BRAIN_QWEN3VL_WEIGHTS by default).
+# Weights come from the model store; flags before the positional arguments name
+# one outright: `--scrfd PATH` for the detector (scrfd_10g_bnkps.onnx),
+# `--dit`, `--vae`, `--text-encoder` and `--tokenizer` for FLUX.2 training, and
+# `--captioner DIR` for the captioner.
 
 set -euo pipefail
+SCRFD=(); CAPTIONER=(); FLUX2_ROLES=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dit|--vae|--text-encoder|--tokenizer) FLUX2_ROLES+=("$1" "${2:?$1 needs a path}"); shift 2 ;;
+    --scrfd)       SCRFD=(--weights "${2:?--scrfd needs a path}"); shift 2 ;;
+    --captioner)   CAPTIONER=(--weights "${2:?--captioner needs a directory}"); shift 2 ;;
+    --) shift; break ;;
+    -*) echo "unknown flag $1" >&2; exit 1 ;;
+    *)  break ;;
+  esac
+done
 
-DIR="${1:?usage: train_identity_lora.sh <photo-dir> \"<their name>\"}"; DIR="${DIR%/}"
+DIR="${1:?usage: train_identity_lora.sh [--scrfd P] [--dit P] [--vae P] [--text-encoder P] [--tokenizer P] [--captioner DIR] <photo-dir> \"<their name>\"}"; DIR="${DIR%/}"
 NAME="${2:?the name of the person -- this is the trigger you will type at generation time}"
 BRAIN="${BRAIN:-./target/release/brain}"
 OUT="${OUT:-$DIR/identity.brain}"
 DATA="$DIR/.identity"
-: "${BRAIN_SCRFD_DIR:?set BRAIN_SCRFD_DIR to the directory holding scrfd_10g_bnkps.onnx}"
 
 rm -rf "$DATA"; mkdir -p "$DATA"
 
-BRAIN="$BRAIN" python3 - "$DIR" "$DATA" <<'PY'
+BRAIN="$BRAIN" SCRFD_ROLE="${SCRFD[*]:-}" python3 - "$DIR" "$DATA" <<'PY'
 import glob, json, os, subprocess, sys
 from PIL import Image
 
 BRAIN = os.environ["BRAIN"]
+SCRFD_ROLE = os.environ["SCRFD_ROLE"].split(maxsplit=1)  # [] or ["--weights", PATH]
 src, out = sys.argv[1], sys.argv[2]
 IMG = (".jpg", ".jpeg", ".png", ".ppm", ".webp", ".bmp")
 
 
 def faces(path):
-    r = subprocess.run([BRAIN, "scrfd", "detect", "--in", f"image={path}", "--max_faces", "16"],
+    r = subprocess.run([BRAIN, "scrfd", "detect", *SCRFD_ROLE, "--in", f"image={path}", "--max_faces", "16"],
                        capture_output=True, text=True)
     for line in r.stdout.splitlines():
         if line.startswith("faces:"):
@@ -141,7 +154,7 @@ PY
 
 # Captions cover framing, pose, clothing, setting and light and deliberately
 # omit the face: what the caption does not explain is what the trigger inherits.
-"$BRAIN" label images "$DATA" --model "${MODEL:-qwen3vl}" \
+"$BRAIN" label images "$DATA" --model "${MODEL:-qwen3vl}" "${CAPTIONER[@]}" \
   --trigger "$NAME" --trigger-role "the name of the person" --max-new 130 --max-pixels 200704 \
   --prompt "Write ONE sentence describing this photograph of a person, covering only: the framing and camera distance, the direction their head is turned and where they look, their expression, their clothing, the background and setting, and the lighting. Do NOT describe their face, head, skin, eyes, eyebrows or facial hair. Do not mention any other people."
 
@@ -152,7 +165,7 @@ echo "captions written to $DATA/captions.yaml - review them, then press enter" >
 SEED="${SEED:-$RANDOM$RANDOM}"
 echo "train_identity_lora: seed $SEED (SEED=$SEED reproduces this run)" >&2
 
-exec "$BRAIN" flux2 lora_train --data "$DATA" --save "$OUT" --seed "$SEED" \
+exec "$BRAIN" flux2 lora_train "${FLUX2_ROLES[@]}" --data "$DATA" --save "$OUT" --seed "$SEED" \
   --variant "${VARIANT:-klein-4b}" --trainer "${TRAINER:-device}" \
   --steps "${STEPS:-1500}" --rank "${RANK:-16}" --lr "${LR:-1e-4}" \
   --size "${SIZE:-512}" --ckpt-every "${CKPT_EVERY:-100}"

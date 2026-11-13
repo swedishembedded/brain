@@ -58,8 +58,7 @@ chat-capable-shaped - over the OpenAI and Anthropic HTTP surfaces
 `completion_tokens` / `finish_reason`:
 
 ```bash
-BRAIN_DEEPSEEK_OCR_DIR=<dir> \
-  brain deepseek2ocr generate \
+brain deepseek2ocr generate --dir <dir> \
     --prompt "<|grounding|>Convert the document to markdown." \
     --max_new 8 --in image=page.ppm --json
 ```

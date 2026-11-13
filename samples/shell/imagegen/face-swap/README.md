@@ -6,8 +6,7 @@ server) around `brain flux2 edit`, using the colocated helper
 internal helper for this sample, not a separate sample of its own.
 
 ```bash
-BRAIN_SCRFD_DIR=... BRAIN_FLUX2_DIT=... BRAIN_FLUX2_VAE=... BRAIN_FLUX2_TE=... BRAIN_FLUX2_TOKENIZER=... \
-  samples/shell/imagegen/face-swap/face_swap.sh <dir-of-images> [count]
+samples/shell/imagegen/face-swap/face_swap.sh <dir-of-images> [count]
 ```
 
 The folder holds numbered images - `ref-01.jpg`, `ref-02.png`, `03.jpeg`, any
@@ -53,14 +52,15 @@ samples/shell/imagegen/identity-score/identity_score.sh <dir> <dir>
 
 ## What it needs
 
-`BRAIN_SCRFD_DIR` for the landmarks, `BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}` for
-generation. References are sized by brain and the output takes the target's
+The SCRFD detector (landmarks) and the FLUX.2 weights, from the model store or
+named with `--scrfd`, `--dit`, `--vae`, `--text-encoder` and `--tokenizer`. References are sized by brain and the output takes the target's
 own size, so pass photographs exactly as they are.
 
 ## Options
 
 ```
 face_swap.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--text-encoder P]
+    [--dit P] [--vae P] [--tokenizer P] [--scrfd P]
 ```
 
 | flag / env | default | meaning |
@@ -68,6 +68,8 @@ face_swap.sh <dir-of-images> [count] [--adapter P] [--lora-scale S] [--text-enco
 | `--adapter` / `ADAPTER` | none | per-identity LoRA, composes with face refs |
 | `--lora-scale` / `LORA_SCALE` | `0.5` | its strength |
 | `--text-encoder` / `TEXT_ENCODER` | none | HF dir or single `.safetensors`/`.gguf` |
+| `--dit` / `DIT`, `--vae` / `VAE`, `--tokenizer` / `TOKENIZER` | model store | the FLUX.2 weight, named explicitly |
+| `--scrfd` / `SCRFD` | model store | the face detector weights |
 | `MASK` | `1` | `0` disables mask-based inpainting |
 | `MASK_GROW` | `2.0` | derived-mask size dial |
 | `STRENGTH` | `0.99` masked / `0.9` unmasked | denoise strength |

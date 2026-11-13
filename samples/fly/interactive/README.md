@@ -95,7 +95,7 @@ watch the animal move at its own speed.
 
 **If `cord` dominates, try `BRAIN_DEVICE=cpu`.** The gather over the edge list
 is pure streaming - about 11 MB per tick and almost no arithmetic - so it runs
-at whatever memory bandwidth the device has. `brain roofline` measures both:
+at whatever memory bandwidth the device has. `brain perf roofline` measures both:
 on a Meteor Lake laptop that is 23 GB/s for the integrated GPU against 68 GB/s
 for the CPU, and the CPU backend also has no readback to wait on, which makes
 it 8x faster there. On a discrete card the GPU wins by the same argument.
