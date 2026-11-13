@@ -154,8 +154,7 @@ impl Controlled {
         let vmap: vae::blocks::Tensors = vt.into_iter().map(|t| (t.name, (t.shape, t.data))).collect();
         let vae = VaeDecoder::from_diffusers(self.vae_cfg.clone(), &vmap, lh, lw, Some(&req.vae_device));
         let chw = vae.decode(&z);
-        let rgb: Vec<f32> = chw.iter().map(|v| ((v + 1.0) * 0.5).clamp(0.0, 1.0)).collect();
-        Ok(imaging::pixels::chw_to_hwc(&rgb, 3, h as usize, w as usize))
+        Ok(imaging::pixels::chw_signed_to_hwc_unit(&chw, 3, h as usize, w as usize))
     }
 }
 
