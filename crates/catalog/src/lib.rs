@@ -575,10 +575,15 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("fastvlm", &fastvlm::spec::FastvlmSpec)),
             resident: None,
         },
+        // `weights` is resolved through `llava::spec::LlavaSpec` - same shape
+        // as fastvlm's own entry above.
         ModelEntry {
             manifest: llava::caps::manifest,
-            provider: always!(llava::caps::LlavaProvider::new()),
-            spec: None,
+            provider: |assembly: &Assembly| {
+                let weights = assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned());
+                Ok(Arc::new(llava::caps::LlavaProvider::new(weights)) as Arc<dyn Provider>)
+            },
+            spec: Some(("llava", &llava::spec::LlavaSpec)),
             resident: None,
         },
         // `weights` is resolved through `qwen3vl::spec::Qwen3VlSpec` (see that
@@ -1122,14 +1127,16 @@ fn empty_assembly() -> Assembly {
 /// [`supir::caps::LLAVA_MODEL`] through, for the direct `brain do`/D-Bus-via-
 /// provider path (`resident_supir.rs` builds an equivalent registry for the
 /// served path).
-/// A stub `LlavaProvider` costs nothing to construct (it loads weights lazily
-/// per call, same as every other captioner in the tree), so this is built
-/// unconditionally rather than gated on `BRAIN_LLAVA_WEIGHTS` being set - an
-/// unset checkpoint just means the eventual `caption` call fails with
-/// llava's own clean error, same as calling it directly would.
+/// The captioner comes from [`provider`], so it resolves its checkpoint
+/// through the catalog's own LLaVA entry. `LlavaProvider` loads weights
+/// lazily per call, so it is registered even when nothing resolved - the
+/// eventual `caption` call then fails with llava's own clean error, same as
+/// calling it directly would.
 fn supir_registry() -> capability::Registry {
     let mut reg = capability::Registry::new();
-    reg.register(Arc::new(llava::caps::LlavaProvider::new()));
+    if let Ok(llava) = provider(llava::caps::MODEL) {
+        reg.register(llava);
+    }
     reg
 }
 

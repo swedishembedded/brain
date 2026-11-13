@@ -86,7 +86,8 @@ shape.
 ## Options
 
 - `caption` - the image caption; empty auto-captions through a registered
-  `brain/llava` when one is available (`BRAIN_LLAVA_WEIGHTS`), else stays
+  `brain/llava` when a LLaVA checkpoint resolves (store or
+  `--pin llava.weights=DIR`), else stays
   empty - upstream's own `--no_llava` path, not an error.
 - `positive_suffix` / `negative_prompt` - upstream's own default prompt
   suffix/negative text, overridable per call.

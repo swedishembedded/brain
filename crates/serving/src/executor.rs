@@ -333,10 +333,18 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
         Err(e) => residency::log::not_served(&format!("brain: januspro not served over the scheduler ({e})")),
     }
     // LLaVA-1.5-13B captioning: same stateless-resident shape as FastVLM
-    // above - the provider manages its own weight residency lazily, per
-    // checkpoint dir. Same `manifest_resident` reasoning as FastVLM.
+    // above - `weights` resolved through `llava::spec::LlavaSpec`, the
+    // provider manages its own weight residency lazily, per checkpoint dir.
+    // Same `manifest_resident` reasoning as FastVLM.
+    let llava_weights = match store.resolve("llava", &llava::spec::LlavaSpec) {
+        Ok(assembly) => assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()),
+        Err(e) => {
+            residency::log::not_served(&format!("brain: llava serving no default checkpoint ({e})"));
+            None
+        }
+    };
     models.push(Arc::new(ProviderResident::stateless_with_manifest(
-        Arc::new(llava::caps::LlavaProvider::new()),
+        Arc::new(llava::caps::LlavaProvider::new(llava_weights)),
         llava::caps::manifest_resident(),
     )));
     // brain/imgpipe: the pipeline holds no weights of its own (each stage

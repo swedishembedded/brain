@@ -17,7 +17,8 @@
 //!
 //! `crates/supir` links no VLM (see `supir::caps`'s own doc): the optional
 //! auto-caption call goes through a `capability::Registry` this file builds
-//! itself, carrying `llava::caps::LlavaProvider` under `supir::caps::LLAVA_MODEL` -
+//! itself, carrying `llava::caps::LlavaProvider` under `supir::caps::LLAVA_MODEL`
+//! over the LLaVA checkpoint the same store resolves (`llava::spec::LlavaSpec`) -
 //! this crate depends on both, unlike `crates/supir`. The catalog's own SUPIR
 //! entry builds an equivalent registry for the direct `brain do`/D-Bus-via-provider
 //! path (`supir_registry` in `lib.rs`).
@@ -40,34 +41,33 @@ use supir::caps::Session;
 pub struct SupirResident {
     sdxl_root: String,
     supir_ckpt: String,
+    /// The captioner's checkpoint; `None` leaves auto-captioning to fail
+    /// per call with llava's own "no checkpoint" error.
+    llava_weights: Option<String>,
 }
 
 impl SupirResident {
-    /// Both checkpoints `store` resolves (or pins) for `supir`; `None` unless
-    /// both are there and the backbone holds a released `unet/` - registering
-    /// a model whose every call would fail is worse than not serving it.
+    /// Both checkpoints `store` resolves (or pins) for `supir`, plus the
+    /// optional LLaVA captioner; `None` unless both SUPIR checkpoints are
+    /// there and the backbone holds a released `unet/` - registering a model
+    /// whose every call would fail is worse than not serving it.
     pub fn from_store(store: &loader::served::ServedStore) -> Option<SupirResident> {
         let assembly = loader::served::served_assembly(store, "supir", &supir::spec::SupirSpec)?;
         let paths = supir::pipeline::Paths::from_assembly(&assembly).map_err(|e| residency::log::not_served(&format!("brain: supir not served ({e})"))).ok()?;
-        Self::new(paths.backbone_root, paths.supir_ckpt)
-    }
-
-    /// Direct constructor for a caller that already holds both checkpoints.
-    pub fn new(sdxl_root: impl Into<String>, supir_ckpt: impl Into<String>) -> Option<SupirResident> {
-        let sdxl_root = sdxl_root.into();
-        if !std::path::Path::new(&sdxl_root).join("unet").exists() {
-            residency::log::not_served(&format!("brain: supir not served ({sdxl_root} holds no unet/)"));
+        if !std::path::Path::new(&paths.backbone_root).join("unet").exists() {
+            residency::log::not_served(&format!("brain: supir not served ({} holds no unet/)", paths.backbone_root));
             return None;
         }
-        Some(SupirResident { sdxl_root, supir_ckpt: supir_ckpt.into() })
+        let llava_weights = store.resolve("llava", &llava::spec::LlavaSpec).ok().and_then(|a| a.roles.get("weights").map(|p| p.to_string_lossy().into_owned()));
+        Some(SupirResident { sdxl_root: paths.backbone_root, supir_ckpt: paths.supir_ckpt, llava_weights })
     }
 }
 
 /// The registry SUPIR's `caption` auto-fill dispatches through, over the
 /// residency path - see this module's doc.
-fn llava_registry() -> Registry {
+fn llava_registry(llava_weights: Option<String>) -> Registry {
     let mut reg = Registry::new();
-    reg.register(Arc::new(llava::caps::LlavaProvider::new()));
+    reg.register(Arc::new(llava::caps::LlavaProvider::new(llava_weights)));
     reg
 }
 
@@ -94,7 +94,7 @@ impl ResidentModel for SupirResident {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        Ok(Box::new(SupirInstance { session: Session::new(self.sdxl_root.clone(), self.supir_ckpt.clone()), registry: Arc::new(llava_registry()), device }))
+        Ok(Box::new(SupirInstance { session: Session::new(self.sdxl_root.clone(), self.supir_ckpt.clone()), registry: Arc::new(llava_registry(self.llava_weights.clone())), device }))
     }
 }
 

@@ -19,7 +19,8 @@ tools/dbus-session.sh --serve "--dbus" -- \
 * The output size is SUPIR's own resize/snap rule (short side >= 1024, both
   axes snapped to a 64px multiple) - `supir_restore.py` reads it back from
   the result rather than assuming it.
-* Set `BRAIN_LLAVA_WEIGHTS` too (leave `--caption` unset) to auto-caption
+* Put a LLaVA checkpoint in the store too, or pin it (`--pin
+  llava.weights=DIR`), and leave `--caption` unset to auto-caption
   the degraded image through LLaVA-1.5-13B before restoring it - SUPIR's
   own upstream behaviour when `--no_llava` is not passed. `crates/supir`
   links no VLM itself; the auto-caption call goes through a
@@ -29,8 +30,8 @@ tools/dbus-session.sh --serve "--dbus" -- \
 
 * The frozen SDXL backbone and SUPIR's own delta checkpoint in the model
   store (or pinned: `--pin supir.sdxl=DIR --pin supir.supir=FILE` in the
-  `--serve` arguments). `BRAIN_LLAVA_WEIGHTS` is optional, for
-  auto-captioning.
+  `--serve` arguments). A LLaVA checkpoint (`--pin llava.weights=DIR`) is
+  optional, for auto-captioning.
 * **Licence**: SUPIR's weights carry a non-commercial licence (SUPIR
   Software License Agreement, (c) 2024 SupPixel Pty Ltd) - commercial use,
   including SaaS deployment and using the output as training data for

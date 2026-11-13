@@ -36,12 +36,6 @@ use qwen3::model::Qwen;
 use crate::config::LlavaConfig;
 
 pub const MODEL: &str = "brain/llava";
-/// Default LLaVA checkpoint directory - from `$BRAIN_LLAVA_WEIGHTS`, never a
-/// baked-in absolute path. Empty when unset, so the `weights` param (or the
-/// caller) must supply one.
-fn default_weights() -> String {
-    std::env::var("BRAIN_LLAVA_WEIGHTS").unwrap_or_default()
-}
 
 /// SUPIR's own default caption prompt for its optional LLaVA pre-pass.
 const DEFAULT_PROMPT: &str = "Describe this image and its style in a very detailed manner.";
@@ -54,7 +48,7 @@ pub fn manifest() -> Manifest {
     let caption = ActionSpec::new("caption", "describe an image (CLIP-L/14@336 tower + Vicuna-1.5-13B decoder, greedy)")
         .param(
             ParamSpec::new("weights", ParamType::Str, "LLaVA checkpoint DIRECTORY (config.json + model.safetensors + tokenizer.json)")
-                .host_env("BRAIN_LLAVA_WEIGHTS"),
+                .host_resolved(),
         )
         .param(ParamSpec::new("prompt", ParamType::Str, "instruction for the model").default(serde_json::json!(DEFAULT_PROMPT)))
         .param(ParamSpec::new("max_new", ParamType::Int, "max caption tokens").min(0.0).max(capability::bounds::TOKENS).default(serde_json::json!(128)))
@@ -69,8 +63,8 @@ pub fn manifest() -> Manifest {
 }
 
 /// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP):
-/// the checkpoint directory is service-side configuration
-/// (`BRAIN_LLAVA_WEIGHTS`), so the served action carries only real
+/// the checkpoint directory is service-side configuration (the `weights`
+/// role `crate::spec::LlavaSpec` resolves), so the served action carries only real
 /// per-request parameters - see `capability::Manifest::for_serving` for
 /// why a static, CLI-facing manifest and a stripped resident one are two
 /// different things, not one hidden behind deployment state. Used by
@@ -97,17 +91,16 @@ struct DecodeStage {
     tok: LlamaBpe,
 }
 
-pub struct LlavaProvider;
-
-impl LlavaProvider {
-    pub fn new() -> LlavaProvider {
-        LlavaProvider
-    }
+/// The `caption` provider. `default_weights` is the resolved `weights` role
+/// (see `crate::spec::LlavaSpec`), used when a request names none; `None`
+/// means every request must name its own `weights`.
+pub struct LlavaProvider {
+    default_weights: Option<String>,
 }
 
-impl Default for LlavaProvider {
-    fn default() -> Self {
-        Self::new()
+impl LlavaProvider {
+    pub fn new(default_weights: Option<String>) -> LlavaProvider {
+        LlavaProvider { default_weights }
     }
 }
 
@@ -116,11 +109,13 @@ impl Provider for LlavaProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "caption").then(|| Arc::new(CaptionAction) as Arc<dyn Action>)
+        (name == "caption").then(|| Arc::new(CaptionAction { default_weights: self.default_weights.clone() }) as Arc<dyn Action>)
     }
 }
 
-struct CaptionAction;
+struct CaptionAction {
+    default_weights: Option<String>,
+}
 
 // One process-wide resident per STAGE, same rationale as `fastvlm::caps`:
 // the vision lock is only held while the tower runs, so request N+1's vision
@@ -134,7 +129,11 @@ impl Action for CaptionAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(default_weights);
+        let dir = inv
+            .get_str("weights")
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.default_weights.clone())
+            .ok_or("llava caption: no checkpoint directory (pass 'weights', or configure one through the models directory)")?;
         let prompt_text = inv.get_str("prompt").unwrap_or_else(|| DEFAULT_PROMPT.to_string());
         let max_new = inv.get_i64("max_new").unwrap_or(128).clamp(1, MAX_NEW_LIMIT as i64) as usize;
         let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".to_string());
@@ -303,7 +302,7 @@ mod tests {
         let inv = Invocation::new()
             .set("weights", serde_json::json!("/nonexistent/llava"))
             .blob("image", Blob::new(Media::Image, vec![0u8; 12]).with_meta(serde_json::json!({"w": 1, "h": 1})));
-        let r = CaptionAction.run(&inv, &mut |_| {});
+        let r = CaptionAction { default_weights: None }.run(&inv, &mut |_| {});
         let err = r.err().unwrap_or_default();
         assert!(err.contains("cannot read"), "{err}");
     }

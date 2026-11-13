@@ -569,7 +569,7 @@ pub(crate) mod tests {
         assert!(err.contains("unknown"), "{err}");
     }
 
-    /// llava/campplus/s3tokenizer all declare `weights_env` but no
+    /// campplus/s3tokenizer both declare `weights_env` but no
     /// `default_ref` (no confirmed small upstream repo to auto-fetch) --
     /// with the variable unset this must name it and explain there is
     /// nothing to fetch, never silently return Ok and leave the caller with
@@ -579,7 +579,6 @@ pub(crate) mod tests {
         let _serial = env_lock();
         let store = store("supply-test-env-weights-no-default-ref");
         for (arch, vars) in [
-            ("llava", &["BRAIN_LLAVA_WEIGHTS"][..]),
             ("campplus", &["BRAIN_CAMPPLUS_DIR"][..]),
             ("s3tokenizer", &["BRAIN_S3TOKENIZER_V2", "BRAIN_S3TOKENIZER_V3"][..]),
         ] {
@@ -602,9 +601,9 @@ pub(crate) mod tests {
     fn ensure_env_weights_with_still_succeeds_when_the_var_is_already_set_with_no_default_ref() {
         let _serial = env_lock();
         let store = store("supply-test-env-weights-no-default-ref-set");
-        std::env::set_var("BRAIN_LLAVA_WEIGHTS", "already-set-llava.gguf");
-        ensure_env_weights_with("llava", &store, &FakeHub::new()).unwrap();
-        std::env::remove_var("BRAIN_LLAVA_WEIGHTS");
+        std::env::set_var("BRAIN_CAMPPLUS_DIR", "already-set-campplus");
+        ensure_env_weights_with("campplus", &store, &FakeHub::new()).unwrap();
+        std::env::remove_var("BRAIN_CAMPPLUS_DIR");
     }
 
     /// `qwen3tts` declares two roles (`weights_dir`, `ckpt`) from its

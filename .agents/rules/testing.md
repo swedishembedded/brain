@@ -292,6 +292,7 @@ neither this variable nor an explicit shard path is given), `BRAIN_QWEN3OMNIMOE_
 `BRAIN_FASTVLM_WEIGHTS` (a second, narrower fixture var:
 `crates/fastvlm/src/captioner.rs`'s own real-image test reads this one
 directly, independent of `BRAIN_FASTVLM_CKPT`),
+`BRAIN_LLAVA_WEIGHTS` (`crates/llava/src/captioner.rs`'s real-image test),
 `BRAIN_FASTVLM_TEST_IMG`, `BRAIN_VL_PARITY_OUT`, `BRAIN_REF_RECT`,
 `BRAIN_WAN_VAE`, `BRAIN_WAN_T5`, `BRAIN_WAN_TOKENIZER`, `BRAIN_WAN_GGUF` (a
 released `city96/Wan2.1-*-gguf` file for `crates/wan`'s `gguf_import_real`

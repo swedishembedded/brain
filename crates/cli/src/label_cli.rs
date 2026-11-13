@@ -56,8 +56,7 @@ const HELP: &str = "brain label <cmd>
                   implementing captioner::Captioner can be listed here; the
                   workflow itself is model-agnostic.
   --weights DIR   checkpoint directory, else resolved automatically from the
-                  models directory (qwen3vl/fastvlm) or the model's own env
-                  var ($BRAIN_LLAVA_WEIGHTS, not yet resolver-based).
+                  models directory.
   --out FILE      caption file, relative to <dir> (default captions.yaml).
   --prompt TEXT   the instruction handed to the model for every image. This
                   is where caption quality is decided; the built-in default
@@ -133,9 +132,8 @@ pub fn run_label(argv: &[String]) {
 /// are all the same vocabulary rather than three that drift.
 const CAPTIONERS: &[&str] = &["qwen3vl", "fastvlm", "llava"];
 
-/// `model`'s resolved `weights` role, for the architectures migrated onto the
-/// model-store resolver (`qwen3vl`, `fastvlm`) - `None` for every other model
-/// (`llava`, still env-based) or when nothing resolved (printed by
+/// `model`'s resolved `weights` role - `None` for a model with no captioner
+/// or when nothing resolved (printed by
 /// `try_resolve`'s own error, not raised here: a labeling run with no
 /// checkpoint anywhere should still reach `build`'s own clean "no checkpoint"
 /// error, worded for this workflow, rather than the resolver's).
@@ -143,6 +141,7 @@ fn resolved_default_weights(model: &str) -> Option<String> {
     let (arch, spec): (&str, &dyn brain_modelstore::resolve::ArchSpec) = match model {
         "qwen3vl" => ("qwen3vl", &qwen3vl::spec::Qwen3VlSpec),
         "fastvlm" => ("fastvlm", &fastvlm::spec::FastvlmSpec),
+        "llava" => ("llava", &llava::spec::LlavaSpec),
         _ => return None,
     };
     // `brain label` takes no `--models-dir`: the resolver's flagless store.
@@ -281,24 +280,7 @@ fn images(args: &[String]) -> Result<(), String> {
     let instruction = instruction(&prompt, &trigger, &trigger_role);
 
     let model = resolve_model(&model, model_was_given, &weights)?;
-    let weights = if !weights.is_empty() {
-        weights
-    } else if let Some(resolved) = resolved_default_weights(&model) {
-        // qwen3vl/fastvlm: resolved through the model-store resolver
-        // (`qwen3vl::spec::Qwen3VlSpec`/`fastvlm::spec::FastvlmSpec`) instead
-        // of `BRAIN_QWEN3VL_WEIGHTS`/`BRAIN_FASTVLM_WEIGHTS` - see those
-        // modules' own doc.
-        resolved
-    } else {
-        // llava: not yet migrated - fetch the architecture's own default
-        // checkpoint and set the env var its captioner still reads, the same
-        // auto-supply every `brain infer <arch>` gets. Without this, the
-        // first thing a new user sees from `brain label images <dir>
-        // --model llava` is the captioner complaining that no checkpoint
-        // directory was set, with no hint that brain can fetch one.
-        crate::supply::ensure_env_weights(&model);
-        weights
-    };
+    let weights = if weights.is_empty() { resolved_default_weights(&model).unwrap_or_default() } else { weights };
     let mut model = build(&model, &weights, max_pixels, &precision)?;
     let caps = model.capabilities();
     eprintln!("label: {} -> {}/{out} (max_new {max_new}{})", caps.model, dir, if overwrite { ", overwrite" } else { ", resuming" });

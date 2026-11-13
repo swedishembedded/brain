@@ -510,7 +510,8 @@ pub const ARCHS: &[Arch] = &[
     // `capability::Registry`, never a hard dependency), and its weights carry
     // no auto-fetch here because SUPIR's own weights don't either, for the
     // same non-commercial-license reason - see the `supir` row below.
-    arch!("llava", "LLaVA-1.5-13B (CLIP-L/14@336 + Vicuna-1.5 decoder)", Multimodal, Brain, "brain-llava", hf: &["LlavaLlamaForCausalLM"], weights_env: &[("BRAIN_LLAVA_WEIGHTS", "weights")]),
+    // `weights` is resolved through `llava::spec::LlavaSpec`.
+    arch!("llava", "LLaVA-1.5-13B (CLIP-L/14@336 + Vicuna-1.5 decoder)", Multimodal, Brain, "brain-llava", hf: &["LlavaLlamaForCausalLM"], weights_env: &[]),
     // BOTH published releases of this model are pullable, and
     // `crates/deepseek2ocr`'s `import::Files::locate` recognizes either on
     // disk: `default_ref` stays the GGUF pair (`ggml-org/DeepSeek-OCR-GGUF`,

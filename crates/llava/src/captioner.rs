@@ -32,8 +32,7 @@ pub struct LlavaCaptioner {
 }
 
 impl LlavaCaptioner {
-    /// Caption with the checkpoint in `dir`. An empty `dir` falls back to
-    /// `$BRAIN_LLAVA_WEIGHTS`, the same as the served path.
+    /// Caption with the checkpoint in `dir`.
     pub fn new(dir: impl Into<String>) -> LlavaCaptioner {
         LlavaCaptioner { dir: dir.into(), precision: "fp32".to_string() }
     }
@@ -66,7 +65,7 @@ impl Captioner for LlavaCaptioner {
                 on_token(d);
             }
         };
-        let action = crate::caps::LlavaProvider::new()
+        let action = crate::caps::LlavaProvider::new(None)
             .action("caption")
             .ok_or("llava: the 'caption' action is missing from its own provider")?;
         let outcome = action.run(&inv, &mut progress)?;

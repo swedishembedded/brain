@@ -1,6 +1,5 @@
 crates/arcface/src/caps.rs	BRAIN_ARCFACE_DIR
 crates/arch/src/lib.rs	BRAIN_CAMPPLUS_DIR
-crates/arch/src/lib.rs	BRAIN_LLAVA_WEIGHTS
 crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V2
 crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V3
 crates/backend-api/src/lib.rs	HOME
@@ -104,7 +103,6 @@ crates/cli/src/run_cli.rs	BRAIN_AUTO_FETCH
 crates/cli/src/serve_daemon.rs	XDG_RUNTIME_DIR
 crates/cli/src/supply.rs	<var>
 crates/cli/src/supply.rs	BRAIN_AUTO_FETCH
-crates/cli/src/supply.rs	BRAIN_LLAVA_WEIGHTS
 crates/cli/src/supply.rs	BRAIN_QWEN3TTS_WEIGHTS
 crates/cli/src/supply.rs	YOLO_RAW_PT
 crates/cli/tests/it/device_routing.rs	BRAIN_DEVICE
@@ -532,7 +530,6 @@ crates/lfm2/tests/it/parity.rs	<env_var>
 crates/lfm2/tests/it/parity.rs	BRAIN_LFM25_230M
 crates/lfm2/tests/it/parity.rs	BRAIN_LFM25_350M
 crates/lfm2/tests/it/parity.rs	BRAIN_TESTDATA
-crates/llava/src/caps.rs	BRAIN_LLAVA_WEIGHTS
 crates/llava/src/captioner.rs	BRAIN_LLAVA_WEIGHTS
 crates/ltxv/tests/it/av_lora_reload.rs	<CHILD_ENV>
 crates/ltxv/tests/it/av_lora_reload.rs	<PATH_ENV>

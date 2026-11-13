@@ -33,15 +33,17 @@ what would close it.
 
 Model id: `brain/llava` (a `brain/`-namespaced served id is never itself
 fetched from the network, and this architecture has no `default_ref` - point
-it at weights you obtained yourself). Set `BRAIN_LLAVA_WEIGHTS` to a directory
-holding `config.json` + `model.safetensors` + `tokenizer.json` (overridable
-per call via the `weights` param).
+it at weights you obtained yourself). Any checkpoint directory under the
+models directory (`config.json` + `model.safetensors` + `tokenizer.json`,
+`architectures[0] == "LlavaLlamaForCausalLM"`) is discovered automatically,
+resolved through `llava::spec::LlavaSpec`. `--weights DIR` names one outright
+per call, and `brain serve --pin llava.weights=DIR` pins it for the server.
 
 ## Running it
 
 ```bash
-BRAIN_LLAVA_WEIGHTS=/path/to/llava-v1.5-13b \
-  brain llava caption --prompt "Describe this image and its style in a very detailed manner." \
+brain llava caption --weights /path/to/llava-v1.5-13b \
+    --prompt "Describe this image and its style in a very detailed manner." \
     --max_new 128 --in image=photo.ppm --out text=caption.txt
 ```
 
@@ -69,8 +71,7 @@ connection setup this snippet builds on.
 - `precision` - `fp32` (default) or `int8` for the Vicuna decoder; the
   CLIP-L336 vision tower always runs fp32 regardless of this setting.
 - `image` input - raw HWC f32 pixels in `[0,1]`, with `{w,h}` metadata.
-- `weights` - per-call override of the checkpoint directory (in place of
-  `BRAIN_LLAVA_WEIGHTS`).
+- `weights` - per-call override of the resolved checkpoint directory.
 
 ## Hardware and limits
 
