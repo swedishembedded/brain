@@ -33,7 +33,7 @@ fn published_files(rig: &crate::support::Rig, report: &Value) -> std::collection
 fn a_full_fine_tune_publishes_its_checkpoint_by_manifest_installs_it_and_a_later_job_trains_on_it() {
     let rig = rig_qwen3("full", 16 << 30);
     let train = data_digest(&rig, &plain());
-    let params = json!({"base": BASE, "steps": 3, "lr": 1e-3, "seed": 7, "max_block": 128, "install_as": "tuned-1", "data": json!({"train": {"digest": train.hex()}}).to_string()});
+    let params = json!({"base": BASE, "steps": 3, "lr": 1e-3, "seed": 7, "max_block": 128, "train_precision": "state=int8,sr=on", "install_as": "tuned-1", "data": json!({"train": {"digest": train.hex()}}).to_string()});
     let frames = Frames::default();
     let outcome = run_action(&rig, FULL_ACTION, &full_spec(), params.clone(), &[], &frames).expect("the run");
 
@@ -100,6 +100,8 @@ fn checkpoint_jobs_refuse_what_is_not_a_digest_a_blob_or_a_plain_name_before_any
     let absent = trainjob::store::digest_of(b"never published");
     assert!(merge(json!({"base": BASE, "adapter_digest": absent.hex()}), &[]).contains("not in the artifact store"));
     assert!(merge(json!({"base": "nobody/nothing", "adapter_digest": train.hex()}), &[]).contains("not in the model store"));
+    let e = full(json!({"base": BASE, "data": data, "train_precision": "state=nonsense"}));
+    assert!(e.contains("train_precision"), "{e}");
     for path in ["path", "out", "save", "checkpoint"] {
         let e = merge(json!({"base": BASE, "adapter_digest": train.hex(), path: "elsewhere"}), &[]);
         assert!(e.contains("unknown param"), "{path}: {e}");

@@ -28,7 +28,9 @@ Two more actions of `brain/train` produce a checkpoint instead of an adapter.
   card holding the weights, their gradients and one step's activations; a Qwen3 or Qwen3.5 base). `data` takes
   `train`, `replay` and `weighted_replay` only; held-out sets, a monitor and a starting adapter are refused by name.
   Params: `base`, `data`, `steps`, `lr`, `weight_decay`, `grad_accum`, `strict_updates`, `seed`, `max_block`,
-  `thinking`, `arch`, `replay_share`, `install_as`.
+  `thinking`, `arch`, `replay_share`, `train_precision` (`key=value,...`, e.g. `state=int8,sr=on`: what each
+  trainable parameter, its gradient and its optimiser state are stored as; fp32 everywhere by default, and an unknown
+  key or value is refused before anything loads), `install_as`.
 - **`merge`** folds a LoRA adapter into the weights it targets (`W + alpha/r B A`). The adapter is the input blob
   `adapter` or `adapter_digest` (exactly one); the work is host-side and takes no card.
 

@@ -73,6 +73,7 @@ pub fn full_spec() -> ActionSpec {
         .param(ParamSpec::new("thinking", ParamType::Bool, "train the model to reason before it answers (off: trained for no-think mode)").default(json!(true)))
         .param(ParamSpec::new("arch", ParamType::Str, "the base's architecture when its directory carries no config.json to tell it by"))
         .param(optional_f("replay_share", "the share of draws that come from the replay sets in all, in (0, 1)", 0.0, 1.0))
+        .param(ParamSpec::new("train_precision", ParamType::Str, "what each trainable parameter, its gradient and its optimiser state are stored as, `key=value,...` (e.g. `state=int8,sr=on`); the default is fp32 everywhere. An unknown key or value is refused before anything loads"))
         .param(install_param())
         .input(blob("dataset", "the training records (`generic-messages-v2` JSONL)"));
     for name in crate::request::REPLAY_BLOBS {
@@ -107,6 +108,7 @@ pub struct FullParams {
     pub thinking: bool,
     pub arch: Option<String>,
     pub replay_share: Option<f32>,
+    pub train_precision: Option<String>,
     pub install_as: Option<String>,
 }
 
@@ -137,6 +139,9 @@ impl FullRequest {
         }
         if let Some(name) = &params.install_as {
             check_install_name(name)?;
+        }
+        if let Some(spec) = &params.train_precision {
+            brain::TrainPrecision::parse(spec).map_err(|e| format!("full_train: train_precision: {e}"))?;
         }
         check_attached(&data, inv)?;
         Ok(FullRequest { params, data })
@@ -310,6 +315,9 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
     }
     if let Some(v) = p.replay_share {
         ft = ft.replay_share(v);
+    }
+    if let Some(spec) = &p.train_precision {
+        ft = ft.train_precision(brain::TrainPrecision::parse(spec).map_err(|e| format!("full_train: train_precision: {e}"))?);
     }
     for path in &staged.replay {
         ft = ft.replay(path);
