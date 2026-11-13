@@ -233,6 +233,8 @@ const PIPELINES: &[(&str, &str)] = &[
     ("lora_xa_rows", kernels::LORA_XA_ROWS),
     ("lora_xa_rows_serial", kernels::LORA_XA_ROWS_SERIAL),
     ("lora_delta_rows", kernels::LORA_DELTA_ROWS),
+    ("lora_xa_rows_tiled", kernels::LORA_XA_ROWS_TILED),
+    ("lora_delta_rows_tiled", kernels::LORA_DELTA_ROWS_TILED),
 ];
 
 /// A tuned-kernel table: variant by (device, kernel sources, row bucket, shape).

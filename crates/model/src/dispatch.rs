@@ -183,12 +183,25 @@ pub struct LoraBank {
 /// for a model's pipeline list (they are resolved by name,
 /// [`LoraBankKernels::resolve`], so their position carries no meaning). A
 /// model that serves an adapter bank registers these.
-pub const LORA_BANK_PIPELINES: [(&str, &str); 4] = [
+pub const LORA_BANK_PIPELINES: [(&str, &str); 7] = [
     ("lora_xa_rows", kernels::LORA_XA_ROWS),
     ("lora_xa_rows_serial", kernels::LORA_XA_ROWS_SERIAL),
     ("lora_delta_rows", kernels::LORA_DELTA_ROWS),
     ("lora_delta_rows_multi", kernels::LORA_DELTA_ROWS_MULTI),
+    ("lora_xa_rows_tiled", kernels::LORA_XA_ROWS_TILED),
+    ("lora_delta_rows_tiled", kernels::LORA_DELTA_ROWS_TILED),
+    ("lora_delta_rows_multi_tiled", kernels::LORA_DELTA_ROWS_MULTI_TILED),
 ];
+
+/// The rank word a bank stores per slot: the low 16 bits are the live width the
+/// projection computes (a single linear's rank, or a group's stacked width) and
+/// the high 16 bits the adapter's own rank, which bounds the epilogue's loop (the
+/// rows of `Bt` past it are zero padding). A word with no high bits is read as
+/// "the rank is the width" (clamped to the bank's `r_max`).
+pub fn rank_word(rank: u32, live_width: u32) -> u32 {
+    assert!(rank <= 0xFFFF && live_width <= 0xFFFF, "rank word: {rank}/{live_width} do not fit 16 bits");
+    (rank << 16) | live_width
+}
 
 /// The three pipeline indices [`lora_bank_rows`] chooses among, as the caller
 /// registered them.
@@ -205,6 +218,16 @@ pub struct LoraBankKernels {
     /// their input ([`lora_bank_group_rows`]); `None` when the model did not
     /// register it, in which case a group is corrected site by site.
     pub delta_multi: Option<usize>,
+    /// `lora_xa_rows_tiled` (four rows by four rank indices a workgroup), the
+    /// projection [`KernelVariant::RowTiled`] selects; `None` when the model did
+    /// not register it, in which case the row-wise projection runs.
+    pub xa_tiled: Option<usize>,
+    /// `lora_delta_rows_tiled` (four rows a thread, one to four sites), the
+    /// epilogue [`KernelVariant::RowTiled`] selects; `None` likewise.
+    pub delta_tiled: Option<usize>,
+    /// `lora_delta_rows_multi_tiled`, the group epilogue of [`KernelVariant::RowTiled`];
+    /// `None` when the model did not register it.
+    pub delta_multi_tiled: Option<usize>,
 }
 
 impl LoraBankKernels {
@@ -217,6 +240,9 @@ impl LoraBankKernels {
             xa_serial: g.kernel_index("lora_xa_rows_serial")?,
             delta: g.kernel_index("lora_delta_rows")?,
             delta_multi: g.kernel_index("lora_delta_rows_multi"),
+            xa_tiled: g.kernel_index("lora_xa_rows_tiled"),
+            delta_tiled: g.kernel_index("lora_delta_rows_tiled"),
+            delta_multi_tiled: g.kernel_index("lora_delta_rows_multi_tiled"),
         })
     }
 }
@@ -277,14 +303,43 @@ pub struct LoraBankRows<'a> {
 /// On a window whose geometry cannot be right: zero `rows`, `k`, `n`, or bank
 /// extent, or `out_col0 + n > out_stride`.
 pub fn lora_bank_rows(g: &Gpu, rq: &LoraBankRows) -> [Step; 2] {
+    let variant = bank_variant(g, rq.kernels, rq.bank.slots, rq.rows, rq.bank.r_max, rq.k, rq.kernels.delta_tiled);
+    lora_bank_rows_as(g, rq, variant)
+}
+
+/// The variant of the bank's projection and epilogue the device and the registered kernels
+/// give a window of `rows` rows over `width` rank rows (`Op::LoraBankProject`): the
+/// row-tiled pair where the selector offers it, the model registered it and the bank holds ONE
+/// adapter (so the rows of a tile share it: with several slots a tile of interleaved adapters
+/// runs the tiled kernel's slow path, measured 2x slower than the row-wise kernel), else the
+/// row-wise projection with its epilogue.
+fn bank_variant(g: &Gpu, kernels: LoraBankKernels, slots: u32, rows: u32, width: u32, k: u32, delta_tiled: Option<usize>) -> gpu_core::select::KernelVariant {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
+    let shape = OpShape { m: rows, n: width, k, dtype: Dtype::F32 };
+    match gpu_core::select::DefaultSelector.select(Op::LoraBankProject, shape, &g.caps()) {
+        KernelVariant::RowTiled if slots > 1 || kernels.xa_tiled.is_none() || delta_tiled.is_none() => KernelVariant::WorkgroupPerOutput,
+        v => v,
+    }
+}
+
+/// [`lora_bank_rows`] with the projection variant given: [`KernelVariant::RowTiled`] (the
+/// four-rows-by-four-ranks projection and the four-rows-a-thread epilogue),
+/// `WorkgroupPerOutput` (a workgroup per row and rank index) or `Reference` (a thread
+/// per row and rank index, the barrier-free kernel).
+///
+/// # Panics
+///
+/// Under the conditions of [`lora_bank_rows`], and when `RowTiled` is asked of a model
+/// that did not register the tiled kernels.
+pub fn lora_bank_rows_as(g: &Gpu, rq: &LoraBankRows, variant: gpu_core::select::KernelVariant) -> [Step; 2] {
+    use gpu_core::select::KernelVariant;
 
     let LoraBankRows { kernels, bank, slot, tscr, x, out, row0, rows, k, n, out_stride, out_col0 } = *rq;
     assert!(rows > 0 && k > 0 && n > 0 && bank.slots > 0 && bank.r_max > 0, "lora_bank_rows: empty window or bank");
     assert!(out_col0 as u64 + n as u64 <= out_stride as u64, "lora_bank_rows: columns {out_col0}..{} overrun the {out_stride}-float output row", out_col0 + n);
 
-    let shape = OpShape { m: rows, n: bank.r_max, k, dtype: Dtype::F32 };
-    let (xa_kernel, xa_grid) = match gpu_core::select::DefaultSelector.select(Op::LoraBankProject, shape, &g.caps()) {
+    let (xa_kernel, xa_grid) = match variant {
+        KernelVariant::RowTiled => (kernels.xa_tiled.expect("lora_bank_rows: RowTiled needs lora_xa_rows_tiled registered"), gpu_core::Dispatch::Workgroups(rows.div_ceil(TILE_ROWS) * bank.r_max.div_ceil(TILE_RANKS))),
         KernelVariant::WorkgroupPerOutput => (kernels.xa, gpu_core::Dispatch::Workgroups(rows * bank.r_max)),
         _ => (kernels.xa_serial, gpu_core::Dispatch::Threads(rows * bank.r_max)),
     };
@@ -292,14 +347,24 @@ pub fn lora_bank_rows(g: &Gpu, rq: &LoraBankRows) -> [Step; 2] {
     // must respect the device's storage-buffer offset alignment (256 bytes),
     // which an arbitrary `row0` does not.
     let project = g.dispatch(xa_kernel, &[x, &bank.a, slot, &bank.rank, tscr], &[rows, k, bank.r_max, bank.slots, row0], xa_grid);
+    let (delta_kernel, delta_threads) = match variant {
+        KernelVariant::RowTiled => (kernels.delta_tiled.expect("lora_bank_rows: RowTiled needs lora_delta_rows_tiled registered"), rows.div_ceil(TILE_ROWS) * n),
+        _ => (kernels.delta, rows * n),
+    };
     let add = g.dispatch(
-        kernels.delta,
+        delta_kernel,
         &[out, tscr, &bank.bt, slot, &bank.rank],
         &[rows, n, bank.r_max, bank.slots, out_stride, out_col0, row0],
-        gpu_core::Dispatch::Threads(rows * n),
+        gpu_core::Dispatch::Threads(delta_threads),
     );
     [project, add]
 }
+
+/// Rows a row-tiled workgroup (projection) or thread (epilogue) owns: the tile of
+/// `lora_xa_rows_tiled.wgsl` and the epilogues beside it.
+pub const TILE_ROWS: u32 = 4;
+/// Rank indices a row-tiled projection workgroup owns.
+pub const TILE_RANKS: u32 = 4;
 
 /// The largest group of linears [`lora_bank_group_rows`] corrects in one
 /// epilogue dispatch (the kernel's output bindings).
@@ -351,15 +416,25 @@ pub struct LoraGroupBank {
 /// `lora_delta_rows_multi`.
 #[allow(clippy::too_many_arguments)]
 pub fn lora_bank_group_rows(g: &Gpu, kernels: LoraBankKernels, bank: &LoraGroupBank, slot: &DeviceBuffer, tscr: &DeviceBuffer, x: &DeviceBuffer, outs: &[LoraGroupOut], rows: u32, k: u32) -> [Step; 2] {
-    use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
+    let variant = bank_variant(g, kernels, bank.slots, rows, outs.len() as u32 * bank.r_max, k, kernels.delta_multi_tiled);
+    lora_bank_group_rows_as(g, kernels, bank, slot, tscr, x, outs, rows, k, variant)
+}
+
+/// [`lora_bank_group_rows`] with the variant given, as [`lora_bank_rows_as`].
+#[allow(clippy::too_many_arguments)]
+pub fn lora_bank_group_rows_as(g: &Gpu, kernels: LoraBankKernels, bank: &LoraGroupBank, slot: &DeviceBuffer, tscr: &DeviceBuffer, x: &DeviceBuffer, outs: &[LoraGroupOut], rows: u32, k: u32, variant: gpu_core::select::KernelVariant) -> [Step; 2] {
+    use gpu_core::select::KernelVariant;
 
     let sites = outs.len() as u32;
     assert!((2..=LORA_GROUP_MAX as u32).contains(&sites), "lora_bank_group_rows: {sites} sites");
     assert!(rows > 0 && k > 0 && bank.slots > 0 && bank.r_max > 0, "lora_bank_group_rows: empty window or bank");
-    let delta_multi = kernels.delta_multi.expect("lora_bank_group_rows: the model did not register lora_delta_rows_multi");
+    let delta_multi = match variant {
+        KernelVariant::RowTiled => kernels.delta_multi_tiled.expect("lora_bank_group_rows: RowTiled needs lora_delta_rows_multi_tiled registered"),
+        _ => kernels.delta_multi.expect("lora_bank_group_rows: the model did not register lora_delta_rows_multi"),
+    };
     let stacked = sites * bank.r_max;
-    let shape = OpShape { m: rows, n: stacked, k, dtype: Dtype::F32 };
-    let (xa_kernel, xa_grid) = match gpu_core::select::DefaultSelector.select(Op::LoraBankProject, shape, &g.caps()) {
+    let (xa_kernel, xa_grid) = match variant {
+        KernelVariant::RowTiled => (kernels.xa_tiled.expect("lora_bank_group_rows: RowTiled needs lora_xa_rows_tiled registered"), gpu_core::Dispatch::Workgroups(rows.div_ceil(TILE_ROWS) * stacked.div_ceil(TILE_RANKS))),
         KernelVariant::WorkgroupPerOutput => (kernels.xa, gpu_core::Dispatch::Workgroups(rows * stacked)),
         _ => (kernels.xa_serial, gpu_core::Dispatch::Threads(rows * stacked)),
     };
@@ -374,8 +449,12 @@ pub fn lora_bank_group_rows(g: &Gpu, kernels: LoraBankKernels, bank: &LoraGroupB
     }
     params.resize(5 + 4 * LORA_GROUP_MAX, 0);
     let total_n: u32 = outs.iter().map(|o| o.n).sum();
+    let threads = match variant {
+        KernelVariant::RowTiled => rows.div_ceil(TILE_ROWS) * total_n,
+        _ => rows * total_n,
+    };
     let bound = |i: usize| outs.get(i).map_or_else(|| &bank.spare[i - 2], |o| o.out);
-    let add = g.dispatch(delta_multi, &[tscr, &bank.bt, slot, &bank.rank, bound(0), bound(1), bound(2), bound(3)], &params, gpu_core::Dispatch::Threads(rows * total_n));
+    let add = g.dispatch(delta_multi, &[tscr, &bank.bt, slot, &bank.rank, bound(0), bound(1), bound(2), bound(3)], &params, gpu_core::Dispatch::Threads(threads));
     [project, add]
 }
 

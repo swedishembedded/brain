@@ -363,6 +363,12 @@ pub enum KernelVariant {
     /// by construction (`@cpu no` - each exceeds the CPU JIT's one-
     /// barrier-per-body limit). Requires `caps.workgroup_reductions`.
     FusedFlash,
+    /// A row-tiled form of a per-row-adapter op (`Op::LoraBankProject`):
+    /// the work is split by tiles of rows and rank indices instead of one
+    /// (row, rank index) pair a workgroup, so values loaded for one row feed
+    /// the others of the tile. Needs `caps.workgroup_reductions` (the projection
+    /// folds its partial sums behind barriers).
+    RowTiled,
 }
 
 /// The `(a, b, accum)` dtype triple a [`KernelVariant`] needs a matrix/tensor
@@ -500,6 +506,7 @@ impl KernelVariant {
             KernelVariant::RegisterTiled => {
                 Requirement { workgroup_reductions: true, ..dtype_storage_requirement(dt) }
             }
+            KernelVariant::RowTiled => Requirement { workgroup_reductions: true, ..dtype_storage_requirement(dt) },
             // The fused paged-attention kernels' INT8 tier (`paged_flash_
             // prefill_i8`, `paged_flash_decode_i8`) reads its packed pool with
             // a shift/mask per byte and multiplies the sign-extended value by
@@ -827,6 +834,12 @@ fn no_coop_gradnorm() -> bool {
 /// for a weight tall enough for the dense GEMM's tiles; above it the weight is decoded and the dense product runs.
 pub const CQ_GEMV_MAX_ROWS: u32 = 16;
 
+/// (row, rank index) pairs from which the row-tiled per-row-adapter LoRA kernels lead the
+/// row-wise ones (`Op::LoraBankProject`): a tile covers 4 x 4 of them, so this many give 128
+/// tiles, about one per multiprocessor of the GH200 it was measured on (the 27B's groups at 32
+/// and 64 rows and its single linears at 64 won, its single linears at 32 rows did not).
+pub const LORA_TILE_MIN_OUTPUTS: u64 = 2048;
+
 /// Every variant that can EXECUTE for `(op, shape)` on this device, with the
 /// static best guess FIRST. Never empty: `Reference` is always executable.
 ///
@@ -1009,6 +1022,14 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // form is NOT bit-identical to the serial one (64 partial sums fold in a
         // different order), so an adopter owes a numerical gate, not an
         // `assert_eq!` on bits.
+        //
+        // From [`LORA_TILE_MIN_OUTPUTS`] (row, rank index) pairs the row-tiled pair leads: it
+        // loads each activation and A row once per tile of four rows by four rank indices
+        // instead of once per pair, which the row-wise kernel pays at the L2's bandwidth. Below
+        // that the tiles are too few to fill the device and the row-wise kernel is as fast. The
+        // tiled kernel assumes the rows of a tile share an adapter; a caller whose bank holds
+        // several adapters withholds it (`model::dispatch`).
+        Op::LoraBankProject if shape.m >= 4 && u64::from(shape.m) * u64::from(shape.n) >= LORA_TILE_MIN_OUTPUTS => vec![RowTiled, WorkgroupPerOutput, Reference],
         Op::LoraBankProject => vec![WorkgroupPerOutput, Reference],
         // Standalone attention softmax has NO shape gate either, for the
         // same reason `Op::MaxAbsRow` does not: it is a per-row reduction
@@ -1304,6 +1325,7 @@ impl KernelVariant {
             KernelVariant::PackedInt8 => "packed_int8",
             KernelVariant::RegisterTiled => "register_tiled",
             KernelVariant::FusedFlash => "fused_flash",
+            KernelVariant::RowTiled => "row_tiled",
         }
     }
     /// Inverse of [`KernelVariant::as_str`]. Deliberately NOT `from_str`:
@@ -1317,6 +1339,7 @@ impl KernelVariant {
             "packed_int8" => KernelVariant::PackedInt8,
             "register_tiled" => KernelVariant::RegisterTiled,
             "fused_flash" => KernelVariant::FusedFlash,
+            "row_tiled" => KernelVariant::RowTiled,
             _ => return None,
         })
     }
@@ -1990,18 +2013,26 @@ mod tests {
         }
     }
 
-    /// The per-row-adapter LoRA projection is cooperative at every shape on a
-    /// device that runs workgroup reductions (a long reduction behind an
-    /// `r_max`-wide output, `Op::MaxAbsRow`'s shape) and falls back to the
-    /// barrier-free twin where it does not - decode (`m = 1`) and prefill alike.
+    /// The per-row-adapter LoRA projection is cooperative on a device that runs
+    /// workgroup reductions (a long reduction behind an `r_max`-wide output,
+    /// `Op::MaxAbsRow`'s shape) and falls back to the barrier-free twin where it
+    /// does not; from `LORA_TILE_MIN_OUTPUTS` (row, rank index) pairs the row-tiled pair
+    /// leads on the device that runs it, with the row-wise kernel the next candidate.
     #[test]
-    fn lora_bank_projection_is_cooperative_at_every_shape_and_serial_without_reductions() {
+    fn lora_bank_projection_is_row_tiled_from_enough_outputs_cooperative_below_and_serial_without_reductions() {
         let s = DefaultSelector;
-        for m in [1u32, 8, 32, 512] {
-            for k in [256u32, 1024, 4096, 12288] {
-                let sh = shape(m, 16, k, Dtype::F32);
-                assert_eq!(s.select(Op::LoraBankProject, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m} k={k}");
-                assert_eq!(s.select(Op::LoraBankProject, sh, &cpu_caps()), KernelVariant::Reference, "m={m} k={k}");
+        for m in [1u32, 3, 4, 8, 32, 64, 512] {
+            for n in [16u32, 32, 64, 128] {
+                for k in [256u32, 4096, 12288] {
+                    let sh = shape(m, n, k, Dtype::F32);
+                    let tiled = m >= 4 && u64::from(m) * u64::from(n) >= LORA_TILE_MIN_OUTPUTS;
+                    let want = if tiled { KernelVariant::RowTiled } else { KernelVariant::WorkgroupPerOutput };
+                    assert_eq!(s.select(Op::LoraBankProject, sh, &gpu_caps()), want, "m={m} n={n} k={k}");
+                    if tiled {
+                        assert_eq!(candidates(Op::LoraBankProject, sh, &gpu_caps()), vec![KernelVariant::RowTiled, KernelVariant::WorkgroupPerOutput, KernelVariant::Reference], "the row-wise kernel stays a candidate");
+                    }
+                    assert_eq!(s.select(Op::LoraBankProject, sh, &cpu_caps()), KernelVariant::Reference, "m={m} n={n} k={k}");
+                }
             }
         }
     }
@@ -2503,6 +2534,7 @@ mod tests {
             KernelVariant::PackedInt8,
             KernelVariant::RegisterTiled,
             KernelVariant::FusedFlash,
+            KernelVariant::RowTiled,
         ] {
             assert_eq!(KernelVariant::parse_str(v.as_str()), Some(v), "{v:?}");
         }

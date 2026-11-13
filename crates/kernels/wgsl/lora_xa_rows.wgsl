@@ -82,7 +82,7 @@ var<workgroup> partial: array<f32, 64>;
 fn is_live(i: u32, j: u32) -> bool {
     if (i >= p.rows) { return false; }
     let s = slot[p.row0 + i];
-    return s < p.slots && j < min(rank[s], p.r_max);
+    return s < p.slots && j < min(rank[s] & 0xFFFFu, p.r_max);
 }
 
 @compute @workgroup_size(64)

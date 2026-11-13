@@ -26,8 +26,9 @@
 //                                   = r_max · Σ_{h<g} n_h
 //   slot    : [rows] u32            >= `slots` (NONE is u32::MAX): the thread returns
 //                                   and no output is touched, so a base row keeps its bits
-//   rank    : [slots] u32           non-zero when the slot's adapter corrects any site
-//                                   of the group; 0 leaves the row alone
+//   rank    : [slots] u32           the rank word: low 16 bits are non-zero when the slot's adapter corrects any site
+//                                   of the group; the high 16 bits, when set, are the adapter's rank, which bounds the
+//                                   loop below (the rows past it are zero padding); 0 leaves the row alone
 //   out0..3 : read_write            site g's output, `s_g` floats per row, the
 //                                   correction added at `[c_g, c_g + n_g)`; a group of
 //                                   fewer than four binds any buffer for the rest and
@@ -71,7 +72,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     var cl = idx - i * ntot;
     let s = slot[p.row0 + i];
     if (s >= p.slots) { return; }
-    if (rank[s] == 0u) { return; }
+    if ((rank[s] & 0xFFFFu) == 0u) { return; }
 
     var site = 0u;
     var n = p.n0;
@@ -94,7 +95,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let tbase = i * (p.g * p.r_max) + site * p.r_max;
     let bbase = s * (p.r_max * ntot) + off + cl;
     var acc = 0.0;
-    for (var c = 0u; c < p.r_max; c = c + 1u) {
+    let word_rank = rank[s] >> 16u;
+    let live = select(p.r_max, min(word_rank, p.r_max), word_rank != 0u);
+    for (var c = 0u; c < live; c = c + 1u) {
         acc = acc + t[tbase + c] * bt_bank[bbase + c * n];
     }
     let o = (p.row0 + i) * stride + col0 + cl;

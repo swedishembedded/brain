@@ -95,6 +95,9 @@ impl WgslProvider {
             KernelVariant::FusedFlash => {
                 unreachable!("Op::MatMul's candidates() never returns FusedFlash")
             }
+            KernelVariant::RowTiled => {
+                unreachable!("Op::MatMul's candidates() never returns RowTiled")
+            }
         }
     }
 

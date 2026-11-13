@@ -47,7 +47,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let i = idx / p.r_max;
     let j = idx - i * p.r_max;
     let s = slot[p.row0 + i];
-    if (s >= p.slots || j >= min(rank[s], p.r_max)) { return; }
+    if (s >= p.slots || j >= min(rank[s] & 0xFFFFu, p.r_max)) { return; }
     let xbase = (p.row0 + i) * p.k;
     let abase = (s * p.r_max + j) * p.k;
     var acc = 0.0;

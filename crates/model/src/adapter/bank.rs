@@ -63,7 +63,7 @@ use gpu_core::{DeviceBuffer, Gpu, Step};
 use super::saved_bank::SavedBank;
 use super::sites::{LoraSites, SavedSite};
 use super::LinearSite;
-use crate::dispatch::{lora_bank_group_rows, lora_bank_rows, LoraBank, LoraBankKernels, LoraBankRows, LoraGroupBank, LoraGroupOut, LORA_GROUP_MAX, LORA_SLOT_NONE};
+use crate::dispatch::{lora_bank_group_rows, lora_bank_rows, rank_word, LoraBank, LoraBankKernels, LoraBankRows, LoraGroupBank, LoraGroupOut, LORA_GROUP_MAX, LORA_SLOT_NONE};
 use crate::lora::device_adapter::DeviceAdapter;
 use crate::paged::{KvNamespace, NamespaceIds, BASE_KV_NAMESPACE};
 use crate::serve::{AdapterAvailability, AdapterId};
@@ -899,13 +899,14 @@ impl AdapterBank {
         // Ranks last: a row can only name this slot once every factor is in.
         // A linear the adapter does not correct gets rank 0 (row untouched); a
         // group gets the width of its stacked rank axis when the adapter
-        // corrects any member, 0 otherwise.
+        // corrects any member, 0 otherwise. The adapter's own rank rides in the
+        // word's high half (`rank_word`), where the epilogue's loop bound reads it.
         let mut ranks = vec![0u32; self.sites.len()];
         let mut group_ranks = vec![0u32; self.groups.len()];
         for unit in &e.sites {
             match unit {
-                HostUnit::Single { bank_ix, .. } => ranks[*bank_ix] = e.rank,
-                HostUnit::Group { group, members } => group_ranks[*group] = r_max as u32 * members.len() as u32,
+                HostUnit::Single { bank_ix, .. } => ranks[*bank_ix] = rank_word(e.rank, e.rank),
+                HostUnit::Group { group, members } => group_ranks[*group] = rank_word(e.rank, r_max as u32 * members.len() as u32),
             }
         }
         for (bs, rank) in self.sites.iter().zip(ranks) {

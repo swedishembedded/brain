@@ -37,7 +37,8 @@
 
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::GemmVariants;
-use model::dispatch::{lora_bank_rows, lora_rows_off, mm8_rows_off, I8Scratch, LoraBank, LoraBankKernels, LoraBankRows, LoraW, LORA_SLOT_NONE};
+use gpu_core::select::KernelVariant;
+use model::dispatch::{lora_bank_group_rows_as, lora_bank_rows, lora_bank_rows_as, lora_rows_off, mm8_rows_off, rank_word, I8Scratch, LoraBank, LoraBankKernels, LoraBankRows, LoraGroupBank, LoraGroupOut, LoraW, LORA_SLOT_NONE};
 use model::int8::quantize_weight;
 
 /// Every kernel here JIT-compiles on the CPU backend, so the whole file runs on it.
@@ -47,6 +48,10 @@ const PIPES: &[(&str, &str)] = &[
     ("lora_xa_rows", kernels::LORA_XA_ROWS),
     ("lora_xa_rows_serial", kernels::LORA_XA_ROWS_SERIAL),
     ("lora_delta_rows", kernels::LORA_DELTA_ROWS),
+    ("lora_delta_rows_multi", kernels::LORA_DELTA_ROWS_MULTI),
+    ("lora_xa_rows_tiled", kernels::LORA_XA_ROWS_TILED),
+    ("lora_delta_rows_tiled", kernels::LORA_DELTA_ROWS_TILED),
+    ("lora_delta_rows_multi_tiled", kernels::LORA_DELTA_ROWS_MULTI_TILED),
 ];
 
 /// The int8 base path adds the DP4A GEMM and the activation quantizer, which
@@ -116,7 +121,8 @@ fn bank(g: &Gpu, ads: &[Adapter], r_max: usize, k: usize, n: usize) -> LoraBank 
         a[i * r_max * k..i * r_max * k + ad.rank * k].copy_from_slice(&ad.a);
         bt[i * r_max * n..i * r_max * n + ad.rank * n].copy_from_slice(&ad.bt);
     }
-    let rank: Vec<u32> = ads.iter().map(|ad| ad.rank as u32).collect();
+    // The rank word as a bank stores it: the width in the low half, the rank in the high half.
+    let rank: Vec<u32> = ads.iter().map(|ad| rank_word(ad.rank as u32, ad.rank as u32)).collect();
     LoraBank { a: upload(g, &a), bt: upload(g, &bt), rank: upload_u32(g, &rank), slots: s as u32, r_max: r_max as u32 }
 }
 
@@ -175,28 +181,50 @@ struct Problem {
 /// row and column against the solo oracle.
 /// Returns how many rows took a correction.
 fn check(g: &Gpu, p: &Problem, ads: &[Adapter], x: &[f32], base: &[f32]) -> usize {
+    check_as(g, p, ads, x, base, None)
+}
+
+/// [`check`] with the row-tiled EPILOGUE alone: the barrier-free projection computes `t`, the
+/// `lora_delta_rows_tiled` kernel (which has no barrier and runs on every backend) applies it.
+fn check_tiled_epilogue(g: &Gpu, p: &Problem, ads: &[Adapter], x: &[f32], base: &[f32]) -> usize {
+    check_with(g, p, ads, x, base, None, true)
+}
+
+/// [`check`] with the bank kernels' variant forced (`None`: what the selector picks).
+fn check_as(g: &Gpu, p: &Problem, ads: &[Adapter], x: &[f32], base: &[f32], variant: Option<KernelVariant>) -> usize {
+    check_with(g, p, ads, x, base, variant, false)
+}
+
+fn check_with(g: &Gpu, p: &Problem, ads: &[Adapter], x: &[f32], base: &[f32], variant: Option<KernelVariant>, tiled_epilogue: bool) -> usize {
     let kernels = LoraBankKernels::resolve(g).expect("the three bank kernels are registered");
     let (xb, outb) = (upload(g, x), upload(g, base));
     let bk = bank(g, ads, p.r_max, p.k, p.n);
     let slot = upload_u32(g, &p.slot);
     let tscr = g.storage((p.rows * p.r_max) as u64);
-    let steps = lora_bank_rows(
-        g,
-        &LoraBankRows {
-            kernels,
-            bank: &bk,
-            slot: &slot,
-            tscr: &tscr,
-            x: &xb,
-            out: &outb,
-            row0: p.row0 as u32,
-            rows: p.rows as u32,
-            k: p.k as u32,
-            n: p.n as u32,
-            out_stride: p.stride as u32,
-            out_col0: p.col0 as u32,
-        },
-    );
+    let rq = LoraBankRows {
+        kernels,
+        bank: &bk,
+        slot: &slot,
+        tscr: &tscr,
+        x: &xb,
+        out: &outb,
+        row0: p.row0 as u32,
+        rows: p.rows as u32,
+        k: p.k as u32,
+        n: p.n as u32,
+        out_stride: p.stride as u32,
+        out_col0: p.col0 as u32,
+    };
+    let steps = match variant {
+        Some(v) => lora_bank_rows_as(g, &rq, v),
+        None => lora_bank_rows(g, &rq),
+    };
+    let mut steps = steps.to_vec();
+    if tiled_epilogue {
+        let tiled = kernels.delta_tiled.expect("lora_delta_rows_tiled is registered");
+        let params = [p.rows as u32, p.n as u32, p.r_max as u32, bk.slots, p.stride as u32, p.col0 as u32, p.row0 as u32];
+        steps[1] = g.dispatch(tiled, &[&outb, &tscr, &bk.bt, &slot, &bk.rank], &params, gpu_core::Dispatch::Threads((p.rows as u32).div_ceil(4) * p.n as u32));
+    }
     g.submit(&[], &steps);
     let got = g.read(&outb, p.total * p.stride);
 
@@ -364,4 +392,195 @@ fn on_an_int8_base_the_correction_arrives_whole_and_none_rows_are_the_plain_int8
         assert!(err <= 1e-3, "row {i} slot {s}: correction on the int8 output differs from the host oracle by {err:.2e}");
         assert!(cosine(&got, &want) >= MIN_COSINE, "row {i}: cosine {}", cosine(&got, &want));
     }
+}
+
+/// The variants a device can run: the row-wise cooperative and barrier-free kernels, and the
+/// row-tiled pair where workgroup reductions execute (it folds its projection behind barriers,
+/// which the CPU JIT mis-executes).
+fn variants(g: &Gpu) -> Vec<KernelVariant> {
+    let mut v = vec![KernelVariant::Reference];
+    if g.caps().workgroup_reductions {
+        v.push(KernelVariant::WorkgroupPerOutput);
+        v.push(KernelVariant::RowTiled);
+    }
+    v
+}
+
+/// The row-tiled pair against the solo oracle on the shapes that decide it: a tile whose rows
+/// share a slot (a rollout group), tiles of mixed slots, a ragged last tile, NONE and
+/// out-of-range slots inside a tile, ranks below `r_max`, and a window inside a larger batch.
+#[test]
+fn every_variant_matches_each_row_run_alone_on_uniform_mixed_and_ragged_tiles() {
+    let g = gpu_core::testgpu::dev(PIPES);
+    let (k, n) = (512, 192);
+    let ads = mixed_adapters(k, n);
+    let cases: Vec<(&str, usize, usize, usize, Vec<u32>)> = vec![
+        ("one slot, whole tiles", 32, 0, 32, vec![2; 32]),
+        ("one slot, ragged tail", 31, 0, 31, vec![0; 31]),
+        ("one slot with NONE rows inside tiles", 24, 0, 24, (0..24).map(|i| if i % 5 == 1 { N } else { 3 }).collect()),
+        ("alternating slots", 20, 0, 20, (0..20).map(|i| (i % 4) as u32).collect()),
+        ("runs of slots with an out-of-range and an empty-rank slot", 40, 3, 33, (0..40).map(|i| [0u32, 0, 0, 0, 1, 1, 1, 1, 7, 7, 4, 4, 2, 2, 2, 2][i % 16]).collect()),
+        ("fewer rows than a tile", 3, 0, 3, vec![1, 1, 1]),
+    ];
+    for (what, total, row0, rows, slot) in cases {
+        let p = Problem { total, row0, rows, k, n, r_max: 16, stride: n + 48, col0: 24, slot };
+        let (x, base) = problem_inputs(&p, 0x51 + total as u64);
+        for v in variants(&g) {
+            assert!(check_as(&g, &p, &ads, &x, &base, Some(v)) > 0, "{what} ({v:?}): the window holds corrected rows");
+        }
+        assert!(check_tiled_epilogue(&g, &p, &ads, &x, &base) > 0, "{what} (tiled epilogue): the window holds corrected rows");
+    }
+}
+
+/// A group bank of three linears over one activation, the layout `AdapterBank` stores: each
+/// slot's `A` blocks stacked along the rank axis, its `Bt` blocks end to end, the rank word
+/// carrying the width and the adapter's rank. Every variant must give each row of each site
+/// the solo path's correction and leave the bits of rows without one.
+#[test]
+fn every_variant_corrects_a_group_of_linears_as_each_site_run_alone() {
+    let g = gpu_core::testgpu::dev(PIPES);
+    let (k, r_max) = (384usize, 16usize);
+    let ns = [96usize, 64, 128];
+    let ranks = [8usize, 16, 3];
+    // adapters[slot][site]
+    let adapters: Vec<Vec<Adapter>> = ranks.iter().enumerate().map(|(s, &r)| ns.iter().enumerate().map(|(i, &n)| adapter(0x300 + (s * 7 + i) as u64, r, k, n)).collect()).collect();
+    let (slots, g_sites) = (ranks.len(), ns.len());
+    let total_n: usize = ns.iter().sum();
+    // A [slots, g*r_max, k], Bt [slots, r_max * sum n], padding rows hold garbage a rank bound must not read.
+    let mut a = fill(0xBAD2, slots * g_sites * r_max * k, 3.0);
+    let mut bt = fill(0xBAD3, slots * r_max * total_n, 3.0);
+    for (s, sites) in adapters.iter().enumerate() {
+        let mut off = 0;
+        for (i, ad) in sites.iter().enumerate() {
+            let a0 = (s * g_sites * r_max + i * r_max) * k;
+            a[a0..a0 + ad.rank * k].copy_from_slice(&ad.a);
+            let b0 = s * r_max * total_n + r_max * off;
+            bt[b0..b0 + ad.rank * ns[i]].copy_from_slice(&ad.bt);
+            off += ns[i];
+        }
+    }
+    let word: Vec<u32> = ranks.iter().map(|&r| rank_word(r as u32, (g_sites * r_max) as u32)).collect();
+    let bank = LoraGroupBank { a: upload(&g, &a), bt: upload(&g, &bt), rank: upload_u32(&g, &word), slots: slots as u32, r_max: r_max as u32, spare: [g.storage(1), g.storage(1)] };
+    let rows = 37usize;
+    let slot: Vec<u32> = (0..rows).map(|i| if i < 16 { 1 } else { [0u32, 2, N, 2, 2, 0, 1][i % 7] }).collect();
+    let x = fill(0x77, rows * k, 1.0);
+    let bases: Vec<Vec<f32>> = ns.iter().enumerate().map(|(i, &n)| fill(0x99 + i as u64, rows * n, 2.0)).collect();
+    let xb = upload(&g, &x);
+    let kernels = LoraBankKernels::resolve(&g).unwrap();
+    // `None`: the barrier-free projection with the row-tiled group epilogue, which runs on every backend.
+    let mut runs: Vec<Option<KernelVariant>> = variants(&g).into_iter().map(Some).collect();
+    runs.push(None);
+    for v in runs {
+        let outs: Vec<DeviceBuffer> = bases.iter().map(|b| upload(&g, b)).collect();
+        let tscr = g.storage((rows * g_sites * r_max) as u64);
+        let group: Vec<LoraGroupOut> = outs.iter().zip(&ns).map(|(o, &n)| LoraGroupOut { out: o, n: n as u32, stride: n as u32, col0: 0 }).collect();
+        let slot_buf = upload_u32(&g, &slot);
+        let mut steps = lora_bank_group_rows_as(&g, kernels, &bank, &slot_buf, &tscr, &xb, &group, rows as u32, k as u32, v.unwrap_or(KernelVariant::Reference)).to_vec();
+        if v.is_none() {
+            let mut params = vec![rows as u32, g_sites as u32, r_max as u32, slots as u32, 0];
+            let mut off = 0u32;
+            for &n in &ns {
+                params.extend([n as u32, n as u32, 0, off]);
+                off += r_max as u32 * n as u32;
+            }
+            params.resize(5 + 4 * 4, 0);
+            let tiled = kernels.delta_multi_tiled.expect("lora_delta_rows_multi_tiled is registered");
+            steps[1] = g.dispatch(tiled, &[&tscr, &bank.bt, &slot_buf, &bank.rank, &outs[0], &outs[1], &outs[2], &bank.spare[0]], &params, gpu_core::Dispatch::Threads((rows as u32).div_ceil(4) * total_n as u32));
+        }
+        let v = format!("{v:?}");
+        g.submit(&[], &steps);
+        for (site, (&n, out)) in ns.iter().zip(&outs).enumerate() {
+            let got = g.read(out, rows * n);
+            for i in 0..rows {
+                let (row, was) = (&got[i * n..(i + 1) * n], &bases[site][i * n..(i + 1) * n]);
+                if slot[i] == N {
+                    assert!(bits_equal(row, was), "{v:?}: site {site} row {i} is NONE and must keep its bits");
+                    continue;
+                }
+                let want = solo_delta(&g, &adapters[slot[i] as usize][site], &xb, i, k, n);
+                let delta: Vec<f32> = row.iter().zip(was).map(|(a, b)| a - b).collect();
+                let err = max_abs(&delta, &want);
+                assert!(err <= MAX_ABS, "{v:?}: site {site} row {i} slot {}: max|delta - solo| {err:.2e}", slot[i]);
+            }
+        }
+    }
+}
+
+/// The bank kernels' device time at the 27B's shapes (k = 5120 groups of 4 and 2 linears, a single
+/// 6144 -> 5120 and a 17408 -> 5120 linear, rank 32): each variant's device time per call over rows
+/// 8/32/64 with every row on one slot and with rows over four slots. Prints a table; it asserts
+/// nothing, so it only runs when asked (`cargo test ... -- --ignored lora_bank_kernels_cost`).
+#[test]
+#[ignore = "a measurement, run on a GPU"]
+fn lora_bank_kernels_cost_at_27b_shapes() {
+    let g = gpu_core::testgpu::dev(PIPES);
+    if !g.caps().workgroup_reductions {
+        eprintln!("no workgroup reductions here; nothing to compare");
+        return;
+    }
+    let kernels = LoraBankKernels::resolve(&g).unwrap();
+    let r_max = 32usize;
+    // Device time of the pair's kernels (timestamp queries inside one pass), not the host's wall time.
+    let time = |steps: &[gpu_core::Step]| -> f64 {
+        let prof = gpu_core::profile::profile(&g, "lora bank", steps, 20);
+        assert!(prof.device_timed, "this backend has no device timestamps");
+        prof.rows.iter().map(|r| r.secs).sum::<f64>() * 1e6
+    };
+    // (label, k, outputs)
+    let shapes: [(&str, usize, Vec<usize>); 4] = [("group 4 (qkv z b a)", 5120, vec![10240, 6144, 48, 48]), ("group 2 (gate up)", 5120, vec![17408, 17408]), ("single out_proj", 6144, vec![5120]), ("single down", 17408, vec![5120])];
+    println!("{:<22} {:>5} {:>6} {:>12} {:>12} {:>12}", "site", "rows", "slots", "reference us", "row-wise us", "row-tiled us");
+    for (label, k, ns) in &shapes {
+        let total_n: usize = ns.iter().sum();
+        let sites = ns.len();
+        for rows in [8usize, 16, 24, 32, 64] {
+            for slots_used in [1usize, 4, 5] {
+                let slots = 4usize;
+                let a = upload(&g, &fill(1, slots * sites * r_max * k, 0.02));
+                let bt = upload(&g, &fill(2, slots * r_max * total_n, 0.02));
+                let rank = upload_u32(&g, &vec![rank_word(32, (sites * r_max) as u32); slots]);
+                // 1 or 4: contiguous runs of rows per slot; 5 stands for four slots interleaved row by row.
+                let slot = upload_u32(&g, &(0..rows).map(|i| if slots_used == 5 { (i % 4) as u32 } else { (i * slots_used / rows) as u32 }).collect::<Vec<_>>());
+                let x = upload(&g, &fill(3, rows * k, 1.0));
+                let tscr = g.storage((rows * sites * r_max) as u64);
+                let outs: Vec<DeviceBuffer> = ns.iter().map(|&n| g.storage((rows * n) as u64)).collect();
+                let cost = |v: KernelVariant| -> f64 {
+                    if sites == 1 {
+                        let bank = LoraBank { a: a.clone(), bt: bt.clone(), rank: rank.clone(), slots: slots as u32, r_max: r_max as u32 };
+                        let rq = LoraBankRows { kernels, bank: &bank, slot: &slot, tscr: &tscr, x: &x, out: &outs[0], row0: 0, rows: rows as u32, k: *k as u32, n: ns[0] as u32, out_stride: ns[0] as u32, out_col0: 0 };
+                        time(&lora_bank_rows_as(&g, &rq, v))
+                    } else {
+                        let bank = LoraGroupBank { a: a.clone(), bt: bt.clone(), rank: rank.clone(), slots: slots as u32, r_max: r_max as u32, spare: [g.storage(1), g.storage(1)] };
+                        let group: Vec<LoraGroupOut> = outs.iter().zip(ns).map(|(o, &n)| LoraGroupOut { out: o, n: n as u32, stride: n as u32, col0: 0 }).collect();
+                        time(&lora_bank_group_rows_as(&g, kernels, &bank, &slot, &tscr, &x, &group, rows as u32, *k as u32, v))
+                    }
+                };
+                println!("{label:<22} {rows:>5} {slots_used:>6} {:>12.1} {:>12.1} {:>12.1}", cost(KernelVariant::Reference), cost(KernelVariant::WorkgroupPerOutput), cost(KernelVariant::RowTiled));
+            }
+        }
+    }
+}
+
+/// One row-tiled projection over interleaved slots at the 27B's `down` shape, for a profiler to
+/// attach to (`ncu --kernel-name regex:lora_xa_rows_tiled`); asserts nothing.
+#[test]
+#[ignore = "a profiler target, run on a GPU"]
+fn lora_bank_row_tiled_projection_over_interleaved_slots_for_a_profiler() {
+    let g = gpu_core::testgpu::dev(PIPES);
+    if !g.caps().workgroup_reductions {
+        return;
+    }
+    let (rows, k, r_max, slots) = (32usize, 17408usize, 32usize, 4usize);
+    let a = upload(&g, &fill(1, slots * r_max * k, 0.02));
+    let bt = upload(&g, &fill(2, slots * r_max * 5120, 0.02));
+    let rank = upload_u32(&g, &vec![rank_word(32, r_max as u32); slots]);
+    let slot = upload_u32(&g, &(0..rows).map(|i| (i % 4) as u32).collect::<Vec<_>>());
+    let x = upload(&g, &fill(3, rows * k, 1.0));
+    let tscr = g.storage((rows * r_max) as u64);
+    let out = g.storage((rows * 5120) as u64);
+    let bank = LoraBank { a, bt, rank, slots: slots as u32, r_max: r_max as u32 };
+    let rq = LoraBankRows { kernels: LoraBankKernels::resolve(&g).unwrap(), bank: &bank, slot: &slot, tscr: &tscr, x: &x, out: &out, row0: 0, rows: rows as u32, k: k as u32, n: 5120, out_stride: 5120, out_col0: 0 };
+    for _ in 0..3 {
+        g.submit(&[], &lora_bank_rows_as(&g, &rq, KernelVariant::RowTiled));
+    }
+    g.read(&out, 1);
 }
