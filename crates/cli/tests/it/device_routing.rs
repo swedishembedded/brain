@@ -105,7 +105,7 @@ fn npu_requested_sidecar_has_zero_occurrences() {
         // This file itself necessarily names the banned symbols (in this
         // very doc comment and in the literal strings the scan below greps
         // for) - it is the gate, not a call site.
-        if entry.ends_with("tests/device_routing.rs") {
+        if entry.ends_with("tests/it/device_routing.rs") {
             continue;
         }
         if entry.extension().and_then(|e| e.to_str()) != Some("rs") {
