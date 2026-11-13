@@ -203,4 +203,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume XIII: Training Large Models Efficiently](v13-training-at-scale/index.md)
 
 1. [Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md): How is training data prepared, mixed and fed at scale?
+2. [Mixed-Precision Training](v13-training-at-scale/02-mixed-precision.md): How do we train in 16 or 8 bits without the model falling apart?
 <!-- /contents -->

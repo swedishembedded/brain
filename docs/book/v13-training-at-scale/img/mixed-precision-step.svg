@@ -1,0 +1,51 @@
+<!-- source-sha256: db4a174d82a7dd65f98444c64c77e4a0645ad88fca8840a582a0dd26022d0d16 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 360" width="1000" height="360"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="360" fill="#ffffff"/>
+<rect x="25" y="36" width="170" height="190" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="103.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">master</text>
+<text x="110" y="119.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fp32 value</text>
+<text x="110" y="135.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle"></text>
+<text x="110" y="151.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">moments</text>
+<text x="110" y="167.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fp32 or 8-bit</text>
+<rect x="255" y="31" width="170" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="50.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">working copy</text>
+<text x="340" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">round(master)</text>
+<text x="340" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bf16 or fp8</text>
+<rect x="485" y="31" width="170" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="50.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">forward, backward</text>
+<text x="570" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">on the loss S x L</text>
+<text x="570" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">narrow products</text>
+<rect x="715" y="31" width="170" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="800" y="50.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">scaled gradient</text>
+<text x="800" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">S x g</text>
+<text x="800" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">narrow format</text>
+<rect x="715" y="169" width="170" height="62" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="800" y="188.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">unscale</text>
+<text x="800" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">g = (S x g) / S</text>
+<text x="800" y="220.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fp32, finite?</text>
+<rect x="485" y="169" width="170" height="62" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="188.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">clip</text>
+<text x="570" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">by the global norm</text>
+<text x="570" y="220.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fp32</text>
+<rect x="255" y="169" width="170" height="62" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="188.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">optimizer rule</text>
+<text x="340" y="204.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">on the master</text>
+<text x="340" y="220.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fp32 arithmetic</text>
+<ellipse cx="800" cy="316" rx="85" ry="22" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="800" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">not finite: skip the step</text>
+<text x="800" y="328.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">S = S / 2</text>
+<line x1="198" y1="62" x2="252" y2="62" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="225" y="53.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">cast down</text>
+<line x1="428" y1="62" x2="482" y2="62" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="455" y="53.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">weights</text>
+<line x1="658" y1="62" x2="712" y2="62" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="685" y="53.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">backward</text>
+<line x1="800" y1="96" x2="800" y2="166" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="712" y1="200" x2="658" y2="200" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="685" y="191.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">finite</text>
+<line x1="482" y1="200" x2="428" y2="200" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="455" y="191.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">g</text>
+<line x1="252" y1="200" x2="198" y2="200" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="800" y1="234" x2="800" y2="291" stroke="#1a202c" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head)"/>
+<text x="320" y="318.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">every update lands on the master;</text>
+<text x="320" y="334.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the working copy is rebuilt from it</text>
+</svg>

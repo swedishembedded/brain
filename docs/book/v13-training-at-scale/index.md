@@ -14,7 +14,7 @@ The order follows the dependencies. The data chapter comes first because every o
 You can write the records of a fine-tuning set as ids, a mask and start offsets, say what each position of a row may read, and count the padding a layout computes before the run starts. You can sort records by length and state what that costs the batch, realise a mixture by listing groups and say how often it repeats a record, find exact and near duplicates with hashes and MinHash and keep the held-out set clean, and give a run an order that a restart and a team of workers can recompute. The later chapters add the rest: to decide where each number of a step lives and in which format, to cut the memory of a step to what the device holds, to adapt a model by training a few million numbers, to divide a run over devices and compute what the division costs, and to make a crashed run produce the model it would have produced.
 
 1. [Data Pipelines for Large Models](01-training-data.md): how is training data prepared, mixed and fed at scale?
-2. Mixed-Precision Training: how do we train in 16 or 8 bits without the model falling apart?
+2. [Mixed-Precision Training](02-mixed-precision.md): how do we train in 16 or 8 bits without the model falling apart?
 3. Where Training Memory Goes: why does training a model need several times the memory of running it, and how do we get it back?
 4. Parameter-Efficient Fine-Tuning: how can we adapt a billion-parameter model by training only a few million numbers?
 5. Parallel and Distributed Training: how is one training run spread across many devices without changing its result?
