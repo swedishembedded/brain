@@ -75,6 +75,7 @@ def main() -> int:
     ap.add_argument("--steps", type=int, default=0, help="denoise steps (0 = variant default)")
     ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: a random one is drawn here and printed; the action requires an explicit seed)")
     ap.add_argument("--variant", default="klein-4b", choices=["klein-4b", "klein-9b", "base-4b", "base-9b"])
+    ap.add_argument("--allow-non-commercial", action="store_true", help="confirm non-commercial use of the FLUX.2 9B weights (the 9B variants are refused without it)")
     args = ap.parse_args()
 
     params = {"prompt": args.prompt, "width": args.width, "height": args.height}
@@ -86,6 +87,7 @@ def main() -> int:
     if args.model != "brain/mock":
         params["steps"] = args.steps
         params["variant"] = args.variant
+        params["allow_non_commercial"] = args.allow_non_commercial
 
     with BrainDBus() as brain:
         models = brain.models()

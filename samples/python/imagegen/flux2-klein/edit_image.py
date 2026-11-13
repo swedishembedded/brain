@@ -44,6 +44,7 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: a random one is drawn here and printed; the action requires an explicit seed)")
     ap.add_argument("--variant", default="klein-4b", choices=["klein-4b", "klein-9b", "base-4b", "base-9b"])
     ap.add_argument("--ref", action="append", default=[], help="additional reference PPM(s) (up to 3)")
+    ap.add_argument("--allow-non-commercial", action="store_true", help="confirm non-commercial use of the FLUX.2 9B weights (the 9B variants are refused without it)")
     args = ap.parse_args()
 
     params = {
@@ -52,6 +53,7 @@ def main() -> int:
         "height": args.height,
         "steps": args.steps,
         "variant": args.variant,
+        "allow_non_commercial": args.allow_non_commercial,
     }
     params["seed"] = args.seed if args.seed is not None else random.SystemRandom().randrange(2**63)
     print(f"seed: {params['seed']} (pass --seed {params['seed']} to reproduce)")

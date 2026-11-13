@@ -8,8 +8,7 @@ as a new class, and validates the result with a genuinely independent
 two-stage recognizer.
 
 ```bash
-BRAIN_FLUX2_ALLOW_NC=1 \
-  samples/shell/imagegen/identity-yolo-pipeline/identity_yolo_pipeline.sh <photo-or-url> [out-dir]
+samples/shell/imagegen/identity-yolo-pipeline/identity_yolo_pipeline.sh --allow-non-commercial <photo-or-url> [out-dir]
 ```
 
 ## What it demonstrates
@@ -63,7 +62,6 @@ right `--pin` arguments, instead of at the first two-minute
 generation):
 
 ```bash
-BRAIN_FLUX2_ALLOW_NC=1 \
 tools/dbus-session.sh --serve "--dbus \
     --pin pulid.flux1=... --pin pulid.pulid=... --pin pulid.arcface=... \
     --pin pulid.clip=... --pin pulid.bisenet=... \
@@ -102,8 +100,8 @@ already present.
   exact path each is expected at (BiSeNet in particular has no fetch recipe;
   its header explains the one-time conversion from facexlib's torch
   pickle).
-- `BRAIN_FLUX2_ALLOW_NC=1`, set explicitly by the caller to confirm
-  non-commercial use: stage 4 uses FLUX.2 Klein-9B, which is
+- `--allow-non-commercial`, passed explicitly by the caller to confirm
+  non-commercial use (each stage-4 request carries `allow_non_commercial`): stage 4 uses FLUX.2 Klein-9B, which is
   NC-licensed (FLUX.2 [Non-Commercial] License, Black Forest Labs).
 
 ## Options (env-overridable, all optional)

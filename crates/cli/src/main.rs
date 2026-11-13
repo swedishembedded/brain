@@ -1278,6 +1278,7 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_MINIMAXMUSIC3_TOKENIZER", replacement: "serve: {pin: [minimaxmusic3.tokenizer=DIR]}" },
     Retired { name: "BRAIN_QWEN3VL_CTX", replacement: "qwen3vl generate: {ctx: N}" },
     Retired { name: "BRAIN_WAN_T5_DEVICE", replacement: "wan t2v / lora_train: {te_device: SPEC}" },
+    Retired { name: "BRAIN_FLUX2_ALLOW_NC", replacement: "flux2 <action>: {allow_non_commercial: true}" },
     Retired { name: "BRAIN_SDXL_VAE_DEVICE", replacement: "sdxl / controlnet text2image: {vae_device: SPEC}" },
     Retired { name: "BRAIN_FLUX1_TE_DEVICE", replacement: "flux1 / pulid text2image: {te_device: cpu|gpuN}" },
     Retired { name: "BRAIN_FLUX1_VAE_DEVICE", replacement: "flux1 / pulid text2image: {vae_device: SPEC}" },

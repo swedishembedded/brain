@@ -52,7 +52,22 @@ pub enum VariantSource<'a> {
     Bound(&'a str),
 }
 
-/// Resolve `source` to a real variant name, license-gate it, load its
+/// A [`VariantSource`] together with whether the request confirmed
+/// non-commercial use of the 9B weights (`allow_non_commercial`): the license
+/// gate needs both, and carrying them as one value keeps the build functions'
+/// argument lists from growing a loose bool.
+pub struct VariantRequest<'a> {
+    pub source: VariantSource<'a>,
+    pub accept_non_commercial: bool,
+}
+
+impl<'a> VariantRequest<'a> {
+    pub fn new(source: VariantSource<'a>, accept_non_commercial: bool) -> Self {
+        VariantRequest { source, accept_non_commercial }
+    }
+}
+
+/// Resolve `request` to a real variant name, license-gate it, load its
 /// config, and correct `requested_precision` for the real DiT file (a
 /// `.gguf` executes through the packed int8 path regardless of what was
 /// asked - `effective_dit_precision`'s own doc) - without building.
@@ -63,13 +78,13 @@ pub enum VariantSource<'a> {
 /// resolved variant/precision as its cache KEY, computed before deciding
 /// whether a rebuild is even needed - calling the full resolve-AND-build
 /// unconditionally there would defeat the cache entirely.
-pub fn resolve(source: VariantSource, paths: &Paths, requested_precision: Precision, precision_was_explicit: bool) -> Result<(Flux2Config, Precision, String), String> {
-    let variant = match source {
+pub fn resolve(request: VariantRequest, paths: &Paths, requested_precision: Precision, precision_was_explicit: bool) -> Result<(Flux2Config, Precision, String), String> {
+    let variant = match request.source {
         VariantSource::Assembly(a) => a.variant.clone().ok_or_else(|| "flux2: assemble: no dit chosen".to_string())?,
         VariantSource::Sniff(requested) => bind_variant(&paths.dit, requested)?,
         VariantSource::Bound(v) => v.to_string(),
     };
-    check_license(&variant)?;
+    check_license(&variant, request.accept_non_commercial)?;
     let cfg = Flux2Config::from_name(&variant)?;
     let precision = effective_dit_precision(&paths.dit, requested_precision, precision_was_explicit)?;
     Ok((cfg, precision, variant))
@@ -86,7 +101,7 @@ pub fn resolve(source: VariantSource, paths: &Paths, requested_precision: Precis
 /// onto afterward (a resident's own bookkeeping, a rebuild-with-an-adapter
 /// call).
 pub fn build_resolved(
-    source: VariantSource,
+    request: VariantRequest,
     paths: &Paths,
     n_fwd: u32,
     n_gen: u32,
@@ -95,7 +110,7 @@ pub fn build_resolved(
     precision_was_explicit: bool,
     max_batch: u32,
 ) -> Result<(Pipeline, Flux2Config, Precision, String), String> {
-    let (cfg, precision, variant) = resolve(source, paths, requested_precision, precision_was_explicit)?;
+    let (cfg, precision, variant) = resolve(request, paths, requested_precision, precision_was_explicit)?;
     let pipe = Pipeline::build_sized(&cfg, paths, n_fwd, n_gen, adapters, precision, max_batch)?;
     Ok((pipe, cfg, precision, variant))
 }
@@ -118,7 +133,7 @@ mod tests {
     fn assembly_with_no_variant_fails_before_any_real_work() {
         let assembly = Assembly { id: "x".to_string(), arch: "flux2".to_string(), variant: None, roles: BTreeMap::new(), provenance: Vec::new() };
         let paths = paths_with_dit("model.safetensors");
-        let Err(err) = build_resolved(VariantSource::Assembly(&assembly), &paths, 1, 1, &[], Precision::F32, false, 1) else { panic!("expected an error") };
+        let Err(err) = build_resolved(VariantRequest::new(VariantSource::Assembly(&assembly), false), &paths, 1, 1, &[], Precision::F32, false, 1) else { panic!("expected an error") };
         assert_eq!(err, "flux2: assemble: no dit chosen");
     }
 
@@ -127,11 +142,11 @@ mod tests {
     /// license gate - a resident instance never gets to skip that.
     #[test]
     fn bound_variant_still_runs_the_license_gate() {
-        let _guard = brain_testutil::env_lock();
-        std::env::remove_var("BRAIN_FLUX2_ALLOW_NC");
         let paths = paths_with_dit("model.safetensors");
-        let Err(err) = build_resolved(VariantSource::Bound("klein-9b"), &paths, 1, 1, &[], Precision::F32, false, 1) else { panic!("expected an error") };
+        let Err(err) = build_resolved(VariantRequest::new(VariantSource::Bound("klein-9b"), false), &paths, 1, 1, &[], Precision::F32, false, 1) else { panic!("expected an error") };
         assert!(err.contains("Non-Commercial"), "{err}");
+        let Err(accepted) = build_resolved(VariantRequest::new(VariantSource::Bound("klein-9b"), true), &paths, 1, 1, &[], Precision::F32, false, 1) else { panic!("expected an error") };
+        assert!(!accepted.contains("Non-Commercial"), "an accepted 9B request must pass the gate: {accepted}");
     }
 
     /// The whole point of this extraction: a `.gguf` DiT gets the precision
@@ -150,7 +165,7 @@ mod tests {
         // enough that variant/license/config/precision all already ran,
         // since neither a missing-variant nor a license-gate message is
         // what comes back.
-        let Err(err) = build_resolved(VariantSource::Bound("klein-4b"), &paths, 1, 1, &[], Precision::F32, false, 1) else { panic!("expected an error") };
+        let Err(err) = build_resolved(VariantRequest::new(VariantSource::Bound("klein-4b"), false), &paths, 1, 1, &[], Precision::F32, false, 1) else { panic!("expected an error") };
         assert!(!err.contains("Non-Commercial"), "{err}");
         assert!(!err.contains("incompatible"), "{err}");
     }
@@ -163,7 +178,7 @@ mod tests {
     #[test]
     fn an_explicit_fp32_request_against_a_gguf_dit_is_refused() {
         let paths = paths_with_dit("model.gguf");
-        let Err(err) = build_resolved(VariantSource::Bound("klein-4b"), &paths, 1, 1, &[], Precision::F32, true, 1) else { panic!("expected an error") };
+        let Err(err) = build_resolved(VariantRequest::new(VariantSource::Bound("klein-4b"), false), &paths, 1, 1, &[], Precision::F32, true, 1) else { panic!("expected an error") };
         assert!(err.contains("incompatible"), "{err}");
     }
 }

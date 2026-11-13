@@ -11,8 +11,8 @@ its own separate terms set by whoever trained and released it.
 
 **Rule going forward:** any crate that auto-fetches a checkpoint under
 anything other than a permissive (Apache-2.0/MIT/BSD) license must gate that
-fetch behind an explicit opt-in (see `crates/flux2`'s `BRAIN_FLUX2_ALLOW_NC`
-for the pattern), and `docs/reference/models/<name>.md` must state the restriction
+fetch behind an explicit opt-in (see `crates/flux2`'s `allow_non_commercial`
+request param for the pattern), and `docs/reference/models/<name>.md` must state the restriction
 inline, not just here. See `.agents/rules/licensing.md`.
 
 Last audited: 2026-09-03 (`.agents/roadmap/licensing-audit.md`). Re-check
@@ -34,8 +34,8 @@ before shipping anything that bundles or hosts inference on these weights.
 | Moondream 3 (`moondream3`) | user-supplied (no auto-fetch; a checkpoint directory dropped under the models directory is discovered automatically, resolved through `moondream3::spec::Moondream3Spec`) | Business Source License 1.1 (M87 Labs) | Production use allowed except hosted/embedded offerings that compete with M87 Labs' paid product; converts to Apache-2.0 at a future Change Date | No |
 | SCRFD (`scrfd`) | antelopev2 `scrfd_10g_bnkps.onnx` | InsightFace (code: MIT; weights: non-commercial research only) | Commercial use requires contacting InsightFace | No |
 | ArcFace (`arcface`) | antelopev2 `glintr100.onnx` | Same as SCRFD | Same as SCRFD | No |
-| FLUX.1-dev / Kontext-dev (`flux1`) | BFL `dev`/`Kontext` checkpoints | FLUX.1-dev Non-Commercial License (schnell is Apache-2.0) | Non-commercial only for `dev`/`Kontext` variants | No opt-in gate - `flux2` has `BRAIN_FLUX2_ALLOW_NC` for its analogous 9B weights |
-| FLUX.2 Klein-9B / base-9B (`flux2`) | BFL 9B checkpoints (4B + VAE + Qwen3 encoder are Apache-2.0) | FLUX Non-Commercial License | Non-commercial only | Yes - gated behind `BRAIN_FLUX2_ALLOW_NC` and documented in `docs/reference/models/flux2.md`, the reference pattern |
+| FLUX.1-dev / Kontext-dev (`flux1`) | BFL `dev`/`Kontext` checkpoints | FLUX.1-dev Non-Commercial License (schnell is Apache-2.0) | Non-commercial only for `dev`/`Kontext` variants | No opt-in gate - `flux2` has `allow_non_commercial` for its analogous 9B weights |
+| FLUX.2 Klein-9B / base-9B (`flux2`) | BFL 9B checkpoints (4B + VAE + Qwen3 encoder are Apache-2.0) | FLUX Non-Commercial License | Non-commercial only | Yes - gated behind the per-request `allow_non_commercial` param and documented in `docs/reference/models/flux2.md`, the reference pattern |
 | LTX-2.x (`ltxv`) | LTX-2.x checkpoints | LTX-2.x Community License (Lightricks) | Commercial-use gating on a broadly-defined "Derivatives of LTX-2.x" | Not cross-checked against `docs/reference/models/ltxv.md`'s current text |
 | SDXL (`sdxlunet`, `controlnet`, `supir`'s frozen backbone) | Stability AI SDXL 1.0 | CreativeML Open RAIL++-M | Use-based restrictions (no illegal/harmful use), not a commercial-use ban, but distinct from Apache-2.0 | Not cross-checked against `docs/reference/models/sdxlunet.md`'s current text |
 | Z-Image (`s3dit`) | `Tongyi-MAI/Z-Image-Turbo` | Unverified - Tongyi-MAI's license text was unreachable from the audit environment | Unknown | No |

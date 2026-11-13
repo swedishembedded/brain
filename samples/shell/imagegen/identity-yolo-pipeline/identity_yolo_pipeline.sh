@@ -11,7 +11,7 @@
 #
 # One photo of a person in, a validated YOLOv8 detector for THAT person out.
 #
-#   identity_yolo_pipeline.sh <photo-or-url> [out-dir]
+#   identity_yolo_pipeline.sh --allow-non-commercial <photo-or-url> [out-dir]
 #
 # 1. Fetch weights (idempotent). 2. Verify one face; canary-check identity
 # conditioning. 3. Generate N_TARGET identity-preserving images (PuLID),
@@ -49,7 +49,19 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
   exec dbus-run-session -- "$0" "$@"
 fi
 
-SRC="${1:?usage: identity_yolo_pipeline.sh <photo-or-url> [out-dir]}"
+# Stage 4 uses FLUX.2 klein-9B (FLUX.2 [Non-Commercial] License): the caller
+# confirms non-commercial use with --allow-non-commercial, which each stage-4
+# request then carries as its `allow_non_commercial` param.
+ALLOW_NC=0
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --allow-non-commercial) ALLOW_NC=1 ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+SRC="${1:?usage: identity_yolo_pipeline.sh [--allow-non-commercial] <photo-or-url> [out-dir]}"
 OUT_DIR="${2:-out/identity-yolo-$(date +%Y%m%d-%H%M%S)}"
 BRAIN="${BRAIN:-./target/release/brain}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -140,9 +152,8 @@ python3 -c "import numpy, PIL, jeepney" 2>/dev/null || die "python3 needs numpy,
 [ -f "$GEN_CLIENT" ] || die "missing $GEN_CLIENT"
 [ -f "$HOME/.cache/huggingface/token" ] || [ -n "${HF_TOKEN:-}" ] || \
   die "no HuggingFace token (~/.cache/huggingface/token or \$HF_TOKEN) - FLUX.1-dev is gated: hf auth login after accepting its license"
-[ "${BRAIN_FLUX2_ALLOW_NC:-}" = "1" ] || \
-  die "stage 4 uses FLUX.2 klein-9B (FLUX.2 [Non-Commercial] License) - set BRAIN_FLUX2_ALLOW_NC=1 yourself to confirm non-commercial use"
-export BRAIN_FLUX2_ALLOW_NC
+[ "$ALLOW_NC" = "1" ] || \
+  die "stage 4 uses FLUX.2 klein-9B (FLUX.2 [Non-Commercial] License) - pass --allow-non-commercial yourself to confirm non-commercial use"
 "$BRAIN" devices >&2 || true
 
 log "Stage 1: weight provisioning"
@@ -417,7 +428,7 @@ mkdir -p "$OUT_DIR/train/target" "$OUT_DIR/train/negative" "$OUT_DIR/train/backg
 # what the residents key their instances on - only prompt/seed vary, so every
 # call after the first reuses the loaded weights.
 pulid_gen() { serve_for pulid; python3 "$GEN_CLIENT" pulid --prompt "$1" --out "$2" --seed "$3" --face "$PHOTO" --width "$GEN_SIZE" --height "$GEN_SIZE" --steps "$GEN_STEPS" --precision int8; }
-flux2_gen() { serve_for flux2; python3 "$GEN_CLIENT" flux2 --prompt "$1" --out "$2" --seed "$3" --width "$GEN_SIZE" --height "$GEN_SIZE" --precision int8 --variant "$FLUX2_VARIANT"; }
+flux2_gen() { serve_for flux2; python3 "$GEN_CLIENT" flux2 --prompt "$1" --out "$2" --seed "$3" --width "$GEN_SIZE" --height "$GEN_SIZE" --precision int8 --variant "$FLUX2_VARIANT" --allow-non-commercial; }
 identity_score() { pytool identity-score "$REF_EMBED" "$1"; }
 above_floor() { [ "$1" != "NA" ] && awk -v s="$1" -v f="$IDENTITY_FLOOR" 'BEGIN{exit !(s+0>f)}'; }
 gen_if_missing() { [ -f "$1" ] || "$2" "$3" "$1" "$(rand_seed)"; }  # <out> <gen-fn> <prompt>

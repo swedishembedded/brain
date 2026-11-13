@@ -273,10 +273,8 @@ mod tests {
     #[cfg(feature = "image")]
     #[test]
     fn a_real_license_gate_failure_becomes_license_required() {
-        let _guard = brain_testutil::env_lock();
-        std::env::remove_var("BRAIN_FLUX2_ALLOW_NC");
-        let Err(msg) = flux2::caps::check_license("flux2-klein-9b") else {
-            panic!("the 9B variant must be gated with BRAIN_FLUX2_ALLOW_NC unset");
+        let Err(msg) = flux2::caps::check_license("flux2-klein-9b", false) else {
+            panic!("the 9B variant must be gated without the opt-in");
         };
         let err = Error::LicenseRequired(msg);
         assert!(err.to_string().starts_with("license required: "), "{err}");

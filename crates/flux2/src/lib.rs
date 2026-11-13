@@ -43,7 +43,7 @@ pub mod request;
 pub mod spec;
 pub mod weights;
 
-pub use build::{build_resolved, resolve, VariantSource};
+pub use build::{build_resolved, resolve, VariantRequest, VariantSource};
 pub use config::Flux2Config;
 pub use import::{dit_config_from_shapes, import_bfl, import_diffusers, sniff_dit_size, DitSize, Tensors};
 pub use mask::Mask;

@@ -319,6 +319,7 @@ impl ImagePipeline {
             cap_len: s3dit::pipeline::DEFAULT_CAP_LEN,
             hifi: None,
             download_policy: loader::DownloadPolicy::default(),
+            accept_non_commercial: false,
         }
     }
 
@@ -497,6 +498,7 @@ pub struct ImagePipelineBuilder {
     cap_len: u32,
     hifi: Option<bool>,
     download_policy: loader::DownloadPolicy,
+    accept_non_commercial: bool,
 }
 
 impl ImagePipelineBuilder {
@@ -517,6 +519,15 @@ impl ImagePipelineBuilder {
     /// only exposes the knob `crates/loader` already defines.
     pub fn download_policy(mut self, policy: loader::DownloadPolicy) -> Self {
         self.download_policy = policy;
+        self
+    }
+
+    /// Confirm that your use of the FLUX.2 9B weights is non-commercial
+    /// (FLUX.2 [Non-Commercial] License, Black Forest Labs). Without it,
+    /// loading a 9B variant fails with [`Error::LicenseRequired`]; a 4B
+    /// variant or an s3dit model is unaffected.
+    pub fn accept_non_commercial(mut self) -> Self {
+        self.accept_non_commercial = true;
         self
     }
 
@@ -639,7 +650,7 @@ impl ImagePipelineBuilder {
     /// crate does not otherwise require, for a capability every caller here
     /// already gets for free by supplying one only where it is used.
     pub fn load_with_progress(self, on_download: &mut dyn FnMut(&str, u64, Option<u64>), on_build: &mut dyn FnMut(&str)) -> Result<ImagePipeline> {
-        let ImagePipelineBuilder { model_id, device, dtype, size, cap_len, hifi, download_policy } = self;
+        let ImagePipelineBuilder { model_id, device, dtype, size, cap_len, hifi, download_policy, accept_non_commercial } = self;
 
         crate::device::apply(&device)?;
 
@@ -690,10 +701,10 @@ impl ImagePipelineBuilder {
                 // variant internally, converging config/precision/build with
                 // every other site rather than only the license check.
                 let variant_name = assembly.variant.clone().ok_or_else(|| Error::Backend(format!("flux2: resolved assembly {:?} has no variant", assembly.id)))?;
-                flux2::caps::check_license(&variant_name).map_err(Error::LicenseRequired)?;
+                flux2::caps::check_license(&variant_name, accept_non_commercial).map_err(Error::LicenseRequired)?;
 
                 let n = size.map(|(w, h)| forward_tokens_for(w, h)).unwrap_or_else(default_forward_tokens);
-                let (pipe, cfg, precision, _variant) = flux2::build_resolved(flux2::VariantSource::Assembly(&assembly), &paths, n, n, &[], dtype, false, 1).map_err(Error::Backend)?;
+                let (pipe, cfg, precision, _variant) = flux2::build_resolved(flux2::VariantRequest::new(flux2::VariantSource::Assembly(&assembly), accept_non_commercial), &paths, n, n, &[], dtype, false, 1).map_err(Error::Backend)?;
 
                 Ok(ImagePipeline { backend: Backend::Flux2(Box::new(Flux2Backend { pipe, cfg, paths, precision, forward_tokens: n, adapter: None })) })
             }

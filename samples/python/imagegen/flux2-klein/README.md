@@ -70,8 +70,9 @@ wrote fox.ppm (512x512)
 - **Variants**: `klein-4b` (default, 4-step distilled), `klein-9b`,
   `base-4b`/`base-9b` (50 steps + CFG via `guidance`). The **9B weights are
   NC-licensed** (FLUX.2 [Non-Commercial] License, Black Forest Labs): the
-  server refuses them unless `BRAIN_FLUX2_ALLOW_NC=1` is set, and prints the
-  attribution notice once when enabled.
+  server refuses a request for them unless it carries
+  `allow_non_commercial: true` (`generate.py --allow-non-commercial`), and
+  prints the attribution notice once when enabled.
 - `pip install -e brain-py` (jeepney with fd passing).
 
 ## What it demonstrates

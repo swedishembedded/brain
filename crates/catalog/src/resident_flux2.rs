@@ -179,7 +179,7 @@ fn check_variant_matches(bound: &str, inv: &Invocation) -> Result<(), String> {
 /// The tokens one forward of an instance key's pipeline sees, for the memory
 /// estimate; 0 if the key does not parse (an unknown key costs nothing extra).
 fn tokens_from_key(config: &str) -> u64 {
-    config.split(':').nth(2).and_then(|s| s.parse().ok()).unwrap_or(0)
+    config.split(':').nth(3).and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
 impl ResidentModel for Flux2Resident {
@@ -197,8 +197,12 @@ impl ResidentModel for Flux2Resident {
         if action == "lora_train" {
             return InstanceKey::new(&self.id, format!("train:{}", self.variant));
         }
-        // "{variant}:{precision}:{forward tokens}:{canvas tokens}:{lora_scale}:{adapters}"
-        // fixes the built graphs; the plan reads the images' sizes from their
+        // "{variant}:{accepted}:{precision}:{forward tokens}:{canvas tokens}:{lora_scale}:{adapters}"
+        // fixes the built graphs; `accepted` (1/0) is the request's
+        // `allow_non_commercial`, keyed so an instance is only ever built
+        // for, and shared among, requests that gave the same answer - a 9B
+        // request that did not confirm is refused at `activate`, before any
+        // weights load; the plan reads the images' sizes from their
         // meta, never their pixels. A request whose plan fails gets a key of
         // its own and is refused when it runs, with the plan's message. The
         // adapter list goes last because it is the only field that may
@@ -206,7 +210,8 @@ impl ResidentModel for Flux2Resident {
         let variant = &self.variant;
         let config = match flux2::request::plan(inv, action == "edit") {
             Ok(plan) => format!(
-                "{variant}:{}:{}:{}:{}:{}",
+                "{variant}:{}:{}:{}:{}:{}:{}",
+                u8::from(flux2::caps::non_commercial_accepted(inv)),
                 plan.precision.name(),
                 plan.forward_tokens(),
                 plan.canvas_tokens(),
@@ -256,26 +261,29 @@ impl ResidentModel for Flux2Resident {
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         if key.config.strip_prefix("train:").is_some() {
-            // `self.variant` - the resident's own BOUND identity (sniffed
-            // from the real weights at construction, see the struct doc),
-            // never a string parsed back out of `key.config`.
-            flux2::caps::check_license(&self.variant)?;
             // Training builds (and drops) its own encoders + host trainer per
-            // run — no resident pipeline to hold.
+            // run - no resident pipeline to hold. The license gate is
+            // `train_action`'s, which answers for each request's own
+            // `allow_non_commercial` against the sniffed variant.
             return Ok(Box::new(Flux2Instance { pipe: None, paths: clone_paths(&self.paths), variant: self.variant.clone() }));
         }
         // Parsing back what `instance_key` wrote; the variant field is
         // always `self.variant`.
-        let mut it = key.config.splitn(6, ':');
+        let mut it = key.config.splitn(7, ':');
         let bad = || format!("flux2: this request could not be planned (instance key {})", key.config);
         let variant = it.next().ok_or_else(bad)?;
+        let accepted = match it.next().ok_or_else(bad)? {
+            "1" => true,
+            "0" => false,
+            _ => return Err(bad()),
+        };
         let precision = flux2::Precision::from_name(it.next().ok_or_else(bad)?).map_err(|_| bad())?;
         let n_fwd: u32 = it.next().and_then(|s| s.parse().ok()).ok_or_else(bad)?;
         let n_gen: u32 = it.next().and_then(|s| s.parse().ok()).ok_or_else(bad)?;
         let lora_scale: f32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
         let adapters = flux2::AdapterSpec::parse_list(it.next().unwrap_or_default(), lora_scale)?;
         // `flux2::build_resolved` runs the license/config/precision decision
-        // AND the build - `variant` here is already `self.variant` (bound at
+        // (the license against the key's `accepted`) AND the build - `variant` here is already `self.variant` (bound at
         // construction, never re-derived per request, see `instance_key`'s
         // own doc), so `VariantSource::Bound` skips `bind_variant`'s sniff.
         // This is also where the `.gguf` precision correction
@@ -288,7 +296,7 @@ impl ResidentModel for Flux2Resident {
         // the assigned card (scoped registry selection; the TE card is
         // flux2's own BRAIN_FLUX2_TE_DEVICE and left as configured).
         let (pipe, ..) = crate::resident_llm::on_device(device, || {
-            flux2::build_resolved(flux2::VariantSource::Bound(variant), &self.paths, n_fwd, n_gen, &adapters, precision, false, self.max_batch)
+            flux2::build_resolved(flux2::VariantRequest::new(flux2::VariantSource::Bound(variant), accepted), &self.paths, n_fwd, n_gen, &adapters, precision, false, self.max_batch)
         })??;
         Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths), variant: self.variant.clone() }))
     }
@@ -455,6 +463,34 @@ mod tests {
         assert_eq!(k4.config, spoofed.config, "instance_key must never key on the per-request variant");
 
         std::fs::remove_file(&p4).ok();
+        std::fs::remove_file(&p9).ok();
+    }
+
+    /// A 9B resident serves a request only when that request itself confirmed
+    /// non-commercial use: the confirmation is part of the instance key, so
+    /// an unconfirmed request is refused at `activate` (before any weights
+    /// load) and can never ride an instance built for a confirmed one.
+    #[test]
+    fn a_9b_request_is_served_only_with_its_own_non_commercial_confirmation() {
+        let p9 = write_fake_dit(&flux2::Flux2Config::klein_9b(), "nc-gate");
+        let r = Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths_with_dit(p9.to_str().unwrap().to_string()), "klein").unwrap();
+        let plain = Invocation::new().set("prompt", json!("a")).set("seed", json!(1));
+        let confirmed = plain.clone().set("allow_non_commercial", json!(true));
+        let (plain_key, confirmed_key) = (r.instance_key("text2image", &plain), r.instance_key("text2image", &confirmed));
+        assert_ne!(plain_key.config, confirmed_key.config, "a confirmation must never share an instance with a request that gave none");
+
+        let Err(refused) = r.activate(&plain_key, Device::Cpu) else { panic!("an unconfirmed 9B request must be refused") };
+        assert!(refused.contains("allow_non_commercial"), "{refused}");
+        // The confirmed key passes the gate; the fake weights then fail the build.
+        let Err(past_gate) = r.activate(&confirmed_key, Device::Cpu) else { panic!("fake weights cannot build") };
+        assert!(!past_gate.contains("Non-Commercial"), "{past_gate}");
+
+        // Training is gated per request on its own instance.
+        let train_key = r.instance_key("lora_train", &plain);
+        let mut inst = r.activate(&train_key, Device::Cpu).unwrap();
+        let train = Invocation::new().set("data", json!("/nonexistent")).set("save", json!("/nonexistent/out")).set("seed", json!(0));
+        let err = inst.run("lora_train", &train, &mut |_| {}).unwrap_err();
+        assert!(err.contains("allow_non_commercial"), "{err}");
         std::fs::remove_file(&p9).ok();
     }
 

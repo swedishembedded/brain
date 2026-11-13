@@ -40,6 +40,7 @@ def main() -> int:
     ap.add_argument("--prompt", default="a lighthouse in a storm", help="prompt (the image is never produced)")
     ap.add_argument("--model", default=MODEL, help="a streaming, cancellable text2image model (or `brain/mock`)")
     ap.add_argument("--variant", default="klein-4b", choices=["klein-4b", "klein-9b", "base-4b", "base-9b"])
+    ap.add_argument("--allow-non-commercial", action="store_true", help="confirm non-commercial use of the FLUX.2 9B weights (the 9B variants are refused without it)")
     args = ap.parse_args()
 
     with BrainDBus() as brain:
@@ -51,6 +52,7 @@ def main() -> int:
         params = {"prompt": args.prompt}
         if args.model != "brain/mock":
             params["variant"] = args.variant
+            params["allow_non_commercial"] = args.allow_non_commercial
 
         # Deliberately the LOW-LEVEL frame iterator (not the high-level
         # subscribe()): this example needs the job id mid-stream to cancel it,

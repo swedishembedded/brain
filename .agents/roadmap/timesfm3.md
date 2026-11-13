@@ -175,10 +175,10 @@ redistributable) - see `docs/reference/models/timesfm3.md`.
       `checkpoint::license::redistributable` is the other half, consulted by
       `model_dir::register`/`register_compound` (registering a model into the
       served catalog IS redistribution - every registered model is reachable
-      over the API) and by `publish_adapter`. There is no environment
-      opt-out, unlike `BRAIN_FLUX2_ALLOW_NC`: that flag exists because
-      FLUX.2's licence permits non-commercial USE and only the operator knows
-      whether their use qualifies, which is a question about the operator;
+      over the API) and by `publish_adapter`. There is no
+      opt-out, unlike flux2's `allow_non_commercial` param: that param exists
+      because FLUX.2's licence permits non-commercial USE and only the caller
+      knows whether their use qualifies, which is a question about the caller;
       redistribution is not. The CLI prints a one-line notice before any
       work, so an operator about to spend hours producing an artifact they
       may not redistribute learns it in the first line.

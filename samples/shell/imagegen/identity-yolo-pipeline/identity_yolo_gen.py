@@ -42,9 +42,10 @@ reads and writes PNG.
 
 The daemon must already be running on this session bus with its weights pinned
 - see `identity_yolo_pipeline.sh`, which starts it, or (FLUX.2 Klein-9B is
-non-commercial: export `BRAIN_FLUX2_ALLOW_NC=1` to confirm that use):
+non-commercial: pass `--allow-non-commercial` to the flux2 backend to confirm
+that use on each request):
 
-    BRAIN_FLUX2_ALLOW_NC=1 tools/dbus-session.sh --serve "--dbus \\
+    tools/dbus-session.sh --serve "--dbus \\
         --pin pulid.flux1=... --pin pulid.pulid=... --pin pulid.arcface=... \\
         --pin pulid.clip=... --pin pulid.bisenet=... \\
         --pin flux2.dit=... --pin flux2.vae=... --pin flux2.text_encoder=... \\
@@ -149,6 +150,8 @@ def main() -> int:
     ap.add_argument("--precision", default="int8", choices=["fp32", "int8"],
                     help="DiT numeric tier; part of flux2's instance key, so it must stay constant across a run")
     ap.add_argument("--variant", help="model variant; flux2's must match the variant the daemon bound from its weights")
+    ap.add_argument("--allow-non-commercial", action="store_true",
+                    help="flux2 only: confirm non-commercial use of the FLUX.2 9B weights (sent as the request's allow_non_commercial)")
     ap.add_argument("--progress", action="store_true", help="print a line per denoise step (flux2 only)")
     args = ap.parse_args()
 
@@ -171,6 +174,8 @@ def main() -> int:
     }
     if args.variant:
         params["variant"] = args.variant
+    if args.allow_non_commercial:
+        params["allow_non_commercial"] = True
 
     t0 = time.monotonic()
     with BrainDBus() as brain:

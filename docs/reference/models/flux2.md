@@ -363,4 +363,5 @@ are not implicit behaviors.
 Licensing: Klein 4B, the FLUX.2 VAE, and the Qwen3 text encoders are Apache
 2.0 (commercial use OK). The 9B variants (`klein-9b`, `base-9b`) are under the
 FLUX Non-Commercial License - research/non-commercial use only, and require
-setting `BRAIN_FLUX2_ALLOW_NC=1` to opt in.
+passing `--allow-non-commercial` (`allow_non_commercial: true` on a served
+request) to opt in, per request.

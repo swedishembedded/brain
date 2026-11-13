@@ -11,9 +11,10 @@
 //! text-to-image, reference-image editing, and LoRA personalisation.
 //!
 //! The **9B variants are NC-licensed** (FLUX.2 \[Non-Commercial\] License,
-//! Black Forest Labs): they refuse to run
-//! unless `BRAIN_FLUX2_ALLOW_NC=1`, and print the attribution notice once when
-//! enabled.
+//! Black Forest Labs): a request refuses to run them
+//! unless it carries `allow_non_commercial: true` (the CLI's
+//! `--allow-non-commercial`), and the attribution notice prints once per
+//! process when one does.
 
 use capability::presentation::maturity;
 use capability::ModelPresentation;
@@ -32,6 +33,12 @@ const VARIANTS: [&str; 4] = ["klein-4b", "klein-9b", "base-4b", "base-9b"];
 /// The DiT numeric-tier enum ([`crate::Precision`] names, fp32 first).
 const PRECISIONS: [&str; 2] = ["fp32", "int8"];
 
+/// The per-request confirmation of non-commercial use, declared by every
+/// action that can load the 9B weights; off unless the request says so.
+fn allow_non_commercial_param() -> ParamSpec {
+    ParamSpec::new("allow_non_commercial", ParamType::Bool, "confirm your use of the FLUX.2 9B weights is non-commercial (FLUX.2 [Non-Commercial] License, Black Forest Labs); a 9B variant is refused without it").default(json!(false))
+}
+
 /// Shared generation params (size / steps / seed / guidance / variant / adapter).
 fn gen_params(spec: ActionSpec) -> ActionSpec {
     spec.param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required())
@@ -40,7 +47,8 @@ fn gen_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default (4 distilled / 50 base)").default(json!(0)).min(0.0).max(crate::pipeline::MAX_STEPS as f64).step(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same prompt/params and no explicit distinct seed would otherwise be indistinguishable to an orchestrator's execution cache and collapse to one cached result").required())
         .param(ParamSpec::new("guidance", ParamType::Float, "CFG scale -- base variants only (klein is guidance-distilled)").default(json!(4.0)).min(0.0).max(30.0).step(0.1))
-        .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; 9B needs BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)").default(json!("klein-4b")))
+        .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; 9B needs allow_non_commercial (FLUX Non-Commercial license)").default(json!("klein-4b")))
+        .param(allow_non_commercial_param())
         // perf-number: 4 bytes per weight to 1 is the definition of int8, not a measured speedup
         .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier: fp32 (parity reference) or int8 (DP4A, ~4x smaller weights; GPU only). Unset: the checkpoint's own - int8 for a GGUF DiT, else fp32"))
         .param(ParamSpec::new("adapter", ParamType::Str, model::adapter::ADAPTER_LIST_HELP).host_resolved())
@@ -96,7 +104,8 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, see text2image's own seed param doc for why").required())
         .param(ParamSpec::new("cards", ParamType::Int, "GPUs the device trainer spreads the block stack over (klein-9b's fp32 frozen base does not fit one 24 GiB card)").min(0.0).max(64.0).default(json!(1)))
         .param(ParamSpec::new("trainer", ParamType::Enum(vec!["device".into(), "host".into()]), "gradient implementation: 'device' runs the WGSL kernels with the frozen base on the card; 'host' is the finite-difference-gradchecked reference it is validated against").default(json!("device")))
-        .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "base model to adapt; 9B needs BRAIN_FLUX2_ALLOW_NC=1").default(json!("klein-4b")))
+        .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "base model to adapt; 9B needs allow_non_commercial").default(json!("klein-4b")))
+        .param(allow_non_commercial_param())
         .param(ParamSpec::new("method", ParamType::Enum(vec!["lora".into(), "rslora".into()]), "adapter scale: 'lora' is alpha/rank, 'rslora' is alpha/sqrt(rank) (rank-stabilized, does not suppress the update as rank grows)").default(json!("lora")))
         .param(ParamSpec::new("lr_ratio", ParamType::Float, "LoRA+ : B's effective learning rate is lr_ratio*lr; 1.0 (the default) is plain LoRA").default(json!(1.0)).min(1.0).max(64.0))
         .param(ParamSpec::new("freeze_a", ParamType::Bool, "LoRA-FA: freeze A at its random init, train only B").default(json!(false)))
@@ -159,22 +168,24 @@ pub fn bind_variant(dit_path: &str, requested: &str) -> Result<String, String> {
     Ok(format!("{family}-{}", size.as_str()))
 }
 
-/// The 9B weights are released under the FLUX.2 \[Non-Commercial\] License —
-/// refuse them unless the operator opted in, and print the attribution notice
-/// once per process when enabled.
+/// The 9B weights are released under the FLUX.2 \[Non-Commercial\] License:
+/// refuse them unless the request confirmed non-commercial use
+/// (`allow_non_commercial`, the CLI's `--allow-non-commercial`), and print the
+/// attribution notice once per process when it did. `accepted` is that
+/// confirmation as the request carried it, so each request answers for itself.
 ///
 /// `variant` must be a TRUSTED variant string - a resident's own bound
 /// identity, or the result of [`bind_variant`] - never a raw, caller-supplied
 /// one: this function itself has no weights to check the claim against, so
 /// passing it an unverified string reopens exactly the hole `bind_variant`
 /// closes.
-pub fn check_license(variant: &str) -> Result<(), String> {
+pub fn check_license(variant: &str, accepted: bool) -> Result<(), String> {
     if !variant.ends_with("9b") {
         return Ok(());
     }
-    if std::env::var("BRAIN_FLUX2_ALLOW_NC").ok().as_deref() != Some("1") {
+    if !accepted {
         return Err(format!(
-            "variant '{variant}' uses the FLUX.2 9B weights, released under the FLUX.2 [Non-Commercial] License (Black Forest Labs). Set BRAIN_FLUX2_ALLOW_NC=1 to confirm non-commercial use."
+            "variant '{variant}' uses the FLUX.2 9B weights, released under the FLUX.2 [Non-Commercial] License (Black Forest Labs). Pass --allow-non-commercial (allow_non_commercial: true in a request) to confirm non-commercial use."
         ));
     }
     static NOTICE: std::sync::Once = std::sync::Once::new();
@@ -182,6 +193,11 @@ pub fn check_license(variant: &str) -> Result<(), String> {
         eprintln!("flux2: 9B weights enabled — FLUX.2 [Non-Commercial] License © Black Forest Labs; non-commercial use only");
     });
     Ok(())
+}
+
+/// A request's `allow_non_commercial`; absent means not confirmed.
+pub fn non_commercial_accepted(inv: &Invocation) -> bool {
+    inv.get_bool("allow_non_commercial").unwrap_or(false)
 }
 
 /// Run a planned generation on a built pipeline.
@@ -225,7 +241,7 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
     // decides which weights it is actually about to train against.
     let variant = bind_variant(&paths.dit, &requested)?;
     let cfg = Flux2Config::from_name(&variant)?;
-    check_license(&variant)?;
+    check_license(&variant, non_commercial_accepted(inv))?;
     let opts = crate::finetune::TrainOpts {
         steps: inv.get_i64("steps").unwrap_or(200).max(1) as u32,
         rank: inv.get_i64("rank").unwrap_or(16).max(1) as usize,
@@ -352,7 +368,7 @@ impl Action for Flux2Action {
                 // it also corrects the precision a served `.gguf` DiT needs.
                 let plan = crate::request::plan(inv, self.name == "edit")?;
                 let paths = &self.paths;
-                let (cfg, precision, variant) = crate::build::resolve(crate::build::VariantSource::Sniff(&plan.variant), paths, plan.precision, plan.precision_explicit)?;
+                let (cfg, precision, variant) = crate::build::resolve(crate::build::VariantRequest::new(crate::build::VariantSource::Sniff(&plan.variant), non_commercial_accepted(inv)), paths, plan.precision, plan.precision_explicit)?;
                 for note in &plan.notes {
                     tracing::info!(target: "flux2", "{note}");
                 }
@@ -464,14 +480,23 @@ mod tests {
 
     #[test]
     fn nine_b_variants_are_license_gated() {
-        // The gate reads the env var per call; only assert the refusing path here
-        // (setting env vars in tests races other tests in the binary).
-        if std::env::var("BRAIN_FLUX2_ALLOW_NC").ok().as_deref() != Some("1") {
-            let err = check_license("klein-9b").unwrap_err();
-            assert!(err.contains("Non-Commercial"), "error must name the license: {err}");
-            assert!(err.contains("BRAIN_FLUX2_ALLOW_NC"), "error must name the opt-in: {err}");
+        let err = check_license("klein-9b", false).unwrap_err();
+        assert!(err.contains("Non-Commercial"), "error must name the license: {err}");
+        assert!(err.contains("--allow-non-commercial") && err.contains("allow_non_commercial"), "error must name the opt-in on both surfaces: {err}");
+        assert!(check_license("klein-9b", true).is_ok());
+        assert!(check_license("klein-4b", false).is_ok());
+        assert!(check_license("base-4b", false).is_ok());
+    }
+
+    #[test]
+    fn every_action_that_can_load_9b_declares_the_opt_in_off_by_default() {
+        for a in manifest().actions {
+            let p = a.params.iter().find(|p| p.name == "allow_non_commercial").unwrap_or_else(|| panic!("{} declares allow_non_commercial", a.name));
+            assert_eq!((&p.ty, &p.default), (&ParamType::Bool, &Some(json!(false))), "{}", a.name);
         }
-        assert!(check_license("klein-4b").is_ok());
+        assert!(!non_commercial_accepted(&Invocation::new()));
+        assert!(!non_commercial_accepted(&Invocation::new().set("allow_non_commercial", json!(false))));
+        assert!(non_commercial_accepted(&Invocation::new().set("allow_non_commercial", json!(true))));
     }
 
     #[test]
@@ -489,7 +514,6 @@ mod tests {
         let inv2 = capability::Invocation::new().set("prompt", json!("a cat")).set("seed", json!(2));
         assert!(t2i.validate(inv1).is_ok());
         assert!(t2i.validate(inv2).is_ok());
-        assert!(check_license("base-4b").is_ok());
     }
 
     /// A minimal single-file safetensors fixture carrying only the five
@@ -534,11 +558,9 @@ mod tests {
         let path = write_fake_dit(&Flux2Config::klein_9b(), "mislabel");
         let bound = bind_variant(path.to_str().unwrap(), "klein-4b").expect("a real 9B checkpoint must sniff cleanly");
         assert_eq!(bound, "klein-9b", "the mislabel must not survive binding");
-        if std::env::var("BRAIN_FLUX2_ALLOW_NC").ok().as_deref() != Some("1") {
-            let err = check_license(&bound).unwrap_err();
-            assert!(err.contains("Non-Commercial"), "{err}");
-            assert!(err.contains("BRAIN_FLUX2_ALLOW_NC"), "{err}");
-        }
+        let err = check_license(&bound, false).unwrap_err();
+        assert!(err.contains("Non-Commercial"), "{err}");
+        assert!(err.contains("allow_non_commercial"), "{err}");
         std::fs::remove_file(&path).ok();
     }
 

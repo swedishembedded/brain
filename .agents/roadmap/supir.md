@@ -199,8 +199,8 @@ Consequences, non-negotiable: no `default_ref`/auto-fetch for this
 architecture; no SUPIR weight bytes or SUPIR-produced image enters `testdata/`
 in a committed form; `docs/reference/models/supir.md` carries the licence note
 prominently. `crates/flux2` gates its own NC-licensed 9B variant behind
-`BRAIN_FLUX2_ALLOW_NC=1` - the same opt-in-env-var mechanism is the right
-precedent for a future `BRAIN_SUPIR_ALLOW_NC=1` if this port ever needs to
+`allow_non_commercial: true` on the request - the same per-request opt-in
+param is the right precedent for a future SUPIR one if this port ever needs to
 distinguish "weights present" from "commercial-use cleared" at runtime.
 
 ## What is and is not started

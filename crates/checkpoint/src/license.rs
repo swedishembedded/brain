@@ -43,9 +43,9 @@ pub const NON_REDISTRIBUTABLE: &[(&str, &str)] = &[
 /// `Err` with an explanation if `license` is one brain must not republish
 /// under, `Ok` otherwise (including for an absent licence).
 ///
-/// There is no environment opt-out. `BRAIN_FLUX2_ALLOW_NC` exists because
-/// FLUX.2's licence permits non-commercial USE and the operator is the one
-/// who knows whether their use qualifies; that is a question about the
+/// There is no environment opt-out. FLUX.2's `allow_non_commercial` request
+/// param exists because its licence permits non-commercial USE and the caller
+/// is the one who knows whether their use qualifies; that is a question about the
 /// operator. Redistribution is not: these weights may not be redistributed by
 /// anyone, so there is no configuration under which publishing them is
 /// correct and no flag that could truthfully assert otherwise.

@@ -367,7 +367,7 @@ Plus `BRAIN_DIAMOND_REPO`, `BRAIN_GENIEREDUX_REPO`.
   trunk+adaptors+backbone graph, unmodified. Off by default because on a
   device without enough memory for that graph, recording it fails loudly
   (an out-of-memory error from the graphics backend) rather than degrading -
-  the same reason `BRAIN_FLUX2_ALLOW_NC` gates a licence opt-in rather than
+  the same reason flux2's `allow_non_commercial` gates a licence opt-in rather than
   silently switching behaviour. Set it only on a machine known to have
   enough device memory for the whole checkpoint.
 

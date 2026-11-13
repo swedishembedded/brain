@@ -93,9 +93,9 @@ assumption that "I'll just look at the shapes."
    enough, per the FastVLM/CodeFormer/YOLOv8 gaps the audit found (silent
    one-command fetch, zero warning).
 4. If it's non-commercial, revenue-capped, field-of-use-restricted, or
-   territory-excluded, gate the auto-fetch behind an explicit opt-in env var
-   (`BRAIN_<MODEL>_ALLOW_NC`, following `flux2`'s `BRAIN_FLUX2_ALLOW_NC`
-   precedent)  -  never a silent one-command default.
+   territory-excluded, gate the auto-fetch behind an explicit per-request opt-in
+   param (`allow_non_commercial` / `allow_community`, a bool action param with
+   a matching `--allow-...` CLI flag, following `flux2` and `minimaxh3`)  -  never a silent one-command default.
 5. If the restriction is a **contract** rather than a copyright license
    (e.g. TimesFM-3's Non-Commercial License, accepted by download/use, with
    its own broad "Derivative" definition), flag it for an actual legal read

@@ -27,7 +27,7 @@ brain pull unsloth/FLUX.2-klein-4B-GGUF-Q8_0         # optional: a smaller DiT
 The four roles resolve from the model store; `--dit`, `--vae`,
 `--text-encoder` and `--tokenizer` name one outright. The 9B variants are
 under the FLUX.2 Non-Commercial license and run only with
-`BRAIN_FLUX2_ALLOW_NC=1`.
+`--allow-non-commercial` on each request.
 
 ## Run
 

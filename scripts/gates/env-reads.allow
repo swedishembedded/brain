@@ -207,8 +207,6 @@ crates/flux2/src/bin/flux2_bench.rs	BRAIN_FLUX2_BENCH_BASELINE
 crates/flux2/src/bin/flux2_bench.rs	BRAIN_FLUX2_DIT
 crates/flux2/src/bin/flux2_bench.rs	BRAIN_FLUX2_VAE
 crates/flux2/src/bin/flux2_latent.rs	BRAIN_FLUX2_VAE
-crates/flux2/src/build.rs	BRAIN_FLUX2_ALLOW_NC
-crates/flux2/src/caps.rs	BRAIN_FLUX2_ALLOW_NC
 crates/flux2/src/model.rs	BRAIN_FLUX2_I8_KEEP_F32
 crates/flux2/src/model.rs	BRAIN_FLUX2_TIME_FORWARD
 crates/flux2/src/model.rs	SMOKE_STEPS
@@ -799,7 +797,6 @@ crates/sam1/tests/parity.rs	BRAIN_DEVICE
 crates/sam1/tests/it/wgpu_block_count_corruption.rs	MOE_SKIP_GPU_TESTS
 crates/sam1/tests/it/wgpu_real_weight_parity.rs	MOE_SKIP_GPU_TESTS
 crates/sdk/src/chat_tokens.rs	QWEN_TOKENIZER
-crates/sdk/src/error.rs	BRAIN_FLUX2_ALLOW_NC
 crates/sdk/tests/auto_pipeline.rs	BRAIN_MODELS_DIR
 crates/sdk/tests/it/creature.rs	BRAIN_CONNECTOME_DIR
 crates/sdk/tests/it/creature.rs	BRAIN_FLYBODY_XML
