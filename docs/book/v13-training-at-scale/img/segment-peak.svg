@@ -1,0 +1,36 @@
+<!-- source-sha256: bad16f1fa9f7a58af09187ecda1fe6cd137d9b6e498e71a1185c41a1e2c28e53 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="75" y1="334" x2="75" y2="30" stroke="#edf2f7"/>
+<text x="75" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="180.4" y1="334" x2="180.4" y2="30" stroke="#edf2f7"/>
+<text x="180.4" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="319.73" y1="334" x2="319.73" y2="30" stroke="#edf2f7"/>
+<text x="319.73" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="425.13" y1="334" x2="425.13" y2="30" stroke="#edf2f7"/>
+<text x="425.13" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="530.53" y1="334" x2="530.53" y2="30" stroke="#edf2f7"/>
+<text x="530.53" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="75" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="69" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">50,000</text>
+<line x1="75" y1="263.66" x2="602" y2="263.66" stroke="#edf2f7"/>
+<text x="69" y="267.66" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100,000</text>
+<line x1="75" y1="193.32" x2="602" y2="193.32" stroke="#edf2f7"/>
+<text x="69" y="197.32" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">200,000</text>
+<line x1="75" y1="100.34" x2="602" y2="100.34" stroke="#edf2f7"/>
+<text x="69" y="104.34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">500,000</text>
+<line x1="75" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="69" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1,000,000</text>
+<rect x="75" y="30" width="527" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="75" y="30" width="527" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="75,221.47 180.4,257.27 242.06,258.58 285.8,249.75 319.73,238.12 347.46,226.15 370.9,214.65 391.2,203.89 409.11,193.89 425.13,184.62 439.62,176.01 452.86,168 465.03,160.52 476.3,153.51 486.79,146.92 496.6,140.71 505.82,134.85 514.51,129.28 522.73,124 530.53,118.97 537.95,114.16 545.02,109.57 551.78,105.17 558.26,100.95 564.46,96.9 570.43,93 576.17,89.24 581.7,85.61 587.03,82.1 592.19,78.71 597.17,75.43 602,72.25"/><line x1="75" y1="72.88" x2="602" y2="72.88" stroke="#a0aec0" stroke-dasharray="4 4"/><text x="89.49" y="61.38" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">keep every block: 655,360</text><circle cx="75" cy="221.47" r="3.5" fill="#c05621"/><circle cx="180.4" cy="257.27" r="3.5" fill="#c05621"/><circle cx="285.8" cy="249.75" r="3.5" fill="#c05621"/><circle cx="391.2" cy="203.89" r="3.5" fill="#c05621"/><circle cx="496.6" cy="140.71" r="3.5" fill="#c05621"/><circle cx="602" cy="72.25" r="3.5" fill="#c05621"/></g>
+<text x="338.5" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">segment length k (blocks rebuilt together)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">numbers held per token at the peak</text>
+<text x="338.5" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Peak of the backward against the segment length</text>
+<rect x="83" y="282" width="182.2" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="91" y1="297" x2="111" y2="297" stroke="#2b6cb0" stroke-width="2"/>
+<text x="117" y="301" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">recompute, segments of k</text>
+<circle cx="101" cy="314" r="3.5" fill="#c05621"/>
+<text x="117" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">k divides L</text>
+</svg>
