@@ -33,14 +33,16 @@ pub const THETA: f64 = 10000.0;
 /// a config error, not something to wrap: `dit::rope` asserts on it.
 pub const MAX_SEQ_LEN: u32 = 1024;
 
-/// The `RopeConfig` for a Wan variant: the three axis widths from
-/// [`WanConfig::rope_axes_dims`], all at `MAX_SEQ_LEN`.
+/// The `RopeConfig` for axis widths `axes_dims` (real components per axis, `[frame, height, width]`) and base
+/// `theta`, all axes at `MAX_SEQ_LEN`. One place builds it: inference ([`rope_config`], [`tables`]) and the host
+/// trainer (`modelgrad::Cfg::rope_tables`) both come here.
+pub fn rope_config_for(axes_dims: [usize; 3], theta: f64) -> RopeConfig {
+    RopeConfig { axes_dims: axes_dims.iter().map(|&d| d as u32).collect(), axes_lens: vec![MAX_SEQ_LEN; 3], theta }
+}
+
+/// The `RopeConfig` for a Wan variant: the three axis widths from [`WanConfig::rope_axes_dims`].
 pub fn rope_config(cfg: &WanConfig) -> RopeConfig {
-    RopeConfig {
-        axes_dims: cfg.rope_axes_dims().iter().map(|&d| d as u32).collect(),
-        axes_lens: vec![MAX_SEQ_LEN; 3],
-        theta: THETA,
-    }
+    rope_config_for(cfg.rope_axes_dims(), THETA)
 }
 
 /// Position ids `[tokens · 3]` for a `(f, h, w)` patch grid, in the token order
@@ -61,7 +63,12 @@ pub fn grid_ids(f: u32, h: u32, w: u32) -> Vec<u32> {
 /// Per-token `(cos, sin)` rotation tables for a `(f, h, w)` grid, row-major
 /// `[tokens · head_dim/2]` - the layout `rope_interleave_table` reads.
 pub fn tables(cfg: &WanConfig, f: u32, h: u32, w: u32) -> RopeTables {
-    tables_for_ids(&rope_config(cfg), &grid_ids(f, h, w), 3)
+    grid_tables(cfg.rope_axes_dims(), THETA, f, h, w)
+}
+
+/// [`tables`] from the axis widths and base directly.
+pub fn grid_tables(axes_dims: [usize; 3], theta: f64, f: u32, h: u32, w: u32) -> RopeTables {
+    tables_for_ids(&rope_config_for(axes_dims, theta), &grid_ids(f, h, w), 3)
 }
 
 #[cfg(test)]

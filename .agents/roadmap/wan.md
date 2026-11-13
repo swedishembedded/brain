@@ -942,6 +942,12 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
         measurement-led change.
       * Not wired to a `lora_train` capability action yet (flux2 and s3dit both
         expose theirs that way); `finetune::run` is the entry point.
+      * **Training RoPE is inference's.** `Cfg::rope_tables` and the
+        inference `rope::tables` now share one builder
+        (`rope::grid_tables`); `the_training_rope_tables_are_the_inference_tables_for_the_patch_grid`
+        pins them equal at the real 1.3B axis split and the tiny config's. The
+        review found no numeric divergence (the two were separate copies of
+        the same construction), only the duplication.
 - [x] **An adapter is never folded into a QUANTIZED base.** The fold site
       (`pipeline::run`) and the quantize site (`dev::WanDitDev`'s `Int8`/`Int4`
       branch) were written independently and neither knew about the other, so

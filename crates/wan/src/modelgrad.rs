@@ -158,15 +158,11 @@ impl Cfg {
         Dims { t: self.n_tokens(), te: self.text_len, dim: self.dim, nh: self.n_heads, ffn: self.ffn_dim, eps: self.eps }
     }
 
-    /// The RoPE tables this config's token grid needs.
+    /// The RoPE tables this config's token grid needs: the ones inference builds for the same patch grid
+    /// ([`crate::rope::grid_tables`]).
     pub fn rope_tables(&self) -> dit::rope::RopeTables {
         let (f, h, w) = self.grid();
-        let rc = dit::rope::RopeConfig {
-            axes_dims: self.rope_axes.iter().map(|&d| d as u32).collect(),
-            axes_lens: vec![crate::rope::MAX_SEQ_LEN; 3],
-            theta: self.rope_theta,
-        };
-        dit::rope::tables_for_ids(&rc, &crate::rope::grid_ids(f as u32, h as u32, w as u32), 3)
+        crate::rope::grid_tables(self.rope_axes, self.rope_theta, f as u32, h as u32, w as u32)
     }
 }
 
@@ -745,6 +741,26 @@ pub fn grad_views<T>(g: &ModelGrads<T>) -> Vec<(String, &Vec<T>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spec: the host trainer's RoPE tables are inference's for the same patch grid (`crate::rope::tables`, what
+    /// `model::preprocess` feeds the DiT), at the real variant's axis split and at the tiny gradcheck config's.
+    #[test]
+    fn the_training_rope_tables_are_the_inference_tables_for_the_patch_grid() {
+        let real = WanConfig::t2v_1_3b();
+        let c = Cfg::from_wan(&real, 3, 4, 6);
+        let (f, h, w) = c.grid();
+        let want = crate::rope::tables(&real, f as u32, h as u32, w as u32);
+        let got = c.rope_tables();
+        assert_eq!((got.cos, got.sin), (want.cos, want.sin));
+
+        let tiny = Cfg::tiny();
+        let as_wan = WanConfig { dim: tiny.dim, num_heads: tiny.n_heads, ..real };
+        assert_eq!(as_wan.rope_axes_dims(), tiny.rope_axes, "the tiny config's axis split is the one a Wan config of its head width has");
+        let (f, h, w) = tiny.grid();
+        let want = crate::rope::tables(&as_wan, f as u32, h as u32, w as u32);
+        let got = tiny.rope_tables();
+        assert_eq!((got.cos, got.sin), (want.cos, want.sin));
+    }
 
     /// The generic patchify/unpatchify must be the SAME permutations the
     /// forward path uses. They are two different orderings (channel-outermost
