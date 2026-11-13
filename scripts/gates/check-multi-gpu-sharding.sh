@@ -81,7 +81,12 @@ nemotronasr	default_ref nemotron-3.5-asr-streaming-0.6b - 0.6B, single GPU by de
 pulid	PuLID-FLUX identity conditioning, adapter-scale on top of a host backbone - single GPU by design.
 qwen3asr	default_ref Qwen/Qwen3-ASR-1.7B - 1.7B, single GPU by design.
 qwen3tts	default_ref Qwen/Qwen3-TTS-12Hz-0.6B-Base - 0.6B, single GPU by design.
-qwen3vl	default_ref Qwen/Qwen3-VL-4B-Instruct - 4B, single GPU by design.
+dflash2	Block-diffusion draft model for speculative decoding (a few layers of the target's width, crates/dflash2/src/config.rs), served beside its target and far smaller than it - single GPU by design.
+huginn	Huginn 3.5B recurrent-depth decoder (default_ref tomg-group-umd/huginn-0125): one KV history per stage, served on one card; not yet migrated onto model::shard; backlog.
+mirage	51M-parameter vision model (docs/reference/models/mirage.md), real-time on a phone-class CPU - single GPU by design.
+ouro	Ouro 2.6B looped decoder (default_ref ByteDance/Ouro-2.6B-Thinking): one 48-layer stack re-applied, fits one card; not yet migrated onto model::shard; backlog.
+spectrallm	Spectral-mixer decoder trained from scratch at research scale (crates/spectrallm), not LLM-scale - single GPU by design.
+yolov5	YOLOv5 anchor-based detector, tens of millions of parameters - single GPU by design.
 qwen3vlmoe	Qwen3-VL-30B-A3B, large by architecture family - not yet migrated onto model::shard; backlog.
 rrdbnet	Real-ESRGAN RRDBNet super-resolution, well under 1B params - single GPU by design.
 s3tokenizer	FSQ supervised-semantic speech tokenizer, well under 1B params - single GPU by design.
