@@ -29,18 +29,17 @@ The slower, non-distilled `Tongyi-MAI/Z-Image` base model auto-fetches the
 same way when requested by name (also opt-in) (use it with more `steps`; classifier-free
 guidance is not implemented, so the base model samples unguided).
 
-`brain serve` does not require `BRAIN_S3DIT_*` either: the statically
-registered resident resolves its four components from the model store, the
-same `s3dit::spec::S3ditSpec` scan/candidate rules a one-shot import uses.
-`BRAIN_S3DIT_DIT`, `_VAE`, `_QWEN`, `_TOKENIZER` still work exactly as
-before when set - each pins that one component outright, overriding whatever
-the store would otherwise pick.
+`brain serve` resolves the four components from the model store with the same
+`s3dit::spec::S3ditSpec` scan/candidate rules a one-shot command uses.
+`brain serve --pin s3dit.dit=FILE` (and `vae`, `text_encoder`, `tokenizer`)
+pins one component outright, overriding whatever the store would otherwise
+pick; a one-shot command takes the same roles as `--dit FILE` and so on.
 
 ### From a GGUF
 
 `brain import` also accepts a quantized Z-Image DiT (unsloth publishes
 `Z-Image-GGUF` and `Z-Image-Turbo-GGUF`), converting it to a brain-native
-safetensors checkpoint that `BRAIN_S3DIT_DIT` can point at. These files declare
+safetensors checkpoint for the `dit` role. These files declare
 `general.architecture = "lumina2"`, which real Lumina2 releases also use, so the
 importer refuses anything without Z-Image's own `cap_embedder.0.weight` rather
 than guessing, and reads the variant off the tensor shapes.

@@ -1144,8 +1144,8 @@ pub fn run_serve(args: &[String]) {
     // / action_request) - the same actions `brain do` runs, now network-reachable.
     // A capability whose weights are absent is left out, not a failed start:
     // the controller serves whatever this machine holds.
-    match s3dit::caps::ZImageProvider::load() {
-        Ok(provider) => ctrl.register_provider(std::sync::Arc::new(provider)),
+    match catalog::provider(s3dit::caps::MODEL) {
+        Ok(provider) => ctrl.register_provider(provider),
         Err(e) => residency::log::not_served(&format!("brain: z-image not served ({e})")),
     }
     match catalog::provider(lfm2::caps::MODEL) {

@@ -181,8 +181,8 @@ pub fn check_steps(steps: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Filesystem locations of the four Z-Image components (never hard-coded - from
-/// the environment, mirroring the crate's tests).
+/// Filesystem locations of the four Z-Image components (never hard-coded -
+/// from the resolved assembly, [`Paths::from_assembly`]).
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub dit: String,
@@ -192,11 +192,6 @@ pub struct Paths {
 }
 
 impl Paths {
-    pub fn from_env() -> Result<Paths, String> {
-        let g = |k: &str| std::env::var(k).map_err(|_| format!("set {k} to the Z-Image {k} path"));
-        Ok(Paths { dit: g("BRAIN_S3DIT_DIT")?, vae: g("BRAIN_S3DIT_VAE")?, qwen: g("BRAIN_S3DIT_QWEN")?, tokenizer: g("BRAIN_S3DIT_TOKENIZER")? })
-    }
-
     /// Build `Paths` from an already-resolved [`capability::Assembly`]
     /// ([`brain_modelstore::resolve::resolve`]'s `Resolution::Resolved`
     /// output) - no environment involved. A missing role should be
@@ -1427,9 +1422,8 @@ mod from_assembly_tests {
         }
     }
 
-    /// The resolver-driven path: every role comes from the [`Assembly`]
-    /// itself, never the environment - `text_encoder` maps to `Paths::qwen`,
-    /// the one role whose env var (`BRAIN_S3DIT_QWEN`) spells it differently.
+    /// Every role comes from the [`Assembly`] itself - `text_encoder` maps to
+    /// `Paths::qwen`, the one field named differently from its role.
     #[test]
     fn from_assembly_reads_every_role_from_the_assembly() {
         let assembly = assembly_with_roles(&[("dit", "d"), ("vae", "v"), ("text_encoder", "q"), ("tokenizer", "k")]);

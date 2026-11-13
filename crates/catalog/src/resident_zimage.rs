@@ -23,10 +23,6 @@ pub struct ZImageResident {
 }
 
 impl ZImageResident {
-    pub fn from_env() -> Result<ZImageResident, String> {
-        Self::from_paths(s3dit::caps::MODEL, Paths::from_env()?)
-    }
-
     /// Each of the four components independently: its pin if the operator
     /// gave one, else whatever the model-store resolver finds for that role
     /// through `s3dit::spec::S3ditSpec` - the SAME spec/scan/candidate rules
@@ -34,10 +30,7 @@ impl ZImageResident {
     /// `crate::resident_flux2::Flux2Resident::from_store`.
     ///
     /// `None` when nothing resolves, or the outcome is ambiguous (logged) -
-    /// never a hard startup failure for the whole daemon. [`Self::from_env`]
-    /// stays as it is: a lower-level escape hatch other callers (`brain perf
-    /// run zimage`, the `#[ignore]`d real-checkpoint tests) still use when
-    /// they deliberately want every path named outright.
+    /// never a hard startup failure for the whole daemon.
     ///
     /// `store` is the serving process's model store and role pins (see
     /// `loader::served::served_assembly`).
@@ -66,8 +59,7 @@ impl ZImageResident {
         }
     }
 
-    /// Built from an already-resolved [`Paths`] rather than the environment,
-    /// under `id` rather than the compiled-in `s3dit::caps::MODEL` -- what
+    /// Built from an already-resolved [`Paths`], under `id` rather than the compiled-in `s3dit::caps::MODEL` -- what
     /// `serving::model_dir::resident_for_local` uses for a compound
     /// (multi-file) model found on disk or just auto-fetched, whose four
     /// component paths come from a `brain.manifest.json`'s roles and whose id
@@ -404,15 +396,10 @@ mod tests {
         std::fs::write(path, serde_json::to_vec(&json!({"version": "1.0", "model": {"vocab": vocab}, "added_tokens": []})).unwrap()).unwrap();
     }
 
-    /// Milestone C's own acceptance case: with every `BRAIN_S3DIT_*` variable
-    /// unset, `ZImageResident::from_store` must still resolve a complete
-    /// assembly purely from local discovery against a synthetic model-store
-    /// fixture - the whole point of routing the static resident registration
-    /// through the resolver instead of [`ZImageResident::from_env`]'s
-    /// four-variables-or-nothing mechanism.
+    /// `ZImageResident::from_store` resolves a complete assembly purely from
+    /// local discovery against a synthetic model-store fixture.
     #[test]
-    fn from_store_resolves_a_synthetic_store_with_no_brain_s3dit_env_vars_set() {
-        let _serial = brain_testutil::env_lock();
+    fn from_store_resolves_a_synthetic_store() {
         let root = scratch_store("s3dit-from-store");
         let vendor = root.join("Tongyi-MAI");
         std::fs::create_dir_all(&vendor).unwrap();
@@ -459,13 +446,11 @@ mod tests {
     /// came back refused "because this pipeline was built for cap_len 512",
     /// contradicting the request the resident was keyed on.
     #[test]
-    #[ignore = "slow: real checkpoint + GPU; set BRAIN_S3DIT_* and run with --ignored"]
+    #[ignore = "slow: real checkpoint + GPU; needs Z-Image in the model store, run with --ignored"]
     fn a_served_request_that_raises_cap_len_gets_a_pipeline_built_for_it() {
-        let paths = match Paths::from_env() {
-            Ok(p) => p,
-            Err(e) => return brain_testutil::skip(&format!("Z-Image checkpoint paths not set: {e}")),
+        let Some(model) = ZImageResident::from_store(&loader::served::ServedStore::new(loader::model_dir::resolve(None))) else {
+            return brain_testutil::skip("no Z-Image checkpoint in the model store");
         };
-        let model = ZImageResident::from_paths(s3dit::caps::MODEL, paths).expect("BRAIN_S3DIT_* all resolved");
         // ~700 caption tokens: over the 512 default, under the 1024 asked for.
         let prompt = "a red fox in deep snow at dawn, long telephoto photograph, soft rim light, ".repeat(40);
         let inv = Invocation::new()
@@ -492,19 +477,19 @@ mod tests {
     /// activate() and promote() so "promote is faster" is a measured
     /// number, not an assertion resting on the design alone.
     #[test]
-    #[ignore = "slow: real checkpoint + GPU; set BRAIN_S3DIT_* and run with --ignored"]
+    #[ignore = "slow: real checkpoint + GPU; needs Z-Image in the model store, run with --ignored"]
     fn zimage_demote_then_promote_produces_a_real_image_and_promote_is_faster() {
         std::env::set_var("BRAIN_S3DIT_RETAIN_INT8_CACHE", "1");
         // Two different failures used to share one skip: "the checkpoint paths
         // are not on this box" (a fixture that is legitimately absent) and
         // "the paths resolved but the provider would not load" (a real
         // failure). Resolve them separately so only the first is a skip.
-        let paths = match s3dit::pipeline::Paths::from_env() {
-            Ok(p) => p,
-            Err(e) => return brain_testutil::skip(&format!("Z-Image checkpoint paths not set: {e}")),
+        let store = loader::served::ServedStore::new(loader::model_dir::resolve(None));
+        let Some(assembly) = loader::served::served_assembly(&store, "s3dit", &s3dit::spec::S3ditSpec) else {
+            return brain_testutil::skip("no Z-Image checkpoint in the model store");
         };
-        let model = ZImageResident::from_paths(s3dit::caps::MODEL, paths)
-            .expect("BRAIN_S3DIT_* all resolved, so the Z-Image provider must load");
+        let paths = Paths::from_assembly(&assembly).expect("a resolved assembly carries every role");
+        let model = ZImageResident::from_paths(s3dit::caps::MODEL, paths).expect("every role resolved, so the Z-Image provider must load");
         let key = InstanceKey::new(s3dit::caps::MODEL, "256x256:int8:");
 
         let t0 = std::time::Instant::now();

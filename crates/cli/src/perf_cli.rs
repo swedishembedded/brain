@@ -1671,12 +1671,8 @@ fn build_zimage(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         }
         (p[0], p[1], p[2])
     };
-    for var in ["BRAIN_S3DIT_DIT", "BRAIN_S3DIT_VAE", "BRAIN_S3DIT_QWEN", "BRAIN_S3DIT_TOKENIZER"] {
-        if std::env::var(var).map(|v| v.is_empty()).unwrap_or(true) {
-            return Err(format!("zimage target needs {var} set"));
-        }
-    }
-    let resident = catalog::resident_zimage::ZImageResident::from_env()?;
+    let resident = catalog::resident_zimage::ZImageResident::from_store(&catalog::ServedStore::new(loader::model_dir::resolve(None)))
+        .ok_or("zimage target needs one Z-Image checkpoint (DiT, VAE, text encoder, tokenizer) in the model store: brain pull Tongyi-MAI/Z-Image-Turbo")?;
     let exec = forecast_executor(resident);
     let info = TargetInfo::new("zimage", "denoise_step")
         .with("width", w.into())

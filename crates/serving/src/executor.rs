@@ -189,12 +189,12 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     }
 
     let mut models: Vec<Arc<dyn ResidentModel>> = Vec::new();
-    // z-image (BRAIN_S3DIT_{DIT,VAE,QWEN,TOKENIZER}, else whatever the model
-    // store resolves through `s3dit::spec::S3ditSpec` - see `ZImageResident::
-    // from_store`'s own doc).
+    // z-image: whatever the model store resolves (or `--pin s3dit.ROLE=PATH`
+    // names) through `s3dit::spec::S3ditSpec` - see `ZImageResident::
+    // from_store`'s own doc.
     match ZImageResident::from_store(store) {
         Some(z) => models.push(Arc::new(z)),
-        None => residency::log::not_served("brain: z-image not served over the scheduler (set BRAIN_S3DIT_DIT/_VAE/_QWEN/_TOKENIZER, or place a checkpoint under the model dir)"),
+        None => residency::log::not_served("brain: z-image not served over the scheduler (place a checkpoint under the model dir, or --pin s3dit.ROLE=PATH)"),
     }
     // YOLO object detection, over the checkpoint the model store holds.
     if let Some(y) = YoloResident::from_store(store) {

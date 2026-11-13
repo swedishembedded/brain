@@ -427,8 +427,9 @@ scratch for every conv lowering - 1D (`audio::conv`), 2D and 3D (`vae::blocks`,
 **Per-model dev/debug knobs:** `BRAIN_VAE_TAPS`,
 `BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS`, `BRAIN_OMNI_DEBUG_LOGITS` (top-3 logit dump
 from the Qwen3-Omni int8 resident), `BRAIN_FLUX2_BENCH_BASELINE`,
-`BRAIN_FLUX2_TIME_FORWARD`, `BRAIN_S3DIT_LAYERS` (truncates the Z-Image DiT
-to N layers in the benchmark binary only), `BRAIN_WAN_VAE_TAPS` (record every
+`BRAIN_FLUX2_TIME_FORWARD`, `BRAIN_S3DIT_DIT` (the Z-Image DiT the
+`zimage_bench` binary and the parity tests load), `BRAIN_S3DIT_LAYERS`
+(truncates the Z-Image DiT to N layers in the benchmark binary only), `BRAIN_WAN_VAE_TAPS` (record every
 Wan-VAE block output for parity debugging; the LTX-2.5 VAE's equivalent is
 `LtxVaeDecoder::build_with_taps`), `BRAIN_VAE3D_NOPOOL` (disable the
 3D VAE builder's buffer pooling, which a tap would otherwise read after reuse),

@@ -124,13 +124,6 @@ pub struct ZImageProvider {
 }
 
 impl ZImageProvider {
-    /// Weights from the environment (`BRAIN_S3DIT_DIT` / `_VAE` / `_QWEN` /
-    /// `_TOKENIZER`) - the historical construction path; still used wherever
-    /// no resolved [`capability::Assembly`] is in hand.
-    pub fn load() -> Result<ZImageProvider, String> {
-        Ok(ZImageProvider::from_paths(crate::pipeline::Paths::from_env()?))
-    }
-
     pub fn from_paths(paths: crate::pipeline::Paths) -> ZImageProvider {
         ZImageProvider { hot: Arc::new(Hot::new()), paths }
     }

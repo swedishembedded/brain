@@ -1398,6 +1398,10 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_FLUX1_DIR", replacement: "serve: {pin: [flux1.root=DIR, pulid.flux1=DIR]}" },
     Retired { name: "BRAIN_PULID_DIR", replacement: "serve: {pin: [pulid.pulid=FILE]}" },
     Retired { name: "BRAIN_BISENET_DIR", replacement: "serve: {pin: [pulid.bisenet=DIR]}" },
+    Retired { name: "BRAIN_S3DIT_DIT", replacement: "serve: {pin: [s3dit.dit=FILE]}" },
+    Retired { name: "BRAIN_S3DIT_VAE", replacement: "serve: {pin: [s3dit.vae=FILE]}" },
+    Retired { name: "BRAIN_S3DIT_QWEN", replacement: "serve: {pin: [s3dit.text_encoder=PATH]}" },
+    Retired { name: "BRAIN_S3DIT_TOKENIZER", replacement: "serve: {pin: [s3dit.tokenizer=PATH]}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 

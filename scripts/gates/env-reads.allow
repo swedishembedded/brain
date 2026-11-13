@@ -88,7 +88,6 @@ crates/cli/src/main.rs	BRAIN_TEST_CONFIG_NUMBER
 crates/cli/src/main.rs	BRAIN_VERBOSE
 crates/cli/src/main.rs	HOME
 crates/cli/src/main.rs	XDG_CONFIG_HOME
-crates/cli/src/perf_cli.rs	<var>
 crates/cli/src/perf_cli.rs	BRAIN_FORECAST_HORIZON
 crates/cli/src/perf_cli.rs	BRAIN_FORECAST_SAMPLES
 crates/cli/src/perf_longctx.rs	<qwen35moe::gguf_load::GGUF_ENV>
@@ -807,15 +806,10 @@ crates/s3dit/src/bin/zimage_bench.rs	BRAIN_S3DIT_DIT
 crates/s3dit/src/bin/zimage_bench.rs	BRAIN_S3DIT_LAYERS
 crates/s3dit/src/block.rs	BRAIN_S3DIT_FLASH
 crates/s3dit/src/finetune.rs	BRAIN_S3DIT_ENCODER_GPU
-crates/s3dit/src/pipeline.rs	<k>
-crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_DIT
 crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_ENCODER_CUT
 crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_ENCODER_FP32SPLIT
 crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_ENCODER_GPU
 crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_ENCODER_RESIDENT
-crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_QWEN
-crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_TOKENIZER
-crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_VAE
 crates/s3dit/src/pipeline.rs	BRAIN_S3DIT_WINDOW_BLOCKS
 crates/s3dit/tests/it/dev_grad.rs	BRAIN_DEV_GPU
 crates/s3dit/tests/it/dev_parity.rs	BRAIN_DEV_GPU

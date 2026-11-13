@@ -74,10 +74,10 @@ def main() -> int:
         if "brain/imageops" in models:
             demo_image_over_fd(brain)
 
-        if "brain/s3dit" in models and os.environ.get("BRAIN_S3DIT_DIT"):
+        if "brain/s3dit" in models:
             demo_streaming_generation(brain)
         else:
-            print("z-image streaming demo skipped (export BRAIN_S3DIT_* to enable)")
+            print("z-image streaming demo skipped (no Z-Image checkpoint in the model store)")
 
         print("scheduler stats:", brain.stats())
     print("OK")

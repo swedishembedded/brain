@@ -319,7 +319,7 @@ pub(crate) const DISCRIMINATOR_TENSOR: &str = "cap_embedder.0.weight";
 
 /// Import a Z-Image GGUF (any block-quant this crate's `checkpoint::gguf`
 /// dequant supports) into a brain-native single-file safetensors checkpoint
-/// that `BRAIN_S3DIT_DIT` can point at directly - the same tensor names
+/// for the `dit` role - the same tensor names
 /// [`import_comfy`] already remaps, since unsloth's GGUF conversion kept the
 /// original/Comfy layout unchanged (`layers.N.attention.qkv.weight`,
 /// `context_refiner.*`, `noise_refiner.*`, `t_embedder.*`, `x_embedder.*`,
@@ -331,7 +331,7 @@ pub(crate) const DISCRIMINATOR_TENSOR: &str = "cap_embedder.0.weight";
 /// is a property of each tensor, never of the file.
 ///
 /// **DiT-only.** The GGUF release does not bundle the VAE or the Qwen-4B text
-/// encoder; `BRAIN_S3DIT_VAE`/`BRAIN_S3DIT_QWEN` still need their own source,
+/// encoder; the `vae` and `text_encoder` roles still need their own source,
 /// same as the safetensors path.
 ///
 /// **Streaming, one source tensor at a time.** The names and shapes come from

@@ -115,7 +115,6 @@ model is not served.
 
 | Variable | Serves | Value |
 | --- | --- | --- |
-| `BRAIN_S3DIT_DIT`, `BRAIN_S3DIT_VAE`, `BRAIN_S3DIT_QWEN`, `BRAIN_S3DIT_TOKENIZER` | Z-Image text2image/edit | optional overrides, one per component -- unset, each is resolved from the model store instead (`s3dit::spec::S3ditSpec`); set, it pins that exact file |
 | _(none)_ | Qwen3.8-27B dense hybrid decoder, FastVLM vision-language, Moondream 3 vision-language, DeepSeek-OCR and DeepSeek-OCR-2 document image → text/markdown - all resolved automatically from the models directory (`qwen35`/`fastvlm`/`moondream3`/`deepseek2ocr::spec`/`deepseekocr2::spec`); `--weights`/`weights` (and `--tokenizer` for qwen35) still name a checkpoint outright per call | n/a |
 | `BRAIN_CHRONOS2` | Chronos-2 forecasting | weights |
 | `BRAIN_FINCAST` | FinCast forecasting | weights |
