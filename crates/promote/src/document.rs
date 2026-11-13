@@ -224,7 +224,7 @@ pub const MIN_HELD_OUT_PROBES: usize = 48;
 /// How far a SINGLE earlier cycle's probe set may fall before a candidate is
 /// refused, independent of the pooled anchor mean.
 ///
-/// [`crate::continual`-driven] studies already compute these blocks - one per
+/// Continual studies (`rl::continual`) already compute these blocks - one per
 /// earlier cycle, `MIN_HELD_OUT_PROBES` probes each - and before this
 /// constant existed they were computed and thrown away, leaving the pooled
 /// mean as the only retention bar.
@@ -233,7 +233,7 @@ pub const MIN_HELD_OUT_PROBES: usize = 48;
 /// this bar exists. With `k` earlier cycles a block dropping `d` moves the
 /// pooled mean by only `d/k`, so the drop is invisible to
 /// [`GateConfig::anchor_budget`] as soon as `k >= d / anchor_budget`. At the
-/// perf-number: illustrative gate arithmetic, not a measurement
+// perf-number: illustrative gate arithmetic, not a measurement
 /// default budget of 0.02 that is 15 cycles to hide losing 30% of one
 /// earlier cycle, and **50 cycles to destroy an entire earlier cycle without
 /// the pooled bar ever firing**. The longer a continual run goes, the less

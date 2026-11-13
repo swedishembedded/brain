@@ -139,12 +139,6 @@ pub struct GateReport {
     pub worst_block_delta: Option<f64>,
 }
 
-/// Score `input` against `cfg` and return the promote/reject decision plus
-/// every intermediate number. Checks run in a fixed order (significance,
-/// effect size, pooled anchor, per-block anchor, degeneracy) and the first
-/// one to fail is reported as the [`Cause`] - every number still gets
-/// computed either way, so `GateReport` always carries the full picture
-/// regardless of which one rejected.
 /// What decides which candidate actually carries forward.
 ///
 /// Lives here rather than with either consumer because BOTH the
@@ -162,7 +156,6 @@ pub enum GatePolicy {
     /// carries no information about what it promoted.
     CoinFlip { seed: u64 },
 }
-
 
 impl GatePolicy {
     /// Whether step `k`'s candidate carries forward. Deterministic for a
@@ -183,6 +176,12 @@ pub fn coin(seed: u64, k: usize) -> bool {
     ((z ^ (z >> 31)) & 1) == 1
 }
 
+/// Score `input` against `cfg` and return the promote/reject decision plus
+/// every intermediate number. Checks run in a fixed order (significance,
+/// effect size, pooled anchor, per-block anchor, degeneracy) and the first
+/// one to fail is reported as the [`Cause`] - every number still gets
+/// computed either way, so `GateReport` always carries the full picture
+/// regardless of which one rejected.
 pub fn gate(input: &GateInput, cfg: &GateConfig) -> GateReport {
     let sign = crate::stats::sign_test(input.candidate_scores, input.incumbent_scores);
     let effect_size = mean(input.candidate_scores) - mean(input.incumbent_scores);
