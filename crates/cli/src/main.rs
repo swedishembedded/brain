@@ -50,7 +50,6 @@ mod continuous_train;
 mod resolve;
 mod roofline_cli;
 mod run_cli;
-mod run_record;
 mod serve_daemon;
 mod supply;
 mod tree;

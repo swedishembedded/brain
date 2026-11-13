@@ -36,6 +36,7 @@
 
 pub mod args;
 pub mod media;
+mod record;
 mod model;
 pub mod resolve;
 mod run;

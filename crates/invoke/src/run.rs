@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use capability::{Manifest, Media, Outcome, Progress, Provider};
 
-use crate::{args, media};
+use crate::{args, media, record};
 
 /// A front end's name for itself and the model it drives, as its help and
 /// errors print them: `brain do brain/sam2`, or a sample's binary name.
@@ -65,6 +65,13 @@ pub fn run_with(program: &Program, provider: Arc<dyn Provider>, action: &str, fl
             1
         })?;
         eprintln!("wrote {name} -> {path}");
+        // A generated output carries the seed and settings that made it.
+        if let Some(seed) = outcome.outputs.get("seed").and_then(serde_json::Value::as_u64) {
+            record::write_run_record(path, &format!("{} {action}", program.name), seed, inv.params.clone()).map_err(|e| {
+                eprintln!("{} {action}: {e}", program.name);
+                1
+            })?;
+        }
     }
     if parsed.json {
         println!("{}", outcome.outputs);

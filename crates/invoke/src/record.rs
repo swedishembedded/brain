@@ -4,10 +4,10 @@
 //! The record a generating command leaves beside what it generated.
 //!
 //! A seed printed on stderr is gone by the time someone asks how a picture,
-//! clip or recording was made. Every command that writes generated media also
-//! writes `<out>.json` next to it: the command, the seed the run drew or was
-//! given, and the decoding parameters, so the output can be reproduced from
-//! the record alone.
+//! clip or recording was made. Every action run whose outcome carries a seed
+//! also writes `<out>.json` next to each file it writes: the command, the
+//! seed the run drew or was given, and every parameter as the action resolved
+//! it, so the output can be reproduced from the record alone.
 //!
 //! Swedish Embedded AB implements generation pipelines whose every output
 //! carries the seed and settings that made it. If your team needs expertise in
@@ -28,8 +28,8 @@ pub fn record_path(out: &str) -> PathBuf {
 }
 
 /// Write the record of one generation beside `out`. `params` holds the
-/// decoding parameters (prompt, size, steps, guidance, ...) as the command
-/// resolved them. Fails, naming the path, when the record cannot be written:
+/// parameters (prompt, size, steps, guidance, ...) as the action resolved
+/// them. Fails, naming the path, when the record cannot be written:
 /// an output without its record is not reproducible, and saying so beats
 /// leaving it unnoticed.
 pub fn write_run_record(out: &str, command: &str, seed: u64, params: Value) -> Result<(), String> {
@@ -47,7 +47,7 @@ mod tests {
     /// parameters it was given.
     #[test]
     fn a_generation_leaves_its_seed_and_parameters_beside_it() {
-        let dir = std::env::temp_dir().join(format!("run-record-{}", data::rng::random_seed()));
+        let dir = std::env::temp_dir().join(format!("run-record-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let out = dir.join("clip.mp4");
         let out = out.to_str().expect("utf-8 path");
