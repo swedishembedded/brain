@@ -23,9 +23,9 @@ transducer. For offline batch transcription of a complete clip instead, see
 
 Model id: `brain/nemotronasr` (the served id itself is never fetched, per
 this project's naming grammar) - but `nvidia/nemotron-3.5-asr-streaming-0.6b`
-auto-fetches (⤓, opt-in `--autofetch`) on first CLI use, no env var needed. To point at a
-different checkpoint, set `BRAIN_NEMOTRONASR` to an HF-layout checkpoint
-directory.
+auto-fetches (⤓, opt-in `--autofetch`) on first CLI use, no env var needed. To use a different HF-layout checkpoint
+directory, put it in the model store, or name it with `--weights DIR`
+(one-shot) or `brain serve --pin nemotronasr.weights=DIR`.
 
 ## Running it
 
@@ -33,8 +33,7 @@ Pass a WAV file directly - `--in audio=` decodes a RIFF/WAVE file, downmixes
 it to mono and resamples it to 16 kHz for you:
 
 ```bash
-BRAIN_NEMOTRONASR=/path/to/nemotron/hf \
-  brain nemotronasr transcribe --in audio=clip.wav --out text=out.txt
+brain nemotronasr transcribe --in audio=clip.wav --out text=out.txt   # --weights /path/to/nemotron/hf names another
 ```
 
 The blob wire format itself is **raw mono f32 little-endian PCM at 16 kHz**
@@ -46,7 +45,7 @@ decoding.
 Resident server (D-Bus):
 
 ```bash
-BRAIN_NEMOTRONASR=/path/to/nemotron/hf brain serve --dbus
+brain serve --dbus                        # --pin nemotronasr.weights=/path/to/nemotron/hf names another
 ```
 
 Additionally exposes `transcribe_stream` for a live session: send successive
@@ -58,7 +57,7 @@ client [`samples/python/asr/transcribe-mic/transcribe_mic.py`](../../../samples/
 protocol.
 
 ```bash
-BRAIN_NEMOTRONASR=/path/to/nemotron/hf dbus-run-session -- bash -c '
+dbus-run-session -- bash -c '
   brain serve --dbus & sleep 2
   python3 samples/python/asr/transcribe-mic/transcribe_mic.py --model brain/nemotronasr --wav clip.wav'
 ```

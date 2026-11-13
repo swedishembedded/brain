@@ -7,8 +7,7 @@ Live microphone -> brain (over D-Bus) -> streaming transcription.
 transcription **segments** as each ~1 s window decodes.
 
 ```bash
-BRAIN_NEMOTRONASR=$BRAIN_TESTDATA/asr/nemotron/hf \
-  tools/dbus-session.sh --serve "--dbus --device cpu" -- \
+tools/dbus-session.sh --serve "--dbus --device cpu --pin nemotronasr.weights=$BRAIN_TESTDATA/asr/nemotron/hf" -- \
   python3 samples/python/asr/transcribe-mic/transcribe_mic.py --model brain/nemotronasr --seconds 15
 ```
 
@@ -44,8 +43,9 @@ python3 samples/python/asr/transcribe-mic/transcribe_mic.py --wav /tmp/tts16k.wa
 
 ## What it needs
 
-- `BRAIN_NEMOTRONASR` pointed at Nemotron weights and/or Qwen3-ASR in the
-  model store (`brain pull Qwen/Qwen3-ASR-1.7B`).
+- Nemotron and/or Qwen3-ASR in the model store (`brain pull
+  nvidia/nemotron-3.5-asr-streaming-0.6b`, `brain pull Qwen/Qwen3-ASR-1.7B`), or
+  pinned with `--pin nemotronasr.weights=DIR` as above.
 - `jeepney` (D-Bus with fd passing, always required) - `pip install -e brain-py`.
 - `sounddevice` + `numpy` only for live mic capture (`pip install sounddevice
   numpy`); not needed for `--wav`.

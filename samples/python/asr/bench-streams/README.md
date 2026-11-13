@@ -8,8 +8,7 @@ first-/final-segment latency, and the scheduler's batch counters - proof
 that concurrent windows actually batched.
 
 ```bash
-BRAIN_NEMOTRONASR=$BRAIN_TESTDATA/asr/nemotron/hf \
-  tools/dbus-session.sh --serve "--dbus --device cpu" -- \
+tools/dbus-session.sh --serve "--dbus --device cpu --pin nemotronasr.weights=$BRAIN_TESTDATA/asr/nemotron/hf" -- \
   python3 samples/python/asr/bench-streams/bench_streams.py --model brain/nemotronasr \
     --wav $BRAIN_TESTDATA/asr/audio/librispeech_mr_quilter.wav \
     --streams 1,2,4
@@ -32,8 +31,9 @@ throughput.
 
 ## What it needs
 
-- `BRAIN_NEMOTRONASR` pointed at Nemotron weights and/or Qwen3-ASR in the
-  model store (`brain pull Qwen/Qwen3-ASR-1.7B`) before `brain serve --dbus`.
+- Nemotron and/or Qwen3-ASR in the model store (`brain pull
+  nvidia/nemotron-3.5-asr-streaming-0.6b`, `brain pull Qwen/Qwen3-ASR-1.7B`), or
+  pinned with `--pin nemotronasr.weights=DIR` as above before `brain serve --dbus`.
 - A 16 kHz mono 16-bit PCM `--wav` clip to replay.
 - `pip install -e brain-py` (jeepney with fd passing) - the only dependency;
   no `sounddevice` needed here.

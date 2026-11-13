@@ -9,8 +9,7 @@ running `brain serve --dbus` over the `StreamTranscribe` D-Bus method through on
 pipe fd, and prints the transcription **segments** as each ~1 s window decodes.
 
     # 1. serve the ASR model(s) on a private session bus
-    BRAIN_NEMOTRONASR=$BRAIN_TESTDATA/asr/nemotron/hf \
-      tools/dbus-session.sh --serve "--dbus --device cpu" -- \
+    tools/dbus-session.sh --serve "--dbus --device cpu --pin nemotronasr.weights=$BRAIN_TESTDATA/asr/nemotron/hf" -- \
         python3 samples/python/asr/transcribe-mic/transcribe_mic.py --model brain/nemotronasr --seconds 15
 
     # or transcribe a wav file (no mic needed - good for a smoke test):
@@ -111,7 +110,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            skip(f"model {args.model!r} not served (have: {models}); start `brain serve --dbus` with BRAIN_NEMOTRONASR / BRAIN_QWEN3ASR set")
+            skip(f"model {args.model!r} not served (have: {models}); put Nemotron or Qwen3-ASR in the model store, or start `brain serve --dbus --pin <arch>.weights=DIR`")
 
         r, w = os.pipe()
         params = {"window_ms": args.window_ms, "sample_rate": SAMPLE_RATE, "prompt_id": 0}

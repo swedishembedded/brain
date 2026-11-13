@@ -55,7 +55,7 @@
 //! here, not a shortcut.
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
-use qwen3vl::caps::{Precision, Resident, DEFAULT_SERVE_MAX_PIXELS, DIR_VAR, MODEL};
+use qwen3vl::caps::{Precision, Resident, DEFAULT_SERVE_MAX_PIXELS, MODEL};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 /// Fallback fp32 estimate for the rare case `self.dir`'s config cannot be
@@ -79,15 +79,14 @@ pub struct Qwen3VlResident {
 }
 
 impl Qwen3VlResident {
-    /// `None` when the variable is unset or the path is absent - registering
-    /// a model whose every call would fail is worse than not serving it.
-    pub fn from_env() -> Option<Qwen3VlResident> {
-        let dir = std::env::var(DIR_VAR).ok().filter(|p| !p.is_empty())?;
-        Self::new(dir)
+    /// The checkpoint `store` resolves (or pins) for `qwen3vl`; `None` when
+    /// there is none or the path is absent - registering a model whose every
+    /// call would fail is worse than not serving it.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<Qwen3VlResident> {
+        Self::new(loader::served::served_assembly(store, "qwen3vl", &qwen3vl::spec::Qwen3VlSpec)?.role_path("weights").ok()?)
     }
 
-    /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
+    /// Direct constructor for a caller that already holds the directory.
     pub fn new(dir: impl Into<String>) -> Option<Qwen3VlResident> {
         let dir = dir.into();
         if !std::path::Path::new(&dir).exists() {

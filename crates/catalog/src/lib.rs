@@ -590,7 +590,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(qwen3vl::caps::QwenVlProvider::new(weights)) as Arc<dyn Provider>)
             },
             spec: Some(("qwen3vl", &qwen3vl::spec::Qwen3VlSpec)),
-            resident: crate::resident!(crate::resident_qwen3vl::Qwen3VlResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_qwen3vl::Qwen3VlResident::from_store),
         },
         ModelEntry {
             manifest: yolov8::caps::manifest,
@@ -891,11 +891,9 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("qwen3tts", &qwen3tts::spec::Qwen3TtsSpec)),
             resident: crate::resident_in_store!(crate::resident_tts::TtsResident::from_store),
         },
-        // MiniMax Music 3. Like flux2, its six roles live in the provider
-        // (resolved through `minimaxmusic3::spec::MinimaxMusic3Spec` from
-        // the Assembly this entry is called with), not `BRAIN_MINIMAXMUSIC3_*`
-        // - the residency adapter (registered directly by `serving::build_executor`,
-        // not from here) still reads those env vars.
+        // MiniMax Music 3. Like flux2, its six roles are resolved through
+        // `minimaxmusic3::spec::MinimaxMusic3Spec`, for the provider and the
+        // residency adapter alike.
         ModelEntry {
             manifest: minimaxmusic3::caps::manifest,
             provider: |assembly: &Assembly| {
@@ -903,7 +901,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(minimaxmusic3::caps::MinimaxMusic3Provider::new(paths)) as Arc<dyn Provider>)
             },
             spec: Some(("minimaxmusic3", &minimaxmusic3::spec::MinimaxMusic3Spec)),
-            resident: crate::resident!(crate::resident_minimaxmusic3::MinimaxMusic3Resident::from_env),
+            resident: crate::resident_in_store!(crate::resident_minimaxmusic3::MinimaxMusic3Resident::from_store),
         },
         // CosyVoice 2/3 zero-shot voice cloning TTS. `llm`/`flow`/`hift`/
         // `tokenizer` come from `cosyvoice::spec::CosyVoiceSpec` via the
@@ -920,7 +918,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(cosyvoice::caps::CosyVoiceProvider::new(paths)) as Arc<dyn Provider>)
             },
             spec: Some(("cosyvoice", &cosyvoice::spec::CosyVoiceSpec)),
-            resident: crate::resident!(crate::resident_cosyvoice::CosyVoiceResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_cosyvoice::CosyVoiceResident::from_store),
         },
         // Speech-to-text. Discovery is weight-free (the caps manifests); the
         // direct `brain do` path wraps the model crates' eager providers in
@@ -938,7 +936,7 @@ pub fn models() -> Vec<ModelEntry> {
                 )) as Arc<dyn Provider>)
             },
             spec: Some(("nemotronasr", &nemotronasr::spec::NemotronAsrSpec)),
-            resident: crate::resident!(crate::resident_asr::NemotronResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_asr::NemotronResident::from_store),
         },
         ModelEntry {
             manifest: qwen3asr::caps::manifest,
@@ -954,7 +952,7 @@ pub fn models() -> Vec<ModelEntry> {
                 )) as Arc<dyn Provider>)
             },
             spec: Some(("qwen3asr", &qwen3asr::spec::Qwen3AsrSpec)),
-            resident: crate::resident!(crate::resident_asr::QwenAsrResident::from_env),
+            resident: crate::resident_in_store!(crate::resident_asr::QwenAsrResident::from_store),
         },
         // Time-series forecasting. Discoverable (`brain caps`) and served
         // (`brain serve`, via the resident ctors), but with no direct `brain do`

@@ -154,13 +154,6 @@ impl Precision {
     }
 }
 
-/// The env var naming the checkpoint directory (or a raw GGUF path) - read by
-/// `crates/catalog/src/resident_qwen3vl.rs::Qwen3VlResident::from_env`, the one
-/// place the residency adapter learns where its weights live (this crate's
-/// own `generate`/`lora_train` actions no longer read it directly - see
-/// `crate::spec::Qwen3VlSpec`).
-pub const DIR_VAR: &str = "BRAIN_QWEN3VL_WEIGHTS";
-
 /// Pixel-area budget for the resident model's DeepStack/splice buffer
 /// CAPACITY (see this module's doc) - a practical default (roughly a
 /// 1024x1024 image, ~1024 visual tokens at the 4B config's patch/merge
@@ -323,7 +316,7 @@ pub fn manifest() -> Manifest {
 }
 
 /// The manifest for the RESIDENT/scheduled service (D-Bus, executor, HTTP):
-/// the checkpoint directory is service-side configuration ([`DIR_VAR`]), so
+/// the checkpoint directory is service-side configuration (the model store), so
 /// the served action carries only real per-request parameters - see
 /// `moondream3::caps::manifest_resident`'s doc for why a static, CLI-facing
 /// manifest and a stripped resident one are two different things, not one
@@ -1292,7 +1285,7 @@ mod tests {
     /// a real checkpoint) - independent of `crate::spec::Qwen3VlSpec`'s own
     /// model-store resolver, which is what a served run actually uses.
     fn default_weights() -> String {
-        std::env::var(DIR_VAR).unwrap_or_default()
+        std::env::var("BRAIN_QWEN3VL_WEIGHTS").unwrap_or_default()
     }
 
     #[test]

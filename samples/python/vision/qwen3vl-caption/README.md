@@ -4,7 +4,6 @@
 an image plus a prompt in, generated text out, streamed token by token.
 
 ```bash
-BRAIN_QWEN3VL_WEIGHTS=<Qwen3-VL-4B checkpoint dir-or-GGUF> \
 tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/vision/qwen3vl-caption/qwen3vl_caption.py --image photo.ppm --prompt "Describe this image."
 ```
@@ -34,7 +33,8 @@ call on the same server reuses the resident instance.
 
 ## What it needs
 
-`BRAIN_QWEN3VL_WEIGHTS` pointing at a checkpoint directory or GGUF. Input
+A Qwen3-VL checkpoint directory or GGUF in the model store (or named with
+`--pin qwen3vl.weights=PATH` in the `--serve` arguments). Input
 is a binary PPM (P6).
 
 ## Options

@@ -76,10 +76,10 @@ brain qwen3vl generate --prompt "Describe this image." --max_new 64 \
   --in image=photo.ppm --out text=answer.txt
 ```
 
-It is also **served**: with `BRAIN_QWEN3VL_WEIGHTS` set, `brain serve --dbus`
-registers a residency adapter (`crates/catalog/src/resident_qwen3vl.rs`, still
-env-configured - it does not yet read the model-store resolver `generate`/
-`lora_train` use) that
+It is also **served**: `brain serve --dbus` registers a residency adapter
+(`crates/catalog/src/resident_qwen3vl.rs`, over the checkpoint the same
+model-store resolver `generate`/`lora_train` use finds, or `--pin
+qwen3vl.weights=DIR`) that
 builds the checkpoint ONCE (device-placed, GPU or CPU) and reuses it across
 requests, reachable over D-Bus (`Run`/`Subscribe` -
 `samples/python/vision/qwen3vl-caption/qwen3vl_caption.py`) and, because `generate` matches the

@@ -50,8 +50,6 @@ crates/capability/src/lib.rs	BRAIN_TEST_HOST_OVERRIDE
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_SERVED
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_UNSET
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_WEIGHTS
-crates/catalog/src/resident_asr.rs	BRAIN_NEMOTRONASR
-crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR
 crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR_MAXNEW
 crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR_WINDOW
 crates/catalog/src/resident_deepseekvl.rs	BRAIN_DEEPSEEKVL_TUNED
@@ -80,7 +78,6 @@ crates/catalog/src/resident_qwen35moe.rs	BRAIN_QWEN35MOE_CTX
 crates/catalog/src/resident_qwen35moe.rs	BRAIN_QWEN35MOE_MAX_BATCH
 crates/catalog/src/resident_qwen35moe.rs	BRAIN_QWEN35MOE_TOKENIZER
 crates/catalog/src/resident_qwen35moe.rs	BRAIN_QWEN35MOE_WEIGHTS
-crates/catalog/src/resident_qwen3vl.rs	<DIR_VAR>
 crates/catalog/src/resident_supir.rs	BRAIN_SDXL_DIR
 crates/catalog/src/resident_supir.rs	BRAIN_SUPIR_DIR
 crates/catalog/src/resident_zimage.rs	BRAIN_S3DIT_RETAIN_INT8_CACHE
@@ -844,7 +841,7 @@ crates/qwen3tts/tests/it/parity.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3tts/tests/it/sft_train.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3tts/tests/it/talker.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3vl/src/bin/qwen3vl_bench.rs	BRAIN_QWEN3VL_WEIGHTS
-crates/qwen3vl/src/caps.rs	<DIR_VAR>
+crates/qwen3vl/src/caps.rs	BRAIN_QWEN3VL_WEIGHTS
 crates/qwen3vl/src/caps.rs	BRAIN_QWEN3VL_CTX
 crates/qwen3vl/src/captioner.rs	BRAIN_QWEN3VL_WEIGHTS
 crates/qwen3vl/src/parity.rs	BRAIN_DEVICE

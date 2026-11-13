@@ -22,8 +22,9 @@ Qwen3-1.7B decoder. For live/streaming transcription instead, see
 
 Model id: `brain/qwen3asr` (the served id itself is never fetched, per this
 project's naming grammar) - but `Qwen/Qwen3-ASR-1.7B` auto-fetches (⤓, opt-in `--autofetch`) on
-first CLI use, no env var needed. To point at a different checkpoint, set
-`BRAIN_QWEN3ASR` to an HF-layout checkpoint directory.
+first CLI use, no env var needed. To use a different HF-layout checkpoint
+directory, put it in the model store, or name it with `--weights DIR`
+(one-shot) or `brain serve --pin qwen3asr.weights=DIR`.
 
 ## Running it
 
@@ -31,8 +32,7 @@ Pass a WAV file directly - `--in audio=` decodes a RIFF/WAVE file, downmixes
 it to mono and resamples it to 16 kHz for you:
 
 ```bash
-BRAIN_QWEN3ASR=/path/to/qwen3-asr/hf \
-  brain qwen3asr transcribe --in audio=clip.wav --out text=out.txt
+brain qwen3asr transcribe --in audio=clip.wav --out text=out.txt   # --weights /path/to/qwen3-asr/hf names another
 ```
 
 The blob wire format itself is **raw mono f32 little-endian PCM at 16 kHz**.
@@ -43,7 +43,7 @@ header triggers decoding.
 Resident server (D-Bus):
 
 ```bash
-BRAIN_QWEN3ASR=/path/to/qwen3-asr/hf brain serve --dbus
+brain serve --dbus                        # --pin qwen3asr.weights=/path/to/qwen3-asr/hf names another
 ```
 
 Reference client:

@@ -27,8 +27,7 @@ capacity.
 
 Run it against a private session bus:
 
-    BRAIN_QWEN3VL_WEIGHTS=<Qwen3-VL-4B checkpoint dir-or-GGUF> \\
-      tools/dbus-session.sh --serve "--dbus" -- \
+    tools/dbus-session.sh --serve "--dbus" -- \
         python3 samples/python/vision/qwen3vl-caption/qwen3vl_caption.py --image photo.ppm --prompt "Describe this image."
 
 The first call pays the activation (checkpoint load + upload); every later
@@ -63,7 +62,7 @@ def main() -> int:
 
     brain = BrainDBus()
     if MODEL not in brain.models():
-        print(f"FATAL: '{MODEL}' not served (set BRAIN_QWEN3VL_WEIGHTS)", file=sys.stderr)
+        print(f"FATAL: '{MODEL}' not served (put a Qwen3-VL checkpoint in the model store, or brain serve --pin qwen3vl.weights=PATH)", file=sys.stderr)
         return 2
 
     params = {"prompt": args.prompt, "max_new": args.max_new, "precision": args.precision}

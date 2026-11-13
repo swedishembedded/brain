@@ -49,12 +49,12 @@ pub struct NemotronResident {
 }
 
 impl NemotronResident {
-    pub fn from_env() -> Option<NemotronResident> {
-        std::env::var("BRAIN_NEMOTRONASR").ok().filter(|p| !p.is_empty()).map(NemotronResident::new)
+    /// The checkpoint `store` resolves (or pins) for `nemotronasr`.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<NemotronResident> {
+        Some(Self::new(loader::served::served_assembly(store, "nemotronasr", &nemotronasr::spec::NemotronAsrSpec)?.role_path("weights").ok()?))
     }
 
-    /// Direct constructor (no env round-trip) - see
-    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale.
+    /// Direct constructor for a caller that already holds the directory.
     pub fn new(dir: impl Into<String>) -> NemotronResident {
         NemotronResident { dir: dir.into() }
     }
@@ -284,14 +284,13 @@ pub struct QwenAsrResident {
 }
 
 impl QwenAsrResident {
-    pub fn from_env() -> Option<QwenAsrResident> {
-        std::env::var("BRAIN_QWEN3ASR").ok().filter(|p| !p.is_empty()).map(QwenAsrResident::new)
+    /// The checkpoint `store` resolves (or pins) for `qwen3asr`.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<QwenAsrResident> {
+        Some(Self::new(loader::served::served_assembly(store, "qwen3asr", &qwen3asr::spec::Qwen3AsrSpec)?.role_path("weights").ok()?))
     }
 
-    /// Direct constructor (no env round-trip for the PATH) - see
-    /// `crate::resident_scrfd::ScrfdResident::new`'s rationale. The two
-    /// tuning knobs (`BRAIN_QWEN3ASR_WINDOW`/`_MAXNEW`) stay env-read here:
-    /// they configure HOW the model runs, not WHICH weights serve.
+    /// Direct constructor for a caller that already holds the directory, with
+    /// the engine tuning of [`qwen_asr_tuning`].
     pub fn new(dir: impl Into<String>) -> QwenAsrResident {
         let (window_secs, max_new) = qwen_asr_tuning();
         QwenAsrResident { dir: dir.into(), window_secs, max_new }

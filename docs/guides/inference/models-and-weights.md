@@ -204,12 +204,12 @@ tells you which applies (look for the **⤓** marker):
   locally by name. The first request against a not-yet-fetched model pays a
   one-time download cost; every request after that loads the checkpoint
   already on disk.
-- **A local checkpoint** - everything else needs you to point brain at a
-  checkpoint on disk, via a `BRAIN_*_WEIGHTS`/`_CKPT`/`_DIR` environment
-  variable named on that model's own page (e.g.
-  `BRAIN_NEMOTRONASR`). Unset ⇒ the
-  model simply isn't served, with no error. The full list of these variables
-  is in [Configuration](../../reference/configuration.md#model-weights--gating).
+- **A local checkpoint** - put it in the model store (or name it with
+  `--weights` on a one-shot command, `--pin ARCH.ROLE=PATH` on `brain serve`).
+  A few models not yet moved onto the store still read a `BRAIN_*`
+  variable named on their own page; unset, such a model simply isn't served,
+  with no error. The full list is in
+  [Configuration](../../reference/configuration.md#model-weights--gating).
 
 ## Importing your own checkpoint
 
