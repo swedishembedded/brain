@@ -199,8 +199,6 @@ crates/florence2/tests/it/text_lm_parity.rs	FLORENCE2_DIR
 crates/florence2/tests/it/train_overfit.rs	MOE_SKIP_GPU_TESTS
 crates/flux1/src/model.rs	BRAIN_FLUX1_I8_KEEP_F32
 crates/flux1/src/model.rs	SMOKE_STEPS
-crates/flux1/src/pipeline.rs	BRAIN_FLUX1_TE_DEVICE
-crates/flux1/src/pipeline.rs	BRAIN_FLUX1_VAE_DEVICE
 crates/flux1/tests/it/dit_parity.rs	BRAIN_FLUX1_FULL
 crates/flux1/tests/it/dit_parity.rs	BRAIN_FLUX1_TRANSFORMER
 crates/flux1/tests/it/dit_parity.rs	BRAIN_TESTDATA

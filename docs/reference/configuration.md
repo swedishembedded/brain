@@ -142,7 +142,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_FLUX2_TE_DEVICE` | **Override** for FLUX.2 text-encoder placement (`gpu<i>[:i8]` for a truncated shard on that card). Unset, placement is automatic: the pipeline declares the DiT, encoder and VAE with their costs and the engine places them on cards that can hold them (`residency::plan`, reached through `gpu_core::devices::place`), printing what it chose | automatic |
-| `BRAIN_FLUX1_TE_DEVICE` | Same override, for FLUX.1's T5-XXL/CLIP-L text-encoder placement (`cpu` or `gpu<i>`) - the escape hatch for when the automatic plan doesn't fit some other box | automatic |
 | `BRAIN_FLUX2_NO_STREAM` | `1` forces a non-GGUF FLUX.2 DiT to build from a whole fp32 tensor map. It is rejected for a `.gguf` DiT: decoding a quantized GGUF into a whole fp32 map is not an allowed implicit conversion | off |
 | `BRAIN_FLUX2_TE_NO_STREAM` | `1` forces the FLUX.2 text encoder to be imported as one whole fp32 map instead of streamed per tensor from a mapping. Same character as `BRAIN_FLUX2_NO_STREAM`: identical weights either way, kept as an A/B instrument and a fallback | off (streamed) |
 | `BRAIN_FLUX2_ALLOW_NC` | `1` opts in to the FLUX Non-Commercial-licensed 9B variants | required, not set |
@@ -156,7 +155,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_S3DIT_WINDOW_BLOCKS` | blocks kept resident in the fp32 single-GPU decode window | 2 |
 | `BRAIN_S3DIT_FLASH` | `1`/`0` forces flash attention on/off for Z-Image | automatic |
 | `BRAIN_WAN_ATTN` | `flash`/`chunked` forces the Wan DiT's self-attention implementation | `flash` where the device supports it |
-| `BRAIN_FLUX1_VAE_DEVICE` | where the FLUX.1 VAE decode runs (`cpu`/`gpu<i>`) | `cpu` |
 | `BRAIN_MIMI_WEIGHTS` | TTS codec weights override | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |

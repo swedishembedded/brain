@@ -98,6 +98,11 @@ pub struct GenerateOptions {
     /// without a `negative_prompt` passed to `generate_injected` - see its
     /// own doc.
     pub true_cfg: Option<TrueCfg>,
+    /// Where T5-XXL and CLIP-L run (`cpu` or `gpu<N>`); `None` follows the
+    /// automatic placement plan.
+    pub te_device: Option<String>,
+    /// Where the VAE decode runs, a `--device` spec (`"cpu"` by default).
+    pub vae_device: String,
 }
 
 /// Parameters of upstream PuLID-FLUX's optional true-CFG branch. See
@@ -110,7 +115,7 @@ pub struct TrueCfg {
 
 impl Default for GenerateOptions {
     fn default() -> GenerateOptions {
-        GenerateOptions { steps: None, guidance: 3.5, seed: data::rng::random_seed(), height: 1024, width: 1024, start_step: 0, true_cfg: None }
+        GenerateOptions { steps: None, guidance: 3.5, seed: data::rng::random_seed(), height: 1024, width: 1024, start_step: 0, true_cfg: None, te_device: None, vae_device: "cpu".to_string() }
     }
 }
 
@@ -263,29 +268,24 @@ pub fn plan_flux1(cfg: &Flux1Config, precision: Precision, n_joint: u64, dit_ext
     gpu_core::devices::place(&part_needs(cfg, precision, n_joint, dit_extra_bytes))
 }
 
-/// `BRAIN_FLUX1_TE_DEVICE` overrides the automatic T5-XXL/CLIP-L placement -
-/// the same escape hatch `BRAIN_FLUX2_TE_DEVICE`/`wan`'s T5 selector give an
-/// operator when the automatic plan doesn't fit some other box.
-fn te_device_override() -> Result<Option<gpu_core::devices::Home>, String> {
+/// A `te_device` request (`cpu` or `gpu<N>`) as a placement, overriding the
+/// automatic T5-XXL/CLIP-L plan - the escape hatch for a box the plan does not
+/// fit, the same role FLUX.2's and Wan's text-encoder device params play.
+fn parse_te_device(s: &str) -> Result<gpu_core::devices::Home, String> {
     use gpu_core::devices::Home;
-    match std::env::var("BRAIN_FLUX1_TE_DEVICE") {
-        Err(_) => Ok(None),
-        Ok(s) if s == "cpu" => Ok(Some(Home::Cpu)),
-        Ok(s) => {
-            let i: u32 = s.strip_prefix("gpu").unwrap_or(&s).parse().map_err(|_| format!("flux1: BRAIN_FLUX1_TE_DEVICE={s:?} - expected cpu or gpu<N>"))?;
-            Ok(Some(Home::Gpu(i)))
-        }
+    if s == "cpu" {
+        return Ok(Home::Cpu);
     }
+    let i: u32 = s.strip_prefix("gpu").unwrap_or(s).parse().map_err(|_| format!("flux1: te_device {s:?} - expected cpu or gpu<N>"))?;
+    Ok(Home::Gpu(i))
 }
 
 /// Run `f` with the ambient device scoped to `home` - the `Home`-typed
 /// sibling of `Homes::run` (which resolves by NAME out of one `Homes`; this
-/// resolves a `Home` this function already picked, honoring
-/// `BRAIN_FLUX1_TE_DEVICE` over the plan). A `Home::Cpu` part builds on the
-/// CPU backend, same as `Homes::run` - it used to run UNSCOPED, so a T5-XXL
-/// "placed on the host tier" (or an operator's explicit
-/// `BRAIN_FLUX1_TE_DEVICE=cpu`) still allocated ~18 GiB on whatever card was
-/// ambient.
+/// resolves a `Home` this function already picked, honoring a request's
+/// `te_device` over the plan). A `Home::Cpu` part builds on the CPU backend,
+/// same as `Homes::run`, so a T5-XXL placed on the host tier never allocates
+/// its ~18 GiB on whatever card is ambient.
 fn run_on_home<R>(home: gpu_core::devices::Home, f: impl FnOnce() -> R) -> Result<R, String> {
     match home {
         gpu_core::devices::Home::Gpu(i) if !gpu_core::devices::gpus().is_empty() => gpu_core::devices::with_gpu(i, f),
@@ -483,14 +483,16 @@ impl Flux1 {
         Ok(Flux1 { root: root.into(), cfg, variant: variant.into(), dit, vae_cfg, hw: (h, w), homes })
     }
 
-    /// T5-XXL/CLIP-L's home, honoring `BRAIN_FLUX1_TE_DEVICE` over the plan -
-    /// resolved once per call rather than cached, since it is cheap and an
-    /// operator may change the env var between requests.
-    fn te_home(&self) -> Result<gpu_core::devices::Home, String> {
-        Ok(te_device_override()?.unwrap_or_else(|| self.homes.of("te").unwrap_or(gpu_core::devices::Home::Cpu)))
+    /// T5-XXL/CLIP-L's home: the request's `te_device` when given, else the
+    /// placement plan's.
+    fn te_home(&self, te_device: Option<&str>) -> Result<gpu_core::devices::Home, String> {
+        match te_device {
+            Some(s) => parse_te_device(s),
+            None => Ok(self.homes.of("te").unwrap_or(gpu_core::devices::Home::Cpu)),
+        }
     }
 
-    fn clip_l(&self) -> Result<ClipText, String> {
+    fn clip_l(&self, home: gpu_core::devices::Home) -> Result<ClipText, String> {
         let cfg = ClipTextConfig::clip_l();
         let t = clip::import::read_text_encoder(&Path::new(&self.root).join("text_encoder"))?;
         let init = clip::import::import_text(t, &cfg)?;
@@ -498,16 +500,16 @@ impl Flux1 {
             init.into_iter().map(|(k, (_, d))| (k, d)).collect();
         // CLIP-L is small (~0.5 GB) - rides on whichever card T5-XXL landed on
         // rather than costing its own placement slot.
-        run_on_home(self.te_home()?, || ClipText::new_on(Gpu::new(clip::model::TEXT_PIPELINES), cfg, 1, 77, &map))
+        run_on_home(home, || ClipText::new_on(Gpu::new(clip::model::TEXT_PIPELINES), cfg, 1, 77, &map))
     }
 
-    fn t5_xxl(&self, max_len: usize) -> Result<T5Encoder, String> {
+    fn t5_xxl(&self, max_len: usize, home: gpu_core::devices::Home) -> Result<T5Encoder, String> {
         let cfg = T5Config::xxl();
         let dir = Path::new(&self.root).join("text_encoder_2");
         let tensors = t5encoder::import::read_encoder(&dir)?;
         let init: std::collections::HashMap<String, Vec<f32>> =
             t5encoder::import::import_hf(tensors, &cfg)?.into_iter().map(|(k, (_, d))| (k, d)).collect();
-        run_on_home(self.te_home()?, || T5Encoder::new_on(Gpu::new(t5encoder::model::PIPELINES), cfg, 1, max_len as u32, &init))
+        run_on_home(home, || T5Encoder::new_on(Gpu::new(t5encoder::model::PIPELINES), cfg, 1, max_len as u32, &init))
     }
 
     /// `(pooled[768], ctx[max_len*4096])` - CLIP-L's pooled EOS row (it does
@@ -515,10 +517,10 @@ impl Flux1 {
     /// (FLUX passes no `attention_mask`, so right-pad positions are
     /// attended as ordinary keys - `t5encoder::caps`'s `flux_xxl` variant
     /// documents the same choice).
-    fn encode(&self, prompt: &str, max_len: usize) -> Result<(Vec<f32>, Vec<f32>), String> {
+    fn encode(&self, prompt: &str, max_len: usize, home: gpu_core::devices::Home) -> Result<(Vec<f32>, Vec<f32>), String> {
         let clip_tok = data::clip_bpe::ClipBpe::from_dir(&Path::new(&self.root).join("tokenizer"))
             .map_err(|e| format!("flux1: CLIP tokenizer: {e}"))?;
-        let clip = self.clip_l()?;
+        let clip = self.clip_l(home)?;
         clip.set_tokens(&clip_tok.encode_with_context(prompt, 77).ids);
         clip.forward();
         let pooled = clip.read_pooled();
@@ -527,7 +529,7 @@ impl Flux1 {
         let t5_tok = UnigramTokenizer::from_dir(Path::new(&self.root).join("tokenizer_2").to_str().ok_or("flux1: non-UTF8 path")?)
             .map_err(|e| format!("flux1: T5 tokenizer: {e}"))?;
         let (ids, _mask) = t5_tok.encode_padded(prompt, max_len);
-        let t5 = self.t5_xxl(max_len)?;
+        let t5 = self.t5_xxl(max_len, home)?;
         t5.set_tokens(&ids);
         t5.forward();
         let ctx = t5.read_hidden(); // unmasked: no pad-row zeroing (see `encode`'s doc)
@@ -562,10 +564,11 @@ impl Flux1 {
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
         let n_gen = lh * lw;
 
-        let (pooled, ctx) = self.encode(prompt, max_len)?;
+        let te_home = self.te_home(o.te_device.as_deref())?;
+        let (pooled, ctx) = self.encode(prompt, max_len, te_home)?;
         // Only pay for the second tower encode when true CFG is actually on.
         let neg = match (negative_prompt, o.true_cfg) {
-            (Some(np), Some(_)) => Some(self.encode(np, max_len)?),
+            (Some(np), Some(_)) => Some(self.encode(np, max_len, te_home)?),
             _ => None,
         };
 
@@ -607,8 +610,7 @@ impl Flux1 {
         let unpacked = unpack_tokens(&lat, c, lh * 2, lw * 2, self.vae_cfg.shift_factor, self.vae_cfg.scaling_factor);
         let vt = read_any_safetensors(&Path::new(&self.root).join("vae"))?;
         let vmap: vae::blocks::Tensors = vt.into_iter().map(|t| (t.name, (t.shape, t.data))).collect();
-        let vdev = std::env::var("BRAIN_FLUX1_VAE_DEVICE").unwrap_or_else(|_| "cpu".into());
-        let dec = VaeDecoder::from_diffusers(self.vae_cfg.clone(), &vmap, (lh * 2) as u32, (lw * 2) as u32, Some(&vdev));
+        let dec = VaeDecoder::from_diffusers(self.vae_cfg.clone(), &vmap, (lh * 2) as u32, (lw * 2) as u32, Some(&o.vae_device));
         let chw = dec.decode(&unpacked);
         // diffusers maps the decoder's [-1,1] output to [0,1].
         let rgb: Vec<f32> = chw.iter().map(|v| ((v + 1.0) * 0.5).clamp(0.0, 1.0)).collect();

@@ -58,6 +58,8 @@ fn text2image_spec() -> ActionSpec {
         .param(ParamSpec::new("guidance", ParamType::Float, "guidance_in scalar -- dev/kontext-dev/krea-dev only, schnell ignores it").default(json!(3.5)).min(0.0).max(10.0).step(0.1))
         .param(ParamSpec::new("max_len", ParamType::Int, "T5-XXL context length").default(json!(DEFAULT_MAX_LEN)).min(32.0).max(crate::pipeline::MAX_TXT_LEN as f64).step(1.0))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant").default(json!("dev")))
+        .param(ParamSpec::new("te_device", ParamType::Str, "where T5-XXL and CLIP-L run, cpu or gpu<N> (unset: the automatic placement plan)"))
+        .param(ParamSpec::new("vae_device", ParamType::Str, "where the VAE decode runs, a --device spec").default(json!("cpu")))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier -- int8 is what fits a 24 GiB card, fp32 is the parity reference").default(json!("fp32")))
         .param(ParamSpec::new("negative_prompt", ParamType::Str, "negative conditioning for true CFG; ignored unless true_cfg > 0"))
@@ -105,6 +107,8 @@ fn req_from(inv: &Invocation) -> Result<Req, String> {
             start_step: 0, // meaningless here: plain flux1 never conditions (inject is always None)
             true_cfg: (true_cfg_scale > 0.0)
                 .then_some(TrueCfg { scale: true_cfg_scale, start_step: inv.get_i64("cfg_start_step").unwrap_or(0).max(0) as usize }),
+            te_device: inv.get_str("te_device").filter(|s| !s.is_empty()),
+            vae_device: inv.get_str("vae_device").unwrap_or_else(|| "cpu".into()),
         },
         max_len: inv.get_i64("max_len").unwrap_or(DEFAULT_MAX_LEN as i64).max(1) as usize,
         precision: crate::model::Precision::from_name(&inv.get_str("precision").unwrap_or_else(|| "fp32".into())).unwrap_or(crate::model::Precision::F32),

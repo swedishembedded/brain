@@ -1279,6 +1279,8 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_QWEN3VL_CTX", replacement: "qwen3vl generate: {ctx: N}" },
     Retired { name: "BRAIN_WAN_T5_DEVICE", replacement: "wan t2v / lora_train: {te_device: SPEC}" },
     Retired { name: "BRAIN_SDXL_VAE_DEVICE", replacement: "sdxl / controlnet text2image: {vae_device: SPEC}" },
+    Retired { name: "BRAIN_FLUX1_TE_DEVICE", replacement: "flux1 / pulid text2image: {te_device: cpu|gpuN}" },
+    Retired { name: "BRAIN_FLUX1_VAE_DEVICE", replacement: "flux1 / pulid text2image: {vae_device: SPEC}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
     Retired { name: "BRAIN_CHRONOS2", replacement: "serve: {pin: [chronos2.weights=PATH]}" },
     Retired { name: "BRAIN_FINCAST", replacement: "serve: {pin: [fincast.weights=FILE]}" },
