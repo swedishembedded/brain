@@ -447,7 +447,7 @@ pub(crate) fn activation_bytes(block: u32, layers: u64, width: u64) -> u64 {
 ///
 /// * No selected card with native 16-bit tensor cores (compute capability 8.0 and up: a CPU, an older or
 ///   non-CUDA card): fp32, the exact reference, as before.
-/// * Otherwise bf16 (the native tier brain trains in; there is no fp8 training path yet - see knowledge 336)
+/// * Otherwise bf16 (the native 16-bit tensor-core tier this default targets)
 ///   when the bf16 base plus the activations of a `block`-token row fit: on the largest single card for
 ///   `qwen35` (its trainer is one card), on the cards together for `qwen3` (it pipelines).
 /// * Otherwise the quantised base (NF4 for `qwen35`, int8 for `qwen3`), which is also what a card too small
