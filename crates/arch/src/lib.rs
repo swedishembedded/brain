@@ -574,10 +574,10 @@ pub const ARCHS: &[Arch] = &[
     // an 8-layer decoder with hyper-connection lanes). It ships as safetensors in
     // Flax naming and as a 2-bit `.cact`; the checkpoint's `config.json` carries
     // `model_type: "mirage"` and no `architectures` list, so no HF class name is
-    // declared. No `caps` yet: a capability row is added only together with the
-    // test that backs it.
+    // declared. Full fine-tune and f32 LoRA are backed by the `mirage` rows of
+    // the training-capability matrix.
     arch!("mirage", "Mirage visual perception (conv/HConvGLU encoder + lane decoder)", Vision, Brain, "brain-mirage",
-        default_ref: Some("Cactus-Compute/mirage")),
+        default_ref: Some("Cactus-Compute/mirage"), caps: Caps::NONE.full_ft().lora(&[BaseTier::F32])),
     // -- Image generation / restoration --------------------------------
     // `families: &["zimage"]` - `ZimageRecipe::id()` (and the
     // `CompoundManifest::family` it writes at pull/finish time) is
