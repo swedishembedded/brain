@@ -644,6 +644,8 @@ pub const GQA_SCORES: &str = include_str!("../wgsl/gqa_scores.wgsl");
 pub const GQA_SCORES_KMASK: &str = include_str!("../wgsl/gqa_scores_kmask.wgsl");
 /// `wgsl/gqa_scores_win.wgsl`
 pub const GQA_SCORES_WIN: &str = include_str!("../wgsl/gqa_scores_win.wgsl");
+/// `wgsl/grad_match.wgsl`
+pub const GRAD_MATCH: &str = include_str!("../wgsl/grad_match.wgsl");
 /// `wgsl/grad_scale.wgsl`
 pub const GRAD_SCALE: &str = include_str!("../wgsl/grad_scale.wgsl");
 /// `wgsl/grad_scale_buf.wgsl`
@@ -1633,14 +1635,20 @@ pub const SPLAT_VIEW_SUPPORT: &str = concat!(
 );
 /// `wgsl/splice.wgsl`
 pub const SPLICE: &str = include_str!("../wgsl/splice.wgsl");
-/// `wgsl/splice_at.wgsl`
-pub const SPLICE_AT: &str = include_str!("../wgsl/splice_at.wgsl");
 /// `wgsl/splice_add.wgsl`
 pub const SPLICE_ADD: &str = include_str!("../wgsl/splice_add.wgsl");
 /// `wgsl/splice_add_offset_src.wgsl`
 pub const SPLICE_ADD_OFFSET_SRC: &str = include_str!("../wgsl/splice_add_offset_src.wgsl");
+/// `wgsl/splice_at.wgsl`
+pub const SPLICE_AT: &str = include_str!("../wgsl/splice_at.wgsl");
 /// `wgsl/splice_bwd.wgsl`
 pub const SPLICE_BWD: &str = include_str!("../wgsl/splice_bwd.wgsl");
+/// `wgsl/ssi_grad.wgsl`
+pub const SSI_GRAD: &str = include_str!("../wgsl/ssi_grad.wgsl");
+/// `wgsl/ssi_moments.wgsl`
+pub const SSI_MOMENTS: &str = include_str!("../wgsl/ssi_moments.wgsl");
+/// `wgsl/ssi_resid.wgsl`
+pub const SSI_RESID: &str = include_str!("../wgsl/ssi_resid.wgsl");
 /// `wgsl/sub.wgsl`
 pub const SUB: &str = include_str!("../wgsl/sub.wgsl");
 /// `wgsl/swap_axes12_vec.wgsl`
@@ -2001,6 +2009,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("gqa_scores", GQA_SCORES),
     ("gqa_scores_kmask", GQA_SCORES_KMASK),
     ("gqa_scores_win", GQA_SCORES_WIN),
+    ("grad_match", GRAD_MATCH),
     ("grad_scale", GRAD_SCALE),
     ("grad_scale_buf", GRAD_SCALE_BUF),
     ("gradnorm_part", GRADNORM_PART),
@@ -2447,9 +2456,12 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_view_support", SPLAT_VIEW_SUPPORT),
     ("splice", SPLICE),
     ("splice_add", SPLICE_ADD),
-    ("splice_at", SPLICE_AT),
     ("splice_add_offset_src", SPLICE_ADD_OFFSET_SRC),
+    ("splice_at", SPLICE_AT),
     ("splice_bwd", SPLICE_BWD),
+    ("ssi_grad", SSI_GRAD),
+    ("ssi_moments", SSI_MOMENTS),
+    ("ssi_resid", SSI_RESID),
     ("sub", SUB),
     ("swap_axes12_vec", SWAP_AXES12_VEC),
     ("syn_gather_csc", SYN_GATHER_CSC),
