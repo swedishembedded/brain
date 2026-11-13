@@ -91,11 +91,12 @@ impl Fincast {
         Ok(Fincast { gpu, cfg, w })
     }
 
-    /// Load from a brain `.safetensors` container (see [`crate::import`]).
+    /// Load from a brain `.safetensors` container (see [`crate::import`]) or
+    /// the released FinCast safetensors, whose dimensions are the published
+    /// default's.
     pub fn load(path: &str) -> Result<Fincast, String> {
-        let c = checkpoint::load(path);
-        let cfg = FincastConfig::from_json(&c.header["config"])?;
-        let weights = c.by_role("");
+        let (_, cfg) = crate::import::open_weights(path)?;
+        let weights = crate::import::load_hf(&cfg, path)?;
         Fincast::from_weights(cfg, &weights)
     }
 

@@ -71,7 +71,7 @@ cd "$ROOT"
 # architecture required merging docs/rebuild into this worktree first. That
 # merge alone (before any chat-template/rename code was touched) carries
 # those commits' own pre-existing backlog in crates this session never edited
-# (npu, wm-diamond, tts, yolo, gradcheck's tests, cli/forecast_cli.rs,
+# (npu, wm-diamond, tts, yolo, gradcheck's tests,
 # cli/npu_cli.rs, cli/resident_asr.rs, omni/mm.rs). Verified, not assumed:
 # every one of the 33 new warnings' file:line was checked against this
 # session's own edits (crates/omni/src/{caps,int8_resident,
@@ -107,7 +107,7 @@ cd "$ROOT"
 # own tip, BEFORE any of that session's uncommitted changes) independently
 # ran this gate and reported 294, with warnings in files that session never
 # touched (`crates/qwen3omnimoe/src/mm.rs`, `crates/cli/src/resident_
-# forecast.rs`, `crates/npu/src/topo.rs`, `crates/cli/src/{forecast_cli,# npu_cli}.rs, crates/catalog/src/{resident_asr,resident_scrfd,resident_arcface}.rs`) -- pre-existing
+# forecast.rs`, `crates/npu/src/topo.rs`, `crates/cli/src/npu_cli.rs, crates/catalog/src/{resident_asr,resident_scrfd,resident_arcface}.rs`) -- pre-existing
 # drift already on this branch's own last commit, not introduced by that
 # session. The session's working tree showed 295 (294 + exactly one new
 # warning, `crates/catalog/src/imageops.rs`'s `draw_boxes` action it added),

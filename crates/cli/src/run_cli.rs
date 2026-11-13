@@ -1149,6 +1149,12 @@ pub fn run_serve(args: &[String]) {
 
     let mut registry = Registry::with_models(infer, detect);
     register_synth(&mut registry, &pins.with_models_dir(loader::model_dir::resolve(models_dir.as_deref())));
+    // The statistical baselines, so a forecast, a backtest and a capability
+    // listing work over this loop with no model loaded. Foundation forecasters
+    // run through their own served actions (`brain <model> forecast`).
+    for baseline in fcbench::baselines::default_set() {
+        registry.register_forecast(std::sync::Arc::from(baseline));
+    }
     let mut ctrl = Controller::with_config(registry, cfg);
 
     // Expose the generic capability providers over the event API (manifest_request

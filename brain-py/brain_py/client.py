@@ -169,16 +169,17 @@ class BrainStdio(BrainBase):
     ) -> None:
         """Spawn a brain server subprocess and drive it over JSONL.
 
-        With ``forecast=True`` the client launches ``brain forecast serve`` (the
-        statistical baselines registered, foundation models added as they land)
-        so :meth:`forecast`, :meth:`backtest` and :meth:`capabilities` work.
-        Otherwise it launches ``brain serve --stdio`` for :meth:`converse` / :meth:`detect`.
+        ``brain serve --stdio`` always registers the statistical baselines, so
+        :meth:`forecast`, :meth:`backtest` and :meth:`capabilities` work against
+        them with no model loaded; ``forecast=True`` launches it without the
+        ``--yolo``/``--gpt`` checkpoints, for a forecasting-only client. A
+        foundation forecaster is served over a socket by a model sample's
+        ``serve`` workflow (``samples/models/<model>``) and reached with
+        :meth:`connect`.
         """
         self._binary = _find_brain_binary(brain_bin)
-        if forecast:
-            argv = [self._binary, "forecast", "serve"]
-        else:
-            argv = [self._binary, "serve", "--stdio"]
+        argv = [self._binary, "serve", "--stdio"]
+        if not forecast:
             if yolo:
                 argv += ["--yolo", yolo]
             if gpt:
@@ -211,14 +212,15 @@ class BrainStdio(BrainBase):
         socket_path: str,
         ready_timeout: float = 30.0,
     ) -> "BrainStdio":
-        """Connect to an ALREADY-RUNNING ``brain forecast serve`` over a socket.
+        """Connect to an ALREADY-RUNNING forecasting server over a socket.
 
         Unlike the constructor (which spawns its own stdio subprocess), this
         attaches to a long-lived server that keeps the models warm across many
         requests — the right shape for a batch job that forecasts a whole
         universe. ``socket_path`` is the Unix socket of
-        ``brain forecast serve --socket <path>``; it admits only the serving
-        user, and there is no network listener.
+        ``sample-models-<model> serve --socket <path>`` (``samples/models/<model>``,
+        the baselines plus that model); it admits only the serving user, and
+        there is no network listener.
 
         The same :meth:`forecast` / :meth:`capabilities` / :meth:`backtest` API
         works over the socket exactly as over stdio.

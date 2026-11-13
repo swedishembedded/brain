@@ -32,7 +32,7 @@ pub mod train;
 
 pub use config::{KronosConfig, KronosTokenizerConfig, Param};
 pub use decoder::KronosDecoder;
-pub use forecaster::KronosForecaster;
+pub use forecaster::{KronosForecaster, KronosSampling};
 pub use generate::{GenOpts, KronosModel};
 pub use preprocess::{denormalize, indices_to_bipolar, normalize, quantized_to_indices, Norm};
 pub use tokenizer::KronosTokenizer;

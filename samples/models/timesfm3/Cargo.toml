@@ -1,0 +1,25 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/timesfm3` -> `sample-models-timesfm3`.
+name = "sample-models-timesfm3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: the TimesFM-3 forecaster beyond its served actions - the scenario battery against the statistical baselines and the JSONL forecasting server over a Unix socket."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-timesfm3.workspace = true
+brain-invoke.workspace = true
+brain-capability.workspace = true
+brain-forecast.workspace = true
+brain-forecastops.workspace = true
+# The JSONL server over stdio or a Unix socket.
+brain-server.workspace = true
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 44

@@ -16,7 +16,6 @@ crates/diamond/src/import.rs	1	offline importer: one whole tensor per call into 
 crates/ecapatdnn/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/ecapatdnn/src/model.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/federated/src/shard.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/fincast/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/flux2/src/pipeline.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/flux2/src/weights.rs	1	flux2 DitWeights wrapper and fp32 rectangle fallback (knowledge 337 class T)
 crates/gemma4/src/block.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)

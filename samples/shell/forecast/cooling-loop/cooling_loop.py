@@ -17,8 +17,8 @@ directly and needs no server.
 Run under a private session bus (needs no system config):
 
     python3 tools/forecast/make_cooling_loop.py --out cooling_loop.csv --seed 7
-    BRAIN_TIMESFM3=timesfm3.safetensors tools/dbus-session.sh \
-      --serve "--dbus --device cpu" \
+    tools/dbus-session.sh \
+      --serve "--dbus --device cpu --pin timesfm3.weights=timesfm3.safetensors" \
       -- python3 samples/shell/forecast/cooling-loop/cooling_loop.py cooling_loop.csv
 """
 from __future__ import annotations
@@ -61,7 +61,7 @@ def main() -> None:
     with BrainDBus() as brain:
         served = brain.models()
         if "brain/timesfm3" not in served:
-            skip(f"brain/timesfm3 is not served (served: {served}); start it with: BRAIN_TIMESFM3=<weights> brain serve --dbus")
+            skip(f"brain/timesfm3 is not served (served: {served}); start it with: brain serve --dbus --pin timesfm3.weights=<weights>")
         out = brain.run(
             "brain/timesfm3", "forecast", {"horizon": HORIZON},
             blobs={"context": f32le(ctx)}, meta={"context": {"media": "bytes", "shape": [len(ctx)]}},

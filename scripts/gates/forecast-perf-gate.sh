@@ -19,10 +19,12 @@
 # not portable source (scripts/gates/check-large-files.sh rule 2). Capture it
 # locally on a rested machine via --update, then hand-review the diff.
 #
-# Weights via env (a model with unset weights is SKIPPED, not failed):
-#   BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER   kronos  (checkpoint dirs)
-#   BRAIN_CHRONOS2                                  chronos2 (.weights)
-#   BRAIN_FINCAST                                   fincast  (.weights)
+# Checkpoints via the gate's own variables (a model with unset ones is
+# SKIPPED, not failed); `brain perf run` takes them in its --target spec:
+#   FORECAST_PERF_KRONOS_TOKENIZER + FORECAST_PERF_KRONOS_DECODER   kronos  (checkpoint dirs)
+#   FORECAST_PERF_CHRONOS2                                          chronos2 (.weights)
+#   FORECAST_PERF_FINCAST                                           fincast  (.weights)
+# The forecast horizon is FORECAST_PERF_HORIZON (default 12), passed as --horizon.
 #
 # Usage: scripts/gates/forecast-perf-gate.sh [--update]
 set -uo pipefail
@@ -34,7 +36,7 @@ BASE=scripts/gates/forecast-perf-baselines
 FLOOR="${FORECAST_PERF_FLOOR:-0.33}"
 INPUT="${FORECAST_PERF_INPUT:-96}"
 export BRAIN_DEVICE="${BRAIN_DEVICE:-cpu}"
-export BRAIN_FORECAST_HORIZON="${BRAIN_FORECAST_HORIZON:-12}"
+HORIZON="${FORECAST_PERF_HORIZON:-12}"
 
 [ -x "$BIN" ] || { echo "build first: make build/release"; exit 2; }
 update=0; [ "${1:-}" = "--update" ] && update=1
@@ -44,7 +46,7 @@ gate_one() { # name target
   local name="$1" target="$2" cand
   cand="$(mktemp)"
   seed_args=(); [ "$update" -eq 1 ] || baseline_seed_args seed_args "$BASE/$name.json"
-  if ! "$BIN" perf run latency --target "$target" --best-of 3 --warmup 1 --input "$INPUT" "${seed_args[@]}" --out "$cand" >/dev/null 2>&1; then
+  if ! "$BIN" perf run latency --target "$target" --best-of 3 --warmup 1 --input "$INPUT" --horizon "$HORIZON" "${seed_args[@]}" --out "$cand" >/dev/null 2>&1; then
     echo "  SKIP $name (perf run failed — weights missing or unreadable)"; rm -f "$cand"; return
   fi
   if [ "$update" -eq 1 ]; then
@@ -61,13 +63,13 @@ gate_one() { # name target
   rm -f "$cand"
 }
 
-if [ -n "${BRAIN_KRONOS_TOKENIZER:-}" ] && [ -n "${BRAIN_KRONOS_DECODER:-}" ]; then
-  gate_one kronos "kronos:${BRAIN_KRONOS_TOKENIZER}:${BRAIN_KRONOS_DECODER}"
+if [ -n "${FORECAST_PERF_KRONOS_TOKENIZER:-}" ] && [ -n "${FORECAST_PERF_KRONOS_DECODER:-}" ]; then
+  gate_one kronos "kronos:${FORECAST_PERF_KRONOS_TOKENIZER}:${FORECAST_PERF_KRONOS_DECODER}"
 else
-  echo "  SKIP kronos (set BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER)"
+  echo "  SKIP kronos (set FORECAST_PERF_KRONOS_TOKENIZER + FORECAST_PERF_KRONOS_DECODER)"
 fi
-if [ -n "${BRAIN_CHRONOS2:-}" ]; then gate_one chronos2 "chronos2:${BRAIN_CHRONOS2}"; else echo "  SKIP chronos2 (set BRAIN_CHRONOS2)"; fi
-if [ -n "${BRAIN_FINCAST:-}" ];  then gate_one fincast  "fincast:${BRAIN_FINCAST}";   else echo "  SKIP fincast (set BRAIN_FINCAST)"; fi
+if [ -n "${FORECAST_PERF_CHRONOS2:-}" ]; then gate_one chronos2 "chronos2:${FORECAST_PERF_CHRONOS2}"; else echo "  SKIP chronos2 (set FORECAST_PERF_CHRONOS2)"; fi
+if [ -n "${FORECAST_PERF_FINCAST:-}" ];  then gate_one fincast  "fincast:${FORECAST_PERF_FINCAST}";   else echo "  SKIP fincast (set FORECAST_PERF_FINCAST)"; fi
 
 if [ "$fail" -eq 0 ]; then echo "forecast-perf-gate: OK"; else echo "forecast-perf-gate: FAIL"; fi
 exit "$fail"

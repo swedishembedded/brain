@@ -178,7 +178,7 @@ targets (--target):
   lfm:<weights>:<tokenizer.json>     LFM2.5 encoder via the residency executor (unit: sequence)
   kronos:<tokenizer-dir>:<decoder-dir>  Kronos OHLCV forecaster via the residency executor
                                      (unit: forecast; input_artifacts = context bars; horizon/
-                                     samples from BRAIN_FORECAST_HORIZON/BRAIN_FORECAST_SAMPLES)
+                                     samples from --horizon/--samples, default 64/1)
   chronos2:<weights>                 Chronos-2 universal forecaster (unit: forecast)
   fincast:<weights>                  FinCast financial forecaster (unit: forecast)
   timesfm3:<weights>                  TimesFM-3 forecaster (unit: forecast)
@@ -377,6 +377,7 @@ fn run(args: &[String]) {
     let mut out: Option<String> = None;
     let mut policy = "cost-aware".to_string();
     let mut longctx = crate::perf_longctx::Args::default();
+    let mut forecast = ForecastShape::default();
 
     let mut i = 1;
     while i < args.len() {
@@ -394,6 +395,8 @@ fn run(args: &[String]) {
             "--prefill" => longctx.prefill = Some(val(args, &mut i, "--prefill")),
             "--steps" => longctx.steps = Some(parse_flag(args, &mut i, "--steps")),
             "--kernels" => longctx.kernels = true,
+            "--horizon" => forecast.horizon = parse_flag(args, &mut i, "--horizon"),
+            "--samples" => forecast.samples = parse_flag(args, &mut i, "--samples"),
             "--requests" => opt.num_requests = val(args, &mut i, "--requests").parse().unwrap_or(opt.num_requests),
             "--input" => opt.input_override = val(args, &mut i, "--input").parse().ok(),
             "--output" => opt.output_override = val(args, &mut i, "--output").parse().ok(),
@@ -472,7 +475,7 @@ fn run(args: &[String]) {
         eprintln!("perf run: --target is required (no default - see `brain perf list` or `brain perf --help`)");
         std::process::exit(2);
     };
-    let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override) {
+    let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override, forecast) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("perf: {e}");
@@ -677,7 +680,7 @@ impl SynthSpec {
     }
 }
 
-fn build_target(spec: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<Box<dyn PerfTarget>, String> {
+fn build_target(spec: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, forecast: ForecastShape) -> Result<Box<dyn PerfTarget>, String> {
     if let Some(shape) = spec.strip_prefix("qwen-synth:") {
         return build_qwen_synth(shape, workload, input_override, output_override);
     }
@@ -697,16 +700,16 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
         return build_lfm(rest);
     }
     if let Some(rest) = spec.strip_prefix("kronos:") {
-        return build_kronos(rest);
+        return build_kronos(rest, forecast);
     }
     if let Some(rest) = spec.strip_prefix("chronos2:") {
-        return build_chronos2(rest);
+        return build_chronos2(rest, forecast);
     }
     if let Some(rest) = spec.strip_prefix("fincast:") {
-        return build_fincast(rest);
+        return build_fincast(rest, forecast);
     }
     if let Some(rest) = spec.strip_prefix("timesfm3:") {
-        return build_timesfm3(rest);
+        return build_timesfm3(rest, forecast);
     }
     if spec == "flux2" {
         return build_flux2("");
@@ -953,12 +956,18 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, lfm2::caps::MODEL, "embed", "sequence", info, build)))
 }
 
-/// `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` (defaults 64 / 1) - the
-/// horizon and sample count every forecast perf target requests.
-fn forecast_env() -> (i64, i64) {
-    let horizon = std::env::var("BRAIN_FORECAST_HORIZON").ok().and_then(|s| s.parse().ok()).filter(|&h| h > 0).unwrap_or(64);
-    let samples = std::env::var("BRAIN_FORECAST_SAMPLES").ok().and_then(|s| s.parse().ok()).filter(|&s| s > 0).unwrap_or(1);
-    (horizon, samples)
+/// The horizon and sample count every forecast perf target requests
+/// (`--horizon` / `--samples`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ForecastShape {
+    horizon: i64,
+    samples: i64,
+}
+
+impl Default for ForecastShape {
+    fn default() -> Self {
+        ForecastShape { horizon: 64, samples: 1 }
+    }
 }
 
 /// Budget the schedulable devices and start a one-resident executor - the shared
@@ -1004,7 +1013,7 @@ fn forecast_build(horizon: i64, samples: i64) -> Box<dyn Fn(&perf::target::PerfR
 /// device placement (CPU/iGPU/NPU) are measured through brain's real serving path.
 /// One forecast per request (`artifact_unit` "forecast"); `input_artifacts` is the
 /// context length in bars, so a prefill/decode sweep is `--ladder` over input size.
-fn build_kronos(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+fn build_kronos(rest: &str, shape: ForecastShape) -> Result<Box<dyn PerfTarget>, String> {
     let (tokenizer, decoder) = rest
         .split_once(':')
         .ok_or("kronos target needs 'kronos:<tokenizer-dir>:<decoder-dir>'")?;
@@ -1014,7 +1023,7 @@ fn build_kronos(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(decoder).exists() {
         return Err(format!("kronos decoder dir not found: {decoder}"));
     }
-    let (horizon, samples) = forecast_env();
+    let ForecastShape { horizon, samples } = shape;
     let exec = forecast_executor(catalog::resident_forecast::KronosResident::new(tokenizer, decoder));
     let info = vec![
         ("tokenizer".to_string(), serde_json::json!(tokenizer)),
@@ -1028,11 +1037,11 @@ fn build_kronos(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
 
 /// `chronos2:<weights>` - the Chronos-2 universal forecaster behind the residency
 /// executor (same measurement path as `kronos:`; `input_artifacts` = context length).
-fn build_chronos2(path: &str) -> Result<Box<dyn PerfTarget>, String> {
+fn build_chronos2(path: &str, shape: ForecastShape) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(path).exists() {
         return Err(format!("chronos2 weights not found: {path}"));
     }
-    let (horizon, _samples) = forecast_env();
+    let horizon = shape.horizon;
     let exec = forecast_executor(catalog::resident_forecast::Chronos2Resident::new(path));
     let info = vec![
         ("weights".to_string(), serde_json::json!(path)),
@@ -1044,11 +1053,11 @@ fn build_chronos2(path: &str) -> Result<Box<dyn PerfTarget>, String> {
 
 /// `fincast:<weights>` - the FinCast financial forecaster behind the residency
 /// executor (same measurement path as `kronos:`; `input_artifacts` = context length).
-fn build_fincast(path: &str) -> Result<Box<dyn PerfTarget>, String> {
+fn build_fincast(path: &str, shape: ForecastShape) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(path).exists() {
         return Err(format!("fincast weights not found: {path}"));
     }
-    let (horizon, _samples) = forecast_env();
+    let horizon = shape.horizon;
     let exec = forecast_executor(catalog::resident_forecast::FincastResident::new(path));
     let info = vec![
         ("weights".to_string(), serde_json::json!(path)),
@@ -1060,11 +1069,11 @@ fn build_fincast(path: &str) -> Result<Box<dyn PerfTarget>, String> {
 
 /// `timesfm3:<weights>` - TimesFM-3 behind the residency executor (same
 /// measurement path as `fincast:`; `input_artifacts` = context length).
-fn build_timesfm3(path: &str) -> Result<Box<dyn PerfTarget>, String> {
+fn build_timesfm3(path: &str, shape: ForecastShape) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(path).exists() {
         return Err(format!("timesfm3 weights not found: {path}"));
     }
-    let (horizon, _samples) = forecast_env();
+    let horizon = shape.horizon;
     let exec = forecast_executor(catalog::resident_forecast::Timesfm3Resident::new(path));
     let info = vec![
         ("weights".to_string(), serde_json::json!(path)),

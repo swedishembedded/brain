@@ -44,27 +44,6 @@ pub fn parse_activations(value: &str) -> Result<model::saved::SavedPolicy, Strin
 /// The flag every training verb takes for what the backward keeps of the forward.
 pub const ACTIVATIONS_FLAG: &str = "--activations";
 
-/// The usage line of [`ACTIVATIONS_FLAG`].
-pub const ACTIVATIONS_USAGE: &str = "[--activations keep|recompute]";
-
-/// Take `--activations` off `args` for a verb that walks its own flag loop: the parsed policy (`None` when the flag
-/// is absent, so the trainer keeps its own default) and the tokens it did not claim. A value other than `keep` or
-/// `recompute` is refused naming the flag.
-pub fn split_activations(args: &[String]) -> Result<(Option<model::saved::SavedPolicy>, Vec<String>), String> {
-    let mut parsed = Args::new(args);
-    let policy = parsed.take_str(ACTIVATIONS_FLAG).map(|value| parse_activations(&value)).transpose()?;
-    Ok((policy, parsed.leftovers()))
-}
-
-/// [`split_activations`] for a verb that reports a usage mistake by exiting: a refused value is printed under the
-/// verb's name (`what`) and the process exits 2 before any other work.
-pub fn split_activations_or_exit(args: &[String], what: &str) -> (Option<model::saved::SavedPolicy>, Vec<String>) {
-    split_activations(args).unwrap_or_else(|e| {
-        eprintln!("{what}: {e}");
-        std::process::exit(2);
-    })
-}
-
 /// Fold `--activations` into the `activations=` key of `--train-precision`, for a verb that takes both. The two
 /// spell the same choice, so naming different values is a conflict and is refused by name; naming the same value
 /// twice, or only one of them, is accepted.
@@ -109,35 +88,9 @@ mod activations_tests {
 }
 
 #[cfg(test)]
-mod split_activations_tests {
-    use super::{merge_activations, split_activations};
+mod merge_activations_tests {
+    use super::merge_activations;
     use model::saved::SavedPolicy;
-
-    fn argv(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| (*s).to_string()).collect()
-    }
-
-    #[test]
-    fn the_flag_is_taken_off_and_the_rest_is_left_in_order() {
-        let (keep, rest) = split_activations(&argv(&["data", "--activations", "keep", "--steps", "3"])).unwrap();
-        assert_eq!(keep, Some(SavedPolicy::Keep));
-        assert_eq!(rest, argv(&["data", "--steps", "3"]));
-        let (recompute, _) = split_activations(&argv(&["--activations", "recompute"])).unwrap();
-        assert_eq!(recompute, Some(SavedPolicy::Recompute));
-    }
-
-    #[test]
-    fn an_absent_flag_leaves_the_trainers_own_default() {
-        let (none, rest) = split_activations(&argv(&["data", "--steps", "3"])).unwrap();
-        assert_eq!(none, None);
-        assert_eq!(rest, argv(&["data", "--steps", "3"]));
-    }
-
-    #[test]
-    fn a_bogus_value_is_refused_naming_the_flag() {
-        let e = split_activations(&argv(&["--activations", "bogus"])).unwrap_err();
-        assert!(e.contains("--activations") && e.contains("bogus"), "{e}");
-    }
 
     #[test]
     fn the_flag_and_train_precision_may_agree_but_not_conflict() {

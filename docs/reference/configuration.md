@@ -116,11 +116,8 @@ model is not served.
 | Variable | Serves | Value |
 | --- | --- | --- |
 | _(none)_ | Qwen3.8-27B dense hybrid decoder, FastVLM vision-language, Moondream 3 vision-language, DeepSeek-OCR and DeepSeek-OCR-2 document image → text/markdown - all resolved automatically from the models directory (`qwen35`/`fastvlm`/`moondream3`/`deepseek2ocr::spec`/`deepseekocr2::spec`); `--weights`/`weights` (and `--tokenizer` for qwen35) still name a checkpoint outright per call | n/a |
-| `BRAIN_CHRONOS2` | Chronos-2 forecasting | weights |
-| `BRAIN_FINCAST` | FinCast forecasting | weights |
-| `BRAIN_TIMESFM3` | TimesFM-3 forecasting (natively multivariate; target-only over this served path). `brain pull google/timesfm-3.0-pytorch` fetches the checkpoint, but no caller sets this variable for you yet - point it at the fetched directory (or an imported `.safetensors`) yourself | weights |
-| `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | Kronos OHLCV forecasting (the served path, `brain serve`, and `brain forecast compare`/`finetune`). `brain forecast predict` instead resolves both roles from the models directory (`NeoQuasar/Kronos-Tokenizer-base` + `NeoQuasar/Kronos-base`, told apart by their own `config.json` content) via `--tokenizer-dir`/`--decoder-dir` or automatically when the store holds exactly one candidate each | the two checkpoint dirs (the decoder also accepts a `.safetensors` fine-tune file) |
-| `BRAIN_KRONOS_ARGMAX` | force Kronos's deterministic modal rollout (argmax over the token distribution) instead of nucleus sampling: one reproducible path, N times cheaper. Set by `brain forecast predict --samples 1` | `0` (sample) |
+| `BRAIN_TIMESFM3` | the TimesFM-3 parity and import tests only (skipped when unset); no served path reads it - the forecasters resolve their checkpoints from the model store (`brain <model> <action> --weights PATH`, `brain serve --pin timesfm3.weights=PATH`) | the fetched `google/timesfm-3.0-pytorch` directory, or an imported `.safetensors` |
+| `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | the Kronos parity, KV-cache and end-to-end tests only (skipped when unset); no served path reads them - Kronos resolves both roles from the model store (`NeoQuasar/Kronos-Tokenizer-base` + `NeoQuasar/Kronos-base`, told apart by their own `config.json` content) or `brain kronos <action> --tokenizer DIR --decoder PATH`, `brain serve --pin kronos.tokenizer=DIR --pin kronos.decoder=PATH` | the two checkpoint dirs (the decoder also accepts a `.safetensors` fine-tune file) |
 
 ## Serving & admission
 
@@ -164,7 +161,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_MIMI_WEIGHTS` | TTS codec weights override | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |
-| `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` | forecast horizon / sample count | 64 / 1 |
 
 The Qwen3 and Qwen3.8 serving sizes are `brain serve` flags, not variables:
 `--ctx` (default: auto-sized to the card), `--max-batch` (default

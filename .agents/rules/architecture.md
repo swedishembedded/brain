@@ -69,17 +69,18 @@ layer 4 - models
     timesfm3, toyautoencoder, toymoe, toypid, toyseq2seq, viewport, vqgan, wan, wm-core, wm-
     display, worldmirror2, yolov5, yolov8, yolov8-faces, zipdepth
 layer 5 - cross-cutting evaluation and tooling
-    bench, capture, fcbench, federated, gradcheck, modelcost, modelopt, rl
+    bench, capture, fcbench, federated, forecastops, gradcheck, modelcost, modelopt, rl
 layer 6 - serving, front ends, SDK, samples
     apiserve, appopts, brain, braintop, capability-mock, catalog, cli, dbus, hfsm, invoke,
     loader, perf, runtime, sample-decision-arena, sample-decision-doom, sample-decision-intents,
     sample-decision-json, sample-decision-patterns, sample-decision-rubiks, sample-decision-
     salesagent, sample-decision-triage, sample-fly-interactive, sample-imagegen-batch, sample-
     imagegen-generate, sample-learning-reader, sample-learning-rlcd, sample-learning-
-    visualclick, sample-models-diamond, sample-models-flux2, sample-models-glmdsa, sample-
-    models-gpt2, sample-models-lfm2, sample-models-ltxv, sample-models-qwen3, sample-models-
-    qwen35, sample-models-qwen35moe, sample-models-qwen3tts, sample-models-sam2, sample-models-
-    splat, sample-models-toymoe, sample-models-toypid, sample-models-wan, sample-models-
+    visualclick, sample-models-chronos2, sample-models-diamond, sample-models-fincast, sample-
+    models-flux2, sample-models-glmdsa, sample-models-gpt2, sample-models-kronos, sample-models-
+    lfm2, sample-models-ltxv, sample-models-qwen3, sample-models-qwen35, sample-models-
+    qwen35moe, sample-models-qwen3tts, sample-models-sam2, sample-models-splat, sample-models-
+    timesfm3, sample-models-toymoe, sample-models-toypid, sample-models-wan, sample-models-
     worldmirror2, sample-models-yolov8, sample-models-zipdepth, sample-npu-rockchip, sample-
     reconstruction-splat, sample-study-chat, sample-study-document, sample-study-timeline,
     sample-text-chat-full-finetune, sample-text-embed, sample-text-embed-train, sample-text-

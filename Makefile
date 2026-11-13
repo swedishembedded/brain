@@ -1279,27 +1279,31 @@ wan/t2v: build/release
 	$(BRAIN) wan t2v --prompt "$(WAN_PROMPT)" --out video=out/wan.mp4 $(WAN_FLAGS)
 
 # ---- forecasting ----------------------------------------------------------
+# The scenario battery and the JSONL forecasting server are actions of the
+# per-model samples (samples/models/{chronos2,fincast,kronos,timesfm3}); these
+# targets run them through the kronos sample. The model's own actions are
+# `brain <model> <action>`.
 ## forecast - lists the forecasting targets; does nothing
 forecast:
 	$(LIST_CHILDREN)
 
 # `make forecast/compare` runs the scenario battery against the statistical
 # baselines and renders the model x scenario x metric report (markdown to
-# stdout). The random-walk negative control is a HARD gate: the command exits
-# non-zero if any model falsely beats naive on it. Add HTML=path to also write a
-# self-contained HTML report. Foundation models join the same battery as they
-# are imported.
+# stdout), with Kronos when its checkpoint is in the model store. The
+# random-walk negative control is a HARD gate: the command exits non-zero if
+# any model falsely beats naive on it. Add HTML=path to also write a
+# self-contained HTML report.
 ## forecast/compare - scenario battery vs the statistical baselines, model x scenario x metric report
 ##   (HTML=path also writes a self-contained report)
-forecast/compare: build/release
-	$(BRAIN) forecast compare $(SEED_FLAG) $(if $(HTML),--html $(HTML),)
+forecast/compare: samples/models/kronos/build
+	$(MAKE) samples/models/kronos/run ARGS="compare $(SEED_FLAG) $(if $(HTML),--out html=$(HTML),)"
 
-# `make forecast/serve` starts the unified JSONL server with the baselines
-# registered. Defaults to a Unix socket; override with LISTEN=host:port for TCP
-# or SOCKET=path for a different socket path.
-## forecast/serve - start the unified JSONL forecasting server (LISTEN=host:port or SOCKET=path)
-forecast/serve: build/release
-	$(BRAIN) forecast serve $(if $(LISTEN),--listen $(LISTEN),--socket $(or $(SOCKET),/tmp/brain-forecast.sock))
+# `make forecast/serve` starts the JSONL forecasting server with the baselines
+# registered (and Kronos when its checkpoint is in the model store) on an
+# owner-only Unix socket; override with SOCKET=path for a different path.
+## forecast/serve - start the JSONL forecasting server on a Unix socket (SOCKET=path)
+forecast/serve: samples/models/kronos/build
+	$(MAKE) samples/models/kronos/run ARGS="serve --socket $(or $(SOCKET),/tmp/brain-forecast.sock)"
 
 ## wm - lists the world-model targets; does nothing
 wm:

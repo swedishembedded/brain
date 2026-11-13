@@ -34,7 +34,7 @@ all - the fly/flybody/connectome stack is unregistered).
 | TTS/music/speech codec | 7 | 3 | **PARTIAL - `TtsPipeline`** (Qwen3-TTS: speak/clone_voice/design; CosyVoice2/3: clone_voice) **+ `MusicPipeline`** (MiniMax Music 3: lyrics+caption-to-song); remaining speech-codec architectures deferred | `tts_cli.rs` + `tts_serve.rs` | no |
 | Vision/detection/segmentation | 4 | 4 | **PARTIAL - `DetectionPipeline`** (YOLOv8) + **`SegmentPipeline`** (SAM2) + **`DepthPipeline`** (ZipDepth; label is a VLM captioning workflow, not a single-arch capability, out of scope here - see Phase 3.1/3.2/3.3) | `yolo_cli.rs`, `sam2_cli.rs`, `depth_cli.rs`, `label_cli.rs` | no |
 | Embedding towers | 3 | 3 | none | **no CLI at all** - `resident_clip/arcface/t5encoder.rs` | no |
-| Forecasting | 4 | 0 (CLI-local) | none | **one unified entry**: `forecast_cli.rs` + generic `resident_forecast.rs` | yes (`brain forecast finetune`) |
+| Forecasting | 4 | 0 (CLI-local) | none | **one served entry**: `catalog::resident_forecast` + `forecast_actions` (`brain <model> <action>`) | yes (`brain kronos|timesfm3 finetune`) |
 | 3D/scene | 2 | 0 (CLI-local) | none | `splat_cli.rs`, `mirror_cli.rs` | no |
 | World models | 2 | 0 | none | `brain/diamond` served actions + `samples/models/diamond` | yes (`brain diamond finetune`) |
 | Toy (excluded from `brain caps`) | 4 | 0 | n/a | `pid_cli.rs` | n/a |
@@ -48,7 +48,7 @@ own bucket.
 when a milestone actually starts one):
 
 1. **`ForecastPipeline`** - only bucket with ONE unified CLI entry already
-   (`forecast_cli.rs`) and one generic resident dispatch; stateless call
+   (`brain <model> forecast|predict`) and one generic resident dispatch; stateless call
    shape; smallest domain object (`Forecast`); already has a `finetune` verb.
    Lowest-risk proof of the *second* `from_pretrained` shape.
 2. **`TextGenerationPipeline`** - highest raw unlock (8 decoders + ~9
@@ -537,11 +537,10 @@ Covers **kronos and timesfm3** - the two forecasting architectures with a
 real model-store `ArchSpec` today (`kronos::spec::KronosSpec`,
 `timesfm3::spec::Timesfm3Spec`), resolved through the SAME `loader::
 resolve_structured` call `ImagePipeline` uses. **chronos2 and fincast are a
-real, tracked gap, not silently unsupported**: neither has a `default_ref`
-or any resolver `ArchSpec` registered anywhere in `brain_arch::ARCHS` -
-both load from a plain `BRAIN_CHRONOS2`/`BRAIN_FINCAST` env var today
-(`resident_forecast.rs`), so there is nothing for a store-based resolver to
-resolve them against; wiring them up is upstream work in those two model
+real, tracked gap, not silently unsupported**: both resolve through a store
+`ArchSpec` now (`chronos2::spec`, `fincast::spec`) but neither has a
+`default_ref` in `brain_arch::ARCHS`, so `from_pretrained` has no reference to
+fetch them by; adding one is upstream work in those two model
 crates, not something to fake at the SDK layer.
 
 Simpler than `ImagePipeline` in one real way: all four forecasting
@@ -579,8 +578,8 @@ each architecture's real, unavoidable ceiling (`Forecaster::load` needs
 every weight tensor its config implies; neither model has a tiny injectable
 config), then a clean typed `Error::Backend`, never a panic.
 
-**Not done, tracked for later**: CLI migration (`forecast_cli.rs`'s
-`predict`/`compare` commands are NOT rebuilt onto `ForecastPipeline` in this
+**Not done, tracked for later**: CLI migration (the `predict` action and
+the samples' `compare` are NOT rebuilt onto `ForecastPipeline` in this
 change - they also own CSV parsing, baseline comparison, chart rendering and
 several sampling-parameter env-var overrides well beyond this pipeline's
 scope, and `--timesfm3 <path>` there is a raw path argument that never goes
@@ -661,7 +660,7 @@ format - see that bullet's own scoped plan in `sdk.md`.
 resolution (needs `qwen3::spec::Qwen3Spec` first, see above); CLI migration
 (the SIX qwen-family CLI files - `qwen_cli.rs`/`qwen35_cli.rs`/
 `qwen35moe_cli.rs`/`glm_cli.rs`/`gpt_cli.rs`/`lfm_cli.rs` - are untouched,
-same class of gap as `flux2_cli.rs`/`forecast_cli.rs`); a `TextGenerationPipeline`
+same class of gap as `flux2_cli.rs`); a `TextGenerationPipeline`
 type that ALSO dispatches across the other decoder families the way
 `ImagePipeline` dispatches across flux2/s3dit, which is what rule 2 actually
 asks for long-term - this milestone proves the shape on the single

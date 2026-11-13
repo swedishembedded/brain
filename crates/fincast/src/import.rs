@@ -44,6 +44,16 @@ pub fn load_hf(cfg: &FincastConfig, path: &str) -> Result<HashMap<String, Vec<f3
     Ok(out)
 }
 
+/// Open a checkpoint for streaming, with its config: a brain container (config
+/// in its header) or the released FinCast safetensors, which carries none and
+/// so takes the published default.
+pub fn open_weights(path: &str) -> Result<(checkpoint::weightio::WeightReader, FincastConfig), String> {
+    let reader = checkpoint::weightio::WeightReader::open_any(path).map_err(|e| format!("fincast: opening {path}: {e}"))?;
+    let header = reader.config();
+    let cfg = if header.is_null() { FincastConfig::default() } else { FincastConfig::from_json(&header)? };
+    Ok((reader, cfg))
+}
+
 /// Import a FinCast safetensors file (or dir) → a brain `.safetensors` container
 /// (config + tensors). The config is the published default (FinCast ships no
 /// `config.json`; the dims are fixed by the checkpoint and asserted by T0).
@@ -117,6 +127,23 @@ mod tests {
         let back = FincastConfig::from_json(&c.header["config"]).unwrap();
         assert_eq!(back, cfg);
         std::fs::remove_file(&good).ok();
+    }
+
+    /// The released file carries no config: `open_weights` gives it the published default,
+    /// and a container's own header config wins.
+    #[test]
+    fn a_configless_file_takes_the_published_config_and_a_container_its_own() {
+        let dir = std::env::temp_dir().join(format!("fincast-open-weights-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bare = dir.join("bare.safetensors");
+        checkpoint::save(bare.to_str().unwrap(), serde_json::Value::Null, &[("w".to_string(), vec![1], vec![0.0])]);
+        assert_eq!(open_weights(bare.to_str().unwrap()).unwrap().1, FincastConfig::default());
+
+        let tiny = FincastConfig::tiny();
+        let own = dir.join("own.safetensors");
+        checkpoint::save(own.to_str().unwrap(), tiny.to_json(), &[("w".to_string(), vec![1], vec![0.0])]);
+        assert_eq!(open_weights(own.to_str().unwrap()).unwrap().1, tiny);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

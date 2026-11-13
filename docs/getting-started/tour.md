@@ -117,8 +117,8 @@ Brain trains and runs neural networks from scratch, in Rust.
 ## Forecast, and score the forecast
 
 ```bash
-$ brain forecast predict --csv crates/kronos/tests/data/synthetic_hourly.csv \
-    --horizon 6 --samples 16 --origins 16 --gnuplot kronos-forecast.png
+$ brain kronos predict --in csv=crates/kronos/tests/data/synthetic_hourly.csv \
+    --horizon 6 --samples 16 --origins 16 --seed $RANDOM --chart true --out chart=kronos-forecast.png
 ```
 
 ![a chart of the history, the actual continuation and the model's forecast with its uncertainty band](img/kronos-forecast.png)

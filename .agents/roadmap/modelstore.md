@@ -47,10 +47,9 @@ nothing on the machine is one counted startup line. Still selected by a
 variable instead of the store, each to move onto a resolver spec and the
 `model_dir` scan, its variable deleted outright:
 
-- [ ] TimesFM-3 serving (`BRAIN_TIMESFM3`; `brain pull` fetches it but serving
-      cannot find it).
-- [ ] Kronos serving (`BRAIN_KRONOS_TOKENIZER` + `_DECODER`; `brain forecast
-      predict` already resolves both from the store).
+- [x] TimesFM-3, Kronos, Chronos-2 and FinCast serving: each resident resolves its
+      checkpoint through the store (`from_store`, `brain serve --pin`); the
+      `BRAIN_TIMESFM3`, `BRAIN_KRONOS_*`, `BRAIN_CHRONOS2` and `BRAIN_FINCAST` variables are gone.
 - [x] DeepSeek-OCR-2: pulled and served from the vendor repo through the resolver (no variable).
 - [ ] Qwen3-VL serving (`BRAIN_QWEN3VL_WEIGHTS`; `brain caps`/`brain do`
       already resolve it from the store).

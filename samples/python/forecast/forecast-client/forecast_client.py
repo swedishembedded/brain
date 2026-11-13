@@ -14,19 +14,19 @@ forecasting foundation models:
   kronos    autoregressive OHLCV forecaster      -> [horizon, feat] sample bars
   timesfm3  natively multivariate forecaster     -> [horizon, 9] quantiles (target-only
             over this wire - the model's own past/known-future covariates need the
-            library API or `brain forecast predict`, not this generic single-series path)
+            library API, not this generic single-series path)
 
 The wire format is raw little-endian float32 with an explicit `shape` in the
 blob meta - no per-model protocol.
 
 Examples:
-  # chronos2 (needs `BRAIN_CHRONOS2=... brain serve --dbus` running):
+  # chronos2 (needs `brain serve --dbus --pin chronos2.weights=<weights>` running):
   python3 samples/python/forecast/forecast-client/forecast_client.py --model brain/chronos2 --horizon 64
   # fincast on the daily bucket:
   python3 samples/python/forecast/forecast-client/forecast_client.py --model brain/fincast --freq 0
   # kronos on synthetic OHLCV:
   python3 samples/python/forecast/forecast-client/forecast_client.py --model brain/kronos --horizon 32
-  # timesfm3 (needs `BRAIN_TIMESFM3=... brain serve --dbus` running):
+  # timesfm3 (needs `brain serve --dbus --pin timesfm3.weights=<weights>` running):
   python3 samples/python/forecast/forecast-client/forecast_client.py --model brain/timesfm3 --horizon 64
 """
 from __future__ import annotations
@@ -89,9 +89,9 @@ def main() -> None:
     with BrainDBus(bus=args.bus) as brain:
         served = brain.models()
         if args.model not in served:
-            how = {"brain/chronos2": "BRAIN_CHRONOS2=<weights> brain serve --dbus", "brain/fincast": "BRAIN_FINCAST=<weights> brain serve --dbus",
-                   "brain/kronos": "BRAIN_KRONOS_TOKENIZER=<dir> BRAIN_KRONOS_DECODER=<dir> brain serve --dbus",
-                   "brain/timesfm3": "BRAIN_TIMESFM3=<weights> brain serve --dbus",
+            how = {"brain/chronos2": "brain serve --dbus --pin chronos2.weights=<weights>", "brain/fincast": "brain serve --dbus --pin fincast.weights=<weights>",
+                   "brain/kronos": "brain serve --dbus --pin kronos.tokenizer=<dir> --pin kronos.decoder=<dir>",
+                   "brain/timesfm3": "brain serve --dbus --pin timesfm3.weights=<weights>",
                    "brain/mock": "brain serve --dbus --mock"}[args.model]
             skip(f"model {args.model!r} is not served (served: {served}); start it with: {how}")
         out = brain.run(

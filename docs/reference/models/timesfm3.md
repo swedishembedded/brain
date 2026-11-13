@@ -24,7 +24,7 @@ other - a target plus measured (past-only) and scheduled/forecast
 |---|---|
 | Inference | [x] |
 | Training from scratch | [ ] |
-| LoRA fine-tune | [ ] |
+| LoRA fine-tune | [x] |
 | CLI (`brain <arch> <action>`) | [x] |
 | HTTP API | [ ] |
 | D-Bus | [x] (native multivariate + covariates - see below) |
@@ -34,36 +34,40 @@ other - a target plus measured (past-only) and scheduled/forecast
 
 - **Model id:** `brain/timesfm3`.
 - **Fetch:** `brain pull google/timesfm-3.0-pytorch` downloads the ungated,
-  non-commercial-licensed checkpoint (~1.3 GB) into the model store. No
-  wired caller sets `BRAIN_TIMESFM3` from that pull for you yet, unlike
-  Kronos's own auto-fetch - point the variable at the result yourself.
-- **Weights:** set `BRAIN_TIMESFM3` to EITHER the raw fetched checkpoint
-  directory (`config.json` + `model.safetensors`, `brain pull`'s own output -
+  non-commercial-licensed checkpoint (~1.3 GB) into the model store, which
+  finds it with no further step.
+- **Weights:** the store resolves EITHER the raw fetched checkpoint directory
+  (`config.json` + `model.safetensors`, `brain pull`'s own output -
   `Timesfm3::load` detects and imports it on the fly) or a single brain
-  `.safetensors` file produced by the explicit import step below.
+  `.safetensors` file (what `import` and `finetune` write). `--weights PATH`
+  names one for a single run, `brain serve --pin timesfm3.weights=PATH` for a
+  server.
 - **Import (optional - only needed to bake the conversion in once instead of
   redoing it on every load):**
   ```bash
   brain pull google/timesfm-3.0-pytorch
-  brain forecast import --timesfm3 <fetched dir> --out timesfm3.safetensors
+  brain timesfm3 import --source <fetched dir> --dest timesfm3.safetensors
   ```
 
 ## Running it
 
 ```bash
 # one-command forecast + score + chart against an OHLCV CSV's close column
-brain forecast predict --csv crates/kronos/tests/data/synthetic_hourly.csv \
-  --timesfm3 timesfm3.safetensors --horizon 32 --gnuplot chart.png
+brain timesfm3 predict --in csv=crates/kronos/tests/data/synthetic_hourly.csv \
+  --horizon 32 --chart true --out chart=chart.png
 
-# backtest against statistical baselines
-brain forecast compare --timesfm3 timesfm3.safetensors --windows 24
-
-# start a resident forecast server
-brain forecast serve --timesfm3 timesfm3.safetensors --socket /tmp/forecast.sock
+# fine-tune on a universe of OHLCV CSVs (the gate decides whether it is kept)
+brain timesfm3 finetune --data <csv-dir> --save timesfm3-ft.safetensors --seed $RANDOM
 ```
 
+The scenario battery against the statistical baselines and the JSONL
+forecasting server are the application part:
+[`samples/models/timesfm3`](../../../samples/models/timesfm3/README.md)
+(`compare`, `serve`).
+
 **Native multivariate forecasting** (the model's actual point) is reached
-through the library API, not the CLI's single-series `predict`/D-Bus paths:
+through the `forecast` action's wire (below) or the library API; `predict` is
+the single-series CSV evaluation. With the library API:
 build a `forecast::Panel` with `Role::Target` (one or more target series),
 `Role::PastCovariate` (measured, not known in advance) and `Role::KnownFuture`
 (the covariate's future path is supplied) variates, then call
@@ -86,8 +90,8 @@ contract); `[num_target, horizon, 9]`, kind `quantiles_thq`, plus a `names`
 meta array, for more than one.
 
 ```bash
-BRAIN_TIMESFM3=/path/to/timesfm3.safetensors dbus-run-session -- bash -c '
-  brain serve --dbus &
+dbus-run-session -- bash -c '
+  brain serve --dbus --pin timesfm3.weights=/path/to/timesfm3.safetensors &
   sleep 2
   python3 samples/python/forecast/forecast-client/forecast_client.py --model brain/timesfm3
 '
@@ -95,18 +99,23 @@ BRAIN_TIMESFM3=/path/to/timesfm3.safetensors dbus-run-session -- bash -c '
 
 ## Options
 
-- `predict`: `--timesfm3 <weights>` selects this model instead of Kronos;
-  `--horizon`, `--context` (the full requested length is used - the
-  forecaster left-pads to the checkpoint's 32-step patch boundary itself,
-  it no longer rounds down and drops history), `--gnuplot <path>`.
-- `compare`/`serve`: `--timesfm3 <weights>`, same flags as the other
-  foundation models.
-- D-Bus `forecast` action: `horizon` (default 64).
+- `forecast`: `horizon` (default 64).
+- `predict`: input `csv`; `horizon` (default 48), `context` (the full
+  requested length is used - the forecaster left-pads to the checkpoint's
+  32-step patch boundary itself, it no longer rounds down and drops history),
+  `samples`, `origins`, `seed`, `season`, `item`, `freq`, `chart`. The model
+  is not stochastic, so `samples` changes nothing for it.
+- `finetune`: `data`, `save`, `holdout_data`, `context`, `horizon` (at most the
+  checkpoint's `stitch_extract_len`, 64 for the published one), `epochs`, `lr`,
+  `lora`, `embargo`, `batch`, `skip_invalid`, `seed`, `activations`. The
+  license notice is the first progress line, and a promoted checkpoint carries
+  `timesfm-non-commercial-license-v1.0` plus the upstream it derives from.
+- `import`: `source`, `dest`.
 
 ## Hardware and limits
 
 - CPU/GPU only - no NPU export yet.
-- No training/LoRA path yet - inference only.
+- Fine-tuning (full and LoRA) is the `finetune` action; training from scratch is not offered.
 - **Left-padding and per-step missing values are handled by one mechanism**:
   a non-finite value in a variate's data (or a `0.0` in its `observed` mask)
   is treated as missing, excluded from RevIN/detrend statistics, and zeroed

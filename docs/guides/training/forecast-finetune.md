@@ -1,8 +1,9 @@
-# Forecast fine-tuning (Chronos-2 / Kronos)
+# Forecast fine-tuning (Kronos / TimesFM-3)
 
-brain can adapt a released time-series forecasting model (the Chronos-2 or
-Kronos family) to your own market data via LoRA, producing a checkpoint
-tuned to recent behavior in the instruments you care about.
+brain can adapt a released time-series forecasting model (Kronos or
+TimesFM-3) to your own market data, in full or via LoRA, producing a
+checkpoint tuned to recent behavior in the instruments you care about. It is
+the `finetune` action of `brain kronos` and `brain timesfm3`.
 
 Fine-tuning these forecasting models runs on CPU or GPU only — it is not
 NPU-capable. The NPU export path is inference-only and can't backpropagate,
@@ -29,7 +30,7 @@ one of them.
 ### Validation
 
 Every file is validated before any weights are loaded, with the same checks
-`brain forecast predict` applies: the header names the six columns in order,
+the `predict` action applies: the header names the six columns in order,
 every row has six fields that all parse, dates are strictly increasing,
 values are finite, prices are positive, `high >= max(open, close)`,
 `low <= min(open, close)`, and the file is long enough for at least one
@@ -44,58 +45,69 @@ milliseconds and happens before the checkpoint loads, so the refusal is
 immediate.
 
 If refusing the whole run is the wrong trade - a several-hundred-name vendor
-dump with one bad row in one file - pass `--skip-invalid`. It trains on the
+dump with one bad row in one file - set `skip_invalid` (`--skip-invalid true`). It trains on the
 files that parsed, still lists every rejection with its file and line, and
 prints the loaded/rejected split either way:
 
 ```
-finetune: BAD.csv: csv: line 118: 5 fields, expected 6
-finetune: excluded QQQ.csv (QQQ is the benchmark index, not one of its constituents)
-finetune: /your/ohlcv-dir: 402 of 403 series loaded, 1 rejected
+finetune data: BAD.csv: csv: line 118: 5 fields, expected 6
+finetune data: excluded QQQ.csv (QQQ is the benchmark index, not one of its constituents)
+finetune data: /your/ohlcv-dir: 402 of 403 series loaded, 1 rejected
 ```
 
-`--holdout-data` is validated the same way, up front, so a typo there cannot
+`holdout_data` is validated the same way, up front, so a typo there cannot
 cost you the generalization report at the end of a finished run.
 
 ## Running a fine-tune
 
 ```
-brain forecast finetune \
-    --tokenizer-dir <tokenizer-dir> \
-    --decoder-dir   <decoder-dir> \
+brain kronos finetune \
     --data <your-ohlcv-dir> \
     --context 180 --horizon 5 --epochs 8 --lr 4e-5 \
-    --lora 8 \
-    --out <output-checkpoint>.safetensors
+    --lora 8 --seed $RANDOM \
+    --save <output-checkpoint>.safetensors
 ```
 
-- `--tokenizer-dir` / `--decoder-dir` - local paths to the released
-  Kronos tokenizer and decoder checkpoints.
+The tokenizer and decoder are resolved from the model store (`--tokenizer
+DIR --decoder PATH` name them for one run). TimesFM-3 is the same command:
+`brain timesfm3 finetune ...` (its `--weights PATH` names a checkpoint).
+
 - `--data` — your directory of OHLCV CSVs.
 - `--context` / `--horizon` — the window shape (history length / forecast
   length).
 - `--epochs` / `--lr` — training length and learning rate.
 - `--lora RANK` — LoRA rank; omit for a full-parameter fine-tune.
+- `--seed` - seeds the LoRA adapters' initial factors; drawn when omitted and
+  echoed in the result, so a run reproduces by passing it back. A full
+  fine-tune draws nothing.
+- `--embargo` - bars cleared either side of each calendar cut (default: the
+  horizon).
+- `--batch` - windows per optimizer step.
 - `--activations keep|recompute` - what the backward keeps of the forward:
   every layer's activations (the default), or only each layer's input, rebuilt
   in the backward for the same gradients at lower memory. Kronos and
   TimesFM-3 both take it.
-- `--out` — where to write the resulting checkpoint, if the fine-tune is
+- `--save` - where to write the resulting checkpoint, if the fine-tune is
   promoted (see below).
+- `--holdout-data` - a second directory of names never trained on, scored
+  after the run to say whether the fine-tune generalizes.
 - `--skip-invalid` - train on the files that passed validation instead of
   refusing the run (see [Validation](#validation)).
+
+The action streams one progress line per optimizer step and stops at the next
+step when cancelled (Ctrl-C on the CLI, a cancel over the serving surface);
+a cancelled run writes nothing.
 
 The tokenizer stays frozen throughout — only the decoder is fine-tuned.
 
 ## The promotion gate
 
 A fine-tune is only kept if it demonstrably beats the un-tuned base model,
-out-of-sample, on held-out (embargoed) data. The command prints its
-decision:
+out-of-sample, on held-out (embargoed) data. The action reports its decision:
 
 ```
-gate: base_val 3.2140 → ft_val 3.1985  (41230 steps)  ⇒  PROMOTE (fine-tune beats base out-of-sample)
-promoted checkpoint → <output-checkpoint>.safetensors
+gate (INCLUDED names, held-out future): base_val 3.2140 -> ft_val 3.1985  (41230 steps)  =>  PROMOTE (fine-tune beats base out-of-sample)
+promoted checkpoint -> <output-checkpoint>.safetensors
 ```
 
 If the fine-tune does not beat the base, no checkpoint is written and the

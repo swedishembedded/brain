@@ -62,6 +62,7 @@ pub mod resident_depth;
 pub mod resident_florence2;
 pub mod resident_flux1;
 pub mod resident_flux2;
+pub mod forecast_actions;
 pub mod resident_forecast;
 pub mod resident_januspro;
 pub mod resident_horizon;
@@ -953,34 +954,32 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("qwen3asr", &qwen3asr::spec::Qwen3AsrSpec)),
             resident: crate::resident_in_store!(crate::resident_asr::QwenAsrResident::from_store),
         },
-        // Time-series forecasting. Discoverable (`brain caps`) and served
-        // (`brain serve`, via the resident ctors), but with no direct `brain do`
-        // provider yet: the forecast run logic lives in the residency instances
-        // (NPU/device placement included), so the provider says exactly how to
-        // reach the model instead of "unknown model".
+        // Time-series forecasting: each model's one-shot provider IS its resident
+        // (`forecast_actions`), so `brain <model> <action>` and `brain serve` run
+        // the same code, and the checkpoint is what the model store resolves.
         ModelEntry {
-            manifest: resident_forecast::chronos2_manifest,
-            provider: |_assembly: &Assembly| Err("chronos-2 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_CHRONOS2 set".to_string()),
-            spec: None,
-            resident: resident!(resident_forecast::Chronos2Resident::from_env),
+            manifest: resident_forecast::chronos2_direct_manifest,
+            provider: forecast_actions::chronos2_provider,
+            spec: Some(("chronos2", &chronos2::spec::Chronos2Spec)),
+            resident: crate::resident_in_store!(resident_forecast::Chronos2Resident::from_store),
         },
         ModelEntry {
-            manifest: resident_forecast::fincast_manifest,
-            provider: |_assembly: &Assembly| Err("fincast has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_FINCAST set".to_string()),
-            spec: None,
-            resident: resident!(resident_forecast::FincastResident::from_env),
+            manifest: resident_forecast::fincast_direct_manifest,
+            provider: forecast_actions::fincast_provider,
+            spec: Some(("fincast", &fincast::spec::FincastSpec)),
+            resident: crate::resident_in_store!(resident_forecast::FincastResident::from_store),
         },
         ModelEntry {
-            manifest: resident_forecast::kronos_manifest,
-            provider: |_assembly: &Assembly| Err("kronos has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER set".to_string()),
+            manifest: resident_forecast::kronos_direct_manifest,
+            provider: forecast_actions::kronos_provider,
             spec: Some(("kronos", &kronos::spec::KronosSpec)),
-            resident: resident!(resident_forecast::KronosResident::from_env),
+            resident: crate::resident_in_store!(resident_forecast::KronosResident::from_store),
         },
         ModelEntry {
-            manifest: resident_forecast::timesfm3_manifest,
-            provider: |_assembly: &Assembly| Err("timesfm3 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_TIMESFM3 set, or the resolver (`brain timesfm3 predict ...`)".to_string()),
+            manifest: resident_forecast::timesfm3_direct_manifest,
+            provider: forecast_actions::timesfm3_provider,
             spec: Some(("timesfm3", &timesfm3::spec::Timesfm3Spec)),
-            resident: resident!(resident_forecast::Timesfm3Resident::from_env),
+            resident: crate::resident_in_store!(resident_forecast::Timesfm3Resident::from_store),
         },
         // 3D Gaussian Splatting (render, fit and the scene tools): needs no weights at all, the scene
         // arrives as request bytes, yet it has a resident because render and fit

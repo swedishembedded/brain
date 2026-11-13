@@ -23,8 +23,8 @@ redistributable) - see `docs/reference/models/timesfm3.md`.
 
 - [x] Training/LoRA fine-tune - DONE. `crates/timesfm3/src/train.rs`
       (graph), `finetune.rs` (objective + gate), `crates/gradcheck/src/
-      timesfm3.rs` (the gate), `brain forecast finetune --timesfm3` (the
-      verb).
+      timesfm3.rs` (the gate), `brain timesfm3 finetune` (the
+      action).
       Scope is `core_forward` only (resblock through the raw output-head
       logits; one forecast patch, no stitching/CPM feedback - see the module
       docs for why that is a real boundary, not a shortcut).
@@ -152,10 +152,9 @@ redistributable) - see `docs/reference/models/timesfm3.md`.
       the host, including the assertion that every entry OUTSIDE the forecast
       row is exactly zero.
 
-      `brain forecast finetune` selects its model from the flags
-      (`--timesfm3` vs `--kronos-decoder`/`--kronos-tokenizer`), refuses
-      both, and falls through to Kronos for neither so a bare invocation
-      prints the usage block it always did. The Kronos body moved into
+      The fine-tune is one action per model (`brain kronos finetune`,
+      `brain timesfm3 finetune`) over the shared request and gate
+      (`forecastops::finetune`). The Kronos body moved into
       `finetune_kronos` unchanged and its nine universe-loader tests pass
       unmodified. An empty VALIDATION slice is its own named failure rather
       than a "KEEP BASE" verdict: the embargoed split clears a band on both
@@ -203,12 +202,9 @@ redistributable) - see `docs/reference/models/timesfm3.md`.
       scan and CPM iterative refinement are inherently sequential over
       O(context/patch_len) patches and are the likely non-GEMM bottleneck at
       the full 15360-context / 32-variate limit.
-- [ ] `crate::supply::ensure_env_weights("timesfm3")` is not called from
-      `forecast_cli.rs`'s `predict`/`compare`/`serve` the way it is for
-      Kronos in `predict` - `brain pull google/timesfm-3.0-pytorch` fetches
-      the checkpoint into the local store, but nothing populates
-      `BRAIN_TIMESFM3` from that pull automatically yet; it must be pointed
-      at the fetched directory (or an imported `.safetensors`) by hand.
+- [x] The pulled checkpoint is found by the model store (`timesfm3::spec`,
+      a released directory or a brain container), so `brain timesfm3 <action>`
+      and `brain serve` need no variable and no manual pointing.
 - [ ] Forecaster-level postprocessing covers quantile sorting and the
       positivity clamp; symmetric averaging (`(f(x) - f(-x)[::-1]) / 2`),
       full z-normalization bookkeeping and 32-variate chunking (needed to
@@ -219,7 +215,7 @@ redistributable) - see `docs/reference/models/timesfm3.md`.
       and zeroes any non-finite step, excluding it from RevIN/detrend stats;
       `Timesfm3Forecaster::forecast` left-pads any context to the checkpoint's
       `input_patch_len` boundary the same way, so the CLI no longer rounds a
-      context down and silently drops history (`forecast_cli.rs`'s `predict`).
+      context down and silently drops history (the `predict` action).
       Interior gaps are masked through, not interpolated - no attempt to
       reproduce the reference wrapper's own interior-NaN interpolation, if it
       has one; that remains a ledgered gap if a future comparison needs it.

@@ -15,7 +15,7 @@
 //! architecture. They are therefore [`informational`](Benchmark::informational)
 //! (reported, never gating the arch suite). The authoritative pass/fail path for
 //! forecasting — including the hard negative-control gate — is the dedicated
-//! `brain forecast compare` harness.
+//! `compare` action of the per-model forecasting samples (`samples/models/<model>`).
 //!
 //! ## Headline score
 //! A 0..1 **skill score** = `clamp(1 − MAE_best / MAE_naive, 0, 1)`: how much the
@@ -158,7 +158,7 @@ impl Benchmark for ForecastBench {
     fn threshold(&self) -> f32 {
         // Structured scenarios should show real skill; the negative control must
         // not (its bar is 0 — informational, so this is a reference line, not a
-        // gate; the hard gate lives in `brain forecast compare`).
+        // gate; the hard gate lives in the samples' `compare` action).
         if self.scenario.is_negative_control() {
             0.0
         } else {

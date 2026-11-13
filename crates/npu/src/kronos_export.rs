@@ -96,7 +96,7 @@ mod tests {
     /// compiled + run through [`KronosS1Session`]/[`KronosS2Session`], must
     /// reproduce the device `core_forward_s1`/`core_forward_s2`. Runs on the NPU
     /// when present, else CPU-OpenVINO; skips only with no OpenVINO runtime. Guards
-    /// the multi-IO session wiring `brain npu kronos` depends on (s1: 1 in → ctx +
+    /// the multi-IO session wiring `samples/models/kronos`'s `npu-forecast` depends on (s1: 1 in → ctx +
     /// s1_logits; s2: ctx + sib → s2_logits).
     #[test]
     fn kronos_sessions_match_core_forward() {

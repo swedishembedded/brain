@@ -5,17 +5,15 @@
 //! OpenVINO / NPU compilation. The host does the scaler/patch/embed/REG and the
 //! head rearrange/denorm around it (see `chronos2_topology`).
 
-use chronos2::Chronos2Config;
 use onnx::builder::GraphBuilder;
 
 use crate::chronos2_topology::build_chronos2_graph_quant;
 use crate::qwen_topology::Quant;
 
-/// Build the Chronos-2 core ONNX bytes from a brain `.safetensors` container, for a
+/// Build the Chronos-2 core ONNX bytes from a brain `.safetensors` container or a released checkpoint, for a
 /// fixed sequence length `s` and forecast-patch count `n_out`.
 pub fn export_onnx(weights_path: &str, s: usize, n_out: usize, quant: Quant) -> Result<Vec<u8>, String> {
-    let reader = checkpoint::weightio::WeightReader::open(weights_path).map_err(|e| format!("open {weights_path}: {e}"))?;
-    let cfg = Chronos2Config::from_hf(&reader.config())?;
+    let (reader, cfg) = chronos2::import::open_weights(weights_path)?;
     let mut g = GraphBuilder::new("chronos2");
     build_chronos2_graph_quant(&cfg, &reader, s, n_out, &mut g, quant);
     Ok(g.finish())
@@ -63,7 +61,7 @@ mod tests {
     /// [`Chronos2Session`], must reproduce the device `core_forward`. Runs on the
     /// NPU when present, else CPU-OpenVINO via `allow_fallback`; skips only if no
     /// OpenVINO runtime is available at all. Guards the two-input session wiring
-    /// (`emb` + `kmask` → `qhead`) that `brain npu chronos2` depends on.
+    /// (`emb` + `kmask` → `qhead`) that `samples/models/chronos2`'s `npu-forecast` depends on.
     #[test]
     fn chronos2_session_matches_core_forward() {
         use crate::openvino::{Chronos2Session, NpuConfig, NpuDevice};

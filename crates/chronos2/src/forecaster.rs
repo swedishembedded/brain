@@ -32,7 +32,13 @@ impl Chronos2Forecaster {
         Chronos2Forecaster { model, version: "amazon/chronos-2".into() }
     }
 
-    /// Load from a brain `.safetensors` container.
+    /// The model this forecaster drives.
+    pub fn model(&self) -> &Chronos2 {
+        &self.model
+    }
+
+    /// Load from a brain `.safetensors` container or an `amazon/chronos-2`
+    /// directory.
     pub fn load(path: &str) -> Result<Chronos2Forecaster, String> {
         Ok(Chronos2Forecaster::new(Chronos2::load(path)?))
     }

@@ -89,9 +89,11 @@ builds an input fd.
 
 `BrainStdio` keeps the `brain serve --stdio` legacy verbs: `detect(image)` (object
 detection), `converse(text)` (the `user_text` → `brain_text_chunk` chat path,
-distinct from the capability `generate`), and — with `BrainStdio(forecast=True)`
-— `forecast(...)`, `backtest(...)`, `capabilities()`. It can also `connect()` to
-a long-lived `brain forecast serve` socket.
+distinct from the capability `generate`), and - over the statistical baselines `brain
+serve --stdio` registers, e.g. `BrainStdio(forecast=True)` - `forecast(...)`,
+`backtest(...)`, `capabilities()`. It can also `connect()` to a long-lived forecasting
+server socket: a model sample's `serve` workflow (`samples/models/<model>`) serves the
+baselines plus that model.
 
 ## Tests
 

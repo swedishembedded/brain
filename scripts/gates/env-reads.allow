@@ -45,11 +45,6 @@ crates/capability/src/lib.rs	BRAIN_TEST_HOST_OVERRIDE
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_SERVED
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_UNSET
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_WEIGHTS
-crates/catalog/src/resident_forecast.rs	BRAIN_CHRONOS2
-crates/catalog/src/resident_forecast.rs	BRAIN_FINCAST
-crates/catalog/src/resident_forecast.rs	BRAIN_KRONOS_DECODER
-crates/catalog/src/resident_forecast.rs	BRAIN_KRONOS_TOKENIZER
-crates/catalog/src/resident_forecast.rs	BRAIN_TIMESFM3
 crates/catalog/src/resident_horizon.rs	MOE_SKIP_GPU_TESTS
 crates/catalog/src/resident_llm.rs	BRAIN_DEVICE
 crates/catalog/src/resident_llm.rs	QWEN_TOKENIZER
@@ -75,9 +70,6 @@ crates/chronos2/tests/it/timing.rs	H
 crates/chronos2/tests/it/timing.rs	MOE_SKIP_GPU_TESTS
 crates/cli/src/caps_cli.rs	NO_COLOR
 crates/cli/src/continuous_train.rs	MOE_SKIP_GPU_TESTS
-crates/cli/src/forecast_cli.rs	BRAIN_KRONOS_ARGMAX
-crates/cli/src/forecast_cli.rs	BRAIN_KRONOS_TEMPERATURE
-crates/cli/src/forecast_cli.rs	BRAIN_KRONOS_TOP_P
 crates/cli/src/main.rs	<&key>
 crates/cli/src/main.rs	BRAIN_AUTO_FETCH
 crates/cli/src/main.rs	BRAIN_MODELS_DIR
@@ -88,8 +80,6 @@ crates/cli/src/main.rs	BRAIN_TEST_CONFIG_NUMBER
 crates/cli/src/main.rs	BRAIN_VERBOSE
 crates/cli/src/main.rs	HOME
 crates/cli/src/main.rs	XDG_CONFIG_HOME
-crates/cli/src/perf_cli.rs	BRAIN_FORECAST_HORIZON
-crates/cli/src/perf_cli.rs	BRAIN_FORECAST_SAMPLES
 crates/cli/src/perf_longctx.rs	<qwen35moe::gguf_load::GGUF_ENV>
 crates/cli/src/run_cli.rs	BRAIN_AUTO_FETCH
 crates/cli/src/serve_daemon.rs	XDG_RUNTIME_DIR
@@ -467,10 +457,6 @@ crates/januspro/tests/it/t2i_tuned_real.rs	JANUS_TUNED_DIR
 crates/januspro/tests/it/t2i_tuned_real.rs	JANUS_TUNED_IMAGE
 crates/januspro/tests/it/t2i_tuned_real.rs	JANUS_TUNED_PROMPT
 crates/kronos/src/decoder.rs	MOE_SKIP_GPU_TESTS
-crates/kronos/src/forecaster.rs	<key>
-crates/kronos/src/forecaster.rs	BRAIN_KRONOS_ARGMAX
-crates/kronos/src/forecaster.rs	BRAIN_KRONOS_TEMPERATURE
-crates/kronos/src/forecaster.rs	BRAIN_KRONOS_TOP_P
 crates/kronos/src/forecaster.rs	MOE_SKIP_GPU_TESTS
 crates/kronos/src/generate.rs	MOE_SKIP_GPU_TESTS
 crates/kronos/src/tokenizer.rs	MOE_SKIP_GPU_TESTS

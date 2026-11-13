@@ -92,6 +92,7 @@ default-members = [
     "crates/flux2",
     "crates/forecast",
     "crates/fcbench",
+    "crates/forecastops",
     "crates/chronos2",
     "crates/kronos",
     "crates/fincast",
@@ -373,6 +374,7 @@ brain-npu = { path = "crates/npu" }
 brain-rknpu = { path = "crates/rknpu" }
 brain-forecast = { path = "crates/forecast" }
 brain-fcbench = { path = "crates/fcbench" }
+brain-forecastops = { path = "crates/forecastops" }
 brain-chronos2 = { path = "crates/chronos2" }
 brain-kronos = { path = "crates/kronos" }
 brain-fincast = { path = "crates/fincast" }

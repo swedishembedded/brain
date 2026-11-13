@@ -1056,15 +1056,12 @@ pub fn finetune(
     train: &[TokenBatch],
     val: &[TokenBatch],
     opts: &FinetuneOpts,
+    observer: forecast::finetune::StepObserver,
 ) -> Result<forecast::FinetuneOutcome, String> {
     // One device for the whole finetune: base evaluation and the fine-tuned
     // trainer share it instead of each building their own.
     let dev = Gpu::new(PIPELINES);
     let base_val = KronosTrain::with_lora_on(dev.share_or_new(PIPELINES), cfg.clone(), t, base_init, None).mean_loss(val);
-    if opts.progress {
-        eprintln!("  [finetune] base held-out loss {base_val:.4} · {} train / {} val windows · {} epoch(s)",
-            train.len(), val.len(), opts.epochs);
-    }
     // Batch `bsz` windows per step. `bsz` is clamped to the window count so a
     // small universe still trains (never zero steps); a trailing partial group is
     // dropped each epoch (a fixed-`b` trainer can't take a short group).
@@ -1074,15 +1071,8 @@ pub fn finetune(
         ft.set_saved_policy(policy)?;
     }
     let groups = train.chunks_exact(bsz as usize);
-    let dropped = train.len() % bsz as usize;
     let per_epoch = train.len() / bsz as usize;
-    if opts.progress && bsz > 1 {
-        eprintln!("  [finetune] batch={bsz} → {per_epoch} step(s)/epoch ({dropped} window(s) dropped/epoch by drop_last)");
-    }
-    let total = (opts.epochs as usize * per_epoch).max(1);
-    let every = (total / 40).max(1);
-    let t0 = std::time::Instant::now();
-    let (mut run, mut cnt) = (0.0f32, 0u32);
+    let total = (opts.epochs as usize * per_epoch).max(1) as u32;
     let mut step = 0u32;
     for ep in 0..opts.epochs {
         for group in groups.clone() {
@@ -1092,18 +1082,8 @@ pub fn finetune(
             let l = ft.forward();
             ft.backward();
             ft.adamw_step(step, opts.lr, opts.wd, Some(opts.clip));
-            run += l;
-            cnt += 1;
-            if opts.progress && ((step as usize).is_multiple_of(every) || step as usize == total) {
-                let el = t0.elapsed().as_secs_f32();
-                let frac = step as f32 / total as f32;
-                let eta = if frac > 0.0 { el / frac - el } else { 0.0 };
-                eprintln!(
-                    "  [finetune] epoch {}/{}  step {step}/{total} ({:.0}%)  loss {:.4}  |  {:.0}s elapsed, ETA {:.0}s",
-                    ep + 1, opts.epochs, frac * 100.0, run / cnt as f32, el, eta
-                );
-                run = 0.0;
-                cnt = 0;
+            if !observer(forecast::finetune::StepReport { step, total, epoch: ep + 1, epochs: opts.epochs, loss: l }) {
+                return Err(forecast::finetune::CANCELLED.to_string());
             }
         }
     }

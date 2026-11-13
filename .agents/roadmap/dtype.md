@@ -1333,11 +1333,11 @@ Grepped every caller across the whole workspace before touching anything.
 C2's own text speculated `Chronos2Session`/`FincastSession` "may have already
 [been] made dead" by its residency migration - checked and that is NOT the
 case: `resident_forecast.rs` (the residency adapter C2 migrated) stopped
-calling them, but `crates/cli/src/npu_cli.rs`'s `brain npu chronos2`/`brain
-npu fincast`/`brain npu kronos` bench subcommands (a SEPARATE, still-live
-call path, unaffected by C2's residency-only migration) still construct
+calling them, but the `npu-forecast` actions of `samples/models/{chronos2,
+fincast,kronos}` (a SEPARATE, still-live call path, unaffected by C2's
+residency-only migration) still construct
 `Chronos2Session`/`FincastSession`/`KronosS1Session`/`KronosS2Session`
-directly (`npu_cli.rs:336,538,704,708`). `NpuSession` is live via
+directly. `NpuSession` is live via
 `crates/npu/src/decode.rs` (YOLO NPU detect), `crates/cli/src/depth_cli.rs`
 (ZipDepth NPU), and `npu_cli.rs`'s own `run`/`bench`/`check`. `DecoderSession`
 is live via `crates/npu/src/{qwen_decode,glm_decode}.rs`. `EmbedSession`/

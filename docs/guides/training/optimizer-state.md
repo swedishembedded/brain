@@ -170,10 +170,10 @@ that defines a backward without one of these mechanisms, unless
 that only gradient-checks a frozen component, or no layer stack).
 
 Every training verb of the `brain` CLI takes `--activations keep|recompute`
-(`crate::args::split_activations`): `gpt2`, `glmdsa`, `lfm2`, `ouro`, `toymoe`,
+(`crate::args::parse_activations`): `gpt2`, `glmdsa`, `lfm2`, `ouro`, `toymoe`,
 `toypid`, `yolov8`, `zipdepth`, `qwen3` (train, finetune, `--lora`), `qwen35`,
 `qwen3tts`, `deepseekvl`, `januspro`, `minicpmv`, `diamond`, `decide`,
-`forecast finetune` (kronos, timesfm3), `federated train-expert`, `wan` and
+`kronos finetune`, `timesfm3 finetune`, `federated train-expert`, `wan` and
 `flux2`. Absent leaves the trainer's own default, so a trainer that only
 recomputes is never forced onto `keep`; a choice the trainer cannot run is
 refused by name before the first step and the command exits non-zero. Where a

@@ -283,9 +283,10 @@ if ! need "$IMG_DIR/kronos-forecast.png" || ! need "$IMG_DIR/kronos-forecast.txt
     # luck. The horizon is 6 because that is where this checkpoint's skill
     # actually is: it beats persistence on CRPS at 6 bars and loses at 12 and
     # 24, and both numbers are in the README next to this one.
-    "$BRAIN" forecast predict --csv crates/kronos/tests/data/synthetic_hourly.csv \
-      --horizon 6 --samples 16 --origins 16 --gnuplot "$IMG_DIR/kronos-forecast.png" \
-      2>/dev/null | grep -v '^  chart:' > "$IMG_DIR/kronos-forecast.txt"
+    "$BRAIN" kronos predict --in csv=crates/kronos/tests/data/synthetic_hourly.csv \
+      --horizon 6 --samples 16 --origins 16 --seed "$RANDOM" --chart true \
+      --out chart="$IMG_DIR/kronos-forecast.png" --out report="$IMG_DIR/kronos-forecast.txt" \
+      2>/dev/null
   fi
 fi
 

@@ -11,7 +11,7 @@
 #   samples/shell/forecast/cooling-loop/cooling_loop.sh <timesfm3.safetensors> [chart.png]
 #
 # Get the weights with:  brain pull google/timesfm-3.0-pytorch && \
-#   brain forecast import --timesfm3 <fetched dir> --out timesfm3.safetensors
+#   brain timesfm3 import --source <fetched dir> --dest timesfm3.safetensors
 # (they are timesfm-non-commercial-license-v1.0: non-commercial/non-production
 # use only, and the checkpoint itself may never be redistributed)
 set -euo pipefail

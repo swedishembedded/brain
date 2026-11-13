@@ -5,17 +5,15 @@
 //! OpenVINO / NPU compilation. The host does the patch-embed/freq around it and
 //! the head rearrange/denorm (see `fincast_topology`).
 
-use fincast::FincastConfig;
 use onnx::builder::GraphBuilder;
 
 use crate::fincast_topology::build_fincast_graph_quant;
 use crate::qwen_topology::Quant;
 
-/// Build the FinCast core ONNX bytes from a brain `.safetensors` container, for a
+/// Build the FinCast core ONNX bytes from a brain `.safetensors` container or a released checkpoint, for a
 /// fixed sequence length `s` (= number of patch tokens).
 pub fn export_onnx(weights_path: &str, s: usize, quant: Quant) -> Result<Vec<u8>, String> {
-    let reader = checkpoint::weightio::WeightReader::open(weights_path).map_err(|e| format!("open {weights_path}: {e}"))?;
-    let cfg = FincastConfig::from_json(&reader.config())?;
+    let (reader, cfg) = fincast::import::open_weights(weights_path)?;
     let mut g = GraphBuilder::new("fincast");
     build_fincast_graph_quant(&cfg, &reader, s, &mut g, quant);
     Ok(g.finish())
@@ -34,8 +32,7 @@ pub fn export_file(weights_path: &str, s: usize, quant: Quant, out: &str) -> Res
 /// [`crate::openvino::FincastSession::load_path`] rather than `load_bytes`
 /// (mirrors `lfm_export::export`).
 pub fn export_external(weights_path: &str, s: usize, quant: Quant, out: &str) -> Result<(), String> {
-    let reader = checkpoint::weightio::WeightReader::open(weights_path).map_err(|e| format!("open {weights_path}: {e}"))?;
-    let cfg = FincastConfig::from_json(&reader.config())?;
+    let (reader, cfg) = fincast::import::open_weights(weights_path)?;
     let mut g = GraphBuilder::new("fincast");
     build_fincast_graph_quant(&cfg, &reader, s, &mut g, quant);
     g.finish_external(out, 1 << 20).map_err(|e| format!("write {out}: {e}"))
@@ -44,6 +41,7 @@ pub fn export_external(weights_path: &str, s: usize, quant: Quant, out: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fincast::FincastConfig;
 
     /// End-to-end: a tiny FinCast's exported core, compiled + run through
     /// [`crate::openvino::FincastSession`], must reproduce the device

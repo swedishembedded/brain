@@ -189,14 +189,20 @@ navigation:
         path: examples/learning/rlcd.md
       - source: samples/learning/visualclick/README.md
         path: examples/learning/visualclick.md
+      - source: samples/models/chronos2/README.md
+        path: examples/models/chronos2.md
       - source: samples/models/diamond/README.md
         path: examples/models/diamond.md
+      - source: samples/models/fincast/README.md
+        path: examples/models/fincast.md
       - source: samples/models/flux2/README.md
         path: examples/models/flux2.md
       - source: samples/models/glmdsa/README.md
         path: examples/models/glmdsa.md
       - source: samples/models/gpt2/README.md
         path: examples/models/gpt2.md
+      - source: samples/models/kronos/README.md
+        path: examples/models/kronos.md
       - source: samples/models/lfm2/README.md
         path: examples/models/lfm2.md
       - source: samples/models/ltxv/README.md
@@ -213,6 +219,8 @@ navigation:
         path: examples/models/sam2.md
       - source: samples/models/splat/README.md
         path: examples/models/splat.md
+      - source: samples/models/timesfm3/README.md
+        path: examples/models/timesfm3.md
       - source: samples/models/toymoe/README.md
         path: examples/models/toymoe.md
       - source: samples/models/toypid/README.md

@@ -4,6 +4,10 @@
 //! TimesFM-3's [`ArchSpec`]: which on-disk HF directory satisfies the single
 //! `weights` role.
 //!
+//! The role is a released directory or a brain container (what `import` and
+//! `finetune` write), told apart from other safetensors by the config in its
+//! header.
+//!
 //! Unlike `qwen3asr`/`nemotronasr`, the upstream `config.json` carries no
 //! `architectures` field at all (it is not a `transformers`-family repo -
 //! see [`crate::config`]'s module doc), so there is no declared-name field to
@@ -39,16 +43,23 @@ impl ArchSpec for Timesfm3Spec {
     fn classify(&self, records: &[ArtifactRecord], _inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
         for (idx, rec) in records.iter().enumerate() {
-            if !rec.usable() || rec.kind != ArtifactKind::HfDir {
+            if !rec.usable() {
                 continue;
             }
-            let Ok(bytes) = std::fs::read(rec.path.join("config.json")) else { continue };
-            let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
-            // No format-level self-declaration exists for this schema (no
-            // `architectures` field upstream) - a real, successful parse of
+            // No format-level self-declaration exists for the released schema
+            // (no `architectures` field upstream) - a real, successful parse of
             // the checkpoint's own nested hyperparameters is the closest
-            // equivalent, so `Derived`, not `Declared`.
-            if Timesfm3Config::from_hf_config_json(&config).is_ok() {
+            // equivalent, so `Derived`, not `Declared`. A brain container (what
+            // `import` and `finetune` write) names its config in its header.
+            let derived = match rec.kind {
+                ArtifactKind::HfDir => std::fs::read(rec.path.join("config.json"))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .is_some_and(|config| Timesfm3Config::from_hf_config_json(&config).is_ok()),
+                ArtifactKind::Safetensors => checkpoint::mmap::MmapSafetensors::open(&rec.path).is_ok_and(|m| Timesfm3Config::from_json(&m.config()).is_ok()),
+                _ => false,
+            };
+            if derived {
                 out.push((idx, "weights".to_string(), Confidence::Derived));
             }
         }
@@ -122,6 +133,23 @@ mod tests {
         write_timesfm3_hfdir(&repo);
 
         let records = vec![complete(repo.clone(), ArtifactKind::HfDir)];
+        let out = Timesfm3Spec.classify(&records, dir.as_path());
+        assert_eq!(out, vec![(0, "weights".to_string(), Confidence::Derived)], "{out:?}");
+    }
+
+    /// A brain container (what `import` and `finetune` write) is the `weights` role by the
+    /// config in its header, and a safetensors file with another config is not.
+    #[test]
+    fn a_brain_container_is_classified_by_its_header_config() {
+        let dir = tmp("container");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ours = dir.join("ft.safetensors");
+        let theirs = dir.join("other.safetensors");
+        let tensor = [("w".to_string(), vec![1u64], vec![0.0f32])];
+        checkpoint::save(ours.to_str().unwrap(), Timesfm3Config::tiny().to_json(), &tensor);
+        checkpoint::save(theirs.to_str().unwrap(), serde_json::json!({"hidden_size": 8}), &tensor);
+
+        let records = vec![complete(ours, ArtifactKind::Safetensors), complete(theirs, ArtifactKind::Safetensors)];
         let out = Timesfm3Spec.classify(&records, dir.as_path());
         assert_eq!(out, vec![(0, "weights".to_string(), Confidence::Derived)], "{out:?}");
     }

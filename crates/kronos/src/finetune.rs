@@ -12,7 +12,8 @@
 
 use crate::generate::KronosModel;
 use crate::train::{finetune, FinetuneOpts, KronosTrain, TokenBatch};
-use forecast::train_data::{self, Series, SplitConfig, Window, WindowRef};
+use forecast::finetune::{StepObserver, Universe};
+use forecast::train_data::{self, Series, Window, WindowRef};
 use std::collections::HashMap;
 
 /// Tokenize one leak-safe window into a next-token training example: 6-feature
@@ -55,16 +56,14 @@ pub fn tokenize_window(model: &KronosModel, w: &Window) -> Option<TokenBatch> {
 /// [`finetune`]. `base_init` is the base decoder's reference-named weights (e.g.
 /// from `import::load_decoder`); on promotion the returned map is the fine-tuned
 /// decoder, ready for `KronosTrain::save` / `checkpoint::save`.
-#[allow(clippy::too_many_arguments)]
 pub fn finetune_universe(
     model: &KronosModel,
     base_init: &HashMap<String, Vec<f32>>,
-    series: &[Series],
-    context: usize,
-    horizon: usize,
-    split: SplitConfig,
+    universe: &Universe,
     opts: &FinetuneOpts,
+    observer: StepObserver,
 ) -> Result<forecast::FinetuneOutcome, String> {
+    let Universe { series, context, horizon, split } = *universe;
     let windows = train_data::enumerate_windows(series, context, horizon);
     let sp = train_data::temporal_split(series, &windows, horizon, split);
     let tok = |ws: &[WindowRef]| -> Vec<TokenBatch> {
@@ -76,7 +75,7 @@ pub fn finetune_universe(
     let val = tok(&sp.val);
     let cfg = model.decoder_config().clone();
     let t = (context - 1) as u32;
-    finetune(cfg, t, base_init, &train, &val, opts)
+    finetune(cfg, t, base_init, &train, &val, opts, observer)
 }
 
 /// Mean next-token loss of a decoder weight set over a universe's leak-safe windows
@@ -122,6 +121,7 @@ pub fn save_decoder_weights(cfg: &crate::config::KronosConfig, weights: &HashMap
 mod tests {
     use super::*;
     use crate::config::{KronosConfig, KronosTokenizerConfig};
+    use forecast::train_data::SplitConfig;
     use std::collections::HashMap;
 
     fn tiny_model() -> (KronosModel, HashMap<String, Vec<f32>>) {
@@ -169,13 +169,45 @@ mod tests {
         let (model, base) = tiny_model();
         let series: Vec<Series> = (0..3).map(|i| synth_series(&format!("S{i}"), 120)).collect();
         let split = SplitConfig { train_frac: 0.6, val_frac: 0.25, embargo: 5 };
-        let opts = FinetuneOpts { epochs: 2, lr: 1e-3, wd: 0.0, clip: 3.0, lora: None, batch: 2, progress: false, saved: None };
-        let (rep, w) = finetune_universe(&model, &base, &series, 10, 3, split, &opts).unwrap();
+        let opts = FinetuneOpts { epochs: 2, lr: 1e-3, wd: 0.0, clip: 3.0, lora: None, batch: 2, saved: None };
+        let (rep, w) = finetune_universe(&model, &base, &Universe { series: &series, context: 10, horizon: 3, split }, &opts, &mut |_| true).unwrap();
         // plumbing must run and produce a well-formed decision.
         assert!(rep.base_val.is_finite() && rep.ft_val.is_finite());
         assert!(rep.steps > 0, "no training steps ran (no train windows tokenized)");
         assert!(w.is_some(), "fine-tuned weights are always returned");
         eprintln!("universe finetune: base {:.3} ft {:.3} promoted {} steps {}", rep.base_val, rep.ft_val, rep.promoted, rep.steps);
+    }
+
+    /// Spec: an observer sees every optimizer step in order with its position in the
+    /// run, and the fine-tune stops with the literal `cancelled` as soon as it
+    /// returns false.
+    #[test]
+    fn the_observer_sees_each_step_and_can_stop_the_run() {
+        if brain_testutil::gpu_tests_skipped() {
+            return;
+        }
+        let (model, base) = tiny_model();
+        let series: Vec<Series> = (0..3).map(|i| synth_series(&format!("S{i}"), 120)).collect();
+        let split = SplitConfig { train_frac: 0.6, val_frac: 0.25, embargo: 5 };
+        let universe = Universe { series: &series, context: 10, horizon: 3, split };
+        let opts = FinetuneOpts { epochs: 2, lr: 1e-3, wd: 0.0, clip: 3.0, lora: None, batch: 2, saved: None };
+
+        let mut seen = Vec::new();
+        let (rep, _) = finetune_universe(&model, &base, &universe, &opts, &mut |r| {
+            seen.push(r);
+            true
+        })
+        .unwrap();
+        assert_eq!(seen.len() as u32, rep.steps);
+        assert!(seen.iter().enumerate().all(|(i, r)| r.step == i as u32 + 1 && r.total == rep.steps && r.epochs == 2 && r.loss.is_finite()), "{seen:?}");
+
+        let mut calls = 0;
+        let err = finetune_universe(&model, &base, &universe, &opts, &mut |_| {
+            calls += 1;
+            calls < 2
+        })
+        .unwrap_err();
+        assert_eq!((err.as_str(), calls), (forecast::finetune::CANCELLED, 2), "stopped at the step the observer refused");
     }
 
     /// Spec: the fine-tune takes the saved-activation policy; a run that recomputes trains, and a choice the trainer
@@ -189,10 +221,10 @@ mod tests {
         let (model, base) = tiny_model();
         let series: Vec<Series> = (0..3).map(|i| synth_series(&format!("S{i}"), 120)).collect();
         let split = SplitConfig { train_frac: 0.6, val_frac: 0.25, embargo: 5 };
-        let with = |saved| FinetuneOpts { epochs: 1, lr: 1e-3, wd: 0.0, clip: 3.0, lora: None, batch: 2, progress: false, saved: Some(saved) };
-        let (rep, _) = finetune_universe(&model, &base, &series, 10, 3, split, &with(SavedPolicy::Recompute)).unwrap();
+        let with = |saved| FinetuneOpts { epochs: 1, lr: 1e-3, wd: 0.0, clip: 3.0, lora: None, batch: 2, saved: Some(saved) };
+        let (rep, _) = finetune_universe(&model, &base, &Universe { series: &series, context: 10, horizon: 3, split }, &with(SavedPolicy::Recompute), &mut |_| true).unwrap();
         assert!(rep.steps > 0 && rep.ft_val.is_finite());
-        let refused = finetune_universe(&model, &base, &series, 10, 3, split, &with(SavedPolicy::Quantized(SavedFormat::Bf16))).unwrap_err();
+        let refused = finetune_universe(&model, &base, &Universe { series: &series, context: 10, horizon: 3, split }, &with(SavedPolicy::Quantized(SavedFormat::Bf16)), &mut |_| true).unwrap_err();
         assert!(refused.contains("kronos"), "{refused}");
     }
 }

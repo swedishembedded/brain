@@ -60,7 +60,7 @@ fn config_from_dir<T>(dir: &str, parse: impl Fn(&serde_json::Value) -> Result<T,
 /// the raw weights (not the assembled [`KronosModel`]) to build the ONNX graph.
 pub fn load_decoder(decoder_dir: &str) -> Result<(KronosConfig, HashMap<String, Vec<f32>>), String> {
     // A brain `.safetensors` container (e.g. a fine-tuned checkpoint from
-    // `brain forecast finetune`) is a single file with the config + tensors
+    // `brain kronos finetune`) is a single file with the config + tensors
     // embedded; an HF checkpoint is a directory. Support both so a fine-tuned
     // decoder loads everywhere the base does (forecaster, server, ranking tool).
     if std::path::Path::new(decoder_dir).is_file() {

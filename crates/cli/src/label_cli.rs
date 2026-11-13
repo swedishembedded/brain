@@ -4,7 +4,7 @@
 //! `brain label <dir>` - caption a dataset with a vision-language model.
 //!
 //! A top-level verb rather than a per-model one, for the same reason
-//! `brain forecast` is: labeling is a workflow **over** the model seam
+//! forecasting is one: labeling is a workflow **over** the model seam
 //! (`captioner::Captioner`), not an action **on** one model. Adding another
 //! captioning model must not add another labeling command, and a caller who
 //! wants a different model changes `--model`, not the verb.

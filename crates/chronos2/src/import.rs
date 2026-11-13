@@ -57,6 +57,15 @@ pub fn load_hf(cfg: &Chronos2Config, path: &str) -> Result<HashMap<String, Vec<f
     Ok(out)
 }
 
+/// Open a checkpoint for streaming, with its config: a brain container
+/// (config in its header) or an `amazon/chronos-2` directory (config in its
+/// `config.json`).
+pub fn open_weights(path: &str) -> Result<(checkpoint::weightio::WeightReader, Chronos2Config), String> {
+    let reader = checkpoint::weightio::WeightReader::open_any(path).map_err(|e| format!("chronos2: opening {path}: {e}"))?;
+    let cfg = if Path::new(path).is_dir() { config_from_dir(path)? } else { Chronos2Config::from_hf(&reader.config())? };
+    Ok((reader, cfg))
+}
+
 /// Read the HF `config.json` next to a checkpoint dir.
 pub fn config_from_dir(dir: &str) -> Result<Chronos2Config, String> {
     let cfg_path = Path::new(dir).join("config.json");
@@ -154,6 +163,30 @@ mod tests {
             assert!(out.iter().all(|&v| (v - mean).abs() < 1e-2), "loaded model lost the mean");
         }
         std::fs::remove_file(&path).ok();
+    }
+
+    /// A released `amazon/chronos-2` directory (config.json + model.safetensors with the
+    /// reference's own shapes) loads as it is, and `open_weights` hands back its config.
+    #[test]
+    fn a_released_directory_loads_without_an_import_step() {
+        let cfg = Chronos2Config::tiny();
+        let dir = std::env::temp_dir().join(format!("chronos2-dir-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&cfg.to_json()).unwrap()).unwrap();
+        let list = cfg.param_list();
+        let plan: Vec<(String, Vec<u64>)> = list.iter().map(|(n, s)| (n.clone(), s.iter().map(|&d| d as u64).collect())).collect();
+        let mut w = checkpoint::weightio::StWriter::create(dir.join("model.safetensors").to_str().unwrap(), &plan, &serde_json::Value::Null, None).unwrap();
+        for (name, shape) in &list {
+            w.write(name, &vec![0.0; shape.iter().product()]).unwrap();
+        }
+        w.finish().unwrap();
+
+        let (reader, got) = open_weights(dir.to_str().unwrap()).unwrap();
+        assert_eq!(got, cfg);
+        assert!(reader.names().count() >= list.len());
+        let loaded = Chronos2::load(dir.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.config(), &cfg);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

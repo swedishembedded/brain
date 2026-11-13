@@ -36,8 +36,8 @@ covariates' own contribution, not noise.
 
 ```bash
 python3 tools/forecast/make_cooling_loop.py --out cooling_loop.csv
-BRAIN_TIMESFM3=timesfm3.safetensors tools/dbus-session.sh \
-  --serve "--dbus --device cpu" \
+tools/dbus-session.sh \
+  --serve "--dbus --device cpu --pin timesfm3.weights=timesfm3.safetensors" \
   -- python3 samples/shell/forecast/cooling-loop/cooling_loop.py cooling_loop.csv
 ```
 
@@ -56,7 +56,7 @@ Get the weights with:
 
 ```bash
 brain pull google/timesfm-3.0-pytorch
-brain forecast import --timesfm3 <fetched dir> --out timesfm3.safetensors
+brain timesfm3 import --source <fetched dir> --dest timesfm3.safetensors
 ```
 
 They ship under `timesfm-non-commercial-license-v1.0` (non-commercial,

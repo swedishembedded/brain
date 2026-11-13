@@ -81,6 +81,7 @@ brain-chronos2.workspace = true
 brain-data.workspace = true
 brain-fincast.workspace = true
 brain-forecast.workspace = true
+brain-forecastops.workspace = true
 brain-gpt2.workspace = true
 brain-toypid.workspace = true
 brain-toymoe.workspace = true

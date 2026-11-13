@@ -47,6 +47,7 @@
 use std::collections::HashMap;
 
 use forecast::metrics::{mean_pinball, mean_pinball_grad};
+use forecast::finetune::{StepObserver, StepReport, Universe};
 use forecast::train_data::{self, Series, Window, WindowRef};
 
 use crate::config::Timesfm3Config;
@@ -285,7 +286,8 @@ fn mean_loss(gpu: &Gpu, cfg: &Timesfm3Config, weights: &HashMap<String, Vec<f32>
 /// The weights are returned whether or not the gate promoted, so the caller
 /// decides what to do with a losing run; `report.promoted` is the only thing
 /// that should decide whether they are WRITTEN.
-pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>, series: &[Series], context: usize, horizon: usize, split: train_data::SplitConfig, opts: &FinetuneOpts) -> Result<forecast::FinetuneOutcome, String> {
+pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>, universe: &Universe, opts: &FinetuneOpts, observer: StepObserver) -> Result<forecast::FinetuneOutcome, String> {
+    let Universe { series, context, horizon, split } = *universe;
     let windows = train_data::enumerate_windows(series, context, horizon);
     let sp = train_data::temporal_split(series, &windows, horizon, split);
     let train = build_examples(cfg, series, &sp.train, context, horizon);
@@ -311,6 +313,7 @@ pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>,
         m.set_saved_policy(policy)?;
     }
 
+    let total = (opts.epochs as usize * (train.len() / b)).max(1) as u32;
     let mut steps = 0u32;
     for epoch in 0..opts.epochs {
         for group in train.chunks_exact(b) {
@@ -319,15 +322,15 @@ pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>,
             m.set_input(&x, &mask);
             m.forward();
             m.poll_wait();
-            let (_, d_logits) = objective(cfg, shape, &built, &m.read_logits(), &actual);
+            let (loss, d_logits) = objective(cfg, shape, &built, &m.read_logits(), &actual);
             m.zero_grads();
             m.backward(&d_logits);
             steps += 1;
             m.adamw_step(steps, opts.lr, opts.wd, Some(opts.clip));
             m.poll_wait();
-        }
-        if opts.progress {
-            eprintln!("timesfm3 finetune: epoch {}/{} ({steps} steps)", epoch + 1, opts.epochs);
+            if !observer(StepReport { step: steps, total, epoch: epoch + 1, epochs: opts.epochs, loss }) {
+                return Err(forecast::finetune::CANCELLED.to_string());
+            }
         }
     }
 
@@ -523,9 +526,9 @@ mod tests {
         let (context, horizon) = (8usize, 4usize);
         let s: Vec<Series> = (0..3).map(|i| series(200, i as f32)).collect();
         let base = crate::train::init_weights(&cfg, 7);
-        let opts = FinetuneOpts { epochs: 1, lr: 1e-3, wd: 0.0, clip: 1.0, lora: None, batch: 2, progress: false, saved: None };
+        let opts = FinetuneOpts { epochs: 1, lr: 1e-3, wd: 0.0, clip: 1.0, lora: None, batch: 2, saved: None };
         let split = train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo: horizon };
-        let (rep, w) = finetune_universe(&cfg, &base, &s, context, horizon, split, &opts).unwrap();
+        let (rep, w) = finetune_universe(&cfg, &base, &Universe { series: &s, context, horizon, split }, &opts, &mut |_| true).unwrap();
 
         assert!(rep.steps > 0, "the fixture produced no training windows");
         assert!(rep.base_val.is_finite(), "base_val must be a real number, got {}", rep.base_val);
@@ -580,9 +583,9 @@ mod tests {
         let (context, horizon) = (8usize, 4usize);
         let s: Vec<Series> = (0..3).map(|i| series(200, i as f32)).collect();
         let base = crate::train::init_weights(&cfg, 7);
-        let opts = FinetuneOpts { epochs: 1, lr: 1e-2, wd: 0.0, clip: 1.0, lora: Some(LoraCfg::attn(2, 4.0)), batch: 2, progress: false, saved: None };
+        let opts = FinetuneOpts { epochs: 1, lr: 1e-2, wd: 0.0, clip: 1.0, lora: Some(LoraCfg::attn(2, 4.0)), batch: 2, saved: None };
         let split = train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo: horizon };
-        let (rep, w) = finetune_universe(&cfg, &base, &s, context, horizon, split, &opts).unwrap();
+        let (rep, w) = finetune_universe(&cfg, &base, &Universe { series: &s, context, horizon, split }, &opts, &mut |_| true).unwrap();
         assert!(rep.steps > 0);
         let w = w.expect("weights are always returned");
         assert_eq!(w.len(), cfg.param_list().len(), "the fold leaves no adapter tensors behind");

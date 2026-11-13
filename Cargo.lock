@@ -883,6 +883,7 @@ dependencies = [
  "brain-flux1",
  "brain-flux2",
  "brain-forecast",
+ "brain-forecastops",
  "brain-glmdsa",
  "brain-gpt2",
  "brain-gpu-core",
@@ -969,11 +970,13 @@ dependencies = [
 name = "brain-chronos2"
 version = "5.1.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-forecast",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-optim",
  "brain-paramstore",
  "brain-testutil",
@@ -1488,11 +1491,13 @@ dependencies = [
 name = "brain-fincast"
 version = "5.1.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-forecast",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
  "brain-optim",
  "brain-paramstore",
  "brain-testutil",
@@ -1599,6 +1604,17 @@ version = "5.1.0"
 dependencies = [
  "brain-seed",
  "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-forecastops"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-fcbench",
+ "brain-forecast",
+ "brain-seed",
  "serde_json",
 ]
 
@@ -6864,6 +6880,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-models-chronos2"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-chronos2",
+ "brain-forecast",
+ "brain-forecastops",
+ "brain-invoke",
+ "brain-npu",
+ "brain-server",
+ "serde_json",
+]
+
+[[package]]
 name = "sample-models-diamond"
 version = "5.1.0"
 dependencies = [
@@ -6871,6 +6901,20 @@ dependencies = [
  "brain-diamond",
  "brain-invoke",
  "brain-wm-display",
+]
+
+[[package]]
+name = "sample-models-fincast"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-fincast",
+ "brain-forecast",
+ "brain-forecastops",
+ "brain-invoke",
+ "brain-npu",
+ "brain-server",
+ "serde_json",
 ]
 
 [[package]]
@@ -6899,6 +6943,20 @@ version = "5.1.0"
 dependencies = [
  "brain-gpt2",
  "brain-invoke",
+]
+
+[[package]]
+name = "sample-models-kronos"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-forecast",
+ "brain-forecastops",
+ "brain-invoke",
+ "brain-kronos",
+ "brain-npu",
+ "brain-server",
+ "serde_json",
 ]
 
 [[package]]
@@ -6985,6 +7043,19 @@ dependencies = [
  "brain-recon",
  "brain-splat",
  "brain-wm-display",
+]
+
+[[package]]
+name = "sample-models-timesfm3"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-forecast",
+ "brain-forecastops",
+ "brain-invoke",
+ "brain-server",
+ "brain-timesfm3",
+ "serde_json",
 ]
 
 [[package]]

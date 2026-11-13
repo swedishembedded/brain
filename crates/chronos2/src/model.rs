@@ -105,13 +105,19 @@ impl Chronos2 {
         Ok(Chronos2 { gpu, cfg, w })
     }
 
-    /// Load a model from a brain `.safetensors` container (see [`crate::import`]).
+    /// Load a model from a brain `.safetensors` container (see
+    /// [`crate::import`]) or an `amazon/chronos-2` directory.
     pub fn load(path: &str) -> Result<Chronos2, String> {
         Chronos2::load_on(Gpu::new(PIPELINES), path)
     }
 
     /// Load on an existing device handle — see `Gpt::new_on`.
     pub fn load_on(gpu: Gpu, path: &str) -> Result<Chronos2, String> {
+        if std::path::Path::new(path).is_dir() {
+            let cfg = crate::import::config_from_dir(path)?;
+            let weights = crate::import::load_hf(&cfg, path)?;
+            return Chronos2::from_weights_on(gpu, cfg, &weights);
+        }
         let c = checkpoint::load(path);
         let cfg = Chronos2Config::from_hf(&c.header["config"])?;
         let weights = c.by_role("");

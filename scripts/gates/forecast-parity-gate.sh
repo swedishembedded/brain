@@ -39,8 +39,8 @@
 #
 #   BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER   the two HF checkpoint dirs
 #
-# ...which `brain forecast predict` auto-fetches, so "I don't have them" is a
-# one-command problem now.
+# ...which `brain pull NeoQuasar/Kronos-base NeoQuasar/Kronos-Tokenizer-base`
+# fetches, so "I don't have them" is a one-command problem now.
 #
 # EVERY test is invoked unconditionally, and each decides for itself whether an
 # absent checkpoint is a skip (`brain_testutil::skip`) or a failure. That is the

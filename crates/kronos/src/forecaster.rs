@@ -38,11 +38,28 @@ use forecast::{
 /// Fixed input column order the adapter builds bars in.
 const OHLCV: [&str; 5] = ["open", "high", "low", "close", "volume"];
 
-/// A sampling knob read from the environment, falling back to the reference
-/// default. Ignores an unparseable or non-finite value rather than failing a
-/// forecast over a typo in a shell variable.
-fn env_f32(key: &str, default: f32) -> f32 {
-    std::env::var(key).ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| v.is_finite() && *v > 0.0).unwrap_or(default)
+/// The sampling knobs of a Kronos rollout.
+///
+/// `top_p` is a CALIBRATION knob: nucleus truncation compounds over an
+/// autoregressive rollout, so a tighter value narrows the predictive band step
+/// after step, and a band is only honest when scored against its nominal
+/// coverage.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KronosSampling {
+    /// Softmax temperature (ignored when `argmax`).
+    pub temperature: f32,
+    /// Nucleus truncation; the reference `KronosPredictor` default.
+    pub top_p: f32,
+    /// The deterministic modal rollout (argmax over the token distribution):
+    /// one stable draw, matching the reference RankIC evaluation's point path,
+    /// with no sampling noise and N times cheaper than a cloud.
+    pub argmax: bool,
+}
+
+impl Default for KronosSampling {
+    fn default() -> Self {
+        KronosSampling { temperature: 1.0, top_p: 0.9, argmax: false }
+    }
 }
 
 /// Calendar variate names, in the reference's stamp order
@@ -72,11 +89,23 @@ fn version_from_path(decoder: &str) -> String {
 pub struct KronosForecaster {
     model: KronosModel,
     version: String,
+    sampling: KronosSampling,
 }
 
 impl KronosForecaster {
     pub fn new(model: KronosModel) -> KronosForecaster {
-        KronosForecaster { model, version: "kronos".into() }
+        KronosForecaster { model, version: "kronos".into(), sampling: KronosSampling::default() }
+    }
+
+    /// The model this forecaster drives.
+    pub fn model(&self) -> &KronosModel {
+        &self.model
+    }
+
+    /// The sampling [`ForecastModel::forecast`] uses.
+    pub fn with_sampling(mut self, sampling: KronosSampling) -> KronosForecaster {
+        self.sampling = sampling;
+        self
     }
 
     /// Load from the two HF checkpoint dirs (tokenizer + decoder).
@@ -167,17 +196,21 @@ impl ForecastModel for KronosForecaster {
     }
 
     fn forecast(&self, panel: &Panel, spec: &ForecastSpec) -> Result<Forecast, ForecastError> {
+        self.forecast_sampled(panel, spec, &self.sampling)
+    }
+}
+
+impl KronosForecaster {
+    /// [`ForecastModel::forecast`] under an explicit `sampling`, so one loaded
+    /// model serves requests that each name their own.
+    pub fn forecast_sampled(&self, panel: &Panel, spec: &ForecastSpec, sampling: &KronosSampling) -> Result<Forecast, ForecastError> {
         self.validate(panel, spec)?;
         if spec.horizon == 0 {
             return Err(ForecastError::bad_request("kronos: horizon must be >= 1"));
         }
         // Honor an explicit sample count; only fall back to the floor when the
         // caller asked for none (they still need a distribution to derive from).
-        // `BRAIN_KRONOS_ARGMAX=1` selects the deterministic modal rollout
-        // (argmax over the token distribution): a single stable draw, matching
-        // the reference RankIC evaluation's point path - no sampling noise, and
-        // ~N times cheaper.
-        let argmax = std::env::var("BRAIN_KRONOS_ARGMAX").map(|v| v != "0").unwrap_or(false);
+        let argmax = sampling.argmax;
         let n_samples = if argmax {
             1
         } else if spec.num_samples == 0 {
@@ -208,16 +241,9 @@ impl ForecastModel for KronosForecaster {
                 .collect();
 
             let opts = GenOpts {
-                temperature: env_f32("BRAIN_KRONOS_TEMPERATURE", 1.0),
+                temperature: sampling.temperature,
                 top_k: 0,
-                // Nucleus truncation. The reference `KronosPredictor` default is
-                // 0.9, and it is what this ships, but it is a CALIBRATION knob:
-                // truncation compounds over an autoregressive rollout, so a
-                // tighter `top_p` narrows the predictive band step after step.
-                // `BRAIN_KRONOS_TOP_P` (and `brain forecast predict --top-p`)
-                // exposes it so the band can be scored against its nominal
-                // coverage rather than assumed calibrated.
-                top_p: env_f32("BRAIN_KRONOS_TOP_P", 0.9),
+                top_p: sampling.top_p,
                 argmax,
                 seed: spec.seed,
             };

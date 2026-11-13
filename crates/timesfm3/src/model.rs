@@ -142,9 +142,8 @@ impl Timesfm3 {
     /// raw form and a brain container is always a single file - `import`'s
     /// own output convention - so that alone tells the two apart, the same
     /// way `kronos::import::load_decoder` accepts both without the caller
-    /// naming which one it has. This is what makes `brain pull` +
-    /// `BRAIN_TIMESFM3=<fetched dir>` work with no manual `brain forecast
-    /// import` step in between.
+    /// naming which one it has. This is what makes `brain pull` + `brain
+    /// timesfm3 forecast` work with no manual `import` step in between.
     pub fn load(path: &str) -> Result<Timesfm3, String> {
         Timesfm3::load_on(Gpu::new(PIPELINES), path)
     }

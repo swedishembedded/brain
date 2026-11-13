@@ -7,7 +7,7 @@
 //! same command ([`resolve::dispatch`]) - the architecture is chosen by
 //! whichever token names one of `brain_arch::ARCHS`, in either position.
 //! Infrastructure commands (`data`, `devices`, `npu`, `bench`,
-//! `perf`, `forecast`, `caps`, `serve`, `flops`) are matched
+//! `perf`, `caps`, `serve`, `flops`) are matched
 //! first and never go through that resolver.
 //!
 //! Run `brain help` for the full usage with examples.
@@ -20,7 +20,6 @@ mod devices_api;
 mod devices_cli;
 mod doctor_cli;
 mod flops_cli;
-mod forecast_cli;
 mod label_cli;
 mod gguf_cli;
 mod image_io;
@@ -432,10 +431,15 @@ MONOCULAR DEPTH (brain/zipdepth; image and camera windows are samples/models/zip
   brain zipdepth calib --images <dir>
       every parameter: brain zipdepth <action> --help
 
-FORECASTING (chronos2 / kronos / fincast behind one seam)
-  brain forecast <compare|serve|import|finetune> ...
-      chronos2/fincast/kronos are also individually listed by `brain caps`,
-      but have no direct per-action CLI path yet - serve them instead.
+TIME-SERIES FORECASTING (brain/chronos2, brain/fincast, brain/kronos, brain/timesfm3; NPU exports,
+the scenario battery and the JSONL server are samples/models/<model>)
+  brain kronos forecast --in context=bars.f32 --horizon 48 --out forecast=out.f32
+  brain kronos predict --in csv=ohlcv.csv --horizon 48 --samples 30 --origins 5 --seed $RANDOM [--chart true --out chart=chart.png]
+  brain kronos finetune --data <csv-dir> --save kronos-ft.safetensors [--holdout-data <csv-dir>] --seed $RANDOM
+  brain chronos2 forecast|predict|import      brain fincast forecast|predict|import
+  brain timesfm3 forecast|predict|finetune|import
+      the checkpoint is resolved from the model store; name one with --weights (kronos: --tokenizer, --decoder)
+      every parameter: brain <model> <action> --help
 
 CAPABILITIES (typed actions; one dispatch path for the CLI, D-Bus and HTTP)
   brain caps                               # every architecture's action manifest
@@ -1417,6 +1421,16 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_MINIMAXMUSIC3_TOKENIZER", replacement: "serve: {pin: [minimaxmusic3.tokenizer=DIR]}" },
     Retired { name: "BRAIN_QWEN3VL_CTX", replacement: "qwen3vl generate: {ctx: N}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
+    Retired { name: "BRAIN_CHRONOS2", replacement: "serve: {pin: [chronos2.weights=PATH]}" },
+    Retired { name: "BRAIN_FINCAST", replacement: "serve: {pin: [fincast.weights=FILE]}" },
+    Retired { name: "BRAIN_KRONOS_TOKENIZER", replacement: "serve: {pin: [kronos.tokenizer=DIR]} (with kronos.decoder)" },
+    Retired { name: "BRAIN_KRONOS_DECODER", replacement: "serve: {pin: [kronos.decoder=PATH]} (with kronos.tokenizer)" },
+    Retired { name: "BRAIN_TIMESFM3", replacement: "serve: {pin: [timesfm3.weights=PATH]}" },
+    Retired { name: "BRAIN_KRONOS_ARGMAX", replacement: "kronos predict: {samples: 1} (the deterministic path); kronos forecast: {argmax: true}" },
+    Retired { name: "BRAIN_KRONOS_TEMPERATURE", replacement: "kronos predict|forecast: {temperature: T}" },
+    Retired { name: "BRAIN_KRONOS_TOP_P", replacement: "kronos predict|forecast: {top_p: P}" },
+    Retired { name: "BRAIN_FORECAST_HORIZON", replacement: "perf run: --horizon N" },
+    Retired { name: "BRAIN_FORECAST_SAMPLES", replacement: "perf run: --samples N" },
 ];
 
 /// One entry of [`RETIRED_VARIABLES`].
@@ -1684,7 +1698,6 @@ fn main() {
         Some("flops") => flops_cli::run_flops(&argv[2..]),
         Some("bench") => run_bench(&argv[2..]),
         Some("perf") => perf_cli::run_perf(&argv[2..]),
-        Some("forecast") => forecast_cli::run_forecast(&argv[2..]),
         Some("label") => label_cli::run_label(&argv[2..]),
         Some("decide") if decide_cli::handles(argv.get(2).map(String::as_str)) => std::process::exit(decide_cli::run_decide(&argv[2..])),
         Some("caps") => std::process::exit(caps_cli::run_caps(&argv[2..])),

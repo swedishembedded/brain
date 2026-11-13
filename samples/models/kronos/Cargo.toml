@@ -1,0 +1,27 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/kronos` -> `sample-models-kronos`.
+name = "sample-models-kronos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: the Kronos OHLCV forecaster beyond its served actions - the scenario battery against the statistical baselines, the autoregressive rollout on the Intel NPU through OpenVINO, and the JSONL forecasting server over a Unix socket."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-kronos.workspace = true
+brain-invoke.workspace = true
+brain-capability.workspace = true
+brain-forecast.workspace = true
+brain-forecastops.workspace = true
+# The JSONL server over stdio or a Unix socket.
+brain-server.workspace = true
+# The NPU route: the ONNX writer and the OpenVINO sessions.
+brain-npu.workspace = true
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 78

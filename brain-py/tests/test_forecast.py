@@ -3,7 +3,7 @@
 
 """CI-fast forecasting tests for BrainClient.
 
-These launch `brain forecast serve` (statistical baselines registered — no model
+These launch `brain serve --stdio` (statistical baselines registered - no model
 load, so CI-fast) and drive it over the real JSONL protocol, exercising the
 forecast/backtest/capabilities request path and the Panel/Forecast helpers.
 """

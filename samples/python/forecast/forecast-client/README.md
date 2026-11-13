@@ -6,16 +6,15 @@ back - end to end, over the generic `Run` method on
 data (no per-model protocol). `forecast_client.py` works against all four
 forecasting foundation models brain serves:
 
-| model | env vars | input | output |
+| model | store roles (pins) | input | output |
 |---|---|---|---|
-| `chronos2` | `BRAIN_CHRONOS2` | univariate series `[T]` | `[levels, horizon]` quantiles (21 levels) |
-| `fincast` | `BRAIN_FINCAST` | univariate series `[T]` (+`freq`) | `[horizon, 1+levels]` - col 0 mean, then 9 quantiles |
-| `kronos` | `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` | OHLCV bars `[T, feat]` (or a univariate `[T]` close, expanded server-side) | `[horizon, feat]` sample bars |
-| `timesfm3` | `BRAIN_TIMESFM3` | univariate series `[T]` over this wire (natively multivariate via the library API - see `samples/shell/forecast/cooling-loop/`) | `[horizon, 9]` quantiles |
+| `chronos2` | `chronos2.weights` | univariate series `[T]` | `[levels, horizon]` quantiles (21 levels) |
+| `fincast` | `fincast.weights` | univariate series `[T]` (+`freq`) | `[horizon, 1+levels]` - col 0 mean, then 9 quantiles |
+| `kronos` | `kronos.tokenizer` + `kronos.decoder` | OHLCV bars `[T, feat]` (or a univariate `[T]` close, expanded server-side) | `[horizon, feat]` sample bars |
+| `timesfm3` | `timesfm3.weights` | univariate series `[T]` over this wire (natively multivariate via the library API - see `samples/shell/forecast/cooling-loop/`) | `[horizon, 9]` quantiles |
 
 ```bash
-BRAIN_CHRONOS2=/path/to/chronos2.weights \
-  tools/dbus-session.sh --serve "--dbus --device cpu" -- \
+tools/dbus-session.sh --serve "--dbus --device cpu --pin chronos2.weights=/path/to/chronos2.safetensors" -- \
   python3 samples/python/forecast/forecast-client/forecast_client.py --model brain/chronos2 --horizon 64
 ```
 
@@ -36,16 +35,15 @@ python3 samples/python/forecast/forecast-client/forecast_client.py --model brain
   budgeted the scheduler **places them on the NPU automatically**
   (`place::pick_device`) - the returned `device` field says where it ran.
   `kronos` and `timesfm3` run on CPU/GPU today.
-* Kronos needs both checkpoint dirs, but you no longer have to find them:
-  `brain forecast predict` auto-fetches `NeoQuasar/Kronos-base` and
-  `NeoQuasar/Kronos-Tokenizer-base` and exports both variables; set them by
-  hand only to override.
+* Kronos needs both checkpoint dirs, but you do not have to name them: the
+  model store resolves `NeoQuasar/Kronos-base` and
+  `NeoQuasar/Kronos-Tokenizer-base` (`brain pull` fetches them); pin them
+  only to override.
 
 ## What it needs
 
-At least one model's weights exported before `brain serve --dbus`:
-`BRAIN_CHRONOS2`, `BRAIN_FINCAST`, `BRAIN_KRONOS_TOKENIZER` +
-`BRAIN_KRONOS_DECODER`, or `BRAIN_TIMESFM3` (see the table above). Plus
+At least one model's checkpoint in the model store (or pinned with `brain
+serve --pin`, see the table above) before `brain serve --dbus`. Plus
 `jeepney` - `pip install -e brain-py`.
 
 ## Options

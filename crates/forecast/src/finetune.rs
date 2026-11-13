@@ -41,8 +41,6 @@ pub struct FinetuneOpts<L, S = ()> {
     /// per step; higher amortises the per-step overhead and is the mean of the
     /// single-window steps.
     pub batch: u32,
-    /// Print per-batch progress.
-    pub progress: bool,
     /// What the backward keeps of the forward; a choice the trainer cannot run
     /// fails the fine-tune by name before the first step.
     pub saved: S,
@@ -50,9 +48,41 @@ pub struct FinetuneOpts<L, S = ()> {
 
 impl<L, S: Default> Default for FinetuneOpts<L, S> {
     fn default() -> FinetuneOpts<L, S> {
-        FinetuneOpts { epochs: 8, lr: 4e-5, wd: 0.1, clip: 3.0, lora: None, batch: 1, progress: false, saved: S::default() }
+        FinetuneOpts { epochs: 8, lr: 4e-5, wd: 0.1, clip: 3.0, lora: None, batch: 1, saved: S::default() }
     }
 }
+
+/// The universe a fine-tune draws its windows from: which series, how long a
+/// context and horizon one window spans, and how the series are split in time.
+#[derive(Clone, Copy, Debug)]
+pub struct Universe<'a> {
+    pub series: &'a [crate::train_data::Series],
+    pub context: usize,
+    pub horizon: usize,
+    pub split: crate::train_data::SplitConfig,
+}
+
+/// One optimizer step, as a fine-tune reports it to its [`StepObserver`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StepReport {
+    /// 1-based index of the step just taken.
+    pub step: u32,
+    /// Steps the run takes in all.
+    pub total: u32,
+    /// 1-based epoch the step belongs to.
+    pub epoch: u32,
+    pub epochs: u32,
+    /// The objective this step's batch scored before the update.
+    pub loss: f32,
+}
+
+/// Watches a fine-tune step by step. Returning `false` stops the run, which
+/// then fails with [`CANCELLED`]: the caller's way to cancel it.
+pub type StepObserver<'a> = &'a mut dyn FnMut(StepReport) -> bool;
+
+/// The error a fine-tune stopped by its [`StepObserver`] returns. The literal
+/// is the one `capability::CancelToken` documents for a cancelled action.
+pub const CANCELLED: &str = "cancelled";
 
 /// The gate decision of one fine-tune.
 #[derive(Clone, Debug)]
@@ -94,7 +124,7 @@ mod tests {
     #[test]
     fn the_defaults_are_one_recipe() {
         let o: FinetuneOpts<()> = FinetuneOpts::default();
-        assert_eq!((o.epochs, o.lr, o.wd, o.clip, o.batch, o.progress), (8, 4e-5, 0.1, 3.0, 1, false));
+        assert_eq!((o.epochs, o.lr, o.wd, o.clip, o.batch), (8, 4e-5, 0.1, 3.0, 1));
         assert!(o.lora.is_none());
     }
 }

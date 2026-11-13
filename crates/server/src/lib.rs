@@ -26,6 +26,7 @@ use std::io::{self, BufRead, Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub mod controller_session;
+pub mod forecast_serve;
 pub mod transport;
 
 pub use controller_session::ControllerSession;

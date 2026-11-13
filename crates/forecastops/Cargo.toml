@@ -1,0 +1,18 @@
+[package]
+name = "brain-forecastops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The capability-facing operations every forecasting model shares: scoring a forecast against held-out data (predict), the scenario battery (compare), and the universe loading a fine-tune reads. One implementation behind brain's served actions and the per-model samples."
+
+[lib]
+name = "forecastops"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+brain-forecast.workspace = true
+brain-fcbench.workspace = true
+brain-seed.workspace = true
+serde_json.workspace = true
+

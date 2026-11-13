@@ -10,10 +10,9 @@
 //! environment variable and no CLI process in the loop.
 //!
 //! chronos2 and fincast are a real, tracked gap, not silently unsupported:
-//! neither has a model-store resolver `ArchSpec` or a `default_ref`
-//! registered anywhere in this workspace yet (both load from a plain
-//! `BRAIN_CHRONOS2`/`BRAIN_FINCAST` path today), so there is nothing for
-//! this pipeline's resolver to resolve them against.
+//! both resolve their checkpoint through a model-store `ArchSpec` but have no
+//! `default_ref` registered in this workspace yet, so there is no upstream
+//! reference for `from_pretrained` to fetch them by.
 //!
 //! Once resolved, every architecture behind this pipeline is uniform: all
 //! four forecasting models (including the two not wired in here yet)

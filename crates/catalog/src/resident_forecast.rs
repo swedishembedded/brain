@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Time-series forecasting (chronos2 / fincast / kronos) behind the residency
-//! scheduler + the Brain1 D-Bus surface.
+//! Time-series forecasting (chronos2 / fincast / kronos / timesfm3) behind the
+//! residency scheduler + the Brain1 D-Bus surface, and behind `brain <model>
+//! <action>`: each model's one-shot provider IS its resident
+//! ([`crate::resident_provider::ResidentProvider`]), so the two run the same code.
 //!
-//! Each foundation model is a [`ResidentModel`] exposing one `forecast` action:
-//! a context series in (f32-LE blob + `{shape}` meta), a forecast tensor out
-//! (f32-LE blob + `{shape,kind,levels}` meta). The dispatch is fully generic, so
-//! this is all that is needed to reach these models over `Run`.
+//! Each foundation model is a [`ResidentModel`] with two served actions.
+//! `forecast`: a context series in (f32-LE blob + `{shape}` meta), a forecast
+//! tensor out (f32-LE blob + `{shape,kind,levels}` meta). `predict`: an OHLCV
+//! CSV in, the model scored against persistence, drift and seasonal naive on the
+//! bars it never saw out ([`forecastops::predict`]). The one-shot surface adds
+//! `finetune` and `import` ([`crate::forecast_actions`]), which need no instance.
+//!
+//! Each checkpoint comes from the model store (`from_store`, or a pin).
 //!
 //! **NPU placement.** chronos2 and fincast advertise an NPU footprint
 //! (`MemCost::with_npu`), so `place::pick_device` auto-schedules them on the NPU
@@ -25,13 +31,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress};
+use forecast::ForecastModel;
 use npu::openvino::{Feed, NpuConfig, NpuDevice, NpuGraph};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
-/// Catalog ids for the three forecasters. No dedicated `caps.rs` exists for
-/// these crates (unlike yolo/depth/tts/…) -- these three consts are the
-/// analogous single source of truth here (also referenced by `perf_cli.rs`'s
+/// Catalog ids for the four forecasters. No dedicated `caps.rs` exists for
+/// these crates (unlike yolo/depth/tts/…) -- these consts are the analogous
+/// single source of truth here (also referenced by `perf_cli.rs`'s
 /// `ExecutorTarget` construction, which must route to the same catalog id).
 pub const CHRONOS2_MODEL: &str = "brain/chronos2";
 pub const FINCAST_MODEL: &str = "brain/fincast";
@@ -108,6 +115,49 @@ fn base_forecast_spec(summary: &str) -> ActionSpec {
         .output(BlobSpec::new("forecast", Media::Bytes, "forecast as raw f32-LE; meta {shape,kind,levels}"))
 }
 
+/// What a forecaster's `predict` needs besides the model: how its window
+/// is used. An autoregressive model (Kronos) keeps its rollout exact only while
+/// context + horizon fit its window; a single-pass model takes the history it
+/// is given up to a cap.
+#[derive(Clone, Copy)]
+enum ContextPolicy {
+    /// Exact while `context + horizon` fits the window.
+    Autoregressive,
+    /// Up to [`SINGLE_PASS_CONTEXT`] bars unless the caller names more.
+    SinglePass,
+}
+
+/// History a single-pass model takes by default, bars.
+const SINGLE_PASS_CONTEXT: usize = 512;
+
+/// Run `predict` with `forecast` as the model's forecast call.
+fn predict_with(
+    forecaster: &dyn ForecastModel,
+    policy: ContextPolicy,
+    forecast: &mut dyn FnMut(&forecast::Panel, &forecast::ForecastSpec) -> Result<forecast::Forecast, forecast::ForecastError>,
+    inv: &Invocation,
+    progress: &mut dyn FnMut(Progress),
+) -> ActionResult {
+    let caps = forecaster.capabilities();
+    let horizon = horizon_of(inv, 48);
+    let exact = caps.max_context.saturating_sub(horizon).max(1);
+    let (default_context, exact_context) = match policy {
+        ContextPolicy::Autoregressive => (exact, Some(exact)),
+        ContextPolicy::SinglePass => (caps.max_context.min(SINGLE_PASS_CONTEXT), None),
+    };
+    forecastops::run_predict(forecastops::PredictModel { name: &caps.name, max_context: caps.max_context, default_context, exact_context, forecast }, inv, progress)
+}
+
+/// The served manifest of a forecaster: `forecast` and `predict`.
+fn served_manifest(model: &str, summary: &str, forecast: ActionSpec, predict: ActionSpec) -> Manifest {
+    Manifest::new(model, summary, vec![forecast, predict])
+}
+
+/// The `predict` action's summary, one sentence shared by every model.
+fn predict_spec(model: &str) -> ActionSpec {
+    forecastops::predict_spec(&format!("score {model} on the last bars of an OHLCV CSV it was not shown, next to persistence, drift and seasonal naive (CRPS, MAE, pinball, band coverage), optionally with the evidence chart"))
+}
+
 /// Hot-footprint RAM estimate for a weights file (~1.3× the on-disk size for the
 /// f32 unpack + index overhead), mirroring the depth resident.
 /// Run `load` with the card `device` names as this thread's device selection.
@@ -141,30 +191,41 @@ fn guard_npu<T>(f: impl FnOnce() -> T) -> Result<T, String> {
 
 // ================================ chronos2 =================================
 
-/// Chronos-2 universal forecaster behind the scheduler. `BRAIN_CHRONOS2` = the
-/// brain-format weights. Emits the model's native 21 quantile levels.
+/// Chronos-2 universal forecaster behind the scheduler: the checkpoint the model
+/// store resolves for `chronos2` (a brain container or an `amazon/chronos-2`
+/// directory). Emits the model's native 21 quantile levels.
 pub struct Chronos2Resident {
     path: String,
 }
 
 impl Chronos2Resident {
-    pub fn from_env() -> Option<Chronos2Resident> {
-        std::env::var("BRAIN_CHRONOS2").ok().filter(|p| !p.is_empty()).map(|path| Chronos2Resident { path })
+    /// The checkpoint `store` resolves (or pins) for `chronos2`.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<Chronos2Resident> {
+        Some(Self::new(loader::served::served_assembly(store, "chronos2", &chronos2::spec::Chronos2Spec)?.role_path("weights").ok()?.as_str()))
     }
-    /// Explicit `.safetensors` path (the `brain perf` target and non-env callers).
+    /// Direct constructor for a caller that already holds the checkpoint path
+    /// (`brain perf`).
     pub fn new(path: &str) -> Chronos2Resident {
         Chronos2Resident { path: path.to_string() }
     }
 }
 
-/// The static (weights-free) Chronos-2 manifest — the catalog's discovery entry
-/// (`brain caps`), shared with [`ResidentModel::manifest`] so the two cannot drift.
+/// The served (weights-free) Chronos-2 manifest, shared with
+/// [`ResidentModel::manifest`] so the two cannot drift.
 pub fn chronos2_manifest() -> Manifest {
-    Manifest::new(
+    served_manifest(
         CHRONOS2_MODEL,
         "probabilistic time-series forecasting (Chronos-2); 21 quantile levels",
-        vec![base_forecast_spec("probabilistic forecast; forecast blob is [levels, horizon] quantile-major")],
+        base_forecast_spec("probabilistic forecast; forecast blob is [levels, horizon] quantile-major"),
+        predict_spec("Chronos-2"),
     )
+}
+
+/// What `brain chronos2 <action>` runs: the served actions plus `import`.
+pub fn chronos2_direct_manifest() -> Manifest {
+    let mut m = chronos2_manifest();
+    m.actions.push(crate::forecast_actions::import_spec("convert an amazon/chronos-2 directory into a brain checkpoint (one container with the config in its header)"));
+    m
 }
 
 impl ResidentModel for Chronos2Resident {
@@ -186,30 +247,33 @@ impl ResidentModel for Chronos2Resident {
         MemCost::new(r, r).with_npu(512 << 20)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let model = on_device(device, || chronos2::model::Chronos2::load(&self.path))?;
+        let forecaster = on_device(device, || chronos2::Chronos2Forecaster::load(&self.path))?;
         if let Device::Npu(_) = device {
             return Ok(Box::new(Chronos2NpuInstance {
-                model,
+                forecaster,
                 path: self.path.clone(),
                 cfg: npu_cfg(),
                 cache: RefCell::new(HashMap::new()),
                 device: RefCell::new("npu".into()),
             }));
         }
-        Ok(Box::new(Chronos2CpuInstance { model }))
+        Ok(Box::new(Chronos2CpuInstance { forecaster }))
     }
 }
 
 /// chronos2 on gpu_core (CPU or GPU per the process backend).
 struct Chronos2CpuInstance {
-    model: chronos2::model::Chronos2,
+    forecaster: chronos2::Chronos2Forecaster,
 }
 
 impl Instance for Chronos2CpuInstance {
-    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if action == "predict" {
+            return predict_with(&self.forecaster, ContextPolicy::SinglePass, &mut |p, s| self.forecaster.forecast(p, s), inv, progress);
+        }
         let (context, _shape) = decode_f32(inv, "context")?;
         let horizon = horizon_of(inv, 64);
-        let q = self.model.forecast_quantiles(&context, horizon); // [21, horizon] quantile-major
+        let q = self.forecaster.model().forecast_quantiles(&context, horizon); // [21, horizon] quantile-major
         Ok(chronos2_outcome(q, horizon, "gpu_core"))
     }
 }
@@ -235,8 +299,7 @@ impl<'a> Chronos2NpuModel<'a> {
 
 impl npu::NpuModel for Chronos2NpuModel<'_> {
     fn build(&self, g: &mut onnx::GraphBuilder) -> Result<(), String> {
-        let reader = checkpoint::weightio::WeightReader::open(self.path).map_err(|e| format!("open {}: {e}", self.path))?;
-        let cfg = chronos2::Chronos2Config::from_hf(&reader.config())?;
+        let (reader, cfg) = chronos2::import::open_weights(self.path)?;
         npu::chronos2_topology::build_chronos2_graph_quant(&cfg, &reader, self.s, self.n_out, g, npu::qwen_topology::Quant::F32);
         Ok(())
     }
@@ -258,7 +321,7 @@ impl npu::NpuModel for Chronos2NpuModel<'_> {
 /// head/denorm. Compiled graphs are cached per `(context_len, n_out)` so repeated
 /// same-shape requests skip recompilation.
 struct Chronos2NpuInstance {
-    model: chronos2::model::Chronos2,
+    forecaster: chronos2::Chronos2Forecaster,
     path: String,
     cfg: NpuConfig,
     cache: RefCell<HashMap<(usize, usize), NpuGraph>>,
@@ -266,11 +329,17 @@ struct Chronos2NpuInstance {
 }
 
 impl Instance for Chronos2NpuInstance {
-    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    // `predict` runs the device path (`ForecastModel::forecast`): the NPU is
+    // the `forecast` action's.
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if action == "predict" {
+            return predict_with(&self.forecaster, ContextPolicy::SinglePass, &mut |p, s| self.forecaster.forecast(p, s), inv, progress);
+        }
         let (context, _shape) = decode_f32(inv, "context")?;
         let horizon = horizon_of(inv, 64);
-        let d = self.model.config().d_model;
-        let (model, path, cfg, cache, devcell) = (&self.model, self.path.as_str(), &self.cfg, &self.cache, &self.device);
+        let model = self.forecaster.model();
+        let d = model.config().d_model;
+        let (path, cfg, cache, devcell) = (self.path.as_str(), &self.cfg, &self.cache, &self.device);
         let q = guard_npu(|| {
             model.forecast_quantiles_with_core(&context, horizon, |emb, mask, n_out| {
                 let s = emb.len() / d;
@@ -303,18 +372,21 @@ fn chronos2_outcome(q: Vec<f32>, horizon: usize, device: &str) -> Outcome {
 
 // ================================= fincast =================================
 
-/// FinCast financial forecaster behind the scheduler. `BRAIN_FINCAST` = the
-/// brain-format weights. `freq` selects the frequency bucket (0/1/2). Emits the
-/// full head: `[horizon, num_outputs]` (col 0 = mean, cols 1.. = 9 quantiles).
+/// FinCast financial forecaster behind the scheduler: the checkpoint the model
+/// store resolves for `fincast` (a brain container or the released
+/// safetensors). `freq` selects the frequency bucket (0/1/2). Emits the full
+/// head: `[horizon, num_outputs]` (col 0 = mean, cols 1.. = 9 quantiles).
 pub struct FincastResident {
     path: String,
 }
 
 impl FincastResident {
-    pub fn from_env() -> Option<FincastResident> {
-        std::env::var("BRAIN_FINCAST").ok().filter(|p| !p.is_empty()).map(|path| FincastResident { path })
+    /// The checkpoint `store` resolves (or pins) for `fincast`.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<FincastResident> {
+        Some(Self::new(loader::served::served_assembly(store, "fincast", &fincast::spec::FincastSpec)?.role_path("weights").ok()?.as_str()))
     }
-    /// Explicit `.safetensors` path (the `brain perf` target and non-env callers).
+    /// Direct constructor for a caller that already holds the checkpoint path
+    /// (`brain perf`).
     pub fn new(path: &str) -> FincastResident {
         FincastResident { path: path.to_string() }
     }
@@ -324,9 +396,16 @@ impl FincastResident {
     }
 }
 
-/// The static (weights-free) FinCast manifest — see [`chronos2_manifest`].
+/// The served (weights-free) FinCast manifest - see [`chronos2_manifest`].
 pub fn fincast_manifest() -> Manifest {
-    Manifest::new(FINCAST_MODEL, "financial time-series forecasting (FinCast); mean + 9 quantiles", vec![FincastResident::spec()])
+    served_manifest(FINCAST_MODEL, "financial time-series forecasting (FinCast); mean + 9 quantiles", FincastResident::spec(), predict_spec("FinCast"))
+}
+
+/// What `brain fincast <action>` runs: the served actions plus `import`.
+pub fn fincast_direct_manifest() -> Manifest {
+    let mut m = fincast_manifest();
+    m.actions.push(crate::forecast_actions::import_spec("convert the released FinCast safetensors into a brain checkpoint (one container with the config in its header)"));
+    m
 }
 
 impl ResidentModel for FincastResident {
@@ -346,31 +425,35 @@ impl ResidentModel for FincastResident {
         MemCost::new(r, r).with_npu(1536 << 20)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let model = on_device(device, || fincast::model::Fincast::load(&self.path))?;
+        let forecaster = on_device(device, || fincast::FincastForecaster::load(&self.path))?;
         if let Device::Npu(_) = device {
             return Ok(Box::new(FincastNpuInstance {
-                model,
+                forecaster,
                 path: self.path.clone(),
                 cfg: npu_cfg(),
                 cache: RefCell::new(HashMap::new()),
                 device: RefCell::new("npu".into()),
             }));
         }
-        Ok(Box::new(FincastCpuInstance { model }))
+        Ok(Box::new(FincastCpuInstance { forecaster }))
     }
 }
 
 struct FincastCpuInstance {
-    model: fincast::model::Fincast,
+    forecaster: fincast::FincastForecaster,
 }
 
 impl Instance for FincastCpuInstance {
-    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if action == "predict" {
+            return predict_with(&self.forecaster, ContextPolicy::SinglePass, &mut |p, s| self.forecaster.forecast(p, s), inv, progress);
+        }
         let (context, _shape) = decode_f32(inv, "context")?;
         let horizon = horizon_of(inv, 64);
         let freq = inv.get_i64("freq").unwrap_or(0).max(0) as usize;
-        let out = self.model.forecast_full(&context, freq, horizon); // [horizon, num_outputs]
-        Ok(fincast_outcome(&self.model, out, horizon, "gpu_core"))
+        let model = self.forecaster.model();
+        let out = model.forecast_full(&context, freq, horizon); // [horizon, num_outputs]
+        Ok(fincast_outcome(model, out, horizon, "gpu_core"))
     }
 }
 
@@ -395,8 +478,7 @@ impl<'a> FincastNpuModel<'a> {
 
 impl npu::NpuModel for FincastNpuModel<'_> {
     fn build(&self, g: &mut onnx::GraphBuilder) -> Result<(), String> {
-        let reader = checkpoint::weightio::WeightReader::open(self.path).map_err(|e| format!("open {}: {e}", self.path))?;
-        let cfg = fincast::FincastConfig::from_json(&reader.config())?;
+        let (reader, cfg) = fincast::import::open_weights(self.path)?;
         npu::fincast_topology::build_fincast_graph_quant(&cfg, &reader, self.s, g, npu::qwen_topology::Quant::F32);
         Ok(())
     }
@@ -432,7 +514,7 @@ impl npu::NpuModel for FincastNpuModel<'_> {
 /// `npu::NpuModel` seam (`FincastNpuModel`). Compiled graphs are cached per
 /// context length `s` so repeated same-shape requests skip recompilation.
 struct FincastNpuInstance {
-    model: fincast::model::Fincast,
+    forecaster: fincast::FincastForecaster,
     path: String,
     cfg: NpuConfig,
     cache: RefCell<HashMap<usize, NpuGraph>>,
@@ -440,11 +522,16 @@ struct FincastNpuInstance {
 }
 
 impl Instance for FincastNpuInstance {
-    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    // `predict` runs the device path, like chronos2's.
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if action == "predict" {
+            return predict_with(&self.forecaster, ContextPolicy::SinglePass, &mut |p, s| self.forecaster.forecast(p, s), inv, progress);
+        }
         let (context, _shape) = decode_f32(inv, "context")?;
         let horizon = horizon_of(inv, 64);
         let freq = inv.get_i64("freq").unwrap_or(0).max(0) as usize;
-        let (model, path, cfg, cache, devcell) = (&self.model, self.path.as_str(), &self.cfg, &self.cache, &self.device);
+        let model = self.forecaster.model();
+        let (path, cfg, cache, devcell) = (self.path.as_str(), &self.cfg, &self.cache, &self.device);
         let out = guard_npu(|| {
             model.forecast_full_with_core(&context, freq, horizon, |emb, amask| {
                 let s = (amask.len() as f64).sqrt() as usize;
@@ -462,7 +549,7 @@ impl Instance for FincastNpuInstance {
             })
         })?;
         let dev = self.device.borrow().clone();
-        Ok(fincast_outcome(&self.model, out, horizon, &dev))
+        Ok(fincast_outcome(self.forecaster.model(), out, horizon, &dev))
     }
 }
 
@@ -477,8 +564,8 @@ fn fincast_outcome(model: &fincast::model::Fincast, out: Vec<f32>, horizon: usiz
 
 // ================================== kronos =================================
 
-/// Kronos autoregressive OHLCV forecaster behind the scheduler.
-/// `BRAIN_KRONOS_TOKENIZER` + `BRAIN_KRONOS_DECODER` = the two checkpoint dirs.
+/// Kronos autoregressive OHLCV forecaster behind the scheduler: the `tokenizer`
+/// and `decoder` roles the model store resolves for `kronos`.
 /// Input `context` is the OHLCV bar matrix `[T, feat]`; optional `ctx_stamp` /
 /// `fut_stamp` are calendar stamps `[·, 5]` u32 (zeros if absent). Output is the
 /// generated bars `[horizon, feat]`. CPU/GPU only for now (the two-graph NPU
@@ -489,19 +576,20 @@ pub struct KronosResident {
 }
 
 impl KronosResident {
-    pub fn from_env() -> Option<KronosResident> {
-        let tokenizer = std::env::var("BRAIN_KRONOS_TOKENIZER").ok().filter(|p| !p.is_empty())?;
-        let decoder = std::env::var("BRAIN_KRONOS_DECODER").ok().filter(|p| !p.is_empty())?;
-        Some(KronosResident { tokenizer, decoder })
+    /// The two checkpoints `store` resolves (or pins) for `kronos`.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<KronosResident> {
+        let assembly = loader::served::served_assembly(store, "kronos", &kronos::spec::KronosSpec)?;
+        Some(Self::new(&assembly.role_path("tokenizer").ok()?, &assembly.role_path("decoder").ok()?))
     }
-    /// Explicit tokenizer + decoder checkpoint dirs (the `brain perf` target and
-    /// any caller that isn't env-driven).
+    /// Direct constructor for a caller that already holds the tokenizer and
+    /// decoder checkpoints (`brain perf`).
     pub fn new(tokenizer: &str, decoder: &str) -> KronosResident {
         KronosResident { tokenizer: tokenizer.to_string(), decoder: decoder.to_string() }
     }
     fn spec() -> ActionSpec {
         base_forecast_spec("OHLCV forecast; context is [T, feat] bars, forecast is [horizon, feat] samples")
             .param(ParamSpec::new("temperature", ParamType::Float, "sampling temperature (0 or argmax=true => deterministic)").default(json!(1.0)))
+            .param(ParamSpec::new("top_p", ParamType::Float, "nucleus truncation of the sampled token distribution (1 = off)").min(0.0).max(1.0).default(json!(1.0)))
             .param(ParamSpec::new("argmax", ParamType::Bool, "deterministic argmax decode").default(json!(true)))
             .param(ParamSpec::new("seed", ParamType::Int, "RNG seed when sampling (omit for random)"))
             .param(ParamSpec::new("samples", ParamType::Int, "sampled paths sharing one prefill (out [N,horizon,feat])").min(0.0).max(1000.0).default(json!(1)))
@@ -509,14 +597,19 @@ impl KronosResident {
             // host's fact, never a remote caller's choice. A served surface drops
             // the param, and the resident falls back to the boot decoder; a local
             // caller (`brain perf`, a fine-tune check) still passes one directly.
-            .param(ParamSpec::new("checkpoint", ParamType::Str,
-                "decoder checkpoint path override (.safetensors file or HF dir); \
-                 empty = the boot decoder. Instances are keyed on (path, mtime, \
-                 size), so per-request checkpoints stay warm side by side and an \
-                 overwritten file hot-reloads — checkpoint selection is request \
-                 state, not server state.").default(json!("")).host_resolved())
+            .param(checkpoint_param())
             .input(BlobSpec::new("ctx_stamp", Media::Bytes, "optional context calendar stamps [T,5] u32-LE"))
             .input(BlobSpec::new("fut_stamp", Media::Bytes, "optional future calendar stamps [horizon,5] u32-LE"))
+    }
+
+    /// `predict` plus the knobs that set how WIDE the predicted band is: left at
+    /// the reference defaults the band is what the model ships, and the coverage
+    /// line says whether it is calibrated on this series.
+    fn predict_spec() -> ActionSpec {
+        predict_spec("Kronos")
+            .param(ParamSpec::new("temperature", ParamType::Float, "sampling temperature of the sampled paths").min(0.0).max(MAX_TEMPERATURE).default(json!(DEFAULT_PREDICT_TEMPERATURE)))
+            .param(ParamSpec::new("top_p", ParamType::Float, "nucleus truncation: tighter narrows the band step after step, so score it against its nominal coverage").min(0.0).max(1.0).default(json!(DEFAULT_PREDICT_TOP_P)))
+            .param(checkpoint_param())
     }
 
     /// The decoder a request selects: the `checkpoint` param when non-empty,
@@ -524,6 +617,28 @@ impl KronosResident {
     fn decoder_for(&self, inv: &Invocation) -> String {
         inv.get_str("checkpoint").filter(|p| !p.is_empty()).unwrap_or_else(|| self.decoder.clone())
     }
+}
+
+/// Highest sampling temperature a request may ask for.
+const MAX_TEMPERATURE: f64 = 10.0;
+/// The reference `KronosPredictor` sampling, which `predict` keeps unless told.
+const DEFAULT_PREDICT_TEMPERATURE: f64 = 1.0;
+const DEFAULT_PREDICT_TOP_P: f64 = 0.9;
+
+/// The `checkpoint` param of a Kronos action.
+///
+/// `host_resolved`: a path on the machine that runs the model is the host's
+/// fact, never a remote caller's choice. A served surface drops the param, and
+/// the resident falls back to the boot decoder; a local caller (`brain perf`,
+/// a fine-tune check) still passes one directly.
+fn checkpoint_param() -> ParamSpec {
+    ParamSpec::new(
+        "checkpoint",
+        ParamType::Str,
+        "decoder checkpoint override (.safetensors or HF dir); empty = the boot decoder. Instances are keyed on (path, mtime, size), so per-request checkpoints stay warm side by side and an overwritten file hot-reloads: checkpoint selection is request state, not server state.",
+    )
+    .default(json!(""))
+    .host_resolved()
 }
 
 /// `"path|mtime|size"` — the identity the residency cache keys a decoder
@@ -549,9 +664,16 @@ fn decoder_from_key(config: &str) -> &str {
     config.rsplitn(3, '|').nth(2).unwrap_or(config)
 }
 
-/// The static (weights-free) Kronos manifest — see [`chronos2_manifest`].
+/// The served (weights-free) Kronos manifest - see [`chronos2_manifest`].
 pub fn kronos_manifest() -> Manifest {
-    Manifest::new(KRONOS_MODEL, "autoregressive OHLCV forecasting (Kronos)", vec![KronosResident::spec()])
+    served_manifest(KRONOS_MODEL, "autoregressive OHLCV forecasting (Kronos)", KronosResident::spec(), KronosResident::predict_spec())
+}
+
+/// What `brain kronos <action>` runs: the served actions plus `finetune`.
+pub fn kronos_direct_manifest() -> Manifest {
+    let mut m = kronos_manifest();
+    m.actions.push(crate::forecast_actions::kronos_finetune_spec());
+    m
 }
 
 impl ResidentModel for KronosResident {
@@ -574,17 +696,17 @@ impl ResidentModel for KronosResident {
         if !std::path::Path::new(&decoder).exists() {
             return Err(format!("kronos checkpoint not found: {decoder}"));
         }
-        let model = on_device(device, || kronos::import::load_model(&self.tokenizer, &decoder))?;
+        let forecaster = on_device(device, || kronos::import::load_model(&self.tokenizer, &decoder).map(kronos::KronosForecaster::new))?;
         if let Device::Npu(_) = device {
             return Ok(Box::new(KronosNpuInstance {
-                model,
+                forecaster,
                 dec_dir: decoder,
                 cfg: npu_cfg(),
                 cached: RefCell::new(HashMap::new()),
                 device: RefCell::new("npu".into()),
             }));
         }
-        Ok(Box::new(KronosInstance { model }))
+        Ok(Box::new(KronosInstance { forecaster }))
     }
 }
 
@@ -602,7 +724,25 @@ fn path_ram(path: &str) -> u64 {
 }
 
 struct KronosInstance {
-    model: kronos::generate::KronosModel,
+    forecaster: kronos::KronosForecaster,
+}
+
+/// The sampling a Kronos `predict` request names: the deterministic modal
+/// rollout for one sample (one stable path, reproducible run to run and N
+/// times cheaper than a cloud), else the temperature and top_p it gives.
+fn predict_sampling(inv: &Invocation) -> kronos::KronosSampling {
+    kronos::KronosSampling {
+        temperature: inv.get_f64("temperature").unwrap_or(DEFAULT_PREDICT_TEMPERATURE) as f32,
+        top_p: inv.get_f64("top_p").unwrap_or(DEFAULT_PREDICT_TOP_P) as f32,
+        argmax: inv.get_i64("samples").unwrap_or(1) <= 1,
+    }
+}
+
+/// Kronos `predict`: its window slides once context + horizon exceed it, so the
+/// default context leaves room for the horizon inside it.
+fn kronos_predict(forecaster: &kronos::KronosForecaster, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    let sampling = predict_sampling(inv);
+    predict_with(forecaster, ContextPolicy::Autoregressive, &mut |p, s| forecaster.forecast_sampled(p, s, &sampling), inv, progress)
 }
 
 /// Decode the kronos context: either full OHLCV bars `[T, feat]`, or a univariate
@@ -648,6 +788,7 @@ fn kronos_opts(inv: &Invocation) -> Result<kronos::generate::GenOpts, String> {
     Ok(kronos::generate::GenOpts {
         temperature: inv.get_f64("temperature").unwrap_or(1.0) as f32,
         argmax: inv.get_bool("argmax").unwrap_or(true),
+        top_p: inv.get_f64("top_p").map_or(1.0, |p| p as f32),
         seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
         ..Default::default()
     })
@@ -663,8 +804,12 @@ fn kronos_outcome(out: Vec<f32>, horizon: usize, feat: usize, device: &str, seed
 }
 
 impl Instance for KronosInstance {
-    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let feat = self.model.feat();
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if action == "predict" {
+            return kronos_predict(&self.forecaster, inv, progress);
+        }
+        let model = self.forecaster.model();
+        let feat = model.feat();
         let (bars, t) = kronos_bars(inv, feat)?;
         let horizon = horizon_of(inv, 64);
         let (ctx_stamp, fut_stamp) = kronos_stamps(inv, t, horizon)?;
@@ -675,7 +820,7 @@ impl Instance for KronosInstance {
         let opts = kronos_opts(inv)?;
         let samples = inv.get_i64("samples").unwrap_or(1).max(1) as usize;
         if samples > 1 {
-            let outs = self.model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, horizon, samples, &opts);
+            let outs = model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, horizon, samples, &opts);
             let flat: Vec<f32> = outs.into_iter().flatten().collect();
             return Ok(Outcome::new()
                 .set("model", json!(KRONOS_MODEL))
@@ -685,7 +830,7 @@ impl Instance for KronosInstance {
                 .set("device", json!("gpu_core"))
                 .blob("forecast", encode_forecast(&flat, vec![samples, horizon, feat], "samples", &[])));
         }
-        let out = self.model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, horizon, &opts); // [horizon, feat]
+        let out = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, horizon, &opts); // [horizon, feat]
         Ok(kronos_outcome(out, horizon, feat, "gpu_core", opts.seed))
     }
 }
@@ -696,7 +841,7 @@ impl Instance for KronosInstance {
 /// run on the accelerator. Sessions are cached per context-length `T` (the graph
 /// is fixed-shape, so the rollout uses a fixed sliding window of `T`).
 struct KronosNpuInstance {
-    model: kronos::generate::KronosModel,
+    forecaster: kronos::KronosForecaster,
     dec_dir: String,
     cfg: NpuConfig,
     /// One compiled KV-cache backend per (context length `t`, cache capacity `cap`).
@@ -713,7 +858,7 @@ impl KronosNpuInstance {
         let q = npu::qwen_topology::Quant::F32;
         let (s1p, s1d, depp, depd) = npu::kronos_export::export_cached_onnx(&self.dec_dir, t, cap, q)?;
         let mk = |b: &[u8]| NpuGraph::compile_bytes(b, &self.cfg).map_err(|e| e.to_string());
-        let core = KronosCachedNpu::new(self.model.decoder_config(), cap, mk(&s1p)?, mk(&s1d)?, mk(&depp)?, mk(&depd)?);
+        let core = KronosCachedNpu::new(self.forecaster.model().decoder_config(), cap, mk(&s1p)?, mk(&s1d)?, mk(&depp)?, mk(&depd)?);
         *self.device.borrow_mut() = core.s1_decode.device().to_string();
         self.cached.borrow_mut().insert((t, cap), core);
         Ok(())
@@ -721,8 +866,12 @@ impl KronosNpuInstance {
 }
 
 impl Instance for KronosNpuInstance {
-    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let feat = self.model.feat();
+    // `predict` runs the host rollout: the NPU is the `forecast` action's.
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if action == "predict" {
+            return kronos_predict(&self.forecaster, inv, progress);
+        }
+        let feat = self.forecaster.model().feat();
         let (bars, t) = kronos_bars(inv, feat)?;
         let horizon = horizon_of(inv, 64);
         let (ctx_stamp, fut_stamp) = kronos_stamps(inv, t, horizon)?;
@@ -730,7 +879,7 @@ impl Instance for KronosNpuInstance {
         let samples = inv.get_i64("samples").unwrap_or(1).max(1) as usize;
         let cap = t + horizon;
         self.ensure(t, cap)?; // compile errors propagate cleanly (no panic)
-        let model = &self.model;
+        let model = self.forecaster.model();
         let cached = &self.cached;
         let dev = self.device.borrow().clone();
         // KV-cached rollout: one prefill fills the cache, then O(cap)/step decode
@@ -985,8 +1134,9 @@ impl kronos::generate::CachedCores for KronosCachedNpu {
 
 // ================================= timesfm3 =================================
 
-/// TimesFM-3 behind the scheduler. `BRAIN_TIMESFM3` = the brain-format
-/// weights. Unlike the other three foundation models here, this wire DOES
+/// TimesFM-3 behind the scheduler: the `weights` role the model store resolves
+/// for `timesfm3` (a `google/timesfm-3.0-pytorch` directory or a brain
+/// container). Unlike the other three foundation models here, this wire DOES
 /// carry the model's native multivariate/covariate capability: `context` is
 /// `[T]` (one target, byte-identical to the original single-series contract)
 /// or `[num_target, T]`; optional `past_covariates` (`[T]`/`[P,T]`) and
@@ -1003,10 +1153,12 @@ pub struct Timesfm3Resident {
 }
 
 impl Timesfm3Resident {
-    pub fn from_env() -> Option<Timesfm3Resident> {
-        std::env::var("BRAIN_TIMESFM3").ok().filter(|p| !p.is_empty()).map(|path| Timesfm3Resident { path })
+    /// The checkpoint `store` resolves (or pins) for `timesfm3`.
+    pub fn from_store(store: &loader::served::ServedStore) -> Option<Timesfm3Resident> {
+        Some(Self::new(loader::served::served_assembly(store, "timesfm3", &timesfm3::spec::Timesfm3Spec)?.role_path("weights").ok()?.as_str()))
     }
-    /// Explicit `.safetensors` path (the `brain perf` target and non-env callers).
+    /// Direct constructor for a caller that already holds the checkpoint path
+    /// (`brain perf`).
     pub fn new(path: &str) -> Timesfm3Resident {
         Timesfm3Resident { path: path.to_string() }
     }
@@ -1021,9 +1173,23 @@ impl Timesfm3Resident {
     }
 }
 
-/// The static (weights-free) TimesFM-3 manifest - see [`chronos2_manifest`].
+/// The served (weights-free) TimesFM-3 manifest - see [`chronos2_manifest`].
 pub fn timesfm3_manifest() -> Manifest {
-    Manifest::new(TIMESFM3_MODEL, "time-series forecasting (TimesFM-3); 9 native quantiles, native multivariate + covariates over this wire", vec![Timesfm3Resident::spec()])
+    served_manifest(
+        TIMESFM3_MODEL,
+        "time-series forecasting (TimesFM-3); 9 native quantiles, native multivariate + covariates over this wire",
+        Timesfm3Resident::spec(),
+        predict_spec("TimesFM-3"),
+    )
+}
+
+/// What `brain timesfm3 <action>` runs: the served actions plus `finetune` and
+/// `import`.
+pub fn timesfm3_direct_manifest() -> Manifest {
+    let mut m = timesfm3_manifest();
+    m.actions.push(crate::forecast_actions::timesfm3_finetune_spec());
+    m.actions.push(crate::forecast_actions::import_spec("convert a google/timesfm-3.0-pytorch directory into a brain checkpoint (one container with the config in its header)"));
+    m
 }
 
 impl ResidentModel for Timesfm3Resident {
@@ -1140,7 +1306,10 @@ impl Timesfm3Instance {
 }
 
 impl Instance for Timesfm3Instance {
-    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if action == "predict" {
+            return predict_with(&self.forecaster, ContextPolicy::SinglePass, &mut |p, s| self.forecaster.forecast(p, s), inv, progress);
+        }
         let horizon = horizon_of(inv, 64);
         let levels = self.forecaster.config().quantile_levels.clone();
 
@@ -1172,6 +1341,11 @@ impl Instance for Timesfm3Instance {
     /// per-job isolation without needing forecast() itself to return partial
     /// results.
     fn run_batch(&mut self, action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        // Only `forecast` is a panel the model batches; a `predict` is its own
+        // multi-origin evaluation.
+        if action != "forecast" {
+            return invs.iter().map(|inv| self.run(action, inv, &mut |_| {})).collect();
+        }
         let levels = self.forecaster.config().quantile_levels.clone();
 
         struct Job {
