@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Read the two LPIPS files into one validated tensor set.
+//! Read the two LPIPS files into one validated tensor set, for either [`Trunk`] (AlexNet, or VGG16 with torchvision's
+//! `vgg16-397923af.pth` and LPIPS v0.1's `vgg.pth`, which the store holds the same way).
 //!
 //! * the trunk, torchvision's `alexnet-owt-7be5be79.pth`, is a zip-container
 //!   `torch.save` that `checkpoint::torchpt` reads as released (a
@@ -20,18 +21,20 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::config::{head_weight, trunk_bias, trunk_weight, TRUNK};
+use crate::config::{head_weight, Trunk};
 
-/// Name -> (shape, data), exactly the fifteen tensors the metric reads.
+/// Name -> (shape, data), exactly the tensors the metric reads: the trunk's convolutions and the five heads.
 pub type Tensors = HashMap<String, (Vec<usize>, Vec<f32>)>;
 
-/// The shapes the metric reads, by name.
-pub fn expected_shapes() -> Vec<(String, Vec<usize>)> {
-    let mut v = Vec::with_capacity(3 * TRUNK.len());
-    for (i, c) in TRUNK.iter().enumerate() {
-        v.push((trunk_weight(i), vec![c.cout as usize, c.cin as usize, c.k as usize, c.k as usize]));
-        v.push((trunk_bias(i), vec![c.cout as usize]));
-        v.push((head_weight(i), vec![1, c.cout as usize, 1, 1]));
+/// The shapes `trunk`'s metric reads, by name.
+pub fn expected_shapes(trunk: Trunk) -> Vec<(String, Vec<usize>)> {
+    let mut v = Vec::new();
+    for c in trunk.convs() {
+        v.push((c.weight(), vec![c.cout as usize, c.cin as usize, c.k as usize, c.k as usize]));
+        v.push((c.bias(), vec![c.cout as usize]));
+    }
+    for (i, ch) in trunk.tap_channels().into_iter().enumerate() {
+        v.push((head_weight(i), vec![1, ch as usize, 1, 1]));
     }
     v
 }
@@ -49,23 +52,46 @@ fn read_into(path: &Path, want: &HashMap<String, Vec<usize>>, out: &mut Tensors)
     Ok(())
 }
 
-/// Read the trunk and the heads, keep the tensors the metric reads, and
+/// Read `trunk`'s files, keep the tensors the metric reads, and
 /// check every one of them is present with its expected shape and finite.
-pub fn read(trunk: &Path, heads: &Path) -> Result<Tensors, String> {
-    let want: HashMap<String, Vec<usize>> = expected_shapes().into_iter().collect();
+pub fn read(trunk: Trunk, trunk_file: &Path, heads: &Path) -> Result<Tensors, String> {
+    let want: HashMap<String, Vec<usize>> = expected_shapes(trunk).into_iter().collect();
     let mut out = Tensors::with_capacity(want.len());
-    read_into(trunk, &want, &mut out)?;
+    read_into(trunk_file, &want, &mut out)?;
     read_into(heads, &want, &mut out)?;
-    validate(&out)?;
+    validate(trunk, &out)?;
     Ok(out)
 }
 
-/// Every expected tensor present, shaped as the graph wants and finite.
-pub fn validate(t: &Tensors) -> Result<(), String> {
-    for (name, shape) in expected_shapes() {
-        let (have, data) = t.get(&name).ok_or_else(|| format!("lpips: no tensor {name} in the trunk or the heads"))?;
+/// A random weight set of `trunk`'s released shapes, for tests and gradient checks that must not need the model store: He-normal
+/// trunk convolutions (so activations keep their scale through the ReLU layers), small biases, and heads uniform in
+/// `[0, 1)` (the released heads are non-negative, which keeps every tap's distance non-negative). Not a metric: its
+/// distances mean nothing, but its arithmetic is the real one.
+pub fn random(trunk: Trunk, seed: u64) -> Tensors {
+    let mut rng = data::rng::Rng::new(seed);
+    expected_shapes(trunk)
+        .into_iter()
+        .map(|(name, shape)| {
+            let n: usize = shape.iter().product();
+            let fan_in = shape[1..].iter().product::<usize>() as f64;
+            let data: Vec<f32> = if name.ends_with(".bias") {
+                (0..n).map(|_| (0.05 * rng.next_gaussian()) as f32).collect()
+            } else if name.starts_with("lin") {
+                (0..n).map(|_| rng.next_f64() as f32).collect()
+            } else {
+                (0..n).map(|_| (rng.next_gaussian() * (2.0 / fan_in).sqrt()) as f32).collect()
+            };
+            (name, (shape, data))
+        })
+        .collect()
+}
+
+/// Every tensor `trunk`'s graph reads present, shaped as it wants and finite.
+pub fn validate(trunk: Trunk, t: &Tensors) -> Result<(), String> {
+    for (name, shape) in expected_shapes(trunk) {
+        let (have, data) = t.get(&name).ok_or_else(|| format!("lpips: no tensor {name} in the {} trunk or heads", trunk.name()))?;
         if *have != shape {
-            return Err(format!("lpips: {name} is {have:?}, expected {shape:?}"));
+            return Err(format!("lpips: {name} is {have:?}, expected {shape:?} for the {} trunk", trunk.name()));
         }
         if let Some(bad) = data.iter().position(|v| !v.is_finite()) {
             return Err(format!("lpips: {name}[{bad}] is {}", data[bad]));

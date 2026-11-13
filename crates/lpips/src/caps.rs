@@ -90,7 +90,7 @@ impl Action for DistanceAction {
         }
 
         self.metric.try_get_mut((), || {
-            let weights = crate::import::read(&self.trunk, &self.heads)?;
+            let weights = crate::import::read(crate::Trunk::Alex, &self.trunk, &self.heads)?;
             Lpips::new(Gpu::new(PIPELINES), &weights)
         }, |metric| {
             let d = metric.distance(&a, &b, w, h, None)?;

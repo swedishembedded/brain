@@ -20,6 +20,8 @@ brain-vision.workspace = true
 brain-imaging.workspace = true
 brain-checkpoint.workspace = true
 brain-paramstore.workspace = true
+# `data::rng::Rng` - `import::random`, the random weight set tests and gradient checks run on.
+brain-data.workspace = true
 
 # `spec.rs` - this metric's rules for the model-store resolver, and the
 # store scan and resolve that find its two files.
@@ -29,5 +31,3 @@ serde_json.workspace = true # `caps`' JSON outputs
 
 [dev-dependencies]
 brain-testutil.workspace = true
-# `data::rng::Lcg` - the one deterministic test PRNG.
-brain-data.workspace = true

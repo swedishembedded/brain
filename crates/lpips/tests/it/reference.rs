@@ -20,26 +20,35 @@
 //! puts them there) and skips, by name, without them.
 
 use gpu_core::Gpu;
-use lpips::config::{head_weight, trunk_bias, trunk_weight, EPS, POOL_K, POOL_STRIDE, SCALE, SHIFT, TRUNK};
+use lpips::config::{head_weight, Trunk, EPS, SCALE, SHIFT, TRUNK};
 use lpips::import::Tensors;
 use lpips::Lpips;
 
 const DUMPER: &str = "tools/goldens/lpips_dump_reference.py";
 
 fn weights() -> Option<Tensors> {
-    let found = lpips::spec::resolve().and_then(|(trunk, heads)| lpips::import::read(&trunk, &heads));
+    store_weights(Trunk::Alex)
+}
+
+/// `trunk`'s released weights from the model store, or a named skip without them.
+fn store_weights(trunk: Trunk) -> Option<Tensors> {
+    let found = lpips::spec::resolve_for(trunk).and_then(|(files, heads)| lpips::import::read(trunk, &files, &heads));
     match found {
         Ok(w) => Some(w),
         Err(e) => {
-            brain_testutil::skip(&format!("LPIPS weights not in the model store ({e}); run {DUMPER}"));
+            brain_testutil::skip(&format!("LPIPS {} weights not in the model store ({e}); run {DUMPER}", trunk.name()));
             None
         }
     }
 }
 
 fn metric(w: &Tensors) -> Lpips {
+    metric_for(Trunk::Alex, w)
+}
+
+pub(crate) fn metric_for(trunk: Trunk, w: &Tensors) -> Lpips {
     let g: Gpu = gpu_core::testgpu::dev(lpips::PIPELINES);
-    Lpips::new(g, w).expect("lpips on the test device")
+    Lpips::with_trunk(g, trunk, w).expect("lpips on the test device")
 }
 
 // ---------------------------------------------------------------------------
@@ -47,7 +56,7 @@ fn metric(w: &Tensors) -> Lpips {
 // ---------------------------------------------------------------------------
 
 /// A `[c, h, w]` map.
-struct Map {
+pub(crate) struct Map {
     c: usize,
     h: usize,
     w: usize,
@@ -58,33 +67,37 @@ fn conv_relu(x: &Map, wt: &[f32], b: &[f32], cout: usize, k: usize, stride: usiz
     let (ho, wo) = ((x.h + 2 * pad - k) / stride + 1, (x.w + 2 * pad - k) / stride + 1);
     let mut v = vec![0.0; cout * ho * wo];
     for o in 0..cout {
-        for oy in 0..ho {
-            for ox in 0..wo {
-                let mut acc = b[o] as f64;
-                for ci in 0..x.c {
-                    for ky in 0..k {
+        let out = &mut v[o * ho * wo..(o + 1) * ho * wo];
+        out.iter_mut().for_each(|a| *a = b[o] as f64);
+        // Tap by tap, each an axpy over the output row it reaches: the same sum as the textbook loop nest, in an
+        // order the compiler vectorises (the f64 reference is run dozens of times by the finite differences).
+        for ci in 0..x.c {
+            for ky in 0..k {
+                for kx in 0..k {
+                    let weight = wt[((o * x.c + ci) * k + ky) * k + kx] as f64;
+                    for oy in 0..ho {
                         let iy = (oy * stride + ky) as isize - pad as isize;
                         if iy < 0 || iy >= x.h as isize {
                             continue;
                         }
-                        for kx in 0..k {
+                        let src = &x.v[(ci * x.h + iy as usize) * x.w..][..x.w];
+                        for (ox, acc) in out[oy * wo..(oy + 1) * wo].iter_mut().enumerate() {
                             let ix = (ox * stride + kx) as isize - pad as isize;
-                            if ix < 0 || ix >= x.w as isize {
-                                continue;
+                            if ix >= 0 && ix < x.w as isize {
+                                *acc += weight * src[ix as usize];
                             }
-                            acc += wt[((o * x.c + ci) * k + ky) * k + kx] as f64 * x.v[(ci * x.h + iy as usize) * x.w + ix as usize];
                         }
                     }
                 }
-                v[(o * ho + oy) * wo + ox] = acc.max(0.0);
             }
         }
+        out.iter_mut().for_each(|a| *a = a.max(0.0));
     }
     Map { c: cout, h: ho, w: wo, v }
 }
 
-fn max_pool(x: &Map) -> Map {
-    let (k, s) = (POOL_K as usize, POOL_STRIDE as usize);
+fn max_pool(trunk: Trunk, x: &Map) -> Map {
+    let (k, s) = (trunk.pool().0 as usize, trunk.pool().1 as usize);
     let (ho, wo) = ((x.h - k) / s + 1, (x.w - k) / s + 1);
     let mut v = vec![f64::NEG_INFINITY; x.c * ho * wo];
     for c in 0..x.c {
@@ -102,8 +115,8 @@ fn max_pool(x: &Map) -> Map {
     Map { c: x.c, h: ho, w: wo, v }
 }
 
-/// The five post-ReLU taps of AlexNet on an interleaved `[0,1]` RGB image.
-fn taps(t: &Tensors, img: &[f32], w: usize, h: usize) -> Vec<Map> {
+/// The five post-ReLU taps of `trunk` on an interleaved `[0,1]` RGB image.
+pub(crate) fn taps(trunk: Trunk, t: &Tensors, img: &[f32], w: usize, h: usize) -> Vec<Map> {
     let mut v = vec![0.0; 3 * w * h];
     for p in 0..w * h {
         for c in 0..3 {
@@ -113,12 +126,15 @@ fn taps(t: &Tensors, img: &[f32], w: usize, h: usize) -> Vec<Map> {
     }
     let mut x = Map { c: 3, h, w, v };
     let mut out = Vec::new();
-    for (i, c) in TRUNK.iter().enumerate() {
+    let tapped = trunk.tap_convs();
+    for (i, c) in trunk.convs().iter().enumerate() {
         if c.pooled {
-            x = max_pool(&x);
+            x = max_pool(trunk, &x);
         }
-        x = conv_relu(&x, &t[&trunk_weight(i)].1, &t[&trunk_bias(i)].1, c.cout as usize, c.k as usize, c.stride as usize, c.pad as usize);
-        out.push(Map { c: x.c, h: x.h, w: x.w, v: x.v.clone() });
+        x = conv_relu(&x, &t[&c.weight()].1, &t[&c.bias()].1, c.cout as usize, c.k as usize, c.stride as usize, c.pad as usize);
+        if tapped.contains(&i) {
+            out.push(Map { c: x.c, h: x.h, w: x.w, v: x.v.clone() });
+        }
     }
     out
 }
@@ -130,10 +146,14 @@ fn cell(o: usize, n: usize, len: usize) -> (usize, usize) {
 
 /// LPIPS per tap, f64: `lpips.LPIPS.forward` with `retPerLayer=True`, the
 /// spatial average weighted by the mask's area average over each cell.
-fn reference(t: &Tensors, a: &[f32], b: &[f32], w: usize, h: usize, mask: Option<&[f32]>) -> [f64; 5] {
-    let (fa, fb) = (taps(t, a, w, h), taps(t, b, w, h));
+pub(crate) fn reference(trunk: Trunk, t: &Tensors, a: &[f32], b: &[f32], w: usize, h: usize, mask: Option<&[f32]>) -> [f64; 5] {
+    distance_of(t, &taps(trunk, t, a, w, h), &taps(trunk, t, b, w, h), w, h, mask)
+}
+
+/// [`reference`] from the two images' taps, so a caller that varies one image computes the other's once.
+pub(crate) fn distance_of(t: &Tensors, fa: &[Map], fb: &[Map], w: usize, h: usize, mask: Option<&[f32]>) -> [f64; 5] {
     let mut out = [0.0; 5];
-    for (i, (ma, mb)) in fa.iter().zip(&fb).enumerate() {
+    for (i, (ma, mb)) in fa.iter().zip(fb).enumerate() {
         let lin = &t[&head_weight(i)].1;
         let hw = ma.h * ma.w;
         let (mut num, mut den) = (0.0, 0.0);
@@ -237,12 +257,28 @@ fn the_device_agrees_with_an_f64_transcription_of_the_reference() {
     let mask: Vec<f32> = (0..w * h).map(|p| if p % w >= w / 3 { 1.0 } else { 0.25 * ((p / w) % 2) as f32 }).collect();
     for mask in [None, Some(&mask[..])] {
         let dev = m.distance(&a, &b, w as u32, h as u32, mask).expect("distance");
-        let host = reference(&t, &a, &b, w, h, mask);
+        let host = reference(Trunk::Alex, &t, &a, &b, w, h, mask);
         for (i, (d, r)) in dev.layers.iter().zip(&host).enumerate() {
             close(*d, *r, &format!("tap {i}, masked {}", mask.is_some()));
         }
         close(dev.total, host.iter().sum(), "total");
         assert!(dev.total > 0.05, "a visibly different pair is far apart: {}", dev.total);
+    }
+}
+
+/// The VGG16 trunk, from the model store: the device agrees with the f64 reference tap by tap. (Without the files the
+/// same comparison runs on random weights in `backward.rs`.)
+#[test]
+fn the_released_vgg16_weights_agree_with_the_f64_reference() {
+    let Some(t) = store_weights(Trunk::Vgg16) else { return };
+    let mut m = metric_for(Trunk::Vgg16, &t);
+    let (w, h) = (40, 32);
+    let a = texture(w, h, 0.0);
+    let b = noisy(&texture(w, h, 2.0), 0.15, 7);
+    let dev = m.distance(&a, &b, w as u32, h as u32, None).expect("distance");
+    let host = reference(Trunk::Vgg16, &t, &a, &b, w, h, None);
+    for (i, (d, r)) in dev.layers.iter().zip(&host).enumerate() {
+        close(*d, *r, &format!("vgg tap {i}"));
     }
 }
 
@@ -300,7 +336,7 @@ fn the_official_example_distances_are_reproduced() {
         let (img, ow, oh) = load(other);
         assert_eq!((ow, oh), (w, h));
         let dev = m.distance(&reference_img, &img, w, h, None).expect("distance");
-        let host = reference(&t, &reference_img, &img, w as usize, h as usize, None);
+        let host = reference(Trunk::Alex, &t, &reference_img, &img, w as usize, h as usize, None);
         for i in 0..5 {
             let official_tap = pair["layers"][i].as_f64().expect("official tap");
             close(dev.layers[i], official_tap, &format!("{other} tap {i} on the device"));

@@ -3,17 +3,19 @@
 
 //! LPIPS, the learned perceptual image patch similarity (2018,
 //! "The Unreasonable Effectiveness of Deep Features as a Perceptual
-//! Metric"), version 0.1 with the AlexNet trunk: the perceptual distance
+//! Metric"), version 0.1 with the AlexNet or the VGG16 trunk: the perceptual distance
 //! novel-view synthesis is conventionally reported in next to PSNR and SSIM.
 //! Lower is closer; identical images are exactly 0.
 //!
 //! * [`caps`] - the metric as a `brain/lpips` capability (`distance`);
-//! * [`config`] - the fixed architecture, read off the reference sources;
+//! * [`config`] - the two fixed architectures ([`Trunk`]), read off the reference sources;
 //! * [`import`] - torchvision's `alexnet-owt-7be5be79.pth` and the v0.1
 //!   heads, validated by shape;
 //! * [`spec`] - how the model-store resolver finds both files;
 //! * [`model`] - [`Lpips`], the metric on the device, built from the shared
-//!   conv-net blocks and existing kernels only.
+//!   conv-net blocks and existing kernels only, and its gradient with respect
+//!   to the input images ([`Lpips::distance_grad`], trunk and heads frozen):
+//!   what a perceptual training loss differentiates.
 //!
 //! Swedish Embedded AB implements image-quality evaluation for 3D
 //! reconstruction and generative pipelines for its clients. If your team
@@ -26,4 +28,5 @@ pub mod import;
 pub mod model;
 pub mod spec;
 
-pub use model::{Distance, Lpips, PIPELINES};
+pub use config::Trunk;
+pub use model::{Distance, Lpips, GRAD_PIPELINES, PIPELINES};
