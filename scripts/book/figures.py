@@ -29,6 +29,7 @@ machines would fail for reasons unrelated to the figure.
     scripts/book/figures.py --check    # verify freshness and pairing
     scripts/book/figures.py --png DIR  # also rasterize every figure to DIR
     scripts/book/figures.py --all      # re-render even figures whose source is unchanged
+    scripts/book/figures.py v13-training-at-scale   # only that volume's figures (with any mode)
 
 Only stale figures are re-rendered unless --all is given.
 
@@ -56,8 +57,28 @@ DOT_DEFAULTS = ["-Gfontname=Helvetica", "-Nfontname=Helvetica", "-Efontname=Helv
                 "-Gfontsize=11", "-Nfontsize=11", "-Efontsize=11", "-Gbgcolor=white", "-Gpad=0.15"]
 
 
-def sources():
-    return sorted(p for p in SRC.rglob("*") if p.suffix in (".dot", ".py") and p.is_file())
+def sources(volumes: list[str] | None = None):
+    found = sorted(p for p in SRC.rglob("*") if p.suffix in (".dot", ".py") and p.is_file())
+    return [p for p in found if p.relative_to(SRC).parts[0] in volumes] if volumes else found
+
+
+def parse_args(args: list[str]) -> tuple[set[str], Path | None, list[str]] | None:
+    """(flags, png directory, volume directories), or None for an unknown option or volume."""
+    flags, png_dir, volumes = set(), None, []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--png" and i + 1 < len(args):
+            png_dir, i = Path(args[i + 1]), i + 2
+            continue
+        if a in ("--check", "--all"):
+            flags.add(a)
+        elif not a.startswith("-") and (SRC / a).is_dir():
+            volumes.append(a)
+        else:
+            return None
+        i += 1
+    return flags, png_dir, volumes
 
 
 def target(src: Path) -> Path:
@@ -106,10 +127,10 @@ def render(src: Path) -> str:
     return f"<!-- source-sha256: {digest(src)} -->\n{svg}"
 
 
-def check() -> int:
+def check(volumes: list[str]) -> int:
     errors = []
     expected = set()
-    for src in sources():
+    for src in sources(volumes):
         out = target(src)
         expected.add(out)
         if not out.is_file():
@@ -121,7 +142,7 @@ def check() -> int:
             errors.append(f"{out.relative_to(ROOT)}: stale, its source changed")
         errors += [f"{out.relative_to(ROOT)}: {p}" for p in svgcheck.problems(text)]
     for svg in BOOK.rglob("img/*.svg"):
-        if svg not in expected:
+        if svg not in expected and (not volumes or svg.relative_to(BOOK).parts[0] in volumes):
             errors.append(f"{svg.relative_to(ROOT)}: no source under scripts/book/figures")
     if errors:
         print("\n".join(errors), file=sys.stderr)
@@ -132,15 +153,18 @@ def check() -> int:
 
 
 def main() -> int:
-    if "--check" in sys.argv:
-        return check()
-    png_dir = None
-    if "--png" in sys.argv:
-        png_dir = Path(sys.argv[sys.argv.index("--png") + 1])
+    parsed = parse_args(sys.argv[1:])
+    if parsed is None:
+        print("usage: figures.py [--check] [--all] [--png DIR] [volume directory ...]", file=sys.stderr)
+        return 2
+    flags, png_dir, volumes = parsed
+    if "--check" in flags:
+        return check(volumes)
+    if png_dir:
         png_dir.mkdir(parents=True, exist_ok=True)
-    everything = "--all" in sys.argv
+    everything = "--all" in flags
     overflow = []
-    for src in sources():
+    for src in sources(volumes):
         out = target(src)
         out.parent.mkdir(parents=True, exist_ok=True)
         stamp = STAMP.search(out.read_text(encoding="utf-8")) if out.is_file() else None

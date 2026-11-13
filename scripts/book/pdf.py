@@ -234,6 +234,16 @@ def jobs(args: list[str]) -> list[tuple]:
 
 def main() -> int:
     args = sys.argv[1:]
+    # A mistyped option must not fall through to building the whole book.
+    valued = {"--volume", "-j"}
+    known = {"--whole", "--volumes"} | valued
+    i = 0
+    while i < len(args):
+        if args[i] not in known:
+            print(f"pdf.py: unknown argument {args[i]}", file=sys.stderr)
+            print("usage: pdf.py [--whole | --volumes | --volume ID] [-j N]", file=sys.stderr)
+            return 2
+        i += 2 if args[i] in valued else 1
     # Each PDF is one single-threaded xelatex chain; a few run side by side.
     workers = int(args[args.index("-j") + 1]) if "-j" in args else 2
     todo = jobs(args)

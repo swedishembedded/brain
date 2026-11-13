@@ -20,6 +20,9 @@ language, from the chapter's own description.
     scripts/book/worked.py              # regenerate every block in place
     scripts/book/worked.py --check      # exit 1 if any block is stale
     scripts/book/worked.py --no-cache   # recompute everything (with either mode)
+    scripts/book/worked.py docs/book/v04-computation   # only pages under these paths
+
+Any other option is refused, so a mistyped flag never starts a full run.
 
 A function's output is cached (build/book/worked-cache.json) under a hash of
 its module and every book module that module imports, so an unchanged
@@ -101,11 +104,29 @@ def regenerate(text: str, where: str, cache: Cache) -> str:
     return BLOCK.sub(repl, text)
 
 
+def selected_pages(args: list[str]) -> list[Path]:
+    """Every book page, or only those under the given paths (relative to the repository)."""
+    pages = sorted(BOOK.rglob("*.md"))
+    if not args:
+        return pages
+    roots = [(ROOT / a).resolve() for a in args]
+    for root in roots:
+        if not root.exists() or not root.is_relative_to(BOOK.resolve()):
+            raise SystemExit(f"worked.py: {root} is not a path under {BOOK.relative_to(ROOT)}")
+    return [p for p in pages if any(p.resolve() == r or p.resolve().is_relative_to(r) for r in roots)]
+
+
 def main() -> int:
-    check = "--check" in sys.argv
-    cache = Cache(enabled="--no-cache" not in sys.argv)
+    flags = [a for a in sys.argv[1:] if a.startswith("-")]
+    unknown = [f for f in flags if f not in ("--check", "--no-cache")]
+    if unknown:
+        print(f"worked.py: unknown option {' '.join(unknown)}", file=sys.stderr)
+        print("usage: worked.py [--check] [--no-cache] [path under docs/book ...]", file=sys.stderr)
+        return 2
+    check = "--check" in flags
+    cache = Cache(enabled="--no-cache" not in flags)
     stale, blocks = [], 0
-    for page in sorted(BOOK.rglob("*.md")):
+    for page in selected_pages([a for a in sys.argv[1:] if not a.startswith("-")]):
         text = page.read_text(encoding="utf-8")
         blocks += len(BLOCK.findall(text))
         new = regenerate(text, str(page.relative_to(ROOT)), cache)
