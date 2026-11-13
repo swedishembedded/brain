@@ -17,12 +17,16 @@ use checkpoint::TensorSource;
 /// - A GGUF is read under brain's names straight off its mapping
 ///   ([`crate::gguf_import::open_source`]), with the shape its KV metadata
 ///   declares.
+/// - A model-store directory holding only `model.brain.safetensors` (and the
+///   repo's `config.json`) opens that brain checkpoint.
 /// - Any other file is a brain checkpoint, opened with
 ///   [`checkpoint::weightio::WeightReader`] (through its packed view when it
 ///   stores bf16, FP8 or packed-int8 tensors, [`checkpoint::packed::stored_source`])
 ///   and configured by [`QwenConfig::from_reader`], which refuses a header
 ///   missing a shape key.
 pub fn open_checkpoint(path: &str) -> Result<(QwenConfig, Box<dyn TensorSource>), String> {
+    let brain = brain_checkpoint_in(path);
+    let path = brain.as_deref().unwrap_or(path);
     let dir = std::path::Path::new(path);
     if dir.is_dir() {
         let cfg = hf_dir_config(dir)?;
@@ -45,12 +49,32 @@ pub fn open_checkpoint(path: &str) -> Result<(QwenConfig, Box<dyn TensorSource>)
 /// The config of the checkpoint at `path`, as [`open_checkpoint`] resolves it,
 /// without opening a tensor source.
 pub fn checkpoint_config(path: &str) -> Result<QwenConfig, String> {
+    let brain = brain_checkpoint_in(path);
+    let path = brain.as_deref().unwrap_or(path);
     let dir = std::path::Path::new(path);
     if dir.is_dir() {
         return hf_dir_config(dir);
     }
     let reader = checkpoint::weightio::WeightReader::open(path).map_err(|e| format!("cannot open {path}: {e}"))?;
     QwenConfig::from_reader(&reader).map_err(|e| format!("{path}: {e}"))
+}
+
+/// The brain checkpoint a model-store directory holds in place of upstream
+/// weights - `model.brain.safetensors` beside the repo's `config.json`, which
+/// is what a converted pull leaves - or `None` when `path` is not such a
+/// directory. A directory that still holds upstream safetensors or
+/// `pytorch_model*.bin` weights is opened as the Hugging Face checkpoint.
+fn brain_checkpoint_in(path: &str) -> Option<String> {
+    let dir = std::path::Path::new(path);
+    let brain = dir.join("model.brain.safetensors");
+    if !dir.is_dir() || !brain.is_file() {
+        return None;
+    }
+    let upstream = std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).any(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        (name.ends_with(".safetensors") && !name.ends_with(".brain.safetensors")) || name.starts_with("pytorch_model")
+    });
+    (!upstream).then(|| brain.to_string_lossy().into_owned())
 }
 
 fn hf_dir_config(dir: &std::path::Path) -> Result<QwenConfig, String> {
@@ -67,5 +91,34 @@ pub fn store_checkpoint_path(weights: &std::path::Path, dir: &std::path::Path) -
         dir.to_path_buf()
     } else {
         weights.to_path_buf()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A model-store directory `brain pull` converted holds the upstream
+    /// `config.json` beside `model.brain.safetensors` and no upstream weights.
+    /// Named as a directory it opens that brain checkpoint, as the file would.
+    #[test]
+    fn a_store_directory_holding_only_the_brain_checkpoint_opens_it() {
+        let dir = std::env::temp_dir().join(format!("qwen3-open-brain-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = QwenConfig::tiny();
+        let weights = crate::init_weights(&cfg, 5);
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(name, numel)| (name.clone(), vec![numel as u64], weights[&name].clone()))
+            .collect();
+        checkpoint::st::save_safetensors(dir.join("model.brain.safetensors").to_str().unwrap(), &tensors, &cfg.to_json(), None).unwrap();
+        std::fs::write(dir.join("config.json"), r#"{"architectures": ["Qwen3ForCausalLM"]}"#).unwrap();
+
+        let path = dir.to_str().unwrap();
+        let (got, _) = open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!((got.n_layers, got.d_model, got.vocab), (cfg.n_layers, cfg.d_model, cfg.vocab));
+        assert_eq!(checkpoint_config(path).unwrap().d_model, cfg.d_model);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
