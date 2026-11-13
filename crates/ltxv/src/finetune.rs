@@ -25,8 +25,11 @@
 //! fine-tune run would be invoked once a real checkpoint exists.
 
 use crate::lora::{save_adapter, LoraAdapter, LoraCfg};
-use crate::modelgrad::{grads_saved, make_flow_batch, Cfg, ModelWeights};
+use crate::modelgrad::{grads_saved, make_flow_batch, Cfg, LatentGrid, ModelWeights};
 use data::rng::Rng;
+
+/// Frame rate the synthetic clips' frame axis is expressed in (RoPE positions are in seconds).
+const SYNTHETIC_FPS: f64 = 24.0;
 
 /// One named tensor: `(name, shape, row-major f32 data)`.
 pub type NamedTensor = (String, Vec<usize>, Vec<f32>);
@@ -79,6 +82,8 @@ pub fn run(cfg: &Cfg, base: &ModelWeights<f32>, opts: &TrainOpts, cancel: &capab
     progress(0, total, format!("{} synthetic clip(s) at t={} context_len={}", clips.len(), cfg.t, cfg.context_len));
 
     let mut adapter = LoraAdapter::new(cfg, LoraCfg::new(opts.rank, opts.seed));
+    // The synthetic clips are token sequences with no spatial extent: one latent frame per token.
+    let grid = LatentGrid::line(cfg.t, SYNTHETIC_FPS);
     let fit = model::flow::LoraFitOpts { steps: opts.steps, start: 0, lr: opts.lr, ckpt_every: opts.ckpt_every };
     model::flow::train(
         &fit,
@@ -90,7 +95,7 @@ pub fn run(cfg: &Cfg, base: &ModelWeights<f32>, opts: &TrainOpts, cancel: &capab
             // the exact 0 the samplers never evaluate.
             let sigma = rng.next_f64().clamp(1e-3, 1.0);
             let noise: Vec<f32> = (0..clip.latent.len()).map(|_| rng.next_gaussian() as f32).collect();
-            make_flow_batch(cfg, &clip.latent, &clip.ctx, sigma, &noise)
+            make_flow_batch(cfg, &grid, &clip.latent, &clip.ctx, sigma, &noise, None)
         },
         |adapter, b, lr| {
             let (loss, g) = grads_saved(cfg, &adapter.apply(base), b, opts.saved).expect("the policy was accepted before the first step");

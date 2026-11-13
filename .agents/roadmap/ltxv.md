@@ -379,6 +379,24 @@ this port:
       apply bit-equal after real training steps, standalone descent
       0.377658->0.170922 over 40 steps. Whole-model overfit (Adam, 400
       steps): loss 1.08134715->0.00000051.
+      Flow batches are built from the latent video's geometry, not a
+      synthetic line: `modelgrad::make_flow_batch` takes a `LatentGrid`
+      `(frames, height, width, fps)` and an optional `denoise_mask`, and
+      builds positions (`pipeline::real_pixel_positions`), the keyframe mask
+      (`pipeline::first_frame_keyframes_mask`) and per-token timesteps
+      (`pipeline::timesteps_from_mask`) with the very functions
+      `denoise_stage`/`GuidedModel` call. A conditioned token (denoise mask 0)
+      is noised to its timestep `mask * sigma` (so enters clean at timestep 0)
+      and is EXCLUDED from the velocity loss (no velocity to predict;
+      inference overwrites it each step): the loss is the mean over the other
+      tokens (`modelgrad::loss_tokens`). Gates:
+      `the_batch_positions_are_the_inference_grid`,
+      `the_batch_keyframe_mask_is_the_first_latent_frame`,
+      `a_conditioned_token_is_clean_at_timestep_zero_and_outside_the_loss`,
+      `a_masked_batch_gradient_matches_central_differences`. Not expressed:
+      conditioning blocks APPENDED past the base grid (keyframe images)
+      have their own positions in `append_image_conditioning` and are not
+      in the training batch.
 - [x] **Latent upscalers + duration head** (`crates/ltxv/src/{upsampler,
       duration_head}.rs`) - real weights, real parity, cosine 1.0 throughout.
       Both real checkpoints (spatial x2, temporal x2) share the same

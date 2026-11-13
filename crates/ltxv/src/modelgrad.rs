@@ -20,8 +20,14 @@
 //! per-token sequence (video-to-token patchification is a separate,
 //! upstream concern outside the DiT's own math scope, see
 //! `crate::patchify`) - so the training target lives directly in that same
-//! `[T, out_channels]` space and [`make_flow_batch`] needs no patch geometry
-//! at all.
+//! `[T, out_channels]` space. The token GEOMETRY still matters, to RoPE and to
+//! the keyframe flags: [`make_flow_batch`] takes the latent's
+//! `(frames, height, width)` ([`LatentGrid`]) and builds positions, keyframe
+//! mask and per-token timesteps with the very functions inference calls
+//! ([`crate::pipeline::real_pixel_positions`],
+//! [`crate::pipeline::first_frame_keyframes_mask`],
+//! [`crate::pipeline::timesteps_from_mask`]), so a trained model is shown the
+//! inputs it will be run on.
 //!
 //! ## The conditioning graph is what makes this one model
 //!
@@ -123,10 +129,10 @@ impl Cfg {
     /// A simple, deterministic 3-axis position grid for `self.t` tokens: axis
     /// 0 (frame) walks `[0,1), [1,2), ...`, axes 1/2 (height/width) are
     /// pinned at the single bound `[0,1)` - a 1-D "T frames, 1x1 spatial"
-    /// sequence. Valid RoPE input (the construction only reads per-axis
-    /// `[start,end)` midpoints, see `crate::rope`'s doc) and enough to
-    /// exercise every training path; a real (f,h,w) video grid is not
-    /// needed for this milestone's synthetic training data.
+    /// sequence, in raw grid units, NOT the pixel-scale units inference runs
+    /// in. For forward-only fixtures (block parity, int8 storage) that need
+    /// arbitrary valid RoPE input; a training batch takes its positions from
+    /// its [`LatentGrid`] ([`make_flow_batch`]).
     pub fn simple_positions(&self) -> Vec<f32> {
         let t = self.t;
         let mut v = vec![0f32; 3 * t * 2];
@@ -371,15 +377,33 @@ pub(crate) fn layernorm_bwd<T: Fp>(xhat: &[T], inv: &[T], rows: usize, d: usize,
 
 /// Flow-matching velocity-MSE loss + its `dpred`: `L = mean((pred - v)^2)`.
 pub fn loss<T: Fp>(pred: &[T], v_target: &[T]) -> (f64, Vec<T>) {
+    loss_tokens(pred, v_target, &[1.0])
+}
+
+/// [`loss`] over the tokens `token_mask` keeps (`1.0`; `0.0` leaves a token out): `L = sum over kept tokens and
+/// channels of (pred - v)^2 / (kept tokens * channels)`, and zero gradient on a left-out token. With every token kept
+/// it is [`loss`]. A batch with no kept token has loss 0.
+pub fn loss_tokens<T: Fp>(pred: &[T], v_target: &[T], token_mask: &[f64]) -> (f64, Vec<T>) {
     assert_eq!(pred.len(), v_target.len(), "loss: prediction/target size");
-    let n = T::fr(pred.len() as f64);
+    assert!(!token_mask.is_empty() && pred.len().is_multiple_of(token_mask.len()), "loss: {} values over {} tokens", pred.len(), token_mask.len());
+    let channels = pred.len() / token_mask.len();
+    let kept = token_mask.iter().filter(|&&m| m > 0.0).count();
+    let mut dpred = vec![T::ZERO; pred.len()];
+    if kept == 0 {
+        return (0.0, dpred);
+    }
+    let n = T::fr((kept * channels) as f64);
     let two = T::fr(2.0);
     let mut l = 0.0;
-    let mut dpred = vec![T::ZERO; pred.len()];
-    for i in 0..pred.len() {
-        let err = pred[i] - v_target[i];
-        l += (err * err / n).f64();
-        dpred[i] = two * err / n;
+    for (tok, &m) in token_mask.iter().enumerate() {
+        if m <= 0.0 {
+            continue;
+        }
+        for i in tok * channels..(tok + 1) * channels {
+            let err = pred[i] - v_target[i];
+            l += (err * err / n).f64();
+            dpred[i] = two * err / n;
+        }
     }
     (l, dpred)
 }
@@ -473,6 +497,27 @@ pub fn backward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, cache: &ModelCache<T>, dp
 
 // ---- flow-matching batch ----
 
+/// The latent video's token geometry: `frames x height x width` latent cells (frame outermost, width innermost: the
+/// token order [`crate::pipeline::tc_to_chw`] assumes) at `fps` pixel frames per second.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LatentGrid {
+    pub frames: usize,
+    pub height: usize,
+    pub width: usize,
+    pub fps: f64,
+}
+
+impl LatentGrid {
+    /// `tokens` latent frames of one cell each: a sequence with no spatial extent.
+    pub fn line(tokens: usize, fps: f64) -> LatentGrid {
+        LatentGrid { frames: tokens, height: 1, width: 1, fps }
+    }
+
+    pub fn tokens(&self) -> usize {
+        self.frames * self.height * self.width
+    }
+}
+
 /// One training example, ready for [`forward`].
 #[derive(Clone)]
 pub struct Batch<T> {
@@ -480,48 +525,71 @@ pub struct Batch<T> {
     pub latent: Vec<T>,
     /// The text encoding, `[context_len*dim]`.
     pub ctx: Vec<T>,
-    /// Model per-token timestep input (`sigma` broadcast uniformly - see
-    /// this function's doc), RAW (the `timestep_scale_multiplier` scaling
-    /// happens inside [`forward`]).
+    /// Model per-token timestep input, RAW (the `timestep_scale_multiplier`
+    /// scaling happens inside [`forward`]): `denoise_mask * sigma`.
     pub timesteps: Vec<f64>,
     pub keyframes_mask: Vec<f64>,
+    /// RoPE position bounds `[3, t, 2]`, the table [`Batch::cos`]/[`Batch::sin`] were built from.
+    pub positions: Vec<f32>,
     pub cos: Vec<T>,
     pub sin: Vec<T>,
     /// Target velocity `v = ε - x0`.
     pub target: Vec<T>,
+    /// `[t]`, `1.0` where a token's velocity is part of the loss, `0.0` for a conditioned token.
+    pub loss_mask: Vec<f64>,
+}
+
+impl<T: Fp> Batch<T> {
+    /// This batch's loss on a prediction and its gradient: [`loss_tokens`] over the tokens the batch denoises.
+    pub fn loss(&self, pred: &[T]) -> (f64, Vec<T>) {
+        loss_tokens(pred, &self.target, &self.loss_mask)
+    }
 }
 
 /// Build one flow-matching batch from a clean latent `x0` (`[t*in_channels]`,
 /// already tokens - see this module's doc), text features `ctx`
-/// (`[context_len*dim]`), noise level `σ ∈ (0,1]` and standard-normal `noise`:
+/// (`[context_len*dim]`), noise level `σ ∈ (0,1]` and standard-normal `noise`,
+/// over the latent video `grid` (`grid.tokens() == cfg.t`):
 ///
-/// `x_σ = (1-σ)·x0 + σ·ε`, target `v = ε - x0`, per-token model timestep
-/// `σ` broadcast to every token (diffusion forcing's per-token
-/// `denoise_mask*sigma` collapses to a single scalar sigma when every token
-/// is denoised uniformly - `keyframes_mask` all-ones, the same "no partial
-/// denoise" simplification `crate::pipeline::SingleForwardModel` already
-/// makes). That is exactly the convention `crate::pipeline::to_denoised`
-/// inverts: `x0 = x_σ - σ·model_out`, consistent only with
-/// `model_out = ε - x0`.
-pub fn make_flow_batch<T: Fp>(cfg: &Cfg, x0: &[T], ctx: &[T], sigma: f64, noise: &[T]) -> Batch<T> {
+/// * positions, the keyframe mask and per-token timesteps are inference's
+///   ([`LatentGrid`]);
+/// * `denoise_mask` (`[t]`, `None` = all ones) is the reference's: `1.0` denoise freely, `0.0` a conditioned token,
+///   `1 - strength` in between. A token's timestep is `denoise_mask * σ`
+///   ([`crate::pipeline::timesteps_from_mask`]) and it is noised to exactly that level, `x = (1-s)·x0 + s·ε` with
+///   `s` its timestep, so a conditioned token enters as its clean content at timestep 0 - what inference feeds a
+///   frozen token;
+/// * target `v = ε - x0`, the convention [`crate::pipeline::to_denoised`] inverts
+///   (`x0 = x_σ - σ·model_out`, consistent only with `model_out = ε - x0`);
+/// * a conditioned token (`denoise_mask == 0`) is EXCLUDED from the loss: it is clean and at timestep 0, so it has no
+///   velocity to predict, and inference overwrites it with its clean content each step
+///   (`post_process_latent`). The loss is the mean over the other tokens ([`loss_tokens`]).
+///
+/// Tokens appended as extra conditioning blocks (keyframe images beyond the base grid) are not expressed here: only
+/// in-place conditioning of the base grid is.
+pub fn make_flow_batch<T: Fp>(cfg: &Cfg, grid: &LatentGrid, x0: &[T], ctx: &[T], sigma: f64, noise: &[T], denoise_mask: Option<&[f32]>) -> Batch<T> {
+    assert_eq!(grid.tokens(), cfg.t, "latent grid is {} tokens, the config has {}", grid.tokens(), cfg.t);
     assert_eq!(x0.len(), cfg.t * cfg.in_channels, "latent size");
     assert_eq!(noise.len(), x0.len(), "noise size");
     assert_eq!(ctx.len(), cfg.context_len * cfg.dim, "ctx size");
-    let s = T::fr(sigma);
-    let latent: Vec<T> = x0.iter().zip(noise).map(|(&x, &e)| (T::ONE - s) * x + s * e).collect();
+    assert_eq!(cfg.in_channels, cfg.out_channels, "the velocity target lives in the input latent's channels");
+    if let Some(m) = denoise_mask {
+        assert_eq!(m.len(), cfg.t, "denoise mask size");
+    }
+    let timesteps: Vec<f64> = crate::pipeline::timesteps_from_mask(denoise_mask, cfg.t, sigma).into_iter().map(f64::from).collect();
+    let c = cfg.in_channels;
+    let latent: Vec<T> = (0..x0.len())
+        .map(|i| {
+            let s = T::fr(timesteps[i / c]);
+            (T::ONE - s) * x0[i] + s * noise[i]
+        })
+        .collect();
     let target: Vec<T> = x0.iter().zip(noise).map(|(&x, &e)| e - x).collect();
-    let positions = cfg.simple_positions();
+    let positions = crate::pipeline::real_pixel_positions(grid.frames, grid.height, grid.width, grid.fps);
     let tables = cfg.rope_tables_f32(&positions);
     let cast = |v: &[f32]| -> Vec<T> { v.iter().map(|&x| T::fr(x as f64)).collect() };
-    Batch {
-        latent,
-        ctx: ctx.to_vec(),
-        timesteps: vec![sigma; cfg.t],
-        keyframes_mask: vec![1.0; cfg.t],
-        cos: cast(&tables.cos),
-        sin: cast(&tables.sin),
-        target,
-    }
+    let keyframes_mask = crate::pipeline::first_frame_keyframes_mask(cfg.t, grid.height, grid.width).into_iter().map(f64::from).collect();
+    let loss_mask = denoise_mask.map_or_else(|| vec![1.0; cfg.t], |m| m.iter().map(|&m| if m > 0.0 { 1.0 } else { 0.0 }).collect());
+    Batch { latent, ctx: ctx.to_vec(), timesteps, keyframes_mask, positions, cos: cast(&tables.cos), sin: cast(&tables.sin), target, loss_mask }
 }
 
 /// One training evaluation: forward + loss + backward. The f32
@@ -533,7 +601,7 @@ pub fn grads<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>) -> (f64, Model
 /// [`grads`] keeping what `saved` names of the forward for the backward (see [`forward`]).
 pub fn grads_saved<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>, saved: SavedPolicy) -> Result<(f64, ModelGrads<T>), String> {
     let (pred, cache) = forward(cfg, w, &b.inputs(), saved)?;
-    let (l, dpred) = loss(&pred, &b.target);
+    let (l, dpred) = b.loss(&pred);
     Ok((l, backward(cfg, w, &cache, &dpred)))
 }
 
@@ -714,24 +782,121 @@ mod tests {
         assert!(c.dim > 0 && c.num_layers > 0);
     }
 
+    const FPS: f64 = 24.0;
+
+    /// A `(frames, h, w) = (3, 2, 1)` grid at 6 tokens, with a `Cfg` of that token count.
+    fn grid_cfg() -> (Cfg, LatentGrid) {
+        (Cfg { t: 6, ..Cfg::tiny() }, LatentGrid { frames: 3, height: 2, width: 1, fps: FPS })
+    }
+
+    fn data(cfg: &Cfg) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let x0: Vec<f64> = (0..cfg.t * cfg.in_channels).map(|i| i as f64 * 0.01 + 0.1).collect();
+        let noise: Vec<f64> = (0..x0.len()).map(|_| 0.5).collect();
+        (x0, noise, vec![0.25f64; cfg.context_len * cfg.dim])
+    }
+
     /// The batch convention must be the one `crate::pipeline::to_denoised`
     /// inverts: at σ=1 the input is pure noise, at σ=0 it is the clean
     /// latent, the target is always `ε - x0`.
     #[test]
     fn flow_batch_matches_the_sampler_convention() {
-        let cfg = Cfg::tiny();
-        let x0: Vec<f64> = (0..cfg.t * cfg.in_channels).map(|i| i as f64 * 0.01).collect();
-        let noise: Vec<f64> = (0..x0.len()).map(|_| 0.5).collect();
-        let ctx = vec![0.25f64; cfg.context_len * cfg.dim];
-        let b1 = make_flow_batch(&cfg, &x0, &ctx, 1.0, &noise);
+        let (cfg, grid) = grid_cfg();
+        let (x0, noise, ctx) = data(&cfg);
+        let b1 = make_flow_batch(&cfg, &grid, &x0, &ctx, 1.0, &noise, None);
         assert_eq!(b1.latent, noise);
-        let b0 = make_flow_batch(&cfg, &x0, &ctx, 0.0, &noise);
+        let b0 = make_flow_batch(&cfg, &grid, &x0, &ctx, 0.0, &noise, None);
         assert_eq!(b0.latent, x0);
         for (i, &v) in b0.target.iter().enumerate() {
             assert!((v - (0.5 - x0[i])).abs() < 1e-12);
         }
         assert!(b0.timesteps.iter().all(|&t| t == 0.0));
         assert!(b1.timesteps.iter().all(|&t| t == 1.0));
+    }
+
+    /// Spec: the batch's RoPE positions are the real latent grid's, in the units inference builds them in (pixel
+    /// scale, causal first frame, frame axis over fps), hand-computed here for frames 0 and 1 and the two rows.
+    #[test]
+    fn the_batch_positions_are_the_inference_grid() {
+        let (cfg, grid) = grid_cfg();
+        let (x0, noise, ctx) = data(&cfg);
+        let b = make_flow_batch(&cfg, &grid, &x0, &ctx, 0.5, &noise, None);
+        assert_eq!(b.positions, crate::pipeline::real_pixel_positions(3, 2, 1, FPS));
+        let t = cfg.t;
+        let at = |axis: usize, tok: usize| (b.positions[(axis * t + tok) * 2], b.positions[(axis * t + tok) * 2 + 1]);
+        // Token order is frame-major then row: token = 2 * frame + row.
+        assert_eq!(at(0, 0), (0.0, 1.0 / FPS as f32), "latent frame 0 covers one pixel frame");
+        assert_eq!(at(0, 2), (1.0 / FPS as f32, 9.0 / FPS as f32), "latent frame 1 covers eight, shifted by the causal fix");
+        assert_eq!(at(1, 1), (32.0, 64.0), "the second latent row spans pixel rows 32..64");
+        assert_eq!(at(2, 5), (0.0, 32.0));
+        let want = cfg.rope_tables_f32(&b.positions);
+        assert_eq!(b.cos, want.cos.iter().map(|&v| f64::from(v)).collect::<Vec<_>>());
+        assert_eq!(b.sin, want.sin.iter().map(|&v| f64::from(v)).collect::<Vec<_>>());
+    }
+
+    /// Spec: the keyframe flags are inference's: the first latent frame's tokens, unconditionally.
+    #[test]
+    fn the_batch_keyframe_mask_is_the_first_latent_frame() {
+        let (cfg, grid) = grid_cfg();
+        let (x0, noise, ctx) = data(&cfg);
+        let b = make_flow_batch(&cfg, &grid, &x0, &ctx, 0.5, &noise, None);
+        assert_eq!(b.keyframes_mask, vec![1.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+        let inference: Vec<f64> = crate::pipeline::first_frame_keyframes_mask(6, 2, 1).iter().map(|&v| f64::from(v)).collect();
+        assert_eq!(b.keyframes_mask, inference);
+    }
+
+    /// Spec: a conditioned token (`denoise_mask` 0) is told timestep 0 - the very per-token timesteps inference
+    /// computes - holds its clean content, and is left out of the loss: it has no velocity to predict. The loss is
+    /// the mean over the tokens that are denoised, and no gradient reaches the conditioned token's output.
+    #[test]
+    fn a_conditioned_token_is_clean_at_timestep_zero_and_outside_the_loss() {
+        let (cfg, grid) = grid_cfg();
+        let (x0, noise, ctx) = data(&cfg);
+        let mask = [0.0f32, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let sigma = 0.6;
+        let b = make_flow_batch(&cfg, &grid, &x0, &ctx, sigma, &noise, Some(&mask));
+
+        let inference = crate::pipeline::timesteps_from_mask(Some(&mask), cfg.t, sigma);
+        assert_eq!(b.timesteps, inference.iter().map(|&v| f64::from(v)).collect::<Vec<_>>());
+        assert_eq!(b.timesteps[0], 0.0);
+        let c = cfg.in_channels;
+        assert_eq!(&b.latent[..c], &x0[..c], "a conditioned token is its clean content");
+        assert_ne!(&b.latent[c..2 * c], &x0[c..2 * c]);
+
+        let pred: Vec<f64> = (0..cfg.t * cfg.out_channels).map(|i| 0.1 * i as f64).collect();
+        let (l, dpred) = b.loss(&pred);
+        let live = cfg.t - 1;
+        let want: f64 = (c..cfg.t * c).map(|i| (pred[i] - b.target[i]).powi(2)).sum::<f64>() / (live * c) as f64;
+        assert!((l - want).abs() < 1e-12, "loss {l} vs mean over denoised tokens {want}");
+        assert!(dpred[..c].iter().all(|&g| g == 0.0), "no gradient on the conditioned token");
+        assert!(dpred[c..].iter().all(|&g| g != 0.0));
+    }
+
+    /// Spec: a masked batch's gradient is still the derivative of its (masked) loss, through the whole model.
+    #[test]
+    fn a_masked_batch_gradient_matches_central_differences() {
+        let (cfg, grid) = grid_cfg();
+        let w = init_model::<f64>(&cfg, 7);
+        let (x0, noise, ctx) = data(&cfg);
+        let b = make_flow_batch(&cfg, &grid, &x0, &ctx, 0.45, &noise, Some(&[0.0, 0.0, 1.0, 1.0, 1.0, 1.0]));
+        let (_, g) = grads(&cfg, &w, &b);
+        let loss_at = |w: &ModelWeights<f64>| {
+            let (pred, _) = forward(&cfg, w, &b.inputs(), SavedPolicy::Keep).unwrap();
+            b.loss(&pred).0
+        };
+        // The output projection, the timestep MLP (a conditioned token's timestep 0 enters here) and the keyframe
+        // embedding (the first frame's flag): central differences in f64.
+        let eps = 1e-6;
+        let gv: std::collections::HashMap<String, Vec<f64>> = grad_views(&g).into_iter().map(|(n, v)| (n, v.clone())).collect();
+        for (name, i) in [("proj_out.weight", 3usize), ("adaln_single.emb.timestep_embedder.linear_1.weight", 5), ("keyframes_abs_pos_embedding", 2)] {
+            let at = |delta: f64| {
+                let mut w2 = w.clone();
+                params_mut(&mut w2).into_iter().find(|(n, _)| n == name).unwrap().1[i] += delta;
+                loss_at(&w2)
+            };
+            let num = (at(eps) - at(-eps)) / (2.0 * eps);
+            let an = gv[name][i];
+            assert!((an - num).abs() < 1e-6 * an.abs().max(1.0), "{name}[{i}]: analytic {an} vs numeric {num}");
+        }
     }
 
     /// Every tensor of the manifest must appear exactly once in
@@ -760,7 +925,8 @@ mod tests {
         manifest.sort();
         assert_eq!(sorted, manifest, "params_mut must enumerate exactly the checkpoint manifest (minus to_gate_logits - not yet trainable, see comment above)");
 
-        let b = make_flow_batch(&cfg, &vec![0.1; cfg.t * cfg.in_channels], &vec![0.2; cfg.context_len * cfg.dim], 0.4, &vec![0.3; cfg.t * cfg.in_channels]);
+        let grid = LatentGrid::line(cfg.t, FPS);
+        let b = make_flow_batch(&cfg, &grid, &vec![0.1; cfg.t * cfg.in_channels], &vec![0.2; cfg.context_len * cfg.dim], 0.4, &vec![0.3; cfg.t * cfg.in_channels], None);
         let (_l, g) = grads(&cfg, &w, &b);
         let gv = grad_views(&g);
         let pm: Vec<(String, usize)> = params_mut(&mut w).into_iter().map(|(n, v)| (n, v.len())).collect();

@@ -1278,13 +1278,13 @@ impl LtxvFixture {
         let x0: Vec<f64> = (0..cfg.t * cfg.in_channels).map(|_| rf()).collect();
         let ctx: Vec<f64> = (0..cfg.context_len * cfg.dim).map(|_| rf()).collect();
         let noise: Vec<f64> = (0..x0.len()).map(|_| rf()).collect();
-        let b = ltxv::modelgrad::make_flow_batch(&cfg, &x0, &ctx, 0.42, &noise);
+        let b = ltxv::modelgrad::make_flow_batch(&cfg, &ltxv::modelgrad::LatentGrid::line(cfg.t, 24.0), &x0, &ctx, 0.42, &noise, None);
         LtxvFixture { cfg, w0, b }
     }
 
     fn loss_of(&self, w: &ltxv::modelgrad::ModelWeights<f64>) -> f64 {
         let (pred, _) = ltxv::modelgrad::forward(&self.cfg, w, &self.b.inputs(), model::saved::SavedPolicy::Keep).expect("keeping every block is always available");
-        ltxv::modelgrad::loss(&pred, &self.b.target).0
+        self.b.loss(&pred).0
     }
 
     /// Analytic grads, in [`ltxv::modelgrad::params_mut`] order.

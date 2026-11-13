@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use ltxv::dit::dit_tensor_manifest;
 use ltxv::lora::{LoraAdapter, LoraCfg};
-use ltxv::modelgrad::{grads, make_flow_batch, Batch, Cfg, ModelWeights};
+use ltxv::modelgrad::{grads, make_flow_batch, Batch, Cfg, LatentGrid, ModelWeights};
 use ltxv::LtxDitConfig;
 use vae::blocks::Tensors;
 
@@ -49,7 +49,7 @@ fn fixed_batch(cfg: &Cfg) -> Batch<f32> {
     let x0: Vec<f32> = (0..cfg.t * cfg.in_channels).map(|i| ((i % 23) as f32 / 23.0 - 0.5) * 1.1).collect();
     let noise: Vec<f32> = (0..x0.len()).map(|i| ((i % 13) as f32 / 13.0 - 0.5) * 0.8).collect();
     let ctx: Vec<f32> = (0..cfg.context_len * cfg.dim).map(|i| ((i % 7) as f32 / 7.0 - 0.5) * 1.4).collect();
-    make_flow_batch(cfg, &x0, &ctx, 0.5, &noise)
+    make_flow_batch(cfg, &LatentGrid::line(cfg.t, 24.0), &x0, &ctx, 0.5, &noise, None)
 }
 
 #[test]

@@ -9,7 +9,7 @@
 //! block's input and gives the loss and gradients of keeping every block's cache, bit for bit
 //! (`model::saved::check_block_recompute`).
 
-use ltxv::modelgrad::{backward, forward, grad_views, init_model, loss, make_flow_batch, Cfg};
+use ltxv::modelgrad::{backward, forward, grad_views, init_model, make_flow_batch, Cfg, LatentGrid};
 use model::saved::{check_block_recompute, BlockStep};
 
 #[test]
@@ -19,10 +19,10 @@ fn the_ltx_dit_trainer_recomputes_its_blocks_exactly() {
     let x0: Vec<f64> = (0..cfg.t * cfg.in_channels).map(|i| ((i % 19) as f64 / 19.0 - 0.5) * 1.2).collect();
     let noise: Vec<f64> = (0..x0.len()).map(|i| ((i % 11) as f64 / 11.0 - 0.5) * 0.7).collect();
     let ctx: Vec<f64> = (0..cfg.context_len * cfg.dim).map(|i| ((i % 5) as f64 / 5.0 - 0.5) * 1.5).collect();
-    let b = make_flow_batch(&cfg, &x0, &ctx, 0.4, &noise);
+    let b = make_flow_batch(&cfg, &LatentGrid::line(cfg.t, 24.0), &x0, &ctx, 0.4, &noise, None);
     check_block_recompute("ltxv", |policy| {
         let (pred, cache) = forward(&cfg, &w, &b.inputs(), policy)?;
-        let (l, dpred) = loss(&pred, &b.target);
+        let (l, dpred) = b.loss(&pred);
         let g = backward(&cfg, &w, &cache, &dpred);
         let grads = grad_views(&g).into_iter().map(|(n, v)| (n.to_string(), v.iter().map(|x| x.to_bits()).collect())).collect();
         Ok(BlockStep { loss: l.to_bits(), grads, held_caches: cache.held_block_caches() })

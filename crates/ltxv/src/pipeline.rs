@@ -1057,6 +1057,32 @@ fn aggregate_head_from_source(src: &dyn checkpoint::TensorSource, hidden: usize,
     Ok(gemma4::AggregateEmbed::new(weight, bias, hidden * n_states, out_dim))
 }
 
+/// `ltx_core.tools.VideoLatentTools._first_frame_keyframes_mask`: `[t]`, `1.0` over the first latent frame's `lh * lw`
+/// tokens and `0.0` after, for a video of `t` tokens. Marked unconditionally: the mask names a TOKEN CLASS (the causal
+/// VAE's first latent frame covers a single pixel frame), not "externally conditioned". Inference
+/// ([`denoise_stage`]) and the training batch ([`crate::modelgrad::make_flow_batch`]) both build it here.
+pub fn first_frame_keyframes_mask(t: usize, lh: usize, lw: usize) -> Vec<f32> {
+    let mut mask = vec![0f32; t];
+    mask[..lh * lw].fill(1.0);
+    mask
+}
+
+/// `timesteps_from_mask(denoise_mask, sigma)` (`ltx_pipelines.utils.helpers`, reached from
+/// `modality_from_latent_state`): the model is told, PER TOKEN, how noisy that token is. A frozen token holds clean
+/// content, so its timestep is `0 * sigma == 0`. Getting this wrong is not a small error: the DiT's AdaLN modulation
+/// is computed from this per-token timestep (`crate::dit::ada_layer_norm_single` builds one shift/scale ROW per
+/// token), so a clean token labelled "as noisy as everything else" is modulated as if it were pure noise - and, through
+/// self-attention, drags every genuinely-noisy token with it. The same holds for a long-form window's carried audio
+/// prefix. `mask: None` is "nothing frozen": every one of `tokens` at `sigma`.
+///
+/// Inference ([`GuidedModel`]) and the training batch ([`crate::modelgrad::make_flow_batch`]) both build timesteps here.
+pub fn timesteps_from_mask(mask: Option<&[f32]>, tokens: usize, sigma: f64) -> Vec<f32> {
+    match mask {
+        Some(m) => m.iter().map(|&m| m * sigma as f32).collect(),
+        None => vec![sigma as f32; tokens],
+    }
+}
+
 /// `[3, T, 2]` row-major RoPE position bounds for a `(f, h, w)` latent grid -
 /// `ltx_core.components.patchifiers.VideoLatentPatchifier.
 /// get_patch_grid_bounds`'s construction at `patch_size=1` (latent-token
@@ -2963,23 +2989,6 @@ struct GuidedModel<'a> {
 }
 
 impl GuidedModel<'_> {
-    /// `timesteps_from_mask(denoise_mask, sigma)` (`ltx_pipelines.utils.
-    /// helpers`, reached from `modality_from_latent_state`): the model is
-    /// told, PER TOKEN, how noisy that token is. A frozen token holds clean
-    /// content, so its timestep is `0 * sigma == 0`. Getting this wrong is not
-    /// a small error: the DiT's AdaLN modulation is computed from this
-    /// per-token timestep (`crate::dit::ada_layer_norm_single` builds one
-    /// shift/scale ROW per token), so a clean token labelled "as noisy as
-    /// everything else" is modulated as if it were pure noise - and, through
-    /// self-attention, drags every genuinely-noisy token with it. The same
-    /// holds for a long-form window's carried audio prefix.
-    fn timesteps(mask: Option<&[f32]>, tokens: usize, sigma: f64) -> Vec<f32> {
-        match mask {
-            Some(m) => m.iter().map(|&m| m * sigma as f32).collect(),
-            None => vec![sigma as f32; tokens],
-        }
-    }
-
     fn audio_mask(&self) -> Option<&[f32]> {
         self.audio.and_then(|a| a.frozen.as_ref().map(|(m, _)| m.as_slice()))
     }
@@ -2990,7 +2999,7 @@ impl GuidedModel<'_> {
     fn x0(&self, latent: &[f32], audio_latent: Option<&[f32]>, sigma: f64, step: usize) -> Result<(Vec<f32>, Option<Vec<f32>>), String> {
         use crate::block::NO_PERTURBATIONS;
         use crate::guidance::Pass;
-        let timesteps = Self::timesteps(self.frozen.map(|f| f.mask), self.t, sigma);
+        let timesteps = timesteps_from_mask(self.frozen.map(|f| f.mask), self.t, sigma);
         let base = StepInputs {
             latent,
             timesteps: &timesteps,
@@ -3008,7 +3017,7 @@ impl GuidedModel<'_> {
         let passes = &self.passes;
         let (cond, others): (Latents, Vec<Latents>) = match (self.audio, audio_latent) {
             (Some(a), Some(a_latent)) => {
-                let a_timesteps = Self::timesteps(self.audio_mask(), a.ta, sigma);
+                let a_timesteps = timesteps_from_mask(self.audio_mask(), a.ta, sigma);
                 let ai = AudioInputs { latent: a_latent, timesteps: &a_timesteps, positions: &a.positions, ta: a.ta, sigma: stream_sigma(sigma, self.audio_mask()) };
                 let a_x0 = |v: Vec<f32>| to_denoised(a_latent, &v, &a_timesteps, self.a_channels);
                 let run = |ptb: &crate::block::Perturbations, v_ctx: Caption, a_ctx: Caption| {
@@ -3719,8 +3728,7 @@ fn denoise_stage(sc: &StageCtx<'_>, mut st: Stage<'_>, total: u32, progress: &mu
     // conditioned", and `dit_cfg.use_keyframes_abs_pos_embedding` is `true`
     // for the real checkpoint, so leaving it all-zero would silently omit a
     // real positional-embedding addition on every generation.
-    let mut keyframes_mask = vec![0f32; t];
-    keyframes_mask[..lh * lw].fill(1.0);
+    let keyframes_mask = first_frame_keyframes_mask(t, lh, lw);
 
     // One draw over the WHOLE post-conditioning sequence, matching
     // `GaussianNoiser._sample_noise`, which runs after every conditioning
@@ -5418,7 +5426,7 @@ mod masked_stage_tests {
         // (`timesteps_from_mask`), so a carried token is at 0 and `to_denoised`
         // is the identity there.
         let sigma = 0.909f32;
-        let timesteps: Vec<f32> = mc.denoise_mask.iter().map(|m| m * sigma).collect();
+        let timesteps = timesteps_from_mask(Some(&mc.denoise_mask), t, f64::from(sigma));
         // A velocity the model might have produced - deliberately not zero, so
         // "the token did not move" cannot be true by accident.
         let velocity: Vec<f32> = (0..t * c).map(|i| 3.0 + i as f32).collect();

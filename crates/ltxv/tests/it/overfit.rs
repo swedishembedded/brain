@@ -13,7 +13,7 @@
 //! only ever receive gradient through the per-token fold, so a
 //! partially-wrong fold shows up here as a loss that stalls.
 
-use ltxv::modelgrad::{grad_views, grads, init_model, make_flow_batch, params_mut, Cfg};
+use ltxv::modelgrad::{grad_views, grads, init_model, make_flow_batch, params_mut, Cfg, LatentGrid};
 
 #[test]
 fn the_whole_model_overfits_one_batch() {
@@ -23,7 +23,7 @@ fn the_whole_model_overfits_one_batch() {
     let x0: Vec<f64> = (0..cfg.t * cfg.in_channels).map(|i| ((i % 19) as f64 / 19.0 - 0.5) * 1.2).collect();
     let noise: Vec<f64> = (0..x0.len()).map(|i| ((i % 11) as f64 / 11.0 - 0.5) * 0.7).collect();
     let ctx: Vec<f64> = (0..cfg.context_len * cfg.dim).map(|i| ((i % 5) as f64 / 5.0 - 0.5) * 1.5).collect();
-    let b = make_flow_batch(&cfg, &x0, &ctx, 0.4, &noise);
+    let b = make_flow_batch(&cfg, &LatentGrid::line(cfg.t, 24.0), &x0, &ctx, 0.4, &noise, None);
 
     // Adam state, flat over every parameter tensor.
     let nparams: usize = params_mut(&mut w).iter().map(|(_, p)| p.len()).sum();
