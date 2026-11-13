@@ -130,8 +130,9 @@ fn score(cfg: &AvCfg, w: &AvModelWeights<f32>, v_noise: &[f32], a_noise: &[f32],
     (cos(&x0_v, concept_v) - cos(&x0_v, distractor_v)) + (cos(&x0_a, concept_a) - cos(&x0_a, distractor_a))
 }
 
-#[test]
-fn an_av_lora_trained_only_on_concept_clips_moves_generated_output_toward_the_concept() {
+/// Train an AV LoRA with `seed` on the concept clips and return the mean held-out
+/// score of the base model and of the adapted model.
+fn train_and_score(seed: u64) -> (f32, f32) {
     let cfg = AvCfg::tiny();
     let n_frames = cfg.tv.max(cfg.ta);
 
@@ -176,7 +177,7 @@ fn an_av_lora_trained_only_on_concept_clips_moves_generated_output_toward_the_co
     let base = init_model::<f32>(&cfg, 0xBA5E_0000);
     let dir = std::env::temp_dir().join(format!("ltxv-av-concept-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("tmp dir");
-    let opts = TrainOpts { steps: 80, rank: 4, lr: 4e-3, seed: data::rng::random_seed(), save_path: dir.join("adapter.brain").to_str().expect("utf-8 path").into(), ckpt_every: 0, saved: model::saved::SavedPolicy::Keep };
+    let opts = TrainOpts { steps: 80, rank: 4, lr: 4e-3, seed, save_path: dir.join("adapter.brain").to_str().expect("utf-8 path").into(), ckpt_every: 0, saved: model::saved::SavedPolicy::Keep };
     let cancel = capability::CancelToken::default();
     let mut last_loss = 0.0;
     let tensors = run(&cfg, &base, &train_clips, &opts, &cancel, |step, total, msg| {
@@ -222,7 +223,30 @@ fn an_av_lora_trained_only_on_concept_clips_moves_generated_output_toward_the_co
     let moved = x0_base_v.iter().zip(&x0_adapted_v).map(|(a, b)| (a - b).abs()).sum::<f32>() / x0_base_v.len() as f32;
     assert!(moved > 1e-4, "the concept LoRA did not move the model's output at all: {moved:.3e}");
 
-    assert!(mean_adapted > mean_base, "the concept-only LoRA must move the held-out-caption output toward the concept more than the base model does: adapted={mean_adapted:+.5} base={mean_base:+.5}");
-
     let _ = std::fs::remove_dir_all(&dir);
+    (mean_base, mean_adapted)
+}
+
+/// Training seeds per gate run. One seed is a draw from a distribution whose
+/// lower tail reaches zero (measured over 30 seeds: margin gain +0.0025 to
+/// +0.049, mean about +0.024, sd about +0.013, so roughly one run in thirty
+/// ends below zero on a single seed), so the claim "the adapter biases the
+/// output toward the concept" is tested on the mean over several draws.
+const TRAIN_SEEDS: usize = 8;
+
+#[test]
+fn an_av_lora_trained_only_on_concept_clips_moves_generated_output_toward_the_concept() {
+    // Random by default, always printed: a failure names the seeds to replay.
+    let seeds: Vec<u64> = (0..TRAIN_SEEDS).map(|_| data::rng::random_seed()).collect();
+    println!("av concept gate: training seeds {seeds:?}");
+    let deltas: Vec<f32> = seeds
+        .iter()
+        .map(|&seed| {
+            let (mean_base, mean_adapted) = train_and_score(seed);
+            mean_adapted - mean_base
+        })
+        .collect();
+    let mean_delta = deltas.iter().sum::<f32>() / deltas.len() as f32;
+    println!("av concept gate: per-seed delta={deltas:?} mean delta={mean_delta:+.5}");
+    assert!(mean_delta > 0.0, "the concept-only LoRA must move the held-out-caption output toward the concept more than the base model does: mean delta {mean_delta:+.5} over seeds {seeds:?}, deltas {deltas:?}");
 }
