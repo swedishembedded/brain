@@ -107,8 +107,8 @@ pub struct PolicyConfig {
 impl Default for PolicyConfig {
     /// PPO's usual clip, entropy low enough to regularize without flattening a
     /// decision the conversation really has made, and a discount mild enough
-    /// that a median-length conversation's first turn still carries about a
-    /// third of the weight of its last.
+    /// that a turn thirteen turns before the last still carries about a third
+    /// of the last turn's weight (0.92^13 = 0.34).
     fn default() -> PolicyConfig {
         PolicyConfig { clip: 0.2, entropy: 0.01, gamma: 0.92, anchor: 0.0, target_kl: 0.02 }
     }
