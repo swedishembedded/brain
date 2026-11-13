@@ -9,7 +9,8 @@
 //! parameter count. A counting allocator measures the peak heap above the
 //! baseline during `step` for a model sixty-four times larger; with value, gradient and
 //! state all on disk the peak must stay within the optimiser's declared staging.
-//! This file holds ONE test: a global allocator sees every thread of its binary.
+//! This file holds ONE test in a binary of its own: a global allocator sees
+//! every thread of its binary, so no other test may run beside it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};

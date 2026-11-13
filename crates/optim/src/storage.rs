@@ -216,8 +216,9 @@ impl StateLayout {
         self.total
     }
 
-    fn min_block(&self) -> usize {
-        self.tensors.iter().flat_map(|(_, s)| s.iter()).map(|s| s.codec.format.block()).filter(|&b| b > 1).min().unwrap_or(1)
+    /// The smallest block of any blocked slot; `None` when no slot has blocks (and so no scales).
+    fn min_block(&self) -> Option<usize> {
+        self.tensors.iter().flat_map(|(_, s)| s.iter()).map(|s| s.codec.format.block()).filter(|&b| b > 1).min()
     }
 }
 
@@ -322,10 +323,10 @@ impl<B: Backing> BlockStateStorage<B> {
         if backing.len() != layout.total_bytes() {
             return Err(invalid(format!("backing is {} bytes, layout needs {}", backing.len(), layout.total_bytes())));
         }
-        let block = layout.min_block();
-        // The widest codec is f32 (4 bytes/element); scales are 4 bytes per block.
+        // The widest codec is f32 (4 bytes/element); scales are 4 bytes per block of the finest blocked slot,
+        // and a layout with no blocked slot stages no scales.
         let data = vec![0u8; 4 * max_tile_elems];
-        let scales = vec![0u8; 4 * max_tile_elems.div_ceil(block)];
+        let scales = vec![0u8; layout.min_block().map_or(0, |block| 4 * max_tile_elems.div_ceil(block))];
         Ok(BlockStateStorage { layout, backing, max_tile: max_tile_elems, data, scales })
     }
 
@@ -461,6 +462,18 @@ mod tests {
     use super::*;
     use crate::codec::SlotKind;
     use paramstore::precision::StateFormat;
+
+    /// Spec: the staging holds a scale region only when a slot has blocks; an
+    /// all-f32 layout stages its data and nothing else.
+    #[test]
+    fn staging_has_scales_only_for_blocked_layouts() {
+        let f32_only = StateLayout::new(&[(1000, vec![codec(StateFormat::F32, SlotKind::Signed)])]);
+        let st = BlockStateStorage::new(f32_only.clone(), MemBacking::zeroed(f32_only.total_bytes()), 256).unwrap();
+        assert_eq!(st.staging_bytes(), 4 * 256);
+        let blocked = StateLayout::new(&[(1000, vec![codec(StateFormat::Int8Block { block: 64 }, SlotKind::Signed)])]);
+        let st = BlockStateStorage::new(blocked.clone(), MemBacking::zeroed(blocked.total_bytes()), 256).unwrap();
+        assert_eq!(st.staging_bytes(), 4 * 256 + 4 * 4);
+    }
 
     fn codec(format: StateFormat, kind: SlotKind) -> StateCodec {
         StateCodec { format, kind }

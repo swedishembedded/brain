@@ -20,5 +20,4 @@ mod fused_update;
 mod named_moments;
 mod offload_parity;
 mod parallel_update;
-mod state_memory;
 mod streamed_state;

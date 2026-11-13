@@ -157,21 +157,22 @@ fn lcm(a: usize, b: usize) -> usize {
 }
 
 /// The tile size an optimiser over `specs` actually uses for a requested one:
-/// rounded up to a multiple of every block size in use, so tiles start on
-/// block boundaries. Size a storage's `max_tile_elems` with this.
+/// rounded up to the smallest multiple of every block size and row length in
+/// use (their least common multiple), so tiles start on block and row
+/// boundaries. Size a storage's `max_tile_elems` with this.
 pub fn effective_tile(specs: &[TensorSpec], requested: usize) -> usize {
-    let mut tile = requested.max(1);
+    let mut align = 1;
     for s in specs {
         if let StateFormat::Int8Block { block } = s.precision.state {
             if block > 0 {
-                tile = lcm(tile, block as usize);
+                align = lcm(align, block as usize);
             }
         }
         if let Some(k) = s.row_len {
-            tile = lcm(tile, k);
+            align = lcm(align, k);
         }
     }
-    tile
+    requested.max(1).div_ceil(align) * align
 }
 
 const VALUE_ROUNDING_SLOT: usize = 255;
@@ -291,7 +292,7 @@ pub struct StreamedOptimizer<S: OptimizerStateStorage> {
     seed: u64,
     step: u32,
     tile: usize,
-    // Five f32 tiles, allocated once: value/master, grad, two state slots.
+    // Five f32 tiles, allocated once: value, grad, two state slots, master.
     w: Vec<f32>,
     g: Vec<f32>,
     st: [Vec<f32>; 2],
@@ -302,7 +303,7 @@ pub struct StreamedOptimizer<S: OptimizerStateStorage> {
 }
 
 impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
-    /// `tile_elems` is rounded up to a multiple of every block size in use; the
+    /// `tile_elems` is rounded up as [`effective_tile`] does; the
     /// storage must have been created with at least that tile bound
     /// (see [`Self::tile_elems`]) and the layout from [`state_layout`].
     pub fn new(rule: Rule, specs: Vec<TensorSpec>, state: S, seed: u64, tile_elems: usize) -> io::Result<Self> {
@@ -711,6 +712,22 @@ mod tests {
         let max_tile = 4096;
         let st = BlockStateStorage::new(layout.clone(), MemBacking::zeroed(layout.total_bytes()), max_tile).unwrap();
         StreamedOptimizer::new(rule, specs, st, 11, tile).unwrap()
+    }
+
+    /// Spec: the effective tile is the requested size rounded up to the
+    /// smallest multiple of every block size and row length in use, so tiles
+    /// start on block and row boundaries without growing past one alignment
+    /// unit beyond the request.
+    #[test]
+    fn effective_tile_rounds_up_to_the_alignment_not_a_multiple_of_the_request() {
+        let mut blocked = spec("q", 4096, StateFormat::Int8Block { block: 64 }, MasterPolicy::None, ValueDtype::F32);
+        assert_eq!(effective_tile(std::slice::from_ref(&blocked), 100), 128);
+        assert_eq!(effective_tile(std::slice::from_ref(&blocked), 128), 128);
+        assert_eq!(effective_tile(std::slice::from_ref(&blocked), 1), 64);
+        blocked.row_len = Some(384);
+        assert_eq!(effective_tile(std::slice::from_ref(&blocked), 1000), 1152);
+        let plain = spec("w", 4096, StateFormat::F32, MasterPolicy::None, ValueDtype::F32);
+        assert_eq!(effective_tile(&[plain], 333), 333);
     }
 
     /// Spec: with f32 state the streamed step is bit-identical to the
