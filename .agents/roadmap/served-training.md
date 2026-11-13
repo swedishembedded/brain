@@ -14,6 +14,10 @@ Scope: Training as a job of the serving process (`crates/trainjob`): `brain/trai
 - A call a model refuses at the door (`check_job`) is a 400 on HTTP and a bus error, before a job exists. `/v1/run` and `/v1/jobs` bodies refuse unknown fields.
 - Tests: `crates/trainjob` (store, request, door refusals, real runs, scheduling, HTTP, D-Bus), `crates/apiserve/tests/capabilities.rs` (event stream), `tests/e2e/api_conformance.bats` (flags, auth, refusals), `crates/residency` (transient, check_job).
 
+## Served-only consumers (lane api, 2026-11-13)
+
+- [x] `objective: dpo` on `brain/train`: `brain::PreferenceFineTune` placed on the scheduler's card (`placed`, architecture detected from the base's config, the frozen base's tier chosen for the card as `ChatFineTune` does), the same request validation, limits, door checks and artifact-store transport; the footprint is sized to the two rows of a pair (`Objective::rows_per_step`). Tested on the CPU toy `qwen3`: the loss starts at ln 2 and falls, the tuned margin is positive, bad pairs are refused by record.
+
 ## Adapter hot-load (lane rollout, 2026-11-13)
 
 - [x] `--serve-adapters DIR`: every `*.safetensors` adapter under a directory is offered as a model of its own and the offered set follows the files (appear, renamed over, disappear) with no restart; symlinks, hidden files and other names ignored, depth 4, 1024 files, each file read once, size-capped and verified against the base. Gated on the CPU in `crates/cli/src/adapter_directory.rs` (follow, refuse without replacing what serves, id moves).

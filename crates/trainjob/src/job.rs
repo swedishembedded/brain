@@ -27,7 +27,7 @@ use capability::{ActionResult, Blob, Invocation, Media, Outcome, Progress};
 use serde_json::{json, Value};
 
 use crate::request::{DataRefs, Objective, Request, Source};
-use crate::store::{ArtifactStore, Digest, StoreError};
+use crate::store::{ArtifactStore, StoreError};
 
 /// The most bytes of one dataset or starting adapter a job takes.
 pub const MAX_INPUT_BYTES: u64 = 8 << 30;
@@ -166,16 +166,18 @@ pub struct FootprintCache(Mutex<BTreeMap<FootprintKey, Result<brain::TrainFootpr
 /// The most footprints kept at once (a server trains a handful of bases).
 const MAX_FOOTPRINTS: usize = 64;
 
-/// What a footprint depends on: the base, the row length, the architecture and format named, the card.
+/// What a footprint depends on: the base, the training rows one step holds, the architecture and format named, the card.
 type FootprintKey = (PathBuf, u32, Option<String>, Option<String>, Option<u64>);
 
 impl FootprintCache {
     pub fn of(&self, base_dir: &Path, request: &Request, card_bytes: Option<u64>) -> Result<brain::TrainFootprint, String> {
-        let key = (base_dir.to_path_buf(), request.params.max_block, request.params.arch.clone(), request.params.base_format.clone(), card_bytes);
+        // The rows one step holds: a preference step holds both candidates of a pair.
+        let rows = request.params.max_block.saturating_mul(request.params.objective.rows_per_step());
+        let key = (base_dir.to_path_buf(), rows, request.params.arch.clone(), request.params.base_format.clone(), card_bytes);
         if let Some(known) = self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             return known.clone();
         }
-        let computed = fine_tune_for_footprint(base_dir, request).and_then(|ft| ft.footprint(request.params.max_block, card_bytes).map_err(|e| format!("train: {e}")));
+        let computed = fine_tune_for_footprint(base_dir, request).and_then(|ft| ft.footprint(rows, card_bytes).map_err(|e| format!("train: {e}")));
         // Only a footprint that was worked out is kept, and only so many: the
         // key carries strings a caller chose, and a refusal is cheap to redo,
         // so neither a stream of invented architectures nor of failures can
@@ -320,6 +322,57 @@ pub fn build_fine_tune(request: &Request, base_dir: &Path, staged: &Staged, out_
     Ok(ft)
 }
 
+/// The preference trainer for `request` over the files `staged`, writing into `out_dir`, on the device this thread is
+/// scoped to.
+pub fn build_preference(request: &Request, base_dir: &Path, staged: &Staged, out_dir: &Path) -> Result<brain::PreferenceFineTune, String> {
+    let p = &request.params;
+    let mut ft = brain::PreferenceFineTune::from_pretrained(utf8(base_dir)?)
+        .placed(true)
+        .dataset(&staged.train)
+        .out_dir(out_dir)
+        .steps(p.steps)
+        .grad_accum(p.grad_accum)
+        .strict_updates(p.strict_updates)
+        .max_block(p.max_block);
+    if let Some(arch) = &p.arch {
+        ft = ft.arch(arch.as_str());
+    }
+    if let Some(id) = &p.adapter_id {
+        ft = ft.adapter_id(id.as_str());
+    }
+    if let Some(v) = p.rank {
+        ft = ft.rank(v);
+    }
+    if let Some(v) = p.alpha {
+        ft = ft.alpha(v);
+    }
+    if let Some(v) = p.seed {
+        ft = ft.seed(v);
+    }
+    if let Some(v) = p.lr {
+        ft = ft.lr(v);
+    }
+    if let Some(v) = &p.base_format {
+        ft = ft.base_format(v.as_str());
+    }
+    if let Some(v) = p.beta {
+        ft = ft.beta(v);
+    }
+    if let Some(v) = p.nll_weight {
+        ft = ft.nll_weight(v);
+    }
+    if let Some(v) = p.keep_reasoning {
+        ft = ft.keep_reasoning(v);
+    }
+    if let Some(path) = &staged.held_out {
+        ft = ft.held_out(path);
+    }
+    if let Some(path) = &staged.start_adapter {
+        ft = ft.continue_from(path);
+    }
+    Ok(ft)
+}
+
 fn finite(v: f32) -> Value {
     json!(v)
 }
@@ -350,11 +403,21 @@ fn score_json(score: Option<brain::HeldOutScore>) -> Value {
     }
 }
 
-/// The report of a finished run: what the trainer measured, and where the adapter is. It rides one frame (a
-/// D-Bus datagram, which is lost when it does not fit the socket), so it holds totals and short lists, every
-/// one bounded by the request (see [`crate::request::MAX_EVALUATIONS`]); the per-step series are the frames
-/// the run streamed and the `record` blob.
-fn report(outcome: &brain::ChatFineTuneOutcome, adapter: Option<Digest>, record: Option<Digest>, evaluations: &[(u32, Digest)]) -> Value {
+/// What a finished run produced, before anything is published: the files the trainer wrote and the objective's own
+/// summary of the run (which rides one frame, a D-Bus datagram that is lost when it does not fit the socket, so it holds
+/// totals and short lists, every one bounded by the request: see [`crate::request::MAX_EVALUATIONS`]; the per-step
+/// series are the frames the run streamed and the `record` blob).
+struct Trained {
+    adapter: PathBuf,
+    record: Option<PathBuf>,
+    /// `sha256:<hex>` of the adapter file, as the adapter's card records it.
+    adapter_sha256: String,
+    /// The adapter of each evaluation the run kept, by step.
+    evaluations: Vec<(u32, PathBuf)>,
+    summary: Value,
+}
+
+fn chat_summary(outcome: &brain::ChatFineTuneOutcome) -> Value {
     // The per-step series is in the frames and in the record blob; the report keeps the run's totals.
     let policy_gradient = outcome.policy_gradient.as_ref().map(|pg| {
         let mut stats = serde_json::to_value(&pg.stats).unwrap_or(Value::Null);
@@ -365,9 +428,6 @@ fn report(outcome: &brain::ChatFineTuneOutcome, adapter: Option<Digest>, record:
         stats
     });
     json!({
-        "status": "completed",
-        "adapter_digest": adapter.map(|d| d.hex()),
-        "record_digest": record.map(|d| d.hex()),
         "adapter_sha256": outcome.adapter_digest,
         "base_digest": outcome.base_digest,
         "trained_from": outcome.trained_from,
@@ -396,9 +456,67 @@ fn report(outcome: &brain::ChatFineTuneOutcome, adapter: Option<Digest>, record:
         "selected_step": outcome.selected_step,
         "selection": outcome.selection,
         "stopped_early": outcome.stopped_early,
-        "evaluations": evaluations.iter().map(|(step, digest)| json!({"step": step, "digest": digest.hex()})).collect::<Vec<_>>(),
         "policy_gradient": policy_gradient,
     })
+}
+
+fn preference_score_json(score: Option<brain::PreferenceScore>) -> Value {
+    match score {
+        Some(s) => json!({"accuracy": s.accuracy, "mean_margin": s.mean_margin, "pairs": s.pairs, "skipped": s.skipped}),
+        None => Value::Null,
+    }
+}
+
+/// A preference run's totals. `records` counts pairs; the scores are the tuned adapter against the run's own reference
+/// (the base, or the adapter continued) on the training and the held-out pairs.
+fn preference_summary(outcome: &brain::PreferenceFineTuneOutcome) -> Value {
+    json!({
+        "adapter_sha256": outcome.adapter_digest,
+        "base_digest": outcome.base_digest,
+        "trained_from": outcome.trained_from,
+        "records": outcome.train_pairs,
+        "block": outcome.block,
+        "seed": outcome.seed,
+        "steps": outcome.steps,
+        "steps_completed": outcome.steps_completed,
+        "rank": outcome.rank,
+        "alpha": outcome.alpha,
+        "beta": outcome.beta,
+        "nll_weight": outcome.nll_weight,
+        "initial_loss": outcome.initial_loss,
+        "final_loss": outcome.final_loss,
+        "train_score": preference_score_json(outcome.train_score),
+        "held_out_score": preference_score_json(outcome.held_out_score),
+    })
+}
+
+/// Maps the SDK's error to the job's: a full card is a condition the caller can act on, with nothing wrong in the request.
+fn trainer_failure(e: brain::Error) -> String {
+    match e {
+        brain::Error::DeviceOutOfMemory { .. } => capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("train: {e}")),
+        e => format!("train: {e}"),
+    }
+}
+
+fn train_chat(request: &Request, base_dir: &Path, staged: &Staged, out_dir: &Path, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
+    let fine_tune = build_fine_tune(request, base_dir, staged, out_dir)?;
+    let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
+    if outcome.status != brain::FineTuneStatus::Completed {
+        return Err("cancelled".into());
+    }
+    let adapter = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
+    let evaluations = if request.params.keep_evaluations { outcome.curve.iter().map(|p| (p.step, out_dir.join("evaluations").join(format!("step-{}.safetensors", p.step)))).collect() } else { Vec::new() };
+    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations, summary: chat_summary(&outcome) })
+}
+
+fn train_preference(request: &Request, base_dir: &Path, staged: &Staged, out_dir: &Path, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
+    let fine_tune = build_preference(request, base_dir, staged, out_dir)?;
+    let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
+    if outcome.status != brain::FineTuneStatus::Completed {
+        return Err("cancelled".into());
+    }
+    let adapter = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
+    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), summary: preference_summary(&outcome) })
 }
 
 /// Runs the job `inv` on the device this thread is scoped to, reporting each step as a frame.
@@ -413,46 +531,45 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
         return Err("cancelled".into());
     }
     let out_dir = work.path().join("run");
-    let fine_tune = build_fine_tune(&request, &base_dir, &staged, &out_dir)?;
     progress(Progress::event(0, steps, json!({"type": "stage", "stage": "loading the base and training"})));
     let began = Instant::now();
-    let outcome = fine_tune
-        .run_with(&inv.cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64()))))
-        .map_err(|e| match e {
-            // A full card is a condition the caller can act on, with nothing wrong in the request.
-            brain::Error::DeviceOutOfMemory { .. } => capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("train: {e}")),
-            e => format!("train: {e}"),
-        })?;
-    if outcome.status != brain::FineTuneStatus::Completed {
-        return Err("cancelled".into());
-    }
-    let adapter_path = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
+    let trained = match request.params.objective {
+        Objective::Dpo => train_preference(&request, &base_dir, &staged, &out_dir, &inv.cancel, began, progress)?,
+        Objective::Sft | Objective::PolicyGradient => train_chat(&request, &base_dir, &staged, &out_dir, &inv.cancel, began, progress)?,
+    };
     let mut result = Outcome::new();
     let mut digest = None;
     if let Some(store) = &env.store {
-        let (published, _) = store.publish(&adapter_path).map_err(|e| store_failure(&e))?;
+        let (published, _) = store.publish(&trained.adapter).map_err(|e| store_failure(&e))?;
         digest = Some(published);
     }
     // The training record holds every step's statistics, which is bulk: it goes to the store beside the adapter.
     let mut record_digest = None;
-    if let (Some(store), Some(record)) = (&env.store, &outcome.record) {
+    if let (Some(store), Some(record)) = (&env.store, &trained.record) {
         record_digest = Some(store.publish(record).map_err(|e| store_failure(&e))?.0);
     }
     let mut evaluations = Vec::new();
-    if let (Some(store), true) = (&env.store, request.params.keep_evaluations) {
-        for point in &outcome.curve {
-            let path = out_dir.join("evaluations").join(format!("step-{}.safetensors", point.step));
-            let (published, _) = store.publish(&path).map_err(|e| store_failure(&e))?;
-            evaluations.push((point.step, published));
+    if let Some(store) = &env.store {
+        for (step, path) in &trained.evaluations {
+            let (published, _) = store.publish(path).map_err(|e| store_failure(&e))?;
+            evaluations.push(json!({"step": step, "digest": published.hex()}));
         }
     }
-    result.outputs = report(&outcome, digest, record_digest, &evaluations);
+    let mut outputs = trained.summary;
+    if let Some(fields) = outputs.as_object_mut() {
+        fields.insert("status".into(), json!("completed"));
+        fields.insert("objective".into(), json!(request.params.objective.name()));
+        fields.insert("adapter_digest".into(), json!(digest.map(|d| d.hex())));
+        fields.insert("record_digest".into(), json!(record_digest.map(|d| d.hex())));
+        fields.insert("evaluations".into(), json!(evaluations));
+    }
+    result.outputs = outputs;
     if request.params.return_adapter {
-        let bytes = std::fs::read(&adapter_path).map_err(|e| format!("train: reading the adapter: {e}"))?;
-        result = result.blob("adapter", Blob::new(Media::Bytes, bytes).with_meta(json!({"sha256": outcome.adapter_digest, "blake3": digest.map(|d| d.hex())})));
+        let bytes = std::fs::read(&trained.adapter).map_err(|e| format!("train: reading the adapter: {e}"))?;
+        result = result.blob("adapter", Blob::new(Media::Bytes, bytes).with_meta(json!({"sha256": trained.adapter_sha256, "blake3": digest.map(|d| d.hex())})));
     }
     // Taken by blob when the caller takes everything by blob (or the server has no store to publish it to).
-    if let (Some(record), true) = (&outcome.record, request.params.return_adapter || record_digest.is_none()) {
+    if let (Some(record), true) = (&trained.record, request.params.return_adapter || record_digest.is_none()) {
         result = result.blob("record", Blob::new(Media::Text, std::fs::read(record).map_err(|e| format!("train: reading the training record: {e}"))?));
     }
     Ok(result)

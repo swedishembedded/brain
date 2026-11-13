@@ -8,7 +8,7 @@ use capability::CancelToken;
 use residency::Job;
 use serde_json::{json, Value};
 
-use crate::support::{assert_reservation_returned, data_digest, invocation, plain, rig, rig_qwen3, rollouts, run, work_is_clean, Frames, BASE};
+use crate::support::{assert_reservation_returned, data_digest, invocation, pair, pairs, plain, rig, rig_qwen3, rollouts, run, work_is_clean, Frames, BASE};
 
 fn hex64(v: &Value) -> bool {
     v.as_str().is_some_and(|s| trainjob::Digest::parse(s).is_ok())
@@ -103,6 +103,51 @@ fn a_policy_gradient_job_streams_each_step_and_hands_back_the_adapter_by_digest_
     assert_eq!(continued.outputs["trained_from"], report["adapter_sha256"], "the new adapter records its parent");
     assert!(!continued.blobs.contains_key("adapter"), "an adapter nobody asked back is only in the store");
     assert!(hex64(&continued.outputs["adapter_digest"]));
+}
+
+/// A preference job reads pairs, trains against a frozen reference, and reports the preference margin it moved: the
+/// architecture is the base's own (none was named), and the adapter leaves like any other job's.
+#[test]
+fn a_dpo_job_trains_a_qwen3_base_on_pairs_and_reports_how_much_more_it_prefers_the_chosen_answers() {
+    let rig = rig_qwen3("run-dpo", 16 << 30);
+    let train = data_digest(&rig, &pairs());
+    let data = json!({"train": {"digest": train.hex()}, "held_out": {"blob": "held_out"}}).to_string();
+    let params = json!({"base": BASE, "objective": "dpo", "beta": 0.1, "steps": 6, "rank": 2, "lr": 1e-1, "seed": 7, "max_block": 128, "data": data, "return_adapter": true});
+    let frames = Frames::default();
+    let held_out = pair("cad", "bed", "kiwi").into_bytes();
+    let outcome = run(&rig, params, &[("held_out", held_out)], &frames).expect("the run");
+
+    assert_eq!(frames.steps().len(), 6, "{:?}", frames.events());
+    assert!(frames.steps().iter().all(|f| f["loss"].is_number() && f.get("pg").is_none()));
+    let report = &outcome.outputs;
+    assert_eq!((report["status"].as_str(), report["objective"].as_str()), (Some("completed"), Some("dpo")));
+    assert_eq!((report["records"].as_u64(), report["steps_completed"].as_u64(), report["beta"].as_f64().map(|b| (b * 10.0).round())), (Some(4), Some(6), Some(1.0)));
+    assert!(hex64(&report["adapter_digest"]) && hex64(&report["record_digest"]), "{report}");
+    assert!(report["adapter_sha256"].as_str().is_some_and(|s| s.starts_with("sha256:")));
+    let initial = report["initial_loss"].as_f64().unwrap();
+    assert!((initial - std::f64::consts::LN_2).abs() < 1e-3, "the policy starts at its reference, so the loss starts at ln 2: {initial}");
+    assert!(report["final_loss"].as_f64().unwrap() < initial, "the loss fell: {report}");
+    assert_eq!(report["train_score"]["pairs"], 4);
+    assert!(report["train_score"]["mean_margin"].as_f64().unwrap() > 0.0, "the tuned policy prefers the chosen answers more than its reference does: {report}");
+    assert_eq!(report["held_out_score"]["pairs"], 1);
+    assert!(outcome.blobs.contains_key("adapter") && outcome.blobs.contains_key("record"));
+    assert!(work_is_clean(&rig.work_root));
+    assert_reservation_returned(&rig);
+}
+
+/// A preference dataset is checked against the base's own tokenizer and template before a card is claimed, and a
+/// record that does not parse is refused by line.
+#[test]
+fn a_dpo_job_refuses_a_bad_pair_by_record_and_a_record_longer_than_max_block() {
+    let rig = rig_qwen3("run-dpo-refuse", 16 << 30);
+    let broken = [pair("cab", "bad", "wig"), r#"{"prompt": [], "chosen": {"role": "assistant", "content": "x"}}"#.to_string()].join("\n").into_bytes();
+    let params = |block: u32| json!({"base": BASE, "objective": "dpo", "steps": 1, "rank": 2, "max_block": block, "data": json!({"train": {"blob": "dataset"}}).to_string(), "return_adapter": true});
+    let why = run(&rig, params(128), &[("dataset", broken)], &Frames::default()).expect_err("the second record is malformed");
+    assert!(why.contains("record 2") || why.contains(":2"), "{why}");
+    let long = pair("cab", &"b".repeat(200), "wig").into_bytes();
+    let why = run(&rig, params(64), &[("dataset", long)], &Frames::default()).expect_err("the record is past max_block");
+    assert!(why.contains("max_block 64"), "{why}");
+    assert!(work_is_clean(&rig.work_root));
 }
 
 #[test]

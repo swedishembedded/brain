@@ -77,6 +77,16 @@ pub fn rollouts() -> Vec<u8> {
     ROLLOUTS.iter().map(|(p, a, adv)| record(p, a, Some(*adv))).collect::<Vec<_>>().join("\n").into_bytes()
 }
 
+/// One `generic-preference-v1` pair of the toy task.
+pub fn pair(user: &str, chosen: &str, rejected: &str) -> String {
+    json!({"prompt": [{"role": "user", "content": user}], "chosen": {"role": "assistant", "content": chosen}, "rejected": {"role": "assistant", "content": rejected}}).to_string()
+}
+
+/// Preference pairs of the toy task: what the rollouts rewarded is preferred to what they punished.
+pub fn pairs() -> Vec<u8> {
+    [("cab", "bad", "wig"), ("fed", "dad", "vow"), ("ace", "cab", "jug"), ("bag", "egg", "mop")].iter().map(|(u, c, r)| pair(u, c, r)).collect::<Vec<_>>().join("\n").into_bytes()
+}
+
 /// The same records as plain supervised ones.
 pub fn plain() -> Vec<u8> {
     ROLLOUTS.iter().map(|(p, a, _)| record(p, a, None)).collect::<Vec<_>>().join("\n").into_bytes()

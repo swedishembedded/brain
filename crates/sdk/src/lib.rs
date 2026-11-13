@@ -217,7 +217,7 @@ mod preference;
 #[cfg(feature = "study")]
 pub mod preference_dataset;
 #[cfg(feature = "study")]
-pub use preference::{score_preference, PreferenceFineTune, PreferenceFineTuneOutcome, PreferenceScore, DEFAULT_DPO_BETA};
+pub use preference::{score_preference, PreferenceFineTune, PreferenceFineTuneOutcome, PreferenceScore, DEFAULT_DPO_BETA, PAIR_ROWS};
 #[cfg(feature = "study")]
 pub use preference_dataset::{validate_preference_dataset, validate_preference_dataset_for, PreferenceDatasetSummary};
 

@@ -115,3 +115,24 @@ fn the_service_has_exactly_the_train_action() {
     let e = rig.exec.run_blocking(trainjob::MODEL, "shell", inv, |_| {}).unwrap_err();
     assert!(e.contains("no action 'shell'"), "{e}");
 }
+
+/// A preference job is held to the same door as every other objective: a dataset is a digest or a blob, never a path;
+/// settings of the other objectives are refused by name; and nothing starts or is reserved by a refusal.
+#[test]
+fn a_dpo_job_is_refused_at_the_door_for_paths_and_for_settings_that_are_not_its_own() {
+    let rig = rig("door-dpo", 8 << 30, true);
+    let train = data_digest(&rig, &crate::support::pairs());
+    let frames = Frames::default();
+    let ask = |params: serde_json::Value| run(&rig, params, &[], &frames).unwrap_err();
+    for held_out in [json!({"path": "/etc/passwd"}), json!({"digest": "../../etc/passwd"})] {
+        let data = json!({"train": {"digest": train.hex()}, "held_out": held_out}).to_string();
+        let e = ask(json!({"base": BASE, "objective": "dpo", "data": data}));
+        assert!(e.contains("data"), "{e}");
+    }
+    let e = ask(json!({"base": BASE, "objective": "dpo", "data": data_of(&train), "replay_share": 0.3}));
+    assert!(e.contains("replay_share") && e.contains("dpo"), "{e}");
+    let e = ask(json!({"base": BASE, "objective": "dpo", "data": data_of(&train), "reference_model": "/etc/passwd"}));
+    assert!(e.contains("unknown param"), "a reference is the run's start, never a path a caller names: {e}");
+    assert!(frames.events().is_empty() && crate::support::work_is_clean(&rig.work_root));
+    assert!(rig.exec.residency().placements.is_empty());
+}

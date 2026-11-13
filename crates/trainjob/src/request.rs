@@ -42,12 +42,12 @@ pub const MAX_ADAPTER_ID_LEN: usize = 200;
 pub fn action_spec() -> ActionSpec {
     let optional_f = |name: &str, help: &str, min: f64, max: f64| ParamSpec::new(name, ParamType::Float, help).min(min).max(max);
     let blob = |name: &str, help: &str| BlobSpec::new(name, Media::Bytes, help);
-    let mut spec = ActionSpec::new(ACTION, "fine-tune a chat model's LoRA adapter on a chat dataset, by supervised imitation or by the clipped policy gradient on rollouts (datasets in by blob or artifact digest, the adapter out by digest or blob)")
+    let mut spec = ActionSpec::new(ACTION, "fine-tune a chat model's LoRA adapter on a chat dataset, by supervised imitation, by the clipped policy gradient on rollouts, or by direct preference optimization on chosen/rejected pairs (datasets in by blob or artifact digest, the adapter out by digest or blob)")
         .training()
         .streaming()
         .param(ParamSpec::new("base", ParamType::Str, "the base model, `<vendor>/<repo>` in the server's model store").required())
         .param(ParamSpec::new("data", ParamType::Str, "JSON document naming the datasets: {\"train\": SRC, \"held_out\"?, \"held_out_text\"?, \"monitor\"?, \"start_adapter\"?, \"replay\"?: [SRC], \"weighted_replay\"?: [{SRC fields, \"share\"}]} where SRC is {\"digest\": \"<blake3 hex>\"} (an artifact of the server's store) or {\"blob\": \"<input name>\"} (an input blob of this call)").required())
-        .param(ParamSpec::new("objective", ParamType::Enum(vec!["sft".into(), "policy_gradient".into()]), "supervised imitation, or the clipped policy gradient on rollout records that carry an advantage or a teacher context").default(json!("sft")))
+        .param(ParamSpec::new("objective", ParamType::Enum(vec!["sft".into(), "policy_gradient".into(), "dpo".into()]), "supervised imitation; the clipped policy gradient on rollout records that carry an advantage or a teacher context; or direct preference optimization on `generic-preference-v1` pairs (`dataset` and `held_out` hold pairs)").default(json!("sft")))
         .param(ParamSpec::new("steps", ParamType::Int, "optimiser steps").default(json!(100)).min(1.0).max(1_000_000.0).step(1.0))
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank of a fresh adapter; a continued adapter keeps its own (default 8)").min(1.0).max(256.0).step(1.0))
         .param(optional_f("alpha", "LoRA alpha (default 2 x rank)", 0.0, 1024.0))
@@ -57,8 +57,8 @@ pub fn action_spec() -> ActionSpec {
         .param(ParamSpec::new("strict_updates", ParamType::Bool, "abort at the first optimiser step whose loss or gradient is not finite (off: such a step is skipped, and the run aborts on the third in a row); the adapter is never updated with a non-finite value").default(json!(false)))
         .param(ParamSpec::new("seed", ParamType::Int, "seed of a fresh adapter's initialisation and the batch order (random when omitted; the report carries the one used)").min(0.0))
         .param(ParamSpec::new("max_block", ParamType::Int, "the longest training row in tokens: the memory reserved for the run is sized to it, and a record longer than it is refused by name").default(json!(8192)).min(64.0).max(1_048_576.0).step(1.0))
-        .param(ParamSpec::new("thinking", ParamType::Bool, "train the model to reason before it answers (off: trained for no-think mode)").default(json!(true)))
-        .param(ParamSpec::new("pack_answers", ParamType::Bool, "train a record that supervises several turns as one sequence").default(json!(false)))
+        .param(ParamSpec::new("thinking", ParamType::Bool, "train the model to reason before it answers (off: trained for no-think mode); sft and policy_gradient only").default(json!(true)))
+        .param(ParamSpec::new("pack_answers", ParamType::Bool, "train a record that supervises several turns as one sequence; sft and policy_gradient only").default(json!(false)))
         .param(ParamSpec::new("arch", ParamType::Str, "the base's architecture (`qwen3`, `qwen35`) when its directory carries no config.json to tell it by; a Hugging Face checkpoint needs none"))
         .param(ParamSpec::new("base_format", ParamType::Str, "how the frozen base is held: f32, bf16, int8, nf4, fp8, ...; refused by name when the architecture's trainer does not hold it (default: the tier that fits the card)"))
         .param(ParamSpec::new("eval_every", ParamType::Int, "steps between evaluations of the monitoring and held-out records (0: none)").default(json!(0)).min(0.0).max(1_000_000.0).step(1.0))
@@ -80,8 +80,11 @@ pub fn action_spec() -> ActionSpec {
         .param(ParamSpec::new("teacher", ParamType::Enum(vec!["base".into(), "start".into()]), "policy gradient with teacher contexts: the frozen policy that scores the student's tokens in the privileged context"))
         .param(optional_f("advantage_bound", "policy gradient with teacher contexts: each token's advantage is clipped to [-bound, bound]", 0.0, 1e6))
         .param(optional_f("sequence_advantage_cap", "policy gradient with teacher contexts: the most the magnitudes of a sequence's token advantages may sum to", 0.0, 1e9))
-        .input(blob("dataset", "the training records (`generic-messages-v2` JSONL)"))
-        .input(blob("held_out", "records scored before and after, never trained on"))
+        .param(optional_f("beta", "dpo: the temperature of the preference loss (default 0.1)", 0.0, 100.0))
+        .param(optional_f("nll_weight", "dpo: the weight of the supervised likelihood of the chosen answer added to the loss (default 0)", 0.0, 1000.0))
+        .param(ParamSpec::new("keep_reasoning", ParamType::Bool, "dpo: train on the reasoning of each candidate (the template drops a closed think block from an assistant turn otherwise)"))
+        .input(blob("dataset", "the training records (`generic-messages-v2` JSONL; `generic-preference-v1` pairs for dpo)"))
+        .input(blob("held_out", "records scored before and after, never trained on (preference pairs for dpo)"))
         .input(blob("held_out_text", "the writer's own text, scored before and after beside the held-out records"))
         .input(blob("monitor", "records scored every eval_every steps"))
         .input(blob("adapter", "the adapter to continue instead of starting a fresh one"));
@@ -227,6 +230,26 @@ impl DataRefs {
 pub enum Objective {
     Sft,
     PolicyGradient,
+    Dpo,
+}
+
+impl Objective {
+    /// The name the spec and the report give it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Objective::Sft => "sft",
+            Objective::PolicyGradient => "policy_gradient",
+            Objective::Dpo => "dpo",
+        }
+    }
+
+    /// The training rows one optimiser step holds at once: a preference step holds both candidates of a pair.
+    pub fn rows_per_step(self) -> u32 {
+        match self {
+            Objective::Dpo => brain::PAIR_ROWS,
+            Objective::Sft | Objective::PolicyGradient => 1,
+        }
+    }
 }
 
 /// The scalar settings, exactly the params the spec declares (the invocation was validated against it).
@@ -268,6 +291,9 @@ pub struct Params {
     pub teacher: Option<String>,
     pub advantage_bound: Option<f32>,
     pub sequence_advantage_cap: Option<f32>,
+    pub beta: Option<f32>,
+    pub nll_weight: Option<f32>,
+    pub keep_reasoning: Option<bool>,
 }
 
 /// A request that passed the spec and every check that needs no file and no device.
@@ -306,6 +332,16 @@ impl Request {
         if params.objective == Objective::Sft && !pg_named.is_empty() {
             return refused(&format!("{} configure the policy gradient; the objective is sft", pg_named.join(", ")));
         }
+        let dpo_named: Vec<&str> = [(params.beta.is_some(), "beta"), (params.nll_weight.is_some(), "nll_weight"), (params.keep_reasoning.is_some(), "keep_reasoning")]
+            .into_iter()
+            .filter_map(|(named, name)| named.then_some(name))
+            .collect();
+        if params.objective != Objective::Dpo && !dpo_named.is_empty() {
+            return refused(&format!("{} configure direct preference optimization; the objective is {}", dpo_named.join(", "), params.objective.name()));
+        }
+        if params.objective == Objective::Dpo {
+            check_preference(&params, &data, &pg_named)?;
+        }
         if params.keep_evaluations && params.eval_every == 0 {
             return refused("keep_evaluations needs eval_every > 0");
         }
@@ -329,6 +365,30 @@ impl Request {
         }
         Ok(Request { params, data })
     }
+}
+
+/// What a preference run does not take: every setting of the other objectives is refused by name rather than
+/// ignored, so a caller who believes it set a replay mix or a monitor is told it did not.
+fn check_preference(params: &Params, data: &DataRefs, pg_named: &[&str]) -> Result<(), String> {
+    let mut unsupported: Vec<&str> = pg_named.to_vec();
+    let sets = [
+        (data.held_out_text.is_some(), "held_out_text"),
+        (data.monitor.is_some(), "monitor"),
+        (!data.replay.is_empty(), "replay"),
+        (!data.weighted_replay.is_empty(), "weighted_replay"),
+        (params.replay_share.is_some(), "replay_share"),
+        (params.weight_decay.is_some(), "weight_decay"),
+        (params.eval_every > 0, "eval_every"),
+        (params.patience > 0, "patience"),
+        (params.keep_evaluations, "keep_evaluations"),
+        (params.pack_answers, "pack_answers"),
+        (!params.thinking, "thinking"),
+    ];
+    unsupported.extend(sets.into_iter().filter_map(|(named, name)| named.then_some(name)));
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    Err(format!("train: {} are not settings of the dpo objective (it takes dataset, held_out and start_adapter pairs, beta, nll_weight, keep_reasoning and the optimiser settings)", unsupported.join(", ")))
 }
 
 #[cfg(test)]
@@ -465,5 +525,45 @@ mod tests {
             assert!(request(json!({"base": "a/b", "data": data, "adapter_id": bad}), &[]).is_err(), "{bad:?}");
         }
         assert!(request(json!({"base": "a/b", "data": data, "adapter_id": "Qwen/Qwen3.8-27B-FP8:local:chat:cand-1"}), &[]).is_ok());
+    }
+
+    #[test]
+    fn a_preference_request_takes_pairs_and_its_own_settings_and_refuses_the_rest_by_name() {
+        let data = json!({"train": {"digest": digest(1)}, "held_out": {"digest": digest(2)}, "start_adapter": {"digest": digest(3)}}).to_string();
+        let ok = request(json!({"base": "a/b", "data": data, "objective": "dpo", "beta": 0.2, "nll_weight": 0.5, "keep_reasoning": true, "steps": 10, "grad_accum": 4, "strict_updates": true}), &[]).unwrap();
+        assert_eq!((ok.params.objective, ok.params.beta, ok.params.nll_weight, ok.params.keep_reasoning), (Objective::Dpo, Some(0.2), Some(0.5), Some(true)));
+        assert_eq!(Objective::Dpo.rows_per_step(), 2, "both candidates of a pair share a forward");
+        let plain = request(json!({"base": "a/b", "data": data, "objective": "dpo"}), &[]).unwrap();
+        assert_eq!((plain.params.beta, plain.params.nll_weight), (None, None), "the trainer's own defaults apply");
+        for (extra, named) in [
+            (json!({"clip_eps": 0.2}), "clip_eps"),
+            (json!({"kl_beta": 0.1}), "kl_beta"),
+            (json!({"eval_every": 5}), "eval_every"),
+            (json!({"patience": 2}), "patience"),
+            (json!({"weight_decay": 0.1}), "weight_decay"),
+            (json!({"replay_share": 0.5}), "replay_share"),
+            (json!({"pack_answers": true}), "pack_answers"),
+            (json!({"thinking": false}), "thinking"),
+        ] {
+            let mut p = json!({"base": "a/b", "data": data, "objective": "dpo"});
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let e = request(p, &[]).unwrap_err();
+            assert!(e.contains(named) && e.contains("dpo"), "{named}: {e}");
+        }
+        for sets in [json!({"monitor": {"digest": digest(4)}}), json!({"held_out_text": {"digest": digest(4)}}), json!({"replay": [{"digest": digest(4)}]})] {
+            let mut doc = json!({"train": {"digest": digest(1)}});
+            doc.as_object_mut().unwrap().extend(sets.as_object().unwrap().clone());
+            assert!(request(json!({"base": "a/b", "data": doc.to_string(), "objective": "dpo"}), &[]).unwrap_err().contains("not settings of the dpo objective"));
+        }
+        // Its own settings belong to it alone, and are bounded by the spec.
+        let e = request(json!({"base": "a/b", "data": data, "beta": 0.1}), &[]).unwrap_err();
+        assert!(e.contains("beta") && e.contains("sft"), "{e}");
+        let e = request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "behaviour": "start_of_run_proxy", "nll_weight": 1.0}), &[]).unwrap_err();
+        assert!(e.contains("nll_weight") && e.contains("policy_gradient"), "{e}");
+        for (name, value) in [("beta", json!(-0.1)), ("beta", json!(1e9)), ("nll_weight", json!(-1.0)), ("nll_weight", json!(1e9)), ("keep_reasoning", json!("yes"))] {
+            let mut p = json!({"base": "a/b", "data": data, "objective": "dpo"});
+            p[name] = value.clone();
+            assert!(validated(p, &[]).is_err(), "{name}={value}");
+        }
     }
 }

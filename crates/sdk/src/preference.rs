@@ -62,11 +62,15 @@ const RECORD_FILE: &str = "training.json";
 /// the conventional DPO default.
 pub const DEFAULT_DPO_BETA: f32 = 0.1;
 
+/// The rows one step holds: the chosen and the rejected candidate of a pair share one forward.
+pub const PAIR_ROWS: u32 = 2;
+
 /// A DPO LoRA fine-tune of a Qwen3 chat model. See this module's doc.
 #[derive(Clone, Debug)]
 pub struct PreferenceFineTune {
     base: String,
-    arch: String,
+    /// The architecture named by [`Self::arch`]; unnamed, the base's own config tells it (`qwen3` where it does not).
+    arch: Option<String>,
     models_dir: Option<String>,
     dataset: Option<PathBuf>,
     held_out: Option<PathBuf>,
@@ -90,6 +94,8 @@ pub struct PreferenceFineTune {
     checkpoint_every: u32,
     cycle: u64,
     device: Device,
+    /// The caller has scoped this thread to its device ([`PreferenceFineTune::placed`]).
+    placed: bool,
     /// What each step's backward keeps of its forward ([`PreferenceFineTune::activations`]); `None` is the base's own.
     activations: Option<model::saved::SavedPolicy>,
     base_format: Option<String>,
@@ -102,7 +108,7 @@ impl PreferenceFineTune {
     pub fn from_pretrained(base: impl Into<String>) -> PreferenceFineTune {
         PreferenceFineTune {
             base: base.into(),
-            arch: "qwen3".to_string(),
+            arch: None,
             models_dir: None,
             dataset: None,
             held_out: None,
@@ -126,6 +132,7 @@ impl PreferenceFineTune {
             checkpoint_every: 0,
             cycle: 0,
             device: Device::default(),
+            placed: false,
             activations: None,
             base_format: None,
         }
@@ -141,11 +148,12 @@ impl PreferenceFineTune {
         self
     }
 
-    /// The architecture of the base (a `brain_arch` id; default `qwen3`).
+    /// The architecture of the base (a `brain_arch` id). Unnamed, the base's own `config.json` tells it, as
+    /// [`crate::ChatFineTune`]'s does, and `qwen3` is the architecture of a checkpoint with none.
     /// Looked up in the same registry as [`crate::study::DocumentStudy`]; an
     /// architecture without a chat fine-tuner or without token objectives (DPO needs them) is refused before anything is read.
     pub fn arch(mut self, id: impl Into<String>) -> Self {
-        self.arch = id.into();
+        self.arch = Some(id.into());
         self
     }
 
@@ -323,6 +331,26 @@ impl PreferenceFineTune {
         self
     }
 
+    /// Run on the device this thread is already scoped to (`gpu_core::devices::with_gpu`, or the host tier), the
+    /// way a residency-managed workload is: the process owns the device selection and other models are being
+    /// served from it, so the run neither resolves [`Self::device`] nor publishes a selection of its own.
+    pub fn placed(mut self, on: bool) -> Self {
+        self.placed = on;
+        self
+    }
+
+    /// The tier a placed run holds its frozen base at when none was named: the one [`crate::ChatFineTune`] picks for
+    /// the card this thread is scoped to (`None`, the host tier, where there is none), sized for the two rows of a
+    /// pair. A run that is not placed holds it in fp32, as it always did.
+    fn placed_base_tier(&self, arch: &str, block: u32) -> Result<String> {
+        let card_bytes = gpu_core::devices::current_gpu().and_then(|index| gpu_core::devices::gpus().iter().find(|d| d.index == index)).map(|d| d.identity.vram_bytes);
+        let mut sizing = crate::ChatFineTune::from_pretrained(self.base.as_str()).arch(arch);
+        if let Some(dir) = &self.models_dir {
+            sizing = sizing.models_dir(dir.as_str());
+        }
+        Ok(sizing.footprint(block.saturating_mul(PAIR_ROWS), card_bytes)?.base_tier)
+    }
+
     /// Run to completion.
     pub fn run(&self) -> Result<PreferenceFineTuneOutcome> {
         self.run_with(&CancelToken::default(), |_| {})
@@ -333,7 +361,12 @@ impl PreferenceFineTune {
     /// `cancel` fires. A cancelled run exports no adapter; it leaves its
     /// resume state, and running the same fine-tune again continues it.
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<PreferenceFineTuneOutcome> {
-        let arch = crate::study::arch(&self.arch)?;
+        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
+        let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let arch = match self.arch.as_deref() {
+            Some(named) => crate::study::arch(named)?,
+            None => crate::study::arch_of_checkpoint(&model_dir).map_or_else(|| crate::study::arch("qwen3"), Ok)?,
+        };
         arch.require(Capability::ChatFineTune)?;
         arch.require(Capability::TokenObjectives)?;
         let chat = arch.chat.ok_or_else(|| Error::Unsupported(model::training::Unsupported::new(arch.id, Capability::ChatFineTune)))?;
@@ -355,22 +388,20 @@ impl PreferenceFineTune {
         rl::objective::dpo::DpoConfig { beta: self.beta, seq_len: 2, nll_weight: self.nll_weight, beta_ablation: self.beta_ablation }
             .validate()
             .map_err(|why| Error::Backend(format!("PreferenceFineTune: invalid dpo configuration: {why}")))?;
-        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
-        let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
-        
         // Every file is checked against the base's own template before a
         // device is claimed.
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
         let render = data::chat::RenderOpts { keep_reasoning: self.keep_reasoning };
         let train = encode_checked(dataset, &tok, &tmpl, self.max_block, render)?;
         let held_out = self.held_out.as_deref().map(|path| encode_checked(path, &tok, &tmpl, None, render)).transpose()?;
+        let block = block_for(longest(&train), self.max_block)?;
         let base_format = match self.base_format.as_deref() {
             Some(spec) => chat.lora_bases.parse(spec).map_err(Error::Backend)?,
+            None if self.placed => chat.lora_bases.parse(&self.placed_base_tier(arch.id, block)?).map_err(Error::Backend)?,
             None => gpu_core::select::Dtype::F32,
         };
         let base_tiers = model::ops::TierPolicy::uniform(base_format);
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha, Default::default())?;
-        let block = block_for(longest(&train), self.max_block)?;
         let seq_len = block as usize;
         let packed = train
             .iter()
@@ -378,12 +409,14 @@ impl PreferenceFineTune {
             .map(|(i, (c, r))| rl::objective::dpo::PackedPair::from_masked(seq_len, (&c.ids, &c.mask), (&r.ids, &r.mask)).map_err(|e| Error::Backend(format!("{}: record {}: {e}", dataset.display(), i + 1))))
             .collect::<Result<Vec<_>>>()?;
 
-        crate::device::resolve(&self.device)?;
+        if !self.placed {
+            crate::device::resolve(&self.device)?;
+        }
 
         let state_path = out_dir.join(STATE_FILE);
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         // Both rows of a pair share one forward.
-        let requested = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, strict_updates: self.strict_updates, stages: self.stages, native_sparse: self.native_sparse, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
+        let requested = model::FitOpts { batch_size: PAIR_ROWS, grad_accum: self.grad_accum, strict_updates: self.strict_updates, stages: self.stages, native_sparse: self.native_sparse, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
         let dpo = rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight, beta_ablation: self.beta_ablation };
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&dpo]).map_err(|e| Error::Backend(format!("PreferenceFineTune: {e}")))?.into_opts();
         let base_digest = digest(&weights)?;

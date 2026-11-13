@@ -13,7 +13,12 @@ The job is the model `brain/train` with one action, `train`. It trains
 - **by policy gradient** (`objective: policy_gradient`): the clipped objective
   on rollout records that carry an `advantage`, or a `teacher_context` for
   self-distillation (a Qwen3.8 base; see `brain::ChatFineTune::policy_gradient`
-  for the record format and the objective's settings).
+  for the record format and the objective's settings);
+- **by direct preference optimization** (`objective: dpo`): `dataset` and
+  `held_out` hold `generic-preference-v1` pairs (a prompt and the `chosen` and
+  `rejected` assistant turns), as `brain::PreferenceFineTune` trains them. The
+  reference is the policy the run starts from (the base, or the `start_adapter`
+  continued), frozen, so no second model is held.
 
 ## Serving it
 
@@ -58,7 +63,7 @@ No dataset or adapter travels through the API as a message body.
 |---|---|
 | `base` | the base model, `<vendor>/<repo>` in the model store (required) |
 | `data` | a JSON document naming the datasets (required), below |
-| `objective` | `sft` (default) or `policy_gradient` |
+| `objective` | `sft` (default), `policy_gradient` or `dpo` |
 | `steps`, `grad_accum`, `rank`, `alpha`, `lr`, `weight_decay`, `seed` | the optimiser's settings; what is not named is the trainer's own default |
 | `strict_updates` | abort at the first optimiser step whose loss or gradient is not finite (default off: such a step is skipped, the weights untouched, and the run aborts on the third in a row) |
 | `max_block` | the longest training row in tokens (default 8192). The memory reserved for the run is sized to it and a longer record is refused by name |
@@ -69,6 +74,7 @@ No dataset or adapter travels through the API as a message body.
 | `return_adapter` | also return the adapter as an output blob (D-Bus) |
 | `clip_eps`, `kl_beta`, `reference`, `behaviour`, `loss_agg`, `temperature`, `teacher`, `advantage_bound`, `sequence_advantage_cap` | the policy-gradient objective's settings (only with `objective: policy_gradient`) |
 | `behaviour` | where the importance ratio's behaviour log-probabilities come from. `recorded` (default): the sampler's own `behavior_logprobs`, on every supervised token of every record with an advantage; a dataset missing any is refused. `start_of_run_proxy`: the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it; the training record states which was used |
+| `beta`, `nll_weight`, `keep_reasoning` | the preference objective's settings (only with `objective: dpo`): the loss temperature (default 0.1), the weight of the supervised likelihood of the chosen answer added to it (default 0) and whether the reasoning of each candidate is trained on |
 | `arch` | the base's architecture, only for a checkpoint directory with no `config.json` |
 
 `data` is `{"train": SRC, "held_out"?: SRC, "held_out_text"?: SRC, "monitor"?:
@@ -76,6 +82,11 @@ SRC, "start_adapter"?: SRC, "replay"?: [SRC], "weighted_replay"?: [{SRC fields,
 "share"}]}` where `SRC` is `{"digest": "<blake3>"}` or `{"blob": "<input
 name>"}`. Unknown fields anywhere are refused, as is a blob that is named but
 not attached or attached but not used.
+
+A preference run takes only what it uses: `held_out_text`, `monitor`, replay sets, `replay_share`,
+`weight_decay`, `eval_every`, `patience`, `keep_evaluations`, `pack_answers`, `thinking: false` and the
+policy-gradient settings are refused by name, never ignored. Each step holds both candidates of a pair,
+so the memory reserved is sized to two `max_block` rows.
 
 A request that could never run is a 400 (HTTP) or a bus error before anything
 starts: an unknown base, a digest the store does not hold, a setting the
@@ -108,9 +119,11 @@ when records carry a teacher context. `seconds` is the time since training
 began. Step frames over D-Bus are droppable like every progress frame: a
 subscriber that does not read them loses frames, never the result.
 
-The result is `outputs` (the report: `adapter_digest`, the scores before and
+The result is `outputs` (the report: `objective`, `adapter_digest`, the scores before and
 after, the monitoring curve, `selected_step`, the policy-gradient totals,
-`base_tier` and why). The trainer's own training record, which holds every
+`base_tier` and why; for `dpo`, `beta`, `nll_weight` and `train_score` and `held_out_score`, each
+`{accuracy, mean_margin, pairs, skipped}`: the share of pairs the tuned policy prefers the chosen
+answer on more than its reference does, and the mean margin in nats). The trainer's own training record, which holds every
 step's statistics, is published to the artifact store beside the adapter
 (`record_digest`), and returned as the blob `record` when the call sets
 `return_adapter` or the server has no store.
