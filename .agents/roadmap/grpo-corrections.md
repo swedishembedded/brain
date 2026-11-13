@@ -146,3 +146,11 @@ Sampled decode on the serving path is itself launch- and top-k-bound: the card i
 kernel time is the top-64 extraction (64 rounds of three launches a step); greedy is 1005 tok/s against 615 sampled.
 Knowledge 443. The Qwen3 engine now records the shared single-launch top-k (`model::readout::topk_rows_steps`): sampled 729 tok/s, greedy 1075 on the same group.
 
+Real-weight improve cycle (2026-11-13, one GH200, Qwen3-4B converted to a brain file, `brain::Improve`, rank 8, group 8, 6 steps,
+max_new 4, rows of 32 tokens, eight capital-city prompts; `a_real_4b_improve_cycle_runs_end_to_end_on_the_engine_path`, ignored):
+the cycle runs end to end on the engine path in 235.7 s and on the model's own sampler in 207.9 s, both gated Reject (not
+significant, p = 1.0, six steps are a mechanism check, not a learning claim). At 32-token rows a cycle is weight loads (three
+f32 checkpoint loads and the trainer, plus the engine's own load on the engine path), so the engine costs 28 s more; its
+advantage is the per-token cost that grows with the square of the row length (254 s against 1.7 s for one 8 x 128 group,
+above), which these short rows do not reach.
+

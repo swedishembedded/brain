@@ -217,3 +217,62 @@ fn a_cap_too_small_for_the_prompt_and_the_completion_is_refused_by_name() {
 fn the_cap_is_off_by_default() {
     assert_eq!(ImproveOptions::default().max_seq_len, None);
 }
+
+/// Prompts "The capital of <country> is" and the first token of the capital's name: the base answers
+/// most but not all of them at temperature 1, so a group of samples earns different rewards.
+struct CapitalEnv {
+    tasks: Vec<(Vec<u32>, u32)>,
+}
+
+impl Environment for CapitalEnv {
+    fn name(&self) -> &str {
+        "capitals"
+    }
+    fn tasks(&self, seed: u64) -> Vec<Task> {
+        self.tasks.iter().enumerate().map(|(i, (prompt, answer))| Task { id: format!("capital-{seed}-{i}"), prompt: prompt.clone(), answer: serde_json::json!(answer) }).collect()
+    }
+}
+
+#[derive(Clone)]
+struct FirstTokenVerifier;
+
+impl Verifier for FirstTokenVerifier {
+    fn verify(&self, task: &Task, _transcript: &[Step], completion: &[u32]) -> Reward {
+        let want: u32 = serde_json::from_value(task.answer.clone()).expect("answer is a token id");
+        Reward { value: f32::from(completion.first() == Some(&want)), parts: Default::default() }
+    }
+}
+
+/// One real-weight improve cycle on Qwen3-4B, on the serving engine and on the model's own sampler: the
+/// numbers a ledger records (wall time of the cycle, which is dominated by weight loads at this length,
+/// and the training steps). Ignored: it needs the checkpoint converted to a brain file
+/// (`brain qwen3 import --hf <Qwen3-4B dir> --out testdata/improve/qwen3-4b.safetensors`) with the model's
+/// `tokenizer.json` beside it, and a GPU with room for the f32 model twice.
+#[test]
+#[ignore = "a real-weight measurement, run on a GPU"]
+fn a_real_4b_improve_cycle_runs_end_to_end_on_the_engine_path() {
+    let base = brain_testutil::testdata_path("improve/qwen3-4b.safetensors");
+    let tokenizer_path = brain_testutil::testdata_path("improve/tokenizer.json");
+    if !base.is_file() || !tokenizer_path.is_file() {
+        brain_testutil::skip_unavailable("testdata/improve holds no converted Qwen3-4B checkpoint and tokenizer.json");
+        return;
+    }
+    let tokenizer = data::qwen_tokenizer::QwenBpe::from_file(tokenizer_path.to_str().expect("utf-8 path")).expect("a tokenizer");
+    use data::Tokenizer as _;
+    let pairs = [("France", " Paris"), ("Japan", " Tokyo"), ("Italy", " Rome"), ("Spain", " Madrid"), ("Canada", " Ottawa"), ("Australia", " Canberra"), ("Brazil", " Bras\u{ed}lia"), ("Egypt", " Cairo")];
+    let tasks: Vec<(Vec<u32>, u32)> = pairs.iter().map(|(country, capital)| (tokenizer.encode(&format!("The capital of {country} is")), tokenizer.encode(capital)[0])).collect();
+    for model_rollouts in [false, true] {
+        let dir = tmp(if model_rollouts { "real-model" } else { "real-engine" });
+        let started = std::time::Instant::now();
+        let outcome = Improve::from_pretrained(base.to_string_lossy().into_owned())
+            .expect("from_pretrained")
+            .adapter_dir(dir.join("adapters"))
+            .work_dir(dir.join("work"))
+            .lora(8)
+            .seed(7)
+            .held_out_seed(9)
+            .run(CapitalEnv { tasks: tasks.clone() }, FirstTokenVerifier, &ImproveOptions { group_size: 8, steps: 6, max_new: 4, max_seq_len: Some(32), temperature: 1.0, lr: 2e-4, model_rollouts, ..ImproveOptions::default() })
+            .expect("the improve cycle runs");
+        println!("REAL-IMPROVE rollouts={} wall={:.1}s decision={:?} p={:.3}", if model_rollouts { "model" } else { "engine" }, started.elapsed().as_secs_f64(), outcome.decision, outcome.p_value);
+    }
+}

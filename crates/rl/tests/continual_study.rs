@@ -362,8 +362,29 @@ fn spec<'a>(base: &'a Path, targets: &'a [String]) -> StudySpec<'a> {
     StudySpec {
         base_checkpoint: base,
         adapter: AdapterMeta { rank: LORA_RANK, alpha: LORA_ALPHA, targets, family: "qwen", base_id: "poscopy-pretrained", dataset_id: None },
-        rollout: Some(qwen3::rollout::engine_factory(lora_cfg(), GROUP_SIZE)),
+        // The recorded study was sampled by the model being trained: its pre-registered numbers and tripwires
+        // are against that sampler, so it stays the default here (the engine path has its own test below).
+        rollout: None,
     }
+}
+
+/// The same loop with its GRPO groups sampled on the serving engine, refit from the trainer's adapters before every group:
+/// the harness runs, its retention matrix is well formed and the scores are probabilities. The recorded study's numbers
+/// are against the model's own sampler and are not re-asserted for this one.
+#[test]
+fn a_study_samples_its_groups_on_the_serving_engine_and_runs_end_to_end() {
+    if gpu_disabled() {
+        return;
+    }
+    let dir = tmp("study-engine");
+    let base = prepare_base();
+    let targets = lora_targets();
+    let cfg = study_config_for(STUDY_SEED, 2, dir.join("arm1"), false, GatePolicy::Real);
+    let spec = StudySpec { rollout: Some(qwen3::rollout::engine_factory(lora_cfg(), GROUP_SIZE)), ..spec(&base, &targets) };
+    let report = continual::run_study::<Qwen, _>(&spec, &PositionCopy::new(0), &cfg).expect("run_study on the engine path");
+    assert_eq!(report.records.len(), 2);
+    assert_eq!(report.r_matrix.len(), 2);
+    assert!(report.r_matrix.iter().flatten().all(|v| (0.0..=1.0).contains(v)), "{:?}", report.r_matrix);
 }
 
 fn print_report(report: &StudyReport) {

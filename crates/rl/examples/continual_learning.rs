@@ -37,7 +37,7 @@
 //! ```text
 //! cargo run --release -p brain-rl --features qwen3 --example continual_learning -- \
 //!     [--regime grpo|sft] [--cycles 12] [--steps N] [--eval-per-cycle N] [--seed S] \
-//!     [--replay 0.0] [--rehearsal N] [--null-gate] [--skip-oracle] [--out DIR] [--base FILE]
+//!     [--replay 0.0] [--rehearsal N] [--null-gate] [--skip-oracle] [--engine-rollouts] [--out DIR] [--base FILE]
 //! ```
 //! With `--seed 1` and no other flags this is bit-identical to the recorded run
 //! above: `--regime grpo`, 240 steps, 16 probes per cycle, rehearsal 0. Without
@@ -232,6 +232,8 @@ struct Args {
     rehearsal: Option<usize>,
     null_gate: bool,
     skip_oracle: bool,
+    /// Sample the GRPO groups on the serving engine instead of the model being trained (the recorded study's sampler).
+    engine_rollouts: bool,
     out: PathBuf,
     base: Option<PathBuf>,
 }
@@ -281,6 +283,7 @@ impl Default for Args {
             rehearsal: None,
             null_gate: false,
             skip_oracle: false,
+            engine_rollouts: false,
             out: std::env::temp_dir().join("brain-rl-example-continual"),
             base: None,
         }
@@ -288,7 +291,7 @@ impl Default for Args {
 }
 
 const USAGE: &str = "usage: continual_learning [--regime grpo|sft] [--cycles N] [--steps N] \
-                     [--eval-per-cycle N] [--seed S] [--replay F] [--rehearsal N] [--null-gate] \
+                     [--eval-per-cycle N] [--seed S] [--replay F] [--rehearsal N] [--null-gate] [--engine-rollouts] \
                      [--skip-oracle] [--out DIR] [--base FILE]";
 
 fn parse_args() -> Args {
@@ -346,6 +349,7 @@ fn parse_args() -> Args {
                 a.base = Some(PathBuf::from(need(i, &argv)));
                 i += 2;
             }
+            "--engine-rollouts" => a.engine_rollouts = true,
             "--null-gate" => {
                 a.null_gate = true;
                 i += 1;
@@ -750,7 +754,7 @@ fn main() {
     let spec = StudySpec {
         base_checkpoint: &base,
         adapter: AdapterMeta { rank: LORA_RANK, alpha: LORA_ALPHA, targets: &targets, family: "qwen", base_id: "poscopy-pretrained", dataset_id: None },
-        rollout: Some(qwen3::rollout::engine_factory(lora_cfg(), GROUP_SIZE)),
+        rollout: args.engine_rollouts.then(|| qwen3::rollout::engine_factory(lora_cfg(), GROUP_SIZE)),
     };
     let regime = args.regime();
     let cfg = StudyConfig {
