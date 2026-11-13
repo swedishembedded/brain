@@ -53,6 +53,17 @@
 //!                                    # 2R) over all 7 projections - the SDK
 //!                                    # fine-tune's shape. Real weights with
 //!                                    # --weights, else random at --model
+//!   qwen_bench rollout --weights CKPT [--engine model|scheduler] [--group N] [--prompt-len T]
+//!                      [--max-new N] [--prompts N] [--temp X] [--tier bf16|f32] [--rank R]
+//!                                    # REAL weights: what one GRPO group costs to
+//!                                    # sample - `model`: the trainer's own LoRA
+//!                                    # model, one `logits_all` per token (O(T^2));
+//!                                    # `scheduler`: the paged engine through the
+//!                                    # generic scheduler, the group sharing its
+//!                                    # prompt prefill. Same prompts, group size,
+//!                                    # sampler and token budget; reports the wall
+//!                                    # clock, generated tokens/s and, for the
+//!                                    # engine, the prefix-cache hit rate
 //!   qwen_bench lora-decode --weights CKPT --adapter ADAPTER [--ctx N] [--tokens N]
 //!                          [--rounds N] [--step-cache]
 //!                                    # REAL weights: greedy decode tok/s of the
@@ -352,6 +363,10 @@ fn main() {
     }
     if mode == "lora-decode" {
         lora_decode_bench(&a);
+        return;
+    }
+    if mode == "rollout" {
+        rollout_bench(&a);
         return;
     }
     if mode == "flash-prefill" {
@@ -1560,4 +1575,73 @@ fn lora_train_bench(a: &[String], shape: QwenConfig, model_name: &str) {
         report(&gpu, &format!("LORA-TRAIN forward T={t}"), m.fwd_steps(), 1, roofs);
         report(&gpu, &format!("LORA-TRAIN backward T={t}"), m.bwd_steps(), 1, roofs);
     }
+}
+
+/// One GRPO group's sampling cost on real weights - see the `rollout` usage line.
+fn rollout_bench(a: &[String]) {
+    use model::rollout::{ModelRollout, Rollout, RolloutParams, SchedulerRollout};
+    use model::serve::SampleParams;
+
+    let weights = flag(a, "--weights").unwrap_or_else(|| panic!("rollout needs --weights CKPT"));
+    let engine = flag(a, "--engine").unwrap_or("scheduler");
+    let num = |name: &str, default: usize| flag(a, name).map_or(default, |s| s.parse().unwrap_or_else(|_| panic!("{name} is a number")));
+    let (group, prompt_len, max_new, prompts) = (num("--group", 8), num("--prompt-len", 256), num("--max-new", 128), num("--prompts", 3));
+    let temp: f32 = flag(a, "--temp").map_or(1.0, |s| s.parse().expect("--temp is a number"));
+    let tier = match flag(a, "--tier").unwrap_or("bf16") {
+        "bf16" => qwen3::Dtype::BF16,
+        "f32" => qwen3::Dtype::F32,
+        other => panic!("--tier is bf16 or f32, not {other}"),
+    };
+    let (cfg, src) = qwen3::open_checkpoint(weights).unwrap_or_else(|e| panic!("{e}"));
+    let total = prompt_len + max_new;
+    // Distinct random-token prompts: the cost depends on lengths, and no member
+    // may share anything with another prompt but the group's own.
+    let prompt_of = |i: usize| -> Vec<u32> { (0..prompt_len).map(|j| ((i * 7919 + j * 131 + 17) as u32) % cfg.vocab).collect() };
+    let params = RolloutParams { max_new, sample: SampleParams { temp, ..SampleParams::greedy() }, eos: None };
+    let t_build = Instant::now();
+    let mut roll: Box<dyn Rollout> = match engine {
+        "model" => {
+            let rank = num("--rank", 16) as u32;
+            let lora = qwen3::LoraCfg::new(rank, 2.0 * rank as f32, qwen3::finetune::default_lora_targets());
+            let base = host_tensors(&cfg, &*src);
+            let mut cfg = cfg.clone();
+            cfg.lora = Some(lora);
+            // The checkpoint's tensors plus freshly initialised adapters (A drawn, B zero), as a LoRA run starts.
+            let mut init = base;
+            let mut rng = data::rng::Rng::random();
+            for (name, n) in cfg.param_list().into_iter().filter(|(name, _)| model::adapter::device::is_adapter_param(name)) {
+                let v = if name.ends_with(model::adapter::kind::LORA_B) { vec![0.0; n] } else { (0..n).map(|_| rng.next_gaussian() as f32 * 0.02).collect() };
+                init.insert(name, v);
+            }
+            let m = Box::leak(Box::new(Qwen::new_lora_dt_gemm(cfg, 1, total as u32, &init, tier, GemmPrecision::default())));
+            Box::new(ModelRollout::new(&*m))
+        }
+        "scheduler" => {
+            let (block, max_blocks_per_seq) = (16u32, (total as u32).div_ceil(16) + 1);
+            let num_blocks = (group as u32 * max_blocks_per_seq * 2).max(256);
+            let e = qwen3::serve::Engine::from_source_tier(cfg.clone(), &*src, block, num_blocks, group as u32, max_blocks_per_seq, 512, false, tier);
+            Box::new(SchedulerRollout::new(e, group))
+        }
+        other => panic!("--engine is model or scheduler, not {other}"),
+    };
+    drop(src);
+    eprintln!("rollout: {engine} built in {:.1}s ({weights}, {tier:?}, group {group}, prompt {prompt_len}, max_new {max_new})", t_build.elapsed().as_secs_f32());
+    // Warm the device (E.0b) with a short group, untimed.
+    let warm = RolloutParams { max_new: 4, ..params };
+    roll.sample_n(&prompt_of(999), group.min(2), &warm, &mut data::rng::Rng::random());
+
+    let (mut wall, mut tokens, mut cached, mut prompt_tokens) = (0.0f64, 0usize, 0usize, 0usize);
+    for i in 0..prompts {
+        let t0 = Instant::now();
+        let out = roll.sample_n(&prompt_of(i), group, &params, &mut data::rng::Rng::random());
+        let secs = t0.elapsed().as_secs_f64();
+        let n: usize = out.iter().map(|c| c.tokens.len()).sum();
+        let hit: usize = out.iter().map(|c| c.cached_tokens).sum();
+        println!("  prompt {i}: {secs:7.2} s  {n} tokens  {:7.1} tok/s  prefix hit {hit}/{} prompt tokens", n as f64 / secs, group * prompt_len);
+        wall += secs;
+        tokens += n;
+        cached += hit;
+        prompt_tokens += group * prompt_len;
+    }
+    println!("rollout {engine}: {prompts} groups of {group}, prompt {prompt_len}, max_new {max_new}: {wall:.2} s wall, {:.2} s/group, {:.1} generated tok/s, prefix hit rate {:.3}", wall / prompts as f64, tokens as f64 / wall, cached as f64 / prompt_tokens as f64);
 }

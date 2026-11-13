@@ -101,3 +101,18 @@ was the data, not the loss:
 
 Open here: whether the same holds on a real model (it was not run), and an optional negative-advantage weight if a
 reused-prompt regime must be supported.
+
+## Rollout cost on real weights (2026-11-13, one GH200, Qwen/Qwen3-4B, bf16, `qwen_bench rollout`)
+
+One group of 8 samples of one 256-token prompt, 128 new tokens each (1024 generated tokens), temperature 1.0, no stop
+token, the same prompts and sampler on both paths, the card to itself (`qwen_bench rollout --weights <Qwen3-4B>
+--group 8 --prompt-len 256 --max-new 128`; weights load 83-92 s on either path, not counted).
+
+| path | wall per group | generated tokens/s | prompt tokens served from the prefix cache |
+|---|---:|---:|---:|
+| the trainer's own sampler (`ModelRollout`: one `logits_all` over the whole sequence per token, rank-16 LoRA model) | 254.4 s | 4.0 | 0 of 2048 (no cache) |
+| the serving path (`SchedulerRollout` over the paged `Engine`, through the generic scheduler) | 1.66 s (3 groups: 1.67, 1.66, 1.66) | 615 | 1680 of 2048 (82 %; 7 of 8 members adopt 240 of their 256 prompt tokens, the last block is always recomputed) |
+
+The serving path is 153 times faster for the same group. The own sampler's per-token cost is the whole-sequence
+forward plus reading every position's logits back and sorting the full vocabulary on the host.
+
