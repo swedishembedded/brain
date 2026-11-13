@@ -173,6 +173,7 @@ default-members = [
     "crates/runtime",
     "crates/server",
     "crates/loader",
+    "crates/invoke",
     "crates/sdk",
     "crates/cli",
     "crates/dbus",
@@ -292,6 +293,7 @@ brain-catalog = { path = "crates/catalog" }
 brain-serving = { path = "crates/serving" }
 brain-trainjob = { path = "crates/trainjob" }
 brain-loader = { path = "crates/loader" }
+brain-invoke = { path = "crates/invoke" }
 # `brain` (crates/sdk), not `brain-sdk`: the public SDK facade package is
 # named literally `brain` on purpose -- see crates/sdk/Cargo.toml.
 # The inherited baseline is NOTHING: a consumer must NAME the surfaces it uses

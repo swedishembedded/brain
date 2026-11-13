@@ -71,15 +71,16 @@ layer 4 - models
 layer 5 - cross-cutting evaluation and tooling
     bench, capture, fcbench, federated, gradcheck, modelcost, modelopt, rl
 layer 6 - serving, front ends, SDK, samples
-    apiserve, appopts, brain, braintop, capability-mock, catalog, cli, dbus, hfsm, loader, perf,
-    runtime, sample-decision-arena, sample-decision-doom, sample-decision-intents, sample-
-    decision-json, sample-decision-patterns, sample-decision-rubiks, sample-decision-salesagent,
-    sample-decision-triage, sample-fly-interactive, sample-imagegen-batch, sample-imagegen-
-    generate, sample-learning-reader, sample-learning-rlcd, sample-learning-visualclick, sample-
-    npu-rockchip, sample-reconstruction-splat, sample-study-chat, sample-study-document, sample-
-    study-timeline, sample-text-chat-full-finetune, sample-text-embed, sample-text-embed-train,
-    sample-text-encoder-finetune, sample-text-retrieve, sample-text-retrieve-json, sample-text-
-    spectral-lm, sample-tts-clone, sample-vision-perception, server, serving, trainjob, web
+    apiserve, appopts, brain, braintop, capability-mock, catalog, cli, dbus, hfsm, invoke,
+    loader, perf, runtime, sample-decision-arena, sample-decision-doom, sample-decision-intents,
+    sample-decision-json, sample-decision-patterns, sample-decision-rubiks, sample-decision-
+    salesagent, sample-decision-triage, sample-fly-interactive, sample-imagegen-batch, sample-
+    imagegen-generate, sample-learning-reader, sample-learning-rlcd, sample-learning-
+    visualclick, sample-npu-rockchip, sample-reconstruction-splat, sample-study-chat, sample-
+    study-document, sample-study-timeline, sample-text-chat-full-finetune, sample-text-embed,
+    sample-text-embed-train, sample-text-encoder-finetune, sample-text-retrieve, sample-text-
+    retrieve-json, sample-text-spectral-lm, sample-tts-clone, sample-vision-perception, server,
+    serving, trainjob, web
 ```
 <!-- crate-layers:end -->
 

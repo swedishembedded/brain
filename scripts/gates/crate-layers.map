@@ -195,6 +195,7 @@ brain-catalog	6
 brain-cli	6
 brain-dbus	6
 brain-hfsm	6
+brain-invoke	6
 brain-loader	6
 brain-perf	6
 brain-runtime	6

@@ -1027,6 +1027,7 @@ dependencies = [
  "brain-huginn",
  "brain-imaging",
  "brain-imgpipe",
+ "brain-invoke",
  "brain-januspro",
  "brain-kronos",
  "brain-lfm2",
@@ -1838,6 +1839,19 @@ dependencies = [
  "brain-model",
  "brain-sdxlunet",
  "brain-testutil",
+]
+
+[[package]]
+name = "brain-invoke"
+version = "5.1.0"
+dependencies = [
+ "brain-audio",
+ "brain-capability",
+ "brain-imaging",
+ "brain-loader",
+ "brain-modelstore",
+ "clap",
+ "serde_json",
 ]
 
 [[package]]
