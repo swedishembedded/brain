@@ -42,7 +42,7 @@ def render() -> str:
         d.arrow(a["r"], b["l"])
 
     y = TOP + PANEL_H + GAP
-    d.panel(20, y, W - 40, PANEL_H, "Encoder 2 (CAM++): the speaker vector that a flow-matching decoder reads after a normalisation")
+    d.panel(20, y, W - 40, PANEL_H, "Encoder 2 (CAM++): the speaker vector that a flow-matching decoder reads after a normalization")
     cy = y + 88
     boxes = [
         (["waveform", "16,000 / s"], "plain"),

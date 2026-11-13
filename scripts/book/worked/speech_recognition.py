@@ -861,7 +861,7 @@ def chunk_attention_toy():
         b = _two_layers(x2, ws, rule)
         rows = [i for i in range(TOY_T) if max(abs(p - q) for p, q in zip(a[i], b[i])) > 1e-12]
         moved.append((name, ", ".join(map(str, rows))))
-    return (f"A two-layer toy of the streaming identity: {TOY_T} rows of width {TOY_D}, one head per layer, the residual form y = x + attention(x) (no normalisation, "
+    return (f"A two-layer toy of the streaming identity: {TOY_T} rows of width {TOY_D}, one head per layer, the residual form y = x + attention(x) (no normalization, "
             "no relative positions, queries, keys and values from the layer's input), scores q . k / 2 over the allowed keys, softmax with the maximum subtracted, "
             "sums left to right. Draws from the book's `Generator(seed_of(\"speech_recognition.chunk_attention\"))` "
             f"(`seed_of` of the pseudocode page, here {bookrng.seed_of(TOY_NAME)}, the generator's starting state): first the {TOY_T * TOY_D} values of x as normals, row by row, then six {TOY_D} x {TOY_D} matrices "
@@ -983,7 +983,7 @@ def block_counts():
             ("FastConformer block", _int(n["attn"]), _int(n["conv"]), _int(n["ff"]), _int(n["ln"]), _int(n["block"]))]
     return ("Parameters of one encoder block at width 1024, by part. The Conformer's feed-forward column is two half-step feed-forwards, each with two "
             "matrices of 1024 x 4096 and no bias; its attention has a fifth matrix for relative positions and two bias vectors of 1024 (u and v).\n\n"
-            + _table(["block", "attention", "convolution module", "feed-forward", "normalisation", "block total"], rows))
+            + _table(["block", "attention", "convolution module", "feed-forward", "normalization", "block total"], rows))
 
 
 # ------------------------------------------------------------------------------------------------ work
@@ -1028,7 +1028,7 @@ def qwen_work():
     d = qwen_decoder_macs(13, 0)
     rows.append(("decoder prefill of the 13 rows (weights only)", _giga(2 * 13 * d["per_token"], 3)))
     return ("GFLOP of Qwen3-ASR for one second of audio (one full chunk of 100 frames, 13 rows), counted as 2 per multiply-add from the shapes of the layers; "
-            "normalisations (the decoder's q and k norms too), activations, softmaxes and biases are left out. The last line is what the decoder spends reading the same 13 rows as prompt tokens "
+            "normalizations (the decoder's q and k norms too), activations, softmaxes and biases are left out. The last line is what the decoder spends reading the same 13 rows as prompt tokens "
             "(the weight matrices of its 28 layers: 28 x 50,331,648 multiply-adds a token, without the attention over the cache and without the head).\n\n"
             + _table(["stage", "GFLOP"], rows))
 
@@ -1062,7 +1062,7 @@ def nemotron_work():
     lstm = N_LSTM * (2 * N_DEC * 4 * N_DEC) + N_DEC * N_DEC
     drows = [("joint head at every evaluation", _mega(2 * head, 2)), ("predictor step (2 LSTM layers and the projector), per letter written", _mega(2 * lstm, 2))]
     return ("MFLOP of Nemotron per encoder row (80 milliseconds of audio, steady state of the streaming path) and GFLOP per second at 12.5 rows a second, counted as 2 per "
-            "multiply-add from the shapes (normalisations, activations, softmaxes and biases left out; the relative-position table, 63 rows through each layer's "
+            "multiply-add from the shapes (normalizations, activations, softmaxes and biases left out; the relative-position table, 63 rows through each layer's "
             f"matrix, is built once per layer: {_mega(2 * m['rel_table'])} MFLOP each). One encoder row is 8 input frames: the three "
             "subsampling stages produce 4, 2 and 1 time positions of it, at 65, 33 and 17 frequencies, and the linear map is applied once; "
             "the projector row is the three matrices 1152 x 2048, 2048 x 1024 and 1024 x 640 of the layout table; a layer's convolution module "

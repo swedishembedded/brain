@@ -963,7 +963,7 @@ def vocoder_counts():
     tm = sum(r[2] for r in rows)
     body = [(n, _i(p), _m(m)) for n, p, m in rows]
     body.append(("total", _i(tp), _m(tm)))
-    return ("Counted from the tensors of the released second-generation vocoder, after the weight-normalisation gains are folded "
+    return ("Counted from the tensors of the released second-generation vocoder, after the weight-normalization gains are folded "
             "into the kernels (the file stores one extra gain per convolution, 14,738 numbers, which are not parameters of the "
             "folded model). A convolution costs c_out c_in k multiply-adds per output position and a transposed convolution c_in "
             "c_out k per input position, at the rates 50, 400, 2000 and 6000 positions a second; the inverse transform and the "
@@ -998,7 +998,7 @@ def stream_schedule():
             "then each time the frame count reaches 3 times the last trigger (8, 24, 72, 216), and once more on the finished clip; "
             "every decode restarts at frame 0 and only the samples not yet sent are handed out. A clip shorter than 8 frames "
             "is decoded once. One decode of n frames costs n x "
-            f"{_m(per)} million multiply-adds (the decoder of the codec chapter).\n\n"
+            f"{_m(per)} million multiply-adds (the decoder of Chapter 3).\n\n"
             + _table(["frames n", "seconds", "frames decoded in each call", "calls", "frames decoded in all", "ratio to n",
                       "seconds of speech before the first sound", "last call repeats the one before"], rows, "rrlrrrrl"))
 
@@ -1064,8 +1064,8 @@ def stream_reference():
         rows.append((k if k < len(chunks) else f"{k} (final)", off, hp, toks, t, _gm(m, 0), _gm(cum, 0)))
     one = flow_macs(2 * (prompt + n_tok))
     first_lm = (1 + 18 + 1 + prompt) * per_dec_lm + 28 * per_dec_lm
-    return ("The chunk rule of the released reference's streaming loop (the third generation's class), which brain's pipeline "
-            "does not implement. A chunk is cut when the tokens generated so far exceed the tokens already sent by the hop plus the "
+    return ("The chunk rule of the released reference's streaming loop (the third generation's class), set against the "
+            "single pass of brain's pipeline. A chunk is cut when the tokens generated so far exceed the tokens already sent by the hop plus the "
             "3 tokens of look-ahead the flow decoder reads; the first hop is 25 tokens plus the padding that rounds the prompt up "
             "to a multiple of 25; after each chunk the hop doubles, up to 100. Each chunk runs the flow decoder again on the "
             "prompt tokens and every token up to the end of the chunk, and keeps only its new frames.\n\n"

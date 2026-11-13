@@ -180,7 +180,7 @@ def _sq(v):
 def rvq_trace():
     base = [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)]
     books = [[(a * 0.5 ** q, b * 0.5 ** q) for a, b in base] for q in range(3)]
-    out = ["Stage q has the four codes (+-0.5, +-0.5) times 0.5^q, listed in the order (-,-), (+,-), (-,+), (+,+); each stage "
+    out = ["Stage q has the four codes (+-0.5, +-0.5) times 0.5^(q - 1) for stages q = 1, 2, 3, listed in the order (-,-), (+,-), (-,+), (+,+); each stage "
            "takes the nearest code of the residual left by the stages before it (a tie goes to the lower index).", ""]
     for x in [(0.62, -0.35), (-0.18, 0.41)]:
         rows, r, recon = [], x, (0.0, 0.0)
@@ -486,7 +486,7 @@ def codec_counts():
             "entries of 256 numbers each). A convolution costs c_out c_in k / groups multiply-adds per output position and a "
             "transposed convolution c_in c_out k per input position; a matrix product costs its input width times its output "
             "width per row; the nearest-code search is counted as d multiply-adds per entry. The squared distances of the "
-            "attention scores, the activations and the normalisations are not counted. Frames arrive at 12.5 per second, "
+            "attention scores, the activations and the normalizations are not counted. Frames arrive at 12.5 per second, "
             "25 per second inside the encoder, 50 per second after the upsampling stages. Each total is the sum of the unrounded "
             "rows, so a printed total can differ by 0.1 from the sum of the printed rows.\n\n"
             + out[0] + "\n\n" + out[1])

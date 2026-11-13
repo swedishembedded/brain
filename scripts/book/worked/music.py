@@ -171,11 +171,11 @@ def integer_division_trap():
     diff = [n for n in range(1, top + 1) if chained(n) != latent_length(n)]
     worst = max(latent_length(n) - chained(n) for n in range(1, top + 1))
     worst_n = max(range(1, top + 1), key=lambda n: (latent_length(n) - chained(n), -n))
-    return ("The latent length of $k$ frames with every division truncated at once (`" "(((k * 44100) // 24000) * 960) // 512`" "), "
+    return ("The latent length of $k$ frames with each division truncated as it is made (`" "(((k * 44100) // 24000) * 960) // 512`" "), "
             "against the one truncation of the left-to-right float product.\n\n"
             + _table(["frames", "truncated at each division", "one truncation"], rows, "rrr")
             + f"\n\nOf the frame counts from 1 to {top:,}, {len(diff):,} give a different length, by at most {worst} steps "
-              f"(first at {worst_n} frames: {chained(worst_n)} against {latent_length(worst_n)}).")
+              f"(the first such count is {worst_n} frame{'' if worst_n == 1 else 's'}: {chained(worst_n)} against {latent_length(worst_n)}).")
 
 
 # ----------------------------------------------------------------------------------------------------------------- song length
@@ -752,7 +752,7 @@ def architecture_layouts():
     voc.append(("total, one stream", "", _i(voc_params()), "", ""))
     return ("The tensors of the five components, the Global LLM in the layout of Volume VI, with the counting conventions. A shape lists outputs before inputs, so a linear map from 4,096 to 2,048 "
             "numbers is 2,048 x 4,096; a convolution is outputs x inputs x taps. A count is the product of the shape and the "
-            "copies, and the total of each table is the count of the next one. Where a bias is not listed the map has none.\n\n"
+            "copies, and the total of each table is that component's row in the parameter table that follows. Where a bias is not listed the map has none.\n\n"
             "Global LLM (the layout of Volume VI's Qwen3 8B, a vocabulary of 200,000, 36 layers, 32 query and 8 key-value "
             "heads of 128, a feed-forward width of 12,288):\n\n"
             + table(lm_rows())
@@ -950,8 +950,8 @@ def work_per_stage():
     lm_mm, dd_mm = ar_frame_macs()
     speech = ss._talker_frame_macs()
     speech_s = (speech[0] + speech[1] + speech[2] + speech[3]) * ss.FRAME_RATE + sum(r[2] for r in ss.ac._decoder_rows())
-    return (f"Multiply-adds to make a song of {secs} seconds ({f:,} frames, {len(w['plan'])} chunks), counted as in the speech "
-            "chapter and by the terms of the table above: every matrix product once per row, attention scores and weighted sums "
+    return (f"Multiply-adds to make a song of {secs} seconds ({f:,} frames, {len(w['plan'])} chunks), counted as in Chapter 6 "
+            "and by the terms of the table above: every matrix product once per row, attention scores and weighted sums "
             "included, the 200 rows of the assumed prompt included, norms and elementwise functions left out. One DiT evaluation over a full chunk "
             f"(length {latent_length(CHUNK_FRAMES)}, {latent_length(CHUNK_FRAMES) + 1} rows with the timestep token) is "
             f"{_eng(one, 'T', 3)} tera-multiply-adds; one autoregressive frame costs {_eng(lm_mm, 'G', 2)} giga for the language "

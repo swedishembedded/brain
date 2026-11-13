@@ -585,7 +585,7 @@ def opening():
     rows = [("the pipeline as specified", "clean", "wer", "cer"),
             ("test audio resampled by linear interpolation", "clean", "lin_wer", "lin_cer"),
             ("test frames from an HTK-scale filterbank", "clean", "htk_wer", "htk_cer"),
-            ("test frames from a filterbank without area normalisation", "clean", "norm_wer", "norm_cer"),
+            ("test frames from a filterbank without area normalization", "clean", "norm_wer", "norm_cer"),
             ("test frames with log10 in place of ln", "clean", "log10_wer", "log10_cer"),
             ("trained with ids not offset past the blank", "shifted", "wer", "cer"),
             ("the four-stage quantizer between front end and recogniser", "clean", "rvq_wer4", "rvq_cer4")]
@@ -690,13 +690,13 @@ def front_end():
     F = features(p)
     stats = [(j, _f(mu[j], 4), _f(sd[j], 4)) for j in range(N_MELS)]
     return (f"Filterbank: {N_MELS} Slaney triangles (Chapter 2) over 0 to 4000 Hz at 8000 Hz and N = {N_FFT} (bins at 31.25 Hz), "
-            "area normalised (each row multiplied by 2 / (right edge - left edge)); columns are the three edges in hertz, the "
+            "area normalized (each row multiplied by 2 / (right edge - left edge)); columns are the three edges in hertz, the "
             "number of nonzero weights in the row and the row's sum.\n\n"
             + _table(["filter", "left", "centre", "right", "nonzero weights", "row sum"], rows, "rrrrrr")
             + f"\n\nThe radix-2 transform of the first frame of training sentence 0, against the transform by definition "
             f"(Chapter 2's `power_bins`): largest relative difference of the 129 powers {diff:.1e}, below 1e-9. The log of Chapter 2's "
             f"recipe A with the guard {GUARD:g}, the sentence's largest value subtracted and a division by 4, then per-band "
-            f"standardisation with the mean and standard deviation (divisor n) over every frame of the {N_TRAIN} training "
+            f"standardization with the mean and standard deviation (divisor n) over every frame of the {N_TRAIN} training "
             "sentences:\n\n" + _table(["band", "mean", "standard deviation"], stats, "rrr")
             + f"\n\nTraining sentence 0 (`{text}`) has {len(p)} frames of {N_MELS} values; the sum of its {len(p) * N_MELS} "
             f"standardized values is {_f(sum(v for r in standardise(log_mel(p)) for v in r), 6)} and the first four entries of the "
@@ -794,7 +794,7 @@ def rvq_table():
             f"concatenated in sentence order and the entries 0, {RVQ_EVERY}, {2 * RVQ_EVERY}, ... of that one list are taken, the "
             f"count never restarted per sentence ({n_fit} frames), starting centres from one `shuffle` of "
             f"the rows per stage with `{RVQ_NAME}` ({_seed(RVQ_NAME)}). The test frames are quantized and summed back, stacked, and read "
-            "by the recogniser of milestone 4, unchanged. Bits are per frame; the mean squared error is the sum over the 16 values "
+            "by the recogniser of milestone 4, unchanged. Bits are per frame; the squared error per frame is the sum over the 16 values "
             "of the squared difference, averaged over the test frames (q = 0 returns zeros).\n\n"
             + _table(["stages", "bits per frame", "bits per second", "squared error per frame", "word error", "character error"], rows,
                      "rrrrrr"))
@@ -869,7 +869,7 @@ def mistakes():
     rows = [("resampling by linear interpolation", f"a 5200 Hz tone arrives at 2800 Hz with amplitude {alias_l:.3f}, not {alias_k:.1e}",
              cell("lin_wer", f3), cell("lin_cer", f3)),
             ("the HTK scale for the Slaney one", f"the filter centres move by up to {shift:.0f} Hz", cell("htk_wer", f3), cell("htk_cer", f3)),
-            ("no area normalisation of the triangles", f"the row sums span a factor {max(fsums) / min(fsums):.1f}, not {max(sums) / min(sums):.1f}",
+            ("no area normalization of the triangles", f"the row sums span a factor {max(fsums) / min(fsums):.1f}, not {max(sums) / min(sums):.1f}",
              cell("norm_wer", f3), cell("norm_cer", f3)),
             ("log10 in place of ln", f"every value is multiplied by {1 / math.log(10):.4f}", cell("log10_wer", f3), cell("log10_cer", f3)),
             ("label ids not offset past the blank", f"the mean training loss reaches {curve_cell(EPOCHS, 'shifted')} (a loss of -ln p is never below 0); spaces written: "
@@ -878,8 +878,8 @@ def mistakes():
     return ("Each mistake is planted alone in an otherwise correct pipeline (the first four at test time only, the recogniser being "
             "the one trained correctly; the last in training) and measured twice: by a number that needs no recogniser, and by "
             "the recogniser's error on the 180 test sentences. One thing changes at a time: the HTK-scale bank keeps the triangles linear in "
-            "hertz and the area normalisation of the Slaney bank and moves only the scale of the edges, the bank without area "
-            "normalisation keeps the Slaney edges, and log10 changes only the base of the logarithm.\n\n"
+            "hertz and the area normalization of the Slaney bank and moves only the scale of the edges, the bank without area "
+            "normalization keeps the Slaney edges, and log10 changes only the base of the logarithm.\n\n"
             + _table(["mistake", "what it does, measured directly", "word error", "character error"], rows, "llrr"))
 
 

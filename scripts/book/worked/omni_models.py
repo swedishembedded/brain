@@ -275,7 +275,7 @@ def interleave_toy():
               "(markers and the text after the clip are left out, as above). The counter after both blocks is "
               f"{after2}.\n\n" + _table(["segment", "sequence index", "rows", "T", "H", "W"], rows2, "llrrrr"))
     t_g3 = segs[4][3][0]                    # video group 3: chunk 0 is two groups and a sound segment, chunk 1 starts at index 3
-    third = ("The sound row that starts the third second is row 39 and the video group of that second is group 3. Time-aligned: the sound row sits at "
+    third = ("The sound row that starts second 3 (the fourth, counting from 0) is row 39 and the video group of that second is group 3. Time-aligned: the sound row sits at "
              f"{prefix + 39} on every axis and the group at T = {t_g3}. Frame-ordinal: the sound row sits at {prefix + 39} and the group at T = "
              f"{segs2[1][3][0] + 3}, with the whole sound block of {segs2[0][2]} rows between them in the sequence.")
     return first + "\n\n" + second + "\n\n" + third
@@ -777,7 +777,7 @@ def first_audio_work():
         s = _first_sound(prompt, 4, CHUNK, N_USER, chunk=CHUNK)
         rows.append((n, f, _b(b["total"], 1), _b(s["total"], 1), f"{b['total'] / s['total']:.1f}"))
     first = (f"Multiply-adds, in billions, that must be done before the first sample of the reply exists, for a prompt of {prompt} rows, a user turn of {N_USER} tokens for the Talker, a "
-             f"reply of n text tokens and F code frames. Brain's order runs the Thinker to the end of the reply, the Talker to the end of its frames and the code-to-wave front "
+             f"reply of n text tokens and F code frames. The crate's order runs the Thinker to the end of the reply, the Talker to the end of its frames and the code-to-wave front "
              f"over all frames, and hands out audio in chunks of up to 300 frames, so for F up to 300 the first chunk is the whole reply. The order the interfaces allow starts the "
              f"Talker when the reply has 4 tokens and hands out the first chunk after {CHUNK} frames (weights only; attention scores and the 25-layer second pass of a "
              "conversation are left out). The count is by these rules. The Thinker's prefill of the prompt gives the reply's first token, so it costs the "

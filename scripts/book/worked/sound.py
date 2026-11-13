@@ -345,7 +345,7 @@ def wav_layout():
                            " ".join(f"{b:02x}" for b in data[4 * i:4 * i + 4])))
     planes = [[brain_read(struct.unpack_from("<h", data, 4 * i + 2 * c)[0]) for i in range(3)] for c in range(2)]
     mono = [(planes[0][i] + planes[1][i]) / 2 for i in range(3)]
-    return ("Two channels, three frames, 8000 Hz, each sample written as code = round(32767 x) with ties away from zero (the rule the section after this table justifies), two bytes little-endian. The file is "
+    return ("Two channels, three frames, 8000 Hz, each sample written as code = round(32767 x) with ties away from zero (the 32767 scale is justified below), two bytes little-endian. The file is "
             f"{len(header) + len(data)} bytes.\n\n"
             + _table(["offset", "bytes", "hex (little-endian)", "field", "value"], rows, "rrlll")
             + "\n\n"

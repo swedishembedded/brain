@@ -1,4 +1,4 @@
-<!-- source-sha256: 71d1d1db9ccda6f63bb25ab86f2fed5576b1655c5bbf5d4a4c209e22da0f52e4 -->
+<!-- source-sha256: e1dd347aa1600ebccae5e560aa9a3f67bdfe1cc7cd5e7fc68322f56531044c27 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 330" width="900" height="330"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="900" height="330" fill="#ffffff"/>
 <rect x="20" y="16" width="860" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Encoder 1 (ECAPA-TDNN): the speaker vector that a voice-cloning synthesiser reads as one position</text>
@@ -36,7 +36,7 @@
 <line x1="618" y1="104" x2="632" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
 <line x1="738" y1="104" x2="752" y2="104" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
 <rect x="20" y="174" width="860" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
-<text x="34" y="196" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Encoder 2 (CAM++): the speaker vector that a flow-matching decoder reads after a normalisation</text>
+<text x="34" y="196" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Encoder 2 (CAM++): the speaker vector that a flow-matching decoder reads after a normalization</text>
 <rect x="35" y="227" width="100" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="85" y="258.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waveform</text>
 <text x="85" y="274.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">16,000 / s</text>

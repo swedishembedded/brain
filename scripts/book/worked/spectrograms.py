@@ -399,7 +399,7 @@ def filterbank_small():
         weights = ", ".join(f"{b}: {_f(w, 4)}" for b, w in enumerate(plain[m]) if w > 0)
         rows.append((m, _f(e[m], 1), _f(e[m + 1], 1), _f(e[m + 2], 1), weights, _f(2 / (e[m + 2] - e[m]), 5)))
     return ("A filterbank for 8000 Hz audio with N = 32 (17 bins, 250 Hz apart), 6 filters from 0 to 4000 Hz, Slaney scale. Left, "
-            "centre and right edges in Hz; the nonzero weights of the unnormalised triangle as bin: weight; and the area factor "
+            "centre and right edges in Hz; the nonzero weights of the unnormalized triangle as bin: weight; and the area factor "
             "2 / (right - left) in 1/Hz.\n\n"
             + _table(["m", "left", "centre", "right", "nonzero weights (bin: weight)", "2/(right-left)"], rows, align="rrrrlr"))
 
@@ -411,7 +411,7 @@ def white_spectrum():
     a = [sum(w * p for w, p in zip(r, flat)) for r in plain]
     b = [sum(w * p for w, p in zip(r, flat)) for r in normal]
     return ("Mel energy of a flat power spectrum (P[b] = 1 for every bin) through the bank above, filter by filter.\n\n"
-            + _table(["m", "unit-height triangles", "area-normalised triangles"], [(m, _f(a[m], 4), _f(b[m], 5)) for m in range(6)]))
+            + _table(["m", "unit-height triangles", "area-normalized triangles"], [(m, _f(a[m], 4), _f(b[m], 5)) for m in range(6)]))
 
 
 def shape_difference():
@@ -448,7 +448,7 @@ def low_band():
     e = band_edges(128, 0, 8000, "slaney")
     low = [m for m in range(128) if e[m + 2] <= 1000.0]
     shared = {b for m in low for b, w in enumerate(bank[m]) if w > 0}
-    return ("Slaney scale, area-normalised triangles. Width of the first filter (right edge minus left edge), the number of "
+    return ("Slaney scale, area-normalized triangles. Width of the first filter (right edge minus left edge), the number of "
             "filters with no, with exactly one and with at most two nonzero weights, and the nonzero weights of the whole bank "
             "against its size.\n\n"
             + _table(["bank", "bin spacing (Hz)", "first filter width (Hz)", "empty", "one bin", "at most two", "nonzero weights", "all weights"],
@@ -575,7 +575,7 @@ def variants():
     padded_edge = edge_only(_log_mel(stft_power(zero_pad(x, n // 2), n, hop, per), slaney, ln))
     return ("The clip through one baseline front end and through six variants that each change one thing. Baseline: N = 400, "
             "H = 160, periodic Hann window, reflect padding of 200 on each side (51 frames), 40 Slaney filters with area "
-            "normalisation from 0 to 8000 Hz, power, ln(max(E, 1e-10)). Pre-emphasis 0.97 means y[0] = x[0] and "
+            "normalization from 0 to 8000 Hz, power, ln(max(E, 1e-10)). Pre-emphasis 0.97 means y[0] = x[0] and "
             "y[n] = x[n] - 0.97 x[n-1] for n >= 1 on the whole clip, before the padding. Over the frames both versions have "
             "(all 40 cells of every frame, so 40 x frames cells), each row counts the cells that differ from the baseline by "
             "more than 0.01 and gives the largest and the mean absolute difference over all of those 40 x frames cells, in nats.\n\n"
@@ -587,7 +587,7 @@ def variants():
 
 
 def qwen_style(samples, target):
-    """N = 400, H = 160, periodic Hann, reflect pad 200, 128 Slaney filters (area-normalised) 0 .. 8000 Hz on 16000 Hz, power,
+    """N = 400, H = 160, periodic Hann, reflect pad 200, 128 Slaney filters (area-normalized) 0 .. 8000 Hz on 16000 Hz, power,
     log10(max(E, 1e-10)), floor at the clip maximum - 8, (v + 4) / 4; the last frame is dropped. Returns [mel][frame]."""
     x = list(samples) + [0.0] * (target - len(samples))
     power = stft_power(reflect_pad(x, 200), 400, 160, hann(400))
@@ -639,26 +639,26 @@ FRONT_ENDS = [
     # key, label, rate, n_fft, hop, n_mels, fmin, fmax, window, padding, pre-processing, mel scale and shape, spectrum, compression
     dict(label="qwen3asr", rate=16000, n_fft=400, hop=160, n_mels=128, fmin=0, fmax=8000, bank=("slaney", True, "hz"),
          window="periodic Hann 400", padding="reflect 200, last frame dropped", pre="none",
-         mel="Slaney, area-normalised", spectrum="power", compression="log10, clamp 1e-10, max - 8, (v + 4)/4"),
+         mel="Slaney, area-normalized", spectrum="power", compression="log10, clamp 1e-10, max - 8, (v + 4)/4"),
     dict(label="nemotronasr", rate=16000, n_fft=512, hop=160, n_mels=128, fmin=0, fmax=8000, bank=("slaney", True, "hz"),
          window="symmetric Hann 400 centred in 512", padding="zeros 256", pre="pre-emphasis 0.97",
-         mel="Slaney, area-normalised", spectrum="power", compression="ln(E + 2^-24)"),
+         mel="Slaney, area-normalized", spectrum="power", compression="ln(E + 2^-24)"),
     dict(label="ecapatdnn", rate=24000, n_fft=1024, hop=256, n_mels=128, fmin=0, fmax=12000, bank=("slaney", True, "hz"),
          window="periodic Hann 1024", padding="reflect 384", pre="none",
-         mel="Slaney, area-normalised", spectrum="magnitude sqrt(p + 1e-9)", compression="ln(max(E, 1e-5))"),
+         mel="Slaney, area-normalized", spectrum="magnitude sqrt(p + 1e-9)", compression="ln(max(E, 1e-5))"),
     dict(label="cosyvoice prompt", rate=24000, n_fft=1920, hop=480, n_mels=80, fmin=0, fmax=8000, bank=("slaney", True, "hz"),
          window="periodic Hann 1920", padding="reflect 720", pre="none",
-         mel="Slaney, area-normalised", spectrum="magnitude sqrt(p + 1e-9)", compression="ln(max(E, 1e-5))"),
+         mel="Slaney, area-normalized", spectrum="magnitude sqrt(p + 1e-9)", compression="ln(max(E, 1e-5))"),
     dict(label="ltxv audio", rate=16000, n_fft=1024, hop=160, n_mels=64, fmin=0, fmax=8000, bank=("slaney", True, "hz"),
          window="periodic Hann 1024", padding="reflect 512", pre="none",
-         mel="Slaney, area-normalised", spectrum="magnitude", compression="ln(max(E, 1e-5))"),
+         mel="Slaney, area-normalized", spectrum="magnitude", compression="ln(max(E, 1e-5))"),
     dict(label="x-vector filterbank", rate=16000, n_fft=512, hop=160, n_mels=80, fmin=20, fmax=8000, bank=("htk", False, "mel"),
          window="symmetric Hann 400, power 0.85, in 512", padding="none (frames that fit)",
          pre="mean removed per frame, pre-emphasis 0.97",
          mel="1127 ln(1 + f/700), unit height, linear in mel", spectrum="power", compression="ln(max(E, 2^-23))"),
     dict(label="evaluation", rate=24000, n_fft=1024, hop=256, n_mels=128, fmin=0, fmax=12000, bank=("slaney", True, "hz"),
          window="periodic Hann 1024", padding="reflect 512", pre="none",
-         mel="Slaney, area-normalised", spectrum="power", compression="ln(E + 1e-6)"),
+         mel="Slaney, area-normalized", spectrum="power", compression="ln(E + 1e-6)"),
 ]
 
 
@@ -755,7 +755,7 @@ def figure_spectrograms():
 
 
 def figure_triangles(n_mels=10, fmax=4000.0, scale="slaney"):
-    """Weights of the area-normalised triangles over a fine grid of frequencies (N = 1024 at 8000 Hz) for the figure."""
+    """Weights of the area-normalized triangles over a fine grid of frequencies (N = 1024 at 8000 Hz) for the figure."""
     rate, n_fft = 8000, 1024
     rows = filterbank(rate, n_fft, n_mels, 0, fmax, scale, True)
     freqs = [b * rate / n_fft for b in range(n_fft // 2 + 1)]
