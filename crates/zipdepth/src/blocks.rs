@@ -1001,6 +1001,10 @@ pub struct MinimalCrossScale {
 /// The reference's residual weight (`architecture.py:314`).
 const CROSS_SCALE_W: f32 = 0.3;
 
+/// `resize_nearest`'s `mode` word for torch's floor rule, the one ZipDepth's
+/// reference uses (and the only one `resize_nearest_dx` is the adjoint of).
+const NEAREST_FLOOR: u32 = 0;
+
 impl MinimalCrossScale {
     pub fn new(ctx: &Ctx, prefix: &str, high: Shape, low: Shape, train: bool) -> MinimalCrossScale {
         let raw = |cout: u32, groups: u32| {
@@ -1071,7 +1075,7 @@ impl MinimalCrossScale {
         let s = ctx.step(
             ctx.ids.need(ctx.ids.resize_nearest, "resize_nearest"),
             &[self.l2h.out(), &self.up],
-            &self.rs(self.high.c, self.low, self.high),
+            &[self.rs(self.high.c, self.low, self.high), vec![NEAREST_FLOOR]].concat(),
             self.high.numel(),
         );
         ctx.gpu.submit(&[], &[s]);
@@ -1564,24 +1568,19 @@ impl FastConvexUpsample {
         vec![self.depth.n, 9, self.scale * self.scale * self.depth.h * self.depth.w]
     }
     /// Params for the resize kernels of the Blend upsampler:
-    /// `[N, C, H, W, Ho, Wo]`, plus an optional 7th `align_corners` word.
+    /// `[N, C, H, W, Ho, Wo, word]`, the 7th word being the kernel's own switch.
     ///
-    /// `align_word` is `Some(0)` for `resize_bilinear` / `resize_bicubic`
-    /// (which read a 7th word; `0` means `align_corners = FALSE`, i.e. the
-    /// half-pixel rule the ZipDepth reference uses) and `None` for
-    /// `resize_nearest`, which reads only six and must not be handed a seventh.
+    /// `word` is `resize_bilinear` / `resize_bicubic`'s `align_corners` (`0`
+    /// means FALSE, i.e. the half-pixel rule the ZipDepth reference uses) or
+    /// `resize_nearest`'s `mode` ([`NEAREST_FLOOR`], torch's floor rule).
     ///
     /// This was a `bool align` whose `true` branch pushed `0` — it read as
     /// "align_corners = true" at every call site and meant the opposite. A
     /// mismatched param list is silently wrong rather than a crash,
     /// so the parameter now carries the word it
     /// actually pushes instead of a name that inverts it.
-    fn up_params(&self, c: u32, align_word: Option<u32>) -> Vec<u32> {
-        let mut v = vec![self.depth.n, c, self.depth.h, self.depth.w, self.out_shape.h, self.out_shape.w];
-        if let Some(w) = align_word {
-            v.push(w);
-        }
-        v
+    fn up_params(&self, c: u32, word: u32) -> Vec<u32> {
+        vec![self.depth.n, c, self.depth.h, self.depth.w, self.out_shape.h, self.out_shape.w, word]
     }
 }
 
@@ -1622,13 +1621,13 @@ impl FastConvexUpsample {
                 let s_nn = ctx.step(
                     ctx.ids.need(ctx.ids.resize_nearest, "resize_nearest"),
                     &[depth, &self.nn_up],
-                    &self.up_params(1, None),
+                    &self.up_params(1, NEAREST_FLOOR),
                     on,
                 );
                 let s_bi = ctx.step(
                     ctx.ids.need(ctx.ids.resize_bilinear, "resize_bilinear"),
                     &[depth, &self.bi_up],
-                    &self.up_params(1, Some(0)),
+                    &self.up_params(1, 0),
                     on,
                 );
                 ctx.gpu.submit(&[], &[s_nn, s_bi]);
@@ -1640,7 +1639,7 @@ impl FastConvexUpsample {
                 let s = ctx.step(
                     ctx.ids.need(ctx.ids.resize_bilinear, "resize_bilinear"),
                     &[c2.out(), &self.alpha_up],
-                    &self.up_params(1, Some(0)),
+                    &self.up_params(1, 0),
                     on,
                 );
                 ctx.gpu.submit(&[], &[s]);
@@ -1757,7 +1756,7 @@ impl FastConvexUpsample {
                 let s = ctx.step(
                     ctx.ids.need(ctx.ids.resize_bilinear_dx, "resize_bilinear_dx"),
                     &[&self.acc, &self.d_alpha_lo],
-                    &self.up_params(1, Some(0)),
+                    &self.up_params(1, 0),
                     self.depth.numel(),
                 );
                 ctx.gpu.submit(&[], &[s]);
@@ -1770,13 +1769,13 @@ impl FastConvexUpsample {
                 let s1 = ctx.step(
                     ctx.ids.need(ctx.ids.resize_nearest_dx, "resize_nearest_dx"),
                     &[&self.d_nn, &self.dd1],
-                    &self.up_params(1, None),
+                    &self.up_params(1, NEAREST_FLOOR),
                     self.depth.numel(),
                 );
                 let s2 = ctx.step(
                     ctx.ids.need(ctx.ids.resize_bilinear_dx, "resize_bilinear_dx"),
                     &[&self.d_bi, &self.dd2],
-                    &self.up_params(1, Some(0)),
+                    &self.up_params(1, 0),
                     self.depth.numel(),
                 );
                 ctx.gpu.submit(&[], &[s1, s2]);
