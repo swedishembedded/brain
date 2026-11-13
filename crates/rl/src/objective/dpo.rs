@@ -664,7 +664,7 @@ mod tests {
     use super::*;
 
     fn completion(tokens: &[u32]) -> Completion {
-        Completion { tokens: tokens.to_vec(), logprobs: vec![0.0; tokens.len()], stop: model::rollout::StopReason::MaxNew, eos_logprob: None }
+        Completion { tokens: tokens.to_vec(), logprobs: vec![0.0; tokens.len()], stop: model::rollout::StopReason::MaxNew, eos_logprob: None, policy_version: 0, cached_tokens: 0 }
     }
 
     #[test]

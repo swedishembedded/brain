@@ -394,7 +394,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         let mut attempts = 0usize;
         let mut score = |c: Completion| {
             let cut = c.tokens.len() > fit;
-            let c = if cut { Completion { tokens: c.tokens[..fit].to_vec(), logprobs: c.logprobs[..fit].to_vec(), stop: StopReason::MaxNew, eos_logprob: None } } else { c };
+            let c = if cut { Completion { tokens: c.tokens[..fit].to_vec(), logprobs: c.logprobs[..fit].to_vec(), stop: StopReason::MaxNew, eos_logprob: None, ..c } } else { c };
             let reward = self.verifier.verify(task, &[], &c.tokens).value;
             spans.push(c.tokens.clone());
             rewards.push(reward);

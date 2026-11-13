@@ -1212,13 +1212,17 @@ struct Resume {
 }
 
 /// What a finished request reports beside its tokens, the same for every decoder whatever shape its cache has.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Completion {
     /// Prompt tokens the decoder's prefix cache served instead of computing them (0 for a cold prompt).
     pub cached_tokens: usize,
     /// The stop token the sequence ended on. It is not among the generated tokens (a stop id is a control
     /// signal, not output); `None` when the sequence ended on its token budget or was cancelled.
     pub stop_token: Option<u32>,
+    /// The log-probability the stop token was drawn with (`0.0` under greedy decoding): `Some` exactly when
+    /// [`Self::stop_token`] is. An objective that trains the policy to stop needs it as it does the log-probability
+    /// of every generated token.
+    pub stop_logprob: Option<f32>,
 }
 
 /// A request being prefilled over several iterations: it holds its blocks and a
@@ -1279,8 +1283,9 @@ struct Running {
     /// Prompt tokens served from the decoder's prefix cache when the sequence was first admitted
     /// (see [`BlockTable::cached_rows`]); a recompute after preemption does not change it.
     cached_tokens: usize,
-    /// The stop token that ended the sequence, once it has.
+    /// The stop token that ended the sequence, once it has, and the log-probability it was drawn with.
     stop_token: Option<u32>,
+    stop_logprob: Option<f32>,
     /// The prompt's embedding rows, kept for a recompute (see [`Waiting::embeds`]).
     embeds: Option<std::sync::Arc<PromptEmbeds>>,
 }
@@ -1318,6 +1323,7 @@ fn accept_token(r: &mut Running, next: u32, logprob: f32) {
     if r.stop.contains(&next) {
         r.done = true;
         r.stop_token = Some(next);
+        r.stop_logprob = Some(logprob);
         return;
     }
     if let Some(t) = r.think.as_mut() {
@@ -1534,9 +1540,9 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// What request `id` reports so far (see [`Completion`]); the default for an unknown id or a request not
     /// admitted yet. Ask before [`Self::cancel_detailed`], which forgets the request.
     pub fn completion_of(&self, id: u64) -> Completion {
-        let cached = |cached_tokens| Completion { cached_tokens, stop_token: None };
+        let cached = |cached_tokens| Completion { cached_tokens, ..Completion::default() };
         if let Some(r) = self.running.iter().chain(self.swapped.iter()).find(|r| r.id == id) {
-            return Completion { cached_tokens: r.cached_tokens, stop_token: r.stop_token };
+            return Completion { cached_tokens: r.cached_tokens, stop_token: r.stop_token, stop_logprob: r.stop_logprob };
         }
         if let Some(p) = self.prefilling.iter().find(|p| p.id == id) {
             return cached(p.resume.as_ref().map_or(p.table.cached_rows() as usize, |r| r.cached_tokens));
@@ -1603,6 +1609,11 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// See [`PagedDecoder::sparse_attention_stats`].
     pub fn sparse_attention_stats(&self) -> Option<crate::lsa::engine::LsaStats> {
         self.dec.sparse_attention_stats()
+    }
+
+    /// The decoder, borrowed.
+    pub fn decoder(&self) -> &D {
+        &self.dec
     }
 
     /// The decoder, for an operation between scheduling steps that must not
@@ -2154,7 +2165,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             // before the preemption, so the prefill's own output is not used.
             let mut context = prompt;
             context.push(next_input);
-            self.running.push(Running { id, table, adapter, generated, logprobs, max_new, stop, next_input, context, spec, done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None });
+            self.running.push(Running { id, table, adapter, generated, logprobs, max_new, stop, next_input, context, spec, done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None, stop_logprob: None });
             return;
         }
         let cached_tokens = table.cached_rows() as usize;
@@ -2175,7 +2186,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             let candidates = if first_candidates.len() >= self.dec.topk_capacity().max(1) { first_candidates } else { self.dec.admit_topk(&hidden, self.dec.topk_capacity().max(1)) };
             sample_in_context(&candidates, sample, &SampleContext { context: &prompt, prompt_len: prompt.len() }, &mut rng)
         };
-        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None };
+        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None, stop_logprob: None };
         accept_token(&mut r, first, first_logprob);
         report.admitted.push(id);
         self.running.push(r);
@@ -2625,7 +2636,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 self.dec.release_table(&mut r.table);
                 self.unpin(r.adapter);
                 report.completed_logprobs.push((r.id, r.logprobs));
-                report.completed_meta.push((r.id, Completion { cached_tokens: r.cached_tokens, stop_token: r.stop_token }));
+                report.completed_meta.push((r.id, Completion { cached_tokens: r.cached_tokens, stop_token: r.stop_token, stop_logprob: r.stop_logprob }));
                 self.prefill_gate.observe_reply(r.generated.len());
                 completed.push((r.id, r.generated));
             } else {
@@ -2951,6 +2962,7 @@ mod tests {
             embeds: None,
             cached_tokens: 0,
             stop_token: None,
+            stop_logprob: None,
         }
     }
 

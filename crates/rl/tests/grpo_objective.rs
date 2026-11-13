@@ -163,7 +163,7 @@ impl model::rollout::Rollout for RecordingRollout {
     fn sample_n(&mut self, _prompt: &[u32], n: usize, params: &model::rollout::RolloutParams, _rng: &mut data::rng::Rng) -> Vec<model::rollout::Completion> {
         let fixed = [vec![4u32, 5, 6], vec![7, 7, 7]];
         (0..n)
-            .map(|i| model::rollout::Completion { tokens: fixed[i % 2][..params.max_new].to_vec(), logprobs: vec![100.0; params.max_new], stop: model::rollout::StopReason::MaxNew, eos_logprob: None })
+            .map(|i| model::rollout::Completion { tokens: fixed[i % 2][..params.max_new].to_vec(), logprobs: vec![100.0; params.max_new], stop: model::rollout::StopReason::MaxNew, eos_logprob: None, policy_version: 0, cached_tokens: 0 })
             .collect()
     }
 }

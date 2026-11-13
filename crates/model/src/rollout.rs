@@ -9,12 +9,12 @@
 //! Two implementations of the one [`Rollout`] trait: [`ModelRollout`], the
 //! always-correct O(T^2) path over any [`Model::logits_all`] (works for
 //! every token-head model with zero per-model code, and doubles as the
-//! oracle [`PagedRollout`] is tested against), and [`PagedRollout`], the fast
-//! path over an existing [`crate::serve::PagedDecoder`] serving engine -
-//! every one of which already shares one prompt's KV across N samples via
-//! its own [`crate::paged::PrefixCache`] (see [`PagedRollout`]'s own doc
-//! comment for why that, and not [`crate::paged::BlockTable::fork`], is the
-//! sharing primitive this builds on).
+//! oracle [`SchedulerRollout`] is tested against), and [`SchedulerRollout`],
+//! the serving path: the group is submitted to the same generic
+//! [`crate::serve::Scheduler`] over an existing [`crate::serve::PagedDecoder`]
+//! engine that answers requests, so a group's samples share their prompt's
+//! prefill, batch their decode steps and run under whichever adapter the
+//! trainer last published, exactly as a served request does.
 //!
 //! EOS and top-p/top-k sampling are not reinvented here: both rollouts
 //! sample via [`crate::serve::sample_from_topk_with_logprob`], the same
@@ -31,8 +31,7 @@ use std::collections::HashMap;
 
 use data::rng::Rng;
 
-use crate::paged::BlockTable;
-use crate::serve::{self, PagedDecoder, SampleParams};
+use crate::serve::{self, AdapterId, PagedDecoder, Request, SampleParams, Scheduler};
 use crate::{Model, ModelConfig};
 
 /// Why a completion stopped.
@@ -63,6 +62,18 @@ pub struct Completion {
     /// an objective that wants the policy to learn to stop trains on it as one
     /// more sampled token and needs the probability it was drawn with.
     pub eos_logprob: Option<f32>,
+    /// The version of the policy that sampled this completion, as the rollout
+    /// numbers its own policies: the count of [`SyncRollout::sync`] calls the
+    /// engine had taken when the sequence was submitted. A sequence finishes on
+    /// the policy it started on, so every token of the completion carries this
+    /// one version; a trainer masks a completion whose version is too far
+    /// behind its own. `0` is a rollout that does not version (the model's own
+    /// [`ModelRollout`]) or a sampler never synced.
+    pub policy_version: u64,
+    /// Prompt tokens the engine's prefix cache served instead of computing
+    /// them: how much of this sample's prefill the group shared. `0` for a
+    /// rollout without a cache.
+    pub cached_tokens: usize,
 }
 
 /// Sampling policy + stopping conditions shared by every completion a
@@ -127,8 +138,8 @@ fn candidates_from_logits(logits: &[f32]) -> Vec<(u32, f32)> {
 
 /// One sampling step's outcome for a single position: accept `next` into
 /// `tokens`/`logprobs` unless it matches `eos`, and report whether the
-/// completion is now done. Shared by [`ModelRollout`] and [`PagedRollout`] so
-/// the two never drift on EOS/`max_new` semantics.
+/// completion is now done. Shared by [`ModelRollout`] and the tests of [`SchedulerRollout`]
+/// so the two never drift on EOS/`max_new` semantics.
 fn accept(tokens: &mut Vec<u32>, logprobs: &mut Vec<f32>, next: u32, logprob: f32, eos: Option<u32>, max_new: usize) -> Option<StopReason> {
     if Some(next) == eos {
         return Some(StopReason::Eos);
@@ -245,7 +256,7 @@ impl<'a, M: Model> ModelRollout<'a, M> {
                 None => ctx.push(next),
             }
         }
-        Completion { tokens, logprobs, stop, eos_logprob: eos_lp }
+        Completion { tokens, logprobs, stop, eos_logprob: eos_lp, policy_version: 0, cached_tokens: 0 }
     }
 }
 
@@ -266,134 +277,110 @@ impl<'a, M: Model> Rollout for ModelRollout<'a, M> {
     }
 }
 
-/// The fast path over an existing [`PagedDecoder`] serving engine: each
-/// sample prefills the SAME prompt through [`PagedDecoder::prefill`], whose
-/// own [`crate::paged::PrefixCache`] already shares one prompt's KV blocks
-/// across N samples - the second call onward is served (almost) entirely
-/// from cache instead of re-running the model, without this rollout
-/// reimplementing that reuse. Any decoder already implementing
-/// [`PagedDecoder`] (every `qwen3::serve::Engine` mode today) gets this for
-/// free.
+/// The serving path: a group of samples is `n` requests to the same
+/// [`Scheduler`] that answers served traffic, over any [`PagedDecoder`]
+/// engine. Nothing here reimplements admission, prefill, sampling or decode:
 ///
-/// [`BlockTable::fork`] is deliberately NOT used to share the prompt's KV
-/// directly: it forks a table's blocks byte-for-byte, including whatever
-/// partially-filled tail block the prompt's own last, still-appendable block
-/// is - unlike [`crate::paged::PrefixCache::lookup`]/`adopt_prefix`, which
-/// only ever share CLOSED, immutable full blocks. The very next token
-/// appended by any two forked samples would then race to write the SAME
-/// physical slot ([`BlockTable::append`] only allocates a fresh block once
-/// the current one is exactly full); privatizing it first
-/// ([`BlockTable::unshare_tail`]) needs a device-side byte copy of that
-/// block's live KV, which [`PagedDecoder`]'s trait surface has no operation
-/// for. `PrefixCache`'s block-boundary-only sharing sidesteps the hazard
-/// entirely, which is why it is the primitive this rollout builds on.
-pub struct PagedRollout<D: PagedDecoder> {
-    dec: D,
+/// * the group's members share their prompt's prefill through the scheduler
+///   (the first prefills, the rest adopt its closed KV blocks from the prefix
+///   cache), and run in the same batched decode steps;
+/// * each member samples with its own seeded RNG stream, so a seed reproduces
+///   whatever else is in the batch;
+/// * the log-probability of every token is the one the sequence was drawn
+///   with, captured at sample time, never re-derived;
+/// * the sequences run under [`Self::set_adapter`]'s adapter (the base
+///   model without one), whose KV namespace keeps a refit policy from ever
+///   adopting another policy's cached prompt.
+///
+/// A request the scheduler refuses (too long for the engine, a token outside
+/// the vocabulary, an adapter the engine does not serve) is a panic naming the
+/// reason: there is no completion to return for it and training on a stand-in
+/// would be silent corruption.
+pub struct SchedulerRollout<D: PagedDecoder> {
+    sched: Scheduler<D>,
+    adapter: Option<AdapterId>,
+    policy_version: u64,
 }
 
-impl<D: PagedDecoder> PagedRollout<D> {
-    pub fn new(dec: D) -> PagedRollout<D> {
-        PagedRollout { dec }
+impl<D: PagedDecoder> SchedulerRollout<D> {
+    /// A rollout over `dec` that runs up to `max_running` of a group's
+    /// sequences at once (the engine's own batch limit applies as well).
+    pub fn new(dec: D, max_running: usize) -> SchedulerRollout<D> {
+        SchedulerRollout { sched: Scheduler::new(dec, max_running), adapter: None, policy_version: 0 }
+    }
+
+    /// Sample under `adapter` (`None`: the base model) from now on, and stamp
+    /// the completions with `version`. A refit publishes its adapter to the
+    /// engine, then calls this with the next version.
+    pub fn set_adapter(&mut self, adapter: Option<AdapterId>, version: u64) {
+        self.adapter = adapter;
+        self.policy_version = version;
+    }
+
+    /// The version completions are stamped with now.
+    pub fn policy_version(&self) -> u64 {
+        self.policy_version
+    }
+
+    /// The scheduler, borrowed: its accounting (`prefix_stats`, `kv_pool_bytes`, ...).
+    pub fn scheduler(&self) -> &Scheduler<D> {
+        &self.sched
     }
 
     /// The decoder, borrowed.
     pub fn decoder(&self) -> &D {
-        &self.dec
+        self.sched.decoder()
     }
 
-    /// Hand the decoder back - the caller's own accounting (`prefix_stats`,
-    /// `kv_pool_bytes`, ...) all live on `D` itself.
+    /// The decoder, mutably: how a refit loads and unloads adapters.
+    pub fn decoder_mut(&mut self) -> &mut D {
+        self.sched.decoder_mut()
+    }
+
+    /// Hand the decoder back.
     pub fn into_decoder(self) -> D {
-        self.dec
+        self.sched.into_decoder()
     }
 }
 
-struct Seq {
-    table: BlockTable,
-    next_input: u32,
-    tokens: Vec<u32>,
-    logprobs: Vec<f32>,
-    stop: Option<StopReason>,
-    eos_logprob: Option<f32>,
-    rng: Rng,
-}
-
-impl<D: PagedDecoder> Rollout for PagedRollout<D> {
+impl<D: PagedDecoder> Rollout for SchedulerRollout<D> {
     fn sample_n(&mut self, prompt: &[u32], n: usize, params: &RolloutParams, rng: &mut Rng) -> Vec<Completion> {
         assert!(n > 0, "sample_n: n must be > 0");
-        // Mirrors the capacity/vocab checks `serve::Scheduler` runs at
-        // admission (`Engine::prefill`'s own doc comment: callers bypassing
-        // the scheduler must check these themselves, or a too-long/bad-token
-        // prompt silently corrupts the block table / reads out of bounds).
-        let need = prompt.len() + params.max_new;
-        assert!(need <= self.dec.max_seq_len(), "PagedRollout: prompt+max_new ({need}) exceeds engine capacity ({})", self.dec.max_seq_len());
-        let vocab = self.dec.vocab() as u32;
-        assert!(prompt.iter().all(|&t| t < vocab), "PagedRollout: prompt token outside vocabulary ({vocab})");
-
-        // Each sample prefills the prompt independently; `PagedDecoder::prefill`'s
-        // own prefix cache serves every call after the first from cache (see
-        // this type's own doc comment for why that beats a raw `fork`).
-        let mut seqs: Vec<Seq> = (0..n)
-            .map(|_| {
-                let mut table = BlockTable::new();
-                let hidden = self.dec.prefill(&mut table, prompt);
-                let mut seq_rng = Rng::new(rng.next_u64());
-                let mut tokens = Vec::with_capacity(params.max_new);
-                let mut logprobs = Vec::with_capacity(params.max_new);
-                let (first, logprob) = if params.sample.is_greedy() {
-                    (self.dec.admit_greedy(&hidden), 0.0)
-                } else {
-                    let k = self.dec.topk_capacity().max(1);
-                    let candidates = self.dec.admit_topk(&hidden, k);
-                    serve::sample_from_topk_with_logprob(&candidates, params.sample, &mut seq_rng)
-                };
-                let stop = accept(&mut tokens, &mut logprobs, first, logprob, params.eos, params.max_new);
-                Seq { table, next_input: first, tokens, logprobs, stop, eos_logprob: eos_logprob(stop, logprob), rng: seq_rng }
+        assert!(!prompt.is_empty(), "SchedulerRollout: an empty prompt is not a question - there is nothing to continue from");
+        let stop: Vec<u32> = params.eos.into_iter().collect();
+        let request = || Request { prompt: prompt.to_vec(), max_new: params.max_new, stop: stop.clone() };
+        if let Some(why) = self.sched.refusal(&request(), self.adapter) {
+            panic!("SchedulerRollout: the engine refuses this prompt: {why}");
+        }
+        // Group members are submitted together, in order: the scheduler
+        // prefills the first and lets the rest adopt its prompt blocks.
+        let ids: Vec<u64> = (0..n)
+            .map(|_| match self.adapter {
+                Some(adapter) => self.sched.submit_for_adapter(request(), adapter, params.sample, rng.next_u64()),
+                None => self.sched.submit_sampled(request(), params.sample, rng.next_u64()),
             })
             .collect();
 
-        // Batched decode over whatever is still active, exactly the shape
-        // `serve::Scheduler::step_inner` drives - one round-trip per token
-        // (no on-device window; correctness over throughput for phase P10).
-        loop {
-            let active: Vec<usize> = (0..seqs.len()).filter(|&i| seqs[i].stop.is_none()).collect();
-            if active.is_empty() {
-                break;
+        let mut done: HashMap<u64, Completion> = HashMap::with_capacity(n);
+        while done.len() < n {
+            let report = self.sched.step_report();
+            if let Some((id, why)) = report.rejected.first() {
+                panic!("SchedulerRollout: request {id} was refused after it was submitted: {why}");
             }
-            let inputs: Vec<u32> = active.iter().map(|&i| seqs[i].next_input).collect();
-            let mut refs: Vec<&mut BlockTable> = Vec::with_capacity(active.len());
-            for (idx, s) in seqs.iter_mut().enumerate() {
-                if active.contains(&idx) {
-                    refs.push(&mut s.table);
-                }
+            let mut logprobs: HashMap<u64, Vec<f32>> = report.completed_logprobs.into_iter().collect();
+            let mut meta: HashMap<u64, serve::Completion> = report.completed_meta.into_iter().collect();
+            for (id, tokens) in report.completed {
+                let logprobs = logprobs.remove(&id).expect("every completed request reports its log-probabilities");
+                let meta = meta.remove(&id).expect("every completed request reports how it was served");
+                let (stop, eos_logprob) = match meta.stop_token {
+                    Some(_) => (StopReason::Eos, meta.stop_logprob),
+                    None => (StopReason::MaxNew, None),
+                };
+                done.insert(id, Completion { tokens, logprobs, stop, eos_logprob, policy_version: self.policy_version, cached_tokens: meta.cached_tokens });
             }
-            if params.sample.is_greedy() {
-                let nexts = self.dec.forward_batched_greedy(&mut refs, &inputs);
-                for (bi, &si) in active.iter().enumerate() {
-                    let s = &mut seqs[si];
-                    s.stop = accept(&mut s.tokens, &mut s.logprobs, nexts[bi], 0.0, params.eos, params.max_new);
-                    s.eos_logprob = eos_logprob(s.stop, 0.0);
-                    s.next_input = nexts[bi];
-                }
-            } else {
-                let k = self.dec.topk_capacity().max(1);
-                let cands = self.dec.forward_batched_topk(&mut refs, &inputs, k);
-                for (bi, &si) in active.iter().enumerate() {
-                    let s = &mut seqs[si];
-                    let (next, logprob) = serve::sample_from_topk_with_logprob(&cands[bi], params.sample, &mut s.rng);
-                    s.stop = accept(&mut s.tokens, &mut s.logprobs, next, logprob, params.eos, params.max_new);
-                    s.eos_logprob = eos_logprob(s.stop, logprob);
-                    s.next_input = next;
-                }
-            }
+            assert!(!report.finished.is_empty() || self.sched.pending(), "SchedulerRollout: the scheduler went idle with {} of {n} samples unfinished", n - done.len());
         }
-
-        seqs.into_iter()
-            .map(|mut s| {
-                self.dec.release_table(&mut s.table);
-                Completion { tokens: s.tokens, logprobs: s.logprobs, stop: s.stop.unwrap_or(StopReason::MaxNew), eos_logprob: s.eos_logprob }
-            })
-            .collect()
+        ids.into_iter().map(|id| done.remove(&id).expect("every submitted request completed")).collect()
     }
 }
 

@@ -23,7 +23,7 @@ use model::adapter::kind::{LORA_A, LORA_B};
 use std::collections::HashMap;
 
 use data::rng::Rng;
-use model::rollout::{Completion, PagedRollout, Rollout, RolloutParams, SyncRollout};
+use model::rollout::{Completion, Rollout, RolloutParams, SchedulerRollout, SyncRollout};
 
 use crate::config::{LoraCfg, QwenConfig};
 use crate::serve::Engine;
@@ -49,7 +49,7 @@ pub struct EngineRollout {
     base: HashMap<String, Vec<f32>>,
     lora: Option<LoraCfg>,
     geometry: EngineGeometry,
-    inner: Option<PagedRollout<Engine>>,
+    inner: Option<SchedulerRollout<Engine>>,
 }
 
 impl EngineRollout {
@@ -121,7 +121,7 @@ impl SyncRollout for EngineRollout {
                 swapped.push((base_name, orig));
             }
             let engine = self.build(&self.base)?;
-            self.inner = Some(PagedRollout::new(engine));
+            self.inner = Some(SchedulerRollout::new(engine, self.geometry.max_batch as usize));
             Ok(())
         })();
         restore(&mut self.base, std::mem::take(&mut swapped));

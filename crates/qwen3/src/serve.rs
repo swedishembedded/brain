@@ -7324,28 +7324,29 @@ mod tests {
 }
 
 /// P10 (generic rollout) gate: `ModelRollout` (the always-correct oracle,
-/// over the dense `Qwen`) and `PagedRollout` (the fast path, over this
-/// module's `Engine`) built from the SAME weights, and `PagedRollout`'s
-/// N-way sampling shares the prompt's KV rather than recomputing it.
+/// over the dense `Qwen`) and `SchedulerRollout` (the serving path, over this
+/// module's `Engine` through the generic scheduler) built from the SAME
+/// weights, and the scheduler's N-way sampling shares the prompt's KV rather
+/// than recomputing it.
 #[cfg(test)]
 mod rollout_tests {
     use super::*;
     use super::tests::tiny_weights;
     use crate::model::Qwen;
     use data::rng::Rng;
-    use model::rollout::{ModelRollout, PagedRollout, Rollout, RolloutParams, StopReason};
+    use model::rollout::{ModelRollout, Rollout, RolloutParams, SchedulerRollout, StopReason};
     use model::serve::SampleParams;
 
     fn gpu_disabled() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
     }
 
-    /// `ModelRollout` (dense `Qwen`) and `PagedRollout` (paged `Engine`),
+    /// `ModelRollout` (dense `Qwen`) and `SchedulerRollout` (paged `Engine`),
     /// built from IDENTICAL weights, must agree token-for-token on GREEDY
-    /// decoding - the P10 gate proving the fast path is not silently wrong,
-    /// independent of any real-sampling RNG-plumbing question.
+    /// decoding - the P10 gate proving the serving path is not silently
+    /// wrong, independent of any real-sampling RNG-plumbing question.
     #[test]
-    fn model_rollout_and_paged_rollout_agree_on_greedy_decoding() {
+    fn model_rollout_and_scheduler_rollout_agree_on_greedy_decoding() {
         if gpu_disabled() {
             return;
         }
@@ -7360,22 +7361,48 @@ mod rollout_tests {
         let mut model_roll = ModelRollout::new(&qwen);
         let model_out = model_roll.sample_n(&prompt, 1, &params, &mut Rng::random()).pop().expect("sample_n(1)");
 
-        let mut paged_roll = PagedRollout::new(engine);
-        let paged_out = paged_roll.sample_n(&prompt, 1, &params, &mut Rng::random()).pop().expect("sample_n(1)");
+        let mut served_roll = SchedulerRollout::new(engine, 1);
+        let served_out = served_roll.sample_n(&prompt, 1, &params, &mut Rng::random()).pop().expect("sample_n(1)");
 
-        assert_eq!(model_out.tokens, paged_out.tokens, "ModelRollout vs PagedRollout diverged on greedy decoding");
+        assert_eq!(model_out.tokens, served_out.tokens, "ModelRollout vs SchedulerRollout diverged on greedy decoding");
         assert_eq!(model_out.stop, StopReason::MaxNew);
-        assert_eq!(paged_out.stop, StopReason::MaxNew);
+        assert_eq!(served_out.stop, StopReason::MaxNew);
     }
 
-    /// `PagedRollout::sample_n(n=8)` on one prompt must prefill that prompt
-    /// through the engine's own prefix cache, not recompute it from scratch
-    /// on every one of the 8 samples: `prefix_stats()`'s `hit_tokens` (tokens
-    /// served from cache) must be nonzero and grow with `n`, and
-    /// `lookup_tokens` (tokens looked up) must be exactly `n * prompt.len()`
-    /// - one lookup per sample's `prefill` call, nothing more.
+    /// Sampled completions: the same seeds give the same tokens through the
+    /// scheduler as through the dense model, and the log-probability each
+    /// token was drawn with agrees to the engine's arithmetic. The scheduler
+    /// seeds each member's stream from the caller's rng exactly as
+    /// `ModelRollout` does.
     #[test]
-    fn sample_n_shares_the_prompts_kv_through_the_prefix_cache() {
+    fn a_sampled_group_matches_the_dense_model_token_for_token() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let qwen = Qwen::new(cfg.clone(), 1, cfg.block_size, &map);
+        let engine = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 8, false, false);
+        let prompt = vec![1u32, 5, 3, 9];
+        // seed: a fixed stream so both rollouts draw the same samples
+        let params = RolloutParams { max_new: 5, sample: SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..SampleParams::greedy() }, eos: None };
+        let want = ModelRollout::new(&qwen).sample_n(&prompt, 4, &params, &mut Rng::new(42));
+        let got = SchedulerRollout::new(engine, 4).sample_n(&prompt, 4, &params, &mut Rng::new(42));
+        for (g, w) in got.iter().zip(&want) {
+            assert_eq!(g.tokens, w.tokens, "the same seed draws the same sample");
+            for (a, b) in g.logprobs.iter().zip(&w.logprobs) {
+                assert!((a - b).abs() < 1e-2, "the log-probability the token was drawn with: {a} vs {b}");
+            }
+            assert!(g.logprobs.iter().all(|&lp| lp <= 0.0 && lp.is_finite()));
+        }
+    }
+
+    /// A group of `n` samples of one prompt computes that prompt once: the
+    /// members after the first adopt its closed KV blocks from the engine's
+    /// prefix cache, and each completion reports how much of its prompt it
+    /// adopted.
+    #[test]
+    fn a_group_shares_its_prompt_prefill_through_the_scheduler() {
         if gpu_disabled() {
             return;
         }
@@ -7385,28 +7412,42 @@ mod rollout_tests {
         let prompt = vec![1u32, 5, 3, 9, 2, 7, 4, 6, 8];
         let params = RolloutParams { max_new: 3, sample: SampleParams::greedy(), eos: None };
 
-        let mut roll = PagedRollout::new(engine);
+        let mut roll = SchedulerRollout::new(engine, 8);
         let n = 8usize;
         let out = roll.sample_n(&prompt, n, &params, &mut Rng::random());
         assert_eq!(out.len(), n);
 
-        let engine = roll.into_decoder();
-        let (hit_tokens, lookup_tokens, cached_blocks) = engine.prefix_stats();
-        assert_eq!(lookup_tokens, n as u64 * prompt.len() as u64, "one prefill lookup per sample, exactly");
-        assert!(hit_tokens > 0, "no prefix reuse observed across {n} samples of the identical prompt");
+        // Two full blocks of the 9-token prompt are shareable (block_size 4).
+        let shared = out.iter().filter(|c| c.cached_tokens > 0).count();
+        assert_eq!(shared, n - 1, "every member after the first adopts the prompt blocks the first prefilled: {:?}", out.iter().map(|c| c.cached_tokens).collect::<Vec<_>>());
+        assert!(out.iter().all(|c| c.cached_tokens == 0 || c.cached_tokens == 8), "a member adopts whole closed blocks of the prompt");
+        let (hit_tokens, _, cached_blocks) = roll.scheduler().prefix_stats();
+        assert!(hit_tokens >= (n as u64 - 1) * 8, "hit_tokens {hit_tokens} too low for {n} samples sharing one prompt's KV");
         assert!(cached_blocks > 0, "the prompt's full blocks must be indexed for reuse");
-        // The first sample computes cold (nothing cached yet); every one of
-        // the remaining n-1 samples must hit the cache for at least one full
-        // block (block_size=4) of the shared prompt - "shared", not
-        // "recomputed 8 times".
-        assert!(hit_tokens >= (n as u64 - 1) * 4, "hit_tokens {hit_tokens} too low for {n} samples sharing one prompt's KV");
+    }
+
+    /// The completions carry the policy version the rollout was told to stamp,
+    /// and a refit to a new version changes what the next group carries.
+    #[test]
+    fn completions_carry_the_policy_version_in_force_when_they_were_sampled() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let engine = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 2, 8, 8, false, false);
+        let params = RolloutParams { max_new: 2, sample: SampleParams::greedy(), eos: None };
+        let mut roll = SchedulerRollout::new(engine, 2);
+        assert!(roll.sample_n(&[1, 2, 3], 2, &params, &mut Rng::random()).iter().all(|c| c.policy_version == 0));
+        roll.set_adapter(None, 7);
+        assert!(roll.sample_n(&[1, 2, 3], 2, &params, &mut Rng::random()).iter().all(|c| c.policy_version == 7));
     }
 
     /// EOS must end a completion immediately (no tokens/logprobs emitted)
     /// regardless of which token the underlying sampling policy would
     /// otherwise have produced - derived from a real run so it holds for
     /// whatever this tiny model's actual greedy continuation is, not a
-    /// guessed token id.
+    /// guessed token id. The stop token's own log-probability is reported.
     #[test]
     fn eos_stops_a_completion_immediately_without_emitting_it() {
         if gpu_disabled() {
@@ -7418,19 +7459,19 @@ mod rollout_tests {
         let no_eos = RolloutParams { max_new: 4, sample: SampleParams::greedy(), eos: None };
 
         let engine = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 32, 1, 8, 8, false, false);
-        let mut roll = PagedRollout::new(engine);
+        let mut roll = SchedulerRollout::new(engine, 1);
         let baseline = roll.sample_n(&prompt, 1, &no_eos, &mut Rng::random()).pop().expect("sample_n(1)");
         assert!(!baseline.tokens.is_empty(), "fixture needs a real first token to use as EOS");
+        assert_eq!(baseline.eos_logprob, None, "a completion that ran to max_new has no stop token");
         let eos_token = baseline.tokens[0];
 
-        let engine = roll.into_decoder();
         let with_eos = RolloutParams { eos: Some(eos_token), ..no_eos };
-        let mut roll = PagedRollout::new(engine);
         let stopped = roll.sample_n(&prompt, 1, &with_eos, &mut Rng::random()).pop().expect("sample_n(1)");
 
         assert_eq!(stopped.stop, StopReason::Eos);
         assert!(stopped.tokens.is_empty(), "EOS must not be appended to the completion");
         assert!(stopped.logprobs.is_empty());
+        assert_eq!(stopped.eos_logprob, Some(0.0), "greedy decoding draws the stop token with probability one");
     }
 
     /// `RolloutParams::sample.top_p` must actually reach the sampling call:
