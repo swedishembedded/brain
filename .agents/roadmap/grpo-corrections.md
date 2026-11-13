@@ -11,7 +11,9 @@ that sampled, never steps on an empty batch and normalises per token (knowledge
       forward from training). The serving path exists: `model::rollout::SchedulerRollout` submits a group to the
       generic scheduler over any paged engine (shared prompt prefill, batched decode, per-token log-probabilities and
       the policy version on each completion; gated against the dense model on a tiny `qwen3`), and `qwen3`'s
-      `EngineRollout` builds on it. Not yet the default of the SDK's improve cycle, and not yet measured on real
+      `EngineRollout` builds on it and refits by publishing the trainer's LoRA factors to the engine's adapter bank
+      as the next policy version (no engine rebuild, the previous version's cached prompts purged; a full fine-tune
+      still rebuilds). Not yet the default of the SDK's improve cycle, and not yet measured on real
       weights. The trainer's behaviour log-probabilities are recomputed by the training forward either way, so only
       speed is at stake.
 - [ ] An entropy term (or an entropy floor) next to the KL term; neither is in

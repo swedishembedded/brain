@@ -31,6 +31,7 @@ use std::collections::HashMap;
 
 use data::rng::Rng;
 
+use crate::adapter::bank::{AdapterError, BankedEngine, VerifiedAdapter};
 use crate::serve::{self, AdapterId, PagedDecoder, Request, SampleParams, Scheduler};
 use crate::{Model, ModelConfig};
 
@@ -340,6 +341,29 @@ impl<D: PagedDecoder> SchedulerRollout<D> {
     /// Hand the decoder back.
     pub fn into_decoder(self) -> D {
         self.sched.into_decoder()
+    }
+}
+
+impl<D: PagedDecoder + BankedEngine> SchedulerRollout<D> {
+    /// Refit the policy to `adapter` without rebuilding the engine: register it
+    /// with the engine's adapter bank, sample under it from now on as the next
+    /// policy version, and unload the one it replaces (which purges that
+    /// adapter's cached prompts, so a prefix cached under the old policy is
+    /// never read under the new). Nothing runs between groups, so the old
+    /// adapter has no sequence left and goes at once. Returns the new version.
+    ///
+    /// # Errors
+    ///
+    /// The engine has no bank, or refuses the adapter (rank above the bank's
+    /// cap, a site the bank does not hold). The previous policy keeps serving.
+    pub fn publish_adapter(&mut self, adapter: VerifiedAdapter) -> Result<u64, AdapterError> {
+        let id = self.sched.decoder_mut().load_adapter(adapter)?;
+        let previous = self.adapter.replace(id);
+        self.policy_version += 1;
+        if let Some(previous) = previous.filter(|p| *p != id) {
+            self.sched.decoder_mut().unload_adapter(previous)?;
+        }
+        Ok(self.policy_version)
     }
 }
 

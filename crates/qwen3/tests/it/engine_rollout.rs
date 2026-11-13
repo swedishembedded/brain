@@ -2,9 +2,11 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Rollouts on the serving engine sample the policy the trainer holds: after
-//! a sync with a LoRA model's adapters, the engine (base weights with the
-//! adapters folded in) decodes what the LoRA model itself does, and a sync
-//! with zeroed adapters decodes the base model again.
+//! a sync with a LoRA model's adapters, the engine (the base weights with the
+//! adapters published to its bank) decodes what the LoRA model itself does,
+//! and a sync with zeroed adapters decodes the base model again. A refit
+//! does not rebuild the engine, numbers the policy, and never lets the next
+//! policy read what the previous one cached.
 
 use std::collections::HashMap;
 
@@ -69,4 +71,38 @@ fn the_engine_samples_what_the_synced_model_does() {
     let want = ModelRollout::new(&plain).sample_n(&prompt, 1, &greedy(), &mut Rng::random());
     assert_eq!(engine.sample_n(&prompt, 1, &greedy(), &mut Rng::random())[0].tokens, want[0].tokens, "zeroed adapters are the base model");
     assert_ne!(want[0].tokens, got[0].tokens, "the adapters changed the greedy path, so the first check was not vacuous");
+}
+
+#[test]
+fn a_refit_publishes_the_next_policy_version_without_rebuilding_the_engine() {
+    if gpu_disabled() {
+        return;
+    }
+    let lora = LoraCfg::attn(2, 4.0);
+    let base_cfg = QwenConfig { block_size: 16, ..QwenConfig::tiny() };
+    let cfg = QwenConfig { lora: Some(lora.clone()), ..base_cfg.clone() };
+    let base = qwen3::init_weights(&base_cfg, 11);
+    let mut init = qwen3::init_weights(&cfg, 11);
+    init.extend(base.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let model = Qwen::new(cfg, 1, 16, &init);
+    let geometry = EngineGeometry { block_size: 4, num_blocks: 128, max_batch: 2, max_blocks_per_seq: 8, max_prefill: 8, tier: Dtype::F32, gpu: None };
+    let mut engine = EngineRollout::new(base_cfg, base, Some(lora), geometry);
+    let prompt = [1u32, 5, 9, 2, 7, 4, 6, 8, 3];
+
+    engine.sync(&trained(&model)).unwrap();
+    let built = engine.engine().unwrap() as *const _;
+    let first = engine.sample_n(&prompt, 2, &greedy(), &mut Rng::random());
+    assert!(first.iter().all(|c| c.policy_version == 1), "the first refit is policy 1");
+    let again = engine.sample_n(&prompt, 2, &greedy(), &mut Rng::random());
+    assert!(again.iter().all(|c| c.cached_tokens > 0), "the policy caches its own prompts: {:?}", again.iter().map(|c| c.cached_tokens).collect::<Vec<_>>());
+
+    engine.sync(&trained(&model)).unwrap();
+    assert_eq!(engine.engine().unwrap() as *const _, built, "a LoRA refit loads factors into the bank; it does not rebuild the engine");
+    let next = engine.sample_n(&prompt, 2, &greedy(), &mut Rng::random());
+    assert!(next.iter().all(|c| c.policy_version == 2), "the second refit is policy 2");
+    assert_eq!(next[0].cached_tokens, 0, "what policy 1 cached is not read by policy 2, though the weights are equal");
+
+    let mut mixed = trained(&model);
+    mixed.insert("tok_emb.weight".to_string(), vec![0.0; 4]);
+    assert!(engine.sync(&mixed).unwrap_err().contains("mix adapter factors"), "factors and whole tensors in one sync are refused by name");
 }
