@@ -37,7 +37,7 @@
 //! (never `register` — [`Int8ThinkerResident::estimate`]/[`activate`](
 //! ResidentModel::activate) are deliberately unusable stand-ins, since a
 //! multi-device-only model has no meaningful single-device footprint; see
-//! `crates/catalog/src/resident_omni.rs::int8_thinker_multi_from_env`).
+//! `crates/catalog/src/resident_omni.rs::int8_thinker_multi_from_store`).
 //!
 //! # Two request shapes, one action
 //!
@@ -53,8 +53,8 @@
 //!
 //! Tokenization needs vocab files, and a brain-native int8 checkpoint is a
 //! single `.safetensors` with no tokenizer sibling, so the directory to read
-//! them from is configured separately (`crates/catalog/src/resident_omni.rs::
-//! int8_thinker_multi_from_env`). Without one the model still serves the raw
+//! them from is resolved separately (`crates/catalog/src/resident_omni.rs::
+//! int8_thinker_multi_from_store`). Without one the model still serves the raw
 //! `ids` contract and says so on a chat request, rather than failing to load.
 //!
 //! # Multimodal input
@@ -79,8 +79,8 @@
 //! Building one would mean writing new quantized vision/audio kernels - real,
 //! separable follow-up work, not attempted here. So this path reuses the
 //! encoders EXACTLY as `brain/qwen3omnimoe` does, reading the towers' fp32 weights
-//! from a real HF checkpoint directory (`BRAIN_QWEN3OMNIMOE_HF_DIR`, the same
-//! directory the tokenizer is often read from already) - see
+//! from the published checkpoint directory (the one `brain/qwen3omnimoe` serves,
+//! and the tokenizer is often read from already) - see
 //! [`Int8ThinkerInstance::generate_chat`]'s multimodal branch. The
 //! int8-quantized `audio.*`/`vision.*` tensors already sitting in the int8
 //! checkpoint are consequently dead weight today, not a blocker: a deployment
@@ -454,7 +454,7 @@ pub struct Int8ThinkerInstance {
     /// vision/audio tower encoders for a multimodal `generate` request (see
     /// this module's doc, "Multimodal input", for why this is a second
     /// reader rather than reading `audio.*`/`vision.*` out of `reader`
-    /// above). `None` when no `BRAIN_QWEN3OMNIMOE_HF_DIR`-equivalent was configured
+    /// above). `None` when no published directory was resolved
     /// or it could not be opened - text-only `generate` is unaffected; an
     /// audio/image/video blob is then rejected with a clear error rather
     /// than silently ignored.
@@ -721,8 +721,8 @@ impl Int8ThinkerInstance {
         let Some((tok, eos_ids)) = &self.tok else {
             return Err(format!(
                 "{MODEL}: no tokenizer configured, so this model serves only the raw token-id contract \
-                 (a 'generate' call with an 'ids' blob). Point BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR (or \
-                 BRAIN_QWEN3OMNIMOE_HF_DIR) at a directory holding tokenizer.json, or vocab.json + merges.txt."
+                 (a 'generate' call with an 'ids' blob). Put tokenizer.json (or vocab.json + merges.txt) beside \
+                 the checkpoint, or start brain serve with --pin qwen3omnimoe-int8.tokenizer=FILE."
             ));
         };
         // Client text cannot spell a control token (`Invocation::escape_client_text`).
@@ -748,7 +748,8 @@ impl Int8ThinkerInstance {
                 return Err(format!(
                     "{MODEL}: got audio/image/video input but no HF checkpoint directory is configured for the \
                      vision/audio towers (the int8 checkpoint's own audio.*/vision.* tensors are quantized and this \
-                     model's encoders only read plain f32 -- see this module's own doc). Set BRAIN_QWEN3OMNIMOE_HF_DIR."
+                     model's encoders only read plain f32 -- see this module's own doc). Put the published checkpoint \
+                     directory in the model store, or start brain serve with --pin qwen3omnimoe.weights=DIR."
                 ));
             };
             // Strip the chat template's own inline media-placeholder literals
@@ -935,7 +936,7 @@ pub struct Int8ThinkerResident {
     /// brain-native int8 checkpoint is a single file with no tokenizer
     /// sibling. `None` ⇒ raw token-ids contract only.
     tokenizer_dir: Option<String>,
-    /// A real HF checkpoint DIRECTORY (`BRAIN_QWEN3OMNIMOE_HF_DIR`) to read the
+    /// The published checkpoint DIRECTORY to read the
     /// vision/audio tower weights from for multimodal `generate` requests -
     /// see this module's doc, "Multimodal input", for why: the int8
     /// checkpoint's own `audio.*`/`vision.*` tensors are quantized, and

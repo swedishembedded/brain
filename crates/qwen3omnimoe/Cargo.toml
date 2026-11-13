@@ -24,6 +24,7 @@ brain-imaging.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
+brain-modelstore.workspace = true
 brain-capability.workspace = true
 brain-data.workspace = true
 brain-residency.workspace = true

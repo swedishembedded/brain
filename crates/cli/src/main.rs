@@ -31,7 +31,6 @@ mod load_line;
 mod import_gguf_cli;
 mod models_cli;
 mod npu_cli;
-mod omni_cli;
 mod perf_cli;
 mod perf_engine;
 mod perf_longctx;
@@ -407,10 +406,12 @@ QWEN3.5-35B-A3B (brain/qwen35moe: hybrid Gated-DeltaNet/GQA sparse-MoE decoder)
       every parameter: brain qwen35moe generate --help; --weights/--tokenizer name a role
       # the ONNX export is an action of samples/models/qwen35moe
 
-QWEN3-OMNI (text/audio/image/video in, text + speech out)
-  brain qwen3omnimoe import --hf <dir> --out Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors [--id VENDOR/REPO]
-      # brain-native W8A16 checkpoint for the GPU-resident sharded Thinker
-      # (serve it with BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT=<out>)
+QWEN3-OMNI (brain/qwen3omnimoe: text/audio/image/video in, text + speech out)
+  brain qwen3omnimoe generate --prompt \"...\" --out text=out.txt     # the store's published checkpoint
+  brain qwen3omnimoe speak --prompt \"...\" --out audio=reply.wav
+  brain qwen3omnimoe import --source <hf_dir> --dest Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors [--id VENDOR/REPO]
+      # brain serve serves the published directory and, GPU-sharded, the int8 Thinker over
+      # the checkpoint import wrote; every parameter: brain qwen3omnimoe <action> --help
 
 LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
   brain lfm2 fill_mask --text \"… <|mask|> …\" [--topk K]
@@ -1383,6 +1384,9 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_QWEN35MOE_TOKENIZER", replacement: "serve: {pin: [qwen35moe.tokenizer=FILE]}" },
     Retired { name: "BRAIN_QWEN35MOE_CTX", replacement: "serve: {ctx: N}" },
     Retired { name: "BRAIN_QWEN35MOE_MAX_BATCH", replacement: "serve: {max-batch: N}" },
+    Retired { name: "BRAIN_QWEN3OMNIMOE_HF_DIR", replacement: "serve: {pin: [qwen3omnimoe.weights=DIR]}" },
+    Retired { name: "BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT", replacement: "serve: {pin: [qwen3omnimoe-int8.weights=FILE]}" },
+    Retired { name: "BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR", replacement: "serve: {pin: [qwen3omnimoe-int8.tokenizer=FILE]}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 

@@ -20,6 +20,7 @@ pub mod int8_resident;
 pub mod int8_thinker_resident;
 pub mod mm;
 pub mod npu_export;
+pub mod spec;
 pub mod talker;
 pub mod talker_generate;
 pub mod talker_prompt;

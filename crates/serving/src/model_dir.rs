@@ -857,8 +857,8 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
             Some("glmdsa") => Ok(Built::Other(Arc::new(catalog::resident_llm::GlmResident::from_card(weights, card, None)))),
             Some("lfm2") => Ok(Built::Other(Arc::new(catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer.to_str(), encoder_batch.unwrap_or(catalog::resident_lfm::DEFAULT_BATCH))?))),
             // Sharded across several GPUs, so it is registered on its own
-            // multi-device path rather than from the model directory.
-            _ => Err(format!("{} is served across GPUs: set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT={weights}", card.id)),
+            // multi-device path (resolved from the store) rather than here.
+            _ => Err(format!("{} is served across GPUs by brain/qwen3omnimoe and its int8 Thinker, not as a model-dir entry", card.id)),
         };
     }
     // EdgeRock: the windowed Qwen3.5 decoder, served from its published directory by the fixed-state ring engine.

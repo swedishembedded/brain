@@ -8,19 +8,17 @@ the OpenAI-compatible `/v1/chat/completions`, or the Anthropic-compatible
 ...}` params, underneath all three - this sample is what proves that.
 
 ```bash
-BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
-  tools/dbus-session.sh --serve "--dbus" -- \
+brain pull Qwen/Qwen3-Omni-30B-A3B-Instruct     # once: the published checkpoint in the model store
+tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/qwen3omnimoe/omni/omni.py --dbus --in-text "Say hello in French." --out-stdio
 ```
 
 Speech or image input (real audio/vision-tower splice, `--dbus` only):
 
 ```bash
-BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
-  tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/qwen3omnimoe/omni/omni.py --dbus --in-speech clip.wav --out-stdio
-BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
-  tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/qwen3omnimoe/omni/omni.py --dbus --in-image photo.ppm --in-text "What is this?" --out-stdio
 ```
 
@@ -28,8 +26,7 @@ The fast GPU-resident int8 path - layer-sharded across however many GPUs it
 needs, ~25-50x `brain/qwen3omnimoe`'s tokens/second on the same hardware:
 
 ```bash
-BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT=... BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR=... \
-  tools/dbus-session.sh --serve "--dbus" -- \
+tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/qwen3omnimoe/omni/omni.py --dbus \
     --model brain/Qwen3-Omni-30B-A3B-Instruct-W8A16 --in-text "Say hello in French." --out-stdio
 ```
@@ -51,10 +48,9 @@ BRAIN_MOCK=1 tools/dbus-session.sh --serve "--dbus" -- \
   (`crate::mm::build_multimodal_prompt`): `brain/qwen3omnimoe` (streamed
   bf16 weights) and `brain/Qwen3-Omni-30B-A3B-Instruct-W8A16` (GPU-resident
   int8) - `--model` selects between them. The int8 model's own vision/audio
-  towers are read from a real HF checkpoint directory too
-  (`BRAIN_QWEN3OMNIMOE_HF_DIR`, same var `brain/qwen3omnimoe` reads), needed
-  alongside `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` for multimodal input against
-  it; text-only `--in-text` doesn't need an HF dir at all.
+  towers are read from the published checkpoint directory in the model store
+  (the one `brain/qwen3omnimoe` reads), needed for multimodal input against
+  it; text-only `--in-text` doesn't need it at all.
 * `--dbus` carries text, speech (`--in-speech`, WAV), image (`--in-image`,
   PPM), and video (`--in-video`, needs `pip install av` for PyAV frame
   extraction) inputs, all real end to end: real audio/vision tower encode,
@@ -79,9 +75,9 @@ not have this limitation - its weights are GPU-resident.
 
 ## What it needs
 
-- `BRAIN_QWEN3OMNIMOE_HF_DIR` for the bf16 model, or
-  `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` + `BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR`
-  (+ `BRAIN_QWEN3OMNIMOE_HF_DIR` for multimodal input) for the int8 model.
+- The published Qwen3-Omni checkpoint directory in the model store: it serves
+  the bf16 model and, quantized as it loads (or from the file
+  `brain qwen3omnimoe import` wrote), the int8 one.
 - `jeepney` for `--dbus` (`pip install -e brain-py`); nothing extra for
   `--openai`/`--anthropic`; `pip install av` only for `--in-video`.
 

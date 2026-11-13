@@ -145,6 +145,9 @@ brain/qwen35moe	generate	eos
 brain/qwen35moe	generate	seed
 brain/qwen35moe	generate	temp
 brain/qwen35moe	generate	top_p
+brain/qwen3omnimoe	converse	seed
+brain/qwen3omnimoe	generate	seed
+brain/qwen3omnimoe	speak	seed
 brain/qwen3tts	batch	seed
 brain/qwen3tts	clone	seed
 brain/qwen3tts	design	seed

@@ -447,20 +447,12 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     for m in catalog::multi_residents(store, gpus, reserved) {
         exec.register_multi(m);
     }
-    // Qwen3-Omni (BRAIN_QWEN3OMNIMOE_HF_DIR): the full chat/multimodal surface, placed
-    // across as many budgeted cards as its real per-layer bytes need. Like the
-    // int8 Thinker below it is multi-device and therefore registered AFTER
-    // `start` via `register_multi` -- see resident_omni's module doc for why a
-    // plain `register` (which is what it used to take) let it spend VRAM the
-    // scheduler had not budgeted.
-    if let Some(o) = catalog::resident_omni::OmniResident::from_env(gpus, reserved) {
-        exec.register_multi(Arc::new(o));
-    }
     // The int8 dual-GPU Thinker is multi-device-only, so it is registered
     // AFTER `start` via `register_multi`, never folded into `models` above
-    // (see `resident_omni::int8_thinker_multi_from_env`'s own doc for why a
-    // plain `register` would be structurally wrong for it).
-    if let Some(t) = catalog::resident_omni::int8_thinker_multi_from_env(gpus, reserved) {
+    // (see `resident_omni::int8_thinker_multi_from_store`'s own doc for why a
+    // plain `register` would be structurally wrong for it). The full Qwen3-Omni
+    // is a catalog multi-device resident, registered with the others above.
+    if let Some(t) = catalog::resident_omni::int8_thinker_multi_from_store(store, gpus, reserved) {
         exec.register_multi(Arc::new(t));
     } else {
         residency::log::not_served(&format!("brain: {} not served over the scheduler (set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT)", qwen3omnimoe::int8_thinker_resident::MODEL));

@@ -67,9 +67,6 @@ crates/catalog/src/resident_llm.rs	QWEN3_DIR
 crates/catalog/src/resident_llm.rs	QWEN_TOKENIZER
 crates/catalog/src/resident_mock.rs	BRAIN_MOCK
 crates/catalog/src/resident_mock.rs	BRAIN_MOCK_DELAY_MS
-crates/catalog/src/resident_omni.rs	BRAIN_QWEN3OMNIMOE_HF_DIR
-crates/catalog/src/resident_omni.rs	BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT
-crates/catalog/src/resident_omni.rs	BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR
 crates/catalog/src/resident_qwen35.rs	QWEN_TOKENIZER
 crates/catalog/src/resident_supir.rs	BRAIN_SDXL_DIR
 crates/catalog/src/resident_supir.rs	BRAIN_SUPIR_DIR

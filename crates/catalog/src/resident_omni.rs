@@ -5,8 +5,9 @@
 //! the residency [`Executor`], mirroring [`crate::resident_tts::TtsResident`].
 //!
 //! This is the path with the full chat/multimodal surface (`generate` with
-//! `messages` + audio/image/video, plus `speak`), served straight from a raw
-//! HF checkpoint (`BRAIN_QWEN3OMNIMOE_HF_DIR`) with no import step.
+//! `messages` + audio/image/video, plus `speak`), served straight from the
+//! published checkpoint directory the model store resolves, with no import
+//! step.
 //!
 //! **It is multi-device, and it budgets honestly.** It used to report
 //! `MemCost::new(0, checkpoint_bytes)` - zero VRAM - and then quietly build a
@@ -25,15 +26,9 @@
 //! checkpoint stores it: this path serves whatever dtype is on disk (bf16
 //! here), decoded to f32 on the card. That is why a 30B checkpoint still does
 //! not fit two 24 GB cards and part of it streams per token - slow, but
-//! bounded and correct. `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT`
-//! ([`int8_thinker_multi_from_env`]) is what changes the precision, and it
-//! uses the identical placement mechanism.
-//!
-//! Config is env-only, mirroring `TtsResident`:
-//!   * `BRAIN_QWEN3OMNIMOE_HF_DIR` - the real HF checkpoint directory (config.json +
-//!     `vocab.json`/`merges.txt` or `tokenizer.json` + the sharded
-//!     `model.safetensors.index.json` + shards). The primary gate; unset ⇒
-//!     not served.
+//! bounded and correct. The int8 Thinker ([`int8_thinker_multi_from_store`])
+//! is what changes the precision, and it uses the identical placement
+//! mechanism.
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use checkpoint::weightio::WeightReader;
@@ -76,13 +71,14 @@ pub struct OmniResident {
 }
 
 impl OmniResident {
-    /// Configure from the environment. Returns `None` (not served) when
-    /// `BRAIN_QWEN3OMNIMOE_HF_DIR` is unset/empty, like every other `from_env`
-    /// resident. `gpus` is the caller's budgeted `(index, TOTAL bytes)` list
-    /// and `reserved` its per-card headroom, so what is carried on is genuinely
-    /// usable capacity - the same figure the scheduler budgets against.
-    pub fn from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<OmniResident> {
-        let hf_dir = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty())?;
+    /// Over the published directory the model store resolved
+    /// (`qwen3omnimoe::spec::SPEC`'s `weights`); `None` (not served) when it
+    /// resolved none. `gpus` is the caller's budgeted `(index, TOTAL bytes)`
+    /// list and `reserved` its per-card headroom, so what is carried on is
+    /// genuinely usable capacity - the same figure the scheduler budgets
+    /// against.
+    pub fn from_assembly(assembly: &capability::Assembly, gpus: &[(u32, u64)], reserved: u64) -> Option<OmniResident> {
+        let hf_dir = assembly.roles.get("weights")?.to_string_lossy().into_owned();
         let devices = if gpus.is_empty() {
             eprintln!("brain: omni has no budgeted GPU; it will fall back to the ambient device");
             Vec::new()
@@ -240,17 +236,14 @@ impl Instance for OmniInstance {
 /// single-device, HF-checkpoint path that re-streams every layer per token;
 /// this one is genuinely GPU-resident, and the two are not interchangeable.
 ///
-/// Config is env-only:
-///   * `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` - the downloaded Hugging Face
-///     checkpoint directory, quantized to int8 as it is loaded
-///     (`qwen3omnimoe::import::Int8View`), or a brain-native int8 file
-///     `brain omni import` wrote. Unset ⇒ not served.
-///   * `BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR` - where to read `tokenizer.json` (or
-///     `vocab.json` + `merges.txt`) for the CHAT request shape. Optional: it
-///     defaults to the checkpoint's own directory when that holds tokenizer
-///     files, else to `BRAIN_QWEN3OMNIMOE_HF_DIR`, which is where they already are
-///     for anyone who converted their own checkpoint. Resolving to nothing is
-///     not an error - the model then serves only raw token ids.
+/// Its checkpoint comes from the model store: the brain-native int8 file
+/// `brain qwen3omnimoe import` wrote (`qwen3omnimoe::spec::INT8_SPEC`), else the
+/// published directory (`qwen3omnimoe::spec::SPEC`), quantized to int8 as it
+/// is loaded (`qwen3omnimoe::import::Int8View`). Its tokenizer, for the CHAT
+/// request shape, is the int8 checkpoint's `tokenizer` role, else the files
+/// beside the checkpoint, else the published directory; resolving to nothing is
+/// not an error - the model then serves only raw token ids. The published
+/// directory also supplies the vision/audio towers for multimodal input.
 ///
 /// `gpus` is `build_executor`'s own budgeted GPU list as `(index, TOTAL
 /// bytes)`, and `reserved` the per-card headroom it keeps free - so what is
@@ -262,8 +255,12 @@ impl Instance for OmniInstance {
 /// them is reported as unplaceable instead of OOMing mid-load. Deriving the
 /// device list from `gpus` (rather than hardcoding `[Gpu(0), Gpu(1)]`) is
 /// also what keeps it correct on a 1-GPU box and on a 3+-GPU one.
-pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<qwen3omnimoe::int8_thinker_resident::Int8ThinkerResident> {
-    let checkpoint_path = std::env::var("BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT").ok().filter(|p| !p.is_empty())?;
+pub fn int8_thinker_multi_from_store(store: &loader::served::ServedStore, gpus: &[(u32, u64)], reserved: u64) -> Option<qwen3omnimoe::int8_thinker_resident::Int8ThinkerResident> {
+    let role = |assembly: Option<capability::Assembly>, name: &str| assembly.and_then(|a| a.roles.get(name).map(|p| p.to_string_lossy().into_owned()));
+    let int8 = loader::served::served_assembly(store, qwen3omnimoe::spec::INT8_ARCH, &qwen3omnimoe::spec::INT8_SPEC);
+    let published = role(loader::served::served_assembly(store, qwen3omnimoe::spec::ARCH, &qwen3omnimoe::spec::SPEC), "weights");
+    let tokenizer_role = role(int8.clone(), "tokenizer");
+    let checkpoint_path = role(int8, "weights").or_else(|| published.clone())?;
     if gpus.is_empty() {
         residency::log::not_served(&format!("brain: {} not served (no GPU budgeted -- it is GPU-sharded only, no CPU path)", qwen3omnimoe::int8_thinker_resident::MODEL));
         return None;
@@ -277,47 +274,45 @@ pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option
     // needs -- see that function's own doc for why this is one config, not
     // two independently-maintained copies of the same numbers.
     let cfg = qwen3omnimoe::config::ThinkerConfig::defaults();
-    let tokenizer_dir = int8_tokenizer_dir(&checkpoint_path);
+    let tokenizer_dir = int8_tokenizer_dir(&checkpoint_path, tokenizer_role.as_deref(), published.as_deref());
     if tokenizer_dir.is_none() {
         eprintln!(
-            "brain: {} has no tokenizer directory -- it will serve raw token ids only, \
-             NOT /v1/chat/completions. Set BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR (or BRAIN_QWEN3OMNIMOE_HF_DIR).",
-            qwen3omnimoe::int8_thinker_resident::MODEL
+            "brain: {} has no tokenizer -- it will serve raw token ids only, NOT /v1/chat/completions. \
+             Put tokenizer.json beside the checkpoint, or --pin {}.tokenizer=FILE.",
+            qwen3omnimoe::int8_thinker_resident::MODEL,
+            qwen3omnimoe::spec::INT8_ARCH
         );
     }
-    // Multimodal input needs a real HF checkpoint directory for the
-    // vision/audio tower weights (the int8 checkpoint's own audio.*/vision.*
-    // tensors are quantized; see qwen3omnimoe::int8_thinker_resident's module doc for
-    // why this model does not read them). Reuses BRAIN_QWEN3OMNIMOE_HF_DIR -- the
-    // same variable brain/qwen3omnimoe itself is configured from -- rather than
-    // inventing a second one; unset ⇒ this model still serves text-only.
-    // A checkpoint that IS the downloaded directory is its own tower source.
-    let hf_dir = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty()).or_else(|| std::path::Path::new(&checkpoint_path).is_dir().then(|| checkpoint_path.clone()));
+    // Multimodal input needs the published directory for the vision/audio
+    // tower weights (the int8 checkpoint's own audio.*/vision.* tensors are
+    // quantized; see qwen3omnimoe::int8_thinker_resident's module doc for why
+    // this model does not read them); without it this model serves text-only.
+    let hf_dir = published;
     if hf_dir.is_none() {
-        eprintln!("brain: {} has no BRAIN_QWEN3OMNIMOE_HF_DIR -- it will serve text-only generate (no audio/image/video input).", qwen3omnimoe::int8_thinker_resident::MODEL);
+        eprintln!("brain: {} has no published checkpoint directory in the model store -- it will serve text-only generate (no audio/image/video input).", qwen3omnimoe::int8_thinker_resident::MODEL);
     }
     Some(qwen3omnimoe::int8_thinker_resident::Int8ThinkerResident::new(checkpoint_path, cfg, devices).with_tokenizer_dir(tokenizer_dir).with_hf_dir(hf_dir))
 }
 
 /// Where the int8 resident reads its tokenizer from, in preference order:
-/// the explicit `BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR`, then the checkpoint's own
-/// directory, then `BRAIN_QWEN3OMNIMOE_HF_DIR`. `None` when none of them holds
+/// the directory of its resolved `tokenizer`, then the checkpoint's own
+/// directory, then the published directory. `None` when none of them holds
 /// tokenizer files.
 ///
 /// The search exists because a brain-native int8 checkpoint is a single
 /// `.safetensors` - it carries weights and a model card, never vocab files -
 /// so the tokenizer has to come from somewhere the operator already has. Each
-/// candidate is CHECKED for the files rather than assumed, so a stale env var
+/// candidate is CHECKED for the files rather than assumed, so a stale pin
 /// falls through to a directory that works instead of disabling chat.
-fn int8_tokenizer_dir(checkpoint_path: &str) -> Option<String> {
+fn int8_tokenizer_dir(checkpoint_path: &str, tokenizer: Option<&str>, published: Option<&str>) -> Option<String> {
     let has_tokenizer = |dir: &std::path::Path| {
         dir.join("tokenizer.json").exists() || (dir.join("vocab.json").exists() && dir.join("merges.txt").exists())
     };
-    let explicit = std::env::var("BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR").ok().filter(|p| !p.is_empty());
+    let explicit = tokenizer.and_then(|t| std::path::Path::new(t).parent()).map(|d| d.to_string_lossy().into_owned());
     // A downloaded checkpoint directory holds its own tokenizer; a converted
     // file has it beside it.
     let path = std::path::Path::new(checkpoint_path);
     let beside = if path.is_dir() { Some(checkpoint_path.to_string()) } else { path.parent().map(|p| p.to_string_lossy().into_owned()) };
-    let hf = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty());
+    let hf = published.map(str::to_string);
     [explicit, beside, hf].into_iter().flatten().find(|d| has_tokenizer(std::path::Path::new(d)))
 }

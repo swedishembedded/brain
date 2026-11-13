@@ -27,7 +27,7 @@ gaps are drawn rather than described - which is the point of having it.
 |---|---|
 | Inference             | [x] |
 | LoRA fine-tune         | [ ] |
-| CLI (`brain <arch> <action>`)       | [ ] |
+| CLI (`brain <arch> <action>`)       | [x] |
 | HTTP API               | [x] |
 | D-Bus                  | [x] |
 | Batched/streaming serving | [x] (token streaming; not batched) |
@@ -36,9 +36,16 @@ gaps are drawn rather than described - which is the point of having it.
 
 Model id: `brain/qwen3omnimoe`. Reserved vendor `brain/` - never auto-fetched.
 
-- `BRAIN_QWEN3OMNIMOE_HF_DIR` - the HF checkpoint directory (`config.json` +
-  tokenizer files + the sharded `model.safetensors.index.json` + shards).
-  This is the gate: serving is unavailable until it's set.
+The published checkpoint directory (`config.json` + tokenizer files + the
+sharded `model.safetensors.index.json` + shards) in the model store, as
+downloaded (`brain pull Qwen/Qwen3-Omni-30B-A3B-Instruct`). `--weights DIR` on a
+one-shot command, or `brain serve --pin qwen3omnimoe.weights=DIR`, names one
+outside the store.
+
+```bash
+brain qwen3omnimoe generate --prompt "Describe this." --in image=photo.ppm --out text=answer.txt
+brain qwen3omnimoe speak --prompt "Say hello." --out audio=hello.wav
+```
 
 ## GPU residency (the sharded int8 path)
 
@@ -47,7 +54,7 @@ audio/image/video surface, but every decoder layer's weights - including all
 128 experts - are re-read from the checkpoint for every generated token, so
 nothing stays on the GPU between calls. It is correct and slow.
 
-The **GPU-resident** path is a second, separately-gated model,
+The **GPU-resident** path is a second model,
 `brain/Qwen3-Omni-30B-A3B-Instruct-W8A16` -- named for what it actually is:
 per-output-channel symmetric INT8 WEIGHT-ONLY quantization (one f32 scale per
 output channel, MoE expert linears only) with full-precision activations,
@@ -61,35 +68,31 @@ weights never leave VRAM between calls. Measure the actual ratio on your own
 hardware with `brain perf run`; a number here would describe one specific
 machine at one point in time.
 
-It reads the checkpoint directory exactly as you downloaded it, quantizing
-every rank-2 weight to int8 as it loads - one tensor at a time, nothing
-written to disk:
+`brain serve` serves it over the checkpoint directory exactly as you
+downloaded it, quantizing every rank-2 weight to int8 as it loads - one tensor
+at a time, nothing written to disk:
 
 ```bash
-BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT=/path/to/Qwen3-Omni-30B-A3B-Instruct \
-  brain serve --openai --dbus --device vulkan
+brain serve --openai --dbus --device vulkan
 ```
 
 The directory also supplies the tokenizer and the audio/vision towers.
-`BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR` and `BRAIN_QWEN3OMNIMOE_HF_DIR` still
-override where those come from.
 
 If you would rather pay the quantization once than at every cold start,
 `brain qwen3omnimoe import` writes the same int8 tensors to a single file
-(~8 minutes, 66 GB in, 33.6 GB out) that `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT`
-can name instead:
+(~8 minutes, 66 GB in, 33.6 GB out); written into the model store, it is what
+the int8 model serves from then on:
 
 ```bash
-brain qwen3omnimoe import --hf /path/to/Qwen3-Omni-30B-A3B-Instruct \
-                  --out /path/to/Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors
+brain qwen3omnimoe import --source /path/to/Qwen3-Omni-30B-A3B-Instruct \
+                  --dest /path/to/models/Qwen/Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors
 ```
 
-Such a file carries no tokenizer, so `BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR`
-says where to read `tokenizer.json` (or `vocab.json` + `merges.txt`) from -
-normally the directory you converted from. It defaults to the checkpoint's
-own directory when that holds tokenizer files, then to
-`BRAIN_QWEN3OMNIMOE_HF_DIR`. Without any of them the model still loads and
-still serves raw token ids, but it is not on the chat endpoints.
+Such a file carries no tokenizer: it is read from a `tokenizer.json` beside
+it, else from the published directory (`--pin qwen3omnimoe-int8.tokenizer=FILE`
+names one outright; `--pin qwen3omnimoe-int8.weights=FILE` the checkpoint).
+Without any the model still loads and still serves raw token ids, but it is
+not on the chat endpoints.
 
 How the sharding decides itself:
 
@@ -131,8 +134,7 @@ Two limits worth knowing before you point it at real weights:
 Serve it over D-Bus and/or the HTTP chat APIs:
 
 ```bash
-BRAIN_QWEN3OMNIMOE_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
-  brain serve --dbus --openai --anthropic
+brain serve --dbus --openai --anthropic
 ```
 
 `brain serve` prints a freshly generated API key per dialect on startup (or

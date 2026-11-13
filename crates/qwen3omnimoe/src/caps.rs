@@ -94,8 +94,8 @@ pub fn chat_generate_spec(desc: &str) -> ActionSpec {
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages; no chat template applied)"))
         .param(ParamSpec::new("system", ParamType::Str, "system prompt (accepted; folded into the flattened prompt only via messages)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(32)))
-        .param(ParamSpec::new("temp", ParamType::Float, "accepted; greedy (argmax) generation ignores it -- see this module's doc"))
-        .param(ParamSpec::new("top_p", ParamType::Float, "accepted; greedy generation ignores it"))
+        .param(ParamSpec::new("temp", ParamType::Float, "accepted; greedy (argmax) generation ignores it -- see this module's doc").min(0.0).max(2.0))
+        .param(ParamSpec::new("top_p", ParamType::Float, "accepted; greedy generation ignores it").min(0.0).max(capability::bounds::UNIT))
         .param(ParamSpec::new("top_k", ParamType::Int, "accepted; greedy generation ignores it").min(0.0).max(capability::bounds::TOP_K))
         .param(ParamSpec::new("seed", ParamType::Int, "accepted; greedy generation is deterministic already"))
         .param(ParamSpec::new("stop", ParamType::Str, "accepted; not yet applied (JSON array string)"))
@@ -175,6 +175,95 @@ pub fn manifest() -> Manifest {
         "Qwen3-Omni-30B-A3B -- text generation with optional real audio/image/video input, real speech output via speak, and real audio/image/video input fused with speech output via converse (validation-tier: streamed weights, no int8/GPU-sharded residency).",
         vec![generate_spec(), speak_spec(), converse_spec()],
     )
+}
+
+/// `import`: the published checkpoint directory converted into the brain-native
+/// W8A16 checkpoint the GPU-sharded int8 Thinker serves, streamed one tensor at
+/// a time. It needs no resolved checkpoint of its own.
+pub fn import_spec() -> ActionSpec {
+    ActionSpec::new("import", "convert the published checkpoint directory into the brain-native W8A16 (int8 MoE experts) checkpoint the GPU-sharded Thinker serves")
+        .from_scratch()
+        .param(ParamSpec::new("source", ParamType::Str, "the downloaded Hugging Face checkpoint directory").required().host_resolved())
+        .param(ParamSpec::new("dest", ParamType::Str, "where to write the .safetensors").required().host_resolved())
+        .param(ParamSpec::new("id", ParamType::Str, "the model id written on the checkpoint's card (vendor/repo); the importer's own by default"))
+}
+
+/// What `brain qwen3omnimoe <action>` offers: the served actions plus `import`.
+pub fn direct_manifest() -> Manifest {
+    let mut m = manifest();
+    m.actions.push(import_spec());
+    m
+}
+
+/// The provider over the published directory the model store resolved
+/// ([`crate::spec::SPEC`]'s `weights`): the model loads on the first served
+/// action and stays loaded; `import` runs without it.
+pub fn provider(assembly: &capability::Assembly) -> Result<Arc<dyn Provider>, String> {
+    let dir = assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned());
+    Ok(Arc::new(DirectProvider { dir, loaded: std::sync::OnceLock::new() }))
+}
+
+struct DirectProvider {
+    dir: Option<String>,
+    loaded: std::sync::OnceLock<Result<Arc<OmniProvider>, String>>,
+}
+
+impl DirectProvider {
+    fn model(&self) -> Result<Arc<OmniProvider>, String> {
+        self.loaded
+            .get_or_init(|| {
+                let dir = self.dir.as_deref().ok_or("qwen3omnimoe: no checkpoint directory in the model store (brain pull Qwen/Qwen3-Omni-30B-A3B-Instruct, or --weights DIR)")?;
+                OmniProvider::load(dir).map(Arc::new)
+            })
+            .clone()
+    }
+}
+
+impl Provider for DirectProvider {
+    fn manifest(&self) -> Manifest {
+        direct_manifest()
+    }
+    fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
+        if name == "import" {
+            return Some(Arc::new(ImportAction));
+        }
+        resolve_action(name).ok()?;
+        Some(Arc::new(DeferredAction { name: name.to_string(), spec: direct_manifest().actions.into_iter().find(|a| a.name == name)?, provider: self.model() }))
+    }
+}
+
+/// A served action whose model failed to load reports why when it runs.
+struct DeferredAction {
+    name: String,
+    spec: ActionSpec,
+    provider: Result<Arc<OmniProvider>, String>,
+}
+
+impl Action for DeferredAction {
+    fn spec(&self) -> ActionSpec {
+        self.spec.clone()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let provider = self.provider.clone()?;
+        run_action(&provider.inner(), &self.name, inv, progress)
+    }
+}
+
+struct ImportAction;
+
+impl Action for ImportAction {
+    fn spec(&self) -> ActionSpec {
+        import_spec()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let source = inv.get_str("source").ok_or("qwen3omnimoe import: missing required param 'source'")?;
+        let dest = inv.get_str("dest").ok_or("qwen3omnimoe import: missing required param 'dest'")?;
+        progress(Progress::step(0, 1, format!("converting {source}")));
+        crate::import::import_as(&source, &dest, inv.get_str("id").as_deref())?;
+        progress(Progress::step(1, 1, "written"));
+        let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+        Ok(Outcome::new().set("dest", json!(dest)).set("bytes", json!(bytes)))
+    }
 }
 
 /// The shared messages-array → last-user-turn extraction — hoisted to

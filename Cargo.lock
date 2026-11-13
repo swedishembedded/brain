@@ -2583,6 +2583,7 @@ dependencies = [
  "brain-kernels",
  "brain-mimi",
  "brain-model",
+ "brain-modelstore",
  "brain-npu",
  "brain-onnx",
  "brain-paramstore",

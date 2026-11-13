@@ -468,6 +468,17 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("qwen35moe", &qwen35moe::spec::SPEC)),
             resident: None,
         },
+        // Qwen3-Omni: the published directory the store resolves, loaded on the
+        // first served action (one-shot) or placed across the budgeted cards by
+        // the multi-device resident (`brain serve`); `import` writes the int8
+        // checkpoint the GPU-sharded Thinker serves (registered by the
+        // executor, `resident_omni::int8_thinker_multi_from_store`).
+        ModelEntry {
+            manifest: qwen3omnimoe::caps::direct_manifest,
+            provider: qwen3omnimoe::caps::provider,
+            spec: Some((qwen3omnimoe::spec::ARCH, &qwen3omnimoe::spec::SPEC)),
+            resident: crate::resident_multi!(crate::resident_omni::OmniResident::from_assembly),
+        },
         // Qwen3.8-27B dense hybrid GDN/GQA decoder: `weights`/`tokenizer` are
         // per-invocation action params, resolved through
         // `qwen35::spec::Qwen35Spec` instead of `BRAIN_QWEN35_{WEIGHTS,
