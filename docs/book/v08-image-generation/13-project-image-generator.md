@@ -45,7 +45,7 @@ Seven questions bring back what the milestones lean on. Answer each before readi
 6. (Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checks.) What is compared with what, with which step, and what number says that a hand-written backward pass is right?
 7. (Volume VIII, [Chapter 1](01-generative-modeling.md), what a model is for.) A model of images offers a sampler, a density, or both. What did the first chapter say a density is needed for, and why is a sample not enough to judge a model?
 
-## Milestones
+## Building the generator in six steps
 
 The pseudocode follows [Pseudocode Conventions](../pseudocode.md). Every random input comes from the book's SplitMix64 at a seed printed beside its table and derived by the rule `seed_of(name)`; the draws are taken in the order the text states. A dot product may be accumulated in any order that is at least as accurate as left to right: no printed digit of an untrained number depends on the last bit of a sum, and the trained numbers are printed only to the digits that survive the nudge rule of this book (a trained table prints the digits that a run and four copies of it, nudged at their first weight, share; Chapter 2 of this volume states it with its first trained tables, and `scripts/book/worked/stable.py` is the code that applies it). The run is repeated from four starting points whose first weight differs by $+10^{-12}$, $-10^{-12}$, $+3 \times 10^{-12}$ and $-3 \times 10^{-12}$, and a digit is printed only if it is the same in all five runs. (Here all five agree on every digit shown; the runs are stable, and the rule is what lets the table say so.)
 
@@ -495,7 +495,7 @@ Every pass is close to $0.5$ FLOPs per byte, which is what a weight that is read
 
 **Milestone 6 ends** when your counts equal the table's. They are integer counts of the shapes and must agree exactly; a count that differs by a small number of FLOPs is a missed bias or a missed modulation term.
 
-## Acceptance tests
+## The yardstick numbers the generator must hit
 
 The tests are the values the worked module prints, collected as a checklist. Test in the order of the milestones: a disagreement at milestone 4 that follows agreement at 1 to 3 points at training and not at the data. "Exact" means equal integers and strings; a numeric tolerance is absolute.
 
@@ -557,7 +557,7 @@ Where this stops. The world has six modes and a Gaussian noise, so its exact fie
 - R. Rombach, A. Blattmann, D. Lorenz, P. Esser and B. Ommer, *High-resolution image synthesis with latent diffusion models*, 2022. The frozen autoencoder and the denoiser on its codes.
 - W. Peebles and S. Xie, *Scalable diffusion models with transformers*, 2023. The conditioning by scale, shift and gate with a zero start.
 
-## Extensions
+## Beyond six modes and Gaussian noise
 
 These are optional. Each changes one thing of the project and asks you to predict the outcome before you run it.
 

@@ -30,7 +30,7 @@ Six questions bring back what the milestones lean on. They reach across the volu
 5. (Volume VI, [Chapter 10](10-model-cost.md), FLOPs per token) A decoder has $N_{\mathrm{act}} = 4{,}032$ parameters in the matrix products of a token, $L = 2$ layers, $H = 4$ heads of width $d_h = 4$, and a token sees $T = 13$ keys. How many FLOPs does the token cost?
 6. (Volume VI, [Chapter 9](09-spectral-lm.md), a registered claim and its interval) Six paired differences have mean $-0.20$ and standard deviation $0.10$. Give the standard error and the 95 percent interval (multiplier 2.5706 for 5 degrees of freedom), and say whether a claim registered as "the difference is at most $-0.1$" is supported, refuted or undecided.
 
-## Milestones
+## Four blocks and a verdict, in five steps
 
 The pseudocode follows [Pseudocode Conventions](../pseudocode.md). It fixes interfaces and the order of operations, and it reuses by name the routines of earlier chapters (`rms_norm` and `rms_norm_backward` of Volume V, Chapter 9, `route` and `balance_loss` of Chapter 4, `gated_delta_tokenwise` and `gated_delta_chunked` of Chapter 5, `ledger` of Chapter 10, `max_abs`, `rel_l2` and `cosine` of Chapter 2). Every random input comes from the book's SplitMix64 at a seed printed beside its table and derived by the rule `seed_of(name)`; the draws are taken in the order the table states. A dot product may be accumulated in any order that is at least as accurate as left to right: every printed digit stays clear of the last bit of a sum. Trained numbers are printed only to the digits that survive the nudge rule of this book (`scripts/book/worked/stable.py`): the run is repeated from four starting points whose first weight differs by $\pm 10^{-12}$ and $\pm 3 \times 10^{-12}$, and a digit is printed only if it is the same in all five runs.
 
@@ -448,7 +448,7 @@ The hybrid beside the two pure stacks it is made of (two layers each; the hybrid
 
 Against the pure dense stack, the hybrid learned the task in these runs where the dense stack mostly had not (H4, supported), at a decode cost of 9,344 FLOPs at 13 tokens against 9,728 and half the memory, 528 bytes against 832; at 4,096 tokens it costs 270,656 FLOPs against 532,352 and holds 131,184 bytes against 262,144, which is the half-slope of milestone 2 priced at the length where it matters. Against the pure recurrent stack the quality is not distinguishable here (H5, undecided), and the cost is higher: at 13 tokens a few hundred FLOPs and 304 more bytes, and at 4,096 tokens the attention layer's linear growth, 270,656 FLOPs against 8,960. The trade-off the table shows is therefore the one Chapter 5 predicted from counts, now with a quality column beside it: the hybrid buys, over the pure recurrent stack, the exact lookup that attention has, and pays for it in a cache that grows; and it buys, over the pure attention stack, half of the memory and half of the growth. Whether the exact lookup is worth its price depends on a task that needs it, and this one, in which the recurrent state was enough, is one on which it did not show. A task that asks the model to copy a long passage would be one on which it would, and the second extension below builds that task.
 
-## Acceptance tests
+## What the comparison must report
 
 The tests are the values the worked module prints, collected as a checklist; an implementation passes when every statement holds. "Exact" means integers, text and digests equal; "criterion" means the stated inequality; the trained numbers are not in the list because the nudge rule leaves them as bounds, but the verdict of each registered claim is.
 
@@ -483,7 +483,7 @@ What the project established, in order. A block interface is two functions and a
 
 Where this stops. The task is synthetic and short, so it favours the block that carries a fixed secret and says nothing about language. The budget is 120 steps, so the quality column is sample efficiency and not quality at convergence. The models have 4,128 parameters, the matching of the mixture is to 3.1 percent and not exact, and six seeds leave two of five predictions undecided. The gated delta layer lacks its convolution and output gate. The costs at sizes where the blocks differ in arithmetic were counted by formula and not by a run. These limits are the reason the extensions exist, and the reason the volume closes here: every later model in the book is a combination of choices that this chapter priced, tested and compared one at a time.
 
-## Extensions
+## Further blocks and larger budgets
 
 These are optional. Each is a larger test of the same ideas.
 

@@ -29,7 +29,7 @@ Five questions bring back what the milestones lean on. They reach back as far as
 4. (Volume VII, [Chapter 7](07-segment-anything.md), prompts.) How many prompt tokens does a box give to the mask decoder, and what labels do they carry?
 5. (Volume VII, [Chapter 7](07-segment-anything.md), the bank.) A clip is prompted on frame 0. Which frames' slabs does frame 9 read, in which slots, with 7 slots?
 
-## Milestones
+## Building the pipeline in five stages
 
 The pseudocode follows [Pseudocode Conventions](../pseudocode.md); it fixes interfaces and the order of operations, and it reuses by name the routines of earlier chapters (`resize_axis` of Chapter 1, `iou`, `nms` and `unletterbox` of Chapter 4, `grow` and `memory_slots` of Chapter 7). The only random input of the project is the clip, drawn from the book's SplitMix64 at a seed derived by the rule `seed_of(name)`. Nothing is trained, so the nudge rule for trained digits does not apply: every printed number is exact arithmetic on stated inputs. Sums run left to right with one accumulator, in the order the text states; a different order moves the last digits and nothing a table prints, and the one value that could flip under rounding, a read-back near the threshold 0.5, is at least 0.0109 away from it (milestone 4).
 
@@ -570,7 +570,7 @@ One track alone costs 27,117.27 billion FLOPs over the clip; three tracks that s
 
 Three tracks that share the trunk cost 1.40 times what one track costs over the clip, where three separate pipelines would cost three times as much. Per track and frame, memory attention is nearly all of the 550 to 621 billion FLOPs of the per-track column once the bank fills, and it is the cost that a false positive at milestone 2 multiplies: the six detections of the loose threshold of 0.8 would be six tracks and six times the per-track column, with three of the six following an object that another track already follows.
 
-## Acceptance tests
+## What a correct pipeline prints
 
 The tests are the values the worked module prints, collected as a checklist. Test in the order of the milestones: a disagreement at milestone 4 that follows agreement at 1 to 3 points at the tracker and not at the preprocessing. "Exact" means equal digests, integers and strings; a numeric tolerance is absolute.
 
@@ -622,7 +622,7 @@ Where this stops. The stand-ins are colour programs on a clean synthetic scene; 
 - A. Kirillov, E. Mintun, N. Ravi, H. Mao, C. Rolland, L. Gustafson, T. Xiao, S. Whitehead, A. C. Berg, W.-Y. Lo, P. Dollar and R. Girshick, *Segment anything*, ICCV 2023. The box prompt as two corner points.
 - Z. Tian, C. Shen, H. Chen and T. He, *FCOS: fully convolutional one-stage object detection*, ICCV 2019. Boxes as distances from a point and the centerness of a cell.
 
-## Extensions
+## Making the stand-ins real
 
 These are optional. Each is a larger test of the same ideas, and each changes one thing of the project and asks you to predict the outcome before you run it.
 

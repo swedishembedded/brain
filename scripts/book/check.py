@@ -15,8 +15,7 @@ Structure (from book.yaml):
 
 Content (of every written page):
   - each chapter starts with `# <its title>` and ends with the reference
-    apparatus a reader looks up (exercises, key terms, answers; a project's
-    milestones and acceptance tests); the body above it is the author's own,
+    apparatus a reader looks up (exercises, key terms, answers); the body above it is the author's own,
     and no heading or run-in label is recycled from chapter to chapter;
   - a chapter's Key terms define exactly the concepts it introduces, each
     marked with its concept id;
@@ -48,11 +47,13 @@ from glossary import key_terms  # noqa: E402
 
 # The reference apparatus at the end of a chapter, the only headings every chapter shares.
 CHAPTER_SECTIONS = ["Exercises", "Key terms", "Answers"]
-PROJECT_SECTIONS = ["Milestones", "Acceptance tests"]
+# A project chapter names its own body sections (build steps, tests, extensions) like any
+# other body heading; of the shared apparatus it must carry the Answers to its recall questions.
+PROJECT_SECTIONS = ["Answers"]
 # Apparatus a chapter may also carry under the same names; every other heading or
 # run-in label (`**Label.**`) belongs to one chapter's subject, so the same one
 # in more than RECYCLED_LIMIT chapters is a template showing through.
-APPARATUS = {"Exercises", "Key terms", "Answers", "Milestones", "Acceptance tests", "Extensions",
+APPARATUS = {"Exercises", "Key terms", "Answers",
              "Summary", "Check your understanding", "References", "Further reading"}
 RECYCLED_LIMIT = 3
 # Labels that announce a template slot instead of a subject; purpose and

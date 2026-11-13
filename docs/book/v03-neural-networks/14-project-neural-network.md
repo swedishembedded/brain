@@ -34,7 +34,7 @@ Before the first line of code, six questions reach across the whole volume, and 
 5. (Chapter 9, [Initialization: Where Training Starts](09-initialization.md)) Why do the weights of a hidden layer with 48 inputs get variance $2/48$ in the He scheme, and why is the starting read-out of a classifier made smaller than the hidden layers?
 6. (Chapter 11, [Regularization in Neural Networks](11-regularization.md), and Volume I, Chapter 17, [Randomness on a Deterministic Machine](../v01-mathematics/17-randomness.md)) A dropout layer processes a $[32, 32]$ batch from the book's SplitMix64 generator. How many numbers does it draw, in what order, and when is a unit kept? A model with dropout is evaluated twice on the same rows. When are the two answers equal?
 
-## Milestones
+## Building the library from layers to a diagnosis
 
 A note on language and style. The pseudocode follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. Use 64-bit floats throughout; the acceptance tests are computed in double precision. Store every tensor row-major, so that a model's parameters are one flat vector once concatenated and the optimizer needs no knowledge of layers. Write the checks of each milestone as a test file that you rerun after every change, and compare tables to the digits printed (a difference below half a unit in the last printed place), unless a milestone states another tolerance.
 
@@ -739,7 +739,7 @@ The diagnosis itself can go wrong in four ways.
 - Comparing a stage's validation loss with the next stage's without checking that the validation pass is the same function in both.
 - "Fixing" the defect by changing a setting that happens to compensate (a larger rate for the collapsed schedule). The checklist's last step is to explain the number that exposed the defect, and a compensated run does not.
 
-## Acceptance tests
+## The checklist your library must pass
 
 The tests are the blocks printed in the milestones above, collected here as a checklist. An implementation passes when every statement holds. "Exact" means integers or text equal; "to $t$" means the stated absolute tolerance.
 
@@ -802,7 +802,7 @@ What the project established, in order. The sizes of the test instance decide wh
 
 Where this stops. The library is dense, single-threaded and written for clarity: every layer is a few loops, and the cost of the autoencoder run is the 456 multiply-adds per example of chapter 13 repeated 2400 steps over a batch of 32. It has no attention, no convolution, no batch normalization (which needs running statistics and a second mode), no gradient accumulation across calls to the optimizer and no mixed precision. The next volume trains models that are millions of times larger, where nothing can be checked by hand; the habits built here (the fixture, the checker with distinct sizes, the exact resume, the checklist in order of cost) are what stand in for checking.
 
-## Extensions
+## Further trainers to build on the library
 
 These are optional. Each is a bigger test of the same ideas.
 

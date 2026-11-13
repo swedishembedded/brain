@@ -51,7 +51,7 @@ Six questions bring back what the milestones lean on. Answer each before reading
 5. (Volume IX, [Chapter 6](06-speech-synthesis.md), conditioning.) A synthesiser is told the voice of a reference clip. Which vector does it receive, and how does the reference clip become that vector?
 6. (Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checks.) What is compared with what, at which step size, and what number says that a hand-written backward pass is right?
 
-## Milestones
+## Building the speech loop in eight steps
 
 The pseudocode follows [Pseudocode Conventions](../pseudocode.md). Every random input comes from the book's SplitMix64 at a seed that is the rule `seed_of(name)` (the first 8 bytes of the SHA-256 digest of the UTF-8 name, read as a big-endian 64-bit integer, as [Pseudocode Conventions](../pseudocode.md) defines it) applied to a name printed beside the table, and the draws are taken in the order the text states. A sum may be accumulated in any order at least as accurate as left to right: no digit of an untrained number printed here depends on the last bit of a sum. Every trained number is printed only to the digits that survive the nudge rule of this book (`scripts/book/worked/stable.py`, taught with Volume VIII's first trained tables): the run is repeated from four starting points whose first weight, here the first weight of the first layer, differs by $+10^{-12}$, $-10^{-12}$, $+3 \times 10^{-12}$ and $-3 \times 10^{-12}$, and a digit is printed only if it is the same in all five runs. Here all five agree on every digit shown. The rule is what lets the tables say so, and what lets a reimplementation in another language, whose `tanh` differs in the last bit, check itself against them.
 
@@ -433,7 +433,7 @@ The surprise of the table is where the work is. The resampler, the one stage tha
 
 The second observation is the one that the bill of [Volume VIII's image generator](../v08-image-generation/13-project-image-generator.md) made too. A frame of the recogniser reads 8,376 bytes of weights for 4,128 operations: 0.49 operations per byte, the 2 operations per 4-byte weight of any vector-matrix product with a fresh vector. At this size the weights sit in cache, so the bytes are cheap, but the ratio is the one that decides a real model's speed on real hardware: a model that reads each weight once per frame is limited by the memory, and a larger batch of frames, which reads each weight once for many frames, is the cure. The same arithmetic sets the rates down the chain: 48,000 bytes a second of 12 kHz audio at 32 bits, 3,200 bytes of features, 100 bytes of codes (800 bits), and 9.7 characters of text.
 
-## Acceptance tests
+## What the loop must print
 
 The tests are the values the worked module prints, collected as a checklist. Test in the order of the milestones: a disagreement at milestone 4 that follows agreement at 1 to 3 points at training and not at the front end. "Exact" means equal integers and strings; a numeric tolerance is absolute, and "the digits shown" means the digits on which the run and its four nudged copies agree.
 
@@ -510,7 +510,7 @@ Where this stops. The world has four letters and six words, and its answer key i
 - D. P. Kingma and J. Ba, *Adam: a method for stochastic optimization*, 2014; I. Loshchilov and F. Hutter, *Decoupled weight decay regularization*, 2017. The optimizer.
 - J. F. Kaiser, *Nonrecursive digital filter design using the I0-sinh window function*, 1974. The taper of the resampler.
 
-## Extensions
+## Beyond four letters and six words
 
 These are optional. Each changes one thing of the project and asks you to predict the outcome before you run it.
 

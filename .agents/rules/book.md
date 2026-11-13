@@ -50,8 +50,9 @@ the chapter where a reader should first meet it.
 - **The end of a chapter is reference apparatus**, the one place every
   chapter is alike so a reader can find it: `## Exercises`, `## Key terms`
   and `## Answers`, optionally preceded by `## Check your understanding`, a
-  `## Summary` and `## References`. A project chapter (`project-*`) has
-  `## Milestones` and `## Acceptance tests`, and optionally `## Extensions`.
+  `## Summary` and `## References`. A project chapter (`project-*`) has `## Answers`; its build steps, its tests
+  and its extensions are body sections, each headed in words specific to that
+  project (never `Milestones`, `Acceptance tests` or `Extensions`).
 - **Prerequisites are recalled, not listed.** Early in the chapter, before the
   new material leans on them, the reader is asked to bring back 3 to 6 ideas
   from the chapter's `requires` (at least one from three or more chapters

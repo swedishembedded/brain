@@ -46,7 +46,7 @@ Every random input comes from the book's SplitMix64 at the seed `seed_of(name)` 
 
 Distances are in metres. The world frame is the frame of camera 0: $x$ to the right, $y$ down, $z$ forward, as in Chapter 3.
 
-## Milestones
+## Building the dynamic scene in eight steps
 
 The pseudocode follows [Pseudocode Conventions](../pseudocode.md). Build and check each milestone before the next: a disagreement at milestone 6 that follows agreement at 1 to 5 points at the prediction and not at the reconstruction.
 
@@ -444,7 +444,7 @@ The surprise of the table is how much of the work is the fit and how little the 
 
 One update reads the 12 target frames (110,592 bytes) and the parameters (8,736 bytes) for 2,556,528 forward operations: 21.4 operations per byte of target and parameters, because each pixel is touched by 13 Gaussians. The dynamics, whose 1,848 operations are less than a thousandth of a percent of the loop, is the part of the loop the project is about, and the part that costs the least.
 
-## Acceptance tests
+## What the scene pipeline must reproduce
 
 The tests are the values the worked module prints, collected as a checklist. Test in the order of the milestones: a disagreement at milestone 6 that follows agreement at 1 to 5 points at the prediction and not at the reconstruction. 'Exact' means equal integers; a tolerance is absolute unless the row says relative, and "the digits shown" means the digits on which the run and its four nudged copies agree.
 
@@ -519,7 +519,7 @@ Where this stops. The world has a wall, a floor and three balls, and the answers
 - D. P. Kingma and J. Ba, *Adam: a method for stochastic optimization*, 2014. The optimizer of the fit.
 - E. Alonso, A. Jelley, V. Micheli, A. Kanervisto, A. Storkey, T. Pearce and F. Fleuret, *Diffusion for world modeling: visual details matter in Atari*, 2024. The pixel-space world model that the last section sets beside this loop.
 
-## Extensions
+## Beyond a wall, a floor and three balls
 
 These are optional. Each changes one thing of the project and asks you to predict the outcome before you run it.
 

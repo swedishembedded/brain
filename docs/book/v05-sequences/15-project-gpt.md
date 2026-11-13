@@ -34,7 +34,7 @@ Before the first milestone, six questions bring back what it leans on. They reac
 5. (Volume III, Chapter 6, [Proving Gradients Correct](../v03-neural-networks/06-gradient-checking.md)) A central difference with step $h = 10^{-5}$ is used to check an analytic gradient in double precision. What size of error does the formula itself make, what size does rounding make, and why is the central form used instead of the one-sided one?
 6. (Volume IV, Chapter 3, [Memory Bandwidth, Compute and the Roofline](../v04-computation/03-roofline.md)) A $128 \times 128$ weight matrix in float32 multiplies one vector. How many FLOPs is that, how many bytes must be read, and what fraction of its peak can a device with a ridge of 50 FLOP per byte reach on it?
 
-## Milestones
+## Building the model in seven steps
 
 The pseudocode follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. It fixes interfaces and the order of the operations, and it reuses by name the routines of earlier chapters (`train_bpe` and `encode_piece` of Chapter 2, `pack`, `batch_order` and `fit` of Chapter 10, `choose_token` of Chapter 11, `extend` of Chapter 12) instead of repeating them. Every random input comes from the book's SplitMix64 (Volume I, Chapter 17) at a seed printed beside its table, derived by the rule `seed_of(name)` of the pseudocode page, and the draws are taken in the order the table states. Write the checks of each milestone as a test file that you rerun after every change.
 
@@ -474,7 +474,7 @@ With many sequences sharing one read of the weights, the intensity at a cache le
 
 The decode step of this model has an intensity of 0.5 FLOP per byte, about a hundredth of the GPU's ridge and a twentieth of the CPU's. The reason is that it reads every weight to do two FLOPs with it, and the weights are 23,552 bytes against at most 4,864 bytes of cache. Prefill reads the same weights once for $n$ tokens, so its intensity grows with $n$, and a prompt of 20 tokens reaches 7.1. Neither phase reaches the ridge in this model, and no batch size would bring a decode step there, because the cache a sequence adds to the step scales with the batch exactly as its FLOPs do. All the numbers of this milestone are properties of the shapes, which is why the whole report can be reproduced on a machine that has never run the model. The one thing it does not contain is a time, and none could be stated without naming a machine and a date.
 
-## Acceptance tests
+## What your run must reproduce
 
 The tests are the blocks printed in the milestones above, collected as a checklist. An implementation passes when every statement holds. "Exact" means integers, digests and text equal; a number marked "digits shown" is compared only to the digits printed, which are the ones that survive the nudges of milestone 4.
 
@@ -532,7 +532,7 @@ What the project established, in order. A tokenizer is a function with a specifi
 
 Where this stops. The model is 6,288 parameters trained for 300 steps on a corpus of 240 documents, so it learns a grammar and not the dependency between sentences, and its generations show it. The corpus is a rule, not language; its tokenizer ends with every word a single token, which no tokenizer of real text does. The cache is checked in double precision, where a tolerance is a few units of $u$; in float32, with quantized weights or with several sequences in one step, the floor is higher, and Chapter 12 showed what the floor of a real stack looks like. Nothing here is faster than the reference: the project measures work and never time. The next volume starts from this model. Its first chapter lists what separates it from the decoders of today (grouped-query attention, normalized queries and keys, an untied head and rotary positions), each a change of the shapes that milestone 7 counts, and the cache-equivalence test of milestone 6 is the one that every such change must keep passing.
 
-## Extensions
+## Where to take the model next
 
 These are optional. Each is a bigger test of the same ideas.
 

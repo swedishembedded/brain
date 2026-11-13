@@ -34,7 +34,7 @@ Before the first line of code, six questions that reach across the whole volume.
 5. (Chapter 7, [Derivatives](07-derivatives.md), and Chapter 15) A central difference has two competing errors. Name them, and say how the best step scales with the machine epsilon.
 6. (Chapter 12, [Statistics](12-statistics.md)) What does a bootstrap do with a sample of $n$ values, and why must the unit it resamples be an independent one?
 
-## Milestones
+## Seven pieces of a numerical library
 
 A note on language and style. The pseudocode below follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. Use 64-bit floats throughout unless a milestone says otherwise, and integers wide enough for 64 unsigned bits where the generator needs them (a language without them can use a pair of 32-bit halves, or a big-integer type, at some cost in speed). Use only your language's standard library, and write the checks as a test file that you can rerun after every change. The tolerances in the acceptance tests assume 64-bit floats.
 
@@ -476,7 +476,7 @@ Four slips are common here.
 - Bootstrapping the $y$ values alone while the $x$ values stay in place. The resamples then describe a different experiment.
 - Reporting the interval without saying that it describes the uncertainty from the $50$ points only, under the assumption that the points are independent draws.
 
-## Acceptance tests
+## The values your library must print
 
 The tests are the blocks printed in the milestones above, collected here as a checklist. A library passes when every statement below holds. "Bit-exact" means integers or text equal; "to $t$" means the stated absolute tolerance.
 
@@ -512,7 +512,7 @@ A library that you have built, tested against stated numbers and used for one en
 
 Where this stops. The array is one-dimensional storage with views, with no devices and no types other than one float; the matrix product is a plain triple loop; the gradient is checked, not computed automatically; and the statistics assume independent draws. Each limit is the subject of a later volume. Volume II turns the end-to-end task into the general problem of learning from examples, and gives the fitted straight line, the squared-residual measure and the bounded steps their proper names. Volume III replaces the hand-derived gradient with a method that produces one for any composition of functions, and then uses your numerical check to prove that method right.
 
-## Extensions
+## Where to take the library next
 
 These are optional. Each is a bigger test of the same ideas.
 

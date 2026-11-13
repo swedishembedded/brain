@@ -34,7 +34,7 @@ Before the first milestone, six questions bring back what it leans on. They reac
 5. (Chapter 11, [Measuring Performance Honestly](11-profiling.md)) A kernel is timed by reading the host clock right after `dispatch` returns. What did the clock measure, and what two additions make the number the cost of the kernel?
 6. (Chapter 12, [Quantization](12-quantization.md)) A weight matrix of shape $[128, 24]$ is stored as 4-bit codes with a float32 scale per group of 32. How many bits per weight is that, and how many bytes does the matrix occupy, against float32?
 
-## Milestones
+## Building the engine from tensor to quantized weights
 
 The pseudocode follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. Every `f32` operation rounds to float32 one operation at a time, as the pseudocode defines; a fused multiply-add is written `fma`. Store every matrix row-major. Every random input comes from the book's SplitMix64 at a seed printed beside the table, and the draws are taken in the order the table states. Write the checks of each milestone as a test file that you rerun after every change.
 
@@ -659,7 +659,7 @@ This is the stage at which the engine stops assuming and starts asking: which ke
 
 Filtering by the name of the device ("the CPU never runs barrier kernels") instead of by the record stays true only until a new device appears. Timing the first run, or the mean of all 300, is a second mistake: the transient is 80 percent over the floor at run 0 and the compile adds twenty floors, and the mean of all runs differs from the steady mean by more than the gap that is being resolved. Comparing two means without the standard error of their difference chooses between candidates whose gap is noise. Measuring a candidate that has not passed the gate and recording its fraction as the engine's is another, since a fraction is a statement about a kernel that gives the right answer. Finally, reporting the time and not the work leaves a number nobody can check, where a fraction of the roofline from a stated roofline can be checked.
 
-## Acceptance tests
+## Digests and counts your engine must match
 
 The tests are the blocks printed in the milestones above, collected here as a checklist. An implementation passes when every statement holds. "Exact" means integers, digests and text equal; a tolerance is absolute unless stated.
 
@@ -708,7 +708,7 @@ What the project established, in order. A tensor is storage plus a recipe for re
 
 Where this stops. The engine runs on a simulator, so it says nothing about the speed of any real machine: its clock is a model, its devices are two configurations of one executor, and its candidates are four. It has no attention, no convolution, no scan, no sort, no packed codes (the simulator holds one code per word), no cache of selections and no search over schedules. Every one of these is an addition to the pipeline and not a change to it. The next volume leaves the machine and turns to text, the first kind of data whose representation is not already numbers; when attention arrives in Volume VII it needs the tiled product, the reductions and the fused epilogue of this chapter exactly as written here.
 
-## Extensions
+## Where the engine goes beyond the CPU
 
 These are optional. Each is a bigger test of the same ideas.
 

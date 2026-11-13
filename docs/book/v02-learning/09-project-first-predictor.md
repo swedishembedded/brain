@@ -36,7 +36,7 @@ Before the first milestone, six questions bring back what the project leans on. 
 5. (Chapter 8, [Experiments, Baselines and Claims](08-experiments.md)) Two models are compared on the same split, then again on the same $16$ splits. Why is the second comparison paired, and why must both models see the same splits?
 6. (Volume I, Chapter 12, [Statistics: Learning Facts from Samples](../v01-mathematics/12-statistics.md), and Chapter 17, [Randomness on a Deterministic Machine](../v01-mathematics/17-randomness.md)) A bootstrap resamples units with replacement. Why must the units be independent, and what is the unit when four rows come from one pump?
 
-## Milestones
+## From honest splits to the report
 
 A note on language and style. The pseudocode follows [Pseudocode Conventions](../pseudocode.md): 0-indexed, row-major, explicit broadcasts, explicit randomness, `require` for every input assumption. Use 64-bit floats. Write the checks of each milestone as a test file that you rerun after every change, and compare tables to the digits printed (a difference below half a unit in the last printed place), unless a milestone states another tolerance. Every generator below is the book's SplitMix64, started at the printed seed with `Generator(seed)`. Every random number is drawn in the printed order, so a reader whose generator is right sees the same numbers.
 
@@ -748,7 +748,7 @@ Bootstrapping rows instead of pumps gives an interval that is too narrow, becaus
 
 The habits of this chapter are ones brain's own code enforces. `crates/decisions/src/evaluation.rs` evaluates a decision model against the majority and chance baselines and, in its module documentation, takes the majority label from the training split because taking it from the evaluated rows flatters the baseline (the trivial-baseline mistake of milestone 2); commit `b3da5ef07` added it with a negative control, a model trained on shuffled labels that must not beat the baseline. `crates/data/src/episode.rs` splits recorded episodes into training and validation sets by whole episode, never by frame, with a test (`episode_split_by_episode_disjoint_and_covers_all`) that the two parts are disjoint: the group split of milestone 1, with the episode as the pump. `crates/rlcd/src/metrics.rs` holds `reliability_bins` and `ece` with the same rule for a probability of exactly $1$ as milestone 5.
 
-## Acceptance tests
+## What your predictor must reproduce
 
 The tests are the blocks printed in the milestones above, collected here as a checklist. An implementation passes when every statement holds. "Exact" means integers or text equal; "to $t$" means the stated absolute tolerance.
 
@@ -801,7 +801,7 @@ What the project established, in order. The honest number for the memoriser is $
 
 Where this stops. The project has one source, one pair of targets and no tuning beyond one penalty and one neighbour count; the intervals describe the uncertainty from the splits of $300$ pumps, not from the choice of those pumps; the shift slice is a single, known shift. A real project would also monitor the incoming data for the kind of shift found here, and would decide in advance what to do when the feature means move (an extension builds the detector of Chapter 5). The loop of this volume, a loss, its gradient, a step and an honest evaluation, is exactly the loop that Volume III runs on models with millions of parameters. There, nothing can be checked by hand, and the habits built here (the numerical gradient check, the baseline, the interval over pumps, the slice that is read last) are what stand in for checking.
 
-## Extensions
+## Questions the predictor leaves open
 
 These are optional. Each is a bigger test of the same ideas.
 

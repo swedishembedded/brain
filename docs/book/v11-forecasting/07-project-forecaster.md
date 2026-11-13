@@ -45,7 +45,7 @@ Nothing in this system is chaotic: the ridge fit is a direct solve, the event mo
 
 The system is judged on two things that are kept apart on purpose. The **study** is the first 240 bars of the panel; it is cut into a fit, a calibration and a test block, and everything the system is allowed to know it learns from the first two. The last 60 bars are the **deployment block**: the forecasts of origins 240 to 294 are made by the models as they stand at the end of the study, and nothing about them is fitted again. A number measured there is what happened next, and it is the one thing in the chapter that no choice made during the study can touch.
 
-## Milestones
+## Building the forecaster in nine steps
 
 The pseudocode follows [Pseudocode Conventions](../pseudocode.md). Build and check each milestone before the next: a disagreement at milestone 6 that follows agreement at 1 to 5 points at the repair and not at the panel.
 
@@ -457,7 +457,7 @@ One fit window is read once, 240 bytes for 1,110 FLOPs, 4.62 FLOPs per byte; the
 
 The fit of the learned model, the scaling, the Gram accumulation and the elimination together, is $25.2$ percent of the $1.55 \times 10^{7}$ FLOPs of the system; scoring the heads on the two blocks is $39.1$ percent and the bootstraps of the skill another $6.3$ (together $45.4$). The system spends more arithmetic judging its forecasts than learning them, so that a change in the number of variants scored changes the bill more than a change in the model. Within the fit the Gram accumulation is $3.27 \times 10^{6}$ FLOPs, 46 times the elimination that solves it ($7.17 \times 10^{4}$): the cost of a ridge fit is in the rows, not in the weights. The accumulation grows with the square of the number of inputs $p = c + 1$ for every row; the elimination grows with its cube and is paid once. One fit window is read once, 240 bytes for 1110 FLOPs, 4.6 FLOPs per byte. The whole panel is 96,000 bytes, and the windows the scaling and the forward pass read add up to $2.6 \times 10^{6}$ bytes, 27 times as many, since each bar of the panel sits in up to 30 windows.
 
-## Acceptance tests
+## What the forecaster must report
 
 The tests are the values the worked module prints, collected as a checklist. Test in the order of the milestones: a disagreement at milestone 6 that follows agreement at 1 to 5 points at the repair and not at the panel. 'Exact' means equal integers; a number with decimals is matched to the digits shown, which are the digits on which the run and its four nudged copies agree.
 
@@ -541,7 +541,7 @@ Where this stops. The panel is generated, its regime changes are all of one kind
 - H. R. Künsch, *The jackknife and the bootstrap for general stationary observations*, 1989. The block bootstrap of milestone 5.
 - R. J. Hyndman and G. Athanasopoulos, *Forecasting: Principles and Practice*, 3rd edition, 2021. The baselines and the walk-forward evaluation.
 
-## Extensions
+## Beyond the generated panel
 
 These are optional. Each changes one thing of the project and asks you to predict the outcome before you run it.
 
