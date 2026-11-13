@@ -136,6 +136,9 @@ Forecasting and decisions:
 - [ ] s3tokenizer: speech_tokenizer_v3 for CosyVoice 3 (v09 ch06).
 - [ ] minimaxmusic3: fixed-seed reference song (v09 ch07).
 - [ ] ltxv: Gemma 3 text path (v10 ch02).
+- [ ] qwen3 DeepSeek parity ladder (`crates/qwen3/tests/it/deepseek_parity.rs:40,105-110`) asserts only a row
+  cosine (COS_FLOOR 0.9999), so a dropped or doubled scale passes; add a rel_l2 bound as `rrdbnet/tests/it/parity.rs`
+  does (needs the checkpoint and its reference dump) (v06 ch02).
 
 ## Book text only
 
