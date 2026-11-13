@@ -98,7 +98,7 @@ impl DecoderLm for MoeDecoder {
         // The `fit`-saved checkpoint is the inference engine's own container
         // (tied `lm_head.weight` included); the block_size is read from it.
         Box::new(MoeScorer {
-            engine: Engine::load(weights.to_str().expect("utf-8 path")),
+            engine: Engine::load(weights.to_str().expect("utf-8 path")).expect("the checkpoint the decoder just trained"),
         })
     }
 }

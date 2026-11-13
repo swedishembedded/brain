@@ -1065,7 +1065,7 @@ three lines in the evaluation code of one model. The chain rule above is why
 this single number is the building block: the log-probability of a whole
 completion is the sum of one `row_logprob` per position.
 
-Expectations over data appear as plain averages. `gpt_val_perplexity` in `crates/eval/src/lib.rs`
+Expectations over data appear as plain averages. `val_perplexity` in `crates/gpt2/src/eval.rs`
 averages the loss of random validation batches and exponentiates the mean, which
 is an estimate of an expectation by a sample average (the long-run table above),
 so it carries the $\sigma/\sqrt{n}$ uncertainty of one. In

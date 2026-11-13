@@ -1,0 +1,19 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/toymoe` -> `sample-models-toymoe`.
+name = "sample-models-toymoe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: the toy sparse Mixture-of-Experts transformer: train it on its synthetic corpus, evaluate how well a checkpoint continues it, and sample from it, every served action with every parameter."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-toymoe.workspace = true
+brain-invoke.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 40

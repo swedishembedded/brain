@@ -23,6 +23,9 @@ brain/flux2-klein	lora_train	seed
 brain/flux2-klein	text2image	seed
 brain/glm	generate	seed
 brain/glm	generate	temp
+brain/gpt2	eval	seed
+brain/gpt2	generate	seed
+brain/gpt2	train	seed
 brain/horizon	predict	max_ood_score
 brain/horizon	train	next_weight
 brain/horizon	train	seed
@@ -165,6 +168,10 @@ brain/sdxl-controlnet	text2image	seed
 brain/splat	fit	lr_position
 brain/supir	restore	restore_cfg
 brain/supir	restore	seed
+brain/toymoe	eval	corpus_seed
+brain/toymoe	generate	seed
+brain/toymoe	train	seed
+brain/toypid	train	seed
 brain/wan	lora_train	lr
 brain/wan	lora_train	seed
 brain/wan	t2v	guidance

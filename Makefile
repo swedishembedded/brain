@@ -1099,7 +1099,7 @@ gpt/gpt/data: build/release $(DATA)/gpt/input.txt
 ## gpt/<dataset>/train - train a GPT on the dataset -> out/gpt-<dataset>.safetensors
 $(GPT_TRAIN_TARGETS): gpt/%/train: build/release
 	@mkdir -p $(OUT)
-	$(BRAIN) gpt2 train $(DATA)/$(gpt_dataset) --out $(OUT)/gpt-$(gpt_dataset).safetensors \
+	$(BRAIN) gpt2 train --data $(DATA)/$(gpt_dataset) --save $(OUT)/gpt-$(gpt_dataset).safetensors \
 		--steps $(STEPS) --batch $(BATCH) --block $(BLOCK) \
 		--layers $(LAYERS) --d-model $(DMODEL) --heads $(HEADS) --lr $(LR) \
 		$(SEED_FLAG) $(MASK_$(gpt_dataset))

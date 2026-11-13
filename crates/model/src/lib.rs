@@ -56,6 +56,7 @@ pub mod snapshot_prefix;
 pub mod distributed;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod job;
+pub mod job_params;
 pub mod fp8;
 pub mod gdn;
 pub mod gdn_mixer;

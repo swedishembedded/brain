@@ -1,0 +1,19 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/toypid` -> `sample-models-toypid`.
+name = "sample-models-toypid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: the PID event/effect control transformer: train it on simulated plants, run a checkpoint in closed loop against each plant's oracle controller, and time one inference, every served action with every parameter."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-toypid.workspace = true
+brain-invoke.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 40

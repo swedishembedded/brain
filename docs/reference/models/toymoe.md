@@ -19,21 +19,22 @@ brain's federated/sharded expert training story is built on.
 
 ## Getting the weights
 
-There's no published checkpoint or model id — this model only exists as
-what you train yourself. `brain train` writes a checkpoint file
-(`moe_rs.safetensors` by default) in the working directory.
+There's no published checkpoint or model id - this model only exists as
+what you train yourself. `brain toymoe train --save F` writes the checkpoint.
 
 ## Running it
 
-There is no `brain moe` subcommand — the bare verbs are this model:
-
 ```bash
-brain train    --steps N --batch-size B --block-size T --lr X --weight-decay X --seed S --out F
-brain eval     --weights F --seed S --samples N
-brain generate --weights F --prompt 1,2,3,4 --max-new N --temperature X --top-k K --seed S
+brain toymoe train --save moe.safetensors --steps N --batch B --block T --lr X --weight-decay X --seed $RANDOM
+brain toymoe eval --weights moe.safetensors --samples N
+brain toymoe generate --weights moe.safetensors --prompt 1,2,3,4 --max-new N --temperature X --top-k K --seed $RANDOM
+brain toymoe generate --weights moe.safetensors --prompt 1,2,3 --logits-only true   # the next token's logits
 ```
 
-`brain eval` sweeps context lengths and reports train-orbit, validation-
+`brain toymoe <action> --help` lists every parameter; `samples/models/toymoe`
+is the same program on its own.
+
+`eval` sweeps context lengths and reports train-orbit, validation-
 orbit, and unseen-orbit accuracy against the random baseline, so
 memorization and generalization show up as separate numbers. For the dense
 baseline decoder instead, use `brain gpt2 …`.

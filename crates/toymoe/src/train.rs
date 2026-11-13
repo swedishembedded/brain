@@ -993,13 +993,16 @@ pub struct TrainArgs {
     pub saved: Option<SavedPolicy>,
 }
 
-/// Train the toy MoE on its synthetic corpus and write the checkpoint to `args.out`.
-pub fn train(args: TrainArgs) -> Result<(), String> {
+/// Train the toy MoE on its synthetic corpus and write the checkpoint to
+/// `args.out`; `on_step` sees every step and stops the run by returning false.
+pub fn train(args: TrainArgs, on_step: &mut dyn FnMut(&model::train::StepReport) -> bool) -> Result<model::train::FitReport, String> {
     let cfg = Config {
         vocab: 64, block_size: args.t, n_layers: 2, d_model: 64, n_heads: 4,
         n_experts: 4, top_k: 2, d_ff: 128, aux_coef: 0.01, z_coef: 1e-4,
     };
-    assert!(args.t <= 64, "T must be <= 64 (the toy corpus window)");
+    if args.t == 0 || args.t > 64 {
+        return Err(format!("the block size must be 1..=64, the toy corpus window (got {})", args.t));
+    }
 
     // Materialise the synthetic corpus as a token dataset on disk, then drive the
     // architecture-agnostic generic trainer (ADR §3/§4) over MoE. The training
@@ -1034,11 +1037,9 @@ pub fn train(args: TrainArgs) -> Result<(), String> {
         ..Default::default()
     };
     let out = std::path::Path::new(&args.out);
-    let fitted = model::train::fit::<Trainer>(&dir, cfg, &opts, Some(out));
+    let fitted = model::train::fit_watched::<Trainer>(&dir, cfg, &opts, Some(out), on_step);
     let _ = std::fs::remove_dir_all(&dir);
-    fitted.map_err(|e| e.to_string())?;
-    println!("saved {}", args.out);
-    Ok(())
+    fitted.map_err(|e| e.to_string())
 }
 
 /// Arguments for training a single expert with a frozen backbone.

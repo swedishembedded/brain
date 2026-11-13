@@ -38,7 +38,6 @@ type Handler = fn(&[String]);
 /// matches `AGENTS.md`'s model grouping; add a row here when a new
 /// architecture gets its own `_cli.rs`.
 const ARCH_HANDLERS: &[(&str, Handler)] = &[
-    ("gpt2", crate::gpt_cli::run_gpt),
     ("qwen3", crate::qwen_cli::run_qwen),
     ("qwen35", crate::qwen35_cli::run_qwen35),
     ("qwen35moe", crate::qwen35moe_cli::run_qwen35moe),
@@ -51,31 +50,12 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     // fake-vs-diamond within `play`/`import`/`export` -- diamond is its one
     // real served architecture, so that's the id this dispatches from.
     ("diamond", crate::wm_cli::run_wm),
-    ("toypid", crate::pid_cli::run_pid),
-    ("toymoe", run_toymoe),
 ];
 
 /// The catalog model id an [`ARCH_HANDLERS`] architecture ALSO registers under
 /// (for `brain caps`/discovery): `brain/<id>`.
 pub(crate) fn catalog_id_for_arch_handler(id: &str) -> String {
     format!("brain/{id}")
-}
-
-/// The bare sparse-MoE toy model used to be three unrelated top-level
-/// commands (`brain train`, `brain eval`, `brain generate`, no shared verb
-/// dispatch). Folded into one handler so it fits [`ARCH_HANDLERS`]'s shape;
-/// `toymoe::run_train`/`run_eval`/`run_generate` themselves are untouched, but for `train` taking the
-/// `--activations` choice parsed here.
-fn run_toymoe(args: &[String]) {
-    match args.first().map(String::as_str) {
-        Some("train") => {
-            let (saved, rest) = crate::args::split_activations_or_exit(&args[1..], "brain toymoe train");
-            toymoe::run_train(&rest, saved);
-        }
-        Some("eval") => toymoe::run_eval(&args[1..]),
-        Some("infer" | "generate" | "gen" | "sample") => toymoe::run_generate(),
-        other => eprintln!("usage: brain toymoe <train|eval|infer> ...  (got {other:?})"),
-    }
 }
 
 /// Architectures with no dedicated CLI module, reached generically through
@@ -149,6 +129,9 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("januspro", "brain/januspro"),
     ("minicpmv", "brain/minicpmv"),
     ("yolov8", "brain/yolov8"),
+    ("gpt2", "brain/gpt2"),
+    ("toypid", "brain/toypid"),
+    ("toymoe", "brain/toymoe"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
@@ -1140,8 +1123,8 @@ mod tests {
     /// existed.
     #[test]
     fn verb_is_known_has_no_opinion_on_an_ungated_handler() {
-        assert_eq!(verb_is_known("gpt2", "t2i"), None);
-        assert_eq!(verb_is_known("gpt2", "train"), None);
+        assert_eq!(verb_is_known("diamond", "t2i"), None);
+        assert_eq!(verb_is_known("diamond", "play"), None);
     }
 
     /// The actual gate `dispatch_arch` consults before calling
@@ -1167,8 +1150,8 @@ mod tests {
     fn wants_weight_acquisition_still_proceeds_for_every_real_verb() {
         // An arch with no verb table entry is unaffected: unchanged
         // (pre-existing) behavior, gated only by help/no-verb.
-        assert!(wants_weight_acquisition("gpt2", &s(&["t2i"])));
-        assert!(wants_weight_acquisition("gpt2", &s(&["train"])));
+        assert!(wants_weight_acquisition("diamond", &s(&["t2i"])));
+        assert!(wants_weight_acquisition("diamond", &s(&["play"])));
     }
 
     /// `ARCH_TO_MODEL` architectures validate against their own capability

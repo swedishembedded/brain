@@ -1,0 +1,19 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/gpt2` -> `sample-models-gpt2`.
+name = "sample-models-gpt2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: the dense GPT baseline: train it on a character dataset (alone or as one rank of a distributed job), generate text and evaluate a checkpoint, every served action with every parameter."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-gpt2.workspace = true
+brain-invoke.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 40

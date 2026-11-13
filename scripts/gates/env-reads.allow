@@ -1066,7 +1066,6 @@ crates/timesfm3/tests/it/t0_param_layout.rs	BRAIN_TIMESFM3
 crates/toyautoencoder/src/model.rs	MOE_SKIP_GPU_TESTS
 crates/toyautoencoder/tests/it/dp_parity.rs	MOE_SKIP_GPU_TESTS
 crates/toyautoencoder/tests/it/dp_parity.rs	SHARD_TEST_GPUS
-crates/toymoe/src/model.rs	DUMP_LOGITS
 crates/toymoe/src/train.rs	MOE_SKIP_GPU_TESTS
 crates/toypid/src/model.rs	MOE_SKIP_GPU_TESTS
 crates/toyseq2seq/tests/it/convergence.rs	MOE_SKIP_GPU_TESTS

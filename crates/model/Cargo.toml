@@ -16,6 +16,8 @@ brain-optim.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true
+# `job_params`: the distributed-job parameters every trainer action declares.
+brain-capability.workspace = true
 # The Gated DeltaNet mixer hoist (`gdn_mixer.rs`) reuses the depthwise causal
 # conv1d fwd/bwd `crates/audio/src/conv.rs` already implements and every GDN
 # model already depends on directly - no circular dependency (`audio` does

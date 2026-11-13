@@ -1131,7 +1131,7 @@ cross-validation folds with a variance correction (the module notes that folds s
 their training data, so their results are positively correlated and the naive standard
 error is too small), and the second resamples whole units so within-unit correlation is
 respected; both arrived with commit `332bc236e` (October 2026), and the general
-statistic form with commit `ab3fbb140`. `crates/eval/src/detection_report.rs` dumps every
+statistic form with commit `ab3fbb140`. `crates/yolov8/src/detection_report.rs` dumps every
 image's ground truth and predictions so that a clustered bootstrap can be run offline.
 The most complete worked case is a sample, `samples/shell/imagegen/rgb-to-ir/rir_bootstrap.py`
 (commit `bfd7f3c1c`, October 2026): a paired bootstrap of the mAP difference between

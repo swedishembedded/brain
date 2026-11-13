@@ -459,7 +459,7 @@ impl<T: Tokenizer> Environment for DocumentEnv<'_, T> {
 /// Programmatic exact match against the probe's own expected answer: decode
 /// the completion, take its first line, [`normalize`] it and compare digests.
 ///
-/// Stopping at the first line break follows `eval::gpt_exact_match`'s
+/// Stopping at the first line break follows `gpt2::eval::exact_match`'s
 /// convention for a greedy decode with a token budget - what comes after the
 /// answer is the decoder filling its budget, not part of the answer. Reward
 /// is 1.0 or 0.0; there is deliberately no partial credit, because a half

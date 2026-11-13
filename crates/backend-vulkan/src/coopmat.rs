@@ -258,7 +258,7 @@ pub fn spec() -> Option<NativeSpec> {
     vulkan::matmul::coopmat_spv().map(|code| NativeSpec::SpirV { code, entry: "main", bindings: BINDINGS })
 }
 
-/// `brain toypid vk-matmul` (behind the `vulkan-coopmat` CLI feature): register
+/// `brain devices coopmat` (behind the `vulkan-coopmat` CLI feature): register
 /// the coopmat kernel on a REAL [`crate::VulkanBackend`] (the same device/
 /// dependency-tracking/async-submission path a served model dispatches
 /// through - never a second, throwaway device) and run one small tile-aligned

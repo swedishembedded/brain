@@ -46,7 +46,20 @@ fn backends_text(seen: &[&str]) -> String {
     if seen.is_empty() { "-".into() } else { seen.join("+") }
 }
 
-pub fn run_devices(_args: &[String]) {
+pub fn run_devices(args: &[String]) {
+    match args.first().map(String::as_str) {
+        // Vulkan diagnostics of the opt-in cooperative-matrix build: the
+        // driver's device and extension report, and the coopmat matmul demo.
+        #[cfg(feature = "vulkan-coopmat")]
+        Some("vulkan") => return vulkan::print_vk_info(),
+        #[cfg(feature = "vulkan-coopmat")]
+        Some("coopmat") => return backend_vulkan::coopmat::demo(),
+        Some(other) => {
+            eprintln!("usage: brain devices [vulkan|coopmat]  (got {other:?}; vulkan and coopmat need the vulkan-coopmat build)");
+            std::process::exit(2);
+        }
+        None => {}
+    }
     let reg = gpu_core::devices::registry();
     let devs = reg.devices();
     if devs.is_empty() {

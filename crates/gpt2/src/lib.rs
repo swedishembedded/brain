@@ -6,6 +6,8 @@
 //! - [`model`] — forward + backprop as WGSL dispatches ([`model::Gpt`]).
 //! - [`init`] — nanogpt-style weight initialization.
 
+pub mod caps;
+pub mod eval;
 pub mod init;
 pub mod model;
 pub mod sample;

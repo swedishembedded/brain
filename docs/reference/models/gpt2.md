@@ -26,23 +26,23 @@ carry.
 `brain/gpt` is a reserved built-in id with no upstream checkpoint - there's
 nothing to fetch. Train your own with `brain gpt2 train`, or point
 `BRAIN_GPT2_WEIGHTS` at an existing brain-format checkpoint to serve one you
-already have.
+already have. The actions name a checkpoint with `--weights PATH`.
 
 ## Running it
 
 ```bash
-brain gpt2 train <data_dir> --out gpt.safetensors --steps 2000
-brain gpt2 eval  --weights gpt.safetensors --data <data_dir>
-brain gpt2 infer   --weights gpt.safetensors --prompt "..." --max-new 200
+brain gpt2 train --data <data_dir> --save gpt.safetensors --steps 2000 --seed $RANDOM
+brain gpt2 eval --weights gpt.safetensors --data <data_dir> --seed $RANDOM
+brain gpt2 generate --weights gpt.safetensors --prompt "..." --max-new 200 --seed $RANDOM
 ```
 
-`gen` / `sample` / `generate` are all accepted as aliases for the same
-inference path. Generation uses an incremental KV-cache, so long completions
-don't recompute the whole prefix each step.
+`brain gpt2 <action> --help` lists every parameter; `samples/models/gpt2`
+is the same program on its own. Generation uses an incremental KV-cache, so
+long completions don't recompute the whole prefix each step.
 
-> Bare `brain train` / `brain eval` / `brain generate` (no `gpt`) run brain's
-> separate toy Sparse MoE model, not this one - always say `brain gpt2 …` to
-> reach this decoder.
+`train --job-plan FILE --job-rank N --job-secret FILE` makes the run one rank
+of a distributed job (the same parameters every distributed trainer takes),
+and `--profile-collectives FILE` writes what its collectives cost.
 
 To serve it over HTTP or D-Bus:
 

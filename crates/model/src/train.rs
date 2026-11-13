@@ -2215,6 +2215,20 @@ pub fn fit<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Pa
     fit_with(model, obj, opts, out)
 }
 
+/// [`fit`] with `on_step` seeing every completed step; it returns false to
+/// stop the run there (a served action's cancellation). The checkpoint at
+/// `out` is written either way, with the steps that ran. Returns the run's
+/// [`FitReport`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn fit_watched<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Path>, on_step: &mut dyn FnMut(&StepReport) -> bool) -> std::io::Result<FitReport> {
+    refuse_images(dir)?;
+    let loaded = load(dir, opts)?;
+    let (model, _start) = build_or_warm_start::<M>(cfg, opts, out, loaded.vocab);
+    let obj = CausalLm::new(loaded.train, loaded.val, loaded.batch_cfg, loaded.itos);
+    let control = FitControl { on_step: Some(on_step), ..Default::default() };
+    fit_controlled(model, obj, opts, out, control).map(|(report, _)| report)
+}
+
 /// [`fit`], WARM-STARTING from WEIGHTS THE CALLER SUPPLIES (see [`StartKind`]).
 ///
 /// [`fit`] has exactly two starting points: a warm start from an existing checkpoint at `out`,

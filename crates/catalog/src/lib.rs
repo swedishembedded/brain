@@ -533,6 +533,11 @@ pub fn models() -> Vec<ModelEntry> {
             spec: None,
             resident: None,
         },
+        // brain's own reference models: no released checkpoint and no store
+        // spec, so their actions name a checkpoint by path.
+        ModelEntry { manifest: gpt2::caps::manifest, provider: always!(gpt2::caps::Gpt2Provider), spec: None, resident: None },
+        ModelEntry { manifest: toypid::caps::manifest, provider: always!(toypid::caps::ToyPidProvider), spec: None, resident: None },
+        ModelEntry { manifest: toymoe::caps::manifest, provider: always!(toymoe::caps::ToyMoeProvider), spec: None, resident: None },
         ModelEntry {
             manifest: lfm2::caps::manifest,
             provider: lfm2::caps::provider,

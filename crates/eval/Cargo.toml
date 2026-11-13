@@ -10,10 +10,8 @@ name = "eval"
 path = "src/lib.rs"
 
 [dependencies]
-brain-gpt2.workspace = true
 brain-yolov8.workspace = true
 brain-data.workspace = true
-brain-checkpoint.workspace = true
 brain-audio.workspace = true
 brain-ecapatdnn.workspace = true
 # `calibration` re-exports `rlcd::metrics` (ECE/AdaECE/classwise-ECE/NLL/
@@ -21,7 +19,7 @@ brain-ecapatdnn.workspace = true
 # model's evaluation metrics were originally specified as. Placed in the
 # leaf layer (`crates/rlcd`), not owned here, so a sample can use the
 # metrics without this crate's own heavier closure
-# (gpt2/yolov8/audio/ecapatdnn) - this re-export is free.
+# (yolov8/audio/ecapatdnn) - this re-export is free.
 brain-rlcd.workspace = true
 serde_json.workspace = true
 

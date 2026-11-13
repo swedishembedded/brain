@@ -926,8 +926,8 @@ see how it behaves.
 
 This chapter is background for the losses and metrics of later volumes, and in
 brain its quantities appear in a few concrete places. Start with perplexity, which
-is an exponentiated mean cross-entropy. `gpt_val_perplexity` in
-`crates/eval/src/lib.rs` loads a checkpoint and a held-out token stream, draws
+is an exponentiated mean cross-entropy. `val_perplexity` in
+`crates/gpt2/src/eval.rs` loads a checkpoint and a held-out token stream, draws
 random batches of windows, adds up the model's mean cross-entropy over each batch
 and returns the exponential of the average. It is the perplexity of this chapter,
 estimated from a sample of validation windows (so it carries the sampling

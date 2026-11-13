@@ -33,32 +33,21 @@ struct Weights {
     tensors: HashMap<String, Vec<f32>>,
 }
 
-fn load_weights(path: &str) -> Weights {
-    let model = checkpoint::st::load_safetensors(path).unwrap_or_else(|e| {
-        eprintln!(
-            "error: cannot read MoE weights '{path}': {e}\n\
-             \n\
-             Specify a checkpoint with --weights <file>, or train one first:\n\
-             \x20 brain train --steps 2000 --out moe.safetensors\n\
-             \x20 brain generate --weights moe.safetensors --prompt 1,2,3,4 --max-new 64\n\
-             \n\
-             (Run `brain help` for all commands.)"
-        );
-        std::process::exit(1);
-    });
+fn load_weights(path: &str) -> Result<Weights, String> {
+    let model = checkpoint::st::load_safetensors(path).map_err(|e| format!("cannot read MoE weights '{path}': {e}"))?;
     let c = model.config();
-    let g = |k: &str| c[k].as_u64().unwrap_or_else(|| panic!("{path}: missing config.{k}")) as u32;
+    let g = |k: &str| c[k].as_u64().map(|v| v as u32).ok_or_else(|| format!("{path}: missing config.{k}"));
     let cfg = Config {
-        vocab_size: g("vocab_size"),
-        block_size: g("block_size"),
-        n_layers: g("n_layers"),
-        d_model: g("d_model"),
-        n_heads: g("n_heads"),
-        n_experts: g("n_experts"),
-        top_k: g("top_k"),
-        d_ff: g("d_ff"),
+        vocab_size: g("vocab_size")?,
+        block_size: g("block_size")?,
+        n_layers: g("n_layers")?,
+        d_model: g("d_model")?,
+        n_heads: g("n_heads")?,
+        n_experts: g("n_experts")?,
+        top_k: g("top_k")?,
+        d_ff: g("d_ff")?,
     };
-    Weights { cfg, tensors: model.tensors }
+    Ok(Weights { cfg, tensors: model.tensors })
 }
 
 const K_EMBED: usize = 0;
@@ -109,8 +98,8 @@ impl Engine {
     /// (`Trainer::save` / the generic `fit`): a safetensors file with the model
     /// config under `brain.config` and a tied `lm_head.weight`, so a
     /// `fit`-saved MoE checkpoint loads here directly.
-    pub fn load(path: &str) -> Engine {
-        Engine::new(load_weights(path))
+    pub fn load(path: &str) -> Result<Engine, String> {
+        load_weights(path).map(Engine::new)
     }
 
     /// Vocabulary size (logits row width) this engine was built for.
@@ -377,90 +366,33 @@ fn sample(logits: &[f32], temperature: f32, top_k: Option<usize>, rng: &mut u64)
     (probs.len() - 1) as u32
 }
 
-struct Args {
-    weights: String,
-    prompt: Vec<u32>,
-    max_new: usize,
-    temperature: f32,
-    top_k: Option<usize>,
-    /// The sampling seed; `None` when `--seed` was not given.
-    seed: Option<u64>,
+/// How well a checkpoint continues the toy corpus, at the context length it
+/// does best at.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvalReport {
+    /// Accuracy of a uniform guess, `1 / vocab`.
+    pub random: f32,
+    /// The context length the accuracies below are measured at.
+    pub best_context: usize,
+    pub train_orbit: f32,
+    pub val_orbit: f32,
+    /// An orbit the model never trained on: whether it learned the
+    /// substitution table rather than the sequences.
+    pub new_orbit: f32,
+    /// New-orbit accuracy at every context length tried.
+    pub by_context: Vec<(usize, f32)>,
 }
 
-/// The seed a run uses: the one given, else a freshly drawn one, announced on
-/// stderr (stdout carries the run's result) so the run can be repeated.
-fn resolve_seed(given: Option<u64>, what: &str) -> u64 {
-    given.unwrap_or_else(|| {
-        let seed = data::rng::random_seed();
-        announce_drawn_seed(what, seed);
-        seed
-    })
-}
-
-fn announce_drawn_seed(what: &str, seed: u64) {
-    eprintln!("{what}: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
-}
-
-fn parse_args() -> Args {
-    let mut a = Args {
-        weights: "moe.safetensors".to_string(),
-        prompt: vec![0, 1, 2, 3],
-        max_new: 64,
-        temperature: 0.8,
-        top_k: None,
-        seed: None,
-    };
-    let argv: Vec<String> = std::env::args().collect();
-    let mut i = if argv.get(1).map(|s| s.as_str()) == Some("generate") { 2 } else { 1 };
-    while i < argv.len() {
-        let next = || argv.get(i + 1).cloned().expect("missing value for flag");
-        match argv[i].as_str() {
-            "--weights" => a.weights = next(),
-            "--prompt" => {
-                a.prompt = next()
-                    .split([',', ' '])
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.parse().expect("bad prompt token"))
-                    .collect()
-            }
-            "--max-new" => a.max_new = next().parse().expect("bad --max-new"),
-            "--temperature" => a.temperature = next().parse().expect("bad --temperature"),
-            "--top-k" => a.top_k = Some(next().parse().expect("bad --top-k")),
-            "--seed" => a.seed = Some(next().parse().expect("bad --seed")),
-            other => panic!("unknown flag: {other}"),
-        }
-        i += 2;
-    }
-    if a.prompt.is_empty() {
-        a.prompt = vec![0];
-    }
-    a
-}
-
-pub fn run_eval(flags: &[String]) {
-    let mut weights_path = "moe_rs.safetensors".to_string();
-    // Not a sampling seed: it names the toy corpus and its substitution table,
-    // so the default must be the corpus the trainer fits.
-    let mut seed: u64 = train::CORPUS_SEED;
-    let mut samples: usize = 400;
-    let mut i = 0;
-    while i < flags.len() {
-        let next = || flags.get(i + 1).cloned().expect("missing value for flag");
-        match flags[i].as_str() {
-            "--weights" => weights_path = next(),
-            "--seed" => seed = next().parse().unwrap(),
-            "--samples" => samples = next().parse().unwrap(),
-            other => panic!("unknown eval flag: {other}"),
-        }
-        i += 2;
-    }
-
-    let weights = load_weights(&weights_path);
+/// Next-token accuracy of the checkpoint at `weights` on the toy corpus that
+/// `corpus_seed` names (the trainer's is [`train::CORPUS_SEED`]), over at
+/// most `samples` positions per measurement.
+pub fn evaluate(weights: &str, corpus_seed: u64, samples: usize) -> Result<EvalReport, String> {
+    let weights = load_weights(weights)?;
     let vocab = weights.cfg.vocab_size;
     let bs = weights.cfg.block_size as usize;
     let engine = Engine::new(weights);
 
-    let (corpus, table) = train::corpus_and_table(20_000, vocab, seed);
+    let (corpus, table) = train::corpus_and_table(20_000, vocab, corpus_seed);
     let n_val = corpus.len() / 10;
     let (train_region, val_region) = corpus.split_at(corpus.len() - n_val);
     let new_orbit = train::orbit(&table, vocab, 1500, 41, 7);
@@ -473,12 +405,7 @@ pub fn run_eval(flags: &[String]) {
                 continue;
             }
             let logits = engine.forward(&seq[j - ctx + 1..=j]);
-            let pred = logits
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .unwrap()
-                .0 as u32;
+            let pred = logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i as u32);
             correct += (pred == seq[j + 1]) as usize;
             total += 1;
             if total >= samples {
@@ -488,89 +415,50 @@ pub fn run_eval(flags: &[String]) {
         correct as f32 / total.max(1) as f32
     };
 
-    let lengths: Vec<usize> = [2usize, 8, 16, 32, bs].into_iter().filter(|&l| l <= bs).collect();
-    let sweep: Vec<(usize, f32)> = lengths.iter().map(|&l| (l, acc(&new_orbit, l, false))).collect();
-    let (best_l, best_acc) = *sweep.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
-
-    println!("\n=== eval {weights_path} ===  (random = {:.1}%)", 100.0 / vocab as f32);
-    println!("accuracy at best context length ({best_l} tokens):");
-    println!("  train orbit       : {:5.1}%", 100.0 * acc(train_region, best_l, true));
-    println!("  val   orbit       : {:5.1}%", 100.0 * acc(val_region, best_l, true));
-    println!("  NEW   orbit       : {:5.1}%", 100.0 * best_acc);
-    let s: Vec<String> = sweep.iter().map(|(l, a)| format!("{l}:{:.0}%", 100.0 * a)).collect();
-    println!("new-orbit acc by context length: {}", s.join("  "));
+    let by_context: Vec<(usize, f32)> = [2usize, 8, 16, 32, bs].into_iter().filter(|&l| l <= bs).map(|l| (l, acc(&new_orbit, l, false))).collect();
+    let (best_context, new_orbit_acc) = by_context.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1)).ok_or("the checkpoint's block size is below 2")?;
+    Ok(EvalReport {
+        random: 1.0 / vocab as f32,
+        best_context,
+        train_orbit: acc(train_region, best_context, true),
+        val_orbit: acc(val_region, best_context, true),
+        new_orbit: new_orbit_acc,
+        by_context,
+    })
 }
 
-/// `brain toymoe train`: `flags` are the training flags, `saved` the `--activations` choice the caller parsed
-/// (`None` keeps the model's default). A refused choice or a failed run exits 1.
-pub fn run_train(flags: &[String], saved: Option<model::saved::SavedPolicy>) {
-    let mut a = train::TrainArgs {
-        steps: 2000,
-        b: 16,
-        t: 64,
-        lr: 3e-4,
-        wd: 0.1,
-        seed: data::rng::random_seed(),
-        out: "moe_rs.safetensors".to_string(),
-        saved,
-    };
-    let mut seed_given = false;
-    let mut i = 0;
-    while i < flags.len() {
-        let next = || flags.get(i + 1).cloned().expect("missing value for flag");
-        match flags[i].as_str() {
-            "--steps" => a.steps = next().parse().unwrap(),
-            "--batch-size" => a.b = next().parse().unwrap(),
-            "--block-size" | "--seq-len" => a.t = next().parse().unwrap(),
-            "--lr" => a.lr = next().parse().unwrap(),
-            "--weight-decay" => a.wd = next().parse().unwrap(),
-            "--seed" => {
-                a.seed = next().parse().unwrap();
-                seed_given = true;
-            }
-            "--out" => a.out = next(),
-            other => panic!("unknown train flag: {other}"),
-        }
-        i += 2;
+/// The logits the checkpoint at `weights` gives the token after `prompt`.
+pub fn logits(weights: &str, prompt: &[u32]) -> Result<Vec<f32>, String> {
+    let weights = load_weights(weights)?;
+    check_prompt(prompt, weights.cfg.vocab_size)?;
+    Ok(Engine::new(weights).forward(prompt))
+}
+
+fn check_prompt(prompt: &[u32], vocab: u32) -> Result<(), String> {
+    if prompt.is_empty() {
+        return Err("the prompt is empty".into());
     }
-    if !seed_given {
-        announce_drawn_seed("toymoe train", a.seed);
-    }
-    if let Err(e) = train::train(a) {
-        eprintln!("toymoe train: {e}");
-        std::process::exit(1);
+    match prompt.iter().find(|&&t| t >= vocab) {
+        Some(t) => Err(format!("prompt token {t} is not below the vocab size {vocab}")),
+        None => Ok(()),
     }
 }
 
-pub fn run_generate() {
-    let args = parse_args();
-    if std::env::var("DUMP_LOGITS").is_ok() {
-        let weights = load_weights(&args.weights);
-        let engine = Engine::new(weights);
-        let logits = engine.forward(&args.prompt);
-        println!(
-            "{}",
-            logits.iter().map(|v| format!("{v:.6}")).collect::<Vec<_>>().join(",")
-        );
-        return;
-    }
-    let weights = load_weights(&args.weights);
+/// `prompt` continued by `max_new` sampled tokens (temperature `temperature`,
+/// the `top_k` most likely when given), from `seed`.
+pub fn generate(weights: &str, prompt: &[u32], max_new: usize, temperature: f32, top_k: Option<usize>, seed: u64) -> Result<Vec<u32>, String> {
+    let weights = load_weights(weights)?;
+    check_prompt(prompt, weights.cfg.vocab_size)?;
     let block_size = weights.cfg.block_size as usize;
-    let vocab = weights.cfg.vocab_size;
-    for &tok in &args.prompt {
-        assert!(tok < vocab, "prompt token {tok} >= vocab_size {vocab}");
-    }
-
     let engine = Engine::new(weights);
-    let mut tokens = args.prompt.clone();
-    let mut rng = resolve_seed(args.seed, "toymoe generate").max(1);
-    for _ in 0..args.max_new {
+    let mut tokens = prompt.to_vec();
+    let mut rng = seed.max(1);
+    for _ in 0..max_new {
         let start = tokens.len().saturating_sub(block_size);
         let logits = engine.forward(&tokens[start..]);
-        let next = sample(&logits, args.temperature, args.top_k, &mut rng);
-        tokens.push(next);
+        tokens.push(sample(&logits, temperature, top_k, &mut rng));
     }
-    println!("{}", tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","));
+    Ok(tokens)
 }
 
 #[cfg(test)]
@@ -590,18 +478,11 @@ mod tests {
         });
         let emb: Vec<f32> = (0..10).map(|i| i as f32).collect();
         checkpoint::save(path, config, &[("token_emb.weight".to_string(), vec![10], emb.clone()), ("lm_head.weight".to_string(), vec![5, 2], emb.clone())]);
-        let w = load_weights(path);
+        let w = load_weights(path).unwrap();
         let _ = std::fs::remove_file(path);
         assert_eq!((w.cfg.vocab_size, w.cfg.block_size, w.cfg.n_experts, w.cfg.d_ff), (5, 8, 2, 4));
         assert_eq!(w.tensors["token_emb.weight"], emb);
         assert_eq!(w.tensors["lm_head.weight"], emb);
-    }
-
-    /// An unset seed is drawn, so two unseeded runs differ; a given one is used as is.
-    #[test]
-    fn an_unset_seed_is_drawn_and_a_given_one_is_kept() {
-        assert_ne!(resolve_seed(None, "test"), resolve_seed(None, "test"));
-        assert_eq!(resolve_seed(Some(7), "test"), 7);
     }
 
     #[test]

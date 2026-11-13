@@ -26,7 +26,6 @@ mod forecast_cli;
 mod label_cli;
 mod glm_cli;
 mod gguf_cli;
-mod gpt_cli;
 mod image_io;
 mod lsa_cli;
 mod mirage_cli;
@@ -43,7 +42,6 @@ mod perf_longctx;
 mod perf_qwen35;
 mod perf_ricursive;
 mod perf_qwen35moe;
-mod pid_cli;
 mod placement;
 mod plan_cli;
 mod pull_cli;
@@ -255,15 +253,12 @@ DECIDE (decision-model training on outcome-labelled examples)
       Validates the file (schema, leakage across splits) and prints its summary.
       `brain caps decide` lists the served `decide` action.
 
-GPT2 (dense baseline)
-  brain gpt2 train <data_dir> [--out F --steps N --batch B --block T
-                              --layers L --d-model D --heads H --lr X --mask = --align
-                              --job-plan FILE --job-rank N --job-secret FILE
-                              --profile-collectives FILE
-                              --activations keep|recompute]
-  brain gpt2 eval  --weights F --data <dir> [--batches N --samples M]
-  brain gpt2 infer --weights F [--data <dir>] [--prompt \"...\" --max-new N --temp X --top-k K]
-                              (vocab is read from the checkpoint; --data only for old ones)
+GPT2 (brain/gpt2: the dense baseline; samples/models/gpt2)
+  brain gpt2 train --data <dir> --save F [--steps N --layers L --d-model D --mask =]
+                   [--job-plan FILE --job-rank N --job-secret FILE --profile-collectives FILE]
+  brain gpt2 eval --weights F --data <dir>
+  brain gpt2 generate --weights F --prompt \"...\" [--max-new N --temperature X --top-k K]
+      every parameter: brain gpt2 <action> --help
 
 FLUX.2 Klein (text-to-image + image editing; 4-step distilled flow matching)
   brain flux2 text2image --prompt \"...\" --seed S --out image=out.png [--width W --height H]
@@ -307,10 +302,10 @@ INTEL NPU (OpenVINO)
       --ov-device selects the OpenVINO target device (NPU|CPU|GPU|AUTO), unrelated to
       brain's own --device; check without OpenVINO decodes the graph only.
 
-TOY ARCHITECTURES (brain's own, no upstream reference - toy tasks, not served)
-  brain toymoe train [--steps N --batch-size B --block-size T --lr X --out F --activations keep|recompute]
-  brain toymoe infer --weights F [--prompt 1,2,3,4 --max-new N --temperature X --top-k K]
-  brain toymoe eval  --weights F [--samples N]
+TOY ARCHITECTURES (brain's own, no upstream reference; samples/models/toymoe, toypid)
+  brain toymoe train --save F [--steps N --batch B --block T --lr X]
+  brain toymoe generate --weights F [--prompt 1,2,3,4 --max-new N --temperature X --top-k K]
+  brain toymoe eval --weights F [--samples N]
   brain toypid <train|rollout|profile> ...   # the WebGPU browser demo's model
 
 FEDERATED MoE (train experts separately, then assemble)
@@ -547,11 +542,11 @@ OTHER
 
 EXAMPLES
   brain data gen calculator --out data/calculator --n 100000
-  brain gpt2 train data/calculator --out out/gpt2.safetensors --steps 2000 --mask =
-  brain gpt2 eval  --weights out/gpt2.safetensors --data data/calculator
-  brain gpt2 infer --weights out/gpt2.safetensors --data data/calculator --prompt \"12+7=\" --max-new 8
-  brain toymoe train --steps 2000 --out moe.safetensors
-  brain toymoe infer --weights moe.safetensors --prompt 1,2,3,4 --max-new 64
+  brain gpt2 train --data data/calculator --save out/gpt2.safetensors --steps 2000 --mask =
+  brain gpt2 eval --weights out/gpt2.safetensors --data data/calculator
+  brain gpt2 generate --weights out/gpt2.safetensors --prompt \"12+7=\" --max-new 8
+  brain toymoe train --steps 2000 --save moe.safetensors
+  brain toymoe generate --weights moe.safetensors --prompt 1,2,3,4 --max-new 64
   brain federated split moe.safetensors out/shards && brain federated verify out/shards
   brain gradcheck
 

@@ -11,7 +11,11 @@
 //! write `toypid::Pid`, `toypid::PidConfig`, `toypid::BOS`, …; the data pipeline stays
 //! under `toypid::data`.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod caps;
 pub mod data;
 pub mod model;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod train;
 
 pub use model::*;

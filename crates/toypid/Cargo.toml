@@ -21,6 +21,9 @@ serde_json.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wgpu.workspace = true
+# The served actions (`caps`) and the trainer: native only.
+brain-capability.workspace = true
+brain-data.workspace = true
 pollster.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
