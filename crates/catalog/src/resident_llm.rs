@@ -16,8 +16,8 @@
 //!
 //! Model SELECTION: `--checkpoint` (+ `--tokenizer`) names the Qwen3
 //! checkpoint to serve; `BRAIN_GPT2_WEIGHTS` still names GPT-2's (`from_env`
-//! returns `None` when it is unset/empty) and GLM's comes from the model
-//! store ([`GlmResident::from_store`]). HOW to serve Qwen3 - context length, batching, KV/weight
+//! returns `None` when it is unset/empty) and the model-dir scan serves each
+//! GLM checkpoint in the store ([`GlmResident::from_card`]). HOW to serve Qwen3 - context length, batching, KV/weight
 //! precision - is [`QwenServeConfig`], which `run_cli.rs`'s serving-policy
 //! flags build; see that struct's own doc for every field and its default.
 //! With no `--ctx` given, context auto-sizes to the target device's
@@ -400,14 +400,6 @@ pub struct GlmResident {
 }
 
 impl GlmResident {
-    /// The checkpoint the model store resolves - a brain checkpoint
-    /// (`import`, `train` or `finetune` wrote it) or a downloaded Hugging Face
-    /// directory - under the model's own id.
-    pub fn from_store(store: &loader::served::ServedStore) -> Option<GlmResident> {
-        let path = loader::served::served_assembly(store, "glmdsa", &glmdsa::spec::SPEC)?.role_path("weights").ok()?;
-        Some(Self::from_card(&path, &ModelCard::new(glmdsa::caps::MODEL, glmdsa::spec::CARD_FAMILY), None))
-    }
-
     /// Construct under the card's id. `path` is a brain checkpoint (char-level,
     /// carrying its own vocabulary) or a Hugging Face GLM checkpoint directory,
     /// served as downloaded with its own `tokenizer.json`; `_tokenizer` is
@@ -2589,15 +2581,11 @@ mod tests {
         assert!(results[0].is_err(), "an out-of-vocab prompt must be reported as an error, not silently dropped");
     }
 
-    /// A serving process finds the GLM checkpoint in its model store with
-    /// nothing set in its environment, serves nothing when the store holds
-    /// none, and generates through the scheduled instance.
+    /// A served GLM brain checkpoint offers every action of the model and
+    /// generates through its scheduled instance.
     #[test]
-    fn the_served_glm_checkpoint_comes_from_the_model_store() {
+    fn a_served_glm_checkpoint_generates() {
         let store = std::env::temp_dir().join(format!("catalog-glm-store-{}", std::process::id()));
-        let empty = store.join("empty");
-        std::fs::create_dir_all(&empty).unwrap();
-        assert!(GlmResident::from_store(&loader::served::ServedStore::new(Some(empty))).is_none());
 
         let cfg = glmdsa::GlmConfig::tiny();
         let init = glmdsa::init_weights(&cfg, 1);
@@ -2605,8 +2593,7 @@ mod tests {
         let ckpt = store.join("full").join("brain").join("glm").join("glm.safetensors");
         std::fs::create_dir_all(ckpt.parent().unwrap()).unwrap();
         glmdsa::Glm::new(cfg.clone(), 1, cfg.block_size, &init).save_with_itos(ckpt.to_str().unwrap(), Some(&itos));
-        let resident = GlmResident::from_store(&loader::served::ServedStore::new(Some(store.join("full")))).expect("the store's checkpoint is served");
-        assert_eq!(resident.path, ckpt.to_str().unwrap());
+        let resident = GlmResident::from_card(ckpt.to_str().unwrap(), &ModelCard::new(glmdsa::caps::MODEL, glmdsa::spec::CARD_FAMILY), None);
         assert_eq!(resident.manifest().actions.len(), glmdsa::caps::manifest().actions.len());
 
         let key = resident.instance_key("generate", &Invocation::new());

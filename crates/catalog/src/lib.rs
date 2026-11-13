@@ -449,14 +449,15 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("qwen3", &qwen3::spec::Qwen3Spec)),
             resident: None,
         },
-        // GLM-5.2: the checkpoint is the `weights` role `glmdsa::spec::SPEC`
-        // resolves (a brain checkpoint or a Hugging Face directory), for the
-        // provider and the residency adapter alike.
+        // GLM-5.2: the provider's checkpoint is the `weights` role
+        // `glmdsa::spec::SPEC` resolves (a brain checkpoint or a Hugging Face
+        // directory). `brain serve` serves every GLM checkpoint the model-dir
+        // scan finds, each under its own id (`crate::resident_llm::GlmResident`).
         ModelEntry {
             manifest: glmdsa::caps::manifest,
             provider: glmdsa::caps::provider,
             spec: Some(("glmdsa", &glmdsa::spec::SPEC)),
-            resident: crate::resident_in_store!(crate::resident_llm::GlmResident::from_store),
+            resident: None,
         },
         // Qwen3.5-35B-A3B: the one-shot provider over the store's checkpoint.
         // `brain serve` serves each checkpoint the model-dir scan finds through
