@@ -12,7 +12,7 @@
 //! of implicit uniform weight. No architecture-specific code lives here -
 //! `qwen3` is simply the first `M: Model` this gets instantiated with (see
 //! `crates/rl/tests/qwen3_fit_weighted.rs`); any other `Model` that
-//! implements `enable_weighted_loss` (today only `qwen3`) can use this
+//! implements `enable_weighted_loss` can use this
 //! unchanged.
 //!
 //! ## Weight file format

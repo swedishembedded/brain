@@ -77,7 +77,7 @@ pub enum RatioBasis {
     /// The legacy basis, for ablations only: the trainer scores the untempered
     /// softmax while the sampler drew at temperature `T`, and the behaviour
     /// log-probability is the sampler's own. At `T != 1` every on-policy ratio
-    /// starts off 1 (see [`GrpoStats::max_onpolicy_ratio_dev`]), and a confident
+    /// starts away from 1 (see [`GrpoStats::max_onpolicy_ratio_dev`]), and a confident
     /// token with a positive advantage starts clipped.
     Sampler,
 }
