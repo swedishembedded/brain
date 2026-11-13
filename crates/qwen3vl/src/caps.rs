@@ -1232,15 +1232,17 @@ fn resolved_ctx_len(cfg: &Qwen3VlConfig, ctx: u32) -> u32 {
 
 /// The largest visual-token count ONE image can produce at `max_pixels`.
 ///
-/// A square at the pixel budget is the largest-area, most token-hungry shape
-/// smart_resize can produce for that budget (any other aspect ratio at the same
-/// area yields <= tokens after patch-grid rounding), so it is the right
-/// per-image upper bound to allocate for.
+/// smart_resize sizes an image to a grid of `factor`-sided cells (factor =
+/// patch x merge) whose area is within the budget, and each cell is one
+/// visual token, so no image yields more than `max_pixels / factor^2` tokens.
+/// A square is not the worst case: its side is floored to the factor on both
+/// axes, and at 1,000,000 px it gives 961 tokens where 800 x 1248 gives 975.
+/// An aspect beyond the reference's 200:1 is sized with its short side at
+/// `factor` and may exceed the budget; a request whose visual tokens exceed the
+/// resident's capacity is refused with an error before anything is uploaded.
 fn per_image_visual_capacity(cfg: &Qwen3VlConfig, max_pixels: u32) -> u32 {
     let factor = cfg.vision.patch_size * cfg.vision.spatial_merge_size;
-    let side = (max_pixels as f64).sqrt() as u32;
-    let (h_cap, w_cap) = smart_resize(side, side, factor, preprocess_min_pixels(), max_pixels);
-    crate::preprocess::image_token_count(h_cap, w_cap, cfg.vision.patch_size, cfg.vision.spatial_merge_size)
+    max_pixels / (factor * factor)
 }
 
 /// Capacity placement: image_row0 is arbitrary (Qwen3Vl::generate's
@@ -1384,6 +1386,32 @@ mod tests {
         cfg.text.max_position_embeddings = 262144; // the real released config's declared ceiling
         assert_eq!(resolved_ctx_len(&cfg, DEFAULT_CTX), DEFAULT_CTX, "a checkpoint with real headroom gets the requested capacity, not a fixed 4096");
         assert_eq!(resolved_ctx_len(&cfg, 65536), 65536, "a larger request is honoured up to the checkpoint's ceiling");
+    }
+
+    /// Spec: no image the preprocessor sizes within the pixel budget yields
+    /// more visual tokens than the per-image capacity. A square is not the
+    /// worst case: at 1,000,000 px a square gives 961 tokens and an
+    /// 800 x 1248 image 975.
+    #[test]
+    fn per_image_capacity_bounds_every_aspect_within_the_budget() {
+        let cfg = Qwen3VlConfig::qwen3_vl_4b();
+        let (patch, merge) = (cfg.vision.patch_size, cfg.vision.spatial_merge_size);
+        for max_pixels in [1_000_000u32, 1_003_520, 16_384 * 28 * 28] {
+            let cap = per_image_visual_capacity(&cfg, max_pixels);
+            for long in (1000u32..=8000).step_by(37) {
+                for ratio_tenths in (10u32..=2000).step_by(7) {
+                    let short = (long * 10 / ratio_tenths).max(1);
+                    for (h, w) in [(short, long), (long, short)] {
+                        let (hb, wb) = crate::preprocess::smart_resize(h, w, patch * merge, preprocess_min_pixels(), max_pixels);
+                        if u64::from(hb) * u64::from(wb) > u64::from(max_pixels) {
+                            continue; // an aspect beyond the reference's 200:1, sized past the budget by design
+                        }
+                        let tokens = crate::preprocess::image_token_count(hb, wb, patch, merge);
+                        assert!(tokens <= cap, "{h} x {w} at {max_pixels} px gives {tokens} tokens, capacity {cap}");
+                    }
+                }
+            }
+        }
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
