@@ -1170,7 +1170,6 @@ crates/yolov8/tests/it/p5_overfit.rs	MOE_SKIP_GPU_TESTS
 crates/yolov8/tests/it/p6_infer.rs	MOE_SKIP_GPU_TESTS
 crates/yolov8/tests/it/parity.rs	YOLO_PARITY_ACTS
 crates/yolov8/tests/it/parity.rs	YOLO_PARITY_WEIGHTS
-crates/zipdepth/src/caps.rs	BRAIN_ZIPDEPTH_WEIGHTS
 crates/zipdepth/tests/it/p1_param_layout.rs	ZIPDEPTH_NPU_PTH
 crates/zipdepth/tests/it/p1_param_layout.rs	ZIPDEPTH_PTH
 crates/zipdepth/tests/it/p3_fused_eval.rs	MOE_SKIP_GPU_TESTS

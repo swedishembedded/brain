@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! ZipDepth's [`ArchSpec`]: which on-disk `.pt`/`.pth` checkpoint satisfies
-//! the single `weights` role.
+//! ZipDepth's [`ArchSpec`]: which on-disk checkpoint satisfies the single
+//! `weights` role - a released `.pt`/`.pth`, or the safetensors `train`
+//! writes.
 //!
-//! A raw `torch.save` archive carries no self-declared architecture field the
-//! way a GGUF or an HF `config.json` does, so classification reads real
+//! Neither carries a self-declared architecture field the way a GGUF or an
+//! HF `config.json` does, so classification reads real
 //! tensor shapes instead: [`ZipConfig::from_tensors`] already derives the
 //! whole net shape (encoder width, per-stage depth, decoder width, which
 //! upsampler) from a checkpoint's own tensor shapes, real content
@@ -27,8 +28,7 @@ pub struct ZipdepthSpec;
 const ROLES: &[&str] = &["weights"];
 
 fn zip_config_for(rec: &ArtifactRecord) -> Option<ZipConfig> {
-    let shapes = checkpoint::torchpt::read_shapes(rec.path.to_string_lossy().as_ref()).ok()?;
-    ZipConfig::from_tensors(&shapes.into_iter().collect()).ok()
+    crate::import::cfg_for_checkpoint(rec.path.to_str()?).ok()
 }
 
 impl ArchSpec for ZipdepthSpec {
@@ -43,15 +43,8 @@ impl ArchSpec for ZipdepthSpec {
     fn classify(&self, records: &[ArtifactRecord], _inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
         for (idx, rec) in records.iter().enumerate() {
-            // A real `.pt`/`.pth` archive the scanner could actually read
-            // classifies `Torch`, not `Opaque` - the same mistake found (and
-            // fixed) in `rrdbnet::spec::RrdbnetSpec` and `sam2::spec::
-            // Sam2Spec` before this spec was written; checked correctly here
-            // from the start.
-            if !rec.usable() || rec.kind != ArtifactKind::Torch {
-                continue;
-            }
-            if !matches!(rec.path.extension().and_then(|e| e.to_str()), Some("pt" | "pth")) {
+            let torch = rec.kind == ArtifactKind::Torch && matches!(rec.path.extension().and_then(|e| e.to_str()), Some("pt" | "pth"));
+            if !rec.usable() || !(torch || rec.kind == ArtifactKind::Safetensors) {
                 continue;
             }
             if zip_config_for(rec).is_some() {
@@ -123,6 +116,26 @@ mod tests {
         let records = vec![complete(path, ArtifactKind::Torch)];
         let out = ZipdepthSpec.classify(&records, dir.as_path());
         assert_eq!(out, vec![(0, "weights".to_string(), Confidence::Derived)], "{out:?}");
+    }
+
+    /// The safetensors `train` writes is a ZipDepth checkpoint as much as a
+    /// released `.pth`: the store finds it, and it loads.
+    #[test]
+    fn a_trained_safetensors_classifies_and_loads() {
+        let dir = tmp("trained-st");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("zipdepth.safetensors");
+        let cfg = tiny();
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            cfg.param_list().into_iter().map(|(name, shape)| (name, shape.iter().map(|&d| d as u64).collect(), vec![0.0f32; shape.iter().product()])).collect();
+        checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({"model": "zipdepth"}), None).unwrap();
+
+        let out = ZipdepthSpec.classify(&[complete(path.clone(), ArtifactKind::Safetensors)], dir.as_path());
+        assert_eq!(out, vec![(0, "weights".to_string(), Confidence::Derived)], "{out:?}");
+        let derived = crate::import::cfg_for_checkpoint(path.to_str().unwrap()).unwrap();
+        assert_eq!(derived.dims, cfg.dims);
+        assert_eq!(crate::import::load(path.to_str().unwrap(), &derived).unwrap().len(), cfg.param_list().len());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A `.pt` with no real ZipDepth tensor names must never classify. A

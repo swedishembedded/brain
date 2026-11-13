@@ -131,20 +131,8 @@ if ! need "$IMG_DIR/depth.png"; then
     curl -sSL -o "$ZIPDEPTH_PTH" \
       "https://github.com/fabiotosi92/ZipDepth/raw/main/checkpoints/zipdepth_base.pth"
   fi
-  # zipdepth's CLI reads/writes PPM directly (not the shared --in/--out
-  # image= codec path every other action here uses), so this is the one
-  # step that round-trips through PPM by hand.
-  python3 -c "
-from PIL import Image
-Image.open('$IMG_DIR/seed.png').convert('RGB').save('$IMG_DIR/.seed.ppm')
-"
-  DISPLAY= "$BRAIN" zipdepth --image "$IMG_DIR/.seed.ppm" --weights "$ZIPDEPTH_PTH" \
-    --headless --view depth --colormap turbo --out "$IMG_DIR/.depth.ppm"
-  python3 -c "
-from PIL import Image
-Image.open('$IMG_DIR/.depth.ppm').save('$IMG_DIR/depth.png')
-"
-  rm -f "$IMG_DIR/.seed.ppm" "$IMG_DIR/.depth.ppm"
+  "$BRAIN" zipdepth infer --image "$IMG_DIR/seed.png" --weights "$ZIPDEPTH_PTH" --view depth --colormap turbo \
+    --out view="$IMG_DIR/depth.png"
 fi
 
 # ---------------------------------------------------------------- 5. image + text -> text (two VLMs)

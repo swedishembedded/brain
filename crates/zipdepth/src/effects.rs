@@ -8,7 +8,7 @@
 //! image by it. They compose the SAME two inputs every view mode already has (the
 //! RGB frame and its depth), so the CLI just dispatches to them.
 
-use crate::viz::Bounds;
+use imaging::viz::Bounds;
 
 /// Linear interpolate two bytes, `t in [0,1]`.
 #[inline]

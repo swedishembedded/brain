@@ -21,103 +21,107 @@ than a slow, large-scale depth transformer.
 ## Getting the weights
 
 Model id: `brain/zipdepth`. Not auto-fetched (no HuggingFace host exists for
-this checkpoint to fetch from) - point it at a released ZipDepth checkpoint
-(`.pth` or an equivalent `.safetensors`) yourself. The upstream
-[ZipDepth](https://github.com/fabiotosi92/ZipDepth) project ships its
-released checkpoints directly in its own GitHub repo, e.g.
-`checkpoints/zipdepth_base.pth` (the base/unfold-upsampler variant this
-crate's importer expects, verified to load and produce a real depth map -
-see `scripts/demo/quickstart.sh`):
+this checkpoint). The upstream [ZipDepth](https://github.com/fabiotosi92/ZipDepth)
+project ships its released checkpoints in its own repository, e.g.
+`checkpoints/zipdepth_base.pth` (the base, unfold-upsampler variant). Put it
+in the model store, where every command finds it:
 
-- Standalone demo (`brain zipdepth --image` / `--camera`): pass `--weights
-  <path>` directly.
-- Served (via `brain do` / D-Bus, or the `--infer npu` path): set
-  `BRAIN_ZIPDEPTH_WEIGHTS=<path>`.
+```bash
+mkdir -p ~/.local/share/brain/models/brain/zipdepth
+curl -L -o ~/.local/share/brain/models/brain/zipdepth/zipdepth_base.pth \
+  https://github.com/fabiotosi92/ZipDepth/raw/main/checkpoints/zipdepth_base.pth
+```
 
-The checkpoint variant (base vs. the NPU-blend layout) is auto-detected from
-the file's own tensor names - you never need to pass `--variant` by hand.
+or name a file outright with `--weights <path>`. A checkpoint `train` writes
+(safetensors) is found and loaded the same way. The variant (base, or the
+NPU blend layout) is read from the file's own tensor shapes.
 
 ## Running it
 
+`brain zipdepth <action>` runs the served actions; `sample-models-zipdepth`
+(`make samples/models/zipdepth/build`) runs the same actions plus the image
+and webcam windows. `<action> --help` lists every parameter with its default.
+
 ```bash
-export ZIPDEPTH_PTH=/path/to/zipdepth_base.pth
+# The depth map, and a view of it (no display needed)
+brain zipdepth infer --image photo.png --out depth=depth.png
+brain zipdepth infer --image photo.png --view side --out view=side.png
 
-# Still image (window; Esc quits, [ ] cycle colormaps, v cycles views)
-brain zipdepth --image photo.ppm --weights $ZIPDEPTH_PTH
+# A window over one image or a live webcam (Linux V4L2, YUYV):
+# v cycles the view, [ ] the colormap, Esc quits
+Z=target/release/sample-models-zipdepth
+$Z show --image photo.png
+$Z camera --res 640x480
 
-# Headless: writes the composite PPM + a content hash, no display needed
-DISPLAY= brain zipdepth --image photo.ppm --weights $ZIPDEPTH_PTH \
-    --headless --out out/depth.ppm
-
-# Webcam, realtime (Linux/V4L2, YUYV)
-brain zipdepth --camera --weights $ZIPDEPTH_PTH
-
-# Pick the accelerator
-brain zipdepth --image photo.ppm --weights $ZIPDEPTH_PTH --device cpu       # all cores
-brain zipdepth --image photo.ppm --weights $ZIPDEPTH_PTH --device gpu       # wgpu (default)
-brain zipdepth --image photo.ppm --weights $ZIPDEPTH_PTH --device vulkan    # native Vulkan
-brain zipdepth --image photo.ppm --infer npu --weights zipdepth_base_npu.pth
-                                                       # Intel NPU via ONNX/OpenVINO
+# Pick the accelerator: --device cpu|gpu, --backend wgpu|vulkan|cuda, or the
+# Intel NPU (the blend checkpoint, compiled through OpenVINO) in the windows
+$Z show --image photo.png --device cpu
+$Z camera --npu --weights zipdepth_npu.pth
 ```
-
-The CLI reads PPM (P6); convert anything else first, e.g. `convert photo.jpg
-photo.ppm`.
-
-Served through the capability system over D-Bus, the model takes one `image`
-input and returns a `depth` map via the `infer` action (`brain caps
-brain/zipdepth` lists it) - zipdepth has its own dedicated CLI module, so
-`brain zipdepth --image ...` above is how the CLI specifically reaches it,
-not a second `brain zipdepth infer ...` form.
 
 ### Views
 
-`--view MODE`, cycled live with `v`:
+`--view` picks what `infer` draws into its `view` output, and what a window
+starts on (`v` cycles them):
 
-| mode | what you see |
+| view | what you see |
 |---|---|
-| `side` | RGB \| colorized depth, side by side (default) |
-| `depth` | full-frame colorized depth |
-| `fog` | depth-graded fog composited onto the RGB |
+| `side` | the photo \| colorized depth, side by side (a window's default) |
+| `depth` | colorized depth |
+| `fog` | depth-graded fog composited onto the photo |
 | `blur` | depth-of-field blur (far = blurred) |
-| `stereo` | random-dot autostereogram (Magic-Eye; free-view straight on) |
-| `stereo-image` | textured autostereogram from the image itself |
-| `stereo-dual` | cross-eye left\|right pair |
+| `stereo` | random-dot autostereogram (free-view straight on) |
+| `stereo-image` | autostereogram patterned with the photo itself |
+| `stereo-dual` | cross-eye left \| right pair |
 
-`[` / `]` cycle colormaps (turbo / gray / grayinv) without re-inference;
-`--stripes N` sets the stereogram pattern repeat count.
+`--colormap turbo|gray|grayinv` colors the depth; `--stripes N` sets how many
+times a stereogram's pattern repeats.
 
 ### Training / fine-tuning
 
 ```bash
-brain zipdepth train --out out/zipdepth.safetensors --steps 50 --batch 2 --size 64x64
-brain zipdepth train --out out/ft.safetensors --weights zipdepth_base.pth   # fine-tune
+brain zipdepth train --save zipdepth.safetensors --steps 50 --batch 2 --width 64 --height 64 --seed $RANDOM
+brain zipdepth train --save ft.safetensors --weights zipdepth_base.pth --seed $RANDOM   # fine-tune
 ```
 
-`--activations keep|recompute` (default `keep`) sets what the backward keeps of
-the forward: every normed unit's intermediates, or only each unit's input,
-rebuilt in the backward for the same gradients at lower memory.
+`train` starts from the checkpoint in the store when there is one (or the one
+`--weights` names) and from freshly initialized weights otherwise, or when
+`--fresh true` asks. `--activations keep|recompute` sets what the backward
+keeps of the forward: every normed unit's intermediates, or only each unit's
+input, rebuilt in the backward for the same gradients at lower memory.
+
+### INT8 calibration report
+
+```bash
+brain zipdepth calib --images calib/
+```
+
+Per-layer activation outlier ratios (absmax / p99.99), the most INT8-hostile
+first, and the encoder's mean against the decoder's: the data for choosing
+which layers keep full precision when quantizing.
 
 ## Options
 
-| Flag / env | Effect |
-|---|---|
-| `--weights <path>` | ZipDepth checkpoint for the standalone demo |
-| `BRAIN_ZIPDEPTH_WEIGHTS` | checkpoint path for the served (`brain do`/D-Bus) path |
-| `--device cpu\|gpu\|vulkan` | pick the compute backend for the engine path |
-| `--infer engine\|npu` | run brain's own engine (default) or the Intel NPU via OpenVINO |
-| `--input N` | model input side (rounded to a multiple of 32); smaller is faster, quadratically |
-| `--view MODE` | initial view (see table above); `v` cycles live |
-| `--colormap turbo\|gray\|grayinv` | initial depth colormap |
-| `--stripes N` | autostereogram pattern repeat count |
-| `--camera` / `--device-path <dev>` / `--res WxH` | webcam capture options (Linux/V4L2 only) |
-| `--headless --out <file>` | write a composite PPM instead of opening a window |
-| `--bench N` | print steady-state per-frame timing over N warm re-inferences |
-| `brain zipdepth calib --report --weights <pth> --images <dir>` | per-layer INT8 outlier report, used to pick which layers to keep in FP when quantizing |
+| Flag | Action | Effect |
+|---|---|---|
+| `--weights <path>` | every action, the windows | the checkpoint, instead of the store's |
+| `--input N` | `infer`, `calib`, the windows | model input side (rounded to 32); smaller is faster, quadratically |
+| `--view`, `--colormap`, `--stripes` | `infer`, the windows | what is drawn (above) |
+| `--bench N` | `infer` | steady-state per-frame timing over N warm re-inferences |
+| `--steps`, `--batch`, `--width`, `--height`, `--lr`, `--wd`, `--seed`, `--fresh`, `--activations` | `train` | the training run |
+| `--max N`, `--top N` | `calib` | images read, layers listed |
+| `--npu` | the windows | run on the Intel NPU (the blend checkpoint) |
+| `--device-path <dev>`, `--res WxH` | `camera` | the webcam and the size asked of it |
+| `--scale N`, `--frames N` | the windows | window pixel scale; close after N frames |
+
+Served (`brain serve`, D-Bus), the same three actions are offered; a serving
+process loads a carded checkpoint found in its models directory, or
+`BRAIN_ZIPDEPTH_WEIGHTS`, and places `infer` on an NPU when one is budgeted.
 
 ## Hardware and limits
 
 Output is unbounded non-negative **inverse depth**, relative only - there is
-no metric-scale mode. `--camera` is Linux/V4L2 (YUYV) only; an MJPEG-only
+no metric-scale mode. `camera` is Linux/V4L2 (YUYV) only; an MJPEG-only
 webcam is rejected. Training uses a built-in synthetic generator today, not
-real depth datasets. HTTP is not wired up for this model - use `brain do`,
-D-Bus, or the standalone `brain zipdepth` demo verb.
+real depth datasets. HTTP is not wired up for this model - use
+`brain zipdepth <action>`, D-Bus, or the sample.

@@ -52,7 +52,6 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("huginn", crate::huginn_cli::run_huginn),
     ("qwen3tts", crate::tts_cli::run_tts),
     ("yolov8", crate::yolo_cli::run_yolo),
-    ("zipdepth", crate::depth_cli::run_depth),
     ("worldmirror2", crate::mirror_cli::run_mirror),
     // wm_cli's own `--arch`/`--model` flags (not this resolver) pick
     // fake-vs-diamond within `play`/`import`/`export` -- diamond is its one
@@ -149,6 +148,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("wan", "brain/wan"),
     ("ltxv", "brain/ltxv"),
     ("splat", "brain/splat"),
+    ("zipdepth", "brain/zipdepth"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
@@ -358,6 +358,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "qwen3asr",
     "nemotronasr",
     "sam2",
+    "zipdepth",
     "lpips",
     "rrdbnet",
     "timesfm3",

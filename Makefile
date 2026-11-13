@@ -1209,39 +1209,36 @@ qwen/finetune: build/release
 		$(SEED_FLAG) $(if $(MODELS_DIR),--models-dir $(MODELS_DIR)) $(if $(DATASET_ID),--dataset-id $(DATASET_ID))
 
 # ---- depth (ZipDepth) ------------------------------------------------------
-# Set ZIPDEPTH_PTH to a released checkpoint (see resources/depth-models).
+# The checkpoint resolves from the model store (docs/reference/models/zipdepth.md
+# says how to put the released one there); ZIPDEPTH_PTH names a file instead.
 ZIPDEPTH_PTH ?=
 DEPTH_IMG    ?=
+DEPTH_WEIGHTS = $(if $(ZIPDEPTH_PTH),--weights $(ZIPDEPTH_PTH),)
 
 ## depth - lists the ZipDepth monocular-depth targets; does nothing
 depth:
 	$(LIST_CHILDREN)
 
-## depth/demo - depth map of one image in a window (ZIPDEPTH_PTH=<ckpt> DEPTH_IMG=<image.ppm>)
-depth/demo: build/release
-	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
-	@test -n "$(DEPTH_IMG)"    || (echo "set DEPTH_IMG=<image.ppm>"; exit 2)
-	$(BRAIN) zipdepth --image $(DEPTH_IMG) --weights $(ZIPDEPTH_PTH)
+## depth/demo - depth map of one image in a window (DEPTH_IMG=<image>, ZIPDEPTH_PTH=<ckpt>)
+depth/demo: samples/models/zipdepth/build
+	@test -n "$(DEPTH_IMG)" || (echo "set DEPTH_IMG=<image>"; exit 2)
+	$(MAKE) samples/models/zipdepth/run ARGS="show --image $(DEPTH_IMG) $(DEPTH_WEIGHTS)"
 
-## depth/smoke - headless depth map of one image -> out/depth.ppm (ZIPDEPTH_PTH, DEPTH_IMG)
+## depth/smoke - photo | depth of one image -> out/depth.png, no display (DEPTH_IMG, ZIPDEPTH_PTH)
 depth/smoke: build/release
-	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
-	@test -n "$(DEPTH_IMG)"    || (echo "set DEPTH_IMG=<image.ppm>"; exit 2)
-	DISPLAY= $(BRAIN) zipdepth --image $(DEPTH_IMG) --weights $(ZIPDEPTH_PTH) \
-		--headless --out $(OUT)/depth.ppm
+	@test -n "$(DEPTH_IMG)" || (echo "set DEPTH_IMG=<image>"; exit 2)
+	$(BRAIN) zipdepth infer --image $(DEPTH_IMG) $(DEPTH_WEIGHTS) --view side --out view=$(OUT)/depth.png
 
 ## depth/camera - live depth map from a camera (ZIPDEPTH_PTH=<ckpt>, DEPTH_ARGS=...)
-depth/camera: build/release
-	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
-	$(BRAIN) zipdepth --camera --weights $(ZIPDEPTH_PTH) $(DEPTH_ARGS)
+depth/camera: samples/models/zipdepth/build
+	$(MAKE) samples/models/zipdepth/run ARGS="camera $(DEPTH_WEIGHTS) $(DEPTH_ARGS)"
 
 # Train ZipDepth end to end on the synthetic RGB->depth pairs (placeholder data,
-# real loop: forward -> masked L1 -> backward -> AdamW; loss printed per step).
-# Fine-tune a released checkpoint instead with ZIPDEPTH_PTH set.
-## depth/train - train ZipDepth on synthetic RGB->depth pairs (fine-tune a release with ZIPDEPTH_PTH)
+# real loop: forward -> masked L1 -> backward -> AdamW). It fine-tunes the
+# store's checkpoint (or ZIPDEPTH_PTH) when there is one.
+## depth/train - train ZipDepth on synthetic RGB->depth pairs -> out/zipdepth.safetensors
 depth/train: build/release
-	$(BRAIN) zipdepth train --out $(OUT)/zipdepth.safetensors --steps 50 --batch 2 \
-		$(if $(ZIPDEPTH_PTH),--weights $(ZIPDEPTH_PTH),)
+	$(BRAIN) zipdepth train --save $(OUT)/zipdepth.safetensors --steps 50 --batch 2 $(DEPTH_WEIGHTS)
 
 # WorldMirror-2 (multi-view 3D reconstruction). MIRROR_CKPT = the reference
 # model.safetensors (or its HF dir); the converted .safetensors is what infer uses.

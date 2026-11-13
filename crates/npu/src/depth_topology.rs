@@ -496,3 +496,43 @@ impl WeightSource for std::collections::HashMap<String, Vec<f32>> {
         self.get(name).cloned().unwrap_or_else(|| panic!("weights missing tensor `{name}`"))
     }
 }
+
+/// ZipDepth compiled for one frame size on the NPU: the frame is resized to
+/// the predictor's own aspect-preserving model input (`zipdepth::predict::target_size`)
+/// and the depth back to the frame grid, as the engine's predictor does.
+pub struct DepthSession {
+    session: crate::openvino::NpuSession,
+    target: (u32, u32),
+}
+
+impl DepthSession {
+    /// Compile the blend (`npu`) checkpoint at `weights` for `w x h` frames.
+    pub fn compile(weights: &str, cfg: &ZipConfig, w: u32, h: u32) -> Result<DepthSession, String> {
+        use crate::openvino::{NpuConfig, NpuDevice, NpuSession};
+        if cfg.upsample_unfold {
+            return Err("the NPU runs the blend ('npu') ZipDepth checkpoint; this one is the base (unfold) layout".into());
+        }
+        let init = zipdepth::import::load(weights, cfg)?;
+        let (th, tw) = zipdepth::predict::target_size(w, h, cfg.input);
+        let mut g = GraphBuilder::new("zipdepth");
+        build_depth_graph_hw(cfg, &init, th, tw, &mut g);
+        let session = NpuSession::load_bytes(&g.finish(), &NpuConfig { device: NpuDevice::Npu, allow_fallback: true, ..Default::default() })
+            .map_err(|e| format!("compiling ZipDepth for the NPU: {e}"))?;
+        Ok(DepthSession { session, target: (th, tw) })
+    }
+
+    /// Where the graph runs (the NPU, or OpenVINO's fallback device).
+    pub fn device(&self) -> &str {
+        self.session.device()
+    }
+
+    /// Raw inverse depth of one `w x h` interleaved-RGB frame in `[0,1]`, on
+    /// the frame's grid.
+    pub fn predict(&mut self, hwc: &[f32], w: u32, h: u32) -> Result<Vec<f32>, String> {
+        let (th, tw) = self.target;
+        let resized = imaging::resize_bilinear_hwc(hwc, 3, w, h, tw, th);
+        let chw = imaging::pixels::hwc_to_chw(&resized, 3, th as usize, tw as usize);
+        let out = self.session.run(&chw, [1, 3, th as usize, tw as usize]).map_err(|e| format!("NPU inference: {e}"))?;
+        Ok(imaging::resize_bilinear_hwc(&out.tensors[0].2, 1, tw, th, w, h))
+    }
+}

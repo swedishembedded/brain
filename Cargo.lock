@@ -1091,7 +1091,6 @@ dependencies = [
  "brain-wm-display",
  "brain-worldmirror2",
  "brain-yolov8",
- "brain-zipdepth",
  "clap",
  "crossterm",
  "libc",
@@ -6894,6 +6893,20 @@ version = "5.1.0"
 dependencies = [
  "brain-invoke",
  "brain-wan",
+]
+
+[[package]]
+name = "sample-models-zipdepth"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-capture",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-invoke",
+ "brain-npu",
+ "brain-wm-display",
+ "brain-zipdepth",
 ]
 
 [[package]]

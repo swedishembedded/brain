@@ -45,7 +45,11 @@ fn overfit_one_batch_loss_decreases() {
     let t = TrainCfg { steps: 30, batch: 2, h: 32, w: 32, lr: 3e-3, wd: 0.0, seed: 7, fixed_batch: true, saved: None };
     let init = zipdepth::init_weights(&cfg, t.seed);
     let mut losses: Vec<f32> = Vec::new();
-    let (_ps, out) = train_loop(&gpu, cfg, &t, &init, |_, l| losses.push(l)).unwrap();
+    let (_ps, out) = train_loop(&gpu, cfg, &t, &init, |_, l| {
+        losses.push(l);
+        true
+    })
+    .unwrap();
     assert!(out.first_loss.is_finite() && out.last_loss.is_finite(), "loss diverged: {losses:?}");
     assert!(
         out.last_loss < 0.5 * out.first_loss,
@@ -95,7 +99,7 @@ fn fixed_batch_repeats_and_rotating_batches_differ() {
     // 2 steps each; just proving the loop runs in both modes and stays finite.
     for fixed in [true, false] {
         let t = TrainCfg { steps: 2, batch: 1, h: 32, w: 32, lr: 1e-3, wd: 0.0, seed, fixed_batch: fixed, saved: None };
-        let (_ps, out) = train_loop(&gpu, cfg.clone(), &t, &init, |_, _| {}).unwrap();
+        let (_ps, out) = train_loop(&gpu, cfg.clone(), &t, &init, |_, _| true).unwrap();
         assert!(out.last_loss.is_finite());
     }
 }

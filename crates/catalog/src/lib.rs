@@ -602,8 +602,8 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: zipdepth::caps::manifest,
-            provider: always!(zipdepth::caps::DepthProvider::new()),
-            spec: None,
+            provider: zipdepth::caps::provider,
+            spec: Some(("zipdepth", &zipdepth::spec::ZipdepthSpec)),
             resident: None,
         },
         // The imaging models carry their weights path in the provider (from a

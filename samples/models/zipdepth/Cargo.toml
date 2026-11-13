@@ -1,0 +1,27 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/zipdepth` -> `sample-models-zipdepth`.
+name = "sample-models-zipdepth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: ZipDepth monocular depth from the command line - infer, train and calib with every parameter - plus image and live-camera depth windows on the engine or the NPU."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-zipdepth.workspace = true
+brain-invoke.workspace = true
+brain-capability.workspace = true
+brain-gpu-core.workspace = true
+brain-imaging.workspace = true
+# The depth windows, and the webcam the live one reads.
+brain-wm-display.workspace = true
+brain-capture.workspace = true
+# ZipDepth compiled for the Intel NPU (`--npu`).
+brain-npu.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 76

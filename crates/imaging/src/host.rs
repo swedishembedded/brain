@@ -8,7 +8,7 @@
 //! twin of it. It exists because three call sites resize an image with **no
 //! `Gpu` in scope at all**:
 //!
-//! * `cli::depth_cli::run_npu_session` and `cli::resident_depth` — the Intel-NPU
+//! * `npu::DepthSession` and `catalog::resident_depth` - the Intel-NPU
 //!   paths. OpenVINO is a whole-graph compiler, not a `gpu-core` backend
 //!   (`AGENTS.md`), so `--device npu` genuinely has no device handle to dispatch
 //!   a `resize_bilinear` on, and building a `Gpu` just to resize would violate

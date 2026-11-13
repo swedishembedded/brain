@@ -1555,7 +1555,7 @@ fn build_depth(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build =
         Box::new(|_req: &perf::target::PerfRequest| capability::Invocation::new().blob("image", synth_image_blob(384, 384)));
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/zipdepth", "depth", "frame", info, build)))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "brain/zipdepth", "infer", "frame", info, build)))
 }
 
 /// `sam2:<weights-dir>[:tiny|large]` - SAM 2.1 promptable segmentation behind

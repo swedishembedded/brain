@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! P5 smoke: `brain zipdepth --image --headless` runs end to end and is deterministic.
+//! Smoke: `brain zipdepth infer --view side` runs end to end and is deterministic.
 //!
-//! Env-gated on the real checkpoint (ZIPDEPTH_PTH). Builds a synthetic PPM, runs
-//! the `brain` binary through the zipdepth image path, and asserts it writes a
-//! composite of the right size with a STABLE content hash — so a silent change to
-//! the pipeline (preprocess, forward, colorize, composite) is caught.
+//! Gated on the real checkpoint (ZIPDEPTH_PTH). Builds a synthetic image, runs
+//! the `brain` binary through the served `infer` action, and asserts it writes
+//! a side-by-side view of the right size with identical bytes on a second run,
+//! so a silent change to the pipeline (preprocess, forward, colorize,
+//! composite) is caught.
 use std::process::Command;
 
 fn bin() -> String {
@@ -43,29 +44,19 @@ fn depth_image_headless_is_deterministic() {
     let out = dir.join("out.ppm");
     write_ppm(img.to_str().unwrap(), 96, 72);
 
-    let run = || -> String {
+    let run = || -> Vec<u8> {
         let o = Command::new(bin())
-            .args([
-                "zipdepth", "--image", img.to_str().unwrap(),
-                "--weights", &ckpt, "--headless", "--out", out.to_str().unwrap(),
-            ])
+            .args(["zipdepth", "infer", "--image", img.to_str().unwrap(), "--weights", &ckpt, "--view", "side", "--out", &format!("view={}", out.display())])
             .args(["--device", "cpu"])
-            .env("DISPLAY", "")
             .output()
             .expect("run brain zipdepth");
         assert!(o.status.success(), "brain zipdepth failed: {}", String::from_utf8_lossy(&o.stderr));
-        String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .find_map(|l| l.split("rollout_hash=").nth(1))
-            .expect("no rollout_hash in output")
-            .trim()
-            .to_string()
+        std::fs::read(&out).unwrap()
     };
 
-    let h1 = run();
-    let h2 = run();
-    assert_eq!(h1, h2, "the zipdepth pipeline must be deterministic across runs");
-    let (px, w, ht) = events::ppm::decode_p6(&std::fs::read(&out).unwrap()).unwrap();
+    let first = run();
+    assert_eq!(first, run(), "the zipdepth pipeline must be deterministic across runs");
+    let (px, w, ht) = events::ppm::decode_p6(&first).unwrap();
     assert_eq!((w, ht), (192, 72), "side-by-side composite is 2x input width");
     assert_eq!(px.len(), (192 * 72 * 3) as usize);
 }

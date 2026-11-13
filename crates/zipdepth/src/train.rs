@@ -118,14 +118,15 @@ fn synth_batch(t: &TrainCfg, step: u32) -> (Vec<f32>, Vec<f32>) {
 
 /// Run the loop: build the model at `(t.h, t.w)`, seed the params from `init`
 /// (fresh `init_weights` or a loaded checkpoint for fine-tune), and step.
-/// `on_step(step, loss)` fires every step (progress printing, test capture).
+/// `on_step(step, loss)` fires every step (progress printing, test capture);
+/// returning false stops the run with an error naming the step.
 /// Returns the trained `ParamStore` (the caller saves it) and the loss report, or the refusal of `t.saved`.
 pub fn train_loop(
     gpu: &Gpu,
     cfg: ZipConfig,
     t: &TrainCfg,
     init: &HashMap<String, Vec<f32>>,
-    mut on_step: impl FnMut(u32, f32),
+    mut on_step: impl FnMut(u32, f32) -> bool,
 ) -> Result<(ParamStore, Trained), String> {
     let ctx = Ctx::new(gpu, crate::net::ids());
     let m = ZipDepth::build_hw(&ctx, cfg, t.batch, t.h, t.w, true);
@@ -171,7 +172,9 @@ pub fn train_loop(
             first = loss;
         }
         last = loss;
-        on_step(step, loss);
+        if !on_step(step, loss) {
+            return Err(format!("cancelled after step {}", step + 1));
+        }
     }
     Ok((ps, Trained { first_loss: first, last_loss: last }))
 }

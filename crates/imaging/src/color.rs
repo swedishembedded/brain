@@ -26,7 +26,7 @@
 //! The workspace's only colour-space conversion, [`yuyv_to_rgb`], now lives
 //! here. It was `capture::convert`, which made `crates/capture` - a minimal
 //! V4L2 ioctl binding — also the home of a pixel-format converter. `capture` is
-//! V4L2 only again; the one caller (`cli::depth_cli`) calls this.
+//! V4L2 only again; the one caller (the ZipDepth sample's live camera) calls this.
 //!
 //! It stays on the host deliberately: it consumes the *packed 4:2:2 byte* stream
 //! straight out of the V4L2 mmap, upstream of any device buffer, and the frame is

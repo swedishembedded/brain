@@ -4,8 +4,7 @@
 //! [`DepthPipeline`]: brain's monocular depth surface, over ZipDepth.
 //! Resolved through `crates/loader`'s resolver against
 //! `zipdepth::spec::ZipdepthSpec`'s one `"weights"` role - the same resolver
-//! `brain do depth infer` would use once `zipdepth::caps::DepthProvider`
-//! itself migrates onto it (see this module's doc note on that gap).
+//! `brain zipdepth infer` and the served `brain/zipdepth` use.
 //!
 //! A NEW public domain type, [`DepthMap`], rather than joining
 //! [`crate::Image`]-shaped pipelines: depth is a per-pixel relative distance

@@ -16,7 +16,7 @@
 //!
 //! Pure and host-side, like the rest of `viz` — rendered and eyeballed to verify.
 
-use crate::viz::Bounds;
+use imaging::viz::Bounds;
 
 /// Autostereogram parameters.
 #[derive(Clone, Copy, Debug)]

@@ -22,13 +22,13 @@ pub mod effects;
 pub mod spec;
 pub mod stereo;
 pub mod train;
-pub mod viz;
+pub mod view;
 pub mod model;
 
 pub use config::{pick_groups, GlobalMode, ZipConfig};
 pub use fuse::{fuse_qarep, Branch};
 pub use init::init_model as init_weights;
-pub use import::{cfg_for_checkpoint, load as load_checkpoint, load_into, tensor_names};
+pub use import::{cfg_for_checkpoint, load as load_checkpoint, load_into};
 pub use model::ZipDepth;
 pub use predict::Predictor;
 pub use quant::{collect_activation_stats, collect_activation_stats_sized, ActStatsCollector, CalibImage, LayerReport};

@@ -82,7 +82,7 @@ pub use quant::Quant;
 pub use sim::{reference_logits, simulate_logits, simulate_map, FakeQuantTap};
 pub use topology::{build_graph, WeightSource};
 pub mod depth_topology;
-pub use depth_topology::{build_depth_graph, build_depth_graph_hw};
+pub use depth_topology::{build_depth_graph, build_depth_graph_hw, DepthSession};
 pub use wm_topology::{build_diamond_graph, WmSession, WmUnetConfig};
 pub use nemotron_topology::{build_nemotron_encoder, build_nemotron_head, build_subsampling, NemotronTopo};
 pub use qwen_asr_topology::{build_qwen_asr_head, QwenAsrTopo};

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-use zipdepth::viz::{colorize, draw_text, Bounds, Colormap};
+use imaging::viz::{colorize, draw_text, Bounds, Colormap};
 
 #[test]
 fn hud_is_legible_on_a_colored_depth_background() {

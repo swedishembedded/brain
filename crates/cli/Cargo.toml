@@ -85,7 +85,6 @@ brain-qwen3asr.workspace = true
 brain-qwen3omnimoe.workspace = true
 brain-toypid.workspace = true
 brain-yolov8.workspace = true
-brain-zipdepth.workspace = true
 brain-sam2.workspace = true
 brain-lpips.workspace = true
 brain-scrfd.workspace = true

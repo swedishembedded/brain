@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! P5: the visualization path — colormap, robust bounds, composite. All pure.
-use zipdepth::viz::{colorize, composite_side_by_side, Bounds, Colormap};
+use imaging::viz::{colorize, composite_side_by_side, Bounds, Colormap};
 
 /// Turbo's endpoints are pinned: a colormap that silently shifts would recolor
 /// every demo frame. Turbo runs dark-blue -> cyan -> yellow -> dark-red.

@@ -25,8 +25,7 @@ estimates how far away everything is:
 
 ```bash
 $ brain sam2 segment --in image=seed.png --points "220,180" --labels "1" --out mask=dog-mask.png
-$ brain zipdepth --image seed.ppm --weights <models>/zipdepth/zipdepth_base.pth \
-    --headless --view depth --colormap turbo --out depth.ppm
+$ brain zipdepth infer --image seed.png --view depth --colormap turbo --out view=depth.png
 ```
 
 | segmentation (sam2) | depth (zipdepth) |

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Load a released ZipDepth `.pth` into a brain init map.
+//! Load a ZipDepth checkpoint into a brain init map: a released `.pth`
+//! (a `torch.save` archive), or the safetensors `train` writes.
 //!
 //! This is a 1:1 NAME COPY, and it is allowed to be that simple only because
 //! [`crate::config::ZipConfig::param_list`] was built from the reference's own
@@ -35,7 +36,7 @@ fn is_counter(name: &str) -> bool {
 /// message names the offending tensor so a wrong `cfg` (e.g. the unfold vs blend
 /// variant) is a one-line diagnosis, not a mystery depth map.
 pub fn load(path: &str, cfg: &ZipConfig) -> Result<HashMap<String, Vec<f32>>, String> {
-    let tensors = checkpoint::torchpt::read(path)?;
+    let tensors = read(path)?;
     let expected: HashMap<String, usize> =
         cfg.param_list().into_iter().map(|(n, s)| (n, s.iter().product())).collect();
 
@@ -103,21 +104,41 @@ pub fn load_into(
     Ok(paramstore::ParamStore::new(gpu, params, &init))
 }
 
-/// The tensor names in a checkpoint (for variant auto-detection), without loading
-/// the data into a model. Skips the int64 counters.
-pub fn tensor_names(path: &str) -> Result<Vec<String>, String> {
-    let tensors = checkpoint::torchpt::read(path)?;
-    Ok(tensors.into_iter().map(|t| t.name).filter(|n| !is_counter(n)).collect())
+/// Whether `path` is a `torch.save` archive (a zip), the format ZipDepth is
+/// released in; anything else is read as safetensors.
+fn is_torch_archive(path: &str) -> Result<bool, String> {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    let n = std::fs::File::open(path).and_then(|mut f| f.read(&mut magic)).map_err(|e| format!("cannot read {path}: {e}"))?;
+    Ok(n == 4 && magic == *b"PK\x03\x04")
+}
+
+/// Every tensor of the checkpoint at `path`.
+fn read(path: &str) -> Result<Vec<checkpoint::torchpt::NamedTensor>, String> {
+    if is_torch_archive(path)? {
+        return checkpoint::torchpt::read(path);
+    }
+    let reader = checkpoint::weightio::WeightReader::open(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let mut out = Vec::new();
+    reader.for_each(|name, shape, data| out.push(checkpoint::torchpt::NamedTensor { name: name.to_string(), shape: shape.iter().map(|&d| d as usize).collect(), data }));
+    Ok(out)
+}
+
+/// Every tensor's shape in the checkpoint at `path`, reading no tensor data.
+fn read_shapes(path: &str) -> Result<HashMap<String, Vec<usize>>, String> {
+    if is_torch_archive(path)? {
+        return Ok(checkpoint::torchpt::read_shapes(path)?.into_iter().collect());
+    }
+    let reader = checkpoint::weightio::WeightReader::open(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let names: Vec<String> = reader.names().map(str::to_string).collect();
+    Ok(names.into_iter().filter_map(|n| reader.shape(&n).map(|s| (n.clone(), s.iter().map(|&d| d as usize).collect()))).collect())
 }
 
 /// Pick the [`ZipConfig`] by inspecting the checkpoint's own tensor SHAPES
-/// ([`ZipConfig::from_tensors`]), so a caller never has to match a `--variant`
-/// flag to the file, and a non-`base` encoder width derives its own dims
-/// rather than silently mis-deriving as `base`. Header-only
-/// ([`checkpoint::torchpt::read_shapes`] never decodes a tensor's storage
-/// bytes), so this is cheap enough to call before committing to a full
-/// [`load`].
+/// ([`ZipConfig::from_tensors`]), so a caller never has to match a variant
+/// to the file, and a non-`base` encoder width derives its own dims rather
+/// than silently mis-deriving as `base`. Header-only, so this is cheap
+/// enough to call before committing to a full [`load`].
 pub fn cfg_for_checkpoint(path: &str) -> Result<ZipConfig, String> {
-    let shapes: HashMap<String, Vec<usize>> = checkpoint::torchpt::read_shapes(path)?.into_iter().collect();
-    ZipConfig::from_tensors(&shapes)
+    ZipConfig::from_tensors(&read_shapes(path)?)
 }

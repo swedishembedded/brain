@@ -311,8 +311,8 @@ brain flux2 edit --variant klein-9b --precision int8 \
 ### Producing a mask
 
 There is no automatic mask generator in brain, and the honest reason is that
-the obvious ones do not work. A monocular-depth mask (`brain zipdepth --view
-depth --colormap gray --headless`, threshold the near field) segments a bedroom
+the obvious ones do not work. A monocular-depth mask (`brain zipdepth infer
+--view depth --colormap gray`, threshold the near field) segments a bedroom
 where the bed is the only near object, but on a living room it marks the
 *ceiling* as foreground - the ceiling directly above the camera is genuinely
 the nearest surface in the frame - while leaving a sofa against the far wall

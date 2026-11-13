@@ -5,7 +5,7 @@
 //! Env-gated: STEREO_PPM, STEREO_OUT_DOTS, STEREO_OUT_TEX, ZIPDEPTH_NPU_PTH.
 use std::collections::HashMap;
 use zipdepth::{autostereogram, autostereogram_textured, import, Predictor, StereoOpts, ZipConfig};
-use zipdepth::viz::Bounds;
+use imaging::viz::Bounds;
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 

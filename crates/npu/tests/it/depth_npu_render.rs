@@ -6,7 +6,7 @@
 //! + DEPTH_RENDER_IMG + DEPTH_RENDER_OUT).
 use std::collections::HashMap;
 use zipdepth::import;
-use zipdepth::viz::{colorize, Bounds, Colormap};
+use imaging::viz::{colorize, Bounds, Colormap};
 use npu::build_depth_graph;
 use npu::openvino::{NpuConfig, NpuDevice, NpuSession};
 use onnx::GraphBuilder;

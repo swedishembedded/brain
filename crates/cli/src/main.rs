@@ -17,7 +17,6 @@ mod caps_cli;
 mod collective_profile;
 mod data_cli;
 mod decide_cli;
-mod depth_cli;
 mod devices_api;
 mod devices_cli;
 mod doctor_cli;
@@ -448,10 +447,11 @@ LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
 QWEN3-TTS (Talker + MTP + neural codec; voice cloning)
   brain qwen3tts <import|clone|synth|design|serve|sim|finetune> ...
 
-MONOCULAR DEPTH (ZipDepth)
-  brain zipdepth --image <P6.ppm> [...]       # single image
-  brain zipdepth --camera                     # realtime V4L2 webcam (Linux)
-  brain zipdepth <calib|train> ...
+MONOCULAR DEPTH (brain/zipdepth; image and camera windows are samples/models/zipdepth)
+  brain zipdepth infer --image photo.png --out depth=depth.png [--view side --out view=side.png]
+  brain zipdepth train --save zipdepth.safetensors [--steps N --fresh true]
+  brain zipdepth calib --images <dir>
+      every parameter: brain zipdepth <action> --help
 
 FORECASTING (chronos2 / kronos / fincast behind one seam)
   brain forecast <compare|serve|import|finetune> ...
