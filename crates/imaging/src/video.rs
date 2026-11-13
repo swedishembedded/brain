@@ -203,13 +203,14 @@ fn external(path: &Path, native: &videocodec::Error) -> Result<VideoMeta, String
 }
 
 /// Decode exactly the frames at `indices` (0-based, in decode order), in the
-/// order asked - an index may repeat. Only the asked frames are kept and
-/// decoding stops after the last one. An index past the clip's end is an
-/// error naming it.
+/// order asked - an index may repeat. Only the asked frames are kept; decoding
+/// starts at the key frame at or before the first one asked
+/// (`videocodec::decode_from`) and stops after the last. An index past the
+/// clip's end is an error naming it.
 pub fn decode_frames_at(path: &Path, indices: &[u64]) -> Result<Vec<Rgb8>, String> {
-    let Some(&last) = indices.iter().max() else { return Ok(Vec::new()) };
+    let (Some(&first), Some(&last)) = (indices.iter().min(), indices.iter().max()) else { return Ok(Vec::new()) };
     let mut kept: std::collections::BTreeMap<u64, Option<Rgb8>> = indices.iter().map(|&i| (i, None)).collect();
-    let native = videocodec::decode(path, &mut |f| {
+    let native = videocodec::decode_from(path, first, &mut |f| {
         if let Some(slot) = kept.get_mut(&f.index) {
             *slot = Some(Rgb8 { w: f.w, h: f.h, px: f.rgb.clone() });
         }
