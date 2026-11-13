@@ -552,6 +552,7 @@ navigation:
           - docs/book/v12-reinforcement-learning/index.md
           - docs/book/v12-reinforcement-learning/01-mdps.md
           - docs/book/v12-reinforcement-learning/02-value-learning.md
+          - docs/book/v12-reinforcement-learning/03-policy-gradients.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

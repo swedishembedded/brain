@@ -16,6 +16,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **activation function**: the fixed one-input function $g$ a neuron applies to its weighted sum to produce its output, for example the identity, the sigmoid or the step. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
 
+**actor-critic**: a learner that keeps a policy (the actor) and a value function (the critic) and updates the policy along the score of its actions times the critic's temporal-difference error. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
+
 **Adam**: an update that steps along a bias-corrected running average of the gradient divided by the root of a bias-corrected running average of its square, keeping two state arrays per parameter. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
 
 **AdamW**: Adam with decoupled weight decay: $\theta \leftarrow \theta - \eta\lambda\theta - \eta\hat{\mathbf{m}}/(\sqrt{\hat{\mathbf{v}}} + \epsilon_{\mathrm{den}})$. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
@@ -25,6 +27,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **adaptive layer normalization**: a normalization layer whose scale and shift (and, around a sublayer, whose gate) are computed from a conditioning vector such as the timestep embedding instead of being learned constants; a zero gate makes the block the identity. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
 
 **additive attention**: attention whose score for a decoder state and an encoder state is computed by a small network that adds a projection of each before a tanh and takes a weighted sum of the result, so that the decoder can build a different weighted average of the encoder states at every step. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
+
+**advantage**: the value of an action in a state minus the value of the state, $q^\pi(s, a) - V^\pi(s)$: how much better the action is than the policy's average there. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
 
 **adversarial loss**: the pair of losses in which a discriminator minimizes a classification loss on real and fake samples while the generator minimizes a loss on the discriminator's score of its samples, each holding the other fixed. *([Adversarial Training](v08-image-generation/04-gans.md))*
 
@@ -99,6 +103,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **bandwidth-bound**: limited by the bytes it moves: the arithmetic intensity is below the machine's ridge point, so the attainable rate is intensity times bandwidth and only moving fewer bytes makes it faster. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
 
 **baseline**: a method run under the same protocol as the new one, trivial (no features), simple (an earlier chapter's method fitted properly) or the previous best, whose result the new one must beat to count as progress. *([Experiments, Baselines and Claims](v02-learning/08-experiments.md))*
+
+**baseline subtraction**: subtracting from the return a number that does not depend on the action taken, which leaves the mean of the gradient estimate unchanged and can reduce its variance greatly. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
 
 **batch dimension**: an extra, usually first, axis of a tensor that indexes independent examples processed together, so that each example is one contiguous block. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
@@ -906,6 +912,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **policy**: a rule that chooses an action in each state; in this chapter a list of one action per state. *([Markov Decision Processes](v12-reinforcement-learning/01-mdps.md))*
 
+**policy-gradient theorem**: the statement that the gradient of the expected discounted return with respect to the policy's parameters is a sum over states, weighted by their discounted visitation, of each action's value times the gradient of its probability, with no term for the change of the state distribution. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
+
 **polynomial**: a sum of constant multiples of powers of $x$; one of degree $n$ has $n + 1$ parameters and is fixed by $n + 1$ points. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
 **pooled text embedding**: a single vector for the whole prompt, usually the row of an encoder at its end token after the final normalization (and, for SDXL, a projection), with no positions, so that it is added to the timestep embedding and reaches every block with the clock and not through attention. *([Conditioning on Text](v08-image-generation/09-text-conditioning.md))*
@@ -913,6 +921,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **pooling**: a layer that summarizes each window of a map by one number, the largest (max pooling, whose gradient goes to the winner of the window) or the mean (average pooling, whose gradient is shared equally), with no weights; global average pooling takes the whole map. *([Convolutional Networks and Residual Learning](v07-vision/03-cnns.md))*
 
 **post-training quantization**: converting a trained float network to integer arithmetic without retraining, by choosing the scale and zero point of each weight tensor from the weights and of each activation tensor from ranges measured on data, and rewriting each layer as an integer accumulation followed by a requantization. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
+
+**PPO**: proximal policy optimisation, which takes several gradient steps on one batch of experience under a surrogate that weights each sample by the ratio of the new to the old policy's probability and clips the term of a sample that has moved far enough in the direction its advantage asked for. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
 
 **pre-norm**: the block layout in which each sublayer reads a normalized copy of the stream and its result is added to the stream unnormalized, $\mathbf{x} + g(\mathrm{norm}(\mathbf{x}))$, so that the path through the additions alone carries no norm. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 
@@ -989,6 +999,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **reference-gated selection**: choosing among candidates only those whose output on the actual device matches a reference within a tolerance derived from their arithmetic, checked at the edges of the shapes they will serve, before any of them is timed. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
 **register blocking**: giving each invocation of a kernel a small square block of outputs held in its registers, so that each operand it reads is used once per row or column of the block, which enlarges the output tile beyond the number of invocations and cuts the reads of shared memory per multiply-add. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
+
+**REINFORCE**: the Monte Carlo policy gradient, which samples a life under the policy and moves the parameters along the score of every action taken times the return that followed it. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
 
 **reinforcement learning (overview)**: learning by an agent that acts in an environment and receives rewards, without being told the right action; full treatment in Volume XII. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 

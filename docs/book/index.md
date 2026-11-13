@@ -193,4 +193,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 
 1. [Markov Decision Processes](v12-reinforcement-learning/01-mdps.md): How do we describe an agent that acts, sees consequences and wants long-term reward?
 2. [Learning Values from Experience](v12-reinforcement-learning/02-value-learning.md): How can an agent learn what states are worth without a model of the world?
+3. [Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md): How do we directly adjust a policy so that good actions become more likely?
 <!-- /contents -->
