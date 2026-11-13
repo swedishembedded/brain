@@ -374,3 +374,49 @@ fn naming_no_axes_leaves_selection_alone() {
     let share = lone as f32 / 4_000.0;
     assert!((share - 1.0 / 6.0).abs() < 0.03, "share was {share}");
 }
+
+/// Twelve cells of identical worth (every weight and every tie equal), filed
+/// in the given order.
+fn tied_archive(order: impl Iterator<Item = i32>, capacity: usize) -> Archive<i32> {
+    let mut a: Archive<i32> = Archive::new(capacity, TOL);
+    for i in order {
+        a.offer(niche(&[i]), Worth::new(0.5, 100), i);
+    }
+    a
+}
+
+/// A search is reproducible from its seed: the same seed draws the same
+/// sequence of cells whatever order the cells were filed in.
+#[test]
+fn the_same_seed_draws_the_same_cells_whatever_the_insertion_order() {
+    let mut forward = tied_archive(0..12, 16);
+    let mut backward = tied_archive((0..12).rev(), 16);
+    let (mut r1, mut r2) = (Rng::new(7), Rng::new(7));
+    let draws = |a: &mut Archive<i32>, r: &mut Rng| -> Vec<i32> {
+        (0..40).map(|_| a.pick(r).unwrap().what).collect()
+    };
+    assert_eq!(draws(&mut forward, &mut r1), draws(&mut backward, &mut r2));
+}
+
+/// Ties are broken the same way every time: `best` takes the lowest niche.
+#[test]
+fn best_among_ties_is_independent_of_insertion_order() {
+    let forward = tied_archive(0..12, 16);
+    let backward = tied_archive((0..12).rev(), 16);
+    assert_eq!(forward.best().unwrap().niche, backward.best().unwrap().niche);
+}
+
+/// Eviction among equally weak cells takes the same one every time.
+#[test]
+fn eviction_among_ties_is_independent_of_insertion_order() {
+    let mut forward = tied_archive(0..4, 4);
+    let mut backward = tied_archive((0..4).rev(), 4);
+    forward.offer(niche(&[99]), Worth::new(0.5, 100), 99);
+    backward.offer(niche(&[99]), Worth::new(0.5, 100), 99);
+    let held = |a: &Archive<i32>| {
+        let mut v: Vec<i32> = a.iter().map(|e| e.what).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(held(&forward), held(&backward));
+}

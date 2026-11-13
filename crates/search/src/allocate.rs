@@ -94,10 +94,6 @@ impl Gain {
     pub fn value(&self) -> f64 {
         FRESH_WORTH * self.fresh + IMPROVED_WORTH * self.improved
     }
-
-    fn rate(&self) -> f64 {
-        self.value() / self.seconds.max(MIN_SECONDS)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -186,9 +182,6 @@ impl Allocator {
         a.seconds += gain.seconds.max(MIN_SECONDS);
         a.value += gain.value();
         self.rounds += 1;
-        // `rate()` is the per-call view; the arm accumulates totals so its
-        // rate is over everything it has ever done rather than the last call.
-        let _ = gain.rate();
     }
 
     pub fn report(&self) -> Vec<Spent> {

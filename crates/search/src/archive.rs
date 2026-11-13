@@ -164,8 +164,14 @@ pub struct Archive<C> {
     // invents a second, lossy spelling of a coordinate that has to parse back
     // exactly. Each elite already carries its own niche, so a list is both
     // smaller and the only spelling there is.
+    //
+    // An ORDERED map, because `pick`, `weakest` and `best` walk the cells and
+    // a draw or a tie decided by iteration order is only reproducible from a
+    // seed if that order is a function of the contents. `HashMap` order is
+    // randomised per instance; `Niche` order is not, and costs O(log n) on
+    // lookups where every walk here is already O(n).
     #[serde(with = "cells_as_list", bound(serialize = "C: Serialize", deserialize = "C: Deserialize<'de>"))]
-    cells: std::collections::HashMap<Niche, Elite<C>>,
+    cells: std::collections::BTreeMap<Niche, Elite<C>>,
     capacity: usize,
     tol: f32,
     /// How sharply selection prefers achievement. See [`FOCUS`].
@@ -196,7 +202,7 @@ impl<C> Archive<C> {
     /// on a game engine, its snapshot slot count.
     pub fn new(capacity: usize, tol: f32) -> Archive<C> {
         Archive {
-            cells: std::collections::HashMap::new(),
+            cells: std::collections::BTreeMap::new(),
             capacity,
             tol,
             focus: FOCUS,
@@ -406,30 +412,29 @@ fn default_focus() -> f32 {
     FOCUS
 }
 
-/// A `HashMap<Niche, _>` keyed by a tuple, on the wire as the list of its
+/// A `BTreeMap<Niche, _>` keyed by a tuple, on the wire as the list of its
 /// values. See the field's own comment for why.
 mod cells_as_list {
     use super::{Elite, Niche};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<C, S>(
-        cells: &std::collections::HashMap<Niche, Elite<C>>,
+        cells: &std::collections::BTreeMap<Niche, Elite<C>>,
         s: S,
     ) -> Result<S::Ok, S::Error>
     where
         C: Serialize,
         S: Serializer,
     {
-        // Sorted, so two archives holding the same cells produce the same
-        // bytes and a diff of two campaign artifacts is readable.
-        let mut all: Vec<&Elite<C>> = cells.values().collect();
-        all.sort_by(|a, b| a.niche.cmp(&b.niche));
-        all.serialize(s)
+        // Already in niche order, so two archives holding the same cells
+        // produce the same bytes and a diff of two campaign artifacts is
+        // readable.
+        cells.values().collect::<Vec<_>>().serialize(s)
     }
 
     pub fn deserialize<'de, C, D>(
         d: D,
-    ) -> Result<std::collections::HashMap<Niche, Elite<C>>, D::Error>
+    ) -> Result<std::collections::BTreeMap<Niche, Elite<C>>, D::Error>
     where
         C: Deserialize<'de>,
         D: Deserializer<'de>,
