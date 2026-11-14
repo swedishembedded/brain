@@ -66,8 +66,9 @@ fi
 # crates/vae is genuinely shared infrastructure AND the AutoencoderKL
 # architecture's home at once (vqgan/rrdbnet/sdxlunet all consume its conv
 # blocks), and splitting it would duplicate that shared code instead of
-# naming it -- see crates/arch/src/lib.rs's own "Deliberately not
-# architectures" note. Extend this list only for an equally-deliberate case,
+# naming it. The exceptions are documented here, in the comments around
+# `permanent_exceptions`, and `Arch::implementation` in crates/arch/src/lib.rs
+# is where a variant resolves to its implementing crate. Extend this list only for an equally-deliberate case,
 # never to silence a rename that just hasn't happened yet.
 #
 # `llama` and `qwen2` are the same kind of permanent case from the other
