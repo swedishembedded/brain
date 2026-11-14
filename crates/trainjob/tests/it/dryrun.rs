@@ -75,3 +75,18 @@ fn a_timeline_dataset_is_checked_line_by_line_without_a_base() {
     let no_base = check(&rig, json!({}), plain()).unwrap_err();
     assert!(no_base.contains("`base` is needed"), "{no_base}");
 }
+
+/// A token that fires mid-check stops the timeline dataset check at the next line.
+#[test]
+fn a_timeline_check_stops_at_the_next_line() {
+    use capability::{Invocation, Outcome, Progress};
+    use capability_mock::cancellation::{certify, Bound};
+    let (subjects, _) = horizon::synthetic::population(5, 1);
+    let text: String = subjects.iter().map(|s| serde_json::to_string(s).unwrap() + "\n").collect();
+    let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+        inv.cancel.check()?;
+        let report = trainjob::dryrun::timeline_report(&text, 64, &mut inv.keep_going(progress, 0, "record"))?;
+        Ok(Outcome::new().set("records", report["records"].clone()))
+    };
+    certify("check_dataset timeline", &Invocation::new, &run, Bound::ONE_STEP);
+}

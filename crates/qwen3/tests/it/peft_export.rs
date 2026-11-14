@@ -30,7 +30,7 @@ fn a_peft_export_folds_as_the_adapter_brain_trained() {
     qwen3::lora::save_adapter(adapter.to_str().unwrap(), &model, "acme/tiny-lora", "acme/tiny", None).unwrap();
 
     let out = dir.join("peft");
-    qwen3::export::export_peft(adapter.to_str().unwrap(), &out, None).unwrap();
+    qwen3::export::export_peft(adapter.to_str().unwrap(), &out, None, &mut || true).unwrap();
     assert_eq!(serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(out.join("adapter_config.json")).unwrap()).unwrap()["base_model_name_or_path"], "acme/tiny", "the base comes from the card");
     let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out.join("adapter_config.json")).unwrap()).unwrap();
     assert_eq!((config["peft_type"].as_str(), config["r"].as_u64(), config["lora_alpha"].as_f64()), (Some("LORA"), Some(2), Some(2.0)));
@@ -86,7 +86,7 @@ fn pairs_of_different_rank_and_scale_keep_their_own_delta() {
     };
     let want: Vec<Vec<f32>> = loras.iter().map(|l| delta(l, l.alpha / l.r as f32)).collect();
     let dir = std::env::temp_dir().join(format!("brain-peft-mixed-{}", std::process::id()));
-    PeftAdapter { base_model: "acme/base".into(), task_type: None, loras, modules_to_save: vec!["head".into()], saved: vec![("head.weight".into(), vec![2], vec![1.0, 2.0])] }.write(&dir).unwrap();
+    PeftAdapter { base_model: "acme/base".into(), task_type: None, loras, modules_to_save: vec!["head".into()], saved: vec![("head.weight".into(), vec![2], vec![1.0, 2.0])] }.write(&dir, &mut || true).unwrap();
     let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("adapter_config.json")).unwrap()).unwrap();
     let (r, alpha) = (config["r"].as_u64().unwrap() as usize, config["lora_alpha"].as_f64().unwrap() as f32);
     assert_eq!((r, config["modules_to_save"].clone()), (4, serde_json::json!(["head"])));

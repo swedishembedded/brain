@@ -285,8 +285,10 @@ pub trait ChatTrainer {
     /// Write the trained model, a brain-format file at `trained`, as a
     /// checkpoint directory at `out` the family's loaders and `brain serve`
     /// open as a base, with the tokenizer files of `tokenizer_dir`; `adapter`
-    /// is folded in when given.
-    fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>) -> Result<(), String>;
+    /// is folded in when given. `keep_going` is asked before each unit of work
+    /// (a tensor, a chunk of a copy); once it says no the export answers
+    /// `Err(CANCELLED)` and leaves no file of its own in `out`.
+    fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String>;
 
     /// The family's serving engine over the base at `base` with each linear
     /// at the tier `tiers` names (an `adapter` folded in when given), sized for
@@ -324,18 +326,49 @@ pub struct PreferenceMargins {
 /// The [`ChatTrainer::export_checkpoint`] of a family with no Hugging Face
 /// writer: a checkpoint directory holding the brain-format weights as
 /// `model.safetensors` and the tokenizer files of `tokenizer_dir`. An adapter
-/// is not folded in.
-pub fn export_brain_checkpoint(family: &str, trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>) -> Result<(), String> {
+/// is not folded in. The weights are copied in chunks, `keep_going` asked
+/// before each; once it says no the copy is removed and the answer is
+/// `Err(CANCELLED)`.
+pub fn export_brain_checkpoint(family: &str, trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
+    use std::io::{Read, Write};
+    /// Bytes copied between two asks.
+    const CHUNK: usize = 8 << 20;
     if adapter.is_some() {
         return Err(format!("{family} does not fold an adapter into a checkpoint yet"));
     }
+    let created = !out.exists();
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-    let copy = |from: &Path, to: &Path| std::fs::copy(from, to).map(drop).map_err(|e| format!("{}: {e}", from.display()));
-    copy(trained, &out.join("model.safetensors"))?;
+    let weights = out.join("model.safetensors");
+    let mut copy_weights = || -> Result<bool, String> {
+        let io = |e: std::io::Error| format!("{}: {e}", trained.display());
+        let mut from = std::fs::File::open(trained).map_err(io)?;
+        let mut to = std::fs::File::create(&weights).map_err(|e| format!("{}: {e}", weights.display()))?;
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            if !keep_going() {
+                return Ok(false);
+            }
+            let n = from.read(&mut buf).map_err(io)?;
+            if n == 0 {
+                return Ok(true);
+            }
+            to.write_all(&buf[..n]).map_err(|e| format!("{}: {e}", weights.display()))?;
+        }
+    };
+    match copy_weights() {
+        Ok(true) => {}
+        stopped => {
+            let _ = std::fs::remove_file(&weights);
+            if created {
+                let _ = std::fs::remove_dir(out);
+            }
+            return Err(stopped.err().unwrap_or_else(|| capability::failure::CANCELLED.to_string()));
+        }
+    }
     for f in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "generation_config.json"] {
         let from = tokenizer_dir.join(f);
         if from.is_file() {
-            copy(&from, &out.join(f))?;
+            std::fs::copy(&from, out.join(f)).map(drop).map_err(|e| format!("{}: {e}", from.display()))?;
         }
     }
     Ok(())
@@ -357,4 +390,48 @@ pub fn served_loss<T: ChatTrainer>(base: &Path, tiers: &TierPolicy, adapter: Opt
         Err(e) => return Some(Err(e)),
     };
     Some(crate::serve::teacher_forced_loss(&mut *engine, &rows).map_err(std::io::Error::other))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::export_brain_checkpoint;
+    use capability::{Invocation, Outcome};
+    use capability_mock::cancellation::{certify, Bound};
+
+    /// A token that fires mid-copy stops the weights copy at the next chunk and leaves neither a partial file nor the directory it made.
+    #[test]
+    fn a_brain_checkpoint_export_stops_at_the_next_chunk_and_leaves_nothing() {
+        let dir = std::env::temp_dir().join(format!("brain-export-brain-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let trained = dir.join("trained.safetensors");
+        // Sparse: five chunks of zeros without writing them.
+        std::fs::File::create(&trained).unwrap().set_len(40 << 20).unwrap();
+        let out = dir.join("checkpoint");
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(capability::Progress)| {
+            inv.cancel.check()?;
+            export_brain_checkpoint("toy", &trained, &dir, &out, None, &mut inv.keep_going(progress, 0, "chunk"))?;
+            Ok(Outcome::new())
+        };
+        certify("brain checkpoint export", &Invocation::new, &run, Bound::ONE_STEP);
+        std::fs::remove_dir_all(&out).ok();
+        let mut asks = 0;
+        let err = export_brain_checkpoint("toy", &trained, &dir, &out, None, &mut || {
+            asks += 1;
+            asks < 3
+        });
+        assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
+        assert!(!out.exists(), "a stopped export leaves no directory it made");
+        std::fs::create_dir_all(&out).unwrap();
+        let mut asks = 0;
+        let err = export_brain_checkpoint("toy", &trained, &dir, &out, None, &mut || {
+            asks += 1;
+            asks < 3
+        });
+        assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "a stopped export leaves no partial weights in a directory that was there");
+        export_brain_checkpoint("toy", &trained, &dir, &out, None, &mut || true).unwrap();
+        assert_eq!(std::fs::metadata(out.join("model.safetensors")).unwrap().len(), 40 << 20);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

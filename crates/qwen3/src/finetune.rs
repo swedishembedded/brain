@@ -920,11 +920,11 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
         trained.save_adapter_with_lineage(path_str(path).map_err(std::io::Error::other)?, lineage.card_id, lineage.base_id, lineage.dataset_id, lineage.provenance.clone())
     }
 
-    fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>) -> Result<(), String> {
+    fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
         let (cfg, src) = crate::open_checkpoint(path_str(trained)?)?;
         let adapter = adapter.map(path_str).transpose()?;
         let opts = crate::export::HfExport { dtype: crate::export::HfDtype::F32, shard_bytes: u64::MAX, tokenizer_dir: Some(tokenizer_dir), adapter };
-        crate::export::export_hf(&*src, &cfg, out, &opts).map_err(|e| format!("{}: writing the checkpoint: {e}", out.display()))
+        crate::export::export_hf(&*src, &cfg, out, &opts, keep_going).map_err(|e| if e == capability::failure::CANCELLED { e } else { format!("{}: writing the checkpoint: {e}", out.display()) })
     }
 
     fn preference_margins(

@@ -231,8 +231,8 @@ impl ChatTrainer for RippleTrainer {
         trained.save_adapter(path_str(path)?, lineage.card_id, lineage.base_id, lineage.dataset_id, lineage.provenance.clone())
     }
 
-    fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>) -> Result<(), String> {
-        model::finetune::export_brain_checkpoint("ricursive", trained, tokenizer_dir, out, adapter)
+    fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
+        model::finetune::export_brain_checkpoint("ricursive", trained, tokenizer_dir, out, adapter, keep_going)
     }
 }
 

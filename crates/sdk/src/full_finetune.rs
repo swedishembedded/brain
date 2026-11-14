@@ -402,7 +402,14 @@ impl ChatFullFineTune {
 
         let checkpoint = out_dir.join(CHECKPOINT_DIR);
         let export_clock = std::time::Instant::now();
-        export_trained(&chat, &tuned, &model_dir, &checkpoint, None)?;
+        match export_trained(&chat, &tuned, &model_dir, &checkpoint, None, &mut || !cancel.is_cancelled()) {
+            Err(Error::Cancelled) => {
+                std::fs::remove_file(&tuned).ok();
+                outcome.status = FineTuneStatus::Cancelled;
+                return Ok(outcome);
+            }
+            exported => exported?,
+        }
         std::fs::remove_file(&tuned).ok();
         model::finetune::stage_time("sdk: export the trained file to the checkpoint directory", export_clock);
         let weights = checkpoint.join(WEIGHTS_FILE);
@@ -573,9 +580,11 @@ pub(crate) fn chat_entry(arch: &str) -> Result<crate::chat_trainer::ChatEntry> {
 
 /// Writes the brain checkpoint `trained` to `checkpoint` as a checkpoint
 /// directory in the architecture's own format, with the tokenizer files of
-/// `tokenizer_dir` and `adapter` folded in when one is given.
-fn export_trained(chat: &crate::chat_trainer::ChatEntry, trained: &Path, tokenizer_dir: &Path, checkpoint: &Path, adapter: Option<&Path>) -> Result<()> {
-    (chat.export)(trained, tokenizer_dir, checkpoint, adapter).map_err(Error::Backend)
+/// `tokenizer_dir` and `adapter` folded in when one is given. `keep_going` is
+/// asked before each unit of the export's work; a stopped export is
+/// [`Error::Cancelled`] and leaves no file of its own.
+fn export_trained(chat: &crate::chat_trainer::ChatEntry, trained: &Path, tokenizer_dir: &Path, checkpoint: &Path, adapter: Option<&Path>, keep_going: &mut dyn FnMut() -> bool) -> Result<()> {
+    (chat.export)(trained, tokenizer_dir, checkpoint, adapter, keep_going).map_err(|e| if e == capability::failure::CANCELLED { Error::Cancelled } else { Error::Backend(e) })
 }
 
 /// Folds the LoRA `adapter` into the weights of `base` it targets
@@ -583,15 +592,18 @@ fn export_trained(chat: &crate::chat_trainer::ChatEntry, trained: &Path, tokeniz
 /// directory: the base with the adapter, in one set of weights, that needs no
 /// adapter to be served. `base` is whatever [`ChatFullFineTune::from_pretrained`]
 /// takes; the tokenizer files are copied from the base's directory. Returns
-/// `out_dir`, with the weights file and its digest.
-pub fn merge_adapter(base: &str, adapter: &Path, out_dir: &Path) -> Result<MergedCheckpoint> {
+/// `out_dir`, with the weights file and its digest. `keep_going` is asked
+/// before each unit of the fold's work (a tensor, a chunk of a copy); once it
+/// says no the merge is [`Error::Cancelled`] and leaves nothing of its own in
+/// `out_dir`.
+pub fn merge_adapter(base: &str, adapter: &Path, out_dir: &Path, keep_going: &mut dyn FnMut() -> bool) -> Result<MergedCheckpoint> {
     let store_root = loader::model_dir::resolve(None);
     let (weights, model_dir, _) = loader::model_dir::resolve_base(base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
     // The base's own architecture folds it (`qwen3` for a checkpoint that does not say); one without an export
     // that takes an adapter refuses by name.
     let chat = chat_entry(crate::study::arch_of_checkpoint(&model_dir).map_or("qwen3", |a| a.id))?;
     let open = (chat.checkpoint_path)(&weights, &model_dir);
-    export_trained(&chat, &open, &model_dir, out_dir, Some(adapter))?;
+    export_trained(&chat, &open, &model_dir, out_dir, Some(adapter), keep_going)?;
     let weights = out_dir.join(WEIGHTS_FILE);
     Ok(MergedCheckpoint { weights_digest: digest(&weights)?, dir: out_dir.to_path_buf(), weights })
 }

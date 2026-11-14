@@ -65,7 +65,7 @@ fn an_adapter_trains_on_a_bf16_base_read_from_a_transformers_directory() {
         ..QwenConfig::tiny()
     };
     let base = scratch.join("base");
-    export_hf(&qwen3::init_weights(&cfg, 7), &cfg, &base, &HfExport { dtype: HfDtype::Bf16, ..Default::default() }).unwrap();
+    export_hf(&qwen3::init_weights(&cfg, 7), &cfg, &base, &HfExport { dtype: HfDtype::Bf16, ..Default::default() }, &mut || true).unwrap();
     write_dataset(&scratch.join("data"));
 
     let opts = model::FitOpts {

@@ -48,7 +48,7 @@ fn every_variant_round_trips_through_a_gguf() {
     for (label, tok_dir, cfg) in cases {
         let weights = qwen3::init_weights(&cfg, 5);
         let path = std::env::temp_dir().join(format!("brain-gguf-export-{label}-{}.gguf", std::process::id()));
-        export_gguf(&weights, &cfg, &path, &GgufExport { dtype: GgufDtype::F32, tokenizer_dir: tok_dir, name: label }).unwrap_or_else(|e| panic!("{label}: {e}"));
+        export_gguf(&weights, &cfg, &path, &GgufExport { dtype: GgufDtype::F32, tokenizer_dir: tok_dir, name: label }, &mut || true).unwrap_or_else(|e| panic!("{label}: {e}"));
 
         let (back, src) = qwen3::open_checkpoint(path.to_str().unwrap()).unwrap_or_else(|e| panic!("{label}: {e}"));
         let same_shape = |c: &QwenConfig| (c.vocab, c.n_layers, c.d_model, c.n_heads, c.n_kv_heads, c.head_dim, c.d_ff, c.qk_norm, c.attn_bias, c.tie_embeddings);

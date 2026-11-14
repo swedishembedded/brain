@@ -92,7 +92,11 @@ impl PeftAdapter {
     /// `lora_alpha == r` (scale 1): each pair's own `alpha / r` is folded
     /// into its `B` and the extra rank is zero, the same delta in any PEFT
     /// version, without per-module patterns.
-    pub fn write(&self, out: &Path) -> Result<(), String> {
+    ///
+    /// `keep_going` is asked before each pair and each saved tensor is
+    /// assembled; once it says no the write answers `Err(CANCELLED)` before
+    /// `out` is created, so a stopped write leaves nothing behind.
+    pub fn write(&self, out: &Path, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
         let first = self.loras.first().ok_or("PEFT export: no LoRA pairs")?;
         let uniform = self.loras.iter().all(|l| l.r == first.r && l.alpha == first.alpha);
         let r = self.loras.iter().map(|l| l.r).max().expect("non-empty");
@@ -100,6 +104,9 @@ impl PeftAdapter {
         let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
         let mut modules: Vec<String> = Vec::new();
         for l in &self.loras {
+            if !keep_going() {
+                return Err(capability::failure::CANCELLED.to_string());
+            }
             if l.r == 0 || l.a.len() % l.r != 0 || l.b.len() % l.r != 0 {
                 return Err(format!("PEFT export: {}'s factors are not rank-{} matrices", l.module, l.r));
             }
@@ -123,6 +130,9 @@ impl PeftAdapter {
             modules.push(l.module.clone());
         }
         for (name, shape, v) in &self.saved {
+            if !keep_going() {
+                return Err(capability::failure::CANCELLED.to_string());
+            }
             if !self.modules_to_save.iter().any(|m| name.starts_with(&format!("{m}."))) {
                 return Err(format!("PEFT export: {name} belongs to no module to save"));
             }

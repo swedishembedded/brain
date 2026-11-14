@@ -74,7 +74,7 @@ pub(crate) fn import(_: &Resolved, inv: &Invocation, progress: &mut dyn FnMut(Pr
     Ok(Outcome::new().set("saved", json!(dest.display().to_string())))
 }
 
-pub(crate) fn export(resolved: &Resolved, inv: &Invocation, _: &mut dyn FnMut(Progress)) -> ActionResult {
+pub(crate) fn export(resolved: &Resolved, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let weights = resolved.weights(inv, "export")?;
     let out = path_param(inv, "out", "export")?;
     let format = inv.get_str("format").unwrap_or_else(|| "hf".into());
@@ -82,6 +82,7 @@ pub(crate) fn export(resolved: &Resolved, inv: &Invocation, _: &mut dyn FnMut(Pr
     let tokenizer_dir = resolved.tokenizer(inv, &weights).parent().map(Path::to_path_buf);
     let adapter = inv.get_str("adapter").filter(|a| !a.is_empty());
     let (cfg, src) = crate::open_checkpoint(&weights).map_err(|e| format!("qwen export: {e}"))?;
+    let mut keep_going = inv.keep_going(progress, 0, "tensor");
     match format.as_str() {
         "hf" => {
             let dtype = match dtype.as_deref().unwrap_or("bf16") {
@@ -91,7 +92,7 @@ pub(crate) fn export(resolved: &Resolved, inv: &Invocation, _: &mut dyn FnMut(Pr
                 other => return Err(format!("qwen export: dtype {other:?}: expected f32, bf16 or f16 for format hf")),
             };
             let opts = HfExport { dtype, tokenizer_dir: tokenizer_dir.as_deref().filter(|d| d.join("tokenizer.json").is_file()), adapter: adapter.as_deref(), ..Default::default() };
-            export_hf(&*src, &cfg, &out, &opts).map_err(|e| format!("qwen export: {e}"))?;
+            export_hf(&*src, &cfg, &out, &opts, &mut keep_going).map_err(|e| failed(e, "export"))?;
         }
         "gguf" => {
             if adapter.is_some() {
@@ -104,17 +105,17 @@ pub(crate) fn export(resolved: &Resolved, inv: &Invocation, _: &mut dyn FnMut(Pr
             };
             let tokenizer_dir = tokenizer_dir.ok_or("qwen export: format gguf embeds the tokenizer; name one")?;
             let name = out.file_stem().and_then(|s| s.to_str()).unwrap_or("model").to_string();
-            export_gguf(&*src, &cfg, &out, &GgufExport { dtype, tokenizer_dir: &tokenizer_dir, name: &name }).map_err(|e| format!("qwen export: {e}"))?;
+            export_gguf(&*src, &cfg, &out, &GgufExport { dtype, tokenizer_dir: &tokenizer_dir, name: &name }, &mut keep_going).map_err(|e| failed(e, "export"))?;
         }
         other => return Err(format!("qwen export: format {other:?}: expected hf or gguf")),
     }
     Ok(Outcome::new().set("saved", json!(out.display().to_string())).set("format", json!(format)))
 }
 
-pub(crate) fn export_peft(_: &Resolved, inv: &Invocation, _: &mut dyn FnMut(Progress)) -> ActionResult {
+pub(crate) fn export_peft(_: &Resolved, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let adapter = path_param(inv, "adapter", "export_peft")?;
     let out = path_param(inv, "out", "export_peft")?;
     let base_model = inv.get_str("base_model").filter(|b| !b.is_empty());
-    write_peft(&adapter.to_string_lossy(), &out, base_model.as_deref()).map_err(|e| format!("qwen export_peft: {e}"))?;
+    write_peft(&adapter.to_string_lossy(), &out, base_model.as_deref(), &mut inv.keep_going(progress, 0, "adapter pair")).map_err(|e| failed(e, "export_peft"))?;
     Ok(Outcome::new().set("saved", json!(out.display().to_string())))
 }

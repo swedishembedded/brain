@@ -220,7 +220,7 @@ impl ModelPruner {
         let job = crate::chat_trainer::PruneJob { base: &work.open, dir: &work.prepared_dir, opts: &work.opts, width: self.width, out: &pruned_file };
         let report = (chat.prune)(job, &mut |p| on_progress(&OptimizerProgress::Search(p))).map_err(|e| Error::Backend(format!("pruning: {e}")))?;
         let checkpoint = work.out_dir.join(CHECKPOINT_DIR);
-        (chat.export)(&pruned_file, &work.model_dir, &checkpoint, None).map_err(|e| Error::Backend(format!("exporting the pruned checkpoint: {e}")))?;
+        (chat.export)(&pruned_file, &work.model_dir, &checkpoint, None, &mut || true).map_err(|e| Error::Backend(format!("exporting the pruned checkpoint: {e}")))?;
         std::fs::remove_file(&pruned_file).map_err(|e| Error::Backend(format!("{}: {e}", pruned_file.display())))?;
         // The pruned directory resolves like any base the caller names, so it opens the way they would open it.
         let checkpoint_ref = checkpoint.to_str().ok_or_else(|| Error::Backend(format!("{}: not a UTF-8 path", checkpoint.display())))?;

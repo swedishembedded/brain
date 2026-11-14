@@ -313,7 +313,7 @@ fn a_transformers_directory_base_fine_tunes_and_scores() {
     let repo = store.join("acme").join("toy");
     let cfg = qwen3::QwenConfig { vocab: 151_936, block_size: 128, max_position_embeddings: 128, ..qwen3::QwenConfig::tiny() };
     let reader = checkpoint::weightio::WeightReader::open(model.join("model.safetensors").to_str().unwrap()).unwrap();
-    qwen3::export::export_hf(&reader, &cfg, &repo, &qwen3::export::HfExport { dtype: qwen3::export::HfDtype::F32, tokenizer_dir: Some(&model), ..Default::default() }).unwrap();
+    qwen3::export::export_hf(&reader, &cfg, &repo, &qwen3::export::HfExport { dtype: qwen3::export::HfDtype::F32, tokenizer_dir: Some(&model), ..Default::default() }, &mut || true).unwrap();
     std::fs::copy(model.join("tokenizer_config.json"), repo.join("tokenizer_config.json")).unwrap();
 
     let train = write_dataset(&model, "train.jsonl", &[("cab", "bad"), ("fed", "deaf"), ("ace", "face"), ("bag", "gab")]);

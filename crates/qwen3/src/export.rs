@@ -173,7 +173,11 @@ struct Planned {
 /// directory (see the module doc). Shards are named
 /// `model-0000i-of-0000n.safetensors` with a `model.safetensors.index.json`,
 /// or `model.safetensors` alone when one holds everything.
-pub fn export_hf(src: &dyn TensorSource, cfg: &QwenConfig, out: &Path, opts: &HfExport) -> Result<(), String> {
+///
+/// `keep_going` is asked before each tensor is read; once it says no the
+/// export answers `Err(CANCELLED)` and removes every shard it had written, so
+/// no file of the unfinished export is left behind.
+pub fn export_hf(src: &dyn TensorSource, cfg: &QwenConfig, out: &Path, opts: &HfExport, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let config = hf_config(cfg, opts.dtype)?;
     let names = HfNames::CAUSAL_LM;
     let plan: Vec<Planned> = cfg
@@ -223,9 +227,15 @@ pub fn export_hf(src: &dyn TensorSource, cfg: &QwenConfig, out: &Path, opts: &Hf
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let n = shards.len();
     let mut weight_map = serde_json::Map::new();
+    let mut written: Vec<std::path::PathBuf> = Vec::new();
     for (i, shard) in shards.iter().enumerate() {
         let file = if n == 1 { "model.safetensors".to_string() } else { format!("model-{:05}-of-{n:05}.safetensors", i + 1) };
-        write_shard(src, shard, opts.dtype, &fold, &out.join(&file))?;
+        let path = out.join(&file);
+        if let Err(e) = write_shard(src, shard, opts.dtype, &fold, &path, keep_going) {
+            written.iter().for_each(|done| drop(std::fs::remove_file(done)));
+            return Err(e);
+        }
+        written.push(path);
         for p in shard {
             weight_map.insert(p.hf.clone(), json!(file));
         }
@@ -254,8 +264,18 @@ fn write_json(path: &Path, v: &Value) -> Result<(), String> {
 
 /// One safetensors file: the header, then each tensor as it is read -
 /// written to a temporary name and renamed into place, so an interrupted
-/// export never leaves a truncated shard under its final name.
-fn write_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, fold: &std::collections::HashMap<String, model::lora::Pair>, path: &Path) -> Result<(), String> {
+/// export never leaves a truncated shard under its final name. A failed or
+/// stopped shard removes its temporary file.
+fn write_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, fold: &std::collections::HashMap<String, model::lora::Pair>, path: &Path, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
+    let tmp = path.with_extension("safetensors.tmp");
+    let result = fill_shard(src, shard, dtype, fold, path, &tmp, keep_going);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn fill_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, fold: &std::collections::HashMap<String, model::lora::Pair>, path: &Path, tmp: &Path, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let mut header = serde_json::Map::new();
     header.insert("__metadata__".to_string(), json!({ "format": "pt" }));
     let mut offset = 0u64;
@@ -267,9 +287,8 @@ fn write_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, fold:
     // The data section starts 8-byte aligned, as the format asks.
     header.resize(header.len().div_ceil(8) * 8, b' ');
 
-    let tmp = path.with_extension("safetensors.tmp");
     let io = |e: std::io::Error| format!("{}: {e}", tmp.display());
-    let file = std::fs::File::create(&tmp).map_err(io)?;
+    let file = std::fs::File::create(tmp).map_err(io)?;
     file.write_all_at(&(header.len() as u64).to_le_bytes(), 0).map_err(io)?;
     file.write_all_at(&header, 8).map_err(io)?;
     let data_start = 8 + header.len() as u64;
@@ -286,6 +305,13 @@ fn write_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, fold:
         |i| {
             let p = shard[i];
             let mut buf = Vec::new();
+            if failure.is_some() {
+                return buf;
+            }
+            if !keep_going() {
+                failure = Some(capability::failure::CANCELLED.to_string());
+                return buf;
+            }
             let found = match fold.get(&p.brain) {
                 None => src.with_tensor(&p.brain, &mut |x| dtype.encode(x, &mut buf)),
                 Some(pair) => src.with_tensor(&p.brain, &mut |x| {
@@ -294,9 +320,9 @@ fn write_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, fold:
                     dtype.encode(&w, &mut buf);
                 }),
             };
-            if failure.is_none() && !found {
+            if !found {
                 failure = Some(format!("export: the checkpoint has no tensor {:?}", p.brain));
-            } else if failure.is_none() && buf.len() as u64 != p.bytes {
+            } else if buf.len() as u64 != p.bytes {
                 failure = Some(format!("export: {} holds {} bytes, expected {}", p.brain, buf.len(), p.bytes));
             }
             buf
@@ -309,7 +335,7 @@ fn write_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, fold:
     written.map_err(io)?;
     file.sync_all().map_err(io)?;
     drop(file);
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    std::fs::rename(tmp, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// The element type of a GGUF export's matrices (norms and biases are
@@ -489,7 +515,16 @@ fn tokenizer_kv(dir: &Path, rows: u32) -> Result<Vec<(String, GgufValue)>, Strin
 /// permuted into the interleaved order llama.cpp's RoPE expects (the inverse
 /// of what the importer undoes), and a llama3 or per-frequency RoPE scaling
 /// is written as the `rope_freqs.weight` divisors llama.cpp reads.
-pub fn export_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, opts: &GgufExport) -> Result<(), String> {
+///
+/// `keep_going` is asked before each tensor is read; once it says no the
+/// export answers `Err(CANCELLED)` and removes the unfinished file.
+pub fn export_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, opts: &GgufExport, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
+    let tokenizer = tokenizer_kv(opts.tokenizer_dir, cfg.vocab)?;
+    write_gguf(src, cfg, path, opts.dtype, opts.name, tokenizer, keep_going)
+}
+
+/// [`export_gguf`] with the tokenizer keys already built.
+fn write_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, dtype: GgufDtype, name: &str, tokenizer: Vec<(String, GgufValue)>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     use checkpoint::gguf::GgmlType;
     let (_, arch) = hf_class(cfg)?;
     if cfg.lora.is_some() {
@@ -498,8 +533,8 @@ pub fn export_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, opts: 
     let a = |k: &str| format!("{arch}.{k}");
     let mut kv = vec![
         ("general.architecture".to_string(), GgufValue::String(arch.into())),
-        ("general.name".to_string(), GgufValue::String(opts.name.into())),
-        ("general.file_type".to_string(), GgufValue::U32(if opts.dtype == GgufDtype::F16 { 1 } else { 0 })),
+        ("general.name".to_string(), GgufValue::String(name.into())),
+        ("general.file_type".to_string(), GgufValue::U32(if dtype == GgufDtype::F16 { 1 } else { 0 })),
         ("general.quantization_version".to_string(), GgufValue::U32(2)),
         (a("vocab_size"), GgufValue::U32(cfg.vocab)),
         (a("context_length"), GgufValue::U32(cfg.max_position_embeddings)),
@@ -541,7 +576,7 @@ pub fn export_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, opts: 
             });
         }
     }
-    kv.extend(tokenizer_kv(opts.tokenizer_dir, cfg.vocab)?);
+    kv.extend(tokenizer);
 
     // Every tensor's name, shape, type and permutation, planned up front: the
     // header carries each one's offset before any bytes are written.
@@ -567,7 +602,7 @@ pub fn export_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, opts: 
     for (brain, _) in cfg.param_list() {
         let gguf = crate::gguf_import::brain_to_gguf(&brain).ok_or_else(|| format!("export: no GGUF name for {brain:?}"))?;
         let shape: Vec<usize> = hf_shape(&brain, cfg)?.into_iter().map(|d| d as usize).collect();
-        let ty = if shape.len() == 1 || opts.dtype == GgufDtype::F32 { GgmlType::F32 } else { GgmlType::F16 };
+        let ty = if shape.len() == 1 || dtype == GgufDtype::F32 { GgmlType::F32 } else { GgmlType::F16 };
         outs.push(Out { permute: permute_heads(&brain), brain: Some(brain), gguf, shape, ty });
     }
     if let Some(f) = &rope_freqs {
@@ -577,11 +612,16 @@ pub fn export_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, opts: 
     let plan = outs.iter().map(|o| checkpoint::gguf_write::TensorPlan { name: o.gguf.clone(), shape: o.shape.clone(), ty: o.ty.id(), nbytes: bytes(o) }).collect();
     let mut w = checkpoint::gguf_write::Writer::create(&path.to_string_lossy(), &kv, plan, 32).map_err(|e| format!("{}: {e}", path.display()))?;
     for o in &outs {
+        if !keep_going() {
+            w.abandon();
+            return Err(capability::failure::CANCELLED.to_string());
+        }
         let mut data = match &o.brain {
             None => rope_freqs.clone().expect("planned with it"),
             Some(brain) => {
                 let mut v = Vec::new();
                 if !src.with_tensor(brain, &mut |x| v.extend_from_slice(x)) {
+                    w.abandon();
                     return Err(format!("export: the checkpoint has no tensor {brain:?}"));
                 }
                 v
@@ -615,11 +655,114 @@ pub fn export_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, opts: 
 /// and target modules, so `peft.PeftModel.from_pretrained` applies it to the
 /// HF checkpoint exactly as brain applies it to its own: `(alpha / r) · B·A`.
 /// `base_model` names the HF checkpoint it applies to; `None` takes the base
-/// the adapter's own card records.
-pub fn export_peft(adapter_path: &str, out: &Path, base_model: Option<&str>) -> Result<(), String> {
+/// the adapter's own card records. `keep_going` is asked before each pair is
+/// assembled ([`PeftAdapter::write`]); a stopped export answers `Err(CANCELLED)`
+/// and writes nothing.
+pub fn export_peft(adapter_path: &str, out: &Path, base_model: Option<&str>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let names = HfNames::CAUSAL_LM;
     let module = |base: &str| names.from_brain(base).and_then(|hf| hf.strip_suffix(".weight").map(str::to_string));
     let (loras, base) = adapter_pairs(adapter_path, &module)?;
     let base_model = base_model.map(str::to_string).or(base).ok_or_else(|| format!("{adapter_path}: no base model given and none on its card"))?;
-    PeftAdapter { base_model, task_type: Some("CAUSAL_LM".into()), loras, modules_to_save: Vec::new(), saved: Vec::new() }.write(out)
+    PeftAdapter { base_model, task_type: Some("CAUSAL_LM".into()), loras, modules_to_save: Vec::new(), saved: Vec::new() }.write(out, keep_going)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{LoraCfg, Qwen, QwenConfig};
+    use capability::{Invocation, Outcome, Progress};
+    use capability_mock::cancellation::{certify, Bound};
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("brain-qwen-export-cancel-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir).map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default()
+    }
+
+    /// A token that fires mid-export stops the export at the next tensor, and no shard of it is left behind.
+    #[test]
+    fn a_hf_export_stops_at_the_next_tensor_and_leaves_no_shard() {
+        let cfg = QwenConfig::tiny();
+        let weights = crate::init_weights(&cfg, 7);
+        let dir = scratch("hf");
+        let out = dir.join("out");
+        // Small shards, so the stop lands after earlier shards were already renamed into place.
+        let opts = HfExport { dtype: HfDtype::F32, shard_bytes: 2_000, ..Default::default() };
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+            inv.cancel.check()?;
+            export_hf(&weights, &cfg, &out, &opts, &mut inv.keep_going(progress, 0, "tensor"))?;
+            Ok(Outcome::new())
+        };
+        certify("qwen export hf", &Invocation::new, &run, Bound::ONE_STEP);
+        let _ = std::fs::remove_dir_all(&out);
+        let mut asks = 0;
+        let err = export_hf(&weights, &cfg, &out, &opts, &mut || {
+            asks += 1;
+            asks < 8
+        });
+        assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
+        assert!(entries(&out).is_empty(), "a stopped export leaves no file: {:?}", entries(&out));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A token that fires mid-export stops the GGUF at the next tensor and removes the unfinished file.
+    #[test]
+    fn a_gguf_export_stops_at_the_next_tensor_and_leaves_no_file() {
+        let cfg = QwenConfig::tiny();
+        let weights = crate::init_weights(&cfg, 5);
+        let dir = scratch("gguf");
+        let path = dir.join("m.gguf");
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+            inv.cancel.check()?;
+            write_gguf(&weights, &cfg, &path, GgufDtype::F16, "m", Vec::new(), &mut inv.keep_going(progress, 0, "tensor"))?;
+            Ok(Outcome::new())
+        };
+        certify("qwen export gguf", &Invocation::new, &run, Bound::ONE_STEP);
+        let _ = std::fs::remove_file(&path);
+        let mut asks = 0;
+        let err = write_gguf(&weights, &cfg, &path, GgufDtype::F16, "m", Vec::new(), &mut || {
+            asks += 1;
+            asks < 4
+        });
+        assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
+        assert!(entries(&dir).is_empty(), "a stopped export leaves no file: {:?}", entries(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A token that fires mid-export stops the PEFT export at the next pair and writes nothing.
+    #[test]
+    fn a_peft_export_stops_at_the_next_pair_and_writes_nothing() {
+        use model::Model;
+        let targets: Vec<String> = ["wq", "wv", "down"].iter().map(|s| s.to_string()).collect();
+        let cfg = QwenConfig { lora: Some(LoraCfg::new(2, 2.0, targets)), ..QwenConfig::tiny() };
+        let model = Qwen::new(cfg.clone(), 1, 4, &crate::init_weights(&cfg, 3));
+        for name in model.param_names().into_iter().filter(|n| n.ends_with(".lora_a") || n.ends_with(".lora_b")) {
+            let n = model.read_weight(&name).len();
+            model.write_weight(&name, &(0..n).map(|i| ((i * 7 % 11) as f32 - 5.0) * 0.01).collect::<Vec<_>>());
+        }
+        let dir = scratch("peft");
+        let adapter = dir.join("adapter.safetensors");
+        crate::lora::save_adapter(adapter.to_str().unwrap(), &model, "acme/tiny-lora", "acme/tiny", None).unwrap();
+        let out = dir.join("peft");
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+            inv.cancel.check()?;
+            export_peft(adapter.to_str().unwrap(), &out, None, &mut inv.keep_going(progress, 0, "adapter pair"))?;
+            Ok(Outcome::new())
+        };
+        certify("qwen export peft", &Invocation::new, &run, Bound::ONE_STEP);
+        let _ = std::fs::remove_dir_all(&out);
+        let mut asks = 0;
+        let err = export_peft(adapter.to_str().unwrap(), &out, None, &mut || {
+            asks += 1;
+            asks < 3
+        });
+        assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
+        assert!(!out.exists(), "a stopped export creates no directory");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

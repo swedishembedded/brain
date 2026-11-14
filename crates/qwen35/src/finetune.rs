@@ -524,8 +524,8 @@ impl model::finetune::ChatTrainer for Qwen35Trainer {
     /// `model.safetensors` (which [`open_base`] reads back) and the tokenizer
     /// files; there is no Hugging Face writer for this architecture, and an
     /// adapter is not folded in.
-    fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>) -> Result<(), String> {
-        model::finetune::export_brain_checkpoint("qwen35", trained, tokenizer_dir, out, adapter)
+    fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
+        model::finetune::export_brain_checkpoint("qwen35", trained, tokenizer_dir, out, adapter, keep_going)
     }
 }
 

@@ -49,7 +49,7 @@ fn a_full_fine_tune_of_a_transformers_directory_trains_every_weight_and_saves_on
     };
     let base = scratch.join("base");
     let init = qwen3::init_weights(&cfg, 7);
-    export_hf(&init, &cfg, &base, &HfExport { dtype: HfDtype::F32, ..Default::default() }).unwrap();
+    export_hf(&init, &cfg, &base, &HfExport { dtype: HfDtype::F32, ..Default::default() }, &mut || true).unwrap();
 
     let data = scratch.join("data");
     std::fs::create_dir_all(&data).unwrap();

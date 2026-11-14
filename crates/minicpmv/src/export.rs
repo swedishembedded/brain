@@ -110,7 +110,7 @@ pub fn export_peft(tune: &Path, base_dir: &Path, out: &Path) -> Result<(), Strin
             tune.display()
         ));
     }
-    PeftAdapter { base_model, task_type: None, loras, modules_to_save, saved }.write(out)
+    PeftAdapter { base_model, task_type: None, loras, modules_to_save, saved }.write(out, &mut || true)
 }
 
 #[cfg(test)]

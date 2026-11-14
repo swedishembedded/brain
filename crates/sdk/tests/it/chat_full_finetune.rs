@@ -145,7 +145,7 @@ fn merging_an_adapter_gives_the_weights_the_adapter_computes() {
     let tuned = ChatFineTune::from_pretrained(base.to_str().unwrap()).dataset(&train).out_dir(model.join("lora")).rank(2).steps(40).lr(3e-1).seed(brain::random_seed()).device(cpu()).run().expect("the adapter trains");
     let adapter = tuned.adapter.expect("an adapter");
 
-    let merged = merge_adapter(base.to_str().unwrap(), &adapter, &model.join("merged")).expect("the adapter merges");
+    let merged = merge_adapter(base.to_str().unwrap(), &adapter, &model.join("merged"), &mut || true).expect("the adapter merges");
     let merged_dir = merged.dir.clone();
     assert!(merged_dir.join("config.json").is_file() && merged_dir.join("tokenizer.json").is_file(), "{merged:?}");
     assert_eq!(merged.weights, merged_dir.join("model.safetensors"));
@@ -190,4 +190,53 @@ fn a_full_fine_tune_without_a_dataset_or_out_directory_is_refused_by_name() {
     let train = write_dataset(&model, "train.jsonl", &TRAIN);
     let no_out = ChatFullFineTune::from_pretrained(base.to_str().unwrap()).dataset(train).device(cpu()).run().unwrap_err().to_string();
     assert!(no_out.contains("out"), "{no_out}");
+}
+
+/// A token that fires mid-merge stops the fold at the next tensor and leaves no file of the merge.
+#[test]
+fn a_merge_stops_at_the_next_tensor_and_leaves_no_checkpoint() {
+    use capability::{Invocation, Outcome};
+    use capability_mock::cancellation::{certify, Bound};
+    let model = chat_model_dir("merge-cancel");
+    let train = write_dataset(&model, "train.jsonl", &TRAIN);
+    let base = model.join("model.safetensors");
+    let adapter = ChatFineTune::from_pretrained(base.to_str().unwrap()).dataset(&train).out_dir(model.join("lora")).rank(2).steps(1).lr(3e-1).seed(1).device(cpu()).run().expect("the adapter trains").adapter.expect("an adapter");
+    let out = model.join("merged");
+    let run = |inv: &Invocation, progress: &mut dyn FnMut(capability::Progress)| {
+        inv.cancel.check()?;
+        merge_adapter(base.to_str().unwrap(), &adapter, &out, &mut inv.keep_going(progress, 0, "tensor")).map_err(|e| match e {
+            brain::Error::Cancelled => capability::failure::CANCELLED.to_string(),
+            e => e.to_string(),
+        })?;
+        Ok(Outcome::new())
+    };
+    certify("merge_adapter", &Invocation::new, &run, Bound::ONE_STEP);
+    std::fs::remove_dir_all(&out).ok();
+    let mut asks = 0;
+    let stopped = merge_adapter(base.to_str().unwrap(), &adapter, &out, &mut || {
+        asks += 1;
+        asks < 4
+    });
+    assert!(matches!(stopped, Err(brain::Error::Cancelled)), "{stopped:?}");
+    assert!(std::fs::read_dir(&out).map_or(true, |d| d.count() == 0), "a stopped merge leaves no file in the output directory");
+}
+
+/// A token that fires mid-check stops the dataset check at the next record.
+#[test]
+fn a_dataset_check_stops_at_the_next_record() {
+    use brain::dataset_report::{check_dataset, DatasetCheck, DatasetKind};
+    use capability::{Invocation, Outcome};
+    use capability_mock::cancellation::{certify, Bound};
+    let model = chat_model_dir("check-cancel");
+    let train = write_dataset(&model, "train.jsonl", &TRAIN);
+    let check = DatasetCheck { kind: DatasetKind::Chat, thinking: false, pack_answers: false, max_block: 64, list_records: None };
+    let run = |inv: &Invocation, progress: &mut dyn FnMut(capability::Progress)| {
+        inv.cancel.check()?;
+        check_dataset(&*model, &train, &check, &mut inv.keep_going(progress, 0, "record")).map_err(|e| match e {
+            brain::Error::Cancelled => capability::failure::CANCELLED.to_string(),
+            e => e.to_string(),
+        })?;
+        Ok(Outcome::new())
+    };
+    certify("check_dataset", &Invocation::new, &run, Bound::ONE_STEP);
 }

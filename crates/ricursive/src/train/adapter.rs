@@ -87,5 +87,5 @@ pub fn export_peft(adapter_path: &str, out: &Path, base_model: Option<&str>) -> 
         saved.push((format!("{module}.modules_to_save.default.weight"), vec![t.data.len() as u64], t.data));
         modules_to_save.push(module);
     }
-    PeftAdapter { base_model, task_type: Some("CAUSAL_LM".into()), loras, modules_to_save, saved }.write(out)
+    PeftAdapter { base_model, task_type: Some("CAUSAL_LM".into()), loras, modules_to_save, saved }.write(out, &mut || true)
 }

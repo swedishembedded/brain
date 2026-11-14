@@ -78,6 +78,8 @@ pub(crate) struct LoraOutcome {
 }
 
 type LoraFn = for<'j, 'c> fn(LoraJob<'j>, FitControl<'c>) -> std::io::Result<LoraOutcome>;
+/// [`ChatTrainer::export_checkpoint`]: the trained file, the tokenizer directory, the checkpoint directory, the adapter to fold in, and the keep-going callback.
+type ExportFn = fn(&Path, &Path, &Path, Option<&Path>, &mut dyn FnMut() -> bool) -> Result<(), String>;
 type FullFn = for<'c> fn(&Path, &Path, &FitOpts, &Path, OptimizerState, FitControl<'c>) -> std::io::Result<FitReport>;
 type PreferenceFn = for<'j, 'c> fn(PreferenceJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, ResidentMargins)>;
 type MarginsFn = fn(&Path, Option<&Path>, &Path, &[(EncodedTurn, EncodedTurn)], u32) -> Option<PreferenceMargins>;
@@ -132,7 +134,7 @@ pub(crate) struct ChatEntry {
     pub checkpoint_path: fn(&Path, &Path) -> PathBuf,
     pub vocab: fn(&Path) -> Result<usize, String>,
     pub full: FullFn,
-    pub export: fn(&Path, &Path, &Path, Option<&Path>) -> Result<(), String>,
+    pub export: ExportFn,
     pub preference: PreferenceFn,
     pub margins: MarginsFn,
     /// The frozen-base formats the family's LoRA trainer holds.

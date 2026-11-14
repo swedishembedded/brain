@@ -43,7 +43,7 @@ fn every_variant_round_trips_through_a_transformers_directory() {
         for (dtype, shard_bytes) in [(HfDtype::F32, u64::MAX), (HfDtype::Bf16, 2_000)] {
             let dir = std::env::temp_dir().join(format!("brain-hf-export-{label}-{dtype:?}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
-            export_hf(&weights, &cfg, &dir, &HfExport { dtype, shard_bytes, ..Default::default() }).unwrap();
+            export_hf(&weights, &cfg, &dir, &HfExport { dtype, shard_bytes, ..Default::default() }, &mut || true).unwrap();
             assert_eq!(dir.join("model.safetensors.index.json").exists(), shard_bytes != u64::MAX, "{label}: sharded as asked");
 
             let (back, src) = qwen3::open_checkpoint(dir.to_str().unwrap()).unwrap_or_else(|e| panic!("{label}: {e}"));
@@ -91,7 +91,7 @@ fn a_folded_adapter_exports_as_the_folded_weights() {
 
     let base: std::collections::HashMap<String, Vec<f32>> = base_cfg.param_list().into_iter().map(|(n, _)| (n.clone(), init[&n].clone())).collect();
     let out = dir.join("hf");
-    export_hf(&base, &base_cfg, &out, &HfExport { dtype: HfDtype::F32, adapter: Some(adapter.to_str().unwrap()), ..Default::default() }).unwrap();
+    export_hf(&base, &base_cfg, &out, &HfExport { dtype: HfDtype::F32, adapter: Some(adapter.to_str().unwrap()), ..Default::default() }, &mut || true).unwrap();
 
     let mut want = base.clone();
     qwen3::lora::fold_adapter_into(&mut want, adapter.to_str().unwrap()).unwrap();

@@ -13,7 +13,7 @@
 //! tokens and supervised tokens per example, examples longer than the training row, and every refused record by line.
 //! It loads no weights and claims no card; it is host work, scheduled and bounded like the other jobs of the service.
 
-use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Media, Outcome, ParamSpec, ParamType};
+use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Media, Outcome, ParamSpec, ParamType, Progress};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -109,7 +109,7 @@ pub fn report_json(report: &brain::dataset_report::DatasetReport, kind: &str, ma
 }
 
 /// Runs the dry run `inv` describes. It is host work and takes no card.
-pub fn run(env: &JobEnv, inv: &Invocation) -> ActionResult {
+pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     inv.cancel.check()?;
     let request = Request::from_invocation(inv)?;
     let p = &request.params;
@@ -122,25 +122,32 @@ pub fn run(env: &JobEnv, inv: &Invocation) -> ActionResult {
     if p.kind == "timeline" {
         let text = std::fs::read_to_string(&dataset).map_err(|e| format!("check_dataset: the dataset: {e}"))?;
         let mut outcome = Outcome::new();
-        outcome.outputs = timeline_report(&text, p.max_block);
+        outcome.outputs = timeline_report(&text, p.max_block, &mut inv.keep_going(progress, 0, "record"))?;
         return Ok(outcome);
     }
     let base = p.base.as_deref().ok_or("check_dataset: `base` is needed to read a chat or preference dataset")?;
     let base_dir = job::resolve_base(env.models_dir.as_deref(), base)?;
     let kind = if p.kind == "preference" { brain::dataset_report::DatasetKind::Preference } else { brain::dataset_report::DatasetKind::Chat };
     let check = brain::dataset_report::DatasetCheck { kind, thinking: p.thinking, pack_answers: p.pack_answers, max_block: p.max_block, list_records: p.per_record.then_some(brain::dataset_report::RecordWindow { offset: p.offset, limit: p.limit }) };
-    let report = brain::dataset_report::check_dataset(&base_dir, &dataset, &check).map_err(job::trainer_failure)?;
+    let report = brain::dataset_report::check_dataset(&base_dir, &dataset, &check, &mut inv.keep_going(progress, 0, "record")).map_err(|e| match e {
+        brain::Error::Cancelled => capability::failure::CANCELLED.to_string(),
+        e => job::trainer_failure(e),
+    })?;
     let mut outcome = Outcome::new();
     outcome.outputs = report_json(&report, &p.kind, p.max_block);
     Ok(outcome)
 }
 
 /// The report of a `timeline-v1` dataset: each non-blank line is a subject or is refused, by its line. No token is
-/// counted, so the token distributions are empty.
-pub fn timeline_report(text: &str, max_block: u32) -> Value {
+/// counted, so the token distributions are empty. `keep_going` is asked before each line; once it says no the
+/// report is the cancelled error.
+pub fn timeline_report(text: &str, max_block: u32, keep_going: &mut dyn FnMut() -> bool) -> Result<Value, String> {
     let (mut records, mut valid, mut invalid_total) = (0usize, 0usize, 0usize);
     let mut invalid = Vec::new();
     for (index, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+        if !keep_going() {
+            return Err(capability::failure::CANCELLED.to_string());
+        }
         records += 1;
         match horizon::timeline::Subject::from_json_line(line) {
             Ok(_) => valid += 1,
@@ -153,7 +160,7 @@ pub fn timeline_report(text: &str, max_block: u32) -> Value {
         }
     }
     let empty = distribution(&brain::dataset_report::Distribution::default());
-    json!({
+    Ok(json!({
         "kind": "timeline",
         "records": records,
         "valid_records": valid,
@@ -167,5 +174,5 @@ pub fn timeline_report(text: &str, max_block: u32) -> Value {
         "invalid_total": invalid_total,
         "invalid": invalid,
         "listed_at_most": brain::dataset_report::MAX_LISTED,
-    })
+    }))
 }

@@ -134,9 +134,12 @@ pub struct DatasetReport {
 /// Dry-runs the dataset `path` against the checkpoint in `model_dir`. Nothing is loaded but the tokenizer and the
 /// chat template.
 ///
+/// `keep_going` is asked before each record; once it says no the check is
+/// [`Error::Cancelled`].
+///
 /// # Errors
-/// The checkpoint's tokenizer or template cannot be read, or the file cannot be.
-pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check: &DatasetCheck) -> Result<DatasetReport> {
+/// The checkpoint's tokenizer or template cannot be read, or the file cannot be, or `keep_going` said no.
+pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check: &DatasetCheck, keep_going: &mut dyn FnMut() -> bool) -> Result<DatasetReport> {
     let (model_dir, path) = (model_dir.as_ref(), path.as_ref());
     let (tok, tmpl) = crate::finetune::tokenizer_and_template(model_dir)?;
     let arch = crate::study::arch_of_checkpoint(model_dir).map_or("qwen3", |a| a.id);
@@ -166,6 +169,9 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
         let line = line.trim();
         if line.is_empty() {
             continue;
+        }
+        if !keep_going() {
+            return Err(Error::Cancelled);
         }
         report.records += 1;
         // Each example of the record as (tokens, supervised tokens, the row it needs: a teacher's rendering is scored

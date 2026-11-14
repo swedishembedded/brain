@@ -361,7 +361,7 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
 }
 
 /// Runs the `merge` job `inv`. Folding is host work: it takes no card.
-pub fn run_merge(env: &JobEnv, inv: &Invocation) -> ActionResult {
+pub fn run_merge(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     inv.cancel.check()?;
     let request = MergeRequest::from_invocation(inv)?;
     let p = &request.params;
@@ -373,7 +373,10 @@ pub fn run_merge(env: &JobEnv, inv: &Invocation) -> ActionResult {
         return Err("cancelled".into());
     }
     let out_dir = work.path().join("merged");
-    let merged = brain::merge_adapter(utf8(&base_dir)?, &adapter, &out_dir).map_err(trainer_failure)?;
+    let merged = brain::merge_adapter(utf8(&base_dir)?, &adapter, &out_dir, &mut inv.keep_going(progress, 0, "tensor")).map_err(|e| match e {
+        brain::Error::Cancelled => capability::failure::CANCELLED.to_string(),
+        e => trainer_failure(e),
+    })?;
     let report = json!({"status": "completed", "objective": "merge", "weights_sha256": merged.weights_digest});
     work.ensure_within_quota()?;
     checkpoint_outcome(env, &merged.dir, p.install_as.as_deref(), report)

@@ -278,8 +278,8 @@ impl Instance for TrainInstance {
         let work: &mut dyn FnMut() -> ActionResult = match action {
             request::ACTION => &mut || job::run(env, inv, progress),
             consolidate::FULL_ACTION => &mut || consolidate::run_full(env, inv, progress),
-            consolidate::MERGE_ACTION => &mut || consolidate::run_merge(env, inv),
-            dryrun::ACTION => &mut || dryrun::run(env, inv),
+            consolidate::MERGE_ACTION => &mut || consolidate::run_merge(env, inv, progress),
+            dryrun::ACTION => &mut || dryrun::run(env, inv, progress),
             timeline::ACTION => &mut || timeline::run(env, inv, progress),
             other => return Err(format!("{} has no action '{other}'", request::MODEL)),
         };
